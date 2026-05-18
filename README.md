@@ -255,6 +255,18 @@ kill-finished-workers.sh --all --with-worktree # full nuke (prompts for 'yes')
 
 `--all --with-worktree` requires confirmation (type `yes`) unless you also pass `--yes` / `-y`.
 
+`kill-finished-workers.sh` walks **live tmux windows**. After a session restart, the on-disk `wt-issue-*` worktrees outlive their windows and become invisible to it. For that case, use `reap-orphan-worktrees.sh`, which walks **directories** under the project parent and applies a three-part safety predicate (age floor, clean tree, PR finalized):
+
+```bash
+reap-orphan-worktrees.sh --dry-run                # preview
+reap-orphan-worktrees.sh                          # default: 2-day age floor, PR MERGED or CLOSED
+reap-orphan-worktrees.sh --min-age-days 0 --yes   # aggressive (no age floor)
+reap-orphan-worktrees.sh --merged-only --yes      # strictest — PR must be MERGED, not CLOSED
+reap-orphan-worktrees.sh --no-pr-check --yes      # offline; require every commit on origin/<default>
+```
+
+Override the default age floor in `<project>/.swarm/.env` via `REAP_MIN_AGE_DAYS=N`.
+
 ### 4. Run Manual Sandbox (Single Agent)
 If you just want a safe shell for a single agent:
 
