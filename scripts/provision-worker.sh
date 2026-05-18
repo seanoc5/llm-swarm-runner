@@ -177,6 +177,25 @@ if [ -z "$DEFAULT_REMOTE_REF" ]; then
 fi
 
 if [ -d "$WT" ]; then
+    # Guard: wt-issue-N paths are namespaced only by issue number, so an
+    # orphan from a deleted sibling repo (or a worktree from a different
+    # project sharing this parent dir) can collide. Refuse to reuse unless
+    # the existing worktree's common gitdir matches $PROJECT_DIR's.
+    # See todo/TODO.md for the proposed path-namespacing fix.
+    expected_common="$(cd "$PROJECT_DIR" && realpath "$(git rev-parse --git-common-dir)")"
+    existing_common="$(git -C "$WT" rev-parse --git-common-dir 2>/dev/null || true)"
+    if [ -n "$existing_common" ]; then
+        existing_common="$(cd "$WT" && realpath "$existing_common" 2>/dev/null || true)"
+    fi
+    if [ -z "$existing_common" ] || [ "$existing_common" != "$expected_common" ]; then
+        echo "ERROR: $WT exists but does not belong to $PROJECT_DIR" >&2
+        echo "       existing gitdir: ${existing_common:-<broken or missing>}" >&2
+        echo "       expected gitdir: $expected_common" >&2
+        echo "       Likely an orphan from a previous project at the same parent dir." >&2
+        echo "       Remove with:  rm -rf '$WT'" >&2
+        echo "       (or 'git worktree remove --force $WT' from its owning repo, if still alive)" >&2
+        exit 2
+    fi
     echo "[1/4] worktree already exists — reusing existing $BRANCH (base unchanged)"
 else
     git worktree add "$WT" -b "$BRANCH" "$DEFAULT_REMOTE_REF"
