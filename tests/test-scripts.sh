@@ -59,6 +59,7 @@ echo "=== Script Sanity Checks ==="
 check_script "$LLM_SWARM_DIR/llm-start.sh"
 check_script "$LLM_SWARM_DIR/sandbox.sh"
 check_script "$LLM_SWARM_DIR/scripts/worker-listener.sh"
+check_script "$LLM_SWARM_DIR/scripts/reap-orphan-worktrees.sh"
 
 echo ""
 echo "Summary: $PASS passed, $FAIL failed."
