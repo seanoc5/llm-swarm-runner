@@ -155,12 +155,32 @@ echo
 
 cd "$PROJECT_DIR"
 
-# 1. Worktree (idempotent)
+# 1. Worktree (idempotent). Pre-flight: refresh remote refs and branch the
+#    worker explicitly from origin/<default>, not from the coordinator's
+#    local HEAD. The coordinator's checkout can be stale, mid-rebase, or on
+#    an unrelated feature branch — branching off the remote ref gives every
+#    new worker a fresh, predictable base without touching the coordinator's
+#    working tree.
+git fetch --quiet origin || echo "WARN: git fetch failed — using cached remote refs" >&2
+DEFAULT_REMOTE_REF="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+if [ -z "$DEFAULT_REMOTE_REF" ]; then
+    for cand in main master; do
+        if git show-ref --verify --quiet "refs/remotes/origin/$cand"; then
+            DEFAULT_REMOTE_REF="origin/$cand"
+            break
+        fi
+    done
+fi
+if [ -z "$DEFAULT_REMOTE_REF" ]; then
+    echo "ERROR: could not resolve origin's default branch (looked for origin/main, origin/master)" >&2
+    exit 2
+fi
+
 if [ -d "$WT" ]; then
-    echo "[1/4] worktree already exists — reusing"
+    echo "[1/4] worktree already exists — reusing existing $BRANCH (base unchanged)"
 else
-    git worktree add "$WT" -b "$BRANCH"
-    echo "[1/4] worktree created"
+    git worktree add "$WT" -b "$BRANCH" "$DEFAULT_REMOTE_REF"
+    echo "[1/4] worktree created (base: $DEFAULT_REMOTE_REF @ $(git rev-parse --short "$DEFAULT_REMOTE_REF"))"
 fi
 
 # 2. Queue dirs (idempotent — listener also creates them on startup)
