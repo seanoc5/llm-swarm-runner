@@ -1,0 +1,13 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using these metadata."
+title: "LLM Swarm Runner"
+abstract: "Run a pool of sandboxed LLM coding agents (Claude Code, Gemini CLI) against a GitHub issue backlog in parallel — each in its own git worktree and Docker container."
+authors:
+  - family-names: "O'Connor"
+    given-names: "Sean"
+    email: "seanoc5@gmail.com"
+    alias: "seanoc5"
+repository-code: "https://github.com/seanoc5/llm-swarm-runner"
+url: "https://github.com/seanoc5/llm-swarm-runner"
+license: MIT
+date-released: "2026-05-18"

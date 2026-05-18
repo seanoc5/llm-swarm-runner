@@ -8,4 +8,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- _(record changes here as they land)_
+- _Nothing yet — add entries here as PRs land._

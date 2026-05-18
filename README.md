@@ -1,5 +1,7 @@
 # LLM Swarm Runner
 
+![CI](https://img.shields.io/badge/CI-pending-lightgrey) ![License](https://img.shields.io/badge/license-MIT-blue)
+
 **TL;DR:** llm-swarm-runner points Claude Code (or Gemini CLI) at your GitHub issue backlog and lets a pool of sandboxed agents chew through it in parallel — each in its own git worktree, each in a Docker container, all visible live in tmux. You stay in the driver's seat; the swarm handles the parallelism, the isolation, and the bookkeeping.
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -29,6 +31,7 @@ Also works as a single-agent sandbox if you don't want the swarm — `sandbox.sh
 ## Contents
 
 - [Documentation Index](#documentation-index)
+- [Requirements](#requirements)
 - [Quick Start](#quick-start)
   - [Prerequisites](#1-prerequisites)
   - [Install](#2-install)
@@ -47,6 +50,18 @@ For deep-dives into specific topics, please refer to the reference documentation
 - 🚑 [**Troubleshooting**](./docs/troubleshooting.md) - Fix common SSH, `gh` auth, and networking errors.
 - 🪟 [**tmux Cheatsheet**](./docs/tmux-cheatsheet.md) - Attach/detach, multi-client handling, capture-pane for diagnostics, and other commands you'll actually use with the swarm.
 - 🌿 [**Git & GitHub Tips**](./docs/VCS/git-github.md) - Crib sheet for swarm-flavored git/`gh`: resolving conflicts when merging worker PRs, recovery recipes, pointers to authoritative references (ohshitgit, Pro Git, etc.). Aimed at users whose git skills are thinner than their swarm-orchestration skills.
+
+---
+
+## Requirements
+
+Host-side tools you'll need before running the swarm:
+
+- `tmux` — session multiplexer (for live observation of workers)
+- `gh` — GitHub CLI, authenticated
+- `docker` — for sandboxed workers
+- One of `claude` (Claude Code) or `gemini` CLI — for the coordinator
+- `git` — >= 2.20 for worktree support
 
 ---
 

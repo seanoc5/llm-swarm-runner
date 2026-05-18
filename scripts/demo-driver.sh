@@ -224,7 +224,6 @@ DRIVER_PID=$!
 cleanup_processes() {
     kill $DRIVER_PID 2>/dev/null || true
     kill $LLM_START_PID 2>/dev/null || true
-    restore_labels
 }
 trap cleanup_processes EXIT
 
