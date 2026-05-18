@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+title: llm-swarm-runner
+message: "If you reference this sandbox, please cite it as below."
+type: software
+authors:
+  - family-names: O'Connor
+    given-names: Sean
+    email: seanoc5@gmail.com
+repository-code: "https://github.com/seanoc5/llm-swarm-runner"
+license: MIT
