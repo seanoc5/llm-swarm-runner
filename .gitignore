@@ -15,3 +15,7 @@
 *.mp4
 *.gif
 demo-*.png
+
+# Editor / OS junk
+.DS_Store
+Thumbs.db
