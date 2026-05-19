@@ -23,6 +23,7 @@ A persistent, local-first sandbox for running autonomous LLM agents (Claude Code
   - [test-shape-swarm.sh — Non-LLM shape test](#test-shape-swarmsh--non-llm-shape-test-for-the-queue-protocol)
   - [test-shape-helpers.sh — Non-LLM shape test for triage helpers](#test-shape-helperssh--non-llm-shape-test-for-triage-helpers)
   - [test-shape-orchestration.sh — Non-LLM shape test for provision/watch/list](#test-shape-orchestrationsh--non-llm-shape-test-for-provisionwatchlist)
+  - [test-watcher-autoclose.sh — Non-LLM shape test for WATCHER_AUTOCLOSE](#test-watcher-autoclosesh--non-llm-shape-test-for-watcher_autoclose)
   - [test-e2e-swarm.sh — Local end-to-end test (with real LLM)](#test-e2e-swarmsh--local-end-to-end-test-with-real-llm)
 - [End-to-End Flow (Real Use)](#end-to-end-flow-real-use)
 - [Coordinator Trade-offs](#coordinator-trade-offs)
@@ -498,6 +499,19 @@ Deterministic coverage for the three orchestration helpers that don't slot into 
 - `sandbox-worktrees.sh`: lists worktrees of a multi-worktree repo, errors on non-git, errors on `-t` outside a tmux session
 
 Stubs `gh` and `tmux` via `PATH` override so no GitHub auth and no live tmux server are needed. Watch test runs `DRY_RUN=1 ONCE=1 POLL_SECS=1` so it never invokes a real `llm-start.sh`. Total runtime ~10s.
+
+### `test-watcher-autoclose.sh` — Non-LLM shape test for WATCHER_AUTOCLOSE
+
+Deterministic coverage for the `coordinator-watch.sh` autoclose pass (issue #32) — the per-outcome invocation of `kill-finished-workers.sh` that frees slots when a worker's PR has reached a terminal state. Stubs both `kill-finished-workers.sh` (via `KILL_FINISHED=`) and `llm-start.sh` (via `LLM_START=`) so we can assert what was called, with what argv, in what order — no tmux, no `gh`, no real worktree.
+
+Covers:
+- `WATCHER_AUTOCLOSE=1` (default): `kill-finished-workers.sh` is invoked **before** `coord.wake`, with `--pr-finalized --with-worktree --yes`.
+- `WATCHER_AUTOCLOSE=0`: stub is **not** invoked; `coord.wake` still fires.
+- Sequential outcomes: each `.ok.json` arrival triggers its own autoclose+wake pair (smooth-flow contract).
+- `.err.json` parity: error outcomes trigger autoclose+wake too (covers worker abort, `/quit`, etc.).
+- `events.log` records `watch.autoclose` and `coord.wake` lines per outcome.
+
+Runs in ~10s. Use `KEEP=1` to retain the temp dir for inspection.
 
 ### `test-e2e-swarm.sh` — Local end-to-end test (with real LLM)
 
