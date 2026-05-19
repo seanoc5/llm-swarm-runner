@@ -3,9 +3,15 @@
 # demo-driver.sh — Drive a deterministic ~70-second demo recording
 #
 # Sets up a clean tmux session, launches the swarm-runner coordinator
-# scoped to a fixed set of demo issues, then choreographs the visual
-# story (window-switch → worker observation → event-log split → PR list)
-# while you focus on the screen recorder.
+# scoped via a temporary `.swarm-policy.md` to issues labeled `demo`,
+# then choreographs the visual story (window-switch → worker observation
+# → event-log split → PR list) while you focus on the screen recorder.
+#
+# The pool of demo-eligible issues is self-healing: anything currently
+# labeled `demo` AND open. After a recording, merged PRs auto-close their
+# linked issues and those drop out of the pool. Add new fodder with
+# `gh issue create --label demo`. No hardcoded issue numbers to update
+# between retakes.
 #
 # Usage:
 #   cd /opt/work/sysadmin/llm-swarm-runner
@@ -13,9 +19,10 @@
 #   DRY_RUN=1 ./scripts/demo-driver.sh   # plan + pre-flight checks; no swarm
 #
 # Tunables (env vars):
-#   MIN_DEMO_BACKLOG    Warn if fewer swarm-ready issues exist (default: 3).
-#                       Below the threshold the coordinator is instructed
-#                       to create more demo-friendly issues inline.
+#   DEMO_LABEL          Label that scopes the demo pool (default: demo).
+#   MIN_DEMO_BACKLOG    Warn if fewer demo-labeled open issues exist
+#                       (default: 3). Coordinator may create more inline.
+#                       Hard floor is 1 — an empty pool aborts pre-flight.
 #   DEMO_PROMPT         Override the coordinator's demo-mode prompt entirely.
 #   COORD_TIMEOUT       Seconds to wait for coordinator first output (default: 45)
 #   WORKER_WATCH_SECS   Seconds to dwell on a worker pane (default: 15)
@@ -31,7 +38,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LLM_SWARM_DIR="$(dirname "$SCRIPT_DIR")"
 SESSION_NAME="llm-$(basename "$PWD")"
 
-MIN_DEMO_BACKLOG="${MIN_DEMO_BACKLOG:-3}"   # warn if fewer than this swarm-ready issues exist
+DEMO_LABEL="${DEMO_LABEL:-demo}"
+MIN_DEMO_BACKLOG="${MIN_DEMO_BACKLOG:-3}"   # warn if fewer than this demo-labeled issues exist
 COORD_TIMEOUT="${COORD_TIMEOUT:-45}"
 WORKER_WATCH_SECS="${WORKER_WATCH_SECS:-15}"
 EVENT_LOG_SECS="${EVENT_LOG_SECS:-10}"
@@ -75,7 +83,8 @@ wait_for_window() {
 
 log "=== llm-swarm-runner demo driver ==="
 log "session name:      $SESSION_NAME"
-log "min backlog:       $MIN_DEMO_BACKLOG (swarm-ready issues; coordinator will create more if short)"
+log "demo label:        $DEMO_LABEL"
+log "min backlog:       $MIN_DEMO_BACKLOG (open ${DEMO_LABEL}-labeled issues; coordinator may create more if short)"
 log "dry run:           $DRY_RUN"
 log ""
 
@@ -95,11 +104,35 @@ if ! gh auth status >/dev/null 2>&1; then
     exit 1
 fi
 
-# Count current swarm-ready backlog (informational — coordinator handles top-up)
-log "[pre-flight] Counting swarm-ready backlog..."
-SWARM_READY_COUNT=$(gh issue list --label swarm-ready --state open --json number --jq 'length')
-log "  $SWARM_READY_COUNT open issues labeled swarm-ready."
-if [ "$SWARM_READY_COUNT" -lt "$MIN_DEMO_BACKLOG" ]; then
+# Ensure the demo label exists on the repo (idempotent — succeeds if already present).
+log "[pre-flight] Ensuring '$DEMO_LABEL' label exists on the repo..."
+if ! gh label list --json name --jq '.[].name' 2>/dev/null | grep -qx "$DEMO_LABEL"; then
+    if gh label create "$DEMO_LABEL" \
+        --description "Demo-friendly fodder: dispatched by demo-driver.sh during recordings" \
+        --color FBCA04 >/dev/null 2>&1; then
+        log "  created label '$DEMO_LABEL'."
+    else
+        warn "  could not create label '$DEMO_LABEL' (continuing — may already exist via race)."
+    fi
+else
+    log "  label '$DEMO_LABEL' present."
+fi
+
+# Count current demo-labeled backlog. An empty pool is a hard failure —
+# silent success would mean the coordinator either idles or starts
+# inventing work outside the demo scope.
+log "[pre-flight] Counting open '$DEMO_LABEL'-labeled issues..."
+DEMO_COUNT=$(gh issue list --label "$DEMO_LABEL" --state open --json number --jq 'length')
+log "  $DEMO_COUNT open issues labeled '$DEMO_LABEL'."
+if [ "$DEMO_COUNT" -eq 0 ]; then
+    err "FATAL: no open issues labeled '$DEMO_LABEL'."
+    err "  Label some demo-friendly fodder first, e.g.:"
+    err "    gh issue list --label swarm-ready --state open"
+    err "    gh issue edit <N> --add-label $DEMO_LABEL"
+    err "  Or create fresh: gh issue create --label $DEMO_LABEL --title '...' --body '...'"
+    exit 1
+fi
+if [ "$DEMO_COUNT" -lt "$MIN_DEMO_BACKLOG" ]; then
     warn "  fewer than MIN_DEMO_BACKLOG=$MIN_DEMO_BACKLOG — coordinator will be instructed to create more inline."
 fi
 
@@ -121,6 +154,71 @@ fi
 log "[setup] Killing any prior session, cleaning .swarm/..."
 tmux kill-session -t "$SESSION_NAME" 2>/dev/null || true
 rm -rf .swarm/
+
+# ---- Temporary .swarm-policy.md -------------------------------------------
+#
+# Writing a scoped policy file is how we constrain the coordinator to demo
+# fodder without baking issue numbers into this script. The coordinator and
+# provision-worker.sh both read .swarm-policy.md from the project root and
+# treat its contents as binding.
+#
+# If a real .swarm-policy.md already exists in the repo, we save it aside and
+# restore it on exit — never silently overwrite user/project state.
+
+POLICY_PATH=".swarm-policy.md"
+POLICY_BACKUP=""
+POLICY_SENTINEL="<!-- written by scripts/demo-driver.sh — auto-removed on exit -->"
+
+if [ -e "$POLICY_PATH" ]; then
+    POLICY_BACKUP="$(mktemp -t swarm-policy-backup-XXXXXX.md)"
+    cp "$POLICY_PATH" "$POLICY_BACKUP"
+    log "[setup] Existing $POLICY_PATH backed up to $POLICY_BACKUP (restored on exit)."
+fi
+
+cat > "$POLICY_PATH" <<EOF
+$POLICY_SENTINEL
+# Demo-recording policy (transient)
+
+This file is written by \`scripts/demo-driver.sh\` for the duration of a demo
+recording, then removed (or replaced with the repo's original policy) on exit.
+
+## Coordinator scope
+
+- The coordinator MUST ONLY dispatch workers to issues that are currently
+  labeled \`$DEMO_LABEL\` AND in state OPEN.
+- The coordinator MUST NOT dispatch to any other issue, regardless of its
+  other labels (e.g. \`swarm-ready\`, \`good first issue\`).
+- If the coordinator chooses to create new issues inline to top up the pool,
+  it MUST label them with \`$DEMO_LABEL\` so they fall under this same scope.
+
+## Why
+
+A recording session merges PRs which auto-close their linked issues; the
+self-healing pool is "whatever is open AND labeled \`$DEMO_LABEL\` right now."
+Hardcoding numbers here would go stale on every retake.
+EOF
+log "[setup] Wrote transient $POLICY_PATH (scope: label=$DEMO_LABEL)."
+
+restore_policy() {
+    # Only act on the file if it still carries our sentinel — if the user
+    # (or a worker) replaced it mid-run, leave their content alone.
+    if [ -f "$POLICY_PATH" ] && head -1 "$POLICY_PATH" | grep -qF -- "$POLICY_SENTINEL"; then
+        rm -f "$POLICY_PATH"
+        log "[cleanup] Removed transient $POLICY_PATH."
+    else
+        warn "[cleanup] $POLICY_PATH no longer carries our sentinel — leaving it alone."
+    fi
+    if [ -n "$POLICY_BACKUP" ] && [ -f "$POLICY_BACKUP" ]; then
+        # Only restore if there's no replacement file already there.
+        if [ ! -e "$POLICY_PATH" ]; then
+            mv "$POLICY_BACKUP" "$POLICY_PATH"
+            log "[cleanup] Restored original $POLICY_PATH from backup."
+        else
+            warn "[cleanup] $POLICY_PATH already present post-cleanup — backup left at $POLICY_BACKUP."
+        fi
+    fi
+}
+trap restore_policy EXIT
 
 # ---- Background driver ----------------------------------------------------
 
@@ -171,21 +269,22 @@ log "[launch] Starting coordinator in detached session..."
 # DEMO-MODE prompt. Instead of hardcoding issue numbers, instruct the coordinator
 # to bias toward simple/visible work — generating new tiny issues on-the-fly if
 # the backlog is short, and avoiding meaty enhancement work that would stall.
-DEFAULT_PROMPT='You are operating in DEMO MODE for a screen recording.
+DEFAULT_PROMPT="You are operating in DEMO MODE for a screen recording.
 
-ISSUE-GENERATION POLICY (if AVAILABLE < 3 simple swarm-ready issues):
-- Create new issues inline via `gh issue create --label swarm-ready`.
+The project's .swarm-policy.md restricts you to issues labeled \`$DEMO_LABEL\`.
+Honor it strictly — do NOT dispatch issues lacking that label, even if they
+otherwise look swarm-ready.
+
+ISSUE-GENERATION POLICY (if AVAILABLE < 3 simple \`$DEMO_LABEL\` issues):
+- Create new issues inline via \`gh issue create --label $DEMO_LABEL\`.
 - Each one MUST be: docs-only or chore-only, single-file scope, completable
   in under 2 minutes of worker time, no logic/test/CI changes. Examples:
   typo fix, missing badge, doc TL;DR, missing config file, gitignore entry.
 - Skip issue creation entirely if there are already 3+ such issues open.
 
 DISPATCH POLICY:
-- Only dispatch issues labeled `swarm-ready`.
+- Only dispatch issues labeled \`$DEMO_LABEL\`.
 - Strongly prefer the SIMPLEST issues: docs/* and chore/* over fix/*.
-- AVOID anything that looks like real product work: titles starting with
-  feat:, "Coordinator-side ...", "Integrate ...", or anything labeled
-  `enhancement`. These exist as real backlog and are not demo material.
 - Dispatch up to MAX_WORKERS workers in this wake; the watcher refills.
 
 CADENCE:
@@ -193,7 +292,7 @@ CADENCE:
 - Do NOT ask the user for confirmation about anything.
 - Do NOT propose merging or reviewing PRs — the recording is in progress.
 - When the watcher wakes you with refresh prompts, apply the same demo-mode
-  discipline: triage outcomes briefly, top up if slots are free, idle.'
+  discipline: triage outcomes briefly, top up if slots are free, idle."
 PROMPT="${DEMO_PROMPT:-$DEFAULT_PROMPT}"
 log "[launch] coordinator prompt: (demo mode — see body)"
 NON_INTERACTIVE=1 "$LLM_SWARM_DIR/llm-start.sh" -w --max-workers 2 "$PROMPT" &
@@ -220,12 +319,15 @@ log "[launch] Session is live. Starting background beat driver..."
 drive_beats &
 DRIVER_PID=$!
 
-# Extend the trap to clean up child processes too
-cleanup_processes() {
+# Extend the existing EXIT trap (which restores .swarm-policy.md) to also
+# clean up child processes. Order matters: kill child processes first so they
+# don't keep handles on the policy file mid-restore.
+cleanup_all() {
     kill $DRIVER_PID 2>/dev/null || true
     kill $LLM_START_PID 2>/dev/null || true
+    restore_policy
 }
-trap cleanup_processes EXIT
+trap cleanup_all EXIT
 
 log ""
 log "============================================================"
