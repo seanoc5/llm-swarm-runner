@@ -120,6 +120,46 @@ When in doubt, rate higher. Be honest — the rating guides the human, it
 doesn't gate merge. Over-rating costs nothing but trust; under-rating
 costs a real incident.
 
+### PR body skeleton
+
+The repo's PR body skeleton is the **single source of truth** for the
+section structure of every PR you open. Before invoking `gh pr create`:
+
+1. **If `.github/PULL_REQUEST_TEMPLATE.md` exists in the repo root, read
+   it** and use its section headings as the skeleton for your PR body.
+   Fill in each section; keep the blind-merge-risk HTML comment + visible
+   line at the top (the template includes both as placeholders). Replace
+   the rubric block with the actual rating; do not leave the
+   `low|medium|high` placeholder in the submitted body.
+2. **If the template file is absent** (older checkouts, other repos
+   adopting this swarm runner before they've added a template), fall
+   back to the inline skeleton below. This is the same structure the
+   template encodes — kept here so workers in template-less repos still
+   produce consistent PR bodies.
+
+Inline fallback skeleton:
+
+```
+<!-- BLIND_MERGE_RISK: low -->
+**Blind-merge risk:** 🟢 low — <one-line rationale naming the riskiest aspect>
+
+## Summary
+
+<What changed and why, in 1–3 sentences. `Closes #N` if applicable.>
+
+## Test plan
+
+- [ ] What you ran locally and the result
+- [ ] What CI covers
+- [ ] Manual verification a reviewer should repeat
+```
+
+When the template *is* present and you've used it as the skeleton, you
+do not need to also emit the template's "Risk assessment" rubric block
+in the final PR body — the visible blind-merge-risk line at the top
+already carries the rating. Strip the rubric (or leave it; both are
+acceptable) so the rendered PR isn't padded with explanatory boilerplate.
+
 ---
 
 ## Verbosity dial
