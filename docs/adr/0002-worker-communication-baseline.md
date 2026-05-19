@@ -60,3 +60,35 @@ Introduce a **shared baseline** of communication conventions that injects into e
 - **`requeue.sh --verbosity` flag.** Mid-stream verbosity adjustment uses a hand-written dial brief documented in the worker baseline; no script change.
 - **Per-PR-author risk-rating calibration** (track historical accuracy of low/med/high ratings vs actual merge incidents). Possible future work; needs data collection first.
 - **Migration of older project `.swarm-policy.md` files** to remove duplicated conventions. Cosmetic; no behavior change required.
+
+## 2026-05 amendment: coordinator-side auto-merge for low-risk PRs (opt-in via `SWARM_AUTOMERGE_LOW`)
+
+The original decision shipped the risk rating as a *signal* only — it rendered in coordinator status reports with traffic-light emoji, but never triggered an action. After a few weeks of use, the gap was clear: 🟢-rated PRs (typo fixes, docs-only changes, dependency bumps with green CI) still required a human click, defeating most of the throughput the rating was supposed to unlock.
+
+This amendment extends — does not supersede — the original decision:
+
+- **Workers still do not merge.** The `.swarm-policy.md.example` rule forbidding worker-side merges stands; rating-and-merge stay separated. Workers grading their own homework AND auto-landing it is too tight a loop and was rejected during the original decision.
+- **Coordinator MAY auto-merge** when `SWARM_AUTOMERGE_LOW=1` is set in the environment (default off — explicit opt-in per session / per project). This preserves the principle that the merge actor is independent of the rating actor: the worker rates, the coordinator (after its own read of the diff) acts.
+- **Six gates** must all hold before auto-merge fires: `<!-- BLIND_MERGE_RISK: low -->` marker present; required CI checks green; no `CHANGES_REQUESTED` reviews; base branch is the repo default; PR is open and non-draft; coordinator's own one-glance diff read confirms the worker's rationale matches reality.
+- **Exact command:** `gh pr merge <N> --squash --delete-branch --auto`. The `--auto` flag lets GitHub gate on branch-protection checks if the repo has them; if not, it merges immediately. Either path leaves a clean audit trail in the PR timeline.
+- **Fallback on any gate failure** is the unchanged pre-amendment behavior: surface the PR to the human with the rating rendered, plus a one-line "held off auto-merge: <reason>" so the human knows why.
+
+### Why opt-in rather than on-by-default
+
+- **Per-project autonomy varies.** A docs repo can absorb an auto-merged typo fix. A repo with a production deploy on `master` should not auto-merge anything ever. Env-knob lets each project decide without forking the coordinator prompt.
+- **Auto-merge is hard to take back.** Squash + delete-branch destroys the recoverable state; the merge commit is in history. Opt-in means the human consciously enabled it and is on the hook.
+- **Recoverable mistakes only.** Even when enabled, the gates above conservatively scope what auto-merges — anything touching auth, schema, or multi-file source code falls outside the 🟢 rubric and remains manual.
+
+### Why not on the worker side
+
+Option A in the original decision (worker auto-merges on `low`) was rejected and stays rejected for the same reasons: the worker rated its own work and merging on that rating is a one-actor loop with no second pair of eyes. The coordinator's separate read of the diff — even a one-glance read — is a cheap second pair of eyes that catches the worst miscalibrations (rating says "docs-only" but diff touches `src/`).
+
+### Why not GitHub-native branch protection alone
+
+GitHub-native branch protection + `--auto` on every PR is the right complementary layer (and is exactly why the gate above uses `--auto`). But it doesn't distinguish low/medium/high on its own — it would either auto-merge everything that passes CI or nothing. The rating-based gate adds the missing dimension; branch protection (where configured) adds defense in depth.
+
+### Consequences
+
+- The coordinator prompt grows by ~40 lines (the new subsection). Trivial budget impact.
+- Projects that already set `SWARM_AUTOMERGE_LOW=1` need no other action; existing 🟢 PRs from already-merged workers are not retroactively re-evaluated (the gate runs at coordinator wake time on currently-open PRs).
+- The amendment is reversible: unsetting `SWARM_AUTOMERGE_LOW` restores the pre-amendment "render-only" behavior with zero code change. No migration burden if a project changes its mind.

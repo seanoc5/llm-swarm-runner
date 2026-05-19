@@ -211,6 +211,39 @@ Use `gh pr view <N> --json body --jq .body | grep -E 'BLIND_MERGE_RISK|Blind-mer
 
 If the markers are missing (older worker, or the worker forgot), default to "🟡 medium — risk rating not provided by worker; review before merge" and flag it as a worker-policy violation in your status update.
 
+### Auto-merge low-risk PRs (opt-in)
+
+The coordinator MAY auto-merge a worker's 🟢-rated PR **only when `SWARM_AUTOMERGE_LOW=1` is set** in the environment (default: unset → never auto-merge). This is an explicit per-session/per-project opt-in: rating-and-merge stay separated by default, and the human stays in the loop unless they consciously enabled the auto-action. Workers remain forbidden from merging their own PRs (per `.swarm-policy.md` / `examples/swarm-policy.md.example`); auto-merge is a coordinator-only action, done after a separate read of the diff.
+
+A project that wants to *disable* auto-merge even when the session opted in can leave `SWARM_AUTOMERGE_LOW` unset in `<project>/.swarm/.env` (it overrides session env), or document a "no auto-merge" rule in `.swarm-policy.md` which you must honor as a hard veto.
+
+**Gates — all must hold before you run the merge command:**
+
+1. PR body contains the exact string `<!-- BLIND_MERGE_RISK: low -->` (case-sensitive `low`).
+2. All required CI checks are green — `gh pr checks <N>` reports no failing required checks and no pending required checks.
+3. No `CHANGES_REQUESTED` review state on the PR.
+4. PR base branch is the repo's default branch (skip feature-to-feature merges).
+5. PR is `OPEN` and not a draft.
+6. You have done your own one-glance read of the diff (`gh pr diff <N>`) and the worker's risk rationale looks defensible — i.e. the claimed scope matches what the diff actually shows. If the worker said "typo fix in README" and the diff touches `src/`, that's a mismatch; surface it instead of merging.
+
+If all six hold, run:
+
+```bash
+gh pr merge <N> --squash --delete-branch --auto
+```
+
+`--auto` lets GitHub gate the actual merge on branch-protection checks if the repo has them; otherwise it merges immediately. Either way, the human gets a clear audit trail in the PR timeline.
+
+**If any gate fails**, fall back to the current behavior: surface the PR with the rating rendered (per the section above) AND include a one-line reason for the no-merge so the human knows why you held off. Examples:
+
+- "PR #N opened (🟢 low risk): <title> — held off auto-merge: CI yellow (lint pending)."
+- "PR #N opened (🟢 low risk): <title> — held off auto-merge: diff touches `src/auth/*`, wider than the worker's 'docs-only' rationale claimed."
+- "PR #N opened (🟢 low risk): <title> — held off auto-merge: `SWARM_AUTOMERGE_LOW` not set."
+
+**Status reporting is unchanged in structure.** Even on a successful auto-merge, you still emit the standard "PR #N opened (🟢 …)" line as soon as the worker surfaces the PR. Then, once GitHub confirms the merge landed (poll `gh pr view <N> --json state` if needed, or read it back from `gh pr merge`'s own output), emit a follow-up "auto-merged #N" line. Don't collapse the two events into one — the human wants to see the rating-and-decision step distinctly from the merge-confirmed step.
+
+Only 🟢 low qualifies. 🟡 medium and 🔴 high are NEVER auto-merged regardless of `SWARM_AUTOMERGE_LOW` — those always stay manual.
+
 ### When the user hits a merge conflict
 
 When the user reports a PR conflict (GitHub said "this branch has conflicts that must be resolved" / "auto-merge failed" / similar), point them at `$LLM_SWARM_DOCS/VCS/git-github.md` — specifically the **"Resolving conflicts in a PR"** section. The env var resolves to the sandbox's docs directory; the path works both for you (running on the host) and for any worker the user might be coordinating with. Don't paraphrase the steps yourself unless they've already read the doc and have a specific follow-up question; the doc is comprehensive, self-contained, and stays in sync. Your job is to surface it, not duplicate it. If the user is in a hurry and just wants a verdict on merge vs. rebase, give it (per the doc's decision table) and link to the doc for the actual command sequence.

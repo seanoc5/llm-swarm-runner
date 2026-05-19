@@ -186,6 +186,7 @@ The coordinator and watcher honor a small set of tunables loaded from three sour
 | `INCLUDE_ASSIGNED_TO_OTHERS` | `0`     | `1` = drop the `@me`-or-unassigned filter; the swarm claims teammates' tickets too.                               |
 | `DEBOUNCE_SECS`              | `30`    | Watcher: window during which repeated worker-finish events coalesce into a single coordinator wake.               |
 | `POLL_SECS`                  | `2`     | Watcher: polling interval when `inotify-tools` isn't installed.                                                   |
+| `SWARM_AUTOMERGE_LOW`        | unset   | Coordinator: when `1`, auto-merge worker PRs rated 🟢 low (six gates apply; see `prompts/coordinator.md`). Default off — explicit opt-in. |
 
 **AVAILABLE** is the coordinator's working definition of "issues a worker can pick up right now":
 
