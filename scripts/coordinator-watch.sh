@@ -96,12 +96,15 @@ DEFAULT WAKE_PROMPT (top-up mode)
 
 EVENTS LOG
     Appends to <project>/.swarm/events.log:
-      watch.start      boot banner with backend + caps
-      worker.finish    outcome JSON detected (issue, ok|err)
-      coord.wake       llm-start.sh invoked (or coord.wake.skip on debounce)
-      sweep.run        sweep-swarm-outcomes.sh fired (when POST_OUTCOMES=1)
-      watch.autoclose  kill-finished-workers.sh invoked (when WATCHER_AUTOCLOSE=1)
-      cap.refused      provision-worker.sh hit MAX_WORKERS / MAX_TMUX_WINDOWS
+      watch.start          boot banner with backend + caps
+      worker.finish        outcome JSON detected (issue, ok|err) — fired only
+                           for worktrees registered with this PROJECT_DIR
+      worker.finish.skip   outcome JSON detected for a foreign worktree
+                           (sibling repo sharing the same WORKSPACE parent)
+      coord.wake           llm-start.sh invoked (or coord.wake.skip on debounce)
+      sweep.run            sweep-swarm-outcomes.sh fired (when POST_OUTCOMES=1)
+      watch.autoclose      kill-finished-workers.sh invoked (when WATCHER_AUTOCLOSE=1)
+      cap.refused          provision-worker.sh hit MAX_WORKERS / MAX_TMUX_WINDOWS
 
 BACKEND
     Auto-detects inotifywait (instant) or falls back to polling find
@@ -207,6 +210,49 @@ log_event watch.start \
 
 # Shared state
 LAST_WAKE=0
+
+# is_our_worktree <outcome-path>
+#
+# Filter cross-talk from sibling repos that share the same WORKSPACE parent
+# (e.g., /opt/work/oconeco/ holds wt-issue-* worktrees for fand-guide,
+# fand-etl, fand-app, fand-poc). Without this filter, a worker finishing in
+# any sibling repo wakes EVERY coordinator running under the same parent.
+#
+# Returns 0 (caller treats as "ours, fire") if the outcome's containing
+# worktree is registered with $PROJECT_DIR's git. Returns 1 otherwise.
+#
+# Fail-open policy: if `git worktree list` errors out (PROJECT_DIR isn't a
+# git repo, git missing, etc.), we treat all events as ours. Preserves the
+# pre-patch behavior for non-git or broken-install setups — the filter
+# only adds scoping when it can verify scoping.
+is_our_worktree() {
+    local path="$1"
+    local worktree_root
+    # Strip "/.swarm/tasks/done/<file>.json" suffix to get the worktree root.
+    worktree_root="$(echo "$path" | sed -E 's|/\.swarm/tasks/done/[^/]+$||')"
+
+    local wt_list
+    wt_list="$(git -C "$PROJECT_DIR" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2}')" || return 0
+    [ -z "$wt_list" ] && return 0
+
+    grep -Fxq "$worktree_root" <<< "$wt_list"
+}
+
+# dispatch_outcome <outcome-path>
+#
+# Wrapper around on_outcome that applies the is_our_worktree filter.
+# Used by both inotify and poll backends so the scoping logic lives in
+# exactly one place.
+dispatch_outcome() {
+    local path="$1"
+    if is_our_worktree "$path"; then
+        on_outcome "$path"
+    else
+        local issue
+        issue=$(basename "$path" | sed -E 's/.*-([0-9]+)\.(ok|err)\.json$/\1/')
+        log_event worker.finish.skip "issue=$issue reason=foreign_worktree path=$path"
+    fi
+}
 
 # cleanup_eligible_workers
 #
@@ -334,7 +380,7 @@ run_inotify() {
     | while IFS= read -r path; do
         case "$path" in
             */wt-issue-*/.swarm/tasks/done/*.ok.json|*/wt-issue-*/.swarm/tasks/done/*.err.json)
-                on_outcome "$path"
+                dispatch_outcome "$path"
                 ;;
         esac
     done
@@ -382,7 +428,7 @@ run_poll() {
         if [ -n "$diff_new" ]; then
             while IFS= read -r path; do
                 [ -z "$path" ] && continue
-                on_outcome "$path"
+                dispatch_outcome "$path"
             done <<< "$diff_new"
             echo "$current" > "$seen_file"
         fi
