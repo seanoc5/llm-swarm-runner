@@ -11,6 +11,13 @@
 # coordinator.md describes everything here as runtime artifacts.
 .swarm/
 
+# Repo-root .env for personal-machine overrides (MAX_WORKERS, FAND_DATA_ROOT, etc.).
+# Shipped defaults live in .env.example (tracked); per-project durable overrides
+# go in <project>/.swarm/.env (gitignored above). Root-only — anchored with the
+# leading slash so it does NOT shadow .env files inside subdirs that might
+# legitimately be tracked.
+/.env
+
 # Demo recording artifacts
 *.mp4
 *.gif
