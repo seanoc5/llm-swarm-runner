@@ -37,9 +37,9 @@ what should stay in per-project policy.
 ### Bootstrap a default `prompts/worker.md`
 Workers currently have no shared system prompt. Spend one focused session
 extracting the "how a worker should behave" expectations that are implicit
-in `prompts/coordinator.md` (rebase before push, don't merge own PRs, PR
-title conventions, etc.) into a sibling `prompts/worker.md`. Wire
-`provision-worker.sh` to surface it.
+in `prompts/coordinator.md` (rebase before push, tiered self-merge per
+risk rating, PR title conventions, etc.) into a sibling `prompts/worker.md`.
+Wire `provision-worker.sh` to surface it.
 
 ### Decide what belongs in worker prompt vs `.swarm-policy.md`
 Once the worker prompt exists, draft a one-page rule for the split. Rough
