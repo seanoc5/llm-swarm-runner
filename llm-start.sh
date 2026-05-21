@@ -34,6 +34,26 @@ LLM_SWARM_DIR="${LLM_SWARM_DIR:-$SCRIPT_DIR}"
 SESSION_NAME="llm-$(basename "$PWD")"
 SYSTEM_PROMPT_FILE="$LLM_SWARM_DIR/prompts/coordinator.md"
 
+# Per-repo tmux socket isolates swarm sessions from the user's default tmux
+# server. Different `-L name` = different tmux server = independent
+# resurrect/continuum state. Without this, swarm sessions land on the default
+# socket alongside `main`, and tmux-continuum on the default socket
+# auto-restores all of them on next server start — clobbering `main` as the
+# expected attach target.
+#
+# Resurrect state for the swarm lives inside the repo (.swarm/tmux-resurrect/),
+# so save/restore is genuinely per-project. tmux-continuum is left disabled on
+# the swarm server; rely on manual prefix+Ctrl-s / prefix+Ctrl-r when desired.
+SWARM_SOCKET="swarm-$(basename "$PWD")"
+SWARM_RESURRECT_DIR="$PWD/.swarm/tmux-resurrect"
+
+# Shadow `tmux` for the lifetime of this script so every tmux call below
+# routes to the swarm socket. Commands sent into panes (via send-keys) run in
+# child shells that don't see this function — but those shells already have
+# $TMUX set by the swarm server, so their bare `tmux` invocations hit the
+# right server automatically.
+tmux() { command tmux -L "$SWARM_SOCKET" "$@"; }
+
 # --- Help / usage ----------------------------------------------------------
 
 usage() {
@@ -316,6 +336,14 @@ if ! $session_existed; then
         echo "Loaded GEMINI_API_KEY from $GEMINI_ENV_SOURCED"
     fi
     tmux new-session -d -s "$SESSION_NAME" "${TMUX_ENV_OPTS[@]}" -n "coordinator"
+
+    # Pin resurrect state to this repo, disable continuum autosave/restore on
+    # the swarm server. The swarm is recreated via llm-start.sh, so we don't
+    # want continuum's timer competing with the repo-local save dir.
+    mkdir -p "$SWARM_RESURRECT_DIR"
+    tmux set-option -g @resurrect-dir "$SWARM_RESURRECT_DIR" >/dev/null
+    tmux set-option -g @continuum-restore 'off' >/dev/null
+    tmux set-option -g @continuum-save-interval '0' >/dev/null
 elif ! $window_exists; then
     echo "Session $SESSION_NAME exists but coordinator window is gone. Recreating window."
     tmux new-window -d -t "$SESSION_NAME" -n coordinator
@@ -493,7 +521,9 @@ fi
 
 # Attach or switch to the session
 if [ "${NON_INTERACTIVE:-0}" != "1" ]; then
-    echo "Connecting to Coordinator..."
+    echo "Connecting to Coordinator (socket: $SWARM_SOCKET)..."
+    echo "  Reattach later from this repo: $LLM_SWARM_DIR/llm-start.sh"
+    echo "  Or directly: tmux -L $SWARM_SOCKET attach -t $SESSION_NAME"
     if $IN_TMUX; then
         # If we are already in tmux, switch the client to the new session
         tmux switch-client -t "$SESSION_NAME"
@@ -503,4 +533,5 @@ if [ "${NON_INTERACTIVE:-0}" != "1" ]; then
     fi
 else
     echo "NON_INTERACTIVE is set. Session $SESSION_NAME created but not attaching."
+    echo "Attach with: tmux -L $SWARM_SOCKET attach -t $SESSION_NAME"
 fi
