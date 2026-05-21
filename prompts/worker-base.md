@@ -7,6 +7,39 @@ override rules — when conflict exists, project policy wins.
 
 ---
 
+## Refresh from master before starting work
+
+The very first thing you do on every task — before reading the brief
+in depth, before editing anything — is sync your branch to current master:
+
+```bash
+git fetch origin master
+git rebase origin/master
+```
+
+Why: your worktree may have been provisioned days ago, or you may be a
+re-provisioned worker landing in a stale worktree. Branches that drift
+from master accumulate two failure modes that bite at PR-merge time:
+
+1. **Hash-rewriting conflicts.** If your branch was built on top of
+   another branch (say `feat/issue-X`) that has since been
+   squash-merged to master, your branch still carries the original
+   commits. Master has the squashed equivalent but with a different
+   hash. Git can't recognize them as equivalent and tries to replay
+   them, producing a wall of conflicts in code that's already on master.
+2. **Semantic drift.** Another PR may have already changed the file
+   you're about to edit. Better to discover that now than at the end.
+
+If the rebase produces conflicts you can't mechanically resolve, stop
+and surface a `## Decision` block — the task may need to be reframed
+in light of what's already on master, or the brief itself may be stale.
+
+If the rebase succeeds, do NOT force-push yet — wait until you have a
+real change to push. (Empty force-pushes churn the PR's commit timeline
+for no reason.)
+
+---
+
 ## End-of-work summary (always)
 
 Every task ends with a `## Summary` block. Structure:
