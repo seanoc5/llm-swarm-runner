@@ -14,6 +14,7 @@ This document covers advanced workflows, custom mounts, and manual Git worktree 
   - [Testcontainers / Docker CLI](#testcontainers--docker-cli)
   - [Rebuilding the Image](#rebuilding-the-image)
 - [Worker Escape Hatch (Ctrl-Z opens a sibling bash pane)](#worker-escape-hatch-ctrl-z-opens-a-sibling-bash-pane)
+- [Peering at Workers from the Host (capture-pane)](#peering-at-workers-from-the-host-capture-pane)
 - [Triage Workflow](#triage-workflow)
   - [The triage cycle](#the-triage-cycle)
   - [Read-only triage prompt](#read-only-triage-prompt)
@@ -238,6 +239,44 @@ tmux list-keys -T root | grep C-z
 ```
 
 See also: [Troubleshooting → Ctrl-Z accidentally suspended claude](./troubleshooting.md#ctrl-z-accidentally-suspended-claude-inside-a-worker).
+
+## Peering at Workers from the Host (capture-pane)
+
+> Architectural background for *why* this works lives at [overview → "Tmux as substrate"](./llm-swarm-runner-overview.md#tmux-as-substrate-not-just-a-ui). Security implications at [security → "Tmux Scrollback Exposure"](./security.md#tmux-scrollback-exposure). This section is the operational how-to.
+
+Because every agent runs in a tmux pane (not a detached background process), the coordinator pane and every worker pane have **host-readable scrollback** for the life of the session — even after the agent inside has exited. The default config retains 50000 lines and keeps `[dead]` panes around on non-zero exit (`remain-on-exit failed`), so post-mortem inspection of a crashed worker works without rerunning anything.
+
+### The one command you'll actually use
+
+```bash
+tmux -L swarm-<repo> capture-pane -t llm-<repo>:iss-<N> -p -S -50000
+```
+
+- `-L swarm-<repo>` selects the per-repo tmux server (each swarm uses its own socket — see [tmux-cheatsheet.md](./tmux-cheatsheet.md)).
+- `-p` prints to stdout (pipeable to `grep`, `less`, `tee`, an LLM, whatever).
+- `-S -50000` includes the full retained scrollback rather than only what's currently visible.
+
+Example — find which worker hit a particular error:
+
+```bash
+for w in $(tmux -L swarm-fand-etl list-windows -t llm-fand-etl -F '#W' | grep '^iss-'); do
+    echo "=== $w ==="
+    tmux -L swarm-fand-etl capture-pane -t "llm-fand-etl:$w" -p -S -50000 \
+        | grep -i 'lazyinitialization\|ParseException' || echo "(no match)"
+done
+```
+
+### What the coordinator could do with this (but doesn't yet)
+
+The host-native coordinator has unrestricted access to the swarm tmux socket. Today's [`prompts/coordinator.md`](../prompts/coordinator.md) uses `tmux list-windows` for *structure* (which slots are occupied) but never `capture-pane` for *content* — cross-agent coordination is file-based via `.swarm/tasks/done/<id>.json` outcomes and GitHub PR state. Latent capabilities a future coordinator could exercise without architecture changes:
+
+- Detect a stuck worker (REPL idle for >N minutes, last lines match a known prompt pattern) and `send-keys` a recovery message instead of killing+respawning.
+- Grep across all workers for cross-cutting failures (e.g. "all workers failed compilation at the same dependency").
+- Replay a failed worker's transcript into a follow-up brief without the human having to copy-paste from the pane.
+
+### What workers can't do
+
+Workers cannot use `tmux capture-pane` to read the coordinator or sibling workers — their containers don't bind-mount the host tmux socket. If you need cross-worker visibility *from inside a worker*, the alternative paths are `docker exec` / `docker logs` (because `/var/run/docker.sock` is mounted), or the shared filesystem under `.swarm/tasks/`. Both have their own risk profiles; see [security.md](./security.md).
 
 ## Triage Workflow
 

@@ -75,9 +75,9 @@ ENV VARS  (precedence: flag > shell env > <project>/.swarm/.env > <sandbox>/.env
     COORDINATOR_USE_API_KEY      0         keep ANTHROPIC_API_KEY (bills API)
 
   Caps & filters  [also loadable from <project>/.swarm/.env]
-    MAX_WORKERS                  2         concurrent worker tmux windows
+    MAX_WORKERS                  5         concurrent worker tmux windows
     MAX_TMUX_WINDOWS             10        total session window cap (HARD)
-    TARGET_AVAILABLE             5         AVAILABLE backlog target
+    TARGET_AVAILABLE             10        AVAILABLE backlog target
     OWNER_LABELS                 (empty)   comma-sep labels = "human-owned"
     INCLUDE_ASSIGNED_TO_OTHERS   0         1 = claim others' tickets
 

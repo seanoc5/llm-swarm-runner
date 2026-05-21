@@ -50,14 +50,14 @@ DESCRIPTION
     the sandbox listener.
 
 CAP ENFORCEMENT (exit 3 on either)
-    MAX_WORKERS         alive iss-* windows < cap         (default 2)
+    MAX_WORKERS         alive iss-* windows < cap         (default 5)
     MAX_TMUX_WINDOWS    total session windows < cap       (default 10)
     Both are checked just before the new tmux window would be created.
     Re-running for an existing iss-N window does NOT count against caps —
     that path queues a follow-up task without adding capacity.
 
 CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
-    MAX_WORKERS         2         worker tmux window cap
+    MAX_WORKERS         5         worker tmux window cap
     MAX_TMUX_WINDOWS    10        total session window cap
     WORKER_VERBOSITY    verbose   worker communication level
     SANDBOX_SH          (auto)    path to sandbox.sh used by the listener
@@ -115,7 +115,7 @@ SANDBOX_SH="${SANDBOX_SH:-$LLM_SWARM_DIR/sandbox.sh}"
 # shellcheck source=_load-env.sh
 . "$SCRIPT_DIR/_load-env.sh" "$PROJECT_DIR"
 
-MAX_WORKERS="${MAX_WORKERS:-2}"
+MAX_WORKERS="${MAX_WORKERS:-5}"
 MAX_TMUX_WINDOWS="${MAX_TMUX_WINDOWS:-10}"
 
 # Resolve verbosity: --verbosity flag > shell/_load-env WORKER_VERBOSITY > 'verbose'.

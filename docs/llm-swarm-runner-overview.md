@@ -65,6 +65,21 @@ Running autonomous LLM agents directly on your host is risky: a hallucinated `rm
 - **Coordinator** lives on the host (not containerized) so it can `tmux new-window`, `git worktree add`, and `gh` against your auth directly.
 - **Workers** live inside `llm-swarm-runner:latest` Docker containers (via `sandbox.sh`) so any destructive command they invent is blast-radius-limited.
 
+### Tmux as substrate, not just a UI
+
+The choice of tmux for the session layer is load-bearing in a way that's easy to miss. Every agent — coordinator and each worker — runs inside a tmux pane rather than as a detached background process, which gives every line every agent ever prints a **persistent, host-readable artifact**: the pane's scrollback. With `history-limit 50000` and `remain-on-exit failed` (see [`examples/tmux.conf.example`](../examples/tmux.conf.example)), even an agent that crashed an hour ago still has its full transcript sitting in a `[dead]` pane, grep-able via:
+
+```bash
+tmux -L swarm-<repo> capture-pane -t llm-<repo>:iss-N -p -S -50000
+```
+
+Two distinct capabilities flow from this:
+
+- **For humans (used today)**: post-mortem grep over a dead worker's exact transcript without re-running it, replay-style debugging, cross-worker comparison. Most of [`docs/tmux-cheatsheet.md`](./tmux-cheatsheet.md) is built around this — `capture-pane -S -200`, the dead-pane workflow, the `kill-finished-workers.sh` helper.
+- **For the host-side coordinator (latent, not exercised by the default prompt today)**: the coordinator runs host-native and has unrestricted access to the swarm's tmux socket. It *could* `capture-pane` to detect a stuck REPL, grep for specific error patterns, or `send-keys` recovery input without restarting the worker. The current coordinator prompt ([`prompts/coordinator.md`](../prompts/coordinator.md)) doesn't do this — it polls `.swarm/tasks/done/<id>.json` outcome files and `gh pr list` instead — but the substrate makes it possible without redesign.
+
+**Asymmetric visibility — not the symmetric one you might assume.** The coordinator can read every worker's pane scrollback; **workers cannot read the coordinator's or each other's panes via tmux**, because the host tmux socket isn't bind-mounted into worker containers (see [`sandbox.sh`](../sandbox.sh) mount list). Workers do, however, share `/var/run/docker.sock` and can `docker exec` into sibling containers — a *larger* blast radius than tmux visibility, covered in [`docs/security.md`](./security.md).
+
 ## Components
 
 ### `sandbox.sh` — Docker wrapper for one agent
@@ -113,7 +128,7 @@ This means you can re-invoke `llm-start.sh` repeatedly with new prompts without 
 | `-w`, `--watch`         | `WATCH=1`                       | Spawn `coordinator-watch.sh` in window 2                                |
 | `-y`, `--yolo`          | (bundle — see below)            | Opinionated automation; explicit flags + shell env still win            |
 | `--status`              | `STATUS=1`                      | Spawn `gh-status-bar.sh` in window 3                                    |
-| `--max-workers N`       | `MAX_WORKERS=N`                 | Concurrent worker tmux windows (default 2)                              |
+| `--max-workers N`       | `MAX_WORKERS=N`                 | Concurrent worker tmux windows (default 5)                              |
 | `--max-windows N`       | `MAX_TMUX_WINDOWS=N`            | Total session window cap (default 10) — runaway brake                  |
 | `--target-available N`  | `TARGET_AVAILABLE=N`            | Backlog target; `0` disables auto-issue-creation                        |
 | `--include-others`      | `INCLUDE_ASSIGNED_TO_OTHERS=1`  | Claim teammates' tickets too                                            |
@@ -142,9 +157,9 @@ WATCH=1  STATUS=1  MAX_WORKERS=5  INCLUDE_ASSIGNED_TO_OTHERS=1  DEBOUNCE_SECS=15
 | `NON_INTERACTIVE`            | `0`                | —                             | When `1`, skip auto-attach (used by tests)                                                       |
 | `WATCH`                      | `0`                | `-w`, `--watch`               | When `1`, spawn `coordinator-watch.sh` in window 2                                               |
 | `STATUS`                     | `0`                | `--status`                    | When `1`, spawn `gh-status-bar.sh` in window 3                                                   |
-| `MAX_WORKERS`                | `2`                | `--max-workers N`             | Concurrent worker tmux windows the coordinator may have alive at once. `provision-worker.sh` enforces server-side (exit 3 on cap). |
+| `MAX_WORKERS`                | `5`                | `--max-workers N`             | Concurrent worker tmux windows the coordinator may have alive at once. `provision-worker.sh` enforces server-side (exit 3 on cap). |
 | `MAX_TMUX_WINDOWS`           | `10`               | `--max-windows N`             | Hard cap on total tmux windows in the session — counts coordinator + watch + status + alive workers + leftover finished worker windows. |
-| `TARGET_AVAILABLE`           | `5`                | `--target-available N`        | Backlog target. Housekeeping creates new issues when AVAILABLE drops below this — NOT when raw open count is low. |
+| `TARGET_AVAILABLE`           | `10`               | `--target-available N`        | Backlog target. Housekeeping creates new issues when AVAILABLE drops below this — NOT when raw open count is low. |
 | `OWNER_LABELS`               | empty              | `--owner-labels L1,L2`        | Comma-separated label names treated as "human-owned" (e.g. `sean,radesh`). The coordinator skips issues bearing any owner-label that isn't `@me`. |
 | `INCLUDE_ASSIGNED_TO_OTHERS` | `0`                | `--include-others`            | `1` = drop the `@me`-or-unassigned filter. Free-text override in the prompt (`"grab anything"`, `"include others"`) also engages this for one-shot use. |
 
