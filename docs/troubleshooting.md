@@ -257,7 +257,17 @@ Claude Code has been suspended. Run `fg` to bring Claude Code back.
 Note: ctrl + z now suspends Claude Code, ctrl + _ undoes input.
 ```
 
-…and `fg` does nothing useful. This means the tmux Ctrl-Z escape hatch binding (see [Advanced Usage → Worker Escape Hatch](./advanced-usage.md#worker-escape-hatch-ctrl-z-drops-to-shell)) is **not loaded in the running tmux server** — Ctrl-Z passed straight through to claude in the container, which SIGSTOPped itself. Since the foreground process in the window is `docker run` (not a host shell), there's no job-control parent to type `fg` into.
+…and `fg` does nothing useful. This means the tmux Ctrl-Z escape hatch binding (see [Advanced Usage → Worker Escape Hatch](./advanced-usage.md#worker-escape-hatch-ctrl-z-opens-a-sibling-bash-pane)) is **not loaded in the running tmux server** — Ctrl-Z passed straight through to claude in the container, which SIGSTOPped itself. Since the foreground process in the window is `docker run` (not a host shell), there's no job-control parent to type `fg` into.
+
+> **The escape hatch is not a "drop to subshell".** Because each swarm uses a per-repo tmux socket (`tmux -L swarm-<repo>`), running `tmux source-file ~/.tmux.conf` on the default socket does **not** reload the binding on the swarm's actual server. Re-source on each running swarm socket too:
+>
+> ```bash
+> for s in /tmp/tmux-$(id -u)/swarm-*; do
+>     tmux -L "$(basename "$s")" source-file ~/.tmux.conf
+> done
+> ```
+>
+> Also note: if the path in the binding is wrong, Ctrl-Z creates a sibling pane that **dies instantly with `bash: line 1: …/tmux-worker-shell.sh: No such file or directory` (exit 127)**. Kill the dead pane and fix the path in `~/.tmux.conf`, then re-source on the swarm socket(s).
 
 Verify the binding is missing:
 
@@ -275,10 +285,14 @@ docker exec swarm-<session>-iss-N bash -c 'pkill -CONT -f claude'
 Then install / reload the binding so this doesn't recur:
 
 ```bash
-# If the binding isn't in your config yet, copy the block from
-# examples/tmux.conf.example or see advanced-usage.md.
+# Easiest: let the installer bake the right path in and reload every swarm socket.
+./scripts/install-tmux-binding.sh
 
+# Or, if you've already added the block manually, just reload on every socket:
 tmux source-file ~/.tmux.conf
+for s in /tmp/tmux-$(id -u)/swarm-*; do
+    tmux -L "$(basename "$s")" source-file ~/.tmux.conf
+done
 tmux list-keys -T root | grep C-z      # should now show a binding
 ```
 

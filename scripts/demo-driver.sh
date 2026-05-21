@@ -8,7 +8,7 @@
 # while you focus on the screen recorder.
 #
 # Usage:
-#   cd /opt/work/sysadmin/llm-swarm-runner
+#   cd /opt/work/llm-swarm-runner   # or wherever you cloned the repo
 #   ./scripts/demo-driver.sh             # full run
 #   DRY_RUN=1 ./scripts/demo-driver.sh   # plan + pre-flight checks; no swarm
 #

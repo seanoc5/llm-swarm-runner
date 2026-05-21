@@ -87,6 +87,11 @@ bind r source-file ~/.tmux.conf \; display-message "~/.tmux.conf reloaded"
 # above.
 
 # === Worker (iss-*) Ctrl-Z escape hatch ====================================
+# RECOMMENDED: use ./scripts/install-tmux-binding.sh instead of pasting this
+# block. The installer self-locates the repo so the absolute path below is
+# always correct, writes a managed block (idempotent), and reloads the
+# config on every running swarm-* socket — not just the default one.
+#
 # In a worker window the foreground process is `docker run` and there is
 # no host-side shell wrapping it — so a stray Ctrl-Z sends SIGTSTP straight
 # to claude inside the container, suspending it with no easy way to `fg`.
@@ -101,6 +106,10 @@ bind r source-file ~/.tmux.conf \; display-message "~/.tmux.conf reloaded"
 # (the default since v2). After adding this, run:
 #   tmux source-file ~/.tmux.conf
 #   tmux list-keys -T root | grep C-z      # verify it's now bound
+# Also re-source on every running swarm socket — each swarm uses its own
+# tmux server (`tmux -L swarm-<repo>`), so reloading on the default socket
+# alone leaves the existing swarms unchanged:
+#   for s in /tmp/tmux-$(id -u)/swarm-*; do tmux -L "$(basename "$s")" source-file ~/.tmux.conf; done
 #
 # IMPORTANT: tmux's if-shell -F expands #{...} in the *condition*, but
 # split-window's shell-command argument is passed literally (no format
@@ -109,9 +118,11 @@ bind r source-file ~/.tmux.conf \; display-message "~/.tmux.conf reloaded"
 # tmux-worker-shell.sh resolves them at run time via `tmux display-message
 # -p -t "$TMUX_PANE"`, which does expand formats.
 #
-# Adjust the absolute path below to where you cloned llm-swarm-runner.
+# >>> YOU MUST EDIT THE ABSOLUTE PATH below to match your clone of      <<<
+# >>> llm-swarm-runner. If it's wrong, Ctrl-Z creates a sibling pane    <<<
+# >>> that immediately dies with "No such file or directory" (exit 127).<<<
 bind-key -n C-z if-shell -F '#{m:iss-*,#{window_name}}' \
-    'split-window -h "/opt/work/sysadmin/llm-swarm-runner/scripts/tmux-worker-shell.sh"' \
+    'split-window -h "/opt/work/llm-swarm-runner/scripts/tmux-worker-shell.sh"' \
     'send-keys C-z'
 
 # === Session persistence (tmux-resurrect + tmux-continuum) =================

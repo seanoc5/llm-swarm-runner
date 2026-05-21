@@ -13,7 +13,7 @@ This document covers advanced workflows, custom mounts, and manual Git worktree 
 - [Docker Integrations](#docker-integrations)
   - [Testcontainers / Docker CLI](#testcontainers--docker-cli)
   - [Rebuilding the Image](#rebuilding-the-image)
-- [Worker Escape Hatch (Ctrl-Z drops to shell)](#worker-escape-hatch-ctrl-z-drops-to-shell)
+- [Worker Escape Hatch (Ctrl-Z opens a sibling bash pane)](#worker-escape-hatch-ctrl-z-opens-a-sibling-bash-pane)
 - [Triage Workflow](#triage-workflow)
   - [The triage cycle](#the-triage-cycle)
   - [Read-only triage prompt](#read-only-triage-prompt)
@@ -154,7 +154,9 @@ docker build -t llm-swarm-runner:latest .
 docker build --no-cache -t llm-swarm-runner:latest .
 ```
 
-## Worker Escape Hatch (Ctrl-Z drops to shell)
+## Worker Escape Hatch (Ctrl-Z opens a sibling bash pane)
+
+> **Not a subshell, not a job-control suspend.** Because each worker runs as `docker run` foreground inside its own tmux window, there is no host shell to "drop to". The Ctrl-Z binding instead **splits a new sibling pane next to claude** and runs `docker exec -it … bash -l` against the same worker container. Claude in the original pane is untouched; the new pane shares the worktree, branch, gh auth, and env of the worker it sits beside.
 
 Sometimes you want a plain shell **inside the same container** as a running worker — to inspect the worktree, run a quick `git log`, check `gh pr view`, poke at `node_modules/`, or drop a manual brief into `.swarm/tasks/inbox/`. You don't want to suspend claude (no useful way to resume it from inside a `docker run` foreground), and you don't want to spin up a separate container that wouldn't share the worktree state.
 
@@ -171,25 +173,46 @@ Three pieces have to line up:
 | Tmux intercepts Ctrl-Z in `iss-*` windows and runs the helper script | `~/.tmux.conf` (you install this) |
 | Helper resolves the session/window names and `docker exec`s in | `scripts/tmux-worker-shell.sh` |
 
-The binding (copy this block into `~/.tmux.conf` — also included in [`examples/tmux.conf.example`](../examples/tmux.conf.example)). Adjust the absolute path to where you cloned `llm-swarm-runner`:
+### Install (recommended): use the install script
+
+The repo ships a small installer that bakes the correct absolute path to *this* checkout into a managed block in `~/.tmux.conf` and re-sources the config on every running swarm socket:
+
+```bash
+./scripts/install-tmux-binding.sh             # install + reload all swarm-* sockets
+./scripts/install-tmux-binding.sh --dry-run   # preview the diff first
+./scripts/install-tmux-binding.sh --uninstall # remove the managed block
+```
+
+The managed block lives between sentinel markers (`# >>> llm-swarm-runner ctrl-z binding (managed) >>>` / `<<<`) so re-running the script is idempotent — it rewrites the block in place rather than appending duplicates. A timestamped backup of `~/.tmux.conf` is taken before any write. If you have a previous manually-pasted copy of the binding outside the managed block, the script warns about it (tmux's last-binding-wins keeps the managed one effective, but you may want to delete the stray).
+
+### Install (manual)
+
+If you prefer to edit `~/.tmux.conf` by hand, paste the block below — also included in [`examples/tmux.conf.example`](../examples/tmux.conf.example):
+
+> ⚠️ **You MUST edit the absolute path below to match where you cloned `llm-swarm-runner`.** If the path is wrong, the sibling pane will appear and immediately die with `bash: line 1: …/tmux-worker-shell.sh: No such file or directory` (exit 127). The install script above sidesteps this by baking in `$SCRIPT_DIR` at install time.
 
 ```tmux
 # Worker (iss-*) Ctrl-Z escape hatch.
 # In any iss-* window, Ctrl-Z splits a sibling pane that docker-execs
 # into the same worker container as a login shell. claude keeps running.
 # In any other window, Ctrl-Z falls through to normal behavior.
+#
+# >>> EDIT THIS PATH to match your clone of llm-swarm-runner <<<
 bind-key -n C-z if-shell -F '#{m:iss-*,#{window_name}}' \
-    'split-window -h "/opt/work/sysadmin/llm-swarm-runner/scripts/tmux-worker-shell.sh"' \
+    'split-window -h "/opt/work/llm-swarm-runner/scripts/tmux-worker-shell.sh"' \
     'send-keys C-z'
 ```
 
 **Why the helper script?** tmux's `if-shell -F` expands `#{...}` formats in its *condition*, but `split-window`'s shell-command argument is passed **literally** — no format substitution. An earlier version of this binding put `#{session_name}` and `#{window_name}` directly in the `docker exec` line; those reached docker unexpanded as the literal container name `swarm-#{session_name}-#{window_name}`, which never matched a real container, so the new pane died with exit 1 every time. The helper sidesteps the limitation by resolving the names at run time via `tmux display-message -p -t "$TMUX_PANE"` (which *does* expand formats) before exec-ing into docker.
 
-After editing the config, reload it into the running tmux server (no restart required):
+After editing the config manually, reload it on every running swarm socket (each swarm uses its own tmux server `tmux -L swarm-<repo>`, so reloading the default socket alone leaves existing swarms unchanged):
 
 ```bash
-tmux source-file ~/.tmux.conf
-tmux list-keys -T root | grep C-z      # expect a binding here — if empty, the source-file didn't take
+tmux source-file ~/.tmux.conf      # default socket
+for s in /tmp/tmux-$(id -u)/swarm-*; do
+    tmux -L "$(basename "$s")" source-file ~/.tmux.conf
+done
+tmux list-keys -T root | grep C-z  # expect a binding here — if empty, the source-file didn't take
 ```
 
 ### Using it
