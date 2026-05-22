@@ -34,19 +34,6 @@ what should stay in per-project policy.
 > Append to the bottom. Use a short headline + 1-3 lines of context.
 > When picking one up, move it to the "Done" section with date + ref.
 
-### Bootstrap a default `prompts/worker.md`
-Workers currently have no shared system prompt. Spend one focused session
-extracting the "how a worker should behave" expectations that are implicit
-in `prompts/coordinator.md` (rebase before push, tiered self-merge per
-risk rating, PR title conventions, etc.) into a sibling `prompts/worker.md`.
-Wire `provision-worker.sh` to surface it.
-
-### Decide what belongs in worker prompt vs `.swarm-policy.md`
-Once the worker prompt exists, draft a one-page rule for the split. Rough
-intuition: behaviours that should hold *across all projects in the swarm*
-go in `prompts/worker.md`; project-specific guardrails (Flyway untouchable,
-no Dockerfile edits, etc.) stay in `.swarm-policy.md`. Codify as an ADR.
-
 ### Apply `prompts/skill-refactor-trim-focus.md` to `prompts/coordinator.md`
 The coordinator prompt is ~13KB and growing. Worth running the
 refactor/trim/focus skill on it before it crosses the "two contributors
@@ -65,6 +52,8 @@ scope; gives the refactor/trim/focus skill a fixed yardstick.
 > `- (YYYY-MM-DD) <headline> — <commit-or-PR-ref>`
 
 - (2026-05-13) **Surface this roadmap to the coordinator** — added step 2 to `prompts/coordinator.md` startup checklist (counts "Open ideas" entries each wake-up, surfaces to user, does NOT auto-file as issues).
+- (2026-05-22) **Bootstrap a default `prompts/worker.md`** — closed across PRs #111 (refresh-from-master), #112 (tiered self-merge), and the rename + system-prompt delivery (this PR). File `prompts/worker-base.md` was renamed to `prompts/worker.md`; `scripts/worker-listener.sh` now passes it as a system prompt at agent launch (`claude --append-system-prompt`, `gemini GEMINI_SYSTEM_MD`) instead of cat'ing into the user message. The original ambiguity ("workers have no shared system prompt") is now literally false.
+- (2026-05-22) **Decide what belongs in worker prompt vs `.swarm-policy.md`** — captured in the system-prompt-migration PR description: universal worker behaviors in `prompts/worker.md` (system), per-project guardrails in `<project>/.swarm-policy.md` (brief, may override). Reference-doc index `prompts/refs.md` stays in brief because it's contextual rather than a behavior rule and may be extended by projects via `.swarm-policy.md`.
 
 ---
 

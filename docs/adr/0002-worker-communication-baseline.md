@@ -1,8 +1,18 @@
-# ADR 0002 — worker communication baseline (`prompts/worker-base.md`)
+# ADR 0002 — worker communication baseline (`prompts/worker.md`)
 
 - **Status:** Accepted.
 - **Date:** 2026-05-13.
 - **Deciders:** llm-swarm-runner maintainers.
+
+> **2026-05-22 update:** the file was renamed from `prompts/worker-base.md`
+> to `prompts/worker.md`, and delivery changed from "cat'd into the user
+> message of every brief" to "passed as a system prompt at agent launch"
+> (claude via `--append-system-prompt`, gemini via `GEMINI_SYSTEM_MD`).
+> The conventions themselves — summary, decision framing, NBA hint, PR
+> risk rating, refresh-from-master, tiered self-merge — are unchanged
+> from this ADR's original specification. Historical references below
+> still mention `worker-base.md` because that's what was decided here;
+> grep current code for `worker.md` for the live path.
 
 ## Context
 

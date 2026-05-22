@@ -34,7 +34,7 @@ ARGUMENTS
 OPTIONS
     -v, --verbosity LEVEL
         Worker communication verbosity. One of: verbose, normal, concise,
-        spartan. See prompts/worker-base.md for what each level means.
+        spartan. See prompts/worker.md for what each level means.
         Default precedence (highest wins):
           1. this flag
           2. WORKER_VERBOSITY in <project>/.swarm/.env
@@ -47,7 +47,8 @@ DESCRIPTION
     -- where <worktree-parent> is either <project-parent> (the default 'flat'
     -- layout) or <project-parent>/<project>-worktrees (when
     -- SWARM_WORKTREE_GROUPING=project; recommended for multi-swarm hosts).
-    the v2 queue, embeds the worker-base communication conventions plus
+    the v2 queue, embeds the worker communication conventions (via
+    system prompt at launch time) plus
     any project .swarm-policy.md guardrails into the brief, atomic-writes
     the task into inbox/, and spawns a worker tmux window 'iss-N' running
     the sandbox listener.
@@ -134,14 +135,17 @@ MAX_TMUX_WINDOWS="${MAX_TMUX_WINDOWS:-10}"
 WORKER_VERBOSITY="${VERBOSITY_OVERRIDE:-${WORKER_VERBOSITY:-verbose}}"
 export WORKER_VERBOSITY
 
-# Path to the always-injected worker baseline (communication conventions).
-# Lives in the sandbox repo; copied verbatim to the top of every worker brief.
-WORKER_BASE_MD="$LLM_SWARM_DIR/prompts/worker-base.md"
+# Worker conventions (`prompts/worker.md`) are delivered as a system prompt
+# by the listener at claude/gemini launch time — see scripts/worker-listener.sh.
+# Briefs no longer carry them verbatim; this script only assembles the
+# per-task payload (refs index + verbosity + project policy + task content).
 
-# Reference-docs index. Cat'd into every brief after worker-base.md so workers
-# know what authoritative docs are available under $LLM_SWARM_DOCS/ inside
-# their container. The docs themselves are reachable via the sandbox-dir
-# bind mount in sandbox.sh.
+# Reference-docs index. Cat'd into every brief so workers know what
+# authoritative docs are available under $LLM_SWARM_DOCS/ inside their
+# container. The docs themselves are reachable via the sandbox-dir bind
+# mount in sandbox.sh. Kept in the brief (not the system prompt) because
+# refs.md is contextual ("consult when triggered") rather than a behavior
+# rule — and projects may append refs via .swarm-policy.md.
 WORKER_REFS_MD="$LLM_SWARM_DIR/prompts/refs.md"
 
 # Append-only structured event log. Same format as coordinator-watch.sh.
@@ -242,17 +246,13 @@ done
 
 TMP="$(mktemp -p "$WT/.swarm/tasks/inbox" .tmp.XXXXXX.md)"
 {
-    # 1. Worker baseline communication conventions (sandbox-wide; non-overridable
-    #    constraints like "always emit a summary, NBA hint, and PR risk rating").
-    if [ -f "$WORKER_BASE_MD" ]; then
-        cat "$WORKER_BASE_MD"
-        echo
-        echo "---"
-        echo
-    fi
-    # 1b. Reference-docs index: tells the worker what authoritative docs live
-    #     under $LLM_SWARM_DOCS/ (mounted ro into the container) and when to
-    #     consult them. Index is small; the doc bodies stay on disk until needed.
+    # Worker baseline conventions (prompts/worker.md) are NOT cat'd here —
+    # they reach the agent via system prompt at launch time (see
+    # scripts/worker-listener.sh). Brief contents below are per-task.
+    #
+    # 1. Reference-docs index: tells the worker what authoritative docs live
+    #    under $LLM_SWARM_DOCS/ (mounted ro into the container) and when to
+    #    consult them. Index is small; the doc bodies stay on disk until needed.
     if [ -f "$WORKER_REFS_MD" ]; then
         cat "$WORKER_REFS_MD"
         echo
@@ -268,7 +268,7 @@ TMP="$(mktemp -p "$WT/.swarm/tasks/inbox" .tmp.XXXXXX.md)"
     echo "---"
     echo
     # 3. Project-specific guardrails (per-project policy may extend or
-    #    override the worker baseline above).
+    #    override the worker baseline delivered via system prompt).
     if [ -f .swarm-policy.md ]; then
         echo "## Project Guardrails (MUST OBEY)"
         echo
