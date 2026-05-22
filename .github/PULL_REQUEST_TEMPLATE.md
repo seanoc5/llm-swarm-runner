@@ -1,6 +1,6 @@
 <!--
   Source of truth for swarm-worker PR bodies. Workers read this file
-  (per prompts/worker-base.md → "PR body skeleton") and use its section
+  (per prompts/worker.md → "PR body skeleton") and use its section
   headings as the skeleton for `gh pr create`. If you change the section
   structure here, the change propagates to worker PRs automatically.
   Keep the visible blind-merge-risk line + HTML comment below at the top.

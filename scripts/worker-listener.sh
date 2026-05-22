@@ -172,6 +172,30 @@ while true; do
         STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
         STARTED_EPOCH=$(date +%s)
 
+        # Worker system prompt: prompts/worker.md (the universal worker
+        # conventions — summary block, decision framing, NBA hint, PR risk
+        # rating, refresh-from-master, tiered self-merge). Delivered as a
+        # system prompt to both agents for stronger adherence than when it
+        # was concatenated into the user message in earlier versions:
+        #   - claude: --append-system-prompt "$(cat worker.md)"
+        #   - gemini: GEMINI_SYSTEM_MD=<path> env var (per gemini-cli docs)
+        WORKER_MD="${LLM_SWARM_DIR:-}/prompts/worker.md"
+        WORKER_SYSTEM_PROMPT_OPTS=()
+        WORKER_SYSTEM_PROMPT_ENV=()
+        if [ -n "${LLM_SWARM_DIR:-}" ] && [ -r "$WORKER_MD" ]; then
+            case "$AGENT" in
+                claude) WORKER_SYSTEM_PROMPT_OPTS=(--append-system-prompt "$(cat "$WORKER_MD")") ;;
+                gemini) WORKER_SYSTEM_PROMPT_ENV=(env "GEMINI_SYSTEM_MD=$WORKER_MD") ;;
+            esac
+        else
+            case "$AGENT" in
+                claude|gemini)
+                    echo "WARN: prompts/worker.md not found at $WORKER_MD — worker conventions will NOT be injected as system prompt." >&2
+                    echo "      Expected LLM_SWARM_DIR to be set and the file readable. Briefs will lack the universal conventions." >&2
+                    ;;
+            esac
+        fi
+
         # Dispatch agent
         # Default: interactive — agent runs the seeded prompt, prints tool
         # calls + final answer, then drops to its REPL so an attached user
@@ -183,15 +207,15 @@ while true; do
         # `-p` also skips claude's "Trust this folder?" dialog by design.
         if [[ "$AGENT" == "claude" ]]; then
             if [ "$HEADLESS" = "1" ]; then
-                claude "${MODEL_OPTS[@]}" -p "$TASK" --dangerously-skip-permissions
+                claude "${MODEL_OPTS[@]}" "${WORKER_SYSTEM_PROMPT_OPTS[@]}" -p "$TASK" --dangerously-skip-permissions
             else
-                claude "${MODEL_OPTS[@]}" "$TASK" --dangerously-skip-permissions
+                claude "${MODEL_OPTS[@]}" "${WORKER_SYSTEM_PROMPT_OPTS[@]}" "$TASK" --dangerously-skip-permissions
             fi
         elif [[ "$AGENT" == "gemini" ]]; then
             if [ "$HEADLESS" = "1" ]; then
-                gemini "${MODEL_OPTS[@]}" -p "$TASK" --yolo --skip-trust
+                "${WORKER_SYSTEM_PROMPT_ENV[@]}" gemini "${MODEL_OPTS[@]}" -p "$TASK" --yolo --skip-trust
             else
-                gemini "${MODEL_OPTS[@]}" -i "$TASK" --yolo --skip-trust
+                "${WORKER_SYSTEM_PROMPT_ENV[@]}" gemini "${MODEL_OPTS[@]}" -i "$TASK" --yolo --skip-trust
             fi
         else
             bash -c "$TASK"
