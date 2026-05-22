@@ -33,7 +33,11 @@ USAGE
     reap-orphan-worktrees.sh [FLAGS]
 
 DESCRIPTION
-    Iterates wt-issue-N directories under \$(dirname \$PROJECT). For each:
+    Iterates wt-issue-N directories under the project's worktree parent.
+    Parent resolution honors SWARM_WORKTREE_GROUPING:
+        flat     -> \$(dirname \$PROJECT)                   (default)
+        project  -> \$(dirname \$PROJECT)/\$(basename \$PROJECT)-worktrees
+    For each:
       - skip if younger than --min-age-days
       - skip if the tree has uncommitted / untracked files
       - skip if the preservation gate fails (default: PR not finalized)
@@ -51,8 +55,10 @@ FLAGS
                                 to be on origin/<default-branch> by patch ID
                                 (i.e., \`git cherry\` against the default
                                 branch reports no '+' lines)
-    -p, --project DIR           Project dir (default: \$PWD). The worktrees
-                                live under \$(dirname \$DIR)/wt-issue-*.
+    -p, --project DIR           Project dir (default: \$PWD). Worktrees live
+                                under \$(dirname \$DIR)/wt-issue-* (flat layout)
+                                or \$(dirname \$DIR)/\$(basename \$DIR)-worktrees/wt-issue-*
+                                (project layout). Set via SWARM_WORKTREE_GROUPING.
 
 ENV
     REAP_MIN_AGE_DAYS           Default for --min-age-days (overridden by flag)
@@ -118,9 +124,14 @@ if [ ! -d "$PROJECT_DIR/.git" ] && ! git -C "$PROJECT_DIR" rev-parse --git-dir >
     exit 1
 fi
 
-PROJECT_PARENT="$(dirname "$PROJECT_DIR")"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KILL_WT="$SCRIPT_DIR/kill-worktree.sh"
+
+# Source the env loader to pick up SWARM_WORKTREE_GROUPING and get
+# swarm_worktree_parent() to derive the scan dir.
+# shellcheck source=_load-env.sh
+. "$SCRIPT_DIR/_load-env.sh" "$PROJECT_DIR"
+PROJECT_PARENT="$(swarm_worktree_parent "$PROJECT_DIR")"
 
 if [ ! -x "$KILL_WT" ]; then
     echo "ERROR: kill-worktree.sh not executable at $KILL_WT" >&2
@@ -194,7 +205,7 @@ FOUND=0
 
 echo "=== reap-orphan-worktrees ==="
 echo "  project:        $PROJECT_DIR"
-echo "  scan dir:       $PROJECT_PARENT"
+echo "  scan dir:       $PROJECT_PARENT  (SWARM_WORKTREE_GROUPING=${SWARM_WORKTREE_GROUPING:-flat})"
 echo "  min-age-days:   $MIN_AGE_DAYS"
 if [ "$MERGED_ONLY" = "1" ]; then
     echo "  preservation:   PR must be MERGED"

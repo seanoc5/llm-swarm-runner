@@ -83,5 +83,61 @@ _load_env_main() {
 
 _load_env_main "$@"
 
-# Cleanup helpers from caller scope so they don't leak.
+# --- Worktree path derivation (public; survives the unset below) ------------
+#
+# Derive the worktree directory for issue N belonging to PROJECT_DIR.
+# Honors SWARM_WORKTREE_GROUPING (default `flat` for backward compat).
+#
+#   flat     — <parent>/wt-issue-N            (original layout, since v0)
+#   project  — <parent>/<project>-worktrees/wt-issue-N
+#
+# Project grouping avoids the cross-project namespace collision that hits
+# when multiple sibling repos under the same parent dir all issue
+# `wt-issue-N` paths and a deleted-then-recreated sibling worktree
+# clobbers a live one. See fand-guide/.swarm-policy.md "Worktree namespace
+# collisions" and the orphan-cleanup standing authorization in operator
+# memory.
+#
+# Usage:
+#   . _load-env.sh "$PROJECT_DIR"
+#   WT=$(swarm_worktree_dir "$PROJECT_DIR" "$ISSUE")
+swarm_worktree_dir() {
+    local project_dir="$1"
+    local issue="$2"
+    local parent base
+    parent="$(dirname "$project_dir")"
+    base="$(basename "$project_dir")"
+    case "${SWARM_WORKTREE_GROUPING:-flat}" in
+        project)
+            echo "$parent/${base}-worktrees/wt-issue-$issue"
+            ;;
+        flat|"")
+            echo "$parent/wt-issue-$issue"
+            ;;
+        *)
+            echo "warn: unknown SWARM_WORKTREE_GROUPING='${SWARM_WORKTREE_GROUPING}', falling back to 'flat'" >&2
+            echo "$parent/wt-issue-$issue"
+            ;;
+    esac
+}
+
+# Derive the discovery directory (where to scan for *this project's* worktrees).
+# Caller appends /wt-issue-* to walk.
+swarm_worktree_parent() {
+    local project_dir="$1"
+    local parent base
+    parent="$(dirname "$project_dir")"
+    base="$(basename "$project_dir")"
+    case "${SWARM_WORKTREE_GROUPING:-flat}" in
+        project)
+            echo "$parent/${base}-worktrees"
+            ;;
+        flat|""|*)
+            echo "$parent"
+            ;;
+    esac
+}
+
+# Cleanup internal-only helpers from caller scope so they don't leak.
+# `swarm_worktree_dir` and `swarm_worktree_parent` are public — left in scope.
 unset -f _apply_env_file _expand_extra_mounts _load_env_main
