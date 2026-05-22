@@ -97,13 +97,13 @@ RUN GEMINI_DIR="$(npm root -g)/@google/gemini-cli" \
     && mkdir -p "${GEMINI_DIR}/bundle/vendor/ripgrep" \
     && ln -sf /usr/bin/rg "${GEMINI_DIR}/bundle/vendor/ripgrep/rg-linux-x64"
 
-# Docker CLI (for DooD — Testcontainers and general docker commands)
+# Docker CLI + Compose v2 plugin (for DooD — Testcontainers, `docker compose -f ...`)
 RUN curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
     | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] \
        https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" \
     > /etc/apt/sources.list.d/docker.list \
-    && apt-get update && apt-get install -y --no-install-recommends docker-ce-cli \
+    && apt-get update && apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin \
     && rm -rf /var/lib/apt/lists/*
 
 # GitHub CLI
