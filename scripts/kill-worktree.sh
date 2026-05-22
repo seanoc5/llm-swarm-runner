@@ -5,10 +5,13 @@
 # Usage:
 #   kill-worktree.sh <issue-number> [project-dir]
 #
-# Removes the worktree at <project-parent>/wt-issue-<N>, deletes the branch
+# Removes the worktree at <derived path>/wt-issue-<N>, deletes the branch
 # fix/issue-<N>, and kills the tmux window iss-<N> if any. Idempotent —
 # warns about pieces that don't exist but never errors. Use for ABANDON
 # verdicts from coordinator triage.
+#
+# Path derivation honors SWARM_WORKTREE_GROUPING (flat|project, default
+# flat). See scripts/_load-env.sh swarm_worktree_dir() for the rule.
 #
 # WARNING: --force is used. Any uncommitted work in the worktree is lost.
 # The script prints how-much-work-will-be-lost before deletion.
@@ -17,7 +20,15 @@ set -euo pipefail
 ISSUE="${1:?usage: kill-worktree.sh <issue-number> [project-dir]}"
 PROJECT_DIR="${2:-$PWD}"
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
-WT="$(dirname "$PROJECT_DIR")/wt-issue-$ISSUE"
+
+# Source the env loader to (a) pick up SWARM_WORKTREE_GROUPING from
+# <project>/.swarm/.env or sandbox .env.example, and (b) get
+# swarm_worktree_dir() to derive WT correctly.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_load-env.sh
+. "$SCRIPT_DIR/_load-env.sh" "$PROJECT_DIR"
+
+WT="$(swarm_worktree_dir "$PROJECT_DIR" "$ISSUE")"
 BRANCH="fix/issue-$ISSUE"
 SESSION_NAME="llm-$(basename "$PROJECT_DIR")"
 

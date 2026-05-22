@@ -43,7 +43,10 @@ OPTIONS
 
 DESCRIPTION
     One-call helper for the coordinator. Creates worktree at
-    <parent>/wt-issue-N on branch fix/issue-N (idempotent), initializes
+    <worktree-parent>/wt-issue-N on branch fix/issue-N (idempotent), initializes
+    -- where <worktree-parent> is either <project-parent> (the default 'flat'
+    -- layout) or <project-parent>/<project>-worktrees (when
+    -- SWARM_WORKTREE_GROUPING=project; recommended for multi-swarm hosts).
     the v2 queue, embeds the worker-base communication conventions plus
     any project .swarm-policy.md guardrails into the brief, atomic-writes
     the task into inbox/, and spawns a worker tmux window 'iss-N' running
@@ -99,7 +102,6 @@ done
 ISSUE="${1:?usage: provision-worker.sh [-v LEVEL] <issue-number> [project-dir]   (try --help)}"
 PROJECT_DIR="${2:-$PWD}"
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
-WT="$(dirname "$PROJECT_DIR")/wt-issue-$ISSUE"
 BRANCH="fix/issue-$ISSUE"
 SESSION_NAME="llm-$(basename "$PROJECT_DIR")"
 # Self-locate so SANDBOX_SH default follows the script. Override with
@@ -111,9 +113,16 @@ SANDBOX_SH="${SANDBOX_SH:-$LLM_SWARM_DIR/sandbox.sh}"
 # Apply <project>/.swarm/.env then sandbox .env.example before reading caps,
 # so caller env > project file > sandbox defaults. Normally the tmux session
 # already has these exported (set by llm-start.sh), but the explicit load
-# lets the script run correctly when invoked standalone.
+# lets the script run correctly when invoked standalone. This also defines
+# swarm_worktree_dir() so we can compute WT honoring SWARM_WORKTREE_GROUPING.
 # shellcheck source=_load-env.sh
 . "$SCRIPT_DIR/_load-env.sh" "$PROJECT_DIR"
+
+# Derive worktree path AFTER env load so SWARM_WORKTREE_GROUPING is honored.
+WT="$(swarm_worktree_dir "$PROJECT_DIR" "$ISSUE")"
+# Ensure parent dir exists in 'project' grouping mode (the flat layout's
+# parent already exists; project-grouping creates <project>-worktrees/).
+mkdir -p "$(dirname "$WT")"
 
 MAX_WORKERS="${MAX_WORKERS:-5}"
 MAX_TMUX_WINDOWS="${MAX_TMUX_WINDOWS:-10}"
