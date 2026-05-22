@@ -179,9 +179,9 @@ The coordinator and watcher honor a small set of tunables loaded from three sour
 
 | Var                          | Default | Purpose                                                                                                          |
 |------------------------------|---------|------------------------------------------------------------------------------------------------------------------|
-| `MAX_WORKERS`                | `2`     | Concurrent worker tmux windows. Increase consciously — each worker is a Claude Code session using real RAM/quota. |
+| `MAX_WORKERS`                | `5`     | Concurrent worker tmux windows. Increase consciously — each worker is a Claude Code session using real RAM/quota. |
 | `MAX_TMUX_WINDOWS`           | `10`    | Hard cap on total session windows (workers + coordinator + watch + leftover finished worker windows).             |
-| `TARGET_AVAILABLE`           | `5`     | Backlog target. Housekeeping creates new issues when AVAILABLE drops below this — NOT when raw open count is low. |
+| `TARGET_AVAILABLE`           | `10`    | Backlog target. Housekeeping creates new issues when AVAILABLE drops below this — NOT when raw open count is low. |
 | `OWNER_LABELS`               | empty   | Comma-separated labels treated as "human-owned" (e.g. `sean,radesh`). Skipped unless the label matches `@me`.     |
 | `INCLUDE_ASSIGNED_TO_OTHERS` | `0`     | `1` = drop the `@me`-or-unassigned filter; the swarm claims teammates' tickets too.                               |
 | `DEBOUNCE_SECS`              | `30`    | Watcher: window during which repeated worker-finish events coalesce into a single coordinator wake.               |

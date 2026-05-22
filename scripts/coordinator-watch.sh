@@ -86,7 +86,7 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     SWEEP               (auto)    override sweep-swarm-outcomes.sh path
     WATCHER_AUTOCLOSE   1         reap finalized workers (MERGED|CLOSED PR; window+worktree+branch) before wake
     WORKSPACE           (auto)    parent dir for wt-issue-* worktrees
-    MAX_WORKERS         2         (referenced by default WAKE_PROMPT)
+    MAX_WORKERS         5         (referenced by default WAKE_PROMPT)
     MAX_TMUX_WINDOWS    10        (referenced by default WAKE_PROMPT)
 
 DEFAULT WAKE_PROMPT (top-up mode)
