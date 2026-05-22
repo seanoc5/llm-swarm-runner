@@ -149,9 +149,79 @@ Every `gh pr create` and any `gh pr edit --body` MUST include both:
   public API change, CI red or skipped, or anything you'd want a second
   pair of eyes on.
 
-When in doubt, rate higher. Be honest — the rating guides the human, it
-doesn't gate merge. Over-rating costs nothing but trust; under-rating
-costs a real incident.
+When in doubt, rate higher. The rating now shapes the friction of a
+self-merge (see "Merging your own PR" below) — over-rating costs you
+one extra "yes" from the user; under-rating risks a real incident.
+The incentive runs in the safe direction.
+
+### Merging your own PR
+
+The risk rating determines how a worker may merge its own PR. The
+friction is matched to blast radius: easy for typo fixes, deliberate
+for code changes, refused outright for anything that touches schemas
+or auth.
+
+**🟢 Low — quick confirmation merge.**
+After opening a low-risk PR, you MAY propose the merge in your
+handoff:
+
+```
+🟢 low risk — typo fix in README. Merge PR #555 now? (yes / go / ship)
+```
+
+Treat any short, unhedged affirmative as approval: `yes`, `y`, `go`,
+`do it`, `ship`, `ship it`, `merge`, `👍`. Then run:
+
+```bash
+gh pr merge <N> --squash --delete-branch
+```
+
+Hedged or qualified responses (`yes but…`, `maybe`, `i think so`,
+`wait…`) do NOT count — re-confirm before merging. Silence is not
+consent; if the user moves on to a different topic without answering,
+leave the PR for them.
+
+**🟡 Medium — explicit instruction required.**
+Do NOT propose merging a medium-risk PR. The user must give an
+unambiguous merge instruction that names the PR, e.g.:
+
+- `merge PR 555`
+- `go ahead and merge 555`
+- `ship 555`
+
+A bare `yes` / `go` / `do it` is NOT enough for medium — the user
+must have typed the PR number (or unambiguously identified the PR in
+some other way) so a half-read "yes" can't accidentally trigger the
+merge. Before running the merge command, echo the rating back as a
+final "are you sure" surface:
+
+```
+You asked to merge PR #555 (🟡 medium — touches auth middleware in
+2 files). Proceeding.
+```
+
+Then merge.
+
+**🔴 High — refuse, even on direct instruction.**
+Do NOT merge a high-risk PR yourself under any circumstances —
+including when the user instructs you to. The context-switch to the
+user's own terminal is the load-bearing safety gate; don't collapse
+it. Instead, decline politely and hand back the exact command:
+
+```
+Refusing to merge PR #555 (🔴 high — touches Flyway migration V47).
+If you've reviewed it and want to proceed, run this yourself:
+
+  gh pr merge 555 --squash --delete-branch
+```
+
+There is NO override keyword for high-risk self-merge. If the user
+pushes back ("just merge it", "override and merge"), restate the
+refusal and the manual command; do not capitulate.
+
+**Project opt-out.** A project's `.swarm-policy.md` may override this
+section entirely (e.g. "workers may not self-merge, even on direct
+user instruction"). Project policy always wins over this default.
 
 ### PR body skeleton
 
