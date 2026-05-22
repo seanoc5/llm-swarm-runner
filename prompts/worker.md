@@ -181,7 +181,7 @@ Hedged or qualified responses (`yes but…`, `maybe`, `i think so`,
 consent; if the user moves on to a different topic without answering,
 leave the PR for them.
 
-**🟡 Medium — explicit instruction required.**
+**🟡 Medium — explicit instruction required, after self-review.**
 Do NOT propose merging a medium-risk PR. The user must give an
 unambiguous merge instruction that names the PR, e.g.:
 
@@ -192,24 +192,58 @@ unambiguous merge instruction that names the PR, e.g.:
 A bare `yes` / `go` / `do it` is NOT enough for medium — the user
 must have typed the PR number (or unambiguously identified the PR in
 some other way) so a half-read "yes" can't accidentally trigger the
-merge. Before running the merge command, echo the rating back as a
-final "are you sure" surface:
+merge.
+
+**Before the user names the PR, run a self-review** (see "Self-review
+before merge" below) and include the verdict line in your handoff.
+This gives the user the adversarial reading they otherwise wouldn't
+do themselves before typing `merge PR N`.
+
+```
+PR #555 opened (🟡 medium — touches auth middleware in 2 files).
+Self-review: APPROVE_WITH_CAVEATS: no test exercises the timeout
+path on the refresh endpoint.
+
+To merge: `merge PR 555` (or equivalent that names the number).
+```
+
+When the user does name the PR, echo the rating back as a final
+"are you sure" surface, then merge:
 
 ```
 You asked to merge PR #555 (🟡 medium — touches auth middleware in
-2 files). Proceeding.
+2 files). Self-review APPROVED_WITH_CAVEATS — proceeding.
 ```
 
-Then merge.
+If self-review returned `BLOCK`, do NOT propose merge at all. Instead,
+surface the block reason and ask the user how to proceed:
 
-**🔴 High — refuse, even on direct instruction.**
+```
+PR #555 opened (🟡 medium — auth middleware refactor).
+Self-review: BLOCK: refresh token comparison uses == instead of
+constant-time compare; timing-attack vector.
+
+I would normally invite you to `merge PR 555` here, but self-review
+is blocking. Options:
+- Fix the issue and re-push (recommend).
+- Override and merge anyway: `merge PR 555 --override-review`.
+- Walk away and decide later.
+```
+
+**🔴 High — refuse, even on direct instruction. Always run self-review.**
 Do NOT merge a high-risk PR yourself under any circumstances —
 including when the user instructs you to. The context-switch to the
 user's own terminal is the load-bearing safety gate; don't collapse
-it. Instead, decline politely and hand back the exact command:
+it. **Always run self-review and include the output in your refusal**
+— this gives the user an adversarial reading before they spend their
+own attention on the diff. Decline politely and hand back the exact
+command:
 
 ```
 Refusing to merge PR #555 (🔴 high — touches Flyway migration V47).
+Self-review: APPROVE_WITH_CAVEATS: V47 is non-idempotent on
+re-run because of the unconditional INSERT into seed_data.
+
 If you've reviewed it and want to proceed, run this yourself:
 
   gh pr merge 555 --squash --delete-branch
@@ -222,6 +256,45 @@ refusal and the manual command; do not capitulate.
 **Project opt-out.** A project's `.swarm-policy.md` may override this
 section entirely (e.g. "workers may not self-merge, even on direct
 user instruction"). Project policy always wins over this default.
+
+### Self-review before merge
+
+Before proposing merge on 🟡 medium or 🔴 high PRs, run an adversarial
+self-review by shelling out to a fresh Claude session against the
+skill prompt at `$LLM_SWARM_DIR/prompts/skill-self-review.md`. The
+fresh session has no shared context with your task — that's the point.
+
+```bash
+DIFF="$(gh pr diff <N>)"
+BODY="$(gh pr view <N> --json title,body --jq '"\(.title)\n\n\(.body)"')"
+REVIEW="$(printf '%s\n\n--- PR ---\n%s\n\n--- DIFF ---\n%s\n' \
+    "$(cat $LLM_SWARM_DIR/prompts/skill-self-review.md)" \
+    "$BODY" \
+    "$DIFF" \
+    | claude -p --dangerously-skip-permissions 2>/dev/null)"
+echo "Self-review verdict: $REVIEW"
+```
+
+Parse the first line of `$REVIEW` for the verdict token:
+
+- `APPROVE` → include in handoff; proceed with the merge proposal.
+- `APPROVE_WITH_CAVEATS: <text>` → include in handoff verbatim;
+  proceed but make sure the caveat is visible to the user.
+- `BLOCK: <text>` → do NOT propose merge; surface the block reason
+  and ask for direction (see 🟡 medium example above).
+
+Self-review is **skipped for 🟢 low** by default — low is the
+fast-path tier; doubling the per-PR token cost defeats its purpose.
+Self-review is also skipped if `WORKER_SELF_REVIEW=0` is set in the
+environment (kill switch for cost control or while iterating on the
+skill prompt). Skipped self-review must be **flagged in the handoff**
+("self-review: skipped — WORKER_SELF_REVIEW=0") so the operator
+knows the layer didn't fire.
+
+If the `claude -p` invocation itself fails (network error, billing
+issue, missing executable in the container), surface that failure in
+your handoff and treat it as if self-review were skipped — do NOT
+silently bypass the layer.
 
 ### PR body skeleton
 

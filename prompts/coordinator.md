@@ -213,7 +213,15 @@ Use `gh pr view <N> --json body --jq .body | grep -E 'BLIND_MERGE_RISK|Blind-mer
 
 If the markers are missing (older worker, or the worker forgot), default to "🟡 medium — risk rating not provided by worker; review before merge" and flag it as a worker-policy violation in your status update.
 
-The tiered self-merge convention lives in `prompts/worker.md` under "Merging your own PR" — consult it if a worker's behavior on a merge request seems off (e.g. it accepted a bare "yes" on a medium-risk PR, or it tried to merge a high-risk PR on instruction). A project's `.swarm-policy.md` may also disable self-merge entirely; if so, instruct workers to hand back the manual `gh pr merge` command regardless of risk rating.
+**Self-review verdict** (🟡 medium and 🔴 high PRs only). Workers run an adversarial self-review via `claude -p` against `prompts/skill-self-review.md` before proposing merge / in their refusal message. Watch for one of three verdict tokens in the worker's pane:
+
+- `APPROVE` → no extra surface; the merge proposal proceeds as normal.
+- `APPROVE_WITH_CAVEATS: <text>` → surface the caveat in the user's status report alongside the PR title. Example: *"PR #555 opened (🟡 medium — auth middleware refactor). Self-review: APPROVE_WITH_CAVEATS: no test exercises the timeout path on the refresh endpoint."*
+- `BLOCK: <text>` → flag the block prominently. The worker should NOT have proposed merge; if it did anyway, that's a worker-policy violation worth flagging. The user may still override with `merge PR N --override-review` per the worker convention.
+
+If you see *"self-review: skipped — WORKER_SELF_REVIEW=0"* or a `claude -p` failure message in the pane, note that the safety layer didn't fire and recommend the user read the diff before merging.
+
+The tiered self-merge + self-review conventions live in `prompts/worker.md` (§ "Merging your own PR" and § "Self-review before merge") — consult them if a worker's behavior on a merge request seems off (e.g. it accepted a bare "yes" on a medium-risk PR, tried to merge a high-risk PR on instruction, or proposed merge despite a BLOCK verdict). A project's `.swarm-policy.md` may also disable self-merge entirely; if so, instruct workers to hand back the manual `gh pr merge` command regardless of risk rating.
 
 ### When the user hits a merge conflict
 

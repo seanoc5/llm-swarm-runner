@@ -13,6 +13,22 @@
 > from this ADR's original specification. Historical references below
 > still mention `worker-base.md` because that's what was decided here;
 > grep current code for `worker.md` for the live path.
+>
+> **2026-05-22 update (later same day):** the "Alternatives considered"
+> entry below — *"Independent fresh-eyes review as the default risk-
+> rating mechanism"* (rejected at original ADR time) — was partially
+> reversed: an adversarial self-review (`prompts/skill-self-review.md`)
+> now runs on 🟡 medium and 🔴 high PRs before workers propose merge
+> or include the verdict in their refusal. 🟢 low remains fast-path
+> with no review (the original rejection rationale still applies at
+> that tier). Gated by `WORKER_SELF_REVIEW` env var (default 1; set
+> 0 to disable). Reason for the partial reversal: the new tiered
+> self-merge convention (#112) gave workers the *authority* to merge
+> their own PRs; the operator's "merge PR N" instruction at the
+> medium tier had become the only adversarial check, but operators
+> rarely read the diff before typing the magic phrase. Self-review
+> fills that gap with an actually-skeptical read from a separate
+> context window.
 
 ## Context
 
