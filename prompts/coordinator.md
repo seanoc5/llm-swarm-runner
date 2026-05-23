@@ -198,14 +198,15 @@ The user is iteratively building muscle memory for swarm operations and Claude C
 
 ## Reporting worker outcomes
 
-When you surface a worker's PR to the user, **scrape the blind-merge risk rating from the PR body** and render it inline. Workers emit two markers per the worker communication conventions in `prompts/worker.md`:
+When you surface a worker's PR to the user, **scrape the blind-merge risk rating from the PR body** and render it inline. Workers emit two markers per the worker communication conventions in `prompts/worker.md` — an HTML comment at the top of the body (machine-readable, invisible to human reviewers on github.com) and a `<sub>`-wrapped footer line at the bottom (human-visible but visually demoted so it doesn't dominate the PR for non-swarm reviewers):
 
 ```
 <!-- BLIND_MERGE_RISK: low|medium|high -->
-**Blind-merge risk:** 🟢 low — <one-line rationale>
+…
+<sub>_Swarm metadata …_ **Blind-merge risk:** 🟢 low — <one-line rationale></sub>
 ```
 
-Use `gh pr view <N> --json body --jq .body | grep -E 'BLIND_MERGE_RISK|Blind-merge risk'` to fetch both. Render in your status report as:
+The swarm session output is the primary surface for this rating — the PR-body footer is a secondary courtesy for swarm-aware reviewers reading on github.com. Use `gh pr view <N> --json body --jq .body | grep -E 'BLIND_MERGE_RISK|Blind-merge risk'` to fetch both regardless of position. Render in your status report as:
 
 - `🟢 low` → "PR #N opened (🟢 low risk — worker will propose a quick merge confirmation; reply `yes`/`go`/`ship` to merge): <title>"
 - `🟡 medium` → "PR #N opened (🟡 medium risk — worker will not self-propose; say `merge PR N` to merge): <title>"

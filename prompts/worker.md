@@ -121,7 +121,7 @@ The human is multi-tasking. Don't make them remember the next move.
 Every `gh pr create` and any `gh pr edit --body` MUST include both:
 
 1. **HTML comment** at the top of the PR body (machine-readable for the
-   coordinator to scrape):
+   coordinator to scrape — invisible to human reviewers on github.com):
 
    ```
    <!-- BLIND_MERGE_RISK: low -->
@@ -129,11 +129,15 @@ Every `gh pr create` and any `gh pr edit --body` MUST include both:
 
    Values: `low`, `medium`, `high` (lowercase, exactly).
 
-2. **Visible body line** immediately below the HTML comment, human-readable
-   on github.com:
+2. **Visible footer line** at the *bottom* of the PR body, demoted with
+   `<sub>` + italics so it doesn't dominate the body for non-swarm
+   reviewers (the coordinator surfaces the same rating inline in the
+   swarm session output, where it's most useful):
 
    ```
-   **Blind-merge risk:** 🟢 low — typo fix in README; no code touched, no tests changed.
+   ---
+
+   <sub>_Swarm metadata (safe to ignore if you're reviewing this as a human)._ **Blind-merge risk:** 🟢 low — typo fix in README; no code touched, no tests changed.</sub>
    ```
 
    Emoji: 🟢 low / 🟡 medium / 🔴 high. Followed by a one-line rationale
@@ -303,10 +307,11 @@ section structure of every PR you open. Before invoking `gh pr create`:
 
 1. **If `.github/PULL_REQUEST_TEMPLATE.md` exists in the repo root, read
    it** and use its section headings as the skeleton for your PR body.
-   Fill in each section; keep the blind-merge-risk HTML comment + visible
-   line at the top (the template includes both as placeholders). Replace
-   the rubric block with the actual rating; do not leave the
-   `low|medium|high` placeholder in the submitted body.
+   Fill in each section. Keep the `<!-- BLIND_MERGE_RISK: ... -->` HTML
+   comment at the **top** (replace the `low|medium|high` placeholder with
+   the actual rating) and the visible `<sub>`-wrapped risk footer at the
+   **bottom** (replace the rubric placeholder with your actual rating +
+   one-line rationale).
 2. **If the template file is absent** (older checkouts, other repos
    adopting this swarm runner before they've added a template), fall
    back to the inline skeleton below. This is the same structure the
@@ -317,7 +322,6 @@ Inline fallback skeleton:
 
 ```
 <!-- BLIND_MERGE_RISK: low -->
-**Blind-merge risk:** 🟢 low — <one-line rationale naming the riskiest aspect>
 
 ## Summary
 
@@ -328,13 +332,16 @@ Inline fallback skeleton:
 - [ ] What you ran locally and the result
 - [ ] What CI covers
 - [ ] Manual verification a reviewer should repeat
+
+---
+
+<sub>_Swarm metadata (safe to ignore if you're reviewing this as a human)._ **Blind-merge risk:** 🟢 low — <one-line rationale naming the riskiest aspect></sub>
 ```
 
 When the template *is* present and you've used it as the skeleton, you
-do not need to also emit the template's "Risk assessment" rubric block
-in the final PR body — the visible blind-merge-risk line at the top
-already carries the rating. Strip the rubric (or leave it; both are
-acceptable) so the rendered PR isn't padded with explanatory boilerplate.
+do not need to emit any extra rubric block in the final PR body — the
+footer line at the bottom already carries the rating, and the rubric in
+the template comment is for the worker's reference, not the rendered PR.
 
 ---
 

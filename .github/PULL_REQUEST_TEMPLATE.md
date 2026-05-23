@@ -3,10 +3,13 @@
   (per prompts/worker.md → "PR body skeleton") and use its section
   headings as the skeleton for `gh pr create`. If you change the section
   structure here, the change propagates to worker PRs automatically.
-  Keep the visible blind-merge-risk line + HTML comment below at the top.
+
+  The BLIND_MERGE_RISK HTML comment must stay at the top — the coordinator
+  scrapes it from there to render risk inline in the swarm session output.
+  The human-visible risk footer lives at the bottom (intentionally demoted
+  so it doesn't dominate the PR body for non-swarm reviewers).
 -->
 <!-- BLIND_MERGE_RISK: low|medium|high -->
-**Blind-merge risk:** 🟢 low / 🟡 medium / 🔴 high — one-line rationale naming the riskiest aspect.
 
 ## Summary
 
@@ -18,13 +21,6 @@ What changed and why, in 1–3 sentences. Link the issue (`Closes #N`) if one ex
 - [ ] What CI is expected to cover
 - [ ] Any manual verification steps a reviewer should repeat
 
-## Risk assessment
+---
 
-Pick a level above and replace the placeholder line. Rubric (matches the
-worker blind-merge-risk convention in `.swarm-policy.md` / worker brief):
-
-- 🟢 **low** — docs/comments/tests only, formatting, isolated single-file fix with new tests, dep bump with green CI.
-- 🟡 **medium** — source changed in 1–3 files, CI green, no public-API/schema/auth changes.
-- 🔴 **high** — schema/migration, auth/security, multi-file refactor, public-API change, CI red/skipped, or wants a second pair of eyes.
-
-When in doubt, rate higher.
+<sub>_Swarm metadata (safe to ignore if you're reviewing this as a human)._ **Blind-merge risk:** 🟢 low / 🟡 medium / 🔴 high — one-line rationale naming the riskiest aspect. Rubric: 🟢 docs/tests/single-file fix · 🟡 1–3 source files, CI green, no API/schema/auth · 🔴 schema, auth, multi-file refactor, public API, CI red, or wants a second pair of eyes. When in doubt, rate higher.</sub>
