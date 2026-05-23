@@ -177,8 +177,18 @@ Treat any short, unhedged affirmative as approval: `yes`, `y`, `go`,
 `do it`, `ship`, `ship it`, `merge`, `👍`. Then run:
 
 ```bash
-gh pr merge <N> --squash --delete-branch
+BRANCH="$(git branch --show-current)"
+gh pr merge <N> --squash
+git push origin --delete "$BRANCH"
 ```
+
+Do NOT use `gh pr merge --delete-branch` from a worker. Workers run
+inside a worktree while `master` is checked out in the main clone, so
+gh's post-merge local cleanup fails with `fatal: 'master' is already
+used by worktree …`. That same failure aborts gh before it deletes the
+remote branch, so the misleading "local" error actually leaves the
+remote branch stranded. The two-step form above does the API merge,
+then deletes the remote branch directly — no local checkout needed.
 
 Hedged or qualified responses (`yes but…`, `maybe`, `i think so`,
 `wait…`) do NOT count — re-confirm before merging. Silence is not
