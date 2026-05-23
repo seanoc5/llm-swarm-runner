@@ -14,18 +14,41 @@
 #
 # A baseline set of communication conventions (PR risk rating, end-of-work
 # summary, decision-point framing, next-best-action hint, verbosity dial,
-# "surface don't bury" notes) is ALREADY injected before this file via
-# `prompts/worker-base.md`. You don't need to repeat them; only override
-# in the "Communication overrides" section below if your project needs
-# something different.
+# "surface don't bury" notes, tiered self-merge by risk) is ALREADY injected
+# before this file via `prompts/worker.md`. You don't need to repeat them;
+# only override in the "Communication overrides" section below if your
+# project needs something different.
 
 ---
 
 ## Pull-request rules
-- Workers are meant to **only push branches**; never `merge`, `gh pr merge`, `git push origin master`, or anything that lands code on the default branch unless explicitly approved by the project lead.
 - PR titles must start with `[swarm]` so they're easy to filter in the UI.
 - PR bodies must include the issue number being closed (`Closes #N`).
-- Do not approve your own PR. Leave PRs in OPEN state for human review.
+- Do not `gh pr review --approve` your own PR.
+- Never `git push origin master` (or `main`) directly. Never `git push --force` to any protected branch.
+- The default is **leave PRs OPEN for human review**. Self-merge is allowed only as described below.
+
+### Merging your own PR
+
+This project **defers to the tiered self-merge convention in `prompts/worker.md`** ("Merging your own PR" section). Summary so workers don't need to chase the link:
+
+| PR risk | Default behavior |
+|---|---|
+| 🟢 **low** | Worker MAY propose a quick merge confirmation in the end-of-work summary (e.g. *"Merge PR #555 now? (yes / go / ship)"*). A short unhedged affirmative — `yes` / `y` / `go` / `do it` / `ship` / `merge` / `👍` — from the project lead authorizes self-merge. Hedged or off-topic replies do NOT count. |
+| 🟡 **medium** | Worker MUST NOT propose merge. Run self-review (per `prompts/worker.md`) and surface the verdict in the handoff. **Only** self-merge on an unambiguous in-session instruction that **names the PR number** (e.g. *"merge PR 555"*, *"ship 555"*). A bare `yes` / `go` / `ship` is NOT enough — the user must have typed the PR number so a half-read affirmative can't trigger the merge. |
+| 🔴 **high** | Worker NEVER self-merges, **even on explicit instruction**. Run self-review, then refuse and hand back the exact `gh pr merge` command for the project lead to run. There is no override keyword. |
+
+**"Unambiguous instruction"** means a coordinator or project lead types **"merge PR N"** (or equivalent English that names the PR number) **in this session**. It is NOT inferable from:
+
+- the PR's risk rating alone (low CAN auto-confirm via the affirmative-after-proposal path; medium and high CANNOT)
+- prior session history or what other workers did on different PRs
+- a bare `yes` / `go` / `ship` that wasn't preceded by your own (low-risk-only) merge proposal
+- the worker's own self-assessment of "looks safe to me"
+- the project lead implying you should merge ("looks good", "nice work")
+
+If the project lead's instruction is ambiguous, ask in-pane. Don't infer.
+
+**To disable self-merge entirely**, replace this section with a clause that explicitly says so (e.g. *"workers may not self-merge regardless of risk rating; always hand back the manual `gh pr merge` command"*). In that mode, even a low-risk merge proposal is forbidden — workers push the branch, open the PR, and hand back the command.
 
 ## File-modification rules
 - Do **not** modify any of: `Dockerfile`, `docker-compose.yml`, `flyway/**`, `secrets/**`, `.env*`, `package-lock.json` (unless the task explicitly says so), `*.lock` (Gradle).
@@ -49,7 +72,7 @@
 
 ## Communication overrides (optional)
 This section overrides or extends the baseline conventions in
-`prompts/worker-base.md` (which is injected above this file in every
+`prompts/worker.md` (which is injected above this file in every
 worker brief). Use it for project-specific tuning. Examples of what could
 go here:
 
