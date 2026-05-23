@@ -120,10 +120,6 @@ EOF
 esac
 
 PROJECT_DIR="$(realpath "${1:-$PWD}")"
-# Worker worktrees are siblings of PROJECT_DIR (provision-worker.sh creates
-# them at <parent>/wt-issue-N), so the watch must scan the parent — not
-# PROJECT_DIR itself. Override with WORKSPACE=<dir> for non-standard layouts.
-WORKSPACE="$(realpath "${WORKSPACE:-$(dirname "$PROJECT_DIR")}")"
 # Self-locate so defaults follow the script wherever it lives. LLM_START and
 # SWEEP env overrides still win for non-standard installs.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -132,9 +128,18 @@ LLM_SWARM_DIR="${LLM_SWARM_DIR:-$(dirname "$SCRIPT_DIR")}"
 # Apply <project>/.swarm/.env then sandbox .env.example before reading
 # tunables, so caller env > project file > sandbox defaults. This script
 # is normally inheriting from the tmux session env (set up by llm-start.sh),
-# but the explicit load lets us run it standalone too.
+# but the explicit load lets us run it standalone too. The sourced file
+# also defines swarm_worktree_parent() which we use below to derive the
+# scan directory in a way that honors SWARM_WORKTREE_GROUPING.
 # shellcheck source=_load-env.sh
 . "$SCRIPT_DIR/_load-env.sh" "$PROJECT_DIR"
+
+# Worker worktrees live at $(swarm_worktree_parent)/wt-issue-N — that's
+# either <parent>/wt-issue-N (flat grouping, default) or
+# <parent>/<project>-worktrees/wt-issue-N (project grouping; multi-swarm
+# hosts). Calling the helper avoids drifting from provision-worker.sh.
+# Override with WORKSPACE=<dir> for non-standard layouts.
+WORKSPACE="$(realpath "${WORKSPACE:-$(swarm_worktree_parent "$PROJECT_DIR")}")"
 
 DEBOUNCE_SECS="${DEBOUNCE_SECS:-30}"
 DRY_RUN="${DRY_RUN:-0}"
