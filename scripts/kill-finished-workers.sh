@@ -8,6 +8,10 @@
 # alone.
 #
 # Use --all to include active windows.
+# Use --merged-only / --pr-finalized to gate on PR state instead of
+#   listener-parked state — these modes reap even when claude's REPL is
+#   still open, since the upstream PR being MERGED|CLOSED is a stronger
+#   "safe to reap" signal than pane scrollback.
 # Use --no-pr-check to skip the gh round-trip and ignore PR state.
 # Use --idle-min N to require N min of pane inactivity before killing.
 # Use --with-worktree to also remove the git worktree + delete branch.
@@ -36,7 +40,12 @@ FLAGS
         --no-pr-check       Skip 'gh pr view fix/issue-N' check (avoid network)
         --merged-only       STRICT: only reap when PR state is MERGED.
                             Strictest mode — guarantees no unmerged work
-                            is destroyed even on origin.
+                            is destroyed even on origin. PR-state is a
+                            stronger signal than listener-parked, so the
+                            parked check is bypassed in this mode (the
+                            window is reaped even if claude's REPL is
+                            still open — the PR being MERGED means the
+                            work is preserved upstream).
         --pr-finalized      Reap when PR state is MERGED *or* CLOSED.
                             "Finalized" means GitHub considers the PR done
                             (user merged it, or closed it as
@@ -45,6 +54,8 @@ FLAGS
                             preserved, so a CLOSED PR remains recoverable
                             via `gh pr reopen N`. Used by the watcher's
                             autoclose pass for smoother slot reclamation.
+                            Parked check is bypassed in this mode for the
+                            same reason as --merged-only.
     -i, --idle-min N        Require N+ minutes since last pane activity
                             (default 0 — any parked window is eligible)
     -w, --with-worktree     Also remove git worktree + delete branch
@@ -220,15 +231,28 @@ for w in "${WINDOWS[@]}"; do
     issue="${w#iss-}"
     reasons=()
 
-    # Parked check (skipped under --all)
-    if [ "$ALL" != "1" ]; then
+    # Parked check.
+    #
+    # Default mode uses pane scrollback ("Waiting for next" → listener
+    # parked, claude has exited) as a proxy for "safe to reap." But
+    # --merged-only and --pr-finalized provide a strictly stronger
+    # signal — PR state on GitHub. If the upstream PR is MERGED or
+    # CLOSED, the work is preserved (or explicitly rejected) regardless
+    # of whether claude's local REPL is still open, so the parked check
+    # would only block legitimate reaps. Skip it in those modes.
+    #
+    # --all already bypasses the parked check by design (its whole
+    # purpose is to include active windows).
+    if [ "$ALL" = "1" ]; then
+        reasons+=("--all")
+    elif [ "$MERGED_ONLY" = "1" ] || [ "$PR_FINALIZED" = "1" ]; then
+        reasons+=("pr-gated")
+    else
         if ! is_parked "$w"; then
             echo "  $w  [active → skip]"
             continue
         fi
         reasons+=("parked")
-    else
-        reasons+=("--all")
     fi
 
     # Idle-min check (applied in both modes when N>0)
