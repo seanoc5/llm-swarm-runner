@@ -282,7 +282,11 @@ TMP="$(mktemp -p "$WT/.swarm/tasks/inbox" .tmp.XXXXXX.md)"
     echo
     echo "Fix issue #$ISSUE. Details follow."
     echo
-    gh issue view "$ISSUE"
+    # Use --json with explicit field selection to bypass the deprecated
+    # `projectCards` field that bare `gh issue view` requests — that field
+    # now returns a GraphQL deprecation error and `gh` exits 1, which
+    # under set -e killed the whole script.
+    gh issue view "$ISSUE" --json number,title,labels,body --template '#{{.number}} — {{.title}}{{printf "\n\nLabels: "}}{{range $i, $l := .labels}}{{if $i}}, {{end}}{{$l.name}}{{end}}{{printf "\n\n%s\n" .body}}'
 } > "$TMP"
 # `mv -n` won't clobber even if a colliding file appeared between our
 # existence check and now; on the (vanishingly rare) race, fall back to
