@@ -210,7 +210,7 @@ The swarm session output is the primary surface for this rating — the PR-body 
 
 - `🟢 low` → "PR #N opened (🟢 low risk — worker will propose a quick merge confirmation; reply `yes`/`go`/`ship` to merge): <title>"
 - `🟡 medium` → "PR #N opened (🟡 medium risk — worker will not self-propose; say `merge PR N` to merge): <title>"
-- `🔴 high` → "PR #N opened (🔴 HIGH risk — worker will refuse to self-merge; review and run `gh pr merge N --squash --delete-branch` yourself): <title>"
+- `🔴 high` → "PR #N opened (🔴 HIGH risk — worker will refuse to self-merge; review and run `gh pr merge N --squash` yourself): <title>"
 
 If the markers are missing (older worker, or the worker forgot), default to "🟡 medium — risk rating not provided by worker; review before merge" and flag it as a worker-policy violation in your status update.
 

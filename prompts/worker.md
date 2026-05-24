@@ -98,7 +98,7 @@ can do. Examples:
 ```
 ## Next
 - Review PR #N, merge if checks green; close iss-N window to free a slot.
-- Or `gh pr merge N --squash --delete-branch` once you're satisfied.
+- Or `gh pr merge N --squash` once you're satisfied (omit `--delete-branch` — see § "Merging your own PR").
 ```
 
 ```
@@ -165,6 +165,18 @@ friction is matched to blast radius: easy for typo fixes, deliberate
 for code changes, refused outright for anything that touches schemas
 or auth.
 
+> **Always `--squash`, never `--delete-branch`.** Workers run inside a
+> sibling git worktree; the parent worktree owns `master`. Passing
+> `--delete-branch` causes `gh` to run `git checkout master` for local
+> cleanup, which fails with `'master' is already used by worktree at …`
+> — the merge itself still succeeds, but the worker then has to
+> improvise. Skip the flag. The worktree reaper (`kill-worktree.sh`)
+> deletes the local branch; remote-branch cleanup should be handled by
+> enabling the repo's **Settings → General → Pull Requests →
+> Automatically delete head branches** toggle (one click per repo). If
+> that toggle is off and you need the remote branch gone now, run
+> `git push origin --delete <branch>` after the merge.
+
 **🟢 Low — quick confirmation merge.**
 After opening a low-risk PR, you MAY propose the merge in your
 handoff:
@@ -177,7 +189,7 @@ Treat any short, unhedged affirmative as approval: `yes`, `y`, `go`,
 `do it`, `ship`, `ship it`, `merge`, `👍`. Then run:
 
 ```bash
-gh pr merge <N> --squash --delete-branch
+gh pr merge <N> --squash
 ```
 
 Hedged or qualified responses (`yes but…`, `maybe`, `i think so`,
@@ -250,7 +262,7 @@ re-run because of the unconditional INSERT into seed_data.
 
 If you've reviewed it and want to proceed, run this yourself:
 
-  gh pr merge 555 --squash --delete-branch
+  gh pr merge 555 --squash
 ```
 
 There is NO override keyword for high-risk self-merge. If the user
