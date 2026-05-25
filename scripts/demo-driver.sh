@@ -24,11 +24,19 @@
 #                       (default: 3). Coordinator may create more inline.
 #                       Hard floor is 1 — an empty pool aborts pre-flight.
 #   DEMO_PROMPT         Override the coordinator's demo-mode prompt entirely.
-#   COORD_TIMEOUT       Seconds to wait for coordinator first output (default: 45)
-#   WORKER_WATCH_SECS   Seconds to dwell on a worker pane (default: 15)
-#   EVENT_LOG_SECS      Seconds to dwell on the event log (default: 10)
-#   PR_LIST_SECS        Seconds to dwell on `gh pr list` (default: 10)
-#   DRY_RUN=1           Skip the actual swarm; print what would run
+#   COORD_TIMEOUT             Seconds to wait for coordinator first output (default: 45)
+#   WORKER_WATCH_SECS         Fallback worker-pane dwell if no merge proposal
+#                             appears within MERGE_PROPOSAL_TIMEOUT_SECS (default: 30)
+#   MERGE_PROPOSAL_TIMEOUT_SECS  How long to wait for a worker to propose a 🟢 low
+#                             self-merge ("Merge PR #..." text in its pane) before
+#                             falling back to plain WORKER_WATCH_SECS dwell. (default: 180)
+#   MERGE_CONFIRM_DWELL_SECS  After a merge proposal appears, dwell on the worker
+#                             pane this long so the recorder catches the user typing
+#                             'yes' / 'y' / 'go' / 'ship' and the worker running
+#                             `gh pr merge`. (default: 30)
+#   EVENT_LOG_SECS            Seconds to dwell on the event log (default: 10)
+#   PR_LIST_SECS              Seconds to dwell on `gh pr list` (default: 10)
+#   DRY_RUN=1                 Skip the actual swarm; print what would run
 
 set -uo pipefail
 
@@ -41,7 +49,9 @@ SESSION_NAME="llm-$(basename "$PWD")"
 DEMO_LABEL="${DEMO_LABEL:-demo}"
 MIN_DEMO_BACKLOG="${MIN_DEMO_BACKLOG:-3}"   # warn if fewer than this demo-labeled issues exist
 COORD_TIMEOUT="${COORD_TIMEOUT:-45}"
-WORKER_WATCH_SECS="${WORKER_WATCH_SECS:-15}"
+WORKER_WATCH_SECS="${WORKER_WATCH_SECS:-30}"
+MERGE_PROPOSAL_TIMEOUT_SECS="${MERGE_PROPOSAL_TIMEOUT_SECS:-180}"
+MERGE_CONFIRM_DWELL_SECS="${MERGE_CONFIRM_DWELL_SECS:-30}"
 EVENT_LOG_SECS="${EVENT_LOG_SECS:-10}"
 PR_LIST_SECS="${PR_LIST_SECS:-10}"
 DRY_RUN="${DRY_RUN:-0}"
@@ -242,7 +252,24 @@ drive_beats() {
         | grep iss- | head -1 | cut -d: -f1)
     log "[bg] Switching to worker window $first_worker_idx..."
     tmux select-window -t "$SESSION_NAME:$first_worker_idx"
-    sleep "$WORKER_WATCH_SECS"
+
+    # Poll the worker pane for a 🟢 low self-merge proposal. The worker emits
+    # something like:  "🟢 low risk — typo fix in README. Merge PR #555 now? (yes / y / go / ship)"
+    # per prompts/worker.md § "Merging your own PR". When it appears, we
+    # dwell MERGE_CONFIRM_DWELL_SECS so the human at the keyboard can read
+    # the prompt, type their reply, and the recording catches the worker
+    # actually running `gh pr merge --squash`. If no proposal lands within
+    # MERGE_PROPOSAL_TIMEOUT_SECS (worker still typing, or the issue turned
+    # out to be 🟡 medium / 🔴 high which doesn't auto-propose), fall back to
+    # the legacy fixed WORKER_WATCH_SECS dwell so the demo doesn't stall.
+    log "[bg] Polling worker pane for merge proposal (timeout ${MERGE_PROPOSAL_TIMEOUT_SECS}s)..."
+    if wait_for_text "$SESSION_NAME:$first_worker_idx" "Merge PR #" "$MERGE_PROPOSAL_TIMEOUT_SECS"; then
+        log "[bg] Merge proposal detected — dwelling ${MERGE_CONFIRM_DWELL_SECS}s for human reply + merge execution."
+        sleep "$MERGE_CONFIRM_DWELL_SECS"
+    else
+        log "[bg] No merge proposal within timeout — falling back to ${WORKER_WATCH_SECS}s plain dwell."
+        sleep "$WORKER_WATCH_SECS"
+    fi
 
     # Beat 6: back to coordinator window, split for event log
     log "[bg] Splitting coordinator pane for event log..."
@@ -287,10 +314,16 @@ DISPATCH POLICY:
 - Strongly prefer the SIMPLEST issues: docs/* and chore/* over fix/*.
 - Dispatch up to MAX_WORKERS workers in this wake; the watcher refills.
 
+SELF-MERGE FLOW (demo highlight):
+- Workers WILL propose merging their own 🟢 low PRs per prompts/worker.md
+  guidance (\"Merge PR #N now? (yes / y / go / ship)\"). That interaction is
+  part of the recording — the user will reply in the worker pane.
+- You (coordinator) do NOT need to act on those proposals or echo them to
+  your own pane. Stay silent unless the watcher wakes you with new work.
+
 CADENCE:
 - After dispatching, report it in ONE concise line and idle silently.
-- Do NOT ask the user for confirmation about anything.
-- Do NOT propose merging or reviewing PRs — the recording is in progress.
+- Do NOT ask the user for confirmation about anything you do.
 - When the watcher wakes you with refresh prompts, apply the same demo-mode
   discipline: triage outcomes briefly, top up if slots are free, idle."
 PROMPT="${DEMO_PROMPT:-$DEFAULT_PROMPT}"
