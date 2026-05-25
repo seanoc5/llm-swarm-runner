@@ -28,6 +28,7 @@ red()    { printf '\033[31m%s\033[0m\n' "$*" >&2; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 WORKER_SHELL="$SCRIPT_DIR/tmux-worker-shell.sh"
+SCRATCH_TOGGLE="$SCRIPT_DIR/coord-scratch-toggle.sh"
 TMUX_CONF="${TMUX_CONF:-$HOME/.tmux.conf}"
 
 BEGIN_MARK="# >>> llm-swarm-runner ctrl-z binding (managed by install-tmux-binding.sh) >>>"
@@ -50,27 +51,36 @@ for arg in "$@"; do
     esac
 done
 
-# --- 1. Sanity-check the worker-shell script exists --------------------------
+# --- 1. Sanity-check the helper scripts exist --------------------------------
 if [ ! -x "$WORKER_SHELL" ]; then
     red "Helper script not found or not executable: $WORKER_SHELL"
     red "This script must live in the same scripts/ dir as tmux-worker-shell.sh."
+    exit 1
+fi
+if [ ! -x "$SCRATCH_TOGGLE" ]; then
+    red "Helper script not found or not executable: $SCRATCH_TOGGLE"
+    red "This script must live in the same scripts/ dir as coord-scratch-toggle.sh."
     exit 1
 fi
 
 # --- 2. Build the managed block ----------------------------------------------
 read -r -d '' MANAGED_BLOCK <<EOF || true
 $BEGIN_MARK
-# Worker (iss-*) Ctrl-Z escape hatch. In any iss-* window, Ctrl-Z splits
-# a sibling bash pane that docker-execs into the same worker container as
-# a login shell. Claude in the original pane is untouched. In any other
-# window, Ctrl-Z falls through to normal behavior.
+# Ctrl-Z dispatch:
+#   • In any iss-* window: split a sibling bash pane that docker-execs
+#     into the same worker container as a login shell. Claude in the
+#     original pane is untouched.
+#   • In the coordinator window: toggle a bare-bash "scratch" pane next
+#     to the coordinator (no worktree, no container). Press again from
+#     anywhere in the window to close it.
+#   • Anywhere else: fall through to normal Ctrl-Z behavior.
 #
-# Path below is baked in by scripts/install-tmux-binding.sh — re-run that
-# script if you move this checkout.
+# Paths below are baked in by scripts/install-tmux-binding.sh — re-run
+# that script if you move this checkout.
 bind-key -n C-z if-shell -F '#{m:iss-*,#{window_name}}' \\
     'split-window -h "$WORKER_SHELL"' \\
     'if-shell -F "#{==:#{window_name},coordinator}" \\
-        "display-message \"Ctrl-Z swallowed in coordinator window\"" \\
+        "run-shell \"$SCRATCH_TOGGLE\"" \\
         "send-keys C-z"'
 $END_MARK
 EOF
@@ -193,5 +203,7 @@ done
 
 if [ "$UNINSTALL" -eq 0 ]; then
     echo
-    green "Done. In any iss-* window: Ctrl-Z opens a sibling bash pane in the same container."
+    green "Done."
+    green "  iss-* window:    Ctrl-Z opens a sibling bash pane in the same container."
+    green "  coordinator:     Ctrl-Z toggles a bare-bash scratch pane (no container)."
 fi
