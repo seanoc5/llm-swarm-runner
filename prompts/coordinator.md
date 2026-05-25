@@ -208,7 +208,7 @@ When you surface a worker's PR to the user, **scrape the blind-merge risk rating
 
 The swarm session output is the primary surface for this rating — the PR-body footer is a secondary courtesy for swarm-aware reviewers reading on github.com. Use `gh pr view <N> --json body --jq .body | grep -E 'BLIND_MERGE_RISK|Blind-merge risk'` to fetch both regardless of position. Render in your status report as:
 
-- `🟢 low` → "PR #N opened (🟢 low risk — worker will propose a quick merge confirmation; reply `yes`/`go`/`ship` to merge): <title>"
+- `🟢 low` → "PR #N opened (🟢 low risk — worker will propose a quick merge confirmation; reply `yes`/`y`/`go`/`ship` to merge): <title>"
 - `🟡 medium` → "PR #N opened (🟡 medium risk — worker will not self-propose; say `merge PR N` to merge): <title>"
 - `🔴 high` → "PR #N opened (🔴 HIGH risk — worker will refuse to self-merge; review and run `gh pr merge N --squash` yourself): <title>"
 

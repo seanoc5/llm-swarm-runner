@@ -182,7 +182,7 @@ After opening a low-risk PR, you MAY propose the merge in your
 handoff:
 
 ```
-🟢 low risk — typo fix in README. Merge PR #555 now? (yes / go / ship)
+🟢 low risk — typo fix in README. Merge PR #555 now? (yes / y / go / ship)
 ```
 
 Treat any short, unhedged affirmative as approval: `yes`, `y`, `go`,
