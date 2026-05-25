@@ -18,6 +18,11 @@
 # legitimately be tracked.
 /.env
 
+# Repo-root local swarm policy. examples/swarm-policy.md.example is the
+# tracked template; per-project opt-ins (e.g. at-rest glyph) belong in a
+# local .swarm-policy.md that should NOT be committed.
+/.swarm-policy.md
+
 # Demo recording artifacts
 *.mp4
 *.gif

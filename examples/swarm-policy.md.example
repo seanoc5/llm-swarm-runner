@@ -80,5 +80,6 @@ go here:
 - "PR risk rating must include a separate `<!-- LIQUIBASE_TOUCHED: yes|no -->` HTML comment when database migrations are present."
 - "End-of-work summary must include a `## Coverage delta` section listing tests added/changed."
 - "Next-best-action hints should always link to the project's runbook (`docs/RUNBOOK.md`) when CI fails."
+- "**At-rest glyph enabled.** Emit `∎` as your final line when truly at rest, per `prompts/worker.md` § 'At-rest signal'."
 
 Leave empty if the baseline is fine for this project.

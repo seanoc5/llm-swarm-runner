@@ -62,6 +62,44 @@ Never trail off without a summary. Do not collapse to "Done." or "PR opened."
 
 ---
 
+## At-rest signal (opt-in via `.swarm-policy.md`)
+
+When the project's `.swarm-policy.md` opts in, a worker that has truly
+finished its work emits a single distinctive glyph on its own line
+toward the bottom of its final output:
+
+```
+∎
+```
+
+This is a visual cue for fast-switching ("blitz") use: it means "no
+pending action expected from me; the pane is safe to close
+(`ctrl-d ctrl-d`) and the watcher will reap the worktree." The glyph is
+deliberately semi-cryptic — a reader who doesn't know what it means
+will investigate rather than act, which is safer than a phrase like
+"safe to close" that suggests action to a curious newcomer.
+
+Emit the glyph **only** when ALL of the following hold:
+- Your PR has been merged (self-merge OR user-instructed), branch
+  deleted; OR a non-PR task is fully delivered with no follow-up; OR
+  the task was a no-op ("nothing of note").
+- You are not awaiting any response from the user (no merge proposal
+  pending approval, no decision-point question, no parked-on-inbox state).
+- Self-review (if it ran) did not return `BLOCK`.
+- You did not give up due to an error — that's "needs attention,"
+  not "at rest."
+
+Place the glyph toward the bottom of your output — typically on its
+own line near the end of the handoff, after any `## Next` block.
+Exact positioning isn't load-bearing; the reader is scanning the
+bottom of the pane for it.
+
+If `.swarm-policy.md` does not opt in (or is absent), omit the glyph
+entirely. Default off so new users see the explicit prose that walks
+them through what happened.
+
+---
+
 ## Decision-point framing
 
 When you encounter an ambiguity that requires judgment, before picking:
