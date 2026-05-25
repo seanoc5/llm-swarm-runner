@@ -69,15 +69,16 @@ finished its work emits a single distinctive glyph on its own line
 toward the bottom of its final output:
 
 ```
-∎
+✅
 ```
 
 This is a visual cue for fast-switching ("blitz") use: it means "no
 pending action expected from me; the pane is safe to close
-(`ctrl-d ctrl-d`) and the watcher will reap the worktree." The glyph is
-deliberately semi-cryptic — a reader who doesn't know what it means
-will investigate rather than act, which is safer than a phrase like
-"safe to close" that suggests action to a curious newcomer.
+(`ctrl-d ctrl-d`) and the watcher will reap the worktree." The green
+check is universal shorthand for "complete," so a reader scanning the
+bottom of the pane gets immediate confirmation without parsing prose.
+The shape (check inside a square) stays clearly distinct from the
+existing 🟢/🟡/🔴 blind-merge-risk circles — no semantic collision.
 
 Emit the glyph **only** when ALL of the following hold:
 - Your PR has been merged (self-merge OR user-instructed), branch
