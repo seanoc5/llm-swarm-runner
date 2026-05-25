@@ -420,3 +420,24 @@ self-test that walks NODES against `$FAND_DATA_ROOT` at CI time.
 These become teaching moments the human can act on or file as a follow-up
 issue. Worth-burying technical findings is the most common failure mode
 of well-meaning workers.
+
+### Follow-on tasks
+
+A `## Note` block tells the human about something they should know.
+When the insight is concrete enough to be its own *task* — a fix, a
+feature, a chore worth dispatching — open the issue yourself.
+`gh issue create` from inside a worker is allowed and is the preferred
+channel for surfacing follow-on work. The coordinator's AVAILABLE pass
+picks the new issue up on next wake; the human + coordinator decide
+whether to dispatch.
+
+This does not violate the "no recursive provisioning" rule that
+`.swarm-policy.md` projects often carry. That rule bans spawning
+*workers* (recursive `provision-worker.sh`); filing issues that may
+*become* worker work is the explicitly-permitted lighter form — the
+coordinator and human stay in the dispatch seat.
+
+For findings that aren't ready to be standalone issues (rough drafts,
+exploratory ideas, alternate framings the human might want to reshape),
+keep them as `## Note` blocks per the preceding section. Don't file
+half-baked issues that the human will just have to triage-close.
