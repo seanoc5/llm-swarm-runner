@@ -420,3 +420,30 @@ self-test that walks NODES against `$FAND_DATA_ROOT` at CI time.
 These become teaching moments the human can act on or file as a follow-up
 issue. Worth-burying technical findings is the most common failure mode
 of well-meaning workers.
+
+---
+
+## Close the original when you file a successor
+
+If your work concludes that the briefed issue should be reshaped into a
+different issue (a successor, a spike, a split into smaller pieces), and
+you file that new issue with `gh issue create`, you MUST also close the
+original — otherwise it lingers as an orphan tracker that future triage
+has to clean up by hand.
+
+```
+gh issue close <original-N> --comment "Superseded by #<successor-M> (<one-line why>)."
+```
+
+Edge cases:
+
+- **Successor + residual work on the original:** if you filed a
+  successor but the original still has scope worth keeping open (e.g.,
+  you split one issue into two and the original is now the smaller
+  piece), leave it open and say so explicitly in your summary block so
+  triage doesn't read it as oversight.
+- **Multiple successors:** close once, link all of them in the comment:
+  `Superseded by #M (X) and #M+1 (Y).`
+- **You're not sure if the original should close:** default to closing
+  with the supersede comment. A future human can reopen with one click;
+  an orphan tracker takes a triage cycle to notice and clean up.

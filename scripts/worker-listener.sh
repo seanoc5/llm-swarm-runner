@@ -152,6 +152,16 @@ EOF
 }
 
 while true; do
+    # If the worktree was reaped out from under us (e.g., the worker
+    # self-deregistered after filing successor issues and deleted its
+    # own worktree), the inbox dir disappears. Without this guard the
+    # listener would spin forever on `find` returning nothing, leaving
+    # a zombie tmux window. Exit cleanly so the window closes.
+    if [ ! -d "$INBOX" ] || [ ! -d "$PWD" ]; then
+        echo "[$(date +%T)] Worktree $WT_LABEL appears reaped (inbox or cwd missing). Listener exiting cleanly."
+        exit 0
+    fi
+
     if claim_next_task; then
         echo "[$(date +%T)] Task received! id=$TASK_ID$([ "$IS_LEGACY" = "1" ] && echo " (v1 legacy)")"
 
