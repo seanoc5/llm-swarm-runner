@@ -193,15 +193,17 @@ If you prefer to edit `~/.tmux.conf` by hand, paste the block below — also inc
 > ⚠️ **You MUST edit the absolute path below to match where you cloned `llm-swarm-runner`.** If the path is wrong, the sibling pane will appear and immediately die with `bash: line 1: …/tmux-worker-shell.sh: No such file or directory` (exit 127). The install script above sidesteps this by baking in `$SCRIPT_DIR` at install time.
 
 ```tmux
-# Worker (iss-*) Ctrl-Z escape hatch.
-# In any iss-* window, Ctrl-Z splits a sibling pane that docker-execs
-# into the same worker container as a login shell. claude keeps running.
-# In any other window, Ctrl-Z falls through to normal behavior.
+# Ctrl-Z dispatch:
+#   • iss-* window  → split a sibling bash pane in the same worker container.
+#   • coordinator   → toggle a bare-bash scratch pane next to claude.
+#   • anywhere else → fall through to normal Ctrl-Z.
 #
-# >>> EDIT THIS PATH to match your clone of llm-swarm-runner <<<
+# >>> EDIT THE TWO PATHS to match your clone of llm-swarm-runner <<<
 bind-key -n C-z if-shell -F '#{m:iss-*,#{window_name}}' \
     'split-window -h "/opt/work/llm-swarm-runner/scripts/tmux-worker-shell.sh"' \
-    'send-keys C-z'
+    'if-shell -F "#{==:#{window_name},coordinator}" \
+        "run-shell \"/opt/work/llm-swarm-runner/scripts/coord-scratch-toggle.sh\"" \
+        "send-keys C-z"'
 ```
 
 **Why the helper script?** tmux's `if-shell -F` expands `#{...}` formats in its *condition*, but `split-window`'s shell-command argument is passed **literally** — no format substitution. An earlier version of this binding put `#{session_name}` and `#{window_name}` directly in the `docker exec` line; those reached docker unexpanded as the literal container name `swarm-#{session_name}-#{window_name}`, which never matched a real container, so the new pane died with exit 1 every time. The helper sidesteps the limitation by resolving the names at run time via `tmux display-message -p -t "$TMUX_PANE"` (which *does* expand formats) before exec-ing into docker.
@@ -222,6 +224,15 @@ tmux list-keys -T root | grep C-z  # expect a binding here — if empty, the sou
 2. Press **Ctrl-Z**. A new pane splits to the right with a `bash -l` prompt inside the same container.
 3. Do whatever — `git log`, `ls .swarm/tasks/`, `gh pr view`, etc.
 4. When done, `exit` to close the helper pane. Claude in the original pane is unaffected.
+
+### Coordinator scratch pane (same key, different window)
+
+In the `coordinator` window, Ctrl-Z does **not** open a container shell — it toggles a **bare-bash scratch pane** next to claude, started in the repo root. No worktree, no docker, just a shell for the ad-hoc commands the coordinator occasionally suggests running on the host.
+
+1. In the coordinator window, press **Ctrl-Z**. A pane splits to the right with a plain bash prompt in the repo root.
+2. Press **Ctrl-Z** again from anywhere in the window (including from the scratch pane itself) to close it.
+
+The scratch pane is identified by its tmux pane title (`coord-scratch`), so the toggle is index-free — it works regardless of how panes have been reordered or zoomed. Each toggle-open spawns a fresh shell, so don't rely on it to preserve state across closes; if you need a long-lived bash with history, use the bare-bash pane in the `util` window instead.
 
 ### Gotcha: config edited but not loaded
 

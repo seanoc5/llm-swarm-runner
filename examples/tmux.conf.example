@@ -86,9 +86,9 @@ bind r source-file ~/.tmux.conf \; display-message "~/.tmux.conf reloaded"
 # only modifies its own session — your other sessions stay as configured
 # above.
 
-# === Worker (iss-*) Ctrl-Z escape hatch ====================================
+# === Ctrl-Z escape hatch (workers + coordinator) ==========================
 # RECOMMENDED: use ./scripts/install-tmux-binding.sh instead of pasting this
-# block. The installer self-locates the repo so the absolute path below is
+# block. The installer self-locates the repo so the absolute paths below are
 # always correct, writes a managed block (idempotent), and reloads the
 # config on every running swarm-* socket — not just the default one.
 #
@@ -99,8 +99,12 @@ bind r source-file ~/.tmux.conf \; display-message "~/.tmux.conf reloaded"
 # Intercept Ctrl-Z in iss-* windows: split a sibling pane that `docker
 # exec`s into the SAME worker container as a login shell. claude keeps
 # running in the original pane; you get a bash with the worktree, branch,
-# and gh auth already in place. In any non-iss window, Ctrl-Z falls
-# through to its normal behavior.
+# and gh auth already in place.
+#
+# In the coordinator window, Ctrl-Z toggles a bare-bash "scratch" pane
+# next to claude (no worktree, no container) — first press splits it in,
+# second press kills it. Anywhere else, Ctrl-Z falls through to its
+# normal behavior.
 #
 # Requires that provision-worker.sh names containers `swarm-<session>-<window>`
 # (the default since v2). After adding this, run:
@@ -118,12 +122,14 @@ bind r source-file ~/.tmux.conf \; display-message "~/.tmux.conf reloaded"
 # tmux-worker-shell.sh resolves them at run time via `tmux display-message
 # -p -t "$TMUX_PANE"`, which does expand formats.
 #
-# >>> YOU MUST EDIT THE ABSOLUTE PATH below to match your clone of      <<<
-# >>> llm-swarm-runner. If it's wrong, Ctrl-Z creates a sibling pane    <<<
+# >>> YOU MUST EDIT THE ABSOLUTE PATHS below to match your clone of     <<<
+# >>> llm-swarm-runner. If they're wrong, Ctrl-Z creates a sibling pane <<<
 # >>> that immediately dies with "No such file or directory" (exit 127).<<<
 bind-key -n C-z if-shell -F '#{m:iss-*,#{window_name}}' \
     'split-window -h "/opt/work/llm-swarm-runner/scripts/tmux-worker-shell.sh"' \
-    'send-keys C-z'
+    'if-shell -F "#{==:#{window_name},coordinator}" \
+        "run-shell \"/opt/work/llm-swarm-runner/scripts/coord-scratch-toggle.sh\"" \
+        "send-keys C-z"'
 
 # === Session persistence (tmux-resurrect + tmux-continuum) =================
 # Survives tmux server restarts (intentional or crash). Without this, a
