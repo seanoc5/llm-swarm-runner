@@ -23,9 +23,13 @@
 # local .swarm-policy.md that should NOT be committed.
 /.swarm-policy.md
 
-# Demo recording artifacts
+# Demo recording artifacts produced by scripts/demo-record-setup.sh,
+# scripts/edit-demo.sh, and asciinema — see docs/demo-recording.md.
+# Default output lands in ~/Videos/, but guard against stray copies into the repo.
 *.mp4
+*.mkv
 *.gif
+*.cast
 demo-*.png
 
 # Editor / OS junk
