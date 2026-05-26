@@ -45,6 +45,13 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LLM_SWARM_DIR="$(dirname "$SCRIPT_DIR")"
 SESSION_NAME="llm-$(basename "$PWD")"
+SWARM_SOCKET="swarm-$(basename "$PWD")"
+
+# Pin every tmux invocation to the per-repo socket llm-start.sh uses.
+# Without this every tmux call lands on the default socket while the
+# real session lives on swarm-<repo> — kill-session no-ops, has-session
+# returns false, and the driver FATALs after a successful llm-start.sh.
+tmux() { command tmux -L "$SWARM_SOCKET" "$@"; }
 
 DEMO_LABEL="${DEMO_LABEL:-demo}"
 MIN_DEMO_BACKLOG="${MIN_DEMO_BACKLOG:-3}"   # warn if fewer than this demo-labeled issues exist
