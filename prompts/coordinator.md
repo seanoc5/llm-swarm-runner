@@ -56,6 +56,7 @@ fi
 - **Tracking / meta issues** — title/body indicates an "epic" or "tracking" issue with sub-issue links and no atomic acceptance criteria. Skip.
 - **Policy-blocked** — read the issue body. If its acceptance criteria require touching paths forbidden by `.swarm-policy.md` (e.g. `.github/workflows/**`, Flyway migrations, Dockerfile), it is *policy-blocked*. Skip and consider applying the `blocked` label so it doesn't keep re-evaluating.
 - **PR already linked** — issue has a linked open PR (visible in `gh issue view N --json closedByPullRequestsReferences`). Skip; the work is in progress.
+- **Epic with pre-baked decomposition** — when the user asks you to *carve* an open epic (or you decide to), the "skip the epic" rule isn't enough. Before filing any new sub-issues from a "Suggested sub-issues" / "Decomposition" list in the body, search closed and merged issues for matching titles: `gh issue list --state all --search "<2-3 distinctive words from a child title>"`. Epics commonly get split into separate sub-issues whose work then ships within hours or days — but the epic itself isn't auto-closed, so the prose still reads like a fresh todo list weeks later. Failure mode observed 2026-05-24 in fand-app: 7 sub-issues filed and 3 workers dispatched against work that had merged 2 days earlier as a parallel ticket series. The workers' refuse-and-report behavior caught it before any duplicate PRs were written, but the dispatch cost was real.
 
 The result is the **AVAILABLE** set. Cache it in your working memory for the rest of this checklist run.
 
@@ -127,6 +128,8 @@ The workflow triggers on either the label or the `@claude` mention; both are bel
 **If the workflow is not installed in the target repo,** do not apply the label. Instead, route to tmux as normal and (optionally) note in the issue that the project may want to install `examples/github-workflows/claude-code.yml.example` from this sandbox repo to enable the Actions class.
 
 ## How to Provision a Worker
+
+**Before provisioning, sanity-check the issue against closed/merged work.** `gh issue list --state closed --search "<2-3 distinctive words from the title>"` is enough. Cheap, catches the "we already shipped this last week" case that the AVAILABLE filter can miss (especially issues filed manually by the user during the session, or carved from an epic body — see "Epic with pre-baked decomposition" under "Computing AVAILABLE").
 
 **One command per issue.** Use the `provision-worker.sh` helper — it handles worktree creation, queue init, `.swarm-policy.md` guardrails embedding, atomic-write of the brief, and worker tmux window spawn in a single call. This avoids `$(...)` command substitution at your tool layer (which gemini's `run_shell_command` blocks) by encapsulating the multi-step shell pipeline inside the helper script.
 
