@@ -13,9 +13,10 @@ Also works as a single-agent sandbox if you don't want the swarm — `sandbox.sh
 
 ## Show me first
 
-> A 60-second demo lives in [`scripts/demo-driver.sh`](./scripts/demo-driver.sh) — it
+> A ~75–90 second demo lives in [`scripts/demo-driver.sh`](./scripts/demo-driver.sh) — it
 > spawns a clean swarm against this repo's own backlog so you can see the
-> coordinator-worker pattern run end-to-end without setting up your own project.
+> coordinator-worker pattern run end-to-end (dispatch → worker code → 🟢 low self-merge → PR list)
+> without setting up your own project.
 
 > ⚠️ **This is NOT a security boundary against a hostile / compromised agent.**
 > The container runs with `--network host`, mounts `/var/run/docker.sock` for Docker-out-of-Docker, mounts `~/.claude` rw and `~/.ssh` ro, and the agents run with `--dangerously-skip-permissions` / `--yolo`. A sufficiently-capable agent inside the container can spawn sibling containers with `-v /:/host`, exfiltrate your gh token, push to your repos, etc. Treat the agents as **trusted-but-fallible**, not as adversaries. See [`docs/security.md`](./docs/security.md) for blast-radius details.
