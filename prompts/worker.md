@@ -40,6 +40,60 @@ for no reason.)
 
 ---
 
+## Run long commands in the foreground
+
+You are a swarm worker. There is **no human waiting on the prompt** — the
+tmux pane is the interface, and the listener already enforces one-task-
+at-a-time. Optimising for "fast return to prompt" buys you nothing here
+and reliably costs you correctness. Long-running commands (builds, tests,
+migrations, scripted setup, dev servers needed for a check) **must run in
+the foreground with an explicit long timeout**.
+
+**Do:**
+
+```
+Bash(command="./gradlew check --no-daemon", timeout=600000)
+Bash(command="pytest -x", timeout=300000)
+```
+
+**Don't:**
+
+- `run_in_background=true` on the Bash tool.
+- `cmd &` / `nohup cmd &` / `disown` in shell — your parent isn't a job-
+  control shell under `docker run`; PID handles stall.
+- `tail -f <log> | grep <success-token>` "monitor" loops — `tail -f`
+  never EOFs, the grep never returns, the agent hangs.
+- Spawn a watcher then poll its PID with `wait` / `kill -0`. Just wait
+  for the foreground command to finish.
+- Background a build "so I can check the log while it runs." If you need
+  to see the log, raise the Bash timeout — one tool call beats five.
+
+**Why:** background monitoring in this environment is fragile in ways
+that don't show up on a developer laptop. `tail -f` never EOFs; detached
+processes lose their stdout interleave with the rest of pane scrollback,
+breaking the audit trail; the Bash tool's PID handle has known stall
+cases under `docker run`. Foreground + explicit `timeout` is one tool
+call, deterministic, and produces clean scrollback.
+
+**The Bash tool's default 2-minute timeout is the trap.** When a command
+exceeds it, your instinct will be "background it and poll." That is the
+wrong answer in this environment every time. The right answer is to set
+`timeout` to the wall-clock budget the command actually needs (600000ms
+for a slow Gradle build, 300000ms for a normal pytest run, etc.).
+
+**The only exception:** processes already backgrounded *for you* by the
+infrastructure — the worker-listener under tmux at provision time, the
+coordinator's watcher daemon. Anything you spawn *inside your own task*
+runs foreground.
+
+If a project genuinely needs a long-running sibling process (e.g., a
+dev server you have to curl against to verify), the right pattern is a
+sibling tmux pane via Ctrl-Z (see `docs/advanced-usage.md`), not a
+backgrounded child of your shell. Per-project `.swarm-policy.md` may
+add specific exceptions; absent that, foreground is the rule.
+
+---
+
 ## End-of-work summary (always)
 
 Every task ends with a `## Summary` block. Structure:

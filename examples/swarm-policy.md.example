@@ -61,6 +61,13 @@ If the project lead's instruction is ambiguous, ask in-pane. Don't infer.
 - Database migrations are read-only research only — do not apply them.
 - Network calls are fine for `gh`, `git`, `npm`, `pip`/`uv`, package registries; everything else is suspect.
 
+### Long-running commands stay foreground
+The universal "run long commands in the foreground" rule from `prompts/worker.md`
+is in force. List per-project additions or exceptions here, e.g.:
+- "`./dev-server.sh` is the project's dev server — open it in a sibling Ctrl-Z pane, never backgrounded from your own shell."
+- "Our slow integration suite needs a 20-minute timeout: `Bash(command='./gradlew :it:test', timeout=1200000)`."
+- "(exception) `./scripts/seed-fixtures.sh` may be backgrounded because it's idempotent and the listener's outcome handler tolerates the late write."
+
 ## Concurrency rules
 - Maximum 1 active worker per worktree.
 - Do not spawn additional workers from inside a worker (no recursive provisioning).
