@@ -1,5 +1,7 @@
 # LLM Swarm Runner
 
+*Multi-agent dev sandbox orchestrating Claude Code workers in parallel tmux panes and isolated git worktrees.*
+
 ![CI](https://img.shields.io/badge/CI-pending-lightgrey) ![License](https://img.shields.io/badge/license-MIT-blue)
 
 **TL;DR:** llm-swarm-runner points Claude Code (or Gemini CLI) at your GitHub issue backlog and lets a pool of sandboxed agents chew through it in parallel — each in its own git worktree, each in a Docker container, all visible live in tmux. You stay in the driver's seat; the swarm handles the parallelism, the isolation, and the bookkeeping.
