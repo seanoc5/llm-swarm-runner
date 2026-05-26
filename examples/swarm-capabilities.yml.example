@@ -1,0 +1,99 @@
+# swarm-capabilities.yml.example
+#
+# Copy this to your project as `.swarm/capabilities.yml` to give the
+# llm-swarm-runner workers an executable contract for "what does
+# `green` mean in this repo." Pairs with `.swarm-policy.md` (prose
+# guardrails); this file is the *structured* sibling.
+#
+# Schema is small on purpose. All fields are optional; missing file ⇒
+# swarm behaves exactly as before this feature shipped (back-compat).
+#
+# Reference: docs/prd/0001-structured-capabilities.md
+#            docs/adr/0003-capabilities-yaml.md
+#
+# Commit this file (do NOT gitignore). Workers in worktrees inherit it
+# via the same path under the worktree root.
+
+# -----------------------------------------------------------------------------
+# verify
+# -----------------------------------------------------------------------------
+# The single command that decides whether a worker may open a PR. Runs in the
+# worktree root, inside the worker sandbox. Non-zero exit ⇒ no PR opened and
+# the task parks with verify.passed=false in its outcome JSON.
+#
+# Pick the *narrow, fast* gate, not "everything CI runs." A 90-second verify
+# is fine; a 20-minute Gradle full-build will make iteration painful and tempt
+# people to set WORKER_SKIP_VERIFY=1, defeating the point.
+#
+# Common patterns:
+#   Kotlin/Gradle:   ./gradlew check --no-daemon
+#   Kotlin/Gradle:   ./gradlew test --no-daemon            # tests only, faster than check
+#   Python/uv:       uv run pytest -x -q
+#   Node:            npm test --silent
+#   Go:              go test ./...
+#   Make-driven:     make verify
+verify: ./gradlew check --no-daemon
+
+# -----------------------------------------------------------------------------
+# lint
+# -----------------------------------------------------------------------------
+# Advisory only in v1: failure logs to outcome JSON but does NOT block PRs.
+# Omit if your project has no separate lint step (e.g., ktlint runs inside
+# `./gradlew check` already — in that case lint is redundant here).
+lint: ./gradlew ktlintCheck
+
+# -----------------------------------------------------------------------------
+# build
+# -----------------------------------------------------------------------------
+# Optional sanity command — e.g., assemble JAR / build container / npm run
+# build. Failure is recorded but does NOT block PRs in v1.
+build: ./gradlew assemble --no-daemon
+
+# -----------------------------------------------------------------------------
+# identity_checks
+# -----------------------------------------------------------------------------
+# Optional list of named invariant checks. Each command runs as part of
+# verify; any non-zero exit folds into verify.passed=false. Use this for
+# domain-level invariants that aren't in your normal test run — accounting
+# identities, schema consistency, "data files we promised to ship still
+# exist," etc.
+#
+# Each entry is a {name, cmd} pair. The name shows up in the outcome JSON.
+identity_checks:
+  - name: balance sheet identity
+    cmd: ./gradlew :engine:identityTests
+  - name: migration ordering invariant
+    cmd: ./scripts/check-migration-order.sh
+
+# -----------------------------------------------------------------------------
+# blast_radius_deny
+# -----------------------------------------------------------------------------
+# Glob patterns (matched against `git diff --name-only` from worktree base).
+# If a worker's diff touches any matching path, the worker prompt instructs
+# it to refuse and surface ambiguity rather than ship the change blindly.
+#
+# v1 is prompt-enforced (the worker SHOULD refuse). Listener-side hard
+# enforcement is a deliberate future-phase decision; see ADR 0003.
+#
+# Typical entries: anything that costs real money on misconfiguration —
+# migrations, infra config, secrets, prod-affecting workflows.
+blast_radius_deny:
+  - "flyway/**"
+  - "db/migration/**"
+  - "Dockerfile"
+  - ".env*"
+  - ".github/workflows/**"
+
+# -----------------------------------------------------------------------------
+# verify_timeout_seconds
+# -----------------------------------------------------------------------------
+# Hard cap on the verify run. Listener SIGKILLs the process after this many
+# seconds and marks verify.passed=false with a timeout reason. Default 600.
+verify_timeout_seconds: 600
+
+# -----------------------------------------------------------------------------
+# Escape hatch
+# -----------------------------------------------------------------------------
+# To skip verify for a one-off worker run (e.g., docs-only PR), set
+# WORKER_SKIP_VERIFY=1 in the worker's environment. The bypass is recorded
+# in the outcome JSON so the audit trail survives.

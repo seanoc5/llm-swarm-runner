@@ -56,6 +56,7 @@ For deep-dives into specific topics, please refer to the reference documentation
 - 🚑 [**Troubleshooting**](./docs/troubleshooting.md) - Fix common SSH, `gh` auth, and networking errors.
 - 🪟 [**tmux Cheatsheet**](./docs/tmux-cheatsheet.md) - Attach/detach, multi-client handling, capture-pane for diagnostics, and other commands you'll actually use with the swarm.
 - 🌿 [**Git & GitHub Tips**](./docs/VCS/git-github.md) - Crib sheet for swarm-flavored git/`gh`: resolving conflicts when merging worker PRs, recovery recipes, pointers to authoritative references (ohshitgit, Pro Git, etc.). Aimed at users whose git skills are thinner than their swarm-orchestration skills.
+- 🗺️ [**Level-5 Roadmap**](./docs/level-5-roadmap.md) - Phased plan for hardening the swarm toward fully autonomous "level 5" agentic workflows: structured project capabilities, judge workers, dependency graphs, sandbox profiles. Pairs with [PRD 0001](./docs/prd/0001-structured-capabilities.md) and [ADR 0003](./docs/adr/0003-capabilities-yaml.md).
 
 ---
 
