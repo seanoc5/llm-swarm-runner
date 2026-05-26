@@ -49,8 +49,8 @@ Running autonomous LLM agents directly on your host is risky: a hallucinated `rm
 |  +---------------+  +-------------+  +-------------+           |
 |  | window 1      |  | window 2    |  | window 3    |   ...     |
 |  | "coordinator" |  | "iss-42"    |  | "iss-57"    |           |
-|  | gemini OR     |  | sandbox.sh  |  | sandbox.sh  |           |
-|  | claude        |  | -> claude   |  | -> claude   |           |
+|  | claude OR     |  | sandbox.sh  |  | sandbox.sh  |           |
+|  | gemini        |  | -> claude   |  | -> claude   |           |
 |  | (host shell)  |  | (in docker) |  | (in docker) |           |
 |  +-------+-------+  +------+------+  +------+------+           |
 |          | provisions       | watches             | watches    |
@@ -151,7 +151,7 @@ WATCH=1  STATUS=1  MAX_WORKERS=5  INCLUDE_ASSIGNED_TO_OTHERS=1  DEBOUNCE_SECS=15
 
 | Variable                     | Default            | Flag                          | Notes                                                                                            |
 |------------------------------|--------------------|-------------------------------|--------------------------------------------------------------------------------------------------|
-| `COORDINATOR_CMD`            | `gemini`           | —                             | `gemini`, `claude`, or any custom CLI                                                            |
+| `COORDINATOR_CMD`            | `claude`           | —                             | `claude`, `gemini`, or any custom CLI                                                            |
 | `COORDINATOR_MODEL`          | `gemini-2.5-flash` | —                             | Only consumed when `COORDINATOR_CMD=gemini`. Stable; `gemini-3-flash-preview` is broken on multi-tool sequences (server-side INVALID_ARGUMENT). |
 | `COORDINATOR_VERBOSE`        | `0`                | —                             | When `1` and using gemini: swaps `-p` for `-i` (`--prompt-interactive`) so tool calls are visible live in the pane. Agent stays alive — exit with `/quit`. claude is unaffected (its `-p` already streams). |
 | `COORDINATOR_USE_API_KEY`    | `0`                | —                             | When `1` and using claude: keeps `ANTHROPIC_API_KEY` in the agent's env (bills the API account). Default strips it so Claude Max OAuth is used. |
@@ -540,12 +540,12 @@ Then polls those marker files for up to 90 seconds, with stuck-detection (kills 
 
 Set `KEEP_ALIVE=1` to leave the tmux session running on success/timeout for inspection.
 
-`COORDINATOR_CMD=claude ./test-e2e-swarm.sh` runs the same test using your Claude Max plan instead of the Gemini free tier — useful when the gemini daily quota is exhausted.
+The test uses your Claude Max plan by default. `COORDINATOR_CMD=gemini ./test-e2e-swarm.sh` runs the same flow against the Gemini free tier — useful when burning fewer Max-plan tokens matters more than ensuring claude-path coverage.
 
 ## End-to-End Flow (Real Use)
 
 1. `cd /opt/work/myproject`
-2. `./llm-start.sh` (or `COORDINATOR_CMD=claude ./llm-start.sh` to use Max).
+2. `./llm-start.sh` (or `COORDINATOR_CMD=gemini ./llm-start.sh` to use Gemini instead of Claude Max).
 3. Coordinator wakes, runs `gh issue list`, picks unassigned issues, provisions worktrees + worker windows.
 4. Workers (claude, in docker) read `.agent-task.md`, do the work, push a branch, open a PR via `gh`.
 5. You attach with `tmux a -t llm-myproject` to watch / intervene.

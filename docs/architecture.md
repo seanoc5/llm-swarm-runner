@@ -16,7 +16,7 @@ By using Git Worktrees, each agent gets a physically separate clone of the repos
 
 This sandbox supports a fully autonomous architecture managed via `tmux`:
 
-1.  **The Coordinator (Brain):** A dedicated `tmux` session is bootstrapped by `llm-start.sh`. Window 1 runs the configured coordinator (`gemini` by default; `COORDINATOR_CMD=claude` switches to Claude Max). The coordinator acts as an autonomous project manager — it uses `gh` to read your backlog, plans tasks, and provisions worker worktrees on the fly via `provision-worker.sh`.
+1.  **The Coordinator (Brain):** A dedicated `tmux` session is bootstrapped by `llm-start.sh`. Window 1 runs the configured coordinator (`claude` by default; `COORDINATOR_CMD=gemini` switches to Gemini CLI). The coordinator acts as an autonomous project manager — it uses `gh` to read your backlog, plans tasks, and provisions worker worktrees on the fly via `provision-worker.sh`.
 2.  **The Workers (Hands):** The Coordinator autonomously provisions background `tmux` windows containing isolated worker sandboxes (`claude` by default; `WORKER_CMD=gemini` switches the per-worker agent).
 3.  **The Communication:** The Coordinator drops task briefs into each worktree's `.swarm/tasks/inbox/` (the v2 queue protocol — atomic mktemp+mv writes, structured `done/*.json` outcomes). A background `worker-listener.sh` claims tasks one at a time, dispatches them to the worker LLM, and writes the outcome JSON. Coordinator monitors progress by polling `done/` and reading the worker's PRs via `gh`.
 
