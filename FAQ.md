@@ -23,3 +23,11 @@ many workers to spin up (bounded by `MAX_WORKERS` and `MAX_TMUX_WINDOWS`).
 Each worker writes its outcome JSON into its worktree's `.swarm/tasks/done/` directory.
 The watcher monitors those paths across all live workers; when a new outcome appears it
 debounces (`DEBOUNCE_SECS`) and wakes the coordinator to triage what's next.
+
+### How do I change the maximum number of concurrent workers?
+
+Set `MAX_WORKERS` in your environment (default: 5). The coordinator reads it on each
+wake-up and respects it as a hard cap. You can set it per-project in
+`<project>/.swarm/.env`, or globally via your shell rc. Pair it with `MAX_TMUX_WINDOWS`
+(default: 10) if you want to allow more total windows including finished-but-unclosed
+worker panes.
