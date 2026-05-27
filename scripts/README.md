@@ -12,6 +12,7 @@ Helper scripts for the llm-swarm-runner. Each is self-documenting at the top —
 | `coordinator-watch.sh` | Daemon that wakes the coordinator via `llm-start.sh` when a worker drops a new outcome JSON. |
 | `demo-driver.sh` | Drives a deterministic ~70-second tmux + swarm demo recording (window switches, splits, PR list). |
 | `demo-record-setup.sh` | Idempotent in-place patcher for `~/.ssr/settings.conf` — tunes SimpleScreenRecorder to the demo-friendly capture rect (1920x1080 fixed), codec (h264 CRF 18), and output path (`~/Videos/demo-raw.mkv`). |
+| `demo-segments-pick.sh` | Interactive picker: plays the raw demo in mpv, captures beat-boundary timestamps on `c` keypresses, then prompts for SPEED/LABEL per pair and emits a ready-to-paste `SEGMENTS=(...)` block for `edit-demo.sh`. |
 | `edit-demo.sh` | Post-processes a raw SimpleScreenRecorder demo capture into a Reddit-ready ~75-second MP4 via ffmpeg segment edits. |
 | `gh-status-bar.sh` | Daemon that periodically pipes open-issue / open-PR / closed-today counts into tmux's `status-right`. |
 | `install-tmux-binding.sh` | Installs the Ctrl-Z worker escape-hatch binding into `~/.tmux.conf` with the absolute path baked in, then re-sources every running `swarm-*` socket. |
