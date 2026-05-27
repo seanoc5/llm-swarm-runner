@@ -85,7 +85,21 @@ The recording lands at `~/Videos/demo-raw.mkv` (overwriting any previous take â€
 ./scripts/edit-demo.sh ~/Videos/demo-raw.mkv ~/Videos/demo-final.mp4
 ```
 
-`edit-demo.sh` reads the `SEGMENTS=(...)` array near the top of its source and stitches the segments together with per-segment speed multipliers. **After your first take, you'll need to scrub through the raw file and update those timestamps** to match the actual beats â€” there's no auto-detection. Each row is:
+`edit-demo.sh` reads the `SEGMENTS=(...)` array near the top of its source and stitches the segments together with per-segment speed multipliers. **After your first take, you'll need to update those timestamps** to match the actual beats. Two ways to do it:
+
+a. **Interactive picker** (recommended for a fresh take):
+
+   ```bash
+   ./scripts/demo-segments-pick.sh > /tmp/segments.txt
+   # in mpv: press `c` at the start AND end of each beat, `q` to quit.
+   # then answer SPEED/LABEL prompts for each pair.
+   ```
+
+   Paste the resulting `SEGMENTS=(...)` block over the one in `edit-demo.sh`.
+
+b. **Manual scrub**: open the raw in mpv/ffprobe, eyeball the times, hand-edit the `SEGMENTS=(...)` array.
+
+Each row is:
 
 ```
 "START_TIME END_TIME SPEED LABEL"
