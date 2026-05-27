@@ -50,8 +50,29 @@ CROP="${CROP:-}"
 #   SPEED                 — playback speed (1.0 = real time; >1 = fast-forward)
 #   LABEL                 — overlay text (empty string = no overlay)
 #
+# LABEL grammar — the text may be followed by trailing modifiers, parsed
+# from the right. Each modifier is space-separated and starts with a
+# sigil. Order doesn't matter; any combination is fine.
+#
+#   @<position>   one of: top-left, top-right, bottom-left,
+#                 bottom-right, top, bottom, center
+#                 (default: top-right for sped-up segments,
+#                  bottom-left for real-time segments)
+#   +<animation>  one of: static (default), fade-in, slide-in
+#                 fade-in:  alpha ramps 0→1 over the first 0.5s
+#                 slide-in: text slides in from the nearest edge
+#                           over the first 0.5s
+#   %<duration>   seconds the overlay stays visible (output-timeline,
+#                 i.e. after speed-up). Default: full segment.
+#
+# Examples:
+#   "00:05:30 00:05:42 1.0 PR opened — 🟢 low risk @top-right +slide-in %2.5"
+#   "00:00:30 00:00:55 1.0 Coordinator dispatches @bottom +fade-in"
+#   "00:01:05 00:05:30 8.0 ⏩ 8x"                  # default top-right chip
+#
 # AFTER RECORDING: replace these placeholder timestamps with your actual
-# beat positions in the raw file. Use ffprobe/mpv/etc to scrub.
+# beat positions in the raw file. Use ffprobe/mpv/etc to scrub
+# (or `./scripts/demo-segments-pick.sh` for an interactive picker).
 SEGMENTS=(
     # title — show the backlog
     "00:00:00 00:00:03 1.0 "
@@ -106,6 +127,116 @@ FONT="/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 log()  { printf '\033[1;36m[edit-demo]\033[0m %s\n' "$*" >&2; }
 err()  { printf '\033[1;31m[edit-demo]\033[0m %s\n' "$*" >&2; }
 
+# Strip trailing @position / +animation / %duration modifiers from a
+# LABEL string. Sets LABEL_TEXT, LABEL_POS, LABEL_ANIM, LABEL_DUR
+# globals. Unrecognised tokens stay as part of LABEL_TEXT.
+parse_label() {
+    local s="$1"
+    LABEL_POS=""
+    LABEL_ANIM=""
+    LABEL_DUR=""
+    local re_pos='^(.*)[[:space:]]@(top-left|top-right|bottom-left|bottom-right|top|bottom|center)$'
+    local re_anim='^(.*)[[:space:]]\+(static|fade-in|slide-in)$'
+    local re_dur='^(.*)[[:space:]]%([0-9]+(\.[0-9]+)?)$'
+    local changed=1
+    while [ $changed -eq 1 ]; do
+        changed=0
+        if [[ "$s" =~ $re_pos ]] && [ -z "$LABEL_POS" ]; then
+            LABEL_POS="${BASH_REMATCH[2]}"
+            s="${BASH_REMATCH[1]}"
+            changed=1
+        elif [[ "$s" =~ $re_anim ]] && [ -z "$LABEL_ANIM" ]; then
+            LABEL_ANIM="${BASH_REMATCH[2]}"
+            s="${BASH_REMATCH[1]}"
+            changed=1
+        elif [[ "$s" =~ $re_dur ]] && [ -z "$LABEL_DUR" ]; then
+            LABEL_DUR="${BASH_REMATCH[2]}"
+            s="${BASH_REMATCH[1]}"
+            changed=1
+        fi
+    done
+    # Trim trailing whitespace
+    [[ "$s" =~ ^(.*[^[:space:]])[[:space:]]*$ ]] && s="${BASH_REMATCH[1]}"
+    [[ "$s" =~ ^[[:space:]]*$ ]] && s=""
+    LABEL_TEXT="$s"
+}
+
+# Build a drawtext= filter expression honoring LABEL modifiers.
+# Args: text pos anim dur speed. Echoes the filter or nothing.
+build_drawtext() {
+    local text="$1" pos="$2" anim="$3" dur="$4" speed="$5"
+    [ -z "$text" ] && return 0
+
+    # Defaults derived from speed, matching the original chip styles.
+    local default_pos fontsize boxborderw
+    if awk "BEGIN{exit !($speed > 1.0)}"; then
+        default_pos="top-right"; fontsize=36; boxborderw=10
+    else
+        default_pos="bottom-left"; fontsize=24; boxborderw=8
+    fi
+    pos="${pos:-$default_pos}"
+    anim="${anim:-static}"
+
+    local final_x final_y
+    case "$pos" in
+        top-left)     final_x="30"        ; final_y="30" ;;
+        top-right)    final_x="w-tw-30"   ; final_y="30" ;;
+        bottom-left)  final_x="30"        ; final_y="h-th-30" ;;
+        bottom-right) final_x="w-tw-30"   ; final_y="h-th-30" ;;
+        top)          final_x="(w-tw)/2"  ; final_y="30" ;;
+        bottom)       final_x="(w-tw)/2"  ; final_y="h-th-30" ;;
+        center)       final_x="(w-tw)/2"  ; final_y="(h-th)/2" ;;
+        *)
+            err "unknown @position '$pos' — falling back to $default_pos"
+            pos="$default_pos"
+            build_drawtext "$text" "$pos" "$anim" "$dur" "$speed"
+            return
+            ;;
+    esac
+
+    local x_expr="$final_x"
+    local y_expr="$final_y"
+    local alpha_extra=""
+
+    case "$anim" in
+        static) ;;
+        fade-in)
+            alpha_extra=":alpha='if(lt(t,0.5),t/0.5,1)'"
+            ;;
+        slide-in)
+            # Slide in over 0.5s from the edge nearest to the final
+            # position. Right-anchored positions slide in from the
+            # right; left-anchored from the left; top from above; the
+            # rest (bottom, center) from below.
+            case "$pos" in
+                top-right|bottom-right)
+                    x_expr="if(lt(t,0.5),w-(w-($final_x))*t/0.5,$final_x)"
+                    ;;
+                top-left|bottom-left)
+                    x_expr="if(lt(t,0.5),-tw+($final_x+tw)*t/0.5,$final_x)"
+                    ;;
+                top)
+                    y_expr="if(lt(t,0.5),-th+($final_y+th)*t/0.5,$final_y)"
+                    ;;
+                bottom|center)
+                    y_expr="if(lt(t,0.5),h+(($final_y)-h)*t/0.5,$final_y)"
+                    ;;
+            esac
+            ;;
+        *)
+            err "unknown +animation '$anim' — using static"
+            ;;
+    esac
+
+    local enable_extra=""
+    if [ -n "$dur" ]; then
+        enable_extra=":enable='between(t,0,$dur)'"
+    fi
+
+    printf "drawtext=fontfile='%s':text='%s':fontcolor=white:fontsize=%d:box=1:boxcolor=black@0.6:boxborderw=%d:x='%s':y='%s'%s%s" \
+        "$FONT" "$text" "$fontsize" "$boxborderw" "$x_expr" "$y_expr" "$alpha_extra" "$enable_extra"
+}
+
 # Tool checks
 command -v ffmpeg  >/dev/null || { err "ffmpeg not installed (apt install ffmpeg)"; exit 1; }
 command -v ffprobe >/dev/null || { err "ffprobe not installed (comes with ffmpeg)"; exit 1; }
@@ -143,16 +274,17 @@ for seg in "${SEGMENTS[@]}"; do
     i=$((i + 1))
     out_clip="$TMPDIR/$(printf '%02d' $((i+10)))-seg.mp4"
 
-    # Build filter: PTS scaling + optional drawtext overlay
+    # Build filter: PTS scaling + optional drawtext overlay (parsed
+    # from LABEL's trailing @position/+animation/%duration modifiers).
+    parse_label "$LABEL"
+    DRAWTEXT=$(build_drawtext "$LABEL_TEXT" "$LABEL_POS" "$LABEL_ANIM" "$LABEL_DUR" "$SPEED")
+
     if awk "BEGIN{exit !($SPEED > 1.0)}"; then
-        # Speed-up segments get a corner overlay
-        FILTER="setpts=PTS/${SPEED},drawtext=fontfile='$FONT':text='${LABEL}':fontcolor=white:fontsize=36:box=1:boxcolor=black@0.6:boxborderw=10:x=w-tw-30:y=30"
-    elif [ -n "$LABEL" ]; then
-        # Real-time segments with a label get a bottom-left chip
-        FILTER="setpts=PTS,drawtext=fontfile='$FONT':text='${LABEL}':fontcolor=white:fontsize=24:box=1:boxcolor=black@0.6:boxborderw=8:x=30:y=h-th-30"
+        FILTER="setpts=PTS/${SPEED}"
     else
         FILTER="setpts=PTS"
     fi
+    [ -n "$DRAWTEXT" ] && FILTER="$FILTER,$DRAWTEXT"
 
     # Optional crop prepended to the filter chain; runs in source pixel
     # space before setpts/drawtext/scale so coordinates are unambiguous.
@@ -161,7 +293,13 @@ for seg in "${SEGMENTS[@]}"; do
         CROP_PREFIX="crop=${CROP},"
     fi
 
-    log "[seg $i] $START → $END  speed=${SPEED}x  ${LABEL:+overlay='$LABEL'  }${CROP:+crop=$CROP}"
+    # Build a short modifier summary for the log line.
+    MOD_SUMMARY=""
+    [ -n "$LABEL_POS" ]  && MOD_SUMMARY="${MOD_SUMMARY}@${LABEL_POS} "
+    [ -n "$LABEL_ANIM" ] && MOD_SUMMARY="${MOD_SUMMARY}+${LABEL_ANIM} "
+    [ -n "$LABEL_DUR" ]  && MOD_SUMMARY="${MOD_SUMMARY}%${LABEL_DUR}s "
+
+    log "[seg $i] $START → $END  speed=${SPEED}x  ${LABEL_TEXT:+overlay='$LABEL_TEXT'  }${MOD_SUMMARY:+($MOD_SUMMARY) }${CROP:+crop=$CROP}"
     ffmpeg -y -loglevel error \
         -ss "$START" -to "$END" \
         -i "$RAW" \
