@@ -27,6 +27,24 @@ set -euo pipefail
 RAW="${1:-${HOME}/Videos/demo-raw.mp4}"
 OUT="${2:-${HOME}/Videos/demo-final.mp4}"
 
+# Optional spatial crop applied to every segment BEFORE the scale/fps pass.
+# Format: "W:H:x:y" — width, height, top-left corner in source pixels.
+# Empty = no crop (default).
+#
+# Use case: the recording captured more than you wanted (e.g., full desktop
+# instead of just the terminal). Drop the unwanted pixels in one place
+# instead of re-recording. Pair with `scripts/demo-record-setup.sh` to
+# avoid the problem on future takes.
+#
+# Examples:
+#   CROP="1920:1080:0:0"      ./scripts/edit-demo.sh      # top-left 1080p of a 1440p capture
+#   CROP="1600:900:160:90"    ./scripts/edit-demo.sh      # 16:9 region centered-ish
+#
+# Sanity: W and H should keep a 16:9 aspect for clean downscale to $RES;
+# non-16:9 crops still work but will get letterbox/pillarbox from the
+# subsequent scale to 1280:720.
+CROP="${CROP:-}"
+
 # Each row: "START_TIME END_TIME SPEED LABEL"
 #   START_TIME, END_TIME — HH:MM:SS or seconds, relative to the RAW file
 #   SPEED                 — playback speed (1.0 = real time; >1 = fast-forward)
@@ -136,11 +154,18 @@ for seg in "${SEGMENTS[@]}"; do
         FILTER="setpts=PTS"
     fi
 
-    log "[seg $i] $START → $END  speed=${SPEED}x  ${LABEL:+overlay='$LABEL'}"
+    # Optional crop prepended to the filter chain; runs in source pixel
+    # space before setpts/drawtext/scale so coordinates are unambiguous.
+    CROP_PREFIX=""
+    if [ -n "$CROP" ]; then
+        CROP_PREFIX="crop=${CROP},"
+    fi
+
+    log "[seg $i] $START → $END  speed=${SPEED}x  ${LABEL:+overlay='$LABEL'  }${CROP:+crop=$CROP}"
     ffmpeg -y -loglevel error \
         -ss "$START" -to "$END" \
         -i "$RAW" \
-        -vf "${FILTER},scale=$RES,fps=$FPS" \
+        -vf "${CROP_PREFIX}${FILTER},scale=$RES,fps=$FPS" \
         -an \
         -c:v libx264 -preset fast -crf "$CRF" -pix_fmt yuv420p \
         "$out_clip"
