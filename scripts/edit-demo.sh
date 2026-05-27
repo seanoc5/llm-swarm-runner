@@ -30,6 +30,8 @@ OUT="${2:-${HOME}/Videos/demo-final.mp4}"
 # Optional spatial crop applied to every segment BEFORE the scale/fps pass.
 # Format: "W:H:x:y" — width, height, top-left corner in source pixels.
 # Empty = no crop (default).
+# Special value "auto" runs ffmpeg's cropdetect against a sample frame
+# (see Auto-detect below) and reuses the result for every segment.
 #
 # Use case: the recording captured more than you wanted (e.g., full desktop
 # instead of just the terminal). Drop the unwanted pixels in one place
@@ -39,6 +41,14 @@ OUT="${2:-${HOME}/Videos/demo-final.mp4}"
 # Examples:
 #   CROP="1920:1080:0:0"      ./scripts/edit-demo.sh      # top-left 1080p of a 1440p capture
 #   CROP="1600:900:160:90"    ./scripts/edit-demo.sh      # 16:9 region centered-ish
+#   CROP=auto                 ./scripts/edit-demo.sh      # sniff terminal rect from raw
+#
+# Auto-detect: cropdetect normally trims DARK borders, but in our case the
+# terminal is the dark area and the desktop is brighter, so the script
+# inverts the sample frame first (negate filter) and runs cropdetect on
+# that. Works when the terminal background is consistently dark and the
+# desktop background isn't (light wallpaper, panel, etc.). If the desktop
+# itself is mostly black, prefer the explicit W:H:x:y form.
 #
 # Sanity: W and H should keep a 16:9 aspect for clean downscale to $RES;
 # non-16:9 crops still work but will get letterbox/pillarbox from the
@@ -114,12 +124,43 @@ command -v ffprobe >/dev/null || { err "ffprobe not installed (comes with ffmpeg
 
 mkdir -p "$(dirname "$OUT")"
 
+# ---- Resolve CROP=auto via cropdetect on a negated sample -------------
+#
+# cropdetect's default heuristic is "crop out dark borders", which is the
+# opposite of what we want here (the terminal IS the dark area we want to
+# keep). Inverting the frame first flips the polarity so the bright
+# desktop background becomes the "border" that cropdetect trims.
+#
+# Sample ~25% into the raw — past the title dwell, into actual content
+# with high-contrast text. We run cropdetect over a 3-second window so
+# it has enough frames to converge.
+if [ "$CROP" = "auto" ]; then
+    DURATION=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$RAW" 2>/dev/null || echo 0)
+    SAMPLE_AT=$(awk -v d="$DURATION" 'BEGIN{ s = d * 0.25; if (s < 5) s = 5; printf "%.2f", s }')
+    log "[crop=auto] probing $RAW at t=${SAMPLE_AT}s (duration ${DURATION}s)"
+    DETECTED=$(ffmpeg -hide_banner -nostats -loglevel info \
+        -ss "$SAMPLE_AT" -i "$RAW" -t 3 \
+        -vf "negate,cropdetect=limit=24:round=2:reset=0" \
+        -an -f null - 2>&1 \
+        | grep -oE 'crop=[0-9]+:[0-9]+:[0-9]+:[0-9]+' \
+        | tail -1 \
+        | sed 's/^crop=//')
+    if [ -z "$DETECTED" ]; then
+        err "CROP=auto: cropdetect found nothing — desktop bg may be too dark."
+        err "Fall back to an explicit CROP=W:H:x:y, or omit CROP."
+        exit 1
+    fi
+    log "[crop=auto] detected: $DETECTED"
+    CROP="$DETECTED"
+fi
+
 TMPDIR=$(mktemp -d /tmp/demo-edit-XXXXXX)
 trap 'rm -rf "$TMPDIR"' EXIT
 log "raw:    $RAW"
 log "output: $OUT"
 log "tmp:    $TMPDIR"
 log "segments: ${#SEGMENTS[@]}"
+[ -n "$CROP" ] && log "crop:   $CROP"
 
 CONCAT_LIST="$TMPDIR/concat.txt"
 : > "$CONCAT_LIST"

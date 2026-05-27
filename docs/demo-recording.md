@@ -124,6 +124,21 @@ Default path is `~/Videos/demo-raw.mkv`. Either SSR wrote somewhere else (check 
 ### I want a different rect than 1920×1080
 Edit `~/.ssr/settings.conf` `[input]` `video_w` / `video_h` after running the setup script. The setup script writes the demo defaults but doesn't lock them — your edit stands until you re-run the setup script. (Or edit the targets in `scripts/demo-record-setup.sh` itself if you want the new size to be the persistent default.)
 
+### I forgot to set the capture rect and the raw includes too much desktop
+`edit-demo.sh` accepts a `CROP` env var that trims pixels before the scale/fps pass — no re-record needed. Either give it explicit coords:
+
+```bash
+CROP="1920:1080:0:0" ./scripts/edit-demo.sh        # top-left 1080p of a larger capture
+```
+
+…or let it sniff the terminal rect itself:
+
+```bash
+CROP=auto ./scripts/edit-demo.sh                   # cropdetect on a negated sample
+```
+
+`CROP=auto` inverts a sample frame (~25% into the raw) so the bright desktop becomes the "border" ffmpeg's `cropdetect` knows how to trim. Works when the terminal background is consistently dark and the desktop isn't (panels, light wallpaper, etc.). If the desktop is mostly black too, fall back to the explicit `W:H:x:y` form.
+
 ## Related
 
 - [`scripts/demo-driver.sh`](../scripts/demo-driver.sh) — coordinates the swarm side of the demo. Self-documents its env vars at the top.
