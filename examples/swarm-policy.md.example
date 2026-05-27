@@ -63,10 +63,25 @@ If the project lead's instruction is ambiguous, ask in-pane. Don't infer.
 
 ### Long-running commands stay foreground
 The universal "run long commands in the foreground" rule from `prompts/worker.md`
-is in force. List per-project additions or exceptions here, e.g.:
-- "`./dev-server.sh` is the project's dev server — open it in a sibling Ctrl-Z pane, never backgrounded from your own shell."
+is in force, including the **no-fake-parallelism corollary**: workers must not
+background to "do something else while X runs." If real parallelism is needed,
+the operator-side escape hatches are:
+
+- the `util` window (slot 2 of this tmux session, a bare host-side bash where
+  the operator runs long-lived observability tools);
+- requesting a sibling worker via the coordinator (new worktree, new branch);
+- bumping `MAX_WORKERS` (env var, default 5).
+
+Workers surface these in a `## Decision` block — they don't act on them
+themselves.
+
+List per-project additions or exceptions here, e.g.:
+- "`./dev-server.sh` is the project's dev server — operator runs it in the
+  `util` window before any `iss-*` worker depends on it; workers `curl` against
+  `localhost:<port>`."
 - "Our slow integration suite needs a 20-minute timeout: `Bash(command='./gradlew :it:test', timeout=1200000)`."
-- "(exception) `./scripts/seed-fixtures.sh` may be backgrounded because it's idempotent and the listener's outcome handler tolerates the late write."
+- "(exception) `./scripts/seed-fixtures.sh` may be backgrounded because it's
+  idempotent and the listener's outcome handler tolerates the late write."
 
 ## Concurrency rules
 - Maximum 1 active worker per worktree.

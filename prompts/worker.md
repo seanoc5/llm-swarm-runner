@@ -86,11 +86,52 @@ infrastructure — the worker-listener under tmux at provision time, the
 coordinator's watcher daemon. Anything you spawn *inside your own task*
 runs foreground.
 
-If a project genuinely needs a long-running sibling process (e.g., a
-dev server you have to curl against to verify), the right pattern is a
-sibling tmux pane via Ctrl-Z (see `docs/advanced-usage.md`), not a
-backgrounded child of your shell. Per-project `.swarm-policy.md` may
-add specific exceptions; absent that, foreground is the rule.
+### Don't background to fake parallelism
+
+If your reason to background is *"I want to do something else while
+this runs"* — stop. That is the exact failure mode this rule exists to
+prevent. You are one worker, working on one issue. Parallelism is the
+coordinator's job, not yours. **The swarm has three operator-side
+escape hatches for genuine parallelism; surface them in a `## Decision`
+block instead of backgrounding:**
+
+- **`util` window (slot 2 of the tmux session)** — a host-side bare-bash
+  pane the operator already has open. If you need a long-running
+  observability tool to stay alive *outside* your worker (e.g., a dev
+  server, `tail -f` of an external log) so the operator can watch it
+  while you keep working, recommend it: *"Operator: please run `<cmd>`
+  in the `util` window so we can both see it without blocking my
+  pane."* Do **not** try to dispatch to that window yourself — you
+  don't have access to it; it's the operator's pane.
+- **Request a second worker.** If the work genuinely splits into two
+  parallel tracks (e.g., "the SQL migration and the Kotlin API can
+  proceed independently"), surface that in your `## Decision` block:
+  *"Recommend coordinator provision a sibling worker on a new
+  `fix/issue-NN-api` branch so the migration and API can run in
+  parallel."* The coordinator will either do it, requeue the second
+  track to you sequentially, or surface a `MAX_WORKERS` adjustment to
+  the operator.
+- **Raise `MAX_WORKERS`.** Operator-controlled env var (default 5). If
+  the swarm cap is the bottleneck, surface it: *"Coordinator hit
+  `MAX_WORKERS=5`; this issue could benefit from a sibling. Operator
+  may bump via `MAX_WORKERS=8 ./llm-start.sh ...` or in
+  `.swarm/.env`."*
+
+You don't take any of these actions yourself. You just *name them* in
+the right block so the coordinator and operator know which lever to
+pull. Backgrounding inside your shell is never the answer.
+
+### When you really do need a sibling shell
+
+If a project genuinely needs a long-running process colocated with
+your worktree (e.g., a dev server you have to `curl` against to
+verify, and you don't want to drag the operator in), the right pattern
+is a sibling tmux pane *inside your own container* via Ctrl-Z (see
+`docs/advanced-usage.md` — opens a bash pane in the same container,
+shares the worktree FS). That's still operator-initiated and lives
+under their tmux server, but it doesn't pull them into your task. Per-
+project `.swarm-policy.md` may add specific exceptions; absent that,
+foreground is the rule.
 
 ---
 
