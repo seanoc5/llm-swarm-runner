@@ -3,12 +3,12 @@
 # llm-start.sh - Bootstrap the multi-agent tmux session
 #
 # This script creates a dedicated tmux session for the current project,
-# spawns the coordinator agent (claude by default; gemini if
-# COORDINATOR_CMD=gemini) in the first window, and issues its initial
+# spawns the coordinator agent (claude by default; gemini or codex if
+# COORDINATOR_CMD selects one) in the first window, and issues its initial
 # startup command.
 #
 # Optional flags (env vars):
-#   COORDINATOR_CMD={claude,gemini}   Default: claude
+#   COORDINATOR_CMD={claude,gemini,codex}   Default: claude
 #   COORDINATOR_MODEL=<id>            Per-coordinator default; see below
 #   COORDINATOR_VERBOSE=1             Stay interactive in coordinator pane
 #   WATCH=1                           Spawn coordinator-watch.sh in a 2nd
@@ -88,7 +88,7 @@ YOLO BUNDLE
 ENV VARS  (precedence: flag > shell env > <project>/.swarm/.env > <sandbox>/.env.example)
 
   Coordinator
-    COORDINATOR_CMD              claude    claude | gemini
+    COORDINATOR_CMD              claude    claude | gemini | codex
     COORDINATOR_MODEL            (varies)  per-coordinator default
     COORDINATOR_VERBOSE          0         gemini -i instead of -p
     COORDINATOR_HEADLESS         0         1 = claude -p (exits after each prompt)
@@ -191,10 +191,12 @@ COORD_CMD="${COORDINATOR_CMD:-claude}"
 #   gemini → gemini-2.5-flash (stable). gemini-3-flash-preview returns
 #     INVALID_ARGUMENT on multi-step tool sequences (which is the
 #     coordinator's whole job), so it's not a viable default.
+#   codex → CLI-configured default. Set COORDINATOR_MODEL to pin one.
 # Override either via COORDINATOR_MODEL=<id>.
 case "$COORD_CMD" in
     claude) COORD_MODEL_DEFAULT='claude-opus-4-7[1m]' ;;
     gemini) COORD_MODEL_DEFAULT='gemini-2.5-flash' ;;
+    codex)  COORD_MODEL_DEFAULT='' ;;
     *)      COORD_MODEL_DEFAULT='' ;;
 esac
 COORD_MODEL="${COORDINATOR_MODEL:-$COORD_MODEL_DEFAULT}"
@@ -420,8 +422,18 @@ if ! $session_existed || ! $window_exists || $coordinator_idle; then
         WRAPPER="$LLM_SWARM_DIR/scripts/coordinator-claude.sh"
         tmux send-keys -t "$SESSION_NAME:coordinator" \
             "${ENV_VARS}exec $(printf '%q' "$WRAPPER") $(printf '%q' "$RENDERED_PROMPT_FILE") $(printf '%q' "$TMP_PROMPT")" C-m
+    elif [ "$COORD_CMD" = "codex" ]; then
+        # Codex has no append-system-prompt flag, so the wrapper prepends the
+        # rendered coordinator prompt to the user's request and runs a
+        # one-shot `codex exec`. This preserves the coordinator's disk-state
+        # re-derivation model without depending on TUI keystroke semantics.
+        ENV_VARS=""
+        [ -n "${COORD_MODEL:-}" ] && ENV_VARS+="COORD_MODEL=$(printf '%q' "$COORD_MODEL") "
+        WRAPPER="$LLM_SWARM_DIR/scripts/coordinator-codex.sh"
+        tmux send-keys -t "$SESSION_NAME:coordinator" \
+            "${ENV_VARS}exec $(printf '%q' "$WRAPPER") $(printf '%q' "$RENDERED_PROMPT_FILE") $(printf '%q' "$TMP_PROMPT")" C-m
     else
-        # gemini (or any other backend): inline construction, unchanged.
+        # gemini (or any other backend): inline construction.
         if [ "$COORD_CMD" = "gemini" ]; then
             BASE_CMD="GEMINI_SYSTEM_MD='$RENDERED_PROMPT_FILE' gemini -m '$COORD_MODEL' --yolo --skip-trust"
         else

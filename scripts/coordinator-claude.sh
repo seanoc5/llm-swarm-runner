@@ -21,8 +21,6 @@ SYSTEM_PROMPT_FILE="${1:?coordinator-claude.sh: missing system-prompt file (arg 
 INITIAL_PROMPT_FILE="${2:?coordinator-claude.sh: missing initial-prompt file (arg 2)}"
 MODEL="${COORD_MODEL:-claude-opus-4-7[1m]}"
 
-trap 'rm -f "$INITIAL_PROMPT_FILE"' EXIT
-
 # Claude Max users authenticate via OAuth in ~/.claude/. If ANTHROPIC_API_KEY
 # is set, claude-code prefers it over OAuth (silently bills the API account).
 # Strip it so Max is used, unless caller explicitly opted into API billing.
@@ -32,11 +30,14 @@ elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
     echo "coordinator-claude: COORDINATOR_USE_API_KEY=1; ANTHROPIC_API_KEY in effect (billing API account)." >&2
 fi
 
+INITIAL_PROMPT="$(cat "$INITIAL_PROMPT_FILE")"
+rm -f "$INITIAL_PROMPT_FILE"
+
 ARGS=(--model "$MODEL"
       --append-system-prompt "$(cat "$SYSTEM_PROMPT_FILE")"
       --dangerously-skip-permissions)
 [ "${COORDINATOR_HEADLESS:-0}" = "1" ] && ARGS+=(-p)
 # Trailing positional: initial user message in REPL mode, print-prompt in -p mode.
-ARGS+=("$(cat "$INITIAL_PROMPT_FILE")")
+ARGS+=("$INITIAL_PROMPT")
 
 exec claude "${ARGS[@]}"

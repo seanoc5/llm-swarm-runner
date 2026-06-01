@@ -8,10 +8,10 @@ set -euo pipefail
 PROJECT_DIR="$(realpath "${1:-$PWD}")"
 if [ $# -gt 0 ]; then shift; fi
 
-# Determine the agent (claude, gemini, listener, or bash)
+# Determine the agent (claude, gemini, codex, listener, or bash)
 AGENT="bash"
 if [[ $# -gt 0 ]]; then
-    if [[ "$1" == "claude" || "$1" == "gemini" || "$1" == "listener" ]]; then
+    if [[ "$1" == "claude" || "$1" == "gemini" || "$1" == "codex" || "$1" == "listener" ]]; then
         AGENT="$1"
         shift
     fi
@@ -27,7 +27,7 @@ if ! docker image inspect "$IMAGE" &>/dev/null; then
 fi
 
 # Ensure host config dirs exist for persistence
-mkdir -p "$HOME/.claude" "$HOME/.npm-global"
+mkdir -p "$HOME/.claude" "$HOME/.codex" "$HOME/.npm-global"
 if [ ! -f "$HOME/.bash_history_sandbox" ]; then
     touch "$HOME/.bash_history_sandbox"
 fi
@@ -39,6 +39,7 @@ MOUNTS=(
     -v "$PROJECT_DIR:$PROJECT_DIR:rw"
     -v "$HOME/.claude:/home/sandbox/.claude:rw"
     -v "$HOME/.claude.json:/home/sandbox/.claude.json:rw"
+    -v "$HOME/.codex:/home/sandbox/.codex:rw"
     -v "$HOME/.ssh:$HOME/.ssh:ro"
     -v "$HOME/.ssh:/home/sandbox/.ssh:ro"
     -v "$HOME/.gitconfig:/home/sandbox/.gitconfig:ro"
@@ -150,7 +151,7 @@ fi
 # Docker to pull the value from this caller's environment if set, otherwise
 # omit — so we never embed values in argv.
 WORKER_ENV_OPTS=()
-for _v in WORKER_HEADLESS WORKER_CMD WORKER_MODEL WORKER_VERBOSITY; do
+for _v in WORKER_HEADLESS WORKER_CMD WORKER_MODEL WORKER_VERBOSITY OPENAI_API_KEY; do
     if [ -n "${!_v:-}" ]; then
         WORKER_ENV_OPTS+=(-e "$_v")
     fi
@@ -223,6 +224,7 @@ if [[ $# -eq 0 ]]; then
     case "$AGENT" in
         claude)   CMD_ARRAY=("claude" "--dangerously-skip-permissions") ;;
         gemini)   CMD_ARRAY=("gemini" "--yolo") ;;
+        codex)    CMD_ARRAY=("codex" "--dangerously-bypass-approvals-and-sandbox" "--no-alt-screen") ;;
         listener) CMD_ARRAY=("$SCRIPT_DIR/scripts/worker-listener.sh" "$WORKER_AGENT") ;;
         *)        CMD_ARRAY=("bash" "-i") ;;
     esac
@@ -230,6 +232,7 @@ else
     case "$AGENT" in
         claude)   CMD_ARRAY=("claude" "$@" "--dangerously-skip-permissions") ;;
         gemini)   CMD_ARRAY=("gemini" "$@" "--yolo") ;;
+        codex)    CMD_ARRAY=("codex" "$@" "--dangerously-bypass-approvals-and-sandbox" "--no-alt-screen") ;;
         listener) CMD_ARRAY=("$SCRIPT_DIR/scripts/worker-listener.sh" "$@" "--dangerously-skip-permissions") ;;
         *)        CMD_ARRAY=("bash" "-c" "$*") ;;
     esac

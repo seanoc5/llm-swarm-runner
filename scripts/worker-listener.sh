@@ -31,9 +31,10 @@
 #                        the agent asks. Exit with /quit (claude) or Ctrl-D.
 #                        First run per worktree: claude prompts "Trust this
 #                        folder? Y/n" — answer Y to proceed.
-#   WORKER_HEADLESS=1  — agent runs with -p (claude) / -p (gemini), prints,
-#                        and exits. Skips the trust dialog. Used by e2e tests
-#                        and any automation where no human is attached.
+#   WORKER_HEADLESS=1  — agent runs with -p (claude) / -p (gemini) /
+#                        codex exec, prints, and exits. Skips the trust
+#                        dialog. Used by e2e tests and any automation where
+#                        no human is attached.
 
 AGENT="${1:-claude}"
 MODEL="${WORKER_MODEL:-}"
@@ -56,12 +57,12 @@ WT_LABEL="$(basename "$PWD")"
 LEGACY_TASK_FILE=".agent-task.md"
 
 # Build per-agent model flag from WORKER_MODEL (no-op when unset → use the
-# agent CLI's own default). claude uses --model, gemini uses -m.
+# agent CLI's own default). claude uses --model, gemini/codex use -m.
 MODEL_OPTS=()
 if [ -n "$MODEL" ]; then
     case "$AGENT" in
         claude) MODEL_OPTS=(--model "$MODEL") ;;
-        gemini) MODEL_OPTS=(-m "$MODEL") ;;
+        gemini|codex) MODEL_OPTS=(-m "$MODEL") ;;
     esac
 fi
 
@@ -189,17 +190,21 @@ while true; do
         # was concatenated into the user message in earlier versions:
         #   - claude: --append-system-prompt "$(cat worker.md)"
         #   - gemini: GEMINI_SYSTEM_MD=<path> env var (per gemini-cli docs)
+        #   - codex: prepend worker.md to the task prompt (codex CLI does not
+        #     expose an append-system-prompt flag)
         WORKER_MD="${LLM_SWARM_DIR:-}/prompts/worker.md"
         WORKER_SYSTEM_PROMPT_OPTS=()
         WORKER_SYSTEM_PROMPT_ENV=()
+        CODEX_TASK="$TASK"
         if [ -n "${LLM_SWARM_DIR:-}" ] && [ -r "$WORKER_MD" ]; then
             case "$AGENT" in
                 claude) WORKER_SYSTEM_PROMPT_OPTS=(--append-system-prompt "$(cat "$WORKER_MD")") ;;
                 gemini) WORKER_SYSTEM_PROMPT_ENV=(env "GEMINI_SYSTEM_MD=$WORKER_MD") ;;
+                codex) CODEX_TASK="$(cat "$WORKER_MD")"$'\n\n---\n\n'"$TASK" ;;
             esac
         else
             case "$AGENT" in
-                claude|gemini)
+                claude|gemini|codex)
                     echo "WARN: prompts/worker.md not found at $WORKER_MD — worker conventions will NOT be injected as system prompt." >&2
                     echo "      Expected LLM_SWARM_DIR to be set and the file readable. Briefs will lack the universal conventions." >&2
                     ;;
@@ -227,10 +232,15 @@ while true; do
             else
                 "${WORKER_SYSTEM_PROMPT_ENV[@]}" gemini "${MODEL_OPTS[@]}" -i "$TASK" --yolo --skip-trust
             fi
+        elif [[ "$AGENT" == "codex" ]]; then
+            if [ "$HEADLESS" = "1" ]; then
+                codex exec "${MODEL_OPTS[@]}" --dangerously-bypass-approvals-and-sandbox "$CODEX_TASK"
+            else
+                codex "${MODEL_OPTS[@]}" --dangerously-bypass-approvals-and-sandbox --no-alt-screen "$CODEX_TASK"
+            fi
         else
             bash -c "$TASK"
-        fi
-        RC=$?
+        fi && RC=0 || RC=$?
 
         FINISHED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
         DURATION=$(( $(date +%s) - STARTED_EPOCH ))
