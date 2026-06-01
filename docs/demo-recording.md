@@ -1,6 +1,6 @@
 # Recording the llm-swarm-runner Demo
 
-End-to-end recipe for capturing a clean ~75-second demo of the swarm runner using **SimpleScreenRecorder** (SSR) on Linux and post-processing with the in-tree `scripts/edit-demo.sh`.
+End-to-end recipe for capturing a clean ~60-second demo of the swarm runner using **SimpleScreenRecorder** (SSR) on Linux and post-processing with the in-tree `scripts/edit-demo.sh`.
 
 This doc replaces the chat-relayed steps. If you've recorded a demo before and just want the cheatsheet, jump to [TL;DR](#tldr).
 

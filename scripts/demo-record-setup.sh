@@ -19,7 +19,7 @@
 #
 # Pairs with: docs/demo-recording.md (the end-to-end recipe)
 #             scripts/demo-driver.sh (the swarm side of the demo)
-#             scripts/edit-demo.sh   (post-processing into ~75-second MP4)
+#             scripts/edit-demo.sh   (post-processing into ~60-second MP4)
 
 set -euo pipefail
 

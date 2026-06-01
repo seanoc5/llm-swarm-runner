@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # edit-demo.sh — Cut, speed-segment, and compress a raw demo recording into
-# a Reddit-ready ~75-second MP4.
+# a Reddit-ready ~60-second MP4.
 #
 # Workflow:
 #   1. Record raw demo with SimpleScreenRecorder (~15 min source is fine)
@@ -74,38 +74,49 @@ CROP="${CROP:-}"
 # beat positions in the raw file. Use ffprobe/mpv/etc to scrub
 # (or `./scripts/demo-segments-pick.sh` for an interactive picker).
 SEGMENTS=(
-    # title — show the backlog
-    "00:00:00 00:00:03 1.0 "
+    # === Setup beats (real-time, sets context) ===
+    # 1s establishing shot: empty terminal prompt
+    "00:00:00 00:00:01 1.0 "
 
-    # invocation — typing ./scripts/demo-driver.sh
-    "00:00:10 00:00:18 1.0 "
+    # demo-driver kicks off, log output starts streaming
+    "00:00:04 00:00:08 1.0 invoke: ./scripts/demo-driver.sh"
 
-    # coordinator wakes, dispatches workers (the money beat — real time)
-    "00:00:30 00:00:55 1.0 "
+    # coordinator wakes, reads .swarm-policy, picks an issue
+    "00:00:10 00:00:13 1.0 coordinator wakes — surveys backlog"
 
-    # window list reveal — iss-* windows now visible
-    "00:00:55 00:01:00 1.0 "
+    # === Worker work montage (sped up) ===
 
-    # worker doing its thing — SPED UP
-    "00:01:05 00:05:30 8.0 ⏩ 8x"
+    # Worker editing FAQ.md (issue #134) — 75s real → 7.5s at 10x
+    "00:00:15 00:01:30 10.0 ⏩ 10x  worker editing FAQ.md"
 
-    # worker finishes, outcome JSON written, PR opens
-    "00:05:30 00:05:42 1.0 "
+    # === First merge — the money beat (real-time) ===
 
-    # human reviews — gh pr diff N | head -40
-    "00:05:50 00:06:05 1.0 "
+    # PR opened, blind-merge risk 🟢 low, self-merge proposed
+    "00:01:35 00:01:39 1.0 PR opened — 🟢 low — self-merge proposed"
 
-    # human merges — gh pr merge N --squash --delete-branch
-    "00:06:05 00:06:12 1.0 "
+    # Operator types yes, gh pr merge --squash runs
+    "00:01:40 00:01:45 1.0 operator confirms: yes"
 
-    # watcher fires, coordinator wakes, wave 2 dispatches — SPED UP
-    "00:06:15 00:07:00 4.0 ⏩ 4x"
+    # === Wave 2 (sped up) ===
 
-    # second-wave workers visible + event log shot
-    "00:07:00 00:07:12 1.0 "
+    # Parallel workers across multiple panes — 90s real → 12s at 7.5x
+    "00:01:50 00:03:20 7.5 ⏩ 7.5x  wave 2: parallel workers"
 
-    # final gh pr list shot
-    "00:07:20 00:07:28 1.0 "
+    # === Wave 2 merge ===
+
+    # PR #153 opens (README tagline)
+    "00:04:03 00:04:07 1.0 wave 2: PR opens"
+
+    # Operator: ship 153
+    "00:04:30 00:04:35 1.0 operator confirms: ship 153"
+
+    # === Wind-down ===
+
+    # Worker reports worktree reapable; watcher runs autoclose
+    "00:04:45 00:04:49 1.0 worktree reaped — watcher autocloses"
+
+    # Clean ending — back at host shell
+    "00:04:52 00:04:54 1.0 "
 )
 
 # Output knobs

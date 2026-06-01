@@ -15,13 +15,23 @@ Also works as a single-agent sandbox if you don't want the swarm — `sandbox.sh
 
 ## Show me first
 
-> A ~75–90 second demo lives in [`scripts/demo-driver.sh`](./scripts/demo-driver.sh) — it
+> A ~60-second demo lives in [`scripts/demo-driver.sh`](./scripts/demo-driver.sh) — it
 > spawns a clean swarm against this repo's own backlog so you can see the
 > coordinator-worker pattern run end-to-end (dispatch → worker code → 🟢 low self-merge → PR list)
 > without setting up your own project.
 
 > ⚠️ **This is NOT a security boundary against a hostile / compromised agent.**
 > The container runs with `--network host`, mounts `/var/run/docker.sock` for Docker-out-of-Docker, mounts `~/.claude` rw and `~/.ssh` ro, and the agents run with `--dangerously-skip-permissions` / `--yolo`. A sufficiently-capable agent inside the container can spawn sibling containers with `-v /:/host`, exfiltrate your gh token, push to your repos, etc. Treat the agents as **trusted-but-fallible**, not as adversaries. See [`docs/security.md`](./docs/security.md) for blast-radius details.
+
+## Tmux as substrate — the interop layer you get for free
+
+Because every agent runs inside a tmux pane on a per-repo socket (`/tmp/tmux-<uid>/swarm-<repo>`), *external* sessions on the host can attach to the running swarm without modifying it. A separate Claude Code, a Gemini CLI, your editor, or an ad-hoc shell can:
+
+- **Read any pane's full scrollback** (`tmux -L swarm-<repo> capture-pane -t llm-<repo>:iss-215 -p -S -200`) — investigate a stuck or slow worker without disturbing it.
+- **Send keystrokes into a running agent** (`tmux -L swarm-<repo> send-keys -t llm-<repo>:coordinator "<your nudge>" Enter`) — clarify, redirect, or recover without restarting.
+- **Tail and react** programmatically — `coordinator-watch.sh` is exactly this pattern; you can write your own.
+
+This makes a meta-agent (one Claude Code supervising a swarm of cheaper ones, for example) possible today with no new code — the substrate already supports it. The benefit framing lives in [Tmux as substrate, not just a UI](./docs/llm-swarm-runner-overview.md#tmux-as-substrate-not-just-a-ui); the matching exposure surface (any host process with your UID can read scrollback and inject keys — that includes secrets that ever got echoed into a pane) is written up in [Tmux Scrollback Exposure](./docs/security.md#tmux-scrollback-exposure).
 
 ## Who this is for / not for
 
@@ -60,7 +70,7 @@ For deep-dives into specific topics, please refer to the reference documentation
 - 🪟 [**tmux Cheatsheet**](./docs/tmux-cheatsheet.md) - Attach/detach, multi-client handling, capture-pane for diagnostics, and other commands you'll actually use with the swarm.
 - 🌿 [**Git & GitHub Tips**](./docs/VCS/git-github.md) - Crib sheet for swarm-flavored git/`gh`: resolving conflicts when merging worker PRs, recovery recipes, pointers to authoritative references (ohshitgit, Pro Git, etc.). Aimed at users whose git skills are thinner than their swarm-orchestration skills.
 - 🗺️ [**Level-5 Roadmap**](./docs/level-5-roadmap.md) - Phased plan for hardening the swarm toward fully autonomous "level 5" agentic workflows: structured project capabilities, judge workers, dependency graphs, sandbox profiles. Pairs with [PRD 0001](./docs/prd/0001-structured-capabilities.md) and [ADR 0003](./docs/adr/0003-capabilities-yaml.md).
-- 🎬 [**Demo Recording**](./docs/demo-recording.md) - End-to-end recipe for capturing the ~75-second demo with SimpleScreenRecorder: capture-rect setup, pre-flight, recording steps, post-processing via `scripts/edit-demo.sh`. Run `scripts/demo-record-setup.sh` once to tune SSR settings.
+- 🎬 [**Demo Recording**](./docs/demo-recording.md) - End-to-end recipe for capturing the ~60-second demo with SimpleScreenRecorder: capture-rect setup, pre-flight, recording steps, post-processing via `scripts/edit-demo.sh`. Run `scripts/demo-record-setup.sh` once to tune SSR settings.
 
 ---
 
@@ -302,3 +312,4 @@ $LLM_SWARM_DIR/sandbox.sh /path/to/project gemini
 - **Auto-top-up Swarm**: Watcher refills workers up to `MAX_WORKERS` as issues finish; hard cap on total tmux windows prevents runaway sessions.
 - **Configurable Filters**: Per-project `.swarm/.env` defines who the swarm works for (`@me` + unassigned by default; teammates on opt-in).
 - **Structured Event Log**: `tail -F .swarm/events.log` gives live, greppable status of every worker start, finish, and cap refusal.
+- **External-session interop**: attach a separate Claude / Gemini / script to the running swarm's tmux socket — read pane scrollback, send keystrokes into a running agent, build your own watcher. See [Tmux as substrate](#tmux-as-substrate--the-interop-layer-you-get-for-free) and [Tmux Scrollback Exposure](./docs/security.md#tmux-scrollback-exposure).
