@@ -23,25 +23,25 @@
 # Output format:  <model> · <cwd-basename> · ctx: <used>/<total> (<%>)
 # Example:        opus · spring-search-tempo · ctx: 195k/1M (19%)
 #
-# Set STATUSLINE_PROBE=/tmp/claude-statusline-last.json to capture the
-# raw stdin payload while debugging schema changes.
-#
-# Codex has a native TUI status line rather than a command hook. Configure:
-#
-#     [tui]
-#     status_line = ["model-with-reasoning", "context-used", "context-window-size"]
+# This script also writes the raw stdin payload to $STATUSLINE_PROBE on
+# every render (default /tmp/claude-statusline-last.json). That dump
+# exists so the *exact* JSON field names for the context window can be
+# confirmed against a real Claude Code render — the first version of
+# this script tries several plausible paths and the dump tells us which
+# one Claude Code actually uses. Once we've confirmed, the fallback
+# probes can be removed.
 
 set -u
 
+PROBE="${STATUSLINE_PROBE:-/tmp/claude-statusline-last.json}"
+
 input="$(cat)"
-if [ -n "${STATUSLINE_PROBE:-}" ]; then
-    printf '%s' "$input" > "$STATUSLINE_PROBE"
-fi
+printf '%s' "$input" > "$PROBE"
 
 # --- Model ---------------------------------------------------------------
 model=$(printf '%s' "$input" | jq -r '
-    .model.id //
     .model.display_name //
+    .model.id //
     .model //
     .model_name //
     .session.model //

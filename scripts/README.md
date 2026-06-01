@@ -27,6 +27,7 @@ All scripts here require bash 4.0+; do not run them under `sh` or `dash`.
 | `sandbox-worktrees.sh` | Lists git worktrees; optionally launches sandboxes and/or tmux windows per worktree. |
 | `setup.sh` | Host-side setup; currently symlinks `/usr/bin/rg` into the path gemini-cli expects. Idempotent. |
 | `swarm-merge.sh` | Resolves the PR for an issue, merges it, and cleans up the local worktree + branch + tmux window in one shot. `--sweep-only` just runs the local-branch sweep. |
+| `statusline-with-context.sh` | Claude Code statusLine command rendering `<model> · <cwd> · ctx: <used>/<total> (<%>)`. For long-lived coordinator sessions — see [advanced-usage.md → "Long-lived coordinator: context monitoring"](../docs/advanced-usage.md#long-lived-coordinator-context-monitoring). |
 | `sweep-swarm-outcomes.sh` | Iterates worker outcome JSONs and invokes a user-configured posting hook; idempotent via `.posted` markers. |
 | `tmux-worker-shell.sh` | Opens a login shell inside a swarm worker container — backs the `C-z` tmux escape hatch. |
 | `worker-listener.sh` | Async queue watcher inside a worktree; atomically claims tasks from `inbox/`, dispatches to the LLM agent, writes outcome to `done/`. |
