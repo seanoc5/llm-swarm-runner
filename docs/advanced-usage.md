@@ -145,6 +145,8 @@ The non-`/home`-or-docker-socket lines should be exactly the host paths you put 
 
 The host Docker socket (`/var/run/docker.sock`) is mounted automatically when present. `entrypoint.sh` adds the sandbox user to the docker group at startup (using `DOCKER_GID`) to silence permission errors. `TESTCONTAINERS_HOST_OVERRIDE=localhost` is set automatically so Testcontainers resolves mapped ports correctly with `--network host`.
 
+`_JAVA_OPTIONS=-Dapi.version=1.45` is also set automatically so Testcontainers' shaded docker-java client negotiates a Docker Engine API version that modern daemons (Docker 25+, minimum API 1.40) will accept — without this, every `@SpringBootTest` using Testcontainers fails with `client version 1.32 is too old`. Override per-invocation with `_JAVA_OPTIONS=-Dapi.version=<other> ./sandbox.sh …`, or per-project via `systemProperty("api.version", "…")` in your `build.gradle.kts` test block (project-level wins, because it's set on the forked test JVM).
+
 ### Rebuilding the Image
 
 ```bash
