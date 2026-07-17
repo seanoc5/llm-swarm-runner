@@ -31,7 +31,7 @@ Reference evaluation: 2026-07-17 session (see `git log` on
 |---|---------|----------------------|--------------------|
 | 1 | Executed acceptance checks — a task passes only when an executed check exits 0 | `ringer.py:85` (`VERIFY_METHOD = "executed-check"`); per-task required `check` field (`ringer.py:~1027-1031`) | `scripts/worker-listener.sh` (`resolve_check_cmd` / `run_check` / extended `write_outcome`); `check_*` fields in `done/<id>.json` |
 | 2 | Self-review as machinery, not prompt convention | ringer runs checks/verdicts in the harness, not inside the worker's own context | _planned (trial)_ |
-| 3 | Eval log + per-(model, task_type) scoreboard | JSONL eval log; `first_try_pass_rate` (`ringer.py:~2364`); `./ringer.py models` scoreboard | _planned (trial)_ |
+| 3 | Eval log + per-(model, task_type) scoreboard | JSONL eval log; `first_try_pass_rate` (`ringer.py:~2364`); `./ringer.py models` scoreboard | `append_eval_log` in `scripts/worker-listener.sh`; `scripts/swarm-scoreboard.sh`; `SWARM_EVAL_LOG` |
 | 4 | Find ≠ fix — the agent that finds a problem never fixes/reviews its own work | `templates/adversarial-review` kit; "never same worker finds and fixes" rule | _planned (trial)_ |
 | 5 | Retry-once with failure output injected | retry prompt fed by check failure output (`ringer.py:~1176` lint: "check may fail without printing why; retry prompt and eval log depend on failure output") | `scripts/worker-listener.sh` (retry block in main loop, `dispatch_agent`); `retried` field in `done/<id>.json`; `WORKER_CHECK_RETRY` |
 | 6 | Brief/manifest lint — reject unverifiable or underspecified tasks before dispatch | manifest lint findings (`ringer.py:~1160-1200`): "check cannot fail", "spec is probably underspecified", pointer-spec warning | _planned (trial)_ |
@@ -69,6 +69,28 @@ requires them per task) because our briefs are generated from GitHub issues
 that don't yet carry acceptance criteria universally — adoption #6 (brief
 lint) is the pressure toward always having one. Check output archiving and
 the ok/err file-suffix contract are ours.
+
+## 3. Eval log + scoreboard
+
+**Ringer's idea:** every task run appends a row to a JSONL model log; a
+scoreboard aggregates per-(model, task_type) pass rates — crucially
+including **first_try_pass_rate** (`ringer.py:~2364`), which feeds routing
+(untested → probation → proven ladder). Model choices become measurements,
+not vibes.
+
+**Our implementation (original, bash/jq):** `append_eval_log` in
+`worker-listener.sh` writes one row per completed v2 task (ts, task_id,
+issue, agent, model, duration, exit code, check_cmd/check_exit, retried,
+outcome) to `.swarm/eval-log.jsonl` (or `$SWARM_EVAL_LOG`).
+`scripts/swarm-scoreboard.sh` pools logs across worktrees and renders
+per-(agent, model) tasks / pass% / first-try% / retries / checked / avg
+duration. This makes the "claude workers default to Sonnet 5" decision
+empirically checkable.
+
+**Deliberate divergences:** we group by (agent, model) — we have no
+task_type taxonomy (our tasks are GitHub issues, not manifest kits). The
+probation/proven routing ladder is NOT adopted; the scoreboard is
+observability-only for now.
 
 ## 5. Retry-once with failure output injected
 

@@ -230,6 +230,36 @@ run_check() {
     fi
 }
 
+# Append one JSONL eval row per completed v2 task — the durable record the
+# scoreboard (scripts/swarm-scoreboard.sh) aggregates per (agent, model).
+# Eval-loop concept adopted from ringer (docs/ringer-adoptions.md #3).
+# Default location is per-worktree (.swarm/eval-log.jsonl); point
+# SWARM_EVAL_LOG at a path outside the worktree to survive worktree reaping
+# and to pool rows across workers. Requires jq (skipped silently without it —
+# the outcome JSON in done/ is unaffected).
+append_eval_log() {
+    local outcome="$1" finished="$2" duration="$3" rc="$4"
+    command -v jq >/dev/null 2>&1 || return 0
+    local log="${SWARM_EVAL_LOG:-.swarm/eval-log.jsonl}"
+    local issue=""
+    case "$WT_LABEL" in wt-issue-*) issue="${WT_LABEL#wt-issue-}" ;; esac
+    jq -cn \
+        --arg ts "$finished" --arg task_id "$TASK_ID" --arg issue "$issue" \
+        --arg agent "$AGENT" --arg model "$MODEL" \
+        --arg check_cmd "${CHECK_CMD:-}" --arg check_exit "${CHECK_EXIT:-}" \
+        --argjson duration "$duration" --argjson exit_code "$rc" \
+        --argjson retried "${RETRIED:-false}" --arg outcome "$outcome" \
+        '{ts: $ts, task_id: $task_id,
+          issue: (if $issue == "" then null else ($issue | tonumber? // $issue) end),
+          agent: $agent,
+          model: (if $model == "" then null else $model end),
+          duration_seconds: $duration, exit_code: $exit_code,
+          check_cmd: (if $check_cmd == "" then null else $check_cmd end),
+          check_exit: (if $check_exit == "" then null else ($check_exit | tonumber) end),
+          retried: $retried, outcome: $outcome}' >> "$log" 2>/dev/null \
+        || echo "WARN: could not append eval row to $log" >&2
+}
+
 # Write a structured outcome record for v2 tasks. No-op for v1 (no contract).
 write_outcome() {
     local rc="$1" started="$2" finished="$3" duration="$4"
@@ -276,6 +306,7 @@ write_outcome() {
 }
 EOF
     echo "[$(date +%T)] Wrote outcome: $outcome_file"
+    append_eval_log "$outcome" "$finished" "$duration" "$rc"
 }
 
 while true; do

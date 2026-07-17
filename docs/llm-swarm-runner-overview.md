@@ -482,8 +482,19 @@ The listener checks v2 inbox first, falls back to v1. Both can be in use simulta
 | `WORKER_CHECK_CMD`    | (none)           | Listener-wide default check command (e.g. the project test suite). Brief marker / `.swarm/check.sh` take precedence. |
 | `WORKER_CHECK_TIMEOUT`| `600`            | Seconds before the check is killed (`timeout`; exit 124 recorded as a failure).             |
 | `WORKER_CHECK_RETRY`  | `1`              | Retry-once on check failure with the failure output injected into the prompt. `0` disables. |
+| `SWARM_EVAL_LOG`      | `.swarm/eval-log.jsonl` | Where the listener appends one JSONL eval row per completed v2 task. Point outside the worktree to survive reaping / pool across workers. |
 
 This decouples the coordinator from the workers: the coordinator just drops a markdown file into the worktree and the worker picks it up asynchronously.
+
+### `swarm-scoreboard.sh` — Per-(agent, model) eval scoreboard
+
+Aggregates the JSONL eval rows the listener appends per completed task (`.swarm/eval-log.jsonl` per worktree, or `$SWARM_EVAL_LOG`) into a per-(agent, model) table: tasks, pass rate, **first-try pass rate** (passed without the retry-once firing), retries, checked count, average duration. Concept adopted from ringer's model log + scoreboard (see [`ringer-adoptions.md`](ringer-adoptions.md) #3) — it makes model-default choices (e.g. Sonnet 5 for workers) empirically checkable.
+
+```bash
+swarm-scoreboard.sh                       # glob CWD + sibling wt-issue-* worktrees
+swarm-scoreboard.sh /opt/work/myproject   # same, from a project root
+swarm-scoreboard.sh --json logs/*.jsonl   # raw aggregation for scripts
+```
 
 ### `prompts/coordinator.md` — Coordinator's brain
 

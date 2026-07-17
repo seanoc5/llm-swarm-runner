@@ -27,6 +27,8 @@ command -v jq >/dev/null 2>&1 || red "jq required for outcome JSON validation"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LISTENER="$SCRIPT_DIR/../scripts/worker-listener.sh"
 [ -x "$LISTENER" ] || red "worker-listener.sh not executable: $LISTENER"
+SCOREBOARD="$SCRIPT_DIR/../scripts/swarm-scoreboard.sh"
+[ -x "$SCOREBOARD" ] || red "swarm-scoreboard.sh not executable: $SCOREBOARD"
 
 TEST_DIR=$(mktemp -d -t shape-checks-XXXXXX)
 LISTENER_PIDS=()
@@ -188,6 +190,37 @@ jq -e '.outcome == "err" and .retried == false' \
 [ "$(wc -l < attempts.txt)" -eq 1 ] || red "c8: agent dispatched more than once"
 [ ! -f .swarm/tasks/done/c8.check.attempt1.log ] || red "c8: attempt1 log should not exist"
 green "WORKER_CHECK_RETRY=0: single attempt, retried: false"
+
+# ============================================================================
+heading "Eval log + scoreboard"
+# ============================================================================
+# Listener A processed c1..c4 → 4 eval rows: 3 ok (c1, c3, c4), 1 err after
+# retry (c2). Validate the JSONL and the scoreboard aggregation over it.
+EVAL_LOG="$TEST_DIR/wt-a/.swarm/eval-log.jsonl"
+[ -f "$EVAL_LOG" ] || red "eval log missing: $EVAL_LOG"
+[ "$(wc -l < "$EVAL_LOG")" -eq 4 ] || { cat "$EVAL_LOG"; red "expected 4 eval rows"; }
+jq -es 'all(.[]; has("ts") and has("task_id") and has("agent") and has("model")
+            and has("duration_seconds") and has("exit_code") and has("check_cmd")
+            and has("check_exit") and has("retried") and has("outcome"))' \
+    "$EVAL_LOG" >/dev/null || { cat "$EVAL_LOG"; red "eval rows missing fields"; }
+jq -es 'map(select(.task_id == "c2")) | .[0].retried == true and .[0].outcome == "err"' \
+    "$EVAL_LOG" >/dev/null || { cat "$EVAL_LOG"; red "c2 eval row wrong"; }
+green "eval log: 4 rows, full schema, retry + outcome recorded"
+
+SB_JSON=$("$SCOREBOARD" --json "$EVAL_LOG")
+printf '%s' "$SB_JSON" | jq -e '
+    length == 1
+    and .[0].agent == "bash"
+    and .[0].tasks == 4
+    and .[0].pass == 3
+    and .[0].retries == 1
+    and .[0].checked == 3
+    and .[0].first_try_pass_rate == 0.75
+' >/dev/null || { printf '%s\n' "$SB_JSON"; red "scoreboard aggregation wrong"; }
+green "scoreboard --json: tasks=4 pass=3 retries=1 first_try=75%"
+
+"$SCOREBOARD" "$EVAL_LOG" | grep -q "bash" || red "scoreboard table missing agent row"
+green "scoreboard table renders"
 
 # ============================================================================
 heading "All executed-check shape tests passed"
