@@ -14,9 +14,26 @@
 #   <wt>/.swarm/tasks/done/<id>.md        listener mv when finished (audit trail)
 #   <wt>/.swarm/tasks/done/<id>.{ok,err}.json
 #                                         listener writes structured outcome
-#                                         (started/finished/duration/exit_code/agent/model)
+#                                         (started/finished/duration/exit_code/agent/model
+#                                          + check_cmd/check_exit/check_output_tail)
+#   <wt>/.swarm/tasks/done/<id>.check.log full acceptance-check output (audit)
 #
 # Coordinator polls done/*.json to know what happened (no need to scrape pane).
+#
+# Executed acceptance checks (v2 tasks only):
+#   After the agent exits, the listener runs a per-issue acceptance check and
+#   stamps the result into the outcome JSON. A task is only `outcome: ok` when
+#   BOTH the agent exited 0 AND the check (if one resolved) exited 0 — an
+#   agent declaring "done" is not proof; an executed check is.
+#   Concept adopted from Nate B. Jones's ringer (see docs/ringer-adoptions.md
+#   for attribution and pointers); implementation here is original.
+#   Check command resolution order:
+#     1. brief marker:  a `<!-- SWARM_CHECK: <cmd> -->` line in the task brief
+#     2. worktree file: .swarm/check.sh (standing per-issue check)
+#     3. env default:   WORKER_CHECK_CMD (listener-wide, e.g. project test suite)
+#   No match → check skipped, check_* fields null (behavior identical to
+#   pre-check versions). Kill switch: WORKER_CHECK=0. Timeout:
+#   WORKER_CHECK_TIMEOUT seconds (default 600; timeout exit 124 = fail).
 #
 # Legacy single-file protocol (v1) — still supported for backward compat:
 #   <wt>/.agent-task.md       drop a task brief here
@@ -39,6 +56,8 @@
 AGENT="${1:-claude}"
 MODEL="${WORKER_MODEL:-}"
 HEADLESS="${WORKER_HEADLESS:-0}"
+CHECK_ENABLED="${WORKER_CHECK:-1}"
+CHECK_TIMEOUT="${WORKER_CHECK_TIMEOUT:-600}"
 
 # Queue v2 directories (per-worktree)
 QUEUE_ROOT=".swarm/tasks"
@@ -129,18 +148,78 @@ claim_next_task() {
     return 1
 }
 
+# ── Executed acceptance checks ──────────────────────────────────────────────
+# Concept adopted from Nate B. Jones's ringer (PolyForm Shield license):
+# a task only truly passes when an *executed* check exits 0 — not when the
+# agent merely declares done. No ringer code is copied; this is an original
+# bash implementation against our queue-v2 outcome schema. Attribution and
+# concept pointers: docs/ringer-adoptions.md.
+
+# Resolve the check command for the current task into $CHECK_CMD (may be
+# empty = no check). See header for the resolution order.
+resolve_check_cmd() {
+    CHECK_CMD=""
+    [ "$CHECK_ENABLED" = "1" ] || return 0
+    # 1. per-task marker in the brief (mirrors ringer's per-task `check` field)
+    CHECK_CMD=$(printf '%s\n' "$TASK" \
+                | sed -n 's/.*<!-- SWARM_CHECK: \(.*\) -->.*/\1/p' | head -1)
+    [ -n "$CHECK_CMD" ] && return 0
+    # 2. standing per-issue check in the worktree
+    if [ -r ".swarm/check.sh" ]; then
+        CHECK_CMD="bash .swarm/check.sh"
+        return 0
+    fi
+    # 3. listener-wide env default
+    CHECK_CMD="${WORKER_CHECK_CMD:-}"
+}
+
+# Run $CHECK_CMD (if any). Sets CHECK_EXIT ("" = check not run) and
+# CHECK_TAIL (last 20 lines of combined output). Full output is kept at
+# done/<id>.check.log as the audit artifact.
+run_check() {
+    CHECK_EXIT=""
+    CHECK_TAIL=""
+    [ -n "$CHECK_CMD" ] || return 0
+    echo "[$(date +%T)] Running acceptance check: $CHECK_CMD"
+    local check_log="$DONE/${TASK_ID}.check.log"
+    timeout "$CHECK_TIMEOUT" bash -c "$CHECK_CMD" > "$check_log" 2>&1 \
+        && CHECK_EXIT=0 || CHECK_EXIT=$?
+    CHECK_TAIL=$(tail -n 20 "$check_log" 2>/dev/null)
+    if [ "$CHECK_EXIT" -eq 0 ]; then
+        echo "[$(date +%T)] Acceptance check PASS (exit 0)."
+    else
+        echo "[$(date +%T)] Acceptance check FAIL (exit $CHECK_EXIT; 124 = timed out after ${CHECK_TIMEOUT}s). Output tail:"
+        printf '%s\n' "$CHECK_TAIL" | sed 's/^/    /'
+    fi
+}
+
 # Write a structured outcome record for v2 tasks. No-op for v1 (no contract).
 write_outcome() {
     local rc="$1" started="$2" finished="$3" duration="$4"
     [ "$IS_LEGACY" = "1" ] && return 0
 
+    # An executed check gates the pass: agent exit 0 alone is not "ok" if
+    # the acceptance check ran and failed.
     local outcome="ok"
     [ "$rc" -ne 0 ] && outcome="err"
+    [ -n "${CHECK_EXIT:-}" ] && [ "$CHECK_EXIT" -ne 0 ] && outcome="err"
     local outcome_file="$DONE/${TASK_ID}.${outcome}.json"
 
     # JSON-escape the model field (may be empty)
     local model_json="null"
     [ -n "$MODEL" ] && model_json="\"$MODEL\""
+
+    # Check fields: null when no check resolved/ran. check_cmd and the output
+    # tail need real JSON escaping (arbitrary shell text) — jq does it; if jq
+    # is absent, record exit code only and null the strings.
+    local check_cmd_json="null" check_exit_json="null" check_tail_json="null"
+    if [ -n "${CHECK_EXIT:-}" ]; then
+        check_exit_json="$CHECK_EXIT"
+        if command -v jq >/dev/null 2>&1; then
+            check_cmd_json=$(printf '%s' "$CHECK_CMD" | jq -Rs .)
+            check_tail_json=$(printf '%s' "$CHECK_TAIL" | jq -Rs .)
+        fi
+    fi
 
     cat > "$outcome_file" <<EOF
 {
@@ -152,7 +231,10 @@ write_outcome() {
   "outcome": "$outcome",
   "agent": "$AGENT",
   "model": $model_json,
-  "headless": $([ "$HEADLESS" = "1" ] && echo true || echo false)
+  "headless": $([ "$HEADLESS" = "1" ] && echo true || echo false),
+  "check_cmd": $check_cmd_json,
+  "check_exit": $check_exit_json,
+  "check_output_tail": $check_tail_json
 }
 EOF
     echo "[$(date +%T)] Wrote outcome: $outcome_file"
@@ -251,11 +333,14 @@ while true; do
         FINISHED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
         DURATION=$(( $(date +%s) - STARTED_EPOCH ))
 
-        # Move brief into the appropriate archive location, then write outcome.
+        # Move brief into the appropriate archive location, then run the
+        # acceptance check (v2 only) and write the outcome record.
         if [ "$IS_LEGACY" = "1" ]; then
             mv "$TASK_PATH" ".agent-task-last.md"
         else
             mv "$TASK_PATH" "$DONE/$(basename "$TASK_PATH")"
+            resolve_check_cmd
+            run_check
             write_outcome "$RC" "$STARTED" "$FINISHED" "$DURATION"
         fi
 

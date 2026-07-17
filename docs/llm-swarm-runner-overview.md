@@ -441,9 +441,14 @@ Runs inside the worker sandbox. Polls every 2 seconds for new tasks. Two protoco
   "outcome": "ok",
   "agent": "claude",
   "model": "claude-sonnet-5",
-  "headless": false
+  "headless": false,
+  "check_cmd": "./gradlew test",
+  "check_exit": 0,
+  "check_output_tail": "BUILD SUCCESSFUL in 41s\n"
 }
 ```
+
+The `check_*` fields are the **executed acceptance check** (concept adopted from ringer — see [`ringer-adoptions.md`](ringer-adoptions.md)): after the agent exits, the listener runs a per-issue check command and a task is `outcome: ok` only when both the agent exit code *and* the check exit code are 0. All three fields are `null` when no check is configured (resolution order: `<!-- SWARM_CHECK: <cmd> -->` marker in the brief → `.swarm/check.sh` in the worktree → `WORKER_CHECK_CMD` env). Full check output is archived at `done/<id>.check.log`.
 
 **v1 single-file (legacy, still supported)** — `.agent-task.md` → `.agent-task-last.md`. No structured outcome.
 
@@ -454,8 +459,9 @@ The listener checks v2 inbox first, falls back to v1. Both can be in use simulta
 1. **Claim** via atomic `mv` (v2) or rename (v1).
 2. **Echo brief** (first 40 lines) to the pane so attached observers see what's running.
 3. **Dispatch** the configured agent (default claude, override via `WORKER_CMD`; claude workers default to `claude-sonnet-5`, gemini/codex use their CLI's default model — override via `WORKER_MODEL`).
-4. **Archive + record** — move brief to `done/` (v2) or `.agent-task-last.md` (v1); for v2 also write `done/<id>.{ok,err}.json` with timing + exit code.
-5. **Loop** back for the next task.
+4. **Check** (v2 only) — resolve and run the acceptance check, if one is configured; capture exit code + output tail.
+5. **Archive + record** — move brief to `done/` (v2) or `.agent-task-last.md` (v1); for v2 also write `done/<id>.{ok,err}.json` with timing, agent exit code, and check result.
+6. **Loop** back for the next task.
 
 #### Worker mode
 
@@ -471,6 +477,9 @@ The listener checks v2 inbox first, falls back to v1. Both can be in use simulta
 | `WORKER_CMD`          | `claude`         | Switches the worker's LLM CLI (`gemini` or `codex` are supported alternatives).             |
 | `WORKER_MODEL`        | (CLI default)    | Passed as `--model` (claude) or `-m` (gemini/codex). E.g. `sonnet`, `gemini-2.5-flash`.      |
 | `WORKER_HEADLESS`     | `0`              | When `1`, run agent with `-p` (print + exit). Required when no human is attached.           |
+| `WORKER_CHECK`        | `1`              | Executed acceptance checks. `0` disables (outcome JSON reverts to agent-exit-only).         |
+| `WORKER_CHECK_CMD`    | (none)           | Listener-wide default check command (e.g. the project test suite). Brief marker / `.swarm/check.sh` take precedence. |
+| `WORKER_CHECK_TIMEOUT`| `600`            | Seconds before the check is killed (`timeout`; exit 124 recorded as a failure).             |
 
 This decouples the coordinator from the workers: the coordinator just drops a markdown file into the worktree and the worker picks it up asynchronously.
 
