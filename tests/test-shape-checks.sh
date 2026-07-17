@@ -13,6 +13,8 @@
 #   4. no check configured                                   → check fields null
 #   5. WORKER_CHECK=0 kill switch                            → check skipped despite check.sh
 #   6. WORKER_CHECK_CMD env fallback
+#   7. retry-once: failing check → re-dispatch with failure context → pass
+#   8. WORKER_CHECK_RETRY=0 disables the retry
 set -euo pipefail
 
 green()  { printf '\033[32m✓ %s\033[0m\n' "$*"; }
@@ -83,6 +85,7 @@ jq -e '
     .outcome == "ok"
     and .exit_code == 0
     and .check_exit == 0
+    and .retried == false
     and (.check_cmd | test("grep -q agent-ran"))
 ' .swarm/tasks/done/c1.ok.json >/dev/null \
     || { cat .swarm/tasks/done/c1.ok.json; red "c1 check fields wrong"; }
@@ -98,10 +101,12 @@ jq -e '
     and .exit_code == 0
     and .check_exit != 0
     and .check_exit != null
+    and .retried == true
 ' .swarm/tasks/done/c2.err.json >/dev/null \
     || { cat .swarm/tasks/done/c2.err.json; red "c2: failing check did not flip outcome to err"; }
 [ ! -f .swarm/tasks/done/c2.ok.json ] || red "c2: spurious ok.json despite failed check"
-green "failing check gates the pass: agent exit 0 + check fail → err.json"
+[ -f .swarm/tasks/done/c2.check.attempt1.log ] || red "c2: first-attempt check log not preserved"
+green "failing check gates the pass: agent exit 0 + check fail → retry → still err.json"
 
 # --- Test 3: .swarm/check.sh fallback (no marker in brief) ------------------
 cat > .swarm/check.sh <<'EOF'
@@ -150,6 +155,39 @@ jq -e '.check_exit == 0 and (.check_cmd | test("env-check"))' \
     .swarm/tasks/done/c6.ok.json >/dev/null \
     || { cat .swarm/tasks/done/c6.ok.json; red "c6 env fallback not used"; }
 green "WORKER_CHECK_CMD env fallback used when no marker and no check.sh"
+
+# ============================================================================
+heading "Listener D: retry-once rescues a failing check"
+# ============================================================================
+# First attempt appends one line; the check needs two. The retry re-runs the
+# brief (with failure context injected before it), appending the second line,
+# so the re-run check passes.
+start_listener "$TEST_DIR/wt-d"
+cd "$TEST_DIR/wt-d"
+drop_v2 "c7" 'echo try >> attempts.txt
+# <!-- SWARM_CHECK: test "$(wc -l < attempts.txt)" -ge 2 -->'
+wait_for "c7 outcome" '[ -f .swarm/tasks/done/c7.ok.json ]'
+jq -e '.outcome == "ok" and .check_exit == 0 and .retried == true' \
+    .swarm/tasks/done/c7.ok.json >/dev/null \
+    || { cat .swarm/tasks/done/c7.ok.json; red "c7: retry did not rescue the task"; }
+[ "$(wc -l < attempts.txt)" -ge 2 ] || red "c7: agent was not re-dispatched"
+[ -f .swarm/tasks/done/c7.check.attempt1.log ] || red "c7: attempt1 check log missing"
+green "retry-once: check fail → re-dispatch with failure context → check pass → ok.json (retried: true)"
+
+# ============================================================================
+heading "Listener E: WORKER_CHECK_RETRY=0 disables the retry"
+# ============================================================================
+start_listener "$TEST_DIR/wt-e" WORKER_CHECK_RETRY=0
+cd "$TEST_DIR/wt-e"
+drop_v2 "c8" 'echo once >> attempts.txt
+# <!-- SWARM_CHECK: false -->'
+wait_for "c8 outcome" '[ -f .swarm/tasks/done/c8.err.json ]'
+jq -e '.outcome == "err" and .retried == false' \
+    .swarm/tasks/done/c8.err.json >/dev/null \
+    || { cat .swarm/tasks/done/c8.err.json; red "c8: retry fired despite WORKER_CHECK_RETRY=0"; }
+[ "$(wc -l < attempts.txt)" -eq 1 ] || red "c8: agent dispatched more than once"
+[ ! -f .swarm/tasks/done/c8.check.attempt1.log ] || red "c8: attempt1 log should not exist"
+green "WORKER_CHECK_RETRY=0: single attempt, retried: false"
 
 # ============================================================================
 heading "All executed-check shape tests passed"

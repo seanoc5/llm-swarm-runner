@@ -444,11 +444,12 @@ Runs inside the worker sandbox. Polls every 2 seconds for new tasks. Two protoco
   "headless": false,
   "check_cmd": "./gradlew test",
   "check_exit": 0,
-  "check_output_tail": "BUILD SUCCESSFUL in 41s\n"
+  "check_output_tail": "BUILD SUCCESSFUL in 41s\n",
+  "retried": false
 }
 ```
 
-The `check_*` fields are the **executed acceptance check** (concept adopted from ringer — see [`ringer-adoptions.md`](ringer-adoptions.md)): after the agent exits, the listener runs a per-issue check command and a task is `outcome: ok` only when both the agent exit code *and* the check exit code are 0. All three fields are `null` when no check is configured (resolution order: `<!-- SWARM_CHECK: <cmd> -->` marker in the brief → `.swarm/check.sh` in the worktree → `WORKER_CHECK_CMD` env). Full check output is archived at `done/<id>.check.log`.
+The `check_*` fields are the **executed acceptance check** (concept adopted from ringer — see [`ringer-adoptions.md`](ringer-adoptions.md)): after the agent exits, the listener runs a per-issue check command and a task is `outcome: ok` only when both the agent exit code *and* the check exit code are 0. All three fields are `null` when no check is configured (resolution order: `<!-- SWARM_CHECK: <cmd> -->` marker in the brief → `.swarm/check.sh` in the worktree → `WORKER_CHECK_CMD` env). Full check output is archived at `done/<id>.check.log`. On check failure the listener re-dispatches the agent **once** with the failure output injected into the prompt and re-runs the check (`retried: true`; first attempt's output kept at `done/<id>.check.attempt1.log`; disable with `WORKER_CHECK_RETRY=0`).
 
 **v1 single-file (legacy, still supported)** — `.agent-task.md` → `.agent-task-last.md`. No structured outcome.
 
@@ -480,6 +481,7 @@ The listener checks v2 inbox first, falls back to v1. Both can be in use simulta
 | `WORKER_CHECK`        | `1`              | Executed acceptance checks. `0` disables (outcome JSON reverts to agent-exit-only).         |
 | `WORKER_CHECK_CMD`    | (none)           | Listener-wide default check command (e.g. the project test suite). Brief marker / `.swarm/check.sh` take precedence. |
 | `WORKER_CHECK_TIMEOUT`| `600`            | Seconds before the check is killed (`timeout`; exit 124 recorded as a failure).             |
+| `WORKER_CHECK_RETRY`  | `1`              | Retry-once on check failure with the failure output injected into the prompt. `0` disables. |
 
 This decouples the coordinator from the workers: the coordinator just drops a markdown file into the worktree and the worker picks it up asynchronously.
 

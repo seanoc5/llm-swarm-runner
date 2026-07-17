@@ -34,6 +34,10 @@
 #   No match → check skipped, check_* fields null (behavior identical to
 #   pre-check versions). Kill switch: WORKER_CHECK=0. Timeout:
 #   WORKER_CHECK_TIMEOUT seconds (default 600; timeout exit 124 = fail).
+#   On check failure the agent is re-dispatched ONCE with the failure output
+#   injected into the prompt, then the check re-runs (retry-once; disable
+#   with WORKER_CHECK_RETRY=0). The first attempt's check output is kept at
+#   done/<id>.check.attempt1.log and the outcome JSON records retried: true.
 #
 # Legacy single-file protocol (v1) — still supported for backward compat:
 #   <wt>/.agent-task.md       drop a task brief here
@@ -58,6 +62,7 @@ MODEL="${WORKER_MODEL:-}"
 HEADLESS="${WORKER_HEADLESS:-0}"
 CHECK_ENABLED="${WORKER_CHECK:-1}"
 CHECK_TIMEOUT="${WORKER_CHECK_TIMEOUT:-600}"
+CHECK_RETRY="${WORKER_CHECK_RETRY:-1}"
 
 # Queue v2 directories (per-worktree)
 QUEUE_ROOT=".swarm/tasks"
@@ -148,6 +153,38 @@ claim_next_task() {
     return 1
 }
 
+# Dispatch the configured agent on a task text. Sets DISPATCH_RC.
+# Relies on globals set per-task in the main loop: MODEL_OPTS,
+# WORKER_SYSTEM_PROMPT_OPTS, WORKER_SYSTEM_PROMPT_ENV, CODEX_PREFIX.
+# Callable more than once per task (used by the check-failure retry).
+dispatch_agent() {
+    local task_text="$1"
+    local codex_task="$task_text"
+    [ -n "$CODEX_PREFIX" ] && codex_task="$CODEX_PREFIX"$'\n\n---\n\n'"$task_text"
+
+    if [[ "$AGENT" == "claude" ]]; then
+        if [ "$HEADLESS" = "1" ]; then
+            claude "${MODEL_OPTS[@]}" "${WORKER_SYSTEM_PROMPT_OPTS[@]}" -p "$task_text" --dangerously-skip-permissions
+        else
+            claude "${MODEL_OPTS[@]}" "${WORKER_SYSTEM_PROMPT_OPTS[@]}" "$task_text" --dangerously-skip-permissions
+        fi
+    elif [[ "$AGENT" == "gemini" ]]; then
+        if [ "$HEADLESS" = "1" ]; then
+            "${WORKER_SYSTEM_PROMPT_ENV[@]}" gemini "${MODEL_OPTS[@]}" -p "$task_text" --yolo --skip-trust
+        else
+            "${WORKER_SYSTEM_PROMPT_ENV[@]}" gemini "${MODEL_OPTS[@]}" -i "$task_text" --yolo --skip-trust
+        fi
+    elif [[ "$AGENT" == "codex" ]]; then
+        if [ "$HEADLESS" = "1" ]; then
+            codex exec "${MODEL_OPTS[@]}" --dangerously-bypass-approvals-and-sandbox "$codex_task"
+        else
+            codex "${MODEL_OPTS[@]}" --dangerously-bypass-approvals-and-sandbox --no-alt-screen "$codex_task"
+        fi
+    else
+        bash -c "$task_text"
+    fi && DISPATCH_RC=0 || DISPATCH_RC=$?
+}
+
 # ── Executed acceptance checks ──────────────────────────────────────────────
 # Concept adopted from Nate B. Jones's ringer (PolyForm Shield license):
 # a task only truly passes when an *executed* check exits 0 — not when the
@@ -234,7 +271,8 @@ write_outcome() {
   "headless": $([ "$HEADLESS" = "1" ] && echo true || echo false),
   "check_cmd": $check_cmd_json,
   "check_exit": $check_exit_json,
-  "check_output_tail": $check_tail_json
+  "check_output_tail": $check_tail_json,
+  "retried": ${RETRIED:-false}
 }
 EOF
     echo "[$(date +%T)] Wrote outcome: $outcome_file"
@@ -283,12 +321,12 @@ while true; do
         WORKER_MD="${LLM_SWARM_DIR:-}/prompts/worker.md"
         WORKER_SYSTEM_PROMPT_OPTS=()
         WORKER_SYSTEM_PROMPT_ENV=()
-        CODEX_TASK="$TASK"
+        CODEX_PREFIX=""
         if [ -n "${LLM_SWARM_DIR:-}" ] && [ -r "$WORKER_MD" ]; then
             case "$AGENT" in
                 claude) WORKER_SYSTEM_PROMPT_OPTS=(--append-system-prompt "$(cat "$WORKER_MD")") ;;
                 gemini) WORKER_SYSTEM_PROMPT_ENV=(env "GEMINI_SYSTEM_MD=$WORKER_MD") ;;
-                codex) CODEX_TASK="$(cat "$WORKER_MD")"$'\n\n---\n\n'"$TASK" ;;
+                codex) CODEX_PREFIX="$(cat "$WORKER_MD")" ;;
             esac
         else
             case "$AGENT" in
@@ -308,39 +346,54 @@ while true; do
         # WORKER_HEADLESS=1: revert to print-and-exit semantics. Used by the
         # e2e test path (which has no human attached) and any automation.
         # `-p` also skips claude's "Trust this folder?" dialog by design.
-        if [[ "$AGENT" == "claude" ]]; then
-            if [ "$HEADLESS" = "1" ]; then
-                claude "${MODEL_OPTS[@]}" "${WORKER_SYSTEM_PROMPT_OPTS[@]}" -p "$TASK" --dangerously-skip-permissions
-            else
-                claude "${MODEL_OPTS[@]}" "${WORKER_SYSTEM_PROMPT_OPTS[@]}" "$TASK" --dangerously-skip-permissions
+        dispatch_agent "$TASK"
+        RC=$DISPATCH_RC
+
+        # Acceptance check + retry-once-with-failure-context (v2 only).
+        # On check failure, re-dispatch the agent ONCE with the check's
+        # failure output injected into the prompt, then re-run the check —
+        # ringer's retry concept (see docs/ringer-adoptions.md #5). Kill
+        # switch: WORKER_CHECK_RETRY=0. Failure context goes BEFORE the
+        # original brief so the final instruction the agent reads is the
+        # task itself.
+        RETRIED=false
+        if [ "$IS_LEGACY" != "1" ]; then
+            resolve_check_cmd
+            run_check
+            if [ -n "$CHECK_EXIT" ] && [ "$CHECK_EXIT" -ne 0 ] && [ "$CHECK_RETRY" = "1" ]; then
+                echo "[$(date +%T)] Check failed — retrying once with failure output injected."
+                mv "$DONE/${TASK_ID}.check.log" "$DONE/${TASK_ID}.check.attempt1.log" 2>/dev/null || true
+                RETRY_TASK="## Retry — previous attempt failed the acceptance check
+
+A previous attempt at the task below did not pass its acceptance check.
+The check command \`$CHECK_CMD\` exited $CHECK_EXIT. Last lines of its
+output:
+
+\`\`\`
+$CHECK_TAIL
+\`\`\`
+
+Diagnose what is wrong, fix it, and make sure the check passes this time.
+The original task follows.
+
+---
+
+$TASK"
+                RETRIED=true
+                dispatch_agent "$RETRY_TASK"
+                RC=$DISPATCH_RC
+                run_check
             fi
-        elif [[ "$AGENT" == "gemini" ]]; then
-            if [ "$HEADLESS" = "1" ]; then
-                "${WORKER_SYSTEM_PROMPT_ENV[@]}" gemini "${MODEL_OPTS[@]}" -p "$TASK" --yolo --skip-trust
-            else
-                "${WORKER_SYSTEM_PROMPT_ENV[@]}" gemini "${MODEL_OPTS[@]}" -i "$TASK" --yolo --skip-trust
-            fi
-        elif [[ "$AGENT" == "codex" ]]; then
-            if [ "$HEADLESS" = "1" ]; then
-                codex exec "${MODEL_OPTS[@]}" --dangerously-bypass-approvals-and-sandbox "$CODEX_TASK"
-            else
-                codex "${MODEL_OPTS[@]}" --dangerously-bypass-approvals-and-sandbox --no-alt-screen "$CODEX_TASK"
-            fi
-        else
-            bash -c "$TASK"
-        fi && RC=0 || RC=$?
+        fi
 
         FINISHED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
         DURATION=$(( $(date +%s) - STARTED_EPOCH ))
 
-        # Move brief into the appropriate archive location, then run the
-        # acceptance check (v2 only) and write the outcome record.
+        # Move brief into the appropriate archive location, then write outcome.
         if [ "$IS_LEGACY" = "1" ]; then
             mv "$TASK_PATH" ".agent-task-last.md"
         else
             mv "$TASK_PATH" "$DONE/$(basename "$TASK_PATH")"
-            resolve_check_cmd
-            run_check
             write_outcome "$RC" "$STARTED" "$FINISHED" "$DURATION"
         fi
 

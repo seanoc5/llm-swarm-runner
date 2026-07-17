@@ -33,7 +33,7 @@ Reference evaluation: 2026-07-17 session (see `git log` on
 | 2 | Self-review as machinery, not prompt convention | ringer runs checks/verdicts in the harness, not inside the worker's own context | _planned (trial)_ |
 | 3 | Eval log + per-(model, task_type) scoreboard | JSONL eval log; `first_try_pass_rate` (`ringer.py:~2364`); `./ringer.py models` scoreboard | _planned (trial)_ |
 | 4 | Find ≠ fix — the agent that finds a problem never fixes/reviews its own work | `templates/adversarial-review` kit; "never same worker finds and fixes" rule | _planned (trial)_ |
-| 5 | Retry-once with failure output injected | retry prompt fed by check failure output (`ringer.py:~1176` lint: "check may fail without printing why; retry prompt and eval log depend on failure output") | _planned (trial)_ |
+| 5 | Retry-once with failure output injected | retry prompt fed by check failure output (`ringer.py:~1176` lint: "check may fail without printing why; retry prompt and eval log depend on failure output") | `scripts/worker-listener.sh` (retry block in main loop, `dispatch_agent`); `retried` field in `done/<id>.json`; `WORKER_CHECK_RETRY` |
 | 6 | Brief/manifest lint — reject unverifiable or underspecified tasks before dispatch | manifest lint findings (`ringer.py:~1160-1200`): "check cannot fail", "spec is probably underspecified", pointer-spec warning | _planned (trial)_ |
 
 ## 1. Executed acceptance checks
@@ -69,3 +69,25 @@ requires them per task) because our briefs are generated from GitHub issues
 that don't yet carry acceptance criteria universally — adoption #6 (brief
 lint) is the pressure toward always having one. Check output archiving and
 the ok/err file-suffix contract are ours.
+
+## 5. Retry-once with failure output injected
+
+**Ringer's idea:** a task whose check fails gets exactly one retry, and the
+retry prompt carries the check's failure output — the worker gets concrete
+evidence of *what* failed, not just "try again." Their manifest lint even
+flags checks that "may fail without printing why; retry prompt and eval log
+depend on failure output" (`ringer.py:~1176`).
+
+**Our implementation (original, bash):** when the acceptance check fails on
+a v2 task and `WORKER_CHECK_RETRY=1` (default), `worker-listener.sh`
+re-dispatches the agent once with a retry preamble containing the check
+command, its exit code, and the last 20 lines of its output — placed
+*before* the original brief so the final instruction the agent reads is the
+task itself — then re-runs the check. The outcome JSON records
+`retried: true` and the first attempt's full check output is preserved at
+`done/<id>.check.attempt1.log`.
+
+**Deliberate divergences:** ringer's workers are stateless one-shots; ours
+may be interactive (the retry re-enters the REPL with an attached human able
+to watch). The retry fires on check failure regardless of the agent's own
+exit code — a crashed agent gets the same single second chance.
