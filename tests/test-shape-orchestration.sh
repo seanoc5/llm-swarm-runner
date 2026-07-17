@@ -12,6 +12,10 @@
 # so it doesn't actually invoke llm-start.sh.
 set -euo pipefail
 
+# These assertions exercise the legacy flat layout. Do not inherit an
+# operator's project-grouped swarm setting from the calling shell.
+export SWARM_WORKTREE_GROUPING=flat
+
 green()  { printf '\033[32m✓ %s\033[0m\n' "$*"; }
 red()    { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
@@ -73,6 +77,9 @@ cd "$TEST_DIR"
 mkdir myproject && cd myproject
 git init -q -b master
 git -c user.email=t@t -c user.name=t commit -q --allow-empty -m "initial"
+git clone -q --bare . "$TEST_DIR/origin.git"
+git remote add origin "$TEST_DIR/origin.git"
+git fetch -q origin
 PROJECT_DIR="$TEST_DIR/myproject"
 green "fixture ready at $PROJECT_DIR"
 
@@ -80,7 +87,8 @@ green "fixture ready at $PROJECT_DIR"
 
 heading "Test 1: provision-worker.sh creates worktree + branch + brief"
 cd "$PROJECT_DIR"
-"$PROVISION" 99 > "$TEST_DIR/prov-1.log" 2>&1 || red "provision-worker exit non-zero: $(cat $TEST_DIR/prov-1.log)"
+WORKER_CMD=codex WORKER_HEADLESS=1 WORKER_MODEL=test-codex WORKER_SELF_REVIEW=0 \
+    "$PROVISION" 99 > "$TEST_DIR/prov-1.log" 2>&1 || red "provision-worker exit non-zero: $(cat $TEST_DIR/prov-1.log)"
 WT="$TEST_DIR/wt-issue-99"
 [ -d "$WT" ] || red "worktree not created at $WT"
 git -C "$PROJECT_DIR" show-ref --verify --quiet refs/heads/fix/issue-99 \
@@ -91,7 +99,9 @@ brief=$(ls "$WT"/.swarm/tasks/inbox/*.md | head -1)
 grep -q "FAKE-GH issue #99" "$brief" || red "stub gh body not embedded in brief"
 grep -qE 'new-window .* iss-99' "$TEST_DIR/tmux.log" \
     || red "expected tmux new-window for iss-99; got: $(cat $TEST_DIR/tmux.log)"
-green "worktree, branch, queue, brief (with gh body), tmux new-window all created"
+grep -q 'WORKER_CMD=codex .*WORKER_MODEL=test-codex .*WORKER_HEADLESS=1 .*WORKER_SELF_REVIEW=0' "$TEST_DIR/tmux.log" \
+    || red "expected worker backend env in tmux spawn; got: $(cat "$TEST_DIR/tmux.log")"
+green "worktree, branch, queue, brief, tmux window, and worker backend env all created"
 
 heading "Test 2: provision-worker.sh embeds .swarm-policy.md when present"
 cd "$PROJECT_DIR"
@@ -279,7 +289,10 @@ green "failed hook → exit non-zero, no marker, summary reports failure"
 # ───────────────── coordinator-watch.sh + sweep integration ─────────────────
 
 heading "Test 14: coordinator-watch.sh POST_OUTCOMES=1 invokes sweep on event"
-# Stage a fresh outcome in a sibling worktree (where sweep looks)
+# Stage a fresh outcome in a registered sibling worktree (where sweep looks).
+# coordinator-watch scopes events to `git worktree list`, so a bare sibling
+# directory is intentionally ignored as foreign.
+git -C "$PROJECT_DIR" worktree add -q -b fix/issue-77 "$TEST_DIR/wt-issue-77" master
 mkdir -p "$TEST_DIR/wt-issue-77/.swarm/tasks/done"
 echo '{"task_id":"t77","outcome":"ok"}' > "$TEST_DIR/wt-issue-77/.swarm/tasks/done/t77.ok.json"
 

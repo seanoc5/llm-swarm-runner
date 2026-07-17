@@ -43,9 +43,20 @@ echo
 
 # Show what we're about to discard
 if [ -d "$WT" ]; then
-    AHEAD="$(git -C "$WT" rev-list --count master..HEAD 2>/dev/null || echo '?')"
+    DEFAULT_BRANCH="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+    DEFAULT_BRANCH="${DEFAULT_BRANCH#origin/}"
+    if [ -z "$DEFAULT_BRANCH" ]; then
+        for candidate in main master; do
+            if git show-ref --verify --quiet "refs/heads/$candidate"; then
+                DEFAULT_BRANCH="$candidate"
+                break
+            fi
+        done
+    fi
+    DEFAULT_BRANCH="${DEFAULT_BRANCH:-master}"
+    AHEAD="$(git -C "$WT" rev-list --count "$DEFAULT_BRANCH..HEAD" 2>/dev/null || echo '?')"
     DIRTY="$(git -C "$WT" status --porcelain 2>/dev/null | wc -l)"
-    echo "  Worktree state: $AHEAD commit(s) ahead of master, $DIRTY uncommitted change(s)"
+    echo "  Worktree state: $AHEAD commit(s) ahead of $DEFAULT_BRANCH, $DIRTY uncommitted change(s)"
     git worktree remove --force "$WT"
     echo "  ✓ removed worktree"
 else

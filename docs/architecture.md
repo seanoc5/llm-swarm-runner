@@ -16,9 +16,11 @@ By using Git Worktrees, each agent gets a physically separate clone of the repos
 
 This sandbox supports a fully autonomous architecture managed via `tmux`:
 
-1.  **The Coordinator (Brain):** A dedicated `tmux` session is bootstrapped by `llm-start.sh`. Window 1 runs the configured coordinator (`claude` by default; `COORDINATOR_CMD=gemini` switches to Gemini CLI). The coordinator acts as an autonomous project manager — it uses `gh` to read your backlog, plans tasks, and provisions worker worktrees on the fly via `provision-worker.sh`.
-2.  **The Workers (Hands):** The Coordinator autonomously provisions background `tmux` windows containing isolated worker sandboxes (`claude` by default; `WORKER_CMD=gemini` switches the per-worker agent).
+1.  **The Coordinator (Brain):** A dedicated `tmux` session is bootstrapped by `llm-start.sh`. Window 1 runs the configured coordinator (`claude` by default; `COORDINATOR_CMD=gemini` or `COORDINATOR_CMD=codex` selects another CLI). The coordinator acts as an autonomous project manager — it uses `gh` to read your backlog, plans tasks, and provisions worker worktrees on the fly via `provision-worker.sh`.
+2.  **The Workers (Hands):** The Coordinator autonomously provisions background `tmux` windows containing isolated worker sandboxes (`claude` by default; `WORKER_CMD=gemini` or `WORKER_CMD=codex` switches the per-worker agent).
 3.  **The Communication:** The Coordinator drops task briefs into each worktree's `.swarm/tasks/inbox/` (the v2 queue protocol — atomic mktemp+mv writes, structured `done/*.json` outcomes). A background `worker-listener.sh` claims tasks one at a time, dispatches them to the worker LLM, and writes the outcome JSON. Coordinator monitors progress by polling `done/` and reading the worker's PRs via `gh`.
+
+> **Side note on tmux as a channel.** The file-based bus above is the canonical inter-agent channel. Tmux is the *substrate* every agent runs on, and the host-side coordinator can also use it as a side-channel (read worker scrollback, `send-keys` recovery input) — this is latent capability, partially used by `scripts/check-stuck-workers.sh`. Workers cannot use tmux to talk to anyone (no socket mount in the container). Cross-swarm tmux messaging isn't wired up. The full pros/cons and an opt-out recipe for ignoring best practice are in [`docs/tmux-as-channel.md`](./tmux-as-channel.md).
 
 ## Worker Classes (Local vs GH Actions)
 

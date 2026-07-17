@@ -9,6 +9,10 @@
 # Pairs with test-shape-swarm.sh, which covers worker-listener.sh.
 set -euo pipefail
 
+# These assertions exercise the legacy flat layout. Do not inherit an
+# operator's project-grouped swarm setting from the calling shell.
+export SWARM_WORKTREE_GROUPING=flat
+
 green()  { printf '\033[32m✓ %s\033[0m\n' "$*"; }
 red()    { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
