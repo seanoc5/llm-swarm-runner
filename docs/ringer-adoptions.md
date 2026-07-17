@@ -30,7 +30,7 @@ Reference evaluation: 2026-07-17 session (see `git log` on
 | # | Concept | Ringer source (idea) | Our implementation |
 |---|---------|----------------------|--------------------|
 | 1 | Executed acceptance checks — a task passes only when an executed check exits 0 | `ringer.py:85` (`VERIFY_METHOD = "executed-check"`); per-task required `check` field (`ringer.py:~1027-1031`) | `scripts/worker-listener.sh` (`resolve_check_cmd` / `run_check` / extended `write_outcome`); `check_*` fields in `done/<id>.json` |
-| 2 | Self-review as machinery, not prompt convention | ringer runs checks/verdicts in the harness, not inside the worker's own context | _planned (trial)_ |
+| 2 | Self-review as machinery, not prompt convention | ringer runs checks/verdicts in the harness, not inside the worker's own context | `scripts/self-review-pr.sh` (verdict → exit code + PR marker comment); BLOCK gate in `scripts/swarm-merge.sh` |
 | 3 | Eval log + per-(model, task_type) scoreboard | JSONL eval log; `first_try_pass_rate` (`ringer.py:~2364`); `./ringer.py models` scoreboard | `append_eval_log` in `scripts/worker-listener.sh`; `scripts/swarm-scoreboard.sh`; `SWARM_EVAL_LOG` |
 | 4 | Find ≠ fix — the agent that finds a problem never fixes/reviews its own work | `templates/adversarial-review` kit; "never same worker finds and fixes" rule | _planned (trial)_ |
 | 5 | Retry-once with failure output injected | retry prompt fed by check failure output (`ringer.py:~1176` lint: "check may fail without printing why; retry prompt and eval log depend on failure output") | `scripts/worker-listener.sh` (retry block in main loop, `dispatch_agent`); `retried` field in `done/<id>.json`; `WORKER_CHECK_RETRY` |
@@ -69,6 +69,30 @@ requires them per task) because our briefs are generated from GitHub issues
 that don't yet carry acceptance criteria universally — adoption #6 (brief
 lint) is the pressure toward always having one. Check output archiving and
 the ok/err file-suffix contract are ours.
+
+## 2. Self-review as machinery
+
+**Ringer's idea:** quality gates live in the *harness*, not in the worker's
+goodwill — checks are executed and parsed by machinery, so a worker
+forgetting (or rationalizing away) a gate doesn't silently bypass it.
+
+**Our gap before adoption:** the adversarial self-review
+(`prompts/skill-self-review.md`) was a prompt convention in
+`prompts/worker.md` — nothing ran it, parsed it, or enforced its verdict.
+
+**Our implementation (original, bash):** `scripts/self-review-pr.sh <N>`
+runs the existing skill prompt against a fresh `claude -p` session with the
+PR title/body + diff, parses the verdict token, and maps it to exit codes
+(0 APPROVE / 3 APPROVE_WITH_CAVEATS / 2 BLOCK / 4 skipped / 1 error). With
+`--post` it publishes the verdict as an idempotent
+`<!-- SWARM_SELF_REVIEW: <verdict> -->` marker comment on the PR.
+`scripts/swarm-merge.sh` reads the latest marker and refuses to merge on
+BLOCK unless `--override-review` is given.
+
+**Deliberate divergences:** the review content and verdict taxonomy are
+ours (pre-dated this adoption); ringer contributes the *machinery* framing.
+The worker-side convention stays — this script makes it independently
+runnable and its verdict enforceable.
 
 ## 3. Eval log + scoreboard
 

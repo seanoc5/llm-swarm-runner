@@ -255,6 +255,8 @@ If the markers are missing (older worker, or the worker forgot), default to "�
 
 If you see *"self-review: skipped — WORKER_SELF_REVIEW=0"* or a `claude -p` failure message in the pane, note that the safety layer didn't fire and recommend the user read the diff before merging.
 
+**Self-review is also available as machinery, not just a worker convention** (ringer-concept adoption — `docs/ringer-adoptions.md` #2). `scripts/self-review-pr.sh <N> --post` runs the same fresh-context review yourself and posts the verdict as a `<!-- SWARM_SELF_REVIEW: <verdict> -->` marker comment on the PR (exit codes: 0 APPROVE / 3 CAVEATS / 2 BLOCK / 4 skipped). Use it when a worker skipped its self-review, or to get an independent verdict on any 🔴 PR before surfacing it. `swarm-merge.sh` reads the marker and **refuses to merge a PR whose latest verdict is BLOCK** unless the user passes `--override-review` — mention that gate when reporting a BLOCKed PR.
+
 The tiered self-merge + self-review conventions live in `prompts/worker.md` (§ "Merging your own PR" and § "Self-review before merge") — consult them if a worker's behavior on a merge request seems off (e.g. it accepted a bare "yes" on a medium-risk PR, tried to merge a high-risk PR on instruction, or proposed merge despite a BLOCK verdict). A project's `.swarm-policy.md` may also disable self-merge entirely; if so, instruct workers to hand back the manual `gh pr merge` command regardless of risk rating.
 
 ### When the user hits a merge conflict

@@ -4,11 +4,17 @@
 # Usage:
 #   swarm-merge.sh <issue#>           # resolves PR from issue, merges, cleans
 #   swarm-merge.sh <issue#> --no-kill # skip the tmux-kill step
+#   swarm-merge.sh <issue#> --override-review  # merge despite a BLOCK verdict
 #   swarm-merge.sh --sweep-only       # just run the local-branch sweep
 #
 # What it does:
 #   1. Resolves the PR linked to the issue.
-#   2. Verifies the PR is OPEN and MERGEABLE (or already MERGED → just cleans).
+#   2. Verifies the PR is OPEN and MERGEABLE (or already MERGED → just cleans),
+#      and checks the self-review verdict gate: a
+#      <!-- SWARM_SELF_REVIEW: BLOCK --> marker comment (posted by
+#      scripts/self-review-pr.sh) refuses the merge unless --override-review
+#      is given. Verdict-gated merging is a ringer-concept adoption — see
+#      docs/ringer-adoptions.md #2.
 #   3. cds to the MAIN worktree of the current repo (not the feature one).
 #   4. Runs `gh pr merge --squash --delete-branch`. The local-delete step may
 #      fail silently if the branch is checked out in a sibling worktree —
@@ -27,6 +33,7 @@ set -euo pipefail
 GRACE_SECONDS=60
 NO_KILL=0
 SWEEP_ONLY=0
+OVERRIDE_REVIEW=0
 ISSUE=""
 
 # --- arg parsing -----------------------------------------------------------
@@ -35,6 +42,7 @@ for arg in "$@"; do
   case "$arg" in
     --no-kill)    NO_KILL=1 ;;
     --sweep-only) SWEEP_ONLY=1 ;;
+    --override-review) OVERRIDE_REVIEW=1 ;;
     --help|-h)
       sed -n '2,/^# Exits/p' "$0" | sed 's/^# \?//'
       exit 0
@@ -151,6 +159,27 @@ case "$PR_STATE" in
       echo "       See \$LLM_SWARM_DOCS/VCS/git-github.md for the playbook." >&2
       exit 1
     fi
+    # Self-review verdict gate (ringer concept #2 — docs/ringer-adoptions.md).
+    # Latest SWARM_SELF_REVIEW marker comment (from self-review-pr.sh) wins.
+    VERDICT=$(gh pr view "$PR_NUM" --json comments -q '.comments[].body' 2>/dev/null \
+              | grep -oE 'SWARM_SELF_REVIEW: (APPROVE_WITH_CAVEATS|APPROVE|BLOCK)' \
+              | tail -1 | sed 's/^SWARM_SELF_REVIEW: //' || true)
+    case "$VERDICT" in
+      BLOCK)
+        if [ "$OVERRIDE_REVIEW" = 0 ]; then
+          echo "ERROR: PR #$PR_NUM has a self-review BLOCK verdict. Read the review" >&2
+          echo "       comment on the PR; merge with --override-review if you disagree." >&2
+          exit 1
+        fi
+        echo "       $(c_amber "⚠ overriding self-review BLOCK verdict (--override-review)")"
+        ;;
+      APPROVE_WITH_CAVEATS)
+        echo "       $(c_amber "self-review: APPROVE_WITH_CAVEATS — read the caveat on the PR")" ;;
+      APPROVE)
+        echo "       $(c_green "self-review: APPROVE")" ;;
+      *)
+        echo "       $(c_dim "no self-review verdict comment (optional: scripts/self-review-pr.sh $PR_NUM --post)")" ;;
+    esac
     echo "[4/7] merging PR #$PR_NUM (squash, delete-branch)…"
     # gh pr merge's local-delete step may fail; tolerate it.
     if ! gh pr merge "$PR_NUM" --squash --delete-branch; then
