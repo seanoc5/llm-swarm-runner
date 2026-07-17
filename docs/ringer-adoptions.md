@@ -34,7 +34,7 @@ Reference evaluation: 2026-07-17 session (see `git log` on
 | 3 | Eval log + per-(model, task_type) scoreboard | JSONL eval log; `first_try_pass_rate` (`ringer.py:~2364`); `./ringer.py models` scoreboard | `append_eval_log` in `scripts/worker-listener.sh`; `scripts/swarm-scoreboard.sh`; `SWARM_EVAL_LOG` |
 | 4 | Find ≠ fix — the agent that finds a problem never fixes/reviews its own work | `templates/adversarial-review` kit; "never same worker finds and fixes" rule | _planned (trial)_ |
 | 5 | Retry-once with failure output injected | retry prompt fed by check failure output (`ringer.py:~1176` lint: "check may fail without printing why; retry prompt and eval log depend on failure output") | `scripts/worker-listener.sh` (retry block in main loop, `dispatch_agent`); `retried` field in `done/<id>.json`; `WORKER_CHECK_RETRY` |
-| 6 | Brief/manifest lint — reject unverifiable or underspecified tasks before dispatch | manifest lint findings (`ringer.py:~1160-1200`): "check cannot fail", "spec is probably underspecified", pointer-spec warning | _planned (trial)_ |
+| 6 | Brief/manifest lint — reject unverifiable or underspecified tasks before dispatch | manifest lint findings (`ringer.py:~1160-1200`): "check cannot fail", "spec is probably underspecified", pointer-spec warning | `scripts/lint-brief.sh`; warn-only hook in `scripts/provision-worker.sh`; `BRIEF_LINT=0` |
 
 ## 1. Executed acceptance checks
 
@@ -137,3 +137,26 @@ task itself — then re-runs the check. The outcome JSON records
 may be interactive (the retry re-enters the REPL with an attached human able
 to watch). The retry fires on check failure regardless of the agent's own
 exit code — a crashed agent gets the same single second chance.
+
+## 6. Brief lint
+
+**Ringer's idea:** lint the work definition *before* dispatch — a check
+that cannot fail verifies nothing (`ringer.py:~1172`), a spec under a
+minimum length is "probably underspecified; workers are stateless and
+cannot ask questions", and a spec that is just a pointer starves the retry
+prompt of context.
+
+**Our implementation (original, bash):** `scripts/lint-brief.sh` lints the
+`## Task` section of a queued brief for: `no-done-definition` (no
+`SWARM_CHECK` marker and no acceptance criteria/checklist),
+`check-cannot-fail` (`true` / `:` / `echo …` / `exit 0`),
+`no-named-files`, and `underspecified` (< 200 chars).
+`provision-worker.sh` runs it warn-only right after queueing the brief
+(`BRIEF_LINT=0` disables; `--strict` available for callers that want a
+hard gate).
+
+**Deliberate divergences:** warn-only where ringer's lint blocks — our
+briefs come from live GitHub issues mid-conversation, and blocking dispatch
+on prose quality would fight the interactive workflow. The lint's job here
+is to pressure issues toward carrying acceptance criteria (which feed
+adoption #1's executed checks).

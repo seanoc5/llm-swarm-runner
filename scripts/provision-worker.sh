@@ -303,6 +303,15 @@ if ! mv -n "$TMP" "$DEST" 2>/dev/null || [ -f "$TMP" ]; then
 fi
 echo "[3/4] brief queued: $DEST"
 
+# Brief lint (ringer manifest-lint concept — docs/ringer-adoptions.md #6).
+# Warn-only: dispatch proceeds, but unverifiable briefs (no acceptance
+# criteria / can't-fail check / no named files / underspecified) are
+# surfaced so the coordinator can improve the issue before the worker
+# burns tokens on it. BRIEF_LINT=0 disables.
+if [ "${BRIEF_LINT:-1}" = "1" ] && [ -x "$SCRIPT_DIR/lint-brief.sh" ]; then
+    "$SCRIPT_DIR/lint-brief.sh" "$DEST" || true
+fi
+
 # 4. Spawn worker tmux window (background — does NOT steal focus from coordinator)
 # If the session doesn't exist, fail clearly — the coordinator should be
 # running inside the session, so it should always exist by the time we
