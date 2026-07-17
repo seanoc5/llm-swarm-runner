@@ -32,7 +32,7 @@ Reference evaluation: 2026-07-17 session (see `git log` on
 | 1 | Executed acceptance checks — a task passes only when an executed check exits 0 | `ringer.py:85` (`VERIFY_METHOD = "executed-check"`); per-task required `check` field (`ringer.py:~1027-1031`) | `scripts/worker-listener.sh` (`resolve_check_cmd` / `run_check` / extended `write_outcome`); `check_*` fields in `done/<id>.json` |
 | 2 | Self-review as machinery, not prompt convention | ringer runs checks/verdicts in the harness, not inside the worker's own context | `scripts/self-review-pr.sh` (verdict → exit code + PR marker comment); BLOCK gate in `scripts/swarm-merge.sh` |
 | 3 | Eval log + per-(model, task_type) scoreboard | JSONL eval log; `first_try_pass_rate` (`ringer.py:~2364`); `./ringer.py models` scoreboard | `append_eval_log` in `scripts/worker-listener.sh`; `scripts/swarm-scoreboard.sh`; `SWARM_EVAL_LOG` |
-| 4 | Find ≠ fix — the agent that finds a problem never fixes/reviews its own work | `templates/adversarial-review` kit; "never same worker finds and fixes" rule | _planned (trial)_ |
+| 4 | Find ≠ fix — the agent that finds a problem never fixes/reviews its own work | `templates/adversarial-review` kit; "never same worker finds and fixes" rule | `prompts/coordinator.md` § "Find ≠ fix: independent review dispatch" |
 | 5 | Retry-once with failure output injected | retry prompt fed by check failure output (`ringer.py:~1176` lint: "check may fail without printing why; retry prompt and eval log depend on failure output") | `scripts/worker-listener.sh` (retry block in main loop, `dispatch_agent`); `retried` field in `done/<id>.json`; `WORKER_CHECK_RETRY` |
 | 6 | Brief/manifest lint — reject unverifiable or underspecified tasks before dispatch | manifest lint findings (`ringer.py:~1160-1200`): "check cannot fail", "spec is probably underspecified", pointer-spec warning | `scripts/lint-brief.sh`; warn-only hook in `scripts/provision-worker.sh`; `BRIEF_LINT=0` |
 
@@ -115,6 +115,26 @@ empirically checkable.
 task_type taxonomy (our tasks are GitHub issues, not manifest kits). The
 probation/proven routing ladder is NOT adopted; the scoreboard is
 observability-only for now.
+
+## 4. Find ≠ fix
+
+**Ringer's idea:** the same worker never both finds and fixes a problem,
+and review is done by *different* models/agents than the author (their
+`adversarial-review` template kit has N different models review the same
+artifact). Author confidence is systematically miscalibrated; independence
+is the antidote.
+
+**Our implementation (prompt-level):** a "Find ≠ fix: independent review
+dispatch" section in `prompts/coordinator.md`: the authoring worker is
+never asked to judge its own PR; the default gate is the fresh-context
+`self-review-pr.sh` (adoption #2); 🔴 high PRs additionally get a
+different-model or different-CLI reviewer; reviewers stay read-only and
+findings are requeued to the author to fix.
+
+**Deliberate divergences:** this is coordinator doctrine, not enforced
+machinery (the merge-blocking half lives in adoption #2's verdict gate).
+N-model review panels are not adopted — one independent reviewer per tier
+matches our interactive economics.
 
 ## 5. Retry-once with failure output injected
 
