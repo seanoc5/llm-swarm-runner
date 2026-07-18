@@ -7,6 +7,14 @@
 # spawn worker nodes in isolated worktrees to perform local tasks.
 set -euo pipefail
 
+case "${1:-}" in
+    -h|--help)
+        echo "Usage: test-e2e-swarm.sh"
+        echo "Runs a real coordinator + worker smoke test and may consume agent quota."
+        exit 0
+        ;;
+esac
+
 green()  { printf '\033[32m%s\033[0m\n' "$*"; }
 yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
 red()    { printf '\033[31m%s\033[0m\n' "$*"; }
@@ -14,10 +22,12 @@ red()    { printf '\033[31m%s\033[0m\n' "$*"; }
 TEST_DIR="/tmp/swarm-e2e-$(date +%s)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 LLM_SWARM_DIR="${LLM_SWARM_DIR:-$(dirname "$SCRIPT_DIR")}"
+TMUX_SOCKET="swarm-main-repo"
+tmux_swarm() { command tmux -L "$TMUX_SOCKET" "$@"; }
 
 echo "=== Swarm E2E Test ==="
 yellow "Cleaning up previous sessions..."
-tmux kill-session -t "llm-main-repo" 2>/dev/null || true
+tmux_swarm kill-session -t "llm-main-repo" 2>/dev/null || true
 
 yellow "Creating temporary workspace at: $TEST_DIR"
 mkdir -p "$TEST_DIR/main-repo"
@@ -68,7 +78,7 @@ export COORDINATOR_HEADLESS=1
 
 echo ""
 yellow "Waiting up to 90 seconds for workers to complete their tasks..."
-echo "You can open another terminal and run 'tmux a' to watch them work!"
+echo "You can open another terminal and run 'tmux -L $TMUX_SOCKET a -t llm-main-repo' to watch them work!"
 
 # Poll for success
 MAX_WAITS=30
@@ -78,14 +88,14 @@ for ((i=1; i<=MAX_WAITS; i++)); do
     sleep 3
     
     # Check if the session is still alive
-    if ! tmux has-session -t "llm-main-repo" 2>/dev/null; then
+    if ! tmux_swarm has-session -t "llm-main-repo" 2>/dev/null; then
         echo ""
         red "✗ Session crashed! The coordinator tmux session is no longer running."
         exit 1
     fi
     
     # Capture the current screen of the coordinator window
-    SCREEN_DUMP=$(tmux capture-pane -p -t "llm-main-repo:coordinator")
+    SCREEN_DUMP=$(tmux_swarm capture-pane -p -t "llm-main-repo:coordinator")
     
     # Stuck detection: the coordinator typically exits within ~20s of launching
     # (fast in -p mode), then the pane sits idle while workers spin up their
@@ -105,7 +115,7 @@ for ((i=1; i<=MAX_WAITS; i++)); do
     if [ $STUCK_COUNT -ge 20 ]; then
         echo ""
         red "✗ Process appears stuck (no output change for 60s). Killing session."
-        tmux kill-session -t "llm-main-repo" 2>/dev/null || true
+        tmux_swarm kill-session -t "llm-main-repo" 2>/dev/null || true
         exit 1
     fi
 
@@ -119,7 +129,7 @@ for ((i=1; i<=MAX_WAITS; i++)); do
          red "> $ERROR_LINE"
          yellow "Full dump saved to /tmp/swarm-error.log"
          echo "$SCREEN_DUMP" > /tmp/swarm-error.log
-         tmux kill-session -t "llm-main-repo" 2>/dev/null || true
+         tmux_swarm kill-session -t "llm-main-repo" 2>/dev/null || true
          exit 1
     fi
 
@@ -132,7 +142,7 @@ for ((i=1; i<=MAX_WAITS; i++)); do
         
         # Cleanup
         if [ "${KEEP_ALIVE:-0}" != "1" ]; then
-            tmux kill-session -t "llm-main-repo" 2>/dev/null || true
+            tmux_swarm kill-session -t "llm-main-repo" 2>/dev/null || true
             rm -rf "$TEST_DIR"
         else
             yellow "KEEP_ALIVE=1 is set. Leaving tmux session 'llm-main-repo' running for review."
@@ -143,8 +153,8 @@ done
 
 echo ""
 red "✗ Timeout. The workers did not complete the tasks in time."
-red "Please attach to the tmux session (tmux a) to see where it got stuck."
+red "Please attach to the tmux session (tmux -L $TMUX_SOCKET a -t llm-main-repo) to see where it got stuck."
 if [ "${KEEP_ALIVE:-0}" != "1" ]; then
-    tmux kill-session -t "llm-main-repo" 2>/dev/null || true
+    tmux_swarm kill-session -t "llm-main-repo" 2>/dev/null || true
 fi
 exit 1

@@ -24,7 +24,9 @@ check_script() {
     # We grep for variable assignments and then for usages to catch obvious typos.
     # A more robust way is to run with 'set -u' but that requires mocking environment.
     if command -v shellcheck &>/dev/null; then
-        if ! shellcheck "$script"; then
+        # SC1091 is informational for dynamic source paths and should not
+        # fail the suite. Keep warnings and errors as the quality gate.
+        if ! shellcheck -S warning "$script"; then
             red "  ✗ $script: Shellcheck failed"
             FAIL=$((FAIL + 1))
             return
@@ -58,6 +60,7 @@ LLM_SWARM_DIR="${LLM_SWARM_DIR:-$(dirname "$TESTS_DIR")}"
 echo "=== Script Sanity Checks ==="
 check_script "$LLM_SWARM_DIR/llm-start.sh"
 check_script "$LLM_SWARM_DIR/sandbox.sh"
+check_script "$LLM_SWARM_DIR/scripts/coordinator-codex.sh"
 check_script "$LLM_SWARM_DIR/scripts/worker-listener.sh"
 check_script "$LLM_SWARM_DIR/scripts/reap-orphan-worktrees.sh"
 

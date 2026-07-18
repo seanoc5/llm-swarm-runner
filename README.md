@@ -1,17 +1,17 @@
 # LLM Swarm Runner
 
-*Multi-agent dev sandbox orchestrating Claude Code workers in parallel tmux panes and isolated git worktrees.*
+*Multi-agent dev sandbox orchestrating coding agents in parallel tmux panes and isolated git worktrees.*
 
 ![CI](https://img.shields.io/badge/CI-pending-lightgrey) ![License](https://img.shields.io/badge/license-MIT-blue)
 
-**TL;DR:** llm-swarm-runner points Claude Code (or Gemini CLI) at your GitHub issue backlog and lets a pool of sandboxed agents chew through it in parallel — each in its own git worktree, each in a Docker container, all visible live in tmux. You stay in the driver's seat; the swarm handles the parallelism, the isolation, and the bookkeeping.
+**TL;DR:** llm-swarm-runner points Claude Code, Gemini CLI, or Codex CLI at your GitHub issue backlog and lets a pool of sandboxed agents chew through it in parallel — each in its own git worktree, each in a Docker container, all visible live in tmux. You stay in the driver's seat; the swarm handles the parallelism, the isolation, and the bookkeeping.
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 A local-first **Claude Code swarm runner** for your own GitHub backlog.
 
 A one-shot coordinator agent triages open issues, provisions isolated workers in **git worktrees**, and an event-driven watcher tops the swarm up as issues finish. Workers run in Docker sandboxes with `--network host`, so they can talk to your local Postgres, Spring Boot, etc. exactly as you do. Tmux gives you live observation of every worker.
 
-Also works as a single-agent sandbox if you don't want the swarm — `sandbox.sh <project> claude` gives you a safer shell around one agent. Supports **Claude Code**, **Gemini CLI**, and **promptfoo**.
+Also works as a single-agent sandbox if you don't want the swarm — `sandbox.sh <project> codex` gives you a safer shell around one agent. Supports **Claude Code**, **Gemini CLI**, **Codex CLI**, and **promptfoo**.
 
 ## Show me first
 
@@ -21,12 +21,12 @@ Also works as a single-agent sandbox if you don't want the swarm — `sandbox.sh
 > without setting up your own project.
 
 > ⚠️ **This is NOT a security boundary against a hostile / compromised agent.**
-> The container runs with `--network host`, mounts `/var/run/docker.sock` for Docker-out-of-Docker, mounts `~/.claude` rw and `~/.ssh` ro, and the agents run with `--dangerously-skip-permissions` / `--yolo`. A sufficiently-capable agent inside the container can spawn sibling containers with `-v /:/host`, exfiltrate your gh token, push to your repos, etc. Treat the agents as **trusted-but-fallible**, not as adversaries. See [`docs/security.md`](./docs/security.md) for blast-radius details.
+> The container runs with `--network host`, mounts `/var/run/docker.sock` for Docker-out-of-Docker, mounts `~/.claude` and `~/.codex` rw plus `~/.ssh` ro, and the agents run with backend-specific auto-approval flags. A sufficiently-capable agent inside the container can spawn sibling containers with `-v /:/host`, exfiltrate your gh token, push to your repos, etc. Treat the agents as **trusted-but-fallible**, not as adversaries. See [`docs/security.md`](./docs/security.md) for blast-radius details.
 
 ## Who this is for / not for
 
 **For you if:**
-- You already use Claude Code or Gemini CLI and want to run several in parallel against real backlogs.
+- You already use Claude Code, Gemini CLI, or Codex CLI and want to run several in parallel against real backlogs.
 - You'd rather observe workers live in tmux than rely on a hosted dashboard.
 - You're OK accepting "trusted-but-fallible agent" as the threat model (see [`docs/security.md`](./docs/security.md)).
 
@@ -71,7 +71,7 @@ Host-side tools you'll need before running the swarm:
 - `tmux` — session multiplexer (for live observation of workers)
 - `gh` — GitHub CLI, authenticated
 - `docker` — for sandboxed workers
-- One of `claude` (Claude Code) or `gemini` CLI — for the coordinator
+- One of `claude` (Claude Code), `gemini`, or `codex` CLI — for the coordinator
 - `git` — >= 2.20 for worktree support
 
 ---
@@ -113,10 +113,10 @@ Let the coordinator triage your backlog and provision worker agents.
 # Navigate to any project you want to work on
 cd /opt/work/myproject
 
-# Bootstrap the coordinator (claude default; COORDINATOR_CMD=gemini to use Gemini)
+# Bootstrap the coordinator (claude default; COORDINATOR_CMD=codex to use Codex)
 $LLM_SWARM_DIR/llm-start.sh "Optional initial prompt; default: run startup checklist"
 ```
-This creates a dedicated `tmux` session, runs the coordinator in Window 1 with the prompt you supplied (default: survey GitHub issues + provision workers), and spawns isolated Claude worker agents in dockerized git worktrees, one per dispatched issue.
+This creates a dedicated `tmux` session, runs the coordinator in Window 1 with the prompt you supplied (default: survey GitHub issues + provision workers), and spawns isolated worker agents in dockerized git worktrees, one per dispatched issue.
 
 **Common CLI flags** (full list in `./llm-start.sh --help`):
 
@@ -140,6 +140,12 @@ COORDINATOR_VERBOSE=1 ./llm-start.sh "..."
 # Use Claude Max instead of gemini (strips ANTHROPIC_API_KEY so OAuth is used)
 COORDINATOR_CMD=claude ./llm-start.sh "..."
 
+# Run a one-shot Codex coordinator; model defaults to your Codex CLI config
+COORDINATOR_CMD=codex ./llm-start.sh "..."
+
+# Use Codex workers behind any coordinator
+WORKER_CMD=codex WORKER_HEADLESS=1 ./llm-start.sh "..."
+
 # Override the gemini model (e.g., A/B-test the preview tier)
 COORDINATOR_MODEL=gemini-3-flash-preview ./llm-start.sh "..."
 ```
@@ -148,14 +154,18 @@ Full env-var reference in [`docs/llm-swarm-runner-overview.md`](./docs/llm-swarm
 
 #### How the coordinator works
 
-The coordinator is a **one-shot triage agent**, not a long-running supervisor daemon:
+The coordinator is a lightweight triage agent, not a supervisor daemon. Codex
+and headless Claude/Gemini runs are one-shot; interactive Claude is the default
+and accepts follow-up prompts in its existing REPL:
 
 1. You invoke `llm-start.sh "<what you want done>"` (or no prompt for the default checklist).
-2. The coordinator wakes, reads project state (`git`, `gh`), provisions any workers needed, and **exits**.
+2. The coordinator reads project state (`git`, `gh`) and provisions any workers needed.
 3. Workers continue asynchronously in their own `tmux` windows — they don't need the coordinator alive to do their work.
 4. When you want a status check or another action, **invoke `llm-start.sh` again** with a follow-up prompt — e.g. `llm-start.sh "Check worker progress and review any open PRs"`.
 
-This is by design, not a limitation. One-shot invocations have clean focused context (cheaper tokens, fewer hallucinations from accumulated history), zero idle cost between actions, and are trivially scriptable.
+Codex intentionally uses one-shot `codex exec` coordination. It re-derives
+state from disk on every wake, which keeps repeated watcher-triggered runs
+focused and scriptable.
 
 ##### Automating the loop
 
@@ -287,13 +297,16 @@ $LLM_SWARM_DIR/sandbox.sh /path/to/project claude
 
 # Launch Gemini CLI inside the sandbox
 $LLM_SWARM_DIR/sandbox.sh /path/to/project gemini
+
+# Launch Codex CLI inside the sandbox
+$LLM_SWARM_DIR/sandbox.sh /path/to/project codex
 ```
 
 ---
 
 ## ✨ Features at a glance
 
-- **Identity Persistence**: Automatically mounts your host's Claude, GitHub, Git, and SSH configs. No re-authentication needed.
+- **Identity Persistence**: Automatically mounts your host's Claude, Codex, GitHub, Git, and SSH configs. No re-authentication needed.
 - **Pre-baked Toolchain**: Node.js 22, Java 21, Python 3 (with `uv`), Deno, Docker CLI, and LLM CLIs.
 - **GitHub CLI Auth**: Injects your host's `gh` token seamlessly so agents can create PRs out of the box.
 - **Git Commit Signing**: Mounts `~/.ssh` correctly so SSH-signed commits pass.

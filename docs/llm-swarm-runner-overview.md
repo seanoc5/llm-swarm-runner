@@ -1,6 +1,6 @@
 # llm-swarm-runner: Project Overview
 
-A persistent, local-first sandbox for running autonomous LLM agents (Claude Code, Gemini CLI) against your real host services, with safety isolation provided by Docker + git worktrees + tmux. This document is the canonical reference for *how the pieces fit together*; for narrower topics see the other files in `docs/`.
+A persistent, local-first sandbox for running autonomous LLM agents (Claude Code, Gemini CLI, Codex CLI) against your real host services, with safety isolation provided by Docker + git worktrees + tmux. This document is the canonical reference for *how the pieces fit together*; for narrower topics see the other files in `docs/`.
 
 ## Contents
 
@@ -27,7 +27,7 @@ A persistent, local-first sandbox for running autonomous LLM agents (Claude Code
   - [test-e2e-swarm.sh — Local end-to-end test (with real LLM)](#test-e2e-swarmsh--local-end-to-end-test-with-real-llm)
 - [End-to-End Flow (Real Use)](#end-to-end-flow-real-use)
 - [Coordinator Trade-offs](#coordinator-trade-offs)
-- [Coordinator Lifecycle (one-shot by design)](#coordinator-lifecycle-one-shot-by-design)
+- [Coordinator Lifecycle](#coordinator-lifecycle)
 - [Known Limitations](#known-limitations)
 - [Reproducible Builds](#reproducible-builds)
 - [Related Files](#related-files)
@@ -49,8 +49,8 @@ Running autonomous LLM agents directly on your host is risky: a hallucinated `rm
 |  +---------------+  +-------------+  +-------------+           |
 |  | window 1      |  | window 2    |  | window 3    |   ...     |
 |  | "coordinator" |  | "iss-42"    |  | "iss-57"    |           |
-|  | claude OR     |  | sandbox.sh  |  | sandbox.sh  |           |
-|  | gemini        |  | -> claude   |  | -> claude   |           |
+|  | configured    |  | sandbox.sh  |  | sandbox.sh  |           |
+|  | coordinator   |  | -> worker   |  | -> worker   |           |
 |  | (host shell)  |  | (in docker) |  | (in docker) |           |
 |  +-------+-------+  +------+------+  +------+------+           |
 |          | provisions       | watches             | watches    |
@@ -81,14 +81,16 @@ Two distinct capabilities flow from this:
 
 **Asymmetric visibility — not the symmetric one you might assume.** The coordinator can read every worker's pane scrollback; **workers cannot read the coordinator's or each other's panes via tmux**, because the host tmux socket isn't bind-mounted into worker containers (see [`sandbox.sh`](../sandbox.sh) mount list). Workers do, however, share `/var/run/docker.sock` and can `docker exec` into sibling containers — a *larger* blast radius than tmux visibility, covered in [`docs/security.md`](./security.md).
 
+For a consolidated treatment of tmux as an inter-agent channel — what works today, what's blocked by design, pros/cons vs the file-based bus, and the escape-hatch recipe for opting out of the sandbox — see [`docs/tmux-as-channel.md`](./tmux-as-channel.md).
+
 ## Components
 
 ### `sandbox.sh` — Docker wrapper for one agent
 
 Generalized launcher: `sandbox.sh <project-dir> <agent> [extra-args]`
 
-- `<agent>` ∈ `{claude, gemini, listener, bash}` (default `bash`).
-- Mounts: project dir (rw), `~/.claude` (rw), `~/.claude.json` (rw), `~/.ssh` (ro), `~/.gitconfig` (ro), `~/.config/gh` (ro), `~/.npm-global` (rw), `~/.npm` (rw), and the script's own dir (ro, so worker-listener.sh is reachable).
+- `<agent>` ∈ `{claude, gemini, codex, listener, bash}` (default `bash`).
+- Mounts: project dir (rw), `~/.claude` (rw), `~/.claude.json` (rw), `~/.codex` (rw), `~/.ssh` (ro), `~/.gitconfig` (ro), `~/.config/gh` (ro), `~/.npm-global` (rw), `~/.npm` (rw), and the script's own dir (ro, so worker-listener.sh is reachable).
 - Auto-mounts the **git common dir** when invoked on a worktree whose `.git` file points outside the project dir.
 - **Docker-out-of-Docker (DooD):** mounts `/var/run/docker.sock` so Testcontainers / `docker` CLI work inside the sandbox; `--group-add` gives the sandbox user write perms on the socket.
 - **GH token passthrough:** reads `gh auth token` on the host and injects as `GH_TOKEN` (necessary because `gh` stores its token in the system keyring on Linux, not in the mounted config dir).
@@ -99,9 +101,9 @@ Generalized launcher: `sandbox.sh <project-dir> <agent> [extra-args]`
 
 ### `llm-start.sh` — Bootstrap a Coordinator session
 
-Creates `tmux` session `llm-<basename-of-cwd>` if missing, opens window 1 as `coordinator`, and launches the configured coordinator command in headless print mode (`-p`) with the initial prompt and the system prompt from `prompts/coordinator.md`.
+Creates `tmux` session `llm-<basename-of-cwd>` if missing, opens window 1 as `coordinator`, and launches the configured coordinator with the initial prompt and the procedure from `prompts/coordinator.md`. Claude defaults to an interactive REPL; Codex runs one-shot via `codex exec`; Gemini supports print or interactive mode.
 
-Optionally also spawns `coordinator-watch.sh` in window 2 (`watch`) when `WATCH=1`. The watcher inherits `POST_OUTCOMES`, `OUTCOME_HOOK`, `DEBOUNCE_SECS`, `WAKE_PROMPT`, `POLL_SECS`, `WORKSPACE`, and `SWEEP` directly from the caller's env, plus `MAX_WORKERS`, `MAX_TMUX_WINDOWS`, `TARGET_AVAILABLE`, `OWNER_LABELS`, and `INCLUDE_ASSIGNED_TO_OTHERS` via the tmux session env (set by `tmux new-session -e` after `llm-start.sh` loads `<project>/.swarm/.env` + `.env.example`). So:
+Optionally also spawns `coordinator-watch.sh` as a second pane in the `util` window when `WATCH=1`. The watcher inherits `POST_OUTCOMES`, `OUTCOME_HOOK`, `DEBOUNCE_SECS`, `WAKE_PROMPT`, `POLL_SECS`, `WORKSPACE`, and `SWEEP` directly from the caller's env, plus `MAX_WORKERS`, `MAX_TMUX_WINDOWS`, `TARGET_AVAILABLE`, `OWNER_LABELS`, and `INCLUDE_ASSIGNED_TO_OTHERS` via the tmux session env (set by `tmux new-session -e` after `llm-start.sh` loads `<project>/.swarm/.env` + `.env.example`). So:
 
 ```bash
 WATCH=1 POST_OUTCOMES=1 OUTCOME_HOOK=/path/to/poster ./llm-start.sh
@@ -126,7 +128,7 @@ This means you can re-invoke `llm-start.sh` repeatedly with new prompts without 
 | Flag                    | Equivalent env                  | Notes                                                                  |
 |-------------------------|---------------------------------|------------------------------------------------------------------------|
 | `-h`, `--help`          | n/a                             | Full reference (env vars, yolo bundle, examples)                       |
-| `-w`, `--watch`         | `WATCH=1`                       | Spawn `coordinator-watch.sh` in window 2                                |
+| `-w`, `--watch`         | `WATCH=1`                       | Spawn `coordinator-watch.sh` in the `util` window                       |
 | `-y`, `--yolo`          | (bundle — see below)            | Opinionated automation; explicit flags + shell env still win            |
 | `--status`              | `STATUS=1`                      | Spawn `gh-status-bar.sh` in window 3                                    |
 | `--max-workers N`       | `MAX_WORKERS=N`                 | Concurrent worker tmux windows (default 5)                              |
@@ -151,12 +153,12 @@ WATCH=1  STATUS=1  MAX_WORKERS=5  INCLUDE_ASSIGNED_TO_OTHERS=1  DEBOUNCE_SECS=15
 
 | Variable                     | Default            | Flag                          | Notes                                                                                            |
 |------------------------------|--------------------|-------------------------------|--------------------------------------------------------------------------------------------------|
-| `COORDINATOR_CMD`            | `claude`           | —                             | `claude`, `gemini`, or any custom CLI                                                            |
-| `COORDINATOR_MODEL`          | `gemini-2.5-flash` | —                             | Only consumed when `COORDINATOR_CMD=gemini`. Stable; `gemini-3-flash-preview` is broken on multi-tool sequences (server-side INVALID_ARGUMENT). |
+| `COORDINATOR_CMD`            | `claude`           | —                             | `claude`, `gemini`, `codex`, or any custom CLI                                                    |
+| `COORDINATOR_MODEL`          | backend-dependent  | —                             | Passed to Claude, Gemini, or Codex when set. Codex otherwise uses the CLI-configured default.      |
 | `COORDINATOR_VERBOSE`        | `0`                | —                             | When `1` and using gemini: swaps `-p` for `-i` (`--prompt-interactive`) so tool calls are visible live in the pane. Agent stays alive — exit with `/quit`. claude is unaffected (its `-p` already streams). |
 | `COORDINATOR_USE_API_KEY`    | `0`                | —                             | When `1` and using claude: keeps `ANTHROPIC_API_KEY` in the agent's env (bills the API account). Default strips it so Claude Max OAuth is used. |
 | `NON_INTERACTIVE`            | `0`                | —                             | When `1`, skip auto-attach (used by tests)                                                       |
-| `WATCH`                      | `0`                | `-w`, `--watch`               | When `1`, spawn `coordinator-watch.sh` in window 2                                               |
+| `WATCH`                      | `0`                | `-w`, `--watch`               | When `1`, spawn `coordinator-watch.sh` in the `util` window                                      |
 | `STATUS`                     | `0`                | `--status`                    | When `1`, spawn `gh-status-bar.sh` in window 3                                                   |
 | `MAX_WORKERS`                | `5`                | `--max-workers N`             | Concurrent worker tmux windows the coordinator may have alive at once. `provision-worker.sh` enforces server-side (exit 3 on cap). |
 | `MAX_TMUX_WINDOWS`           | `10`               | `--max-windows N`             | Hard cap on total tmux windows in the session — counts coordinator + watch + status + alive workers + leftover finished worker windows. |
@@ -184,7 +186,7 @@ Reverse of `provision-worker.sh`. Removes the worktree, deletes the `fix/issue-N
 kill-worktree.sh <issue-number> [project-dir]
 ```
 
-Use for ABANDON verdicts from coordinator triage. Uses `--force` on the worktree removal — uncommitted work is lost. The script prints `N commits ahead of master, M uncommitted changes` before deletion so you can spot any worktree that has unexpected work.
+Use for ABANDON verdicts from coordinator triage. Uses `--force` on the worktree removal — uncommitted work is lost. The script prints `N commits ahead of <default-branch>, M uncommitted changes` before deletion so you can spot any worktree that has unexpected work.
 
 ### `requeue.sh` — Drop a follow-up brief into a worker's queue
 
@@ -254,7 +256,7 @@ If the file is absent, the coordinator omits the Guardrails section entirely (no
 
 ### OpenBrain MCP integration
 
-Both coordinator backends (claude + gemini) and any worker agents can talk to a local **OpenBrain** MCP server (knowledge graph at `http://127.0.0.1:8100`) via Model Context Protocol. This gives the agents persistent memory tools across invocations:
+Claude and Gemini coordinators/workers can talk to a local **OpenBrain** MCP server (knowledge graph at `http://127.0.0.1:8100`) via Model Context Protocol. Codex has the same config mount and host-network reachability, but still needs its MCP entry configured before it has parity. OpenBrain gives configured agents persistent memory tools across invocations:
 
 | MCP tool | What it does |
 |---|---|
@@ -271,6 +273,8 @@ Both coordinator backends (claude + gemini) and any worker agents can talk to a 
 | **Claude** (workers in docker) | inherited via the mount | yes |
 | **Gemini** (host coordinator) | `~/.gemini/settings.json` → `mcpServers.open-brain` (added `gemini mcp add open-brain ... -s user -t http --trust`) | yes when present |
 | **Gemini** (workers in docker) | inherited via mount | yes — `~/.gemini` ro-mounted into sandbox if it exists |
+| **Codex** (host coordinator) | `~/.codex/config.toml` → MCP entry not configured yet | yes — `~/.codex` rw-mounted into sandbox |
+| **Codex** (workers in docker) | inherited via mount after configuration | yes |
 
 Workers reach `http://127.0.0.1:8100` because `sandbox.sh` runs containers with `--network host`, so the container's loopback IS the host's.
 
@@ -436,10 +440,16 @@ Runs inside the worker sandbox. Polls every 2 seconds for new tasks. Two protoco
   "exit_code": 0,
   "outcome": "ok",
   "agent": "claude",
-  "model": null,
-  "headless": false
+  "model": "claude-sonnet-5",
+  "headless": false,
+  "check_cmd": "./gradlew test",
+  "check_exit": 0,
+  "check_output_tail": "BUILD SUCCESSFUL in 41s\n",
+  "retried": false
 }
 ```
+
+The `check_*` fields are the **executed acceptance check** (concept adopted from ringer — see [`ringer-adoptions.md`](ringer-adoptions.md)): after the agent exits, the listener runs a per-issue check command and a task is `outcome: ok` only when both the agent exit code *and* the check exit code are 0. All three fields are `null` when no check is configured (resolution order: `<!-- SWARM_CHECK: <cmd> -->` marker in the brief → `.swarm/check.sh` in the worktree → `WORKER_CHECK_CMD` env). Full check output is archived at `done/<id>.check.log`. On check failure the listener re-dispatches the agent **once** with the failure output injected into the prompt and re-runs the check (`retried: true`; first attempt's output kept at `done/<id>.check.attempt1.log`; disable with `WORKER_CHECK_RETRY=0`).
 
 **v1 single-file (legacy, still supported)** — `.agent-task.md` → `.agent-task-last.md`. No structured outcome.
 
@@ -449,26 +459,42 @@ The listener checks v2 inbox first, falls back to v1. Both can be in use simulta
 
 1. **Claim** via atomic `mv` (v2) or rename (v1).
 2. **Echo brief** (first 40 lines) to the pane so attached observers see what's running.
-3. **Dispatch** the configured agent (default claude, override via `WORKER_CMD`; default model from the agent's CLI, override via `WORKER_MODEL`).
-4. **Archive + record** — move brief to `done/` (v2) or `.agent-task-last.md` (v1); for v2 also write `done/<id>.{ok,err}.json` with timing + exit code.
-5. **Loop** back for the next task.
+3. **Dispatch** the configured agent (default claude, override via `WORKER_CMD`; claude workers default to `claude-sonnet-5`, gemini/codex use their CLI's default model — override via `WORKER_MODEL`).
+4. **Check** (v2 only) — resolve and run the acceptance check, if one is configured; capture exit code + output tail.
+5. **Archive + record** — move brief to `done/` (v2) or `.agent-task-last.md` (v1); for v2 also write `done/<id>.{ok,err}.json` with timing, agent exit code, and check result.
+6. **Loop** back for the next task.
 
 #### Worker mode
 
 | Mode                  | Agent flags                                | Lifecycle                                                                                                  |
 |-----------------------|--------------------------------------------|------------------------------------------------------------------------------------------------------------|
 | **interactive** (default) | `claude "$TASK"` / `gemini -i "$TASK"` | Runs prompt + tools, drops to REPL. User attaches to interact / answer questions / `/quit` when done.       |
-| **headless** (`WORKER_HEADLESS=1`) | `claude -p "$TASK"` / `gemini -p "$TASK"` | Prints output and exits. Skips claude's "Trust this folder?" dialog. Used by e2e tests and any automation. |
+| **headless** (`WORKER_HEADLESS=1`) | `claude -p "$TASK"` / `gemini -p "$TASK"` / `codex exec "$TASK"` | Prints output and exits. Skips claude's "Trust this folder?" dialog. Used by e2e tests and any automation. |
 
 #### Worker env vars (threaded through `caller → llm-start.sh → tmux session env → sandbox.sh -e → container env`)
 
 | Variable              | Default          | Notes                                                                                       |
 |-----------------------|------------------|---------------------------------------------------------------------------------------------|
-| `WORKER_CMD`          | `claude`         | Switches the worker's LLM CLI (e.g. `gemini` for fallback when claude Max is capped).       |
-| `WORKER_MODEL`        | (CLI default)    | Passed as `--model` (claude) or `-m` (gemini). E.g. `sonnet`, `gemini-2.5-flash`.            |
+| `WORKER_CMD`          | `claude`         | Switches the worker's LLM CLI (`gemini` or `codex` are supported alternatives).             |
+| `WORKER_MODEL`        | (CLI default)    | Passed as `--model` (claude) or `-m` (gemini/codex). E.g. `sonnet`, `gemini-2.5-flash`.      |
 | `WORKER_HEADLESS`     | `0`              | When `1`, run agent with `-p` (print + exit). Required when no human is attached.           |
+| `WORKER_CHECK`        | `1`              | Executed acceptance checks. `0` disables (outcome JSON reverts to agent-exit-only).         |
+| `WORKER_CHECK_CMD`    | (none)           | Listener-wide default check command (e.g. the project test suite). Brief marker / `.swarm/check.sh` take precedence. |
+| `WORKER_CHECK_TIMEOUT`| `600`            | Seconds before the check is killed (`timeout`; exit 124 recorded as a failure).             |
+| `WORKER_CHECK_RETRY`  | `1`              | Retry-once on check failure with the failure output injected into the prompt. `0` disables. |
+| `SWARM_EVAL_LOG`      | `.swarm/eval-log.jsonl` | Where the listener appends one JSONL eval row per completed v2 task. Point outside the worktree to survive reaping / pool across workers. |
 
 This decouples the coordinator from the workers: the coordinator just drops a markdown file into the worktree and the worker picks it up asynchronously.
+
+### `swarm-scoreboard.sh` — Per-(agent, model) eval scoreboard
+
+Aggregates the JSONL eval rows the listener appends per completed task (`.swarm/eval-log.jsonl` per worktree, or `$SWARM_EVAL_LOG`) into a per-(agent, model) table: tasks, pass rate, **first-try pass rate** (passed without the retry-once firing), retries, checked count, average duration. Concept adopted from ringer's model log + scoreboard (see [`ringer-adoptions.md`](ringer-adoptions.md) #3) — it makes model-default choices (e.g. Sonnet 5 for workers) empirically checkable.
+
+```bash
+swarm-scoreboard.sh                       # glob CWD + sibling wt-issue-* worktrees
+swarm-scoreboard.sh /opt/work/myproject   # same, from a project root
+swarm-scoreboard.sh --json logs/*.jsonl   # raw aggregation for scripts
+```
 
 ### `prompts/coordinator.md` — Coordinator's brain
 
@@ -559,9 +585,9 @@ The test uses your Claude Max plan by default. `COORDINATOR_CMD=gemini ./test-e2
 | `claude` (Max OAuth)  | No per-request billing under Max plan; strong tool use                        | Subject to Max-plan rolling 5-hour usage caps                       |
 | `claude` (API key)    | Highest reliability, paid                                                     | Pay-per-token; the script *strips* the API key by default — opt-in  |
 
-## Coordinator Lifecycle (one-shot by design)
+## Coordinator Lifecycle
 
-The coordinator runs in `-p` headless mode: each `llm-start.sh` invocation wakes it, the agent reads disk state (`git`, `gh`, worktrees), takes its action, and exits. There is no resident supervisor process. This is deliberate — see the README's "How the coordinator works" section for the rationale and the three upgrade paths (cron, event-driven, interactive) when you outgrow it.
+Codex coordination runs one-shot via `codex exec`: each `llm-start.sh` invocation wakes it, the agent reads disk state (`git`, `gh`, worktrees), takes its action, and exits. Claude defaults to a resident interactive REPL so follow-up invocations can land in the same conversation. The watcher remains a separate lightweight process in either case.
 
 The disk *is* the coordinator's memory across invocations: worktrees, branches, open PRs, `.agent-task-last.md` archives. Any new wake re-derives state from that.
 

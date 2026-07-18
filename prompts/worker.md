@@ -7,32 +7,41 @@ override rules — when conflict exists, project policy wins.
 
 ---
 
-## Refresh from master before starting work
+## Refresh from the default branch before starting work
 
 The very first thing you do on every task — before reading the brief
-in depth, before editing anything — is sync your branch to current master:
+in depth, before editing anything — is sync your branch to the current
+remote default branch:
 
 ```bash
-git fetch origin master
-git rebase origin/master
+DEFAULT_REMOTE_REF="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD || true)"
+if [ -z "$DEFAULT_REMOTE_REF" ]; then
+  for candidate in main master; do
+    git show-ref --verify --quiet "refs/remotes/origin/$candidate" &&
+      DEFAULT_REMOTE_REF="origin/$candidate" && break
+  done
+fi
+[ -n "$DEFAULT_REMOTE_REF" ] || { echo "Cannot resolve origin default branch" >&2; exit 1; }
+git fetch origin "${DEFAULT_REMOTE_REF#origin/}"
+git rebase "$DEFAULT_REMOTE_REF"
 ```
 
 Why: your worktree may have been provisioned days ago, or you may be a
 re-provisioned worker landing in a stale worktree. Branches that drift
-from master accumulate two failure modes that bite at PR-merge time:
+from the default branch accumulate two failure modes that bite at PR-merge time:
 
 1. **Hash-rewriting conflicts.** If your branch was built on top of
    another branch (say `feat/issue-X`) that has since been
-   squash-merged to master, your branch still carries the original
-   commits. Master has the squashed equivalent but with a different
+   squash-merged to the default branch, your branch still carries the original
+   commits. The default branch has the squashed equivalent but with a different
    hash. Git can't recognize them as equivalent and tries to replay
-   them, producing a wall of conflicts in code that's already on master.
+   them, producing a wall of conflicts in code that's already on the default branch.
 2. **Semantic drift.** Another PR may have already changed the file
    you're about to edit. Better to discover that now than at the end.
 
 If the rebase produces conflicts you can't mechanically resolve, stop
 and surface a `## Decision` block — the task may need to be reframed
-in light of what's already on master, or the brief itself may be stale.
+in light of what's already on the default branch, or the brief itself may be stale.
 
 If the rebase succeeds, do NOT force-push yet — wait until you have a
 real change to push. (Empty force-pushes churn the PR's commit timeline
@@ -132,6 +141,19 @@ shares the worktree FS). That's still operator-initiated and lives
 under their tmux server, but it doesn't pull them into your task. Per-
 project `.swarm-policy.md` may add specific exceptions; absent that,
 foreground is the rule.
+
+### Never try to `tmux send-keys` into the coordinator or a sibling worker
+
+Your container does not bind-mount the host tmux socket, so direct
+`tmux send-keys -t llm-...` from inside the sandbox will fail. Don't
+try to route around that via `docker exec` on the mounted Docker
+socket either — injecting keystrokes into another agent's REPL races
+with whatever tool call they're in the middle of and silently corrupts
+state. The supported way to communicate with the coordinator is the
+file bus: write to your own `.swarm/tasks/done/<id>.json` (the
+coordinator polls it), or — for cross-issue signals — leave a comment
+on the issue/PR via `gh`. See `docs/tmux-as-channel.md` for the full
+rationale.
 
 ---
 
@@ -300,9 +322,9 @@ for code changes, refused outright for anything that touches schemas
 or auth.
 
 > **Always `--squash`, never `--delete-branch`.** Workers run inside a
-> sibling git worktree; the parent worktree owns `master`. Passing
-> `--delete-branch` causes `gh` to run `git checkout master` for local
-> cleanup, which fails with `'master' is already used by worktree at …`
+> sibling git worktree; the parent worktree owns the default branch. Passing
+> `--delete-branch` causes `gh` to check out that branch for local cleanup,
+> which fails with `'<branch>' is already used by worktree at …`
 > — the merge itself still succeeds, but the worker then has to
 > improvise. Skip the flag. The worktree reaper (`kill-worktree.sh`)
 > deletes the local branch; remote-branch cleanup should be handled by

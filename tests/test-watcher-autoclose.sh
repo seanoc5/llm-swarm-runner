@@ -75,6 +75,7 @@ start_watcher() {
     WATCHER_AUTOCLOSE="$autoclose" \
         KILL_FINISHED="$FAKE_KILL" \
         LLM_START="$FAKE_LLM_START" \
+        WORKSPACE="$TEST_DIR" \
         DRY_RUN=0 ONCE=1 POLL_SECS=1 DEBOUNCE_SECS=0 \
         "$WATCH" "$PROJECT_DIR" > "$logfile" 2>&1 &
     WATCH_PID=$!

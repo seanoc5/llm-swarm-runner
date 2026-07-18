@@ -113,7 +113,7 @@ done
 echo ""
 echo "[ Toolchain — language runtimes ]"
 
-output=$(run_in_sandbox "java -version" 2>&1 | head -1) && pass "java 21" "$output" || fail "java 21" "$output"
+output=$(run_in_sandbox "java -version" 2>&1) && pass "java 21" "$(head -1 <<< "$output")" || fail "java 21" "$output"
 output=$(run_in_sandbox "node --version" 2>&1)           && pass "node" "$output"    || fail "node" "$output"
 output=$(run_in_sandbox "python3 --version" 2>&1)        && pass "python3" "$output" || fail "python3" "$output"
 output=$(run_in_sandbox "uv --version" 2>&1)             && pass "uv" "$output"      || fail "uv" "$output"
@@ -124,6 +124,7 @@ echo "[ Toolchain — LLM CLIs ]"
 
 output=$(run_in_sandbox "claude --version" 2>&1 | head -1) && pass "claude-code" "$output" || fail "claude-code" "$output"
 output=$(run_in_sandbox "gemini --version" 2>&1 | head -1) && pass "gemini-cli" "$output"  || fail "gemini-cli" "$output"
+output=$(run_in_sandbox "codex --version" 2>&1 | head -1)  && pass "codex-cli" "$output"   || fail "codex-cli" "$output"
 
 # ── Sandbox script ────────────────────────────────────────────────────────────
 

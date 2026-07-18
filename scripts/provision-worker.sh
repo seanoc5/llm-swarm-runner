@@ -215,6 +215,15 @@ else
     echo "[1/4] worktree created (base: $DEFAULT_REMOTE_REF @ $(git rev-parse --short "$DEFAULT_REMOTE_REF"))"
 fi
 
+# Symlink the project's .env into the worktree so workers find credentials
+# (DB hosts/ports/passwords, API keys) at the path the project's own code
+# expects. .env is gitignored so worktrees don't get it from the checkout.
+# Skip if the target already exists (worker may have written scratch creds).
+if [ -f "$PROJECT_DIR/.env" ] && [ ! -e "$WT/.env" ]; then
+    ln -s "$PROJECT_DIR/.env" "$WT/.env"
+    echo "       linked .env -> $PROJECT_DIR/.env"
+fi
+
 # 2. Queue dirs (idempotent — listener also creates them on startup)
 mkdir -p "$WT/.swarm/tasks/inbox" "$WT/.swarm/tasks/processing" "$WT/.swarm/tasks/done"
 
@@ -294,6 +303,15 @@ if ! mv -n "$TMP" "$DEST" 2>/dev/null || [ -f "$TMP" ]; then
 fi
 echo "[3/4] brief queued: $DEST"
 
+# Brief lint (ringer manifest-lint concept — docs/ringer-adoptions.md #6).
+# Warn-only: dispatch proceeds, but unverifiable briefs (no acceptance
+# criteria / can't-fail check / no named files / underspecified) are
+# surfaced so the coordinator can improve the issue before the worker
+# burns tokens on it. BRIEF_LINT=0 disables.
+if [ "${BRIEF_LINT:-1}" = "1" ] && [ -x "$SCRIPT_DIR/lint-brief.sh" ]; then
+    "$SCRIPT_DIR/lint-brief.sh" "$DEST" || true
+fi
+
 # 4. Spawn worker tmux window (background — does NOT steal focus from coordinator)
 # If the session doesn't exist, fail clearly — the coordinator should be
 # running inside the session, so it should always exist by the time we
@@ -334,7 +352,7 @@ else
     #   swarm-<session>-iss-<issue>
     container_name="swarm-${SESSION_NAME}-iss-${ISSUE}"
     tmux new-window -d -t "$SESSION_NAME" -n "iss-$ISSUE" \
-        "WORKER_CONTAINER_NAME=$container_name WORKER_VERBOSITY=$WORKER_VERBOSITY EXTRA_MOUNTS='${EXTRA_MOUNTS:-}' $SANDBOX_SH $WT listener"
+        "WORKER_CONTAINER_NAME=$(printf '%q' "$container_name") WORKER_VERBOSITY=$(printf '%q' "$WORKER_VERBOSITY") WORKER_CMD=$(printf '%q' "${WORKER_CMD:-claude}") WORKER_MODEL=$(printf '%q' "${WORKER_MODEL:-}") WORKER_HEADLESS=$(printf '%q' "${WORKER_HEADLESS:-0}") WORKER_SELF_REVIEW=$(printf '%q' "${WORKER_SELF_REVIEW:-1}") EXTRA_MOUNTS=$(printf '%q' "${EXTRA_MOUNTS:-}") $(printf '%q' "$SANDBOX_SH") $(printf '%q' "$WT") listener"
     echo "[4/4] tmux window iss-$ISSUE spawned (listener)"
     log_event worker.start "issue=$ISSUE task_id=$TASK_ID window=iss-$ISSUE alive=$((alive_workers + 1))/$MAX_WORKERS total_windows=$((total_windows + 1))/$MAX_TMUX_WINDOWS"
 fi

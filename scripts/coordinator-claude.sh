@@ -11,7 +11,7 @@
 #   $2   path to initial user prompt file   (passed as trailing positional)
 #
 # Env:
-#   COORD_MODEL                Claude model id (default: claude-opus-4-7[1m])
+#   COORD_MODEL                Claude model id (default: claude-fable-5)
 #   COORDINATOR_HEADLESS=1     Use claude -p (exits after the prompt prints)
 #   COORDINATOR_USE_API_KEY=1  Keep ANTHROPIC_API_KEY in env (bills API, not Max OAuth)
 
@@ -19,9 +19,7 @@ set -euo pipefail
 
 SYSTEM_PROMPT_FILE="${1:?coordinator-claude.sh: missing system-prompt file (arg 1)}"
 INITIAL_PROMPT_FILE="${2:?coordinator-claude.sh: missing initial-prompt file (arg 2)}"
-MODEL="${COORD_MODEL:-claude-opus-4-7[1m]}"
-
-trap 'rm -f "$INITIAL_PROMPT_FILE"' EXIT
+MODEL="${COORD_MODEL:-claude-fable-5}"
 
 # Claude Max users authenticate via OAuth in ~/.claude/. If ANTHROPIC_API_KEY
 # is set, claude-code prefers it over OAuth (silently bills the API account).
@@ -32,11 +30,14 @@ elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
     echo "coordinator-claude: COORDINATOR_USE_API_KEY=1; ANTHROPIC_API_KEY in effect (billing API account)." >&2
 fi
 
+INITIAL_PROMPT="$(cat "$INITIAL_PROMPT_FILE")"
+rm -f "$INITIAL_PROMPT_FILE"
+
 ARGS=(--model "$MODEL"
       --append-system-prompt "$(cat "$SYSTEM_PROMPT_FILE")"
       --dangerously-skip-permissions)
 [ "${COORDINATOR_HEADLESS:-0}" = "1" ] && ARGS+=(-p)
 # Trailing positional: initial user message in REPL mode, print-prompt in -p mode.
-ARGS+=("$(cat "$INITIAL_PROMPT_FILE")")
+ARGS+=("$INITIAL_PROMPT")
 
 exec claude "${ARGS[@]}"
