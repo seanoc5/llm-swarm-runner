@@ -2,6 +2,8 @@
 
 Helper scripts for the llm-swarm-runner. Each is self-documenting at the top — `head -20 <script>` is the canonical source of truth. This table is an index for quick discovery.
 
+All scripts here require bash 4.0+; do not run them under `sh` or `dash`.
+
 | Script | Purpose |
 |---|---|
 | `_load-env.sh` | Sourceable env loader: applies `<project>/.swarm/.env` then `.env.example` to the current shell; caller-set vars win. |
