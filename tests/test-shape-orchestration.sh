@@ -94,6 +94,7 @@ WT="$TEST_DIR/wt-issue-99"
 git -C "$PROJECT_DIR" show-ref --verify --quiet refs/heads/fix/issue-99 \
     || red "branch fix/issue-99 not created"
 [ -d "$WT/.swarm/tasks/inbox" ] || red "queue inbox dir not created"
+[ -d "$WT/.swarm/tasks/status" ] || red "queue status dir not created (see #129: worker status-file hand-off)"
 brief=$(ls "$WT"/.swarm/tasks/inbox/*.md | head -1)
 [ -n "$brief" ] || red "no brief file in inbox"
 grep -q "FAKE-GH issue #99" "$brief" || red "stub gh body not embedded in brief"
@@ -101,7 +102,7 @@ grep -qE 'new-window .* iss-99' "$TEST_DIR/tmux.log" \
     || red "expected tmux new-window for iss-99; got: $(cat $TEST_DIR/tmux.log)"
 grep -q 'WORKER_CMD=codex .*WORKER_MODEL=test-codex .*WORKER_HEADLESS=1 .*WORKER_SELF_REVIEW=0' "$TEST_DIR/tmux.log" \
     || red "expected worker backend env in tmux spawn; got: $(cat "$TEST_DIR/tmux.log")"
-green "worktree, branch, queue, brief, tmux window, and worker backend env all created"
+green "worktree, branch, queue (incl. status/), brief, tmux window, and worker backend env all created"
 
 heading "Test 2: provision-worker.sh embeds .swarm-policy.md when present"
 cd "$PROJECT_DIR"

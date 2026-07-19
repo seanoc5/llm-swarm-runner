@@ -179,6 +179,67 @@ Never trail off without a summary. Do not collapse to "Done." or "PR opened."
 
 ---
 
+## Worker status file (declare state explicitly)
+
+Immediately after opening your PR — or the moment you reach a terminal
+no-PR state (policy-blocked, duplicate found, needs-decision, task is
+a no-op) — write a status file so the watcher can see your state
+while you're still parked and attachable, without scraping the pane
+or waiting on a `gh pr list` poll.
+
+**Path:** `<worktree>/.swarm/tasks/status/<task_id>.json` — per-worktree,
+alongside `inbox/`, `processing/`, `done/` (created for you by
+`provision-worker.sh` / the listener at startup). Use the `task_id`
+from your brief's inbox filename.
+
+**Write atomically** — same mktemp+mv pattern as every other queue write:
+
+```bash
+STATUS_DIR="$(git rev-parse --show-toplevel)/.swarm/tasks/status"
+TMP="$(mktemp -p "$STATUS_DIR" .tmp.XXXXXX.json)"
+cat > "$TMP" <<EOF
+{"task_id": "$TASK_ID", "state": "ready-for-review", "pr": 555, "ts": "$(date -u +%Y-%m-%dT%H:%M:%SZ)", "note": "opened PR, awaiting review"}
+EOF
+mv "$TMP" "$STATUS_DIR/$TASK_ID.json"
+```
+
+**Schema:**
+
+```json
+{"task_id": "...", "state": "ready-for-review" | "blocked" | "done-no-pr", "pr": <number|null>, "ts": "<ISO8601>", "note": "<one line>"}
+```
+
+**States:**
+
+- `ready-for-review` — PR opened, awaiting a merge decision. `pr` set.
+- `blocked` — stuck on a decision, missing input, or a policy refusal
+  that needs a human before you can continue. `pr` null unless a
+  draft/WIP PR already exists.
+- `done-no-pr` — terminal, but no PR: duplicate work found, task
+  determined to be a no-op, or work landed via a non-PR path the
+  project explicitly allows. `pr` null.
+
+**When to write:** once per terminal state reached in the task —
+right after `gh pr create` / a `gh pr edit --body` that changes the
+risk rating, the moment you recognize you're stuck and about to raise
+a `## Decision` question, or when you conclude no PR is needed.
+Overwrite (same atomic pattern, same filename) if the state changes
+later in the same task, e.g. `blocked` → `ready-for-review` once
+unblocked.
+
+**Reliability framing:** this is a convention, not a guarantee — same
+class as the blind-merge-risk markers. It exists so the watcher can
+react (e.g. trigger the acceptance check) while you're still parked;
+it does not replace the `done/<id>.{ok,err}.json` outcome record the
+listener writes automatically on agent exit, and it does not replace
+the `## Summary` / `## Next` blocks in your handoff. If you forget to
+write it, the coordinator's `gh pr list` / `done/*.json` poll is the
+backstop for PR-bearing outcomes — but `blocked` and `done-no-pr`
+states are exactly the ones that backstop can never see, so don't
+skip this file for those two.
+
+---
+
 ## At-rest signal (opt-in via `.swarm-policy.md`)
 
 When the project's `.swarm-policy.md` opts in, a worker that has truly
