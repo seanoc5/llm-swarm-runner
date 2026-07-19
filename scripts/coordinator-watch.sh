@@ -47,6 +47,46 @@
 #                           kill-worktree.sh, so accidental closures are
 #                           recoverable via `gh pr reopen N`.
 #
+#   WATCH_PR_POLL_SECS=60   (issue #119) The outcome-driven trigger above
+#                           only fires when a NEW outcome.json appears —
+#                           but outcome.json is written once, usually
+#                           right after the PR is opened. A PR that merges
+#                           later (parked interactive worker, or the user
+#                           batch-merging while away) never produces a
+#                           second outcome.json, so the reap pass never
+#                           re-runs for it. This knob starts an independent
+#                           background timer that, every N seconds, runs a
+#                           single `gh pr list --state all` call across all
+#                           worker branches and re-fires the WATCHER_AUTOCLOSE
+#                           reap pass if any tracked worktree's PR has gone
+#                           MERGED/CLOSED. Set to 0 to disable (falls back to
+#                           the original outcome-only behavior). Gated by
+#                           WATCHER_AUTOCLOSE — if that's 0, detection still
+#                           logs but no reap fires. Same poll also powers the
+#                           check-on-done PR-open backstop (see
+#                           WATCH_CHECK_ON_DONE).
+#   WATCH_CHECK_ON_DONE=1   Set to 0 to disable check-on-done. When enabled,
+#                           the watcher treats a worker as "done" via either
+#                           signal: (a) a `.swarm/tasks/status/<id>.json`
+#                           file with state "ready-for-review" (fast path,
+#                           polled every 2s), or (b) a PR appearing on
+#                           fix/issue-N with no status file (backstop, via
+#                           the WATCH_PR_POLL_SECS poll). On first done
+#                           signal per task (atomic claim via mkdir — losing
+#                           path no-ops), resolves the same acceptance check
+#                           worker-listener.sh would (brief marker ->
+#                           .swarm/check.sh -> WORKER_CHECK_CMD) and runs it
+#                           once in a visible tmux window `chk-N`, recording
+#                           the result to `<id>.check.json` and events.log.
+#   CHECK_RUNNER=<path>     Test-only override: when set, check-on-done runs
+#                           `$CHECK_RUNNER <worktree> <check_cmd>` synchronously
+#                           instead of spawning a real tmux window. Lets tests
+#                           exercise the claim/resolve/record logic without a
+#                           live tmux session.
+#   SESSION_NAME=<name>     tmux session check-on-done spawns chk-N windows
+#                           in. Default: llm-$(basename PROJECT_DIR), matching
+#                           kill-finished-workers.sh / provision-worker.sh.
+#
 # Watch backend (auto-detected):
 #   - inotifywait (preferred): instant response. Install with:
 #       sudo apt install inotify-tools
@@ -85,6 +125,9 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     OUTCOME_HOOK        (none)    path to per-outcome poster
     SWEEP               (auto)    override sweep-swarm-outcomes.sh path
     WATCHER_AUTOCLOSE   1         reap finalized workers (MERGED|CLOSED PR; window+worktree+branch) before wake
+    WATCH_PR_POLL_SECS  60        periodic gh-poll backstop reap (0=off); see header comment
+    WATCH_CHECK_ON_DONE 1         run acceptance check when a worker signals done; see header comment
+    SESSION_NAME        (auto)    tmux session for chk-N windows (llm-<project-basename>)
     WORKSPACE           (auto)    parent dir for wt-issue-* worktrees
     MAX_WORKERS         5         (referenced by default WAKE_PROMPT)
     MAX_TMUX_WINDOWS    10        (referenced by default WAKE_PROMPT)
@@ -103,7 +146,10 @@ EVENTS LOG
                            (sibling repo sharing the same WORKSPACE parent)
       coord.wake           llm-start.sh invoked (or coord.wake.skip on debounce)
       sweep.run            sweep-swarm-outcomes.sh fired (when POST_OUTCOMES=1)
-      watch.autoclose      kill-finished-workers.sh invoked (when WATCHER_AUTOCLOSE=1)
+      watch.autoclose      kill-finished-workers.sh invoked (trigger=outcome|pr_poll)
+      watch.timer.start    background pr-poll/check-on-done timer loop started
+      watch.pr_poll        terminal PR detected via periodic gh poll (reap backstop)
+      watch.check_on_done  check-on-done result (issue, task_id, result=running|pass|fail|skipped)
       cap.refused          provision-worker.sh hit MAX_WORKERS / MAX_TMUX_WINDOWS
 
 BACKEND
@@ -156,6 +202,24 @@ POST_OUTCOMES="${POST_OUTCOMES:-0}"
 SWEEP="${SWEEP:-$LLM_SWARM_DIR/scripts/sweep-swarm-outcomes.sh}"
 WATCHER_AUTOCLOSE="${WATCHER_AUTOCLOSE:-1}"
 KILL_FINISHED="${KILL_FINISHED:-$LLM_SWARM_DIR/scripts/kill-finished-workers.sh}"
+WATCH_PR_POLL_SECS="${WATCH_PR_POLL_SECS:-60}"
+WATCH_CHECK_ON_DONE="${WATCH_CHECK_ON_DONE:-1}"
+CHECK_RUNNER="${CHECK_RUNNER:-}"
+SESSION_NAME="${SESSION_NAME:-llm-$(basename "$PROJECT_DIR")}"
+
+if ! [[ "$WATCH_PR_POLL_SECS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: WATCH_PR_POLL_SECS must be a non-negative integer (got: $WATCH_PR_POLL_SECS)" >&2
+    exit 1
+fi
+
+# jq is optional throughout this codebase (see worker-listener.sh's
+# append_eval_log). status_poll_pass/maybe_run_check parse status-file JSON
+# with it; under `set -e`, an unguarded `var=$(jq ...)` with jq missing
+# would silently kill the background timer loop's subshell. Guard instead
+# of hard-requiring it — the PR-open backstop degrades gracefully to a
+# synthetic per-issue claim key, and the status-file fast path just no-ops.
+HAVE_JQ=0
+command -v jq >/dev/null 2>&1 && HAVE_JQ=1
 
 # Append-only structured event log. Every observable event (start, outcome,
 # wake, sweep, cap-refusal) gets a single line so `tail -F` gives live status.
@@ -202,6 +266,8 @@ poll interval: ${POLL_SECS}s$([ "$BACKEND" = "inotify" ] && echo " (unused in in
 llm-start.sh:  $LLM_START
 post-outcomes: $POST_OUTCOMES$([ "$POST_OUTCOMES" = "1" ] && echo " (sweep: $SWEEP, hook: ${OUTCOME_HOOK:-default dry-run stub})")
 autoclose:     $WATCHER_AUTOCLOSE$([ "$WATCHER_AUTOCLOSE" = "1" ] && echo " (script: $KILL_FINISHED)")
+pr-poll:       ${WATCH_PR_POLL_SECS}s$([ "$WATCH_PR_POLL_SECS" = "0" ] && echo " (disabled)")
+check-on-done: $WATCH_CHECK_ON_DONE$([ "$WATCH_CHECK_ON_DONE" = "1" ] && echo " (session: $SESSION_NAME)")
 dry-run:       $DRY_RUN
 once:          $ONCE
 
@@ -284,7 +350,13 @@ dispatch_outcome() {
 # Failures are non-fatal — the watcher's job is wake the coordinator, and
 # the coordinator can still JIT-reap and/or report cap-reached if cleanup
 # didn't fire.
+#
+# trigger (default "outcome"): who called us, for the events.log line.
+# "outcome" = fired from on_outcome (a new outcome.json arrived); "pr_poll"
+# = fired from the WATCH_PR_POLL_SECS backstop (issue #119) — same cleanup,
+# different reason it ran.
 cleanup_eligible_workers() {
+    local trigger="${1:-outcome}"
     local dry_arg=""
     [ "$DRY_RUN" = "1" ] && dry_arg="--dry-run"
 
@@ -293,7 +365,242 @@ cleanup_eligible_workers() {
     # + worktrees + branches reaped). The autoclose event in our log
     # records that we ran.
     "$KILL_FINISHED" --idle-min 0 --pr-finalized --with-worktree --yes $dry_arg >/dev/null 2>&1 || true
-    log_event watch.autoclose "trigger=outcome mode=pr-finalized+worktree dry_run=$DRY_RUN"
+    log_event watch.autoclose "trigger=$trigger mode=pr-finalized+worktree dry_run=$DRY_RUN"
+}
+
+# pr_poll_pass
+#
+# Behavior A backstop (issue #119): the outcome-driven reap above only
+# fires when a NEW outcome.json appears, but outcome.json is written once
+# — usually right after the PR opens, well before it merges. A worker
+# that's parked (interactive REPL still open) or whose listener already
+# exited never produces a second outcome.json, so a PR merging later never
+# re-triggers the reap. This runs on its own timer (WATCH_PR_POLL_SECS),
+# independent of the outcome-driven backend, so it fires even when that
+# backend is blocked waiting on filesystem events that will never come.
+#
+# One `gh pr list --state all` call covers every worker branch in a single
+# API round-trip (vs. kill-finished-workers.sh's N per-window `gh pr view`
+# calls) — cheap enough to run every 60s indefinitely (~60 req/hr).
+#
+# Also drives the Behavior B (check-on-done) PR-open backstop: any branch
+# with a PR at all (regardless of state) counts as "done" for a worker
+# that never wrote a status file.
+pr_poll_pass() {
+    local prs
+    prs="$(cd "$PROJECT_DIR" && gh pr list --state all --limit 500 \
+            --json headRefName,state,number \
+            --jq '.[] | "\(.headRefName)\t\(.state)\t\(.number)"' 2>/dev/null)" || {
+        log_event pr_poll.error "reason=gh_pr_list_failed"
+        return 0
+    }
+    [ -n "$prs" ] || return 0
+
+    local reap_hit=0 branch state pr_number issue wt_dir
+    while IFS=$'\t' read -r branch state pr_number; do
+        [ -z "$branch" ] && continue
+        case "$branch" in
+            fix/issue-*) : ;;
+            *) continue ;;
+        esac
+        issue="${branch#fix/issue-}"
+        [[ "$issue" =~ ^[0-9]+$ ]] || continue
+        wt_dir="$WORKSPACE/wt-issue-$issue"
+        [ -d "$wt_dir" ] || continue   # already reaped, or never provisioned here
+
+        if [ "$state" = "MERGED" ] || [ "$state" = "CLOSED" ]; then
+            reap_hit=1
+        fi
+
+        if [ "$WATCH_CHECK_ON_DONE" = "1" ]; then
+            maybe_run_check "$wt_dir" "$issue"
+        fi
+    done <<< "$prs"
+
+    if [ "$reap_hit" = "1" ]; then
+        log_event watch.pr_poll "reason=terminal_pr_detected"
+        if [ "$WATCHER_AUTOCLOSE" = "1" ]; then
+            echo "[$(date +%T)] pr-poll: terminal PR(s) detected on unreaped worktree(s) — running autoclose"
+            cleanup_eligible_workers pr_poll
+        else
+            echo "[$(date +%T)] pr-poll: terminal PR(s) detected but WATCHER_AUTOCLOSE=0 — not reaping"
+        fi
+    fi
+}
+
+# status_poll_pass
+#
+# Behavior B fast path (issue #119): scan every worktree's
+# .swarm/tasks/status/ dir (worker->coordinator "done" declaration, see
+# issue #129) for a state of "ready-for-review" and fire the acceptance
+# check. Cheap (local filesystem only), so this runs every 2s from the
+# timer loop regardless of WATCH_PR_POLL_SECS.
+status_poll_pass() {
+    [ "$HAVE_JQ" = "1" ] || return 0
+    shopt -s nullglob
+    local f wt_dir issue state
+    for f in "$WORKSPACE"/wt-issue-*/.swarm/tasks/status/*.json; do
+        case "$f" in *.check.json) continue ;; esac
+        wt_dir="${f%/.swarm/tasks/status/*}"
+        issue="$(basename "$wt_dir")"; issue="${issue#wt-issue-}"
+        state=$(jq -r '.state // empty' "$f" 2>/dev/null) || continue
+        if [ "$state" = "ready-for-review" ]; then
+            maybe_run_check "$wt_dir" "$issue"
+        fi
+    done
+    shopt -u nullglob
+}
+
+# maybe_run_check <worktree-dir> <issue>
+#
+# Resolve + claim + run the acceptance check for a worker that has
+# signaled done (either status-poll_pass or pr_poll_pass called us). Both
+# callers converge here so a task that fires both signals in the same
+# window only runs its check once — the claim is an atomic `mkdir`
+# (kernel-level single-writer), and both callers derive the SAME claim key
+# by re-reading the worktree's own status file (if one exists) rather than
+# trusting whatever the caller happened to pass in.
+maybe_run_check() {
+    local wt_dir="$1" issue="$2"
+    local status_dir="$wt_dir/.swarm/tasks/status"
+    mkdir -p "$status_dir" 2>/dev/null || return 0
+
+    # Prefer the task_id from the worker's own status file (mirrors what
+    # status_poll_pass just read) so the PR-open backstop and the fast
+    # status-file path land on the same claim key when both fire close
+    # together. No status file yet (worker never wrote one, or #129 isn't
+    # deployed here) → synthesize a per-issue key so the backstop still
+    # works standalone.
+    local task_id="" latest
+    latest=$(find "$status_dir" -maxdepth 1 -name '*.json' -not -name '*.check.json' 2>/dev/null | sort | tail -1)
+    if [ -n "$latest" ] && [ "$HAVE_JQ" = "1" ]; then
+        task_id=$(jq -r '.task_id // empty' "$latest" 2>/dev/null) || task_id=""
+    fi
+    [ -n "$task_id" ] || task_id="pr-issue-$issue"
+
+    local claim_dir="$status_dir/${task_id}.check-claim"
+    mkdir "$claim_dir" 2>/dev/null || return 0   # already claimed — nothing to do
+
+    local check_json="$status_dir/${task_id}.check.json"
+    printf '{"task_id":"%s","state":"checking","check_exit":null,"ts":"%s"}\n' \
+        "$task_id" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$check_json" 2>/dev/null || true
+
+    # Resolve the check command the same order worker-listener.sh does:
+    #   1. brief marker in the task file (processing/ if still parked,
+    #      done/ if the listener already archived it)
+    #   2. standing per-issue check in the worktree
+    #   3. listener-wide env default
+    local check_cmd="" brief
+    brief=$(find "$wt_dir/.swarm/tasks/processing" "$wt_dir/.swarm/tasks/done" \
+                -maxdepth 1 -name "${task_id}*.md" 2>/dev/null | head -1)
+    if [ -n "$brief" ]; then
+        check_cmd=$(sed -n 's/.*<!-- SWARM_CHECK: \(.*\) -->.*/\1/p' "$brief" | head -1)
+    fi
+    if [ -z "$check_cmd" ] && [ -r "$wt_dir/.swarm/check.sh" ]; then
+        check_cmd="bash .swarm/check.sh"
+    fi
+    [ -z "$check_cmd" ] && check_cmd="${WORKER_CHECK_CMD:-}"
+
+    if [ -z "$check_cmd" ]; then
+        printf '{"task_id":"%s","state":"skipped","check_exit":null,"ts":"%s"}\n' \
+            "$task_id" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$check_json" 2>/dev/null || true
+        log_event watch.check_on_done "issue=$issue task_id=$task_id result=skipped reason=no_check_resolved"
+        return 0
+    fi
+
+    log_event watch.check_on_done "issue=$issue task_id=$task_id result=running"
+
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "[$(date +%T)] [DRY] check-on-done issue #$issue (task $task_id): $check_cmd"
+        printf '{"task_id":"%s","state":"skipped","check_exit":null,"ts":"%s"}\n' \
+            "$task_id" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$check_json" 2>/dev/null || true
+        return 0
+    fi
+
+    execute_check "$wt_dir" "$issue" "$task_id" "$check_cmd" "$check_json"
+}
+
+# record_check_result <task_id> <issue> <check_json> <exit-code>
+#
+# Single place that writes the watcher-owned <task_id>.check.json + the
+# events.log line, so both the synchronous CHECK_RUNNER (test) path and
+# the real tmux path record results identically.
+record_check_result() {
+    local task_id="$1" issue="$2" check_json="$3" rc="$4"
+    local state="pass"
+    [ "$rc" -eq 0 ] || state="fail"
+    printf '{"task_id":"%s","state":"%s","check_exit":%d,"ts":"%s"}\n' \
+        "$task_id" "$state" "$rc" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$check_json" 2>/dev/null || true
+    log_event watch.check_on_done "issue=$issue task_id=$task_id result=$state check_exit=$rc"
+}
+
+# execute_check <worktree-dir> <issue> <task_id> <check-cmd> <check-json>
+#
+# Runs the resolved check exactly once (claim already taken by the caller)
+# and records the result. Two backends:
+#   - CHECK_RUNNER set (tests): synchronous — run "$CHECK_RUNNER <worktree>
+#     <check_cmd>", record the result immediately via record_check_result.
+#     No tmux dependency.
+#   - default: spawn a visible tmux window `chk-N` (mirrors provision-worker.sh's
+#     `iss-N` windows) so the operator can watch/scroll back the run. The
+#     window's own shell writes the result files directly (it's a separate
+#     process — it can't call back into this script's bash functions), using
+#     the identical two-line shape record_check_result writes, kept in sync
+#     by comment cross-reference rather than by sharing code across processes.
+execute_check() {
+    local wt_dir="$1" issue="$2" task_id="$3" check_cmd="$4" check_json="$5"
+
+    if [ -n "$CHECK_RUNNER" ]; then
+        local rc=0
+        "$CHECK_RUNNER" "$wt_dir" "$check_cmd" || rc=$?
+        record_check_result "$task_id" "$issue" "$check_json" "$rc"
+        return 0
+    fi
+
+    if ! command -v tmux >/dev/null 2>&1 || ! tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+        log_event watch.check_on_done "issue=$issue task_id=$task_id result=skipped reason=no_tmux_session"
+        printf '{"task_id":"%s","state":"skipped","check_exit":null,"ts":"%s"}\n' \
+            "$task_id" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$check_json" 2>/dev/null || true
+        return 0
+    fi
+
+    local win="chk-$issue"
+    local timeout_secs="${WORKER_CHECK_TIMEOUT:-600}"
+    # Mirrors record_check_result's output shape exactly — see that
+    # function if this drifts.
+    tmux new-window -d -t "$SESSION_NAME" -n "$win" -c "$wt_dir" bash -c "
+        echo '--- check-on-done: issue #$issue (task $task_id) ---'
+        echo 'check: $check_cmd'
+        timeout $timeout_secs bash -c '$check_cmd'
+        rc=\$?
+        state=pass; [ \$rc -eq 0 ] || state=fail
+        ts=\$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+        printf '{\"task_id\":\"%s\",\"state\":\"%s\",\"check_exit\":%d,\"ts\":\"%s\"}\n' '$task_id' \"\$state\" \$rc \"\$ts\" > '$check_json'
+        printf '%s  %-15s %s\n' \"\$ts\" 'watch.check_on_done' \"issue=$issue task_id=$task_id result=\$state check_exit=\$rc\" >> '$EVENTS_LOG'
+        echo \"--- check \$state (exit \$rc) — this window stays open for review ---\"
+        exec bash
+    " 2>/dev/null || log_event watch.check_on_done.error "issue=$issue task_id=$task_id reason=tmux_new_window_failed"
+}
+
+# run_watch_timer_loop
+#
+# Single background process driving both Behavior A (WATCH_PR_POLL_SECS)
+# and Behavior B fast-path (2s status-file poll). One process (not two)
+# to keep trap-based cleanup simple — see the trap wired up near the
+# bottom of the script.
+run_watch_timer_loop() {
+    local last_pr_poll=0 now
+    while true; do
+        sleep 2
+        [ "$WATCH_CHECK_ON_DONE" = "1" ] && { status_poll_pass || true; }
+        if [ "$WATCH_PR_POLL_SECS" -gt 0 ]; then
+            now=$(date +%s)
+            if [ $((now - last_pr_poll)) -ge "$WATCH_PR_POLL_SECS" ]; then
+                pr_poll_pass || true
+                last_pr_poll=$now
+            fi
+        fi
+    done
 }
 
 # Trigger logic — called when a NEW outcome JSON path is observed
@@ -340,7 +647,7 @@ on_outcome() {
     # alive-worker counts and reports cap-reached when wave 2 should fire.
     if [ "$WATCHER_AUTOCLOSE" = "1" ]; then
         echo "[$(date +%T)] running autoclose pass before wake..."
-        cleanup_eligible_workers
+        cleanup_eligible_workers outcome
     fi
 
     echo "[$(date +%T)] outcome: $path"
@@ -398,11 +705,12 @@ run_poll() {
     # Build a baseline of currently-known outcome JSONs so we don't fire
     # for anything that existed before the watcher started.
     # NOTE: seen_file is intentionally script-global (no `local`) so the
-    # EXIT/INT/TERM trap can reach it even if a signal arrives outside of
-    # run_poll's stack frame. The :- guard handles the early-shutdown case
-    # where the signal fires before mktemp ran.
+    # shared EXIT/INT/TERM trap (set once, near the bottom of the script —
+    # see cleanup_on_exit) can reach it even if a signal arrives outside of
+    # run_poll's stack frame. Deliberately NOT setting a trap here: bash
+    # traps are process-wide, so a second `trap ... EXIT` here would
+    # silently replace the one that also kills the background timer loop.
     seen_file=$(mktemp -t coord-watch-seen-XXXXXX)
-    trap '[ -n "${seen_file:-}" ] && rm -f -- "$seen_file"' EXIT INT TERM
 
     # Scan only wt-issue-*/.swarm/tasks/done dirs under WORKSPACE. The glob
     # may expand to nothing if no worker worktrees exist yet — handle that
@@ -441,6 +749,29 @@ run_poll() {
         sleep "$POLL_SECS"
     done
 }
+
+# ---------------------------------------------------------------------------
+# Timer loop startup (issue #119) — independent of the outcome-driven
+# backend selected above. Started here (after every function it calls is
+# defined, and after the backend case below so shutdown ordering doesn't
+# matter) so it's live before we block in run_inotify/run_poll.
+# ---------------------------------------------------------------------------
+WATCH_TIMER_PID=""
+if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ]; then
+    run_watch_timer_loop &
+    WATCH_TIMER_PID=$!
+    log_event watch.timer.start "pr_poll_secs=$WATCH_PR_POLL_SECS check_on_done=$WATCH_CHECK_ON_DONE"
+fi
+
+# Single shared trap for both the background timer loop and run_poll's
+# seen_file (script-global — see the NOTE at its mktemp above). Set once,
+# here, so nothing downstream can silently clobber it with a second
+# `trap ... EXIT` and drop the timer-loop kill.
+cleanup_on_exit() {
+    [ -n "$WATCH_TIMER_PID" ] && kill "$WATCH_TIMER_PID" 2>/dev/null || true
+    [ -n "${seen_file:-}" ] && rm -f -- "$seen_file"
+}
+trap cleanup_on_exit EXIT INT TERM
 
 case "$BACKEND" in
     inotify) run_inotify ;;
