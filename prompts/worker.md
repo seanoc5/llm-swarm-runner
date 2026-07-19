@@ -196,6 +196,7 @@ from your brief's inbox filename.
 
 ```bash
 STATUS_DIR="$(git rev-parse --show-toplevel)/.swarm/tasks/status"
+mkdir -p "$STATUS_DIR"   # pre-existing worktrees may predate this dir
 TMP="$(mktemp -p "$STATUS_DIR" .tmp.XXXXXX.json)"
 cat > "$TMP" <<EOF
 {"task_id": "$TASK_ID", "state": "ready-for-review", "pr": 555, "ts": "$(date -u +%Y-%m-%dT%H:%M:%SZ)", "note": "opened PR, awaiting review"}
