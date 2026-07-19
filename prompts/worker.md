@@ -228,6 +228,13 @@ Overwrite (same atomic pattern, same filename) if the state changes
 later in the same task, e.g. `blocked` → `ready-for-review` once
 unblocked.
 
+**No lifecycle/cleanup yet:** nothing deletes or expires
+`status/<id>.json` once the task ends — a leftover `blocked` from a
+crashed or recovered task can persist indefinitely. A future consumer
+of this file must not assume freshness; cross-check `ts` against
+`done/*.json` or treat a file older than the worktree's last activity
+as stale. Filed as open scope, not solved by this convention.
+
 **Reliability framing:** this is a convention, not a guarantee — same
 class as the blind-merge-risk markers. It exists so the watcher can
 react (e.g. trigger the acceptance check) while you're still parked;
