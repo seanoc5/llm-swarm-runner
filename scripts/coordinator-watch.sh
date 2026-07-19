@@ -438,43 +438,69 @@ pr_poll_pass() {
 status_poll_pass() {
     [ "$HAVE_JQ" = "1" ] || return 0
     shopt -s nullglob
-    local f wt_dir issue state
+    local f wt_dir issue state task_id
     for f in "$WORKSPACE"/wt-issue-*/.swarm/tasks/status/*.json; do
         case "$f" in *.check.json) continue ;; esac
         wt_dir="${f%/.swarm/tasks/status/*}"
         issue="$(basename "$wt_dir")"; issue="${issue#wt-issue-}"
+        # task_id = filename sans .json, per the #129 status-file path
+        # convention (<task_id>.json) — not the JSON body's task_id field,
+        # so this stays correct even without jq.
+        task_id="$(basename "$f" .json)"
         state=$(jq -r '.state // empty' "$f" 2>/dev/null) || continue
         if [ "$state" = "ready-for-review" ]; then
-            maybe_run_check "$wt_dir" "$issue"
+            maybe_run_check "$wt_dir" "$issue" "$task_id"
         fi
     done
     shopt -u nullglob
 }
 
-# maybe_run_check <worktree-dir> <issue>
+# maybe_run_check <worktree-dir> <issue> [task_id]
 #
 # Resolve + claim + run the acceptance check for a worker that has
-# signaled done (either status-poll_pass or pr_poll_pass called us). Both
+# signaled done (either status_poll_pass or pr_poll_pass called us). Both
 # callers converge here so a task that fires both signals in the same
 # window only runs its check once — the claim is an atomic `mkdir`
-# (kernel-level single-writer), and both callers derive the SAME claim key
-# by re-reading the worktree's own status file (if one exists) rather than
-# trusting whatever the caller happened to pass in.
+# (kernel-level single-writer).
+#
+# task_id: status_poll_pass always knows it (the file it just read).
+# pr_poll_pass (PR-open backstop) doesn't — it only knows the issue. In
+# that case we look for the first status file that hasn't already been
+# claimed/checked and use ITS task_id, rather than guessing (a prior
+# version picked the lexicographically-latest status file, which could
+# grab the WRONG task in a worktree that's processed more than one, and
+# permanently consume the claim so the real ready-for-review task never
+# gets checked). We only fall back to a synthetic per-issue key when the
+# worktree has no status file at all — the literal "worker never wrote
+# the #129 convention" case the backstop exists for.
 maybe_run_check() {
-    local wt_dir="$1" issue="$2"
+    local wt_dir="$1" issue="$2" task_id="${3:-}"
     local status_dir="$wt_dir/.swarm/tasks/status"
     mkdir -p "$status_dir" 2>/dev/null || return 0
 
-    # Prefer the task_id from the worker's own status file (mirrors what
-    # status_poll_pass just read) so the PR-open backstop and the fast
-    # status-file path land on the same claim key when both fire close
-    # together. No status file yet (worker never wrote one, or #129 isn't
-    # deployed here) → synthesize a per-issue key so the backstop still
-    # works standalone.
-    local task_id="" latest
-    latest=$(find "$status_dir" -maxdepth 1 -name '*.json' -not -name '*.check.json' 2>/dev/null | sort | tail -1)
-    if [ -n "$latest" ] && [ "$HAVE_JQ" = "1" ]; then
-        task_id=$(jq -r '.task_id // empty' "$latest" 2>/dev/null) || task_id=""
+    if [ -z "$task_id" ]; then
+        # Distinguish "no status file exists at all" (synthesize a key —
+        # this is the literal backstop case) from "a status file exists
+        # but is already claimed" (some other pass already owns it —
+        # return, don't synthesize a SECOND key for the same issue, which
+        # would double-run the check under a different task_id).
+        local f candidate any_status=0 unclaimed=""
+        shopt -s nullglob
+        for f in "$status_dir"/*.json; do
+            case "$f" in *.check.json) continue ;; esac
+            any_status=1
+            candidate="$(basename "$f" .json)"
+            if [ ! -d "$status_dir/${candidate}.check-claim" ]; then
+                unclaimed="$candidate"
+                break
+            fi
+        done
+        shopt -u nullglob
+        if [ -n "$unclaimed" ]; then
+            task_id="$unclaimed"
+        elif [ "$any_status" = "1" ]; then
+            return 0
+        fi
     fi
     [ -n "$task_id" ] || task_id="pr-issue-$issue"
 
@@ -542,11 +568,15 @@ record_check_result() {
 #     <check_cmd>", record the result immediately via record_check_result.
 #     No tmux dependency.
 #   - default: spawn a visible tmux window `chk-N` (mirrors provision-worker.sh's
-#     `iss-N` windows) so the operator can watch/scroll back the run. The
-#     window's own shell writes the result files directly (it's a separate
-#     process — it can't call back into this script's bash functions), using
-#     the identical two-line shape record_check_result writes, kept in sync
-#     by comment cross-reference rather than by sharing code across processes.
+#     `iss-N` windows) so the operator can watch/scroll back the run. check_cmd
+#     is free-form text (from a SWARM_CHECK marker, .swarm/check.sh, or
+#     WORKER_CHECK_CMD) — rather than interpolate it into a `tmux ... bash -c
+#     "..."` string (a stray single quote would break, or worse, the nested
+#     shell), we write a small standalone script and hand tmux its path. Each
+#     dynamic value is written as its own `NAME=%q` assignment (printf %q
+#     shell-quotes it correctly regardless of content); the rest of the
+#     script is a literal heredoc ('SCRIPT' — unexpanded by this shell) that
+#     just references those variables normally.
 execute_check() {
     local wt_dir="$1" issue="$2" task_id="$3" check_cmd="$4" check_json="$5"
 
@@ -566,20 +596,35 @@ execute_check() {
 
     local win="chk-$issue"
     local timeout_secs="${WORKER_CHECK_TIMEOUT:-600}"
-    # Mirrors record_check_result's output shape exactly — see that
-    # function if this drifts.
-    tmux new-window -d -t "$SESSION_NAME" -n "$win" -c "$wt_dir" bash -c "
-        echo '--- check-on-done: issue #$issue (task $task_id) ---'
-        echo 'check: $check_cmd'
-        timeout $timeout_secs bash -c '$check_cmd'
-        rc=\$?
-        state=pass; [ \$rc -eq 0 ] || state=fail
-        ts=\$(date -u +'%Y-%m-%dT%H:%M:%SZ')
-        printf '{\"task_id\":\"%s\",\"state\":\"%s\",\"check_exit\":%d,\"ts\":\"%s\"}\n' '$task_id' \"\$state\" \$rc \"\$ts\" > '$check_json'
-        printf '%s  %-15s %s\n' \"\$ts\" 'watch.check_on_done' \"issue=$issue task_id=$task_id result=\$state check_exit=\$rc\" >> '$EVENTS_LOG'
-        echo \"--- check \$state (exit \$rc) — this window stays open for review ---\"
-        exec bash
-    " 2>/dev/null || log_event watch.check_on_done.error "issue=$issue task_id=$task_id reason=tmux_new_window_failed"
+    local runner_script="$wt_dir/.swarm/tasks/status/${task_id}.check-run.sh"
+    {
+        printf '#!/usr/bin/env bash\n'
+        printf 'ISSUE=%q\n'        "$issue"
+        printf 'TASK_ID=%q\n'      "$task_id"
+        printf 'CHECK_CMD=%q\n'    "$check_cmd"
+        printf 'CHECK_JSON=%q\n'   "$check_json"
+        printf 'EVENTS_LOG=%q\n'   "$EVENTS_LOG"
+        printf 'TIMEOUT_SECS=%q\n' "$timeout_secs"
+        # Mirrors record_check_result's output shape exactly — see that
+        # function if this drifts. Kept as inline shell (not a call back
+        # into this script) because this runs as a separate tmux process.
+        cat <<'SCRIPT'
+echo "--- check-on-done: issue #$ISSUE (task $TASK_ID) ---"
+echo "check: $CHECK_CMD"
+timeout "$TIMEOUT_SECS" bash -c "$CHECK_CMD"
+rc=$?
+state=pass; [ "$rc" -eq 0 ] || state=fail
+ts=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+printf '{"task_id":"%s","state":"%s","check_exit":%d,"ts":"%s"}\n' "$TASK_ID" "$state" "$rc" "$ts" > "$CHECK_JSON"
+printf '%s  %-15s %s\n' "$ts" 'watch.check_on_done' "issue=$ISSUE task_id=$TASK_ID result=$state check_exit=$rc" >> "$EVENTS_LOG"
+echo "--- check $state (exit $rc) — this window stays open for review ---"
+exec bash
+SCRIPT
+    } > "$runner_script" 2>/dev/null
+    chmod +x "$runner_script" 2>/dev/null
+
+    tmux new-window -d -t "$SESSION_NAME" -n "$win" -c "$wt_dir" bash "$runner_script" 2>/dev/null \
+        || log_event watch.check_on_done.error "issue=$issue task_id=$task_id reason=tmux_new_window_failed"
 }
 
 # run_watch_timer_loop
