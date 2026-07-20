@@ -43,11 +43,19 @@ set -u
 PROBE="${STATUSLINE_PROBE:-${XDG_RUNTIME_DIR:-/tmp}/claude-statusline-$UID.json}"
 
 input="$(cat)"
-# Refuse to follow a pre-planted symlink at the probe path (relevant mainly
-# for the shared-/tmp fallback when XDG_RUNTIME_DIR is unset) — drop the
-# link so the write below always lands on a fresh regular file we own.
-[ -L "$PROBE" ] && rm -f "$PROBE"
-printf '%s' "$input" > "$PROBE"
+# Write via mktemp+mv rather than a direct `>`: on the shared-/tmp fallback
+# (when XDG_RUNTIME_DIR is unset) an attacker with a different UID can
+# pre-plant a symlink at $PROBE that we cannot unlink (sticky-bit /tmp only
+# lets the symlink's owner remove it), so a plain redirect would silently
+# follow it into an arbitrary file. `mv` replaces whatever sits at the
+# destination via an atomic rename(2) — it never follows an existing
+# symlink there — so this is safe regardless of who owns it.
+probe_dir="$(dirname "$PROBE")"
+if probe_tmp="$(mktemp "$probe_dir/.claude-statusline.XXXXXX" 2>/dev/null)"; then
+    printf '%s' "$input" > "$probe_tmp" && mv -f "$probe_tmp" "$PROBE"
+else
+    printf '%s' "$input" > "$PROBE"
+fi
 
 # --- Model ---------------------------------------------------------------
 model=$(printf '%s' "$input" | jq -r '
