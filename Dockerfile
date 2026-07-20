@@ -48,6 +48,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     postgresql-client \
     less vim tree htop tmux \
     iproute2 net-tools \
+    shellcheck \
     && rm -rf /var/lib/apt/lists/*
 
 # JDK 21

@@ -31,6 +31,8 @@ check_script() {
             FAIL=$((FAIL + 1))
             return
         fi
+    else
+        red "  WARN: shellcheck not installed — lint gate SKIPPED for $script"
     fi
 
     # 3. Specific logic checks for llm-start.sh
