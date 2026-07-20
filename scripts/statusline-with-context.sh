@@ -47,11 +47,11 @@ printf '%s' "$input" > "$PROBE"
 
 # --- Model ---------------------------------------------------------------
 model=$(printf '%s' "$input" | jq -r '
-    .model.display_name //
-    .model.id //
+    .model.display_name? //
+    .model.id? //
     (.model | select(type == "string")) //
-    .model_name //
-    .session.model //
+    .model_name? //
+    .session.model? //
     empty
 ' 2>/dev/null)
 [ -z "$model" ] && model="?"
