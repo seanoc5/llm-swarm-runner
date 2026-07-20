@@ -95,6 +95,7 @@ Two worker classes; decide per issue before provisioning (full rationale: `docs/
 
 **If unsure, default to tmux** — a misroute to Actions costs tokens and Max economics; a misroute to tmux just stays local.
 
+To dispatch to the Actions class instead of `provision-worker.sh`:
 ```bash
 gh issue edit <N> --add-label claude-action
 gh issue comment <N> --body "@claude please address this issue. See the issue body for full context."
