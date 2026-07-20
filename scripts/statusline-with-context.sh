@@ -50,11 +50,16 @@ input="$(cat)"
 # follow it into an arbitrary file. `mv` replaces whatever sits at the
 # destination via an atomic rename(2) — it never follows an existing
 # symlink there — so this is safe regardless of who owns it.
+# No unsafe fallback on mktemp failure (e.g. an attacker exhausting /tmp
+# inodes to force it) — skip the probe for this render rather than fall
+# back to the direct-redirect hazard mktemp+mv exists to avoid. Also clean
+# up the temp file if the write or the mv itself fails, since this runs on
+# every render and a leaked temp file per failed render adds up fast.
 probe_dir="$(dirname "$PROBE")"
 if probe_tmp="$(mktemp "$probe_dir/.claude-statusline.XXXXXX" 2>/dev/null)"; then
-    printf '%s' "$input" > "$probe_tmp" && mv -f "$probe_tmp" "$PROBE"
-else
-    printf '%s' "$input" > "$PROBE"
+    if ! printf '%s' "$input" > "$probe_tmp" || ! mv -f "$probe_tmp" "$PROBE"; then
+        rm -f "$probe_tmp" 2>/dev/null
+    fi
 fi
 
 # --- Model ---------------------------------------------------------------
