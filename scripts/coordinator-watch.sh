@@ -90,6 +90,65 @@
 #                           readable pane echo below, restoring silent-
 #                           stdout (banner only) — for headless runs or
 #                           when piping the watcher's own stdout elsewhere.
+#   AUTO_COMPACT=1          Before waking a long-lived coordinator (live
+#                           claude REPL still in the pane, not a fresh
+#                           launch), check its context usage and inject a
+#                           real `/compact` — not just text in the input
+#                           box, an actual submitted command, the same
+#                           load-buffer+paste-buffer+Enter mechanism
+#                           llm-start.sh's live-REPL reprompt path uses —
+#                           if it's at/above AUTO_COMPACT_THRESHOLD_TOKENS.
+#                           Blocks (polling capture-pane) until compaction
+#                           visibly starts and finishes before proceeding
+#                           to the normal wake. Requires
+#                           scripts/statusline-with-context.sh to be
+#                           installed as the coordinator's statusLine —
+#                           that's this feature's only source of context
+#                           data (via the probe file it writes); with no
+#                           fresh probe file, this is a no-op (fails open,
+#                           never blocks the wake). Set to 0 to disable.
+#   AUTO_COMPACT_THRESHOLD_TOKENS=150000
+#                           Used-token threshold that triggers the above.
+#   AUTO_COMPACT_PROBE=<path>
+#                           Path to the statusline probe file. Default
+#                           matches the statusline script's own default:
+#                           ${STATUSLINE_PROBE:-${XDG_RUNTIME_DIR:-/tmp}/claude-statusline-$UID.json}.
+#                           Override if you've set STATUSLINE_PROBE to a
+#                           custom path for the coordinator's session.
+#   AUTO_COMPACT_PROBE_MAX_AGE_SECS=120
+#                           Probe file older than this (mtime) is treated
+#                           as stale — the coordinator may not actually be
+#                           rendering right now — and the check is skipped
+#                           rather than acted on.
+#   AUTO_COMPACT_BUSY_PATTERN
+#                           Regex checked against (ANSI-stripped) captured
+#                           pane content to tell "claude is mid-turn" from
+#                           "claude is idle at its input prompt" — both
+#                           states show the same pane_current_command, so
+#                           this is the only signal available. Defaults to
+#                           the same spinner-phrase pattern
+#                           check-stuck-workers.sh's detect_state() already
+#                           relies on for its ACTIVE state (Considering…,
+#                           Sautéed for, Cooked for, Baked for, Simmered
+#                           for, ✻, ✶) plus the exit-confirm-pending
+#                           prompt, which would misfire on a bare Enter.
+#                           This is TUI chrome, not a documented API, and
+#                           may need updating if Claude Code's wording
+#                           changes — keep in sync with that file's
+#                           pattern if you touch either.
+#   AUTO_COMPACT_START_TIMEOUT_SECS=15
+#                           Max wait for the busy indicator to APPEAR after
+#                           sending /compact (confirms the CLI actually
+#                           picked it up). Giving up here just skips ahead
+#                           to the normal wake — never blocks it.
+#   AUTO_COMPACT_FINISH_TIMEOUT_SECS=300
+#                           Max wait for the busy indicator to clear
+#                           (compaction is a real, possibly minutes-long
+#                           turn). Giving up here also just proceeds with
+#                           the normal wake.
+#   AUTO_COMPACT_POLL_SECS=2
+#                           capture-pane polling interval for both of the
+#                           waits above.
 #
 # Watch backend (auto-detected):
 #   - inotifywait (preferred): instant response. Install with:
@@ -136,6 +195,14 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     MAX_WORKERS         5         (referenced by default WAKE_PROMPT)
     MAX_TMUX_WINDOWS    10        (referenced by default WAKE_PROMPT)
     WATCHER_QUIET       0         suppress human-readable pane echo (banner only); see PANE ECHO
+    AUTO_COMPACT        1         inject real /compact into a long-lived coordinator before waking it if over threshold; see header comment
+    AUTO_COMPACT_THRESHOLD_TOKENS     150000  used-token trigger
+    AUTO_COMPACT_PROBE                (auto)  statusline probe file path
+    AUTO_COMPACT_PROBE_MAX_AGE_SECS   120     probe staleness cutoff
+    AUTO_COMPACT_BUSY_PATTERN         (auto)  capture-pane busy-indicator regex
+    AUTO_COMPACT_START_TIMEOUT_SECS   15      max wait for compaction to start
+    AUTO_COMPACT_FINISH_TIMEOUT_SECS  300     max wait for compaction to finish
+    AUTO_COMPACT_POLL_SECS            2       capture-pane poll interval
 
 DEFAULT WAKE_PROMPT (top-up mode)
     Coordinator triages outcomes, then refills workers toward MAX_WORKERS
@@ -156,6 +223,10 @@ EVENTS LOG
       watch.pr_poll        terminal PR detected via periodic gh poll (reap backstop)
       watch.check_on_done  check-on-done result (issue, task_id, result=running|pass|fail|skipped)
       cap.refused          provision-worker.sh hit MAX_WORKERS / MAX_TMUX_WINDOWS
+      coord.compact        /compact injected before wake (used, threshold)
+      coord.compact.skip   auto-compact skipped this cycle (reason=pane_busy|no_fresh_probe|...)
+      coord.compact.timeout  gave up waiting on the busy indicator (phase=start|finish, waited)
+      coord.compact.done   busy indicator cleared — compaction confirmed finished (waited)
 
 PANE ECHO (issue #38)
     By default, every line appended to events.log — by this process OR any
@@ -222,11 +293,38 @@ WATCH_CHECK_ON_DONE="${WATCH_CHECK_ON_DONE:-1}"
 CHECK_RUNNER="${CHECK_RUNNER:-}"
 SESSION_NAME="${SESSION_NAME:-llm-$(basename "$PROJECT_DIR")}"
 WATCHER_QUIET="${WATCHER_QUIET:-0}"
+AUTO_COMPACT="${AUTO_COMPACT:-1}"
+AUTO_COMPACT_THRESHOLD_TOKENS="${AUTO_COMPACT_THRESHOLD_TOKENS:-150000}"
+# Mirrors scripts/statusline-with-context.sh's own default probe path —
+# this feature has no context data source other than that file, so if the
+# statusline isn't installed (or STATUSLINE_PROBE points elsewhere for the
+# coordinator's session), override AUTO_COMPACT_PROBE to match.
+AUTO_COMPACT_PROBE="${AUTO_COMPACT_PROBE:-${STATUSLINE_PROBE:-${XDG_RUNTIME_DIR:-/tmp}/claude-statusline-$UID.json}}"
+AUTO_COMPACT_PROBE_MAX_AGE_SECS="${AUTO_COMPACT_PROBE_MAX_AGE_SECS:-120}"
+# Same spinner-phrase pattern check-stuck-workers.sh's detect_state() uses
+# for its ACTIVE state, plus the Ctrl-C exit-confirm prompt (a bare Enter
+# into that state would confirm an unintended exit rather than compact).
+AUTO_COMPACT_BUSY_PATTERN="${AUTO_COMPACT_BUSY_PATTERN:-Considering…|Sautéed for|Cooked for|Baked for|Simmered for|✻|✶|Press Ctrl-C again to .xit}"
+AUTO_COMPACT_START_TIMEOUT_SECS="${AUTO_COMPACT_START_TIMEOUT_SECS:-15}"
+AUTO_COMPACT_FINISH_TIMEOUT_SECS="${AUTO_COMPACT_FINISH_TIMEOUT_SECS:-300}"
+AUTO_COMPACT_POLL_SECS="${AUTO_COMPACT_POLL_SECS:-2}"
 
 if ! [[ "$WATCH_PR_POLL_SECS" =~ ^[0-9]+$ ]]; then
     echo "ERROR: WATCH_PR_POLL_SECS must be a non-negative integer (got: $WATCH_PR_POLL_SECS)" >&2
     exit 1
 fi
+for _var in AUTO_COMPACT_THRESHOLD_TOKENS AUTO_COMPACT_PROBE_MAX_AGE_SECS \
+            AUTO_COMPACT_START_TIMEOUT_SECS AUTO_COMPACT_FINISH_TIMEOUT_SECS; do
+    if ! [[ "${!_var}" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: $_var must be a non-negative integer (got: ${!_var})" >&2
+        exit 1
+    fi
+done
+if ! [[ "$AUTO_COMPACT_POLL_SECS" =~ ^[0-9]+$ ]] || [ "$AUTO_COMPACT_POLL_SECS" -lt 1 ]; then
+    echo "ERROR: AUTO_COMPACT_POLL_SECS must be a positive integer (got: $AUTO_COMPACT_POLL_SECS)" >&2
+    exit 1
+fi
+unset _var
 
 # jq is optional throughout this codebase (see worker-listener.sh's
 # append_eval_log). status_poll_pass/maybe_run_check parse status-file JSON
@@ -278,6 +376,10 @@ format_event_line() {
         coord.wake)                   glyph="→"; color=$'\033[36m' ;;
         coord.wake.skip)              glyph="⏸"; color=$'\033[33m' ;;
         coord.wake.error)             glyph="✗"; color=$'\033[31m' ;;
+        coord.compact)                 glyph="◈"; color=$'\033[36m' ;;
+        coord.compact.skip)             glyph="·"; color=$'\033[2m'  ;;
+        coord.compact.timeout)           glyph="⚠"; color=$'\033[33m' ;;
+        coord.compact.done)               glyph="◈"; color=$'\033[32m' ;;
         watch.autoclose)               glyph="♻"; color=$'\033[36m' ;;
         watch.pr_poll)                  glyph="⚠"; color=$'\033[33m' ;;
         pr_poll.error)                   glyph="✗"; color=$'\033[31m' ;;
@@ -331,6 +433,7 @@ post-outcomes: $POST_OUTCOMES$([ "$POST_OUTCOMES" = "1" ] && echo " (sweep: $SWE
 autoclose:     $WATCHER_AUTOCLOSE$([ "$WATCHER_AUTOCLOSE" = "1" ] && echo " (script: $KILL_FINISHED)")
 pr-poll:       ${WATCH_PR_POLL_SECS}s$([ "$WATCH_PR_POLL_SECS" = "0" ] && echo " (disabled)")
 check-on-done: $WATCH_CHECK_ON_DONE$([ "$WATCH_CHECK_ON_DONE" = "1" ] && echo " (session: $SESSION_NAME)")
+auto-compact:  $AUTO_COMPACT$([ "$AUTO_COMPACT" = "1" ] && echo " (threshold: ${AUTO_COMPACT_THRESHOLD_TOKENS} tokens, probe: $AUTO_COMPACT_PROBE)")
 dry-run:       $DRY_RUN
 once:          $ONCE
 pane-echo:     $([ "$WATCHER_QUIET" = "1" ] && echo "disabled (WATCHER_QUIET=1)" || echo "enabled (WATCHER_QUIET=1 to silence)")
@@ -772,6 +875,173 @@ run_watch_timer_loop() {
     done
 }
 
+# --- Auto-compact (before wake) ---------------------------------------------
+#
+# Portable mtime (epoch seconds). GNU coreutils first, BSD fallback. Mirrors
+# reap-orphan-worktrees.sh's mtime_epoch — kept local rather than shared
+# since scripts here are self-contained (see scripts/README.md).
+mtime_epoch() {
+    stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
+}
+
+# coordinator_pane_state
+#
+# Echoes "absent" (no session, or no coordinator window), "shell" (pane's
+# foreground process is a bare shell — claude already exited, nothing to
+# compact), or "cli" (a CLI process, e.g. claude, is the foreground
+# command — compaction may be possible, subject to coordinator_pane_busy).
+# Mirrors llm-start.sh's coordinator_idle detection (pane_current_command).
+coordinator_pane_state() {
+    tmux has-session -t "$SESSION_NAME" 2>/dev/null || { echo absent; return; }
+    tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx 'coordinator' || { echo absent; return; }
+    local pane_cmd
+    pane_cmd="$(tmux list-panes -t "$SESSION_NAME:coordinator" -F '#{pane_current_command}' 2>/dev/null | head -1)" || pane_cmd=""
+    case "$pane_cmd" in
+        bash|zsh|sh|fish|"") echo shell ;;
+        *)                   echo cli ;;
+    esac
+}
+
+# coordinator_pane_busy
+#
+# True (rc 0) if the coordinator pane's currently rendered content matches
+# AUTO_COMPACT_BUSY_PATTERN — i.e. claude is mid-turn (or sitting at an
+# exit-confirmation prompt) rather than idle at its input box.
+# pane_current_command can't tell these apart (claude is the foreground
+# command in both states), so this greps the actual screen content
+# instead — same technique check-stuck-workers.sh's detect_state() uses to
+# classify worker panes, applied here to the coordinator's own pane.
+# ANSI-stripped and LC_ALL=C for the same reason documented there: raw
+# escape sequences and the Unicode spinner glyphs (✻/✶) can otherwise trip
+# bash's here-string handling under a UTF-8 locale.
+coordinator_pane_busy() {
+    local content clean
+    content="$(tmux capture-pane -t "$SESSION_NAME:coordinator" -p 2>/dev/null)" || return 1
+    clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
+    printf '%s\n' "$clean" | LC_ALL=C grep -qE "$AUTO_COMPACT_BUSY_PATTERN"
+}
+
+# probe_ctx_used
+#
+# Echoes the coordinator's last-reported used-token count and returns 0,
+# or returns 1 with no output, when the probe file (written by
+# scripts/statusline-with-context.sh, when installed as the coordinator's
+# statusLine) is missing, stale (mtime older than
+# AUTO_COMPACT_PROBE_MAX_AGE_SECS — the coordinator may not actually be
+# rendering right now, e.g. pane not visible), or doesn't parse to a plain
+# integer. Fails closed throughout: no probe file (feature not set up) is
+# indistinguishable here from "can't tell," and both correctly skip
+# auto-compact rather than guess. jq paths mirror the statusline script's
+# own ctx_used extraction — the probe file IS that script's raw stdin
+# payload, so the same field-path fallbacks apply.
+probe_ctx_used() {
+    [ "$HAVE_JQ" = "1" ] || return 1
+    [ -r "$AUTO_COMPACT_PROBE" ] || return 1
+    local mtime now
+    mtime=$(mtime_epoch "$AUTO_COMPACT_PROBE") || return 1
+    [ -n "$mtime" ] || return 1
+    now=$(date +%s)
+    [ $((now - mtime)) -le "$AUTO_COMPACT_PROBE_MAX_AGE_SECS" ] || return 1
+
+    local used
+    used=$(jq -r '
+        .context_window.total_input_tokens //
+        .context_window.used_tokens //
+        .context.input_tokens //
+        .context.used //
+        .usage.input_tokens //
+        empty
+    ' "$AUTO_COMPACT_PROBE" 2>/dev/null) || true
+    [[ "$used" =~ ^[0-9]+$ ]] || return 1
+    echo "$used"
+}
+
+# maybe_auto_compact
+#
+# Called right before waking the coordinator (from on_outcome, after the
+# debounce check has already passed — i.e. we're committed to waking).
+# If AUTO_COMPACT is enabled, the coordinator pane holds a live and
+# currently-idle CLI session, and its last-probed context usage is
+# at/above AUTO_COMPACT_THRESHOLD_TOKENS, injects a real `/compact` via
+# the same load-buffer + paste-buffer + send-keys-Enter mechanism
+# llm-start.sh's live-REPL reprompt path uses (Enter actually submits it —
+# this is not just populating the input box), then blocks in a poll loop
+# until the busy indicator confirms compaction started and later cleared.
+#
+# Fails open at every step: a missing precondition, a stale/absent probe,
+# or either timeout just returns 0 and falls through to the normal wake —
+# this is strictly an optimization on top of that wake, never a gate on
+# it. Blocking here (a real compaction run is commonly a minute or more)
+# is consistent with the rest of on_outcome, which is already a
+# synchronous, one-outcome-at-a-time call chain.
+maybe_auto_compact() {
+    [ "$AUTO_COMPACT" = "1" ] || return 0
+
+    local state
+    state="$(coordinator_pane_state)" || state="absent"
+    [ "$state" = "cli" ] || return 0   # no live session to compact
+
+    if coordinator_pane_busy; then
+        log_event coord.compact.skip "reason=pane_busy"
+        return 0   # don't race a live turn — see docs/tmux-as-channel.md on send-keys races
+    fi
+
+    local used
+    used="$(probe_ctx_used)" || {
+        log_event coord.compact.skip "reason=no_fresh_probe"
+        return 0
+    }
+
+    [ "$used" -ge "$AUTO_COMPACT_THRESHOLD_TOKENS" ] || return 0   # under threshold — the common case
+
+    echo "[$(date +%T)] coordinator context at ${used} tokens (>= ${AUTO_COMPACT_THRESHOLD_TOKENS}) — compacting before wake..."
+    log_event coord.compact "used=$used threshold=$AUTO_COMPACT_THRESHOLD_TOKENS"
+
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "[DRY] would inject /compact into $SESSION_NAME:coordinator and wait for it to finish"
+        return 0
+    fi
+
+    # Every step below is best-effort — a transient tmux failure here must
+    # degrade to "compaction never visibly started" (caught by the start-
+    # timeout below) rather than take the whole daemon down via set -e.
+    local tmp_compact
+    tmp_compact=$(mktemp) || { log_event coord.compact.skip "reason=mktemp_failed"; return 0; }
+    printf '/compact\n' > "$tmp_compact" 2>/dev/null || true
+    tmux load-buffer -b llm-coord-autocompact "$tmp_compact" 2>/dev/null || true
+    tmux paste-buffer -b llm-coord-autocompact -t "$SESSION_NAME:coordinator" -d 2>/dev/null || true
+    tmux send-keys -t "$SESSION_NAME:coordinator" Enter 2>/dev/null || true
+    rm -f "$tmp_compact" 2>/dev/null || true
+
+    # Wait for compaction to actually start (busy indicator appears) —
+    # confirms the CLI picked up the input. If it never appears within
+    # the timeout, something's off (race, rejected input, wrong pane
+    # state); log it and fall through rather than block further.
+    local waited=0
+    while ! coordinator_pane_busy; do
+        sleep "$AUTO_COMPACT_POLL_SECS"
+        waited=$((waited + AUTO_COMPACT_POLL_SECS))
+        if [ "$waited" -ge "$AUTO_COMPACT_START_TIMEOUT_SECS" ]; then
+            log_event coord.compact.timeout "phase=start waited=${waited}s"
+            return 0
+        fi
+    done
+
+    # Now wait for it to finish (busy indicator clears).
+    waited=0
+    while coordinator_pane_busy; do
+        sleep "$AUTO_COMPACT_POLL_SECS"
+        waited=$((waited + AUTO_COMPACT_POLL_SECS))
+        if [ "$waited" -ge "$AUTO_COMPACT_FINISH_TIMEOUT_SECS" ]; then
+            log_event coord.compact.timeout "phase=finish waited=${waited}s"
+            return 0
+        fi
+    done
+
+    echo "[$(date +%T)] compaction done (${waited}s) — proceeding with wake"
+    log_event coord.compact.done "waited=${waited}s"
+}
+
 # Trigger logic — called when a NEW outcome JSON path is observed
 on_outcome() {
     local path="$1"
@@ -818,6 +1088,8 @@ on_outcome() {
         echo "[$(date +%T)] running autoclose pass before wake..."
         cleanup_eligible_workers outcome
     fi
+
+    maybe_auto_compact
 
     echo "[$(date +%T)] outcome: $path"
     echo "[$(date +%T)] waking coordinator..."
