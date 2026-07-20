@@ -320,15 +320,15 @@ opus · spring-search-tempo · ctx: 195k/1M (19%)
 }
 ```
 
-(Or symlink the script under `~/.claude/` and reference that path — your call.) Restart Claude Code for the change to take effect.
+(`/opt/work/llm-swarm-runner` is this repo's path in the reference swarm deployment — adjust to wherever you cloned it. Or symlink the script under `~/.claude/` and reference that path — your call.) Restart Claude Code for the change to take effect.
 
-The script also writes the raw stdin JSON payload to `/tmp/claude-statusline-last.json` on every render. This is intentional — the first version of the script tries several plausible jq paths for the context fields because Claude Code's statusLine JSON schema isn't documented exhaustively; the dump lets you confirm which path is actually used in your build. Once you see `ctx: <something>k/<something>M (<n>%)` rendered correctly, the probe has served its purpose; if you see `ctx: ?`, inspect the dump and either update the script or report back so the fallback paths can be tightened.
+The script also writes the raw stdin JSON payload to `$STATUSLINE_PROBE` (default `${XDG_RUNTIME_DIR:-/tmp}/claude-statusline-$UID.json`) on every render. This is intentional — the first version of the script tries several plausible jq paths for the context fields because Claude Code's statusLine JSON schema isn't documented exhaustively; the dump lets you confirm which path is actually used in your build. Once you see `ctx: <something>k/<something>M (<n>%)` rendered correctly, the probe has served its purpose; if you see `ctx: ?`, inspect the dump and either update the script or report back so the fallback paths can be tightened.
 
 ### Compact discipline
 
 Even with the indicator, the coordinator should compact proactively rather than waiting for the soft boundary:
 
-- **On every coordinator wake** (the `coordinator-watch.sh` re-trigger after a worker finishes), the coordinator system prompt now includes a self-check (`prompts/coordinator.md` startup-checklist step 5) for stale background shells. A natural sibling discipline: if `ctx` is > 60% at wake, run `/compact` before processing the wake event. The just-completed worker is done; there's no live in-flight reasoning to preserve.
+- **On every coordinator wake** (the `coordinator-watch.sh` re-trigger after a worker finishes), check the statusline `ctx` reading before processing the wake event; if it's > 60%, run `/compact` first. The just-completed worker is done; there's no live in-flight reasoning to preserve.
 - **On every status report to the user,** the coordinator can include a one-line `ctx: 195k/1M (19%) — healthy` indicator so you don't have to ask.
 
 If you don't want to keep the coordinator long-lived, the alternative is the **reset-after-each-coordination** flow — `/clear` (or exit and re-invoke `llm-start.sh`) after each batch. You lose the cross-coordination memory but you also never have to think about context drift. The trade-off is yours; the long-lived path is the default because the memory is usually worth more.

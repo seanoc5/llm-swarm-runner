@@ -16,6 +16,9 @@
 #       }
 #     }
 #
+# (/opt/work/llm-swarm-runner is this repo's path in the reference swarm
+# deployment — adjust to wherever you cloned it.)
+#
 # The path must be absolute. If you want this under ~/.claude/ instead of
 # the repo, symlink it: `ln -s /opt/work/llm-swarm-runner/scripts/statusline-with-context.sh ~/.claude/statusline.sh`
 # and reference ~/.claude/statusline.sh in settings.json.
@@ -24,16 +27,20 @@
 # Example:        opus · spring-search-tempo · ctx: 195k/1M (19%)
 #
 # This script also writes the raw stdin payload to $STATUSLINE_PROBE on
-# every render (default /tmp/claude-statusline-last.json). That dump
-# exists so the *exact* JSON field names for the context window can be
-# confirmed against a real Claude Code render — the first version of
+# every render (default ${XDG_RUNTIME_DIR:-/tmp}/claude-statusline-$UID.json).
+# That dump exists so the *exact* JSON field names for the context window can
+# be confirmed against a real Claude Code render — the first version of
 # this script tries several plausible paths and the dump tells us which
 # one Claude Code actually uses. Once we've confirmed, the fallback
 # probes can be removed.
 
+# Only -u, not -euo pipefail: this runs as a statusLine command hook, so any
+# non-zero exit or unbound var here would blank the statusline every render
+# instead of just degrading one field to "?" — the never-fail contract wins
+# over strictness.
 set -u
 
-PROBE="${STATUSLINE_PROBE:-/tmp/claude-statusline-last.json}"
+PROBE="${STATUSLINE_PROBE:-${XDG_RUNTIME_DIR:-/tmp}/claude-statusline-$UID.json}"
 
 input="$(cat)"
 printf '%s' "$input" > "$PROBE"
@@ -42,7 +49,7 @@ printf '%s' "$input" > "$PROBE"
 model=$(printf '%s' "$input" | jq -r '
     .model.display_name //
     .model.id //
-    .model //
+    (.model | select(type == "string")) //
     .model_name //
     .session.model //
     empty
@@ -104,7 +111,13 @@ fmt_tokens() {
     fi
 }
 
-if [ -n "$ctx_used" ] && [ -n "$ctx_total" ] && [ "$ctx_used" -gt 0 ] 2>/dev/null; then
+# Both fields must be plain non-negative integers, and total must be
+# nonzero, before any arithmetic touches them — a non-numeric or zero
+# total (e.g. "1M", or a not-yet-populated 0) must degrade to "?"
+# rather than take down the statusline via a division/unbound-var death.
+is_uint() { [[ "$1" =~ ^[0-9]+$ ]]; }
+
+if is_uint "$ctx_used" && is_uint "$ctx_total" && [ "$ctx_total" -gt 0 ]; then
     used_fmt=$(fmt_tokens "$ctx_used")
     total_fmt=$(fmt_tokens "$ctx_total")
     if [ -n "$ctx_pct" ]; then
