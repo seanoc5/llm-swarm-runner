@@ -201,6 +201,7 @@ The coordinator and watcher honor a small set of tunables loaded from three sour
 | `INCLUDE_ASSIGNED_TO_OTHERS` | `0`     | `1` = drop the `@me`-or-unassigned filter; the swarm claims teammates' tickets too.                               |
 | `DEBOUNCE_SECS`              | `30`    | Watcher: window during which repeated worker-finish events coalesce into a single coordinator wake.               |
 | `POLL_SECS`                  | `2`     | Watcher: polling interval when `inotify-tools` isn't installed.                                                   |
+| `SWARM_AUTOMERGE_LOW`        | `0`     | `1` = coordinator may auto-merge a worker's 🟢 low-risk PR once CI is green and its own diff read agrees with the rating (`prompts/coordinator.md` § "Auto-merge low-risk PRs"). Default: off. |
 
 **AVAILABLE** is the coordinator's working definition of "issues a worker can pick up right now":
 
