@@ -204,16 +204,33 @@ state="$(coordinator_pane_state)"
 check "fake REPL foreground (argv[0]=claude) -> cli" "cli" "$state"
 
 printf '{"context_window":{"context_window_size":200000,"total_input_tokens":160000}}' > "$AUTO_COMPACT_PROBE"
+# Simulate a real installed statusline re-rendering with post-compaction
+# usage: the fixture's fake compaction takes 4s, so land the lower value
+# in the probe file around then -- close to when maybe_auto_compact's own
+# post-compaction settle-sleep (3s after the busy indicator clears) reads
+# it back. This exercises the ineffective-compaction check's HAPPY path
+# (usage really did drop -> no warning).
+( sleep 4; printf '{"context_window":{"context_window_size":200000,"total_input_tokens":40000}}' > "$AUTO_COMPACT_PROBE" ) &
+BGPID=$!
 start_ts=$(date +%s)
 maybe_auto_compact
 end_ts=$(date +%s)
+wait "$BGPID" 2>/dev/null || true
 elapsed=$((end_ts - start_ts))
 
-if grep -q 'coord.compact.done' "$EVENTS_LOG" && [ "$elapsed" -ge 3 ] && [ "$elapsed" -lt 15 ]; then
-    green "real /compact injection observed start->finish transition (~${elapsed}s; fixture sleeps 4s)"
+# start-wait (~0-1s) + fixture compaction (4s) + finish-wait (~0-1s) +
+# settle-sleep (3s) puts this around 7-9s; bound generously either side.
+if grep -q 'coord.compact.done' "$EVENTS_LOG" && [ "$elapsed" -ge 6 ] && [ "$elapsed" -lt 20 ]; then
+    green "real /compact injection observed start->finish transition (~${elapsed}s; fixture sleeps 4s + 3s settle)"
     PASS=$((PASS + 1))
 else
     red "did not observe expected coord.compact.done within the expected window (elapsed=${elapsed}s); events.log: $(cat "$EVENTS_LOG")"
+fi
+if grep -q 'coord.compact.ineffective' "$EVENTS_LOG"; then
+    red "usage genuinely dropped (160000 -> 40000) but coord.compact.ineffective still fired; events.log: $(cat "$EVENTS_LOG")"
+else
+    green "usage genuinely dropped -> no false-positive coord.compact.ineffective"
+    PASS=$((PASS + 1))
 fi
 
 heading "Test 6: set -e safety — a forced tmux failure must not abort the process"
@@ -235,6 +252,27 @@ if [ "$state" = "shell" ]; then
     PASS=$((PASS + 1))
 else
     red "expected state=shell on tmux failure, got [$state]"
+fi
+
+heading "Test 7: ineffective-compaction detection — usage that DOESN'T drop must warn"
+# Reuses the SAME fake REPL instance still running from Test 5 (it's a
+# `while read` loop, so it's just sitting idle waiting for the next line --
+# no need to restart it, and no C-c here: that process was launched via
+# `exec`, so interrupting it would kill the pane's only process and take
+# the whole session down with it). This time the probe file is left
+# untouched at the pre-compaction value throughout -- simulating the exact
+# silent-failure mode self-review flagged: a pasted "/compact" that somehow
+# got submitted as a plain chat message instead of the slash command would
+# still show the busy indicator appearing and clearing (claude processed
+# *a* turn), but context would not actually drop.
+: > "$EVENTS_LOG"
+printf '{"context_window":{"context_window_size":200000,"total_input_tokens":160000}}' > "$AUTO_COMPACT_PROBE"
+maybe_auto_compact
+if grep -q 'coord.compact.ineffective' "$EVENTS_LOG"; then
+    green "usage did not drop -> coord.compact.ineffective correctly fired"
+    PASS=$((PASS + 1))
+else
+    red "usage stayed at 160000 across the 'compaction' but no coord.compact.ineffective fired; events.log: $(cat "$EVENTS_LOG")"
 fi
 
 echo ""

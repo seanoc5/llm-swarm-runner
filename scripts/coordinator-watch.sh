@@ -107,6 +107,15 @@
 #                           data (via the probe file it writes); with no
 #                           fresh probe file, this is a no-op (fails open,
 #                           never blocks the wake). Set to 0 to disable.
+#                           After a confirmed compaction, re-checks the
+#                           probe once the statusline has had a moment to
+#                           re-render — whether a pasted "/compact" is
+#                           truly parsed as the slash command (vs. a plain
+#                           chat message) isn't verifiable short of a live
+#                           session, and a silent miss would otherwise
+#                           repeat every wake with no visible symptom. If
+#                           usage didn't drop, logs coord.compact.ineffective
+#                           loudly rather than let that happen quietly.
 #   AUTO_COMPACT_THRESHOLD_TOKENS=150000
 #                           Used-token threshold that triggers the above.
 #   AUTO_COMPACT_PROBE=<path>
@@ -233,6 +242,7 @@ EVENTS LOG
       coord.compact.skip   auto-compact skipped this cycle (reason=pane_busy|no_fresh_probe|...)
       coord.compact.timeout  gave up waiting on the busy indicator (phase=start|finish, waited)
       coord.compact.done   busy indicator cleared — compaction confirmed finished (waited)
+      coord.compact.ineffective  context didn't drop post-compact (before, after) — investigate
 
 PANE ECHO (issue #38)
     By default, every line appended to events.log — by this process OR any
@@ -391,6 +401,7 @@ format_event_line() {
         coord.compact.skip)             glyph="·"; color=$'\033[2m'  ;;
         coord.compact.timeout)           glyph="⚠"; color=$'\033[33m' ;;
         coord.compact.done)               glyph="◈"; color=$'\033[32m' ;;
+        coord.compact.ineffective)          glyph="⚠"; color=$'\033[31m' ;;
         watch.autoclose)               glyph="♻"; color=$'\033[36m' ;;
         watch.pr_poll)                  glyph="⚠"; color=$'\033[33m' ;;
         pr_poll.error)                   glyph="✗"; color=$'\033[31m' ;;
@@ -1016,9 +1027,18 @@ maybe_auto_compact() {
     # Every step below is best-effort — a transient tmux failure here must
     # degrade to "compaction never visibly started" (caught by the start-
     # timeout below) rather than take the whole daemon down via set -e.
+    #
+    # Deliberately NO trailing newline in the pasted buffer (unlike
+    # llm-start.sh's own reprompt path, which pastes an arbitrary multi-line
+    # prompt where a trailing newline is harmless either way): "/compact" is
+    # a single slash command, and pasting it with an embedded newline plus a
+    # separate trailing Enter leaves it ambiguous whether the CLI's input
+    # buffer sees "/compact" (trimmed) or "/compact\n" at submit time.
+    # Pasting the bare text with no newline at all, then a genuinely
+    # separate Enter keystroke, removes that ambiguity outright.
     local tmp_compact
     tmp_compact=$(mktemp) || { log_event coord.compact.skip "reason=mktemp_failed"; return 0; }
-    printf '/compact\n' > "$tmp_compact" 2>/dev/null || true
+    printf '/compact' > "$tmp_compact" 2>/dev/null || true
     tmux load-buffer -b llm-coord-autocompact "$tmp_compact" 2>/dev/null || true
     tmux paste-buffer -b llm-coord-autocompact -t "$SESSION_NAME:coordinator" -d 2>/dev/null || true
     tmux send-keys -t "$SESSION_NAME:coordinator" Enter 2>/dev/null || true
@@ -1051,6 +1071,24 @@ maybe_auto_compact() {
 
     echo "[$(date +%T)] compaction done (${waited}s) — proceeding with wake"
     log_event coord.compact.done "waited=${waited}s"
+
+    # Whether a pasted "/compact" is actually recognized as the slash
+    # command (vs. submitted as a plain chat message) isn't something this
+    # script can verify short of a live session — the busy indicator
+    # appears and clears identically either way, since both cases are just
+    # "claude processing a turn". If it silently landed as a chat message,
+    # context grows instead of shrinking, and since it'd still be over
+    # threshold, this would otherwise repeat on every subsequent wake with
+    # no visible symptom. A brief settle delay lets the statusline
+    # re-render with post-compaction data, then this re-checks: if usage
+    # didn't drop, log it loudly rather than let that repeat silently.
+    sleep 3
+    local used_after
+    used_after="$(probe_ctx_used)" || used_after=""
+    if [ -n "$used_after" ] && [ "$used_after" -ge "$used" ]; then
+        echo "[$(date +%T)] WARNING: context did not drop after /compact (before=$used after=$used_after) — the injected command may not have been recognized as a slash command; investigate before this repeats every wake"
+        log_event coord.compact.ineffective "before=$used after=$used_after"
+    fi
 }
 
 # Trigger logic — called when a NEW outcome JSON path is observed
