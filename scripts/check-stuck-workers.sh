@@ -16,7 +16,10 @@
 #     before deciding to top up the swarm
 #
 # Pattern catalog (precedence order, most-specific first):
-#   IDLE-PARKED            healthy: "Task complete (exit 0...Waiting for next brief"
+#   IDLE-PARKED            healthy: listener printed "[polling for next brief"
+#                          after a task-complete status block (success or
+#                          failure — a failed task's result belongs to PR/
+#                          outcome-JSON review, not to "is this pane stuck")
 #   ACTIVE                 healthy: spinner glyph (✻/✶) or "Considering…/Sautéed for/Cooked for"
 #   EXITED-IDLE            healthy: container gone + clean Task-complete marker
 #   CONTEXT-LARGE          suggestion: "/clear to save Nk tokens" visible
@@ -115,7 +118,7 @@ strip_ansi() {
 detect_state() {
     local clean="$1"
     # Precedence: parked > active > exit-confirm > context-large > exited > unknown
-    if printf '%s\n' "$clean" | LC_ALL=C grep -q 'Task complete (exit 0.*Waiting for next brief'; then
+    if printf '%s\n' "$clean" | LC_ALL=C grep -q '\[polling for next brief'; then
         echo IDLE-PARKED; return
     fi
     if printf '%s\n' "$clean" | LC_ALL=C grep -qE '(Considering…|Sautéed for|Cooked for|Baked for|Simmered for|✻|✶)'; then

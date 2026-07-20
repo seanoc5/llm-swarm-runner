@@ -2,10 +2,10 @@
 #
 # kill-finished-workers.sh — bulk-close idle iss-* worker tmux windows
 #
-# Defaults to "parked-only mode": kills iss-* windows whose listener is at
-# "Waiting for next" (claude exited, listener polling). Skips windows tied
-# to an open PR (preserves scrollback for review). Active workers are left
-# alone.
+# Defaults to "parked-only mode": kills iss-* windows whose listener has
+# printed the post-task "[polling for next brief" marker (claude exited,
+# listener polling). Skips windows tied to an open PR (preserves scrollback
+# for review). Active workers are left alone.
 #
 # Use --all to include active windows.
 # Use --merged-only / --pr-finalized to gate on PR state instead of
@@ -29,7 +29,7 @@ USAGE
 
 DESCRIPTION
     Default mode kills iss-* windows that are ALL of:
-      - parked  (listener at "Waiting for next" — claude has exited)
+      - parked  (listener at "[polling for next brief" — claude has exited)
       - PR-safe (no open GH PR exists for fix/issue-N)
       - idle for at least --idle-min N (default 0)
 
@@ -170,14 +170,16 @@ echo "Found ${#WINDOWS[@]} iss-* window(s) in session '$SESSION_NAME':"
 
 # Helpers --------------------------------------------------------------------
 
-# Returns 0 if pane scrollback shows the listener parked at "Waiting for next".
+# Returns 0 if pane scrollback shows the listener parked at the
+# "[polling for next brief" marker (the last line of the post-task status
+# block; see worker-listener.sh's print_completion_block).
 is_parked() {
-    tmux capture-pane -t "$SESSION_NAME:$1" -p -S -5 2>/dev/null | grep -q 'Waiting for next'
+    tmux capture-pane -t "$SESSION_NAME:$1" -p -S -5 2>/dev/null | grep -q '\[polling for next brief'
 }
 
 # Returns minutes since last pane activity. Uses tmux's window_activity
 # (last data sent to the pane) — listener's 2s sleep loop doesn't print
-# anything, so this stays at the last "Task complete" line's wall-clock time.
+# anything, so this stays at the status block's wall-clock time.
 window_idle_min() {
     local activity
     activity=$(tmux list-windows -t "$SESSION_NAME" -F '#{window_name} #{window_activity}' 2>/dev/null \
@@ -233,8 +235,8 @@ for w in "${WINDOWS[@]}"; do
 
     # Parked check.
     #
-    # Default mode uses pane scrollback ("Waiting for next" → listener
-    # parked, claude has exited) as a proxy for "safe to reap." But
+    # Default mode uses pane scrollback ("[polling for next brief" →
+    # listener parked, claude has exited) as a proxy for "safe to reap." But
     # --merged-only and --pr-finalized provide a strictly stronger
     # signal — PR state on GitHub. If the upstream PR is MERGED or
     # CLOSED, the work is preserved (or explicitly rejected) regardless

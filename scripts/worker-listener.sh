@@ -262,15 +262,18 @@ append_eval_log() {
 }
 
 # Write a structured outcome record for v2 tasks. No-op for v1 (no contract).
+# Sets global TASK_OUTCOME ("ok"/"err") so the caller can build the
+# post-task status block without recomputing the check-gating logic.
 write_outcome() {
     local rc="$1" started="$2" finished="$3" duration="$4"
     [ "$IS_LEGACY" = "1" ] && return 0
 
     # An executed check gates the pass: agent exit 0 alone is not "ok" if
     # the acceptance check ran and failed.
-    local outcome="ok"
-    [ "$rc" -ne 0 ] && outcome="err"
-    [ -n "${CHECK_EXIT:-}" ] && [ "$CHECK_EXIT" -ne 0 ] && outcome="err"
+    TASK_OUTCOME="ok"
+    [ "$rc" -ne 0 ] && TASK_OUTCOME="err"
+    [ -n "${CHECK_EXIT:-}" ] && [ "$CHECK_EXIT" -ne 0 ] && TASK_OUTCOME="err"
+    local outcome="$TASK_OUTCOME"
     local outcome_file="$DONE/${TASK_ID}.${outcome}.json"
 
     # JSON-escape the model field (may be empty)
@@ -308,6 +311,64 @@ write_outcome() {
 EOF
     echo "[$(date +%T)] Wrote outcome: $outcome_file"
     append_eval_log "$outcome" "$finished" "$duration" "$rc"
+}
+
+# Print a structured, actionable status block once per completed task —
+# replaces the old one-line "Task complete... Waiting for next brief"
+# message, which was indistinguishable from a hang at a glance (issue #42).
+#
+# The literal marker "[polling for next brief" on its own line at the end
+# is load-bearing: it's what check-stuck-workers.sh and
+# kill-finished-workers.sh grep for to detect an idle/parked listener.
+# Keep that exact substring if you touch this function.
+print_completion_block() {
+    local rc="$1" duration="$2" outcome="$3" is_legacy="$4" brief_ref="$5"
+    local bar="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    local issue_num="${WT_LABEL#wt-issue-}"
+
+    # Pull PR/blocked/done-no-pr status from the worker's own status file
+    # (queue-v2 protocol: .swarm/tasks/status/<task_id>.json), when present.
+    local pr="" pr_state="" pr_note=""
+    if [ "$is_legacy" != "1" ] && command -v jq >/dev/null 2>&1; then
+        local status_file="$STATUS/${TASK_ID}.json"
+        if [ -r "$status_file" ]; then
+            pr=$(jq -r 'if (.pr // null) == null then "" else (.pr|tostring) end' "$status_file" 2>/dev/null)
+            pr_state=$(jq -r '.state // empty' "$status_file" 2>/dev/null)
+            pr_note=$(jq -r '.note // empty' "$status_file" 2>/dev/null)
+        fi
+    fi
+
+    echo ""
+    echo "$bar"
+    if [ "$outcome" = "ok" ]; then
+        printf '  TASK COMPLETE    exit=%s    duration=%ss\n' "$rc" "$duration"
+    else
+        printf '  TASK FAILED       exit=%s    duration=%ss\n' "$rc" "$duration"
+    fi
+    if [ -n "$pr" ]; then
+        echo "  PR #$pr opened — gh pr view $pr"
+    elif [ "$pr_state" = "blocked" ]; then
+        echo "  Blocked${pr_note:+: $pr_note}"
+    elif [ "$pr_state" = "done-no-pr" ]; then
+        echo "  No PR — task delivered without one${pr_note:+: $pr_note}"
+    fi
+    echo "$bar"
+    echo ""
+    echo "What to do next:"
+    if [ -n "$pr" ]; then
+        echo "  • Accept & merge:   gh pr merge $pr --squash"
+        echo "  • Reject:           gh pr close $pr"
+    elif [ "$outcome" != "ok" ]; then
+        echo "  • Investigate:      gh pr view, scrollback above, brief at $brief_ref"
+    fi
+    echo "  • Follow up here:   requeue.sh $issue_num \"<follow-up brief>\""
+    echo "  • Leave it          this listener will pick up the next brief on inbox/"
+    echo "                      (different issues need their own worktree via provision-worker.sh)"
+    echo ""
+    echo "(Watcher detects PR-state changes; this slot frees automatically — see #32)"
+    echo "$bar"
+    echo ""
+    echo "[$(date +%T)] [polling for next brief in $WT_LABEL/$INBOX/ ...]"
 }
 
 while true; do
@@ -422,15 +483,19 @@ $TASK"
         DURATION=$(( $(date +%s) - STARTED_EPOCH ))
 
         # Move brief into the appropriate archive location, then write outcome.
+        BRIEF_REF=""
         if [ "$IS_LEGACY" = "1" ]; then
             mv "$TASK_PATH" ".agent-task-last.md"
+            TASK_OUTCOME="ok"
+            [ "$RC" -ne 0 ] && TASK_OUTCOME="err"
+            BRIEF_REF=".agent-task-last.md"
         else
             mv "$TASK_PATH" "$DONE/$(basename "$TASK_PATH")"
             write_outcome "$RC" "$STARTED" "$FINISHED" "$DURATION"
+            BRIEF_REF="$DONE/$(basename "$TASK_PATH")"
         fi
 
-        echo "------------------------------"
-        echo "[$(date +%T)] Task complete (exit $RC, ${DURATION}s). Waiting for next brief in $WT_LABEL/$INBOX/ — use 'requeue.sh ${WT_LABEL#wt-issue-} <brief>' to send a follow-up on this issue. (Different issues need their own worktree via provision-worker.sh.)"
+        print_completion_block "$RC" "$DURATION" "$TASK_OUTCOME" "$IS_LEGACY" "$BRIEF_REF"
     fi
     sleep 2
 done
