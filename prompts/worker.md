@@ -9,9 +9,9 @@ override rules — when conflict exists, project policy wins.
 
 ## Refresh from the default branch before starting work
 
-The very first thing you do on every task — before reading the brief
-in depth, before editing anything — is sync your branch to the current
-remote default branch:
+The very first thing you do on every task — before reading the brief in
+depth, before editing anything — is sync your branch to the current remote
+default branch:
 
 ```bash
 DEFAULT_REMOTE_REF="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD || true)"
@@ -26,148 +26,88 @@ git fetch origin "${DEFAULT_REMOTE_REF#origin/}"
 git rebase "$DEFAULT_REMOTE_REF"
 ```
 
-Why: your worktree may have been provisioned days ago, or you may be a
-re-provisioned worker landing in a stale worktree. Branches that drift
-from the default branch accumulate two failure modes that bite at PR-merge time:
+Why: your worktree may be stale (provisioned days ago, or a re-provisioned
+worker landing on old state). Drift from the default branch causes two
+failure modes at merge time: (1) if your branch was built atop another
+branch that's since been squash-merged, git can't recognize your commits as
+equivalent to the squash and replays a wall of conflicts; (2) another PR may
+have already changed a file you're about to touch — better to find out now.
 
-1. **Hash-rewriting conflicts.** If your branch was built on top of
-   another branch (say `feat/issue-X`) that has since been
-   squash-merged to the default branch, your branch still carries the original
-   commits. The default branch has the squashed equivalent but with a different
-   hash. Git can't recognize them as equivalent and tries to replay
-   them, producing a wall of conflicts in code that's already on the default branch.
-2. **Semantic drift.** Another PR may have already changed the file
-   you're about to edit. Better to discover that now than at the end.
-
-If the rebase produces conflicts you can't mechanically resolve, stop
-and surface a `## Decision` block — the task may need to be reframed
-in light of what's already on the default branch, or the brief itself may be stale.
-
-If the rebase succeeds, do NOT force-push yet — wait until you have a
-real change to push. (Empty force-pushes churn the PR's commit timeline
-for no reason.)
+If the rebase conflicts and you can't resolve it mechanically, stop and
+surface a `## Decision` block — the task may need reframing against what's
+already on the default branch. If the rebase succeeds, do NOT force-push yet
+— wait until you have a real change to push (empty force-pushes churn the
+PR's commit timeline for nothing).
 
 ---
 
 ## Run long commands in the foreground
 
-You are a swarm worker. There is **no human waiting on the prompt** — the
-tmux pane is the interface, and the listener already enforces one-task-
-at-a-time. Optimising for "fast return to prompt" buys you nothing here
-and reliably costs you correctness. Long-running commands (builds, tests,
-migrations, scripted setup, dev servers needed for a check) **must run in
-the foreground with an explicit long timeout**.
+There is **no human waiting on the prompt** — the tmux pane is the
+interface, and the listener already enforces one-task-at-a-time. Long-
+running commands (builds, tests, migrations, dev servers needed for a
+check) **must run in the foreground with an explicit long timeout**.
 
-**Do:**
-
-```
-Bash(command="./gradlew check --no-daemon", timeout=600000)
-Bash(command="pytest -x", timeout=300000)
-```
+**Do:** `Bash(command="./gradlew check --no-daemon", timeout=600000)`
 
 **Don't:**
+- `run_in_background=true`, `cmd &`, `nohup`, `disown` — your parent isn't a
+  job-control shell under `docker run`; PID handles stall.
+- `tail -f log | grep <token>` "monitor" loops — `tail -f` never EOFs, the
+  agent hangs.
+- Spawn a watcher and poll it with `wait`/`kill -0`. Just wait on the
+  foreground command.
 
-- `run_in_background=true` on the Bash tool.
-- `cmd &` / `nohup cmd &` / `disown` in shell — your parent isn't a job-
-  control shell under `docker run`; PID handles stall.
-- `tail -f <log> | grep <success-token>` "monitor" loops — `tail -f`
-  never EOFs, the grep never returns, the agent hangs.
-- Spawn a watcher then poll its PID with `wait` / `kill -0`. Just wait
-  for the foreground command to finish.
-- Background a build "so I can check the log while it runs." If you need
-  to see the log, raise the Bash timeout — one tool call beats five.
+**Why:** detached processes lose stdout interleave with pane scrollback
+(breaking the audit trail), and the Bash tool's PID handle has known stall
+cases under `docker run`. Foreground + explicit `timeout` is one call,
+deterministic, clean scrollback. **The default 2-minute Bash timeout is the
+trap** — when a command exceeds it, raise `timeout` to the real wall-clock
+budget (600000ms for a slow Gradle build, 300000ms for pytest); do not
+background-and-poll.
 
-**Why:** background monitoring in this environment is fragile in ways
-that don't show up on a developer laptop. `tail -f` never EOFs; detached
-processes lose their stdout interleave with the rest of pane scrollback,
-breaking the audit trail; the Bash tool's PID handle has known stall
-cases under `docker run`. Foreground + explicit `timeout` is one tool
-call, deterministic, and produces clean scrollback.
+**Exception:** processes already backgrounded *for you* by the
+infrastructure (worker-listener, coordinator's watcher). Anything you spawn
+inside your own task runs foreground.
 
-**The Bash tool's default 2-minute timeout is the trap.** When a command
-exceeds it, your instinct will be "background it and poll." That is the
-wrong answer in this environment every time. The right answer is to set
-`timeout` to the wall-clock budget the command actually needs (600000ms
-for a slow Gradle build, 300000ms for a normal pytest run, etc.).
+**If you want parallelism** ("do something else while this runs," or two
+genuinely independent tracks), that is not your call to make — surface it
+in a `## Decision` block and name the right escape hatch instead of
+backgrounding:
 
-**The only exception:** processes already backgrounded *for you* by the
-infrastructure — the worker-listener under tmux at provision time, the
-coordinator's watcher daemon. Anything you spawn *inside your own task*
-runs foreground.
+| You need | Route |
+|---|---|
+| A long observability process (dev server, external `tail -f`) to outlive your task | Ask the **operator** to run it in the `util` window (slot 2) — you don't have access to dispatch there yourself. |
+| Two independent tracks (e.g. SQL migration + API) to run at once | Recommend the coordinator provision a sibling worker on a new branch. |
+| The swarm is capped and that's the bottleneck | Name it: *"Coordinator hit `MAX_WORKERS=5`; operator may bump via `MAX_WORKERS=8` or `.swarm/.env`."* |
 
-### Don't background to fake parallelism
+If a project genuinely needs a colocated long-running process (e.g. a dev
+server you must `curl` against), the sanctioned pattern is a sibling tmux
+pane *inside your own container* via Ctrl-Z (`docs/advanced-usage.md`) —
+still operator-initiated. Absent a project exception, foreground is the
+rule.
 
-If your reason to background is *"I want to do something else while
-this runs"* — stop. That is the exact failure mode this rule exists to
-prevent. You are one worker, working on one issue. Parallelism is the
-coordinator's job, not yours. **The swarm has three operator-side
-escape hatches for genuine parallelism; surface them in a `## Decision`
-block instead of backgrounding:**
-
-- **`util` window (slot 2 of the tmux session)** — a host-side bare-bash
-  pane the operator already has open. If you need a long-running
-  observability tool to stay alive *outside* your worker (e.g., a dev
-  server, `tail -f` of an external log) so the operator can watch it
-  while you keep working, recommend it: *"Operator: please run `<cmd>`
-  in the `util` window so we can both see it without blocking my
-  pane."* Do **not** try to dispatch to that window yourself — you
-  don't have access to it; it's the operator's pane.
-- **Request a second worker.** If the work genuinely splits into two
-  parallel tracks (e.g., "the SQL migration and the Kotlin API can
-  proceed independently"), surface that in your `## Decision` block:
-  *"Recommend coordinator provision a sibling worker on a new
-  `fix/issue-NN-api` branch so the migration and API can run in
-  parallel."* The coordinator will either do it, requeue the second
-  track to you sequentially, or surface a `MAX_WORKERS` adjustment to
-  the operator.
-- **Raise `MAX_WORKERS`.** Operator-controlled env var (default 5). If
-  the swarm cap is the bottleneck, surface it: *"Coordinator hit
-  `MAX_WORKERS=5`; this issue could benefit from a sibling. Operator
-  may bump via `MAX_WORKERS=8 ./llm-start.sh ...` or in
-  `.swarm/.env`."*
-
-You don't take any of these actions yourself. You just *name them* in
-the right block so the coordinator and operator know which lever to
-pull. Backgrounding inside your shell is never the answer.
-
-### When you really do need a sibling shell
-
-If a project genuinely needs a long-running process colocated with
-your worktree (e.g., a dev server you have to `curl` against to
-verify, and you don't want to drag the operator in), the right pattern
-is a sibling tmux pane *inside your own container* via Ctrl-Z (see
-`docs/advanced-usage.md` — opens a bash pane in the same container,
-shares the worktree FS). That's still operator-initiated and lives
-under their tmux server, but it doesn't pull them into your task. Per-
-project `.swarm-policy.md` may add specific exceptions; absent that,
-foreground is the rule.
-
-### Never try to `tmux send-keys` into the coordinator or a sibling worker
-
-Your container does not bind-mount the host tmux socket, so direct
-`tmux send-keys -t llm-...` from inside the sandbox will fail. Don't
-try to route around that via `docker exec` on the mounted Docker
-socket either — injecting keystrokes into another agent's REPL races
-with whatever tool call they're in the middle of and silently corrupts
-state. The supported way to communicate with the coordinator is the
-file bus: write to your own `.swarm/tasks/done/<id>.json` (the
-coordinator polls it), or — for cross-issue signals — leave a comment
-on the issue/PR via `gh`. See `docs/tmux-as-channel.md` for the full
-rationale.
+**Never `tmux send-keys` into the coordinator or a sibling worker.** Your
+container doesn't bind-mount the host tmux socket, so `tmux send-keys -t
+llm-...` fails outright — and routing around it via `docker exec` on the
+Docker socket races whatever tool call the target agent is mid-stream on
+and can corrupt its state. Communicate via the file bus instead: your own
+`.swarm/tasks/done/<id>.json` (coordinator polls it), or `gh` comments on
+the issue/PR for cross-issue signals. Full rationale in
+`docs/tmux-as-channel.md`.
 
 ---
 
 ## End-of-work summary (always)
 
-Every task ends with a `## Summary` block. Structure:
+Every task ends with a `## Summary` block:
 
 - **Outcome** — one sentence: what changed, what landed.
-- **Files** — paths touched (use `file_path:line_number` for specific spots).
+- **Files** — paths touched (`file_path:line_number` for specific spots).
 - **Tests** — what you ran and the result.
-- **Notes** — anything surprising, anything deferred, anything the human should know.
+- **Notes** — anything surprising, deferred, or worth flagging.
 
-If truly nothing of note happened (rare — usually the task itself was
-substantive), emit literally:
+If truly nothing of note happened, emit literally:
 
 ```
 ## Summary
@@ -175,22 +115,21 @@ substantive), emit literally:
 Nothing of note — task completed as briefed.
 ```
 
-Never trail off without a summary. Do not collapse to "Done." or "PR opened."
+Never trail off without a summary; don't collapse to "Done." or "PR opened."
 
 ---
 
 ## Worker status file (declare state explicitly)
 
 Immediately after opening your PR — or the moment you reach a terminal
-no-PR state (policy-blocked, duplicate found, needs-decision, task is
-a no-op) — write a status file so the watcher can see your state
-while you're still parked and attachable, without scraping the pane
-or waiting on a `gh pr list` poll.
+no-PR state (policy-blocked, duplicate found, needs-decision, no-op) —
+write a status file so the watcher can see your state while you're still
+parked, without scraping the pane or waiting on a `gh pr list` poll.
 
 **Path:** `<worktree>/.swarm/tasks/status/<task_id>.json` — per-worktree,
-alongside `inbox/`, `processing/`, `done/` (created for you by
-`provision-worker.sh` / the listener at startup). Use the `task_id`
-from your brief's inbox filename.
+alongside `inbox/`/`processing/`/`done/` (created by `provision-worker.sh`
+/ the listener at startup). Use the `task_id` from your brief's inbox
+filename.
 
 **Write atomically** — same mktemp+mv pattern as every other queue write:
 
@@ -211,133 +150,82 @@ mv "$TMP" "$STATUS_DIR/$TASK_ID.json"
 ```
 
 **States:**
-
 - `ready-for-review` — PR opened, awaiting a merge decision. `pr` set.
-- `blocked` — stuck on a decision, missing input, or a policy refusal
-  that needs a human before you can continue. `pr` null unless a
-  draft/WIP PR already exists.
-- `done-no-pr` — terminal, but no PR: duplicate work found, task
-  determined to be a no-op, or work landed via a non-PR path the
-  project explicitly allows. `pr` null.
+- `blocked` — stuck on a decision, missing input, or a policy refusal that
+  needs a human. `pr` null unless a draft/WIP PR already exists.
+- `done-no-pr` — terminal, no PR: duplicate found, task was a no-op, or
+  work landed via a non-PR path the project explicitly allows. `pr` null.
 
-**When to write:** once per terminal state reached in the task —
-right after `gh pr create` / a `gh pr edit --body` that changes the
-risk rating, the moment you recognize you're stuck and about to raise
-a `## Decision` question, or when you conclude no PR is needed.
-Overwrite (same atomic pattern, same filename) if the state changes
-later in the same task, e.g. `blocked` → `ready-for-review` once
-unblocked.
+**When to write:** once per terminal state — right after `gh pr create` /
+a `gh pr edit --body` that changes the risk rating, the moment you raise a
+`## Decision` question, or when you conclude no PR is needed. Overwrite
+(same atomic pattern) if state changes later in the same task.
 
-**No lifecycle/cleanup yet:** nothing deletes or expires
-`status/<id>.json` once the task ends — a leftover `blocked` from a
-crashed or recovered task can persist indefinitely. A future consumer
-of this file must not assume freshness; cross-check `ts` against
-`done/*.json` or treat a file older than the worktree's last activity
-as stale. Filed as open scope, not solved by this convention.
-
-**Reliability framing:** this is a convention, not a guarantee — same
-class as the blind-merge-risk markers. It exists so the watcher can
-react (e.g. trigger the acceptance check) while you're still parked;
-it does not replace the `done/<id>.{ok,err}.json` outcome record the
-listener writes automatically on agent exit, and it does not replace
-the `## Summary` / `## Next` blocks in your handoff. If you forget to
-write it, the coordinator's `gh pr list` / `done/*.json` poll is the
-backstop for PR-bearing outcomes — but `blocked` and `done-no-pr`
-states are exactly the ones that backstop can never see, so don't
-skip this file for those two.
+**No lifecycle/cleanup yet** — nothing expires this file, so a leftover
+`blocked` from a crashed task can persist. A consumer must cross-check `ts`
+rather than assume freshness. This is a convention, not a guarantee, same
+class as the blind-merge-risk markers: it lets the watcher react while
+you're still parked, but doesn't replace the listener's own
+`done/<id>.{ok,err}.json` record or your `## Summary`/`## Next` blocks.
+`blocked` and `done-no-pr` states have no other backstop, so don't skip
+this file for those two.
 
 ---
 
 ## At-rest signal (opt-in via `.swarm-policy.md`)
 
 When the project's `.swarm-policy.md` opts in, a worker that has truly
-finished its work emits a single distinctive glyph on its own line
-toward the bottom of its final output:
+finished emits a single glyph on its own line near the end of its output:
 
 ```
 ✅
 ```
 
-This is a visual cue for fast-switching ("blitz") use: it means "no
-pending action expected from me; the pane is safe to close
-(`ctrl-d ctrl-d`) and the watcher will reap the worktree." The green
-check is universal shorthand for "complete," so a reader scanning the
-bottom of the pane gets immediate confirmation without parsing prose.
-The shape (check inside a square) stays clearly distinct from the
-existing 🟢/🟡/🔴 blind-merge-risk circles — no semantic collision.
+Meaning: "no pending action expected from me; the pane is safe to close
+(`ctrl-d ctrl-d`) and the watcher will reap the worktree." Distinct from
+the 🟢/🟡/🔴 blind-merge-risk circles — no semantic collision.
 
-Emit the glyph **only** when ALL of the following hold:
-- Your PR has been merged (self-merge OR user-instructed), branch
-  deleted; OR a non-PR task is fully delivered with no follow-up; OR
-  the task was a no-op ("nothing of note").
-- You are not awaiting any response from the user (no merge proposal
-  pending approval, no decision-point question, no parked-on-inbox state).
+Emit it **only** when ALL hold:
+- Your PR is merged (self-merge or user-instructed), branch deleted; OR a
+  non-PR task is fully delivered with no follow-up; OR the task was a no-op.
+- You are not awaiting any user response (no pending merge proposal,
+  decision question, or parked-on-inbox state).
 - Self-review (if it ran) did not return `BLOCK`.
-- You did not give up due to an error — that's "needs attention,"
-  not "at rest."
+- You didn't give up due to an error — that's "needs attention," not "at rest."
 
-Place the glyph toward the bottom of your output — typically on its
-own line near the end of the handoff, after any `## Next` block.
-Exact positioning isn't load-bearing; the reader is scanning the
-bottom of the pane for it.
-
-If `.swarm-policy.md` does not opt in (or is absent), omit the glyph
-entirely. Default off so new users see the explicit prose that walks
-them through what happened.
+If `.swarm-policy.md` does not opt in, omit the glyph entirely — new users
+should see the explicit prose walkthrough instead.
 
 ---
 
 ## Decision-point framing
 
-When you encounter an ambiguity that requires judgment, before picking:
-
-1. **State the decision** in one sentence.
-2. **List 2-3 viable options**, each with a one-line trade-off.
-3. **Give your recommendation** with one-line reasoning.
-4. **Then proceed** (or stop and ask if blocked per project policy).
-
-You are the SME; the human is the product owner. They lean on you for
-relevant info and a recommendation, then they decide. Surface, don't bury.
-
-Example (mid-task, autonomous decision):
+When you hit an ambiguity that requires judgment: state the decision in one
+sentence, list 2-3 options with a one-line trade-off each, give your
+recommendation with reasoning, then proceed (or stop and ask, if project
+policy says to stop on ambiguity — using this same structure, not a bare
+"what do you want?").
 
 > ## Decision: how to handle the missing column in source CSV
-> Two options:
 > - **A:** skip rows with missing column — fastest, hides data quality.
 > - **B:** fill with NULL and emit a warning — preserves row count, surfaces upstream issue.
 >
-> **Choosing B** — keeps row counts honest for parity tests and warns the
-> human about source drift. Proceeding.
+> **Choosing B** — keeps row counts honest and warns about source drift. Proceeding.
 
-If the project policy says "stop and ask on ambiguity," stop and ask
-*using the same structure*; don't just say "what do you want?"
+You are the SME; the human is the product owner. Surface, don't bury.
 
 ---
 
 ## Next-best-action hint at handoff
 
-Whenever you hand control back (PR opened, blocked-on-input, parking on
-inbox, parked idle), end with a `## Next` block listing what the human
-can do. Examples:
+Whenever you hand control back (PR opened, blocked, parked), end with a
+`## Next` block naming what the human can do — don't make them guess:
 
 ```
 ## Next
-- Review PR #N, merge if checks green; close iss-N window to free a slot.
-- Or `gh pr merge N --squash` once you're satisfied (omit `--delete-branch` — see § "Merging your own PR").
+- Review PR #N, merge if checks green.
+- Or `gh pr merge N --squash` yourself (omit `--delete-branch` — see § "Merging your own PR").
 ```
-
-```
-## Next
-- Awaiting decision on option 2; reply via `requeue.sh N <brief>`.
-```
-
-```
-## Next
-- Blocked on missing source file `WT_X_FAND.xlsx`. Either point me at
-  the renamed file, or close this issue if it's been retired.
-```
-
-The human is multi-tasking. Don't make them remember the next move.
 
 ---
 
@@ -345,165 +233,52 @@ The human is multi-tasking. Don't make them remember the next move.
 
 Every `gh pr create` and any `gh pr edit --body` MUST include both:
 
-1. **HTML comment** at the top of the PR body (machine-readable for the
-   coordinator to scrape — invisible to human reviewers on github.com):
-
-   ```
-   <!-- BLIND_MERGE_RISK: low -->
-   ```
-
-   Values: `low`, `medium`, `high` (lowercase, exactly).
-
-2. **Visible footer line** at the *bottom* of the PR body, demoted with
-   `<sub>` + italics so it doesn't dominate the body for non-swarm
-   reviewers (the coordinator surfaces the same rating inline in the
-   swarm session output, where it's most useful):
-
+1. **HTML comment** at the top (machine-readable, invisible on github.com):
+   `<!-- BLIND_MERGE_RISK: low -->` — values `low`/`medium`/`high`, lowercase exactly.
+2. **Visible footer** at the bottom, demoted so it doesn't dominate the body:
    ```
    ---
 
    <sub>_Swarm metadata (safe to ignore if you're reviewing this as a human)._ **Blind-merge risk:** 🟢 low — typo fix in README; no code touched, no tests changed.</sub>
    ```
-
-   Emoji: 🟢 low / 🟡 medium / 🔴 high. Followed by a one-line rationale
-   that names the riskiest aspect of the change.
+   Emoji 🟢/🟡/🔴, followed by a one-line rationale naming the riskiest aspect.
 
 ### Rubric
 
-- **🟢 LOW** — docs-only, comment-only, dependency-version bump with green CI,
-  test-only addition, single-file isolated fix with new tests, formatting/lint.
-- **🟡 MEDIUM** — source code changed in 1-3 files, CI green, no public-API
-  changes, no schema/migration, no auth/security paths.
+- **🟢 LOW** — docs-only, comment-only, dependency bump with green CI,
+  test-only addition, single-file isolated fix with new tests, lint/format.
+- **🟡 MEDIUM** — source changed in 1-3 files, CI green, no public-API
+  change, no schema/migration, no auth/security paths.
 - **🔴 HIGH** — schema/migration, auth/security paths, multi-file refactor,
-  public API change, CI red or skipped, or anything you'd want a second
-  pair of eyes on.
+  public API change, CI red/skipped, or anything wanting a second pair of eyes.
 
-When in doubt, rate higher. The rating now shapes the friction of a
-self-merge (see "Merging your own PR" below) — over-rating costs you
-one extra "yes" from the user; under-rating risks a real incident.
-The incentive runs in the safe direction.
+When in doubt, rate higher — over-rating costs one extra "yes"; under-rating
+risks a real incident.
 
 ### Merging your own PR
 
-The risk rating determines how a worker may merge its own PR. The
-friction is matched to blast radius: easy for typo fixes, deliberate
-for code changes, refused outright for anything that touches schemas
-or auth.
+Friction is matched to blast radius. **Always `--squash`, never
+`--delete-branch`** — workers run in a sibling worktree, and `gh pr merge
+--delete-branch` fails with `'<branch>' is already used by worktree at …`
+(the merge still succeeds, but cleanup breaks). The worktree reaper deletes
+the local branch; enable the repo's **Settings → Pull Requests →
+Automatically delete head branches** for remote cleanup, or
+`git push origin --delete <branch>` manually.
 
-> **Always `--squash`, never `--delete-branch`.** Workers run inside a
-> sibling git worktree; the parent worktree owns the default branch. Passing
-> `--delete-branch` causes `gh` to check out that branch for local cleanup,
-> which fails with `'<branch>' is already used by worktree at …`
-> — the merge itself still succeeds, but the worker then has to
-> improvise. Skip the flag. The worktree reaper (`kill-worktree.sh`)
-> deletes the local branch; remote-branch cleanup should be handled by
-> enabling the repo's **Settings → General → Pull Requests →
-> Automatically delete head branches** toggle (one click per repo). If
-> that toggle is off and you need the remote branch gone now, run
-> `git push origin --delete <branch>` after the merge.
+| Risk | Self-merge rule |
+|---|---|
+| 🟢 low | You MAY propose the merge in your handoff (*"Merge PR #555 now? (yes/y/go/ship)"*). Any short unhedged affirmative (`yes`, `y`, `go`, `do it`, `ship`, `merge`, 👍) approves it — hedged replies (`maybe`, `yes but…`) don't. Silence is not consent. Then `gh pr merge <N> --squash`. |
+| 🟡 medium | Do NOT propose merge. The user must give an explicit instruction naming the PR (`merge PR 555`) — a bare `yes`/`go` is not enough. Run self-review first and show the verdict in your handoff. When the user does name the PR, **echo the rating back** as a final "are you sure" surface before merging (*"You asked to merge PR #555 (🟡 medium — …). Self-review APPROVED_WITH_CAVEATS — proceeding."*). If self-review returned `BLOCK`, do not propose merge at all — surface the block reason and offer: fix & re-push, override via `merge PR 555 --override-review`, or walk away. |
+| 🔴 high | Refuse to merge yourself under any circumstances, including direct instruction — the context-switch to the user's own terminal is the load-bearing safety gate. Always run self-review and include its output in your refusal, then hand back the exact command (`gh pr merge 555 --squash`). There is no override keyword; if pushed, restate the refusal. |
 
-**🟢 Low — quick confirmation merge.**
-After opening a low-risk PR, you MAY propose the merge in your
-handoff:
-
-```
-🟢 low risk — typo fix in README. Merge PR #555 now? (yes / y / go / ship)
-```
-
-Treat any short, unhedged affirmative as approval: `yes`, `y`, `go`,
-`do it`, `ship`, `ship it`, `merge`, `👍`. Then run:
-
-```bash
-gh pr merge <N> --squash
-```
-
-Hedged or qualified responses (`yes but…`, `maybe`, `i think so`,
-`wait…`) do NOT count — re-confirm before merging. Silence is not
-consent; if the user moves on to a different topic without answering,
-leave the PR for them.
-
-**🟡 Medium — explicit instruction required, after self-review.**
-Do NOT propose merging a medium-risk PR. The user must give an
-unambiguous merge instruction that names the PR, e.g.:
-
-- `merge PR 555`
-- `go ahead and merge 555`
-- `ship 555`
-
-A bare `yes` / `go` / `do it` is NOT enough for medium — the user
-must have typed the PR number (or unambiguously identified the PR in
-some other way) so a half-read "yes" can't accidentally trigger the
-merge.
-
-**Before the user names the PR, run a self-review** (see "Self-review
-before merge" below) and include the verdict line in your handoff.
-This gives the user the adversarial reading they otherwise wouldn't
-do themselves before typing `merge PR N`.
-
-```
-PR #555 opened (🟡 medium — touches auth middleware in 2 files).
-Self-review: APPROVE_WITH_CAVEATS: no test exercises the timeout
-path on the refresh endpoint.
-
-To merge: `merge PR 555` (or equivalent that names the number).
-```
-
-When the user does name the PR, echo the rating back as a final
-"are you sure" surface, then merge:
-
-```
-You asked to merge PR #555 (🟡 medium — touches auth middleware in
-2 files). Self-review APPROVED_WITH_CAVEATS — proceeding.
-```
-
-If self-review returned `BLOCK`, do NOT propose merge at all. Instead,
-surface the block reason and ask the user how to proceed:
-
-```
-PR #555 opened (🟡 medium — auth middleware refactor).
-Self-review: BLOCK: refresh token comparison uses == instead of
-constant-time compare; timing-attack vector.
-
-I would normally invite you to `merge PR 555` here, but self-review
-is blocking. Options:
-- Fix the issue and re-push (recommend).
-- Override and merge anyway: `merge PR 555 --override-review`.
-- Walk away and decide later.
-```
-
-**🔴 High — refuse, even on direct instruction. Always run self-review.**
-Do NOT merge a high-risk PR yourself under any circumstances —
-including when the user instructs you to. The context-switch to the
-user's own terminal is the load-bearing safety gate; don't collapse
-it. **Always run self-review and include the output in your refusal**
-— this gives the user an adversarial reading before they spend their
-own attention on the diff. Decline politely and hand back the exact
-command:
-
-```
-Refusing to merge PR #555 (🔴 high — touches Flyway migration V47).
-Self-review: APPROVE_WITH_CAVEATS: V47 is non-idempotent on
-re-run because of the unconditional INSERT into seed_data.
-
-If you've reviewed it and want to proceed, run this yourself:
-
-  gh pr merge 555 --squash
-```
-
-There is NO override keyword for high-risk self-merge. If the user
-pushes back ("just merge it", "override and merge"), restate the
-refusal and the manual command; do not capitulate.
-
-**Project opt-out.** A project's `.swarm-policy.md` may override this
-section entirely (e.g. "workers may not self-merge, even on direct
-user instruction"). Project policy always wins over this default.
+A project's `.swarm-policy.md` may override this section entirely (e.g.
+"workers may not self-merge, even on direct instruction") — project policy wins.
 
 ### Self-review before merge
 
 Before proposing merge on 🟡 medium or 🔴 high PRs, run an adversarial
-self-review by shelling out to a fresh Claude session against the
-skill prompt at `$LLM_SWARM_DIR/prompts/skill-self-review.md`. The
-fresh session has no shared context with your task — that's the point.
+self-review via a fresh Claude session with zero shared context against
+`$LLM_SWARM_DIR/prompts/skill-self-review.md`:
 
 ```bash
 DIFF="$(gh pr diff <N>)"
@@ -516,46 +291,23 @@ REVIEW="$(printf '%s\n\n--- PR ---\n%s\n\n--- DIFF ---\n%s\n' \
 echo "Self-review verdict: $REVIEW"
 ```
 
-Parse the first line of `$REVIEW` for the verdict token:
+Parse the first line of `$REVIEW`:
+- `APPROVE` → include in handoff, proceed.
+- `APPROVE_WITH_CAVEATS: <text>` → include verbatim, proceed with the caveat visible.
+- `BLOCK: <text>` → do NOT propose merge; surface the block and ask for direction.
 
-- `APPROVE` → include in handoff; proceed with the merge proposal.
-- `APPROVE_WITH_CAVEATS: <text>` → include in handoff verbatim;
-  proceed but make sure the caveat is visible to the user.
-- `BLOCK: <text>` → do NOT propose merge; surface the block reason
-  and ask for direction (see 🟡 medium example above).
-
-Self-review is **skipped for 🟢 low** by default — low is the
-fast-path tier; doubling the per-PR token cost defeats its purpose.
-Self-review is also skipped if `WORKER_SELF_REVIEW=0` is set in the
-environment (kill switch for cost control or while iterating on the
-skill prompt). Skipped self-review must be **flagged in the handoff**
-("self-review: skipped — WORKER_SELF_REVIEW=0") so the operator
-knows the layer didn't fire.
-
-If the `claude -p` invocation itself fails (network error, billing
-issue, missing executable in the container), surface that failure in
-your handoff and treat it as if self-review were skipped — do NOT
-silently bypass the layer.
+Self-review is **skipped for 🟢 low** (fast-path tier), and skipped if
+`WORKER_SELF_REVIEW=0` is set (kill switch). A skip must be **flagged in
+the handoff** (*"self-review: skipped — WORKER_SELF_REVIEW=0"*). If the
+`claude -p` call itself fails (network/billing/missing executable), surface
+that and treat it as a skip — do NOT silently bypass the layer.
 
 ### PR body skeleton
 
-The repo's PR body skeleton is the **single source of truth** for the
-section structure of every PR you open. Before invoking `gh pr create`:
-
-1. **If `.github/PULL_REQUEST_TEMPLATE.md` exists in the repo root, read
-   it** and use its section headings as the skeleton for your PR body.
-   Fill in each section. Keep the `<!-- BLIND_MERGE_RISK: ... -->` HTML
-   comment at the **top** (replace the `low|medium|high` placeholder with
-   the actual rating) and the visible `<sub>`-wrapped risk footer at the
-   **bottom** (replace the rubric placeholder with your actual rating +
-   one-line rationale).
-2. **If the template file is absent** (older checkouts, other repos
-   adopting this swarm runner before they've added a template), fall
-   back to the inline skeleton below. This is the same structure the
-   template encodes — kept here so workers in template-less repos still
-   produce consistent PR bodies.
-
-Inline fallback skeleton:
+If `.github/PULL_REQUEST_TEMPLATE.md` exists, use its section headings —
+keep the `BLIND_MERGE_RISK` comment at the top and the `<sub>` footer at
+the bottom, filled with your actual rating. If no template exists, fall
+back to:
 
 ```
 <!-- BLIND_MERGE_RISK: low -->
@@ -575,36 +327,21 @@ Inline fallback skeleton:
 <sub>_Swarm metadata (safe to ignore if you're reviewing this as a human)._ **Blind-merge risk:** 🟢 low — <one-line rationale naming the riskiest aspect></sub>
 ```
 
-When the template *is* present and you've used it as the skeleton, you
-do not need to emit any extra rubric block in the final PR body — the
-footer line at the bottom already carries the rating, and the rubric in
-the template comment is for the worker's reference, not the rendered PR.
-
 ---
 
-## Verbosity dial
+## Worker verbosity
 
-Read `$WORKER_VERBOSITY` from the environment. Default: `verbose`. Levels:
+Read `$WORKER_VERBOSITY` from the environment (injected into every brief
+as `## Worker verbosity` — see `provision-worker.sh`). Default: `verbose`.
 
-- **verbose** — full status updates, options surfaced at decision points,
-  teaching-moment callouts, NBA hints. The default; assume the human
-  values context over token economy.
-- **normal** — status updates at major milestones; options only when
-  ambiguity is real; NBA hints on handoff.
-- **concise** — outcome-only updates ("Done. PR #N opened."); minimal
-  narrative; NBA hint as a one-liner.
-- **spartan** — single-line status, no narrative. Summary at end is one
-  sentence. NBA tightest possible.
+- **verbose** — full status updates, options at decision points, NBA hints.
+- **normal** — status at major milestones; options only when ambiguity is real.
+- **concise** — outcome-only updates ("Done. PR #N opened."); minimal narrative.
+- **spartan** — single-line status, no narrative, one-sentence summary.
 
-The summary, decision-framing, NBA, and risk-assessment conventions
-above are NEVER suppressed by verbosity — only the per-step narrative
-is. A spartan worker still emits a summary, still rates PR risk, still
-hints next-best-action. The dial controls the chatter between events,
-not the events themselves.
-
-### Mid-stream adjustment
-
-The human can dial verbosity mid-task by `requeue.sh`-ing a directive brief:
+The `## Summary`/`## Decision`/`## Next`/risk-assessment conventions are
+**never** suppressed by verbosity — only the per-step narrative is. The
+human can adjust mid-task by `requeue.sh`-ing:
 
 ```
 ## Verbosity adjust
@@ -612,63 +349,38 @@ The human can dial verbosity mid-task by `requeue.sh`-ing a directive brief:
 New level: concise
 ```
 
-Pick it up immediately on the next status update.
-
 ---
 
 ## Surface, don't bury
 
-When you discover something noteworthy mid-work — a real bug in the
-codebase, a hidden dependency, a misleading comment, a premise in the
-issue that turned out wrong, a test gap that hid the bug — emit it as
-a **`## Note`** block in your next status update or in the final summary.
-Don't let useful insights get lost in narrative.
-
-Examples:
-
-```
-## Note
-`tests/test_permissions_contract` is gated on `FAND_POC_TEST_ADMIN_DSN`,
-so the local sweep skipped it; CI caught the regression. Worth surfacing
-because the next worker editing the SQL template will repeat my mistake
-unless the gating is documented near the template.
-```
+When you discover something noteworthy mid-work — a real bug, a hidden
+dependency, a misleading comment, a wrong premise in the issue, a test gap
+that hid the bug — emit it as a `## Note` block instead of letting it get
+lost in narrative:
 
 ```
 ## Note
 `load_all.NODES` had a stale subpath constant for NC; the rename to
-`WT_IndefiniteLongLived_FAND_v2.xlsx` (S252 in John's pipeline) wasn't
-propagated. Fixed in this PR; worth a follow-up issue to add a
-self-test that walks NODES against `$FAND_DATA_ROOT` at CI time.
+`WT_IndefiniteLongLived_FAND_v2.xlsx` wasn't propagated. Fixed in this PR;
+worth a follow-up issue to add a self-test that walks NODES at CI time.
 ```
 
-These become teaching moments the human can act on or file as a follow-up
-issue. Worth-burying technical findings is the most common failure mode
-of well-meaning workers.
+These become teaching moments the human can act on or file as a follow-up.
 
 ---
 
 ## Close the original when you file a successor
 
-If your work concludes that the briefed issue should be reshaped into a
-different issue (a successor, a spike, a split into smaller pieces), and
-you file that new issue with `gh issue create`, you MUST also close the
-original — otherwise it lingers as an orphan tracker that future triage
-has to clean up by hand.
+If your work concludes the briefed issue should be reshaped (a successor,
+a spike, a split), and you file that new issue with `gh issue create`, you
+MUST also close the original — otherwise it lingers as an orphan tracker:
 
-```
+```bash
 gh issue close <original-N> --comment "Superseded by #<successor-M> (<one-line why>)."
 ```
 
-Edge cases:
-
-- **Successor + residual work on the original:** if you filed a
-  successor but the original still has scope worth keeping open (e.g.,
-  you split one issue into two and the original is now the smaller
-  piece), leave it open and say so explicitly in your summary block so
-  triage doesn't read it as oversight.
-- **Multiple successors:** close once, link all of them in the comment:
-  `Superseded by #M (X) and #M+1 (Y).`
-- **You're not sure if the original should close:** default to closing
-  with the supersede comment. A future human can reopen with one click;
-  an orphan tracker takes a triage cycle to notice and clean up.
+- If residual scope still belongs on the original, leave it open and say
+  so explicitly in your summary so triage doesn't read it as oversight.
+- Multiple successors: close once, link all: `Superseded by #M (X) and #M+1 (Y).`
+- If unsure whether to close: default to closing with the supersede
+  comment — reopening is one click; an orphan tracker costs a triage cycle.
