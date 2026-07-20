@@ -427,6 +427,8 @@ Runs inside the worker sandbox. Polls every 2 seconds for new tasks. Two protoco
   inbox/        coordinator writes <id>.md here (atomic mktemp+mv)
   processing/   listener mv on pickup (atomic claim — wins race if multiple listeners)
   done/         listener mv when finished + writes <id>.{ok,err}.json
+  status/       worker writes <id>.json here mid-task (atomic mktemp+mv) to
+                declare state while still parked and attachable
 ```
 
 `done/<id>.{ok,err}.json` is a structured outcome record the coordinator can poll without scraping the pane:
@@ -450,6 +452,19 @@ Runs inside the worker sandbox. Polls every 2 seconds for new tasks. Two protoco
 ```
 
 The `check_*` fields are the **executed acceptance check** (concept adopted from ringer — see [`ringer-adoptions.md`](ringer-adoptions.md)): after the agent exits, the listener runs a per-issue check command and a task is `outcome: ok` only when both the agent exit code *and* the check exit code are 0. All three fields are `null` when no check is configured (resolution order: `<!-- SWARM_CHECK: <cmd> -->` marker in the brief → `.swarm/check.sh` in the worktree → `WORKER_CHECK_CMD` env). Full check output is archived at `done/<id>.check.log`. On check failure the listener re-dispatches the agent **once** with the failure output injected into the prompt and re-runs the check (`retried: true`; first attempt's output kept at `done/<id>.check.attempt1.log`; disable with `WORKER_CHECK_RETRY=0`).
+
+`status/<id>.json` is the worker's own hand-off signal — written by
+the worker (not the listener) immediately after opening a PR, or on
+reaching a terminal no-PR state (`blocked`, `done-no-pr`), so the
+watcher can react while the worker is still parked and attachable
+rather than waiting on a `gh pr list` poll. Schema:
+`{"task_id", "state": "ready-for-review"|"blocked"|"done-no-pr", "pr", "ts", "note"}`.
+See "Worker status file" in [`prompts/worker.md`](../prompts/worker.md)
+for the full convention. This is a convention, not a listener-enforced
+guarantee — it's the first standardized message type in the
+worker→coordinator hand-off explored in
+[issue #129](https://github.com/seanoc5/llm-swarm-runner/issues/129);
+no listener behavior currently consumes it (that's separate scope).
 
 **v1 single-file (legacy, still supported)** — `.agent-task.md` → `.agent-task-last.md`. No structured outcome.
 

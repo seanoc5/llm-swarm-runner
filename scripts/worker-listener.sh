@@ -69,7 +69,8 @@ QUEUE_ROOT=".swarm/tasks"
 INBOX="$QUEUE_ROOT/inbox"
 PROCESSING="$QUEUE_ROOT/processing"
 DONE="$QUEUE_ROOT/done"
-mkdir -p "$INBOX" "$PROCESSING" "$DONE"
+STATUS="$QUEUE_ROOT/status"
+mkdir -p "$INBOX" "$PROCESSING" "$DONE" "$STATUS"
 
 # Per-worktree label used in user-visible messages so it's obvious which
 # worktree's inbox this listener is bound to (and that it does NOT serve
