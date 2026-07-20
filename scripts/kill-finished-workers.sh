@@ -95,6 +95,13 @@ SESSION_NAME="${SESSION_NAME:-llm-$(basename "$PWD")}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LLM_SWARM_DIR="${LLM_SWARM_DIR:-$(dirname "$SCRIPT_DIR")}"
 KILL_WT="$LLM_SWARM_DIR/scripts/kill-worktree.sh"
+PROJECT_DIR="$PWD"
+
+# Source the env loader for SWARM_WORKTREE_GROUPING + swarm_worktree_dir(),
+# needed to locate each issue's worktree so PR checks can key off the
+# branch actually checked out there (see worktree_branch() below).
+# shellcheck source=_load-env.sh
+. "$SCRIPT_DIR/_load-env.sh" "$PROJECT_DIR"
 
 require_value() {
     if [ -z "${2:-}" ] || [[ "${2:-}" == -* ]]; then
@@ -189,39 +196,56 @@ window_idle_min() {
     echo $(( (NOW - activity) / 60 ))
 }
 
-# Returns 0 if there's an OPEN GH PR for fix/issue-N (i.e., should preserve).
-# Returns 1 otherwise (no PR, merged, closed). Network round-trip; gated by
-# PR_CHECK at call site.
+# Resolves the branch to run PR checks against for issue N. Prefers the
+# branch actually checked out in that issue's worktree over the
+# dirname-derived fix/issue-N — a parked worker can be repurposed onto a
+# different branch mid-life (checkout -B), which decouples the two. Falls
+# back to fix/issue-N when the worktree is absent or on a detached HEAD
+# (e.g. already reaped, or never had --with-worktree applied). See #97.
+worktree_branch() {
+    local issue="$1" wt branch
+    wt="$(swarm_worktree_dir "$PROJECT_DIR" "$issue")"
+    if [ -d "$wt" ]; then
+        branch="$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+        [ -n "$branch" ] && { echo "$branch"; return; }
+    fi
+    echo "fix/issue-$issue"
+}
+
+# Returns 0 if there's an OPEN GH PR for the given branch (i.e., should
+# preserve). Returns 1 otherwise (no PR, merged, closed). Network
+# round-trip; gated by PR_CHECK at call site.
 has_open_pr() {
-    local issue="$1"
+    local branch="$1"
     # `gh pr view <branch>` is the cheapest single-PR query. Output filtered
     # for state. 2>/dev/null swallows "no pull requests found" noise.
     local state
-    state=$(gh pr view "fix/issue-$issue" --json state -q .state 2>/dev/null || true)
+    state=$(gh pr view "$branch" --json state -q .state 2>/dev/null || true)
     [ "$state" = "OPEN" ]
 }
 
-# Returns 0 if the PR for fix/issue-N is MERGED (strict). Returns 1 for
-# OPEN, CLOSED-without-merge, or no PR at all. Used by --merged-only mode
-# so we never reap a worktree whose work hasn't been preserved upstream.
+# Returns 0 if the PR for the given branch is MERGED (strict). Returns 1
+# for OPEN, CLOSED-without-merge, or no PR at all. Used by --merged-only
+# mode so we never reap a worktree whose work hasn't been preserved
+# upstream.
 pr_is_merged() {
-    local issue="$1"
+    local branch="$1"
     local state
-    state=$(gh pr view "fix/issue-$issue" --json state -q .state 2>/dev/null || true)
+    state=$(gh pr view "$branch" --json state -q .state 2>/dev/null || true)
     [ "$state" = "MERGED" ]
 }
 
-# Returns 0 if the PR for fix/issue-N is finalized — MERGED or CLOSED.
+# Returns 0 if the PR for the given branch is finalized — MERGED or CLOSED.
 # Returns 1 for OPEN or no PR at all. Used by --pr-finalized mode so the
 # watcher can also reap PRs the user has rejected/closed without merging
 # (superseded, duplicate, abandoned). Local worktree + branch get removed,
-# but origin/fix/issue-N is preserved by kill-worktree.sh (it only does
+# but the origin branch is preserved by kill-worktree.sh (it only does
 # `git branch -D`, never `git push --delete`), so accidental closures are
 # recoverable via `gh pr reopen N`.
 pr_is_finalized() {
-    local issue="$1"
+    local branch="$1"
     local state
-    state=$(gh pr view "fix/issue-$issue" --json state -q .state 2>/dev/null || true)
+    state=$(gh pr view "$branch" --json state -q .state 2>/dev/null || true)
     [ "$state" = "MERGED" ] || [ "$state" = "CLOSED" ]
 }
 
@@ -265,22 +289,27 @@ for w in "${WINDOWS[@]}"; do
         reasons+=("idle ${idle}m")
     fi
 
-    # PR check (applied in both modes when enabled)
+    # PR check (applied in both modes when enabled). Resolved once per
+    # window against the actual checked-out branch (see worktree_branch),
+    # not the dirname-derived fix/issue-N.
+    if [ "$MERGED_ONLY" = "1" ] || [ "$PR_FINALIZED" = "1" ] || [ "$PR_CHECK" = "1" ]; then
+        branch="$(worktree_branch "$issue")"
+    fi
     if [ "$MERGED_ONLY" = "1" ]; then
-        if ! pr_is_merged "$issue"; then
-            echo "  $w  [PR fix/issue-$issue not MERGED → skip (merged-only mode)]"
+        if ! pr_is_merged "$branch"; then
+            echo "  $w  [PR $branch not MERGED → skip (merged-only mode)]"
             continue
         fi
         reasons+=("PR-merged")
     elif [ "$PR_FINALIZED" = "1" ]; then
-        if ! pr_is_finalized "$issue"; then
-            echo "  $w  [PR fix/issue-$issue not MERGED|CLOSED → skip (pr-finalized mode)]"
+        if ! pr_is_finalized "$branch"; then
+            echo "  $w  [PR $branch not MERGED|CLOSED → skip (pr-finalized mode)]"
             continue
         fi
         reasons+=("PR-finalized")
     elif [ "$PR_CHECK" = "1" ]; then
-        if has_open_pr "$issue"; then
-            echo "  $w  [PR fix/issue-$issue still OPEN → skip (use --no-pr-check to override)]"
+        if has_open_pr "$branch"; then
+            echo "  $w  [PR $branch still OPEN → skip (use --no-pr-check to override)]"
             continue
         fi
         reasons+=("PR-safe")
