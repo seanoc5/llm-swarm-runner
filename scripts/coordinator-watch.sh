@@ -837,10 +837,15 @@ on_outcome() {
         # Brief grace period so the pane-echo tail (issue #38) catches up on
         # this burst of writes (worker.finish, watch.autoclose, coord.wake,
         # watch.exit) before cleanup_on_exit kills it — without this, a
-        # fast ONCE=1 exit can race past tail's polling interval (see
-        # --sleep-interval=0.2 above) and silently drop the last few lines
-        # from stdout (the log file itself is unaffected either way).
-        [ "$WATCHER_QUIET" = "1" ] || sleep 0.5
+        # fast ONCE=1 exit can race past tail's polling interval and
+        # silently drop the last few lines from stdout (the log file
+        # itself is unaffected either way). 1.5s (not 0.2s) deliberately:
+        # this smoke-test-only path has to clear tail's WORST-CASE
+        # interval, not the GNU --sleep-interval=0.2 fast path above — a
+        # non-GNU tail without that flag falls back to its own default
+        # (commonly ~1.0s), and ONCE=1 is never on the real long-running
+        # daemon's hot path, so the extra latency here is free.
+        [ "$WATCHER_QUIET" = "1" ] || sleep 1.5
         exit 0
     fi
 }
