@@ -393,7 +393,12 @@ cleanup_on_exit() {
     # aren't parent/child of each other), so it needs its own kill too —
     # otherwise it lingers until its next write hits the now-closed pipe.
     [ -n "${WATCHER_ECHO_PID:-}" ] && kill "$WATCHER_ECHO_PID" 2>/dev/null || true
-    pkill -P $$ -x tail 2>/dev/null || true
+    # Scoped to WATCHER_ECHO_PID (only runs if the pane-echo tail was
+    # actually spawned) and matched by its exact args (-f against
+    # EVENTS_LOG's path), not "-x tail" — so this can't collide with some
+    # unrelated tail a future change might add as another direct child of
+    # this script.
+    [ -n "${WATCHER_ECHO_PID:-}" ] && pkill -P $$ -f "tail .* -F .*$EVENTS_LOG" 2>/dev/null || true
     [ -n "${seen_file:-}" ] && rm -f -- "$seen_file"
 }
 trap cleanup_on_exit EXIT INT TERM
