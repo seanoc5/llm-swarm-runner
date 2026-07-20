@@ -365,6 +365,31 @@ if [ "$WATCHER_QUIET" != "1" ]; then
     WATCHER_ECHO_PID=$!
 fi
 
+# Single shared trap for the pane-echo pipeline, the background timer loop
+# (issue #119, started later), and run_poll's seen_file (script-global —
+# see the NOTE at its mktemp near run_poll). Installed immediately after
+# the first backgrounded process (WATCHER_ECHO_PID) that needs it — under
+# `set -e`, any ordinary command between spawning a background job and
+# installing its cleanup trap is a window where an early failure orphans
+# that job. WATCH_TIMER_PID and seen_file are pre-declared empty here too
+# so the trap is safe to fire before either is actually assigned further
+# down. Set once, so nothing downstream can silently clobber it with a
+# second `trap ... EXIT` and drop one of these kills.
+WATCH_TIMER_PID=""
+seen_file=""
+cleanup_on_exit() {
+    [ -n "${WATCH_TIMER_PID:-}" ] && kill "$WATCH_TIMER_PID" 2>/dev/null || true
+    # WATCHER_ECHO_PID is the `while read` reader — the last stage of the
+    # `tail | while` pipeline, and the only PID $! gives us for it. `tail`
+    # itself is a separate direct child of this script (pipeline stages
+    # aren't parent/child of each other), so it needs its own kill too —
+    # otherwise it lingers until its next write hits the now-closed pipe.
+    [ -n "${WATCHER_ECHO_PID:-}" ] && kill "$WATCHER_ECHO_PID" 2>/dev/null || true
+    pkill -P $$ -x tail 2>/dev/null || true
+    [ -n "${seen_file:-}" ] && rm -f -- "$seen_file"
+}
+trap cleanup_on_exit EXIT INT TERM
+
 # Shared state
 LAST_WAKE=0
 
@@ -893,30 +918,14 @@ run_poll() {
 # backend selected above. Started here (after every function it calls is
 # defined, and after the backend case below so shutdown ordering doesn't
 # matter) so it's live before we block in run_inotify/run_poll.
+# WATCH_TIMER_PID itself is pre-declared (empty) up near the shared trap
+# installation, above — this just fills it in when the feature is on.
 # ---------------------------------------------------------------------------
-WATCH_TIMER_PID=""
 if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ]; then
     run_watch_timer_loop &
     WATCH_TIMER_PID=$!
     log_event watch.timer.start "pr_poll_secs=$WATCH_PR_POLL_SECS check_on_done=$WATCH_CHECK_ON_DONE"
 fi
-
-# Single shared trap for the background timer loop, the pane-echo pipeline,
-# and run_poll's seen_file (script-global — see the NOTE at its mktemp
-# above). Set once, here, so nothing downstream can silently clobber it
-# with a second `trap ... EXIT` and drop one of these kills.
-cleanup_on_exit() {
-    [ -n "$WATCH_TIMER_PID" ] && kill "$WATCH_TIMER_PID" 2>/dev/null || true
-    # WATCHER_ECHO_PID is the `while read` reader — the last stage of the
-    # `tail | while` pipeline, and the only PID $! gives us for it. `tail`
-    # itself is a separate direct child of this script (pipeline stages
-    # aren't parent/child of each other), so it needs its own kill too —
-    # otherwise it lingers until its next write hits the now-closed pipe.
-    [ -n "${WATCHER_ECHO_PID:-}" ] && kill "$WATCHER_ECHO_PID" 2>/dev/null || true
-    pkill -P $$ -x tail 2>/dev/null || true
-    [ -n "${seen_file:-}" ] && rm -f -- "$seen_file"
-}
-trap cleanup_on_exit EXIT INT TERM
 
 case "$BACKEND" in
     inotify) run_inotify ;;
