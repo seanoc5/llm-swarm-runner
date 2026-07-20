@@ -3,7 +3,7 @@
 # kill-worktree.sh — remove a worker worktree, its branch, and tmux window.
 #
 # Usage:
-#   kill-worktree.sh <issue-number> [project-dir]
+#   kill-worktree.sh <issue-number> [project-dir] [--no-compose-down]
 #
 # Removes the worktree at <derived path>/wt-issue-<N>, deletes the branch
 # fix/issue-<N>, and kills the tmux window iss-<N> if any. Idempotent —
@@ -13,11 +13,27 @@
 # Path derivation honors SWARM_WORKTREE_GROUPING (flat|project, default
 # flat). See scripts/_load-env.sh swarm_worktree_dir() for the rule.
 #
+# Before the worktree is removed, brings down any docker compose stack the
+# worker started inside it (see _compose-down-for-worktree.sh) — otherwise
+# the containers survive as port-squatters after the worktree is gone
+# (issue #105). Pass --no-compose-down to skip this and preserve the
+# containers (e.g. to inspect their logs after the fact).
+#
 # WARNING: --force is used. Any uncommitted work in the worktree is lost.
 # The script prints how-much-work-will-be-lost before deletion.
 set -euo pipefail
 
-ISSUE="${1:?usage: kill-worktree.sh <issue-number> [project-dir]}"
+NO_COMPOSE_DOWN=0
+ARGS=()
+for arg in "$@"; do
+    case "$arg" in
+        --no-compose-down) NO_COMPOSE_DOWN=1 ;;
+        *) ARGS+=("$arg") ;;
+    esac
+done
+set -- "${ARGS[@]+"${ARGS[@]}"}"
+
+ISSUE="${1:?usage: kill-worktree.sh <issue-number> [project-dir] [--no-compose-down]}"
 PROJECT_DIR="${2:-$PWD}"
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
 
@@ -57,6 +73,11 @@ if [ -d "$WT" ]; then
     AHEAD="$(git -C "$WT" rev-list --count "$DEFAULT_BRANCH..HEAD" 2>/dev/null || echo '?')"
     DIRTY="$(git -C "$WT" status --porcelain 2>/dev/null | wc -l)"
     echo "  Worktree state: $AHEAD commit(s) ahead of $DEFAULT_BRANCH, $DIRTY uncommitted change(s)"
+    if [ "$NO_COMPOSE_DOWN" = "1" ]; then
+        echo "  - skipping compose down (--no-compose-down)"
+    else
+        "$SCRIPT_DIR/_compose-down-for-worktree.sh" "$WT" || echo "  WARN: compose-down helper exited non-zero (continuing)"
+    fi
     git worktree remove --force "$WT"
     echo "  ✓ removed worktree"
 else
