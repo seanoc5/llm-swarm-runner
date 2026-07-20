@@ -86,6 +86,10 @@
 #   SESSION_NAME=<name>     tmux session check-on-done spawns chk-N windows
 #                           in. Default: llm-$(basename PROJECT_DIR), matching
 #                           kill-finished-workers.sh / provision-worker.sh.
+#   WATCHER_QUIET=0         (issue #38) Set to 1 to suppress the human-
+#                           readable pane echo below, restoring silent-
+#                           stdout (banner only) — for headless runs or
+#                           when piping the watcher's own stdout elsewhere.
 #
 # Watch backend (auto-detected):
 #   - inotifywait (preferred): instant response. Install with:
@@ -131,6 +135,7 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     WORKSPACE           (auto)    parent dir for wt-issue-* worktrees
     MAX_WORKERS         5         (referenced by default WAKE_PROMPT)
     MAX_TMUX_WINDOWS    10        (referenced by default WAKE_PROMPT)
+    WATCHER_QUIET       0         suppress human-readable pane echo (banner only); see PANE ECHO
 
 DEFAULT WAKE_PROMPT (top-up mode)
     Coordinator triages outcomes, then refills workers toward MAX_WORKERS
@@ -151,6 +156,16 @@ EVENTS LOG
       watch.pr_poll        terminal PR detected via periodic gh poll (reap backstop)
       watch.check_on_done  check-on-done result (issue, task_id, result=running|pass|fail|skipped)
       cap.refused          provision-worker.sh hit MAX_WORKERS / MAX_TMUX_WINDOWS
+
+PANE ECHO (issue #38)
+    By default, every line appended to events.log — by this process OR any
+    sibling script sharing the same file (provision-worker.sh's
+    worker.start/cap.refused, worker-listener.sh's worker.requeue) — is
+    echoed to stdout as a colorized, glyph-prefixed one-liner, so the
+    watcher's tmux window becomes a live status feed instead of sitting
+    empty behind the startup banner. events.log itself is untouched — this
+    is a stdout-only presentation layer. Set WATCHER_QUIET=1 to disable and
+    restore silent-stdout (banner only).
 
 BACKEND
     Auto-detects inotifywait (instant) or falls back to polling find
@@ -206,6 +221,7 @@ WATCH_PR_POLL_SECS="${WATCH_PR_POLL_SECS:-60}"
 WATCH_CHECK_ON_DONE="${WATCH_CHECK_ON_DONE:-1}"
 CHECK_RUNNER="${CHECK_RUNNER:-}"
 SESSION_NAME="${SESSION_NAME:-llm-$(basename "$PROJECT_DIR")}"
+WATCHER_QUIET="${WATCHER_QUIET:-0}"
 
 if ! [[ "$WATCH_PR_POLL_SECS" =~ ^[0-9]+$ ]]; then
     echo "ERROR: WATCH_PR_POLL_SECS must be a non-negative integer (got: $WATCH_PR_POLL_SECS)" >&2
@@ -234,6 +250,53 @@ log_event() {
     local ts
     ts="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
     printf '%s  %-15s %s\n' "$ts" "$cat" "$*" >> "$EVENTS_LOG" 2>/dev/null || true
+}
+
+# format_event_line <raw-events.log-line>
+#
+# Presentation layer for the pane echo (issue #38): parses one
+# log_event-formatted line ("<iso8601-ts>  <category>  k=v k=v ...") and
+# prints a colorized, column-aligned human line to stdout. Read-only w.r.t.
+# the log file — never writes back to it, so events.log's format is
+# untouched by this feature.
+format_event_line() {
+    local line="$1" ts cat kv hhmmss glyph color
+    read -r ts cat kv <<< "$line"
+    [ -n "$cat" ] || return 0
+    hhmmss="$(date -d "$ts" +%T 2>/dev/null || echo "$ts")"
+
+    case "$cat" in
+        worker.finish)
+            case "$kv" in
+                *outcome=ok*)  glyph="✓"; color=$'\033[32m' ;;
+                *)             glyph="✗"; color=$'\033[31m' ;;
+            esac ;;
+        worker.finish.skip)        glyph="·"; color=$'\033[2m'  ;;
+        worker.start)               glyph="◐"; color=$'\033[33m' ;;
+        worker.requeue)              glyph="↺"; color=$'\033[36m' ;;
+        cap.refused)                  glyph="⚠"; color=$'\033[33m' ;;
+        coord.wake)                   glyph="→"; color=$'\033[36m' ;;
+        coord.wake.skip)              glyph="⏸"; color=$'\033[33m' ;;
+        coord.wake.error)             glyph="✗"; color=$'\033[31m' ;;
+        watch.autoclose)               glyph="♻"; color=$'\033[36m' ;;
+        watch.pr_poll)                  glyph="⚠"; color=$'\033[33m' ;;
+        pr_poll.error)                   glyph="✗"; color=$'\033[31m' ;;
+        watch.check_on_done)
+            case "$kv" in
+                *result=pass*)     glyph="✓"; color=$'\033[32m' ;;
+                *result=fail*)     glyph="✗"; color=$'\033[31m' ;;
+                *result=running*)  glyph="◐"; color=$'\033[33m' ;;
+                *)                 glyph="·"; color=$'\033[2m'  ;;
+            esac ;;
+        watch.check_on_done.error)  glyph="✗"; color=$'\033[31m' ;;
+        watch.start|watch.timer.start) glyph="▶"; color=$'\033[36m' ;;
+        watch.exit)                     glyph="■"; color=$'\033[2m'  ;;
+        sweep.run|sweep.dry)             glyph="↻"; color=$'\033[36m' ;;
+        sweep.error)                      glyph="✗"; color=$'\033[31m' ;;
+        *)                                 glyph="·"; color=$'\033[0m'  ;;
+    esac
+
+    printf '[watch] %s  %s%s\033[0m %-22s %s\n' "$hhmmss" "$color" "$glyph" "$cat" "$kv"
 }
 
 # Validation
@@ -270,6 +333,7 @@ pr-poll:       ${WATCH_PR_POLL_SECS}s$([ "$WATCH_PR_POLL_SECS" = "0" ] && echo "
 check-on-done: $WATCH_CHECK_ON_DONE$([ "$WATCH_CHECK_ON_DONE" = "1" ] && echo " (session: $SESSION_NAME)")
 dry-run:       $DRY_RUN
 once:          $ONCE
+pane-echo:     $([ "$WATCHER_QUIET" = "1" ] && echo "disabled (WATCHER_QUIET=1)" || echo "enabled (WATCHER_QUIET=1 to silence)")
 
 EOF
 [ "$BACKEND" = "poll" ] && echo "Press Ctrl-C to stop. Polling every ${POLL_SECS}s for new outcome JSONs..." || \
@@ -278,6 +342,66 @@ echo ""
 
 log_event watch.start \
     "project=$PROJECT_DIR backend=$BACKEND debounce=${DEBOUNCE_SECS}s max_workers=${MAX_WORKERS:-?} max_tmux_windows=${MAX_TMUX_WINDOWS:-?}"
+
+# Pane echo (issue #38): tail events.log itself — rather than only echoing
+# the events THIS process logs — so events written by sibling processes
+# sharing the same events.log (provision-worker.sh's worker.start/
+# cap.refused, worker-listener.sh's worker.requeue, etc.) also show up
+# live in the watcher's tmux window. `-n 1` replays just the watch.start
+# line we wrote above (guaranteeing it appears with no startup race)
+# without dumping older sessions' history. WATCHER_QUIET=1 skips this
+# entirely, restoring silent-stdout (banner only).
+WATCHER_ECHO_PID=""
+if [ "$WATCHER_QUIET" != "1" ]; then
+    # --sleep-interval=0.2: only takes effect when tail falls back to
+    # polling (inotify unavailable — the common case in containers/
+    # sandboxes without inotify support). GNU tail's polling default is
+    # 1.0s, which reads as sluggish for a "live" pane; 0.2s keeps it snappy
+    # without meaningfully raising CPU use. No-op when inotify IS available
+    # (events forward immediately regardless of this value).
+    #
+    # Feature-detected, not assumed: --sleep-interval is GNU-only. On a
+    # BSD/busybox tail (no such flag), passing it unconditionally would
+    # make tail exit immediately on an unrecognized option — with stderr
+    # suppressed below, the whole pane-echo feature would silently vanish
+    # rather than degrade to plain default-interval following.
+    TAIL_OPTS=(-n 1 -F)
+    tail --help 2>/dev/null | grep -q -- '--sleep-interval' && TAIL_OPTS+=(--sleep-interval=0.2)
+    tail "${TAIL_OPTS[@]}" "$EVENTS_LOG" 2>/dev/null | while IFS= read -r line; do
+        format_event_line "$line"
+    done &
+    WATCHER_ECHO_PID=$!
+fi
+
+# Single shared trap for the pane-echo pipeline, the background timer loop
+# (issue #119, started later), and run_poll's seen_file (script-global —
+# see the NOTE at its mktemp near run_poll). Installed immediately after
+# the first backgrounded process (WATCHER_ECHO_PID) that needs it — under
+# `set -e`, any ordinary command between spawning a background job and
+# installing its cleanup trap is a window where an early failure orphans
+# that job. WATCH_TIMER_PID and seen_file are pre-declared empty here too
+# so the trap is safe to fire before either is actually assigned further
+# down. Set once, so nothing downstream can silently clobber it with a
+# second `trap ... EXIT` and drop one of these kills.
+WATCH_TIMER_PID=""
+seen_file=""
+cleanup_on_exit() {
+    [ -n "${WATCH_TIMER_PID:-}" ] && kill "$WATCH_TIMER_PID" 2>/dev/null || true
+    # WATCHER_ECHO_PID is the `while read` reader — the last stage of the
+    # `tail | while` pipeline, and the only PID $! gives us for it. `tail`
+    # itself is a separate direct child of this script (pipeline stages
+    # aren't parent/child of each other), so it needs its own kill too —
+    # otherwise it lingers until its next write hits the now-closed pipe.
+    [ -n "${WATCHER_ECHO_PID:-}" ] && kill "$WATCHER_ECHO_PID" 2>/dev/null || true
+    # Scoped to WATCHER_ECHO_PID (only runs if the pane-echo tail was
+    # actually spawned) and matched by its exact args (-f against
+    # EVENTS_LOG's path), not "-x tail" — so this can't collide with some
+    # unrelated tail a future change might add as another direct child of
+    # this script.
+    [ -n "${WATCHER_ECHO_PID:-}" ] && pkill -P $$ -f "tail .* -F .*$EVENTS_LOG" 2>/dev/null || true
+    [ -n "${seen_file:-}" ] && rm -f -- "$seen_file"
+}
+trap cleanup_on_exit EXIT INT TERM
 
 # Shared state
 LAST_WAKE=0
@@ -715,6 +839,18 @@ on_outcome() {
     if [ "$ONCE" = "1" ]; then
         echo "[$(date +%T)] ONCE=1 — exiting after first wake."
         log_event watch.exit "reason=once"
+        # Brief grace period so the pane-echo tail (issue #38) catches up on
+        # this burst of writes (worker.finish, watch.autoclose, coord.wake,
+        # watch.exit) before cleanup_on_exit kills it — without this, a
+        # fast ONCE=1 exit can race past tail's polling interval and
+        # silently drop the last few lines from stdout (the log file
+        # itself is unaffected either way). 1.5s (not 0.2s) deliberately:
+        # this smoke-test-only path has to clear tail's WORST-CASE
+        # interval, not the GNU --sleep-interval=0.2 fast path above — a
+        # non-GNU tail without that flag falls back to its own default
+        # (commonly ~1.0s), and ONCE=1 is never on the real long-running
+        # daemon's hot path, so the extra latency here is free.
+        [ "$WATCHER_QUIET" = "1" ] || sleep 1.5
         exit 0
     fi
 }
@@ -800,23 +936,14 @@ run_poll() {
 # backend selected above. Started here (after every function it calls is
 # defined, and after the backend case below so shutdown ordering doesn't
 # matter) so it's live before we block in run_inotify/run_poll.
+# WATCH_TIMER_PID itself is pre-declared (empty) up near the shared trap
+# installation, above — this just fills it in when the feature is on.
 # ---------------------------------------------------------------------------
-WATCH_TIMER_PID=""
 if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ]; then
     run_watch_timer_loop &
     WATCH_TIMER_PID=$!
     log_event watch.timer.start "pr_poll_secs=$WATCH_PR_POLL_SECS check_on_done=$WATCH_CHECK_ON_DONE"
 fi
-
-# Single shared trap for both the background timer loop and run_poll's
-# seen_file (script-global — see the NOTE at its mktemp above). Set once,
-# here, so nothing downstream can silently clobber it with a second
-# `trap ... EXIT` and drop the timer-loop kill.
-cleanup_on_exit() {
-    [ -n "$WATCH_TIMER_PID" ] && kill "$WATCH_TIMER_PID" 2>/dev/null || true
-    [ -n "${seen_file:-}" ] && rm -f -- "$seen_file"
-}
-trap cleanup_on_exit EXIT INT TERM
 
 case "$BACKEND" in
     inotify) run_inotify ;;
