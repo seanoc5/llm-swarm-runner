@@ -20,6 +20,7 @@ All scripts here require bash 4.0+; do not run them under `sh` or `dash`.
 | `install-tmux-binding.sh` | Installs the Ctrl-Z worker escape-hatch binding into `~/.tmux.conf` with the absolute path baked in, then re-sources every running `swarm-*` socket. |
 | `kill-finished-workers.sh` | Bulk-closes idle `iss-*` worker tmux windows (parked-only by default; flags for active / worktree / dry-run; `--merged-only` and `--pr-finalized` bypass the parked check). |
 | `kill-worktree.sh` | Removes one worker's worktree, branch, and tmux window — ABANDON-verdict helper. |
+| `list-swarms.sh` | Enumerates per-project tmux swarm sockets in `/tmp/tmux-$UID/` as LIVE vs ORPHAN; `--prune` deletes orphan socket files. Read-only by default. |
 | `provision-worker.sh` | Coordinator one-shot: creates worktree, initialises queue, writes brief, spawns worker tmux window. |
 | `reap-orphan-worktrees.sh` | Bulk-reaps stale `wt-issue-*` worktree DIRECTORIES whose work is preserved elsewhere; complements `kill-finished-workers.sh` (which walks live tmux windows) by catching worktrees that outlived their session. |
 | `relocate-blind-merge-risk.sh` | One-off PR-body rewriter: moves the visible "Blind-merge risk:" line from the top of a PR body to the bottom footer, matching the current PR template. |
