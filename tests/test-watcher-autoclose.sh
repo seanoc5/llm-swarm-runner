@@ -68,19 +68,55 @@ exit 0
 EOF
 chmod +x "$FAKE_LLM_START"
 
+# Stub gh: pr_poll_pass's only gh call is `gh pr list --state all --limit 500
+# --json headRefName,state,number --jq '...'`, which (via --jq) already
+# returns tab-separated "branch\tstate\tnumber" lines — so the stub just
+# cats a fixture file tests populate before triggering a poll tick.
+GH_PR_LIST_FILE="$TEST_DIR/gh-pr-list.tsv"
+: > "$GH_PR_LIST_FILE"
+mkdir -p "$TEST_DIR/bin"
+FAKE_GH="$TEST_DIR/bin/gh"
+cat > "$FAKE_GH" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "pr" ] && [ "\$2" = "list" ]; then
+    cat "$GH_PR_LIST_FILE"
+    exit 0
+fi
+exit 0
+EOF
+chmod +x "$FAKE_GH"
+export PATH="$TEST_DIR/bin:$PATH"
+
 # Helper: start watcher in background with given WATCHER_AUTOCLOSE value.
 # Returns PID via global. Uses ONCE=1 so it exits after first wake.
+#
+# WATCH_PR_POLL_SECS / WATCH_CHECK_ON_DONE default to 0 here (feature off)
+# so tests 1-4 — which predate issue #119 — stay hermetic and don't spin up
+# the new background timer loop. Tests targeting #119 export these (and
+# ONCE=0, since the pr-poll/check-on-done triggers aren't tied to
+# on_outcome's ONCE=1 exit) as a prefix before calling start_watcher.
 start_watcher() {
     local autoclose="$1" logfile="$2"
     WATCHER_AUTOCLOSE="$autoclose" \
         KILL_FINISHED="$FAKE_KILL" \
         LLM_START="$FAKE_LLM_START" \
         WORKSPACE="$TEST_DIR" \
-        DRY_RUN=0 ONCE=1 POLL_SECS=1 DEBOUNCE_SECS=0 \
+        WATCH_PR_POLL_SECS="${WATCH_PR_POLL_SECS:-0}" \
+        WATCH_CHECK_ON_DONE="${WATCH_CHECK_ON_DONE:-0}" \
+        CHECK_RUNNER="${CHECK_RUNNER:-}" \
+        DRY_RUN=0 ONCE="${ONCE:-1}" POLL_SECS=1 DEBOUNCE_SECS=0 \
         "$WATCH" "$PROJECT_DIR" > "$logfile" 2>&1 &
     WATCH_PID=$!
     # Let the watcher baseline existing outcomes before we drop a new one
     sleep 1.5
+}
+
+# Helper: stop a background (ONCE=0) watcher started via start_watcher.
+stop_watcher() {
+    [ -n "${WATCH_PID:-}" ] || return 0
+    kill "$WATCH_PID" 2>/dev/null || true
+    wait "$WATCH_PID" 2>/dev/null || true
+    unset WATCH_PID
 }
 
 # Helper: wait for watcher to exit (it should after first wake under ONCE=1)
@@ -223,6 +259,108 @@ $(cat "$TEST_DIR/watch-4.log")"
 [ -s "$WAKE_LOG" ] || red ".err.json outcome did not trigger coord.wake"
 green ".err.json outcomes trigger autoclose + wake (parity with .ok.json)"
 
+# ============================================================================
+heading "Test 5: pr-poll backstop reaps a merged PR with NO outcome.json ever arriving (issue #119)"
+# ============================================================================
+# The bug: on_outcome only fires from a NEW outcome.json write, but
+# outcome.json is written once (usually right after the PR opens) — a PR
+# merging later (parked interactive worker, or the user batch-merging while
+# away) never produces a second one, so the reap pass never re-runs. This
+# drives the fix directly: no outcome.json is EVER dropped in this test, so
+# any reap must come from the independent WATCH_PR_POLL_SECS timer.
+: > "$KILL_LOG"
+rm -f "$PROJECT_DIR/.swarm/events.log"
+mkdir -p "$TEST_DIR/wt-issue-50/.swarm/tasks/done"
+printf 'fix/issue-50\tMERGED\t101\n' > "$GH_PR_LIST_FILE"
+
+ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 1 "$TEST_DIR/watch-5.log"
+sleep 5
+stop_watcher
+
+[ -s "$KILL_LOG" ] || red "pr-poll backstop did not invoke kill-finished-workers.sh for a merged PR with no outcome.json. Watch log:
+$(cat "$TEST_DIR/watch-5.log")"
+green "pr-poll backstop reaped a merged-PR worktree without any outcome.json ever arriving"
+
+EVENTS_LOG="$PROJECT_DIR/.swarm/events.log"
+grep -q 'watch\.pr_poll ' "$EVENTS_LOG" 2>/dev/null \
+    || red "expected 'watch.pr_poll' event in events.log; got:
+$(cat "$EVENTS_LOG" 2>/dev/null || echo '(missing)')"
+grep -q 'trigger=pr_poll' "$EVENTS_LOG" \
+    || red "expected watch.autoclose trigger=pr_poll in events.log"
+green "events.log records watch.pr_poll + watch.autoclose(trigger=pr_poll) — additive to the outcome trigger"
+
+# ============================================================================
+heading "Test 6: check-on-done runs the resolved check once a status file signals ready-for-review"
+# ============================================================================
+mkdir -p "$TEST_DIR/wt-issue-60/.swarm/tasks/status"
+mkdir -p "$TEST_DIR/wt-issue-60/.swarm/tasks/done"
+echo 'echo ok' > "$TEST_DIR/wt-issue-60/.swarm/check.sh"
+
+CHECK_RUNNER_LOG="$TEST_DIR/check-runner.log"
+: > "$CHECK_RUNNER_LOG"
+FAKE_CHECK_RUNNER="$TEST_DIR/fake-check-runner.sh"
+cat > "$FAKE_CHECK_RUNNER" <<EOF
+#!/usr/bin/env bash
+printf 'RAN: %s :: %s\n' "\$1" "\$2" >> "$CHECK_RUNNER_LOG"
+exit 0
+EOF
+chmod +x "$FAKE_CHECK_RUNNER"
+
+rm -f "$PROJECT_DIR/.swarm/events.log"
+echo '{"task_id":"t60","state":"ready-for-review","pr":77,"ts":"2026-07-19T00:00:00Z"}' \
+    > "$TEST_DIR/wt-issue-60/.swarm/tasks/status/t60.json"
+
+ONCE=0 WATCH_CHECK_ON_DONE=1 CHECK_RUNNER="$FAKE_CHECK_RUNNER" \
+    start_watcher 0 "$TEST_DIR/watch-6.log"
+sleep 4
+stop_watcher
+
+[ -s "$CHECK_RUNNER_LOG" ] || red "check-on-done did not invoke CHECK_RUNNER for a ready-for-review status file. Watch log:
+$(cat "$TEST_DIR/watch-6.log")"
+grep -q "wt-issue-60" "$CHECK_RUNNER_LOG" \
+    || red "CHECK_RUNNER invoked with unexpected worktree arg: $(cat "$CHECK_RUNNER_LOG")"
+grep -q "check.sh" "$CHECK_RUNNER_LOG" \
+    || red "expected the standing .swarm/check.sh to resolve as the check command: $(cat "$CHECK_RUNNER_LOG")"
+green "check-on-done resolved the standing .swarm/check.sh and ran it via CHECK_RUNNER"
+
+CHECK_JSON="$TEST_DIR/wt-issue-60/.swarm/tasks/status/t60.check.json"
+[ -f "$CHECK_JSON" ] || red "expected $CHECK_JSON to be written"
+grep -q '"state":"pass"' "$CHECK_JSON" || red "expected check.json state=pass; got: $(cat "$CHECK_JSON")"
+green "check.json recorded state=pass"
+
+EVENTS_LOG="$PROJECT_DIR/.swarm/events.log"
+grep -q 'watch\.check_on_done' "$EVENTS_LOG" \
+    || red "expected watch.check_on_done event in events.log"
+green "events.log records watch.check_on_done"
+
+# ============================================================================
+heading "Test 7: status-file signal + PR-open backstop both firing → exactly ONE check run"
+# ============================================================================
+# The atomic-claim requirement: both done-signals can fire in the same
+# poll window (2s status-file scan and the WATCH_PR_POLL_SECS gh-poll can
+# land close together). maybe_run_check must converge both callers on the
+# same claim key (re-derived from the worktree's own status file) so only
+# one of them wins the mkdir claim.
+: > "$CHECK_RUNNER_LOG"
+rm -f "$PROJECT_DIR/.swarm/events.log"
+mkdir -p "$TEST_DIR/wt-issue-70/.swarm/tasks/status"
+mkdir -p "$TEST_DIR/wt-issue-70/.swarm/tasks/done"
+echo 'echo ok' > "$TEST_DIR/wt-issue-70/.swarm/check.sh"
+echo '{"task_id":"t70","state":"ready-for-review","pr":88,"ts":"2026-07-19T00:00:00Z"}' \
+    > "$TEST_DIR/wt-issue-70/.swarm/tasks/status/t70.json"
+printf 'fix/issue-70\tOPEN\t88\n' > "$GH_PR_LIST_FILE"
+
+ONCE=0 WATCH_PR_POLL_SECS=2 WATCH_CHECK_ON_DONE=1 CHECK_RUNNER="$FAKE_CHECK_RUNNER" \
+    start_watcher 0 "$TEST_DIR/watch-7.log"
+sleep 6
+stop_watcher
+
+RUNS=$(grep -c "wt-issue-70" "$CHECK_RUNNER_LOG" || true)
+[ "$RUNS" -eq 1 ] \
+    || red "expected exactly 1 check run for issue #70 (status-file + PR-open both fired); got $RUNS. Log:
+$(cat "$CHECK_RUNNER_LOG")"
+green "status-file signal and PR-open backstop converge on one claim key — exactly one check run, no double-fire"
+
 # ────────────────────────── Done ──────────────────────────
 
 heading "All watcher-autoclose tests passed"
@@ -232,4 +370,7 @@ echo "  Argv: --pr-finalized --with-worktree --yes (terminal-PR mode)"
 echo "  Events log: watch.autoclose + coord.wake recorded per outcome"
 echo "  Smooth-flow: each outcome triggers its own autoclose pass"
 echo "  .err.json outcomes also trigger autoclose (parity with .ok.json)"
+echo "  #119: pr-poll backstop reaps merged PRs with no outcome.json at all"
+echo "  #119: check-on-done runs the resolved check on a ready-for-review status file"
+echo "  #119: status-file + PR-open signals converge on one atomic claim (no double-run)"
 yellow "Run with KEEP=1 to leave $TEST_DIR for inspection."
