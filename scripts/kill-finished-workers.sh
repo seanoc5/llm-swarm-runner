@@ -200,14 +200,19 @@ window_idle_min() {
 # branch actually checked out in that issue's worktree over the
 # dirname-derived fix/issue-N — a parked worker can be repurposed onto a
 # different branch mid-life (checkout -B), which decouples the two. Falls
-# back to fix/issue-N when the worktree is absent or on a detached HEAD
-# (e.g. already reaped, or never had --with-worktree applied). See #97.
+# back to fix/issue-N only when there's no worktree to inspect at all
+# (already reaped, or never had --with-worktree applied) — that's the
+# pre-#97 behavior and not a regression. If the worktree EXISTS but is on
+# a detached HEAD, prints nothing (caller must treat that as "unknown,
+# don't reap") rather than silently falling back to fix/issue-N — a stale
+# dirname-derived branch could be finalized while the detached HEAD holds
+# unrelated, unpreserved work. Mirrors reap-orphan-worktrees.sh's handling.
 worktree_branch() {
-    local issue="$1" wt branch
+    local issue="$1" wt
     wt="$(swarm_worktree_dir "$PROJECT_DIR" "$issue")"
     if [ -d "$wt" ]; then
-        branch="$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
-        [ -n "$branch" ] && { echo "$branch"; return; }
+        git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null
+        return
     fi
     echo "fix/issue-$issue"
 }
@@ -294,6 +299,10 @@ for w in "${WINDOWS[@]}"; do
     # not the dirname-derived fix/issue-N.
     if [ "$MERGED_ONLY" = "1" ] || [ "$PR_FINALIZED" = "1" ] || [ "$PR_CHECK" = "1" ]; then
         branch="$(worktree_branch "$issue")"
+        if [ -z "$branch" ]; then
+            echo "  $w  [worktree on detached HEAD → skip (can't resolve a branch to check)]"
+            continue
+        fi
     fi
     if [ "$MERGED_ONLY" = "1" ]; then
         if ! pr_is_merged "$branch"; then
