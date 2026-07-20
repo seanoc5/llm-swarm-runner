@@ -47,19 +47,21 @@ input="$(cat)"
 # (when XDG_RUNTIME_DIR is unset) an attacker with a different UID can
 # pre-plant a symlink at $PROBE that we cannot unlink (sticky-bit /tmp only
 # lets the symlink's owner remove it), so a plain redirect would silently
-# follow it into an arbitrary file. `mv -T` replaces whatever sits at the
-# destination via an atomic rename(2) — it never follows an existing
-# symlink there (plain `mv` would move *into* a symlinked directory
-# instead of replacing the link) — so this is safe regardless of who
-# owns it.
+# follow it into an arbitrary file. `mv` replaces whatever sits at the
+# destination via an atomic rename(2) — it never follows a symlink-to-file
+# there — so this is safe regardless of who owns it. Skipping when the
+# destination resolves to a directory sidesteps the one case where mv
+# behaves the "wrong" way (moving into it instead of replacing it) —
+# avoided rather than fixed with GNU's `-T`, which macOS/BSD mv lacks.
 # No unsafe fallback on mktemp failure (e.g. an attacker exhausting /tmp
 # inodes to force it) — skip the probe for this render rather than fall
 # back to the direct-redirect hazard mktemp+mv exists to avoid. Also clean
-# up the temp file if the write or the mv itself fails, since this runs on
-# every render and a leaked temp file per failed render adds up fast.
+# up the temp file if the write, the directory check, or the mv itself
+# fails, since this runs on every render and a leaked temp file per
+# failed render adds up fast.
 probe_dir="$(dirname "$PROBE")"
 if probe_tmp="$(mktemp "$probe_dir/.claude-statusline.XXXXXX" 2>/dev/null)"; then
-    if ! printf '%s' "$input" > "$probe_tmp" || ! mv -fT "$probe_tmp" "$PROBE"; then
+    if [ -d "$PROBE" ] || ! printf '%s' "$input" > "$probe_tmp" || ! mv -f "$probe_tmp" "$PROBE"; then
         rm -f "$probe_tmp" 2>/dev/null
     fi
 fi
