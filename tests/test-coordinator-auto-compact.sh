@@ -60,6 +60,7 @@ AUTO_COMPACT_PROBE_MAX_AGE_SECS=120
 AUTO_COMPACT_BUSY_PATTERN='Considering…|Sautéed for|Cooked for|Baked for|Simmered for|✻|✶|Press Ctrl-C again to .xit'
 AUTO_COMPACT_START_TIMEOUT_SECS=15
 AUTO_COMPACT_FINISH_TIMEOUT_SECS=300
+AUTO_COMPACT_VERIFY_TIMEOUT_SECS=30
 AUTO_COMPACT_POLL_SECS=2
 AUTO_COMPACT_PROBE="$TEST_DIR/probe.json"
 
@@ -186,6 +187,7 @@ chmod +x "$FAKE_REPL"
 DRY_RUN=0
 AUTO_COMPACT_START_TIMEOUT_SECS=10
 AUTO_COMPACT_FINISH_TIMEOUT_SECS=15
+AUTO_COMPACT_VERIFY_TIMEOUT_SECS=10
 AUTO_COMPACT_POLL_SECS=1
 : > "$EVENTS_LOG"
 
@@ -206,10 +208,10 @@ check "fake REPL foreground (argv[0]=claude) -> cli" "cli" "$state"
 printf '{"context_window":{"context_window_size":200000,"total_input_tokens":160000}}' > "$AUTO_COMPACT_PROBE"
 # Simulate a real installed statusline re-rendering with post-compaction
 # usage: the fixture's fake compaction takes 4s, so land the lower value
-# in the probe file around then -- close to when maybe_auto_compact's own
-# post-compaction settle-sleep (3s after the busy indicator clears) reads
-# it back. This exercises the ineffective-compaction check's HAPPY path
-# (usage really did drop -> no warning).
+# in the probe file around then -- close to when the busy indicator clears
+# and maybe_auto_compact starts polling the probe's mtime for a refresh.
+# This exercises the ineffective-compaction check's HAPPY path (usage
+# really did drop -> no warning).
 ( sleep 4; printf '{"context_window":{"context_window_size":200000,"total_input_tokens":40000}}' > "$AUTO_COMPACT_PROBE" ) &
 BGPID=$!
 start_ts=$(date +%s)
@@ -219,9 +221,11 @@ wait "$BGPID" 2>/dev/null || true
 elapsed=$((end_ts - start_ts))
 
 # start-wait (~0-1s) + fixture compaction (4s) + finish-wait (~0-1s) +
-# settle-sleep (3s) puts this around 7-9s; bound generously either side.
-if grep -q 'coord.compact.done' "$EVENTS_LOG" && [ "$elapsed" -ge 6 ] && [ "$elapsed" -lt 20 ]; then
-    green "real /compact injection observed start->finish transition (~${elapsed}s; fixture sleeps 4s + 3s settle)"
+# verify-poll until the probe's mtime advances (~0-1s, since the
+# background job lands the fresh probe right around when busy clears)
+# puts this around 5-7s; bound generously either side.
+if grep -q 'coord.compact.done' "$EVENTS_LOG" && [ "$elapsed" -ge 4 ] && [ "$elapsed" -lt 20 ]; then
+    green "real /compact injection observed start->finish transition (~${elapsed}s; fixture sleeps 4s)"
     PASS=$((PASS + 1))
 else
     red "did not observe expected coord.compact.done within the expected window (elapsed=${elapsed}s); events.log: $(cat "$EVENTS_LOG")"
@@ -259,20 +263,42 @@ heading "Test 7: ineffective-compaction detection — usage that DOESN'T drop mu
 # `while read` loop, so it's just sitting idle waiting for the next line --
 # no need to restart it, and no C-c here: that process was launched via
 # `exec`, so interrupting it would kill the pane's only process and take
-# the whole session down with it). This time the probe file is left
-# untouched at the pre-compaction value throughout -- simulating the exact
-# silent-failure mode self-review flagged: a pasted "/compact" that somehow
-# got submitted as a plain chat message instead of the slash command would
-# still show the busy indicator appearing and clearing (claude processed
-# *a* turn), but context would not actually drop.
+# the whole session down with it). This time the background job re-writes
+# the probe with the SAME value (fresh mtime, unchanged usage) -- simulating
+# a statusline that genuinely re-rendered post-compaction but showed no
+# drop, which is the exact silent-failure mode self-review flagged: a
+# pasted "/compact" that somehow got submitted as a plain chat message
+# instead of the slash command would still show the busy indicator
+# appearing and clearing (claude processed *a* turn), but context would not
+# actually drop. (A probe that's never rewritten AT ALL is a different,
+# inconclusive case -- covered by Test 8 below.)
 : > "$EVENTS_LOG"
 printf '{"context_window":{"context_window_size":200000,"total_input_tokens":160000}}' > "$AUTO_COMPACT_PROBE"
+( sleep 4; printf '{"context_window":{"context_window_size":200000,"total_input_tokens":160000}}' > "$AUTO_COMPACT_PROBE" ) &
+BGPID7=$!
 maybe_auto_compact
+wait "$BGPID7" 2>/dev/null || true
 if grep -q 'coord.compact.ineffective' "$EVENTS_LOG"; then
-    green "usage did not drop -> coord.compact.ineffective correctly fired"
+    green "usage did not drop (fresh probe, same value) -> coord.compact.ineffective correctly fired"
     PASS=$((PASS + 1))
 else
     red "usage stayed at 160000 across the 'compaction' but no coord.compact.ineffective fired; events.log: $(cat "$EVENTS_LOG")"
+fi
+
+heading "Test 8: verify-skip — a probe that never refreshes must NOT be flagged as ineffective"
+# Same setup as Test 7, but the probe is left completely untouched this
+# time (no background rewrite at all) -- simulating a statusline that
+# simply hasn't re-rendered yet (slow refresh cadence, pane not focused,
+# etc). This must be inconclusive (coord.compact.verify_skip), not a false
+# "ineffective" warning on a compaction that may have worked fine.
+: > "$EVENTS_LOG"
+printf '{"context_window":{"context_window_size":200000,"total_input_tokens":160000}}' > "$AUTO_COMPACT_PROBE"
+AUTO_COMPACT_VERIFY_TIMEOUT_SECS=3 maybe_auto_compact
+if grep -q 'coord.compact.verify_skip' "$EVENTS_LOG" && ! grep -q 'coord.compact.ineffective' "$EVENTS_LOG"; then
+    green "probe never refreshed -> coord.compact.verify_skip (no false-positive ineffective)"
+    PASS=$((PASS + 1))
+else
+    red "expected verify_skip with no ineffective warning; events.log: $(cat "$EVENTS_LOG")"
 fi
 
 echo ""

@@ -161,9 +161,19 @@
 #                           (compaction is a real, possibly minutes-long
 #                           turn). Giving up here also just proceeds with
 #                           the normal wake.
+#   AUTO_COMPACT_VERIFY_TIMEOUT_SECS=30
+#                           Max wait, after the busy indicator clears, for
+#                           the probe file's mtime to actually advance past
+#                           its pre-compaction value — confirms the
+#                           statusline genuinely re-rendered with fresh
+#                           data before trusting it for the ineffective-
+#                           compaction check above. If it never refreshes
+#                           in time, that's inconclusive (logged as
+#                           coord.compact.verify_skip), not a failure —
+#                           the wake still proceeds either way.
 #   AUTO_COMPACT_POLL_SECS=2
-#                           capture-pane polling interval for both of the
-#                           waits above.
+#                           capture-pane / probe-mtime polling interval for
+#                           all of the waits above.
 #
 # Watch backend (auto-detected):
 #   - inotifywait (preferred): instant response. Install with:
@@ -217,7 +227,8 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     AUTO_COMPACT_BUSY_PATTERN         (auto)  capture-pane busy-indicator regex
     AUTO_COMPACT_START_TIMEOUT_SECS   15      max wait for compaction to start
     AUTO_COMPACT_FINISH_TIMEOUT_SECS  300     max wait for compaction to finish
-    AUTO_COMPACT_POLL_SECS            2       capture-pane poll interval
+    AUTO_COMPACT_VERIFY_TIMEOUT_SECS  30      max wait for probe to refresh post-compact
+    AUTO_COMPACT_POLL_SECS            2       capture-pane/probe poll interval
 
 DEFAULT WAKE_PROMPT (top-up mode)
     Coordinator triages outcomes, then refills workers toward MAX_WORKERS
@@ -243,6 +254,7 @@ EVENTS LOG
       coord.compact.timeout  gave up waiting on the busy indicator (phase=start|finish, waited)
       coord.compact.done   busy indicator cleared — compaction confirmed finished (waited)
       coord.compact.ineffective  context didn't drop post-compact (before, after) — investigate
+      coord.compact.verify_skip  probe never refreshed post-compact — inconclusive, not a failure
 
 PANE ECHO (issue #38)
     By default, every line appended to events.log — by this process OR any
@@ -328,6 +340,7 @@ AUTO_COMPACT_PROBE_MAX_AGE_SECS="${AUTO_COMPACT_PROBE_MAX_AGE_SECS:-120}"
 AUTO_COMPACT_BUSY_PATTERN="${AUTO_COMPACT_BUSY_PATTERN:-Considering…|Sautéed for|Cooked for|Baked for|Simmered for|✻|✶|Press Ctrl-C again to .xit}"
 AUTO_COMPACT_START_TIMEOUT_SECS="${AUTO_COMPACT_START_TIMEOUT_SECS:-15}"
 AUTO_COMPACT_FINISH_TIMEOUT_SECS="${AUTO_COMPACT_FINISH_TIMEOUT_SECS:-300}"
+AUTO_COMPACT_VERIFY_TIMEOUT_SECS="${AUTO_COMPACT_VERIFY_TIMEOUT_SECS:-30}"
 AUTO_COMPACT_POLL_SECS="${AUTO_COMPACT_POLL_SECS:-2}"
 
 if ! [[ "$WATCH_PR_POLL_SECS" =~ ^[0-9]+$ ]]; then
@@ -335,7 +348,8 @@ if ! [[ "$WATCH_PR_POLL_SECS" =~ ^[0-9]+$ ]]; then
     exit 1
 fi
 for _var in AUTO_COMPACT_THRESHOLD_TOKENS AUTO_COMPACT_PROBE_MAX_AGE_SECS \
-            AUTO_COMPACT_START_TIMEOUT_SECS AUTO_COMPACT_FINISH_TIMEOUT_SECS; do
+            AUTO_COMPACT_START_TIMEOUT_SECS AUTO_COMPACT_FINISH_TIMEOUT_SECS \
+            AUTO_COMPACT_VERIFY_TIMEOUT_SECS; do
     if ! [[ "${!_var}" =~ ^[0-9]+$ ]]; then
         echo "ERROR: $_var must be a non-negative integer (got: ${!_var})" >&2
         exit 1
@@ -402,6 +416,7 @@ format_event_line() {
         coord.compact.timeout)           glyph="⚠"; color=$'\033[33m' ;;
         coord.compact.done)               glyph="◈"; color=$'\033[32m' ;;
         coord.compact.ineffective)          glyph="⚠"; color=$'\033[31m' ;;
+        coord.compact.verify_skip)            glyph="·"; color=$'\033[2m'  ;;
         watch.autoclose)               glyph="♻"; color=$'\033[36m' ;;
         watch.pr_poll)                  glyph="⚠"; color=$'\033[33m' ;;
         pr_poll.error)                   glyph="✗"; color=$'\033[31m' ;;
@@ -1024,6 +1039,14 @@ maybe_auto_compact() {
         return 0
     fi
 
+    # Reference point for the post-compaction verification below: captured
+    # BEFORE injection so we can later tell "the probe genuinely re-rendered
+    # with fresh data" from "the statusline just hasn't refreshed yet" —
+    # only the former is meaningful evidence either way.
+    local probe_mtime_before
+    probe_mtime_before=$(mtime_epoch "$AUTO_COMPACT_PROBE" 2>/dev/null) || probe_mtime_before=0
+    [ -n "$probe_mtime_before" ] || probe_mtime_before=0
+
     # Every step below is best-effort — a transient tmux failure here must
     # degrade to "compaction never visibly started" (caught by the start-
     # timeout below) rather than take the whole daemon down via set -e.
@@ -1079,13 +1102,31 @@ maybe_auto_compact() {
     # "claude processing a turn". If it silently landed as a chat message,
     # context grows instead of shrinking, and since it'd still be over
     # threshold, this would otherwise repeat on every subsequent wake with
-    # no visible symptom. A brief settle delay lets the statusline
-    # re-render with post-compaction data, then this re-checks: if usage
-    # didn't drop, log it loudly rather than let that repeat silently.
-    sleep 3
-    local used_after
-    used_after="$(probe_ctx_used)" || used_after=""
-    if [ -n "$used_after" ] && [ "$used_after" -ge "$used" ]; then
+    # no visible symptom.
+    #
+    # Poll for the probe's mtime to actually advance past
+    # probe_mtime_before, rather than trusting a fixed sleep — the
+    # statusline's render cadence isn't guaranteed to land within any fixed
+    # window, and checking a probe that hasn't been rewritten yet would
+    # just re-read the pre-compaction value and misreport a working
+    # compaction as ineffective. If it never refreshes within
+    # AUTO_COMPACT_VERIFY_TIMEOUT_SECS, this is inconclusive (not a
+    # failure) — logged as verify_skip, not ineffective.
+    local verify_waited=0 probe_mtime_after used_after=""
+    while [ "$verify_waited" -lt "$AUTO_COMPACT_VERIFY_TIMEOUT_SECS" ]; do
+        sleep "$AUTO_COMPACT_POLL_SECS"
+        verify_waited=$((verify_waited + AUTO_COMPACT_POLL_SECS))
+        probe_mtime_after=$(mtime_epoch "$AUTO_COMPACT_PROBE" 2>/dev/null) || probe_mtime_after=0
+        [ -n "$probe_mtime_after" ] || probe_mtime_after=0
+        if [ "$probe_mtime_after" -gt "$probe_mtime_before" ]; then
+            used_after="$(probe_ctx_used)" || used_after=""
+            break
+        fi
+    done
+
+    if [ -z "$used_after" ]; then
+        log_event coord.compact.verify_skip "reason=probe_not_refreshed waited=${verify_waited}s"
+    elif [ "$used_after" -ge "$used" ]; then
         echo "[$(date +%T)] WARNING: context did not drop after /compact (before=$used after=$used_after) — the injected command may not have been recognized as a slash command; investigate before this repeats every wake"
         log_event coord.compact.ineffective "before=$used after=$used_after"
     fi
