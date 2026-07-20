@@ -185,18 +185,16 @@ mtime_epoch() {
     stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
 }
 
-# Pre-fetch all PR states for fix/issue-* in a single gh call ----------------
-# Cheaper than N round-trips when many orphan worktrees exist. Skipped under
+# Pre-fetch PR states for every branch in a single gh call -------------------
+# Keyed by the branch name itself (headRefName), not derived from the
+# wt-issue-N dirname — a worktree can be repurposed onto a different branch
+# mid-life (checkout -B from a parked worker), which decouples the dirname
+# from the branch actually checked out. See issue #97. Skipped under
 # --no-pr-check.
 declare -A PR_STATE=()
 if [ "$PR_CHECK" = "1" ]; then
     while IFS=$'\t' read -r ref state; do
-        case "$ref" in
-            fix/issue-*)
-                issue="${ref#fix/issue-}"
-                [[ "$issue" =~ ^[0-9]+$ ]] && PR_STATE[$issue]="$state"
-                ;;
-        esac
+        [ -n "$ref" ] && PR_STATE["$ref"]="$state"
     done < <(gh pr list --state all --limit 500 --json headRefName,state \
                 --jq '.[] | "\(.headRefName)\t\(.state)"' 2>/dev/null || true)
 fi
@@ -259,22 +257,42 @@ for WT in "$PROJECT_PARENT"/wt-issue-*/; do
     fi
 
     # 3. Preservation gate ----------------------------------------------------
+    if [ "$MERGED_ONLY" = "1" ] || [ "$PR_FINALIZED" = "1" ]; then
+        # Look up PR state for the branch actually checked out in this
+        # worktree, not the dirname-derived fix/issue-N — a repurposed
+        # worker (checkout -B onto a different branch mid-life) decouples
+        # the two. See issue #97.
+        BRANCH="$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+        if [ -z "$BRANCH" ]; then
+            echo "  $NAME  [detached HEAD → skip (can't resolve a branch to check)]"
+            SKIPPED+=("$NAME(detached)")
+            continue
+        fi
+        state="${PR_STATE[$BRANCH]:-}"
+        if [ -z "$state" ]; then
+            if git -C "$WT" rev-parse --verify --quiet "refs/remotes/origin/$BRANCH" >/dev/null; then
+                detail="no PR (pushed to origin/$BRANCH, none found)"
+            else
+                detail="no PR ($BRANCH unpushed)"
+            fi
+        else
+            detail="PR $BRANCH state=$state"
+        fi
+    fi
     if [ "$MERGED_ONLY" = "1" ]; then
-        state="${PR_STATE[$ISSUE]:-}"
         if [ "$state" != "MERGED" ]; then
-            echo "  $NAME  [PR state=${state:-NONE} → skip (merged-only mode)]"
+            echo "  $NAME  [$detail → skip (merged-only mode)]"
             SKIPPED+=("$NAME(pr=${state:-NONE})")
             continue
         fi
-        reason="PR-MERGED"
+        reason="PR-MERGED($BRANCH)"
     elif [ "$PR_FINALIZED" = "1" ]; then
-        state="${PR_STATE[$ISSUE]:-}"
         if [ "$state" != "MERGED" ] && [ "$state" != "CLOSED" ]; then
-            echo "  $NAME  [PR state=${state:-NONE} → skip (pr-finalized mode)]"
+            echo "  $NAME  [$detail → skip (pr-finalized mode)]"
             SKIPPED+=("$NAME(pr=${state:-NONE})")
             continue
         fi
-        reason="PR-$state"
+        reason="PR-$state($BRANCH)"
     else
         if ! all_commits_upstream "$WT"; then
             echo "  $NAME  [local commits not on origin/$DEFAULT_BRANCH → skip]"

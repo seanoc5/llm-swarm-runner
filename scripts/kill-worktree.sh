@@ -50,10 +50,22 @@ SESSION_NAME="llm-$(basename "$PROJECT_DIR")"
 
 cd "$PROJECT_DIR"
 
+# The worktree may have been repurposed onto a different branch mid-life
+# (checkout -B from a parked worker — see issue #97), decoupling the
+# dirname-derived fix/issue-N from what's actually checked out. Capture the
+# real branch before removal so it doesn't linger as an orphaned local ref.
+ACTUAL_BRANCH=""
+if [ -d "$WT" ]; then
+    ACTUAL_BRANCH="$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+fi
+
 echo "=== kill-worktree #$ISSUE ==="
 echo "  project:  $PROJECT_DIR"
 echo "  worktree: $WT"
 echo "  branch:   $BRANCH"
+if [ -n "$ACTUAL_BRANCH" ] && [ "$ACTUAL_BRANCH" != "$BRANCH" ]; then
+    echo "  actual:   $ACTUAL_BRANCH (worktree was repurposed; deleting this too)"
+fi
 echo "  tmux:     $SESSION_NAME / iss-$ISSUE"
 echo
 
@@ -86,9 +98,18 @@ fi
 
 if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
     git branch -D "$BRANCH"
-    echo "  ✓ deleted branch"
+    echo "  ✓ deleted branch $BRANCH"
 else
-    echo "  - branch not present (skipped)"
+    echo "  - branch $BRANCH not present (skipped)"
+fi
+
+if [ -n "$ACTUAL_BRANCH" ] && [ "$ACTUAL_BRANCH" != "$BRANCH" ]; then
+    if git show-ref --verify --quiet "refs/heads/$ACTUAL_BRANCH"; then
+        git branch -D "$ACTUAL_BRANCH"
+        echo "  ✓ deleted branch $ACTUAL_BRANCH (repurposed)"
+    else
+        echo "  - branch $ACTUAL_BRANCH not present (skipped)"
+    fi
 fi
 
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
