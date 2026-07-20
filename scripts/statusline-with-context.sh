@@ -43,6 +43,10 @@ set -u
 PROBE="${STATUSLINE_PROBE:-${XDG_RUNTIME_DIR:-/tmp}/claude-statusline-$UID.json}"
 
 input="$(cat)"
+# Refuse to follow a pre-planted symlink at the probe path (relevant mainly
+# for the shared-/tmp fallback when XDG_RUNTIME_DIR is unset) — drop the
+# link so the write below always lands on a fresh regular file we own.
+[ -L "$PROBE" ] && rm -f "$PROBE"
 printf '%s' "$input" > "$PROBE"
 
 # --- Model ---------------------------------------------------------------
