@@ -110,11 +110,17 @@
 #   AUTO_COMPACT_THRESHOLD_TOKENS=150000
 #                           Used-token threshold that triggers the above.
 #   AUTO_COMPACT_PROBE=<path>
-#                           Path to the statusline probe file. Default
-#                           matches the statusline script's own default:
-#                           ${STATUSLINE_PROBE:-${XDG_RUNTIME_DIR:-/tmp}/claude-statusline-$UID.json}.
-#                           Override if you've set STATUSLINE_PROBE to a
-#                           custom path for the coordinator's session.
+#                           Path to the statusline probe file. Defaults to
+#                           the project+role-scoped path
+#                           coordinator-claude.sh sets STATUSLINE_PROBE to
+#                           for its own claude invocation
+#                           (${XDG_RUNTIME_DIR:-/tmp}/claude-statusline-<project-basename>-coordinator.json)
+#                           — deliberately NOT the statusline script's own
+#                           generic per-UID default, which any other
+#                           interactive `claude` session on the same host
+#                           would silently clobber. Override only if
+#                           you've set STATUSLINE_PROBE to something else
+#                           for the coordinator's session specifically.
 #   AUTO_COMPACT_PROBE_MAX_AGE_SECS=120
 #                           Probe file older than this (mtime) is treated
 #                           as stale — the coordinator may not actually be
@@ -295,11 +301,16 @@ SESSION_NAME="${SESSION_NAME:-llm-$(basename "$PROJECT_DIR")}"
 WATCHER_QUIET="${WATCHER_QUIET:-0}"
 AUTO_COMPACT="${AUTO_COMPACT:-1}"
 AUTO_COMPACT_THRESHOLD_TOKENS="${AUTO_COMPACT_THRESHOLD_TOKENS:-150000}"
-# Mirrors scripts/statusline-with-context.sh's own default probe path —
-# this feature has no context data source other than that file, so if the
-# statusline isn't installed (or STATUSLINE_PROBE points elsewhere for the
-# coordinator's session), override AUTO_COMPACT_PROBE to match.
-AUTO_COMPACT_PROBE="${AUTO_COMPACT_PROBE:-${STATUSLINE_PROBE:-${XDG_RUNTIME_DIR:-/tmp}/claude-statusline-$UID.json}}"
+# Matches coordinator-claude.sh's own STATUSLINE_PROBE default for its
+# claude invocation — a project+role-scoped path, NOT the statusline
+# script's generic per-UID default. Using the generic default here would
+# mean any other interactive `claude` session on the same host (sharing
+# the same UID) silently clobbers the coordinator's probe data, and this
+# feature would act on the wrong session's context usage. This feature
+# has no context data source other than that probe file, so if the
+# statusline isn't installed at all, it's simply a no-op (see
+# probe_ctx_used's staleness/missing-file handling below).
+AUTO_COMPACT_PROBE="${AUTO_COMPACT_PROBE:-${STATUSLINE_PROBE:-${XDG_RUNTIME_DIR:-/tmp}/claude-statusline-$(basename "$PROJECT_DIR")-coordinator.json}}"
 AUTO_COMPACT_PROBE_MAX_AGE_SECS="${AUTO_COMPACT_PROBE_MAX_AGE_SECS:-120}"
 # Same spinner-phrase pattern check-stuck-workers.sh's detect_state() uses
 # for its ACTIVE state, plus the Ctrl-C exit-confirm prompt (a bare Enter
