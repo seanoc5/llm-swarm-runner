@@ -16,6 +16,9 @@
 #       }
 #     }
 #
+# (/opt/work/llm-swarm-runner is this repo's path in the reference swarm
+# deployment — adjust to wherever you cloned it.)
+#
 # The path must be absolute. If you want this under ~/.claude/ instead of
 # the repo, symlink it: `ln -s /opt/work/llm-swarm-runner/scripts/statusline-with-context.sh ~/.claude/statusline.sh`
 # and reference ~/.claude/statusline.sh in settings.json.
@@ -23,28 +26,57 @@
 # Output format:  <model> · <cwd-basename> · ctx: <used>/<total> (<%>)
 # Example:        opus · spring-search-tempo · ctx: 195k/1M (19%)
 #
-# Set STATUSLINE_PROBE=/tmp/claude-statusline-last.json to capture the
-# raw stdin payload while debugging schema changes.
-#
-# Codex has a native TUI status line rather than a command hook. Configure:
-#
-#     [tui]
-#     status_line = ["model-with-reasoning", "context-used", "context-window-size"]
+# This script also writes the raw stdin payload to $STATUSLINE_PROBE on
+# every render (default ${XDG_RUNTIME_DIR:-/tmp}/claude-statusline-$UID.json).
+# That dump exists so the *exact* JSON field names for the context window can
+# be confirmed against a real Claude Code render — the first version of
+# this script tries several plausible paths and the dump tells us which
+# one Claude Code actually uses. Once we've confirmed, the fallback
+# probes can be removed.
 
+# Only -u, not -euo pipefail: this runs as a statusLine command hook, so any
+# non-zero exit or unbound var here would blank the statusline every render
+# instead of just degrading one field to "?" — the never-fail contract wins
+# over strictness.
 set -u
 
+PROBE="${STATUSLINE_PROBE:-${XDG_RUNTIME_DIR:-/tmp}/claude-statusline-$UID.json}"
+
 input="$(cat)"
-if [ -n "${STATUSLINE_PROBE:-}" ]; then
-    printf '%s' "$input" > "$STATUSLINE_PROBE"
+# Write via mktemp+mv rather than a direct `>`: on the shared-/tmp fallback
+# (when XDG_RUNTIME_DIR is unset) an attacker with a different UID can
+# pre-plant a symlink at $PROBE that we cannot unlink (sticky-bit /tmp only
+# lets the symlink's owner remove it), so a plain redirect would silently
+# follow it into an arbitrary file. `mv` replaces whatever sits at the
+# destination via an atomic rename(2) — it never follows a symlink-to-file
+# there — so this is safe regardless of who owns it. Skipping when the
+# destination resolves to a directory avoids the one case where mv
+# behaves the "wrong" way (moving into it instead of replacing it) —
+# checked ahead of the mv rather than fixed with GNU's `-T` (which
+# macOS/BSD mv lacks); a symlink-to-directory planted in the resulting
+# check-then-mv window would still divert the temp file into that
+# directory, but never overwrites anything the attacker doesn't already
+# control, so this is a best-effort narrowing, not a hard guarantee.
+# No unsafe fallback on mktemp failure (e.g. an attacker exhausting /tmp
+# inodes to force it) — skip the probe for this render rather than fall
+# back to the direct-redirect hazard mktemp+mv exists to avoid. Also clean
+# up the temp file if the write, the directory check, or the mv itself
+# fails, since this runs on every render and a leaked temp file per
+# failed render adds up fast.
+probe_dir="$(dirname "$PROBE")"
+if probe_tmp="$(mktemp "$probe_dir/.claude-statusline.XXXXXX" 2>/dev/null)"; then
+    if [ -d "$PROBE" ] || ! printf '%s' "$input" > "$probe_tmp" || ! mv -f "$probe_tmp" "$PROBE"; then
+        rm -f "$probe_tmp" 2>/dev/null
+    fi
 fi
 
 # --- Model ---------------------------------------------------------------
 model=$(printf '%s' "$input" | jq -r '
-    .model.id //
-    .model.display_name //
-    .model //
-    .model_name //
-    .session.model //
+    .model.display_name? //
+    .model.id? //
+    (.model | select(type == "string")) //
+    .model_name? //
+    .session.model? //
     empty
 ' 2>/dev/null)
 [ -z "$model" ] && model="?"
@@ -104,7 +136,16 @@ fmt_tokens() {
     fi
 }
 
-if [ -n "$ctx_used" ] && [ -n "$ctx_total" ] && [ "$ctx_used" -gt 0 ] 2>/dev/null; then
+# Both fields must be plain non-negative integers, and total must be
+# nonzero, before any arithmetic touches them — a non-numeric or zero
+# total (e.g. "1M", or a not-yet-populated 0) must degrade to "?"
+# rather than take down the statusline via a division/unbound-var death.
+is_uint() { [[ "$1" =~ ^[0-9]+$ ]]; }
+# Percentages may be reported as floats (e.g. "19.4"); same guard, decimal allowed.
+is_pct() { [[ "$1" =~ ^[0-9]+(\.[0-9]+)?$ ]]; }
+is_pct "$ctx_pct" || ctx_pct=""
+
+if is_uint "$ctx_used" && is_uint "$ctx_total" && [ "$ctx_total" -gt 0 ]; then
     used_fmt=$(fmt_tokens "$ctx_used")
     total_fmt=$(fmt_tokens "$ctx_total")
     if [ -n "$ctx_pct" ]; then

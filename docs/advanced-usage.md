@@ -15,6 +15,7 @@ This document covers advanced workflows, custom mounts, and manual Git worktree 
   - [Rebuilding the Image](#rebuilding-the-image)
 - [Worker Escape Hatch (Ctrl-Z opens a sibling bash pane)](#worker-escape-hatch-ctrl-z-opens-a-sibling-bash-pane)
 - [Peering at Workers from the Host (capture-pane)](#peering-at-workers-from-the-host-capture-pane)
+- [Long-lived coordinator: context monitoring](#long-lived-coordinator-context-monitoring)
 - [Triage Workflow](#triage-workflow)
   - [The triage cycle](#the-triage-cycle)
   - [Read-only triage prompt](#read-only-triage-prompt)
@@ -288,6 +289,49 @@ The host-native coordinator has unrestricted access to the swarm tmux socket. To
 ### What workers can't do
 
 Workers cannot use `tmux capture-pane` to read the coordinator or sibling workers — their containers don't bind-mount the host tmux socket. If you need cross-worker visibility *from inside a worker*, the alternative paths are `docker exec` / `docker logs` (because `/var/run/docker.sock` is mounted), or the shared filesystem under `.swarm/tasks/`. Both have their own risk profiles; see [security.md](./security.md).
+
+## Long-lived coordinator: context monitoring
+
+The default flow keeps the coordinator Claude Code session running across many worker dispatches — provisioning, watching, reporting outcomes, resuming the next wave — for hours or days at a stretch. The cross-coordination memory is valuable: which workers are doing what, which PRs are mid-review, what the user just asked about last turn. But a single Claude session that lives that long accumulates context bloat, and somewhere above ~120k tokens (a soft, model-and-task-dependent boundary often referred to as the "stupid zone") the model starts to lose focus on the actual work in front of it.
+
+Two related observations make this worse than it sounds:
+
+1. **Auto-compact is not user-tunable.** Claude Code does auto-compact as you approach the context limit, but there is no setting to raise or lower its threshold — you cannot pin it to "auto-compact at 150k" or "at 60%." The trigger is internal to Claude Code. The only knob you have is the **manual `/compact`** slash command, and you have to remember to use it.
+2. **There is no built-in visual indicator of context usage.** `/context` works, but it's a slash command you have to type. If you don't type it, you don't see context % until auto-compact fires — by which point degradation has already happened.
+
+The fix is operator-side instrumentation, not architectural change. The long-lived coordinator is the right design; what it needs is a context-window gauge in the statusline so you can see drift coming.
+
+### Statusline with context indicator
+
+`scripts/statusline-with-context.sh` is a Claude Code statusLine command that renders:
+
+```
+opus · spring-search-tempo · ctx: 195k/1M (19%)
+```
+
+— model, working-dir basename, and context-window usage. To install (per-user), add to `~/.claude/settings.json`:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "/opt/work/llm-swarm-runner/scripts/statusline-with-context.sh"
+  }
+}
+```
+
+(`/opt/work/llm-swarm-runner` is this repo's path in the reference swarm deployment — adjust to wherever you cloned it. Or symlink the script under `~/.claude/` and reference that path — your call.) Restart Claude Code for the change to take effect.
+
+The script also writes the raw stdin JSON payload to `$STATUSLINE_PROBE` (default `${XDG_RUNTIME_DIR:-/tmp}/claude-statusline-$UID.json`) on every render. This is intentional — the first version of the script tries several plausible jq paths for the context fields because Claude Code's statusLine JSON schema isn't documented exhaustively; the dump lets you confirm which path is actually used in your build. Once you see `ctx: <something>k/<something>M (<n>%)` rendered correctly, the probe has served its purpose; if you see `ctx: ?`, inspect the dump and either update the script or report back so the fallback paths can be tightened.
+
+### Compact discipline
+
+Even with the indicator, the coordinator should compact proactively rather than waiting for the soft boundary:
+
+- **On every coordinator wake** (the `coordinator-watch.sh` re-trigger after a worker finishes), check the statusline `ctx` reading before processing the wake event; if it's > 60%, run `/compact` first. The just-completed worker is done; there's no live in-flight reasoning to preserve.
+- **On every status report to the user,** the coordinator can include a one-line `ctx: 195k/1M (19%) — healthy` indicator so you don't have to ask.
+
+If you don't want to keep the coordinator long-lived, the alternative is the **reset-after-each-coordination** flow — `/clear` (or exit and re-invoke `llm-start.sh`) after each batch. You lose the cross-coordination memory but you also never have to think about context drift. The trade-off is yours; the long-lived path is the default because the memory is usually worth more.
 
 ## Triage Workflow
 
