@@ -172,6 +172,21 @@ Missing markers → default to "🟡 medium — risk rating not provided by work
 
 **Self-review verdict** (🟡/🔴 PRs only) — workers run `claude -p` against `prompts/skill-self-review.md` before proposing merge; watch their pane for the verdict token. `APPROVE` needs no extra surface. `APPROVE_WITH_CAVEATS: <text>` → surface the caveat alongside the PR title. `BLOCK: <text>` → flag prominently; if the worker proposed merge anyway despite BLOCK, that's a worker-policy violation (the user may still override with `merge PR N --override-review`). A pane showing *"self-review: skipped — WORKER_SELF_REVIEW=0"* or a `claude -p` failure means the safety layer didn't fire — recommend reading the diff before merging.
 
+### Auto-merge low-risk PRs (opt-in via `SWARM_AUTOMERGE_LOW`)
+
+Workers stay forbidden from merging their own PRs (`prompts/worker.md` § "Merging your own PR" / `examples/swarm-policy.md.example`) — self-grading plus auto-landing is too tight a loop. The coordinator is a separate actor with a separate diff read, so when `SWARM_AUTOMERGE_LOW=1` (default off; same precedence as every other knob: shell env > `<project>/.swarm/.env` > `<sandbox>/.env.example`), you MAY auto-merge a 🟢 low-risk PR without waiting for the human's `yes`/`go`/`ship` — provided all six gates pass:
+
+1. **Rating marker** — `gh pr view <N> --json body --jq .body` contains `<!-- BLIND_MERGE_RISK: low -->` exactly (case-sensitive). `medium`/`high`/missing/malformed → not eligible.
+2. **CI green** — `gh pr checks <N>` shows every required check passing; no `FAIL`, no pending required check.
+3. **No review block** — `gh pr view <N> --json reviewDecision -q .reviewDecision` is not `CHANGES_REQUESTED`.
+4. **Targets the default branch** — `gh pr view <N> --json baseRefName -q .baseRefName` matches `git symbolic-ref refs/remotes/origin/HEAD`. Never auto-merge feature-to-feature.
+5. **Open, not draft** — `gh pr view <N> --json state,isDraft` shows `OPEN` / `isDraft: false`.
+6. **Your own one-glance `gh pr diff <N>` read** — does the diff's actual scope match the claimed low rating? A worker can under-rate (e.g. call a multi-file behavioral change "docs-only"); treat a wider-than-claimed diff as a gate failure, not a rubber stamp.
+
+All six pass → `gh pr merge <N> --squash --delete-branch --auto`. `--auto` (not an immediate merge) lets branch-protection checks gate the real merge where configured, and merges immediately where they aren't — one command works either way; branch-protection setup itself is out of scope here.
+
+Still emit the standard status line first (`PR #555 opened (🟢 low risk — …): <title>`) — auto-merge adds to the reporting convention, it doesn't replace it — then, once gates pass and the merge lands (or GitHub confirms, if `--auto` deferred to branch protection): `Auto-merged PR #555 (SWARM_AUTOMERGE_LOW=1, all gates passed).` Any gate failure falls back to today's behavior unchanged — render the rating, hand back to the human, and name the failing gate (`Not auto-merged: CI still pending on \`build\`.`) so they're not left guessing. A project can force this off regardless of the env var via `.swarm-policy.md` (e.g. "never auto-merge, even on low risk") — project policy always wins.
+
 **Self-review as machinery** (ringer-concept adoption — `docs/ringer-adoptions.md` #2): `scripts/self-review-pr.sh <N> --post` runs the same fresh-context review yourself and posts the verdict as a `<!-- SWARM_SELF_REVIEW: <verdict> -->` marker comment (exit codes: 0 APPROVE / 3 CAVEATS / 2 BLOCK / 4 skipped). Use it when a worker skipped self-review, or to get an independent verdict on a 🔴 PR. `swarm-merge.sh` reads the marker and **refuses to merge a PR whose latest verdict is BLOCK** unless `--override-review` is passed — mention that gate when reporting a BLOCKed PR.
 
 The tiered self-merge/self-review conventions live in `prompts/worker.md` (§ "Merging your own PR", § "Self-review before merge") — consult them if a worker's merge behavior looks off. `.swarm-policy.md` may disable self-merge entirely; if so, workers should hand back the manual `gh pr merge` command regardless of rating.
