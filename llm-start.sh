@@ -420,6 +420,14 @@ if ! $session_existed || ! $window_exists || $coordinator_idle; then
         [ -n "${COORD_MODEL:-}" ]                && ENV_VARS+="COORD_MODEL=$(printf '%q' "$COORD_MODEL") "
         [ "${COORDINATOR_HEADLESS:-0}" = "1" ]   && ENV_VARS+="COORDINATOR_HEADLESS=1 "
         [ "${COORDINATOR_USE_API_KEY:-0}" = "1" ] && ENV_VARS+="COORDINATOR_USE_API_KEY=1 "
+        # Passed explicitly rather than left to coordinator-claude.sh's own
+        # fallback (which re-derives the same path from its own $PWD): this
+        # script already knows PWD/SESSION_NAME with certainty at the
+        # moment it decides to launch, so computing it once here avoids two
+        # independent derivations silently diverging if the wrapper is ever
+        # invoked with a different cwd than this script had. Caller-set
+        # STATUSLINE_PROBE still wins over this default.
+        ENV_VARS+="STATUSLINE_PROBE=$(printf '%q' "${STATUSLINE_PROBE:-${XDG_RUNTIME_DIR:-/tmp}/claude-statusline-$(basename "$PWD")-coordinator.json}") "
 
         WRAPPER="$LLM_SWARM_DIR/scripts/coordinator-claude.sh"
         tmux send-keys -t "$SESSION_NAME:coordinator" \
