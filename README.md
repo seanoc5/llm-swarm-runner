@@ -288,6 +288,8 @@ reap-orphan-worktrees.sh --no-pr-check --yes      # offline; require every commi
 
 Override the default age floor in `<project>/.swarm/.env` via `REAP_MIN_AGE_DAYS=N`.
 
+**Cleanup: docker compose teardown.** All three removal paths (`kill-worktree.sh`, `kill-finished-workers.sh --with-worktree`, `reap-orphan-worktrees.sh`) now bring down a worktree's `docker-compose.yml` stack (`--remove-orphans --volumes`, bounded to 30s) before removing the worktree, so a worker's compose containers can't outlive their worktree and squat on a port. Pass `--no-compose-down` to any of them to skip this and keep the containers around for inspection.
+
 ### 4. Run Manual Sandbox (Single Agent)
 If you just want a safe shell for a single agent:
 

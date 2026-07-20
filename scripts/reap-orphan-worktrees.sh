@@ -47,6 +47,8 @@ FLAGS
     -h, --help                  Show this help and exit
     -n, --dry-run               List what would be reaped; take no action
     -y, --yes                   Skip the confirmation prompt
+        --no-compose-down       Skip docker compose teardown before each
+                                worktree removal (preserves containers)
         --min-age-days N        Require worktree dir at least N days old
                                 (default: REAP_MIN_AGE_DAYS or 2)
         --pr-finalized          Reap when PR is MERGED or CLOSED (default)
@@ -69,6 +71,7 @@ EXAMPLES
     reap-orphan-worktrees.sh --min-age-days 0 --yes        # aggressive (no age floor)
     reap-orphan-worktrees.sh --merged-only --yes           # safest
     reap-orphan-worktrees.sh --no-pr-check --yes           # offline / no gh
+    reap-orphan-worktrees.sh --no-compose-down --yes       # keep containers for inspection
 
 EXIT
     0    success (or nothing to reap)
@@ -80,6 +83,7 @@ EOF
 PROJECT_DIR="$PWD"
 DRY=0
 YES=0
+NO_COMPOSE_DOWN=0
 MERGED_ONLY=0
 PR_FINALIZED=1     # default mode
 PR_CHECK=1
@@ -97,6 +101,7 @@ while [[ $# -gt 0 ]]; do
         -h|--help)            usage; exit 0 ;;
         -n|--dry-run)         DRY=1; shift ;;
         -y|--yes)             YES=1; shift ;;
+        --no-compose-down)    NO_COMPOSE_DOWN=1; shift ;;
         --merged-only)        MERGED_ONLY=1; PR_FINALIZED=0; PR_CHECK=1; shift ;;
         --pr-finalized)       PR_FINALIZED=1; MERGED_ONLY=0; PR_CHECK=1; shift ;;
         --no-pr-check)        PR_CHECK=0; PR_FINALIZED=0; MERGED_ONLY=0; shift ;;
@@ -318,7 +323,9 @@ fi
 
 echo
 for ISSUE in "${CANDIDATES[@]}"; do
-    "$KILL_WT" "$ISSUE" "$PROJECT_DIR" || echo "  WARN: kill-worktree.sh exited non-zero for #$ISSUE (continuing)"
+    KILL_WT_ARGS=("$ISSUE" "$PROJECT_DIR")
+    [ "$NO_COMPOSE_DOWN" = "1" ] && KILL_WT_ARGS+=(--no-compose-down)
+    "$KILL_WT" "${KILL_WT_ARGS[@]}" || echo "  WARN: kill-worktree.sh exited non-zero for #$ISSUE (continuing)"
     echo
 done
 

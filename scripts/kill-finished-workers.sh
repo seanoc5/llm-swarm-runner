@@ -17,6 +17,8 @@
 # Use --with-worktree to also remove the git worktree + delete branch.
 # Use --dry-run to preview without action.
 # Use --yes to skip the confirmation prompt for --all --with-worktree.
+# Use --no-compose-down to skip tearing down a worktree's docker compose
+#   stack (only meaningful with --with-worktree).
 
 set -euo pipefail
 
@@ -60,6 +62,9 @@ FLAGS
                             (default 0 — any parked window is eligible)
     -w, --with-worktree     Also remove git worktree + delete branch
                             (calls kill-worktree.sh; uncommitted work LOST)
+        --no-compose-down   Skip docker compose teardown before worktree
+                            removal (preserves containers for inspection;
+                            only meaningful with --with-worktree)
     -n, --dry-run           List what would be killed; take no action
     -y, --yes               Skip the --all --with-worktree confirmation
     -s, --session NAME      Override session name
@@ -76,6 +81,7 @@ EXAMPLES
     kill-finished-workers.sh --all --with-worktree -y # full nuke, no prompt
     kill-finished-workers.sh --merged-only --with-worktree -y     # safe auto-reap
     kill-finished-workers.sh --pr-finalized --with-worktree -y    # also reap closed-without-merge
+    kill-finished-workers.sh --with-worktree --no-compose-down    # keep containers for inspection
 
 EXIT
     0    success (or nothing to do)
@@ -87,6 +93,7 @@ ALL=0
 WITH_WT=0
 DRY=0
 YES=0
+NO_COMPOSE_DOWN=0
 PR_CHECK=1
 MERGED_ONLY=0
 PR_FINALIZED=0
@@ -108,6 +115,7 @@ while [[ $# -gt 0 ]]; do
         -h|--help)            usage; exit 0 ;;
         -a|--all)             ALL=1; shift ;;
         -w|--with-worktree)   WITH_WT=1; shift ;;
+        --no-compose-down)    NO_COMPOSE_DOWN=1; shift ;;
         -n|--dry-run)         DRY=1; shift ;;
         -y|--yes)             YES=1; shift ;;
         --no-pr-check)        PR_CHECK=0; shift ;;
@@ -311,7 +319,9 @@ for w in "${KILL_LIST[@]}"; do
     if [ "$WITH_WT" = "1" ]; then
         if [ -x "$KILL_WT" ]; then
             echo "→ $w (issue #$issue): kill-worktree.sh (window + worktree + branch)"
-            "$KILL_WT" "$issue" || echo "  WARN: kill-worktree.sh exited non-zero (continuing)"
+            KILL_WT_ARGS=("$issue")
+            [ "$NO_COMPOSE_DOWN" = "1" ] && KILL_WT_ARGS+=(--no-compose-down)
+            "$KILL_WT" "${KILL_WT_ARGS[@]}" || echo "  WARN: kill-worktree.sh exited non-zero (continuing)"
         else
             echo "ERROR: kill-worktree.sh not executable at $KILL_WT" >&2
             exit 1
