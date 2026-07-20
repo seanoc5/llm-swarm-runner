@@ -14,12 +14,24 @@
 #   COORD_MODEL                Claude model id (default: claude-fable-5)
 #   COORDINATOR_HEADLESS=1     Use claude -p (exits after the prompt prints)
 #   COORDINATOR_USE_API_KEY=1  Keep ANTHROPIC_API_KEY in env (bills API, not Max OAuth)
+#   STATUSLINE_PROBE           Path scripts/statusline-with-context.sh (if
+#                              installed as this session's statusLine) dumps
+#                              its raw stdin JSON to. Defaulted below to a
+#                              project+role-scoped path rather than left to
+#                              that script's own generic per-UID default —
+#                              coordinator-watch.sh's AUTO_COMPACT feature
+#                              reads this same file to decide when to
+#                              compact, and the generic default would get
+#                              silently clobbered by any other interactive
+#                              `claude` session on the same host sharing the
+#                              same UID. Caller-set values still win.
 
 set -euo pipefail
 
 SYSTEM_PROMPT_FILE="${1:?coordinator-claude.sh: missing system-prompt file (arg 1)}"
 INITIAL_PROMPT_FILE="${2:?coordinator-claude.sh: missing initial-prompt file (arg 2)}"
 MODEL="${COORD_MODEL:-claude-fable-5}"
+export STATUSLINE_PROBE="${STATUSLINE_PROBE:-${XDG_RUNTIME_DIR:-/tmp}/claude-statusline-$(basename "$PWD")-coordinator.json}"
 
 # Claude Max users authenticate via OAuth in ~/.claude/. If ANTHROPIC_API_KEY
 # is set, claude-code prefers it over OAuth (silently bills the API account).
