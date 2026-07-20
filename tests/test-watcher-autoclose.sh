@@ -361,6 +361,54 @@ RUNS=$(grep -c "wt-issue-70" "$CHECK_RUNNER_LOG" || true)
 $(cat "$CHECK_RUNNER_LOG")"
 green "status-file signal and PR-open backstop converge on one claim key — exactly one check run, no double-fire"
 
+# ============================================================================
+heading "Test 8: pane echo (issue #38) — default (WATCHER_QUIET unset) echoes formatted event lines"
+# ============================================================================
+: > "$KILL_LOG"
+: > "$WAKE_LOG"
+rm -f "$PROJECT_DIR/.swarm/events.log"
+mkdir -p "$TEST_DIR/wt-issue-80/.swarm/tasks/done"
+
+start_watcher 1 "$TEST_DIR/watch-8.log"
+echo '{"task_id":"t80","outcome":"ok"}' > "$TEST_DIR/wt-issue-80/.swarm/tasks/done/t80.ok.json"
+wait_for_watcher_exit
+
+grep -q '^\[watch\] .* worker\.finish' "$TEST_DIR/watch-8.log" \
+    || red "expected a [watch] ... worker.finish line in watcher stdout; got:
+$(cat "$TEST_DIR/watch-8.log")"
+grep -q '^\[watch\] .* coord\.wake ' "$TEST_DIR/watch-8.log" \
+    || red "expected a [watch] ... coord.wake line in watcher stdout"
+green "default pane echo formats worker.finish + coord.wake to stdout"
+
+sleep 0.5
+if pgrep -f "tail -n 1 -F.*${PROJECT_DIR}/.swarm/events.log" >/dev/null 2>&1; then
+    red "pane-echo tail process leaked after watcher exit"
+fi
+green "pane-echo tail process does not leak after watcher exit"
+
+# ============================================================================
+heading "Test 9: WATCHER_QUIET=1 suppresses the pane echo entirely"
+# ============================================================================
+: > "$KILL_LOG"
+: > "$WAKE_LOG"
+rm -f "$PROJECT_DIR/.swarm/events.log"
+mkdir -p "$TEST_DIR/wt-issue-81/.swarm/tasks/done"
+
+WATCHER_QUIET=1 start_watcher 1 "$TEST_DIR/watch-9.log"
+echo '{"task_id":"t81","outcome":"ok"}' > "$TEST_DIR/wt-issue-81/.swarm/tasks/done/t81.ok.json"
+wait_for_watcher_exit
+
+if grep -q '^\[watch\]' "$TEST_DIR/watch-9.log"; then
+    red "WATCHER_QUIET=1 should suppress all [watch]-formatted lines; got:
+$(cat "$TEST_DIR/watch-9.log")"
+fi
+green "WATCHER_QUIET=1 produces zero [watch] lines (events.log still records everything)"
+
+EVENTS_LOG="$PROJECT_DIR/.swarm/events.log"
+grep -q '^.*worker\.finish ' "$EVENTS_LOG" \
+    || red "events.log should still record worker.finish even when pane echo is quiet"
+green "events.log unaffected by WATCHER_QUIET"
+
 # ────────────────────────── Done ──────────────────────────
 
 heading "All watcher-autoclose tests passed"
@@ -373,4 +421,6 @@ echo "  .err.json outcomes also trigger autoclose (parity with .ok.json)"
 echo "  #119: pr-poll backstop reaps merged PRs with no outcome.json at all"
 echo "  #119: check-on-done runs the resolved check on a ready-for-review status file"
 echo "  #119: status-file + PR-open signals converge on one atomic claim (no double-run)"
+echo "  #38: default pane echo formats events.log lines to stdout; no leaked tail process"
+echo "  #38: WATCHER_QUIET=1 suppresses pane echo without affecting events.log"
 yellow "Run with KEEP=1 to leave $TEST_DIR for inspection."

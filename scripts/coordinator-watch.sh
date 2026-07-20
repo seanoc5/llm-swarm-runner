@@ -359,7 +359,15 @@ if [ "$WATCHER_QUIET" != "1" ]; then
     # 1.0s, which reads as sluggish for a "live" pane; 0.2s keeps it snappy
     # without meaningfully raising CPU use. No-op when inotify IS available
     # (events forward immediately regardless of this value).
-    tail -n 1 -F --sleep-interval=0.2 "$EVENTS_LOG" 2>/dev/null | while IFS= read -r line; do
+    #
+    # Feature-detected, not assumed: --sleep-interval is GNU-only. On a
+    # BSD/busybox tail (no such flag), passing it unconditionally would
+    # make tail exit immediately on an unrecognized option — with stderr
+    # suppressed below, the whole pane-echo feature would silently vanish
+    # rather than degrade to plain default-interval following.
+    TAIL_OPTS=(-n 1 -F)
+    tail --help 2>/dev/null | grep -q -- '--sleep-interval' && TAIL_OPTS+=(--sleep-interval=0.2)
+    tail "${TAIL_OPTS[@]}" "$EVENTS_LOG" 2>/dev/null | while IFS= read -r line; do
         format_event_line "$line"
     done &
     WATCHER_ECHO_PID=$!
