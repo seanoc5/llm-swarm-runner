@@ -50,9 +50,13 @@ input="$(cat)"
 # follow it into an arbitrary file. `mv` replaces whatever sits at the
 # destination via an atomic rename(2) — it never follows a symlink-to-file
 # there — so this is safe regardless of who owns it. Skipping when the
-# destination resolves to a directory sidesteps the one case where mv
+# destination resolves to a directory avoids the one case where mv
 # behaves the "wrong" way (moving into it instead of replacing it) —
-# avoided rather than fixed with GNU's `-T`, which macOS/BSD mv lacks.
+# checked ahead of the mv rather than fixed with GNU's `-T` (which
+# macOS/BSD mv lacks); a symlink-to-directory planted in the resulting
+# check-then-mv window would still divert the temp file into that
+# directory, but never overwrites anything the attacker doesn't already
+# control, so this is a best-effort narrowing, not a hard guarantee.
 # No unsafe fallback on mktemp failure (e.g. an attacker exhausting /tmp
 # inodes to force it) — skip the probe for this render rather than fall
 # back to the direct-redirect hazard mktemp+mv exists to avoid. Also clean
@@ -137,6 +141,9 @@ fmt_tokens() {
 # total (e.g. "1M", or a not-yet-populated 0) must degrade to "?"
 # rather than take down the statusline via a division/unbound-var death.
 is_uint() { [[ "$1" =~ ^[0-9]+$ ]]; }
+# Percentages may be reported as floats (e.g. "19.4"); same guard, decimal allowed.
+is_pct() { [[ "$1" =~ ^[0-9]+(\.[0-9]+)?$ ]]; }
+is_pct "$ctx_pct" || ctx_pct=""
 
 if is_uint "$ctx_used" && is_uint "$ctx_total" && [ "$ctx_total" -gt 0 ]; then
     used_fmt=$(fmt_tokens "$ctx_used")
