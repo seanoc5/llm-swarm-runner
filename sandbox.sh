@@ -161,6 +161,10 @@ done
 # --group-add gives the sandbox user permission to write to the socket.
 # TESTCONTAINERS_HOST_OVERRIDE=localhost is needed with --network host so Testcontainers
 # resolves mapped ports against localhost rather than the bridge IP.
+# _JAVA_OPTIONS=-Dapi.version=1.45 pins the Docker Engine API version negotiated by
+# Testcontainers' shaded docker-java (which otherwise defaults to 1.32 — rejected by
+# Docker Engine 25+, minimum 1.40). Projects can override by setting their own
+# systemProperty("api.version", ...) on the test JVM (project-level wins).
 DOCKER_SOCK_OPTS=()
 if [ -S /var/run/docker.sock ]; then
     DOCKER_SOCK_OPTS=(
@@ -168,6 +172,7 @@ if [ -S /var/run/docker.sock ]; then
         --group-add "$(stat -c '%g' /var/run/docker.sock)"
         -e DOCKER_GID="$(stat -c '%g' /var/run/docker.sock)"
         -e TESTCONTAINERS_HOST_OVERRIDE=localhost
+        -e _JAVA_OPTIONS=-Dapi.version=1.45
     )
 fi
 
