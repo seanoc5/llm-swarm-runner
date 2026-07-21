@@ -25,6 +25,7 @@ All scripts here require bash 4.0+; do not run them under `sh` or `dash`.
 | `reap-orphan-worktrees.sh` | Bulk-reaps stale `wt-issue-*` worktree DIRECTORIES whose work is preserved elsewhere; complements `kill-finished-workers.sh` (which walks live tmux windows) by catching worktrees that outlived their session. |
 | `relocate-blind-merge-risk.sh` | One-off PR-body rewriter: moves the visible "Blind-merge risk:" line from the top of a PR body to the bottom footer, matching the current PR template. |
 | `requeue.sh` | Atomically drops a follow-up task brief into a worker's v2 inbox (file or stdin). |
+| `run-all-tests.sh` | Runs every `tests/test-*.sh` suite under a per-suite timeout (`TEST_TIMEOUT`, default 300s), prints a PASS/FAIL/TIMEOUT summary table, exits non-zero on any failure. `--only <glob>` filters, `--list` enumerates without running. |
 | `sandbox-worktrees.sh` | Lists git worktrees; optionally launches sandboxes and/or tmux windows per worktree. |
 | `setup.sh` | Host-side setup; currently symlinks `/usr/bin/rg` into the path gemini-cli expects. Idempotent. |
 | `swarm-merge.sh` | Resolves the PR for an issue, merges it, and cleans up the local worktree + branch + tmux window in one shot. `--sweep-only` just runs the local-branch sweep. |
