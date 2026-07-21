@@ -16,6 +16,13 @@ set -euo pipefail
 # operator's project-grouped swarm setting from the calling shell.
 export SWARM_WORKTREE_GROUPING=flat
 
+# Freeze "now" for provision-worker.sh's TASK_ID base so the Test 3
+# collision-suffix assertion doesn't depend on two real invocations landing
+# within the same wall-clock second (was flaky — see #192). All provision
+# calls below share this frozen epoch, so re-dispatching the same issue
+# deterministically collides on BASE_ID and exercises the -2 suffix path.
+export PROVISION_NOW_EPOCH="$(date +%s)"
+
 green()  { printf '\033[32m✓ %s\033[0m\n' "$*"; }
 red()    { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
