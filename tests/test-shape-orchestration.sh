@@ -140,17 +140,28 @@ collision_brief=$(ls "$WT"/.swarm/tasks/inbox/*-99-2.md 2>/dev/null | head -1 ||
     || red "expected a *-99-2.md collision-suffix brief; got: $(ls $WT/.swarm/tasks/inbox/)"
 green "re-run reuses worktree, queues follow-up with -2 collision suffix"
 
-heading "Test 3b: provision-worker.sh reuses a stale branch with no unique commits"
+heading "Test 3b: provision-worker.sh reuses a stale branch with no unique commits (and fast-forwards it)"
 cd "$PROJECT_DIR"
 # Simulate branch sweep leftover: fix/issue-101 exists but was never (or no
 # longer is) attached to a worktree — e.g. the worktree dir was removed by
-# hand, or a grouping-mode change orphaned it (#174).
+# hand, or a grouping-mode change orphaned it (#174). Advance master
+# afterward so the branch is genuinely stale (0 ahead, N behind) — this
+# exercises the fast-forward-on-reuse path, not just the identical-tip case.
 git branch fix/issue-101
+git -c user.email=t@t -c user.name=t commit -q --allow-empty -m "master moves on without issue-101"
+git push -q origin master
+git fetch -q origin
+old_tip="$(git rev-parse fix/issue-101)"
+new_default="$(git rev-parse origin/master)"
+[ "$old_tip" != "$new_default" ] || red "fixture bug: fix/issue-101 should be behind origin/master"
 "$PROVISION" 101 > "$TEST_DIR/prov-3b.log" 2>&1 || red "provision-worker exit non-zero for stale-but-clean branch: $(cat "$TEST_DIR/prov-3b.log")"
 grep -q "reused stale branch fix/issue-101" "$TEST_DIR/prov-3b.log" \
     || red "expected 'reused stale branch' message; got: $(cat "$TEST_DIR/prov-3b.log")"
 [ -d "$TEST_DIR/wt-issue-101" ] || red "worktree not created for reused stale branch"
-green "stale branch with no unique commits vs default is reused (no -b), worktree created"
+reused_tip="$(git rev-parse fix/issue-101)"
+[ "$reused_tip" = "$new_default" ] \
+    || red "expected fix/issue-101 fast-forwarded to $new_default, got $reused_tip"
+green "stale branch with no unique commits is reused (no -b) and fast-forwarded to the latest default ref"
 
 heading "Test 3c: provision-worker.sh refuses a stale branch with unique commits (never exit 0)"
 cd "$PROJECT_DIR"

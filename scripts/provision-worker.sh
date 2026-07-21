@@ -230,11 +230,15 @@ elif git show-ref --verify --quiet "refs/heads/$BRANCH"; then
     # letting `-b` fail blind.
     unique_commits="$(git rev-list --count "$DEFAULT_REMOTE_REF..$BRANCH" 2>/dev/null || echo "")"
     if [ "$unique_commits" = "0" ]; then
-        # No commits beyond the default branch — safe to treat as equivalent
-        # to a fresh branch. Attach a worktree to the existing ref instead of
-        # creating a new one (no -b).
+        # No commits beyond the default branch means $BRANCH is an ancestor
+        # of (or equal to) $DEFAULT_REMOTE_REF, so fast-forwarding it there
+        # is lossless. Do that before attaching a worktree so a long-stale
+        # branch (0-ahead but many commits *behind*) doesn't hand the worker
+        # an outdated base — without this it would silently reuse the old
+        # tip instead of matching the fresh-branch path's base.
+        git branch -f "$BRANCH" "$DEFAULT_REMOTE_REF"
         git worktree add "$WT" "$BRANCH"
-        echo "[1/4] worktree created (reused stale branch $BRANCH — no unique commits vs $DEFAULT_REMOTE_REF)"
+        echo "[1/4] worktree created (reused stale branch $BRANCH — no unique commits vs $DEFAULT_REMOTE_REF, fast-forwarded)"
     else
         echo "ERROR: branch '$BRANCH' already exists with ${unique_commits:-an unknown number of} commit(s) not on $DEFAULT_REMOTE_REF," >&2
         echo "       but no worktree at $WT is attached to it. Refusing to silently discard or" >&2
