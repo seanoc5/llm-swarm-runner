@@ -112,8 +112,8 @@ cd "$TEST_DIR/myproject"
 "$KILLWT" 99 >/tmp/kill-out 2>&1 || red "idempotent re-run exited non-zero"
 grep -q "worktree dir not present (skipped)" /tmp/kill-out \
     || red "expected idempotent skip for missing worktree"
-grep -q "branch not present (skipped)" /tmp/kill-out \
-    || red "expected idempotent skip for missing branch"
+grep -q "branch fix/issue-99 not present (skipped)" /tmp/kill-out \
+    || red "expected idempotent skip for missing branch fix/issue-99"
 green "idempotent re-run succeeds with 'skipped' notes"
 
 heading "All shape-helper tests passed"
