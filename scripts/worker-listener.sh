@@ -52,10 +52,21 @@
 #                        the agent asks. Exit with /quit (claude) or Ctrl-D.
 #                        First run per worktree: claude prompts "Trust this
 #                        folder? Y/n" — answer Y to proceed.
+#                        Once the agent exits and no other task is queued,
+#                        the pane drops to a normal interactive `bash -i`
+#                        prompt (issue #43) instead of blocking silently.
+#                        A background subshell keeps polling inbox/; when a
+#                        new brief lands it's picked up the next time the
+#                        shell returns to an idle prompt (never mid-command),
+#                        and the agent is relaunched automatically. See
+#                        run_idle_shell() below for the mechanism.
 #   WORKER_HEADLESS=1  — agent runs with -p (claude) / -p (gemini) /
 #                        codex exec, prints, and exits. Skips the trust
 #                        dialog. Used by e2e tests and any automation where
-#                        no human is attached.
+#                        no human is attached. Idle time uses the original
+#                        silent `sleep 2` poll — no interactive shell is
+#                        spawned (there's no operator to hand it to, and
+#                        `bash -i` needs a real tty).
 
 AGENT="${1:-claude}"
 MODEL="${WORKER_MODEL:-}"
@@ -71,6 +82,11 @@ PROCESSING="$QUEUE_ROOT/processing"
 DONE="$QUEUE_ROOT/done"
 STATUS="$QUEUE_ROOT/status"
 mkdir -p "$INBOX" "$PROCESSING" "$DONE" "$STATUS"
+
+# Sentinel used by run_idle_shell()'s background poller to signal the
+# interactive shell that a brief has arrived. Not inside INBOX itself so it
+# can never be mistaken for a queued task.
+IDLE_SENTINEL="$QUEUE_ROOT/.brief-pending"
 
 # Per-worktree label used in user-visible messages so it's obvious which
 # worktree's inbox this listener is bound to (and that it does NOT serve
@@ -110,6 +126,11 @@ echo "Legacy:   $LEGACY_TASK_FILE (v1, still supported)"
   to interact. On first run claude will ask "Trust this folder?" — say Y.
   When done, /quit (claude) or Ctrl-D (gemini) to release the listener
   for the next task. Set WORKER_HEADLESS=1 to disable.
+
+  Between tasks, once the queue is empty, this pane drops to a normal
+  bash prompt in this worktree — poke around freely (git status, logs,
+  etc). Polling continues in the background; a new brief relaunches the
+  agent automatically once you're back at an idle prompt.
 
 NOTE
 echo "------------------------------"
@@ -371,6 +392,75 @@ print_completion_block() {
     echo "[$(date +%T)] [polling for next brief in $WT_LABEL/$INBOX/ ...]"
 }
 
+# ── Interactive idle shell (issue #43) ──────────────────────────────────────
+# Between agent invocations, hand the pane to the operator as a normal bash
+# shell instead of blocking the pane on a silent `sleep 2` poll. Two pieces:
+#
+#   poll_for_brief  — background subshell; sleeps 2s at a time watching
+#                      inbox/ (same emptiness check claim_next_task uses) and
+#                      touches IDLE_SENTINEL the moment a brief shows up,
+#                      then exits. It never claims the task itself — that
+#                      stays claim_next_task's job once control returns here.
+#
+#   run_idle_shell  — starts poll_for_brief, then execs an interactive
+#                      `bash -i` whose PROMPT_COMMAND checks IDLE_SENTINEL
+#                      right before each new prompt is drawn. PROMPT_COMMAND
+#                      only runs between commands, so this can never fire
+#                      mid-keystroke or kill a command the operator has
+#                      running — the trade-off is that a genuinely idle,
+#                      untouched prompt won't pick up a brief until the
+#                      operator hits Enter again. Given the alternative is
+#                      forcibly killing whatever's running in the shell,
+#                      that trade-off is the right default (see issue #43's
+#                      "race handling" discussion for the other options
+#                      considered).
+poll_for_brief() {
+    while true; do
+        sleep 2
+        [ -d "$INBOX" ] && [ -d "$PWD" ] || return 0
+        local next
+        next=$(find "$INBOX" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | head -1)
+        if [ -n "$next" ]; then
+            touch "$IDLE_SENTINEL" 2>/dev/null
+            return 0
+        fi
+    done
+}
+
+run_idle_shell() {
+    rm -f "$IDLE_SENTINEL"
+    poll_for_brief &
+    local poll_pid=$!
+
+    local rcfile
+    rcfile=$(mktemp)
+    # Unquoted heredoc: $IDLE_SENTINEL is baked in as a literal path below.
+    # PROMPT_COMMAND is chained (not overwritten) so anything ~/.bashrc set
+    # still runs — our check just runs first.
+    cat > "$rcfile" <<EOF
+[ -r ~/.bashrc ] && source ~/.bashrc
+
+__swarm_check_brief() {
+    if [ -f "$IDLE_SENTINEL" ]; then
+        rm -f "$IDLE_SENTINEL"
+        echo
+        echo "[new brief detected — launching claude]"
+        sleep 1
+        exit 0
+    fi
+}
+PROMPT_COMMAND="__swarm_check_brief\${PROMPT_COMMAND:+; \$PROMPT_COMMAND}"
+EOF
+
+    echo ""
+    echo "[$(date +%T)] Queue empty — dropping to interactive shell in $WT_LABEL/. Polling continues in the background."
+    bash --rcfile "$rcfile" -i
+
+    rm -f "$rcfile"
+    kill "$poll_pid" 2>/dev/null
+    wait "$poll_pid" 2>/dev/null
+}
+
 while true; do
     # If the worktree was reaped out from under us (e.g., the worker
     # self-deregistered after filing successor issues and deleted its
@@ -496,6 +586,19 @@ $TASK"
         fi
 
         print_completion_block "$RC" "$DURATION" "$TASK_OUTCOME" "$IS_LEGACY" "$BRIEF_REF"
+
+        # Loop straight back to claim_next_task rather than falling through
+        # to the idle branch below — if more briefs are already queued,
+        # drain them in order before handing the pane to the operator.
+        continue
     fi
-    sleep 2
+
+    # Queue empty. Headless (automation, e2e tests) keeps the original
+    # silent poll — no operator to hand the pane to, and `bash -i` needs a
+    # real tty. Interactive mode drops to a real shell (see run_idle_shell).
+    if [ "$HEADLESS" = "1" ]; then
+        sleep 2
+    else
+        run_idle_shell
+    fi
 done

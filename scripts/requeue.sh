@@ -68,7 +68,9 @@ SESSION_NAME=""
 if [ -n "$SESSION_NAME" ] && tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
     LISTENERS=$(tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -c '^iss-' || true)
     if [ "$LISTENERS" -gt 0 ]; then
-        echo "  (tmux session '$SESSION_NAME' has $LISTENERS listener window(s); pickup expected within ~2s)"
+        echo "  (tmux session '$SESSION_NAME' has $LISTENERS listener window(s); pickup expected within ~2s"
+        echo "   once that pane is idle — headless workers or an idle interactive shell pick up immediately;"
+        echo "   an interactive shell mid-command finishes that command first, see issue #43)"
     else
         echo "  WARN: session '$SESSION_NAME' is alive but has no iss-* listener window."
         echo "        Spawn one with:"
