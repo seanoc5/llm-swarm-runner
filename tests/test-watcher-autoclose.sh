@@ -72,6 +72,11 @@ chmod +x "$FAKE_LLM_START"
 # --json headRefName,state,number --jq '...'`, which (via --jq) already
 # returns tab-separated "branch\tstate\tnumber" lines — so the stub just
 # cats a fixture file tests populate before triggering a poll tick.
+#
+# Also handles `gh pr view <branch> --json state -q .state` (issue #181's
+# pr_state_for_worktree, called from maybe_run_check) by looking the branch
+# up in the same fixture file — keeps both call sites consistent off one
+# piece of test state.
 GH_PR_LIST_FILE="$TEST_DIR/gh-pr-list.tsv"
 : > "$GH_PR_LIST_FILE"
 mkdir -p "$TEST_DIR/bin"
@@ -81,6 +86,11 @@ cat > "$FAKE_GH" <<EOF
 if [ "\$1" = "pr" ] && [ "\$2" = "list" ]; then
     cat "$GH_PR_LIST_FILE"
     exit 0
+fi
+if [ "\$1" = "pr" ] && [ "\$2" = "view" ]; then
+    branch="\$3"
+    awk -F'\t' -v b="\$branch" '\$1 == b { print \$2; found=1 } END { exit found ? 0 : 1 }' "$GH_PR_LIST_FILE"
+    exit \$?
 fi
 exit 0
 EOF
@@ -409,6 +419,139 @@ grep -q '^.*worker\.finish ' "$EVENTS_LOG" \
     || red "events.log should still record worker.finish even when pane echo is quiet"
 green "events.log unaffected by WATCHER_QUIET"
 
+# ============================================================================
+heading "Test 10-12: kill-worktree.sh's reap-side check-claim guard (issue #181)"
+# ============================================================================
+# These exercise the REAL kill-worktree.sh (not the FAKE_KILL stub used
+# above) against a real git repo + worktree — it's the actual place that
+# does `git worktree remove --force`, so it's the actual place the #181
+# race (reap yanking a worktree out from under a running check-on-done)
+# has to be fixed.
+KILL_WT_SCRIPT="$SCRIPT_DIR/../scripts/kill-worktree.sh"
+[ -x "$KILL_WT_SCRIPT" ] || red "kill-worktree.sh not executable: $KILL_WT_SCRIPT"
+
+GIT_FIXTURE="$TEST_DIR/git-fixture"
+GIT_PROJECT="$GIT_FIXTURE/proj"
+mkdir -p "$GIT_PROJECT"
+git init -q "$GIT_PROJECT"
+git -C "$GIT_PROJECT" config user.email test@example.com
+git -C "$GIT_PROJECT" config user.name "Test"
+echo hello > "$GIT_PROJECT/README.md"
+git -C "$GIT_PROJECT" add README.md
+git -C "$GIT_PROJECT" commit -q -m init
+DEFAULT_BRANCH="$(git -C "$GIT_PROJECT" symbolic-ref --quiet --short HEAD)"
+
+# --- Test 10: an active (fresh) check-claim defers removal -----------------
+git -C "$GIT_PROJECT" worktree add -q -b fix/issue-90 "$GIT_FIXTURE/wt-issue-90" "$DEFAULT_BRANCH"
+CLAIM_90="$GIT_FIXTURE/wt-issue-90/.swarm/tasks/status/t90.check-claim"
+mkdir -p "$CLAIM_90"
+
+set +e
+"$KILL_WT_SCRIPT" 90 "$GIT_PROJECT" > "$TEST_DIR/kill-wt-defer.log" 2>&1
+KW_RC=$?
+set -e
+
+[ -d "$GIT_FIXTURE/wt-issue-90" ] \
+    || red "worktree #90 was removed despite an active check-claim (the #181 race). Output:
+$(cat "$TEST_DIR/kill-wt-defer.log")"
+[ "$KW_RC" -ne 0 ] \
+    || red "kill-worktree.sh exited 0 while deferring — callers can't tell defer from success"
+green "kill-worktree.sh deferred removal while a check-claim was active (worktree preserved, exit $KW_RC)"
+
+# --- Test 11: releasing the claim lets the retry succeed --------------------
+rmdir "$CLAIM_90"
+"$KILL_WT_SCRIPT" 90 "$GIT_PROJECT" > "$TEST_DIR/kill-wt-proceed.log" 2>&1
+
+[ ! -d "$GIT_FIXTURE/wt-issue-90" ] \
+    || red "worktree #90 still present after the check-claim was released. Output:
+$(cat "$TEST_DIR/kill-wt-proceed.log")"
+green "kill-worktree.sh removed the worktree once the check-claim was released (retry-next-pass works)"
+
+# --- Test 12: a stale (crashed-check) claim does not block reaping forever --
+git -C "$GIT_PROJECT" worktree add -q -b fix/issue-91 "$GIT_FIXTURE/wt-issue-91" "$DEFAULT_BRANCH"
+STALE_CLAIM="$GIT_FIXTURE/wt-issue-91/.swarm/tasks/status/t91.check-claim"
+mkdir -p "$STALE_CLAIM"
+touch -d '@1000000000' "$STALE_CLAIM" 2>/dev/null || touch -t 200109090100 "$STALE_CLAIM"
+
+CHECK_CLAIM_STALE_SECS=5 "$KILL_WT_SCRIPT" 91 "$GIT_PROJECT" > "$TEST_DIR/kill-wt-stale.log" 2>&1
+
+[ ! -d "$GIT_FIXTURE/wt-issue-91" ] \
+    || red "a stale check-claim (age >> TTL) still blocked removal — a crashed check would wedge the worktree forever. Output:
+$(cat "$TEST_DIR/kill-wt-stale.log")"
+green "a stale check-claim (past CHECK_CLAIM_STALE_SECS) does not block reaping — crashed checks can't wedge a worktree"
+
+# ============================================================================
+heading "Test 13: check-on-done skips spawning a check once the PR is already MERGED (issue #181)"
+# ============================================================================
+# The merge already validated the work — running the check now (and holding
+# the reap-blocking claim while it runs) would be pure waste. This is the
+# other half of the #181 fix: the check-side skip that complements
+# kill-worktree.sh's reap-side defer above.
+: > "$CHECK_RUNNER_LOG"
+: > "$KILL_LOG"
+rm -f "$PROJECT_DIR/.swarm/events.log"
+mkdir -p "$TEST_DIR/wt-issue-95/.swarm/tasks/status"
+mkdir -p "$TEST_DIR/wt-issue-95/.swarm/tasks/done"
+echo 'echo ok' > "$TEST_DIR/wt-issue-95/.swarm/check.sh"
+echo '{"task_id":"t95","state":"ready-for-review","pr":99,"ts":"2026-07-20T00:00:00Z"}' \
+    > "$TEST_DIR/wt-issue-95/.swarm/tasks/status/t95.json"
+printf 'fix/issue-95\tMERGED\t99\n' > "$GH_PR_LIST_FILE"
+
+ONCE=0 WATCH_PR_POLL_SECS=2 WATCH_CHECK_ON_DONE=1 CHECK_RUNNER="$FAKE_CHECK_RUNNER" \
+    start_watcher 1 "$TEST_DIR/watch-13.log"
+sleep 5
+stop_watcher
+
+if grep -q "wt-issue-95" "$CHECK_RUNNER_LOG"; then
+    red "check-on-done spawned a check for a worktree whose PR is already MERGED (should skip — the merge already validated the work). Log:
+$(cat "$CHECK_RUNNER_LOG")"
+fi
+green "check-on-done did not spawn a check for an already-MERGED PR"
+
+CHECK_JSON_95="$TEST_DIR/wt-issue-95/.swarm/tasks/status/t95.check.json"
+[ -f "$CHECK_JSON_95" ] || red "expected $CHECK_JSON_95 to be written even when the check is skipped"
+grep -q '"state":"skipped"' "$CHECK_JSON_95" \
+    || red "expected check.json state=skipped for a terminal-PR skip; got: $(cat "$CHECK_JSON_95")"
+green "check.json recorded state=skipped with the pr_terminal reason"
+
+[ -s "$KILL_LOG" ] || red "reap did not fire for the merged PR despite the check being skipped"
+green "reap still proceeds normally when the check is skipped for a terminal PR"
+
+# ============================================================================
+heading "Test 14: check-claim is released on completion and does not cause a re-run (issue #181)"
+# ============================================================================
+# The reap-side guard (Tests 10-12) treats claim-dir existence as "in
+# flight" — so the claim MUST be released once the check actually finishes,
+# or a completed check would wedge its own worktree forever. But since the
+# claim is also part of the double-run guard, releasing it must not let a
+# later poll tick re-claim and re-run an already-resolved task (that's what
+# the *.check.json terminal-state check inside maybe_run_check now exists
+# for — see coordinator-watch.sh).
+: > "$CHECK_RUNNER_LOG"
+rm -f "$PROJECT_DIR/.swarm/events.log"
+mkdir -p "$TEST_DIR/wt-issue-96/.swarm/tasks/status"
+mkdir -p "$TEST_DIR/wt-issue-96/.swarm/tasks/done"
+echo 'echo ok' > "$TEST_DIR/wt-issue-96/.swarm/check.sh"
+echo '{"task_id":"t96","state":"ready-for-review","pr":96,"ts":"2026-07-20T00:00:00Z"}' \
+    > "$TEST_DIR/wt-issue-96/.swarm/tasks/status/t96.json"
+printf 'fix/issue-96\tOPEN\t96\n' > "$GH_PR_LIST_FILE"
+
+ONCE=0 WATCH_CHECK_ON_DONE=1 CHECK_RUNNER="$FAKE_CHECK_RUNNER" \
+    start_watcher 0 "$TEST_DIR/watch-14.log"
+sleep 5
+stop_watcher
+
+RUNS=$(grep -c "wt-issue-96" "$CHECK_RUNNER_LOG" || true)
+[ "$RUNS" -eq 1 ] \
+    || red "expected exactly 1 check run for issue #96 across multiple 2s poll ticks (claim release must not cause a re-run); got $RUNS. Log:
+$(cat "$CHECK_RUNNER_LOG")"
+green "check ran exactly once across multiple poll ticks despite the claim being released after completion"
+
+if [ -d "$TEST_DIR/wt-issue-96/.swarm/tasks/status/t96.check-claim" ]; then
+    red "check-claim dir still present after the check completed — a reap pass would be blocked forever"
+fi
+green "check-claim released promptly after completion (reap is free to proceed)"
+
 # ────────────────────────── Done ──────────────────────────
 
 heading "All watcher-autoclose tests passed"
@@ -423,4 +566,8 @@ echo "  #119: check-on-done runs the resolved check on a ready-for-review status
 echo "  #119: status-file + PR-open signals converge on one atomic claim (no double-run)"
 echo "  #38: default pane echo formats events.log lines to stdout; no leaked tail process"
 echo "  #38: WATCHER_QUIET=1 suppresses pane echo without affecting events.log"
+echo "  #181: kill-worktree.sh defers removal while a check-claim is active, retries after release"
+echo "  #181: a stale (crashed-check) claim past its TTL does not block reaping forever"
+echo "  #181: check-on-done skips spawning a check once the PR is already MERGED/CLOSED"
+echo "  #181: the claim is released on completion without causing a double-run"
 yellow "Run with KEEP=1 to leave $TEST_DIR for inspection."

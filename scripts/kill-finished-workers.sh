@@ -361,7 +361,15 @@ for w in "${KILL_LIST[@]}"; do
             echo "→ $w (issue #$issue): kill-worktree.sh (window + worktree + branch)"
             KILL_WT_ARGS=("$issue")
             [ "$NO_COMPOSE_DOWN" = "1" ] && KILL_WT_ARGS+=(--no-compose-down)
-            "$KILL_WT" "${KILL_WT_ARGS[@]}" || echo "  WARN: kill-worktree.sh exited non-zero (continuing)"
+            kw_rc=0
+            "$KILL_WT" "${KILL_WT_ARGS[@]}" || kw_rc=$?
+            # issue #181: exit 75 = deferred (in-flight check-on-done claim),
+            # not a real failure — kill-worktree.sh retries cleanly next pass.
+            if [ "$kw_rc" -eq 75 ]; then
+                echo "  ⏸ deferred: in-flight check-on-done claim (retry next reap pass)"
+            elif [ "$kw_rc" -ne 0 ]; then
+                echo "  WARN: kill-worktree.sh exited non-zero (continuing)"
+            fi
         else
             echo "ERROR: kill-worktree.sh not executable at $KILL_WT" >&2
             exit 1

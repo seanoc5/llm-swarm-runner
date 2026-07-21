@@ -343,7 +343,15 @@ echo
 for ISSUE in "${CANDIDATES[@]}"; do
     KILL_WT_ARGS=("$ISSUE" "$PROJECT_DIR")
     [ "$NO_COMPOSE_DOWN" = "1" ] && KILL_WT_ARGS+=(--no-compose-down)
-    "$KILL_WT" "${KILL_WT_ARGS[@]}" || echo "  WARN: kill-worktree.sh exited non-zero for #$ISSUE (continuing)"
+    kw_rc=0
+    "$KILL_WT" "${KILL_WT_ARGS[@]}" || kw_rc=$?
+    # issue #181: exit 75 = deferred (in-flight check-on-done claim), not a
+    # real failure — kill-worktree.sh retries cleanly next pass.
+    if [ "$kw_rc" -eq 75 ]; then
+        echo "  ⏸ deferred: in-flight check-on-done claim for #$ISSUE (retry next reap pass)"
+    elif [ "$kw_rc" -ne 0 ]; then
+        echo "  WARN: kill-worktree.sh exited non-zero for #$ISSUE (continuing)"
+    fi
     echo
 done
 

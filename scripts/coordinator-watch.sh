@@ -78,6 +78,17 @@
 #                           .swarm/check.sh -> WORKER_CHECK_CMD) and runs it
 #                           once in a visible tmux window `chk-N`, recording
 #                           the result to `<id>.check.json` and events.log.
+#                           (issue #181) If the PR is already MERGED/CLOSED
+#                           by the time the claim is won, the check is
+#                           skipped entirely (merge already validated the
+#                           work) and recorded as state=skipped. The claim
+#                           dir doubles as a reap-side guard — see
+#                           kill-worktree.sh, which defers removing a
+#                           worktree while its check-claim is unexpired —
+#                           and is released the moment the check reaches a
+#                           terminal outcome, or after CHECK_CLAIM_STALE_SECS
+#                           (default WORKER_CHECK_TIMEOUT+300s) if the check
+#                           process itself crashed without releasing it.
 #   CHECK_RUNNER=<path>     Test-only override: when set, check-on-done runs
 #                           `$CHECK_RUNNER <worktree> <check_cmd>` synchronously
 #                           instead of spawning a real tmux window. Lets tests
@@ -719,6 +730,30 @@ status_poll_pass() {
     shopt -u nullglob
 }
 
+# pr_state_for_worktree <worktree-dir> <issue>
+#
+# Best-effort PR state lookup for whatever branch is actually checked out
+# in the worktree (falls back to fix/issue-N if that can't be resolved —
+# e.g. a fixture dir in tests, or a worktree mid-provision). One `gh pr
+# view` round-trip; only called right after a check-claim is won (see
+# maybe_run_check), so it's not on any hot polling path. Echoes the state
+# string (OPEN/MERGED/CLOSED/...) or nothing on any failure — callers must
+# treat empty as "unknown, don't skip."
+pr_state_for_worktree() {
+    local wt_dir="$1" issue="$2" branch
+    branch="$(git -C "$wt_dir" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+    [ -n "$branch" ] || branch="fix/issue-$issue"
+    (cd "$wt_dir" 2>/dev/null && gh pr view "$branch" --json state -q .state 2>/dev/null) || true
+}
+
+# check_json_state <check-json-path>
+#
+# Extracts .state from a *.check.json without requiring jq (this runs from
+# both the jq-gated status_poll_pass and the always-on pr_poll_pass).
+check_json_state() {
+    sed -n 's/.*"state":"\([a-zA-Z_]*\)".*/\1/p' "$1" 2>/dev/null | head -1
+}
+
 # maybe_run_check <worktree-dir> <issue> [task_id]
 #
 # Resolve + claim + run the acceptance check for a worker that has
@@ -737,6 +772,15 @@ status_poll_pass() {
 # gets checked). We only fall back to a synthetic per-issue key when the
 # worktree has no status file at all — the literal "worker never wrote
 # the #129 convention" case the backstop exists for.
+#
+# issue #181: the claim dir is released (rmdir) as soon as its run reaches
+# a terminal outcome (pass/fail/skipped) — see execute_check below — so
+# kill-worktree.sh's reap-side guard only sees it as "in flight" for the
+# actual duration of the check, not forever. That means claim-dir
+# ABSENCE can no longer be used as an "already handled" signal (a
+# completed task's claim is gone too) — the "unclaimed" scan below and
+# the fast-path re-entry check just above it both key off the *.check.json
+# terminal state instead, which IS permanent.
 maybe_run_check() {
     local wt_dir="$1" issue="$2" task_id="${3:-}"
     local status_dir="$wt_dir/.swarm/tasks/status"
@@ -745,19 +789,26 @@ maybe_run_check() {
     if [ -z "$task_id" ]; then
         # Distinguish "no status file exists at all" (synthesize a key —
         # this is the literal backstop case) from "a status file exists
-        # but is already claimed" (some other pass already owns it —
-        # return, don't synthesize a SECOND key for the same issue, which
-        # would double-run the check under a different task_id).
+        # but is already claimed or resolved" (some other pass already
+        # owns/finished it — return, don't synthesize a SECOND key for the
+        # same issue, which would double-run the check under a different
+        # task_id).
         local f candidate any_status=0 unclaimed=""
         shopt -s nullglob
         for f in "$status_dir"/*.json; do
             case "$f" in *.check.json) continue ;; esac
             any_status=1
             candidate="$(basename "$f" .json)"
-            if [ ! -d "$status_dir/${candidate}.check-claim" ]; then
-                unclaimed="$candidate"
-                break
+            if [ -d "$status_dir/${candidate}.check-claim" ]; then
+                continue   # in flight — some other pass owns it
             fi
+            if [ -f "$status_dir/${candidate}.check.json" ]; then
+                case "$(check_json_state "$status_dir/${candidate}.check.json")" in
+                    pass|fail|skipped) continue ;;   # already resolved
+                esac
+            fi
+            unclaimed="$candidate"
+            break
         done
         shopt -u nullglob
         if [ -n "$unclaimed" ]; then
@@ -768,10 +819,30 @@ maybe_run_check() {
     fi
     [ -n "$task_id" ] || task_id="pr-issue-$issue"
 
-    local claim_dir="$status_dir/${task_id}.check-claim"
-    mkdir "$claim_dir" 2>/dev/null || return 0   # already claimed — nothing to do
-
     local check_json="$status_dir/${task_id}.check.json"
+    if [ -f "$check_json" ]; then
+        case "$(check_json_state "$check_json")" in
+            pass|fail|skipped) return 0 ;;   # already resolved — don't re-run
+        esac
+    fi
+
+    local claim_dir="$status_dir/${task_id}.check-claim"
+    mkdir "$claim_dir" 2>/dev/null || return 0   # already claimed (in flight) — nothing to do
+
+    # issue #181: the PR may already be MERGED/CLOSED by the time we win
+    # the claim — the merge already validated the work, so spawning a
+    # check now is redundant and would only hold the reap-blocking claim
+    # for no benefit. Skip and let reap proceed.
+    local pr_state
+    pr_state="$(pr_state_for_worktree "$wt_dir" "$issue")"
+    if [ "$pr_state" = "MERGED" ] || [ "$pr_state" = "CLOSED" ]; then
+        printf '{"task_id":"%s","state":"skipped","check_exit":null,"ts":"%s"}\n' \
+            "$task_id" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$check_json" 2>/dev/null || true
+        log_event watch.check_on_done "issue=$issue task_id=$task_id result=skipped reason=pr_terminal_$pr_state"
+        rmdir "$claim_dir" 2>/dev/null || true
+        return 0
+    fi
+
     printf '{"task_id":"%s","state":"checking","check_exit":null,"ts":"%s"}\n' \
         "$task_id" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$check_json" 2>/dev/null || true
 
@@ -795,6 +866,7 @@ maybe_run_check() {
         printf '{"task_id":"%s","state":"skipped","check_exit":null,"ts":"%s"}\n' \
             "$task_id" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$check_json" 2>/dev/null || true
         log_event watch.check_on_done "issue=$issue task_id=$task_id result=skipped reason=no_check_resolved"
+        rmdir "$claim_dir" 2>/dev/null || true
         return 0
     fi
 
@@ -804,10 +876,11 @@ maybe_run_check() {
         echo "[$(date +%T)] [DRY] check-on-done issue #$issue (task $task_id): $check_cmd"
         printf '{"task_id":"%s","state":"skipped","check_exit":null,"ts":"%s"}\n' \
             "$task_id" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$check_json" 2>/dev/null || true
+        rmdir "$claim_dir" 2>/dev/null || true
         return 0
     fi
 
-    execute_check "$wt_dir" "$issue" "$task_id" "$check_cmd" "$check_json"
+    execute_check "$wt_dir" "$issue" "$task_id" "$check_cmd" "$check_json" "$claim_dir"
 }
 
 # record_check_result <task_id> <issue> <check_json> <exit-code>
@@ -824,7 +897,7 @@ record_check_result() {
     log_event watch.check_on_done "issue=$issue task_id=$task_id result=$state check_exit=$rc"
 }
 
-# execute_check <worktree-dir> <issue> <task_id> <check-cmd> <check-json>
+# execute_check <worktree-dir> <issue> <task_id> <check-cmd> <check-json> <claim-dir>
 #
 # Runs the resolved check exactly once (claim already taken by the caller)
 # and records the result. Two backends:
@@ -841,13 +914,22 @@ record_check_result() {
 #     shell-quotes it correctly regardless of content); the rest of the
 #     script is a literal heredoc ('SCRIPT' — unexpanded by this shell) that
 #     just references those variables normally.
+#
+# issue #181: claim_dir is released (rmdir) as soon as this reaches a
+# terminal outcome — synchronously here for the CHECK_RUNNER/no-tmux/spawn-
+# failure paths, or inside the runner_script itself for the real tmux path
+# (that one completes asynchronously, long after this function returns).
+# kill-worktree.sh's reap-side guard treats claim_dir existence as "check
+# in flight, defer" — releasing it promptly is what lets reap proceed
+# right after the check finishes instead of waiting out the stale-claim TTL.
 execute_check() {
-    local wt_dir="$1" issue="$2" task_id="$3" check_cmd="$4" check_json="$5"
+    local wt_dir="$1" issue="$2" task_id="$3" check_cmd="$4" check_json="$5" claim_dir="$6"
 
     if [ -n "$CHECK_RUNNER" ]; then
         local rc=0
         "$CHECK_RUNNER" "$wt_dir" "$check_cmd" || rc=$?
         record_check_result "$task_id" "$issue" "$check_json" "$rc"
+        rmdir "$claim_dir" 2>/dev/null || true
         return 0
     fi
 
@@ -855,6 +937,7 @@ execute_check() {
         log_event watch.check_on_done "issue=$issue task_id=$task_id result=skipped reason=no_tmux_session"
         printf '{"task_id":"%s","state":"skipped","check_exit":null,"ts":"%s"}\n' \
             "$task_id" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$check_json" 2>/dev/null || true
+        rmdir "$claim_dir" 2>/dev/null || true
         return 0
     fi
 
@@ -867,6 +950,7 @@ execute_check() {
         printf 'TASK_ID=%q\n'      "$task_id"
         printf 'CHECK_CMD=%q\n'    "$check_cmd"
         printf 'CHECK_JSON=%q\n'   "$check_json"
+        printf 'CLAIM_DIR=%q\n'    "$claim_dir"
         printf 'EVENTS_LOG=%q\n'   "$EVENTS_LOG"
         printf 'TIMEOUT_SECS=%q\n' "$timeout_secs"
         # Mirrors record_check_result's output shape exactly — see that
@@ -880,6 +964,7 @@ rc=$?
 state=pass; [ "$rc" -eq 0 ] || state=fail
 ts=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
 printf '{"task_id":"%s","state":"%s","check_exit":%d,"ts":"%s"}\n' "$TASK_ID" "$state" "$rc" "$ts" > "$CHECK_JSON"
+rmdir "$CLAIM_DIR" 2>/dev/null || true
 printf '%s  %-15s %s\n' "$ts" 'watch.check_on_done' "issue=$ISSUE task_id=$TASK_ID result=$state check_exit=$rc" >> "$EVENTS_LOG"
 echo "--- check $state (exit $rc) — this window stays open for review ---"
 exec bash
@@ -888,7 +973,7 @@ SCRIPT
     chmod +x "$runner_script" 2>/dev/null
 
     tmux new-window -d -t "$SESSION_NAME" -n "$win" -c "$wt_dir" bash "$runner_script" 2>/dev/null \
-        || log_event watch.check_on_done.error "issue=$issue task_id=$task_id reason=tmux_new_window_failed"
+        || { log_event watch.check_on_done.error "issue=$issue task_id=$task_id reason=tmux_new_window_failed"; rmdir "$claim_dir" 2>/dev/null || true; }
 }
 
 # run_watch_timer_loop

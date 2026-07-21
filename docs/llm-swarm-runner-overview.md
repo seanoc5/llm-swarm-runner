@@ -188,6 +188,8 @@ kill-worktree.sh <issue-number> [project-dir]
 
 Use for ABANDON verdicts from coordinator triage. Uses `--force` on the worktree removal — uncommitted work is lost. The script prints `N commits ahead of <default-branch>, M uncommitted changes` before deletion so you can spot any worktree that has unexpected work.
 
+(issue #181) If `coordinator-watch.sh`'s check-on-done has an acceptance check actively running against the worktree (a `.swarm/tasks/status/<task_id>.check-claim` dir, mkdir'd for the duration of the run), removal is deferred — exit code 75 — rather than yanking the worktree out from under the running check. `kill-finished-workers.sh` and `reap-orphan-worktrees.sh` both recognize this exit code and log it as a deferral, not a failure; the next reap pass retries. A claim older than `CHECK_CLAIM_STALE_SECS` (default: `WORKER_CHECK_TIMEOUT` + 300s) is treated as a crashed check and no longer blocks removal.
+
 ### `requeue.sh` — Drop a follow-up brief into a worker's queue
 
 Atomic write into a worker's `.swarm/tasks/inbox/`. Wraps the mktemp+mv pattern so the listener never sees a half-written brief.
