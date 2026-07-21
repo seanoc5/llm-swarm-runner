@@ -76,37 +76,55 @@ check() {
     fi
 }
 
+# check_eventually — like check(), but for assertions that read tmux pane
+# state right after a send-keys: the shell needs a moment to parse the
+# injected keystrokes and exec the new foreground process, and tmux needs a
+# moment after that to notice the pty's foreground pgrp changed. A single
+# fixed sleep before sampling is a race — generous enough on an idle box,
+# too short under load (e.g. this host running several other things at
+# once), which is exactly the "expected [cli] got [shell]" flake this
+# fixture used to produce. Polling up to `max` times keeps a correct-and-fast
+# run just as fast (it returns the instant the condition holds) while giving
+# a loaded run real headroom -- a genuine classification bug still fails,
+# just after the full poll window instead of after one guess.
+check_eventually() {
+    local desc="$1" expect="$2" cmd="$3" max="${4:-30}"
+    local got=""
+    for ((i = 0; i < max; i++)); do
+        got="$(eval "$cmd")"
+        if [ "$expect" = "$got" ]; then
+            green "$desc"
+            PASS=$((PASS + 1))
+            return 0
+        fi
+        sleep 0.1
+    done
+    red "$desc (expected [$expect] got [$got] after $((max))x0.1s polling)"
+}
+
 heading "Test 1: coordinator_pane_state"
 state="$(coordinator_pane_state)"
 check "no session -> absent" "absent" "$state"
 
 tmux new-session -d -s "$SESSION_NAME" -n coordinator 2>/dev/null
-sleep 0.3
-state="$(coordinator_pane_state)"
-check "fresh session, bash foreground -> shell" "shell" "$state"
+check_eventually "fresh session, bash foreground -> shell" "shell" 'coordinator_pane_state'
 
 tmux send-keys -t "$SESSION_NAME:coordinator" "sleep 300" Enter
-sleep 0.3
-state="$(coordinator_pane_state)"
-check "non-shell foreground -> cli" "cli" "$state"
+check_eventually "non-shell foreground -> cli" "cli" 'coordinator_pane_state'
 tmux send-keys -t "$SESSION_NAME:coordinator" C-c
 sleep 0.2
 
 heading "Test 2: coordinator_pane_busy"
+busy_or_idle() { if coordinator_pane_busy; then echo busy; else echo idle; fi; }
+
 tmux send-keys -t "$SESSION_NAME:coordinator" "clear; echo 'some idle prompt >'" Enter
-sleep 0.3
-if coordinator_pane_busy; then got=busy; else got=idle; fi
-check "idle-looking text -> not busy" "idle" "$got"
+check_eventually "idle-looking text -> not busy" "idle" 'busy_or_idle'
 
 tmux send-keys -t "$SESSION_NAME:coordinator" "clear; echo '✻ Considering… (esc to interrupt)'" Enter
-sleep 0.3
-if coordinator_pane_busy; then got=busy; else got=idle; fi
-check "spinner text -> busy" "busy" "$got"
+check_eventually "spinner text -> busy" "busy" 'busy_or_idle'
 
 tmux send-keys -t "$SESSION_NAME:coordinator" "clear; echo 'Press Ctrl-C again to exit'" Enter
-sleep 0.3
-if coordinator_pane_busy; then got=busy; else got=idle; fi
-check "exit-confirm text -> busy (guarded against a stray Enter)" "busy" "$got"
+check_eventually "exit-confirm text -> busy (guarded against a stray Enter)" "busy" 'busy_or_idle'
 
 heading "Test 3: probe_ctx_used"
 rm -f "$AUTO_COMPACT_PROBE"
@@ -132,9 +150,7 @@ printf '{"context_window":{"context_window_size":200000,"total_input_tokens":500
 # while leaving the just-echoed line as the visible screen content, so both
 # the pane-state and busy checks see what we intend simultaneously.
 tmux send-keys -t "$SESSION_NAME:coordinator" "clear; echo 'idle >'; cat" Enter
-sleep 0.3
-state="$(coordinator_pane_state)"
-check "cat foreground -> cli (sanity check before the threshold test)" "cli" "$state"
+check_eventually "cat foreground -> cli (sanity check before the threshold test)" "cli" 'coordinator_pane_state'
 
 before="$(wc -l < "$EVENTS_LOG")"
 maybe_auto_compact
@@ -201,9 +217,7 @@ sleep 0.3
 # itself a bash script, would be indistinguishable from an idle interactive
 # shell under coordinator_pane_state's process-name check.
 tmux send-keys -t "$SESSION_NAME:coordinator" "exec -a claude bash $FAKE_REPL" Enter
-sleep 1
-state="$(coordinator_pane_state)"
-check "fake REPL foreground (argv[0]=claude) -> cli" "cli" "$state"
+check_eventually "fake REPL foreground (argv[0]=claude) -> cli" "cli" 'coordinator_pane_state'
 
 printf '{"context_window":{"context_window_size":200000,"total_input_tokens":160000}}' > "$AUTO_COMPACT_PROBE"
 # Simulate a real installed statusline re-rendering with post-compaction
