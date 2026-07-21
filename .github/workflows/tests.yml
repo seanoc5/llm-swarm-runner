@@ -65,21 +65,43 @@ jobs:
         #     and drives an actual coordinator/worker LLM round-trip; "may
         #     consume agent quota" per its own --help text.
         #
-        # run-all-tests.sh's --only takes one glob matched against the
-        # basename, so the CI-safe set (13 of 16 suites) is covered by
-        # calling it once per glob group below rather than one combined
-        # pattern.
+        # Deliberately an exclude-list, not an include-list of glob groups:
+        # a future tests/test-*.sh suite should run in CI by default unless
+        # explicitly added to EXCLUDE below, not silently skipped because it
+        # didn't happen to match a hardcoded pattern. run-all-tests.sh's
+        # --only takes one glob against the basename, but a literal filename
+        # (no metacharacters) matches exactly that one file, so it still
+        # works as the per-suite filter here.
         run: |
           set -euo pipefail
-          groups=(
-            'test-codex-support.sh'
-            'test-scripts.sh'
-            'test-shape-*.sh'
-            'test-watcher-autoclose.sh'
+          EXCLUDE=(
+            test-sandbox.sh
+            test-coordinator-auto-compact.sh
+            test-e2e-swarm.sh
           )
+          # Collect into an array first, then iterate with a plain for loop.
+          # A `while read < <(find ...)` loop instead would leave the loop's
+          # stdin (the find process substitution) inherited by whatever runs
+          # inside the body; run-all-tests.sh's own suites do `read`/stdin
+          # things, which would silently consume bytes meant for this outer
+          # loop's file list and truncate it after the first iteration.
+          SUITES=()
+          while IFS= read -r -d '' f; do
+            SUITES+=("$f")
+          done < <(find tests -maxdepth 1 -name 'test-*.sh' -print0 | sort -z)
+
           fail=0
-          for g in "${groups[@]}"; do
-            echo "=== run-all-tests.sh --only '$g' ==="
-            scripts/run-all-tests.sh --only "$g" || fail=1
+          for f in "${SUITES[@]}"; do
+            base="$(basename "$f")"
+            skip=0
+            for ex in "${EXCLUDE[@]}"; do
+              [ "$base" = "$ex" ] && skip=1 && break
+            done
+            if [ "$skip" = "1" ]; then
+              echo "=== skip (needs live infra): $base ==="
+              continue
+            fi
+            echo "=== run-all-tests.sh --only '$base' ==="
+            scripts/run-all-tests.sh --only "$base" || fail=1
           done
           exit "$fail"
