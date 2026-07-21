@@ -15,6 +15,12 @@
 # pane_current_command / capture-pane behavior without mocking tmux itself.
 #
 # Requires: tmux, jq (both already required by the feature itself).
+#
+# The tmux() shadow function near Test 6 is defined mid-file on purpose:
+# calls above it hit the real tmux binary, calls below it (until unset -f)
+# hit the stub. shellcheck's SC2218 flags every call above the definition
+# as if it were a forward-reference bug, so it's disabled file-wide here.
+# shellcheck disable=SC2218
 set -euo pipefail
 
 green()   { printf '\033[32m✓ %s\033[0m\n' "$*"; }

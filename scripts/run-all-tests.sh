@@ -62,7 +62,8 @@ if [ -n "$ONLY" ]; then
     FILTERED=()
     for f in "${SUITES[@]}"; do
         base="$(basename "$f")"
-        # shellcheck disable=SC2053 -- intentional unquoted glob match
+        # Intentional unquoted glob match against $ONLY.
+        # shellcheck disable=SC2053
         [[ "$base" == $ONLY ]] && FILTERED+=("$f")
     done
     SUITES=("${FILTERED[@]}")
