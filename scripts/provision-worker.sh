@@ -403,8 +403,13 @@ else
     # specific worker. Format must match the binding in ~/.tmux.conf:
     #   swarm-<session>-iss-<issue>
     container_name="swarm-${SESSION_NAME}-iss-${ISSUE}"
+    # WORKER_CHECK*/SWARM_EVAL_LOG must ride this line too: _load-env.sh
+    # applies <project>/.swarm/.env only in THIS host process, and the tmux
+    # window's shell inherits the tmux server env instead — without the
+    # explicit hand-off the acceptance-check config documented in
+    # .env.example never reaches sandbox.sh (and thus never the listener).
     tmux new-window -d -t "$SESSION_NAME" -n "iss-$ISSUE" \
-        "WORKER_CONTAINER_NAME=$(printf '%q' "$container_name") WORKER_VERBOSITY=$(printf '%q' "$WORKER_VERBOSITY") WORKER_CMD=$(printf '%q' "${WORKER_CMD:-claude}") WORKER_MODEL=$(printf '%q' "${WORKER_MODEL:-}") WORKER_HEADLESS=$(printf '%q' "${WORKER_HEADLESS:-0}") WORKER_SELF_REVIEW=$(printf '%q' "${WORKER_SELF_REVIEW:-1}") EXTRA_MOUNTS=$(printf '%q' "${EXTRA_MOUNTS:-}") $(printf '%q' "$SANDBOX_SH") $(printf '%q' "$WT") listener"
+        "WORKER_CONTAINER_NAME=$(printf '%q' "$container_name") WORKER_VERBOSITY=$(printf '%q' "$WORKER_VERBOSITY") WORKER_CMD=$(printf '%q' "${WORKER_CMD:-claude}") WORKER_MODEL=$(printf '%q' "${WORKER_MODEL:-}") WORKER_HEADLESS=$(printf '%q' "${WORKER_HEADLESS:-0}") WORKER_SELF_REVIEW=$(printf '%q' "${WORKER_SELF_REVIEW:-1}") WORKER_CHECK=$(printf '%q' "${WORKER_CHECK:-}") WORKER_CHECK_CMD=$(printf '%q' "${WORKER_CHECK_CMD:-}") WORKER_CHECK_TIMEOUT=$(printf '%q' "${WORKER_CHECK_TIMEOUT:-}") WORKER_CHECK_RETRY=$(printf '%q' "${WORKER_CHECK_RETRY:-}") SWARM_EVAL_LOG=$(printf '%q' "${SWARM_EVAL_LOG:-}") EXTRA_MOUNTS=$(printf '%q' "${EXTRA_MOUNTS:-}") $(printf '%q' "$SANDBOX_SH") $(printf '%q' "$WT") listener"
     echo "[4/4] tmux window iss-$ISSUE spawned (listener)"
     log_event worker.start "issue=$ISSUE task_id=$TASK_ID window=iss-$ISSUE alive=$((alive_workers + 1))/$MAX_WORKERS total_windows=$((total_windows + 1))/$MAX_TMUX_WINDOWS"
 fi
