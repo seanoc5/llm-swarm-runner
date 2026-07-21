@@ -60,6 +60,15 @@ CAP ENFORCEMENT (exit 3 on either)
     Re-running for an existing iss-N window does NOT count against caps —
     that path queues a follow-up task without adding capacity.
 
+STALE BRANCH (exit 2)
+    If fix/issue-N already exists as a branch but no worktree at
+    <worktree-parent>/wt-issue-N is attached to it (deleted manually, left
+    behind by branch sweep, or orphaned by a worktree-grouping change), the
+    script decides instead of letting 'git worktree add -b' fail blind:
+      - no commits beyond the default branch  -> reused automatically
+      - unique commits present                -> refuses, exits 2 with a
+                                                   remedy hint (never exit 0)
+
 CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     MAX_WORKERS         5         worker tmux window cap
     MAX_TMUX_WINDOWS    10        total session window cap
@@ -210,6 +219,36 @@ if [ -d "$WT" ]; then
         exit 2
     fi
     echo "[1/4] worktree already exists — reusing existing $BRANCH (base unchanged)"
+elif git show-ref --verify --quiet "refs/heads/$BRANCH"; then
+    # Stale branch: $BRANCH already exists but no worktree at $WT is attached
+    # to it (deleted manually, orphaned by a worktree-grouping change, or
+    # left behind by branch sweep — see #174). `git worktree add -b` refuses
+    # to recreate an existing branch, and under `set -e` that failure used
+    # to propagate as a plain nonzero exit with no diagnosis, or — worse, in
+    # some invocation contexts — got swallowed, spawning no window and no
+    # brief while still reporting success. Decide explicitly instead of
+    # letting `-b` fail blind.
+    unique_commits="$(git rev-list --count "$DEFAULT_REMOTE_REF..$BRANCH" 2>/dev/null || echo "")"
+    if [ "$unique_commits" = "0" ]; then
+        # No commits beyond the default branch means $BRANCH is an ancestor
+        # of (or equal to) $DEFAULT_REMOTE_REF, so fast-forwarding it there
+        # is lossless. Do that before attaching a worktree so a long-stale
+        # branch (0-ahead but many commits *behind*) doesn't hand the worker
+        # an outdated base — without this it would silently reuse the old
+        # tip instead of matching the fresh-branch path's base.
+        git branch -f "$BRANCH" "$DEFAULT_REMOTE_REF"
+        git worktree add "$WT" "$BRANCH"
+        echo "[1/4] worktree created (reused stale branch $BRANCH — no unique commits vs $DEFAULT_REMOTE_REF, fast-forwarded)"
+    else
+        echo "ERROR: branch '$BRANCH' already exists with ${unique_commits:-an unknown number of} commit(s) not on $DEFAULT_REMOTE_REF," >&2
+        echo "       but no worktree at $WT is attached to it. Refusing to silently discard or" >&2
+        echo "       reuse that work." >&2
+        echo "       Remedy: inspect it —  git log $DEFAULT_REMOTE_REF..$BRANCH" >&2
+        echo "         then either reuse it:  git worktree add '$WT' '$BRANCH'" >&2
+        echo "         or discard it:         git branch -D '$BRANCH'   (then re-run this script)" >&2
+        log_event provision.stale_branch "issue=$ISSUE branch=$BRANCH unique_commits=${unique_commits:-unknown}"
+        exit 2
+    fi
 else
     git worktree add "$WT" -b "$BRANCH" "$DEFAULT_REMOTE_REF"
     echo "[1/4] worktree created (base: $DEFAULT_REMOTE_REF @ $(git rev-parse --short "$DEFAULT_REMOTE_REF"))"

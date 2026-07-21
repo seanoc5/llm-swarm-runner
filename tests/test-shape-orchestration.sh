@@ -140,6 +140,49 @@ collision_brief=$(ls "$WT"/.swarm/tasks/inbox/*-99-2.md 2>/dev/null | head -1 ||
     || red "expected a *-99-2.md collision-suffix brief; got: $(ls $WT/.swarm/tasks/inbox/)"
 green "re-run reuses worktree, queues follow-up with -2 collision suffix"
 
+heading "Test 3b: provision-worker.sh reuses a stale branch with no unique commits (and fast-forwards it)"
+cd "$PROJECT_DIR"
+# Simulate branch sweep leftover: fix/issue-101 exists but was never (or no
+# longer is) attached to a worktree — e.g. the worktree dir was removed by
+# hand, or a grouping-mode change orphaned it (#174). Advance master
+# afterward so the branch is genuinely stale (0 ahead, N behind) — this
+# exercises the fast-forward-on-reuse path, not just the identical-tip case.
+git branch fix/issue-101
+git -c user.email=t@t -c user.name=t commit -q --allow-empty -m "master moves on without issue-101"
+git push -q origin master
+git fetch -q origin
+old_tip="$(git rev-parse fix/issue-101)"
+new_default="$(git rev-parse origin/master)"
+[ "$old_tip" != "$new_default" ] || red "fixture bug: fix/issue-101 should be behind origin/master"
+"$PROVISION" 101 > "$TEST_DIR/prov-3b.log" 2>&1 || red "provision-worker exit non-zero for stale-but-clean branch: $(cat "$TEST_DIR/prov-3b.log")"
+grep -q "reused stale branch fix/issue-101" "$TEST_DIR/prov-3b.log" \
+    || red "expected 'reused stale branch' message; got: $(cat "$TEST_DIR/prov-3b.log")"
+[ -d "$TEST_DIR/wt-issue-101" ] || red "worktree not created for reused stale branch"
+reused_tip="$(git rev-parse fix/issue-101)"
+[ "$reused_tip" = "$new_default" ] \
+    || red "expected fix/issue-101 fast-forwarded to $new_default, got $reused_tip"
+green "stale branch with no unique commits is reused (no -b) and fast-forwarded to the latest default ref"
+
+heading "Test 3c: provision-worker.sh refuses a stale branch with unique commits (never exit 0)"
+cd "$PROJECT_DIR"
+# This time the stale branch has real work on it — refuse to silently
+# discard or reuse it. Must exit non-zero and must NOT spawn a window or
+# worktree (the original #174 bug: exited 0, no worktree, no window).
+git checkout -q -b fix/issue-102
+git -c user.email=t@t -c user.name=t commit -q --allow-empty -m "unmerged work on stale branch"
+git checkout -q master
+set +e
+"$PROVISION" 102 > "$TEST_DIR/prov-3c.log" 2>&1
+prov_exit=$?
+set -e
+[ "$prov_exit" -ne 0 ] || red "provision-worker should exit non-zero for a stale branch with unique commits, got 0: $(cat "$TEST_DIR/prov-3c.log")"
+grep -q "already exists with 1 commit(s) not on" "$TEST_DIR/prov-3c.log" \
+    || red "expected diverged-branch error message; got: $(cat "$TEST_DIR/prov-3c.log")"
+[ -d "$TEST_DIR/wt-issue-102" ] && red "worktree should NOT have been created for the refused branch"
+grep -qE 'new-window .* iss-102' "$TEST_DIR/tmux.log" \
+    && red "tmux window should NOT have been spawned for the refused branch"
+green "stale branch with unique commits refuses with nonzero exit, no worktree, no tmux window"
+
 # ────────────────────────── coordinator-watch.sh ──────────────────────────
 
 heading "Test 4: coordinator-watch.sh detects new outcome JSON (DRY_RUN, ONCE)"
@@ -198,14 +241,16 @@ green "exits non-zero on missing project dir"
 # ────────────────────────── sandbox-worktrees.sh ──────────────────────────
 
 heading "Test 6: sandbox-worktrees.sh lists worktrees of a multi-worktree repo"
-# We already have 2 extra worktrees (wt-issue-99 and wt-issue-100) plus the
-# main repo, so listing should find 3.
+# We already have 3 extra worktrees (wt-issue-99, wt-issue-100, and
+# wt-issue-101 from the stale-branch-reuse fixture in Test 3b) plus the main
+# repo, so listing should find 4. wt-issue-102 is intentionally absent — that
+# fixture (Test 3c) asserts provision-worker refused to create it.
 cd "$PROJECT_DIR"
 out=$(env -u TMUX "$LIST" "$PROJECT_DIR" 2>&1) || red "list mode exit non-zero: $out"
-grep -q "Found 3 worktree(s)" <<< "$out" || red "expected 3 worktrees; got: $out"
+grep -q "Found 4 worktree(s)" <<< "$out" || red "expected 4 worktrees; got: $out"
 grep -q "myproject" <<< "$out" || red "expected main worktree 'myproject' listed"
 grep -q "wt-issue-99" <<< "$out" || red "expected 'wt-issue-99' listed"
-green "lists 3 worktrees (main + 2 wt-issue)"
+green "lists 4 worktrees (main + 3 wt-issue)"
 
 heading "Test 7: sandbox-worktrees.sh rejects non-git directory"
 if env -u TMUX "$LIST" /tmp > "$TEST_DIR/list-err.log" 2>&1; then
