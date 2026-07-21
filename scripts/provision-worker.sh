@@ -246,7 +246,17 @@ echo "[2/4] queue dirs ready"
 # in the same wall-clock second for the same issue, append a counter
 # (-2, -3, ...) so we don't silently clobber the previous brief. The common
 # case (no collision) keeps the clean YYYYMMDD-HHMMSS-N naming.
-BASE_ID="$(date +%Y%m%d-%H%M%S)-$ISSUE"
+#
+# PROVISION_NOW_EPOCH lets callers (tests) freeze/inject "now" so the
+# collision-suffix path doesn't depend on two real invocations landing in
+# the same wall-clock second — see #192. Unset in normal operation.
+if [ -n "${PROVISION_NOW_EPOCH:-}" ]; then
+    NOW_FMT="$(date -d "@$PROVISION_NOW_EPOCH" +%Y%m%d-%H%M%S 2>/dev/null \
+        || date -r "$PROVISION_NOW_EPOCH" +%Y%m%d-%H%M%S)"
+else
+    NOW_FMT="$(date +%Y%m%d-%H%M%S)"
+fi
+BASE_ID="$NOW_FMT-$ISSUE"
 TASK_ID="$BASE_ID"
 DEST="$WT/.swarm/tasks/inbox/$TASK_ID.md"
 N=2
