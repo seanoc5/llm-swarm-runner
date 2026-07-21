@@ -1,0 +1,107 @@
+name: tests
+
+"on":
+  pull_request:
+  push:
+    branches: [master]
+
+# Cancel superseded runs on the same ref so PR pushes don't queue stale jobs.
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shell-lint:
+    name: bash -n + shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Syntax check every script (bash -n)
+        run: |
+          set -euo pipefail
+          fail=0
+          while IFS= read -r -d '' f; do
+            echo "bash -n: $f"
+            bash -n "$f" || fail=1
+          done < <(find scripts tests -maxdepth 1 -name '*.sh' -print0 | sort -z)
+          exit "$fail"
+
+      - name: shellcheck (runner image ships it preinstalled)
+        # Gated at -S error (real bugs: unparsable directives, undefined
+        # forward references, etc.), not the default "style" bar. The repo
+        # carries a long tail of pre-existing info/warning-level findings
+        # (SC2015, SC2034, SC1091, ...) unrelated to this change; ratcheting
+        # the bar to warning/style is a separate cleanup effort. Verified
+        # clean at -S error across scripts/ and tests/ as of this commit.
+        run: |
+          set -euo pipefail
+          command -v shellcheck >/dev/null 2>&1 || { echo "shellcheck not found on runner" >&2; exit 1; }
+          shellcheck --version
+          fail=0
+          while IFS= read -r -d '' f; do
+            echo "shellcheck: $f"
+            shellcheck -S error "$f" || fail=1
+          done < <(find scripts tests -maxdepth 1 -name '*.sh' -print0 | sort -z)
+          exit "$fail"
+
+  shape-tests:
+    name: CI-safe suites (run-all-tests.sh)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run CI-safe suites
+        # Everything under tests/test-*.sh EXCEPT the three below is
+        # deterministic and PATH-stubs gh/tmux/docker/claude — no live
+        # daemon, network, GitHub auth, or LLM tokens required. Excluded
+        # (need real infra this runner doesn't have / shouldn't use):
+        #   - test-sandbox.sh              — needs the built
+        #     llm-swarm-runner:latest Docker image (`docker run` against it).
+        #   - test-coordinator-auto-compact.sh — exercises tmux-only
+        #     functions (probe_ctx_used, maybe_auto_compact) against a real,
+        #     throwaway tmux *session*, not a PATH-stubbable tmux binary.
+        #   - test-e2e-swarm.sh            — spins up a real tmux session
+        #     and drives an actual coordinator/worker LLM round-trip; "may
+        #     consume agent quota" per its own --help text.
+        #
+        # Deliberately an exclude-list, not an include-list of glob groups:
+        # a future tests/test-*.sh suite should run in CI by default unless
+        # explicitly added to EXCLUDE below, not silently skipped because it
+        # didn't happen to match a hardcoded pattern. run-all-tests.sh's
+        # --only takes one glob against the basename, but a literal filename
+        # (no metacharacters) matches exactly that one file, so it still
+        # works as the per-suite filter here.
+        run: |
+          set -euo pipefail
+          EXCLUDE=(
+            test-sandbox.sh
+            test-coordinator-auto-compact.sh
+            test-e2e-swarm.sh
+          )
+          # Collect into an array first, then iterate with a plain for loop.
+          # A `while read < <(find ...)` loop instead would leave the loop's
+          # stdin (the find process substitution) inherited by whatever runs
+          # inside the body; run-all-tests.sh's own suites do `read`/stdin
+          # things, which would silently consume bytes meant for this outer
+          # loop's file list and truncate it after the first iteration.
+          SUITES=()
+          while IFS= read -r -d '' f; do
+            SUITES+=("$f")
+          done < <(find tests -maxdepth 1 -name 'test-*.sh' -print0 | sort -z)
+
+          fail=0
+          for f in "${SUITES[@]}"; do
+            base="$(basename "$f")"
+            skip=0
+            for ex in "${EXCLUDE[@]}"; do
+              [ "$base" = "$ex" ] && skip=1 && break
+            done
+            if [ "$skip" = "1" ]; then
+              echo "=== skip (needs live infra): $base ==="
+              continue
+            fi
+            echo "=== run-all-tests.sh --only '$base' ==="
+            scripts/run-all-tests.sh --only "$base" || fail=1
+          done
+          exit "$fail"
