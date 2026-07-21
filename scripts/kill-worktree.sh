@@ -21,7 +21,24 @@
 #
 # WARNING: --force is used. Any uncommitted work in the worktree is lost.
 # The script prints how-much-work-will-be-lost before deletion.
+#
+# issue #181: before removing anything, checks for an in-flight check-on-done
+# run (coordinator-watch.sh's maybe_run_check claims a worktree via a
+# `mkdir`'d .swarm/tasks/status/<task_id>.check-claim dir while its
+# acceptance check runs). If an unexpired claim is found, removal is
+# DEFERRED (exit 75) rather than yanking the worktree out from under a
+# running check — see maybe_run_check's own comments for the claim/release
+# protocol. A claim older than CHECK_CLAIM_STALE_SECS (default:
+# WORKER_CHECK_TIMEOUT + 300s slack) is treated as a crashed check and no
+# longer blocks removal.
 set -euo pipefail
+
+# Portable mtime (epoch seconds). GNU coreutils first, BSD fallback. Mirrors
+# reap-orphan-worktrees.sh's mtime_epoch — kept local since scripts here are
+# self-contained (see scripts/README.md).
+mtime_epoch() {
+    stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
+}
 
 NO_COMPOSE_DOWN=0
 ARGS=()
@@ -85,6 +102,30 @@ if [ -d "$WT" ]; then
     AHEAD="$(git -C "$WT" rev-list --count "$DEFAULT_BRANCH..HEAD" 2>/dev/null || echo '?')"
     DIRTY="$(git -C "$WT" status --porcelain 2>/dev/null | wc -l)"
     echo "  Worktree state: $AHEAD commit(s) ahead of $DEFAULT_BRANCH, $DIRTY uncommitted change(s)"
+
+    # issue #181: defer if a check-on-done run is actively using this
+    # worktree. Reap racing a running check produced spurious failures
+    # (getcwd/"No such file or directory") on code that was actually fine
+    # — the ground vanished mid-run, not the code. See maybe_run_check in
+    # coordinator-watch.sh for where the claim is taken and released.
+    CHECK_CLAIM_STALE_SECS="${CHECK_CLAIM_STALE_SECS:-$(( ${WORKER_CHECK_TIMEOUT:-600} + 300 ))}"
+    ACTIVE_CLAIM=""
+    shopt -s nullglob
+    for claim in "$WT"/.swarm/tasks/status/*.check-claim; do
+        [ -d "$claim" ] || continue
+        claim_age=$(( $(date +%s) - $(mtime_epoch "$claim") ))
+        if [ "$claim_age" -lt "$CHECK_CLAIM_STALE_SECS" ]; then
+            ACTIVE_CLAIM="$(basename "$claim") (${claim_age}s old)"
+            break
+        fi
+        echo "  - stale check-claim $(basename "$claim") (${claim_age}s >= ${CHECK_CLAIM_STALE_SECS}s TTL) — treating as a crashed check, proceeding"
+    done
+    shopt -u nullglob
+    if [ -n "$ACTIVE_CLAIM" ]; then
+        echo "  ⏸ in-flight check ($ACTIVE_CLAIM) — deferring worktree removal, retry next reap pass"
+        exit 75
+    fi
+
     if [ "$NO_COMPOSE_DOWN" = "1" ]; then
         echo "  - skipping compose down (--no-compose-down)"
     else
