@@ -34,6 +34,14 @@ what should stay in per-project policy.
 > Append to the bottom. Use a short headline + 1-3 lines of context.
 > When picking one up, move it to the "Done" section with date + ref.
 
+### Trim "grokkability fat" after the layered-handoff evaluation period
+2026-07-24: worker.md's cold-reader layering (TL;DR / re-entry brief /
+decisions & alternatives / review focus) deliberately spends an estimated
++20-50% on handoff surfaces to support multi-swarm context-switching.
+After a few months of use, revisit which layers earn their keep and trim
+toward a ~5% overhead (e.g. collapse layers on 🟡 PRs, shorten the
+skeleton's prompts).
+
 ### Standardize an "audience statement" on every prompt/skill file
 Every file in `prompts/` should open with one sentence: "this doc is read
 by [WHO] who needs to [DO WHAT]." Forces the author to be honest about

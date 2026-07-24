@@ -159,6 +159,40 @@ Whenever you hand control back (PR opened, blocked, parked), end with a
 
 ---
 
+## Write for the cold reader (re-entry briefing)
+
+Your PR bodies, the issues you file, and your terminal handoffs are read by a
+human who runs several swarms at once, context-switches away, and returns
+hours or days later with most of the original context gone — or by a
+different person entirely. Optimize for their re-entry, not for the merge
+moment:
+
+- **Layer it.** Bottom line first (TL;DR: what happened, what they must
+  decide), plain-language orientation second (re-entry brief), expert detail
+  third. The reader picks their depth; nobody should have to read everything
+  to act.
+- **Never open mid-story.** "Implements the two sources #661 deferred"
+  requires remembering #661. Restate what those sources are and why they were
+  deferred, *then* cite the issue.
+- **Links are provenance, not prerequisites.** Cite issues/ADRs/PRs freely,
+  but the body must stand alone without opening any of them.
+- **Define project jargon at first use** — construct names, table names,
+  internal shorthand. A parenthetical is enough: "`l2_farm` (the county-level
+  BEA farm-income source)".
+- **Surface decisions as decisions.** Anywhere you weighed options, that
+  belongs in "Decisions & alternatives" with one-line pros/cons per option
+  and your opinionated recommendation — not buried in a bullet's subordinate
+  clause. Concerns you couldn't resolve go there too.
+
+This deliberately spends extra tokens on handoff surfaces; that trade is
+accepted swarm policy. It applies to PR bodies (skeleton below), issues you
+file (successors, follow-ups: same TL;DR / re-entry brief / acceptance-
+criteria layering), and `## Summary` blocks for **no-PR terminal states**,
+where the pane summary is the only record. When a PR carries the full
+re-entry brief, the pane `## Summary` may stay tight and point to it.
+
+---
+
 ## PR risk assessment (always, on PR open or PR-body update)
 
 Every `gh pr create` and any `gh pr edit --body` MUST include both:
@@ -228,14 +262,36 @@ including a failed `claude -p` call — must be **flagged in the handoff**
 ### PR body skeleton
 
 If `.github/PULL_REQUEST_TEMPLATE.md` exists, use its headings — keeping the
-`BLIND_MERGE_RISK` comment at top and `<sub>` footer at bottom. Otherwise:
+`BLIND_MERGE_RISK` comment at top, the `<sub>` footer at bottom, and weaving
+the TL;DR / re-entry / decisions layers into whatever sections it defines.
+Otherwise:
 
 ```
 <!-- BLIND_MERGE_RISK: low -->
 
-## Summary
+## TL;DR
 
-<What changed and why, in 1–3 sentences. `Closes #N` if applicable.>
+<1–2 sentences, bottom line up front: what this PR does + what the human
+should do or decide next.>
+
+## Re-entry brief
+
+<3–8 sentences of plain language for a reader who has forgotten everything.
+What was the problem, why did it matter, where does this sit in the larger
+effort? Define jargon at first use. Restate the essentials of the briefed
+issue here — cite it for provenance, but never require opening it.>
+
+## What changed
+
+<The expert layer: design shape, files, mechanics. Bullets fine.
+`Closes #N` if applicable.>
+
+## Decisions & alternatives
+
+<Each judgment call you made: the options that existed, one-line pros/cons
+per option, what you chose, why, and any residual concern. Be opinionated —
+state your view plainly. If there were genuinely no judgment calls, say so
+in one line.>
 
 ## Test plan
 
@@ -243,10 +299,20 @@ If `.github/PULL_REQUEST_TEMPLATE.md` exists, use its headings — keeping the
 - [ ] What CI covers
 - [ ] Manual verification a reviewer should repeat
 
+## Review focus
+
+<Ranked: what a reviewer should actually scrutinize or decide — especially
+anything that is a methodology/product call rather than a code call — plus
+anything deferred and its tracking issue.>
+
 ---
 
 <sub>_Swarm metadata (safe to ignore if you're reviewing this as a human)._ **Blind-merge risk:** 🟢 low — <one-line rationale naming the riskiest aspect></sub>
 ```
+
+For small 🟢 low diffs (typo, lint, docs touch-up) the layers may collapse —
+TL;DR plus a two-sentence re-entry brief and "no judgment calls" is enough;
+don't pad. The full structure is mandatory for 🟡/🔴 PRs.
 
 ---
 
