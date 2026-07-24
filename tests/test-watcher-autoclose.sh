@@ -49,14 +49,22 @@ mkdir -p "$TEST_DIR/wt-issue-43/.swarm/tasks/done"
 
 # Stub kill-finished-workers.sh: record argv + a timestamp so we can assert
 # order vs the coordinator wake. Sleep briefly so timestamps differ.
+# Prints the real script's "Done. Closed N window(s)." summary — the watcher
+# parses it for the killed=N count and suppresses the watch.autoclose event
+# on killed=0 passes (see make_kill_stub / Test 1b).
 KILL_LOG="$TEST_DIR/kill.log"
 FAKE_KILL="$TEST_DIR/fake-kill-finished-workers.sh"
-cat > "$FAKE_KILL" <<EOF
+make_kill_stub() {
+    local summary="$1"
+    cat > "$FAKE_KILL" <<EOF
 #!/usr/bin/env bash
 printf '%s  KILL: %s\n' "\$(date +%s%N)" "\$*" >> "$KILL_LOG"
+echo "$summary"
 exit 0
 EOF
-chmod +x "$FAKE_KILL"
+    chmod +x "$FAKE_KILL"
+}
+make_kill_stub "Done. Closed 1 window(s)."
 
 # Stub llm-start.sh: record argv + timestamp.
 WAKE_LOG="$TEST_DIR/wake.log"
@@ -177,15 +185,41 @@ grep -q -- '--yes' "$KILL_LOG" \
     || red "expected --yes in kill stub argv; got: $(cat "$KILL_LOG")"
 green "kill stub called with --pr-finalized --with-worktree --yes (terminal-PR mode)"
 
-# Assert the events log recorded watch.autoclose
+# Assert the events log recorded watch.autoclose with the parsed kill count
 EVENTS_LOG="$PROJECT_DIR/.swarm/events.log"
 [ -f "$EVENTS_LOG" ] || red "events.log not created"
-grep -q '^.*watch\.autoclose ' "$EVENTS_LOG" \
-    || red "expected 'watch.autoclose' event in events.log; got:
+grep -q '^.*watch\.autoclose .*killed=1' "$EVENTS_LOG" \
+    || red "expected 'watch.autoclose ... killed=1' event in events.log; got:
 $(cat "$EVENTS_LOG")"
 grep -q '^.*coord\.wake ' "$EVENTS_LOG" \
     || red "expected 'coord.wake' event in events.log"
-green "events.log recorded watch.autoclose + coord.wake"
+green "events.log recorded watch.autoclose killed=1 + coord.wake"
+
+# ============================================================================
+heading "Test 1b: no-op reap pass — watch.autoclose event suppressed (killed=0)"
+# ============================================================================
+: > "$KILL_LOG"
+: > "$WAKE_LOG"
+rm -f "$PROJECT_DIR/.swarm/events.log"
+make_kill_stub "Nothing to kill given current filters."
+
+start_watcher 1 "$TEST_DIR/watch-1b.log"
+echo '{"task_id":"t42b","outcome":"ok"}' > "$TEST_DIR/wt-issue-42/.swarm/tasks/done/t42b.ok.json"
+wait_for_watcher_exit
+
+[ -s "$KILL_LOG" ] || red "kill stub was NOT invoked on the no-op pass. Watch log:
+$(cat "$TEST_DIR/watch-1b.log")"
+EVENTS_LOG="$PROJECT_DIR/.swarm/events.log"
+if [ -f "$EVENTS_LOG" ] && grep -q '^.*watch\.autoclose ' "$EVENTS_LOG"; then
+    red "watch.autoclose should be suppressed when the reaper killed nothing; got:
+$(cat "$EVENTS_LOG")"
+fi
+grep -q '^.*coord\.wake ' "$EVENTS_LOG" 2>/dev/null \
+    || red "expected 'coord.wake' event on the no-op pass"
+green "killed=0 pass: reaper still ran, watch.autoclose suppressed, coord.wake intact"
+
+# Restore the killing stub for the remaining tests.
+make_kill_stub "Done. Closed 1 window(s)."
 
 # ============================================================================
 heading "Test 2: WATCHER_AUTOCLOSE=0 — kill-finished-workers NOT invoked"
