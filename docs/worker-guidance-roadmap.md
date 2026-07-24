@@ -34,11 +34,6 @@ what should stay in per-project policy.
 > Append to the bottom. Use a short headline + 1-3 lines of context.
 > When picking one up, move it to the "Done" section with date + ref.
 
-### Apply `prompts/skill-refactor-trim-focus.md` to `prompts/coordinator.md`
-The coordinator prompt is ~13KB and growing. Worth running the
-refactor/trim/focus skill on it before it crosses the "two contributors
-disagree about what it says" threshold.
-
 ### Standardize an "audience statement" on every prompt/skill file
 Every file in `prompts/` should open with one sentence: "this doc is read
 by [WHO] who needs to [DO WHAT]." Forces the author to be honest about
@@ -47,6 +42,8 @@ scope; gives the refactor/trim/focus skill a fixed yardstick.
 ---
 
 ## Done
+
+- (2026-07-23) **Apply refactor/trim/focus to `prompts/coordinator.md` (and `worker.md`, `refs.md`)** — coordinator.md had grown to 23KB; trimmed to ~half by extracting the AVAILABLE gh-filter into `scripts/available-issues.sh`, dropping the teaching-mode and decision-point-conventions sections (native behavior on Fable-5-class coordinators), and deduplicating the parallelism routing table with worker.md. worker.md trimmed ~40% (constraints kept verbatim, why-essays compressed); at-rest glyph default unified to `∎`.
 
 > Move entries here as they're addressed. Format:
 > `- (YYYY-MM-DD) <headline> — <commit-or-PR-ref>`
