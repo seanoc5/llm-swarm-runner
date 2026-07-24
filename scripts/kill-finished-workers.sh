@@ -19,6 +19,14 @@
 # Use --yes to skip the confirmation prompt for --all --with-worktree.
 # Use --no-compose-down to skip tearing down a worktree's docker compose
 #   stack (only meaningful with --with-worktree).
+#
+# EVENTS LOG + PANE ARCHIVE
+#   Every actual kill appends a `reap.window` line to
+#   <project>/.swarm/events.log (issue, window, branch, reasons,
+#   with_worktree, capture) and snapshots the pane's last
+#   REAP_CAPTURE_LINES (default 500) scrollback lines to
+#   <project>/.swarm/reaped/iss-N-<utc>.txt before the window dies.
+#   Dry runs log nothing.
 
 set -euo pipefail
 
@@ -109,6 +117,21 @@ PROJECT_DIR="$PWD"
 # branch actually checked out there (see worktree_branch() below).
 # shellcheck source=_load-env.sh
 . "$SCRIPT_DIR/_load-env.sh" "$PROJECT_DIR"
+
+# Append-only structured event log + reaped-pane archive. Same format as
+# coordinator-watch.sh / provision-worker.sh. Every actual kill emits a
+# `reap.window` event naming the window, and archives the pane's last
+# scrollback lines under .swarm/reaped/ first — reaping destroys the only
+# in-flight audit trail (pane history), so snapshot it before the kill.
+EVENTS_LOG="$PROJECT_DIR/.swarm/events.log"
+REAPED_DIR="$PROJECT_DIR/.swarm/reaped"
+REAP_CAPTURE_LINES="${REAP_CAPTURE_LINES:-500}"
+log_event() {
+    local cat="$1"; shift
+    local ts
+    ts="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+    printf '%s  %-15s %s\n' "$ts" "$cat" "$*" >> "$EVENTS_LOG" 2>/dev/null || true
+}
 
 require_value() {
     if [ -z "${2:-}" ] || [[ "${2:-}" == -* ]]; then
@@ -266,6 +289,7 @@ pr_is_finalized() {
 
 # Decide which ones to kill ---------------------------------------------------
 KILL_LIST=()
+declare -A KILL_REASONS KILL_BRANCH
 for w in "${WINDOWS[@]}"; do
     issue="${w#iss-}"
     reasons=()
@@ -337,6 +361,9 @@ for w in "${WINDOWS[@]}"; do
     # Survived all filters → kill
     echo "  $w  [$(IFS=,; echo "${reasons[*]}") → kill]"
     KILL_LIST+=("$w")
+    reasons_str="$(IFS=,; echo "${reasons[*]}")"
+    KILL_REASONS[$w]="${reasons_str// /_}"
+    KILL_BRANCH[$w]="${branch:-}"
 done
 
 if [ "${#KILL_LIST[@]}" -eq 0 ]; then
@@ -353,9 +380,33 @@ if [ "$DRY" = "1" ]; then
 fi
 
 # Execute --------------------------------------------------------------------
+
+# Snapshot the pane's tail before killing, then emit the per-target
+# reap.window event. The capture is the post-mortem substitute for the
+# scrollback the kill destroys — e.g. "who actually ran the merge on that
+# high-risk PR" is only answerable from pane history once the window is
+# gone. capture=failed (window died between listing and capture) is still
+# logged so the reap itself stays on the record.
+capture_and_log_reap() {
+    local w="$1" issue="$2"
+    local ts file capture_ref
+    ts="$(date -u +'%Y%m%dT%H%M%SZ')"
+    file="$REAPED_DIR/$w-$ts.txt"
+    mkdir -p "$REAPED_DIR" 2>/dev/null || true
+    if tmux capture-pane -p -t "$SESSION_NAME:$w" -S "-$REAP_CAPTURE_LINES" > "$file" 2>/dev/null; then
+        capture_ref="$file"
+    else
+        capture_ref="failed"
+        rm -f "$file" 2>/dev/null || true
+    fi
+    log_event reap.window \
+        "issue=$issue window=$w branch=${KILL_BRANCH[$w]:-unknown} reasons=${KILL_REASONS[$w]:-} with_worktree=$WITH_WT capture=$capture_ref"
+}
+
 echo
 for w in "${KILL_LIST[@]}"; do
     issue="${w#iss-}"
+    capture_and_log_reap "$w" "$issue"
     if [ "$WITH_WT" = "1" ]; then
         if [ -x "$KILL_WT" ]; then
             echo "→ $w (issue #$issue): kill-worktree.sh (window + worktree + branch)"

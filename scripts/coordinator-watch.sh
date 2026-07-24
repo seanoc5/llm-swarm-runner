@@ -255,7 +255,10 @@ EVENTS LOG
                            (sibling repo sharing the same WORKSPACE parent)
       coord.wake           llm-start.sh invoked (or coord.wake.skip on debounce)
       sweep.run            sweep-swarm-outcomes.sh fired (when POST_OUTCOMES=1)
-      watch.autoclose      kill-finished-workers.sh invoked (trigger=outcome|pr_poll)
+      watch.autoclose      kill-finished-workers.sh reaped ≥1 window (trigger=outcome|pr_poll,
+                           killed=N); passes that reap nothing are not logged
+      reap.window          per-target kill record written by kill-finished-workers.sh
+                           (issue, window, branch, reasons, capture=<pane snapshot path>)
       watch.timer.start    background pr-poll/check-on-done timer loop started
       watch.pr_poll        terminal PR detected via periodic gh poll (reap backstop)
       watch.check_on_done  check-on-done result (issue, task_id, result=running|pass|fail|skipped)
@@ -429,6 +432,7 @@ format_event_line() {
         coord.compact.ineffective)          glyph="⚠"; color=$'\033[31m' ;;
         coord.compact.verify_skip)            glyph="·"; color=$'\033[2m'  ;;
         watch.autoclose)               glyph="♻"; color=$'\033[36m' ;;
+        reap.window)                    glyph="✂"; color=$'\033[36m' ;;
         watch.pr_poll)                  glyph="⚠"; color=$'\033[33m' ;;
         pr_poll.error)                   glyph="✗"; color=$'\033[31m' ;;
         watch.check_on_done)
@@ -635,12 +639,19 @@ cleanup_eligible_workers() {
     local dry_arg=""
     [ "$DRY_RUN" = "1" ] && dry_arg="--dry-run"
 
-    # We deliberately discard stdout/stderr — kill-finished-workers.sh has
-    # its own verbose output; we only care about the side effect (windows
-    # + worktrees + branches reaped). The autoclose event in our log
-    # records that we ran.
-    "$KILL_FINISHED" --idle-min 0 --pr-finalized --with-worktree --yes $dry_arg >/dev/null 2>&1 || true
-    log_event watch.autoclose "trigger=$trigger mode=pr-finalized+worktree dry_run=$DRY_RUN"
+    # Capture stdout to count kills from the "Done. Closed N window(s)."
+    # summary — per-target detail is kill-finished-workers.sh's own
+    # reap.window events, so this line only carries the aggregate. A pass
+    # that killed nothing is not logged (killed=0 heartbeats used to be
+    # ~95% of events.log — the watch.pr_poll line already records that the
+    # backstop fired); dry runs are always logged for visibility.
+    local kf_out killed
+    kf_out="$("$KILL_FINISHED" --idle-min 0 --pr-finalized --with-worktree --yes $dry_arg 2>&1 || true)"
+    killed="$(sed -nE 's/^Done\. Closed ([0-9]+) window\(s\)\.$/\1/p' <<<"$kf_out" | tail -1)"
+    killed="${killed:-0}"
+    if [ "$killed" != "0" ] || [ "$DRY_RUN" = "1" ]; then
+        log_event watch.autoclose "trigger=$trigger mode=pr-finalized+worktree dry_run=$DRY_RUN killed=$killed"
+    fi
 }
 
 # pr_poll_pass
