@@ -102,6 +102,52 @@ You have host-side tmux access and could `send-keys` into any pane. **Don't** �
 
 On a status-update request: (1) `tmux list-windows` for process state; (2) prefer structured outcomes — `for f in ../wt-issue-*/.swarm/tasks/done/*.json; do echo "$f:"; cat "$f"; done` (`outcome=err` means read `done/<id>.md` for the failed brief); (3) `gh pr list`, rendering the risk rating inline (below); (4) if a window closed with no PR, check the outcome file, then `done/<id>.md` (v2) / `.agent-task-last.md` (v1), then pane scrollback; (5) if a worker opened a PR, dispatch an independent review — never the authoring worker ("Find ≠ fix" below).
 
+## Wake digest (open every wake report and status update with this)
+
+The human runs several swarms at once and may not have looked at this one for
+hours or days. Every wake report and status update opens with a compact
+digest, most-actionable first — assume they remember nothing:
+
+```
+## Wake digest — <time> (wake: iss-696 finished | manual status request)
+**Needs you (ranked by risk × age):**
+1. 🔴 PR #714 (rate limiting on public MCP surface) — awaiting your manual merge since yesterday. TL;DR: <quoted from PR body>
+2. 🟡 PR #689 (data-authority pages) — self-review APPROVE_WITH_CAVEATS: <the caveat>. `merge PR 689` when satisfied.
+**Moved since last wake:** #707 merged; iss-702 opened PR #710; nudged #713 (stale 8h).
+**In flight:** iss-593 (active ~40m); iss-677 (parked on inbox, awaiting review).
+**Backlog:** OPEN=12 AVAILABLE=6 ALIVE=3/5 WINDOWS=7/10
+```
+
+- **Needs you** is the load-bearing part: name the PR *and* what it is in
+  plain words, quote its TL;DR, and give the exact next action/command.
+- **Moved since last wake:** diff against your previous digest (it's in your
+  scrollback/context). First digest of a session: say so, no delta.
+- Keep the digest under ~25 lines; everything deeper goes in the sections
+  after it. The startup checklist's `OPEN=… AVAILABLE=…` line is the
+  digest's **Backlog** row — don't report it twice.
+
+### Stale-PR nudge (per wake)
+
+On each wake, run `{{LLM_SWARM_DIR}}/scripts/stale-pr-nudges.sh` (honors
+`STALE_PR_NUDGE_HOURS`, default 6; 0 disables; one JSON line per PR needing a
+nudge). For each candidate, post ONE refresh comment on the PR containing:
+
+- the literal marker `<!-- SWARM_STALE_NUDGE -->` on its own line (the
+  script keys re-nudge suppression on it — omit it and the PR gets nudged
+  every wake);
+- a 2-4 sentence plain-language recap of what the PR does and why it exists
+  (source it from the body's TL;DR/re-entry brief; if the body predates the
+  layered format, derive it from the diff);
+- whose move it is and the exact next command (`gh pr merge N --squash`, or
+  the open question blocking it);
+- anything that changed since the body was written — check
+  `gh pr view N --json mergeable,mergeStateStatus` and `gh pr checks N`
+  (new conflicts with the default branch or CI state changes are exactly
+  what a returning reader needs).
+
+List nudged PRs in the wake digest's "Moved since last wake" row. Trust the
+script's suppression — never hand-nudge a PR it didn't return.
+
 ## Reporting worker outcomes
 
 Scrape the blind-merge risk rating from the PR body (`gh pr view <N> --json body --jq .body | grep -E 'BLIND_MERGE_RISK|Blind-merge risk'` — markers at top and bottom, fetch regardless of position) and render it inline:
