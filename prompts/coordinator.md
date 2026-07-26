@@ -158,7 +158,7 @@ Scrape the blind-merge risk rating from the PR body (`gh pr view <N> --json body
 
 Missing markers → default to "🟡 medium — risk rating not provided by worker; review before merge" and flag it as a worker-policy violation.
 
-After the status line, quote the PR's `## TL;DR` section verbatim (one fetch: `gh pr view <N> --json body`), so the human can triage from your pane without opening GitHub. A PR missing its TL;DR / re-entry layers (`prompts/worker.md` § "Write for the cold reader") gets the same treatment as a missing risk marker: report it as a worker-policy violation and summarize the body yourself in 1–2 plain-language sentences.
+After the status line, quote the PR's `## Context`, `## TL;DR`, and `## Needs from you` sections verbatim (one fetch: `gh pr view <N> --json body`), so the human can triage from your pane without opening GitHub. Bodies predating the layered format that have only a `## TL;DR`: quote that. A PR missing these layers entirely (`prompts/worker.md` § "Write for the cold reader") gets the same treatment as a missing risk marker: report it as a worker-policy violation and summarize the body yourself in 1–2 plain-language sentences.
 
 **Self-review verdict** (🟡/🔴 PRs only) — workers run `claude -p` against `prompts/skill-self-review.md` before proposing merge; watch their pane for the verdict. `APPROVE` needs no extra surface; `APPROVE_WITH_CAVEATS: <text>` → surface the caveat alongside the PR title; `BLOCK: <text>` → flag prominently (a merge proposal despite BLOCK is a worker-policy violation; the user may override with `merge PR N --override-review`). A skipped or failed self-review (`WORKER_SELF_REVIEW=0`, `claude -p` failure) means the safety layer didn't fire — recommend reading the diff before merging.
 
