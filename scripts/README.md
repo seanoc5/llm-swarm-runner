@@ -25,6 +25,7 @@ All scripts here require bash 4.0+; do not run them under `sh` or `dash`.
 | `reap-orphan-worktrees.sh` | Bulk-reaps stale `wt-issue-*` worktree DIRECTORIES whose work is preserved elsewhere; complements `kill-finished-workers.sh` (which walks live tmux windows) by catching worktrees that outlived their session. |
 | `relocate-blind-merge-risk.sh` | One-off PR-body rewriter: moves the visible "Blind-merge risk:" line from the top of a PR body to the bottom footer, matching the current PR template. |
 | `requeue.sh` | Atomically drops a follow-up task brief into a worker's v2 inbox (file or stdin). |
+| `review-scoreboard.sh` | Aggregates `SWARM_SELF_REVIEW` verdict markers across a repo's PRs into a review-coverage scoreboard: coverage by blind-merge risk since adoption, verdict distribution, and ⚠ flags (merged-on-BLOCK, unreviewed 🟡/🔴 merges). Sibling of `swarm-scoreboard.sh` (task-level eval logs). |
 | `run-all-tests.sh` | Runs every `tests/test-*.sh` suite under a per-suite timeout (`TEST_TIMEOUT`, default 300s), prints a PASS/FAIL/TIMEOUT summary table, exits non-zero on any failure. `--only <glob>` filters, `--list` enumerates without running. |
 | `sandbox-worktrees.sh` | Lists git worktrees; optionally launches sandboxes and/or tmux windows per worktree. |
 | `setup.sh` | Host-side setup; currently symlinks `/usr/bin/rg` into the path gemini-cli expects. Idempotent. |
