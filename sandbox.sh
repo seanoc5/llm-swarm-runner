@@ -221,10 +221,16 @@ fi
 # worker log) instead of taking the host down. --memory-swap is set equal
 # to --memory on purpose: without it the cgroup overflows into swap and
 # recreates exactly the host-wide IO stall the cap exists to prevent.
-# Override per-worker with SANDBOX_MEM_LIMIT (e.g. "32g"); "0" disables
-# the cap entirely (ad-hoc debugging only).
+#
+# The 8g default is sized for the smallest host we expect to support
+# (16 GB RAM: half for one worker, half for the OS and everything else).
+# It doubles as an early tripwire: a suite that needs more than 8 GB is
+# usually load-everything-into-memory code smell worth a look before it
+# grows into a 31 GB one. Beefy hosts raise it at provision time
+# (e.g. SANDBOX_MEM_LIMIT=24g on a 128 GB box); "0" disables the cap
+# entirely (ad-hoc debugging only).
 MEM_OPTS=()
-SANDBOX_MEM_LIMIT="${SANDBOX_MEM_LIMIT:-24g}"
+SANDBOX_MEM_LIMIT="${SANDBOX_MEM_LIMIT:-8g}"
 if [ "$SANDBOX_MEM_LIMIT" != "0" ]; then
     MEM_OPTS=(--memory "$SANDBOX_MEM_LIMIT" --memory-swap "$SANDBOX_MEM_LIMIT")
 fi
