@@ -10,6 +10,7 @@
 | Tasks stuck in `processing/` | `mv <wt>/.swarm/tasks/processing/<id>.md <wt>/.swarm/tasks/inbox/` | [↓](#tasks-stuck-in-processing) |
 | Ctrl-Z suspended claude inside a worker | `docker exec swarm-<session>-iss-N bash -c 'pkill -CONT -f claude'` | [↓](#ctrl-z-accidentally-suspended-claude-inside-a-worker) |
 | `Ripgrep is not available` warning from gemini | Run `./scripts/setup.sh` on the host once | [↓](#ripgrep-fallback-warning-from-gemini) |
+| Swarm vanished after a Docker update/restart | Just re-run `llm-start.sh` — the leftover socket is handled automatically | [↓](#docker-daemon-restarted--swarm-died-socket-left-behind) |
 
 ---
 
@@ -48,6 +49,7 @@ Common issues and their resolutions. If you hit something not covered here, plea
 - [Host Sysadmin Issues](#host-sysadmin-issues)
   - [OOM kills (host or container)](#oom-kills-host-or-container)
   - [GPU lockups / `Xid` errors](#gpu-lockups--xid-errors)
+  - [Docker daemon restarted — swarm died, socket left behind](#docker-daemon-restarted--swarm-died-socket-left-behind)
   - [tmux session vanished](#tmux-session-vanished)
 - [Placeholders](#placeholders)
 
@@ -329,9 +331,40 @@ If the *host* OOM-killed something important, the swap and swappiness fixes docu
 
 Out of scope for the sandbox itself, but workers can trigger this if they invoke local LLM inference (ollama). See `/opt/work/sysadmin/README.md` — root cause was NVIDIA Xid 31 MMU faults compounded by VRAM exhaustion. The fix bundle is already applied on minti9.
 
+### Docker daemon restarted — swarm died, socket left behind
+
+**Symptom:** a swarm that was running yesterday is simply gone — no session, no worker windows — but its socket file still sits in `/tmp/tmux-$(id -u)/` (e.g. `swarm-myproject`), and `scripts/list-swarms.sh` reports it as `ORPHAN`. Worker containers all show `Exited` around the same timestamp in `docker ps -a`.
+
+**Cause:** a Docker **daemon** restart (package upgrade, snap refresh, `systemctl restart docker`) stops every running container even though the host itself never rebooted. Swarm worker windows are container-backed panes, so they exit; once a session's last window closes, that swarm's per-project tmux server exits too — and tmux leaves the socket file of an exited server behind. Any swarm you relaunched afterwards looks fine; the ones you didn't become orphans.
+
+**Confirm what happened:**
+
+```bash
+scripts/list-swarms.sh                     # LIVE vs ORPHAN per swarm socket
+uptime -s                                  # host boot time — rules a reboot in or out
+ps -o lstart= -p "$(pgrep -xo dockerd)"    # when the docker daemon (re)started
+docker ps -a                               # workers all Exited near that time = daemon restart
+```
+
+If `uptime -s` is well before the swarm died but dockerd's start time matches the moment it vanished, it was a daemon restart, not a reboot.
+
+**Recovery:** the stale socket file is harmless and needs no manual cleanup. `llm-start.sh` handles it end-to-end: its `tmux has-session` probe fails exactly as if no session existed, and the `tmux new-session` that follows detects the dead socket, unlinks it (tmux does this itself, under a lock), and starts a fresh server.
+
+```bash
+cd /opt/work/myproject
+$LLM_SWARM_DIR/llm-start.sh "<your prompt>"   # just relaunch — stale socket auto-replaced
+scripts/list-swarms.sh --prune                # optional: rm orphan socket files (cosmetic only)
+```
+
+Then deal with what the dead swarm left behind:
+
+- **Worktrees** (`../wt-issue-*`) survive with any in-flight work. Check them for unpushed commits or open PRs before cleaning up; `scripts/reap-orphan-worktrees.sh` removes the ones whose work is preserved elsewhere.
+- **Support containers** (project test DBs, compose services) died in the same restart and are *not* restarted by `llm-start.sh` — bring them up again if worker checks depend on them.
+- **Listeners** don't come back on their own — see [Reviving listeners after a tmux session is killed](./advanced-usage.md#reviving-listeners-after-a-tmux-session-is-killed).
+
 ### tmux session vanished
 
-Orphaned worktrees survive — only the session and listeners are gone. Recovery procedure is documented in `advanced-usage.md` → [Reviving listeners after a tmux session is killed](./advanced-usage.md#reviving-listeners-after-a-tmux-session-is-killed).
+Orphaned worktrees survive — only the session and listeners are gone. A common cause is a Docker daemon restart taking out every container-backed window — see [the previous entry](#docker-daemon-restarted--swarm-died-socket-left-behind). Recovery procedure is documented in `advanced-usage.md` → [Reviving listeners after a tmux session is killed](./advanced-usage.md#reviving-listeners-after-a-tmux-session-is-killed).
 
 ---
 

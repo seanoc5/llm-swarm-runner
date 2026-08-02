@@ -7,6 +7,9 @@ A short reference to the tmux commands that actually come up when you're running
 Conventions used below:
 - `<prefix>` = your tmux **prefix key** (see note above). After pressing it (briefly) you then press the next key.
 - `<session>` = your swarm session name — typically `llm-<project-basename>` (e.g. `llm-fand-app`).
+- `<socket>` = the swarm's socket name — `swarm-<project-basename>` (e.g. `swarm-fand-app`).
+
+> **Swarm sockets:** `llm-start.sh` runs each swarm on its **own tmux server**, addressed by socket name. A bare `tmux` command talks to your *default* server and won't see any swarm session — prefix the commands below with `-L <socket>` when targeting a swarm, e.g. `tmux -L swarm-fand-app attach -t llm-fand-app`. `scripts/list-swarms.sh` enumerates all swarm sockets (LIVE vs ORPHAN) with ready-to-paste attach commands.
 
 ---
 
