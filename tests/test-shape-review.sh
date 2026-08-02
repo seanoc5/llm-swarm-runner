@@ -105,6 +105,21 @@ if "$REVIEW" 42 >/dev/null 2>&1; then RC=0; else RC=$?; fi
 green "unparseable verdict → exit 1"
 
 # ============================================================================
+heading "Test 3b: markdown-wrapped verdicts still parse (#213)"
+# ============================================================================
+printf '`APPROVE_WITH_CAVEATS: no test for timeout path`\n' > "$CLAUDE_STUB_OUTPUT"
+if "$REVIEW" 42 >/dev/null; then RC=0; else RC=$?; fi
+[ "$RC" -eq 3 ] || red "backtick-wrapped CAVEATS: expected exit 3, got $RC"
+printf '**BLOCK: broken invariant**\n' > "$CLAUDE_STUB_OUTPUT"
+if "$REVIEW" 42 >/dev/null; then RC=0; else RC=$?; fi
+[ "$RC" -eq 2 ] || red "bold-wrapped BLOCK: expected exit 2, got $RC"
+printf '```\nAPPROVE\n```\n' > "$CLAUDE_STUB_OUTPUT"
+if OUT=$("$REVIEW" 42); then RC=0; else RC=$?; fi
+[ "$RC" -eq 0 ] || red "code-fenced APPROVE: expected exit 0, got $RC"
+echo "$OUT" | grep -q "verdict: APPROVE" || red "code-fenced APPROVE: verdict line missing"
+green "backtick/bold/code-fence wrapped verdicts parse"
+
+# ============================================================================
 heading "Test 4: --post adds marker comment; idempotent on re-run"
 # ============================================================================
 printf 'BLOCK: broken invariant\n' > "$CLAUDE_STUB_OUTPUT"

@@ -78,7 +78,13 @@ REVIEW="$(printf '%s\n\n--- PR ---\n%s\n\n--- DIFF ---\n%s\n' \
     | claude -p "${MODEL_OPTS[@]}" --dangerously-skip-permissions)" \
     || { echo "ERROR: claude -p review invocation failed" >&2; exit 1; }
 
+# The review session sometimes wraps the verdict token in markdown
+# (backticks, bold, a code fence) despite the skill prompt's "no markdown"
+# instruction — strip leading wrapping before matching so a good verdict
+# isn't misread as unparseable (#213). Trailing wrapping is harmless: the
+# case patterns below match with arbitrary suffixes.
 VERDICT_LINE="$(printf '%s\n' "$REVIEW" \
+    | sed 's/^[[:space:]`*]*//' \
     | grep -m1 -E '^(APPROVE|APPROVE_WITH_CAVEATS:|BLOCK:)' || true)"
 case "$VERDICT_LINE" in
     APPROVE*CAVEATS:*) VERDICT="APPROVE_WITH_CAVEATS"; EXIT=3 ;;
