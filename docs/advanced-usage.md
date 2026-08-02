@@ -478,13 +478,17 @@ done
 
 ### Reviving listeners after a tmux session is killed
 
-When the tmux session dies, worktrees survive but listeners don't. To pick up where you left off:
+When the tmux session dies, worktrees survive but listeners don't. To pick up where you left off — remembering that swarm sessions live on the **per-project socket** (`-L swarm-<project>`), so bare `tmux` commands against your default server won't see them:
 
 ```bash
 cd /opt/work/myproject
+SOCKET="swarm-$(basename $PWD)"
+SESSION="llm-$(basename $PWD)"
 
-# 1. Recreate the session if needed (status-only prompt — read-only)
-tmux has-session -t "llm-$(basename $PWD)" 2>/dev/null || \
+# 1. Recreate the session if needed (status-only prompt — read-only).
+#    A leftover ORPHAN socket file from the dead server is fine: llm-start.sh
+#    targets the socket itself, and tmux unlinks a stale socket on server start.
+tmux -L "$SOCKET" has-session -t "$SESSION" 2>/dev/null || \
     NON_INTERACTIVE=1 $LLM_SWARM_DIR/llm-start.sh \
         "Status check ONLY — list worktrees and recent outcomes."
 
@@ -492,14 +496,13 @@ tmux has-session -t "llm-$(basename $PWD)" 2>/dev/null || \
 for issue in <list>; do
     WT=$(dirname $PWD)/wt-issue-$issue
     [ -d "$WT" ] || continue
-    SESSION="llm-$(basename $PWD)"
-    tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -qx "iss-$issue" || \
-        tmux new-window -d -t "$SESSION" -n "iss-$issue" \
+    tmux -L "$SOCKET" list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -qx "iss-$issue" || \
+        tmux -L "$SOCKET" new-window -d -t "$SESSION" -n "iss-$issue" \
             "$LLM_SWARM_DIR/sandbox.sh $WT listener"
 done
 
 # 3. Verify
-tmux list-windows -t "llm-$(basename $PWD)"
+tmux -L "$SOCKET" list-windows -t "$SESSION"
 ```
 
 Now `requeue.sh <issue> -` drops will be picked up within ~2 seconds.
