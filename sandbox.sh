@@ -214,6 +214,21 @@ if [ -n "${WORKER_CONTAINER_NAME:-}" ]; then
     NAME_OPT=(--name "$WORKER_CONTAINER_NAME")
 fi
 
+# Memory governor. Added after the 2026-08-01 incident where a fand-etl
+# worker's full-suite pytest grew past 31 GB RSS, exhausted host RAM, and
+# stalled the desktop on NVMe writeback (seanoc5/fand-etl#684). A cap makes
+# a runaway process OOM-kill inside its own container (exit 137 in the
+# worker log) instead of taking the host down. --memory-swap is set equal
+# to --memory on purpose: without it the cgroup overflows into swap and
+# recreates exactly the host-wide IO stall the cap exists to prevent.
+# Override per-worker with SANDBOX_MEM_LIMIT (e.g. "32g"); "0" disables
+# the cap entirely (ad-hoc debugging only).
+MEM_OPTS=()
+SANDBOX_MEM_LIMIT="${SANDBOX_MEM_LIMIT:-24g}"
+if [ "$SANDBOX_MEM_LIMIT" != "0" ]; then
+    MEM_OPTS=(--memory "$SANDBOX_MEM_LIMIT" --memory-swap "$SANDBOX_MEM_LIMIT")
+fi
+
 # Get the directory of this script so we can find worker-listener.sh
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 
@@ -250,6 +265,7 @@ echo "---------------------------"
 
 exec docker run "${INTERACTIVE_FLAGS[@]}" --rm --init \
     "${NAME_OPT[@]}" \
+    "${MEM_OPTS[@]}" \
     --network host \
     --user "$(id -u):$(id -g)" \
     --workdir "$PROJECT_DIR" \
