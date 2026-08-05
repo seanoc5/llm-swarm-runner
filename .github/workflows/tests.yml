@@ -52,7 +52,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Run CI-safe suites
-        # Everything under tests/test-*.sh EXCEPT the three below is
+        # Everything under tests/test-*.sh EXCEPT the four below is
         # deterministic and PATH-stubs gh/tmux/docker/claude — no live
         # daemon, network, GitHub auth, or LLM tokens required. Excluded
         # (need real infra this runner doesn't have / shouldn't use):
@@ -61,6 +61,11 @@ jobs:
         #   - test-coordinator-auto-compact.sh — exercises tmux-only
         #     functions (probe_ctx_used, maybe_auto_compact) against a real,
         #     throwaway tmux *session*, not a PATH-stubbable tmux binary.
+        #   - test-worker-auto-compact.sh  — same story as
+        #     test-coordinator-auto-compact.sh above, generalized to iss-*
+        #     worker windows (worker_pane_state, worker_pane_busy,
+        #     worker_pane_ctx_used, maybe_worker_compact) — real tmux
+        #     session required, not PATH-stubbable.
         #   - test-e2e-swarm.sh            — spins up a real tmux session
         #     and drives an actual coordinator/worker LLM round-trip; "may
         #     consume agent quota" per its own --help text.
@@ -77,6 +82,7 @@ jobs:
           EXCLUDE=(
             test-sandbox.sh
             test-coordinator-auto-compact.sh
+            test-worker-auto-compact.sh
             test-e2e-swarm.sh
           )
           # Collect into an array first, then iterate with a plain for loop.

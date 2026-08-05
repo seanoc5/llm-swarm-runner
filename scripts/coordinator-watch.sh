@@ -186,6 +186,100 @@
 #                           capture-pane / probe-mtime polling interval for
 #                           all of the waits above.
 #
+#   WORKER_AUTO_COMPACT=1   (issue #226) Same idea as AUTO_COMPACT, generalized
+#                           to every `iss-*` worker window in the session.
+#                           Motivation: a worker running a model with a
+#                           native 1M context window (e.g. Sonnet 5) can
+#                           cruise past 400k+ tokens without Claude Code's
+#                           built-in auto-compact ever firing — that trigger
+#                           keys off *window fill*, not absolute token count,
+#                           so a 1M-window model stays deep in the quality
+#                           "dumb zone" (roughly 150k+) far longer than a
+#                           200k-window model would. Workers idle at their
+#                           REPL prompt between turns the same way the
+#                           coordinator does (interactive mode — see
+#                           worker-listener.sh's header comment), so the same
+#                           between-turn injection pattern applies.
+#                           Context source differs from the coordinator's: a
+#                           worker's statusline probe file is written INSIDE
+#                           its docker container, to a path the host can't
+#                           see (no /tmp or $XDG_RUNTIME_DIR bind-mount — see
+#                           sandbox.sh's MOUNTS array). Instead this parses
+#                           the rendered statusline text straight out of
+#                           `tmux capture-pane` output (the same
+#                           statusline-with-context.sh output the coordinator
+#                           uses, "ctx: <used>/<total> (<pct>%)" — installed
+#                           per-user in ~/.claude/settings.json, which
+#                           sandbox.sh bind-mounts into every worker
+#                           container too). No probe file, no staleness
+#                           check needed — whatever's currently on screen IS
+#                           current. See worker_pane_ctx_used().
+#                           A single background pass (worker_compact_pass(),
+#                           run from the existing timer loop on its own
+#                           WORKER_COMPACT_SCAN_SECS interval) enumerates
+#                           every `iss-*` window each cycle and, for any
+#                           that's idle (cli foreground, not mid-turn) and
+#                           over threshold, injects /compact the same way
+#                           maybe_auto_compact does for the coordinator, then
+#                           sends a short "continue" nudge once compaction
+#                           finishes. Fails open exactly like AUTO_COMPACT:
+#                           a busy pane, an unparseable statusline, or any
+#                           timeout just skips that window this cycle —
+#                           never blocks the watcher or any other window.
+#                           Known limitation: a single marathon turn offers
+#                           no idle window until it ends — this only catches
+#                           workers idling BETWEEN turns, not mid-turn (that
+#                           would be a much riskier Esc-to-interrupt "Tier B"
+#                           this issue deliberately does not build — see
+#                           worker_compact_pass()'s header comment).
+#                           Set to 0 to disable.
+#   WORKER_COMPACT_THRESHOLD_TOKENS=150000
+#                           Used-token threshold that triggers the above for
+#                           a worker with no PR open yet (still mid-task —
+#                           plenty of work likely remains, so compact now
+#                           rather than let it degrade further).
+#   WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS=300000
+#                           Raised threshold used instead of the above once
+#                           the worker's worktree has an open PR (per its
+#                           `.swarm/tasks/status/<task_id>.json`, the same
+#                           file worker-listener.sh's completion block reads
+#                           — see worker.md's status-file convention). A
+#                           worker that's already at PR-open, wrap-up phase
+#                           may be about to land; compacting a worker that's
+#                           only slightly over the lower threshold and about
+#                           to finish just costs a needless pause. The gap
+#                           between the two thresholds is deliberate
+#                           hysteresis — it takes real, sustained context
+#                           growth after PR-open to trigger a compact, so
+#                           this can't flap back and forth as the PR-open
+#                           signal itself doesn't change turn to turn.
+#   WORKER_COMPACT_BUSY_PATTERN
+#                           Same purpose and default as AUTO_COMPACT_BUSY_PATTERN,
+#                           applied per iss-* window instead of the
+#                           coordinator window — see that entry above.
+#   WORKER_COMPACT_START_TIMEOUT_SECS=15
+#   WORKER_COMPACT_FINISH_TIMEOUT_SECS=300
+#   WORKER_COMPACT_VERIFY_TIMEOUT_SECS=30
+#   WORKER_COMPACT_POLL_SECS=2
+#                           Same purpose as their AUTO_COMPACT_* counterparts,
+#                           applied per worker window.
+#   WORKER_COMPACT_SCAN_SECS=30
+#                           How often worker_compact_pass() sweeps every
+#                           iss-* window from the background timer loop.
+#                           Deliberately coarser than the 2s status-file poll
+#                           — each sweep is one capture-pane per live worker,
+#                           and injecting /compact is a rare event gated by
+#                           the threshold, not something that benefits from
+#                           2s responsiveness the way status_poll_pass's
+#                           done-detection does.
+#   WORKER_COMPACT_NUDGE_PROMPT=Continue your task from where you left off.
+#                           Text submitted (as a real turn, same paste-buffer
+#                           +Enter mechanism as /compact itself) right after
+#                           a worker's compaction finishes — /compact alone
+#                           leaves the agent sitting idle with a summarized
+#                           context; without a nudge it would just wait at
+#                           the prompt indefinitely instead of resuming work.
+#
 # Watch backend (auto-detected):
 #   - inotifywait (preferred): instant response. Install with:
 #       sudo apt install inotify-tools
@@ -240,6 +334,16 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     AUTO_COMPACT_FINISH_TIMEOUT_SECS  300     max wait for compaction to finish
     AUTO_COMPACT_VERIFY_TIMEOUT_SECS  30      max wait for probe to refresh post-compact
     AUTO_COMPACT_POLL_SECS            2       capture-pane/probe poll interval
+    WORKER_AUTO_COMPACT               1       same idea as AUTO_COMPACT, generalized to iss-* worker windows; see header comment
+    WORKER_COMPACT_THRESHOLD_TOKENS         150000  used-token trigger (no PR open yet)
+    WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS  300000  raised trigger once the worker's PR is open
+    WORKER_COMPACT_BUSY_PATTERN             (auto)  capture-pane busy-indicator regex (per iss-* window)
+    WORKER_COMPACT_START_TIMEOUT_SECS       15      max wait for compaction to start
+    WORKER_COMPACT_FINISH_TIMEOUT_SECS      300     max wait for compaction to finish
+    WORKER_COMPACT_VERIFY_TIMEOUT_SECS      30      max wait for the pane's ctx reading to refresh post-compact
+    WORKER_COMPACT_POLL_SECS                2       capture-pane poll interval
+    WORKER_COMPACT_SCAN_SECS                30      how often the timer loop sweeps all iss-* windows
+    WORKER_COMPACT_NUDGE_PROMPT       (see header)  text sent to resume the worker after compaction
 
 DEFAULT WAKE_PROMPT (top-up mode)
     Coordinator triages outcomes, then refills workers toward MAX_WORKERS
@@ -272,6 +376,12 @@ EVENTS LOG
       coord.compact.done   busy indicator cleared — compaction confirmed finished (waited)
       coord.compact.ineffective  context didn't drop post-compact (before, after) — investigate
       coord.compact.verify_skip  probe never refreshed post-compact — inconclusive, not a failure
+      worker.compact        /compact injected into an iss-* window (issue, used, threshold, wrapup)
+      worker.compact.skip   worker auto-compact skipped this window this cycle (issue, reason=pane_busy|no_ctx_parsed|...)
+      worker.compact.timeout  gave up waiting on the worker's busy indicator (issue, phase=start|finish, waited)
+      worker.compact.done   worker busy indicator cleared — compaction confirmed finished (issue, waited)
+      worker.compact.ineffective  worker context didn't drop post-compact (issue, before, after) — investigate
+      worker.compact.verify_skip  worker's ctx reading never refreshed post-compact — inconclusive, not a failure
 
 PANE ECHO (issue #38)
     By default, every line appended to events.log — by this process OR any
@@ -359,6 +469,20 @@ AUTO_COMPACT_START_TIMEOUT_SECS="${AUTO_COMPACT_START_TIMEOUT_SECS:-15}"
 AUTO_COMPACT_FINISH_TIMEOUT_SECS="${AUTO_COMPACT_FINISH_TIMEOUT_SECS:-300}"
 AUTO_COMPACT_VERIFY_TIMEOUT_SECS="${AUTO_COMPACT_VERIFY_TIMEOUT_SECS:-30}"
 AUTO_COMPACT_POLL_SECS="${AUTO_COMPACT_POLL_SECS:-2}"
+# issue #226 — worker-side generalization of the above. No probe/staleness
+# knobs here: worker context comes from parsing the rendered statusline
+# straight out of capture-pane (see worker_pane_ctx_used()), not a probe
+# file, so there's nothing to go stale.
+WORKER_AUTO_COMPACT="${WORKER_AUTO_COMPACT:-1}"
+WORKER_COMPACT_THRESHOLD_TOKENS="${WORKER_COMPACT_THRESHOLD_TOKENS:-150000}"
+WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS="${WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS:-300000}"
+WORKER_COMPACT_BUSY_PATTERN="${WORKER_COMPACT_BUSY_PATTERN:-Considering…|Sautéed for|Cooked for|Baked for|Simmered for|✻|✶|Press Ctrl-C again to .xit}"
+WORKER_COMPACT_START_TIMEOUT_SECS="${WORKER_COMPACT_START_TIMEOUT_SECS:-15}"
+WORKER_COMPACT_FINISH_TIMEOUT_SECS="${WORKER_COMPACT_FINISH_TIMEOUT_SECS:-300}"
+WORKER_COMPACT_VERIFY_TIMEOUT_SECS="${WORKER_COMPACT_VERIFY_TIMEOUT_SECS:-30}"
+WORKER_COMPACT_POLL_SECS="${WORKER_COMPACT_POLL_SECS:-2}"
+WORKER_COMPACT_SCAN_SECS="${WORKER_COMPACT_SCAN_SECS:-30}"
+WORKER_COMPACT_NUDGE_PROMPT="${WORKER_COMPACT_NUDGE_PROMPT:-Continue your task from where you left off.}"
 
 if ! [[ "$WATCH_PR_POLL_SECS" =~ ^[0-9]+$ ]]; then
     echo "ERROR: WATCH_PR_POLL_SECS must be a non-negative integer (got: $WATCH_PR_POLL_SECS)" >&2
@@ -366,7 +490,10 @@ if ! [[ "$WATCH_PR_POLL_SECS" =~ ^[0-9]+$ ]]; then
 fi
 for _var in AUTO_COMPACT_THRESHOLD_TOKENS AUTO_COMPACT_PROBE_MAX_AGE_SECS \
             AUTO_COMPACT_START_TIMEOUT_SECS AUTO_COMPACT_FINISH_TIMEOUT_SECS \
-            AUTO_COMPACT_VERIFY_TIMEOUT_SECS; do
+            AUTO_COMPACT_VERIFY_TIMEOUT_SECS \
+            WORKER_COMPACT_THRESHOLD_TOKENS WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS \
+            WORKER_COMPACT_START_TIMEOUT_SECS WORKER_COMPACT_FINISH_TIMEOUT_SECS \
+            WORKER_COMPACT_VERIFY_TIMEOUT_SECS WORKER_COMPACT_SCAN_SECS; do
     if ! [[ "${!_var}" =~ ^[0-9]+$ ]]; then
         echo "ERROR: $_var must be a non-negative integer (got: ${!_var})" >&2
         exit 1
@@ -374,6 +501,10 @@ for _var in AUTO_COMPACT_THRESHOLD_TOKENS AUTO_COMPACT_PROBE_MAX_AGE_SECS \
 done
 if ! [[ "$AUTO_COMPACT_POLL_SECS" =~ ^[0-9]+$ ]] || [ "$AUTO_COMPACT_POLL_SECS" -lt 1 ]; then
     echo "ERROR: AUTO_COMPACT_POLL_SECS must be a positive integer (got: $AUTO_COMPACT_POLL_SECS)" >&2
+    exit 1
+fi
+if ! [[ "$WORKER_COMPACT_POLL_SECS" =~ ^[0-9]+$ ]] || [ "$WORKER_COMPACT_POLL_SECS" -lt 1 ]; then
+    echo "ERROR: WORKER_COMPACT_POLL_SECS must be a positive integer (got: $WORKER_COMPACT_POLL_SECS)" >&2
     exit 1
 fi
 unset _var
@@ -434,6 +565,12 @@ format_event_line() {
         coord.compact.done)               glyph="◈"; color=$'\033[32m' ;;
         coord.compact.ineffective)          glyph="⚠"; color=$'\033[31m' ;;
         coord.compact.verify_skip)            glyph="·"; color=$'\033[2m'  ;;
+        worker.compact)                 glyph="◈"; color=$'\033[36m' ;;
+        worker.compact.skip)             glyph="·"; color=$'\033[2m'  ;;
+        worker.compact.timeout)           glyph="⚠"; color=$'\033[33m' ;;
+        worker.compact.done)               glyph="◈"; color=$'\033[32m' ;;
+        worker.compact.ineffective)          glyph="⚠"; color=$'\033[31m' ;;
+        worker.compact.verify_skip)            glyph="·"; color=$'\033[2m'  ;;
         watch.autoclose)               glyph="♻"; color=$'\033[36m' ;;
         reap.window)                    glyph="✂"; color=$'\033[36m' ;;
         watch.pr_poll)                  glyph="⚠"; color=$'\033[33m' ;;
@@ -489,6 +626,7 @@ autoclose:     $WATCHER_AUTOCLOSE$([ "$WATCHER_AUTOCLOSE" = "1" ] && echo " (scr
 pr-poll:       ${WATCH_PR_POLL_SECS}s$([ "$WATCH_PR_POLL_SECS" = "0" ] && echo " (disabled)")
 check-on-done: $WATCH_CHECK_ON_DONE$([ "$WATCH_CHECK_ON_DONE" = "1" ] && echo " (session: $SESSION_NAME)")
 auto-compact:  $AUTO_COMPACT$([ "$AUTO_COMPACT" = "1" ] && echo " (threshold: ${AUTO_COMPACT_THRESHOLD_TOKENS} tokens, probe: $AUTO_COMPACT_PROBE)")
+worker-compact: $WORKER_AUTO_COMPACT$([ "$WORKER_AUTO_COMPACT" = "1" ] && echo " (threshold: ${WORKER_COMPACT_THRESHOLD_TOKENS}/${WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS} tokens, scan: ${WORKER_COMPACT_SCAN_SECS}s)")
 dry-run:       $DRY_RUN
 once:          $ONCE
 pane-echo:     $([ "$WATCHER_QUIET" = "1" ] && echo "disabled (WATCHER_QUIET=1)" || echo "enabled (WATCHER_QUIET=1 to silence)")
@@ -1033,12 +1171,13 @@ SCRIPT
 
 # run_watch_timer_loop
 #
-# Single background process driving both Behavior A (WATCH_PR_POLL_SECS)
-# and Behavior B fast-path (2s status-file poll). One process (not two)
+# Single background process driving Behavior A (WATCH_PR_POLL_SECS), Behavior
+# B fast-path (2s status-file poll), and — issue #226 — the worker
+# auto-compact sweep (WORKER_COMPACT_SCAN_SECS). One process (not several)
 # to keep trap-based cleanup simple — see the trap wired up near the
 # bottom of the script.
 run_watch_timer_loop() {
-    local last_pr_poll=0 now
+    local last_pr_poll=0 last_worker_compact=0 now
     while true; do
         sleep 2
         [ "$WATCH_CHECK_ON_DONE" = "1" ] && { status_poll_pass || true; }
@@ -1047,6 +1186,13 @@ run_watch_timer_loop() {
             if [ $((now - last_pr_poll)) -ge "$WATCH_PR_POLL_SECS" ]; then
                 pr_poll_pass || true
                 last_pr_poll=$now
+            fi
+        fi
+        if [ "$WORKER_AUTO_COMPACT" = "1" ]; then
+            now=$(date +%s)
+            if [ $((now - last_worker_compact)) -ge "$WORKER_COMPACT_SCAN_SECS" ]; then
+                worker_compact_pass || true
+                last_worker_compact=$now
             fi
         fi
     done
@@ -1269,6 +1415,263 @@ maybe_auto_compact() {
     fi
 }
 
+# --- Worker auto-compact (issue #226) ---------------------------------------
+#
+# Generalizes the coordinator's maybe_auto_compact above to every `iss-*`
+# worker window. See the WORKER_AUTO_COMPACT header comment for the full
+# design rationale (1M-window models, why the pane is parsed instead of a
+# probe file, the wrap-up hysteresis). The pane-injection mechanism
+# (load-buffer + paste-buffer -d + send-keys Enter, no trailing newline in
+# the pasted buffer) is identical to maybe_auto_compact's — see that
+# function's comments for why.
+
+# worker_pane_state <window>
+#
+# Same classification as coordinator_pane_state, parameterized by window
+# name instead of hardcoded "coordinator": "absent" (no session or no such
+# window), "shell" (foreground process is a bare shell — nothing live to
+# compact — this is the normal state for a parked worker sitting at
+# run_idle_shell's bash prompt between tasks), or "cli" (a CLI process,
+# e.g. claude, is in the foreground — compaction may be possible, subject
+# to worker_pane_busy).
+worker_pane_state() {
+    local win="$1"
+    tmux has-session -t "$SESSION_NAME" 2>/dev/null || { echo absent; return; }
+    tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx "$win" || { echo absent; return; }
+    local pane_cmd
+    pane_cmd="$(tmux list-panes -t "$SESSION_NAME:$win" -F '#{pane_current_command}' 2>/dev/null | head -1)" || pane_cmd=""
+    case "$pane_cmd" in
+        bash|zsh|sh|fish|"") echo shell ;;
+        *)                   echo cli ;;
+    esac
+}
+
+# worker_pane_busy <window>
+#
+# True (rc 0) if the window's currently rendered content matches
+# WORKER_COMPACT_BUSY_PATTERN — mid-turn (or at the exit-confirmation
+# prompt) rather than idle. Same technique as coordinator_pane_busy /
+# check-stuck-workers.sh's detect_state(), parameterized by window.
+worker_pane_busy() {
+    local win="$1" content clean
+    content="$(tmux capture-pane -t "$SESSION_NAME:$win" -p 2>/dev/null)" || return 1
+    clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
+    printf '%s\n' "$clean" | LC_ALL=C grep -qE "$WORKER_COMPACT_BUSY_PATTERN"
+}
+
+# worker_pane_ctx_used <window>
+#
+# Echoes the worker's last-rendered used-token count and returns 0, or
+# returns 1 with no output when nothing parseable is on screen. Unlike the
+# coordinator's probe_ctx_used, there is no probe file to read (a worker's
+# statusline runs inside its docker container and writes to a path the host
+# can't see — no /tmp or $XDG_RUNTIME_DIR bind-mount; see sandbox.sh's
+# MOUNTS array) — so this parses statusline-with-context.sh's OWN rendered
+# output straight out of `tmux capture-pane`: "ctx: <used>/<total> (<pct>%)"
+# where <used>/<total> are each an integer optionally suffixed k (×1000) or
+# M (×1000000), per that script's fmt_tokens(). No staleness check is
+# needed the way the probe file needs one — whatever's currently on screen
+# IS current; if the statusline hasn't rendered at all (script not
+# installed, or the "?" fallback because Claude Code's JSON schema didn't
+# match any of its jq paths), there's simply no match and this fails
+# closed, same fail-open-to-skip contract as probe_ctx_used.
+worker_pane_ctx_used() {
+    local win="$1" content clean line
+    content="$(tmux capture-pane -t "$SESSION_NAME:$win" -p 2>/dev/null)" || return 1
+    clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
+    # tail -1: if the pattern somehow appears more than once in the visible
+    # screen (shouldn't normally happen — the statusline is one line — but
+    # scrollback wrap or a stale duplicate render shouldn't pick the wrong
+    # one), the most recently rendered occurrence is the last line matched.
+    line="$(printf '%s\n' "$clean" | LC_ALL=C grep -oE 'ctx: [0-9]+[kM]?/[0-9]+[kM]?[[:space:]]*\([0-9]+%\)' | tail -1)"
+    [ -n "$line" ] || return 1
+    [[ "$line" =~ ctx:\ ([0-9]+)([kM]?)/ ]] || return 1
+    local num="${BASH_REMATCH[1]}" suffix="${BASH_REMATCH[2]}"
+    case "$suffix" in
+        M) echo $((num * 1000000)) ;;
+        k) echo $((num * 1000)) ;;
+        *) echo "$num" ;;
+    esac
+}
+
+# worker_has_open_pr <worktree-dir>
+#
+# True (rc 0) if any status file in <worktree>/.swarm/tasks/status/ (the
+# worker.md "queue-v2" convention — task_id.json, non-null "pr" field once
+# a PR is opened; see prompts/worker.md and worker-listener.sh's
+# print_completion_block, which reads the same file for its own pane
+# output) records an open PR. This is the "wrap-up" signal used to raise
+# the compact threshold — a worker that already has a PR up may be close to
+# landing, so it takes more headroom (WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS)
+# before this feature interrupts it with a compact. Deliberately reading
+# the status file directly (host-visible — the worktree is bind-mounted at
+# the same path in and out of the container) rather than parsing "PR #NNN"
+# out of pane text: the status file is the authoritative source
+# worker-listener.sh itself uses, and is already read this way elsewhere in
+# this script (see status_poll_pass/maybe_run_check above).
+worker_has_open_pr() {
+    local wt_dir="$1"
+    [ "$HAVE_JQ" = "1" ] || return 1
+    local f has_pr
+    shopt -s nullglob
+    for f in "$wt_dir/.swarm/tasks/status"/*.json; do
+        case "$f" in *.check.json) continue ;; esac
+        has_pr=$(jq -r 'if (.pr // null) == null then "" else "1" end' "$f" 2>/dev/null) || continue
+        if [ "$has_pr" = "1" ]; then
+            shopt -u nullglob
+            return 0
+        fi
+    done
+    shopt -u nullglob
+    return 1
+}
+
+# maybe_worker_compact <window>
+#
+# Per-window counterpart to maybe_auto_compact, called by worker_compact_pass
+# below for each `iss-*` window on every WORKER_COMPACT_SCAN_SECS sweep.
+# Fails open at every step, exactly like maybe_auto_compact — a missing
+# precondition, unparseable pane text, or either timeout just returns 0 and
+# leaves the worker alone this cycle. This is purely an optimization; it
+# never blocks or otherwise gates the worker's own progress.
+maybe_worker_compact() {
+    local win="$1" issue wt_dir
+    issue="${win#iss-}"
+    [[ "$issue" =~ ^[0-9]+$ ]] || return 0
+    wt_dir="$WORKSPACE/wt-issue-$issue"
+
+    local state
+    state="$(worker_pane_state "$win")" || state="absent"
+    [ "$state" = "cli" ] || return 0   # parked at a bash prompt, or gone — nothing live to compact
+
+    if worker_pane_busy "$win"; then
+        log_event worker.compact.skip "issue=$issue reason=pane_busy"
+        return 0   # don't race a live turn — see docs/tmux-as-channel.md on send-keys races
+    fi
+
+    local used
+    used="$(worker_pane_ctx_used "$win")" || {
+        log_event worker.compact.skip "issue=$issue reason=no_ctx_parsed"
+        return 0
+    }
+
+    local threshold="$WORKER_COMPACT_THRESHOLD_TOKENS" wrapup=0
+    if worker_has_open_pr "$wt_dir"; then
+        threshold="$WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS"
+        wrapup=1
+    fi
+
+    [ "$used" -ge "$threshold" ] || return 0   # under threshold — the common case
+
+    echo "[$(date +%T)] worker $win context at ${used} tokens (>= ${threshold}, wrapup=$wrapup) — compacting before next turn..."
+    log_event worker.compact "issue=$issue used=$used threshold=$threshold wrapup=$wrapup"
+
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "[DRY] would inject /compact into $SESSION_NAME:$win, wait for it to finish, then nudge to continue"
+        return 0
+    fi
+
+    # Buffer names scoped per-issue (unlike the coordinator's single
+    # llm-coord-autocompact buffer) — worker_compact_pass may be mid-sweep
+    # across several windows, and tmux buffer names are session-global, so
+    # a shared name would race between concurrent windows' load/paste pairs.
+    local tmp_compact
+    tmp_compact=$(mktemp) || { log_event worker.compact.skip "issue=$issue reason=mktemp_failed"; return 0; }
+    printf '/compact' > "$tmp_compact" 2>/dev/null || true
+    tmux load-buffer -b "llm-worker-autocompact-$issue" "$tmp_compact" 2>/dev/null || true
+    tmux paste-buffer -b "llm-worker-autocompact-$issue" -t "$SESSION_NAME:$win" -d 2>/dev/null || true
+    tmux send-keys -t "$SESSION_NAME:$win" Enter 2>/dev/null || true
+    rm -f "$tmp_compact" 2>/dev/null || true
+
+    # Wait for compaction to actually start (busy indicator appears).
+    local waited=0
+    while ! worker_pane_busy "$win"; do
+        sleep "$WORKER_COMPACT_POLL_SECS"
+        waited=$((waited + WORKER_COMPACT_POLL_SECS))
+        if [ "$waited" -ge "$WORKER_COMPACT_START_TIMEOUT_SECS" ]; then
+            log_event worker.compact.timeout "issue=$issue phase=start waited=${waited}s"
+            return 0
+        fi
+    done
+
+    # Now wait for it to finish (busy indicator clears).
+    waited=0
+    while worker_pane_busy "$win"; do
+        sleep "$WORKER_COMPACT_POLL_SECS"
+        waited=$((waited + WORKER_COMPACT_POLL_SECS))
+        if [ "$waited" -ge "$WORKER_COMPACT_FINISH_TIMEOUT_SECS" ]; then
+            log_event worker.compact.timeout "issue=$issue phase=finish waited=${waited}s"
+            return 0
+        fi
+    done
+
+    echo "[$(date +%T)] worker $win compaction done (${waited}s) — nudging to continue"
+    log_event worker.compact.done "issue=$issue waited=${waited}s"
+
+    # Poll for the pane to show SOME parseable ctx reading post-compaction,
+    # rather than trusting a fixed sleep — the statusline's render cadence
+    # isn't guaranteed to land within any fixed window. This is NOT quite
+    # the same freshness test as maybe_auto_compact's probe-mtime loop:
+    # pane text carries no mtime, so there's no way to tell "genuinely
+    # re-rendered with an unchanged value" from "stale leftover frame" —
+    # the busy indicator having just cleared (confirmed above) is the only
+    # freshness evidence available, and the first sleep in this loop is
+    # deliberately BEFORE the first read to give that redraw a moment to
+    # land. Any parseable value ends the wait; only the total absence of
+    # one within the timeout counts as inconclusive (verify_skip) — an
+    # unchanged-but-parseable value is treated as evidence the compact
+    # didn't help (ineffective), same verdict maybe_auto_compact reaches
+    # when its mtime-fresh probe shows an unchanged value.
+    local verify_waited=0 used_after=""
+    while [ "$verify_waited" -lt "$WORKER_COMPACT_VERIFY_TIMEOUT_SECS" ]; do
+        sleep "$WORKER_COMPACT_POLL_SECS"
+        verify_waited=$((verify_waited + WORKER_COMPACT_POLL_SECS))
+        used_after="$(worker_pane_ctx_used "$win")" && break
+        used_after=""
+    done
+
+    if [ -z "$used_after" ]; then
+        log_event worker.compact.verify_skip "issue=$issue reason=ctx_not_refreshed waited=${verify_waited}s"
+    elif [ "$used_after" -ge "$used" ]; then
+        echo "[$(date +%T)] WARNING: worker $win context did not drop after /compact (before=$used after=$used_after) — the injected command may not have been recognized as a slash command; investigate before this repeats every sweep"
+        log_event worker.compact.ineffective "issue=$issue before=$used after=$used_after"
+    fi
+
+    # /compact leaves the agent idle with a summarized context — without a
+    # nudge it would just sit at the prompt indefinitely instead of
+    # resuming work. Same injection mechanism as /compact itself, just a
+    # different buffer name (avoids clobbering the one still in flight
+    # above on some backend that reuses buffer content after paste).
+    local tmp_nudge
+    tmp_nudge=$(mktemp) || return 0
+    printf '%s' "$WORKER_COMPACT_NUDGE_PROMPT" > "$tmp_nudge" 2>/dev/null || true
+    tmux load-buffer -b "llm-worker-nudge-$issue" "$tmp_nudge" 2>/dev/null || true
+    tmux paste-buffer -b "llm-worker-nudge-$issue" -t "$SESSION_NAME:$win" -d 2>/dev/null || true
+    tmux send-keys -t "$SESSION_NAME:$win" Enter 2>/dev/null || true
+    rm -f "$tmp_nudge" 2>/dev/null || true
+}
+
+# worker_compact_pass
+#
+# Enumerates every `iss-*` window in the session and runs maybe_worker_compact
+# against each. Called from run_watch_timer_loop on its own
+# WORKER_COMPACT_SCAN_SECS interval. A missing session (no workers
+# provisioned yet) or zero iss-* windows is the common case and simply
+# no-ops — this always fails open, same as every other pass in this file.
+worker_compact_pass() {
+    [ "$WORKER_AUTO_COMPACT" = "1" ] || return 0
+    tmux has-session -t "$SESSION_NAME" 2>/dev/null || return 0
+
+    local windows win
+    windows="$(tmux list-windows -t "$SESSION_NAME" -F '#{window_name}' 2>/dev/null | grep '^iss-' || true)"
+    [ -n "$windows" ] || return 0
+
+    while IFS= read -r win; do
+        [ -n "$win" ] || continue
+        maybe_worker_compact "$win"
+    done <<< "$windows"
+}
+
 # Trigger logic — called when a NEW outcome JSON path is observed
 on_outcome() {
     local path="$1"
@@ -1438,10 +1841,10 @@ run_poll() {
 # WATCH_TIMER_PID itself is pre-declared (empty) up near the shared trap
 # installation, above — this just fills it in when the feature is on.
 # ---------------------------------------------------------------------------
-if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ]; then
+if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ] || [ "$WORKER_AUTO_COMPACT" = "1" ]; then
     run_watch_timer_loop &
     WATCH_TIMER_PID=$!
-    log_event watch.timer.start "pr_poll_secs=$WATCH_PR_POLL_SECS check_on_done=$WATCH_CHECK_ON_DONE"
+    log_event watch.timer.start "pr_poll_secs=$WATCH_PR_POLL_SECS check_on_done=$WATCH_CHECK_ON_DONE worker_auto_compact=$WORKER_AUTO_COMPACT"
 fi
 
 case "$BACKEND" in

@@ -16,6 +16,7 @@ This document covers advanced workflows, custom mounts, and manual Git worktree 
 - [Worker Escape Hatch (Ctrl-Z opens a sibling bash pane)](#worker-escape-hatch-ctrl-z-opens-a-sibling-bash-pane)
 - [Peering at Workers from the Host (capture-pane)](#peering-at-workers-from-the-host-capture-pane)
 - [Long-lived coordinator: context monitoring](#long-lived-coordinator-context-monitoring)
+  - [Worker auto-compact](#worker-auto-compact)
 - [Triage Workflow](#triage-workflow)
   - [The triage cycle](#the-triage-cycle)
   - [Read-only triage prompt](#read-only-triage-prompt)
@@ -334,6 +335,16 @@ Even with the indicator, the coordinator should compact proactively rather than 
 - **On every status report to the user,** the coordinator can include a one-line `ctx: 195k/1M (19%) — healthy` indicator so you don't have to ask.
 
 If you don't want to keep the coordinator long-lived, the alternative is the **reset-after-each-coordination** flow — `/clear` (or exit and re-invoke `llm-start.sh`) after each batch. You lose the cross-coordination memory but you also never have to think about context drift. The trade-off is yours; the long-lived path is the default because the memory is usually worth more.
+
+### Worker auto-compact
+
+Everything above is about the coordinator's own session. Workers have the same problem, and arguably a worse one: `AUTO_COMPACT` above only watches the `coordinator` pane, and Claude Code's built-in auto-compact keys off *context-window fill*, not absolute token count. A worker running a model with a native 1M context window (Sonnet 5, the default worker model — see `.env.example`'s `WORKER_MODEL`) can cruise past 400k+ tokens without the built-in trigger ever firing, sitting deep in the "stupid zone" the whole time.
+
+`coordinator-watch.sh` (issue #226) generalizes the same pattern to every `iss-*` worker window via `WORKER_AUTO_COMPACT` (on by default). The mechanism differs from the coordinator's in one important way: a worker's statusline probe file is written *inside* its docker container, to a path the host genuinely cannot see (no `/tmp` or `$XDG_RUNTIME_DIR` bind-mount). So instead of reading a probe file, it parses the rendered statusline text straight out of `tmux capture-pane` — the same `ctx: <used>/<total> (<pct>%)` line `statusline-with-context.sh` renders, since that script is installed per-user (`~/.claude/settings.json`) and gets bind-mounted into every worker container the same way it renders in the coordinator's own pane.
+
+On its own timer (`WORKER_COMPACT_SCAN_SECS`, default 30s), it sweeps every `iss-*` window and, for any that's idle at its REPL prompt (not mid-turn — workers idle between tasks the same way the coordinator idles between wakes) and over threshold, injects a real `/compact` and follows it with a short "continue your task" nudge once compaction finishes. A worker whose worktree already has an open PR (per its `.swarm/tasks/status/<task_id>.json`) gets a raised threshold (`WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS`, default 300k vs. the normal 150k) — a worker that's already at wrap-up phase may be about to land, and compacting it over a small overage just costs a needless pause.
+
+Known limitation: this only catches workers idling *between* turns. A single marathon turn offers no idle window until it ends. See `coordinator-watch.sh`'s header comment for the full knob list (`WORKER_AUTO_COMPACT`, `WORKER_COMPACT_THRESHOLD_TOKENS`, `WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS`, timeouts, `WORKER_COMPACT_NUDGE_PROMPT`, etc.) and `worker_compact_pass()`'s implementation comments for the rest of the design rationale.
 
 ## Triage Workflow
 
