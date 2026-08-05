@@ -214,18 +214,27 @@
 #                           container too). No probe file, no staleness
 #                           check needed — whatever's currently on screen IS
 #                           current. See worker_pane_ctx_used().
-#                           A single background pass (worker_compact_pass(),
-#                           run from the existing timer loop on its own
-#                           WORKER_COMPACT_SCAN_SECS interval) enumerates
-#                           every `iss-*` window each cycle and, for any
-#                           that's idle (cli foreground, not mid-turn) and
-#                           over threshold, injects /compact the same way
-#                           maybe_auto_compact does for the coordinator, then
-#                           sends a short "continue" nudge once compaction
-#                           finishes. Fails open exactly like AUTO_COMPACT:
-#                           a busy pane, an unparseable statusline, or any
-#                           timeout just skips that window this cycle —
-#                           never blocks the watcher or any other window.
+#                           A background pass (worker_compact_pass(), run
+#                           from its OWN dedicated loop — run_worker_compact_
+#                           loop, on its own WORKER_COMPACT_SCAN_SECS
+#                           interval, deliberately NOT sharing the existing
+#                           WATCH_PR_POLL_SECS/status-file timer loop — see
+#                           run_worker_compact_loop's header comment for why)
+#                           enumerates every `iss-*` window each cycle and,
+#                           for any that's idle (cli foreground, not
+#                           mid-turn) and over threshold, injects /compact
+#                           the same way maybe_auto_compact does for the
+#                           coordinator, then sends a short "continue" nudge
+#                           once compaction finishes. Fails open exactly
+#                           like AUTO_COMPACT: a busy pane, an unparseable
+#                           statusline, or any timeout just skips that
+#                           window this cycle. A single compaction can block
+#                           for minutes (see WORKER_COMPACT_FINISH_TIMEOUT_
+#                           SECS below) — this never blocks the coordinator-
+#                           watch.sh outcome/status/PR-poll machinery
+#                           because it runs in its own process, but it DOES
+#                           mean other over-threshold windows in the same
+#                           sweep queue up behind it (serial, not parallel).
 #                           Known limitation: a single marathon turn offers
 #                           no idle window until it ends — this only catches
 #                           workers idling BETWEEN turns, not mid-turn (that
@@ -265,12 +274,13 @@
 #                           applied per worker window.
 #   WORKER_COMPACT_SCAN_SECS=30
 #                           How often worker_compact_pass() sweeps every
-#                           iss-* window from the background timer loop.
-#                           Deliberately coarser than the 2s status-file poll
-#                           — each sweep is one capture-pane per live worker,
-#                           and injecting /compact is a rare event gated by
-#                           the threshold, not something that benefits from
-#                           2s responsiveness the way status_poll_pass's
+#                           iss-* window, from its own dedicated background
+#                           loop (run_worker_compact_loop). Deliberately
+#                           coarser than the 2s status-file poll — each
+#                           sweep is one capture-pane per live worker, and
+#                           injecting /compact is a rare event gated by the
+#                           threshold, not something that benefits from 2s
+#                           responsiveness the way status_poll_pass's
 #                           done-detection does.
 #   WORKER_COMPACT_NUDGE_PROMPT=Continue your task from where you left off.
 #                           Text submitted (as a real turn, same paste-buffer
@@ -342,7 +352,7 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     WORKER_COMPACT_FINISH_TIMEOUT_SECS      300     max wait for compaction to finish
     WORKER_COMPACT_VERIFY_TIMEOUT_SECS      30      max wait for the pane's ctx reading to refresh post-compact
     WORKER_COMPACT_POLL_SECS                2       capture-pane poll interval
-    WORKER_COMPACT_SCAN_SECS                30      how often the timer loop sweeps all iss-* windows
+    WORKER_COMPACT_SCAN_SECS                30      how often its own loop sweeps all iss-* windows
     WORKER_COMPACT_NUDGE_PROMPT       (see header)  text sent to resume the worker after compaction
 
 DEFAULT WAKE_PROMPT (top-up mode)
@@ -363,7 +373,9 @@ EVENTS LOG
                            killed=N); passes that reap nothing are not logged
       reap.window          per-target kill record written by kill-finished-workers.sh
                            (issue, window, branch, reasons, capture=<pane snapshot path>)
-      watch.timer.start    background pr-poll/check-on-done timer loop started
+      watch.timer.start    a background timer loop started — pr-poll/check-on-done
+                           timer loop, and/or (issue #226) the separate
+                           worker-compact loop; up to two lines, one per loop
       watch.pr_poll        terminal PR detected via periodic gh poll (reap backstop);
                            reason=stale_pr_ignored when the terminal PR
                            predates the worktree (issue #185 — recycled
@@ -670,19 +682,24 @@ if [ "$WATCHER_QUIET" != "1" ]; then
 fi
 
 # Single shared trap for the pane-echo pipeline, the background timer loop
-# (issue #119, started later), and run_poll's seen_file (script-global —
-# see the NOTE at its mktemp near run_poll). Installed immediately after
-# the first backgrounded process (WATCHER_ECHO_PID) that needs it — under
-# `set -e`, any ordinary command between spawning a background job and
-# installing its cleanup trap is a window where an early failure orphans
-# that job. WATCH_TIMER_PID and seen_file are pre-declared empty here too
-# so the trap is safe to fire before either is actually assigned further
-# down. Set once, so nothing downstream can silently clobber it with a
-# second `trap ... EXIT` and drop one of these kills.
+# (issue #119, started later), the worker-compact loop (issue #226, its own
+# separate process — see run_worker_compact_loop's header comment for why
+# it isn't folded into the same loop), and run_poll's seen_file
+# (script-global — see the NOTE at its mktemp near run_poll). Installed
+# immediately after the first backgrounded process (WATCHER_ECHO_PID) that
+# needs it — under `set -e`, any ordinary command between spawning a
+# background job and installing its cleanup trap is a window where an early
+# failure orphans that job. WATCH_TIMER_PID, WORKER_COMPACT_TIMER_PID, and
+# seen_file are pre-declared empty here too so the trap is safe to fire
+# before any of them is actually assigned further down. Set once, so
+# nothing downstream can silently clobber it with a second `trap ... EXIT`
+# and drop one of these kills.
 WATCH_TIMER_PID=""
+WORKER_COMPACT_TIMER_PID=""
 seen_file=""
 cleanup_on_exit() {
     [ -n "${WATCH_TIMER_PID:-}" ] && kill "$WATCH_TIMER_PID" 2>/dev/null || true
+    [ -n "${WORKER_COMPACT_TIMER_PID:-}" ] && kill "$WORKER_COMPACT_TIMER_PID" 2>/dev/null || true
     # WATCHER_ECHO_PID is the `while read` reader — the last stage of the
     # `tail | while` pipeline, and the only PID $! gives us for it. `tail`
     # itself is a separate direct child of this script (pipeline stages
@@ -1171,13 +1188,25 @@ SCRIPT
 
 # run_watch_timer_loop
 #
-# Single background process driving Behavior A (WATCH_PR_POLL_SECS), Behavior
-# B fast-path (2s status-file poll), and — issue #226 — the worker
-# auto-compact sweep (WORKER_COMPACT_SCAN_SECS). One process (not several)
-# to keep trap-based cleanup simple — see the trap wired up near the
-# bottom of the script.
+# Single background process driving Behavior A (WATCH_PR_POLL_SECS) and
+# Behavior B fast-path (2s status-file poll). One process (not two) to keep
+# trap-based cleanup simple — see the trap wired up near the bottom of the
+# script.
+#
+# issue #226's worker auto-compact sweep deliberately does NOT live in this
+# loop, even though it's gated by its own interval the same way pr_poll_pass
+# is — a single maybe_worker_compact call can block for minutes (up to
+# WORKER_COMPACT_START_TIMEOUT_SECS + WORKER_COMPACT_FINISH_TIMEOUT_SECS +
+# WORKER_COMPACT_VERIFY_TIMEOUT_SECS ≈ 345s by default) waiting out a real
+# compaction, and worker_compact_pass sweeps EVERY over-threshold iss-*
+# window serially. Sharing this loop would stall status_poll_pass's 2s
+# done-detection and the WATCH_PR_POLL_SECS reap backstop for every OTHER
+# worker for the full duration of that wait — a real regression to
+# already-shipped responsiveness, not an acceptable tradeoff for keeping
+# process/trap bookkeeping simple. See run_worker_compact_loop below,
+# started as its own background process.
 run_watch_timer_loop() {
-    local last_pr_poll=0 last_worker_compact=0 now
+    local last_pr_poll=0 now
     while true; do
         sleep 2
         [ "$WATCH_CHECK_ON_DONE" = "1" ] && { status_poll_pass || true; }
@@ -1188,13 +1217,21 @@ run_watch_timer_loop() {
                 last_pr_poll=$now
             fi
         fi
-        if [ "$WORKER_AUTO_COMPACT" = "1" ]; then
-            now=$(date +%s)
-            if [ $((now - last_worker_compact)) -ge "$WORKER_COMPACT_SCAN_SECS" ]; then
-                worker_compact_pass || true
-                last_worker_compact=$now
-            fi
-        fi
+    done
+}
+
+# run_worker_compact_loop
+#
+# Own background process for the worker auto-compact sweep (issue #226),
+# separate from run_watch_timer_loop for the blocking-duration reason
+# documented on that function above. A plain fixed-interval loop (not the
+# "gate inside a tighter loop" shape run_watch_timer_loop uses for
+# WATCH_PR_POLL_SECS) since this loop has exactly one job — there's no
+# faster-cadence sibling pass it needs to interleave with.
+run_worker_compact_loop() {
+    while true; do
+        sleep "$WORKER_COMPACT_SCAN_SECS"
+        worker_compact_pass || true
     done
 }
 
@@ -1654,10 +1691,13 @@ maybe_worker_compact() {
 # worker_compact_pass
 #
 # Enumerates every `iss-*` window in the session and runs maybe_worker_compact
-# against each. Called from run_watch_timer_loop on its own
-# WORKER_COMPACT_SCAN_SECS interval. A missing session (no workers
-# provisioned yet) or zero iss-* windows is the common case and simply
-# no-ops — this always fails open, same as every other pass in this file.
+# against each. Called from run_worker_compact_loop's own dedicated
+# background process on its own WORKER_COMPACT_SCAN_SECS interval — kept
+# separate from run_watch_timer_loop's tighter status/PR-poll loop because a
+# single compaction can block for minutes; see that function's header
+# comment for the full rationale. A missing session (no workers provisioned
+# yet) or zero iss-* windows is the common case and simply no-ops — this
+# always fails open, same as every other pass in this file.
 worker_compact_pass() {
     [ "$WORKER_AUTO_COMPACT" = "1" ] || return 0
     tmux has-session -t "$SESSION_NAME" 2>/dev/null || return 0
@@ -1838,13 +1878,21 @@ run_poll() {
 # backend selected above. Started here (after every function it calls is
 # defined, and after the backend case below so shutdown ordering doesn't
 # matter) so it's live before we block in run_inotify/run_poll.
-# WATCH_TIMER_PID itself is pre-declared (empty) up near the shared trap
-# installation, above — this just fills it in when the feature is on.
+# WATCH_TIMER_PID / WORKER_COMPACT_TIMER_PID are pre-declared (empty) up
+# near the shared trap installation, above — this just fills them in when
+# each feature is on. Two separate processes (issue #226) — see
+# run_worker_compact_loop's header comment for why the worker-compact sweep
+# doesn't share run_watch_timer_loop's process.
 # ---------------------------------------------------------------------------
-if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ] || [ "$WORKER_AUTO_COMPACT" = "1" ]; then
+if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ]; then
     run_watch_timer_loop &
     WATCH_TIMER_PID=$!
-    log_event watch.timer.start "pr_poll_secs=$WATCH_PR_POLL_SECS check_on_done=$WATCH_CHECK_ON_DONE worker_auto_compact=$WORKER_AUTO_COMPACT"
+    log_event watch.timer.start "pr_poll_secs=$WATCH_PR_POLL_SECS check_on_done=$WATCH_CHECK_ON_DONE"
+fi
+if [ "$WORKER_AUTO_COMPACT" = "1" ]; then
+    run_worker_compact_loop &
+    WORKER_COMPACT_TIMER_PID=$!
+    log_event watch.timer.start "worker_auto_compact=$WORKER_AUTO_COMPACT scan_secs=$WORKER_COMPACT_SCAN_SECS"
 fi
 
 case "$BACKEND" in
