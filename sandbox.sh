@@ -150,8 +150,14 @@ fi
 # Pass-through env vars the worker agents read. `-e VAR` (no value) tells
 # Docker to pull the value from this caller's environment if set, otherwise
 # omit — so we never embed values in argv.
+# The WORKER_CHECK*/SWARM_EVAL_LOG group feeds worker-listener.sh's
+# acceptance-check + eval-log machinery (docs/ringer-adoptions.md #1/#3);
+# provision-worker.sh forwards them from <project>/.swarm/.env onto our
+# command line. `-e` here outranks any --env-file (.sandbox-env) value for
+# the same key — host config wins when both are set.
 WORKER_ENV_OPTS=()
-for _v in WORKER_HEADLESS WORKER_CMD WORKER_MODEL WORKER_VERBOSITY WORKER_SELF_REVIEW OPENAI_API_KEY; do
+for _v in WORKER_HEADLESS WORKER_CMD WORKER_MODEL WORKER_VERBOSITY WORKER_SELF_REVIEW OPENAI_API_KEY \
+          WORKER_CHECK WORKER_CHECK_CMD WORKER_CHECK_TIMEOUT WORKER_CHECK_RETRY SWARM_EVAL_LOG; do
     if [ -n "${!_v:-}" ]; then
         WORKER_ENV_OPTS+=(-e "$_v")
     fi
