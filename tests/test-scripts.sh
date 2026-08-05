@@ -161,6 +161,110 @@ FAKEGH
 }
 test_repurposed_worktree_reap
 
+# --- Functional: dangling git registration reap (issue #225) ----------------
+#
+# After a Docker daemon restart (#217), a worktree directory can survive
+# while its `.git` file's link back to the main repo's `.git/worktrees/<name>`
+# administrative area is gone — every git command run INSIDE the worktree
+# then fails with exit 128 (verified directly: both `git status --porcelain`
+# and `git rev-parse --git-dir` do). Before this fix, reap-orphan-worktrees.sh
+# had no branch for this — the clean-tree check and branch lookup would just
+# misbehave/skip it forever. Reproduces the corruption by removing the main
+# repo's admin dir for the worktree, then asserts the script reaps it via
+# rm -rf + `git worktree prune` (not kill-worktree.sh's `git worktree
+# remove`, which also needs a working registration) once the dirname-derived
+# branch's PR is finalized.
+test_dangling_registration_reap() {
+    local name="dangling git registration reap"
+    echo "Checking $name..."
+
+    local tmproot
+    tmproot="$(mktemp -d)"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$tmproot'" RETURN
+
+    local project="$tmproot/project"
+    local wt="$tmproot/wt-issue-747"
+
+    git -c init.defaultBranch=main init -q "$project" || { red "  ✗ $name: init failed"; FAIL=$((FAIL + 1)); return; }
+    (
+        cd "$project" &&
+        git config user.email test@example.com &&
+        git config user.name "Test" &&
+        echo x > x && git add x && git commit -qm initial
+    ) >/dev/null 2>&1 || { red "  ✗ $name: initial commit failed"; FAIL=$((FAIL + 1)); return; }
+
+    git -C "$project" worktree add -q -b fix/issue-747 "$wt" >/dev/null 2>&1 \
+        || { red "  ✗ $name: worktree add failed"; FAIL=$((FAIL + 1)); return; }
+
+    # Corrupt the registration by removing the main repo's administrative
+    # area for this worktree — confirmed to reproduce the exact #217 symptom
+    # (git -C "$wt" <anything> exits 128).
+    rm -rf "$project/.git/worktrees/wt-issue-747"
+    if git -C "$wt" rev-parse --git-dir >/dev/null 2>&1; then
+        red "  ✗ $name: fixture setup didn't actually corrupt the registration"
+        FAIL=$((FAIL + 1))
+        return
+    fi
+
+    # Fake `gh`: fix/issue-747's PR is MERGED (finalized) — reap-eligible.
+    local fakebin="$tmproot/fakebin"
+    mkdir -p "$fakebin"
+    cat > "$fakebin/gh" <<'FAKEGH'
+#!/usr/bin/env bash
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+    printf 'fix/issue-747\tMERGED\n'
+    exit 0
+fi
+exit 1
+FAKEGH
+    chmod +x "$fakebin/gh"
+
+    # Dry-run first: must flag it as a reap candidate without touching it.
+    local out rc
+    out="$(PATH="$fakebin:$PATH" "$LLM_SWARM_DIR/scripts/reap-orphan-worktrees.sh" \
+            --dry-run --min-age-days 0 --project "$project" 2>&1)" && rc=0 || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        red "  ✗ $name: dry-run exited $rc"
+        echo "$out"
+        FAIL=$((FAIL + 1))
+        return
+    fi
+    if ! echo "$out" | grep -q "wt-issue-747.*dangling.*reap"; then
+        red "  ✗ $name: expected wt-issue-747 flagged as a dangling-registration reap candidate"
+        echo "$out"
+        FAIL=$((FAIL + 1))
+        return
+    fi
+    [ -d "$wt" ] || { red "  ✗ $name: dry-run must not remove anything"; FAIL=$((FAIL + 1)); return; }
+
+    # Real run: must actually remove the directory + local branch without
+    # going anywhere near kill-worktree.sh's git-worktree-remove path.
+    out="$(PATH="$fakebin:$PATH" "$LLM_SWARM_DIR/scripts/reap-orphan-worktrees.sh" \
+            --yes --min-age-days 0 --project "$project" 2>&1)" && rc=0 || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        red "  ✗ $name: real run exited $rc"
+        echo "$out"
+        FAIL=$((FAIL + 1))
+        return
+    fi
+    if [ -d "$wt" ]; then
+        red "  ✗ $name: dangling worktree directory was not removed"
+        echo "$out"
+        FAIL=$((FAIL + 1))
+        return
+    fi
+    if git -C "$project" show-ref --verify --quiet refs/heads/fix/issue-747; then
+        red "  ✗ $name: local branch fix/issue-747 was not deleted"
+        FAIL=$((FAIL + 1))
+        return
+    fi
+
+    green "  ✓ $name: Passed"
+    PASS=$((PASS + 1))
+}
+test_dangling_registration_reap
+
 echo ""
 echo "Summary: $PASS passed, $FAIL failed."
 [[ $FAIL -eq 0 ]] && exit 0 || exit 1

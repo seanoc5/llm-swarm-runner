@@ -65,6 +65,35 @@
 #                           logs but no reap fires. Same poll also powers the
 #                           check-on-done PR-open backstop (see
 #                           WATCH_CHECK_ON_DONE).
+#
+#                           (issue #225) A terminal PR only becomes a
+#                           reap_hit here if a LIVE iss-N tmux window
+#                           actually exists — kill-finished-workers.sh
+#                           (invoked by cleanup_eligible_workers) iterates
+#                           live windows only, so a worktree that outlived
+#                           its window (session restart, docker daemon
+#                           restart — cf. #217) can never be reaped by that
+#                           path. Such window-less worktrees are logged
+#                           once (not every poll) as watch.pr_poll
+#                           reason=orphan_no_window and left to the slower
+#                           WATCH_ORPHAN_SWEEP_SECS sweep below, which
+#                           walks worktree DIRECTORIES instead of tmux
+#                           windows and can actually clear them.
+#   WATCH_ORPHAN_SWEEP_SECS=3600
+#                           (issue #225) Independent, much slower timer
+#                           that runs reap-orphan-worktrees.sh --pr-finalized
+#                           --yes to clear worktrees whose tmux window is
+#                           already gone but the directory + local branch
+#                           survive with a finalized (MERGED/CLOSED) PR —
+#                           exactly the case WATCH_PR_POLL_SECS's
+#                           kill-finished-workers.sh pass can't reach. Runs
+#                           from the same background timer loop, gated by
+#                           WATCHER_AUTOCLOSE (set that to 0 to disable all
+#                           auto-reaping, including this). Set to 0 to
+#                           disable just the orphan sweep while keeping the
+#                           window-based reap on WATCH_PR_POLL_SECS. Honors
+#                           DRY_RUN. Override REAP_ORPHAN to point at a
+#                           non-standard reap-orphan-worktrees.sh.
 #   WATCH_CHECK_ON_DONE=1   Set to 0 to disable check-on-done. When enabled,
 #                           the watcher treats a worker as "done" via either
 #                           signal: (a) a `.swarm/tasks/status/<id>.json`
@@ -225,6 +254,7 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     SWEEP               (auto)    override sweep-swarm-outcomes.sh path
     WATCHER_AUTOCLOSE   1         reap finalized workers (MERGED|CLOSED PR; window+worktree+branch) before wake
     WATCH_PR_POLL_SECS  60        periodic gh-poll backstop reap (0=off); see header comment
+    WATCH_ORPHAN_SWEEP_SECS 3600  periodic reap-orphan-worktrees.sh sweep for window-less worktrees (0=off); see header comment
     WATCH_CHECK_ON_DONE 1         run acceptance check when a worker signals done; see header comment
     SESSION_NAME        (auto)    tmux session for chk-N windows (llm-<project-basename>)
     WORKSPACE           (auto)    parent dir for wt-issue-* worktrees
@@ -263,7 +293,14 @@ EVENTS LOG
       watch.pr_poll        terminal PR detected via periodic gh poll (reap backstop);
                            reason=stale_pr_ignored when the terminal PR
                            predates the worktree (issue #185 — recycled
-                           branch name, not evidence about this worktree)
+                           branch name, not evidence about this worktree);
+                           reason=orphan_no_window when the worktree has no
+                           live iss-N tmux window for kill-finished-workers.sh
+                           to reap (issue #225 — logged once per issue, left
+                           to watch.orphan_sweep instead)
+      watch.orphan_sweep   reap-orphan-worktrees.sh --pr-finalized sweep ran
+                           (issue #225 — reaped=N); passes that reap nothing
+                           are not logged (dry runs always are)
       watch.check_on_done  check-on-done result (issue, task_id, result=running|pass|fail|skipped)
       cap.refused          provision-worker.sh hit MAX_WORKERS / MAX_TMUX_WINDOWS
       coord.compact        /compact injected before wake (used, threshold)
@@ -334,6 +371,8 @@ SWEEP="${SWEEP:-$LLM_SWARM_DIR/scripts/sweep-swarm-outcomes.sh}"
 WATCHER_AUTOCLOSE="${WATCHER_AUTOCLOSE:-1}"
 KILL_FINISHED="${KILL_FINISHED:-$LLM_SWARM_DIR/scripts/kill-finished-workers.sh}"
 WATCH_PR_POLL_SECS="${WATCH_PR_POLL_SECS:-60}"
+WATCH_ORPHAN_SWEEP_SECS="${WATCH_ORPHAN_SWEEP_SECS:-3600}"
+REAP_ORPHAN="${REAP_ORPHAN:-$LLM_SWARM_DIR/scripts/reap-orphan-worktrees.sh}"
 WATCH_CHECK_ON_DONE="${WATCH_CHECK_ON_DONE:-1}"
 CHECK_RUNNER="${CHECK_RUNNER:-}"
 SESSION_NAME="${SESSION_NAME:-llm-$(basename "$PROJECT_DIR")}"
@@ -362,6 +401,10 @@ AUTO_COMPACT_POLL_SECS="${AUTO_COMPACT_POLL_SECS:-2}"
 
 if ! [[ "$WATCH_PR_POLL_SECS" =~ ^[0-9]+$ ]]; then
     echo "ERROR: WATCH_PR_POLL_SECS must be a non-negative integer (got: $WATCH_PR_POLL_SECS)" >&2
+    exit 1
+fi
+if ! [[ "$WATCH_ORPHAN_SWEEP_SECS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: WATCH_ORPHAN_SWEEP_SECS must be a non-negative integer (got: $WATCH_ORPHAN_SWEEP_SECS)" >&2
     exit 1
 fi
 for _var in AUTO_COMPACT_THRESHOLD_TOKENS AUTO_COMPACT_PROBE_MAX_AGE_SECS \
@@ -435,6 +478,7 @@ format_event_line() {
         coord.compact.ineffective)          glyph="⚠"; color=$'\033[31m' ;;
         coord.compact.verify_skip)            glyph="·"; color=$'\033[2m'  ;;
         watch.autoclose)               glyph="♻"; color=$'\033[36m' ;;
+        watch.orphan_sweep)             glyph="♻"; color=$'\033[36m' ;;
         reap.window)                    glyph="✂"; color=$'\033[36m' ;;
         watch.pr_poll)                  glyph="⚠"; color=$'\033[33m' ;;
         pr_poll.error)                   glyph="✗"; color=$'\033[31m' ;;
@@ -468,6 +512,11 @@ if [ "$WATCHER_AUTOCLOSE" = "1" ] && [ ! -x "$KILL_FINISHED" ]; then
     echo "      Disabling autoclose; set WATCHER_AUTOCLOSE=0 to silence this." >&2
     WATCHER_AUTOCLOSE=0
 fi
+if [ "$WATCH_ORPHAN_SWEEP_SECS" -gt 0 ] && [ ! -x "$REAP_ORPHAN" ]; then
+    echo "WARN: WATCH_ORPHAN_SWEEP_SECS>0 but reap-orphan-worktrees.sh not executable: $REAP_ORPHAN" >&2
+    echo "      Disabling orphan sweep; set WATCH_ORPHAN_SWEEP_SECS=0 to silence this." >&2
+    WATCH_ORPHAN_SWEEP_SECS=0
+fi
 
 # Pick a backend
 BACKEND="poll"
@@ -487,6 +536,7 @@ llm-start.sh:  $LLM_START
 post-outcomes: $POST_OUTCOMES$([ "$POST_OUTCOMES" = "1" ] && echo " (sweep: $SWEEP, hook: ${OUTCOME_HOOK:-default dry-run stub})")
 autoclose:     $WATCHER_AUTOCLOSE$([ "$WATCHER_AUTOCLOSE" = "1" ] && echo " (script: $KILL_FINISHED)")
 pr-poll:       ${WATCH_PR_POLL_SECS}s$([ "$WATCH_PR_POLL_SECS" = "0" ] && echo " (disabled)")
+orphan-sweep:  ${WATCH_ORPHAN_SWEEP_SECS}s$([ "$WATCH_ORPHAN_SWEEP_SECS" = "0" ] && echo " (disabled)" || echo " (script: $REAP_ORPHAN)")
 check-on-done: $WATCH_CHECK_ON_DONE$([ "$WATCH_CHECK_ON_DONE" = "1" ] && echo " (session: $SESSION_NAME)")
 auto-compact:  $AUTO_COMPACT$([ "$AUTO_COMPACT" = "1" ] && echo " (threshold: ${AUTO_COMPACT_THRESHOLD_TOKENS} tokens, probe: $AUTO_COMPACT_PROBE)")
 dry-run:       $DRY_RUN
@@ -563,6 +613,14 @@ trap cleanup_on_exit EXIT INT TERM
 
 # Shared state
 LAST_WAKE=0
+
+# issue #225: dedups the watch.pr_poll reason=orphan_no_window log line so a
+# window-less worktree with a terminal PR gets logged once, not every
+# WATCH_PR_POLL_SECS tick forever. Keyed by issue number; cleared in
+# pr_poll_pass once the worktree directory is gone (reaped, or never
+# provisioned here) so a future worktree reusing the same issue number isn't
+# permanently suppressed.
+declare -A ORPHAN_PR_LOGGED=()
 
 # is_our_worktree <outcome-path>
 #
@@ -694,6 +752,19 @@ pr_predates_worktree() {
     [ "$pr_epoch" -lt "$wt_epoch" ]
 }
 
+# has_live_window <issue>
+#
+# issue #225: kill-finished-workers.sh (invoked by cleanup_eligible_workers)
+# only ever iterates LIVE iss-N tmux windows in $SESSION_NAME — it has no way
+# to see a worktree whose window is already gone. Callers use this to decide
+# whether a terminal-PR worktree is actually reapable via that path, or is an
+# orphan that needs reap-orphan-worktrees.sh instead (see orphan_sweep_pass).
+# Returns 1 (no window) if the session itself doesn't exist — that's still
+# correctly "kill-finished-workers.sh can't reach this."
+has_live_window() {
+    tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx "iss-$1"
+}
+
 # pr_poll_pass
 #
 # Behavior A backstop (issue #119): the outcome-driven reap above only
@@ -732,13 +803,32 @@ pr_poll_pass() {
         issue="${branch#fix/issue-}"
         [[ "$issue" =~ ^[0-9]+$ ]] || continue
         wt_dir="$WORKSPACE/wt-issue-$issue"
-        [ -d "$wt_dir" ] || continue   # already reaped, or never provisioned here
+        if [ ! -d "$wt_dir" ]; then
+            # already reaped, or never provisioned here — drop any stale
+            # dedup entry so a future worktree reusing this issue number
+            # starts fresh (see ORPHAN_PR_LOGGED comment above).
+            unset "ORPHAN_PR_LOGGED[$issue]" 2>/dev/null || true
+            continue
+        fi
 
         if [ "$state" = "MERGED" ] || [ "$state" = "CLOSED" ]; then
             if pr_predates_worktree "$created_at" "$wt_dir"; then
                 log_event watch.pr_poll "reason=stale_pr_ignored issue=$issue branch=$branch pr=$pr_number state=$state"
-            else
+            elif has_live_window "$issue"; then
                 reap_hit=1
+            else
+                # issue #225: this worktree outlived its tmux window
+                # (session restart, docker daemon restart — cf. #217).
+                # cleanup_eligible_workers's kill-finished-workers.sh only
+                # iterates LIVE iss-N windows, so routing this into reap_hit
+                # would just re-run that pass forever with killed=0 every
+                # cycle. Log once per issue and leave the actual reap to
+                # orphan_sweep_pass (reap-orphan-worktrees.sh), which walks
+                # worktree DIRECTORIES instead of tmux windows.
+                if [ -z "${ORPHAN_PR_LOGGED[$issue]:-}" ]; then
+                    log_event watch.pr_poll "reason=orphan_no_window issue=$issue branch=$branch pr=$pr_number state=$state"
+                    ORPHAN_PR_LOGGED[$issue]=1
+                fi
             fi
         fi
 
@@ -755,6 +845,31 @@ pr_poll_pass() {
         else
             echo "[$(date +%T)] pr-poll: terminal PR(s) detected but WATCHER_AUTOCLOSE=0 — not reaping"
         fi
+    fi
+}
+
+# orphan_sweep_pass
+#
+# issue #225: the reap in cleanup_eligible_workers (kill-finished-workers.sh)
+# only ever sees LIVE iss-N tmux windows, so a worktree whose window is
+# already gone (session restart, docker daemon restart — cf. #217) can never
+# be cleared by pr_poll_pass's reap_hit path above — it just gets logged
+# once as orphan_no_window and would otherwise sit there forever. This runs
+# reap-orphan-worktrees.sh, which walks worktree DIRECTORIES instead of tmux
+# windows and has its own independent safety predicate (min-age, clean tree,
+# PR finalized), on a much slower cadence (WATCH_ORPHAN_SWEEP_SECS) since
+# it's a heavier full-directory sweep rather than a single gh round-trip.
+# Failures are non-fatal, same policy as cleanup_eligible_workers.
+orphan_sweep_pass() {
+    local dry_arg=""
+    [ "$DRY_RUN" = "1" ] && dry_arg="--dry-run"
+
+    local out reaped
+    out="$(cd "$PROJECT_DIR" && "$REAP_ORPHAN" --pr-finalized --yes $dry_arg 2>&1 || true)"
+    reaped="$(sed -nE 's/^Done\. Reaped ([0-9]+) worktree\(s\).*/\1/p' <<<"$out" | tail -1)"
+    reaped="${reaped:-0}"
+    if [ "$reaped" != "0" ] || [ "$DRY_RUN" = "1" ]; then
+        log_event watch.orphan_sweep "mode=pr-finalized dry_run=$DRY_RUN reaped=$reaped"
     fi
 }
 
@@ -1038,7 +1153,7 @@ SCRIPT
 # to keep trap-based cleanup simple — see the trap wired up near the
 # bottom of the script.
 run_watch_timer_loop() {
-    local last_pr_poll=0 now
+    local last_pr_poll=0 last_orphan_sweep=0 now
     while true; do
         sleep 2
         [ "$WATCH_CHECK_ON_DONE" = "1" ] && { status_poll_pass || true; }
@@ -1047,6 +1162,13 @@ run_watch_timer_loop() {
             if [ $((now - last_pr_poll)) -ge "$WATCH_PR_POLL_SECS" ]; then
                 pr_poll_pass || true
                 last_pr_poll=$now
+            fi
+        fi
+        if [ "$WATCH_ORPHAN_SWEEP_SECS" -gt 0 ] && [ "$WATCHER_AUTOCLOSE" = "1" ]; then
+            now=$(date +%s)
+            if [ $((now - last_orphan_sweep)) -ge "$WATCH_ORPHAN_SWEEP_SECS" ]; then
+                orphan_sweep_pass || true
+                last_orphan_sweep=$now
             fi
         fi
     done
@@ -1438,10 +1560,10 @@ run_poll() {
 # WATCH_TIMER_PID itself is pre-declared (empty) up near the shared trap
 # installation, above — this just fills it in when the feature is on.
 # ---------------------------------------------------------------------------
-if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ]; then
+if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ] || [ "$WATCH_ORPHAN_SWEEP_SECS" -gt 0 ]; then
     run_watch_timer_loop &
     WATCH_TIMER_PID=$!
-    log_event watch.timer.start "pr_poll_secs=$WATCH_PR_POLL_SECS check_on_done=$WATCH_CHECK_ON_DONE"
+    log_event watch.timer.start "pr_poll_secs=$WATCH_PR_POLL_SECS check_on_done=$WATCH_CHECK_ON_DONE orphan_sweep_secs=$WATCH_ORPHAN_SWEEP_SECS"
 fi
 
 case "$BACKEND" in

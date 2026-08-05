@@ -66,6 +66,25 @@ EOF
 }
 make_kill_stub "Done. Closed 1 window(s)."
 
+# Stub reap-orphan-worktrees.sh: issue #225's orphan_sweep_pass invokes this
+# (via $REAP_ORPHAN) on WATCH_ORPHAN_SWEEP_SECS to clear window-less
+# worktrees kill-finished-workers.sh can never reach. Prints the real
+# script's "Done. Reaped N worktree(s) ..." summary — orphan_sweep_pass
+# parses it for the reaped=N count, same technique used for KILL_LOG above.
+REAP_ORPHAN_LOG="$TEST_DIR/reap-orphan.log"
+FAKE_REAP_ORPHAN="$TEST_DIR/fake-reap-orphan-worktrees.sh"
+make_reap_orphan_stub() {
+    local summary="$1"
+    cat > "$FAKE_REAP_ORPHAN" <<EOF
+#!/usr/bin/env bash
+printf '%s  REAP: %s\n' "\$(date +%s%N)" "\$*" >> "$REAP_ORPHAN_LOG"
+echo "$summary"
+exit 0
+EOF
+    chmod +x "$FAKE_REAP_ORPHAN"
+}
+make_reap_orphan_stub "Done. Reaped 0 worktree(s) (skipped 0 of 0 scanned)."
+
 # Stub llm-start.sh: record argv + timestamp.
 WAKE_LOG="$TEST_DIR/wake.log"
 FAKE_LLM_START="$TEST_DIR/fake-llm-start.sh"
@@ -103,23 +122,53 @@ fi
 exit 0
 EOF
 chmod +x "$FAKE_GH"
+
+# Stub tmux: issue #225's has_live_window() calls `tmux list-windows -t
+# $SESSION_NAME -F '#W'` to decide whether kill-finished-workers.sh could
+# possibly reap a terminal-PR worktree (it only ever sees LIVE windows).
+# TMUX_WINDOWS_FILE starts empty — the default "no live windows" state,
+# matching this sandbox's real tmux (no server running) — so by default
+# every worktree looks window-less/orphaned to pr_poll_pass. Tests that
+# exercise the REAP path populate it with "iss-N" for their issue first;
+# the new orphan-path tests (17+) rely on the empty default.
+# has-session always fails (exit 1) — mirrors "no live coordinator session"
+# so maybe_auto_compact's coordinator_pane_state() stays "absent", same as
+# the pre-#225 behavior with no tmux stub at all.
+TMUX_WINDOWS_FILE="$TEST_DIR/tmux-windows.txt"
+: > "$TMUX_WINDOWS_FILE"
+FAKE_TMUX="$TEST_DIR/bin/tmux"
+cat > "$FAKE_TMUX" <<EOF
+#!/usr/bin/env bash
+case "\$1" in
+    list-windows) cat "$TMUX_WINDOWS_FILE" ;;
+    has-session)  exit 1 ;;
+    *)            exit 0 ;;
+esac
+EOF
+chmod +x "$FAKE_TMUX"
+
 export PATH="$TEST_DIR/bin:$PATH"
 
 # Helper: start watcher in background with given WATCHER_AUTOCLOSE value.
 # Returns PID via global. Uses ONCE=1 so it exits after first wake.
 #
-# WATCH_PR_POLL_SECS / WATCH_CHECK_ON_DONE default to 0 here (feature off)
-# so tests 1-4 — which predate issue #119 — stay hermetic and don't spin up
-# the new background timer loop. Tests targeting #119 export these (and
-# ONCE=0, since the pr-poll/check-on-done triggers aren't tied to
-# on_outcome's ONCE=1 exit) as a prefix before calling start_watcher.
+# WATCH_PR_POLL_SECS / WATCH_ORPHAN_SWEEP_SECS / WATCH_CHECK_ON_DONE default
+# to 0 here (feature off) so tests 1-4 — which predate issues #119/#225 —
+# stay hermetic and don't spin up the new background timer loop. Tests
+# targeting #119/#225 export these (and ONCE=0, since the pr-poll/orphan-
+# sweep/check-on-done triggers aren't tied to on_outcome's ONCE=1 exit) as a
+# prefix before calling start_watcher. REAP_ORPHAN always defaults to the
+# stub (never the real script) so a test that forgets to override it can't
+# accidentally shell out to the genuine reap-orphan-worktrees.sh.
 start_watcher() {
     local autoclose="$1" logfile="$2"
     WATCHER_AUTOCLOSE="$autoclose" \
         KILL_FINISHED="$FAKE_KILL" \
+        REAP_ORPHAN="${REAP_ORPHAN:-$FAKE_REAP_ORPHAN}" \
         LLM_START="$FAKE_LLM_START" \
         WORKSPACE="$TEST_DIR" \
         WATCH_PR_POLL_SECS="${WATCH_PR_POLL_SECS:-0}" \
+        WATCH_ORPHAN_SWEEP_SECS="${WATCH_ORPHAN_SWEEP_SECS:-0}" \
         WATCH_CHECK_ON_DONE="${WATCH_CHECK_ON_DONE:-0}" \
         CHECK_RUNNER="${CHECK_RUNNER:-}" \
         DRY_RUN=0 ONCE="${ONCE:-1}" POLL_SECS=1 DEBOUNCE_SECS=0 \
@@ -316,6 +365,10 @@ heading "Test 5: pr-poll backstop reaps a merged PR with NO outcome.json ever ar
 rm -f "$PROJECT_DIR/.swarm/events.log"
 mkdir -p "$TEST_DIR/wt-issue-50/.swarm/tasks/done"
 printf 'fix/issue-50\tMERGED\t101\n' > "$GH_PR_LIST_FILE"
+# issue #225: a live iss-50 window is what makes this reapable via
+# kill-finished-workers.sh in the first place — without it, has_live_window
+# would (correctly) route this into the orphan_no_window path instead.
+echo "iss-50" > "$TMUX_WINDOWS_FILE"
 
 ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 1 "$TEST_DIR/watch-5.log"
 sleep 5
@@ -530,6 +583,7 @@ echo 'echo ok' > "$TEST_DIR/wt-issue-95/.swarm/check.sh"
 echo '{"task_id":"t95","state":"ready-for-review","pr":99,"ts":"2026-07-20T00:00:00Z"}' \
     > "$TEST_DIR/wt-issue-95/.swarm/tasks/status/t95.json"
 printf 'fix/issue-95\tMERGED\t99\n' > "$GH_PR_LIST_FILE"
+echo "iss-95" > "$TMUX_WINDOWS_FILE"   # issue #225 — see Test 5's comment
 
 ONCE=0 WATCH_PR_POLL_SECS=2 WATCH_CHECK_ON_DONE=1 CHECK_RUNNER="$FAKE_CHECK_RUNNER" \
     start_watcher 1 "$TEST_DIR/watch-13.log"
@@ -600,6 +654,7 @@ heading "Test 15: pr-poll ignores a terminal PR that predates the freshly provis
 rm -f "$PROJECT_DIR/.swarm/events.log"
 mkdir -p "$TEST_DIR/wt-issue-100/.swarm/tasks/done"
 printf 'fix/issue-100\tCLOSED\t101\t2020-01-01T00:00:00Z\n' > "$GH_PR_LIST_FILE"
+: > "$TMUX_WINDOWS_FILE"   # irrelevant here — stale-PR check short-circuits before has_live_window
 
 ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 1 "$TEST_DIR/watch-15.log"
 sleep 5
@@ -623,6 +678,7 @@ rm -f "$PROJECT_DIR/.swarm/events.log"
 mkdir -p "$TEST_DIR/wt-issue-102/.swarm/tasks/done"
 NOW_ISO="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 printf 'fix/issue-102\tCLOSED\t103\t%s\n' "$NOW_ISO" > "$GH_PR_LIST_FILE"
+echo "iss-102" > "$TMUX_WINDOWS_FILE"   # issue #225 — see Test 5's comment
 
 ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 1 "$TEST_DIR/watch-15b.log"
 sleep 5
@@ -709,6 +765,89 @@ green "kill-finished-workers.sh --pr-finalized preserved a fresh worktree whose 
 $(cat "$TEST_DIR/kfw-run.log")"
 green "kill-finished-workers.sh --pr-finalized still reaps a worktree whose terminal PR postdates it"
 
+# ============================================================================
+heading "Test 17: pr-poll logs orphan_no_window ONCE for a window-less terminal-PR worktree, never reaps it (issue #225)"
+# ============================================================================
+# The bug: a worktree whose tmux window is already gone (session restart,
+# docker daemon restart — cf. #217) has a MERGED/CLOSED PR forever, so every
+# pr_poll_pass tick used to re-detect it and re-run kill-finished-workers.sh
+# — which can never actually kill anything, since it only iterates LIVE
+# iss-N windows. Reproduces that: a terminal PR, no matching entry in
+# TMUX_WINDOWS_FILE (no live window), WATCH_ORPHAN_SWEEP_SECS=0 so this test
+# isolates pr_poll_pass's own behavior from the sweep. Across several poll
+# ticks, kill-finished-workers.sh must never fire, and the orphan_no_window
+# reason must be logged exactly once (not once per tick).
+: > "$KILL_LOG"
+: > "$TMUX_WINDOWS_FILE"
+rm -f "$PROJECT_DIR/.swarm/events.log"
+mkdir -p "$TEST_DIR/wt-issue-200/.swarm/tasks/done"
+printf 'fix/issue-200\tMERGED\t201\n' > "$GH_PR_LIST_FILE"
+
+ONCE=0 WATCH_PR_POLL_SECS=1 WATCH_ORPHAN_SWEEP_SECS=0 start_watcher 1 "$TEST_DIR/watch-17.log"
+sleep 6
+stop_watcher
+
+[ ! -s "$KILL_LOG" ] \
+    || red "kill-finished-workers.sh fired for a window-less worktree — it can never reap this (issue #225). Kill log:
+$(cat "$KILL_LOG")"
+green "kill-finished-workers.sh was never invoked for the window-less terminal-PR worktree"
+
+EVENTS_LOG="$PROJECT_DIR/.swarm/events.log"
+ORPHAN_LINES=$(grep -c 'reason=orphan_no_window issue=200' "$EVENTS_LOG" 2>/dev/null || true)
+[ "$ORPHAN_LINES" -eq 1 ] \
+    || red "expected exactly 1 orphan_no_window log line across multiple poll ticks; got $ORPHAN_LINES. Events log:
+$(cat "$EVENTS_LOG" 2>/dev/null || echo '(missing)')"
+green "orphan_no_window logged exactly once despite multiple WATCH_PR_POLL_SECS ticks (no spam)"
+
+if grep -q 'reason=terminal_pr_detected' "$EVENTS_LOG" 2>/dev/null; then
+    red "terminal_pr_detected (the reap_hit trigger) should not fire for a window-less worktree"
+fi
+green "reap_hit was never set for the window-less worktree — orphan_sweep_pass is the only path that can clear it"
+
+# ============================================================================
+heading "Test 18: orphan_sweep_pass runs reap-orphan-worktrees.sh on WATCH_ORPHAN_SWEEP_SECS, gated by WATCHER_AUTOCLOSE (issue #225)"
+# ============================================================================
+# This is the actual fix for Test 17's scenario: a slower, independent timer
+# that walks worktree DIRECTORIES (not tmux windows) via
+# reap-orphan-worktrees.sh, so window-less orphans eventually get cleared.
+: > "$REAP_ORPHAN_LOG"
+rm -f "$PROJECT_DIR/.swarm/events.log"
+make_reap_orphan_stub "Done. Reaped 2 worktree(s) (skipped 1 of 3 scanned)."
+
+ONCE=0 WATCH_PR_POLL_SECS=0 WATCH_ORPHAN_SWEEP_SECS=1 \
+    REAP_ORPHAN="$FAKE_REAP_ORPHAN" start_watcher 1 "$TEST_DIR/watch-18a.log"
+sleep 4
+stop_watcher
+
+[ -s "$REAP_ORPHAN_LOG" ] \
+    || red "reap-orphan-worktrees.sh stub was NOT invoked with WATCH_ORPHAN_SWEEP_SECS=1 WATCHER_AUTOCLOSE=1. Watch log:
+$(cat "$TEST_DIR/watch-18a.log")"
+grep -q -- '--pr-finalized' "$REAP_ORPHAN_LOG" \
+    || red "expected --pr-finalized in reap-orphan stub argv; got: $(cat "$REAP_ORPHAN_LOG")"
+grep -q -- '--yes' "$REAP_ORPHAN_LOG" \
+    || red "expected --yes in reap-orphan stub argv; got: $(cat "$REAP_ORPHAN_LOG")"
+green "orphan_sweep_pass invoked reap-orphan-worktrees.sh --pr-finalized --yes on its own timer"
+
+EVENTS_LOG="$PROJECT_DIR/.swarm/events.log"
+grep -q '^.*watch\.orphan_sweep .*reaped=2' "$EVENTS_LOG" \
+    || red "expected 'watch.orphan_sweep ... reaped=2' event in events.log; got:
+$(cat "$EVENTS_LOG" 2>/dev/null || echo '(missing)')"
+green "events.log recorded watch.orphan_sweep with the parsed reaped=N count"
+
+: > "$REAP_ORPHAN_LOG"
+rm -f "$PROJECT_DIR/.swarm/events.log"
+ONCE=0 WATCH_PR_POLL_SECS=0 WATCH_ORPHAN_SWEEP_SECS=1 \
+    REAP_ORPHAN="$FAKE_REAP_ORPHAN" start_watcher 0 "$TEST_DIR/watch-18b.log"
+sleep 4
+stop_watcher
+
+[ ! -s "$REAP_ORPHAN_LOG" ] \
+    || red "orphan sweep ran despite WATCHER_AUTOCLOSE=0 — it should be gated by the same autoclose switch as the window-based reap. Log:
+$(cat "$REAP_ORPHAN_LOG")"
+green "WATCHER_AUTOCLOSE=0 disables the orphan sweep too (single kill switch for all auto-reaping)"
+
+make_reap_orphan_stub "Done. Reaped 0 worktree(s) (skipped 0 of 0 scanned)."
+
 # ────────────────────────── Done ──────────────────────────
 
 heading "All watcher-autoclose tests passed"
@@ -729,4 +868,6 @@ echo "  #181: check-on-done skips spawning a check once the PR is already MERGED
 echo "  #181: the claim is released on completion without causing a double-run"
 echo "  #185: pr-poll ignores a terminal PR that predates the freshly provisioned worktree"
 echo "  #185: kill-finished-workers.sh --pr-finalized preserves a fresh worktree with a stale closed PR"
+echo "  #225: pr-poll never reaps a window-less worktree; logs orphan_no_window once, not every tick"
+echo "  #225: orphan_sweep_pass runs reap-orphan-worktrees.sh on its own timer, gated by WATCHER_AUTOCLOSE"
 yellow "Run with KEEP=1 to leave $TEST_DIR for inspection."
