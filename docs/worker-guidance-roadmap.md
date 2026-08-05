@@ -47,6 +47,31 @@ Every file in `prompts/` should open with one sentence: "this doc is read
 by [WHO] who needs to [DO WHAT]." Forces the author to be honest about
 scope; gives the refactor/trim/focus skill a fixed yardstick.
 
+### DONE 2026-07-25 — context-first restructure of the PR-body skeleton
+Review of 16 recent fand-app/fand-etl PR bodies found reviewer obligations
+(decisions to make, things to verify, data hazards) consistently landing at
+50–90% depth, filed under Decisions/Review-focus. Restructured the skeleton:
+`## Context` (1–3 sentence advance-organizer frame, always first — context
+after details does ~nothing for comprehension, per Bransford & Johnson 1972),
+`## TL;DR`, `## Needs from you` (DECIDE/VERIFY/BEWARE, ≤3 bullets or
+"Nothing."), new `## Findings` split out of Decisions, Re-entry brief moved
+below the fold (long-form for cold agents), ~8-line budget on the top block.
+Coordinator triage-quote updated to match.
+
+Context length ruling (same day): operator leaned toward a flat 1–5
+sentences + optional bullets; settled on a conditional window instead —
+1–3 sentences warm territory, up to 5 cold (design proposals, new
+subsystems), rationale: organizer length in the literature scales with
+reader coldness (Bransford's one-line title ↔ Ausubel's ~500-word
+passages), and flat windows act as targets, not caps, for LLM writers.
+Bullets rejected: frames encode relations, bullets encode membership.
+
+Provenance note, per operator request: the DECIDE/VERIFY/BEWARE tag names
+and the top-block line budget were accepted as the drafting agent's
+defaults — the operator explicitly skipped the suggested review of those
+two knobs. They are unreviewed defaults, not considered rulings; revisit
+if they chafe in practice.
+
 ---
 
 ## Done

@@ -167,10 +167,14 @@ hours or days later with most of the original context gone — or by a
 different person entirely. Optimize for their re-entry, not for the merge
 moment:
 
-- **Layer it.** Bottom line first (TL;DR: what happened, what they must
-  decide), plain-language orientation second (re-entry brief), expert detail
-  third. The reader picks their depth; nobody should have to read everything
-  to act.
+- **Layer it.** Context frame first (a few sentences, sized to how cold
+  the reader likely is: what territory this touches and why the work
+  exists — parseable by someone who hasn't read the diff or the issue),
+  bottom line second (TL;DR + what the human must
+  do or decide), expert detail third. Context must *precede* detail — the
+  same orientation sentences placed after the details do almost nothing
+  for a reader. The reader picks their depth; nobody should have to read
+  everything to act.
 - **Never open mid-story.** "Implements the two sources #661 deferred"
   requires remembering #661. Restate what those sources are and why they were
   deferred, *then* cite the issue.
@@ -183,10 +187,15 @@ moment:
   belongs in "Decisions & alternatives" with one-line pros/cons per option
   and your opinionated recommendation — not buried in a bullet's subordinate
   clause. Concerns you couldn't resolve go there too.
+- **Findings are not rationale.** New facts about the data/system you
+  discovered en route (a data hazard, a wrong premise in the issue, an
+  upstream quirk consumers must know) go in "Findings" — readers treat
+  Decisions bullets as skippable justification, so a finding filed there
+  is a finding lost.
 
 This deliberately spends extra tokens on handoff surfaces; that trade is
 accepted swarm policy. It applies to PR bodies (skeleton below), issues you
-file (successors, follow-ups: same TL;DR / re-entry brief / acceptance-
+file (successors, follow-ups: same context / TL;DR / re-entry / acceptance-
 criteria layering), and `## Summary` blocks for **no-PR terminal states**,
 where the pane summary is the only record. When a PR carries the full
 re-entry brief, the pane `## Summary` may stay tight and point to it.
@@ -263,35 +272,64 @@ including a failed `claude -p` call — must be **flagged in the handoff**
 
 If `.github/PULL_REQUEST_TEMPLATE.md` exists, use its headings — keeping the
 `BLIND_MERGE_RISK` comment at top, the `<sub>` footer at bottom, and weaving
-the TL;DR / re-entry / decisions layers into whatever sections it defines.
-Otherwise:
+the context / TL;DR / needs-from-you / re-entry layers into whatever
+sections it defines. Otherwise:
 
 ```
 <!-- BLIND_MERGE_RISK: low -->
 
+## Context
+
+<Prose the reader can parse before knowing anything about the diff: what
+part of the system this touches (anchored in referents the human already
+knows — issue #s, subsystem/table names) and why the work exists now.
+Size it to how cold the reader likely is: 1–3 sentences when the territory
+is warm (closing an issue they filed recently); up to 5 when it's cold
+(design proposals, new subsystems, week-old briefs). No bullets — a frame
+works by stating the *relations* between things, and enumeration is
+"What changed" material. No mechanism, no file names, no history — those
+come later. This is the reader's mental staging area; every later detail
+should have an obvious place to land after these sentences.>
+
 ## TL;DR
 
-<1–2 sentences, bottom line up front: what this PR does + what the human
-should do or decide next.>
+<1–2 sentences: what this PR does. `Closes #N` if applicable. If the PR is
+a proposal, state the recommendation itself — never just "recommendation
+inside". Do not restate the risk rating here; the comment above and the
+footer below already carry it.>
 
-## Re-entry brief
+## Needs from you
 
-<3–8 sentences of plain language for a reader who has forgotten everything.
-What was the problem, why did it matter, where does this sit in the larger
-effort? Define jargon at first use. Restate the essentials of the briefed
-issue here — cite it for provenance, but never require opening it.>
+<At most 3 bullets, or the single word "Nothing." — which is a claim you
+must actually check, not a default. Tag each bullet:
+- DECIDE: <a call only the human can make — e.g. a design choice the issue left open>
+- VERIFY: <something the human must check before trusting the result>
+- BEWARE: <a hazard they need to know before using this code/data>>
 
 ## What changed
 
-<The expert layer: design shape, files, mechanics. Bullets fine.
-`Closes #N` if applicable.>
+<The expert layer: design shape, files, mechanics. Bullets fine.>
+
+## Findings
+
+<New facts about the data/system discovered en route, whether or not they
+shaped the diff — data hazards, wrong premises in the issue, upstream
+quirks downstream consumers must know. Omit the section entirely if none.>
 
 ## Decisions & alternatives
 
 <Each judgment call you made: the options that existed, one-line pros/cons
 per option, what you chose, why, and any residual concern. Be opinionated —
-state your view plainly. If there were genuinely no judgment calls, say so
-in one line.>
+state your view plainly. Rationale only — facts you discovered belong in
+Findings. If there were genuinely no judgment calls, say so in one line.>
+
+## Re-entry brief
+
+<3–8 sentences of plain language for a cold reader — the full story behind
+the Context frame above: what was the problem, why did it matter, where
+does this sit in the larger effort? Define jargon at first use. Restate the
+essentials of the briefed issue here — cite it for provenance, but never
+require opening it.>
 
 ## Test plan
 
@@ -301,9 +339,10 @@ in one line.>
 
 ## Review focus
 
-<Ranked: what a reviewer should actually scrutinize or decide — especially
-anything that is a methodology/product call rather than a code call — plus
-anything deferred and its tracking issue.>
+<Ranked "worth a skim" pointers for a reviewer with time — code areas,
+heuristics, chosen tolerances — plus anything deferred and its tracking
+issue. Reviewer obligations (decide/verify/beware) belong in "Needs from
+you", not here.>
 
 ---
 
@@ -311,8 +350,13 @@ anything deferred and its tracking issue.>
 ```
 
 For small 🟢 low diffs (typo, lint, docs touch-up) the layers may collapse —
-TL;DR plus a two-sentence re-entry brief and "no judgment calls" is enough;
-don't pad. The full structure is mandatory for 🟡/🔴 PRs.
+Context + TL;DR + `Needs from you: Nothing.` is enough; don't pad. The full
+structure is mandatory for 🟡/🔴 PRs.
+
+Total budget for Context + TL;DR + Needs from you: ~8 lines (~10 when a
+cold-territory Context earns its 5 sentences). That top block is the
+human's triage screen; everything below it may stay as thorough as the
+work deserves.
 
 ---
 
@@ -334,7 +378,9 @@ is. The human can adjust mid-task via a `requeue.sh` brief containing
 When you discover something noteworthy mid-work — a real bug, a hidden
 dependency, a wrong premise in the issue, a test gap that hid the bug — emit
 it as a `## Note` block instead of letting it get lost in narrative. These
-become teaching moments the human can act on or file as a follow-up.
+become teaching moments the human can act on or file as a follow-up. Notes
+still relevant at PR time land in the PR body's `## Findings` section (and,
+if the human must act on one, as a `## Needs from you` bullet).
 
 ---
 
