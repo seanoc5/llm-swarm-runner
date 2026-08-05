@@ -268,29 +268,74 @@ has_open_pr() {
     [ "$state" = "OPEN" ]
 }
 
-# Returns 0 if the PR for the given branch is MERGED (strict). Returns 1
-# for OPEN, CLOSED-without-merge, or no PR at all. Used by --merged-only
-# mode so we never reap a worktree whose work hasn't been preserved
-# upstream.
-pr_is_merged() {
-    local branch="$1"
-    local state
-    state=$(gh pr view "$branch" --json state -q .state 2>/dev/null || true)
-    [ "$state" = "MERGED" ]
+# Portable mtime (epoch seconds). GNU coreutils first, BSD fallback. Mirrors
+# reap-orphan-worktrees.sh's mtime_epoch — kept local since scripts here are
+# self-contained (see scripts/README.md).
+mtime_epoch() {
+    stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
 }
 
-# Returns 0 if the PR for the given branch is finalized — MERGED or CLOSED.
-# Returns 1 for OPEN or no PR at all. Used by --pr-finalized mode so the
-# watcher can also reap PRs the user has rejected/closed without merging
-# (superseded, duplicate, abandoned). Local worktree + branch get removed,
-# but the origin branch is preserved by kill-worktree.sh (it only does
-# `git branch -D`, never `git push --delete`), so accidental closures are
+# pr_predates_worktree <created_at-iso8601> <worktree-dir>
+#
+# issue #185: `gh pr view <branch>` returns the branch's most recent PR in
+# ANY state. A recycled branch name whose previous PR is MERGED/CLOSED
+# makes a freshly provisioned worktree on that branch look "finalized" to
+# pr_is_merged/pr_is_finalized below, even though the terminal PR predates
+# this worktree entirely and has nothing to do with the work currently in
+# it. Compares the PR's createdAt against the worktree root directory's
+# mtime — set once by `git worktree add` and otherwise stable, our
+# lowest-cost proxy for "when this worktree was born" (same technique
+# reap-orphan-worktrees.sh uses for orphan staleness).
+#
+# Fails CLOSED (i.e. "does NOT predate", not stale) whenever either
+# timestamp can't be resolved, so a parsing hiccup falls back to the
+# pre-#185 behavior (treat the terminal PR as reap evidence) rather than
+# silently blocking a legitimate reap forever.
+pr_predates_worktree() {
+    local created_at="$1" wt="$2"
+    [ -n "$created_at" ] && [ -d "$wt" ] || return 1
+    local pr_epoch wt_epoch
+    pr_epoch=$(date -d "$created_at" +%s 2>/dev/null) || return 1
+    [ -n "$pr_epoch" ] || return 1
+    wt_epoch=$(mtime_epoch "$wt") || return 1
+    [ -n "$wt_epoch" ] || return 1
+    [ "$pr_epoch" -lt "$wt_epoch" ]
+}
+
+# Returns 0 if the PR for the given branch is MERGED (strict) AND was
+# created after the given worktree came into existence. Returns 1 for
+# OPEN, CLOSED-without-merge, no PR at all, or a MERGED PR that predates
+# the worktree (issue #185 — stale history from a recycled branch name,
+# not evidence about the CURRENT worktree). Used by --merged-only mode so
+# we never reap a worktree whose work hasn't been preserved upstream.
+pr_is_merged() {
+    local branch="$1" wt="$2"
+    local json state created_at
+    json=$(gh pr view "$branch" --json state,createdAt -q '"\(.state)\t\(.createdAt)"' 2>/dev/null) || return 1
+    IFS=$'\t' read -r state created_at <<< "$json"
+    [ "$state" = "MERGED" ] || return 1
+    ! pr_predates_worktree "$created_at" "$wt"
+}
+
+# Returns 0 if the PR for the given branch is finalized — MERGED or
+# CLOSED — AND was created after the given worktree came into existence.
+# Returns 1 for OPEN, no PR at all, or a finalized PR that predates the
+# worktree (issue #185). Used by --pr-finalized mode so the watcher can
+# also reap PRs the user has rejected/closed without merging (superseded,
+# duplicate, abandoned). Local worktree + branch get removed, but the
+# origin branch is preserved by kill-worktree.sh (it only does `git
+# branch -D`, never `git push --delete`), so accidental closures are
 # recoverable via `gh pr reopen N`.
 pr_is_finalized() {
-    local branch="$1"
-    local state
-    state=$(gh pr view "$branch" --json state -q .state 2>/dev/null || true)
-    [ "$state" = "MERGED" ] || [ "$state" = "CLOSED" ]
+    local branch="$1" wt="$2"
+    local json state created_at
+    json=$(gh pr view "$branch" --json state,createdAt -q '"\(.state)\t\(.createdAt)"' 2>/dev/null) || return 1
+    IFS=$'\t' read -r state created_at <<< "$json"
+    case "$state" in
+        MERGED|CLOSED) : ;;
+        *) return 1 ;;
+    esac
+    ! pr_predates_worktree "$created_at" "$wt"
 }
 
 # Decide which ones to kill ---------------------------------------------------
@@ -336,23 +381,26 @@ for w in "${WINDOWS[@]}"; do
 
     # PR check (applied in both modes when enabled). Resolved once per
     # window against the actual checked-out branch (see worktree_branch),
-    # not the dirname-derived fix/issue-N.
+    # not the dirname-derived fix/issue-N. wt is passed alongside so
+    # pr_is_merged/pr_is_finalized can ignore a terminal PR that predates
+    # this worktree (issue #185).
     if [ "$MERGED_ONLY" = "1" ] || [ "$PR_FINALIZED" = "1" ] || [ "$PR_CHECK" = "1" ]; then
         branch="$(worktree_branch "$issue")"
         if [ -z "$branch" ]; then
             echo "  $w  [can't resolve worktree branch (detached HEAD or corrupt worktree registration) → skip]"
             continue
         fi
+        wt="$(swarm_worktree_dir "$PROJECT_DIR" "$issue")"
     fi
     if [ "$MERGED_ONLY" = "1" ]; then
-        if ! pr_is_merged "$branch"; then
-            echo "  $w  [PR $branch not MERGED → skip (merged-only mode)]"
+        if ! pr_is_merged "$branch" "$wt"; then
+            echo "  $w  [PR $branch not MERGED, or its terminal state predates this worktree → skip (merged-only mode)]"
             continue
         fi
         reasons+=("PR-merged")
     elif [ "$PR_FINALIZED" = "1" ]; then
-        if ! pr_is_finalized "$branch"; then
-            echo "  $w  [PR $branch not MERGED|CLOSED → skip (pr-finalized mode)]"
+        if ! pr_is_finalized "$branch" "$wt"; then
+            echo "  $w  [PR $branch not MERGED|CLOSED, or its terminal state predates this worktree → skip (pr-finalized mode)]"
             continue
         fi
         reasons+=("PR-finalized")

@@ -260,7 +260,10 @@ EVENTS LOG
       reap.window          per-target kill record written by kill-finished-workers.sh
                            (issue, window, branch, reasons, capture=<pane snapshot path>)
       watch.timer.start    background pr-poll/check-on-done timer loop started
-      watch.pr_poll        terminal PR detected via periodic gh poll (reap backstop)
+      watch.pr_poll        terminal PR detected via periodic gh poll (reap backstop);
+                           reason=stale_pr_ignored when the terminal PR
+                           predates the worktree (issue #185 — recycled
+                           branch name, not evidence about this worktree)
       watch.check_on_done  check-on-done result (issue, task_id, result=running|pass|fail|skipped)
       cap.refused          provision-worker.sh hit MAX_WORKERS / MAX_TMUX_WINDOWS
       coord.compact        /compact injected before wake (used, threshold)
@@ -654,6 +657,43 @@ cleanup_eligible_workers() {
     fi
 }
 
+# Portable mtime (epoch seconds). GNU coreutils first, BSD fallback. Mirrors
+# reap-orphan-worktrees.sh's mtime_epoch — kept local since scripts here are
+# self-contained (see scripts/README.md). Also used below by
+# probe_ctx_used for the auto-compact probe's staleness check.
+mtime_epoch() {
+    stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
+}
+
+# pr_predates_worktree <created_at-iso8601> <worktree-dir>
+#
+# issue #185: `gh pr list --state all` returns every PR that ever existed
+# for a branch name — a recycled branch name whose previous PR is
+# MERGED/CLOSED makes a freshly provisioned worktree on that branch look
+# "finalized" to pr_poll_pass below, even though the terminal PR predates
+# this worktree entirely (observed: a worker reaped 3s after provisioning
+# because an old closed PR on the same branch name was still terminal).
+# Compares the PR's createdAt against the worktree root directory's mtime
+# — set once by `git worktree add` and otherwise stable, our lowest-cost
+# proxy for "when this worktree was born" (same technique
+# reap-orphan-worktrees.sh uses for orphan staleness, and the same check
+# kill-finished-workers.sh's pr_is_merged/pr_is_finalized now apply).
+#
+# Fails CLOSED (i.e. "does NOT predate", not stale) whenever either
+# timestamp can't be resolved, so a parsing hiccup falls back to the
+# pre-#185 behavior (treat the terminal PR as reap evidence) rather than
+# silently suppressing a legitimate reap forever.
+pr_predates_worktree() {
+    local created_at="$1" wt_dir="$2"
+    [ -n "$created_at" ] && [ -d "$wt_dir" ] || return 1
+    local pr_epoch wt_epoch
+    pr_epoch=$(date -d "$created_at" +%s 2>/dev/null) || return 1
+    [ -n "$pr_epoch" ] || return 1
+    wt_epoch=$(mtime_epoch "$wt_dir") || return 1
+    [ -n "$wt_epoch" ] || return 1
+    [ "$pr_epoch" -lt "$wt_epoch" ]
+}
+
 # pr_poll_pass
 #
 # Behavior A backstop (issue #119): the outcome-driven reap above only
@@ -675,15 +715,15 @@ cleanup_eligible_workers() {
 pr_poll_pass() {
     local prs
     prs="$(cd "$PROJECT_DIR" && gh pr list --state all --limit 500 \
-            --json headRefName,state,number \
-            --jq '.[] | "\(.headRefName)\t\(.state)\t\(.number)"' 2>/dev/null)" || {
+            --json headRefName,state,number,createdAt \
+            --jq '.[] | "\(.headRefName)\t\(.state)\t\(.number)\t\(.createdAt)"' 2>/dev/null)" || {
         log_event pr_poll.error "reason=gh_pr_list_failed"
         return 0
     }
     [ -n "$prs" ] || return 0
 
-    local reap_hit=0 branch state pr_number issue wt_dir
-    while IFS=$'\t' read -r branch state pr_number; do
+    local reap_hit=0 branch state pr_number created_at issue wt_dir
+    while IFS=$'\t' read -r branch state pr_number created_at; do
         [ -z "$branch" ] && continue
         case "$branch" in
             fix/issue-*) : ;;
@@ -695,7 +735,11 @@ pr_poll_pass() {
         [ -d "$wt_dir" ] || continue   # already reaped, or never provisioned here
 
         if [ "$state" = "MERGED" ] || [ "$state" = "CLOSED" ]; then
-            reap_hit=1
+            if pr_predates_worktree "$created_at" "$wt_dir"; then
+                log_event watch.pr_poll "reason=stale_pr_ignored issue=$issue branch=$branch pr=$pr_number state=$state"
+            else
+                reap_hit=1
+            fi
         fi
 
         if [ "$WATCH_CHECK_ON_DONE" = "1" ]; then
@@ -1010,12 +1054,9 @@ run_watch_timer_loop() {
 
 # --- Auto-compact (before wake) ---------------------------------------------
 #
-# Portable mtime (epoch seconds). GNU coreutils first, BSD fallback. Mirrors
-# reap-orphan-worktrees.sh's mtime_epoch — kept local rather than shared
-# since scripts here are self-contained (see scripts/README.md).
-mtime_epoch() {
-    stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
-}
+# mtime_epoch is defined above, near pr_predates_worktree (issue #185) —
+# probe_ctx_used below reuses it for the auto-compact probe's staleness
+# check.
 
 # coordinator_pane_state
 #

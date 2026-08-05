@@ -586,6 +586,129 @@ if [ -d "$TEST_DIR/wt-issue-96/.swarm/tasks/status/t96.check-claim" ]; then
 fi
 green "check-claim released promptly after completion (reap is free to proceed)"
 
+# ============================================================================
+heading "Test 15: pr-poll ignores a terminal PR that predates the freshly provisioned worktree (issue #185)"
+# ============================================================================
+# The bug: gh pr list/view returns a branch's most recent PR in ANY state.
+# A recycled branch name whose PREVIOUS PR is MERGED/CLOSED makes a
+# brand-new worktree on that branch look "finalized" 3s after provisioning
+# — the fresh worker gets reaped before it does anything. GH_PR_LIST_FILE
+# now carries a 4th column (createdAt); an old CLOSED PR with a createdAt
+# far in the past must NOT trigger a reap for a worktree that (by
+# definition, in this test) was just created.
+: > "$KILL_LOG"
+rm -f "$PROJECT_DIR/.swarm/events.log"
+mkdir -p "$TEST_DIR/wt-issue-100/.swarm/tasks/done"
+printf 'fix/issue-100\tCLOSED\t101\t2020-01-01T00:00:00Z\n' > "$GH_PR_LIST_FILE"
+
+ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 1 "$TEST_DIR/watch-15.log"
+sleep 5
+stop_watcher
+
+[ ! -s "$KILL_LOG" ] \
+    || red "reap fired for a freshly provisioned worktree whose only terminal PR predates it (the #185 bug). Kill log:
+$(cat "$KILL_LOG")"
+green "a stale terminal PR (predates the worktree) did NOT trigger a reap"
+
+EVENTS_LOG="$PROJECT_DIR/.swarm/events.log"
+grep -q 'reason=stale_pr_ignored' "$EVENTS_LOG" 2>/dev/null \
+    || red "expected watch.pr_poll reason=stale_pr_ignored in events.log; got:
+$(cat "$EVENTS_LOG" 2>/dev/null || echo '(missing)')"
+green "events.log recorded the stale-PR-ignored reason"
+
+# Positive control: a terminal PR created AFTER the worktree still reaps
+# normally — the fix must not over-suppress genuine terminal PRs.
+: > "$KILL_LOG"
+rm -f "$PROJECT_DIR/.swarm/events.log"
+mkdir -p "$TEST_DIR/wt-issue-102/.swarm/tasks/done"
+NOW_ISO="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+printf 'fix/issue-102\tCLOSED\t103\t%s\n' "$NOW_ISO" > "$GH_PR_LIST_FILE"
+
+ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 1 "$TEST_DIR/watch-15b.log"
+sleep 5
+stop_watcher
+
+[ -s "$KILL_LOG" ] \
+    || red "a genuinely fresh terminal PR (created after the worktree) failed to trigger reap — fix is over-suppressing. Watch log:
+$(cat "$TEST_DIR/watch-15b.log")"
+green "a terminal PR created after the worktree still triggers reap (fix isn't over-suppressing)"
+
+# ============================================================================
+heading "Test 16: kill-finished-workers.sh --pr-finalized preserves a fresh worktree with a stale closed PR (issue #185)"
+# ============================================================================
+# Drives the fix at the layer that actually removes worktrees —
+# kill-finished-workers.sh's pr_is_finalized — rather than through the
+# coordinator-watch.sh stub used above. Uses the real git-fixture repo from
+# Tests 10-12 (GIT_PROJECT/GIT_FIXTURE/DEFAULT_BRANCH already set up).
+#
+# tmux is stubbed (not a live session — see the CI workflow's exclusion
+# rationale for test-coordinator-auto-compact.sh/test-e2e-swarm.sh, the
+# only two suites here that DO spin up a real tmux server) so this stays
+# CI-safe: has-session/list-windows/kill-window are the only calls
+# kill-finished-workers.sh + kill-worktree.sh make on the --pr-finalized
+# --with-worktree --idle-min 0 path (no parked/idle pane inspection).
+KFW_SCRIPT="$SCRIPT_DIR/../scripts/kill-finished-workers.sh"
+[ -x "$KFW_SCRIPT" ] || red "kill-finished-workers.sh not executable: $KFW_SCRIPT"
+
+git -C "$GIT_PROJECT" worktree add -q -b fix/issue-120 "$GIT_FIXTURE/wt-issue-120" "$DEFAULT_BRANCH"
+git -C "$GIT_PROJECT" worktree add -q -b fix/issue-121 "$GIT_FIXTURE/wt-issue-121" "$DEFAULT_BRANCH"
+
+# gh stub for kill-finished-workers.sh's `gh pr view <branch> --json
+# state,createdAt -q '"\(.state)\t\(.createdAt)"'` call — emulate gh's -q
+# output shape directly (tab-separated state + createdAt) rather than
+# parsing --json/-q, since only one query shape is ever issued here.
+GH_VIEW_FILE="$TEST_DIR/gh-pr-view-kfw.tsv"
+NOW_ISO_121="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+{
+    printf 'fix/issue-120\tCLOSED\t2020-01-01T00:00:00Z\n'
+    printf 'fix/issue-121\tCLOSED\t%s\n' "$NOW_ISO_121"
+} > "$GH_VIEW_FILE"
+
+mkdir -p "$TEST_DIR/bin-kfw"
+FAKE_GH_KFW="$TEST_DIR/bin-kfw/gh"
+cat > "$FAKE_GH_KFW" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "pr" ] && [ "\$2" = "view" ]; then
+    branch="\$3"
+    awk -F'\t' -v b="\$branch" '\$1 == b { printf "%s\t%s\n", \$2, \$3; found=1 } END { exit found ? 0 : 1 }' "$GH_VIEW_FILE"
+    exit \$?
+fi
+exit 1
+EOF
+chmod +x "$FAKE_GH_KFW"
+
+# kill-worktree.sh (invoked by --with-worktree) derives its own
+# SESSION_NAME as "llm-$(basename PROJECT_DIR)" — not overridable — so
+# rather than pass --session and fight that, just let both scripts agree
+# by running from $GIT_PROJECT (basename "proj" -> session "llm-proj").
+FAKE_TMUX_KFW="$TEST_DIR/bin-kfw/tmux"
+cat > "$FAKE_TMUX_KFW" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+    has-session)   exit 0 ;;
+    list-windows)  printf 'iss-120\niss-121\n' ;;
+    kill-window)   exit 0 ;;
+esac
+exit 0
+EOF
+chmod +x "$FAKE_TMUX_KFW"
+
+(
+    cd "$GIT_PROJECT"
+    PATH="$TEST_DIR/bin-kfw:$PATH" \
+        "$KFW_SCRIPT" --idle-min 0 --pr-finalized --with-worktree --yes
+) > "$TEST_DIR/kfw-run.log" 2>&1 || true
+
+[ -d "$GIT_FIXTURE/wt-issue-120" ] \
+    || red "worktree #120 was removed despite its only terminal PR predating the worktree (the #185 bug). Output:
+$(cat "$TEST_DIR/kfw-run.log")"
+green "kill-finished-workers.sh --pr-finalized preserved a fresh worktree whose terminal PR predates it"
+
+[ ! -d "$GIT_FIXTURE/wt-issue-121" ] \
+    || red "worktree #121 (genuinely closed PR created after the worktree) was NOT reaped — fix is over-suppressing. Output:
+$(cat "$TEST_DIR/kfw-run.log")"
+green "kill-finished-workers.sh --pr-finalized still reaps a worktree whose terminal PR postdates it"
+
 # ────────────────────────── Done ──────────────────────────
 
 heading "All watcher-autoclose tests passed"
@@ -604,4 +727,6 @@ echo "  #181: kill-worktree.sh defers removal while a check-claim is active, ret
 echo "  #181: a stale (crashed-check) claim past its TTL does not block reaping forever"
 echo "  #181: check-on-done skips spawning a check once the PR is already MERGED/CLOSED"
 echo "  #181: the claim is released on completion without causing a double-run"
+echo "  #185: pr-poll ignores a terminal PR that predates the freshly provisioned worktree"
+echo "  #185: kill-finished-workers.sh --pr-finalized preserves a fresh worktree with a stale closed PR"
 yellow "Run with KEEP=1 to leave $TEST_DIR for inspection."
