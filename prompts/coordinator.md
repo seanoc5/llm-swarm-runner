@@ -125,6 +125,11 @@ digest, most-actionable first — assume they remember nothing:
 - Keep the digest under ~25 lines; everything deeper goes in the sections
   after it. The startup checklist's `OPEN=… AVAILABLE=…` line is the
   digest's **Backlog** row — don't report it twice.
+- The digest's numbered "Needs you" list plus any later options/trade-off
+  lists in the same report are exactly the shape that goes ambiguous —
+  follow `prompts/worker.md` § "Unambiguous list labeling & cross-references"
+  (hierarchical dotted numbering, fully qualified cross-refs, one label
+  style per list) for this and every other recap/status report.
 
 ### Stale-PR nudge (per wake)
 

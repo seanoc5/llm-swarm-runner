@@ -159,6 +159,84 @@ Whenever you hand control back (PR opened, blocked, parked), end with a
 
 ---
 
+## Unambiguous list labeling & cross-references
+
+Every labeled item in a response — `## Summary`/`## Decision`/`## Next`
+blocks, PR bodies, terminal handoffs — must be referenceable without a
+"which one?" round-trip. This binds wherever more than one list appears in
+the visible response or thread, including tables that re-present an earlier
+list's rows.
+
+- **Hierarchical dotted numbering** whenever a response has sections AND
+  items: `1.`, `1.1`, `1.2`, `2.` — never flat parallel lists whose labels
+  collide across sections.
+- **Echo the user's own numbering.** When the user numbers their questions
+  (`1.1`, `2)`, …), answer using *their* labels verbatim rather than
+  inventing a fresh scheme.
+- **Fully qualified cross-references.** Write "option 2.2" or "your question
+  1.1" — never a bare "c" or "option 2" once more than one list exists in the
+  conversation.
+- **One label style per list.** Two ordered lists at the same level use
+  different styles (numbers / letters / roman / greek). A table that
+  re-presents an earlier list says so explicitly, e.g. "rows = fix
+  approaches 2.1-2.3 above."
+
+**Before** (ambiguous — real example, 2026-08-01):
+
+```
+1) Root cause options:
+   1. Stale PID file
+   2. Port already bound
+   3. Config drift
+
+2) Fix approaches:
+   a. Restart with cleanup script
+   b. Manual kill + restart
+   c. Rebuild container
+
+3) Trade-offs:
+   | Option | Risk | Time |
+   |--------|------|------|
+   | a      | Low  | 2m   |
+   | b      | Med  | 1m   |
+   | c      | High | 10m  |
+
+My pick: c
+```
+
+"My pick: c" is ambiguous between section 1's item 3 and section 2's item c
+— and the trade-offs table silently reuses section 2's `a/b/c` labels
+without saying so.
+
+**After:**
+
+```
+1. Root cause options:
+   1.1 Stale PID file
+   1.2 Port already bound
+   1.3 Config drift
+
+2. Fix approaches:
+   2.1 Restart with cleanup script
+   2.2 Manual kill + restart
+   2.3 Rebuild container
+
+3. Trade-offs (rows = fix approaches 2.1-2.3 above):
+   | Option | Risk | Time |
+   |--------|------|------|
+   | 2.1    | Low  | 2m   |
+   | 2.2    | Med  | 1m   |
+   | 2.3    | High | 10m  |
+
+My pick: 2.3 (rebuild container) — trades 10m now for avoiding the
+stale-PID recurrence in 1.1.
+```
+
+This applies to every worker-authored response surface in this doc:
+summaries, decision blocks, PR bodies, and handoffs.
+
+---
+
 ## Write for the cold reader (re-entry briefing)
 
 Your PR bodies, the issues you file, and your terminal handoffs are read by a
