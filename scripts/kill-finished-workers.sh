@@ -244,7 +244,13 @@ worktree_branch() {
     local issue="$1" wt
     wt="$(swarm_worktree_dir "$PROJECT_DIR" "$issue")"
     if [ -d "$wt" ]; then
-        git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null
+        # || true: git exits nonzero here on a detached HEAD (rc 1) and on a
+        # corrupt worktree registration (rc 128 — .git/worktrees/<wt> pruned
+        # while the dir survived, e.g. after a docker/session restart).
+        # Without the guard, set -e propagates that rc through the caller's
+        # command substitution and aborts the ENTIRE reap pass — one sick
+        # worktree silently disables autoclose for the whole swarm (#223).
+        git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true
         return
     fi
     echo "fix/issue-$issue"
@@ -334,7 +340,7 @@ for w in "${WINDOWS[@]}"; do
     if [ "$MERGED_ONLY" = "1" ] || [ "$PR_FINALIZED" = "1" ] || [ "$PR_CHECK" = "1" ]; then
         branch="$(worktree_branch "$issue")"
         if [ -z "$branch" ]; then
-            echo "  $w  [worktree on detached HEAD → skip (can't resolve a branch to check)]"
+            echo "  $w  [can't resolve worktree branch (detached HEAD or corrupt worktree registration) → skip]"
             continue
         fi
     fi
