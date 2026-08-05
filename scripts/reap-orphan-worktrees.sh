@@ -222,6 +222,17 @@ worktree_registration_ok() {
 # recoverable via `gh pr reopen N`. There is no tmux window to kill here —
 # a live window would mean kill-finished-workers.sh could have reaped this
 # already; by definition these are window-less orphans.
+#
+# REDUCED GUARANTEES vs. the healthy-registration path: a dangling worktree
+# can't run `git status` (is_clean_tree, above), so uncommitted/untracked
+# work inside it is destroyed unverified — the only backstops left are the
+# --min-age-days floor and the dirname-derived fix/issue-N PR state. It also
+# can't resolve its actually-checked-out branch (the #97 repurposed-worktree
+# protection), so a worktree repurposed onto a different branch mid-life
+# (checkout -B) is judged solely on the ORIGINAL fix/issue-N branch's PR,
+# not whatever it was last working on. Both gaps are inherent to a
+# registration git itself can't read from — there's no lower-risk way to
+# recover the same information.
 reap_dangling() {
     local issue="$1" wt
     wt="$(swarm_worktree_dir "$PROJECT_DIR" "$issue")"

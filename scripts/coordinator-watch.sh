@@ -94,6 +94,15 @@
 #                           window-based reap on WATCH_PR_POLL_SECS. Honors
 #                           DRY_RUN. Override REAP_ORPHAN to point at a
 #                           non-standard reap-orphan-worktrees.sh.
+#                           Like WATCH_PR_POLL_SECS, the first sweep fires on
+#                           the timer loop's very first tick (not one full
+#                           interval after startup) — every coordinator-watch
+#                           restart runs one immediately. This is a real
+#                           (non-dry-run, --yes) reap-orphan-worktrees.sh
+#                           pass, not just a detection poll; its own
+#                           min-age-days/clean-tree/PR-finalized predicate is
+#                           what keeps this safe on a frequent-restart dev
+#                           loop, not sweep timing.
 #   WATCH_CHECK_ON_DONE=1   Set to 0 to disable check-on-done. When enabled,
 #                           the watcher treats a worker as "done" via either
 #                           signal: (a) a `.swarm/tasks/status/<id>.json`
