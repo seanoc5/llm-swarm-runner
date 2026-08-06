@@ -22,6 +22,17 @@
 # No-network mode: --no-pr-check (replaces condition 3 with a cherry check
 # against origin/<default-branch> — every local commit must already be on
 # the default branch, by patch ID).
+#
+# Dangling git registration (issue #225, #217 aftermath): after a Docker
+# daemon restart, a worktree directory can survive while its `.git` file's
+# link back to the main repo's `.git/worktrees/<name>` administrative area
+# is broken — every git command run INSIDE the worktree then fails (exit
+# 128), including the clean-tree check above. These are detected separately
+# (worktree_registration_ok) and, when the dirname-derived fix/issue-N PR is
+# finalized, reaped by removing the directory directly (rm -rf + `git
+# worktree prune`) rather than via kill-worktree.sh's `git worktree remove`,
+# which also needs a working registration to succeed. Skipped entirely under
+# --no-pr-check (the cherry check needs a working `git cherry` too).
 
 set -euo pipefail
 
@@ -185,6 +196,65 @@ mtime_epoch() {
     stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
 }
 
+# worktree_registration_ok <worktree-dir>
+#
+# issue #225: returns 0 if git considers this a valid, connected worktree —
+# i.e. ANY git command run inside it can resolve a git-dir. Returns 1 for a
+# dangling/corrupt registration (the #217 aftermath): the worktree's `.git`
+# file still exists and points at the main repo's `.git/worktrees/<name>`
+# administrative area, but that area is gone or broken, so git commands run
+# with `-C <dir>` — including the is_clean_tree check below — fail with
+# exit 128 rather than reporting real tree state.
+worktree_registration_ok() {
+    git -C "$1" rev-parse --git-dir >/dev/null 2>&1
+}
+
+# reap_dangling <issue-number>
+#
+# issue #225: removal path for a worktree whose git registration is
+# dangling (worktree_registration_ok returned false) — every git command
+# inside it fails, including the `git worktree remove` that kill-worktree.sh
+# relies on. Bypasses git for the worktree directory itself: best-effort
+# compose-down (mirrors kill-worktree.sh), rm -rf the directory, `git
+# worktree prune` to drop the main repo's now-stale administrative entry,
+# then delete the LOCAL fix/issue-N branch the same way kill-worktree.sh
+# does. Origin is never touched, so a CLOSED-without-merge PR remains
+# recoverable via `gh pr reopen N`. There is no tmux window to kill here —
+# a live window would mean kill-finished-workers.sh could have reaped this
+# already; by definition these are window-less orphans.
+#
+# REDUCED GUARANTEES vs. the healthy-registration path: a dangling worktree
+# can't run `git status` (is_clean_tree, above), so uncommitted/untracked
+# work inside it is destroyed unverified — the only backstops left are the
+# --min-age-days floor and the dirname-derived fix/issue-N PR state. It also
+# can't resolve its actually-checked-out branch (the #97 repurposed-worktree
+# protection), so a worktree repurposed onto a different branch mid-life
+# (checkout -B) is judged solely on the ORIGINAL fix/issue-N branch's PR,
+# not whatever it was last working on. Both gaps are inherent to a
+# registration git itself can't read from — there's no lower-risk way to
+# recover the same information.
+reap_dangling() {
+    local issue="$1" wt
+    wt="$(swarm_worktree_dir "$PROJECT_DIR" "$issue")"
+    echo "=== reap-dangling #$issue ==="
+    echo "  worktree: $wt (dangling git registration)"
+    if [ "$NO_COMPOSE_DOWN" != "1" ] && [ -x "$SCRIPT_DIR/_compose-down-for-worktree.sh" ]; then
+        "$SCRIPT_DIR/_compose-down-for-worktree.sh" "$wt" || echo "  WARN: compose-down helper exited non-zero (continuing)"
+    fi
+    rm -rf -- "$wt"
+    echo "  ✓ removed worktree directory"
+    git -C "$PROJECT_DIR" worktree prune
+    echo "  ✓ pruned stale worktree registration"
+    local branch="fix/issue-$issue"
+    if git -C "$PROJECT_DIR" show-ref --verify --quiet "refs/heads/$branch"; then
+        git -C "$PROJECT_DIR" branch -D "$branch"
+        echo "  ✓ deleted branch $branch"
+    else
+        echo "  - branch $branch not present (skipped)"
+    fi
+    echo
+}
+
 # Pre-fetch PR states for every branch in a single gh call -------------------
 # Keyed by the branch name itself (headRefName), not derived from the
 # wt-issue-N dirname — a worktree can be repurposed onto a different branch
@@ -203,6 +273,7 @@ fi
 NOW=$(date +%s)
 shopt -s nullglob
 declare -a CANDIDATES=()
+declare -a DANGLING_CANDIDATES=()
 declare -a SKIPPED=()
 FOUND=0
 
@@ -247,6 +318,37 @@ for WT in "$PROJECT_PARENT"/wt-issue-*/; do
             SKIPPED+=("$NAME(age)")
             continue
         fi
+    fi
+
+    # Dangling git registration (issue #225) ----------------------------------
+    # Every git command inside $WT fails here, so the clean-tree check below
+    # and the checked-out-branch lookup in the preservation gate are both
+    # unusable. Route through the dirname-derived branch instead and skip
+    # straight to a git-free removal — see reap_dangling / worktree_registration_ok.
+    if ! worktree_registration_ok "$WT"; then
+        if [ "$PR_CHECK" = "0" ]; then
+            echo "  $NAME  [dangling git registration, --no-pr-check can't verify upstream → skip]"
+            SKIPPED+=("$NAME(dangling)")
+            continue
+        fi
+        DBRANCH="fix/issue-$ISSUE"
+        dstate="${PR_STATE[$DBRANCH]:-}"
+        if [ "$MERGED_ONLY" = "1" ]; then
+            if [ "$dstate" != "MERGED" ]; then
+                echo "  $NAME  [dangling git registration, PR $DBRANCH state=${dstate:-NONE} → skip (merged-only mode)]"
+                SKIPPED+=("$NAME(dangling,pr=${dstate:-NONE})")
+                continue
+            fi
+        else
+            if [ "$dstate" != "MERGED" ] && [ "$dstate" != "CLOSED" ]; then
+                echo "  $NAME  [dangling git registration, PR $DBRANCH state=${dstate:-NONE} → skip (pr-finalized mode)]"
+                SKIPPED+=("$NAME(dangling,pr=${dstate:-NONE})")
+                continue
+            fi
+        fi
+        echo "  $NAME  [dangling git registration, PR $DBRANCH state=$dstate → reap (rm -rf + worktree prune)]"
+        DANGLING_CANDIDATES+=("$ISSUE")
+        continue
     fi
 
     # 2. Clean tree -----------------------------------------------------------
@@ -311,7 +413,8 @@ if [ "$FOUND" -eq 0 ]; then
     exit 0
 fi
 
-if [ "${#CANDIDATES[@]}" -eq 0 ]; then
+TOTAL_CANDIDATES=$(( ${#CANDIDATES[@]} + ${#DANGLING_CANDIDATES[@]} ))
+if [ "$TOTAL_CANDIDATES" -eq 0 ]; then
     echo
     echo "Nothing to reap given current filters. (${#SKIPPED[@]} skipped of $FOUND scanned.)"
     exit 0
@@ -319,19 +422,24 @@ fi
 
 if [ "$DRY" = "1" ]; then
     echo
-    echo "DRY-RUN — no action taken. Would reap: ${CANDIDATES[*]}"
+    echo "DRY-RUN — no action taken. Would reap: ${CANDIDATES[*]} ${DANGLING_CANDIDATES[*]}"
+    [ "${#DANGLING_CANDIDATES[@]}" -gt 0 ] && echo "  (of which dangling-registration, rm -rf + worktree prune: ${DANGLING_CANDIDATES[*]})"
     exit 0
 fi
 
 if [ "$YES" != "1" ]; then
     cat <<EOF
 
-About to reap ${#CANDIDATES[@]} worktree(s): ${CANDIDATES[*]}
+About to reap $TOTAL_CANDIDATES worktree(s): ${CANDIDATES[*]} ${DANGLING_CANDIDATES[*]}
 Each call: kill-worktree.sh removes wt-issue-N + fix/issue-N + iss-N tmux window.
 Local branches deleted; origin branches preserved. Uncommitted work was
 screened out above, but --force is still used.
-
 EOF
+    if [ "${#DANGLING_CANDIDATES[@]}" -gt 0 ]; then
+        echo "Dangling-registration worktrees (${DANGLING_CANDIDATES[*]}) are removed directly"
+        echo "(rm -rf + git worktree prune) since git itself can't operate on them."
+    fi
+    echo
     read -r -p "Type 'yes' to proceed: " confirm
     if [ "$confirm" != "yes" ]; then
         echo "Aborted."
@@ -355,4 +463,8 @@ for ISSUE in "${CANDIDATES[@]}"; do
     echo
 done
 
-echo "Done. Reaped ${#CANDIDATES[@]} worktree(s) (skipped ${#SKIPPED[@]} of $FOUND scanned)."
+for ISSUE in "${DANGLING_CANDIDATES[@]}"; do
+    reap_dangling "$ISSUE"
+done
+
+echo "Done. Reaped $TOTAL_CANDIDATES worktree(s) (skipped ${#SKIPPED[@]} of $FOUND scanned)."
