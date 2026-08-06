@@ -237,46 +237,36 @@ summaries, decision blocks, PR bodies, and handoffs.
 
 ---
 
-## Write for the cold reader (re-entry briefing)
+## Write for the cold reader (appendix & terminal handoffs)
 
-Your PR bodies, the issues you file, and your terminal handoffs are read by a
-human who runs several swarms at once, context-switches away, and returns
-hours or days later with most of the original context gone — or by a
-different person entirely. Optimize for their re-entry, not for the merge
-moment:
+PR-body appendices, terminal handoffs, and no-PR `## Summary` blocks are read
+by a human who runs several swarms at once, context-switches away, and
+returns hours or days later with most of the original context gone — or by a
+different person entirely. Rules:
 
-- **Layer it.** Context frame first (a few sentences, sized to how cold
-  the reader likely is: what territory this touches and why the work
-  exists — parseable by someone who hasn't read the diff or the issue),
-  bottom line second (TL;DR + what the human must
-  do or decide), expert detail third. Context must *precede* detail — the
-  same orientation sentences placed after the details do almost nothing
-  for a reader. The reader picks their depth; nobody should have to read
-  everything to act.
 - **Never open mid-story.** "Implements the two sources #661 deferred"
   requires remembering #661. Restate what those sources are and why they were
   deferred, *then* cite the issue.
 - **Links are provenance, not prerequisites.** Cite issues/ADRs/PRs freely,
-  but the body must stand alone without opening any of them.
+  but the text must stand alone without opening any of them.
 - **Define project jargon at first use** — construct names, table names,
   internal shorthand. A parenthetical is enough: "`l2_farm` (the county-level
   BEA farm-income source)".
-- **Surface decisions as decisions.** Anywhere you weighed options, that
-  belongs in "Decisions & alternatives" with one-line pros/cons per option
-  and your opinionated recommendation — not buried in a bullet's subordinate
-  clause. Concerns you couldn't resolve go there too.
-- **Findings are not rationale.** New facts about the data/system you
-  discovered en route (a data hazard, a wrong premise in the issue, an
-  upstream quirk consumers must know) go in "Findings" — readers treat
-  Decisions bullets as skippable justification, so a finding filed there
-  is a finding lost.
+- **Surface decisions as decisions.** Every judgment call gets its options
+  and one-line pros/cons somewhere explicit — the screen's Decide table if
+  still open, `## Decisions made` if closed. Never bury one in a bullet's
+  subordinate clause.
+- **Findings are not rationale.** New facts about the code/data discovered en
+  route (a hazard, a wrong premise in the issue, an upstream quirk) go in
+  `## Findings` — readers treat Decisions entries as skippable justification,
+  so a finding filed there is a finding lost.
 
-This deliberately spends extra tokens on handoff surfaces; that trade is
-accepted swarm policy. It applies to PR bodies (skeleton below), issues you
-file (successors, follow-ups: same context / TL;DR / re-entry / acceptance-
-criteria layering), and `## Summary` blocks for **no-PR terminal states**,
-where the pane summary is the only record. When a PR carries the full
-re-entry brief, the pane `## Summary` may stay tight and point to it.
+These rules govern the PR-body appendix (skeleton below) and no-PR terminal
+`## Summary` blocks, which use the same screen-first shape *without* the
+`<details>` fold — terminal panes don't render it, so it's the two bold lines
+up top followed by plain sections. Issues you file use a different,
+brief-shaped template built for an LLM reader, not cold-reader prose — see
+"Issue skeleton" below.
 
 ---
 
@@ -348,93 +338,113 @@ including a failed `claude -p` call — must be **flagged in the handoff**
 
 ### PR body skeleton
 
-If `.github/PULL_REQUEST_TEMPLATE.md` exists, use its headings — keeping the
-`BLIND_MERGE_RISK` comment at top, the `<sub>` footer at bottom, and weaving
-the context / TL;DR / needs-from-you / re-entry layers into whatever
-sections it defines. Otherwise:
+If `.github/PULL_REQUEST_TEMPLATE.md` exists, use its headings — keep the
+`BLIND_MERGE_RISK` comment at top and the `<sub>` footer at bottom, and fold
+everything but the reviewer's triage answer behind a `<details>` as below.
+Otherwise, the skeleton is a **screen** (everything needed to decide
+merge-now / queue / needs-thought, unexpanded) over a **folded appendix**
+(everything else):
 
-```
-<!-- BLIND_MERGE_RISK: low -->
+```markdown
+<!-- BLIND_MERGE_RISK: <low|medium|high> -->
+**What this is:** <1–2 self-contained sentences: what this PR does plus the
+one clause of context that makes it parseable cold. `Closes #N`.>
+**What I need from you:** <one line, ONLY when it fits in one line — e.g.
+"Merge decision only." or "Nothing — FYI." "Nothing" is a claim to verify,
+not a default.>
 
-## Context
+#### What I need from you
+- <up to 3 short bullets, tagged DECIDE / VERIFY / BEWARE — use this heading
+  form instead of the inline line above whenever there's more than one item>
 
-<Prose the reader can parse before knowing anything about the diff: what
-part of the system this touches (anchored in referents the human already
-knows — issue #s, subsystem/table names) and why the work exists now.
-Size it to how cold the reader likely is: 1–3 sentences when the territory
-is warm (closing an issue they filed recently); up to 5 when it's cold
-(design proposals, new subsystems, week-old briefs). No bullets — a frame
-works by stating the *relations* between things, and enumeration is
-"What changed" material. No mechanism, no file names, no history — those
-come later. This is the reader's mental staging area; every later detail
-should have an obvious place to land after these sentences.>
+#### Decide: <question>
+| Option | Pro | Con | |
+|---|---|---|---|
+| A: <name> | <one line> | <one line> | |
+| B: <name> | <one line> | <one line> | ✅ recommended — <one-line why> |
 
-## TL;DR
+---
 
-<1–2 sentences: what this PR does. `Closes #N` if applicable. If the PR is
-a proposal, state the recommendation itself — never just "recommendation
-inside". Do not restate the risk rating here; the comment above and the
-footer below already carry it.>
+<details><summary>Appendix — background, what changed, findings, decisions made, test plan, review focus</summary>
 
-## Needs from you
-
-<At most 3 bullets, or the single word "Nothing." — which is a claim you
-must actually check, not a default. Tag each bullet:
-- DECIDE: <a call only the human can make — e.g. a design choice the issue left open>
-- VERIFY: <something the human must check before trusting the result>
-- BEWARE: <a hazard they need to know before using this code/data>>
+## Background
+<One frame for a cold reader, 3–8 short sentences: what part of the system
+this touches, why the work exists now, jargon defined at first use. Replaces
+the old separate Context + Re-entry brief sections — write it once.>
 
 ## What changed
-
-<The expert layer: design shape, files, mechanics. Bullets fine.>
+<Expert layer: design shape, files, mechanics. Bullets fine.>
 
 ## Findings
+<New facts about the code/data discovered en route, whether or not they
+shaped the diff. Omit the section entirely if none.>
 
-<New facts about the data/system discovered en route, whether or not they
-shaped the diff — data hazards, wrong premises in the issue, upstream
-quirks downstream consumers must know. Omit the section entirely if none.>
-
-## Decisions & alternatives
-
-<Each judgment call you made: the options that existed, one-line pros/cons
-per option, what you chose, why, and any residual concern. Be opinionated —
-state your view plainly. Rationale only — facts you discovered belong in
-Findings. If there were genuinely no judgment calls, say so in one line.>
-
-## Re-entry brief
-
-<3–8 sentences of plain language for a cold reader — the full story behind
-the Context frame above: what was the problem, why did it matter, where
-does this sit in the larger effort? Define jargon at first use. Restate the
-essentials of the briefed issue here — cite it for provenance, but never
-require opening it.>
+## Decisions made
+<Closed judgment calls only — options as table rows or one-line bullets, not
+paragraphs. An OPEN decision belongs on the screen's Decide table, never
+here. If there were genuinely no judgment calls, say so in one line.>
 
 ## Test plan
-
 - [ ] What you ran locally and the result
 - [ ] What CI covers
 - [ ] Manual verification a reviewer should repeat
 
 ## Review focus
+<Ranked "worth a skim" pointers for a reviewer with time, plus anything
+deferred and its tracking issue. Reviewer obligations belong in "What I need
+from you", not here.>
 
-<Ranked "worth a skim" pointers for a reviewer with time — code areas,
-heuristics, chosen tolerances — plus anything deferred and its tracking
-issue. Reviewer obligations (decide/verify/beware) belong in "Needs from
-you", not here.>
+</details>
 
 ---
 
 <sub>_Swarm metadata (safe to ignore if you're reviewing this as a human)._ **Blind-merge risk:** 🟢 low — <one-line rationale naming the riskiest aspect></sub>
 ```
 
-For small 🟢 low diffs (typo, lint, docs touch-up) the layers may collapse —
-Context + TL;DR + `Needs from you: Nothing.` is enough; don't pad. The full
-structure is mandatory for 🟡/🔴 PRs.
+**Rules:**
 
-Total budget for Context + TL;DR + Needs from you: ~8 lines (~10 when a
-cold-territory Context earns its 5 sentences). That top block is the
-human's triage screen; everything below it may stay as thorough as the
-work deserves.
+a. **The screen is everything above the fold** — the two bold lines, plus a
+   `#### What I need from you` list and/or a `#### Decide` table only when
+   they apply. Nothing else may appear outside the `<details>` block.
+b. **Screen sentences carry one clause of payload each** — subordinate-clause
+   chains and inline-code density belong in the appendix.
+c. **A decision is either open or closed, never both:** open → `#### Decide`
+   table on the screen; closed → `## Decisions made` in the appendix.
+d. Small 🟢 PRs (typo, lint, docs touch-up) may drop the appendix entirely —
+   the two bold lines plus footer suffice. The full structure is mandatory
+   for 🟡/🔴 PRs.
+
+---
+
+## Issue skeleton (for issues you file)
+
+~90% of issues are read only by LLMs — the worker that picks up the brief,
+and future agents citing it back — not by a human. Optimize for that reader:
+completeness and explicit values, not cold-reader prose or BLUF layering.
+
+```markdown
+## Goal
+<1–2 sentences: what should exist when this is done.>
+
+## Constraints
+<Explicit MUST/MUST-NOT imperatives, including scope fences.>
+
+## Acceptance criteria
+- [ ] <checklist item>
+
+## Pointers
+<Exact file paths, config keys, values, line numbers, related issues/ADRs.>
+
+## Out of scope
+<What NOT to touch, if it isn't already obvious from Constraints.>
+```
+
+No BLUF ordering, no `<details>` fold, no narrative re-entry prose, no
+glossing terms the model already knows.
+
+**Exception:** epics carrying human-only acceptance items — the one issue
+type Sean actually reads — stay written for a cold human reader (background,
+plain-language re-entry, acceptance criteria a person signs off on).
 
 ---
 
@@ -458,7 +468,7 @@ dependency, a wrong premise in the issue, a test gap that hid the bug — emit
 it as a `## Note` block instead of letting it get lost in narrative. These
 become teaching moments the human can act on or file as a follow-up. Notes
 still relevant at PR time land in the PR body's `## Findings` section (and,
-if the human must act on one, as a `## Needs from you` bullet).
+if the human must act on one, as a "What I need from you" bullet).
 
 ---
 
