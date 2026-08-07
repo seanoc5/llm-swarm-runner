@@ -34,13 +34,26 @@ what should stay in per-project policy.
 > Append to the bottom. Use a short headline + 1-3 lines of context.
 > When picking one up, move it to the "Done" section with date + ref.
 
-### Trim "grokkability fat" after the layered-handoff evaluation period
+### DONE 2026-08-06 — trimmed via two-tier screen + folded-appendix rebuild (issue #230)
 2026-07-24: worker.md's cold-reader layering (TL;DR / re-entry brief /
 decisions & alternatives / review focus) deliberately spends an estimated
 +20-50% on handoff surfaces to support multi-swarm context-switching.
 After a few months of use, revisit which layers earn their keep and trim
 toward a ~5% overhead (e.g. collapse layers on 🟡 PRs, shorten the
 skeleton's prompts).
+
+Resolution (2026-08-06, trial): rather than trimming line-by-line, rebuilt
+the skeleton around a two-tier structure — a BLUF screen (`**What this
+is:**` / `**What I need from you:**`, plus a `#### Decide` table only when
+an open decision exists) over a folded `<details>` appendix holding
+Background/What changed/Findings/Decisions made/Test plan/Review focus.
+`## Context` and `## Re-entry brief` merged into one `## Background`. The
+fold, not a line-count budget, is now the enforcement mechanism. Status:
+trial — Sean judges from real PR specimens before this is considered
+settled. Issues got a separate brief-shaped template (`## Goal` /
+`## Constraints` / `## Acceptance criteria` / `## Pointers` /
+`## Out of scope`) since ~90% of issues are read only by LLMs, not the cold
+human reader the old layering targeted.
 
 ### Standardize an "audience statement" on every prompt/skill file
 Every file in `prompts/` should open with one sentence: "this doc is read

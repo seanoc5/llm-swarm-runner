@@ -13,7 +13,7 @@ When the user asks you to "Execute the Initial Startup Checklist" (or you are wo
 3. **Local state:** `git status`, `git branch`, `git worktree list`, `tmux list-windows`. Note the alive-worker count (windows matching `iss-*`) and total window count.
 4. **Config from env** (loaded by `llm-start.sh` from `.env.example` + optional `<project>/.swarm/.env`; read with `echo`, do NOT hardcode the defaults): `MAX_WORKERS` (default 5), `MAX_TMUX_WINDOWS` (10), `TARGET_AVAILABLE` (10), `OWNER_LABELS` (empty), `INCLUDE_ASSIGNED_TO_OTHERS` (0).
 5. **Remote state:** `gh pr list`, then compute **AVAILABLE** (below). Report: `OPEN=N AVAILABLE=M ALIVE=A/$MAX_WORKERS WINDOWS=W/$MAX_TMUX_WINDOWS`.
-6. **Housekeeping (trigger on AVAILABLE, not OPEN):** if `AVAILABLE < TARGET_AVAILABLE`, create new tmux-friendly issues to fill the gap. Write every issue for a cold reader (the human returns days later with no context, and the assigned worker gets only the issue body): `## TL;DR`, a plain-language `## Re-entry brief` (problem, why it matters, jargon defined at first use, links as provenance not prerequisites), `## Acceptance criteria`, and — where implementation judgment is expected — `## Options` with one-line pros/cons each and your recommendation. **Special case:** `AVAILABLE = 0` with `OPEN >> TARGET_AVAILABLE` means the backlog is *stalled* — surface it ("backlog stalled: N open, all blocked/owner-labeled/policy-blocked") and let the user decide; don't silently pile on issues nobody can pick up.
+6. **Housekeeping (trigger on AVAILABLE, not OPEN):** if `AVAILABLE < TARGET_AVAILABLE`, create new tmux-friendly issues to fill the gap. Write every issue per `prompts/worker.md` § "Issue skeleton" (`## Goal`, `## Constraints`, `## Acceptance criteria`, `## Pointers`, `## Out of scope`) — the assigned worker gets only the issue body, so be explicit rather than cold-reader-narrative. **Special case:** `AVAILABLE = 0` with `OPEN >> TARGET_AVAILABLE` means the backlog is *stalled* — surface it ("backlog stalled: N open, all blocked/owner-labeled/policy-blocked") and let the user decide; don't silently pile on issues nobody can pick up.
 7. **Provisioning (subject to caps):** `slots = min(MAX_WORKERS - alive_workers, MAX_TMUX_WINDOWS - total_windows)`. If `slots <= 0`, follow "Caps" below. Otherwise route up to `slots` AVAILABLE items (see "Issue Routing") through `provision-worker.sh`; the script re-enforces caps server-side (exit 3) — treat that as a hard stop, don't retry.
 
 ## Computing AVAILABLE
@@ -111,7 +111,7 @@ digest, most-actionable first — assume they remember nothing:
 ```
 ## Wake digest — <time> (wake: iss-696 finished | manual status request)
 **Needs you (ranked by risk × age):**
-1. 🔴 PR #714 (rate limiting on public MCP surface) — awaiting your manual merge since yesterday. TL;DR: <quoted from PR body>
+1. 🔴 PR #714 (rate limiting on public MCP surface) — awaiting your manual merge since yesterday. What it is: <quoted from PR body's "What this is" line>
 2. 🟡 PR #689 (data-authority pages) — self-review APPROVE_WITH_CAVEATS: <the caveat>. `merge PR 689` when satisfied.
 **Moved since last wake:** #707 merged; iss-702 opened PR #710; nudged #713 (stale 8h).
 **In flight:** iss-593 (active ~40m); iss-677 (parked on inbox, awaiting review).
@@ -119,7 +119,8 @@ digest, most-actionable first — assume they remember nothing:
 ```
 
 - **Needs you** is the load-bearing part: name the PR *and* what it is in
-  plain words, quote its TL;DR, and give the exact next action/command.
+  plain words, quote its "What this is" line, and give the exact next
+  action/command.
 - **Moved since last wake:** diff against your previous digest (it's in your
   scrollback/context). First digest of a session: say so, no delta.
 - Keep the digest under ~25 lines; everything deeper goes in the sections
@@ -141,8 +142,8 @@ nudge). For each candidate, post ONE refresh comment on the PR containing:
   script keys re-nudge suppression on it — omit it and the PR gets nudged
   every wake);
 - a 2-4 sentence plain-language recap of what the PR does and why it exists
-  (source it from the body's TL;DR/re-entry brief; if the body predates the
-  layered format, derive it from the diff);
+  (source it from the body's "What this is" line and appendix `## Background`;
+  if the body predates the layered format, derive it from the diff);
 - whose move it is and the exact next command (`gh pr merge N --squash`, or
   the open question blocking it);
 - anything that changed since the body was written — check
@@ -163,7 +164,14 @@ Scrape the blind-merge risk rating from the PR body (`gh pr view <N> --json body
 
 Missing markers → default to "🟡 medium — risk rating not provided by worker; review before merge" and flag it as a worker-policy violation.
 
-After the status line, quote the PR's `## Context`, `## TL;DR`, and `## Needs from you` sections verbatim (one fetch: `gh pr view <N> --json body`), so the human can triage from your pane without opening GitHub. Bodies predating the layered format that have only a `## TL;DR`: quote that. A PR missing these layers entirely (`prompts/worker.md` § "Write for the cold reader") gets the same treatment as a missing risk marker: report it as a worker-policy violation and summarize the body yourself in 1–2 plain-language sentences.
+After the status line, quote the PR's **What this is** and **What I need
+from you** lines verbatim, plus the `#### Decide` table if present (one
+fetch: `gh pr view <N> --json body`), so the human can triage from your pane
+without opening GitHub. Bodies predating the layered format that have only a
+`## TL;DR`: quote that. A PR missing these layers entirely (`prompts/worker.md`
+§ "PR body skeleton") gets the same treatment as a missing risk marker:
+report it as a worker-policy violation and summarize the body yourself in
+1–2 plain-language sentences.
 
 **Self-review verdict** (🟡/🔴 PRs only) — workers run `claude -p` against `prompts/skill-self-review.md` before proposing merge; watch their pane for the verdict. `APPROVE` needs no extra surface; `APPROVE_WITH_CAVEATS: <text>` → surface the caveat alongside the PR title; `BLOCK: <text>` → flag prominently (a merge proposal despite BLOCK is a worker-policy violation; the user may override with `merge PR N --override-review`). A skipped or failed self-review (`WORKER_SELF_REVIEW=0`, `claude -p` failure) means the safety layer didn't fire — recommend reading the diff before merging.
 
