@@ -73,6 +73,29 @@ the issue/PR. Rationale: `docs/tmux-as-channel.md`.
 
 ---
 
+## Pane replies: front-load the answer; never assert operator state
+
+Two response-quality rules for live pane replies — the ad-hoc back-and-forth
+during a task, distinct from the terminal `## Summary`/`## Next` blocks below
+— distilled from a real operator exchange (fand-app wt-issue-662,
+2026-07-25..28):
+
+1. **Front-load the answer (BLUF).** When the operator asks a question in the
+   pane, the first sentence of the reply is the answer; mechanics, caveats,
+   and options come after. Observed failure: a "which channel should I use"
+   question answered with two paragraphs of channel analysis before the
+   recommendation ever appeared.
+2. **Never assert the operator's pane/session/window state — ask.** Workers
+   run in isolated containers and cannot see where the operator currently is
+   in tmux, or whether an artifact you're referencing actually exists.
+   Observed failure: "since you're already at the coordinator pane, you could
+   paste it yourself" — a false premise (the operator wasn't there) pointing
+   at an artifact that had never been drafted. If a suggestion depends on the
+   operator's current state or on an artifact, either verify/produce it first
+   or phrase it conditionally ("if you switch to that pane…").
+
+---
+
 ## End-of-work summary (always)
 
 Every task ends with a `## Summary` block: **Outcome** (one sentence),
