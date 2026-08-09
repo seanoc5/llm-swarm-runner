@@ -165,6 +165,71 @@
 #                           repeat every wake with no visible symptom. If
 #                           usage didn't drop, logs coord.compact.ineffective
 #                           loudly rather than let that happen quietly.
+#
+#                           (issue #210) This wake-path trigger (called from
+#                           on_outcome, right before a coord.wake) is one of
+#                           TWO triggers into the same maybe_auto_compact —
+#                           see AUTO_COMPACT_TICK_SECS below for the other,
+#                           a periodic poll-tick trigger that fires even when
+#                           no worker ever finishes. maybe_auto_compact takes
+#                           a `trigger` arg (wake|poll, defaults to wake) that
+#                           is recorded on every coord.compact* event it logs
+#                           — see EVENTS LOG below — but otherwise runs
+#                           identical logic either way; this wake-path call
+#                           site's behavior is unchanged by that addition.
+#   AUTO_COMPACT_TICK_SECS=60
+#                           (issue #210) A coordinator that stays busy on a
+#                           long, purely interactive stretch — the user
+#                           driving it directly, no worker ever finishing —
+#                           never reaches on_outcome, so the wake-path
+#                           trigger above never runs and context can grow
+#                           unbounded until a human notices. This starts an
+#                           independent tick, from its own dedicated
+#                           background process (run_auto_compact_poll_loop —
+#                           NOT WATCH_PR_POLL_SECS's run_watch_timer_loop; a
+#                           compaction can block for minutes, and sharing
+#                           that loop would stall its status/PR polling for
+#                           the duration — same reasoning as
+#                           WORKER_AUTO_COMPACT's separate loop, see
+#                           run_auto_compact_poll_loop's header comment),
+#                           that calls maybe_auto_compact with trigger=poll
+#                           every AUTO_COMPACT_TICK_SECS — deliberately its
+#                           own interval, not reusing WATCH_PR_POLL_SECS's,
+#                           so disabling the PR-poll backstop
+#                           (WATCH_PR_POLL_SECS=0) doesn't silently disable
+#                           this too. Set to 0 to disable just this trigger
+#                           while keeping AUTO_COMPACT=1 for the wake path
+#                           (the dedicated process itself only starts when
+#                           both AUTO_COMPACT=1 and this is nonzero — see the
+#                           loop-startup section near the bottom of the
+#                           script). Every other precondition (idle cli pane,
+#                           fresh probe, threshold) is identical to the
+#                           wake-path trigger — see maybe_auto_compact.
+#   AUTO_COMPACT_COOLDOWN_SECS=900
+#                           (issue #210) Applies ONLY to the poll-tick
+#                           trigger above (never to the wake-path trigger —
+#                           that one is already rate-limited by DEBOUNCE_SECS
+#                           and only runs when a worker actually finishes, so
+#                           it needs no extra guard, and adding one there
+#                           would violate "wake-path behavior unchanged").
+#                           After a poll-tick call to maybe_auto_compact
+#                           actually attempts a compaction (i.e. it got far
+#                           enough to log a bare coord.compact event —
+#                           whether that attempt then finishes cleanly or
+#                           turns out coord.compact.ineffective), the poll-
+#                           tick trigger suppresses itself for this many
+#                           seconds (logging coord.compact.skip
+#                           reason=cooldown trigger=poll each tick it would
+#                           otherwise have fired) before trying again.
+#                           Without this, a probe that hasn't refreshed yet
+#                           post-compact (see AUTO_COMPACT_VERIFY_TIMEOUT_SECS)
+#                           would still read as over-threshold on the very
+#                           next tick and re-inject /compact into a pane
+#                           that may just be idling while its statusline
+#                           catches up — an unbounded injection loop. Tracked
+#                           in-memory by run_auto_compact_poll_loop's own
+#                           process (not a file), so it resets on watcher
+#                           restart.
 #   AUTO_COMPACT_THRESHOLD_TOKENS=150000
 #                           Used-token threshold that triggers the above.
 #   AUTO_COMPACT_PROBE=<path>
@@ -376,6 +441,8 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     WATCHER_QUIET       0         suppress human-readable pane echo (banner only); see PANE ECHO
     AUTO_COMPACT        1         inject real /compact into a long-lived coordinator before waking it if over threshold; see header comment
     AUTO_COMPACT_THRESHOLD_TOKENS     150000  used-token trigger
+    AUTO_COMPACT_TICK_SECS            60      periodic poll-tick trigger interval (0=off); catches long interactive stretches with no worker completions; see header comment
+    AUTO_COMPACT_COOLDOWN_SECS        900     poll-tick-only cooldown after an attempted compact, before it may re-trigger
     AUTO_COMPACT_PROBE                (auto)  statusline probe file path
     AUTO_COMPACT_PROBE_MAX_AGE_SECS   120     probe staleness cutoff
     AUTO_COMPACT_BUSY_PATTERN         (auto)  capture-pane busy-indicator regex
@@ -428,12 +495,13 @@ EVENTS LOG
                            are not logged (dry runs always are)
       watch.check_on_done  check-on-done result (issue, task_id, result=running|pass|fail|skipped)
       cap.refused          provision-worker.sh hit MAX_WORKERS / MAX_TMUX_WINDOWS
-      coord.compact        /compact injected before wake (used, threshold)
-      coord.compact.skip   auto-compact skipped this cycle (reason=pane_busy|no_fresh_probe|...)
-      coord.compact.timeout  gave up waiting on the busy indicator (phase=start|finish, waited)
-      coord.compact.done   busy indicator cleared — compaction confirmed finished (waited)
-      coord.compact.ineffective  context didn't drop post-compact (before, after) — investigate
-      coord.compact.verify_skip  probe never refreshed post-compact — inconclusive, not a failure
+      coord.compact        /compact injected before wake (used, threshold, trigger=poll|wake)
+      coord.compact.skip   auto-compact skipped this cycle (reason=pane_busy|no_fresh_probe|cooldown|...,
+                           trigger=poll|wake — reason=cooldown only ever fires trigger=poll)
+      coord.compact.timeout  gave up waiting on the busy indicator (phase=start|finish, waited, trigger=poll|wake)
+      coord.compact.done   busy indicator cleared — compaction confirmed finished (waited, trigger=poll|wake)
+      coord.compact.ineffective  context didn't drop post-compact (before, after, trigger=poll|wake) — investigate
+      coord.compact.verify_skip  probe never refreshed post-compact — inconclusive, not a failure (trigger=poll|wake)
       worker.compact        /compact injected into an iss-* window (issue, used, threshold, wrapup)
       worker.compact.skip   worker auto-compact skipped this window this cycle (issue, reason=pane_busy|no_ctx_parsed|...)
       worker.compact.timeout  gave up waiting on the worker's busy indicator (issue, phase=start|finish, waited)
@@ -510,6 +578,10 @@ SESSION_NAME="${SESSION_NAME:-llm-$(basename "$PROJECT_DIR")}"
 WATCHER_QUIET="${WATCHER_QUIET:-0}"
 AUTO_COMPACT="${AUTO_COMPACT:-1}"
 AUTO_COMPACT_THRESHOLD_TOKENS="${AUTO_COMPACT_THRESHOLD_TOKENS:-150000}"
+# issue #210 — periodic poll-tick trigger (see header comment). Independent
+# interval and cooldown from WATCH_PR_POLL_SECS/its gate, on purpose.
+AUTO_COMPACT_TICK_SECS="${AUTO_COMPACT_TICK_SECS:-60}"
+AUTO_COMPACT_COOLDOWN_SECS="${AUTO_COMPACT_COOLDOWN_SECS:-900}"
 # Matches coordinator-claude.sh's own STATUSLINE_PROBE default for its
 # claude invocation — a project+role-scoped path, NOT the statusline
 # script's generic per-UID default. Using the generic default here would
@@ -554,7 +626,7 @@ if ! [[ "$WATCH_ORPHAN_SWEEP_SECS" =~ ^[0-9]+$ ]]; then
 fi
 for _var in AUTO_COMPACT_THRESHOLD_TOKENS AUTO_COMPACT_PROBE_MAX_AGE_SECS \
             AUTO_COMPACT_START_TIMEOUT_SECS AUTO_COMPACT_FINISH_TIMEOUT_SECS \
-            AUTO_COMPACT_VERIFY_TIMEOUT_SECS \
+            AUTO_COMPACT_VERIFY_TIMEOUT_SECS AUTO_COMPACT_TICK_SECS AUTO_COMPACT_COOLDOWN_SECS \
             WORKER_COMPACT_THRESHOLD_TOKENS WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS \
             WORKER_COMPACT_START_TIMEOUT_SECS WORKER_COMPACT_FINISH_TIMEOUT_SECS \
             WORKER_COMPACT_VERIFY_TIMEOUT_SECS WORKER_COMPACT_SCAN_SECS; do
@@ -586,6 +658,12 @@ command -v jq >/dev/null 2>&1 && HAVE_JQ=1
 # wake, sweep, cap-refusal) gets a single line so `tail -F` gives live status.
 EVENTS_LOG="$PROJECT_DIR/.swarm/events.log"
 mkdir -p "$(dirname "$EVENTS_LOG")" 2>/dev/null || true
+
+# issue #210: maybe_auto_compact is now reachable from two separate OS
+# processes (the wake path in the main watcher process, and the poll-tick
+# path in run_auto_compact_poll_loop's own background process) — this lock
+# serializes them. See maybe_auto_compact's header comment for why.
+AUTO_COMPACT_LOCK="$PROJECT_DIR/.swarm/coord-compact.lock"
 
 # log_event <category> <key=val>...
 # Writes one line: "<utc-iso8601>  <category>  k=v k=v ..."
@@ -696,7 +774,7 @@ autoclose:     $WATCHER_AUTOCLOSE$([ "$WATCHER_AUTOCLOSE" = "1" ] && echo " (scr
 pr-poll:       ${WATCH_PR_POLL_SECS}s$([ "$WATCH_PR_POLL_SECS" = "0" ] && echo " (disabled)")
 orphan-sweep:  ${WATCH_ORPHAN_SWEEP_SECS}s$([ "$WATCH_ORPHAN_SWEEP_SECS" = "0" ] && echo " (disabled)" || echo " (script: $REAP_ORPHAN)")
 check-on-done: $WATCH_CHECK_ON_DONE$([ "$WATCH_CHECK_ON_DONE" = "1" ] && echo " (session: $SESSION_NAME)")
-auto-compact:  $AUTO_COMPACT$([ "$AUTO_COMPACT" = "1" ] && echo " (threshold: ${AUTO_COMPACT_THRESHOLD_TOKENS} tokens, probe: $AUTO_COMPACT_PROBE)")
+auto-compact:  $AUTO_COMPACT$([ "$AUTO_COMPACT" = "1" ] && echo " (threshold: ${AUTO_COMPACT_THRESHOLD_TOKENS} tokens, probe: $AUTO_COMPACT_PROBE, poll-tick: ${AUTO_COMPACT_TICK_SECS}s$([ "$AUTO_COMPACT_TICK_SECS" = "0" ] && echo " disabled"), cooldown: ${AUTO_COMPACT_COOLDOWN_SECS}s)")
 worker-compact: $WORKER_AUTO_COMPACT$([ "$WORKER_AUTO_COMPACT" = "1" ] && echo " (threshold: ${WORKER_COMPACT_THRESHOLD_TOKENS}/${WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS} tokens, scan: ${WORKER_COMPACT_SCAN_SECS}s)")
 dry-run:       $DRY_RUN
 once:          $ONCE
@@ -743,22 +821,26 @@ fi
 # Single shared trap for the pane-echo pipeline, the background timer loop
 # (issue #119, started later), the worker-compact loop (issue #226, its own
 # separate process — see run_worker_compact_loop's header comment for why
-# it isn't folded into the same loop), and run_poll's seen_file
-# (script-global — see the NOTE at its mktemp near run_poll). Installed
-# immediately after the first backgrounded process (WATCHER_ECHO_PID) that
-# needs it — under `set -e`, any ordinary command between spawning a
-# background job and installing its cleanup trap is a window where an early
-# failure orphans that job. WATCH_TIMER_PID, WORKER_COMPACT_TIMER_PID, and
-# seen_file are pre-declared empty here too so the trap is safe to fire
-# before any of them is actually assigned further down. Set once, so
-# nothing downstream can silently clobber it with a second `trap ... EXIT`
-# and drop one of these kills.
+# it isn't folded into the same loop), the coordinator poll-tick auto-compact
+# loop (issue #210, same reasoning — see run_auto_compact_poll_loop's header
+# comment), and run_poll's seen_file (script-global — see the NOTE at its
+# mktemp near run_poll). Installed immediately after the first backgrounded
+# process (WATCHER_ECHO_PID) that needs it — under `set -e`, any ordinary
+# command between spawning a background job and installing its cleanup trap
+# is a window where an early failure orphans that job. WATCH_TIMER_PID,
+# WORKER_COMPACT_TIMER_PID, AUTO_COMPACT_POLL_TIMER_PID, and seen_file are
+# pre-declared empty here too so the trap is safe to fire before any of them
+# is actually assigned further down. Set once, so nothing downstream can
+# silently clobber it with a second `trap ... EXIT` and drop one of these
+# kills.
 WATCH_TIMER_PID=""
 WORKER_COMPACT_TIMER_PID=""
+AUTO_COMPACT_POLL_TIMER_PID=""
 seen_file=""
 cleanup_on_exit() {
     [ -n "${WATCH_TIMER_PID:-}" ] && kill "$WATCH_TIMER_PID" 2>/dev/null || true
     [ -n "${WORKER_COMPACT_TIMER_PID:-}" ] && kill "$WORKER_COMPACT_TIMER_PID" 2>/dev/null || true
+    [ -n "${AUTO_COMPACT_POLL_TIMER_PID:-}" ] && kill "$AUTO_COMPACT_POLL_TIMER_PID" 2>/dev/null || true
     # WATCHER_ECHO_PID is the `while read` reader — the last stage of the
     # `tail | while` pipeline, and the only PID $! gives us for it. `tail`
     # itself is a separate direct child of this script (pipeline stages
@@ -1348,6 +1430,12 @@ SCRIPT
 # already-shipped responsiveness, not an acceptable tradeoff for keeping
 # process/trap bookkeeping simple. See run_worker_compact_loop below,
 # started as its own background process.
+#
+# issue #210's coordinator poll-tick auto-compact trigger doesn't live here
+# either, for the identical blocking-duration reason (a single
+# maybe_auto_compact call, not a sweep, but the same ~345s worst case) — see
+# run_auto_compact_poll_loop, started as its own background process right
+# after this function.
 run_watch_timer_loop() {
     local last_pr_poll=0 last_orphan_sweep=0 now
     while true; do
@@ -1367,6 +1455,27 @@ run_watch_timer_loop() {
                 last_orphan_sweep=$now
             fi
         fi
+    done
+}
+
+# run_auto_compact_poll_loop
+#
+# issue #210: own background process for the coordinator poll-tick
+# auto-compact trigger, on its own AUTO_COMPACT_TICK_SECS interval — NOT
+# folded into run_watch_timer_loop, for the same reason WORKER_AUTO_COMPACT's
+# sweep (run_worker_compact_loop, just below) isn't either: a single
+# maybe_auto_compact call can block for minutes (up to
+# AUTO_COMPACT_START_TIMEOUT_SECS + AUTO_COMPACT_FINISH_TIMEOUT_SECS +
+# AUTO_COMPACT_VERIFY_TIMEOUT_SECS ≈ 345s by default) waiting out a real
+# compaction. Sharing run_watch_timer_loop would stall status_poll_pass's 2s
+# done-detection and the WATCH_PR_POLL_SECS reap backstop for that entire
+# duration on every tick a compaction actually fires — the exact regression
+# run_worker_compact_loop's header comment already documents avoiding for
+# the per-worker case.
+run_auto_compact_poll_loop() {
+    while true; do
+        sleep "$AUTO_COMPACT_TICK_SECS"
+        auto_compact_poll_pass || true
     done
 }
 
@@ -1463,10 +1572,16 @@ probe_ctx_used() {
     echo "$used"
 }
 
-# maybe_auto_compact
+# maybe_auto_compact [trigger]
 #
-# Called right before waking the coordinator (from on_outcome, after the
-# debounce check has already passed — i.e. we're committed to waking).
+# Called from two places (issue #210): on_outcome, right before waking the
+# coordinator (after the debounce check has already passed — i.e. we're
+# committed to waking) — trigger=wake (the default, so pre-#210 call sites
+# and the test fixture's bare `maybe_auto_compact` are unchanged); and
+# auto_compact_poll_pass, on its own AUTO_COMPACT_TICK_SECS timer — trigger=
+# poll. `trigger` is recorded on every coord.compact* event this logs (see
+# EVENTS LOG in the header) but otherwise doesn't change this function's
+# logic at all — the wake path's behavior is identical to before #210.
 # If AUTO_COMPACT is enabled, the coordinator pane holds a live and
 # currently-idle CLI session, and its last-probed context usage is
 # at/above AUTO_COMPACT_THRESHOLD_TOKENS, injects a real `/compact` via
@@ -1480,125 +1595,226 @@ probe_ctx_used() {
 # this is strictly an optimization on top of that wake, never a gate on
 # it. Blocking here (a real compaction run is commonly a minute or more)
 # is consistent with the rest of on_outcome, which is already a
-# synchronous, one-outcome-at-a-time call chain.
+# synchronous, one-outcome-at-a-time call chain. The poll-tick caller
+# blocks the SAME way — it runs from its own dedicated background process
+# (see run_auto_compact_poll_loop), separate from both the wake path and
+# run_watch_timer_loop, so blocking there for a minute+ never delays a
+# coordinator wake or the status/PR-poll timer loop's own ticks.
 maybe_auto_compact() {
+    local trigger="${1:-wake}"
     [ "$AUTO_COMPACT" = "1" ] || return 0
 
-    local state
-    state="$(coordinator_pane_state)" || state="absent"
-    [ "$state" = "cli" ] || return 0   # no live session to compact
+    # issue #210: this function is now reachable from two separate
+    # processes — the wake path (on_outcome, in the main watcher process)
+    # and the poll-tick path (auto_compact_poll_pass, in
+    # run_auto_compact_poll_loop's own dedicated process) — that can fire
+    # within milliseconds of each other. Without serialization, both could
+    # pass the coordinator_pane_busy check while the pane is still idle,
+    # then both hit the SAME tmux buffer (llm-coord-autocompact) below,
+    # corrupting what actually lands in the live user-facing session. flock
+    # the whole busy-check-through-injection critical section in a subshell
+    # so only one caller is ever "in flight" at a time; the subshell scopes
+    # the lock release to fd 9 closing on any exit path, without threading
+    # cleanup through every early return below. On contention — a narrow
+    # window, only when a wake and a poll tick land back to back — skip and
+    # let the loser's own next trigger (wake or poll) retry, same as every
+    # other precondition here (pane_busy, no_fresh_probe, ...).
+    (
+        flock -n 9 || { log_event coord.compact.skip "reason=locked trigger=$trigger"; exit 0; }
 
-    if coordinator_pane_busy; then
-        log_event coord.compact.skip "reason=pane_busy"
-        return 0   # don't race a live turn — see docs/tmux-as-channel.md on send-keys races
+        local state
+        state="$(coordinator_pane_state)" || state="absent"
+        [ "$state" = "cli" ] || exit 0   # no live session to compact
+
+        if coordinator_pane_busy; then
+            log_event coord.compact.skip "reason=pane_busy trigger=$trigger"
+            exit 0   # don't race a live turn — see docs/tmux-as-channel.md on send-keys races
+        fi
+
+        local used
+        used="$(probe_ctx_used)" || {
+            log_event coord.compact.skip "reason=no_fresh_probe trigger=$trigger"
+            exit 0
+        }
+
+        [ "$used" -ge "$AUTO_COMPACT_THRESHOLD_TOKENS" ] || exit 0   # under threshold — the common case
+
+        echo "[$(date +%T)] coordinator context at ${used} tokens (>= ${AUTO_COMPACT_THRESHOLD_TOKENS}) — compacting before wake..."
+        log_event coord.compact "used=$used threshold=$AUTO_COMPACT_THRESHOLD_TOKENS trigger=$trigger"
+
+        if [ "$DRY_RUN" = "1" ]; then
+            echo "[DRY] would inject /compact into $SESSION_NAME:coordinator and wait for it to finish"
+            exit 0
+        fi
+
+        # Reference point for the post-compaction verification below: captured
+        # BEFORE injection so we can later tell "the probe genuinely re-rendered
+        # with fresh data" from "the statusline just hasn't refreshed yet" —
+        # only the former is meaningful evidence either way.
+        local probe_mtime_before
+        probe_mtime_before=$(mtime_epoch "$AUTO_COMPACT_PROBE" 2>/dev/null) || probe_mtime_before=0
+        [ -n "$probe_mtime_before" ] || probe_mtime_before=0
+
+        # Every step below is best-effort — a transient tmux failure here must
+        # degrade to "compaction never visibly started" (caught by the start-
+        # timeout below) rather than take the whole daemon down via set -e.
+        #
+        # Deliberately NO trailing newline in the pasted buffer (unlike
+        # llm-start.sh's own reprompt path, which pastes an arbitrary multi-line
+        # prompt where a trailing newline is harmless either way): "/compact" is
+        # a single slash command, and pasting it with an embedded newline plus a
+        # separate trailing Enter leaves it ambiguous whether the CLI's input
+        # buffer sees "/compact" (trimmed) or "/compact\n" at submit time.
+        # Pasting the bare text with no newline at all, then a genuinely
+        # separate Enter keystroke, removes that ambiguity outright.
+        local tmp_compact
+        tmp_compact=$(mktemp) || { log_event coord.compact.skip "reason=mktemp_failed trigger=$trigger"; exit 0; }
+        printf '/compact' > "$tmp_compact" 2>/dev/null || true
+        tmux load-buffer -b llm-coord-autocompact "$tmp_compact" 2>/dev/null || true
+        tmux paste-buffer -b llm-coord-autocompact -t "$SESSION_NAME:coordinator" -d 2>/dev/null || true
+        tmux send-keys -t "$SESSION_NAME:coordinator" Enter 2>/dev/null || true
+        rm -f "$tmp_compact" 2>/dev/null || true
+
+        # Wait for compaction to actually start (busy indicator appears) —
+        # confirms the CLI picked up the input. If it never appears within
+        # the timeout, something's off (race, rejected input, wrong pane
+        # state); log it and fall through rather than block further.
+        local waited=0
+        while ! coordinator_pane_busy; do
+            sleep "$AUTO_COMPACT_POLL_SECS"
+            waited=$((waited + AUTO_COMPACT_POLL_SECS))
+            if [ "$waited" -ge "$AUTO_COMPACT_START_TIMEOUT_SECS" ]; then
+                log_event coord.compact.timeout "phase=start waited=${waited}s trigger=$trigger"
+                exit 0
+            fi
+        done
+
+        # Now wait for it to finish (busy indicator clears).
+        waited=0
+        while coordinator_pane_busy; do
+            sleep "$AUTO_COMPACT_POLL_SECS"
+            waited=$((waited + AUTO_COMPACT_POLL_SECS))
+            if [ "$waited" -ge "$AUTO_COMPACT_FINISH_TIMEOUT_SECS" ]; then
+                log_event coord.compact.timeout "phase=finish waited=${waited}s trigger=$trigger"
+                exit 0
+            fi
+        done
+
+        echo "[$(date +%T)] compaction done (${waited}s) — proceeding with wake"
+        log_event coord.compact.done "waited=${waited}s trigger=$trigger"
+
+        # Whether a pasted "/compact" is actually recognized as the slash
+        # command (vs. submitted as a plain chat message) isn't something this
+        # script can verify short of a live session — the busy indicator
+        # appears and clears identically either way, since both cases are just
+        # "claude processing a turn". If it silently landed as a chat message,
+        # context grows instead of shrinking, and since it'd still be over
+        # threshold, this would otherwise repeat on every subsequent wake with
+        # no visible symptom.
+        #
+        # Poll for the probe's mtime to actually advance past
+        # probe_mtime_before, rather than trusting a fixed sleep — the
+        # statusline's render cadence isn't guaranteed to land within any fixed
+        # window, and checking a probe that hasn't been rewritten yet would
+        # just re-read the pre-compaction value and misreport a working
+        # compaction as ineffective. If it never refreshes within
+        # AUTO_COMPACT_VERIFY_TIMEOUT_SECS, this is inconclusive (not a
+        # failure) — logged as verify_skip, not ineffective.
+        local verify_waited=0 probe_mtime_after used_after=""
+        while [ "$verify_waited" -lt "$AUTO_COMPACT_VERIFY_TIMEOUT_SECS" ]; do
+            sleep "$AUTO_COMPACT_POLL_SECS"
+            verify_waited=$((verify_waited + AUTO_COMPACT_POLL_SECS))
+            probe_mtime_after=$(mtime_epoch "$AUTO_COMPACT_PROBE" 2>/dev/null) || probe_mtime_after=0
+            [ -n "$probe_mtime_after" ] || probe_mtime_after=0
+            if [ "$probe_mtime_after" -gt "$probe_mtime_before" ]; then
+                used_after="$(probe_ctx_used)" || used_after=""
+                break
+            fi
+        done
+
+        if [ -z "$used_after" ]; then
+            log_event coord.compact.verify_skip "reason=probe_not_refreshed waited=${verify_waited}s trigger=$trigger"
+        elif [ "$used_after" -ge "$used" ]; then
+            echo "[$(date +%T)] WARNING: context did not drop after /compact (before=$used after=$used_after) — the injected command may not have been recognized as a slash command; investigate before this repeats every wake"
+            log_event coord.compact.ineffective "before=$used after=$used_after trigger=$trigger"
+        fi
+    ) 9>"$AUTO_COMPACT_LOCK"
+}
+
+# LAST_AUTO_COMPACT_POLL_TRIGGER (issue #210)
+#
+# Cooldown timestamp for auto_compact_poll_pass below, in epoch seconds; 0
+# means "no compact attempted yet this run." Deliberately a plain global,
+# not a file: it's only ever read/written from run_auto_compact_poll_loop's
+# own background process (the only caller of auto_compact_poll_pass), so a
+# same-process global is sufficient — no cross-process sharing needed the
+# way, say, ORPHAN_PR_LOGGED's declare -A doesn't need to be (also
+# process-local for the same reason). Resets to 0 on watcher restart, same
+# as every other timer-loop cooldown/dedup state in this file.
+LAST_AUTO_COMPACT_POLL_TRIGGER=0
+
+# auto_compact_poll_pass
+#
+# issue #210: periodic poll-tick trigger for maybe_auto_compact, called from
+# run_auto_compact_poll_loop's own dedicated background process on its own
+# AUTO_COMPACT_TICK_SECS cadence. Exists because the wake-path trigger
+# (on_outcome -> maybe_auto_compact, above)
+# only ever runs right before a coord.wake — during a long purely
+# interactive stretch (the human driving the coordinator directly, no
+# worker ever finishing), on_outcome never fires, so a coordinator can grow
+# unbounded past AUTO_COMPACT_THRESHOLD_TOKENS with nothing to catch it.
+# This tick is that catch.
+#
+# Cooldown-gated (AUTO_COMPACT_COOLDOWN_SECS) so a probe that hasn't
+# refreshed yet right after a compact doesn't read as still-over-threshold
+# on the very next tick and re-inject /compact into a pane that's simply
+# waiting for its statusline to catch up — see LAST_AUTO_COMPACT_POLL_
+# TRIGGER above. The wake-path trigger has no equivalent cooldown, by
+# design: wake events are already rate-limited by DEBOUNCE_SECS and only
+# ever happen when a worker actually finishes, so adding one there would
+# only add a way for it to (incorrectly) skip a legitimate wake-time
+# compact — see maybe_auto_compact's header comment: "wake-path behavior
+# unchanged" is a hard requirement of issue #210, not just a nice-to-have.
+#
+# Detects whether THIS call actually attempted a compaction (rather than
+# skipping under threshold, which needs no cooldown) by checking whether it
+# added a bare "coord.compact " line to events.log — log_event's category
+# field is fixed-width-padded (see format_event_line's comment on the same
+# distinction), so "coord.compact " (with the trailing space) matches only
+# the literal injection event, never coord.compact.skip/.timeout/.done/
+# .ineffective/.verify_skip (all of which have a "." immediately after
+# "compact", not a space). A bare coord.compact line is written the moment
+# a compaction is ATTEMPTED (threshold exceeded, pane idle) — before the
+# blocking wait for it to start/finish/verify — so this correctly starts
+# the cooldown whether the attempt goes on to finish cleanly or turns out
+# coord.compact.ineffective; either way, re-firing immediately would be
+# thrash, not progress.
+#
+# The grep also requires "trigger=poll" specifically, not just a bare
+# coord.compact line — maybe_auto_compact's own flock (issue #210) keeps a
+# concurrent wake-triggered attempt from running WHILE this call holds the
+# lock, but a wake can still log its own "trigger=wake" coord.compact line
+# in the tiny unlocked gap between maybe_auto_compact returning above and
+# the "after" line count being read below. Scoping the grep to this call's
+# own trigger avoids the cooldown being armed by someone else's compact.
+auto_compact_poll_pass() {
+    [ "$AUTO_COMPACT" = "1" ] || return 0
+
+    local now
+    now=$(date +%s)
+    if [ "$LAST_AUTO_COMPACT_POLL_TRIGGER" -gt 0 ] \
+        && [ $((now - LAST_AUTO_COMPACT_POLL_TRIGGER)) -lt "$AUTO_COMPACT_COOLDOWN_SECS" ]; then
+        log_event coord.compact.skip "reason=cooldown trigger=poll"
+        return 0
     fi
 
-    local used
-    used="$(probe_ctx_used)" || {
-        log_event coord.compact.skip "reason=no_fresh_probe"
-        return 0
-    }
-
-    [ "$used" -ge "$AUTO_COMPACT_THRESHOLD_TOKENS" ] || return 0   # under threshold — the common case
-
-    echo "[$(date +%T)] coordinator context at ${used} tokens (>= ${AUTO_COMPACT_THRESHOLD_TOKENS}) — compacting before wake..."
-    log_event coord.compact "used=$used threshold=$AUTO_COMPACT_THRESHOLD_TOKENS"
-
-    if [ "$DRY_RUN" = "1" ]; then
-        echo "[DRY] would inject /compact into $SESSION_NAME:coordinator and wait for it to finish"
-        return 0
-    fi
-
-    # Reference point for the post-compaction verification below: captured
-    # BEFORE injection so we can later tell "the probe genuinely re-rendered
-    # with fresh data" from "the statusline just hasn't refreshed yet" —
-    # only the former is meaningful evidence either way.
-    local probe_mtime_before
-    probe_mtime_before=$(mtime_epoch "$AUTO_COMPACT_PROBE" 2>/dev/null) || probe_mtime_before=0
-    [ -n "$probe_mtime_before" ] || probe_mtime_before=0
-
-    # Every step below is best-effort — a transient tmux failure here must
-    # degrade to "compaction never visibly started" (caught by the start-
-    # timeout below) rather than take the whole daemon down via set -e.
-    #
-    # Deliberately NO trailing newline in the pasted buffer (unlike
-    # llm-start.sh's own reprompt path, which pastes an arbitrary multi-line
-    # prompt where a trailing newline is harmless either way): "/compact" is
-    # a single slash command, and pasting it with an embedded newline plus a
-    # separate trailing Enter leaves it ambiguous whether the CLI's input
-    # buffer sees "/compact" (trimmed) or "/compact\n" at submit time.
-    # Pasting the bare text with no newline at all, then a genuinely
-    # separate Enter keystroke, removes that ambiguity outright.
-    local tmp_compact
-    tmp_compact=$(mktemp) || { log_event coord.compact.skip "reason=mktemp_failed"; return 0; }
-    printf '/compact' > "$tmp_compact" 2>/dev/null || true
-    tmux load-buffer -b llm-coord-autocompact "$tmp_compact" 2>/dev/null || true
-    tmux paste-buffer -b llm-coord-autocompact -t "$SESSION_NAME:coordinator" -d 2>/dev/null || true
-    tmux send-keys -t "$SESSION_NAME:coordinator" Enter 2>/dev/null || true
-    rm -f "$tmp_compact" 2>/dev/null || true
-
-    # Wait for compaction to actually start (busy indicator appears) —
-    # confirms the CLI picked up the input. If it never appears within
-    # the timeout, something's off (race, rejected input, wrong pane
-    # state); log it and fall through rather than block further.
-    local waited=0
-    while ! coordinator_pane_busy; do
-        sleep "$AUTO_COMPACT_POLL_SECS"
-        waited=$((waited + AUTO_COMPACT_POLL_SECS))
-        if [ "$waited" -ge "$AUTO_COMPACT_START_TIMEOUT_SECS" ]; then
-            log_event coord.compact.timeout "phase=start waited=${waited}s"
-            return 0
-        fi
-    done
-
-    # Now wait for it to finish (busy indicator clears).
-    waited=0
-    while coordinator_pane_busy; do
-        sleep "$AUTO_COMPACT_POLL_SECS"
-        waited=$((waited + AUTO_COMPACT_POLL_SECS))
-        if [ "$waited" -ge "$AUTO_COMPACT_FINISH_TIMEOUT_SECS" ]; then
-            log_event coord.compact.timeout "phase=finish waited=${waited}s"
-            return 0
-        fi
-    done
-
-    echo "[$(date +%T)] compaction done (${waited}s) — proceeding with wake"
-    log_event coord.compact.done "waited=${waited}s"
-
-    # Whether a pasted "/compact" is actually recognized as the slash
-    # command (vs. submitted as a plain chat message) isn't something this
-    # script can verify short of a live session — the busy indicator
-    # appears and clears identically either way, since both cases are just
-    # "claude processing a turn". If it silently landed as a chat message,
-    # context grows instead of shrinking, and since it'd still be over
-    # threshold, this would otherwise repeat on every subsequent wake with
-    # no visible symptom.
-    #
-    # Poll for the probe's mtime to actually advance past
-    # probe_mtime_before, rather than trusting a fixed sleep — the
-    # statusline's render cadence isn't guaranteed to land within any fixed
-    # window, and checking a probe that hasn't been rewritten yet would
-    # just re-read the pre-compaction value and misreport a working
-    # compaction as ineffective. If it never refreshes within
-    # AUTO_COMPACT_VERIFY_TIMEOUT_SECS, this is inconclusive (not a
-    # failure) — logged as verify_skip, not ineffective.
-    local verify_waited=0 probe_mtime_after used_after=""
-    while [ "$verify_waited" -lt "$AUTO_COMPACT_VERIFY_TIMEOUT_SECS" ]; do
-        sleep "$AUTO_COMPACT_POLL_SECS"
-        verify_waited=$((verify_waited + AUTO_COMPACT_POLL_SECS))
-        probe_mtime_after=$(mtime_epoch "$AUTO_COMPACT_PROBE" 2>/dev/null) || probe_mtime_after=0
-        [ -n "$probe_mtime_after" ] || probe_mtime_after=0
-        if [ "$probe_mtime_after" -gt "$probe_mtime_before" ]; then
-            used_after="$(probe_ctx_used)" || used_after=""
-            break
-        fi
-    done
-
-    if [ -z "$used_after" ]; then
-        log_event coord.compact.verify_skip "reason=probe_not_refreshed waited=${verify_waited}s"
-    elif [ "$used_after" -ge "$used" ]; then
-        echo "[$(date +%T)] WARNING: context did not drop after /compact (before=$used after=$used_after) — the injected command may not have been recognized as a slash command; investigate before this repeats every wake"
-        log_event coord.compact.ineffective "before=$used after=$used_after"
+    local before after
+    before=$(wc -l < "$EVENTS_LOG" 2>/dev/null || echo 0)
+    maybe_auto_compact poll
+    after=$(wc -l < "$EVENTS_LOG" 2>/dev/null || echo 0)
+    if [ "$after" -gt "$before" ] \
+        && tail -n "$((after - before))" "$EVENTS_LOG" 2>/dev/null | grep -q 'coord.compact  .*trigger=poll'; then
+        LAST_AUTO_COMPACT_POLL_TRIGGER=$now
     fi
 }
 
@@ -1909,7 +2125,7 @@ on_outcome() {
         cleanup_eligible_workers outcome
     fi
 
-    maybe_auto_compact
+    maybe_auto_compact wake
 
     echo "[$(date +%T)] outcome: $path"
     echo "[$(date +%T)] waking coordinator..."
@@ -2028,11 +2244,12 @@ run_poll() {
 # backend selected above. Started here (after every function it calls is
 # defined, and after the backend case below so shutdown ordering doesn't
 # matter) so it's live before we block in run_inotify/run_poll.
-# WATCH_TIMER_PID / WORKER_COMPACT_TIMER_PID are pre-declared (empty) up
-# near the shared trap installation, above — this just fills them in when
-# each feature is on. Two separate processes (issue #226) — see
-# run_worker_compact_loop's header comment for why the worker-compact sweep
-# doesn't share run_watch_timer_loop's process.
+# WATCH_TIMER_PID / WORKER_COMPACT_TIMER_PID / AUTO_COMPACT_POLL_TIMER_PID
+# are pre-declared (empty) up near the shared trap installation, above —
+# this just fills them in when each feature is on. Three separate processes
+# (issues #226 and #210) — see run_worker_compact_loop's and
+# run_auto_compact_poll_loop's header comments for why those sweeps don't
+# share run_watch_timer_loop's process.
 # ---------------------------------------------------------------------------
 if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ] || [ "$WATCH_ORPHAN_SWEEP_SECS" -gt 0 ]; then
     run_watch_timer_loop &
@@ -2043,6 +2260,11 @@ if [ "$WORKER_AUTO_COMPACT" = "1" ]; then
     run_worker_compact_loop &
     WORKER_COMPACT_TIMER_PID=$!
     log_event watch.timer.start "worker_auto_compact=$WORKER_AUTO_COMPACT scan_secs=$WORKER_COMPACT_SCAN_SECS"
+fi
+if [ "$AUTO_COMPACT" = "1" ] && [ "$AUTO_COMPACT_TICK_SECS" -gt 0 ]; then
+    run_auto_compact_poll_loop &
+    AUTO_COMPACT_POLL_TIMER_PID=$!
+    log_event watch.timer.start "auto_compact_tick_secs=$AUTO_COMPACT_TICK_SECS auto_compact_cooldown_secs=$AUTO_COMPACT_COOLDOWN_SECS"
 fi
 
 case "$BACKEND" in

@@ -50,7 +50,8 @@ extract_fn() {
     local fn="$1"
     sed -n "/^${fn}() {/,/^}/p" "$WATCH"
 }
-for fn in mtime_epoch coordinator_pane_state coordinator_pane_busy probe_ctx_used maybe_auto_compact log_event; do
+for fn in mtime_epoch coordinator_pane_state coordinator_pane_busy probe_ctx_used maybe_auto_compact \
+          auto_compact_poll_pass log_event; do
     body="$(extract_fn "$fn")"
     [ -n "$body" ] || red "could not extract function '$fn' from $WATCH — has it been renamed?"
     eval "$body"
@@ -58,6 +59,7 @@ done
 
 # ─────────────────────────── fixed env the functions expect ────────────────
 EVENTS_LOG="$TEST_DIR/events.log"; : > "$EVENTS_LOG"
+AUTO_COMPACT_LOCK="$TEST_DIR/coord-compact.lock"
 HAVE_JQ=1
 DRY_RUN=1
 AUTO_COMPACT=1
@@ -69,6 +71,8 @@ AUTO_COMPACT_FINISH_TIMEOUT_SECS=300
 AUTO_COMPACT_VERIFY_TIMEOUT_SECS=30
 AUTO_COMPACT_POLL_SECS=2
 AUTO_COMPACT_PROBE="$TEST_DIR/probe.json"
+AUTO_COMPACT_COOLDOWN_SECS=900
+LAST_AUTO_COMPACT_POLL_TRIGGER=0
 
 PASS=0
 
@@ -319,6 +323,114 @@ if grep -q 'coord.compact.verify_skip' "$EVENTS_LOG" && ! grep -q 'coord.compact
     PASS=$((PASS + 1))
 else
     red "expected verify_skip with no ineffective warning; events.log: $(cat "$EVENTS_LOG")"
+fi
+
+heading "Test 9: auto_compact_poll_pass — issue #210 poll-tick trigger"
+# Reuses the same fake REPL still running from Tests 5/7/8 (idle at its
+# prompt, cli foreground via exec -a claude) -- see Test 7's comment on why
+# it's never interrupted once launched via exec.
+
+# --- 9a: over threshold, idle pane -> fires with trigger=poll, cooldown starts ---
+: > "$EVENTS_LOG"
+printf '{"context_window":{"context_window_size":200000,"total_input_tokens":160000}}' > "$AUTO_COMPACT_PROBE"
+LAST_AUTO_COMPACT_POLL_TRIGGER=0
+( sleep 4; printf '{"context_window":{"context_window_size":200000,"total_input_tokens":40000}}' > "$AUTO_COMPACT_PROBE" ) &
+BGPID9=$!
+auto_compact_poll_pass
+wait "$BGPID9" 2>/dev/null || true
+
+if grep -Eq '^[^ ]+  coord\.compact {2}.*trigger=poll' "$EVENTS_LOG"; then
+    green "poll-tick trigger fires and tags the coord.compact event trigger=poll"
+    PASS=$((PASS + 1))
+else
+    red "expected a coord.compact line tagged trigger=poll; events.log: $(cat "$EVENTS_LOG")"
+fi
+if grep -q 'coord.compact.done.*trigger=poll' "$EVENTS_LOG"; then
+    green "coord.compact.done also tagged trigger=poll"
+    PASS=$((PASS + 1))
+else
+    red "expected coord.compact.done tagged trigger=poll; events.log: $(cat "$EVENTS_LOG")"
+fi
+check "cooldown timestamp recorded after an attempted compact" "1" "$([ "$LAST_AUTO_COMPACT_POLL_TRIGGER" -gt 0 ] && echo 1 || echo 0)"
+
+# --- 9b: still over threshold, but within cooldown -> must NOT re-fire ---
+before="$(wc -l < "$EVENTS_LOG")"
+auto_compact_poll_pass
+after="$(wc -l < "$EVENTS_LOG")"
+check "cooldown suppresses immediate re-trigger -> no new lines logged beyond the skip" \
+    "1" "$(tail -n $((after - before)) "$EVENTS_LOG" | grep -c 'coord.compact.skip.*reason=cooldown trigger=poll' || true)"
+if tail -n $((after - before)) "$EVENTS_LOG" | grep -q '^[^ ]\+  coord\.compact  '; then
+    red "cooldown should have suppressed a second injection; events.log tail: $(tail -n $((after - before)) "$EVENTS_LOG")"
+else
+    green "no second coord.compact injection while cooldown is active"
+    PASS=$((PASS + 1))
+fi
+
+# --- 9c: cooldown expires -> poll-tick fires again ---
+AUTO_COMPACT_COOLDOWN_SECS=1
+sleep 2
+printf '{"context_window":{"context_window_size":200000,"total_input_tokens":160000}}' > "$AUTO_COMPACT_PROBE"
+before="$(wc -l < "$EVENTS_LOG")"
+( sleep 4; printf '{"context_window":{"context_window_size":200000,"total_input_tokens":40000}}' > "$AUTO_COMPACT_PROBE" ) &
+BGPID9c=$!
+auto_compact_poll_pass
+wait "$BGPID9c" 2>/dev/null || true
+after="$(wc -l < "$EVENTS_LOG")"
+if tail -n $((after - before)) "$EVENTS_LOG" | grep -Eq '^[^ ]+  coord\.compact {2}.*trigger=poll'; then
+    green "poll-tick re-fires once the cooldown window has elapsed"
+    PASS=$((PASS + 1))
+else
+    red "expected a fresh coord.compact after cooldown expiry; events.log tail: $(tail -n $((after - before)) "$EVENTS_LOG")"
+fi
+AUTO_COMPACT_COOLDOWN_SECS=900
+
+# --- 9d: busy pane -> poll-tick skips silently, tagged trigger=poll, no
+# cooldown consumed (so it can retry on the very next tick rather than wait
+# out a cooldown meant for actual compact attempts) ---
+orig_coordinator_pane_busy="$(extract_fn coordinator_pane_busy)"
+coordinator_pane_busy() { return 0; }
+: > "$EVENTS_LOG"
+LAST_AUTO_COMPACT_POLL_TRIGGER=0
+auto_compact_poll_pass
+eval "$orig_coordinator_pane_busy"
+if grep -q 'coord.compact.skip.*reason=pane_busy trigger=poll' "$EVENTS_LOG"; then
+    green "busy pane -> coord.compact.skip reason=pane_busy trigger=poll (existing skip event, now tagged)"
+    PASS=$((PASS + 1))
+else
+    red "expected coord.compact.skip reason=pane_busy trigger=poll; events.log: $(cat "$EVENTS_LOG")"
+fi
+check "pane-busy skip does not start a cooldown" "0" "$LAST_AUTO_COMPACT_POLL_TRIGGER"
+
+heading "Test 10: maybe_auto_compact serializes concurrent wake + poll callers (issue #210 review finding)"
+# Reuses the same fake REPL still running from Tests 5/7/8/9 (idle at its
+# prompt). Before the flock added in review, a wake-path call and a
+# poll-tick call landing within milliseconds of each other could both pass
+# the coordinator_pane_busy check while the pane was still idle, then both
+# race on the SAME tmux buffer (llm-coord-autocompact) -- this fires them
+# genuinely concurrently (each in its own subshell, backgrounded together)
+# and asserts only ONE of them actually injects, the other backs off with
+# reason=locked rather than racing the tmux calls.
+: > "$EVENTS_LOG"
+printf '{"context_window":{"context_window_size":200000,"total_input_tokens":160000}}' > "$AUTO_COMPACT_PROBE"
+( sleep 4; printf '{"context_window":{"context_window_size":200000,"total_input_tokens":40000}}' > "$AUTO_COMPACT_PROBE" ) &
+BGPID10=$!
+( maybe_auto_compact wake ) &
+WAKE_PID=$!
+( maybe_auto_compact poll ) &
+POLL_PID=$!
+wait "$WAKE_PID" 2>/dev/null || true
+wait "$POLL_PID" 2>/dev/null || true
+wait "$BGPID10" 2>/dev/null || true
+
+attempts="$(grep -Ec '^[^ ]+  coord\.compact {2,}' "$EVENTS_LOG" || true)"
+locked_skips="$(grep -c 'coord.compact.skip.*reason=locked' "$EVENTS_LOG" || true)"
+check "exactly one caller actually attempted a compact (no double injection)" "1" "$attempts"
+check "exactly one caller backed off on the lock" "1" "$locked_skips"
+if grep -q 'coord.compact.done' "$EVENTS_LOG"; then
+    green "the winning caller completed its compaction cleanly"
+    PASS=$((PASS + 1))
+else
+    red "expected the lock winner to reach coord.compact.done; events.log: $(cat "$EVENTS_LOG")"
 fi
 
 echo ""
