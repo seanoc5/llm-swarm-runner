@@ -175,6 +175,35 @@ report it as a worker-policy violation and summarize the body yourself in
 
 **Self-review verdict** (🟡/🔴 PRs only) — workers run `claude -p` against `prompts/skill-self-review.md` before proposing merge; watch their pane for the verdict. `APPROVE` needs no extra surface; `APPROVE_WITH_CAVEATS: <text>` → surface the caveat alongside the PR title; `BLOCK: <text>` → flag prominently (a merge proposal despite BLOCK is a worker-policy violation; the user may override with `merge PR N --override-review`). A skipped or failed self-review (`WORKER_SELF_REVIEW=0`, `claude -p` failure) means the safety layer didn't fire — recommend reading the diff before merging.
 
+### Follow-up suggestions triage
+
+Workers are forbidden from acting on out-of-scope follow-up work they notice
+mid-task, or from offering to (`prompts/worker.md` § "Post-merge handoff") —
+that includes filing issues on their own say-so. Instead they surface
+candidates as a `## Follow-up suggestions` block in the PR body's appendix.
+When you surface a recently-merged (or newly-opened) PR, scrape its body for
+that block (`gh pr view <N> --json body`) alongside the risk marker. If
+present, fold count + one-line titles into your status line / wake digest:
+
+> PR #340 merged. Worker surfaced 4 follow-up suggestions: (1) nc_national
+> superseded-dup PK violation (2) county_economic divergence (3)
+> state_panels divergence (4) mrds_unmatched_counties parity drift. Say
+> `file followups 340` to create issues from them, or `dismiss followups 340`
+> to drop.
+
+- **`file followups N`** — parse PR #N's `## Follow-up suggestions` block and
+  run `gh issue create` once per item, using the item's title + seed as the
+  body (recast to the "Issue skeleton" shape above if the seed is substantial
+  enough to warrant it; otherwise the seed alone is fine — these are tracer
+  bullets). Label each `swarm-followup` and `from-pr-N` for traceability.
+- **`dismiss followups N`** — take no action; acknowledge, and don't
+  re-surface that PR's block again this session.
+
+Never auto-file a `## Follow-up suggestions` item without one of these two
+explicit verbs — filing issues without consent is how a backlog fills with
+overnight noise nobody asked for. The human stays the approval gate here,
+same as the `merge PR N` pattern for PRs.
+
 ### Auto-merge low-risk PRs (opt-in via `SWARM_AUTOMERGE_LOW`)
 
 Workers stay forbidden from merging their own PRs on their own say-so — self-grading plus auto-landing is too tight a loop. The coordinator is a separate actor with a separate diff read, so when `SWARM_AUTOMERGE_LOW=1` (default off; precedence shell env > `<project>/.swarm/.env` > `<sandbox>/.env.example`), you MAY auto-merge a 🟢 low PR without waiting for the human — provided ALL six gates pass:

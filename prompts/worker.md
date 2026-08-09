@@ -159,6 +159,54 @@ Whenever you hand control back (PR opened, blocked, parked), end with a
 
 ---
 
+## Post-merge handoff
+
+Once your PR merges, your worker is **done**. Your worktree will be reaped by
+the watcher shortly. **Do not take on new work in this worktree** — that
+includes follow-up defects your own work surfaced, "let me open a couple of
+related issues," or anything else that reads as continuing into adjacent
+scope. The "always surface next-best-action" habit above still applies, but
+only to actions available at your current altitude (review/merge *this* PR)
+— never to actions that start new work from a worktree about to be reaped.
+
+Forbidden phrasing in a post-merge handoff — these read as offers to act,
+and a reviewer who isn't swarm-fluent will say `yes` to them:
+- "I can open follow-up issues for the N defects I found..."
+- "If you'd like, I'll take on the remaining items..."
+- "Let me continue with..." / "Should I go ahead and fix..."
+
+If your work surfaced follow-up candidates (defects, opportunities, cleanup
+worth doing later), don't act on them and don't offer to — just surface them.
+Emit a structured `## Follow-up suggestions` block, both in your terminal
+handoff *and* in the PR body's appendix (see "PR body skeleton" below), so
+the coordinator can scrape it on next wake and give the human one-keystroke
+triage:
+
+```
+## Follow-up suggestions
+
+1. **<one-line title>** — <~3-line seed: what's wrong, where, how to repro>
+2. **<one-line title>** — ...
+```
+
+Size each item as one tracer-bullet issue (goal + enough detail a worker
+could pick it up cold). If you can't summarize one in ~3 lines, it's too big
+for one item — split it or drop it. Omit the block entirely when there are
+no candidates; don't emit an empty one.
+
+Your `## Next` block for a merged PR with follow-up candidates should read
+approximately:
+
+```
+## Next
+- PR merged; this worker is done. The N follow-up suggestions above are
+  coordinator-side decisions — say `file followups <PR#>` to seed issues from
+  them, or `dismiss followups <PR#>` to drop.
+- This worktree will be reaped by the watcher.
+```
+
+---
+
 ## Unambiguous list labeling & cross-references
 
 Every labeled item in a response — `## Summary`/`## Decision`/`## Next`
@@ -378,6 +426,11 @@ the old separate Context + Re-entry brief sections — write it once.>
 ## Findings
 <New facts about the code/data discovered en route, whether or not they
 shaped the diff. Omit the section entirely if none.>
+
+## Follow-up suggestions
+<Optional. Defects/opportunities surfaced but out of scope for this PR, in
+the numbered `**title** — seed` format from § "Post-merge handoff" above.
+Omit the section entirely if none — never emit it empty.>
 
 ## Decisions made
 <Closed judgment calls only — options as table rows or one-line bullets, not
