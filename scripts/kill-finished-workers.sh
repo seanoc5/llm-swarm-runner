@@ -275,6 +275,26 @@ mtime_epoch() {
     stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
 }
 
+# worktree_birth_path <worktree-dir>
+#
+# issue #232: the worktree ROOT directory's mtime bumps on every direct
+# child create/rename/delete — .agent-task.md rewrites, build/.gradle
+# creation, status-file writes — so any worker activity after the PR opens
+# makes the root look "born" later than it really was, permanently
+# defeating pr_predates_worktree below. `<worktree>/.git` is a FILE (not a
+# dir) for a worktree checkout, written once by `git worktree add` and
+# never touched again by normal work, so its mtime is a stable proxy for
+# "when this worktree was born." Falls back to the worktree dir itself if
+# that file is somehow absent (e.g. a non-worktree checkout in tests).
+worktree_birth_path() {
+    local wt="$1"
+    if [ -f "$wt/.git" ]; then
+        printf '%s/.git' "$wt"
+    else
+        printf '%s' "$wt"
+    fi
+}
+
 # pr_predates_worktree <created_at-iso8601> <worktree-dir>
 #
 # issue #185: `gh pr view <branch>` returns the branch's most recent PR in
@@ -282,10 +302,9 @@ mtime_epoch() {
 # makes a freshly provisioned worktree on that branch look "finalized" to
 # pr_is_merged/pr_is_finalized below, even though the terminal PR predates
 # this worktree entirely and has nothing to do with the work currently in
-# it. Compares the PR's createdAt against the worktree root directory's
-# mtime — set once by `git worktree add` and otherwise stable, our
-# lowest-cost proxy for "when this worktree was born" (same technique
-# reap-orphan-worktrees.sh uses for orphan staleness).
+# it. Compares the PR's createdAt against the worktree's birth timestamp
+# (see worktree_birth_path — issue #232 moved this off the root dir's
+# unstable mtime).
 #
 # Fails CLOSED (i.e. "does NOT predate", not stale) whenever either
 # timestamp can't be resolved, so a parsing hiccup falls back to the
@@ -297,10 +316,17 @@ pr_predates_worktree() {
     local pr_epoch wt_epoch
     pr_epoch=$(date -d "$created_at" +%s 2>/dev/null) || return 1
     [ -n "$pr_epoch" ] || return 1
-    wt_epoch=$(mtime_epoch "$wt") || return 1
+    wt_epoch=$(mtime_epoch "$(worktree_birth_path "$wt")") || return 1
     [ -n "$wt_epoch" ] || return 1
     [ "$pr_epoch" -lt "$wt_epoch" ]
 }
+
+# Set by pr_is_merged/pr_is_finalized on a 1-return, to the specific
+# condition that failed (issue #232: the two conditions used to be
+# bundled into one caller-side message — "not MERGED|CLOSED" vs "terminal
+# state predates this worktree" are very different diagnoses). Empty/stale
+# on a 0-return; callers must only read it right after a failed call.
+PR_SKIP_REASON=""
 
 # Returns 0 if the PR for the given branch is MERGED (strict) AND was
 # created after the given worktree came into existence. Returns 1 for
@@ -311,10 +337,21 @@ pr_predates_worktree() {
 pr_is_merged() {
     local branch="$1" wt="$2"
     local json state created_at
-    json=$(gh pr view "$branch" --json state,createdAt -q '"\(.state)\t\(.createdAt)"' 2>/dev/null) || return 1
+    json=$(gh pr view "$branch" --json state,createdAt -q '"\(.state)\t\(.createdAt)"' 2>/dev/null)
+    if [ -z "$json" ]; then
+        PR_SKIP_REASON="no PR found"
+        return 1
+    fi
     IFS=$'\t' read -r state created_at <<< "$json"
-    [ "$state" = "MERGED" ] || return 1
-    ! pr_predates_worktree "$created_at" "$wt"
+    if [ "$state" != "MERGED" ]; then
+        PR_SKIP_REASON="not MERGED (state=$state)"
+        return 1
+    fi
+    if pr_predates_worktree "$created_at" "$wt"; then
+        PR_SKIP_REASON="terminal state predates this worktree"
+        return 1
+    fi
+    return 0
 }
 
 # Returns 0 if the PR for the given branch is finalized — MERGED or
@@ -329,13 +366,24 @@ pr_is_merged() {
 pr_is_finalized() {
     local branch="$1" wt="$2"
     local json state created_at
-    json=$(gh pr view "$branch" --json state,createdAt -q '"\(.state)\t\(.createdAt)"' 2>/dev/null) || return 1
+    json=$(gh pr view "$branch" --json state,createdAt -q '"\(.state)\t\(.createdAt)"' 2>/dev/null)
+    if [ -z "$json" ]; then
+        PR_SKIP_REASON="no PR found"
+        return 1
+    fi
     IFS=$'\t' read -r state created_at <<< "$json"
     case "$state" in
         MERGED|CLOSED) : ;;
-        *) return 1 ;;
+        *)
+            PR_SKIP_REASON="not MERGED|CLOSED (state=$state)"
+            return 1
+            ;;
     esac
-    ! pr_predates_worktree "$created_at" "$wt"
+    if pr_predates_worktree "$created_at" "$wt"; then
+        PR_SKIP_REASON="terminal state predates this worktree"
+        return 1
+    fi
+    return 0
 }
 
 # Decide which ones to kill ---------------------------------------------------
@@ -394,13 +442,13 @@ for w in "${WINDOWS[@]}"; do
     fi
     if [ "$MERGED_ONLY" = "1" ]; then
         if ! pr_is_merged "$branch" "$wt"; then
-            echo "  $w  [PR $branch not MERGED, or its terminal state predates this worktree → skip (merged-only mode)]"
+            echo "  $w  [PR $branch: ${PR_SKIP_REASON:-unknown reason} → skip (merged-only mode)]"
             continue
         fi
         reasons+=("PR-merged")
     elif [ "$PR_FINALIZED" = "1" ]; then
         if ! pr_is_finalized "$branch" "$wt"; then
-            echo "  $w  [PR $branch not MERGED|CLOSED, or its terminal state predates this worktree → skip (pr-finalized mode)]"
+            echo "  $w  [PR $branch: ${PR_SKIP_REASON:-unknown reason} → skip (pr-finalized mode)]"
             continue
         fi
         reasons+=("PR-finalized")
