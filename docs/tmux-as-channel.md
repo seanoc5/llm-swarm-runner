@@ -35,6 +35,38 @@ tmux -L swarm-<basename> send-keys -t llm-<basename>:coordinator "<your prompt>"
 
 This is documented in [`tmux-cheatsheet.md`](./tmux-cheatsheet.md) as the "control terminal" pattern. It's a **human → coordinator** channel — the human is the only actor outside the agent loop who has enough situational awareness to know whether the coordinator is at a prompt or mid-tool-call, and to retry if their keystrokes get eaten. Any other use of `send-keys` (agent → agent, script → agent that's running an LLM) lacks that situational awareness and is duct tape — see §4c.
 
+### c. Pane content is not verified truth — UI chrome is not conversation
+
+`capture-pane -p` (plain, the flag used everywhere in this doc and in `check-stuck-workers.sh`) strips color/attribute info along with the ANSI it drops. That's normally harmless — but Claude Code's TUI renders several kinds of chrome that only a *human eye with color* can distinguish from something someone actually typed and submitted:
+
+- **The composer's suggested-next-prompt autofill.** Claude Code sometimes prefills the empty input box with a dimmed suggestion (e.g. `❯ Loop in Radesh and John on this PR for review`). In a plain-text capture, dim and normal text render identically — the suggestion looks exactly like typed, submitted input.
+- **`※ recap:` lines** — Claude Code's own recap/summary chrome, not something either party wrote as a turn.
+- **Spinner/status lines** — `✻`/`✶` glyphs, `Considering…`, `Sautéed for Ns`, `Cooked for Ns`, `Baked for Ns`, `Simmered for Ns`, `Brewed for Ns`, `Crunched for Ns` (the same catalog `check-stuck-workers.sh`'s `detect_state` matches on) — transient progress chrome, not conversation.
+- **Session-resume dialogs** — `❯ 1. Resume from summary…`, `Resume this session with…` — a picker UI, not a submitted message.
+
+**The incident this section exists for** (oconeco-site swarm, 2026-08-01): a coordinator read a worker pane, saw a dimmed composer suggestion sitting below the last response, and reported it to the operator as "you've asked that worker to…" — attributing UI chrome to the human. The report was wrong; the operator had typed nothing of the sort.
+
+**The rule:** never attribute text to the operator (or to an agent "saying" something) on the strength of a plain-text pane capture alone. Composer-region text in particular — anything sitting below the last rendered response, above wherever the prompt currently sits — is *never* confirmed input until it appears as a submitted turn in the actual session transcript.
+
+**The verification recipe** (what actually disproved the incident above, in order of cheapness):
+
+1. **Location.** Does the suspect line live *only* inside the composer box below the last response, or does it appear as a submitted `>` turn earlier in scrollback? Composer-only placement is a strong tell by itself.
+2. **Transcript grep — the load-bearing check.** Every Claude Code session writes its turns to a JSONL transcript under `~/.claude/projects/<slug>/`, where `<slug>` is the worktree's absolute path with every `/` replaced by `-` (e.g. `/opt/work/wt-issue-219` → `-opt-work-wt-issue-219`). Because `sandbox.sh` bind-mounts `$HOME/.claude` into every worker container (`sandbox.sh:40`), the host coordinator's own `~/.claude/projects/` tree already contains every worker's transcripts — no container exec needed. Grep it:
+   ```bash
+   grep -l 'Loop in Radesh' ~/.claude/projects/-opt-work-wt-issue-219/*.jsonl
+   ```
+   No hit in any session transcript for that worktree means the text was never actually submitted — full stop. Transcripts are ground truth for what was actually sent; the rendered pane is not. `scripts/capture-worker.sh <window> --verify "<text>"` (see below) automates this step — it derives the worktree path for you via `swarm_worktree_dir`, greps, and exits 0/1 on found/not-found.
+3. **Does it persist or change on its own?** Typed-but-unsubmitted text sticks around until the user acts on it. A suggestion can vanish on its own (e.g. the pane idles into a session-resume dialog and the suggestion is gone) — something a human never did. Self-changing content without operator action is corroborating evidence it was chrome, not input.
+
+**Use `scripts/capture-worker.sh` instead of raw `capture-pane`** when the question is "did the operator/worker really say X": it tags every line matching the chrome catalog above as `[UI-CHROME]` inline, and its `--verify TEXT` mode runs check 2 for you:
+
+```bash
+scripts/capture-worker.sh iss-42                          # tagged dump, last 200 lines
+scripts/capture-worker.sh iss-42 --verify "Loop in Radesh"  # FOUND / NOT FOUND against the transcript
+```
+
+Raw `capture-pane` is still fine for structural checks that don't hinge on attributing text to a person — `check-stuck-workers.sh`'s state classification (spinner present? dead pane?) never claims a human said anything, so it doesn't need this treatment.
+
 ---
 
 ## 2. What's blocked by design
@@ -138,6 +170,7 @@ If your prompt or script is reaching for `tmux send-keys -t llm-...:iss-N`, repl
 | Channel                                     | Supported? | Where documented                                          |
 |---------------------------------------------|------------|-----------------------------------------------------------|
 | Coordinator reads worker scrollback         | Yes        | `overview.md` §Tmux as substrate; `check-stuck-workers.sh` |
+| Coordinator attributes pane text to a person| **Verify first** | Plain capture can't tell UI chrome from typed input — check the session transcript before believing it (§1c, `scripts/capture-worker.sh --verify`) |
 | Coordinator `send-keys` to worker           | **Discouraged** | Permitted by substrate; treat as footgun, use file bus instead (§4c) |
 | Operator `send-keys` to coordinator         | Yes        | `tmux-cheatsheet.md`                                      |
 | Worker reads/writes any tmux                | **Blocked** | `sandbox.sh` (no socket mount); `security.md`             |

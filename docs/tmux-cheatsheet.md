@@ -60,6 +60,8 @@ tmux capture-pane -t <session>:<window> -p -S - > /tmp/iss-215-full.log
 
 `-p` = print to stdout; `-S -N` = start N lines back in the scrollback buffer; omit `-S` for current pane only.
 
+> **Careful attributing what you read.** Plain `capture-pane -p` strips color, so a dimmed composer suggestion, a `※ recap:` line, or a spinner can look exactly like something the operator actually typed. Never report "the user/worker said X" from a raw capture without checking the session transcript first — see [`docs/tmux-as-channel.md`](./tmux-as-channel.md) §1c. `scripts/capture-worker.sh <window>` tags known chrome inline; `scripts/capture-worker.sh <window> --verify "<text>"` checks the transcript for you.
+
 ## 5. Scrollback / search inside a window (interactive)
 
 | What                                                          | Command                                                                                       |

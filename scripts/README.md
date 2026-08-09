@@ -7,6 +7,7 @@ All scripts here require bash 4.0+; do not run them under `sh` or `dash`.
 | Script | Purpose |
 |---|---|
 | `_load-env.sh` | Sourceable env loader: applies `<project>/.swarm/.env` then `.env.example` to the current shell; caller-set vars win. |
+| `capture-worker.sh` | Reads a worker/coordinator pane without mistaking UI chrome (composer suggestions, recaps, spinners, resume dialogs) for conversation — tags known chrome lines inline, and `--verify TEXT` checks the session transcript for whether text was actually submitted. See `docs/tmux-as-channel.md` §1c. |
 | `check-stuck-workers.sh` | Surveys `iss-*` worker panes, pattern-matches the last 50 lines against known healthy/attention/broken states, and exits non-zero if any worker needs eyes-on. |
 | `coord-scratch-toggle.sh` | Toggles a bare-bash scratch pane in the coordinator window (split right, repo root, no container). Invoked by the Ctrl-Z binding in the coordinator window. |
 | `coordinator-claude.sh` | Launches the Claude Code coordinator REPL (wraps the long `claude` invocation so the tmux line stays short). |
