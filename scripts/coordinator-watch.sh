@@ -887,6 +887,26 @@ mtime_epoch() {
     stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
 }
 
+# worktree_birth_path <worktree-dir>
+#
+# issue #232: the worktree ROOT directory's mtime bumps on every direct
+# child create/rename/delete — .agent-task.md rewrites, build/.gradle
+# creation, status-file writes — so any worker activity after the PR opens
+# makes the root look "born" later than it really was, permanently
+# defeating pr_predates_worktree below. `<worktree>/.git` is a FILE (not a
+# dir) for a worktree checkout, written once by `git worktree add` and
+# never touched again by normal work, so its mtime is a stable proxy for
+# "when this worktree was born." Falls back to the worktree dir itself if
+# that file is somehow absent (e.g. a non-worktree checkout in tests).
+worktree_birth_path() {
+    local wt_dir="$1"
+    if [ -f "$wt_dir/.git" ]; then
+        printf '%s/.git' "$wt_dir"
+    else
+        printf '%s' "$wt_dir"
+    fi
+}
+
 # pr_predates_worktree <created_at-iso8601> <worktree-dir>
 #
 # issue #185: `gh pr list --state all` returns every PR that ever existed
@@ -895,11 +915,10 @@ mtime_epoch() {
 # "finalized" to pr_poll_pass below, even though the terminal PR predates
 # this worktree entirely (observed: a worker reaped 3s after provisioning
 # because an old closed PR on the same branch name was still terminal).
-# Compares the PR's createdAt against the worktree root directory's mtime
-# — set once by `git worktree add` and otherwise stable, our lowest-cost
-# proxy for "when this worktree was born" (same technique
-# reap-orphan-worktrees.sh uses for orphan staleness, and the same check
-# kill-finished-workers.sh's pr_is_merged/pr_is_finalized now apply).
+# Compares the PR's createdAt against the worktree's birth timestamp (see
+# worktree_birth_path — issue #232 moved this off the root dir's unstable
+# mtime; same fix applied to kill-finished-workers.sh's
+# pr_is_merged/pr_is_finalized).
 #
 # Fails CLOSED (i.e. "does NOT predate", not stale) whenever either
 # timestamp can't be resolved, so a parsing hiccup falls back to the
@@ -911,7 +930,7 @@ pr_predates_worktree() {
     local pr_epoch wt_epoch
     pr_epoch=$(date -d "$created_at" +%s 2>/dev/null) || return 1
     [ -n "$pr_epoch" ] || return 1
-    wt_epoch=$(mtime_epoch "$wt_dir") || return 1
+    wt_epoch=$(mtime_epoch "$(worktree_birth_path "$wt_dir")") || return 1
     [ -n "$wt_epoch" ] || return 1
     [ "$pr_epoch" -lt "$wt_epoch" ]
 }
