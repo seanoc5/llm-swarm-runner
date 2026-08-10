@@ -35,17 +35,50 @@
 #   SWEEP=<path>            Override path to sweep-swarm-outcomes.sh.
 #   WATCHER_AUTOCLOSE=1     Set to 0 to disable automatic cleanup of
 #                           finalized workers before each coord.wake. When
-#                           enabled (default), invokes
-#                             kill-finished-workers.sh --pr-finalized \
-#                                 --with-worktree --yes
-#                           so workers whose PRs are MERGED *or* CLOSED
-#                           fully reap (window + worktree + local branch)
-#                           and free their slot. OPEN PRs and "no PR yet"
-#                           cases are left untouched. CLOSED PRs are
-#                           treated as terminal — the user said no — but
-#                           origin/fix/issue-N is preserved by
-#                           kill-worktree.sh, so accidental closures are
-#                           recoverable via `gh pr reopen N`.
+#                           enabled (default), invokes kill-finished-workers.sh
+#                           with --with-worktree --yes plus a PR-state flag
+#                           chosen by WATCHER_AUTOCLOSE_MODE (below) so
+#                           eligible workers fully reap (window + worktree +
+#                           local branch) and free their slot. OPEN PRs and
+#                           "no PR yet" cases are always left untouched,
+#                           regardless of mode.
+#   WATCHER_AUTOCLOSE_MODE=merged
+#                           (issue #237) Which terminal PR states count as
+#                           "eligible to reap" for WATCHER_AUTOCLOSE, applied
+#                           consistently at both autoclose call sites (the
+#                           outcome-triggered cleanup_eligible_workers call
+#                           and the WATCH_PR_POLL_SECS pr_poll_pass backstop
+#                           below):
+#                             merged     (default) STRICT — only a MERGED PR
+#                                        is reap-eligible
+#                                        (kill-finished-workers.sh --merged-only).
+#                                        A CLOSED-without-merge PR is left
+#                                        alone entirely: window, worktree, and
+#                                        branch all stay put, and pr_poll_pass
+#                                        doesn't even log terminal_pr_detected
+#                                        for it — a closed-without-merge PR is
+#                                        a rejection/oddity the operator likely
+#                                        wants to inspect, not a clean success
+#                                        like a merge.
+#                             finalized  MERGED *or* CLOSED is reap-eligible
+#                                        (kill-finished-workers.sh
+#                                        --pr-finalized) — this is the
+#                                        behavior WATCHER_AUTOCLOSE had before
+#                                        this knob existed. CLOSED PRs are
+#                                        treated as terminal — the user said
+#                                        no — but origin/fix/issue-N is
+#                                        preserved by kill-worktree.sh, so
+#                                        accidental closures are recoverable
+#                                        via `gh pr reopen N`.
+#                           The WATCH_ORPHAN_SWEEP_SECS orphan sweep below is
+#                           NOT gated by this knob — it always runs
+#                           reap-orphan-worktrees.sh --pr-finalized. That
+#                           sweep only ever reaches worktrees whose tmux
+#                           window is already gone (see its own header
+#                           comment), so there's no live window/scrollback
+#                           left to preserve for operator inspection either
+#                           way — the "leave it for review" motivation behind
+#                           this knob doesn't apply there.
 #
 #   WATCH_PR_POLL_SECS=60   (issue #119) The outcome-driven trigger above
 #                           only fires when a NEW outcome.json appears —
@@ -553,7 +586,8 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     POST_OUTCOMES       0         run sweep-swarm-outcomes.sh per outcome
     OUTCOME_HOOK        (none)    path to per-outcome poster
     SWEEP               (auto)    override sweep-swarm-outcomes.sh path
-    WATCHER_AUTOCLOSE   1         reap finalized workers (MERGED|CLOSED PR; window+worktree+branch) before wake
+    WATCHER_AUTOCLOSE   1         reap eligible workers (window+worktree+branch) before wake; see WATCHER_AUTOCLOSE_MODE
+    WATCHER_AUTOCLOSE_MODE merged which terminal PR states are reap-eligible: merged (MERGED only, default) | finalized (MERGED or CLOSED)
     WATCH_PR_POLL_SECS  60        periodic gh-poll backstop reap (0=off); see header comment
     WATCH_ORPHAN_SWEEP_SECS 3600  periodic reap-orphan-worktrees.sh sweep for window-less worktrees (0=off); see header comment
     WATCH_CHECK_ON_DONE 1         run acceptance check when a worker signals done; see header comment
@@ -701,6 +735,9 @@ POLL_SECS="${POLL_SECS:-2}"
 POST_OUTCOMES="${POST_OUTCOMES:-0}"
 SWEEP="${SWEEP:-$LLM_SWARM_DIR/scripts/sweep-swarm-outcomes.sh}"
 WATCHER_AUTOCLOSE="${WATCHER_AUTOCLOSE:-1}"
+# issue #237 — which terminal PR states are reap-eligible for WATCHER_AUTOCLOSE;
+# see header comment. Validated below alongside the other enumerated/numeric knobs.
+WATCHER_AUTOCLOSE_MODE="${WATCHER_AUTOCLOSE_MODE:-merged}"
 KILL_FINISHED="${KILL_FINISHED:-$LLM_SWARM_DIR/scripts/kill-finished-workers.sh}"
 WATCH_PR_POLL_SECS="${WATCH_PR_POLL_SECS:-60}"
 WATCH_ORPHAN_SWEEP_SECS="${WATCH_ORPHAN_SWEEP_SECS:-3600}"
@@ -758,6 +795,14 @@ WORKER_COMPACT_NUDGE_PROMPT="${WORKER_COMPACT_NUDGE_PROMPT:-Continue your task f
 WORKER_COMPACT_BACKOFF_SECS="${WORKER_COMPACT_BACKOFF_SECS:-600}"
 WORKER_COMPACT_MAX_FAILURES="${WORKER_COMPACT_MAX_FAILURES:-3}"
 
+case "$WATCHER_AUTOCLOSE_MODE" in
+    merged)    AUTOCLOSE_PR_FLAG="--merged-only" ;;
+    finalized) AUTOCLOSE_PR_FLAG="--pr-finalized" ;;
+    *)
+        echo "ERROR: WATCHER_AUTOCLOSE_MODE must be 'merged' or 'finalized' (got: $WATCHER_AUTOCLOSE_MODE)" >&2
+        exit 1
+        ;;
+esac
 if ! [[ "$WATCH_PR_POLL_SECS" =~ ^[0-9]+$ ]]; then
     echo "ERROR: WATCH_PR_POLL_SECS must be a non-negative integer (got: $WATCH_PR_POLL_SECS)" >&2
     exit 1
@@ -914,7 +959,7 @@ debounce:      ${DEBOUNCE_SECS}s
 poll interval: ${POLL_SECS}s$([ "$BACKEND" = "inotify" ] && echo " (unused in inotify mode)")
 llm-start.sh:  $LLM_START
 post-outcomes: $POST_OUTCOMES$([ "$POST_OUTCOMES" = "1" ] && echo " (sweep: $SWEEP, hook: ${OUTCOME_HOOK:-default dry-run stub})")
-autoclose:     $WATCHER_AUTOCLOSE$([ "$WATCHER_AUTOCLOSE" = "1" ] && echo " (script: $KILL_FINISHED)")
+autoclose:     $WATCHER_AUTOCLOSE$([ "$WATCHER_AUTOCLOSE" = "1" ] && echo " (mode: $WATCHER_AUTOCLOSE_MODE [$AUTOCLOSE_PR_FLAG], script: $KILL_FINISHED)")
 pr-poll:       ${WATCH_PR_POLL_SECS}s$([ "$WATCH_PR_POLL_SECS" = "0" ] && echo " (disabled)")
 orphan-sweep:  ${WATCH_ORPHAN_SWEEP_SECS}s$([ "$WATCH_ORPHAN_SWEEP_SECS" = "0" ] && echo " (disabled)" || echo " (script: $REAP_ORPHAN)")
 check-on-done: $WATCH_CHECK_ON_DONE$([ "$WATCH_CHECK_ON_DONE" = "1" ] && echo " (session: $SESSION_NAME)")
@@ -1057,21 +1102,25 @@ dispatch_outcome() {
 
 # cleanup_eligible_workers
 #
-# Full reap of workers whose PR has reached a terminal GitHub state —
-# either MERGED (work landed) or CLOSED (work rejected/superseded). Kills
-# the tmux window, removes the worktree, deletes the local branch. Called
-# inside on_outcome (after debounce passes, before coord.wake) so freed
-# slots show up in the coordinator's window/alive count on its next wake.
+# Full reap of workers whose PR has reached a reap-eligible terminal GitHub
+# state, per WATCHER_AUTOCLOSE_MODE (issue #237): MERGED only (mode=merged,
+# default), or MERGED *or* CLOSED (mode=finalized). Kills the tmux window,
+# removes the worktree, deletes the local branch. Called inside on_outcome
+# (after debounce passes, before coord.wake) so freed slots show up in the
+# coordinator's window/alive count on its next wake.
 #
-# Uses --pr-finalized + --with-worktree. CLOSED-without-merge is treated
-# as terminal because the human explicitly said "not this work" — keeping
-# the listener parked just burns a slot. Recovery is cheap if the closure
-# was accidental: kill-worktree.sh only deletes the LOCAL branch (never
-# pushes a delete), so origin/fix/issue-N survives and `gh pr reopen N`
-# restores the PR.
+# Uses $AUTOCLOSE_PR_FLAG (--merged-only or --pr-finalized, derived from
+# WATCHER_AUTOCLOSE_MODE above) + --with-worktree. In finalized mode,
+# CLOSED-without-merge is treated as terminal because the human explicitly
+# said "not this work" — keeping the listener parked just burns a slot.
+# Recovery is cheap if the closure was accidental: kill-worktree.sh only
+# deletes the LOCAL branch (never pushes a delete), so origin/fix/issue-N
+# survives and `gh pr reopen N` restores the PR. In the default merged mode,
+# CLOSED-without-merge is left alone entirely (window + worktree intact) so
+# the operator can inspect it before it vanishes.
 #
-# OPEN PRs and "no PR yet" cases are left untouched — those represent
-# work the user may still want to land or babysit.
+# OPEN PRs and "no PR yet" cases are always left untouched, regardless of
+# mode — those represent work the user may still want to land or babysit.
 #
 # This is the smooth-flow contract: PR reaches a terminal state -> watcher
 # reaps everything -> slot fully free for the next dispatch. No manual
@@ -1097,11 +1146,11 @@ cleanup_eligible_workers() {
     # ~95% of events.log — the watch.pr_poll line already records that the
     # backstop fired); dry runs are always logged for visibility.
     local kf_out killed
-    kf_out="$("$KILL_FINISHED" --idle-min 0 --pr-finalized --with-worktree --yes $dry_arg 2>&1 || true)"
+    kf_out="$("$KILL_FINISHED" --idle-min 0 "$AUTOCLOSE_PR_FLAG" --with-worktree --yes $dry_arg 2>&1 || true)"
     killed="$(sed -nE 's/^Done\. Closed ([0-9]+) window\(s\)\.$/\1/p' <<<"$kf_out" | tail -1)"
     killed="${killed:-0}"
     if [ "$killed" != "0" ] || [ "$DRY_RUN" = "1" ]; then
-        log_event watch.autoclose "trigger=$trigger mode=pr-finalized+worktree dry_run=$DRY_RUN killed=$killed"
+        log_event watch.autoclose "trigger=$trigger mode=${WATCHER_AUTOCLOSE_MODE}+worktree dry_run=$DRY_RUN killed=$killed"
     fi
 }
 
@@ -1220,7 +1269,13 @@ pr_poll_pass() {
             continue
         fi
 
-        if [ "$state" = "MERGED" ] || [ "$state" = "CLOSED" ]; then
+        # issue #237: in the default merged mode, a CLOSED-without-merge PR
+        # is not reap-eligible at all — skip it here so it never triggers
+        # stale_pr_ignored/orphan_no_window logging or a wasted
+        # cleanup_eligible_workers pass for a worker WATCHER_AUTOCLOSE_MODE
+        # says to leave alone. finalized mode keeps the original MERGED-or-
+        # CLOSED behavior.
+        if [ "$state" = "MERGED" ] || { [ "$state" = "CLOSED" ] && [ "$WATCHER_AUTOCLOSE_MODE" = "finalized" ]; }; then
             if pr_predates_worktree "$created_at" "$wt_dir"; then
                 log_event watch.pr_poll "reason=stale_pr_ignored issue=$issue branch=$branch pr=$pr_number state=$state"
             elif has_live_window "$issue"; then
@@ -1269,6 +1324,13 @@ pr_poll_pass() {
 # PR finalized), on a much slower cadence (WATCH_ORPHAN_SWEEP_SECS) since
 # it's a heavier full-directory sweep rather than a single gh round-trip.
 # Failures are non-fatal, same policy as cleanup_eligible_workers.
+#
+# issue #237: deliberately NOT gated by WATCHER_AUTOCLOSE_MODE — always
+# --pr-finalized. Every target here already has no live tmux window (that's
+# the whole reason it's an orphan), so there's no scrollback left to
+# preserve either way; the "leave CLOSED-without-merge open for inspection"
+# motivation behind WATCHER_AUTOCLOSE_MODE doesn't apply to a window that's
+# already gone.
 orphan_sweep_pass() {
     local dry_arg=""
     [ "$DRY_RUN" = "1" ] && dry_arg="--dry-run"

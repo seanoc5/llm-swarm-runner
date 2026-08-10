@@ -563,7 +563,7 @@ Stubs `gh` and `tmux` via `PATH` override so no GitHub auth and no live tmux ser
 Deterministic coverage for the `coordinator-watch.sh` autoclose pass (issue #32) — the per-outcome invocation of `kill-finished-workers.sh` that frees slots when a worker's PR has reached a terminal state. Stubs both `kill-finished-workers.sh` (via `KILL_FINISHED=`) and `llm-start.sh` (via `LLM_START=`) so we can assert what was called, with what argv, in what order — no tmux, no `gh`, no real worktree.
 
 Covers:
-- `WATCHER_AUTOCLOSE=1` (default): `kill-finished-workers.sh` is invoked **before** `coord.wake`, with `--pr-finalized --with-worktree --yes`.
+- `WATCHER_AUTOCLOSE=1` (default): `kill-finished-workers.sh` is invoked **before** `coord.wake`, with `--with-worktree --yes` plus a PR-state flag from `WATCHER_AUTOCLOSE_MODE` — `--merged-only` by default, or `--pr-finalized` when `WATCHER_AUTOCLOSE_MODE=finalized` (issue #237).
 - `WATCHER_AUTOCLOSE=0`: stub is **not** invoked; `coord.wake` still fires.
 - Sequential outcomes: each `.ok.json` arrival triggers its own autoclose+wake pair (smooth-flow contract).
 - `.err.json` parity: error outcomes trigger autoclose+wake too (covers worker abort, `/quit`, etc.).
