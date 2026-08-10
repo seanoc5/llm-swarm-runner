@@ -22,7 +22,7 @@
 #
 # Requires: tmux, jq (both already required by the feature itself).
 #
-# The tmux() shadow function near Test 8 is defined mid-file on purpose:
+# The tmux() shadow function near Test 10 is defined mid-file on purpose:
 # calls above it hit the real tmux binary, calls below it (until unset -f)
 # hit the stub. shellcheck's SC2218 flags every call above the definition
 # as if it were a forward-reference bug, so it's disabled file-wide here.
@@ -57,6 +57,7 @@ extract_fn() {
     sed -n "/^${fn}() {/,/^}/p" "$WATCH"
 }
 for fn in worker_pane_state worker_pane_busy worker_pane_ctx_used worker_has_open_pr \
+          worker_task_done worker_compact_record_failure worker_compact_record_success \
           maybe_worker_compact log_event; do
     body="$(extract_fn "$fn")"
     [ -n "$body" ] || red "could not extract function '$fn' from $WATCH — has it been renamed?"
@@ -70,17 +71,26 @@ DRY_RUN=1
 WORKER_AUTO_COMPACT=1
 WORKER_COMPACT_THRESHOLD_TOKENS=150000
 WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS=300000
-WORKER_COMPACT_BUSY_PATTERN='Considering…|Sautéed for|Cooked for|Baked for|Simmered for|✻|✶|Press Ctrl-C again to .xit'
+# issue #252: must match coordinator-watch.sh's own default — anchored on
+# the "(esc to interrupt)" hint instead of a spinner-verb list (see that
+# file's AUTO_COMPACT_BUSY_PATTERN header comment for why).
+WORKER_COMPACT_BUSY_PATTERN='\(esc to interrupt\)|Press Ctrl-C again to .xit'
 WORKER_COMPACT_START_TIMEOUT_SECS=15
 WORKER_COMPACT_FINISH_TIMEOUT_SECS=300
 WORKER_COMPACT_VERIFY_TIMEOUT_SECS=30
 WORKER_COMPACT_POLL_SECS=2
 WORKER_COMPACT_NUDGE_PROMPT="Continue your task from where you left off."
+WORKER_COMPACT_BACKOFF_SECS=600
+WORKER_COMPACT_MAX_FAILURES=3
+declare -A WORKER_COMPACT_LAST_FAIL=()
+declare -A WORKER_COMPACT_FAIL_COUNT=()
+declare -A WORKER_COMPACT_GAVE_UP=()
 
 WORKSPACE="$TEST_DIR/workspace"
 WT_DIR="$WORKSPACE/wt-issue-42"
 STATUS_DIR="$WT_DIR/.swarm/tasks/status"
-mkdir -p "$STATUS_DIR"
+DONE_DIR="$WT_DIR/.swarm/tasks/done"
+mkdir -p "$STATUS_DIR" "$DONE_DIR"
 WIN="iss-42"
 
 PASS=0
@@ -135,6 +145,20 @@ check_eventually "idle-looking text -> not busy" "idle" 'busy_or_idle'
 
 tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo '✻ Considering… (esc to interrupt)'" Enter
 check_eventually "spinner text -> busy" "busy" 'busy_or_idle'
+
+# issue #252 mode 1 (missing verbs): a present-tense verb Claude Code hasn't
+# rendered before still counts as busy, because detection no longer keys off
+# a fixed verb list — it's anchored on the "(esc to interrupt)" hint that
+# accompanies EVERY in-flight turn regardless of wording.
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo '✻ Cogitated for 3s (esc to interrupt)'" Enter
+check_eventually "unlisted verb + esc-to-interrupt -> still busy (issue #252 mode 1)" "busy" 'busy_or_idle'
+
+# issue #252 mode 2 (past-tense scrollback): a completed turn's leftover
+# summary line ("Simmered for 12s", no "(esc to interrupt)" — the turn is
+# over) must NOT read as busy. The old verb-list pattern matched this text
+# unconditionally and produced a false-busy skip.
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo '✻ Simmered for 12s'" Enter
+check_eventually "past-tense completed-turn text (no esc-hint) -> idle, not busy (issue #252 mode 2)" "idle" 'busy_or_idle'
 
 tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'Press Ctrl-C again to exit'" Enter
 check_eventually "exit-confirm text -> busy (guarded against a stray Enter)" "busy" 'busy_or_idle'
@@ -195,27 +219,165 @@ maybe_worker_compact "$WIN"
 if grep -q 'worker.compact ' "$EVENTS_LOG"; then got=logged; else got=missing; fi
 check "200k, no PR open -> above the 150k threshold, compact logged" "logged" "$got"
 
-# Now with a PR open, the higher wrap-up threshold (300000) applies — 200k
-# should NOT trigger a compact anymore (hysteresis: the worker looks like
-# it's wrapping up, so it gets more headroom).
+# Now with a PR open: issue #252's worker_task_done fires the moment the
+# status file reports "ready-for-review" — see this file's
+# WORKER_AUTO_COMPACT header comment for why that now supersedes
+# WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS in the common case (worker_
+# has_open_pr and worker_task_done's status check key off the same "pr"
+# field). So BOTH a below-threshold 200k ctx and an above-wrap-up-threshold
+# 310k ctx should skip below — but for the SAME reason (task_done), not
+# because of a ctx/threshold comparison. Test 7 below covers task_done in
+# isolation; this just confirms it also wins inside the full
+# maybe_worker_compact call this test already had wired up.
 printf '{"task_id":"t2","state":"ready-for-review","pr":777,"ts":"2026-01-01T00:00:00Z","note":""}' \
     > "$STATUS_DIR/t2.json"
-before="$(wc -l < "$EVENTS_LOG")"
+
+: > "$EVENTS_LOG"
 maybe_worker_compact "$WIN"
-after="$(wc -l < "$EVENTS_LOG")"
-check "200k WITH PR open -> below wrap-up threshold (300k), no compact logged" "$before" "$after"
+if grep -q 'worker.compact.skip.*reason=task_done' "$EVENTS_LOG"; then got=skipped; else got=notskipped; fi
+check "200k WITH PR open -> skipped as task_done (issue #252)" "skipped" "$got"
+if grep -q 'worker.compact ' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "200k WITH PR open -> no compact injection logged" "missing" "$got"
 
 tmux send-keys -t "$SESSION_NAME:$WIN" C-c
 sleep 0.2
 tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'sonnet · wt-issue-42 · ctx: 310k/1M (31%)'; cat" Enter
 check_eventually "cat foreground w/ 310k ctx -> cli" "cli" "worker_pane_state '$WIN'"
 
+: > "$EVENTS_LOG"
 maybe_worker_compact "$WIN"
+if grep -q 'worker.compact.skip.*reason=task_done' "$EVENTS_LOG"; then got=skipped; else got=notskipped; fi
+check "310k WITH PR open -> STILL skipped as task_done, even above the old 300k wrap-up threshold" "skipped" "$got"
 if grep -q 'worker.compact ' "$EVENTS_LOG"; then got=logged; else got=missing; fi
-check "310k WITH PR open -> above wrap-up threshold, compact logged (DRY_RUN, no real injection)" "logged" "$got"
+check "310k WITH PR open -> no compact injection logged (issue #252 supersedes the wrap-up threshold)" "missing" "$got"
 rm -f "$STATUS_DIR"/*.json
 
-heading "Test 6: real (non-DRY_RUN) injection against a fake worker REPL"
+heading "Test 6: worker_task_done — three independent signals + the requeue-staleness guard (issue #252)"
+rm -f "$STATUS_DIR"/*.json "$DONE_DIR"/*.json 2>/dev/null || true
+
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.2
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'sonnet · wt-issue-42 · ctx: 50k/1M (5%)'; cat" Enter
+check_eventually "plain idle-looking pane -> cli (sanity check)" "cli" "worker_pane_state '$WIN'"
+
+rc=0; worker_task_done "$WIN" "$WT_DIR" || rc=$?
+check "no done-file, no terminal status, no completion-block text -> rc1 (not done)" "1" "$rc"
+
+# (a) outcome file in done/
+printf '{}' > "$DONE_DIR/t1.ok.json"
+rc=0; worker_task_done "$WIN" "$WT_DIR" || rc=$?
+check "(a) outcome file present in done/ -> rc0 (task done)" "0" "$rc"
+rm -f "$DONE_DIR"/*.json
+
+# staleness guard: a leftover outcome file from an EARLIER, already-concluded
+# task must NOT block a NEWER task that's currently claimed (processing/
+# non-empty) — otherwise every requeue.sh follow-up into a worktree that has
+# ever finished once would permanently disable auto-compact for it.
+PROCESSING_DIR="$WT_DIR/.swarm/tasks/processing"
+mkdir -p "$PROCESSING_DIR"
+printf '%s' "a newer task brief" > "$PROCESSING_DIR/t2.md"
+printf '{}' > "$DONE_DIR/t1.ok.json"
+rc=0; worker_task_done "$WIN" "$WT_DIR" || rc=$?
+check "stale done-file from a PAST task + a claimed task in processing/ -> rc1 (NOT done — requeue-staleness guard)" "1" "$rc"
+rm -f "$DONE_DIR"/*.json "$PROCESSING_DIR"/*.md
+rmdir "$PROCESSING_DIR" 2>/dev/null || true
+
+# (b) status file terminal state
+printf '{"task_id":"t1","state":"ready-for-review","pr":555,"ts":"2026-01-01T00:00:00Z","note":""}' \
+    > "$STATUS_DIR/t1.json"
+rc=0; worker_task_done "$WIN" "$WT_DIR" || rc=$?
+check "(b) status state=ready-for-review -> rc0 (task done)" "0" "$rc"
+
+printf '{"task_id":"t1","state":"done-no-pr","pr":null,"ts":"2026-01-01T00:00:00Z","note":""}' \
+    > "$STATUS_DIR/t1.json"
+rc=0; worker_task_done "$WIN" "$WT_DIR" || rc=$?
+check "(b) status state=done-no-pr -> rc0 (task done)" "0" "$rc"
+
+printf '{"task_id":"t1","state":"blocked","pr":null,"ts":"2026-01-01T00:00:00Z","note":"waiting"}' \
+    > "$STATUS_DIR/t1.json"
+rc=0; worker_task_done "$WIN" "$WT_DIR" || rc=$?
+check "(b) status state=blocked -> rc1 (still a normal compact candidate, NOT done)" "1" "$rc"
+rm -f "$STATUS_DIR"/*.json
+
+# (c) pane shows the listener's completion block — the only signal
+# available before (a)/(b) land, so NOT gated by the processing/ guard.
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.2
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; printf 'TASK COMPLETE    exit=0    duration=12s\n'; cat" Enter
+check_eventually "completion-block pane foreground -> cli" "cli" "worker_pane_state '$WIN'"
+rc=0; worker_task_done "$WIN" "$WT_DIR" || rc=$?
+check "(c) pane shows TASK COMPLETE banner (no done-file/status yet) -> rc0 (task done)" "0" "$rc"
+
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.2
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; printf 'TASK FAILED       exit=1    duration=9s\n'; cat" Enter
+check_eventually "TASK FAILED banner pane foreground -> cli" "cli" "worker_pane_state '$WIN'"
+rc=0; worker_task_done "$WIN" "$WT_DIR" || rc=$?
+check "(c) pane shows TASK FAILED banner -> rc0 (task done)" "0" "$rc"
+
+heading "Test 7: maybe_worker_compact skips an over-threshold window whose task is already done"
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.2
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'sonnet · wt-issue-42 · ctx: 200k/1M (20%)'; cat" Enter
+check_eventually "cat foreground w/ 200k ctx -> cli" "cli" "worker_pane_state '$WIN'"
+
+printf '{"task_id":"t3","state":"ready-for-review","pr":999,"ts":"2026-01-01T00:00:00Z","note":""}' \
+    > "$STATUS_DIR/t3.json"
+: > "$EVENTS_LOG"
+maybe_worker_compact "$WIN"
+if grep -q 'worker.compact.skip.*reason=task_done' "$EVENTS_LOG"; then got=skipped; else got=notskipped; fi
+check "200k, well over threshold, but task_done -> skipped as task_done" "skipped" "$got"
+if grep -q 'worker.compact ' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "no compact injection logged when task_done" "missing" "$got"
+rm -f "$STATUS_DIR"/*.json
+
+heading "Test 8: per-window backoff after failed injection attempts (issue #252)"
+: > "$EVENTS_LOG"
+unset 'WORKER_COMPACT_LAST_FAIL[42]' 'WORKER_COMPACT_FAIL_COUNT[42]' 'WORKER_COMPACT_GAVE_UP[42]'
+
+worker_compact_record_failure 42
+check "1st consecutive failure -> not yet given up" "" "${WORKER_COMPACT_GAVE_UP[42]:-}"
+worker_compact_record_failure 42
+check "2nd consecutive failure -> still not given up" "" "${WORKER_COMPACT_GAVE_UP[42]:-}"
+if grep -q 'worker.compact.giving_up' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "no giving_up event before WORKER_COMPACT_MAX_FAILURES (3) is reached" "missing" "$got"
+
+worker_compact_record_failure 42
+check "3rd consecutive failure (MAX_FAILURES=3) -> gave up" "1" "${WORKER_COMPACT_GAVE_UP[42]:-}"
+if grep -q 'worker.compact.giving_up.*issue=42 failures=3' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "worker.compact.giving_up logged exactly once, with failures=3" "logged" "$got"
+
+# Once given up, maybe_worker_compact must stay completely silent for this
+# window from then on — no repeated warnings/skip lines every sweep.
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.2
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'sonnet · wt-issue-42 · ctx: 200k/1M (20%)'; cat" Enter
+check_eventually "cat foreground w/ 200k ctx -> cli" "cli" "worker_pane_state '$WIN'"
+
+before="$(wc -l < "$EVENTS_LOG")"
+maybe_worker_compact "$WIN"
+after="$(wc -l < "$EVENTS_LOG")"
+check "gave-up window: maybe_worker_compact stays silent (no new log lines)" "$before" "$after"
+
+# A window that failed once (but hasn't hit MAX_FAILURES) cools down for
+# WORKER_COMPACT_BACKOFF_SECS instead of retrying every sweep.
+unset 'WORKER_COMPACT_LAST_FAIL[42]' 'WORKER_COMPACT_FAIL_COUNT[42]' 'WORKER_COMPACT_GAVE_UP[42]'
+WORKER_COMPACT_LAST_FAIL[42]=$(date +%s)
+: > "$EVENTS_LOG"
+maybe_worker_compact "$WIN"
+if grep -q 'worker.compact.skip.*reason=backoff' "$EVENTS_LOG"; then got=skipped; else got=notskipped; fi
+check "recent failure timestamp -> skipped as backoff (cooldown still active)" "skipped" "$got"
+if grep -q 'worker.compact ' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "no compact injection logged during the backoff cooldown" "missing" "$got"
+
+# A real success clears all backoff/failure bookkeeping immediately.
+WORKER_COMPACT_FAIL_COUNT[42]=2
+worker_compact_record_success 42
+check "record_success clears LAST_FAIL" "" "${WORKER_COMPACT_LAST_FAIL[42]:-}"
+check "record_success clears FAIL_COUNT" "" "${WORKER_COMPACT_FAIL_COUNT[42]:-}"
+check "record_success clears GAVE_UP" "" "${WORKER_COMPACT_GAVE_UP[42]:-}"
+
+heading "Test 9: real (non-DRY_RUN) injection against a fake worker REPL"
 # Stand-in for a live worker Claude Code REPL: renders its own statusline
 # (no probe file, no background writer needed — unlike the coordinator
 # fixture, the "before" and "after" ctx values are both rendered directly
@@ -316,7 +478,7 @@ fi
 check_eventually "post-compact nudge was actually received by the worker" "resumed: $WORKER_COMPACT_NUDGE_PROMPT" \
     "tmux capture-pane -t '$SESSION_NAME:$WIN' -p | grep -o 'resumed: .*' | tail -1"
 
-heading "Test 7: set -e safety — a forced tmux failure must not abort the process"
+heading "Test 10: set -e safety — a forced tmux failure must not abort the process"
 # This file (coordinator-watch.sh) runs under set -euo pipefail. Force
 # `tmux list-panes` to fail mid-call and confirm the function degrades to a
 # safe fallback instead of taking the whole daemon down.
@@ -335,18 +497,18 @@ else
     red "expected state=shell on tmux failure, got [$state]"
 fi
 
-heading "Test 8: ineffective-compaction detection — usage that DOESN'T drop must warn"
-# Same fake REPL instance from Test 6, still running (a `while read` loop —
+heading "Test 11: ineffective-compaction detection — usage that DOESN'T drop must warn"
+# Same fake REPL instance from Test 9, still running (a `while read` loop —
 # no need to touch the pane's foreground process at all). Just flip the
 # mode file to "same" so this round's /compact redraws whatever the
-# CURRENT ctx is (40k, left over from Test 6's drop) unchanged — mirroring
+# CURRENT ctx is (40k, left over from Test 9's drop) unchanged — mirroring
 # test-coordinator-auto-compact.sh's Test 7 (fresh probe, unchanged usage).
 # Threshold lowered so 40k still counts as "over" — the point here is the
 # ineffective-detection logic, not re-establishing the 150k trigger.
 : > "$EVENTS_LOG"
 WORKER_COMPACT_THRESHOLD_TOKENS=10000
 echo same > "$REPL_MODE_FILE"
-check_eventually "REPL settled back to idle before Test 8" "cli" "worker_pane_state '$WIN'"
+check_eventually "REPL settled back to idle before Test 11" "cli" "worker_pane_state '$WIN'"
 
 maybe_worker_compact "$WIN"
 if grep -q 'worker.compact.ineffective' "$EVENTS_LOG"; then
@@ -355,8 +517,12 @@ if grep -q 'worker.compact.ineffective' "$EVENTS_LOG"; then
 else
     red "usage stayed unchanged across the 'compaction' but no worker.compact.ineffective fired; events.log: $(cat "$EVENTS_LOG")"
 fi
+# That ineffective verdict just armed issue #252's backoff for this window
+# (worker_compact_record_failure) — clear it so Test 12 below exercises
+# verify_skip in isolation instead of getting swallowed by reason=backoff.
+unset 'WORKER_COMPACT_LAST_FAIL[42]' 'WORKER_COMPACT_FAIL_COUNT[42]' 'WORKER_COMPACT_GAVE_UP[42]'
 
-heading "Test 9: verify-skip — a pane whose ctx text never comes back must NOT be flagged ineffective"
+heading "Test 12: verify-skip — a pane whose ctx text never comes back must NOT be flagged ineffective"
 # Same fake REPL instance, still running. Flip the mode file to "blank" so
 # this round's post-compact screen shows NOTHING parseable within the
 # verify window (a short WORKER_COMPACT_VERIFY_TIMEOUT_SECS makes this
@@ -365,7 +531,7 @@ heading "Test 9: verify-skip — a pane whose ctx text never comes back must NOT
 # value").
 : > "$EVENTS_LOG"
 echo blank > "$REPL_MODE_FILE"
-check_eventually "REPL settled back to idle before Test 9" "cli" "worker_pane_state '$WIN'"
+check_eventually "REPL settled back to idle before Test 12" "cli" "worker_pane_state '$WIN'"
 
 WORKER_COMPACT_VERIFY_TIMEOUT_SECS=3 maybe_worker_compact "$WIN"
 if grep -q 'worker.compact.verify_skip' "$EVENTS_LOG" && ! grep -q 'worker.compact.ineffective' "$EVENTS_LOG"; then
