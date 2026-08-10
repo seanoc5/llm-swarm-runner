@@ -163,6 +163,7 @@ export PATH="$TEST_DIR/bin:$PATH"
 start_watcher() {
     local autoclose="$1" logfile="$2"
     WATCHER_AUTOCLOSE="$autoclose" \
+        WATCHER_AUTOCLOSE_MODE="${WATCHER_AUTOCLOSE_MODE:-}" \
         KILL_FINISHED="$FAKE_KILL" \
         REAP_ORPHAN="${REAP_ORPHAN:-$FAKE_REAP_ORPHAN}" \
         LLM_START="$FAKE_LLM_START" \
@@ -225,14 +226,17 @@ WAKE_TS=$(awk 'NR==1 { print $1 }' "$WAKE_LOG")
     || red "kill-finished-workers.sh should run BEFORE coord.wake (kill=$KILL_TS wake=$WAKE_TS)"
 green "kill-finished-workers.sh ran BEFORE coord.wake (autoclose then dispatch)"
 
-# Assert the documented argv: --pr-finalized --with-worktree --yes
+# Assert the documented default argv (issue #237: WATCHER_AUTOCLOSE_MODE
+# defaults to "merged" -> --merged-only, not --pr-finalized).
+grep -q -- '--merged-only' "$KILL_LOG" \
+    || red "expected --merged-only in kill stub argv (default WATCHER_AUTOCLOSE_MODE=merged); got: $(cat "$KILL_LOG")"
 grep -q -- '--pr-finalized' "$KILL_LOG" \
-    || red "expected --pr-finalized in kill stub argv; got: $(cat "$KILL_LOG")"
+    && red "did not expect --pr-finalized in kill stub argv under default WATCHER_AUTOCLOSE_MODE=merged; got: $(cat "$KILL_LOG")"
 grep -q -- '--with-worktree' "$KILL_LOG" \
     || red "expected --with-worktree in kill stub argv; got: $(cat "$KILL_LOG")"
 grep -q -- '--yes' "$KILL_LOG" \
     || red "expected --yes in kill stub argv; got: $(cat "$KILL_LOG")"
-green "kill stub called with --pr-finalized --with-worktree --yes (terminal-PR mode)"
+green "kill stub called with --merged-only --with-worktree --yes (default merged mode)"
 
 # Assert the events log recorded watch.autoclose with the parsed kill count
 EVENTS_LOG="$PROJECT_DIR/.swarm/events.log"
@@ -650,13 +654,20 @@ heading "Test 15: pr-poll ignores a terminal PR that predates the freshly provis
 # now carries a 4th column (createdAt); an old CLOSED PR with a createdAt
 # far in the past must NOT trigger a reap for a worktree that (by
 # definition, in this test) was just created.
+#
+# issue #237: exercised via CLOSED-state PRs specifically to drive the
+# predates-worktree logic, which is orthogonal to WATCHER_AUTOCLOSE_MODE —
+# so this test pins WATCHER_AUTOCLOSE_MODE=finalized (the pre-#237 default)
+# to keep testing that logic on its own. The new default (mode=merged)
+# leaving CLOSED-without-merge alone regardless of predates is covered
+# separately below.
 : > "$KILL_LOG"
 rm -f "$PROJECT_DIR/.swarm/events.log"
 mkdir -p "$TEST_DIR/wt-issue-100/.swarm/tasks/done"
 printf 'fix/issue-100\tCLOSED\t101\t2020-01-01T00:00:00Z\n' > "$GH_PR_LIST_FILE"
 : > "$TMUX_WINDOWS_FILE"   # irrelevant here — stale-PR check short-circuits before has_live_window
 
-ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 1 "$TEST_DIR/watch-15.log"
+ONCE=0 WATCH_PR_POLL_SECS=2 WATCHER_AUTOCLOSE_MODE=finalized start_watcher 1 "$TEST_DIR/watch-15.log"
 sleep 5
 stop_watcher
 
@@ -680,14 +691,59 @@ NOW_ISO="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 printf 'fix/issue-102\tCLOSED\t103\t%s\n' "$NOW_ISO" > "$GH_PR_LIST_FILE"
 echo "iss-102" > "$TMUX_WINDOWS_FILE"   # issue #225 — see Test 5's comment
 
-ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 1 "$TEST_DIR/watch-15b.log"
+ONCE=0 WATCH_PR_POLL_SECS=2 WATCHER_AUTOCLOSE_MODE=finalized start_watcher 1 "$TEST_DIR/watch-15b.log"
 sleep 5
 stop_watcher
 
 [ -s "$KILL_LOG" ] \
-    || red "a genuinely fresh terminal PR (created after the worktree) failed to trigger reap — fix is over-suppressing. Watch log:
+    || red "a genuinely fresh terminal PR (created after the worktree) failed to trigger reap under WATCHER_AUTOCLOSE_MODE=finalized — fix is over-suppressing. Watch log:
 $(cat "$TEST_DIR/watch-15b.log")"
-green "a terminal PR created after the worktree still triggers reap (fix isn't over-suppressing)"
+green "a terminal PR created after the worktree still triggers reap under finalized mode (fix isn't over-suppressing)"
+
+# ============================================================================
+heading "Test 15c: default WATCHER_AUTOCLOSE_MODE=merged leaves a fresh CLOSED-without-merge PR untouched (issue #237)"
+# ============================================================================
+# The new default: unlike Test 15b (finalized mode), a CLOSED PR — even one
+# created well after the worktree, so pr_predates_worktree would NOT
+# suppress it under finalized mode — must never trigger a reap when
+# WATCHER_AUTOCLOSE_MODE defaults to "merged". The window/worktree/branch
+# are left fully intact for operator inspection.
+: > "$KILL_LOG"
+rm -f "$PROJECT_DIR/.swarm/events.log"
+mkdir -p "$TEST_DIR/wt-issue-103/.swarm/tasks/done"
+NOW_ISO_103="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+printf 'fix/issue-103\tCLOSED\t104\t%s\n' "$NOW_ISO_103" > "$GH_PR_LIST_FILE"
+echo "iss-103" > "$TMUX_WINDOWS_FILE"
+
+ONCE=0 WATCH_PR_POLL_SECS=2 WATCHER_AUTOCLOSE_MODE= start_watcher 1 "$TEST_DIR/watch-15c.log"
+sleep 5
+stop_watcher
+
+[ ! -s "$KILL_LOG" ] \
+    || red "kill-finished-workers.sh fired for a CLOSED-without-merge PR under the default WATCHER_AUTOCLOSE_MODE=merged — should be left open for inspection. Kill log:
+$(cat "$KILL_LOG")"
+green "default mode=merged leaves a fresh CLOSED-without-merge PR's worktree/window untouched"
+
+EVENTS_LOG="$PROJECT_DIR/.swarm/events.log"
+if grep -q 'reason=terminal_pr_detected' "$EVENTS_LOG" 2>/dev/null; then
+    red "terminal_pr_detected should not fire for a CLOSED-without-merge PR under default mode=merged"
+fi
+green "no terminal_pr_detected logged for the CLOSED-without-merge PR under default mode=merged"
+
+# Positive control on the same worktree/branch: switching to
+# WATCHER_AUTOCLOSE_MODE=finalized reaps it, proving the worktree really was
+# reap-eligible all along and mode=merged (not some other suppression) is
+# what held it back above.
+: > "$KILL_LOG"
+rm -f "$PROJECT_DIR/.swarm/events.log"
+ONCE=0 WATCH_PR_POLL_SECS=2 WATCHER_AUTOCLOSE_MODE=finalized start_watcher 1 "$TEST_DIR/watch-15c-control.log"
+sleep 5
+stop_watcher
+
+[ -s "$KILL_LOG" ] \
+    || red "positive control failed: the same CLOSED-without-merge PR did not reap under WATCHER_AUTOCLOSE_MODE=finalized. Watch log:
+$(cat "$TEST_DIR/watch-15c-control.log")"
+green "the same worktree reaps normally under WATCHER_AUTOCLOSE_MODE=finalized — confirms mode=merged was the reason it was spared above"
 
 # ============================================================================
 heading "Test 16: kill-finished-workers.sh --pr-finalized preserves a fresh worktree with a stale closed PR (issue #185)"
@@ -853,7 +909,7 @@ make_reap_orphan_stub "Done. Reaped 0 worktree(s) (skipped 0 of 0 scanned)."
 heading "All watcher-autoclose tests passed"
 echo "  WATCHER_AUTOCLOSE=1: kill-finished-workers runs BEFORE coord.wake"
 echo "  WATCHER_AUTOCLOSE=0: kill-finished-workers is skipped, wake still fires"
-echo "  Argv: --pr-finalized --with-worktree --yes (terminal-PR mode)"
+echo "  Argv: --merged-only --with-worktree --yes (default WATCHER_AUTOCLOSE_MODE=merged)"
 echo "  Events log: watch.autoclose + coord.wake recorded per outcome"
 echo "  Smooth-flow: each outcome triggers its own autoclose pass"
 echo "  .err.json outcomes also trigger autoclose (parity with .ok.json)"
@@ -870,4 +926,5 @@ echo "  #185: pr-poll ignores a terminal PR that predates the freshly provisione
 echo "  #185: kill-finished-workers.sh --pr-finalized preserves a fresh worktree with a stale closed PR"
 echo "  #225: pr-poll never reaps a window-less worktree; logs orphan_no_window once, not every tick"
 echo "  #225: orphan_sweep_pass runs reap-orphan-worktrees.sh on its own timer, gated by WATCHER_AUTOCLOSE"
+echo "  #237: WATCHER_AUTOCLOSE_MODE=merged (default) leaves CLOSED-without-merge workers open; =finalized reaps MERGED-or-CLOSED like before"
 yellow "Run with KEEP=1 to leave $TEST_DIR for inspection."
