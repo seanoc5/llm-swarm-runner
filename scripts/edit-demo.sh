@@ -24,7 +24,7 @@ set -euo pipefail
 # CONFIGURATION — edit these after recording
 # =========================================================================
 
-RAW="${1:-${HOME}/Videos/demo-raw.mp4}"
+RAW="${1:-${HOME}/Videos/demo-raw.mkv}"
 OUT="${2:-${HOME}/Videos/demo-final.mp4}"
 
 # Optional spatial crop applied to every segment BEFORE the scale/fps pass.
