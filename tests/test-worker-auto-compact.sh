@@ -315,6 +315,18 @@ check_eventually "TASK FAILED banner pane foreground -> cli" "cli" "worker_pane_
 rc=0; worker_task_done "$WIN" "$WT_DIR" || rc=$?
 check "(c) pane shows TASK FAILED banner -> rc0 (task done)" "0" "$rc"
 
+# Regression: an in-progress worker whose pane merely displays the phrase
+# "TASK COMPLETE" (e.g. grepping/catting worker-listener.sh's own source, or
+# this repo's test fixtures) must NOT be misread as done — the real
+# completion block is a specific line shape ("  TASK COMPLETE    exit=0..."),
+# not just the bare phrase anywhere in scrollback.
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.2
+tmux send-keys -t "$SESSION_NAME:$WIN" 'clear; echo "365:        printf ..TASK COMPLETE    exit=.s.."; cat' Enter
+check_eventually "source-grep-like pane text foreground -> cli" "cli" "worker_pane_state '$WIN'"
+rc=0; worker_task_done "$WIN" "$WT_DIR" || rc=$?
+check "phrase appears mid-line (source/grep context, not the real banner) -> rc1 (NOT done)" "1" "$rc"
+
 heading "Test 7: maybe_worker_compact skips an over-threshold window whose task is already done"
 tmux send-keys -t "$SESSION_NAME:$WIN" C-c
 sleep 0.2

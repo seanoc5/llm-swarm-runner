@@ -2149,7 +2149,13 @@ worker_task_done() {
     local content clean
     content="$(tmux capture-pane -t "$SESSION_NAME:$win" -p 2>/dev/null)" || return 1
     clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
-    printf '%s\n' "$clean" | LC_ALL=C grep -qE 'TASK (COMPLETE|FAILED)'
+    # Anchored on the literal completion-block line shape from
+    # worker-listener.sh's print_completion_block() — "  TASK COMPLETE    exit=0    duration=42s"
+    # — not just the bare phrase. An unanchored match on "TASK (COMPLETE|FAILED)"
+    # would also fire if a worker's own pane happened to display that phrase
+    # via source/test-fixture content (e.g. this repo's own worker-listener.sh
+    # or test-shape-stuck-workers.sh), falsely marking an in-progress worker done.
+    printf '%s\n' "$clean" | LC_ALL=C grep -qE '^[[:space:]]*TASK (COMPLETE|FAILED)[[:space:]]+exit='
 }
 
 # WORKER_COMPACT_LAST_FAIL / WORKER_COMPACT_FAIL_COUNT / WORKER_COMPACT_GAVE_UP
