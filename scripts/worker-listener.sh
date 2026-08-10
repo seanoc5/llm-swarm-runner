@@ -175,6 +175,59 @@ claim_next_task() {
     return 1
 }
 
+# Guard against a stale $LLM_SWARM_DIR (issue #251). $LLM_SWARM_DIR is the
+# runner sandbox's own checkout — the source of prompts/worker.md, injected
+# as a system prompt into every dispatched agent below. Worktrees always
+# fetch fresh from origin/<default> in provision-worker.sh, so if the runner
+# checkout itself falls behind (e.g. only the coordinator's checkout got
+# pulled), the staleness is invisible from the worktree side and workers
+# silently get outdated conventions. Fast-forward when it's safe to; warn
+# only when the checkout is dirty, diverged, or the remote is unreachable —
+# never mutate in those cases. Cheap: one fetch + rev-list per task dispatch.
+refresh_stale_runner_checkout() {
+    local dir="${LLM_SWARM_DIR:-}"
+    [ -n "$dir" ] && [ -d "$dir/.git" ] || return 0
+
+    if ! git -C "$dir" fetch --quiet origin 2>/dev/null; then
+        echo "WARN stale-prompts: git fetch failed in \$LLM_SWARM_DIR ($dir) — remote unreachable, proceeding with local prompts as-is." >&2
+        return 0
+    fi
+
+    local default_ref
+    default_ref="$(git -C "$dir" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+    if [ -z "$default_ref" ]; then
+        local cand
+        for cand in main master; do
+            if git -C "$dir" show-ref --verify --quiet "refs/remotes/origin/$cand"; then
+                default_ref="origin/$cand"
+                break
+            fi
+        done
+    fi
+    [ -n "$default_ref" ] || return 0
+
+    local behind ahead
+    behind="$(git -C "$dir" rev-list --count "HEAD..$default_ref" 2>/dev/null || echo 0)"
+    ahead="$(git -C "$dir" rev-list --count "$default_ref..HEAD" 2>/dev/null || echo 0)"
+    [ "${behind:-0}" -gt 0 ] || return 0
+
+    if [ "${ahead:-0}" -gt 0 ]; then
+        echo "WARN stale-prompts: \$LLM_SWARM_DIR ($dir) has diverged from $default_ref ($behind behind, $ahead ahead) — not auto-mutating a diverged checkout; pull manually." >&2
+        return 0
+    fi
+
+    if [ -n "$(git -C "$dir" status --porcelain 2>/dev/null)" ]; then
+        echo "WARN stale-prompts: \$LLM_SWARM_DIR ($dir) is $behind commit(s) behind $default_ref but has uncommitted changes — not auto-mutating a dirty checkout; pull manually." >&2
+        return 0
+    fi
+
+    if git -C "$dir" merge --ff-only --quiet "$default_ref" 2>/dev/null; then
+        echo "[$(date +%T)] Fast-forwarded \$LLM_SWARM_DIR ($dir) $behind commit(s) to $default_ref before prompt injection."
+    else
+        echo "WARN stale-prompts: \$LLM_SWARM_DIR ($dir) is $behind commit(s) behind $default_ref and fast-forward failed — proceeding with stale prompts." >&2
+    fi
+}
+
 # Dispatch the configured agent on a task text. Sets DISPATCH_RC.
 # Relies on globals set per-task in the main loop: MODEL_OPTS,
 # WORKER_SYSTEM_PROMPT_OPTS, WORKER_SYSTEM_PROMPT_ENV, CODEX_PREFIX.
@@ -501,6 +554,7 @@ while true; do
         #   - gemini: GEMINI_SYSTEM_MD=<path> env var (per gemini-cli docs)
         #   - codex: prepend worker.md to the task prompt (codex CLI does not
         #     expose an append-system-prompt flag)
+        refresh_stale_runner_checkout
         WORKER_MD="${LLM_SWARM_DIR:-}/prompts/worker.md"
         WORKER_SYSTEM_PROMPT_OPTS=()
         WORKER_SYSTEM_PROMPT_ENV=()
