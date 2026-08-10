@@ -36,6 +36,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 START_WINDOW=7
 AGENT=""
 PROJECT_DIR=""
@@ -73,7 +74,7 @@ fi
 
 # --- Single-worktree mode: -a without -t launches sandbox in current shell ---
 if [ -n "$AGENT" ] && ! $USE_TMUX; then
-    exec "$SCRIPT_DIR/sandbox.sh" "$PROJECT_DIR" "$AGENT"
+    exec "$REPO_ROOT/sandbox.sh" "$PROJECT_DIR" "$AGENT"
 fi
 
 # --- Multi-worktree mode: list (and optionally create tmux windows) ---
@@ -120,7 +121,7 @@ for wt in "${WORKTREES[@]}"; do
         # Optionally launch sandbox
         if [ -n "$AGENT" ]; then
             # Run the sandbox, then rename the window when it exits
-            tmux send-keys -t "$WINDOW" "$SCRIPT_DIR/sandbox.sh $wt $AGENT; tmux rename-window '💤 $short_branch'" Enter
+            tmux send-keys -t "$WINDOW" "$REPO_ROOT/sandbox.sh $wt $AGENT; tmux rename-window '💤 $short_branch'" Enter
             echo "    -> launched sandbox ($AGENT)"
         fi
 
