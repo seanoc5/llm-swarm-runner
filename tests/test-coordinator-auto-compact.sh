@@ -65,7 +65,10 @@ DRY_RUN=1
 AUTO_COMPACT=1
 AUTO_COMPACT_THRESHOLD_TOKENS=150000
 AUTO_COMPACT_PROBE_MAX_AGE_SECS=120
-AUTO_COMPACT_BUSY_PATTERN='Considering…|Sautéed for|Cooked for|Baked for|Simmered for|✻|✶|Press Ctrl-C again to .xit'
+# issue #252: must match coordinator-watch.sh's own default — anchored on
+# the "(esc to interrupt)" hint instead of a spinner-verb list (see that
+# file's AUTO_COMPACT_BUSY_PATTERN header comment for why).
+AUTO_COMPACT_BUSY_PATTERN='\(esc to interrupt\)|Press Ctrl-C again to .xit'
 AUTO_COMPACT_START_TIMEOUT_SECS=15
 AUTO_COMPACT_FINISH_TIMEOUT_SECS=300
 AUTO_COMPACT_VERIFY_TIMEOUT_SECS=30

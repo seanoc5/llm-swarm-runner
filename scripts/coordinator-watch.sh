@@ -254,17 +254,35 @@
 #                           pane content to tell "claude is mid-turn" from
 #                           "claude is idle at its input prompt" — both
 #                           states show the same pane_current_command, so
-#                           this is the only signal available. Defaults to
-#                           the same spinner-phrase pattern
-#                           check-stuck-workers.sh's detect_state() already
-#                           relies on for its ACTIVE state (Considering…,
-#                           Sautéed for, Cooked for, Baked for, Simmered
-#                           for, ✻, ✶) plus the exit-confirm-pending
-#                           prompt, which would misfire on a bare Enter.
-#                           This is TUI chrome, not a documented API, and
-#                           may need updating if Claude Code's wording
-#                           changes — keep in sync with that file's
-#                           pattern if you touch either.
+#                           this is the only signal available. (issue #252)
+#                           Defaults to the "(esc to interrupt)" hint that
+#                           accompanies the spinner line for the ENTIRE
+#                           duration of any in-flight turn or compaction —
+#                           regardless of which present-tense verb Claude
+#                           Code renders that cycle — plus the exit-confirm-
+#                           pending prompt, which would misfire on a bare
+#                           Enter. This replaced an earlier spinner-verb
+#                           list (Considering…, Sautéed for, Cooked for,
+#                           Baked for, Simmered for, ✻, ✶ — the same list
+#                           check-stuck-workers.sh's detect_state() still
+#                           uses for its ACTIVE state) after runtime-log
+#                           analysis (#252) showed it failing both
+#                           directions at once: newer verbs (e.g. "Cogitated
+#                           for") aren't in any fixed list, so a live turn
+#                           could read as idle, while a *finished* turn's
+#                           past-tense summary line ("Simmered for 12s") can
+#                           stay visible on screen and falsely read as busy.
+#                           The "(esc to interrupt)" hint only renders while
+#                           a turn is actually in flight and disappears the
+#                           moment it ends, so it doesn't share either
+#                           failure mode and needs no maintenance as Claude
+#                           Code's verb wording evolves. This is still TUI
+#                           chrome, not a documented API, and may need
+#                           updating if Claude Code's rendering changes —
+#                           keep in sync with WORKER_COMPACT_BUSY_PATTERN if
+#                           you touch either (check-stuck-workers.sh's
+#                           separate pattern is out of scope for #252 and
+#                           still uses the verb list).
 #   AUTO_COMPACT_START_TIMEOUT_SECS=15
 #                           Max wait for the busy indicator to APPEAR after
 #                           sending /compact (confirms the CLI actually
@@ -345,6 +363,68 @@
 #                           this issue deliberately does not build — see
 #                           worker_compact_pass()'s header comment).
 #                           Set to 0 to disable.
+#                           (issue #252) Before injecting, maybe_worker_compact
+#                           now also skips (worker.compact.skip
+#                           reason=task_done) any window whose CURRENT task
+#                           has already finished — see worker_task_done().
+#                           Runtime-log analysis found 13/88 real injections
+#                           landing within 3 minutes of the same worker's
+#                           finish event: the pre-#252 wrap-up-threshold
+#                           guard (WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS
+#                           above) loses this race because the status file's
+#                           "pr" field is written LAST in worker-listener.sh's
+#                           wind-down, well after the pane already shows the
+#                           final summary. worker_task_done checks three
+#                           signals, earliest-available first: (a) an outcome
+#                           file already in the worktree's
+#                           `.swarm/tasks/done/` (the on_outcome/
+#                           WATCHER_AUTOCLOSE reap path will pick this window
+#                           up shortly, so compacting it first is pure waste);
+#                           (b) the status file's `state` at "ready-for-review"
+#                           or "done-no-pr" (NOT "blocked" — a blocked worker
+#                           is idle awaiting a decision but may still resume,
+#                           so it's still a normal compact candidate); (c) the
+#                           pane itself showing worker-listener.sh's
+#                           print_completion_block output (the "TASK
+#                           COMPLETE"/"TASK FAILED" banner) — the only signal
+#                           available during the roughly one-minute window
+#                           before (a) or (b) land. A compacted-then-reaped
+#                           worker gains nothing from compaction: it just
+#                           burns a ~150k-token summarization pass and risks
+#                           the post-compact nudge waking an already-finished
+#                           worker for a pointless turn. Signals (a) and (b)
+#                           are themselves guarded on `.swarm/tasks/
+#                           processing/` being empty — old done/status files
+#                           never get cleaned up, so a worktree reused via
+#                           requeue.sh would otherwise read as permanently
+#                           task_done from its first-ever completed task
+#                           onward, silently disabling this feature for
+#                           every later follow-up. See worker_task_done's
+#                           own header comment for the full reasoning.
+#                           NOTE: because worker_has_open_pr's "pr" field is
+#                           only ever non-null together with state=
+#                           "ready-for-review" (see the schema in
+#                           worker.md), this done-guard fires for
+#                           essentially the SAME condition
+#                           WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS below was
+#                           written to raise the bar for, and fires first
+#                           (skip, not "raise the threshold to 300k") — so
+#                           in practice a worker with an open PR is no
+#                           longer compacted via the wrap-up path at all —
+#                           worker_task_done's status check and
+#                           worker_has_open_pr key off the same "pr" field,
+#                           so WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS is now
+#                           effectively unreachable code in normal
+#                           operation. That's an intentional consequence of
+#                           the corpus evidence motivating #252 (zero of the
+#                           20 completed compactions in the analyzed logs
+#                           were confirmed effective — raising the
+#                           threshold was never actually buying anything),
+#                           not an oversight, and left in place rather than
+#                           deleted since it's still a well-defined,
+#                           independently-tested fallback if a future change
+#                           narrows worker_task_done's status check (e.g.
+#                           back to done-no-pr only).
 #   WORKER_COMPACT_THRESHOLD_TOKENS=150000
 #                           Used-token threshold that triggers the above for
 #                           a worker with no PR open yet (still mid-task —
@@ -392,6 +472,49 @@
 #                           leaves the agent sitting idle with a summarized
 #                           context; without a nudge it would just wait at
 #                           the prompt indefinitely instead of resuming work.
+#   WORKER_COMPACT_BACKOFF_SECS=600  (issue #252) Runtime-log analysis found
+#                           one worker taking ~10 injections over ~30 minutes
+#                           while its context climbed 161k -> 275k — every
+#                           single attempt logged worker.compact.timeout or
+#                           worker.compact.ineffective, meaning the injected
+#                           text was never actually being recognized as a
+#                           slash command by that pane. Each swallowed
+#                           injection can cost a full worker turn at 160k+
+#                           context, far more expensive than the problem
+#                           compaction was meant to solve. After a
+#                           maybe_worker_compact attempt for a window ends in
+#                           `timeout` (either phase) or `ineffective` — see
+#                           worker_compact_record_failure() — that window is
+#                           skipped (worker.compact.skip reason=backoff,
+#                           logged every sweep it would otherwise have
+#                           fired, same as coord.compact.skip reason=cooldown
+#                           above) until this many seconds have passed since
+#                           the failure. A verify_skip verdict (inconclusive
+#                           — the pane's ctx reading just never refreshed in
+#                           time) does NOT count as a failure and starts no
+#                           backoff; only a definite timeout or a confirmed-
+#                           unchanged ctx reading does. A later attempt that
+#                           actually succeeds (worker_compact_record_success)
+#                           clears the backoff and the consecutive-failure
+#                           count below immediately.
+#   WORKER_COMPACT_MAX_FAILURES=3  (issue #252) After this many CONSECUTIVE
+#                           timeout/ineffective verdicts for the same window
+#                           (the backoff above resets between attempts but
+#                           the failure count doesn't, until a success does),
+#                           maybe_worker_compact gives up on that window
+#                           entirely: logs one worker.compact.giving_up
+#                           warning and, from then on, returns silently
+#                           without even attempting the backoff-cooldown
+#                           check — no repeated warnings every sweep. Both
+#                           the backoff timestamp and the failure count are
+#                           in-memory associative arrays (WORKER_COMPACT_
+#                           LAST_FAIL / WORKER_COMPACT_FAIL_COUNT /
+#                           WORKER_COMPACT_GAVE_UP), not files — scoped to
+#                           run_worker_compact_loop's own dedicated
+#                           background process, same as LAST_AUTO_COMPACT_
+#                           POLL_TRIGGER and ORPHAN_PR_LOGGED elsewhere in
+#                           this file — so a watcher restart clears them and
+#                           gives every window a fresh start.
 #
 # Watch backend (auto-detected):
 #   - inotifywait (preferred): instant response. Install with:
@@ -460,6 +583,8 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     WORKER_COMPACT_POLL_SECS                2       capture-pane poll interval
     WORKER_COMPACT_SCAN_SECS                30      how often its own loop sweeps all iss-* windows
     WORKER_COMPACT_NUDGE_PROMPT       (see header)  text sent to resume the worker after compaction
+    WORKER_COMPACT_BACKOFF_SECS             600     cooldown for a window after a timeout/ineffective verdict
+    WORKER_COMPACT_MAX_FAILURES             3       consecutive failures before giving up on a window entirely
 
 DEFAULT WAKE_PROMPT (top-up mode)
     Coordinator triages outcomes, then refills workers toward MAX_WORKERS
@@ -503,11 +628,19 @@ EVENTS LOG
       coord.compact.ineffective  context didn't drop post-compact (before, after, trigger=poll|wake) — investigate
       coord.compact.verify_skip  probe never refreshed post-compact — inconclusive, not a failure (trigger=poll|wake)
       worker.compact        /compact injected into an iss-* window (issue, used, threshold, wrapup)
-      worker.compact.skip   worker auto-compact skipped this window this cycle (issue, reason=pane_busy|no_ctx_parsed|...)
+      worker.compact.skip   worker auto-compact skipped this window this cycle (issue,
+                           reason=pane_busy|no_ctx_parsed|task_done|backoff|...; reason=task_done
+                           means the window's current task already finished — see worker_task_done()
+                           — reason=backoff means a prior timeout/ineffective is still cooling down,
+                           logged every sweep it would otherwise have fired, same as
+                           coord.compact.skip reason=cooldown)
       worker.compact.timeout  gave up waiting on the worker's busy indicator (issue, phase=start|finish, waited)
       worker.compact.done   worker busy indicator cleared — compaction confirmed finished (issue, waited)
       worker.compact.ineffective  worker context didn't drop post-compact (issue, before, after) — investigate
       worker.compact.verify_skip  worker's ctx reading never refreshed post-compact — inconclusive, not a failure
+      worker.compact.giving_up  (issue #252) N consecutive timeout/ineffective verdicts for this
+                           window (issue, failures=N) — maybe_worker_compact stops attempting
+                           /compact for it until the watcher restarts; logged once, not every sweep
 
 PANE ECHO (issue #38)
     By default, every line appended to events.log — by this process OR any
@@ -593,10 +726,14 @@ AUTO_COMPACT_COOLDOWN_SECS="${AUTO_COMPACT_COOLDOWN_SECS:-900}"
 # probe_ctx_used's staleness/missing-file handling below).
 AUTO_COMPACT_PROBE="${AUTO_COMPACT_PROBE:-${STATUSLINE_PROBE:-${XDG_RUNTIME_DIR:-/tmp}/claude-statusline-$(basename "$PROJECT_DIR")-coordinator.json}}"
 AUTO_COMPACT_PROBE_MAX_AGE_SECS="${AUTO_COMPACT_PROBE_MAX_AGE_SECS:-120}"
-# Same spinner-phrase pattern check-stuck-workers.sh's detect_state() uses
-# for its ACTIVE state, plus the Ctrl-C exit-confirm prompt (a bare Enter
-# into that state would confirm an unintended exit rather than compact).
-AUTO_COMPACT_BUSY_PATTERN="${AUTO_COMPACT_BUSY_PATTERN:-Considering…|Sautéed for|Cooked for|Baked for|Simmered for|✻|✶|Press Ctrl-C again to .xit}"
+# issue #252: anchored on the "(esc to interrupt)" hint that accompanies the
+# spinner line for the full duration of any in-flight turn or compaction,
+# regardless of which present-tense verb Claude Code renders that cycle —
+# see this file's AUTO_COMPACT_BUSY_PATTERN header comment for why this
+# replaced the old spinner-verb list. Plus the Ctrl-C exit-confirm prompt (a
+# bare Enter into that state would confirm an unintended exit rather than
+# compact).
+AUTO_COMPACT_BUSY_PATTERN="${AUTO_COMPACT_BUSY_PATTERN:-\(esc to interrupt\)|Press Ctrl-C again to .xit}"
 AUTO_COMPACT_START_TIMEOUT_SECS="${AUTO_COMPACT_START_TIMEOUT_SECS:-15}"
 AUTO_COMPACT_FINISH_TIMEOUT_SECS="${AUTO_COMPACT_FINISH_TIMEOUT_SECS:-300}"
 AUTO_COMPACT_VERIFY_TIMEOUT_SECS="${AUTO_COMPACT_VERIFY_TIMEOUT_SECS:-30}"
@@ -608,13 +745,18 @@ AUTO_COMPACT_POLL_SECS="${AUTO_COMPACT_POLL_SECS:-2}"
 WORKER_AUTO_COMPACT="${WORKER_AUTO_COMPACT:-1}"
 WORKER_COMPACT_THRESHOLD_TOKENS="${WORKER_COMPACT_THRESHOLD_TOKENS:-150000}"
 WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS="${WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS:-300000}"
-WORKER_COMPACT_BUSY_PATTERN="${WORKER_COMPACT_BUSY_PATTERN:-Considering…|Sautéed for|Cooked for|Baked for|Simmered for|✻|✶|Press Ctrl-C again to .xit}"
+# issue #252: same anchor as AUTO_COMPACT_BUSY_PATTERN above — keep in sync.
+WORKER_COMPACT_BUSY_PATTERN="${WORKER_COMPACT_BUSY_PATTERN:-\(esc to interrupt\)|Press Ctrl-C again to .xit}"
 WORKER_COMPACT_START_TIMEOUT_SECS="${WORKER_COMPACT_START_TIMEOUT_SECS:-15}"
 WORKER_COMPACT_FINISH_TIMEOUT_SECS="${WORKER_COMPACT_FINISH_TIMEOUT_SECS:-300}"
 WORKER_COMPACT_VERIFY_TIMEOUT_SECS="${WORKER_COMPACT_VERIFY_TIMEOUT_SECS:-30}"
 WORKER_COMPACT_POLL_SECS="${WORKER_COMPACT_POLL_SECS:-2}"
 WORKER_COMPACT_SCAN_SECS="${WORKER_COMPACT_SCAN_SECS:-30}"
 WORKER_COMPACT_NUDGE_PROMPT="${WORKER_COMPACT_NUDGE_PROMPT:-Continue your task from where you left off.}"
+# issue #252 — per-window backoff after a failed (timeout/ineffective)
+# injection attempt; see this file's WORKER_AUTO_COMPACT header comment.
+WORKER_COMPACT_BACKOFF_SECS="${WORKER_COMPACT_BACKOFF_SECS:-600}"
+WORKER_COMPACT_MAX_FAILURES="${WORKER_COMPACT_MAX_FAILURES:-3}"
 
 if ! [[ "$WATCH_PR_POLL_SECS" =~ ^[0-9]+$ ]]; then
     echo "ERROR: WATCH_PR_POLL_SECS must be a non-negative integer (got: $WATCH_PR_POLL_SECS)" >&2
@@ -629,7 +771,8 @@ for _var in AUTO_COMPACT_THRESHOLD_TOKENS AUTO_COMPACT_PROBE_MAX_AGE_SECS \
             AUTO_COMPACT_VERIFY_TIMEOUT_SECS AUTO_COMPACT_TICK_SECS AUTO_COMPACT_COOLDOWN_SECS \
             WORKER_COMPACT_THRESHOLD_TOKENS WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS \
             WORKER_COMPACT_START_TIMEOUT_SECS WORKER_COMPACT_FINISH_TIMEOUT_SECS \
-            WORKER_COMPACT_VERIFY_TIMEOUT_SECS WORKER_COMPACT_SCAN_SECS; do
+            WORKER_COMPACT_VERIFY_TIMEOUT_SECS WORKER_COMPACT_SCAN_SECS \
+            WORKER_COMPACT_BACKOFF_SECS WORKER_COMPACT_MAX_FAILURES; do
     if ! [[ "${!_var}" =~ ^[0-9]+$ ]]; then
         echo "ERROR: $_var must be a non-negative integer (got: ${!_var})" >&2
         exit 1
@@ -713,6 +856,7 @@ format_event_line() {
         worker.compact.done)               glyph="◈"; color=$'\033[32m' ;;
         worker.compact.ineffective)          glyph="⚠"; color=$'\033[31m' ;;
         worker.compact.verify_skip)            glyph="·"; color=$'\033[2m'  ;;
+        worker.compact.giving_up)                glyph="⚠"; color=$'\033[31m' ;;
         watch.autoclose)               glyph="♻"; color=$'\033[36m' ;;
         watch.orphan_sweep)             glyph="♻"; color=$'\033[36m' ;;
         reap.window)                    glyph="✂"; color=$'\033[36m' ;;
@@ -1929,6 +2073,138 @@ worker_has_open_pr() {
     return 1
 }
 
+# worker_task_done <window> <worktree-dir>
+#
+# True (rc 0) if the worker owning <window> has already finished its
+# CURRENT task (issue #252's "after-the-fact compact" fix — see this file's
+# WORKER_AUTO_COMPACT header comment for the full timeline this addresses).
+# Checked in order of how early each signal becomes available, since the
+# last one is the ONLY signal that exists during the ~1-minute window
+# before the first two land:
+#   (a) an outcome file already landed in the worktree's
+#       `.swarm/tasks/done/` — worker-listener.sh's final write for this
+#       task; the watcher's own on_outcome/WATCHER_AUTOCLOSE path will reap
+#       this window shortly, so compacting it first is pure waste;
+#   (b) the worker's status file (queue-v2 protocol, same file
+#       worker_has_open_pr reads above) reports "ready-for-review" or
+#       "done-no-pr" — terminal for the current task. Deliberately NOT
+#       "blocked": a blocked worker is idle awaiting a human decision but
+#       may still resume once unblocked, so it stays a normal compact
+#       candidate rather than being permanently skipped;
+#   (c) the pane itself shows worker-listener.sh's print_completion_block
+#       output (the "TASK COMPLETE"/"TASK FAILED" banner) — the only
+#       signal available before (a) or (b) land; see that function's
+#       header comment for why this exact substring is load-bearing there
+#       too.
+#
+# (a) and (b) are guarded by a `.swarm/tasks/processing/` check first: a
+# worktree that's been requeued (worker.md's "Follow up here: requeue.sh")
+# keeps EVERY past task's done/status files on disk forever — nothing ever
+# deletes them. Without this guard, a worktree that completed task #1 weeks
+# ago would read as permanently task_done for task #2, #3, ... every
+# follow-up ever dispatched into it, silently disabling WORKER_AUTO_COMPACT
+# for that window's entire remaining life. claim_next_task() only clears
+# processing/ for an entry once write_outcome/print_completion_block have
+# already run for THAT entry (worker-listener.sh's main loop), so a
+# non-empty processing/ reliably means "a task is currently claimed and has
+# NOT concluded yet" regardless of what's sitting in done/ or status/ from
+# earlier work. (c) is deliberately NOT gated the same way — it exists
+# specifically to catch the window BEFORE processing/ empties, so gating it
+# on processing/ being empty would defeat its own purpose; the residual
+# risk of stale completion-block text lingering into a genuinely new task's
+# first few lines of screen output is bounded and self-correcting (new
+# output pushes it out of the visible, unscrolled capture-pane view).
+#
+# Fails open like every other check in this file: an unreadable done/
+# dir, missing jq, or no tmux session just falls through to "not done".
+worker_task_done() {
+    local win="$1" wt_dir="$2"
+
+    if [ -z "$(find "$wt_dir/.swarm/tasks/processing" -maxdepth 1 -type f 2>/dev/null | head -1)" ]; then
+        local f
+        shopt -s nullglob
+        for f in "$wt_dir/.swarm/tasks/done"/*.ok.json "$wt_dir/.swarm/tasks/done"/*.err.json; do
+            shopt -u nullglob
+            return 0
+        done
+        shopt -u nullglob
+
+        if [ "$HAVE_JQ" = "1" ]; then
+            local state
+            shopt -s nullglob
+            for f in "$wt_dir/.swarm/tasks/status"/*.json; do
+                case "$f" in *.check.json) continue ;; esac
+                state=$(jq -r '.state // empty' "$f" 2>/dev/null) || continue
+                case "$state" in
+                    ready-for-review|done-no-pr)
+                        shopt -u nullglob
+                        return 0
+                        ;;
+                esac
+            done
+            shopt -u nullglob
+        fi
+    fi
+
+    local content clean
+    content="$(tmux capture-pane -t "$SESSION_NAME:$win" -p 2>/dev/null)" || return 1
+    clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
+    # Anchored on the literal completion-block line shape from
+    # worker-listener.sh's print_completion_block() — "  TASK COMPLETE    exit=0    duration=42s"
+    # — not just the bare phrase. An unanchored match on "TASK (COMPLETE|FAILED)"
+    # would also fire if a worker's own pane happened to display that phrase
+    # via source/test-fixture content (e.g. this repo's own worker-listener.sh
+    # or test-shape-stuck-workers.sh), falsely marking an in-progress worker done.
+    printf '%s\n' "$clean" | LC_ALL=C grep -qE '^[[:space:]]*TASK (COMPLETE|FAILED)[[:space:]]+exit='
+}
+
+# WORKER_COMPACT_LAST_FAIL / WORKER_COMPACT_FAIL_COUNT / WORKER_COMPACT_GAVE_UP
+# (issue #252)
+#
+# Per-window backoff bookkeeping, keyed by issue number. In-memory
+# associative arrays, not files — exactly like ORPHAN_PR_LOGGED and
+# LAST_AUTO_COMPACT_POLL_TRIGGER elsewhere in this file: only ever read/
+# written from run_worker_compact_loop's own dedicated background process,
+# so a same-process global is sufficient, and a watcher restart correctly
+# clears all three and gives every window a fresh start.
+declare -A WORKER_COMPACT_LAST_FAIL=()
+declare -A WORKER_COMPACT_FAIL_COUNT=()
+declare -A WORKER_COMPACT_GAVE_UP=()
+
+# worker_compact_record_failure <issue>
+#
+# Called after a maybe_worker_compact attempt ends in `timeout` (either
+# phase) or `ineffective` — the two verdicts that mean the injection
+# didn't do what it was supposed to (see WORKER_COMPACT_BACKOFF_SECS'
+# header comment for the runtime-log evidence this fixes). Records the
+# failure timestamp (starts the WORKER_COMPACT_BACKOFF_SECS cooldown) and
+# bumps the consecutive-failure count; once that count reaches
+# WORKER_COMPACT_MAX_FAILURES, gives up on this window for good — one loud
+# warning, then silence (see the WORKER_COMPACT_GAVE_UP check at the top of
+# maybe_worker_compact).
+worker_compact_record_failure() {
+    local issue="$1" now count
+    now=$(date +%s)
+    WORKER_COMPACT_LAST_FAIL[$issue]=$now
+    count=$(( ${WORKER_COMPACT_FAIL_COUNT[$issue]:-0} + 1 ))
+    WORKER_COMPACT_FAIL_COUNT[$issue]=$count
+    if [ "$count" -ge "$WORKER_COMPACT_MAX_FAILURES" ]; then
+        WORKER_COMPACT_GAVE_UP[$issue]=1
+        echo "[$(date +%T)] WARNING: worker iss-$issue failed /compact $count times in a row (timeout or ineffective every attempt) — giving up on this window; investigate why the injection isn't taking effect before it repeats"
+        log_event worker.compact.giving_up "issue=$issue failures=$count"
+    fi
+}
+
+# worker_compact_record_success <issue>
+#
+# Called after a compaction that neither timed out nor came back
+# ineffective — a real success, so any prior backoff/near-give-up state no
+# longer applies and is cleared.
+worker_compact_record_success() {
+    local issue="$1"
+    unset "WORKER_COMPACT_LAST_FAIL[$issue]" "WORKER_COMPACT_FAIL_COUNT[$issue]" "WORKER_COMPACT_GAVE_UP[$issue]"
+}
+
 # maybe_worker_compact <window>
 #
 # Per-window counterpart to maybe_auto_compact, called by worker_compact_pass
@@ -1946,6 +2222,23 @@ maybe_worker_compact() {
     local state
     state="$(worker_pane_state "$win")" || state="absent"
     [ "$state" = "cli" ] || return 0   # parked at a bash prompt, or gone — nothing live to compact
+
+    if worker_task_done "$win" "$wt_dir"; then
+        log_event worker.compact.skip "issue=$issue reason=task_done"
+        return 0   # about to be reaped, or just finished — see worker_task_done's header comment
+    fi
+
+    if [ "${WORKER_COMPACT_GAVE_UP[$issue]:-0}" = "1" ]; then
+        return 0   # already logged the one worker.compact.giving_up warning — stay silent from here on
+    fi
+
+    local bo_now bo_last_fail
+    bo_now=$(date +%s)
+    bo_last_fail="${WORKER_COMPACT_LAST_FAIL[$issue]:-0}"
+    if [ "$bo_last_fail" -gt 0 ] && [ $(( bo_now - bo_last_fail )) -lt "$WORKER_COMPACT_BACKOFF_SECS" ]; then
+        log_event worker.compact.skip "issue=$issue reason=backoff remaining=$(( WORKER_COMPACT_BACKOFF_SECS - (bo_now - bo_last_fail) ))s"
+        return 0
+    fi
 
     if worker_pane_busy "$win"; then
         log_event worker.compact.skip "issue=$issue reason=pane_busy"
@@ -1993,6 +2286,7 @@ maybe_worker_compact() {
         waited=$((waited + WORKER_COMPACT_POLL_SECS))
         if [ "$waited" -ge "$WORKER_COMPACT_START_TIMEOUT_SECS" ]; then
             log_event worker.compact.timeout "issue=$issue phase=start waited=${waited}s"
+            worker_compact_record_failure "$issue"
             return 0
         fi
     done
@@ -2004,6 +2298,7 @@ maybe_worker_compact() {
         waited=$((waited + WORKER_COMPACT_POLL_SECS))
         if [ "$waited" -ge "$WORKER_COMPACT_FINISH_TIMEOUT_SECS" ]; then
             log_event worker.compact.timeout "issue=$issue phase=finish waited=${waited}s"
+            worker_compact_record_failure "$issue"
             return 0
         fi
     done
@@ -2035,9 +2330,14 @@ maybe_worker_compact() {
 
     if [ -z "$used_after" ]; then
         log_event worker.compact.verify_skip "issue=$issue reason=ctx_not_refreshed waited=${verify_waited}s"
+        # Inconclusive, not a confirmed failure — no backoff/failure-count
+        # bump either way; see WORKER_COMPACT_BACKOFF_SECS's header comment.
     elif [ "$used_after" -ge "$used" ]; then
         echo "[$(date +%T)] WARNING: worker $win context did not drop after /compact (before=$used after=$used_after) — the injected command may not have been recognized as a slash command; investigate before this repeats every sweep"
         log_event worker.compact.ineffective "issue=$issue before=$used after=$used_after"
+        worker_compact_record_failure "$issue"
+    else
+        worker_compact_record_success "$issue"
     fi
 
     # /compact leaves the agent idle with a summarized context — without a
