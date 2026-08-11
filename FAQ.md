@@ -5,9 +5,12 @@ A few starter questions about the llm-swarm-runner. See the [README](./README.md
 
 ### What does the swarm coordinator do?
 
-The coordinator is a one-shot triage agent: it wakes, reads project state (via `git` and
-`gh`), provisions any worker agents needed for open issues, and exits. Workers then run
-asynchronously in their own dockerized git worktrees, and the event-driven watcher
+By default the coordinator is a persistent interactive Claude REPL: it reads project state
+(via `git` and `gh`), provisions any worker agents needed for open issues, and then stays
+alive in its tmux pane so follow-up prompts (`llm-start.sh "..."`) paste straight into the
+same conversation. Set `COORDINATOR_HEADLESS=1` for the old one-shot behavior (exits after
+each prompt); Codex coordination (`COORDINATOR_CMD=codex`) is one-shot by design. Workers
+run asynchronously in their own dockerized git worktrees, and the event-driven watcher
 (`coordinator-watch.sh`) re-wakes the coordinator whenever a worker finishes so the swarm
 stays topped up.
 
