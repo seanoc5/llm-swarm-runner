@@ -2,7 +2,7 @@
 
 This doc consolidates a question that comes up periodically: *can tmux itself be the channel agents use to talk to each other?* The substrate makes some of this trivially possible, some of it deliberately blocked, and some of it possible-but-discouraged. Material on this topic was previously scattered across [`architecture.md`](./architecture.md), [`llm-swarm-runner-overview.md`](./llm-swarm-runner-overview.md) ("Tmux as substrate"), [`security.md`](./security.md) ("Tmux Scrollback Exposure"), and [`adr/0003-capabilities-yaml.md`](./adr/0003-capabilities-yaml.md). Read this for the consolidated picture.
 
-> **TL;DR:** The canonical inter-agent channel is the file-based bus under `.swarm/tasks/{inbox,processing,done}/` (briefs are `<id>.md`; structured outcome JSON lands in `done/` as `<id>.{ok,err}.json`). Tmux is the *substrate* every agent runs on, and the host-side coordinator has enough access to use it as a **read-only** side-channel for diagnosing workers — and the project does this for stuck-worker detection. **`tmux send-keys` from one agent into another agent's pane is duct tape**, not a channel: no schema, no ack, no idempotency, and it races with whatever the receiver is doing. Use the file bus to ask agents to do things. The only blessed `send-keys` flow is a *human operator* nudging the coordinator from a control terminal. Workers cannot use tmux to talk to anyone, by design. Cross-swarm tmux messaging is not wired up and requires opting out of the sandbox if you want it.
+> **TL;DR:** The canonical inter-agent channel is the file-based bus under `.swarm/tasks/{inbox,processing,done}/` (briefs are `<id>.md`; structured outcome JSON lands in `done/` as `<id>.{ok,err}.json`). Tmux is the *substrate* every agent runs on, and the host-side coordinator has enough access to use it as a **read-only** side-channel for diagnosing workers — the project does this for stuck-worker detection (`scripts/check-stuck-workers.sh`), and the default `prompts/coordinator.md` now explicitly blesses read-only `capture-pane` as a diagnostic fallback. **`tmux send-keys` from one agent into another agent's pane is duct tape**, not a channel: no schema, no ack, no idempotency, and it races with whatever the receiver is doing — that principle still holds for LLM-agent-driven `send-keys`, which stays forbidden. What's changed is that the project now also ships **host-side scripted `send-keys`**, gated by heuristic busy-pattern detection rather than agent judgment: `llm-start.sh` pastes a re-prompt into the coordinator REPL on session reuse, and `coordinator-watch.sh` injects `/compact` into the coordinator pane and every idle `iss-*` worker pane (`WORKER_AUTO_COMPACT`, default on, issue #226). These are supported, idle-gated infrastructure flows — not a license for agents to reach for `send-keys` themselves. Use the file bus to ask agents to do things. Workers cannot use tmux to talk to anyone, by design. Cross-swarm tmux messaging is not wired up and requires opting out of the sandbox if you want it.
 
 ### Guiding principle
 
@@ -22,20 +22,29 @@ The coordinator runs **host-native** and has unrestricted access to the per-repo
 tmux -L swarm-<basename> capture-pane -t llm-<basename>:iss-42 -p -S -50000
 ```
 
-…on any worker window. `scripts/check-stuck-workers.sh:167` already does this to classify workers as `IDLE-PARKED`, `ACTIVE`, `DEAD-PANE`, or `ORPHANED-CONTAINER`. The default `prompts/coordinator.md` *doesn't* tell the LLM to do this — it polls `.swarm/tasks/done/<id>.json` outcome files instead — but the LLM has the permissions and the substrate, so a custom coordinator prompt could `capture-pane` to diagnose a stuck worker and surface findings to the operator. `remain-on-exit failed` (in `examples/tmux.conf.example`) keeps `[dead]` panes' scrollback readable for forensic reads after the agent process exits.
+…on any worker window. `scripts/check-stuck-workers.sh:170` already does this, classifying each worker into one of eight states: healthy (`IDLE-PARKED`, `ACTIVE`, `EXITED-IDLE`), advisory (`CONTEXT-LARGE`), or needs-attention/broken (`EXIT-CONFIRM-PENDING`, `UNKNOWN`, `DEAD-PANE`, `ORPHANED-CONTAINER`) — see the pattern catalog at `check-stuck-workers.sh:19-29`. The default `prompts/coordinator.md` prefers structured `.swarm/tasks/done/<id>.json` outcomes for routine polling, but its "Never `tmux send-keys`" section (`coordinator.md:99`) explicitly blesses read-only `capture-pane` as a diagnostic fallback, and its status-update procedure (`coordinator.md:107`, step 4) instructs checking pane scrollback when a window closed with no PR. `remain-on-exit failed` (in `examples/tmux.conf.example`) keeps `[dead]` panes' scrollback readable for forensic reads after the agent process exits.
 
 **`capture-pane` good; `send-keys` from the coordinator into a worker bad.** Reading scrollback is observation. Injecting keystrokes into a running worker REPL is a race against whatever tool call the worker is currently in — see §4c for why this is a footgun even though the permissions allow it. If a worker needs a recovery hint, write it to that worker's `.swarm/tasks/inbox/`; the listener will deliver it cleanly between tasks.
 
-### b. Operator drives coordinator from outside (the *only* blessed `send-keys` flow)
+### b. Operator drives coordinator from outside (the blessed *human* `send-keys` flow)
 From any host shell:
 
 ```bash
 tmux -L swarm-<basename> send-keys -t llm-<basename>:coordinator "<your prompt>" Enter
 ```
 
-This is documented in [`tmux-cheatsheet.md`](./tmux-cheatsheet.md) as the "control terminal" pattern. It's a **human → coordinator** channel — the human is the only actor outside the agent loop who has enough situational awareness to know whether the coordinator is at a prompt or mid-tool-call, and to retry if their keystrokes get eaten. Any other use of `send-keys` (agent → agent, script → agent that's running an LLM) lacks that situational awareness and is duct tape — see §4c.
+This is documented in [`tmux-cheatsheet.md`](./tmux-cheatsheet.md) as the "control terminal" pattern. It's a **human → coordinator** channel — the human is the only actor outside the agent loop who has enough situational awareness to know whether the coordinator is at a prompt or mid-tool-call, and to retry if their keystrokes get eaten. Any *agent-driven* use of `send-keys` (agent → agent, script → agent that's running an LLM on the model's own initiative) lacks that situational awareness and is duct tape — see §4c.
 
-### c. Pane content is not verified truth — UI chrome is not conversation
+### c. Host-side scripted `send-keys` (engineered, idle-gated — not agent-driven)
+
+A third tier sits between (a) read-only observation and (b) human-driven writes: **host scripts** that inject keystrokes on a timer, gated by heuristic busy-pattern detection instead of an agent's own judgment call.
+
+- **`llm-start.sh`** pastes a re-prompt into the *running* coordinator REPL via `load-buffer` + `paste-buffer` + `send-keys Enter` when it detects an idle coordinator pane on session reuse (see "Session reuse: detect-dead-coordinator" in `docs/llm-swarm-runner-overview.md`).
+- **`coordinator-watch.sh`** injects a real `/compact` into the coordinator pane when `AUTO_COMPACT=1` (default) and the pane is over its token threshold, and does the same into every idle `iss-*` worker pane when `WORKER_AUTO_COMPACT=1` (default, issue #226) — followed by a short "continue your task" nudge once compaction finishes.
+
+Both are gated by `coordinator_pane_busy()` / `worker_pane_busy()` — a `capture-pane` regex match against a busy-indicator pattern (spinner glyphs, `Considering…`, etc., the same catalog `check-stuck-workers.sh` uses) — and skip the injection with `reason=pane_busy` when the pane is mid-turn rather than idle. This is why it's safe as *engineered infrastructure* in a way an agent improvising the same move wouldn't be: the gating is deterministic and tested (`test-watcher-autoclose.sh` and friends), not a judgment call made fresh each time. It does not license agents to reach for `send-keys` on their own — §4c's argument against agent-initiated `send-keys` is unchanged.
+
+### d. Pane content is not verified truth — UI chrome is not conversation
 
 `capture-pane -p` (plain, the flag used everywhere in this doc and in `check-stuck-workers.sh`) strips color/attribute info along with the ANSI it drops. That's normally harmless — but Claude Code's TUI renders several kinds of chrome that only a *human eye with color* can distinguish from something someone actually typed and submitted:
 
@@ -152,10 +161,10 @@ Caveats:
 - The receiving coordinator has no protocol for "incoming cross-swarm message" — it will interpret it as user input, which can derail its current task.
 - Prefer the file-based bus shared across swarms (a shared `.swarm/inbox/` on disk or in a shared repo), or `gh issue comment` as the cross-swarm channel. Both have schemas, acks, and history.
 
-### c. Coordinator → worker `send-keys` (**strongly discouraged** — works at the substrate level, footgun at the agent level)
-The permissions allow it. The substrate doesn't stop you. The default `prompts/coordinator.md` deliberately doesn't teach it, and you shouldn't add it. Why:
+### c. Coordinator → worker `send-keys` (**strongly discouraged for the agent** — works at the substrate level, footgun at the agent level)
+The permissions allow it. The substrate doesn't stop you. The default `prompts/coordinator.md` deliberately doesn't teach the *LLM* to reach for this, and you shouldn't add it to a prompt. Why:
 
-- **No idle detection.** When the coordinator decides to "nudge a stuck worker", the worker is almost never actually idle at a clean prompt — most stuck-looking workers are mid-tool-call, mid-permission-prompt, or mid-LLM-stream. Keystrokes injected into any of those states corrupt the in-flight operation in ways that are hard to detect and harder to recover from. The coordinator has no reliable way to know the worker's REPL state from the outside.
+- **Idle detection is heuristic, not reliable enough for an agent's own judgment call.** `coordinator-watch.sh`'s `worker_pane_busy()` (§1c) classifies a worker pane via `capture-pane` against a busy-indicator pattern (spinner glyphs, `Considering…`, etc.) and skips its own scripted injection when the match says "busy". That's good enough for a narrow, tested, fail-open optimization like auto-compact — it is not good enough to make agent-initiated `send-keys` a reliable messaging channel. A coordinator LLM deciding in the moment whether to nudge a "stuck" worker has no comparable safety net: most stuck-looking workers are mid-tool-call, mid-permission-prompt, or mid-LLM-stream, and keystrokes injected into any of those states corrupt the in-flight operation in ways that are hard to detect and harder to recover from.
 - **No ack, no retry semantics, no ordering.** If two nudges are sent in quick succession (e.g. the coordinator's polling fires twice), there's no way to know whether the first one was accepted, eaten by a tool, or buffered for later replay.
 - **Silently bad on misroute.** Sending to the wrong window name (typo, killed worker, recycled window) does nothing visible — `send-keys` returns success either way.
 - **Couples coordinator prompt to receiver agent UX.** The exact keystrokes that "wake up" a stuck worker depend on which CLI (claude/codex/gemini), which version, and which interactive mode. Prompts that hard-code these decay fast.
@@ -170,9 +179,10 @@ If your prompt or script is reaching for `tmux send-keys -t llm-...:iss-N`, repl
 | Channel                                     | Supported? | Where documented                                          |
 |---------------------------------------------|------------|-----------------------------------------------------------|
 | Coordinator reads worker scrollback         | Yes        | `overview.md` §Tmux as substrate; `check-stuck-workers.sh` |
-| Coordinator attributes pane text to a person| **Verify first** | Plain capture can't tell UI chrome from typed input — check the session transcript before believing it (§1c, `scripts/capture-worker.sh --verify`) |
-| Coordinator `send-keys` to worker           | **Discouraged** | Permitted by substrate; treat as footgun, use file bus instead (§4c) |
-| Operator `send-keys` to coordinator         | Yes        | `tmux-cheatsheet.md`                                      |
+| Coordinator attributes pane text to a person| **Verify first** | Plain capture can't tell UI chrome from typed input — check the session transcript before believing it (§1d, `scripts/capture-worker.sh --verify`) |
+| Operator `send-keys` to coordinator         | Yes        | `tmux-cheatsheet.md`; §1b                                  |
+| Host script `send-keys` (wake re-prompt, `/compact` injection) | Yes, idle-gated | `llm-start.sh`, `coordinator-watch.sh` (`AUTO_COMPACT`/`WORKER_AUTO_COMPACT`); §1c |
+| Coordinator (LLM) `send-keys` to worker     | **Discouraged** | Permitted by substrate; treat as footgun, use file bus instead (§4c) |
 | Worker reads/writes any tmux                | **Blocked** | `sandbox.sh` (no socket mount); `security.md`             |
 | Cross-swarm tmux (coordinator → coordinator)| Not wired  | Possible with shared socket dir; see §4b                  |
 | Cross-swarm via files / `gh`                | Yes        | Use this instead of §4b                                   |

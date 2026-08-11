@@ -41,7 +41,8 @@ Unlocks B (judge has structured signal to gate on), D-α (cost telemetry plugs i
 - **Mechanism:** separate container, reads PR diff + `verify.log` + outcome JSON, writes `.swarm/tasks/done/<id>.judge.json` with `{verdict, reasons[], confidence}`. The coordinator's merge step gates on judge verdict; a dissenting judge overrides 🟢-low self-merge.
 - **Lead check:** shape test stubs `gh pr diff`, asserts the judge is invoked exactly once per medium/high PR, verdict file is present, and the coordinator's triage reads it.
 - **Size:** 2–3 days. Mostly prompt design and plumbing; reuses sandbox + listener.
-- **Replaces:** the adversarial self-review introduced in #116. That pass was cheap but biased (author criticising own work); a separate context window is the right architecture.
+- **Status: substantially shipped** via PR #170 (`scripts/self-review-pr.sh`) — runs the review skill in a fresh `claude -p` session with only the PR title/body + diff (no shared context with the PR author, `self-review-pr.sh:111`), posts a `<!-- SWARM_SELF_REVIEW: <verdict> -->` marker, and `scripts/swarm-merge.sh:165-174` refuses to merge on a `BLOCK` verdict unless `--override-review` is passed. The "author criticising own work" bias this phase was meant to fix no longer applies — the review already runs in a separate context window. What remains unbuilt: a distinct judge worker class (own container, reads `verify.log`/outcome JSON directly, structured `{verdict, reasons[], confidence}` file, coordinator-invoked specifically on 🟡/🔴 PRs) — a richer signal source than the marker-comment verdict, not the separate-context property itself.
+- **Replaces:** the adversarial self-review introduced in #116 — now itself superseded by the fresh-context review above.
 
 ### Phase 4 — D-γ: Replay fixtures
 
@@ -66,6 +67,7 @@ Unlocks B (judge has structured signal to gate on), D-α (cost telemetry plugs i
 - **Lead check:** an issue containing only a one-line title gets rewritten with structured sections before any `iss-*` window spawns.
 - **Size:** 1 week.
 - **Order rationale:** lifts the success rate of every downstream phase; placed here because C made the cost of dispatching vague issues compound.
+- **Status: deterministic half shipped** via PR #170 (ringer concept #6) — `scripts/lint-brief.sh` lints every queued brief for `no-done-definition`, `check-cannot-fail`, `no-named-files`, and `underspecified` (<200 chars); `scripts/provision-worker.sh:363-364` runs it warn-only right after queueing (`BRIEF_LINT=0` disables, `--strict` available for a hard gate). What remains unbuilt is the LLM half described above: a `prompts/triage-worker.md` worker that reads the issue and *rewrites* it (`gh issue edit`) with acceptance criteria before dispatch — lint-brief only flags problems, it doesn't fix them.
 
 ### Phase 7 — D-δ: Per-worker sandbox profile
 

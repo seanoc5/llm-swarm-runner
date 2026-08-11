@@ -281,13 +281,13 @@ for w in $(tmux -L swarm-fand-etl list-windows -t llm-fand-etl -F '#W' | grep '^
 done
 ```
 
-### What the coordinator could do with this (but doesn't yet)
+### What the coordinator does with this today
 
-The host-native coordinator has unrestricted access to the swarm tmux socket. Today's [`prompts/coordinator.md`](../prompts/coordinator.md) uses `tmux list-windows` for *structure* (which slots are occupied) but never `capture-pane` for *content* — cross-agent coordination is file-based via `.swarm/tasks/done/<id>.json` outcomes and GitHub PR state. Latent capabilities a future coordinator could exercise without architecture changes:
+The host-native coordinator has unrestricted access to the swarm tmux socket. Cross-agent coordination is still primarily file-based via `.swarm/tasks/done/<id>.json` outcomes and GitHub PR state, but [`prompts/coordinator.md`](../prompts/coordinator.md) now explicitly blesses read-only `capture-pane` as a diagnostic fallback (its "Never `tmux send-keys`" section, `coordinator.md:99`) and its status-update procedure checks pane scrollback when a window closed with no PR (`coordinator.md:107`). Two of the three capabilities once listed here as latent are now shipped tooling, not prompt behavior:
 
-- Detect a stuck worker (REPL idle for >N minutes, last lines match a known prompt pattern) and `send-keys` a recovery message instead of killing+respawning.
-- Grep across all workers for cross-cutting failures (e.g. "all workers failed compilation at the same dependency").
-- Replay a failed worker's transcript into a follow-up brief without the human having to copy-paste from the pane.
+- **Stuck-worker detection is shipped**: `scripts/check-stuck-workers.sh` captures each `iss-*` pane, strips ANSI, and pattern-matches it into one of eight states (`IDLE-PARKED`, `ACTIVE`, `EXITED-IDLE`, `CONTEXT-LARGE`, `EXIT-CONFIRM-PENDING`, `UNKNOWN`, `DEAD-PANE`, `ORPHANED-CONTAINER`). Recovery, when the worker is idle over its context threshold, is a real `/compact` injection via `coordinator-watch.sh`'s `WORKER_AUTO_COMPACT` (below) — an engineered, idle-gated `send-keys`, not a coordinator LLM improvising one. See [`docs/tmux-as-channel.md`](./tmux-as-channel.md) §1c for the full argument on why that distinction matters.
+- **Cross-worker failure grep remains a manual pattern** — the loop shown earlier in this section (`for w in ... capture-pane ... | grep`) is the closest thing shipped; nothing automates "grep every worker for the same error" on a timer yet.
+- **Transcript replay into a follow-up brief is still unbuilt** — a failed worker's transcript still has to be read and summarized by hand into a `requeue.sh` brief.
 
 ### What workers can't do
 
@@ -299,7 +299,7 @@ The default flow keeps the coordinator Claude Code session running across many w
 
 Two related observations make this worse than it sounds:
 
-1. **Auto-compact is not user-tunable.** Claude Code does auto-compact as you approach the context limit, but there is no setting to raise or lower its threshold — you cannot pin it to "auto-compact at 150k" or "at 60%." The trigger is internal to Claude Code. The only knob you have is the **manual `/compact`** slash command, and you have to remember to use it.
+1. **Claude Code's own built-in auto-compact is not user-tunable.** It fires as you approach the context limit, but there is no setting to raise or lower its threshold — you cannot pin it to "auto-compact at 150k" or "at 60%." The trigger is internal to Claude Code. This project ships its own external mechanism to get ahead of that internal trigger — see "Compact discipline" below — and its knobs (`AUTO_COMPACT_THRESHOLD_TOKENS`, `WORKER_COMPACT_THRESHOLD_TOKENS`, etc.) *are* user-tunable; only Claude Code's native trigger is opaque.
 2. **There is no built-in visual indicator of context usage.** `/context` works, but it's a slash command you have to type. If you don't type it, you don't see context % until auto-compact fires — by which point degradation has already happened.
 
 The fix is operator-side instrumentation, not architectural change. The long-lived coordinator is the right design; what it needs is a context-window gauge in the statusline so you can see drift coming.
@@ -329,7 +329,7 @@ The script also writes the raw stdin JSON payload to `$STATUSLINE_PROBE` (defaul
 
 ### Compact discipline
 
-Even with the indicator, the coordinator should compact proactively rather than waiting for the soft boundary:
+This used to be purely a prompt convention (the coordinator LLM checking its own `ctx` reading and choosing to `/compact`); it's now also automated. `coordinator-watch.sh`'s `AUTO_COMPACT` (default on) injects a real `/compact` into the coordinator pane itself — the same idle-gated `send-keys` mechanism `WORKER_AUTO_COMPACT` generalizes to worker panes below — before waking a long-lived coordinator that's over `AUTO_COMPACT_THRESHOLD_TOKENS` (default 150k). The prompt-level discipline below still applies as a second line of defense and for the user-facing status indicator:
 
 - **On every coordinator wake** (the `coordinator-watch.sh` re-trigger after a worker finishes), check the statusline `ctx` reading before processing the wake event; if it's > 60%, run `/compact` first. The just-completed worker is done; there's no live in-flight reasoning to preserve.
 - **On every status report to the user,** the coordinator can include a one-line `ctx: 195k/1M (19%) — healthy` indicator so you don't have to ask.
