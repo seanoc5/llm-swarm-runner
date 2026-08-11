@@ -22,8 +22,10 @@ Ringside"). Our ground rules, applied to everything in this document:
 - **Attribute everything.** New adoptions must add a row + section here and
   a short comment at the implementation site.
 
-Reference evaluation: 2026-07-17 session (see `git log` on
-`trial/ringer-adoption`). ringer clone examined at commit `4ac3791`.
+Reference evaluation: 2026-07-17 session (the working branch,
+`trial/ringer-adoption`, was deleted after merge — see PR #170 or merge
+commit `7431e01`, or tags `ringer-trial-checkpoint-1`/`-2`). ringer clone
+examined at commit `4ac3791`.
 
 ## Adoption index
 

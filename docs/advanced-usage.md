@@ -188,7 +188,7 @@ The repo ships a small installer that bakes the correct absolute path to *this* 
 ./scripts/install-tmux-binding.sh --uninstall # remove the managed block
 ```
 
-The managed block lives between sentinel markers (`# >>> llm-swarm-runner ctrl-z binding (managed) >>>` / `<<<`) so re-running the script is idempotent — it rewrites the block in place rather than appending duplicates. A timestamped backup of `~/.tmux.conf` is taken before any write. If you have a previous manually-pasted copy of the binding outside the managed block, the script warns about it (tmux's last-binding-wins keeps the managed one effective, but you may want to delete the stray).
+The managed block lives between sentinel markers (`# >>> llm-swarm-runner ctrl-z binding (managed by install-tmux-binding.sh) >>>` / `<<<`) so re-running the script is idempotent — it rewrites the block in place rather than appending duplicates. A timestamped backup of `~/.tmux.conf` is taken before any write. If you have a previous manually-pasted copy of the binding outside the managed block, the script warns about it (tmux's last-binding-wins keeps the managed one effective, but you may want to delete the stray).
 
 ### Install (manual)
 

@@ -6,11 +6,14 @@ All scripts here require bash 4.0+; do not run them under `sh` or `dash`.
 
 | Script | Purpose |
 |---|---|
+| `_compose-down-for-worktree.sh` | Brings down a worktree's docker compose stack (`--remove-orphans --volumes`) before the worktree is removed, so orphaned containers can't outlive it and squat on a port. Called by the worktree-removal scripts. |
 | `_load-env.sh` | Sourceable env loader: applies `<project>/.swarm/.env` then `.env.example` to the current shell; caller-set vars win. |
+| `available-issues.sh` | Implements the mechanical half of the AVAILABLE computation (`prompts/coordinator.md` § "Computing AVAILABLE"): gh-level stop-label, owner-label, and assignee filtering. The judgment half stays with the coordinator. |
 | `capture-worker.sh` | Reads a worker/coordinator pane without mistaking UI chrome (composer suggestions, recaps, spinners, resume dialogs) for conversation — tags known chrome lines inline, and `--verify TEXT` checks the session transcript for whether text was actually submitted. See `docs/tmux-as-channel.md` §1c. |
 | `check-stuck-workers.sh` | Surveys `iss-*` worker panes, pattern-matches the last 50 lines against known healthy/attention/broken states, and exits non-zero if any worker needs eyes-on. |
 | `coord-scratch-toggle.sh` | Toggles a bare-bash scratch pane in the coordinator window (split right, repo root, no container). Invoked by the Ctrl-Z binding in the coordinator window. |
 | `coordinator-claude.sh` | Launches the Claude Code coordinator REPL (wraps the long `claude` invocation so the tmux line stays short). |
+| `coordinator-codex.sh` | Launches a one-shot Codex coordinator: feeds the rendered system prompt and the user's request together on stdin to `codex exec`, since Codex has no `--append-system-prompt` flag. |
 | `coordinator-error-tail.sh` | Surfaces truncated gemini-cli API errors by tailing the most recent `/tmp/gemini-*-error-*.json`. No-op for the claude path. |
 | `coordinator-watch.sh` | Daemon that wakes the coordinator via `llm-start.sh` when a worker drops a new outcome JSON. |
 | `demo-driver.sh` | Drives a deterministic ~70-second tmux + swarm demo recording (window switches, splits, PR list). |
@@ -21,16 +24,20 @@ All scripts here require bash 4.0+; do not run them under `sh` or `dash`.
 | `install-tmux-binding.sh` | Installs the Ctrl-Z worker escape-hatch binding into `~/.tmux.conf` with the absolute path baked in, then re-sources every running `swarm-*` socket. |
 | `kill-finished-workers.sh` | Bulk-closes idle `iss-*` worker tmux windows (parked-only by default; flags for active / worktree / dry-run; `--merged-only` and `--pr-finalized` bypass the parked check). |
 | `kill-worktree.sh` | Removes one worker's worktree, branch, and tmux window — ABANDON-verdict helper. |
+| `lint-brief.sh` | Lints a queued task brief for verifiability before dispatch — flags missing done-definitions, checks that can't fail, unnamed files, and underspecified prose. Warn-only by default; `provision-worker.sh` runs it after queueing. |
 | `list-swarms.sh` | Enumerates per-project tmux swarm sockets in `/tmp/tmux-$UID/` as LIVE vs ORPHAN; `--prune` deletes orphan socket files. Read-only by default. |
 | `provision-worker.sh` | Coordinator one-shot: creates worktree, initialises queue, writes brief, spawns worker tmux window. |
 | `reap-orphan-worktrees.sh` | Bulk-reaps stale `wt-issue-*` worktree DIRECTORIES whose work is preserved elsewhere; complements `kill-finished-workers.sh` (which walks live tmux windows) by catching worktrees that outlived their session. |
 | `relocate-blind-merge-risk.sh` | One-off PR-body rewriter: moves the visible "Blind-merge risk:" line from the top of a PR body to the bottom footer, matching the current PR template. |
 | `requeue.sh` | Atomically drops a follow-up task brief into a worker's v2 inbox (file or stdin). |
-| `review-scoreboard.sh` | Aggregates `SWARM_SELF_REVIEW` verdict markers across a repo's PRs into a review-coverage scoreboard: coverage by blind-merge risk since adoption, verdict distribution, and ⚠ flags (merged-on-BLOCK, unreviewed 🟡/🔴 merges). Sibling of `swarm-scoreboard.sh` (task-level eval logs). |
+| `review-scoreboard.sh` | Aggregates `SWARM_SELF_REVIEW` verdict markers across a repo's PRs into a review-coverage scoreboard: coverage by blind-merge risk since adoption, verdict distribution, and ⚠ flags (merged-on-BLOCK, unreviewed 🟡/🔴 merges). Sibling of `swarm-scoreboard.sh` (task-level eval logs, below). |
 | `run-all-tests.sh` | Runs every `tests/test-*.sh` suite under a per-suite timeout (`TEST_TIMEOUT`, default 300s), prints a PASS/FAIL/TIMEOUT summary table, exits non-zero on any failure. `--only <glob>` filters, `--list` enumerates without running. |
 | `sandbox-worktrees.sh` | Lists git worktrees; optionally launches sandboxes and/or tmux windows per worktree. |
+| `self-review-pr.sh` | Runs the fresh-context adversarial self-review skill against an open PR's title/body/diff via `claude -p`, and (with `--post`) publishes the verdict as a machine-parseable `<!-- SWARM_SELF_REVIEW: ... -->` marker comment. |
 | `setup.sh` | Host-side setup; currently symlinks `/usr/bin/rg` into the path gemini-cli expects. Idempotent. |
+| `stale-pr-nudges.sh` | Read-only detector for swarm PRs needing a re-entry refresh comment — open, not draft, carries the swarm risk marker, no activity for `STALE_PR_NUDGE_HOURS`, and not already nudged this activity cycle. |
 | `swarm-merge.sh` | Resolves the PR for an issue, merges it, and cleans up the local worktree + branch + tmux window in one shot. `--sweep-only` just runs the local-branch sweep. |
+| `swarm-scoreboard.sh` | Aggregates `.swarm/eval-log.jsonl` rows across worktrees into a per-(agent, model) scoreboard: tasks / pass% / first-try% / retries / checked / avg duration. Sibling of `review-scoreboard.sh` (PR-review coverage). |
 | `statusline-with-context.sh` | Claude Code statusLine command rendering `<model> · <cwd> · ctx: <used>/<total> (<%>)`. For long-lived coordinator sessions — see [advanced-usage.md → "Long-lived coordinator: context monitoring"](../docs/advanced-usage.md#long-lived-coordinator-context-monitoring). |
 | `sweep-swarm-outcomes.sh` | Iterates worker outcome JSONs and invokes a user-configured posting hook; idempotent via `.posted` markers. |
 | `tmux-worker-shell.sh` | Opens a login shell inside a swarm worker container — backs the `C-z` tmux escape hatch. |

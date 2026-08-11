@@ -68,9 +68,11 @@ tmux capture-pane -t <session>:<window> -p -S - > /tmp/iss-215-full.log
 |---------------------------------------------------------------|------------------------------------------------------------------------------------------------|
 | Enter copy/scrollback mode                                    | `<prefix> [`                                                                                  |
 | Scroll up / down (in copy mode)                                | `PgUp` / `PgDn`, or arrow keys                                                                 |
-| Search backward                                                | `Ctrl-r` then type term, `Enter`                                                               |
-| Search forward                                                 | `Ctrl-s`                                                                                       |
+| Search backward                                                | `Ctrl-r` then type term, `Enter` (default emacs mode); `?` then type term, `Enter` (vi mode)   |
+| Search forward                                                 | `Ctrl-s` (default emacs mode); `/` then type term, `Enter` (vi mode)                           |
 | Exit copy mode                                                 | `q`                                                                                            |
+
+> The example config at [`examples/tmux.conf.example`](../examples/tmux.conf.example) sets `setw -g mode-keys vi` — if you've installed it (or otherwise set vi copy-mode keys), use the `?` / `/` forms above instead of `Ctrl-r` / `Ctrl-s`.
 
 ## 6. Killing a single window (worker)
 
