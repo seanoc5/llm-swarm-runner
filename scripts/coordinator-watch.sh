@@ -458,11 +458,48 @@
 #                           independently-tested fallback if a future change
 #                           narrows worker_task_done's status check (e.g.
 #                           back to done-no-pr only).
+#   WORKER_COMPACT_PCT=75
+#   WORKER_COMPACT_THRESHOLD_CAP_TOKENS=250000
+#                           (issue #259, follow-up to #252) The fixed
+#                           WORKER_COMPACT_THRESHOLD_TOKENS below ignores the
+#                           worker model's own context window — on a 1M-
+#                           context worker (Sonnet 5's statusline reads
+#                           "ctx: 259k/1M (26%)") the 150k default triggered
+#                           a compact at just 15% capacity: pure waste, since
+#                           compaction is lossy and costs a summarization
+#                           pass plus re-reading turns. worker_pane_ctx_window()
+#                           parses the SAME statusline text worker_pane_ctx_
+#                           used() already reads ("ctx: <used>/<window>
+#                           (<pct>%)") for its denominator, and
+#                           worker_compact_effective_threshold() computes the
+#                           actual trigger as min(WORKER_COMPACT_PCT% of that
+#                           window, WORKER_COMPACT_THRESHOLD_CAP_TOKENS) —
+#                           falling back to the flat WORKER_COMPACT_THRESHOLD_
+#                           TOKENS below when the denominator can't be parsed
+#                           (statusline not installed/rendered yet, or the "?"
+#                           JSON-schema-mismatch fallback). Defaults yield
+#                           150000 on a 200k-window worker (today's behavior,
+#                           unchanged) and 250000 on a 1M-window worker. The
+#                           250k cap (not a bare 75% = 750k) is deliberate:
+#                           long-context quality research reviewed 2026-08-10
+#                           (Chroma "context rot", NoLiMa, Fiction.LiveBench,
+#                           LOCA-bench, MRCR-v2 on 2026 frontier models) shows
+#                           effective capacity for the best models is roughly
+#                           50-65% of nominal, with measurable degradation
+#                           cliffs by ~512k and agent-task degradation
+#                           starting earlier — 250k keeps workers in the
+#                           high-quality zone while roughly halving compaction
+#                           frequency vs. 150k on 1M models. This is a quality
+#                           decision, not a pricing one (Anthropic bills the
+#                           full window at standard per-token rates on
+#                           ≥4.6-era models — no >200k premium tier).
 #   WORKER_COMPACT_THRESHOLD_TOKENS=150000
 #                           Used-token threshold that triggers the above for
 #                           a worker with no PR open yet (still mid-task —
 #                           plenty of work likely remains, so compact now
-#                           rather than let it degrade further).
+#                           rather than let it degrade further). Also the
+#                           fallback used verbatim when the window denominator
+#                           can't be parsed — see WORKER_COMPACT_PCT above.
 #   WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS=300000
 #                           Raised threshold used instead of the above once
 #                           the worker's worktree has an open PR (per its
@@ -477,7 +514,15 @@
 #                           hysteresis — it takes real, sustained context
 #                           growth after PR-open to trigger a compact, so
 #                           this can't flap back and forth as the PR-open
-#                           signal itself doesn't change turn to turn.
+#                           signal itself doesn't change turn to turn. That
+#                           gap (WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS minus
+#                           WORKER_COMPACT_THRESHOLD_TOKENS, 150000 by
+#                           default) is preserved verbatim on top of the
+#                           scaled base threshold above — e.g. a 1M-window
+#                           worker's effective wrap-up threshold is 250000 +
+#                           150000 = 400000, not the fixed 300000 that would
+#                           otherwise leave only 50000 of headroom above the
+#                           scaled 250000 base.
 #   WORKER_COMPACT_BUSY_PATTERN
 #                           Same purpose and default as AUTO_COMPACT_BUSY_PATTERN,
 #                           applied per iss-* window instead of the
@@ -608,8 +653,10 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     AUTO_COMPACT_VERIFY_TIMEOUT_SECS  30      max wait for probe to refresh post-compact
     AUTO_COMPACT_POLL_SECS            2       capture-pane/probe poll interval
     WORKER_AUTO_COMPACT               1       same idea as AUTO_COMPACT, generalized to iss-* worker windows; see header comment
-    WORKER_COMPACT_THRESHOLD_TOKENS         150000  used-token trigger (no PR open yet)
-    WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS  300000  raised trigger once the worker's PR is open
+    WORKER_COMPACT_PCT                       75      percent of the worker's own context window used as the effective threshold; see header comment
+    WORKER_COMPACT_THRESHOLD_CAP_TOKENS      250000  cap on the above (250k on a 1M-window worker, not 750k)
+    WORKER_COMPACT_THRESHOLD_TOKENS         150000  used-token trigger (no PR open yet); also the fallback when the window can't be parsed
+    WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS  300000  raised trigger once the worker's PR is open (scales with the base threshold; see header comment)
     WORKER_COMPACT_BUSY_PATTERN             (auto)  capture-pane busy-indicator regex (per iss-* window)
     WORKER_COMPACT_START_TIMEOUT_SECS       15      max wait for compaction to start
     WORKER_COMPACT_FINISH_TIMEOUT_SECS      300     max wait for compaction to finish
@@ -780,6 +827,12 @@ AUTO_COMPACT_POLL_SECS="${AUTO_COMPACT_POLL_SECS:-2}"
 # straight out of capture-pane (see worker_pane_ctx_used()), not a probe
 # file, so there's nothing to go stale.
 WORKER_AUTO_COMPACT="${WORKER_AUTO_COMPACT:-1}"
+# issue #259 — scale the effective threshold to the worker model's own
+# context window (min(WORKER_COMPACT_PCT% of window, ..._CAP_TOKENS)); see
+# worker_compact_effective_threshold() and this file's WORKER_AUTO_COMPACT
+# header comment for the full rationale and the wrap-up gap-preservation math.
+WORKER_COMPACT_PCT="${WORKER_COMPACT_PCT:-75}"
+WORKER_COMPACT_THRESHOLD_CAP_TOKENS="${WORKER_COMPACT_THRESHOLD_CAP_TOKENS:-250000}"
 WORKER_COMPACT_THRESHOLD_TOKENS="${WORKER_COMPACT_THRESHOLD_TOKENS:-150000}"
 WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS="${WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS:-300000}"
 # issue #252: same anchor as AUTO_COMPACT_BUSY_PATTERN above — keep in sync.
@@ -814,6 +867,7 @@ fi
 for _var in AUTO_COMPACT_THRESHOLD_TOKENS AUTO_COMPACT_PROBE_MAX_AGE_SECS \
             AUTO_COMPACT_START_TIMEOUT_SECS AUTO_COMPACT_FINISH_TIMEOUT_SECS \
             AUTO_COMPACT_VERIFY_TIMEOUT_SECS AUTO_COMPACT_TICK_SECS AUTO_COMPACT_COOLDOWN_SECS \
+            WORKER_COMPACT_PCT WORKER_COMPACT_THRESHOLD_CAP_TOKENS \
             WORKER_COMPACT_THRESHOLD_TOKENS WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS \
             WORKER_COMPACT_START_TIMEOUT_SECS WORKER_COMPACT_FINISH_TIMEOUT_SECS \
             WORKER_COMPACT_VERIFY_TIMEOUT_SECS WORKER_COMPACT_SCAN_SECS \
@@ -964,7 +1018,7 @@ pr-poll:       ${WATCH_PR_POLL_SECS}s$([ "$WATCH_PR_POLL_SECS" = "0" ] && echo "
 orphan-sweep:  ${WATCH_ORPHAN_SWEEP_SECS}s$([ "$WATCH_ORPHAN_SWEEP_SECS" = "0" ] && echo " (disabled)" || echo " (script: $REAP_ORPHAN)")
 check-on-done: $WATCH_CHECK_ON_DONE$([ "$WATCH_CHECK_ON_DONE" = "1" ] && echo " (session: $SESSION_NAME)")
 auto-compact:  $AUTO_COMPACT$([ "$AUTO_COMPACT" = "1" ] && echo " (threshold: ${AUTO_COMPACT_THRESHOLD_TOKENS} tokens, probe: $AUTO_COMPACT_PROBE, poll-tick: ${AUTO_COMPACT_TICK_SECS}s$([ "$AUTO_COMPACT_TICK_SECS" = "0" ] && echo " disabled"), cooldown: ${AUTO_COMPACT_COOLDOWN_SECS}s)")
-worker-compact: $WORKER_AUTO_COMPACT$([ "$WORKER_AUTO_COMPACT" = "1" ] && echo " (threshold: ${WORKER_COMPACT_THRESHOLD_TOKENS}/${WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS} tokens, scan: ${WORKER_COMPACT_SCAN_SECS}s)")
+worker-compact: $WORKER_AUTO_COMPACT$([ "$WORKER_AUTO_COMPACT" = "1" ] && echo " (threshold: min(${WORKER_COMPACT_PCT}% of window, ${WORKER_COMPACT_THRESHOLD_CAP_TOKENS})/wrapup+$(( WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS - WORKER_COMPACT_THRESHOLD_TOKENS )), fallback: ${WORKER_COMPACT_THRESHOLD_TOKENS}/${WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS} tokens, scan: ${WORKER_COMPACT_SCAN_SECS}s)")
 dry-run:       $DRY_RUN
 once:          $ONCE
 pane-echo:     $([ "$WATCHER_QUIET" = "1" ] && echo "disabled (WATCHER_QUIET=1)" || echo "enabled (WATCHER_QUIET=1 to silence)")
@@ -2103,6 +2157,64 @@ worker_pane_ctx_used() {
     esac
 }
 
+# worker_pane_ctx_window <window>
+#
+# Sibling of worker_pane_ctx_used() above, parsing the SAME rendered
+# "ctx: <used>/<total> (<pct>%)" statusline text for the DENOMINATOR instead
+# of the numerator — the worker model's own context-window size, used by
+# worker_compact_effective_threshold() to scale the compact trigger (issue
+# #259). Echoes the parsed window size and returns 0, or returns 1 with no
+# output on the same failure modes as worker_pane_ctx_used() (nothing
+# parseable on screen, or the "?" fallback). Deliberately a separate
+# capture-pane + parse rather than sharing state with worker_pane_ctx_used()
+# — same one-concern-per-function, no-shared-mutable-state convention as
+# worker_pane_busy()/worker_pane_ctx_used() already follow in this file.
+worker_pane_ctx_window() {
+    local win="$1" content clean line
+    content="$(tmux capture-pane -t "$SESSION_NAME:$win" -p 2>/dev/null)" || return 1
+    clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
+    line="$(printf '%s\n' "$clean" | LC_ALL=C grep -oE 'ctx: [0-9]+[kM]?/[0-9]+[kM]?[[:space:]]*\([0-9]+%\)' | tail -1)"
+    [ -n "$line" ] || return 1
+    [[ "$line" =~ /([0-9]+)([kM]?)[[:space:]]*\( ]] || return 1
+    local num="${BASH_REMATCH[1]}" suffix="${BASH_REMATCH[2]}"
+    case "$suffix" in
+        M) echo $((num * 1000000)) ;;
+        k) echo $((num * 1000)) ;;
+        *) echo "$num" ;;
+    esac
+}
+
+# worker_compact_effective_threshold <window>
+#
+# Echoes "<base-threshold> <wrapup-threshold>" (always succeeds — this is
+# pure arithmetic over WORKER_COMPACT_* env vars plus whatever
+# worker_pane_ctx_window() could parse, never a pane/tmux failure mode of its
+# own). base-threshold = min(WORKER_COMPACT_PCT% of the worker's parsed
+# context window, WORKER_COMPACT_THRESHOLD_CAP_TOKENS); falls back to the
+# flat WORKER_COMPACT_THRESHOLD_TOKENS when the window denominator isn't
+# parseable (statusline not installed/rendered, or the "?" fallback) — same
+# fail-open contract as every other pane-parsing helper in this file.
+# wrapup-threshold = base-threshold + the CONFIGURED gap (WORKER_COMPACT_
+# WRAPUP_THRESHOLD_TOKENS - WORKER_COMPACT_THRESHOLD_TOKENS, 150000 by
+# default), preserved verbatim rather than recomputed as its own percentage
+# — issue #259's "keep wrap-up headroom meaningfully above the base"
+# criterion, satisfied by holding the absolute gap constant as the base
+# scales up with the window, and this same formula reduces to today's exact
+# 150000/300000 defaults when the denominator can't be parsed (base falls
+# back to WORKER_COMPACT_THRESHOLD_TOKENS, so base+gap == WORKER_COMPACT_
+# WRAPUP_THRESHOLD_TOKENS unchanged).
+worker_compact_effective_threshold() {
+    local win="$1" window base gap
+    gap=$(( WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS - WORKER_COMPACT_THRESHOLD_TOKENS ))
+    if window="$(worker_pane_ctx_window "$win")" && [ -n "$window" ]; then
+        base=$(( window * WORKER_COMPACT_PCT / 100 ))
+        [ "$base" -gt "$WORKER_COMPACT_THRESHOLD_CAP_TOKENS" ] && base="$WORKER_COMPACT_THRESHOLD_CAP_TOKENS"
+    else
+        base="$WORKER_COMPACT_THRESHOLD_TOKENS"
+    fi
+    echo "$base $((base + gap))"
+}
+
 # worker_has_open_pr <worktree-dir>
 #
 # True (rc 0) if any status file in <worktree>/.swarm/tasks/status/ (the
@@ -2313,9 +2425,11 @@ maybe_worker_compact() {
         return 0
     }
 
-    local threshold="$WORKER_COMPACT_THRESHOLD_TOKENS" wrapup=0
+    local base_threshold wrapup_threshold
+    read -r base_threshold wrapup_threshold < <(worker_compact_effective_threshold "$win")
+    local threshold="$base_threshold" wrapup=0
     if worker_has_open_pr "$wt_dir"; then
-        threshold="$WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS"
+        threshold="$wrapup_threshold"
         wrapup=1
     fi
 

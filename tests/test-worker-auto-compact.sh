@@ -56,7 +56,8 @@ extract_fn() {
     local fn="$1"
     sed -n "/^${fn}() {/,/^}/p" "$WATCH"
 }
-for fn in worker_pane_state worker_pane_busy worker_pane_ctx_used worker_has_open_pr \
+for fn in worker_pane_state worker_pane_busy worker_pane_ctx_used worker_pane_ctx_window \
+          worker_compact_effective_threshold worker_has_open_pr \
           worker_task_done worker_compact_record_failure worker_compact_record_success \
           maybe_worker_compact log_event; do
     body="$(extract_fn "$fn")"
@@ -69,6 +70,8 @@ EVENTS_LOG="$TEST_DIR/events.log"; : > "$EVENTS_LOG"
 HAVE_JQ=1
 DRY_RUN=1
 WORKER_AUTO_COMPACT=1
+WORKER_COMPACT_PCT=75
+WORKER_COMPACT_THRESHOLD_CAP_TOKENS=250000
 WORKER_COMPACT_THRESHOLD_TOKENS=150000
 WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS=300000
 # issue #252: must match coordinator-watch.sh's own default — anchored on
@@ -183,6 +186,42 @@ sleep 0.3
 rc=0; out="$(worker_pane_ctx_used "$WIN")" || rc=$?
 check "unparseable '?' fallback -> rc1" "1" "$rc"
 
+heading "Test 3b: worker_pane_ctx_window (parsing the statusline denominator, issue #259)"
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'sonnet · wt-issue-42 · ctx: 160k/1M (16%)'" Enter
+check_eventually "M-suffixed window -> window=1000000" "1000000" "worker_pane_ctx_window '$WIN'"
+
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'sonnet · wt-issue-42 · ctx: 20k/200k (10%)'" Enter
+check_eventually "k-suffixed window -> window=200000" "200000" "worker_pane_ctx_window '$WIN'"
+
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'no statusline here'" Enter
+sleep 0.3
+rc=0; out="$(worker_pane_ctx_window "$WIN")" || rc=$?
+check "no ctx text on screen -> rc1" "1" "$rc"
+
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'sonnet · wt-issue-42 · ctx: ?'" Enter
+sleep 0.3
+rc=0; out="$(worker_pane_ctx_window "$WIN")" || rc=$?
+check "unparseable '?' fallback -> rc1" "1" "$rc"
+
+heading "Test 3c: worker_compact_effective_threshold — min(pct-of-window, cap) + gap-preserving wrap-up (issue #259)"
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'sonnet · wt-issue-42 · ctx: 20k/200k (10%)'" Enter
+check_eventually "200k-window worker settles on screen" "200000" "worker_pane_ctx_window '$WIN'"
+read -r base wrapup < <(worker_compact_effective_threshold "$WIN")
+check "200k window: base = 75% of window (150000), under the 250000 cap" "150000" "$base"
+check "200k window: wrap-up preserves the 150000 default gap -> 300000 (today's unchanged behavior)" "300000" "$wrapup"
+
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'sonnet · wt-issue-42 · ctx: 260k/1M (26%)'" Enter
+check_eventually "1M-window worker settles on screen" "1000000" "worker_pane_ctx_window '$WIN'"
+read -r base wrapup < <(worker_compact_effective_threshold "$WIN")
+check "1M window: 75% (750000) exceeds the cap -> clamped to 250000" "250000" "$base"
+check "1M window: wrap-up = scaled base + preserved 150000 gap -> 400000 (not the stale flat 300000)" "400000" "$wrapup"
+
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'no statusline here'" Enter
+sleep 0.3
+read -r base wrapup < <(worker_compact_effective_threshold "$WIN")
+check "unparseable window -> base falls back to flat WORKER_COMPACT_THRESHOLD_TOKENS (150000)" "150000" "$base"
+check "unparseable window -> wrap-up falls back to flat WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS (300000)" "300000" "$wrapup"
+
 heading "Test 4: worker_has_open_pr"
 rm -f "$STATUS_DIR"/*.json
 rc=0; worker_has_open_pr "$WT_DIR" || rc=$?
@@ -201,7 +240,13 @@ rm -f "$STATUS_DIR"/*.json
 
 heading "Test 5: maybe_worker_compact threshold + wrap-up hysteresis (DRY_RUN)"
 # `cat` (no args) keeps a non-shell process in the foreground (state=cli)
-# while leaving the just-echoed line as the visible screen content.
+# while leaving the just-echoed line as the visible screen content. This
+# window renders a 1M-window statusline throughout, so (issue #259, with the
+# fixed-env defaults above: WORKER_COMPACT_PCT=75, CAP=250000) the effective
+# base threshold is min(750000, 250000) = 250000, not the flat 150000
+# WORKER_COMPACT_THRESHOLD_TOKENS fallback — see Test 3c above for that
+# fallback path covered in isolation, and Test 9 below for why the
+# real-injection fixture has to override the cap downward instead.
 tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'sonnet · wt-issue-42 · ctx: 50k/1M (5%)'; cat" Enter
 check_eventually "cat foreground -> cli (sanity check before the threshold test)" "cli" "worker_pane_state '$WIN'"
 
@@ -212,12 +257,12 @@ check "under threshold, no PR -> no compact event logged" "$before" "$after"
 
 tmux send-keys -t "$SESSION_NAME:$WIN" C-c
 sleep 0.2
-tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'sonnet · wt-issue-42 · ctx: 200k/1M (20%)'; cat" Enter
-check_eventually "cat foreground w/ 200k ctx -> cli" "cli" "worker_pane_state '$WIN'"
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'sonnet · wt-issue-42 · ctx: 260k/1M (26%)'; cat" Enter
+check_eventually "cat foreground w/ 260k ctx -> cli" "cli" "worker_pane_state '$WIN'"
 
 maybe_worker_compact "$WIN"
 if grep -q 'worker.compact ' "$EVENTS_LOG"; then got=logged; else got=missing; fi
-check "200k, no PR open -> above the 150k threshold, compact logged" "logged" "$got"
+check "260k, no PR open -> above the scaled 250k threshold (75% of 1M, capped), compact logged" "logged" "$got"
 
 # Now with a PR open: issue #252's worker_task_done fires the moment the
 # status file reports "ready-for-review" — see this file's
@@ -225,12 +270,18 @@ check "200k, no PR open -> above the 150k threshold, compact logged" "logged" "$
 # WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS in the common case (worker_
 # has_open_pr and worker_task_done's status check key off the same "pr"
 # field). So BOTH a below-threshold 200k ctx and an above-wrap-up-threshold
-# 310k ctx should skip below — but for the SAME reason (task_done), not
-# because of a ctx/threshold comparison. Test 7 below covers task_done in
-# isolation; this just confirms it also wins inside the full
-# maybe_worker_compact call this test already had wired up.
+# 410k ctx (the scaled 250k base + the preserved 150k gap = 400k wrap-up
+# threshold; see Test 3c above) should skip below — but for the SAME reason
+# (task_done), not because of a ctx/threshold comparison. Test 7 below
+# covers task_done in isolation; this just confirms it also wins inside the
+# full maybe_worker_compact call this test already had wired up.
 printf '{"task_id":"t2","state":"ready-for-review","pr":777,"ts":"2026-01-01T00:00:00Z","note":""}' \
     > "$STATUS_DIR/t2.json"
+
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.2
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'sonnet · wt-issue-42 · ctx: 200k/1M (20%)'; cat" Enter
+check_eventually "cat foreground w/ 200k ctx -> cli" "cli" "worker_pane_state '$WIN'"
 
 : > "$EVENTS_LOG"
 maybe_worker_compact "$WIN"
@@ -241,15 +292,15 @@ check "200k WITH PR open -> no compact injection logged" "missing" "$got"
 
 tmux send-keys -t "$SESSION_NAME:$WIN" C-c
 sleep 0.2
-tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'sonnet · wt-issue-42 · ctx: 310k/1M (31%)'; cat" Enter
-check_eventually "cat foreground w/ 310k ctx -> cli" "cli" "worker_pane_state '$WIN'"
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'sonnet · wt-issue-42 · ctx: 410k/1M (41%)'; cat" Enter
+check_eventually "cat foreground w/ 410k ctx -> cli" "cli" "worker_pane_state '$WIN'"
 
 : > "$EVENTS_LOG"
 maybe_worker_compact "$WIN"
 if grep -q 'worker.compact.skip.*reason=task_done' "$EVENTS_LOG"; then got=skipped; else got=notskipped; fi
-check "310k WITH PR open -> STILL skipped as task_done, even above the old 300k wrap-up threshold" "skipped" "$got"
+check "410k WITH PR open -> STILL skipped as task_done, even above the scaled 400k wrap-up threshold" "skipped" "$got"
 if grep -q 'worker.compact ' "$EVENTS_LOG"; then got=logged; else got=missing; fi
-check "310k WITH PR open -> no compact injection logged (issue #252 supersedes the wrap-up threshold)" "missing" "$got"
+check "410k WITH PR open -> no compact injection logged (issue #252 supersedes the wrap-up threshold)" "missing" "$got"
 rm -f "$STATUS_DIR"/*.json
 
 heading "Test 6: worker_task_done — three independent signals + the requeue-staleness guard (issue #252)"
@@ -330,15 +381,15 @@ check "phrase appears mid-line (source/grep context, not the real banner) -> rc1
 heading "Test 7: maybe_worker_compact skips an over-threshold window whose task is already done"
 tmux send-keys -t "$SESSION_NAME:$WIN" C-c
 sleep 0.2
-tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'sonnet · wt-issue-42 · ctx: 200k/1M (20%)'; cat" Enter
-check_eventually "cat foreground w/ 200k ctx -> cli" "cli" "worker_pane_state '$WIN'"
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'sonnet · wt-issue-42 · ctx: 260k/1M (26%)'; cat" Enter
+check_eventually "cat foreground w/ 260k ctx -> cli" "cli" "worker_pane_state '$WIN'"
 
 printf '{"task_id":"t3","state":"ready-for-review","pr":999,"ts":"2026-01-01T00:00:00Z","note":""}' \
     > "$STATUS_DIR/t3.json"
 : > "$EVENTS_LOG"
 maybe_worker_compact "$WIN"
 if grep -q 'worker.compact.skip.*reason=task_done' "$EVENTS_LOG"; then got=skipped; else got=notskipped; fi
-check "200k, well over threshold, but task_done -> skipped as task_done" "skipped" "$got"
+check "260k, well over the scaled 250k threshold, but task_done -> skipped as task_done" "skipped" "$got"
 if grep -q 'worker.compact ' "$EVENTS_LOG"; then got=logged; else got=missing; fi
 check "no compact injection logged when task_done" "missing" "$got"
 rm -f "$STATUS_DIR"/*.json
@@ -452,6 +503,15 @@ WORKER_COMPACT_START_TIMEOUT_SECS=10
 WORKER_COMPACT_FINISH_TIMEOUT_SECS=15
 WORKER_COMPACT_VERIFY_TIMEOUT_SECS=10
 WORKER_COMPACT_POLL_SECS=1
+# issue #259: the fixture renders a 1M-window statusline, which is now
+# parseable by worker_pane_ctx_window() — so the effective threshold comes
+# from min(WORKER_COMPACT_PCT% of 1M, WORKER_COMPACT_THRESHOLD_CAP_TOKENS),
+# NOT the flat WORKER_COMPACT_THRESHOLD_TOKENS fallback (that only applies
+# when the denominator can't be parsed — see Test 3c above for that path in
+# isolation). Lower the cap below the fixture's 160k starting value so this
+# real-injection timing/verify test still exercises the same mechanics it
+# did pre-#259.
+WORKER_COMPACT_THRESHOLD_CAP_TOKENS=100000
 : > "$EVENTS_LOG"
 
 # Test 5 left `cat` blocked in the foreground reading stdin -- interrupt it
@@ -516,9 +576,14 @@ heading "Test 11: ineffective-compaction detection — usage that DOESN'T drop m
 # CURRENT ctx is (40k, left over from Test 9's drop) unchanged — mirroring
 # test-coordinator-auto-compact.sh's Test 7 (fresh probe, unchanged usage).
 # Threshold lowered so 40k still counts as "over" — the point here is the
-# ineffective-detection logic, not re-establishing the 150k trigger.
+# ineffective-detection logic, not re-establishing the scaled trigger. The
+# window (1M) is still parseable, so it's the CAP that has to come down
+# (see Test 9's comment above) — WORKER_COMPACT_THRESHOLD_TOKENS is set too,
+# purely for fallback-path consistency, but does nothing while the window
+# parses.
 : > "$EVENTS_LOG"
 WORKER_COMPACT_THRESHOLD_TOKENS=10000
+WORKER_COMPACT_THRESHOLD_CAP_TOKENS=10000
 echo same > "$REPL_MODE_FILE"
 check_eventually "REPL settled back to idle before Test 11" "cli" "worker_pane_state '$WIN'"
 
