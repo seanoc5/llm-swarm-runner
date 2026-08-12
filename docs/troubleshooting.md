@@ -5,7 +5,7 @@
 | Symptom | Quick fix | Details |
 |---|---|---|
 | `permission denied` on `/var/run/docker.sock` | `sudo usermod -aG docker $USER`, then re-login (or `newgrp docker`) | [↓](#permission-denied-on-varrundockersock) |
-| `gh: HTTP 401` in sandbox | Confirm `gh auth status` works on host; rebuild image if the token isn't propagating | [↓](#gh-http-401) |
+| `gh: HTTP 401` in sandbox | Confirm `gh auth token` prints a token on the host; if it does but the sandbox still 401s, update your `llm-swarm-runner` checkout | [↓](#gh-http-401) |
 | Worker isn't picking up briefs | Start a listener window: `tmux new-window … sandbox.sh <wt> listener` | [↓](#worker-isnt-picking-up-briefs) |
 | Tasks stuck in `processing/` | `mv <wt>/.swarm/tasks/processing/<id>.md <wt>/.swarm/tasks/inbox/` | [↓](#tasks-stuck-in-processing) |
 | Ctrl-Z suspended claude inside a worker | `docker exec swarm-<session>-iss-N bash -c 'pkill -CONT -f claude'` | [↓](#ctrl-z-accidentally-suspended-claude-inside-a-worker) |
@@ -119,7 +119,7 @@ $LLM_SWARM_DIR/scripts/coordinator-error-tail.sh
 
 ### `gh: HTTP 401`
 
-The host `gh` token was not forwarded. Check that `gh auth status` works on your host machine. The token is read at sandbox startup via `gh auth token` and passed in via `-e GH_TOKEN`. If it works on the host but fails in the sandbox, rebuild the image — older entrypoints didn't propagate it.
+The host `gh` token was not forwarded. Check that `gh auth token` prints a token on your host machine — `sandbox.sh` reads it via `gh auth token` at every container launch and passes it in via `-e GH_TOKEN` (sandbox.sh:187-198). This is a run-time concern of `sandbox.sh`, not the Docker image — `entrypoint.sh` contains no `gh`/`GH_TOKEN` logic at all. If `gh auth token` works on the host but the sandbox still 401s, update your `llm-swarm-runner` checkout so `sandbox.sh` includes the `GH_TOKEN` forwarding block, rather than rebuilding the image.
 
 ---
 
@@ -376,6 +376,6 @@ Issues we expect to be rare. If you hit one, please open an issue and we'll expa
 - **[placeholder] Testcontainers can't reach mapped ports** — `TESTCONTAINERS_HOST_OVERRIDE=localhost` is set automatically. If it's still failing, the port may be claimed by another worker (per-worktree port offsets via `.env` in compose projects help).
 - **Testcontainers fails with "client version 1.32 is too old"** — Docker Engine 25+ rejects API versions below 1.40, but Testcontainers' shaded docker-java client defaults to 1.32. `sandbox.sh` now sets `_JAVA_OPTIONS=-Dapi.version=1.45` automatically whenever the Docker socket is mounted, which fixes this for the majority of projects. If you still see the error, your project may be clobbering `_JAVA_OPTIONS` from its `build.gradle.kts` (or from a parent `init.gradle`); either bump it there, or — preferred — add a project-level pin on the test JVM: `tasks.withType<Test> { systemProperty("api.version", "1.45") }`. The shaded `org.testcontainers.shaded.com.github.dockerjava.core.DefaultDockerClientConfig` reads this system property at client init.
 - **[placeholder] OpenBrain MCP not visible to worker** — worker inherits `~/.gemini` (ro) for shared MCP config. If worker's `claude` doesn't see it, confirm the MCP is configured in the user-level (not project-local) claude config.
-- **[placeholder] `EXTRA_MOUNTS` path with spaces** — not currently quoted-safe in `sandbox.sh`. Avoid spaces in mount paths for now.
+- **`EXTRA_MOUNTS` path with spaces** — handled: `sandbox.sh` array-quotes each mount spec end to end (`MOUNTS+=("-v" "$final_mount")`, expanded quoted as `"${MOUNTS[@]}"` at `docker run`), so internal spaces in a path survive. The actual limitations: paths containing a **comma** break (the comma is the spec delimiter and splitting is unconditional), a **colon** inside the container-side path is misparsed (the host:container split takes everything after the last colon as the container path), and leading/trailing whitespace around a spec is trimmed.
 - **[placeholder] Coordinator wakes itself in a loop** — `coordinator-watch.sh` has a 30s debounce, but a misconfigured prompt that *creates* `done/*.json` files could in theory loop. Use `DRY_RUN=1` to inspect first.
 - **[placeholder] Worker on a feature branch that was force-pushed** — git inside the container will see a divergent history. Recover by deleting the worktree (`kill-worktree.sh`) and re-provisioning.
