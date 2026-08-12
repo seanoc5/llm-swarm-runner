@@ -2,7 +2,7 @@
 
 This doc consolidates a question that comes up periodically: *can tmux itself be the channel agents use to talk to each other?* The substrate makes some of this trivially possible, some of it deliberately blocked, and some of it possible-but-discouraged. Material on this topic was previously scattered across [`architecture.md`](./architecture.md), [`llm-swarm-runner-overview.md`](./llm-swarm-runner-overview.md) ("Tmux as substrate"), [`security.md`](./security.md) ("Tmux Scrollback Exposure"), and [`adr/0003-capabilities-yaml.md`](./adr/0003-capabilities-yaml.md). Read this for the consolidated picture.
 
-> **TL;DR:** The canonical inter-agent channel is the file-based bus under `.swarm/tasks/` (inbox / claimed / done JSON). Tmux is the *substrate* every agent runs on, and the host-side coordinator has enough access to use it as a **read-only** side-channel for diagnosing workers — and the project does this for stuck-worker detection. **`tmux send-keys` from one agent into another agent's pane is duct tape**, not a channel: no schema, no ack, no idempotency, and it races with whatever the receiver is doing. Use the file bus to ask agents to do things. The only blessed `send-keys` flow is a *human operator* nudging the coordinator from a control terminal. Workers cannot use tmux to talk to anyone, by design. Cross-swarm tmux messaging is not wired up and requires opting out of the sandbox if you want it.
+> **TL;DR:** The canonical inter-agent channel is the file-based bus under `.swarm/tasks/{inbox,processing,done}/` (briefs are `<id>.md`; structured outcome JSON lands in `done/` as `<id>.{ok,err}.json`). Tmux is the *substrate* every agent runs on, and the host-side coordinator has enough access to use it as a **read-only** side-channel for diagnosing workers — and the project does this for stuck-worker detection. **`tmux send-keys` from one agent into another agent's pane is duct tape**, not a channel: no schema, no ack, no idempotency, and it races with whatever the receiver is doing. Use the file bus to ask agents to do things. The only blessed `send-keys` flow is a *human operator* nudging the coordinator from a control terminal. Workers cannot use tmux to talk to anyone, by design. Cross-swarm tmux messaging is not wired up and requires opting out of the sandbox if you want it.
 
 ### Guiding principle
 
@@ -89,7 +89,7 @@ Not via tmux.
 
 ## 3. Pros and cons vs the file-based bus
 
-The canonical channel is `.swarm/tasks/{inbox,claimed,done}/<id>.json` written via atomic `mktemp + mv`, claimed by `worker-listener.sh`, with structured outcome JSON. Tmux-as-channel is a tempting alternative because the substrate is already there — but the project has explicitly chosen against it for verification outcomes ([ADR-0003](./adr/0003-capabilities-yaml.md)). The trade-off:
+The canonical channel is `.swarm/tasks/{inbox,processing,done}/` — task briefs (`<id>.md`) written to `inbox/` via atomic `mktemp + mv`, atomically claimed by `worker-listener.sh` (moved to `processing/`), with structured outcome JSON (`<id>.{ok,err}.json`) written to `done/`. Tmux-as-channel is a tempting alternative because the substrate is already there — but the project has explicitly chosen against it for verification outcomes ([ADR-0003](./adr/0003-capabilities-yaml.md)). The trade-off:
 
 **Pros of tmux as channel:**
 

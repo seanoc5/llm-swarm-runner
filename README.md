@@ -2,10 +2,9 @@
 
 *Multi-agent dev sandbox orchestrating coding agents in parallel tmux panes and isolated git worktrees.*
 
-![CI](https://img.shields.io/badge/CI-pending-lightgrey) ![License](https://img.shields.io/badge/license-MIT-blue)
+[![CI](https://github.com/seanoc5/llm-swarm-runner/actions/workflows/tests.yml/badge.svg)](https://github.com/seanoc5/llm-swarm-runner/actions/workflows/tests.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 **TL;DR:** llm-swarm-runner points Claude Code, Gemini CLI, or Codex CLI at your GitHub issue backlog and lets a pool of sandboxed agents chew through it in parallel — each in its own git worktree, each in a Docker container, all visible live in tmux. You stay in the driver's seat; the swarm handles the parallelism, the isolation, and the bookkeeping.
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 A local-first **Claude Code swarm runner** for your own GitHub backlog.
 
@@ -313,7 +312,7 @@ $LLM_SWARM_DIR/sandbox.sh /path/to/project codex
 
 ## ✨ Features at a glance
 
-- **Identity Persistence**: Automatically mounts your host's Claude, Codex, GitHub, Git, and SSH configs. No re-authentication needed.
+- **Identity Persistence**: Automatically mounts your host's Claude, Gemini, Codex, GitHub, Git, and SSH configs. No re-authentication needed.
 - **Pre-baked Toolchain**: Node.js 22, Java 21, Python 3 (with `uv`), Deno, Docker CLI, and LLM CLIs.
 - **GitHub CLI Auth**: Injects your host's `gh` token seamlessly so agents can create PRs out of the box.
 - **Git Commit Signing**: Mounts `~/.ssh` correctly so SSH-signed commits pass.

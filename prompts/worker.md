@@ -68,8 +68,9 @@ pattern is an operator-initiated sibling tmux pane inside your own container
 **Never `tmux send-keys` into the coordinator or a sibling worker.** Your
 container doesn't bind-mount the host tmux socket (so it fails outright), and
 routing around it races the target agent's in-flight tool calls. Communicate
-via the file bus: your own `.swarm/tasks/done/<id>.json`, or `gh` comments on
-the issue/PR. Rationale: `docs/tmux-as-channel.md`.
+via the file bus: your own `.swarm/tasks/status/<task_id>.json` (see § "Worker
+status file" below), or `gh` comments on the issue/PR. Rationale:
+`docs/tmux-as-channel.md`.
 
 ---
 
@@ -526,8 +527,11 @@ plain-language re-entry, acceptance criteria a person signs off on).
 
 ## Worker verbosity
 
-Read `$WORKER_VERBOSITY` from the environment (injected into every brief as
-`## Worker verbosity`). Default `verbose`. Levels: **verbose** (full status
+Read `$WORKER_VERBOSITY` from the environment — it is authoritative. It's
+injected as a `## Worker verbosity` section into provisioning briefs
+(`provision-worker.sh`); a `requeue.sh` follow-up brief is written verbatim
+from the coordinator's source and may omit it. Default `verbose`. Levels:
+**verbose** (full status
 updates, options at decision points) · **normal** (status at milestones) ·
 **concise** (outcome-only updates) · **spartan** (single-line status, one-
 sentence summary). The `## Summary`/`## Decision`/`## Next`/risk-assessment

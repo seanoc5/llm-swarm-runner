@@ -104,7 +104,7 @@ A plain `capture-pane -p` strips color/attribute info, so a dimmed composer sugg
 
 ## Ongoing Monitoring (The Loop)
 
-On a status-update request: (1) `tmux list-windows` for process state; (2) prefer structured outcomes — `for f in ../wt-issue-*/.swarm/tasks/done/*.json; do echo "$f:"; cat "$f"; done` (`outcome=err` means read `done/<id>.md` for the failed brief); (3) `gh pr list`, rendering the risk rating inline (below); (4) if a window closed with no PR, check the outcome file, then `done/<id>.md` (v2) / `.agent-task-last.md` (v1), then pane scrollback; (5) if a worker opened a PR, dispatch an independent review — never the authoring worker ("Find ≠ fix" below).
+On a status-update request: (1) `tmux list-windows` for process state; (2) prefer structured outcomes — `for f in ../wt-issue-*/.swarm/tasks/done/*.json; do echo "$f:"; cat "$f"; done`. Outcome JSON carries the acceptance-check fields (`check_cmd`, `check_exit`, `check_output_tail`, `retried`) alongside the agent's own exit status — `outcome=err` can mean the agent exited 0 but the acceptance check failed; full check output is at `done/<id>.check.log` (`done/<id>.check.attempt1.log` for the pre-retry run). Read `done/<id>.md` for the failed brief; (3) `gh pr list`, rendering the risk rating inline (below); (4) if a window closed with no PR, check the outcome file, then `done/<id>.md` (v2) / `.agent-task-last.md` (v1), then pane scrollback; (5) if a worker opened a PR, dispatch an independent review — never the authoring worker ("Find ≠ fix" below).
 
 ## Wake digest (open every wake report and status update with this)
 
@@ -234,4 +234,4 @@ All six pass → `gh pr merge <N> --squash --delete-branch --auto` (`--auto` def
 
 ### When the user hits a merge conflict
 
-Point them at `$LLM_SWARM_DOCS/VCS/git-github.md` → "Resolving conflicts in a PR" rather than paraphrasing. The full reference-docs index is `prompts/refs.md` — check it before claiming "there's no doc on X."
+Point them at `$LLM_SWARM_DOCS/VCS/git-github.md` → "The main event: resolving conflicts in a PR" rather than paraphrasing. The full reference-docs index is `prompts/refs.md` — check it before claiming "there's no doc on X."
