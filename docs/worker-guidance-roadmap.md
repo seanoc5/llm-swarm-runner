@@ -12,20 +12,20 @@ the "Open ideas" section below is the place to add new entries.
 
 ## Why this file exists
 
-Workers in this swarm currently have **no written system prompt**.
-`prompts/coordinator.md` exists; `prompts/worker.md` does not. Workers run
-on default Claude Code behaviour plus whatever the per-project
-`.swarm-policy.md` specifies. That works for now, but it means every
-project that wants worker-side conventions has to invent them in its own
-policy file.
+Workers in this swarm originally had **no written system prompt** —
+`prompts/coordinator.md` existed; `prompts/worker.md` did not. That meant
+every project that wanted worker-side conventions had to invent them in
+its own `.swarm-policy.md`.
 
-We expect this to change. As patterns emerge across projects ("workers
-should always tag PR titles with the issue number," "workers must rebase
-before push," etc.), they belong in a shared `prompts/worker.md` rather
-than copy-pasted into each project's `.swarm-policy.md`.
+That gap is closed: `prompts/worker.md` now exists and is delivered as a
+real system prompt at agent launch — `scripts/worker-listener.sh:564`
+passes `--append-system-prompt "$(cat worker.md)"` for claude, and
+`:565` sets `GEMINI_SYSTEM_MD=$WORKER_MD` for gemini (see the Done entry
+below, 2026-05-22, PRs #111/#112).
 
-This file tracks what should go into that future shared worker prompt and
-what should stay in per-project policy.
+This file now tracks ongoing refinement of that shared prompt — patterns
+that should move from a project's `.swarm-policy.md` into `prompts/worker.md`
+once they prove out across projects, and vice versa.
 
 ---
 
@@ -60,34 +60,15 @@ Every file in `prompts/` should open with one sentence: "this doc is read
 by [WHO] who needs to [DO WHAT]." Forces the author to be honest about
 scope; gives the refactor/trim/focus skill a fixed yardstick.
 
-### DONE 2026-07-25 — context-first restructure of the PR-body skeleton
-Review of 16 recent fand-app/fand-etl PR bodies found reviewer obligations
-(decisions to make, things to verify, data hazards) consistently landing at
-50–90% depth, filed under Decisions/Review-focus. Restructured the skeleton:
-`## Context` (1–3 sentence advance-organizer frame, always first — context
-after details does ~nothing for comprehension, per Bransford & Johnson 1972),
-`## TL;DR`, `## Needs from you` (DECIDE/VERIFY/BEWARE, ≤3 bullets or
-"Nothing."), new `## Findings` split out of Decisions, Re-entry brief moved
-below the fold (long-form for cold agents), ~8-line budget on the top block.
-Coordinator triage-quote updated to match.
-
-Context length ruling (same day): operator leaned toward a flat 1–5
-sentences + optional bullets; settled on a conditional window instead —
-1–3 sentences warm territory, up to 5 cold (design proposals, new
-subsystems), rationale: organizer length in the literature scales with
-reader coldness (Bransford's one-line title ↔ Ausubel's ~500-word
-passages), and flat windows act as targets, not caps, for LLM writers.
-Bullets rejected: frames encode relations, bullets encode membership.
-
-Provenance note, per operator request: the DECIDE/VERIFY/BEWARE tag names
-and the top-block line budget were accepted as the drafting agent's
-defaults — the operator explicitly skipped the suggested review of those
-two knobs. They are unreviewed defaults, not considered rulings; revisit
-if they chafe in practice.
-
 ---
 
 ## Done
+
+- (2026-07-25) **Context-first restructure of the PR-body skeleton** — review of 16 recent fand-app/fand-etl PR bodies found reviewer obligations (decisions to make, things to verify, data hazards) consistently landing at 50–90% depth, filed under Decisions/Review-focus. Restructured the skeleton: `## Context` (1–3 sentence advance-organizer frame, always first — context after details does ~nothing for comprehension, per Bransford & Johnson 1972), `## TL;DR`, `## Needs from you` (DECIDE/VERIFY/BEWARE, ≤3 bullets or "Nothing."), new `## Findings` split out of Decisions, Re-entry brief moved below the fold (long-form for cold agents), ~8-line budget on the top block. Coordinator triage-quote updated to match.
+
+  Context length ruling (same day): operator leaned toward a flat 1–5 sentences + optional bullets; settled on a conditional window instead — 1–3 sentences warm territory, up to 5 cold (design proposals, new subsystems), rationale: organizer length in the literature scales with reader coldness (Bransford's one-line title ↔ Ausubel's ~500-word passages), and flat windows act as targets, not caps, for LLM writers. Bullets rejected: frames encode relations, bullets encode membership.
+
+  Provenance note, per operator request: the DECIDE/VERIFY/BEWARE tag names and the top-block line budget were accepted as the drafting agent's defaults — the operator explicitly skipped the suggested review of those two knobs. They are unreviewed defaults, not considered rulings; revisit if they chafe in practice.
 
 - (2026-07-23) **Apply refactor/trim/focus to `prompts/coordinator.md` (and `worker.md`, `refs.md`)** — coordinator.md had grown to 23KB; trimmed to ~half by extracting the AVAILABLE gh-filter into `scripts/available-issues.sh`, dropping the teaching-mode and decision-point-conventions sections (native behavior on Fable-5-class coordinators), and deduplicating the parallelism routing table with worker.md. worker.md trimmed ~40% (constraints kept verbatim, why-essays compressed); at-rest glyph default unified to `∎`.
 

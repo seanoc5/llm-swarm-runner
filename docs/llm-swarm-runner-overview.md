@@ -78,7 +78,7 @@ tmux -L swarm-<repo> capture-pane -t llm-<repo>:iss-N -p -S -50000
 Two distinct capabilities flow from this:
 
 - **For humans (used today)**: post-mortem grep over a dead worker's exact transcript without re-running it, replay-style debugging, cross-worker comparison. Most of [`docs/tmux-cheatsheet.md`](./tmux-cheatsheet.md) is built around this — `capture-pane -S -200`, the dead-pane workflow, the `kill-finished-workers.sh` helper.
-- **For the host-side coordinator (latent, not exercised by the default prompt today)**: the coordinator runs host-native and has unrestricted access to the swarm's tmux socket. It *could* `capture-pane` to detect a stuck REPL, grep for specific error patterns, or `send-keys` recovery input without restarting the worker. The current coordinator prompt ([`prompts/coordinator.md`](../prompts/coordinator.md)) doesn't do this — it polls `.swarm/tasks/done/<id>.json` outcome files and `gh pr list` instead — but the substrate makes it possible without redesign.
+- **For the host-side coordinator**: the coordinator runs host-native and has unrestricted access to the swarm's tmux socket, and this is no longer purely latent. `scripts/check-stuck-workers.sh` already `capture-pane`s to classify a stuck REPL, and `coordinator-watch.sh`'s `WORKER_AUTO_COMPACT` already `send-keys`s a real `/compact` (plus a "continue your task" nudge) into idle over-threshold worker panes by default (issue #226) — an engineered, idle-gated flow, not the coordinator LLM improvising a recovery `send-keys` on its own initiative. The current coordinator prompt ([`prompts/coordinator.md`](../prompts/coordinator.md)) still polls `.swarm/tasks/done/<id>.json` outcome files and `gh pr list` as its primary loop, but explicitly blesses read-only `capture-pane` as a diagnostic fallback (`coordinator.md:99`).
 
 **Asymmetric visibility — not the symmetric one you might assume.** The coordinator can read every worker's pane scrollback; **workers cannot read the coordinator's or each other's panes via tmux**, because the host tmux socket isn't bind-mounted into worker containers (see [`sandbox.sh`](../sandbox.sh) mount list). Workers do, however, share `/var/run/docker.sock` and can `docker exec` into sibling containers — a *larger* blast radius than tmux visibility, covered in [`docs/security.md`](./security.md).
 
@@ -464,11 +464,16 @@ watcher can react while the worker is still parked and attachable
 rather than waiting on a `gh pr list` poll. Schema:
 `{"task_id", "state": "ready-for-review"|"blocked"|"done-no-pr", "pr", "ts", "note"}`.
 See "Worker status file" in [`prompts/worker.md`](../prompts/worker.md)
-for the full convention. This is a convention, not a listener-enforced
-guarantee — it's the first standardized message type in the
-worker→coordinator hand-off explored in
-[issue #129](https://github.com/seanoc5/llm-swarm-runner/issues/129);
-no listener behavior currently consumes it (that's separate scope).
+for the full convention. It started as a convention with no consumer —
+the first standardized message type in the worker→coordinator hand-off
+explored in
+[issue #129](https://github.com/seanoc5/llm-swarm-runner/issues/129) —
+but `coordinator-watch.sh` now actively reads it: its check-on-done pass
+(issue #181) scans every worktree's `status/*.json` for state
+`"ready-for-review"` and fires the acceptance check
+(`coordinator-watch.sh:1351-1367`), and the same directory also carries
+the check-claim coordination files (`kill-worktree.sh`'s deferred-removal
+handling, see its own section above).
 
 **v1 single-file (legacy, still supported)** — `.agent-task.md` → `.agent-task-last.md`. No structured outcome.
 
