@@ -9,7 +9,7 @@
 
 A local-first **Claude Code swarm runner** for your own GitHub backlog.
 
-A one-shot coordinator agent triages open issues, provisions isolated workers in **git worktrees**, and an event-driven watcher tops the swarm up as issues finish. Workers run in Docker sandboxes with `--network host`, so they can talk to your local Postgres, Spring Boot, etc. exactly as you do. Tmux gives you live observation of every worker.
+A coordinator agent — a persistent interactive Claude REPL by default, one-shot for Codex or headless Claude/Gemini runs — triages open issues, provisions isolated workers in **git worktrees**, and an event-driven watcher tops the swarm up as issues finish. Workers run in Docker sandboxes with `--network host`, so they can talk to your local Postgres, Spring Boot, etc. exactly as you do. Tmux gives you live observation of every worker.
 
 Also works as a single-agent sandbox if you don't want the swarm — `sandbox.sh <project> codex` gives you a safer shell around one agent. Supports **Claude Code**, **Gemini CLI**, **Codex CLI**, and **promptfoo**.
 
@@ -134,11 +134,13 @@ Precedence is the standard chain: **flag > shell env > `<project>/.swarm/.env` >
 **Common env-only knobs** (no flag equivalent — set per-invocation or in shell rc):
 
 ```bash
-# Watch gemini work live (interactive UI in coordinator pane; exit with /quit)
-COORDINATOR_VERBOSE=1 ./llm-start.sh "..."
+# Run the claude coordinator one-shot (-p, exits after each prompt) instead
+# of the default resident interactive REPL
+COORDINATOR_HEADLESS=1 ./llm-start.sh "..."
 
-# Use Claude Max instead of gemini (strips ANTHROPIC_API_KEY so OAuth is used)
-COORDINATOR_CMD=claude ./llm-start.sh "..."
+# Use the gemini coordinator instead of the claude default (strips
+# ANTHROPIC_API_KEY for claude so Max OAuth is used; N/A for gemini)
+COORDINATOR_CMD=gemini ./llm-start.sh "..."
 
 # Run a one-shot Codex coordinator; model defaults to your Codex CLI config
 COORDINATOR_CMD=codex ./llm-start.sh "..."
@@ -146,8 +148,10 @@ COORDINATOR_CMD=codex ./llm-start.sh "..."
 # Use Codex workers behind any coordinator
 WORKER_CMD=codex WORKER_HEADLESS=1 ./llm-start.sh "..."
 
-# Override the gemini model (e.g., A/B-test the preview tier)
-COORDINATOR_MODEL=gemini-3-flash-preview ./llm-start.sh "..."
+# Override the coordinator model (defaults: claude -> claude-fable-5,
+# gemini -> gemini-2.5-flash; gemini-3-flash-preview is known-broken for
+# the coordinator's multi-step tool use, don't use it here)
+COORDINATOR_MODEL=claude-sonnet-5 ./llm-start.sh "..."
 ```
 
 Full env-var reference in [`docs/llm-swarm-runner-overview.md`](./docs/llm-swarm-runner-overview.md#env-vars).
@@ -180,7 +184,7 @@ The watcher's default wake prompt is **top-up mode**: triage finished work, then
 Other automation paths if you want them:
 
 - **Time-based:** add a `cron` / `systemd --user` timer running `llm-start.sh "Check status; advance any stalled workers"` every 15min — usually unnecessary if the watcher is on.
-- **Conversational:** drop `-p` and run `claude` / `gemini` interactively in Window 1 — possible but burns plan capacity while idle and the context window grows over time. Not recommended for a Max-plan user.
+- **Conversational (the default for claude):** the coordinator's Window 1 is already a resident interactive REPL — just re-invoke `llm-start.sh "<follow-up prompt>"` and it pastes into the live session instead of spawning a new one. Set `COORDINATOR_HEADLESS=1` if you'd rather it exit after each prompt (capacity-conscious, one-shot).
 
 See [`docs/llm-swarm-runner-overview.md`](./docs/llm-swarm-runner-overview.md) for the full architecture.
 
@@ -195,7 +199,7 @@ The coordinator and watcher honor a small set of tunables loaded from three sour
 | Var                          | Default | Purpose                                                                                                          |
 |------------------------------|---------|------------------------------------------------------------------------------------------------------------------|
 | `MAX_WORKERS`                | `5`     | Concurrent worker tmux windows. Increase consciously — each worker is a Claude Code session using real RAM/quota. |
-| `MAX_TMUX_WINDOWS`           | `10`    | Hard cap on total session windows (workers + coordinator + watch + leftover finished worker windows).             |
+| `MAX_TMUX_WINDOWS`           | `10`    | Hard cap on total session windows (`coordinator` + `util`, always present and hosting the watcher pane when `WATCH=1`; + optional `status` + alive workers + leftover finished worker windows).             |
 | `TARGET_AVAILABLE`           | `10`    | Backlog target. Housekeeping creates new issues when AVAILABLE drops below this — NOT when raw open count is low. |
 | `OWNER_LABELS`               | empty   | Comma-separated labels treated as "human-owned" (e.g. `sean,radesh`). Skipped unless the label matches `@me`.     |
 | `INCLUDE_ASSIGNED_TO_OTHERS` | `0`     | `1` = drop the `@me`-or-unassigned filter; the swarm claims teammates' tickets too.                               |

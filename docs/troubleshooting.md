@@ -68,7 +68,7 @@ claude /status        # in a running claude session — shows account + plan
 
 Or visit https://claude.ai/settings/billing on the web. If your plan is expired or paused, claude falls back to API billing (if `ANTHROPIC_API_KEY` is set) or fails outright.
 
-`llm-start.sh` strips `ANTHROPIC_API_KEY` from the coordinator env when `COORDINATOR_CMD=claude` so the OAuth session is always used. Workers inherit the same behavior via `sandbox.sh`.
+`scripts/coordinator-claude.sh` (invoked by `llm-start.sh` for the claude coordinator) unsets `ANTHROPIC_API_KEY` before launching claude, unless `COORDINATOR_USE_API_KEY=1` is set, so the OAuth session is used by default. Workers never receive the key in the first place — `sandbox.sh`'s pass-through env list simply doesn't forward it into the container, not because anything strips it.
 
 ### Claude API key — get / validate
 
@@ -113,7 +113,7 @@ $LLM_SWARM_DIR/scripts/coordinator-error-tail.sh
 
 | Symptom                                               | Likely cause                                       | Fix                                              |
 |-------------------------------------------------------|----------------------------------------------------|--------------------------------------------------|
-| Claude coordinator burning API credits unexpectedly   | `ANTHROPIC_API_KEY` set in env at launch time      | Confirm `llm-start.sh` is the caller (it strips it). If you launched `claude` directly, run `env -u ANTHROPIC_API_KEY claude ...`. |
+| Claude coordinator burning API credits unexpectedly   | `ANTHROPIC_API_KEY` set in env, or `COORDINATOR_USE_API_KEY=1` set   | Confirm `scripts/coordinator-claude.sh` is in the launch path (via `llm-start.sh`; it strips the key) and that `COORDINATOR_USE_API_KEY` isn't `1`. If you launched `claude` directly, run `env -u ANTHROPIC_API_KEY claude ...`. |
 | Gemini fails with no API key error                    | Key not in any of the 4 search paths               | Put it in `~/.gemini/.env` as `GEMINI_API_KEY=...` |
 | Claude Max session expired mid-run                    | OAuth token TTL elapsed                             | Run `claude /login` on the host once             |
 

@@ -40,7 +40,7 @@ The result is the **AVAILABLE** set. Cache it for the rest of this checklist run
 ## Caps (NEVER violate)
 
 - `MAX_WORKERS` — concurrent worker tmux windows alive at once.
-- `MAX_TMUX_WINDOWS` — total windows: `coordinator` + `watch` + `status` + alive workers + leftover finished worker windows.
+- `MAX_TMUX_WINDOWS` — total windows: `coordinator` + `util` (always present; hosts the watcher as a second pane when `WATCH=1`, so it doesn't consume its own window slot) + optional `status` + alive workers + leftover finished worker windows.
 
 **Before reporting a cap reached, JIT-reap** (the watcher auto-reaps on wake but can miss events):
 

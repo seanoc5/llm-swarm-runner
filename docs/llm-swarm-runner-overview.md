@@ -156,12 +156,13 @@ WATCH=1  STATUS=1  MAX_WORKERS=5  INCLUDE_ASSIGNED_TO_OTHERS=1  DEBOUNCE_SECS=15
 | `COORDINATOR_CMD`            | `claude`           | —                             | `claude`, `gemini`, `codex`, or any custom CLI                                                    |
 | `COORDINATOR_MODEL`          | backend-dependent  | —                             | Passed to Claude, Gemini, or Codex when set. Codex otherwise uses the CLI-configured default.      |
 | `COORDINATOR_VERBOSE`        | `0`                | —                             | When `1` and using gemini: swaps `-p` for `-i` (`--prompt-interactive`) so tool calls are visible live in the pane. Agent stays alive — exit with `/quit`. claude is unaffected (its `-p` already streams). |
+| `COORDINATOR_HEADLESS`       | `0`                | —                             | When `1` and using claude: run one-shot (`-p`, exits after each prompt) like codex, instead of the default resident interactive REPL. |
 | `COORDINATOR_USE_API_KEY`    | `0`                | —                             | When `1` and using claude: keeps `ANTHROPIC_API_KEY` in the agent's env (bills the API account). Default strips it so Claude Max OAuth is used. |
 | `NON_INTERACTIVE`            | `0`                | —                             | When `1`, skip auto-attach (used by tests)                                                       |
 | `WATCH`                      | `0`                | `-w`, `--watch`               | When `1`, spawn `coordinator-watch.sh` in the `util` window                                      |
 | `STATUS`                     | `0`                | `--status`                    | When `1`, spawn `gh-status-bar.sh` in window 3                                                   |
 | `MAX_WORKERS`                | `5`                | `--max-workers N`             | Concurrent worker tmux windows the coordinator may have alive at once. `provision-worker.sh` enforces server-side (exit 3 on cap). |
-| `MAX_TMUX_WINDOWS`           | `10`               | `--max-windows N`             | Hard cap on total tmux windows in the session — counts coordinator + watch + status + alive workers + leftover finished worker windows. |
+| `MAX_TMUX_WINDOWS`           | `10`               | `--max-windows N`             | Hard cap on total tmux windows in the session — counts `coordinator` + `util` (always present; hosts the watcher as a second pane when `WATCH=1`) + optional `status` + alive workers + leftover finished worker windows. |
 | `TARGET_AVAILABLE`           | `10`               | `--target-available N`        | Backlog target. Housekeeping creates new issues when AVAILABLE drops below this — NOT when raw open count is low. |
 | `OWNER_LABELS`               | empty              | `--owner-labels L1,L2`        | Comma-separated label names treated as "human-owned" (e.g. `sean,radesh`). The coordinator skips issues bearing any owner-label that isn't `@me`. |
 | `INCLUDE_ASSIGNED_TO_OTHERS` | `0`                | `--include-others`            | `1` = drop the `@me`-or-unassigned filter. Free-text override in the prompt (`"grab anything"`, `"include others"`) also engages this for one-shot use. |
@@ -515,15 +516,21 @@ swarm-scoreboard.sh --json logs/*.jsonl   # raw aggregation for scripts
 
 ### `prompts/coordinator.md` — Coordinator's brain
 
-Defines the coordinator's startup checklist (read `.swarm-policy.md` → `git status` → `gh issue list` → backlog grooming → provision up to 3 workers) and the exact shell commands for spawning a worker:
+Defines the coordinator's Initial Startup Checklist, run sequentially on every wake:
+
+1. **Project guardrails** — `cat .swarm-policy.md` if present (binding constraints on every worker it provisions).
+2. **Worker guidance roadmap** — count entries in `docs/worker-guidance-roadmap.md` if present; report the count, never auto-file one as an issue.
+3. **Local state** — `git status`, `git branch`, `git worktree list`, `tmux list-windows`; note alive-worker count (`iss-*` windows) and total window count.
+4. **Config from env** — `MAX_WORKERS` (default 5), `MAX_TMUX_WINDOWS` (10), `TARGET_AVAILABLE` (10), `OWNER_LABELS`, `INCLUDE_ASSIGNED_TO_OTHERS`, loaded by `llm-start.sh` from `.env.example` + `<project>/.swarm/.env`.
+5. **Remote state** — `gh pr list`, then compute **AVAILABLE** (mechanical filters via `scripts/available-issues.sh`, plus LLM judgment filters for tracking issues, policy-blocked work, and issues with a PR already linked). Report `OPEN=N AVAILABLE=M ALIVE=A/$MAX_WORKERS WINDOWS=W/$MAX_TMUX_WINDOWS`.
+6. **Housekeeping** — if `AVAILABLE < TARGET_AVAILABLE`, file new issues to fill the gap (per the "Issue skeleton" format in `prompts/worker.md`).
+7. **Provisioning** — compute `slots = min(MAX_WORKERS - alive_workers, MAX_TMUX_WINDOWS - total_windows)`, then route up to `slots` AVAILABLE issues through `provision-worker.sh` (the script re-enforces both caps server-side, exit 3 on cap hit):
 
 ```bash
-git worktree add ../wt-issue-42 -b fix/issue-42
-tmux new-window -d -n "iss-42" "$LLM_SWARM_DIR/sandbox.sh ../wt-issue-42 listener"
-echo "Fix issue #42. Details: $(gh issue view 42)" > ../wt-issue-42/.agent-task.md
+$LLM_SWARM_DIR/scripts/provision-worker.sh 42
 ```
 
-Note the `tmux new-window -d` — workers spawn *in the background* so they don't steal focus.
+`provision-worker.sh` itself handles worktree creation (`../wt-issue-42`, branch `fix/issue-42`, idempotent), queue init (`.swarm/tasks/{inbox,processing,done}/`), `.swarm-policy.md` embedding, issue-body append, atomic brief write, and the `tmux new-window -d` spawn (background, so it doesn't steal focus) — the coordinator never assembles these steps by hand.
 
 ### `test-shape-swarm.sh` — Non-LLM shape test for the queue protocol
 
