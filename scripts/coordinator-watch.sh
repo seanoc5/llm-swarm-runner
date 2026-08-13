@@ -305,17 +305,31 @@
 #                           could read as idle, while a *finished* turn's
 #                           past-tense summary line ("Simmered for 12s") can
 #                           stay visible on screen and falsely read as busy.
-#                           The "(esc to interrupt)" hint only renders while
-#                           a turn is actually in flight and disappears the
-#                           moment it ends, so it doesn't share either
-#                           failure mode and needs no maintenance as Claude
-#                           Code's verb wording evolves. This is still TUI
-#                           chrome, not a documented API, and may need
-#                           updating if Claude Code's rendering changes —
-#                           keep in sync with WORKER_COMPACT_BUSY_PATTERN if
-#                           you touch either (check-stuck-workers.sh's
-#                           separate pattern is out of scope for #252 and
-#                           still uses the verb list).
+#                           issue #266: Claude Code 2.1.x REMOVED the "(esc to
+#                           interrupt)" hint entirely, so that alternation
+#                           silently stopped matching anything — a live
+#                           worker read as idle, and /compact got injected
+#                           mid-turn and then queued/repeated. Two more
+#                           alternations were added to restore coverage on
+#                           2.1.x: the spinner's "· ↓ <n> tokens" download
+#                           counter (present only while a turn/compaction is
+#                           actually running — the finished-turn summary line
+#                           "✻ Churned for 13s" has no token counter, so this
+#                           doesn't false-positive on completed turns left on
+#                           screen) and the "Press up to edit queued messages"
+#                           marker shown while input is queued behind a live
+#                           turn. The "(esc to interrupt)" and Ctrl-C
+#                           alternations are kept for ≤2.0.x compatibility.
+#                           This is still TUI chrome, not a documented API —
+#                           it needs no maintenance for verb-wording changes,
+#                           but MUST be re-verified against real panes after
+#                           every Claude Code CLI upgrade, since #266 shows
+#                           the chrome itself (not just the verbs) can change
+#                           out from under it. Keep in sync with
+#                           WORKER_COMPACT_BUSY_PATTERN if you touch either
+#                           (check-stuck-workers.sh's separate pattern is out
+#                           of scope for #252/#266 and still uses the verb
+#                           list).
 #   AUTO_COMPACT_START_TIMEOUT_SECS=15
 #                           Max wait for the busy indicator to APPEAR after
 #                           sending /compact (confirms the CLI actually
@@ -816,8 +830,10 @@ AUTO_COMPACT_PROBE_MAX_AGE_SECS="${AUTO_COMPACT_PROBE_MAX_AGE_SECS:-120}"
 # see this file's AUTO_COMPACT_BUSY_PATTERN header comment for why this
 # replaced the old spinner-verb list. Plus the Ctrl-C exit-confirm prompt (a
 # bare Enter into that state would confirm an unintended exit rather than
-# compact).
-AUTO_COMPACT_BUSY_PATTERN="${AUTO_COMPACT_BUSY_PATTERN:-\(esc to interrupt\)|Press Ctrl-C again to .xit}"
+# compact). issue #266: Claude Code 2.1.x dropped the "(esc to interrupt)"
+# hint, so two more anchors (spinner token counter, queued-input marker)
+# were added — see the AUTO_COMPACT_BUSY_PATTERN header comment above.
+AUTO_COMPACT_BUSY_PATTERN="${AUTO_COMPACT_BUSY_PATTERN:-\(esc to interrupt\)|Press Ctrl-C again to .xit|· ↓ [0-9.,]+k? tokens|Press up to edit queued messages}"
 AUTO_COMPACT_START_TIMEOUT_SECS="${AUTO_COMPACT_START_TIMEOUT_SECS:-15}"
 AUTO_COMPACT_FINISH_TIMEOUT_SECS="${AUTO_COMPACT_FINISH_TIMEOUT_SECS:-300}"
 AUTO_COMPACT_VERIFY_TIMEOUT_SECS="${AUTO_COMPACT_VERIFY_TIMEOUT_SECS:-30}"
@@ -835,8 +851,8 @@ WORKER_COMPACT_PCT="${WORKER_COMPACT_PCT:-75}"
 WORKER_COMPACT_THRESHOLD_CAP_TOKENS="${WORKER_COMPACT_THRESHOLD_CAP_TOKENS:-250000}"
 WORKER_COMPACT_THRESHOLD_TOKENS="${WORKER_COMPACT_THRESHOLD_TOKENS:-150000}"
 WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS="${WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS:-300000}"
-# issue #252: same anchor as AUTO_COMPACT_BUSY_PATTERN above — keep in sync.
-WORKER_COMPACT_BUSY_PATTERN="${WORKER_COMPACT_BUSY_PATTERN:-\(esc to interrupt\)|Press Ctrl-C again to .xit}"
+# issue #252/#266: same anchors as AUTO_COMPACT_BUSY_PATTERN above — keep in sync.
+WORKER_COMPACT_BUSY_PATTERN="${WORKER_COMPACT_BUSY_PATTERN:-\(esc to interrupt\)|Press Ctrl-C again to .xit|· ↓ [0-9.,]+k? tokens|Press up to edit queued messages}"
 WORKER_COMPACT_START_TIMEOUT_SECS="${WORKER_COMPACT_START_TIMEOUT_SECS:-15}"
 WORKER_COMPACT_FINISH_TIMEOUT_SECS="${WORKER_COMPACT_FINISH_TIMEOUT_SECS:-300}"
 WORKER_COMPACT_VERIFY_TIMEOUT_SECS="${WORKER_COMPACT_VERIFY_TIMEOUT_SECS:-30}"

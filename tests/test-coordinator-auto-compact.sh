@@ -436,5 +436,36 @@ else
     red "expected the lock winner to reach coord.compact.done; events.log: $(cat "$EVENTS_LOG")"
 fi
 
+heading "Test 11: shipped AUTO_COMPACT_BUSY_PATTERN default matches 2.1.x busy chrome (issue #266)"
+# Every test above pins its own AUTO_COMPACT_BUSY_PATTERN override (set at
+# the top of this file), so none of them would have caught issue #266: the
+# 2.1.x CLI dropped the "(esc to interrupt)" hint the OLD default was solely
+# anchored on, and the default silently stopped matching anything. This test
+# extracts the actual shipped default straight out of coordinator-watch.sh
+# (not a hand-copied guess) so it fails if the default ever regresses again.
+default_pattern="$(
+    unset AUTO_COMPACT_BUSY_PATTERN
+    eval "$(grep -m1 '^AUTO_COMPACT_BUSY_PATTERN=' "$WATCH")"
+    printf '%s' "$AUTO_COMPACT_BUSY_PATTERN"
+)"
+[ -n "$default_pattern" ] || red "could not extract AUTO_COMPACT_BUSY_PATTERN default from $WATCH"
+
+match_default() {
+    printf '%s' "$1" | LC_ALL=C grep -qE "$default_pattern" && echo match || echo nomatch
+}
+
+check "default matches 2.1.x spinner token counter" "match" \
+    "$(match_default '✽ Churning… (1s · ↓ 63 tokens)')"
+check "default matches queued-input marker" "match" \
+    "$(match_default '❯ Press up to edit queued messages')"
+check "default still matches legacy esc-to-interrupt hint (<=2.0.x)" "match" \
+    "$(match_default '✻ Considering… (esc to interrupt)')"
+check "default still matches Ctrl-C exit-confirm prompt" "match" \
+    "$(match_default 'Press Ctrl-C again to exit')"
+check "default does NOT match finished-turn summary (no token counter)" "nomatch" \
+    "$(match_default '✻ Churned for 13s')"
+check "default does NOT match idle statusline /clear hint" "nomatch" \
+    "$(match_default 'sonnet · wt-issue-42 · ctx: 900k/1M (90%) · new task? /clear to save 109.7k tokens')"
+
 echo ""
 green "All coordinator-auto-compact tests passed ($PASS checks)"
