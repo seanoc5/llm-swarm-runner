@@ -129,7 +129,7 @@ EXTRA_MOUNTS=/opt/work/myorg/guide:ro,/opt/work/myorg/poc:ro
 
 Use the same host:container path on both sides (the implicit default when you omit the container side) so absolute paths in code resolve identically inside and outside the container.
 
-**Mounts apply only to newly-spawned workers.** In-flight `iss-*` containers were started with whatever `EXTRA_MOUNTS` was set when *they* spawned — they don't see edits to `.swarm/.env` after the fact. To pick up changes: `tmux kill-window -t llm-<project>:iss-N`, then re-provision the issue. Restarting the whole coordinator session (`tmux kill-session -t llm-<project>` then a fresh `llm-start.sh`) is the heavier-hammer equivalent.
+**Mounts apply only to newly-spawned workers.** In-flight `iss-*` containers were started with whatever `EXTRA_MOUNTS` was set when *they* spawned — they don't see edits to `.swarm/.env` after the fact. To pick up changes: `tmux -L swarm-<project> kill-window -t llm-<project>:iss-N`, then re-provision the issue. Restarting the whole coordinator session (`tmux -L swarm-<project> kill-session -t llm-<project>` then a fresh `llm-start.sh`) is the heavier-hammer equivalent.
 
 **Verify mounts landed.** After a worker spawns, inspect the running container:
 
@@ -139,7 +139,7 @@ docker inspect swarm-llm-<project>-iss-<N> \
     | grep -v ' -> /home\| -> /var/run'
 ```
 
-The non-`/home`-or-docker-socket lines should be exactly the host paths you put in `EXTRA_MOUNTS`. If a path is missing, the propagation broke somewhere between `.swarm/.env` and the `docker run` invocation — check `tmux show-env -t llm-<project> -g EXTRA_MOUNTS` to see what the tmux session has, and `tmux capture-pane -t llm-<project>:iss-<N> -pS -100` to see what the listener invocation looked like.
+The non-`/home`-or-docker-socket lines should be exactly the host paths you put in `EXTRA_MOUNTS`. If a path is missing, the propagation broke somewhere between `.swarm/.env` and the `docker run` invocation. Don't bother with `tmux show-env … EXTRA_MOUNTS` — `EXTRA_MOUNTS` never lands in the tmux session environment; it travels as a prefix on the `tmux new-window` command that starts the worker listener (`provision-worker.sh:412`), not through `tmux new-session -e`/`set-environment`, so `show-env` shows nothing even on a healthy setup. Instead check the listener's actual launch command with `tmux -L swarm-<project> capture-pane -t llm-<project>:iss-<N> -pS -100` (scroll to the top of the pane for the `EXTRA_MOUNTS=...` prefix), or just read `<project>/.swarm/.env` directly.
 
 ## Docker Integrations
 
@@ -405,8 +405,10 @@ After the table, list any worktrees with NO .swarm/tasks/done/*.json
 (older pre-v2 worktrees) — verdict relies on git log + diff alone for those.
 EOF
 )"
-tmux a -t llm-$(basename $PWD)
+tmux -L swarm-$(basename $PWD) a -t llm-$(basename $PWD)
 ```
+
+(Or run `scripts/list-swarms.sh` for a ready-to-paste attach command with the right socket.)
 
 ### Acting on each verdict
 

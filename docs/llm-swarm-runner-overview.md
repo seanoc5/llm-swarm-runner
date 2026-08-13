@@ -617,7 +617,7 @@ The test uses your Claude Max plan by default. `COORDINATOR_CMD=gemini ./tests/t
 2. `./llm-start.sh` (or `COORDINATOR_CMD=gemini ./llm-start.sh` to use Gemini instead of Claude Max).
 3. Coordinator wakes, runs `gh issue list`, picks unassigned issues, provisions worktrees + worker windows.
 4. Workers pick up the brief from `.swarm/tasks/inbox/` (v2 queue, written by `provision-worker.sh`), do the work, push a branch, open a PR via `gh`, and record a structured outcome in `.swarm/tasks/done/`.
-5. You attach with `tmux a -t llm-myproject` to watch / intervene.
+5. You attach with `tmux -L swarm-myproject a -t llm-myproject` to watch / intervene (or run `scripts/list-swarms.sh` for a ready-to-paste attach command).
 
 ## Coordinator Trade-offs
 
