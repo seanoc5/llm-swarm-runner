@@ -59,7 +59,7 @@ extract_fn() {
 for fn in worker_pane_state worker_pane_busy worker_pane_ctx_used worker_pane_ctx_window \
           worker_compact_effective_threshold worker_has_open_pr \
           worker_task_done worker_compact_record_failure worker_compact_record_success \
-          maybe_worker_compact log_event; do
+          maybe_worker_compact compact_retract_queued log_event; do
     body="$(extract_fn "$fn")"
     [ -n "$body" ] || red "could not extract function '$fn' from $WATCH — has it been renamed?"
     eval "$body"
@@ -85,6 +85,9 @@ WORKER_COMPACT_POLL_SECS=2
 WORKER_COMPACT_NUDGE_PROMPT="Continue your task from where you left off."
 WORKER_COMPACT_BACKOFF_SECS=600
 WORKER_COMPACT_MAX_FAILURES=3
+# issue #265 — must match coordinator-watch.sh's own default marker text.
+COMPACT_QUEUED_MARKER_PATTERN='Press up to edit queued messages'
+COMPACT_RETRACT_BACKSPACES=3
 declare -A WORKER_COMPACT_LAST_FAIL=()
 declare -A WORKER_COMPACT_FAIL_COUNT=()
 declare -A WORKER_COMPACT_GAVE_UP=()
@@ -648,6 +651,104 @@ check "default does NOT match finished-turn summary (no token counter)" "nomatch
     "$(match_default '✻ Churned for 13s')"
 check "default does NOT match idle statusline /clear hint" "nomatch" \
     "$(match_default 'sonnet · wt-issue-42 · ctx: 900k/1M (90%) · new task? /clear to save 109.7k tokens')"
+
+heading "Test 14: compact_retract_queued — phase=start timeout retracts a still-queued /compact (issue #265)"
+# The original $WIN pane has been occupied by the exec'd fake REPL since
+# Test 9 (exec'd, so C-c'ing it would kill the pane's only process and take
+# the whole session down — see Test 9's comment), and that fixture always
+# renders the busy-matching "(esc to interrupt)" spinner the instant it
+# sees "/compact", so it could never exercise a phase=start timeout anyway.
+# A fresh window with a plain `cat` foreground sidesteps both problems: cat
+# echoes back whatever it's sent but never renders anything resembling
+# WORKER_COMPACT_BUSY_PATTERN, so injecting "/compact" here deterministically
+# times out at phase=start — exactly the busy-detection blind spot this
+# retraction path defends against (issue #266 was one such regression; this
+# is the safety net for any future one).
+WIN2="iss-43"
+tmux new-window -t "$SESSION_NAME" -n "$WIN2" 2>/dev/null
+tmux send-keys -t "$SESSION_NAME:$WIN2" "clear; echo 'sonnet · wt-issue-43 · ctx: 260k/1M (26%)'; cat" Enter
+check_eventually "second window: cat foreground w/ 260k ctx -> cli" "cli" "worker_pane_state '$WIN2'"
+
+# Shadow tmux to record every invocation (delegating to the real binary
+# throughout) so the assertions below can confirm the actual Escape/
+# Backspace keystrokes were sent, not just that SOME retraction ran.
+TMUX_CALL_LOG="$TEST_DIR/tmux-calls.log"
+: > "$TMUX_CALL_LOG"
+tmux() {
+    printf '%s\n' "$*" >> "$TMUX_CALL_LOG"
+    command tmux "$@"
+}
+
+DRY_RUN=0
+WORKER_COMPACT_START_TIMEOUT_SECS=2
+WORKER_COMPACT_POLL_SECS=1
+: > "$EVENTS_LOG"
+maybe_worker_compact "$WIN2"
+unset -f tmux
+
+if grep -q 'worker.compact.timeout issue=43 phase=start' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "phase=start timeout logged for the never-busy pane" "logged" "$got"
+
+if grep -q 'worker.compact.retracted issue=43' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "retraction attempted and succeeded (queued marker never present) -> worker.compact.retracted" "logged" "$got"
+
+if grep -q 'worker.compact.retract_failed' "$EVENTS_LOG"; then got=present; else got=absent; fi
+check "no false-positive retract_failed" "absent" "$got"
+
+if grep -q "send-keys -t $SESSION_NAME:$WIN2 Escape" "$TMUX_CALL_LOG"; then got=sent; else got=missing; fi
+check "retraction sent an Escape keystroke to the target pane" "sent" "$got"
+
+bspace_count="$(grep -c "send-keys -t $SESSION_NAME:$WIN2 BSpace" "$TMUX_CALL_LOG" || true)"
+check "retraction sent COMPACT_RETRACT_BACKSPACES (3) Backspace keystrokes" "3" "$bspace_count"
+
+heading "Test 15: compact_retract_queued — queued marker still visible -> worker.compact.retract_failed (issue #265)"
+# Same fresh-window technique as Test 14, but this fixture keeps
+# re-rendering the queued-input marker on every read cycle regardless of
+# what's sent — Escape/Backspace (no trailing Enter) never complete a line,
+# so this `read` loop never even wakes up for them; the screen just stays
+# exactly as first rendered. That models a retraction attempt that
+# genuinely did not clear the queue, so the outcome must be logged as
+# retract_failed, never a false-positive retracted.
+WIN3="iss-44"
+tmux new-window -t "$SESSION_NAME" -n "$WIN3" 2>/dev/null
+FAKE_STUCK="$TEST_DIR/fake-stuck-repl.sh"
+cat > "$FAKE_STUCK" <<'REPL'
+#!/usr/bin/env bash
+render() {
+    clear
+    echo "sonnet · wt-issue-44 · ctx: 260k/1M (26%)"
+    echo "❯ Press up to edit queued messages"
+}
+render
+while IFS= read -r line; do
+    render
+done
+REPL
+chmod +x "$FAKE_STUCK"
+tmux send-keys -t "$SESSION_NAME:$WIN3" "exec -a claude bash $FAKE_STUCK" Enter
+check_eventually "third window: fake stuck-queue REPL foreground -> cli" "cli" "worker_pane_state '$WIN3'"
+
+: > "$TMUX_CALL_LOG"
+tmux() {
+    printf '%s\n' "$*" >> "$TMUX_CALL_LOG"
+    command tmux "$@"
+}
+
+: > "$EVENTS_LOG"
+maybe_worker_compact "$WIN3"
+unset -f tmux
+
+if grep -q 'worker.compact.timeout issue=44 phase=start' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "phase=start timeout logged for the stuck-queue pane" "logged" "$got"
+
+if grep -q 'worker.compact.retract_failed issue=44' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "queued marker still visible after Escape/Backspace -> worker.compact.retract_failed" "logged" "$got"
+
+if grep -q 'worker.compact.retracted issue=44' "$EVENTS_LOG"; then got=present; else got=absent; fi
+check "no false-positive retracted verdict" "absent" "$got"
+
+if grep -q "send-keys -t $SESSION_NAME:$WIN3 Escape" "$TMUX_CALL_LOG"; then got=sent; else got=missing; fi
+check "retraction still sent an Escape keystroke even though it didn't clear the queue" "sent" "$got"
 
 echo ""
 green "All worker-auto-compact tests passed ($PASS checks)"

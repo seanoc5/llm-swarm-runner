@@ -38,6 +38,7 @@ TEST_DIR=$(mktemp -d -t coord-auto-compact-XXXXXX)
 SESSION_NAME="test-auto-compact-$$"
 cleanup() {
     tmux kill-session -t "$SESSION_NAME" 2>/dev/null || true
+    tmux kill-session -t "${SESSION_NAME}-retract" 2>/dev/null || true
     if [ "${KEEP:-0}" = "1" ]; then
         yellow "KEEP=1: leaving $TEST_DIR for inspection"
     else
@@ -51,7 +52,7 @@ extract_fn() {
     sed -n "/^${fn}() {/,/^}/p" "$WATCH"
 }
 for fn in mtime_epoch coordinator_pane_state coordinator_pane_busy probe_ctx_used maybe_auto_compact \
-          auto_compact_poll_pass log_event; do
+          auto_compact_poll_pass compact_retract_queued log_event; do
     body="$(extract_fn "$fn")"
     [ -n "$body" ] || red "could not extract function '$fn' from $WATCH — has it been renamed?"
     eval "$body"
@@ -76,6 +77,9 @@ AUTO_COMPACT_POLL_SECS=2
 AUTO_COMPACT_PROBE="$TEST_DIR/probe.json"
 AUTO_COMPACT_COOLDOWN_SECS=900
 LAST_AUTO_COMPACT_POLL_TRIGGER=0
+# issue #265 — must match coordinator-watch.sh's own default marker text.
+COMPACT_QUEUED_MARKER_PATTERN='Press up to edit queued messages'
+COMPACT_RETRACT_BACKSPACES=3
 
 PASS=0
 
@@ -466,6 +470,118 @@ check "default does NOT match finished-turn summary (no token counter)" "nomatch
     "$(match_default '✻ Churned for 13s')"
 check "default does NOT match idle statusline /clear hint" "nomatch" \
     "$(match_default 'sonnet · wt-issue-42 · ctx: 900k/1M (90%) · new task? /clear to save 109.7k tokens')"
+
+heading "Test 12: compact_retract_queued — phase=start timeout retracts a still-queued /compact (issue #265)"
+# coordinator_pane_state/coordinator_pane_busy hardcode the "coordinator"
+# window against $SESSION_NAME, and the main session's coordinator window
+# has been permanently occupied by the exec'd fake REPL since Test 5 (exec'd,
+# so C-c'ing it would kill the pane's only process and take the whole
+# session down with it — see Test 7's comment). That fixture also always
+# renders the busy-matching "(esc to interrupt)" spinner the instant it sees
+# "/compact", so it can never exercise a phase=start timeout anyway. Spin up
+# a completely separate session+window instead: a `cat` foreground there
+# never renders anything resembling AUTO_COMPACT_BUSY_PATTERN, so injecting
+# "/compact" deterministically times out at phase=start — exactly the
+# busy-detection blind spot this retraction path defends against (issue
+# #266 was one such regression; this is the safety net for any future one).
+RETRACT_SESSION="${SESSION_NAME}-retract"
+tmux new-session -d -s "$RETRACT_SESSION" -n coordinator 2>/dev/null
+tmux send-keys -t "$RETRACT_SESSION:coordinator" "clear; echo 'idle >'; cat" Enter
+
+ORIG_SESSION_NAME="$SESSION_NAME"
+SESSION_NAME="$RETRACT_SESSION"
+check_eventually "retraction session: cat foreground -> cli" "cli" 'coordinator_pane_state'
+
+printf '{"context_window":{"context_window_size":200000,"total_input_tokens":200000}}' > "$AUTO_COMPACT_PROBE"
+
+# Shadow tmux to record every invocation (delegating to the real binary
+# throughout) so the assertions below can confirm the actual Escape/
+# Backspace keystrokes were sent, not just that SOME retraction ran.
+TMUX_CALL_LOG="$TEST_DIR/tmux-calls.log"
+: > "$TMUX_CALL_LOG"
+tmux() {
+    printf '%s\n' "$*" >> "$TMUX_CALL_LOG"
+    command tmux "$@"
+}
+
+DRY_RUN=0
+AUTO_COMPACT_START_TIMEOUT_SECS=2
+AUTO_COMPACT_POLL_SECS=1
+: > "$EVENTS_LOG"
+maybe_auto_compact wake
+unset -f tmux
+SESSION_NAME="$ORIG_SESSION_NAME"
+tmux kill-session -t "$RETRACT_SESSION" 2>/dev/null || true
+
+if grep -q 'coord.compact.timeout.*phase=start' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "phase=start timeout logged for the never-busy coordinator pane" "logged" "$got"
+
+if grep -q 'coord.compact.retracted' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "retraction attempted and succeeded (queued marker never present) -> coord.compact.retracted" "logged" "$got"
+
+if grep -q 'coord.compact.retract_failed' "$EVENTS_LOG"; then got=present; else got=absent; fi
+check "no false-positive retract_failed" "absent" "$got"
+
+if grep -q "send-keys -t $RETRACT_SESSION:coordinator Escape" "$TMUX_CALL_LOG"; then got=sent; else got=missing; fi
+check "retraction sent an Escape keystroke to the coordinator pane" "sent" "$got"
+
+bspace_count="$(grep -c "send-keys -t $RETRACT_SESSION:coordinator BSpace" "$TMUX_CALL_LOG" || true)"
+check "retraction sent COMPACT_RETRACT_BACKSPACES (3) Backspace keystrokes" "3" "$bspace_count"
+
+heading "Test 13: compact_retract_queued — queued marker still visible -> coord.compact.retract_failed (issue #265)"
+# Same separate-session technique as Test 12, but this fixture keeps
+# re-rendering the queued-input marker on every read cycle regardless of
+# what's sent — Escape/Backspace (no trailing Enter) never complete a line,
+# so this `read` loop never even wakes up for them; the screen just stays
+# exactly as first rendered. That models a retraction attempt that
+# genuinely did not clear the queue, so the outcome must be logged as
+# retract_failed, never a false-positive retracted.
+RETRACT_SESSION2="${SESSION_NAME}-retract2"
+tmux new-session -d -s "$RETRACT_SESSION2" -n coordinator 2>/dev/null
+FAKE_STUCK="$TEST_DIR/fake-stuck-repl.sh"
+cat > "$FAKE_STUCK" <<'REPL'
+#!/usr/bin/env bash
+render() {
+    clear
+    echo "idle >"
+    echo "❯ Press up to edit queued messages"
+}
+render
+while IFS= read -r line; do
+    render
+done
+REPL
+chmod +x "$FAKE_STUCK"
+tmux send-keys -t "$RETRACT_SESSION2:coordinator" "exec -a claude bash $FAKE_STUCK" Enter
+
+SESSION_NAME="$RETRACT_SESSION2"
+check_eventually "stuck-queue session: fake REPL foreground -> cli" "cli" 'coordinator_pane_state'
+
+printf '{"context_window":{"context_window_size":200000,"total_input_tokens":200000}}' > "$AUTO_COMPACT_PROBE"
+
+: > "$TMUX_CALL_LOG"
+tmux() {
+    printf '%s\n' "$*" >> "$TMUX_CALL_LOG"
+    command tmux "$@"
+}
+
+: > "$EVENTS_LOG"
+maybe_auto_compact wake
+unset -f tmux
+SESSION_NAME="$ORIG_SESSION_NAME"
+tmux kill-session -t "$RETRACT_SESSION2" 2>/dev/null || true
+
+if grep -q 'coord.compact.timeout.*phase=start' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "phase=start timeout logged for the stuck-queue coordinator pane" "logged" "$got"
+
+if grep -q 'coord.compact.retract_failed' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "queued marker still visible after Escape/Backspace -> coord.compact.retract_failed" "logged" "$got"
+
+if grep -q 'coord.compact.retracted' "$EVENTS_LOG"; then got=present; else got=absent; fi
+check "no false-positive retracted verdict" "absent" "$got"
+
+if grep -q "send-keys -t $RETRACT_SESSION2:coordinator Escape" "$TMUX_CALL_LOG"; then got=sent; else got=missing; fi
+check "retraction still sent an Escape keystroke even though it didn't clear the queue" "sent" "$got"
 
 echo ""
 green "All coordinator-auto-compact tests passed ($PASS checks)"

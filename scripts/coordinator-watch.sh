@@ -607,6 +607,37 @@
 #                           POLL_TRIGGER and ORPHAN_PR_LOGGED elsewhere in
 #                           this file — so a watcher restart clears them and
 #                           gives every window a fresh start.
+#   COMPACT_QUEUED_MARKER_PATTERN
+#   COMPACT_RETRACT_BACKSPACES=3
+#                           (issue #265) Shared by BOTH the coordinator and
+#                           per-window retraction paths (see
+#                           compact_retract_queued's header comment): when a
+#                           phase=start timeout fires, the injected
+#                           "/compact" + Enter may simply be sitting queued
+#                           behind an already-in-flight turn that AUTO_
+#                           COMPACT_BUSY_PATTERN/WORKER_COMPACT_BUSY_PATTERN
+#                           failed to recognize as busy (a detection blind
+#                           spot — issue #266 was one such regression; this
+#                           is the safety net for ANY future one). Left
+#                           alone, that queued /compact fires whenever the
+#                           real in-flight turn eventually ends, often
+#                           minutes later against a since-stale rationale.
+#                           compact_retract_queued sends one Escape (clears
+#                           a QUEUED follow-up without touching an in-flight
+#                           turn — no Ctrl-C, ever) then this many Backspace
+#                           keystrokes as belt-and-braces cleanup for any
+#                           stray composer text Escape didn't reach, then
+#                           re-captures the pane and checks whether
+#                           COMPACT_QUEUED_MARKER_PATTERN (same literal
+#                           embedded in AUTO_COMPACT_BUSY_PATTERN/WORKER_
+#                           COMPACT_BUSY_PATTERN above — kept as its own var
+#                           since the full busy pattern also matches
+#                           spinner/exit-confirm text irrelevant to "is
+#                           there still something queued") is still visible
+#                           — NEVER assumes the keystrokes worked. Logs
+#                           coord.compact.retracted/retract_failed or
+#                           worker.compact.retracted/retract_failed
+#                           accordingly.
 #
 # Watch backend (auto-detected):
 #   - inotifywait (preferred): instant response. Install with:
@@ -680,6 +711,8 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     WORKER_COMPACT_NUDGE_PROMPT       (see header)  text sent to resume the worker after compaction
     WORKER_COMPACT_BACKOFF_SECS             600     cooldown for a window after a timeout/ineffective verdict
     WORKER_COMPACT_MAX_FAILURES             3       consecutive failures before giving up on a window entirely
+    COMPACT_QUEUED_MARKER_PATTERN     (auto)  queued-input marker checked when retracting a stuck phase=start injection; see header comment
+    COMPACT_RETRACT_BACKSPACES        3       Backspace keystrokes sent alongside the retraction Escape (coord + worker, shared; issue #265)
 
 DEFAULT WAKE_PROMPT (top-up mode)
     Coordinator triages outcomes, then refills workers toward MAX_WORKERS
@@ -719,6 +752,12 @@ EVENTS LOG
       coord.compact.skip   auto-compact skipped this cycle (reason=pane_busy|no_fresh_probe|cooldown|...,
                            trigger=poll|wake — reason=cooldown only ever fires trigger=poll)
       coord.compact.timeout  gave up waiting on the busy indicator (phase=start|finish, waited, trigger=poll|wake)
+      coord.compact.retracted  (issue #265) a phase=start timeout's injected /compact was
+                           retracted (Escape/Backspace) — the queued-input marker was gone on
+                           re-capture (trigger=poll|wake)
+      coord.compact.retract_failed  (issue #265) same retraction attempt, but the queued-input
+                           marker was STILL visible after Escape/Backspace — investigate
+                           (trigger=poll|wake)
       coord.compact.done   busy indicator cleared — compaction confirmed finished (waited, trigger=poll|wake)
       coord.compact.ineffective  context didn't drop post-compact (before, after, trigger=poll|wake) — investigate
       coord.compact.verify_skip  probe never refreshed post-compact — inconclusive, not a failure (trigger=poll|wake)
@@ -730,6 +769,11 @@ EVENTS LOG
                            logged every sweep it would otherwise have fired, same as
                            coord.compact.skip reason=cooldown)
       worker.compact.timeout  gave up waiting on the worker's busy indicator (issue, phase=start|finish, waited)
+      worker.compact.retracted  (issue #265) a phase=start timeout's injected /compact was
+                           retracted (Escape/Backspace) — the queued-input marker was gone on
+                           re-capture (issue)
+      worker.compact.retract_failed  (issue #265) same retraction attempt, but the queued-input
+                           marker was STILL visible after Escape/Backspace — investigate (issue)
       worker.compact.done   worker busy indicator cleared — compaction confirmed finished (issue, waited)
       worker.compact.ineffective  worker context didn't drop post-compact (issue, before, after) — investigate
       worker.compact.verify_skip  worker's ctx reading never refreshed post-compact — inconclusive, not a failure
@@ -863,6 +907,10 @@ WORKER_COMPACT_NUDGE_PROMPT="${WORKER_COMPACT_NUDGE_PROMPT:-Continue your task f
 # injection attempt; see this file's WORKER_AUTO_COMPACT header comment.
 WORKER_COMPACT_BACKOFF_SECS="${WORKER_COMPACT_BACKOFF_SECS:-600}"
 WORKER_COMPACT_MAX_FAILURES="${WORKER_COMPACT_MAX_FAILURES:-3}"
+# issue #265 — shared between the coordinator and per-window retraction
+# paths; see this file's COMPACT_QUEUED_MARKER_PATTERN header comment above.
+COMPACT_QUEUED_MARKER_PATTERN="${COMPACT_QUEUED_MARKER_PATTERN:-Press up to edit queued messages}"
+COMPACT_RETRACT_BACKSPACES="${COMPACT_RETRACT_BACKSPACES:-3}"
 
 case "$WATCHER_AUTOCLOSE_MODE" in
     merged)    AUTOCLOSE_PR_FLAG="--merged-only" ;;
@@ -887,7 +935,8 @@ for _var in AUTO_COMPACT_THRESHOLD_TOKENS AUTO_COMPACT_PROBE_MAX_AGE_SECS \
             WORKER_COMPACT_THRESHOLD_TOKENS WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS \
             WORKER_COMPACT_START_TIMEOUT_SECS WORKER_COMPACT_FINISH_TIMEOUT_SECS \
             WORKER_COMPACT_VERIFY_TIMEOUT_SECS WORKER_COMPACT_SCAN_SECS \
-            WORKER_COMPACT_BACKOFF_SECS WORKER_COMPACT_MAX_FAILURES; do
+            WORKER_COMPACT_BACKOFF_SECS WORKER_COMPACT_MAX_FAILURES \
+            COMPACT_RETRACT_BACKSPACES; do
     if ! [[ "${!_var}" =~ ^[0-9]+$ ]]; then
         echo "ERROR: $_var must be a non-negative integer (got: ${!_var})" >&2
         exit 1
@@ -962,12 +1011,16 @@ format_event_line() {
         coord.compact)                 glyph="◈"; color=$'\033[36m' ;;
         coord.compact.skip)             glyph="·"; color=$'\033[2m'  ;;
         coord.compact.timeout)           glyph="⚠"; color=$'\033[33m' ;;
+        coord.compact.retracted)          glyph="↩"; color=$'\033[32m' ;;
+        coord.compact.retract_failed)      glyph="⚠"; color=$'\033[31m' ;;
         coord.compact.done)               glyph="◈"; color=$'\033[32m' ;;
         coord.compact.ineffective)          glyph="⚠"; color=$'\033[31m' ;;
         coord.compact.verify_skip)            glyph="·"; color=$'\033[2m'  ;;
         worker.compact)                 glyph="◈"; color=$'\033[36m' ;;
         worker.compact.skip)             glyph="·"; color=$'\033[2m'  ;;
         worker.compact.timeout)           glyph="⚠"; color=$'\033[33m' ;;
+        worker.compact.retracted)          glyph="↩"; color=$'\033[32m' ;;
+        worker.compact.retract_failed)      glyph="⚠"; color=$'\033[31m' ;;
         worker.compact.done)               glyph="◈"; color=$'\033[32m' ;;
         worker.compact.ineffective)          glyph="⚠"; color=$'\033[31m' ;;
         worker.compact.verify_skip)            glyph="·"; color=$'\033[2m'  ;;
@@ -1848,6 +1901,55 @@ probe_ctx_used() {
     echo "$used"
 }
 
+# compact_retract_queued <tmux-target> <event-prefix> <extra-log-fields>
+#
+# (issue #265) Best-effort retraction of an injected "/compact" that a
+# phase=start timeout suggests never actually started — most likely because
+# it landed queued behind an already-in-flight turn that AUTO_COMPACT_BUSY_
+# PATTERN/WORKER_COMPACT_BUSY_PATTERN failed to recognize as busy (a
+# detection blind spot; issue #266 was one such regression, this is the
+# safety net for any future one). Left alone, that queued "/compact" fires
+# whenever the real in-flight turn eventually ends — often minutes later,
+# well after the reasoning that justified compacting has gone stale, and
+# sometimes stacking with a second stale injection from the very next sweep
+# (the originally reported symptom).
+#
+# Sends a single Escape — documented (TUI chrome, not an API; re-verify
+# against a live pane on every Claude Code CLI upgrade, same caveat as
+# AUTO_COMPACT_BUSY_PATTERN above) to clear a QUEUED follow-up message
+# without touching an in-flight turn. That makes it safe to send even when
+# the timeout was a false alarm and a real (non-queued) turn is actually
+# running — this function must NEVER send Ctrl-C or anything else that
+# could interrupt in-flight work. A handful of Backspace keystrokes follow
+# as belt-and-braces cleanup for any stray composer text Escape didn't
+# reach. Then re-captures the pane and checks whether
+# COMPACT_QUEUED_MARKER_PATTERN is still visible — NEVER assumes the
+# keystrokes worked — logging "<event-prefix>.retracted" (marker gone) or
+# "<event-prefix>.retract_failed" (still there) accordingly. Fails open
+# like everything else in this file: a tmux error along the way just leaves
+# the re-capture to decide the verdict.
+compact_retract_queued() {
+    local target="$1" prefix="$2" extra="$3"
+
+    tmux send-keys -t "$target" Escape 2>/dev/null || true
+    sleep 1
+    local i
+    for ((i = 0; i < COMPACT_RETRACT_BACKSPACES; i++)); do
+        tmux send-keys -t "$target" BSpace 2>/dev/null || true
+    done
+    sleep 1
+
+    local content clean
+    content="$(tmux capture-pane -t "$target" -p 2>/dev/null)" || content=""
+    clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
+    if printf '%s\n' "$clean" | LC_ALL=C grep -qE "$COMPACT_QUEUED_MARKER_PATTERN"; then
+        log_event "${prefix}.retract_failed" "$extra"
+        return 1
+    fi
+    log_event "${prefix}.retracted" "$extra"
+    return 0
+}
+
 # maybe_auto_compact [trigger]
 #
 # Called from two places (issue #210): on_outcome, right before waking the
@@ -1961,6 +2063,7 @@ maybe_auto_compact() {
             waited=$((waited + AUTO_COMPACT_POLL_SECS))
             if [ "$waited" -ge "$AUTO_COMPACT_START_TIMEOUT_SECS" ]; then
                 log_event coord.compact.timeout "phase=start waited=${waited}s trigger=$trigger"
+                compact_retract_queued "$SESSION_NAME:coordinator" coord.compact "trigger=$trigger" || true
                 exit 0
             fi
         done
@@ -2478,6 +2581,7 @@ maybe_worker_compact() {
         waited=$((waited + WORKER_COMPACT_POLL_SECS))
         if [ "$waited" -ge "$WORKER_COMPACT_START_TIMEOUT_SECS" ]; then
             log_event worker.compact.timeout "issue=$issue phase=start waited=${waited}s"
+            compact_retract_queued "$SESSION_NAME:$win" worker.compact "issue=$issue" || true
             worker_compact_record_failure "$issue"
             return 0
         fi
