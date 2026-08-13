@@ -88,6 +88,19 @@ mkdir -p "$INBOX" "$PROCESSING" "$DONE" "$STATUS"
 # can never be mistaken for a queued task.
 IDLE_SENTINEL="$QUEUE_ROOT/.brief-pending"
 
+# Sentinel touched by the idle shell's `close-worker` command to tell the
+# listener the operator wants this listener ended and the window closed.
+# Needed because a plain `exit` from the idle shell deliberately respawns it
+# (the slot must survive stray exits / Ctrl-D — see run_idle_shell), which
+# left no in-pane way to close a worker at all: the watcher's autoclose
+# never touches no-PR workers (their worktrees may hold unpushed or
+# untracked work), so a worker that finishes without opening a PR would
+# otherwise sit parked forever unless reaped host-side. Swept at startup so
+# a leftover sentinel from a killed container can't instantly close a fresh
+# listener.
+CLOSE_SENTINEL="$QUEUE_ROOT/.close-requested"
+rm -f "$CLOSE_SENTINEL"
+
 # Per-worktree label used in user-visible messages so it's obvious which
 # worktree's inbox this listener is bound to (and that it does NOT serve
 # briefs for other issues — those need their own provision-worker.sh /
@@ -438,8 +451,14 @@ print_completion_block() {
     echo "  • Follow up here:   requeue.sh $issue_num \"<follow-up brief>\""
     echo "  • Leave it          this listener will pick up the next brief on inbox/"
     echo "                      (different issues need their own worktree via provision-worker.sh)"
+    echo "  • Close it:         type close-worker at the shell prompt below"
+    echo "                      (plain 'exit' only respawns the shell; worktree stays for kill-worktree.sh)"
     echo ""
-    echo "(Watcher detects PR-state changes; this slot frees automatically — see #32)"
+    if [ -n "$pr" ]; then
+        echo "(Watcher detects PR-state changes; this slot frees automatically — see #32)"
+    else
+        echo "(No PR — the watcher will NOT autoclose this slot; use close-worker when done here)"
+    fi
     echo "$bar"
     echo ""
     echo "[$(date +%T)] [polling for next brief in $WT_LABEL/$INBOX/ ...]"
@@ -503,15 +522,37 @@ __swarm_check_brief() {
     fi
 }
 PROMPT_COMMAND="__swarm_check_brief\${PROMPT_COMMAND:+; \$PROMPT_COMMAND}"
+
+# Operator-facing close affordance: plain \`exit\` deliberately respawns the
+# idle shell (the slot must survive stray exits), so this is the one way to
+# end the listener from inside the pane. Touches CLOSE_SENTINEL, which
+# run_idle_shell checks the moment this shell exits.
+close-worker() {
+    touch "$CLOSE_SENTINEL"
+    echo "[close requested — ending listener]"
+    exit 0
+}
 EOF
 
     echo ""
     echo "[$(date +%T)] Queue empty — dropping to interactive shell in $WT_LABEL/. Polling continues in the background."
+    echo "               (a plain 'exit' respawns this shell — type 'close-worker' to end the listener and close this window)"
     bash --rcfile "$rcfile" -i
 
     rm -f "$rcfile"
     kill "$poll_pid" 2>/dev/null
     wait "$poll_pid" 2>/dev/null
+
+    # `close-worker` ran in the idle shell: end the listener process itself,
+    # which closes the tmux window (same clean-exit contract as the
+    # reaped-worktree guard in the main loop). The worktree is deliberately
+    # left in place — it may hold unpushed or untracked material; clean it
+    # up host-side with kill-worktree.sh when genuinely done with it.
+    if [ -f "$CLOSE_SENTINEL" ]; then
+        rm -f "$CLOSE_SENTINEL"
+        echo "[$(date +%T)] close-worker: listener exiting — window will close. Worktree $WT_LABEL/ is left intact (remove later with kill-worktree.sh)."
+        exit 0
+    fi
 }
 
 while true; do
