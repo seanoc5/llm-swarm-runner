@@ -205,6 +205,10 @@ The coordinator and watcher honor a small set of tunables loaded from three sour
 | `DEBOUNCE_SECS`              | `30`    | Watcher: window during which repeated worker-finish events coalesce into a single coordinator wake.               |
 | `POLL_SECS`                  | `2`     | Watcher: polling interval when `inotify-tools` isn't installed.                                                   |
 | `SWARM_AUTOMERGE_LOW`        | `0`     | `1` = coordinator may auto-merge a worker's 🟢 low-risk PR once CI is green and its own diff read agrees with the rating (`prompts/coordinator.md` § "Auto-merge low-risk PRs"). Default: off. |
+| `STALE_PR_NUDGE_HOURS`       | `6`     | Hours of PR inactivity before `stale-pr-nudges.sh` flags it for a re-entry nudge comment. `0` disables. |
+| `BRIEF_LINT`                 | `1`     | `provision-worker.sh` warn-only lints a worker's brief before dispatch (flags underspecified briefs; doesn't block). `0` disables. |
+
+This table covers the day-to-day tunables; `.env.example` at the repo root is the exhaustive, always-current reference for every knob (including less-common ones like `SWARM_WORKTREE_GROUPING` and `WORKER_SELF_REVIEW`).
 
 **AVAILABLE** is the coordinator's working definition of "issues a worker can pick up right now":
 
@@ -308,6 +312,8 @@ $LLM_SWARM_DIR/sandbox.sh /path/to/project gemini
 $LLM_SWARM_DIR/sandbox.sh /path/to/project codex
 ```
 
+Every sandbox container is memory-capped at `SANDBOX_MEM_LIMIT` (default `8g`, applied as `--memory`/`--memory-swap`). Exit code 137 in a worker log usually means this cap fired — raise it with `SANDBOX_MEM_LIMIT=24g` (or disable with `0`) for heavyweight builds/test suites. See [advanced-usage.md](docs/advanced-usage.md#memory-limit-sandbox_mem_limit).
+
 ---
 
 ## ✨ Features at a glance
@@ -319,5 +325,6 @@ $LLM_SWARM_DIR/sandbox.sh /path/to/project codex
 - **Docker-outside-of-Docker (DooD)**: Full support for Testcontainers.
 - **Full Linux Userland**: Based on `ubuntu-standard` so agents have `less`, `vim`, `strace`, etc.
 - **Auto-top-up Swarm**: Watcher refills workers up to `MAX_WORKERS` as issues finish; hard cap on total tmux windows prevents runaway sessions.
+- **Memory-capped Containers**: Every sandbox runs with `SANDBOX_MEM_LIMIT` (default `8g`, `--memory`/`--memory-swap`) so a runaway build OOM-kills inside its own container (exit 137) instead of the host.
 - **Configurable Filters**: Per-project `.swarm/.env` defines who the swarm works for (`@me` + unassigned by default; teammates on opt-in).
 - **Structured Event Log**: `tail -F .swarm/events.log` gives live, greppable status of every worker start, finish, and cap refusal.

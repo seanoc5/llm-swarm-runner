@@ -96,6 +96,7 @@ Generalized launcher: `sandbox.sh <project-dir> <agent> [extra-args]`
 - **Docker-out-of-Docker (DooD):** mounts `/var/run/docker.sock` so Testcontainers / `docker` CLI work inside the sandbox; `--group-add` gives the sandbox user write perms on the socket.
 - **GH token passthrough:** reads `gh auth token` on the host and injects as `GH_TOKEN` (necessary because `gh` stores its token in the system keyring on Linux, not in the mounted config dir).
 - **SSH agent forwarding** when `SSH_AUTH_SOCK` is set.
+- **Memory cap:** `SANDBOX_MEM_LIMIT` (default `8g`) is applied as `--memory`/`--memory-swap` on every container; set higher (e.g. `24g`) for heavyweight builds or `0` to disable. Exit code 137 inside the sandbox usually means this cap fired — see [advanced-usage.md](./advanced-usage.md#memory-limit-sandbox_mem_limit).
 - `EXTRA_MOUNTS` env var: comma-separated `host:container[:ro|:rw]` extra bind mounts.
 - `.sandbox-env` file in the project dir is auto-loaded as a Docker `--env-file`.
 - Networking: `--network host` (so agents can reach `localhost:5432` Postgres, etc.).

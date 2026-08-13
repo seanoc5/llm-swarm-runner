@@ -7,9 +7,11 @@ This document covers advanced workflows, custom mounts, and manual Git worktree 
 - [Git Worktrees](#git-worktrees)
   - [Manual Multi-worktree tmux setup](#manual-multi-worktree-tmux-setup)
   - [Creating worktrees manually](#creating-worktrees-manually)
+  - [Worktree layout (SWARM_WORKTREE_GROUPING)](#worktree-layout-swarm_worktree_grouping)
 - [Custom Configuration](#custom-configuration)
   - [Per-project Environment (.sandbox-env)](#per-project-environment-sandbox-env)
   - [Extra Mounts](#extra-mounts)
+  - [Memory limit (SANDBOX_MEM_LIMIT)](#memory-limit-sandbox_mem_limit)
 - [Docker Integrations](#docker-integrations)
   - [Testcontainers / Docker CLI](#testcontainers--docker-cli)
   - [Rebuilding the Image](#rebuilding-the-image)
@@ -76,6 +78,19 @@ git worktree list
 git worktree remove ../myproject-wt2
 ```
 
+### Worktree layout (`SWARM_WORKTREE_GROUPING`)
+
+`scripts/_load-env.sh` derives every swarm worktree path from `SWARM_WORKTREE_GROUPING`, which supports two layouts:
+
+- **`flat`** (default, for backward compat) — `<parent>/wt-issue-N`, i.e. a worktree sits directly next to the project directory.
+- **`project`** — `<parent>/<project>-worktrees/wt-issue-N`, i.e. worktrees for a given project are grouped under their own subdirectory.
+
+`project` grouping exists to solve a cross-project namespace collision: when several sibling repos live under the same parent directory and each spawns swarm workers, they can all produce a `wt-issue-N` path for the same issue number, and a deleted-then-recreated worktree in one project can clobber a live one in another. Set `SWARM_WORKTREE_GROUPING=project` per project (e.g. in `<project>/.swarm/.env`) to give each project its own worktree namespace.
+
+Set this **before** any worktrees exist for the project — there is no automatic migration between layouts, so switching it after the fact leaves existing worktrees at the old path while new ones land at the new path.
+
+**The triage/revive examples elsewhere in this doc (and `requeue.sh`) assume `flat` layout** — paths like `../wt-issue-N` or `$(dirname $PWD)/wt-issue-$issue` resolve to the wrong location under `project` grouping. If your project uses `project` grouping, adjust those paths to `<project>-worktrees/wt-issue-N` instead.
+
 ## Custom Configuration
 
 ### Per-project Environment (`.sandbox-env`)
@@ -140,6 +155,19 @@ docker inspect swarm-llm-<project>-iss-<N> \
 ```
 
 The non-`/home`-or-docker-socket lines should be exactly the host paths you put in `EXTRA_MOUNTS`. If a path is missing, the propagation broke somewhere between `.swarm/.env` and the `docker run` invocation — check `tmux show-env -t llm-<project> -g EXTRA_MOUNTS` to see what the tmux session has, and `tmux capture-pane -t llm-<project>:iss-<N> -pS -100` to see what the listener invocation looked like.
+
+### Memory limit (`SANDBOX_MEM_LIMIT`)
+
+Every sandbox container runs with a memory cap, applied as `--memory` and `--memory-swap` (set equal to each other, so the cgroup can't overflow into swap and stall the host on IO). `SANDBOX_MEM_LIMIT` defaults to `8g`; `SANDBOX_MEM_LIMIT=0` disables the cap entirely (ad-hoc debugging only).
+
+Heavy builds and test suites — JVM projects in particular — can exceed the 8g default. Set it higher per-project in `.swarm/.env` so every worker spawn picks it up:
+
+```bash
+# /opt/work/myproject/.swarm/.env  — gitignored
+SANDBOX_MEM_LIMIT=24g
+```
+
+Some full-suite JVM runs need even more headroom — 40g is not unusual on a beefy host. The symptom of hitting the cap is exit code 137 in the worker log (the cgroup OOM-killed the process inside its own container). See [troubleshooting.md's OOM entry](troubleshooting.md#oom-kills-host-or-container) for how to confirm this is what happened.
 
 ## Docker Integrations
 
