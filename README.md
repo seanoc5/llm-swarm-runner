@@ -173,13 +173,25 @@ focused and scriptable.
 
 ##### Automating the loop
 
-The sandbox ships a built-in event-driven supervisor: `coordinator-watch.sh`. Set `WATCH=1` and `llm-start.sh` spawns it in a sibling tmux window — it watches every worker's `.swarm/tasks/done/` dir and wakes the coordinator each time an outcome JSON appears (debounced by `DEBOUNCE_SECS`).
+The sandbox ships a built-in event-driven supervisor: `coordinator-watch.sh`. It's **on by default** — `llm-start.sh` spawns it as a second pane in the always-created `util` window (next to a bare shell), watching every worker's `.swarm/tasks/done/` dir and waking the coordinator each time an outcome JSON appears (debounced by `DEBOUNCE_SECS`). Set `WATCH=0` to disable it.
 
 ```bash
-WATCH=1 ./llm-start.sh           # coordinator + watcher in one session
+./llm-start.sh                   # coordinator + watcher in one session (default)
+WATCH=0 ./llm-start.sh           # coordinator only, no watcher pane
 ```
 
 The watcher's default wake prompt is **top-up mode**: triage finished work, then refill alive workers toward `MAX_WORKERS` from the AVAILABLE backlog. To revert to the conservative "triage-only, don't dispatch" behavior, set `WAKE_PROMPT="..."` to your own text.
+
+Beyond wake-on-finish, the watcher runs several other default-on behaviors — each with an env var to turn it off:
+
+| Feature | Env var (default) | What it does |
+|---|---|---|
+| Finalized-worker autoclose | `WATCHER_AUTOCLOSE=1` | Reaps (window + worktree + branch) workers whose PR is MERGED (or MERGED/CLOSED with `WATCHER_AUTOCLOSE_MODE=finalized`) before each wake, plus a 60s poll backstop and a 1hr orphan-worktree sweep. |
+| Check-on-done | `WATCH_CHECK_ON_DONE=1` | Runs the project's acceptance check in a visible `chk-N` window the moment a worker signals done, instead of waiting for the coordinator to notice. |
+| Coordinator auto-compact | `AUTO_COMPACT=1` | Injects a real `/compact` into a long-lived coordinator pane before waking it, once it's over `AUTO_COMPACT_THRESHOLD_TOKENS`. |
+| Worker auto-compact | `WORKER_AUTO_COMPACT=1` | Same idea, generalized to every idle `iss-*` worker window over threshold. |
+
+Full knob reference (including `WATCH_PR_POLL_SECS`, `WATCH_ORPHAN_SWEEP_SECS`, and the `*_COMPACT_*` family) is in [`docs/llm-swarm-runner-overview.md`](./docs/llm-swarm-runner-overview.md#coordinator-watchsh--event-driven-coordinator-wake-ups).
 
 Other automation paths if you want them:
 
@@ -199,7 +211,7 @@ The coordinator and watcher honor a small set of tunables loaded from three sour
 | Var                          | Default | Purpose                                                                                                          |
 |------------------------------|---------|------------------------------------------------------------------------------------------------------------------|
 | `MAX_WORKERS`                | `5`     | Concurrent worker tmux windows. Increase consciously — each worker is a Claude Code session using real RAM/quota. |
-| `MAX_TMUX_WINDOWS`           | `10`    | Hard cap on total session windows (`coordinator` + `util`, always present and hosting the watcher pane when `WATCH=1`; + optional `status` + alive workers + leftover finished worker windows).             |
+| `MAX_TMUX_WINDOWS`           | `10`    | Hard cap on total session windows (`coordinator` + `util`, always present and hosting the watcher pane by default; + optional `status` + alive workers + leftover finished worker windows).             |
 | `TARGET_AVAILABLE`           | `10`    | Backlog target. Housekeeping creates new issues when AVAILABLE drops below this — NOT when raw open count is low. |
 | `OWNER_LABELS`               | empty   | Comma-separated labels treated as "human-owned" (e.g. `sean,radesh`). Skipped unless the label matches `@me`.     |
 | `INCLUDE_ASSIGNED_TO_OTHERS` | `0`     | `1` = drop the `@me`-or-unassigned filter; the swarm claims teammates' tickets too.                               |
@@ -269,7 +281,7 @@ Format: `<utc-iso8601>  <category>  k=v k=v ...`. Greppable. One line per event.
 2026-05-05T14:32:14Z  cap.refused     issue=178 reason=max_workers alive=2 max=2
 ```
 
-When `cap.refused` fires repeatedly, close finished `iss-*` windows: `tmux -L swarm-<project> kill-window -t llm-<project>:iss-NN`. The watcher won't auto-close them — your scrollback is preserved for review.
+When `cap.refused` fires repeatedly and you're not running the watcher (`WATCH=0`), close finished `iss-*` windows yourself: `tmux -L swarm-<project> kill-window -t llm-<project>:iss-NN`. With the watcher on (the default), it auto-reaps windows whose PR has reached a terminal state before each wake — see `WATCHER_AUTOCLOSE` above — so most cap-refusal churn from finished work clears itself; a window is only left for manual cleanup if its PR is still open or doesn't exist yet.
 
 For bulk cleanup, use `kill-finished-workers.sh`. Default: parked-only AND PR-safe (workers tied to an open PR are preserved so you can review the scrollback alongside the PR):
 

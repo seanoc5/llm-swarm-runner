@@ -20,6 +20,31 @@ This sandbox supports a fully autonomous architecture managed via `tmux`:
 2.  **The Workers (Hands):** The Coordinator autonomously provisions background `tmux` windows containing isolated worker sandboxes (`claude` by default; `WORKER_CMD=gemini` or `WORKER_CMD=codex` switches the per-worker agent).
 3.  **The Communication:** The Coordinator drops task briefs into each worktree's `.swarm/tasks/inbox/` (the v2 queue protocol — atomic mktemp+mv writes, structured `done/*.json` outcomes). A background `worker-listener.sh` claims tasks one at a time, dispatches them to the worker LLM, and writes the outcome JSON. Coordinator monitors progress by polling `done/` and reading the worker's PRs via `gh`.
 
+### Session anatomy
+
+A running swarm session (`llm-<project-basename>`, on its own tmux socket) has these windows:
+
+| Window | Created by | Purpose |
+|---|---|---|
+| `coordinator` | Always, first window | The resident coordinator agent (interactive REPL for claude by default; one-shot for codex/headless modes). |
+| `util` | Always, second window | Bare bash in the project dir for ad-hoc inspection — plus, as a **second pane** in this same window, the `coordinator-watch.sh` watcher (on by default; `WATCH=0` to skip it). The watcher is a pane, not a sibling window, so it never counts against `MAX_TMUX_WINDOWS` on its own. |
+| `status` (optional) | `STATUS=1` / `--status` | `gh-status-bar.sh`, updating the session's `status-right` with live open-issue/open-PR/closed-today counts. |
+| `iss-N` (0..MAX_WORKERS) | The coordinator, via `provision-worker.sh` | One window per active worker, each running `worker-listener.sh` against its own `wt-issue-N` git worktree. |
+| `chk-N` (transient) | The watcher, when `WATCH_CHECK_ON_DONE=1` (default) | Spawned the moment a worker signals done, to run the project's acceptance check visibly; closes once the check resolves. |
+
+`MAX_TMUX_WINDOWS` (default 10) caps `coordinator` + `util` + `status` + `iss-N` + any leftover finished-worker windows combined — the watcher's own pane inside `util` doesn't add to that count, but the `chk-N` windows it spawns do, transiently.
+
+### The watcher's roles
+
+`coordinator-watch.sh` is more than an event-driven wake supervisor. By default it also:
+
+- **Wakes the coordinator** when a worker finishes (new outcome JSON in `.swarm/tasks/done/`), debounced by `DEBOUNCE_SECS`.
+- **Auto-compacts** both the coordinator (`AUTO_COMPACT`) and idle over-threshold worker panes (`WORKER_AUTO_COMPACT`) by injecting a real `/compact`, keeping long-lived sessions out of the context "stupid zone".
+- **Auto-closes finalized workers** (`WATCHER_AUTOCLOSE`) — reaps the window, worktree, and branch for any worker whose PR reached the terminal state configured by `WATCHER_AUTOCLOSE_MODE` (`merged` by default; `finalized` also reaps CLOSED-without-merge), snapshotting the pane to `.swarm/reaped/` first.
+- **Runs check-on-done** (`WATCH_CHECK_ON_DONE`) — fires the project's acceptance check in a `chk-N` window as soon as a worker hands off, rather than waiting for the coordinator to notice.
+
+See [`docs/llm-swarm-runner-overview.md`](./llm-swarm-runner-overview.md#coordinator-watchsh--event-driven-coordinator-wake-ups) for the full knob reference.
+
 > **Side note on tmux as a channel.** The file-based bus above is the canonical inter-agent channel. Tmux is the *substrate* every agent runs on, and the host-side coordinator uses it as a read-only side-channel today: `scripts/check-stuck-workers.sh` classifies worker pane health, and `coordinator-watch.sh` actively drives scripted `send-keys` by default — `/compact` injection into the coordinator pane (`AUTO_COMPACT`) and into every idle `iss-*` worker pane (`WORKER_AUTO_COMPACT`, issue #226), plus wake re-prompts into the coordinator REPL. This is engineered, idle-gated infrastructure, not an LLM agent improvising `send-keys` on its own — that remains off-limits. Workers cannot use tmux to talk to anyone (no socket mount in the container). Cross-swarm tmux messaging isn't wired up. The full pros/cons and an opt-out recipe for ignoring best practice are in [`docs/tmux-as-channel.md`](./tmux-as-channel.md).
 
 ## Worker Classes (Local vs GH Actions)

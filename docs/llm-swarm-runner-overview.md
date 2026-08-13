@@ -105,13 +105,13 @@ Generalized launcher: `sandbox.sh <project-dir> <agent> [extra-args]`
 
 Creates `tmux` session `llm-<basename-of-cwd>` if missing, opens window 1 as `coordinator`, and launches the configured coordinator with the initial prompt and the procedure from `prompts/coordinator.md`. Claude defaults to an interactive REPL; Codex runs one-shot via `codex exec`; Gemini supports print or interactive mode.
 
-Optionally also spawns `coordinator-watch.sh` as a second pane in the `util` window when `WATCH=1`. The watcher inherits `POST_OUTCOMES`, `OUTCOME_HOOK`, `DEBOUNCE_SECS`, `WAKE_PROMPT`, `POLL_SECS`, `WORKSPACE`, and `SWEEP` directly from the caller's env, plus `MAX_WORKERS`, `MAX_TMUX_WINDOWS`, `TARGET_AVAILABLE`, `OWNER_LABELS`, and `INCLUDE_ASSIGNED_TO_OTHERS` via the tmux session env (set by `tmux new-session -e` after `llm-start.sh` loads `<project>/.swarm/.env` + `.env.example`). So:
+Also spawns `coordinator-watch.sh` as a second pane in the `util` window when `WATCH=1` — the default; set `WATCH=0` to skip it. The watcher inherits `POST_OUTCOMES`, `OUTCOME_HOOK`, `DEBOUNCE_SECS`, `WAKE_PROMPT`, `POLL_SECS`, `WORKSPACE`, and `SWEEP` directly from the caller's env, plus `MAX_WORKERS`, `MAX_TMUX_WINDOWS`, `TARGET_AVAILABLE`, `OWNER_LABELS`, and `INCLUDE_ASSIGNED_TO_OTHERS` via the tmux session env (set by `tmux new-session -e` after `llm-start.sh` loads `<project>/.swarm/.env` + `.env.example`). So:
 
 ```bash
 WATCH=1 POST_OUTCOMES=1 OUTCOME_HOOK=/path/to/poster ./llm-start.sh
 ```
 
-…spins up the entire unattended supervisor pattern (coordinator + event-driven wakes + audit-trail posting) from a single invocation. Idempotent — re-running with `WATCH=1` against an existing session that already has a `watch` window logs a "skipping watch spawn" notice instead of stacking duplicates.
+…spins up the entire unattended supervisor pattern (coordinator + event-driven wakes + audit-trail posting) from a single invocation. Idempotent — re-running against an existing session that already has a coordinator-watch pane running in `util` logs `coordinator-watch pane already running in '<session>:util' — skipping spawn` instead of stacking duplicates.
 
 #### Session reuse: detect-dead-coordinator
 
@@ -130,7 +130,7 @@ This means you can re-invoke `llm-start.sh` repeatedly with new prompts without 
 | Flag                    | Equivalent env                  | Notes                                                                  |
 |-------------------------|---------------------------------|------------------------------------------------------------------------|
 | `-h`, `--help`          | n/a                             | Full reference (env vars, yolo bundle, examples)                       |
-| `-w`, `--watch`         | `WATCH=1`                       | Spawn `coordinator-watch.sh` in the `util` window                       |
+| `-w`, `--watch`         | `WATCH=1`                       | Spawn `coordinator-watch.sh` in the `util` window (already the default; use `WATCH=0` to disable) |
 | `-y`, `--yolo`          | (bundle — see below)            | Opinionated automation; explicit flags + shell env still win            |
 | `--status`              | `STATUS=1`                      | Spawn `gh-status-bar.sh` in a dedicated `status` window                 |
 | `--max-workers N`       | `MAX_WORKERS=N`                 | Concurrent worker tmux windows (default 5)                              |
@@ -161,10 +161,10 @@ WATCH=1  STATUS=1  MAX_WORKERS=5  INCLUDE_ASSIGNED_TO_OTHERS=1  DEBOUNCE_SECS=15
 | `COORDINATOR_HEADLESS`       | `0`                | —                             | When `1` and using claude: run one-shot (`-p`, exits after each prompt) like codex, instead of the default resident interactive REPL. |
 | `COORDINATOR_USE_API_KEY`    | `0`                | —                             | When `1` and using claude: keeps `ANTHROPIC_API_KEY` in the agent's env (bills the API account). Default strips it so Claude Max OAuth is used. |
 | `NON_INTERACTIVE`            | `0`                | —                             | When `1`, skip auto-attach (used by tests)                                                       |
-| `WATCH`                      | `0`                | `-w`, `--watch`               | When `1`, spawn `coordinator-watch.sh` in the `util` window                                      |
+| `WATCH`                      | `1`                | `-w`, `--watch`               | On by default: spawns `coordinator-watch.sh` as a second pane in the `util` window. Set `0` to disable. |
 | `STATUS`                     | `0`                | `--status`                    | When `1`, spawn `gh-status-bar.sh` in a dedicated `status` window                                |
 | `MAX_WORKERS`                | `5`                | `--max-workers N`             | Concurrent worker tmux windows the coordinator may have alive at once. `provision-worker.sh` enforces server-side (exit 3 on cap). |
-| `MAX_TMUX_WINDOWS`           | `10`               | `--max-windows N`             | Hard cap on total tmux windows in the session — counts `coordinator` + `util` (always present; hosts the watcher as a second pane when `WATCH=1`) + optional `status` + alive workers + leftover finished worker windows. |
+| `MAX_TMUX_WINDOWS`           | `10`               | `--max-windows N`             | Hard cap on total tmux windows in the session — counts `coordinator` + `util` (always present; hosts the watcher as a second pane by default) + optional `status` + alive workers + leftover finished worker windows. |
 | `TARGET_AVAILABLE`           | `10`               | `--target-available N`        | Backlog target. Housekeeping creates new issues when AVAILABLE drops below this — NOT when raw open count is low. |
 | `OWNER_LABELS`               | empty              | `--owner-labels L1,L2`        | Comma-separated label names treated as "human-owned" (e.g. `sean,radesh`). The coordinator skips issues bearing any owner-label that isn't `@me`. |
 | `INCLUDE_ASSIGNED_TO_OTHERS` | `0`                | `--include-others`            | `1` = drop the `@me`-or-unassigned filter. Free-text override in the prompt (`"grab anything"`, `"include others"`) also engages this for one-shot use. |
@@ -349,6 +349,19 @@ ONCE=1 coordinator-watch.sh
 | `POLL_SECS` | `2` | Polling interval (polling backend only) |
 | `POST_OUTCOMES` | `0` | Set to `1` to also run `sweep-swarm-outcomes.sh` on each detected outcome. Honors `$OUTCOME_HOOK`. Fires outside the wake-debounce window so every outcome gets audit coverage even when wakes are coalesced. |
 | `SWEEP` | `$LLM_SWARM_DIR/scripts/sweep-swarm-outcomes.sh` | Override sweep path |
+| `WATCHER_AUTOCLOSE` | `1` | Before each coordinator wake, reap finalized workers (window + worktree + local branch) via `kill-finished-workers.sh --with-worktree --yes` plus a PR-state flag from `WATCHER_AUTOCLOSE_MODE`. `0` disables all auto-reaping, including the poll and orphan-sweep timers below. |
+| `WATCHER_AUTOCLOSE_MODE` | `merged` | (issue #237) Which terminal PR states are reap-eligible. `merged` (default): only a MERGED PR is reaped; a CLOSED-without-merge PR is left untouched (window, worktree, branch) for operator inspection. `finalized`: MERGED *or* CLOSED is reap-eligible (the pre-#237 behavior) — the branch survives a CLOSED reap via `kill-worktree.sh`, recoverable with `gh pr reopen N`. |
+| `WATCH_PR_POLL_SECS` | `60` | (issue #119) Background timer that polls `gh pr list --state all` across all worker branches and re-fires the `WATCHER_AUTOCLOSE` reap pass for any worktree whose PR went MERGED/CLOSED since the last outcome-driven check (catches PRs merged later, e.g. a parked interactive worker). Also powers the `WATCH_CHECK_ON_DONE` PR-open backstop. `0` disables (falls back to outcome-only detection). |
+| `WATCH_ORPHAN_SWEEP_SECS` | `3600` | (issue #225) Slower independent timer that runs `reap-orphan-worktrees.sh --pr-finalized --yes` to clear worktrees whose tmux window is already gone but the directory + branch survive with a finalized PR — the case `WATCH_PR_POLL_SECS`'s window-based reap can't reach. Gated by `WATCHER_AUTOCLOSE`; `0` disables just this sweep. |
+| `WATCH_CHECK_ON_DONE` | `1` | Runs the project's acceptance check in a visible `chk-N` tmux window the moment a worker signals done (a `status/<id>.json` with `state: ready-for-review`, or a PR appearing with no status file, via the `WATCH_PR_POLL_SECS` backstop). Records the result to `<id>.check.json` and `events.log`; skipped (state=skipped) if the PR is already MERGED/CLOSED by the time the check claim is won. `0` disables. |
+| `AUTO_COMPACT` | `1` | Before waking a long-lived coordinator, injects a real `/compact` into the coordinator pane if it's at/above `AUTO_COMPACT_THRESHOLD_TOKENS`. Requires `scripts/statusline-with-context.sh` installed as the coordinator's statusLine (no probe file = no-op). `0` disables. See [advanced-usage.md § Compact discipline](./advanced-usage.md#compact-discipline). |
+| `AUTO_COMPACT_THRESHOLD_TOKENS` | `150000` | Used-token threshold that triggers `AUTO_COMPACT`. |
+| `AUTO_COMPACT_TICK_SECS` | `60` | (issue #210) Independent poll-tick trigger so a coordinator that never reaches a wake (pure interactive use) still gets auto-compacted. `0` disables just this trigger. |
+| `WORKER_AUTO_COMPACT` | `1` | (issue #226) Same pattern generalized to every `iss-*` worker window — injects `/compact` (via rendered statusline text, not a probe file) into idle over-threshold workers, then nudges them to continue. `0` disables. See [advanced-usage.md § Worker auto-compact](./advanced-usage.md#worker-auto-compact). |
+| `WORKER_COMPACT_SCAN_SECS` | `30` | Sweep interval for `WORKER_AUTO_COMPACT`. |
+| `WORKER_COMPACT_THRESHOLD_TOKENS` | `150000` | Used-token threshold for `WORKER_AUTO_COMPACT` (raised to `WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS`, default `300000`, once a worker has an open PR). |
+
+The full knob list — including all `AUTO_COMPACT_*` / `WORKER_COMPACT_*` timeouts, `WATCHER_QUIET`, `CHECK_RUNNER`, and `SESSION_NAME` — is documented in `coordinator-watch.sh`'s own header comment; the rows above cover the behavior-changing defaults worth knowing before your first unattended run.
 
 The watcher also reads `MAX_WORKERS` / `MAX_TMUX_WINDOWS` / `TARGET_AVAILABLE` / `OWNER_LABELS` / `INCLUDE_ASSIGNED_TO_OTHERS` from the same precedence chain (shell env > project `.swarm/.env` > sandbox `.env.example`). It uses them in two places: (a) the startup `watch.start` event line, and (b) implicitly via the wake prompt referencing the caps so the coordinator computes slots correctly.
 
@@ -362,6 +375,8 @@ The watcher also reads `MAX_WORKERS` / `MAX_TMUX_WINDOWS` / `TARGET_AVAILABLE` /
 To revert to the old conservative behavior ("triage only, don't dispatch"), set `WAKE_PROMPT` explicitly to your own text.
 
 **Events log:** the watcher and `provision-worker.sh` both append structured event lines to `<project>/.swarm/events.log` (`watch.start`, `worker.start`, `worker.finish`, `coord.wake`, `cap.refused`, etc.). `tail -F` it for live status.
+
+`WATCHER_AUTOCLOSE` reap passes add two more: `watch.autoclose` (one line per pass — `trigger=outcome|pr_poll mode=<WATCHER_AUTOCLOSE_MODE>+worktree dry_run=<0|1> killed=<n>`) and, per-target, `reap.window` from `kill-finished-workers.sh` itself (`issue=N window=iss-N branch=... reasons=... with_worktree=1 capture=<path>`). Every real (non-dry-run) kill snapshots the pane's last `REAP_CAPTURE_LINES` (default 500) scrollback lines to `<project>/.swarm/reaped/iss-N-<utc>.txt` *before* the window dies — that `capture=` path (or `capture=failed` if the window died mid-snapshot) is the only surviving record of what happened in a reaped window's pane.
 
 **Combined audit + wake (recommended for unattended runs):**
 
