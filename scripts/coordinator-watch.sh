@@ -1914,17 +1914,27 @@ probe_ctx_used() {
 # sometimes stacking with a second stale injection from the very next sweep
 # (the originally reported symptom).
 #
-# Sends a single Escape — documented (TUI chrome, not an API; re-verify
-# against a live pane on every Claude Code CLI upgrade, same caveat as
-# AUTO_COMPACT_BUSY_PATTERN above) to clear a QUEUED follow-up message
-# without touching an in-flight turn. That makes it safe to send even when
-# the timeout was a false alarm and a real (non-queued) turn is actually
-# running — this function must NEVER send Ctrl-C or anything else that
-# could interrupt in-flight work. A handful of Backspace keystrokes follow
-# as belt-and-braces cleanup for any stray composer text Escape didn't
-# reach. Then re-captures the pane and checks whether
-# COMPACT_QUEUED_MARKER_PATTERN is still visible — NEVER assumes the
-# keystrokes worked — logging "<event-prefix>.retracted" (marker gone) or
+# Sends a single Escape — per issue #265, BELIEVED (not independently
+# verified against a live pane; see below) to clear a QUEUED follow-up
+# message without touching an in-flight turn. Take that belief with a grain
+# of salt: this same file's AUTO_COMPACT_BUSY_PATTERN/WORKER_COMPACT_BUSY_
+# PATTERN header comments document a persistent "(esc to interrupt)" hint
+# shown for the ENTIRE duration of any in-flight turn — i.e. Escape is
+# ALSO documented, elsewhere in this very file, as the interrupt key for a
+# turn with nothing queued behind it. Whether a genuinely queued follow-up
+# changes that (cancel-the-queue-first, common in chat TUIs) or Escape just
+# interrupts regardless is exactly the "re-verify against a live pane"
+# uncertainty a self-review flagged on this function's first version — no
+# live 2.1.x pane was available to settle it empirically here. This is why
+# this function must NEVER send Ctrl-C or anything else definitely more
+# destructive than Escape, and why the retraction's actual effect is never
+# assumed either way — only re-capture-and-log decides the verdict, so a
+# wrong assumption here shows up as data (a worse-than-expected retracted/
+# retract_failed ratio, or an operator-visible interrupted turn) instead of
+# silently mis-firing forever. A handful of Backspace keystrokes follow as
+# belt-and-braces cleanup for any stray composer text Escape didn't reach.
+# Then re-captures the pane and checks whether COMPACT_QUEUED_MARKER_PATTERN
+# is still visible, logging "<event-prefix>.retracted" (marker gone) or
 # "<event-prefix>.retract_failed" (still there) accordingly. Fails open
 # like everything else in this file: a tmux error along the way just leaves
 # the re-capture to decide the verdict.
