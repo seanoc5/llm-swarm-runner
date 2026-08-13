@@ -101,6 +101,16 @@ IDLE_SENTINEL="$QUEUE_ROOT/.brief-pending"
 CLOSE_SENTINEL="$QUEUE_ROOT/.close-requested"
 rm -f "$CLOSE_SENTINEL"
 
+# Double-Ctrl-D close: a respawned idle shell (IDLE_RESPAWNS >= 2, i.e. not
+# the first shell of this parked stretch) that exits again within this many
+# seconds is read as the operator hammering "get me out" — the pre-#43
+# muscle memory. Guarded by an inbox-empty check so a brief-arrival relaunch
+# (which also exits the shell quickly) can never be mistaken for it.
+# IDLE_RESPAWNS resets on every task dispatch, so the first shell after a
+# task completes never quick-closes on a single Ctrl-D.
+IDLE_QUICK_EXIT_SECS="${WORKER_IDLE_QUICK_EXIT_SECS:-3}"
+IDLE_RESPAWNS=0
+
 # Per-worktree label used in user-visible messages so it's obvious which
 # worktree's inbox this listener is bound to (and that it does NOT serve
 # briefs for other issues — those need their own provision-worker.sh /
@@ -451,7 +461,7 @@ print_completion_block() {
     echo "  • Follow up here:   requeue.sh $issue_num \"<follow-up brief>\""
     echo "  • Leave it          this listener will pick up the next brief on inbox/"
     echo "                      (different issues need their own worktree via provision-worker.sh)"
-    echo "  • Close it:         type close-worker at the shell prompt below"
+    echo "  • Close it:         Ctrl-D twice, Ctrl-C twice, or type close-worker at the shell prompt below"
     echo "                      (plain 'exit' only respawns the shell; worktree stays for kill-worktree.sh)"
     echo ""
     if [ -n "$pr" ]; then
@@ -508,11 +518,18 @@ run_idle_shell() {
     rcfile=$(mktemp)
     # Unquoted heredoc: $IDLE_SENTINEL is baked in as a literal path below.
     # PROMPT_COMMAND is chained (not overwritten) so anything ~/.bashrc set
-    # still runs — our check just runs first.
+    # still runs — our check runs LAST so its INT-trap re-assert wins (see
+    # __swarm_check_brief's comment).
     cat > "$rcfile" <<EOF
 [ -r ~/.bashrc ] && source ~/.bashrc
 
 __swarm_check_brief() {
+    # Re-assert the double-Ctrl-C trap every prompt: some ~/.bashrc hook
+    # stacks (observed with a bash-preexec/atuin setup, exact culprit
+    # rc-dependent) clear user INT traps before the first prompt draws.
+    # This hook runs LAST in the PROMPT_COMMAND chain, so it wins over
+    # whatever earlier hooks did to the trap this cycle.
+    trap __swarm_on_int INT
     if [ -f "$IDLE_SENTINEL" ]; then
         rm -f "$IDLE_SENTINEL"
         echo
@@ -521,7 +538,7 @@ __swarm_check_brief() {
         exit 0
     fi
 }
-PROMPT_COMMAND="__swarm_check_brief\${PROMPT_COMMAND:+; \$PROMPT_COMMAND}"
+PROMPT_COMMAND="\${PROMPT_COMMAND:+\$PROMPT_COMMAND; }__swarm_check_brief"
 
 # Operator-facing close affordance: plain \`exit\` deliberately respawns the
 # idle shell (the slot must survive stray exits), so this is the one way to
@@ -532,26 +549,64 @@ close-worker() {
     echo "[close requested — ending listener]"
     exit 0
 }
+
+# Double-Ctrl-C close (pre-#43 muscle memory): interactive bash runs INT
+# traps at the readline prompt, so two Ctrl-C within 2s close the worker
+# via the same sentinel as close-worker. A lone Ctrl-C just prints the
+# hint. While a foreground command is running, Ctrl-C still goes to that
+# command as usual — this only fires once bash is back in control.
+__swarm_int_last=-10
+__swarm_on_int() {
+    if [ \$((SECONDS - __swarm_int_last)) -le 2 ]; then
+        touch "$CLOSE_SENTINEL"
+        echo
+        echo "[double ctrl-c — ending listener]"
+        exit 0
+    fi
+    __swarm_int_last=\$SECONDS
+    echo
+    echo "(ctrl-c again within 2s to close this worker window)"
+}
+trap __swarm_on_int INT
 EOF
+
+    IDLE_RESPAWNS=$((IDLE_RESPAWNS + 1))
+    local spawned=$SECONDS
 
     echo ""
     echo "[$(date +%T)] Queue empty — dropping to interactive shell in $WT_LABEL/. Polling continues in the background."
-    echo "               (a plain 'exit' respawns this shell — type 'close-worker' to end the listener and close this window)"
+    echo "               (a plain 'exit' respawns this shell — close the worker with Ctrl-D twice, Ctrl-C twice, or 'close-worker')"
     bash --rcfile "$rcfile" -i
+    local lifetime=$((SECONDS - spawned))
 
     rm -f "$rcfile"
     kill "$poll_pid" 2>/dev/null
     wait "$poll_pid" 2>/dev/null
 
-    # `close-worker` ran in the idle shell: end the listener process itself,
-    # which closes the tmux window (same clean-exit contract as the
-    # reaped-worktree guard in the main loop). The worktree is deliberately
-    # left in place — it may hold unpushed or untracked material; clean it
-    # up host-side with kill-worktree.sh when genuinely done with it.
+    # `close-worker` or the double-Ctrl-C trap ran in the idle shell: end
+    # the listener process itself, which closes the tmux window (same
+    # clean-exit contract as the reaped-worktree guard in the main loop).
+    # The worktree is deliberately left in place — it may hold unpushed or
+    # untracked material; clean it up host-side with kill-worktree.sh when
+    # genuinely done with it.
     if [ -f "$CLOSE_SENTINEL" ]; then
         rm -f "$CLOSE_SENTINEL"
-        echo "[$(date +%T)] close-worker: listener exiting — window will close. Worktree $WT_LABEL/ is left intact (remove later with kill-worktree.sh)."
+        echo "[$(date +%T)] close requested: listener exiting — window will close. Worktree $WT_LABEL/ is left intact (remove later with kill-worktree.sh)."
         exit 0
+    fi
+
+    # Double-Ctrl-D close: this was already a respawned shell (not the first
+    # of this parked stretch) and it exited again almost immediately —
+    # operator is hammering exit/Ctrl-D to get out. The inbox guard keeps a
+    # brief-arrival relaunch (which also exits the shell quickly) from ever
+    # matching; with a brief pending, the main loop dispatches as normal.
+    if [ "$IDLE_RESPAWNS" -ge 2 ] && [ "$lifetime" -le "$IDLE_QUICK_EXIT_SECS" ]; then
+        local pending
+        pending=$(find "$INBOX" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | head -1)
+        if [ -z "$pending" ]; then
+            echo "[$(date +%T)] double exit: listener exiting — window will close. Worktree $WT_LABEL/ is left intact (remove later with kill-worktree.sh)."
+            exit 0
+        fi
     fi
 }
 
@@ -568,6 +623,7 @@ while true; do
 
     if claim_next_task; then
         echo "[$(date +%T)] Task received! id=$TASK_ID$([ "$IS_LEGACY" = "1" ] && echo " (v1 legacy)")"
+        IDLE_RESPAWNS=0   # new parked stretch after this task — see IDLE_QUICK_EXIT_SECS
 
         TASK=$(cat "$TASK_PATH")
 
