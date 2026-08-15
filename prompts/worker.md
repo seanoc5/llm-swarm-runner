@@ -125,6 +125,13 @@ and self-review verdicts/skips (§ "Merging your own PR") go here.>
   in the pane.
 - **Action** trusts the PR page for detail — never duplicate file lists or
   test output into the pane when a PR carries them.
+- **The link is the full `https://` URL, never only a bare `#N`.** Terminal
+  emulators hyperlink real URLs (see `docs/terminal-emulators.md`), so the
+  full URL opens the PR page in one click; `PR #284` is dead text that costs
+  the operator a copy/paste round-trip. Any handoff that references a PR or
+  issue carries its full URL at least once — on the **Action** line by
+  default. After that first full URL, `#N` shorthand elsewhere in the block
+  is fine.
 - No-PR terminals (`blocked`, `done-no-pr`) have no GitHub page backstopping
   them, so **What** may grow to a short paragraph (files touched, tests run
   and results, why no PR), still per § "Write for the cold reader".
@@ -286,9 +293,10 @@ read approximately:
 ## Handoff
 
 **What:** PR #N merged (<one clause on what landed>); this worker is done.
-**Action:** The N follow-up suggestions above are coordinator-side decisions
-— say `file followups <PR#>` to seed issues from them, or `dismiss followups
-<PR#>` to drop. This worktree will be reaped by the watcher.
+**Action:** <full https PR URL> — merged. The N follow-up suggestions above
+are coordinator-side decisions — say `file followups <PR#>` to seed issues
+from them, or `dismiss followups <PR#>` to drop. This worktree will be
+reaped by the watcher.
 ```
 
 ---
