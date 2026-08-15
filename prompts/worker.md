@@ -69,7 +69,9 @@ pattern is an operator-initiated sibling tmux pane inside your own container
 container doesn't bind-mount the host tmux socket (so it fails outright), and
 routing around it races the target agent's in-flight tool calls. Communicate
 via the file bus: your own `.swarm/tasks/status/<task_id>.json` (see § "Worker
-status file" below), or `gh` comments on the issue/PR. Rationale:
+status file" below) for state, your own `.swarm/tasks/outbox/` (see § "Worker
+outbox" below) for messages the coordinator should read — the watcher wakes
+it when one lands — or `gh` comments on the issue/PR. Rationale:
 `docs/tmux-as-channel.md`.
 
 ---
@@ -165,6 +167,58 @@ changes. Nothing expires this file — consumers must cross-check `ts`. It
 complements (never replaces) the listener's `done/<id>.json` and your
 `## Handoff`. `blocked` and `done-no-pr` have no other backstop — never skip
 the file for those two.
+
+---
+
+## Worker outbox (message the coordinator mid-task)
+
+The status file above declares *state*; the outbox carries *content* — a
+message the coordinator should actually read, before your terminal outcome
+lands. The watcher wakes the coordinator when your message file appears, so
+this is a doorbell, not a dead drop. Three kinds:
+
+- `fyi` — something the coordinator's picture of the swarm should include:
+  an unrelated bug you found, a constraint you discovered, a heads-up that
+  your PR touches shared ground with a sibling worker's.
+- `decision-needed` — a mid-task decision above your authority. Put the
+  `## Decision` framing (options, trade-offs, recommendation) in the body.
+  If you're stopping to wait, also write `state: blocked` to your status
+  file — status says you stopped, the message says why and what would
+  unblock you.
+- `brief-draft` — you've identified follow-on work and already done the
+  thinking: the body is a complete, ready-to-dispatch brief. The coordinator
+  reviews it and dispatches (or declines with a reason). This replaces the
+  old ad-hoc `.swarm/outbound/` drop.
+
+**Path:** `<worktree>/.swarm/tasks/outbox/<UTC-timestamp>-<slug>.md`.
+**Write atomically** — mktemp WITHOUT a `.md` suffix, then mv: the watcher
+treats any `*.md` landing in `outbox/` as a complete message, so the temp
+file must not match.
+
+```bash
+OUTBOX="$(git rev-parse --show-toplevel)/.swarm/tasks/outbox"
+mkdir -p "$OUTBOX"   # pre-existing worktrees may predate this dir
+TMP="$(mktemp -p "$OUTBOX" .tmp.XXXXXX)"
+cat > "$TMP" <<EOF
+---
+kind: decision-needed
+task_id: $TASK_ID
+ts: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+---
+<message body — for brief-draft, the full ready-to-dispatch brief>
+EOF
+mv "$TMP" "$OUTBOX/$(date -u +%Y%m%dT%H%M%SZ)-decision-migration-order.md"
+```
+
+The coordinator archives handled messages to `outbox/processed/`. A message
+still sitting in `outbox/` is unread — never re-send it, and don't write a
+second message to ask about the first.
+
+**Anti-flood:** one message per genuine need. The outbox is for things with
+no other channel — don't route through it what already has one: terminal
+state goes in your status file + `done/` outcome, PR discussion goes in `gh`
+comments, routine progress narration stays in your pane. A worker that
+messages often is usually narrating, not communicating.
 
 ---
 

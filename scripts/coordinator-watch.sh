@@ -23,6 +23,26 @@
 #                           Useful for smoke-testing.
 #   LLM_START=<path>        Override path to llm-start.sh.
 #   WAKE_PROMPT=<text>      Prompt sent to the coordinator on wake.
+#   WATCH_OUTBOX=1          (issue #129) Also watch every worker's
+#                           `.swarm/tasks/outbox/` dir. When a worker drops
+#                           a message file (`*.md`, atomic mktemp+mv) there,
+#                           wake the coordinator with a message-triage prompt
+#                           instead of the outcome top-up prompt. This is the
+#                           worker→coordinator mid-task channel: workers
+#                           can't reach the coordinator's tmux socket (not
+#                           mounted — docs/tmux-as-channel.md §2a), so the
+#                           outbox file + this doorbell is how a worker says
+#                           anything before its terminal outcome lands.
+#                           Messages the coordinator has handled are archived
+#                           to `outbox/processed/` (never re-triggers). Set
+#                           to 0 to disable outbox watching entirely.
+#   OUTBOX_WAKE_PROMPT=<text>
+#                           Override the coordinator prompt used for outbox
+#                           wakes. Default (built per-event) names the
+#                           triggering message path and instructs a full
+#                           scan of $WORKSPACE/wt-issue-*/.swarm/tasks/outbox/
+#                           — so messages coalesced away by the debounce
+#                           window are still picked up on the next wake.
 #   POLL_SECS=2             Polling interval (used only in polling-mode
 #                           fallback when inotifywait is unavailable).
 #   POST_OUTCOMES=0         Set to 1 to also run sweep-swarm-outcomes.sh
@@ -664,7 +684,10 @@ DESCRIPTION
     Long-running daemon. Watches every worker's .swarm/tasks/done/ dir
     under the workspace (parent of project-dir). When a new outcome JSON
     appears, wakes the coordinator via llm-start.sh so it can triage,
-    re-dispatch, and top up workers.
+    re-dispatch, and top up workers. Also watches every worker's
+    .swarm/tasks/outbox/ dir (WATCH_OUTBOX, issue #129): a message file
+    dropped there by a worker wakes the coordinator with a message-triage
+    prompt — the worker→coordinator mid-task channel.
 
 CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     DEBOUNCE_SECS       30        coalesce window for repeat events
@@ -673,6 +696,8 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     ONCE                0         exit after first wake (smoke-test)
     LLM_START           (auto)    override path to llm-start.sh
     WAKE_PROMPT         (top-up)  what the coordinator does on wake
+    WATCH_OUTBOX        1         wake on worker outbox messages (issue #129); 0=off
+    OUTBOX_WAKE_PROMPT  (scan-all) what the coordinator does on an outbox wake
     POST_OUTCOMES       0         run sweep-swarm-outcomes.sh per outcome
     OUTCOME_HOOK        (none)    path to per-outcome poster
     SWEEP               (auto)    override sweep-swarm-outcomes.sh path
@@ -836,6 +861,9 @@ LLM_START="${LLM_START:-$LLM_SWARM_DIR/llm-start.sh}"
 # auto-provisioning (old conservative default), set WAKE_PROMPT explicitly
 # or invoke with INCLUDE_ASSIGNED_TO_OTHERS / triage-only language.
 WAKE_PROMPT="${WAKE_PROMPT:-Worker(s) just finished. Triage their outcome JSONs in worktrees/.swarm/tasks/done/, then top up workers per the Initial Startup Checklist (compute AVAILABLE, count alive workers, fill open slots up to MAX_WORKERS subject to MAX_TMUX_WINDOWS). Use the @me-or-unassigned filter unless INCLUDE_ASSIGNED_TO_OTHERS=1.}"
+# issue #129 — worker→coordinator outbox channel; see header comment.
+WATCH_OUTBOX="${WATCH_OUTBOX:-1}"
+OUTBOX_WAKE_PROMPT="${OUTBOX_WAKE_PROMPT:-}"
 POLL_SECS="${POLL_SECS:-2}"
 POST_OUTCOMES="${POST_OUTCOMES:-0}"
 SWEEP="${SWEEP:-$LLM_SWARM_DIR/scripts/sweep-swarm-outcomes.sh}"
@@ -1076,7 +1104,8 @@ fi
 cat <<EOF
 === coordinator-watch.sh ===
 project:       $PROJECT_DIR
-workspace:     $WORKSPACE (scanning $WORKSPACE/wt-issue-*/.swarm/tasks/done/)
+workspace:     $WORKSPACE (scanning $WORKSPACE/wt-issue-*/.swarm/tasks/done/$([ "$WATCH_OUTBOX" = "1" ] && echo " + outbox/"))
+outbox:        $WATCH_OUTBOX$([ "$WATCH_OUTBOX" = "1" ] && echo " (worker→coordinator messages; wake prompt: ${OUTBOX_WAKE_PROMPT:-built-in scan-all})")
 backend:       $BACKEND$([ "$BACKEND" = "poll" ] && echo " (install inotify-tools for instant response)")
 debounce:      ${DEBOUNCE_SECS}s
 poll interval: ${POLL_SECS}s$([ "$BACKEND" = "inotify" ] && echo " (unused in inotify mode)")
@@ -1171,6 +1200,12 @@ trap cleanup_on_exit EXIT INT TERM
 
 # Shared state
 LAST_WAKE=0
+# Separate debounce clock for outbox-message wakes (issue #129): a message
+# wake must not be swallowed by a just-fired outcome wake (whose top-up
+# prompt says nothing about outboxes), and vice versa. Coalesced messages
+# aren't lost either way — the outbox wake prompt instructs a full scan of
+# every worker outbox, not just the triggering file.
+LAST_MSG_WAKE=0
 
 # issue #225: dedups the watch.pr_poll reason=orphan_no_window log line so a
 # window-less worktree with a terminal PR gets logged once, not every
@@ -1197,8 +1232,10 @@ declare -A ORPHAN_PR_LOGGED=()
 is_our_worktree() {
     local path="$1"
     local worktree_root
-    # Strip "/.swarm/tasks/done/<file>.json" suffix to get the worktree root.
-    worktree_root="$(echo "$path" | sed -E 's|/\.swarm/tasks/done/[^/]+$||')"
+    # Strip the "/.swarm/tasks/done/<file>.json" (outcome) or
+    # "/.swarm/tasks/outbox/<file>.md" (worker message, issue #129) suffix
+    # to get the worktree root.
+    worktree_root="$(echo "$path" | sed -E 's%/\.swarm/tasks/(done|outbox)/[^/]+$%%')"
 
     local wt_list
     wt_list="$(git -C "$PROJECT_DIR" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2}')" || return 0
@@ -1221,6 +1258,30 @@ dispatch_outcome() {
         issue=$(basename "$path" | sed -E 's/.*-([0-9]+)\.(ok|err)\.json$/\1/')
         log_event worker.finish.skip "issue=$issue reason=foreign_worktree path=$path"
     fi
+}
+
+# dispatch_message <outbox-message-path>
+#
+# (issue #129) Outbox counterpart of dispatch_outcome: same is_our_worktree
+# scoping, routed to on_message. Used by both backends.
+dispatch_message() {
+    local path="$1"
+    if is_our_worktree "$path"; then
+        on_message "$path"
+    else
+        local issue
+        issue=$(msg_issue "$path")
+        log_event worker.message.skip "issue=$issue reason=foreign_worktree path=$path"
+    fi
+}
+
+# msg_issue <outbox-message-path> — issue number from the worktree dir name
+# (wt-issue-42/... -> 42; "?" when the path doesn't match, e.g. custom
+# worktree layouts).
+msg_issue() {
+    local n
+    n=$(echo "$1" | sed -nE 's|.*/wt-issue-([0-9]+)/.*|\1|p')
+    echo "${n:-?}"
 }
 
 # cleanup_eligible_workers
@@ -2769,6 +2830,61 @@ on_outcome() {
     fi
 }
 
+# on_message <outbox-message-path>
+#
+# (issue #129) A worker dropped a message file into its
+# `.swarm/tasks/outbox/`. Wake the coordinator with a message-triage prompt.
+# Mirrors on_outcome's shape (debounce -> pre-wake compact -> llm-start ->
+# ONCE) minus the outcome-only steps: no sweep (nothing to post — the message
+# IS the payload) and no autoclose pass (a message never frees a slot).
+on_message() {
+    local path="$1"
+    local now issue
+    now=$(date +%s)
+    issue=$(msg_issue "$path")
+    log_event worker.message "issue=$issue path=$path"
+
+    if [ $((now - LAST_MSG_WAKE)) -lt "$DEBOUNCE_SECS" ]; then
+        echo "[$(date +%T)] message: $path — within debounce window (${DEBOUNCE_SECS}s), skipping wake"
+        log_event coord.wake.skip "issue=$issue reason=debounce window=${DEBOUNCE_SECS}s trigger=outbox"
+        return
+    fi
+
+    maybe_auto_compact wake
+
+    # Default prompt is built per-event so it can name the triggering file,
+    # but it always instructs a full outbox scan — that's what makes the
+    # debounce above safe (coalesced messages surface on the next wake) and
+    # what picks up messages that predate this watcher process.
+    local wake_prompt="$OUTBOX_WAKE_PROMPT"
+    if [ -z "$wake_prompt" ]; then
+        wake_prompt="Worker iss-$issue posted a message to its outbox: $path. List every unprocessed message with: ls $WORKSPACE/wt-issue-*/.swarm/tasks/outbox/*.md — then, oldest first, read each and act on its kind (fyi: note it in your status picture; decision-needed: decide or surface to the operator; brief-draft: review the drafted brief and dispatch it via provision-worker.sh or requeue.sh if warranted, otherwise tell the operator why not). After handling a message, archive it: mkdir -p <its-outbox>/processed && mv <message> <its-outbox>/processed/. Never leave a handled message in outbox/ — unarchived means unread."
+    fi
+
+    echo "[$(date +%T)] message: $path"
+    echo "[$(date +%T)] waking coordinator (outbox)..."
+    log_event coord.wake "issue=$issue trigger=outbox:$(basename "$path")"
+
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "[DRY] would: cd $PROJECT_DIR && NON_INTERACTIVE=1 $LLM_START \"$wake_prompt\""
+    else
+        ( cd "$PROJECT_DIR" && NON_INTERACTIVE=1 "$LLM_START" "$wake_prompt" ) || {
+            echo "[$(date +%T)] WARN: coordinator wake exited non-zero (continuing watch)"
+            log_event coord.wake.error "issue=$issue trigger=outbox"
+        }
+    fi
+    LAST_MSG_WAKE=$now
+
+    if [ "$ONCE" = "1" ]; then
+        echo "[$(date +%T)] ONCE=1 — exiting after first wake."
+        log_event watch.exit "reason=once"
+        # Same pane-echo grace period as on_outcome's ONCE path — see the
+        # comment there for why 1.5s.
+        [ "$WATCHER_QUIET" = "1" ] || sleep 1.5
+        exit 0
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # Backend: inotify
 # ---------------------------------------------------------------------------
@@ -2788,6 +2904,16 @@ run_inotify() {
         case "$path" in
             */wt-issue-*/.swarm/tasks/done/*.ok.json|*/wt-issue-*/.swarm/tasks/done/*.err.json)
                 dispatch_outcome "$path"
+                ;;
+            */wt-issue-*/.swarm/tasks/outbox/processed/*)
+                # Lifecycle archive (coordinator mv after handling) — the
+                # mv into processed/ raises moved_to too; not a new message.
+                ;;
+            */wt-issue-*/.swarm/tasks/outbox/*.md)
+                # Worker message (issue #129). Only final names trigger:
+                # the write convention is mktemp WITHOUT the .md suffix,
+                # then mv — so half-written temp files never match *.md.
+                [ "$WATCH_OUTBOX" = "1" ] && dispatch_message "$path"
                 ;;
         esac
     done
@@ -2811,16 +2937,22 @@ run_poll() {
     # may expand to nothing if no worker worktrees exist yet — handle that
     # gracefully via nullglob so the find call gets an empty arg list.
     scan_outcomes() {
-        local done_dirs=()
+        local done_dirs=() outbox_dirs=()
         shopt -s nullglob
         done_dirs=("$WORKSPACE"/wt-issue-*/.swarm/tasks/done)
+        outbox_dirs=("$WORKSPACE"/wt-issue-*/.swarm/tasks/outbox)
         shopt -u nullglob
-        if [ "${#done_dirs[@]}" -eq 0 ]; then
-            return 0   # no worker worktrees — emit empty
-        fi
-        find "${done_dirs[@]}" -maxdepth 1 \
-            \( -name '*.ok.json' -o -name '*.err.json' \) -print 2>/dev/null \
-            | sort -u
+        {
+            if [ "${#done_dirs[@]}" -gt 0 ]; then
+                find "${done_dirs[@]}" -maxdepth 1 \
+                    \( -name '*.ok.json' -o -name '*.err.json' \) -print 2>/dev/null
+            fi
+            # Worker messages (issue #129). -maxdepth 1 keeps the archived
+            # outbox/processed/ subtree out of the scan.
+            if [ "$WATCH_OUTBOX" = "1" ] && [ "${#outbox_dirs[@]}" -gt 0 ]; then
+                find "${outbox_dirs[@]}" -maxdepth 1 -name '*.md' -print 2>/dev/null
+            fi
+        } | sort -u
     }
 
     scan_outcomes > "$seen_file"
@@ -2836,7 +2968,10 @@ run_poll() {
         if [ -n "$diff_new" ]; then
             while IFS= read -r path; do
                 [ -z "$path" ] && continue
-                dispatch_outcome "$path"
+                case "$path" in
+                    */.swarm/tasks/outbox/*.md) dispatch_message "$path" ;;
+                    *)                          dispatch_outcome "$path" ;;
+                esac
             done <<< "$diff_new"
             echo "$current" > "$seen_file"
         fi
