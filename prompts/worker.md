@@ -525,19 +525,12 @@ plain-language re-entry, acceptance criteria a person signs off on).
 
 ---
 
-## Worker verbosity
+## Worker voice
 
-Read `$WORKER_VERBOSITY` from the environment — it is authoritative. It's
-injected as a `## Worker verbosity` section into provisioning briefs
-(`provision-worker.sh`); a `requeue.sh` follow-up brief is written verbatim
-from the coordinator's source and may omit it. Default `verbose`. Levels:
-**verbose** (full status
-updates, options at decision points) · **normal** (status at milestones) ·
-**concise** (outcome-only updates) · **spartan** (single-line status, one-
-sentence summary). The `## Summary`/`## Decision`/`## Next`/risk-assessment
-conventions are **never** suppressed by verbosity — only per-step narrative
-is. The human can adjust mid-task via a `requeue.sh` brief containing
-`## Verbosity adjust` / `New level: <level>`.
+One voice, no dial: emit status at milestones (worktree ready, tests
+green, PR opened), not per-step narrative; present options only at genuine
+decision points. The `## Summary`/`## Decision`/`## Next`/risk-assessment
+conventions are structural, not chatter — always emit them.
 
 ---
 

@@ -13,7 +13,7 @@
 # mode (which otherwise has no other constraint).
 #
 # A baseline set of communication conventions (PR risk rating, end-of-work
-# summary, decision-point framing, next-best-action hint, verbosity dial,
+# summary, decision-point framing, next-best-action hint,
 # "surface don't bury" notes, tiered self-merge by risk) is ALREADY injected
 # before this file via `prompts/worker.md`. You don't need to repeat them;
 # only override in the "Communication overrides" section below if your
@@ -98,7 +98,7 @@ This section overrides or extends the baseline conventions in
 worker brief). Use it for project-specific tuning. Examples of what could
 go here:
 
-- "Override default verbosity to `concise` for all workers in this repo."
+- "Skip per-milestone status updates for all workers in this repo — handoff blocks only."
 - "PR risk rating must include a separate `<!-- LIQUIBASE_TOUCHED: yes|no -->` HTML comment when database migrations are present."
 - "End-of-work summary must include a `## Coverage delta` section listing tests added/changed."
 - "Next-best-action hints should always link to the project's runbook (`docs/RUNBOOK.md`) when CI fails."

@@ -34,12 +34,12 @@ PROJECT="$TEST_DIR/project"
 mkdir -p "$SANDBOX" "$PROJECT/.swarm"
 
 cat > "$SANDBOX/.env.example" <<'EOF'
-WORKER_VERBOSITY=verbose
+WORKER_MODEL=opus
 SWARM_WORKTREE_GROUPING=flat
 MAX_WORKERS=5
 EOF
 
-VARS=(WORKER_VERBOSITY SWARM_WORKTREE_GROUPING MAX_WORKERS)
+VARS=(WORKER_MODEL SWARM_WORKTREE_GROUPING MAX_WORKERS)
 
 # ============================================================================
 heading "Test 1: no project override → sandbox .env.example defaults apply"
@@ -49,7 +49,7 @@ rm -f "$PROJECT/.swarm/.env"
     unset "${VARS[@]}" 2>/dev/null || true
     export LLM_SWARM_DIR="$SANDBOX"
     . "$LOAD_ENV" "$PROJECT"
-    [ "$WORKER_VERBOSITY" = "verbose" ]      || { echo "WORKER_VERBOSITY=$WORKER_VERBOSITY, want verbose" >&2; exit 1; }
+    [ "$WORKER_MODEL" = "opus" ]             || { echo "WORKER_MODEL=$WORKER_MODEL, want opus" >&2; exit 1; }
     [ "$SWARM_WORKTREE_GROUPING" = "flat" ]  || { echo "SWARM_WORKTREE_GROUPING=$SWARM_WORKTREE_GROUPING, want flat" >&2; exit 1; }
     [ "$MAX_WORKERS" = "5" ]                 || { echo "MAX_WORKERS=$MAX_WORKERS, want 5" >&2; exit 1; }
 ) || red "defaults-only layer failed"
@@ -59,14 +59,14 @@ green "no project .env, no shell env → .env.example defaults win"
 heading "Test 2: project .swarm/.env overrides .env.example defaults"
 # ============================================================================
 cat > "$PROJECT/.swarm/.env" <<'EOF'
-WORKER_VERBOSITY=concise
+WORKER_MODEL=sonnet
 MAX_WORKERS=8
 EOF
 (
     unset "${VARS[@]}" 2>/dev/null || true
     export LLM_SWARM_DIR="$SANDBOX"
     . "$LOAD_ENV" "$PROJECT"
-    [ "$WORKER_VERBOSITY" = "concise" ]      || { echo "WORKER_VERBOSITY=$WORKER_VERBOSITY, want concise" >&2; exit 1; }
+    [ "$WORKER_MODEL" = "sonnet" ]           || { echo "WORKER_MODEL=$WORKER_MODEL, want sonnet" >&2; exit 1; }
     [ "$MAX_WORKERS" = "8" ]                 || { echo "MAX_WORKERS=$MAX_WORKERS, want 8" >&2; exit 1; }
     # Not overridden by the project file — still falls back to the default.
     [ "$SWARM_WORKTREE_GROUPING" = "flat" ]  || { echo "SWARM_WORKTREE_GROUPING=$SWARM_WORKTREE_GROUPING, want flat" >&2; exit 1; }
@@ -78,10 +78,10 @@ heading "Test 3: caller-supplied shell env (flag) beats project .swarm/.env"
 # ============================================================================
 (
     unset SWARM_WORKTREE_GROUPING MAX_WORKERS 2>/dev/null || true
-    export WORKER_VERBOSITY=spartan   # simulates a pre-set flag/env var
+    export WORKER_MODEL=haiku   # simulates a pre-set flag/env var
     export LLM_SWARM_DIR="$SANDBOX"
     . "$LOAD_ENV" "$PROJECT"
-    [ "$WORKER_VERBOSITY" = "spartan" ] || { echo "WORKER_VERBOSITY=$WORKER_VERBOSITY, want spartan (shell env should win)" >&2; exit 1; }
+    [ "$WORKER_MODEL" = "haiku" ]       || { echo "WORKER_MODEL=$WORKER_MODEL, want haiku (shell env should win)" >&2; exit 1; }
     # Project file still wins over the sandbox default for the var it sets
     # and the caller didn't touch.
     [ "$MAX_WORKERS" = "8" ]            || { echo "MAX_WORKERS=$MAX_WORKERS, want 8 (project .env)" >&2; exit 1; }
@@ -91,6 +91,6 @@ green "pre-set shell env beats project .swarm/.env, which still beats sandbox de
 # ============================================================================
 heading "All _load-env.sh precedence shape tests passed"
 # ============================================================================
-green "flag(shell env) > project .swarm/.env > sandbox .env.example, for WORKER_VERBOSITY/SWARM_WORKTREE_GROUPING/MAX_WORKERS"
+green "flag(shell env) > project .swarm/.env > sandbox .env.example, for WORKER_MODEL/SWARM_WORKTREE_GROUPING/MAX_WORKERS"
 echo ""
 yellow "Run with KEEP=1 to leave $TEST_DIR for inspection."

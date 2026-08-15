@@ -25,21 +25,11 @@ case "${1:-}" in
 provision-worker.sh — Provision a worker for one GitHub issue
 
 USAGE
-    provision-worker.sh [-v|--verbosity LEVEL] <issue-number> [project-dir]
+    provision-worker.sh <issue-number> [project-dir]
 
 ARGUMENTS
     issue-number    GitHub issue number to dispatch (required)
     project-dir     Path to project root (default: \$PWD)
-
-OPTIONS
-    -v, --verbosity LEVEL
-        Worker communication verbosity. One of: verbose, normal, concise,
-        spartan. See prompts/worker.md for what each level means.
-        Default precedence (highest wins):
-          1. this flag
-          2. WORKER_VERBOSITY in <project>/.swarm/.env
-          3. WORKER_VERBOSITY in <sandbox>/.env.example
-          4. 'verbose' (baseline default)
 
 DESCRIPTION
     One-call helper for the coordinator. Creates worktree at
@@ -72,7 +62,6 @@ STALE BRANCH (exit 2)
 CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     MAX_WORKERS         5         worker tmux window cap
     MAX_TMUX_WINDOWS    10        total session window cap
-    WORKER_VERBOSITY    verbose   worker communication level
     SANDBOX_SH          (auto)    path to sandbox.sh used by the listener
     LLM_SWARM_DIR     (auto)    sandbox install dir
 
@@ -85,31 +74,19 @@ EVENTS LOG
 EXAMPLES
     provision-worker.sh 142                          # dispatch issue #142 from \$PWD
     provision-worker.sh 142 /path/to/proj            # explicit project dir
-    provision-worker.sh -v concise 142               # quiet worker
-    provision-worker.sh --verbosity spartan 142      # quietest worker
 EOF
         exit 0
         ;;
 esac
 
-# --- Optional -v|--verbosity flag (must come before the issue number) ---
-VERBOSITY_OVERRIDE=""
 while [[ "${1:-}" == -* ]]; do
     case "$1" in
-        -v|--verbosity)
-            VERBOSITY_OVERRIDE="${2:?--verbosity requires a value: verbose|normal|concise|spartan}"
-            case "$VERBOSITY_OVERRIDE" in
-                verbose|normal|concise|spartan) ;;
-                *) echo "ERROR: --verbosity must be one of: verbose, normal, concise, spartan (got '$VERBOSITY_OVERRIDE')" >&2; exit 2 ;;
-            esac
-            shift 2
-            ;;
         --) shift; break ;;
         *) echo "ERROR: unknown flag '$1' (try --help)" >&2; exit 2 ;;
     esac
 done
 
-ISSUE="${1:?usage: provision-worker.sh [-v LEVEL] <issue-number> [project-dir]   (try --help)}"
+ISSUE="${1:?usage: provision-worker.sh <issue-number> [project-dir]   (try --help)}"
 PROJECT_DIR="${2:-$PWD}"
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
 BRANCH="fix/issue-$ISSUE"
@@ -137,17 +114,10 @@ mkdir -p "$(dirname "$WT")"
 MAX_WORKERS="${MAX_WORKERS:-5}"
 MAX_TMUX_WINDOWS="${MAX_TMUX_WINDOWS:-10}"
 
-# Resolve verbosity: --verbosity flag > shell/_load-env WORKER_VERBOSITY > 'verbose'.
-# Exported below into the worker container so the worker reads it from env;
-# also injected into the brief as a `## Worker verbosity` directive so a
-# worker that misses the env var still sees it in its task.
-WORKER_VERBOSITY="${VERBOSITY_OVERRIDE:-${WORKER_VERBOSITY:-verbose}}"
-export WORKER_VERBOSITY
-
 # Worker conventions (`prompts/worker.md`) are delivered as a system prompt
 # by the listener at claude/gemini launch time — see scripts/worker-listener.sh.
 # Briefs no longer carry them verbatim; this script only assembles the
-# per-task payload (refs index + verbosity + project policy + task content).
+# per-task payload (refs index + project policy + task content).
 
 # Reference-docs index. Cat'd into every brief so workers know what
 # authoritative docs are available under $LLM_SWARM_DOCS/ inside their
@@ -320,15 +290,7 @@ TMP="$(mktemp -p "$WT/.swarm/tasks/inbox" .tmp.XXXXXX.md)"
         echo "---"
         echo
     fi
-    # 2. Active verbosity directive — explicit so a worker without the env var
-    #    still picks it up from prose.
-    echo "## Worker verbosity"
-    echo
-    echo "Active level: \`$WORKER_VERBOSITY\`"
-    echo
-    echo "---"
-    echo
-    # 3. Project-specific guardrails (per-project policy may extend or
+    # 2. Project-specific guardrails (per-project policy may extend or
     #    override the worker baseline delivered via system prompt).
     if [ -f .swarm-policy.md ]; then
         echo "## Project Guardrails (MUST OBEY)"
@@ -338,7 +300,7 @@ TMP="$(mktemp -p "$WT/.swarm/tasks/inbox" .tmp.XXXXXX.md)"
         echo "---"
         echo
     fi
-    # 4. The actual task.
+    # 3. The actual task.
     echo "## Task"
     echo
     echo "Fix issue #$ISSUE. Details follow."
@@ -409,7 +371,7 @@ else
     # explicit hand-off the acceptance-check config documented in
     # .env.example never reaches sandbox.sh (and thus never the listener).
     tmux new-window -d -t "$SESSION_NAME" -n "iss-$ISSUE" \
-        "WORKER_CONTAINER_NAME=$(printf '%q' "$container_name") WORKER_VERBOSITY=$(printf '%q' "$WORKER_VERBOSITY") WORKER_CMD=$(printf '%q' "${WORKER_CMD:-claude}") WORKER_MODEL=$(printf '%q' "${WORKER_MODEL:-}") WORKER_HEADLESS=$(printf '%q' "${WORKER_HEADLESS:-0}") WORKER_SELF_REVIEW=$(printf '%q' "${WORKER_SELF_REVIEW:-1}") WORKER_CHECK=$(printf '%q' "${WORKER_CHECK:-}") WORKER_CHECK_CMD=$(printf '%q' "${WORKER_CHECK_CMD:-}") WORKER_CHECK_TIMEOUT=$(printf '%q' "${WORKER_CHECK_TIMEOUT:-}") WORKER_CHECK_RETRY=$(printf '%q' "${WORKER_CHECK_RETRY:-}") SWARM_EVAL_LOG=$(printf '%q' "${SWARM_EVAL_LOG:-}") EXTRA_MOUNTS=$(printf '%q' "${EXTRA_MOUNTS:-}") $(printf '%q' "$SANDBOX_SH") $(printf '%q' "$WT") listener"
+        "WORKER_CONTAINER_NAME=$(printf '%q' "$container_name") WORKER_CMD=$(printf '%q' "${WORKER_CMD:-claude}") WORKER_MODEL=$(printf '%q' "${WORKER_MODEL:-}") WORKER_HEADLESS=$(printf '%q' "${WORKER_HEADLESS:-0}") WORKER_SELF_REVIEW=$(printf '%q' "${WORKER_SELF_REVIEW:-1}") WORKER_CHECK=$(printf '%q' "${WORKER_CHECK:-}") WORKER_CHECK_CMD=$(printf '%q' "${WORKER_CHECK_CMD:-}") WORKER_CHECK_TIMEOUT=$(printf '%q' "${WORKER_CHECK_TIMEOUT:-}") WORKER_CHECK_RETRY=$(printf '%q' "${WORKER_CHECK_RETRY:-}") SWARM_EVAL_LOG=$(printf '%q' "${SWARM_EVAL_LOG:-}") EXTRA_MOUNTS=$(printf '%q' "${EXTRA_MOUNTS:-}") $(printf '%q' "$SANDBOX_SH") $(printf '%q' "$WT") listener"
     echo "[4/4] tmux window iss-$ISSUE spawned (listener)"
     log_event worker.start "issue=$ISSUE task_id=$TASK_ID window=iss-$ISSUE alive=$((alive_workers + 1))/$MAX_WORKERS total_windows=$((total_windows + 1))/$MAX_TMUX_WINDOWS"
 fi

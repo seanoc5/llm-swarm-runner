@@ -9,6 +9,9 @@ style when they are written.
 
 ## [Unreleased]
 
+### Removed
+- The four-level `WORKER_VERBOSITY` dial (`verbose`/`normal`/`concise`/`spartan`, ADR 0002) and its plumbing: `provision-worker.sh -v/--verbosity` flag, env resolution chain, per-brief `## Worker verbosity` injection, and the `sandbox.sh`/`llm-start.sh` passthrough entries. Workers now speak with one baked-in voice (`prompts/worker.md` § "Worker voice"): status at milestones, options only at genuine decision points. (#279)
+
 ### Added
 - `scripts/reap-orphan-worktrees.sh` — bulk-reap stale `wt-issue-*` worktrees whose work is preserved elsewhere. Iterates directories (unlike `kill-finished-workers.sh`, which iterates live `iss-*` tmux windows), so it catches worktrees that outlived their tmux session. Default safety predicate: at least `--min-age-days N` old (default 2; overridable via `REAP_MIN_AGE_DAYS`), clean tree, and PR finalized (MERGED or CLOSED). Stricter `--merged-only` and offline `--no-pr-check` modes available.
 

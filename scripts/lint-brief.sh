@@ -22,7 +22,7 @@
 #                        ask the issue author questions
 #
 # Only the `## Task` section onward is linted when present (the brief
-# preamble — refs index, verbosity, guardrails — would trigger false
+# preamble — refs index, guardrails — would trigger false
 # positives). Whole file is linted if there is no `## Task` heading.
 #
 # Usage:
