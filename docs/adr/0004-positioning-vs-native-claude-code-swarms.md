@@ -1,8 +1,8 @@
 # ADR 0004: Positioning vs. Claude Code's native swarm capabilities
 
-**Status:** Proposed — drafted by the coordinator 2026-08-13, awaiting Sean's
-red-pen. Claims marked `[verify]` are the author's best reconstruction and
-need operator confirmation before this ADR is Accepted or quoted publicly.
+**Status:** Proposed — drafted by the coordinator 2026-08-13; operator
+red-pen 2026-08-15 confirmed the dropped-claims list and resolved the
+reconstruction markers. Becomes Accepted on merge.
 
 ## Context
 
@@ -30,8 +30,10 @@ Dropped from our positioning; do not use them in demos or posts:
   run on the same subscription/API economics. The real economic lever is
   worker-class *routing* (send trivial issues to CI-verified `claude-code-
   action`, keep heavy ones local) and the ability to spread work across
-  days of a subscription rather than one sitting. `[verify: this matches
-  the lost session's conclusion]`
+  days of a subscription rather than one sitting. (This is this ADR's own
+  conclusion — the earlier unrecorded evaluation may have reasoned
+  differently, but nobody remembers, which is rather the point of writing
+  ADRs.)
 
 ## Claims that survive
 

@@ -94,9 +94,10 @@ building time.
 
 ## Venue notes (operator decisions, not in the post)
 
-- Nate's Newsletter: post as a community thread/comment where allowed;
-  subscriber standing may earn attention but keep the ask concrete and
-  short — the four questions carry it. `[Sean: confirm the exact venue
-  mechanics — chat thread vs comment vs Notes]`
+- Nate's Newsletter: Sean is checking what the venue actually offers
+  subscribers (chat thread vs comment vs Notes) before posting — the draft
+  above is deliberately venue-neutral so it works in any of the three.
+  Subscriber standing may earn attention but keep the ask concrete and
+  short — the four questions carry it.
 - Secondary: r/ClaudeAI or Hacker News *after* the substack pass has
   hardened the framing — the feedback there is higher-volume, lower-signal.
