@@ -323,9 +323,9 @@ journalctl --since "1 hour ago" | grep -iE 'oom|killed process'
 dmesg | grep -i 'killed process' | tail -20
 ```
 
-If a *container* was killed: the host ran out of RAM/swap. Containers with `--network host` and no memory limit will use whatever's available, so a runaway worker can OOM the whole box. Check `free -h` and look at `/var/log/system-monitor.log` if you have the monitor service installed (see the main README in `/opt/work/sysadmin/`).
+If a *worker process* was killed inside its container: check the worker log for exit code 137. Every sandbox container runs with a memory cap (`SANDBOX_MEM_LIMIT`, default `8g`, applied as `--memory`/`--memory-swap`; see [advanced-usage.md](advanced-usage.md#memory-limit-sandbox_mem_limit)), so the common case now is the cgroup OOM-killing the runaway process *inside its own container* rather than the host running out of RAM. Raise the cap per-project in `.swarm/.env` (e.g. `SANDBOX_MEM_LIMIT=24g` for a heavy JVM test suite) if the workload legitimately needs more than 8 GB.
 
-If the *host* OOM-killed something important, the swap and swappiness fixes documented in `/opt/work/sysadmin/README.md` apply.
+If the *host* itself ran out of RAM/swap: this is now only expected when `SANDBOX_MEM_LIMIT` was raised on a box that can't back it, or set to `0` to disable the cap entirely. Check `free -h` and look at `/var/log/system-monitor.log` if you have the monitor service installed (see the main README in `/opt/work/sysadmin/`). If the host OOM-killed something important, the swap and swappiness fixes documented in `/opt/work/sysadmin/README.md` apply.
 
 ### GPU lockups / `Xid` errors
 

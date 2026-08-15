@@ -8,6 +8,7 @@ When giving an autonomous AI tool access to your filesystem, security must be a 
 
 *   **Runs as your host UID/GID:** The sandbox runs processes using your exact User ID and Group ID. This ensures file permissions inside and outside the container match perfectly, but it also means the agent has the exact same file-level access rights as you do for any mounted directories.
 *   **Containment via Mounts:** The blast radius is limited to bind-mounted paths, not only `$PROJECT_DIR`. Defaults include the project, agent config (`~/.claude`, `~/.codex`), selected Git/GitHub/SSH config, npm caches, the git common dir for worktrees, and optionally `/var/run/docker.sock`. The agent cannot accidentally `rm -rf /` your host filesystem unless Docker socket access is present and misused, but it can alter or expose mounted paths.
+*   **Memory governor:** Every container runs with a memory cap (`SANDBOX_MEM_LIMIT`, default `8g`, applied as `--memory`/`--memory-swap` pinned equal so the cgroup can't overflow into swap). This is host-DoS containment — a runaway workload OOM-kills *inside its own container* (exit 137) instead of exhausting host RAM. `SANDBOX_MEM_LIMIT=0` disables the cap. See [advanced-usage.md](advanced-usage.md#memory-limit-sandbox_mem_limit).
 
 ## Known Risks and Caveats
 
@@ -26,6 +27,7 @@ Mounting `/var/run/docker.sock` gives the container full Docker daemon access. T
 ### Credentials
 *   **SSH keys:** Mounted `ro` (read-only). The agent can use them to sign commits or push to GitHub, but it cannot modify them.
 *   **Agent config:** Claude and Codex config directories are mounted `rw` for persisted login state. Gemini config is mounted `ro` when present.
+*   **GH_TOKEN injection:** `sandbox.sh` reads the host's `gh auth token` at every launch and injects it into the container as the `GH_TOKEN` env var (passed via `-e GH_TOKEN` so the value itself never appears in argv — but it's fully readable from the container's environment). This gives the agent your full `gh` scope; treat it as exfiltratable like any other mounted credential.
 *   **Exfiltration:** An actively malicious agent could read mounted credentials and exfiltrate them via the network. You must trust the LLM provider (Anthropic, Google, or OpenAI) you are using.
 
 ### Tmux Scrollback Exposure
