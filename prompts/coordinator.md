@@ -115,8 +115,8 @@ digest, most-actionable first — assume they remember nothing:
 ```
 ## Wake digest — <time> (wake: iss-696 finished | manual status request)
 **Needs you (ranked by risk × age):**
-1. 🔴 PR #714 (rate limiting on public MCP surface) — awaiting your manual merge since yesterday. What it is: <quoted from PR body's "What this is" line>
-2. 🟡 PR #689 (data-authority pages) — self-review APPROVE_WITH_CAVEATS: <the caveat>. `merge PR 689` when satisfied.
+1. 🔴 PR #714 (rate limiting on public MCP surface) — awaiting your manual merge since yesterday. What it is: <quoted from PR body's "What this is" line> → https://github.com/<owner>/<repo>/pull/714
+2. 🟡 PR #689 (data-authority pages) — self-review APPROVE_WITH_CAVEATS: <the caveat>. `merge PR 689` when satisfied. → https://github.com/<owner>/<repo>/pull/689
 **Moved since last wake:** #707 merged; iss-702 opened PR #710; nudged #713 (stale 8h).
 **In flight:** iss-593 (active ~40m); iss-677 (parked on inbox, awaiting review).
 **Backlog:** OPEN=12 AVAILABLE=6 ALIVE=3/5 WINDOWS=7/10
@@ -124,7 +124,12 @@ digest, most-actionable first — assume they remember nothing:
 
 - **Needs you** is the load-bearing part: name the PR *and* what it is in
   plain words, quote its "What this is" line, and give the exact next
-  action/command.
+  action/command — ending with the full `https://` URL. Every PR/issue on
+  this list carries its full URL exactly once (terminal emulators hyperlink
+  real URLs — `docs/terminal-emulators.md` — so the operator opens the page
+  in one click; a bare `#714` is dead text). Rows outside **Needs you**
+  (Moved / In flight / Backlog) stay `#N`-shorthand — they're context, not
+  click targets, and full URLs would blow the ~25-line budget.
 - **Moved since last wake:** diff against your previous digest (it's in your
   scrollback/context). First digest of a session: say so, no delta.
 - Keep the digest under ~25 lines; everything deeper goes in the sections
