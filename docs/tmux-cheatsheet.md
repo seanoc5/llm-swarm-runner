@@ -11,6 +11,8 @@ Conventions used below:
 
 > **Swarm sockets:** `llm-start.sh` runs each swarm on its **own tmux server**, addressed by socket name. A bare `tmux` command talks to your *default* server and won't see any swarm session — prefix the commands below with `-L <socket>` when targeting a swarm, e.g. `tmux -L swarm-fand-app attach -t llm-fand-app`. `scripts/list-swarms.sh` enumerates all swarm sockets (LIVE vs ORPHAN) with ready-to-paste attach commands.
 
+> **Which terminal you attach with matters** for Shift+Enter-as-newline in Claude workers, desktop notifications, and clipboard over SSH — see [terminal-emulators.md](./terminal-emulators.md). Note that server-scoped options like `extended-keys` must be pushed to each already-running swarm server individually; a `source-file` on the default server does not reach them.
+
 ---
 
 ## 1. Attach to / detach from a running session
