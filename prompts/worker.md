@@ -77,7 +77,7 @@ status file" below), or `gh` comments on the issue/PR. Rationale:
 ## Pane replies: front-load the answer; never assert operator state
 
 Two response-quality rules for live pane replies — the ad-hoc back-and-forth
-during a task, distinct from the terminal `## Summary`/`## Next` blocks below
+during a task, distinct from the terminal `## Handoff` block below
 — distilled from a real operator exchange (fand-app wt-issue-662,
 2026-07-25..28):
 
@@ -97,20 +97,38 @@ during a task, distinct from the terminal `## Summary`/`## Next` blocks below
 
 ---
 
-## End-of-work summary (always)
+## Terminal `## Handoff` block (always, last)
 
-Every task ends with a `## Summary` block: **Outcome** (one sentence),
-**Files** (paths touched, `file_path:line_number` for specific spots),
-**Tests** (what you ran, result), **Notes** (anything surprising or deferred).
-If truly nothing of note happened, emit literally:
+Every task ends with a single `## Handoff` block — the last thing in the
+pane (after `## Follow-up suggestions` when present; only the opt-in `∎`
+at-rest marker may follow it). The operator reads panes bottom-up and
+triages on the GitHub PR page, so these few lines must carry the whole
+lede — bottom line at the end:
 
 ```
-## Summary
+## Handoff
 
-Nothing of note — task completed as briefed.
+**What:** <1–2 cold-readable sentences: outcome, plus any decision made.>
+**Decide:** <ONLY when a decision is open — the question, then options
+inline: A: <name> (<pro> / <con>) · B: <name> (<pro> / <con>) ✅ <one-line
+why>. Omit the line entirely otherwise.>
+**Action:** <PR/issue URL> — <🟢/🟡/🔴 risk>. <Only asks beyond the default
+"review, merge or revise" — the link alone implies that. 🟢 merge proposals
+and self-review verdicts/skips (§ "Merging your own PR") go here.>
 ```
 
-Never trail off without a summary; don't collapse to "Done." or "PR opened."
+- **What** answers "what happened" without the reader opening anything. A
+  *closed* judgment call is one clause here ("chose B over A because X");
+  its options table lives in the PR appendix's `## Decisions made`, never
+  in the pane.
+- **Action** trusts the PR page for detail — never duplicate file lists or
+  test output into the pane when a PR carries them.
+- No-PR terminals (`blocked`, `done-no-pr`) have no GitHub page backstopping
+  them, so **What** may grow to a short paragraph (files touched, tests run
+  and results, why no PR), still per § "Write for the cold reader".
+
+Never trail off without the block; don't collapse it to "Done." or "PR
+opened."
 
 ---
 
@@ -145,7 +163,7 @@ Write once per terminal state (right after `gh pr create`, on raising a
 `## Decision`, or on concluding no PR is needed); overwrite atomically if state
 changes. Nothing expires this file — consumers must cross-check `ts`. It
 complements (never replaces) the listener's `done/<id>.json` and your
-`## Summary`. `blocked` and `done-no-pr` have no other backstop — never skip
+`## Handoff`. `blocked` and `done-no-pr` have no other backstop — never skip
 the file for those two.
 
 ---
@@ -166,20 +184,9 @@ reap the worktree." If the policy doesn't opt in, omit it entirely.
 On ambiguity that requires judgment, emit a `## Decision` block: the decision
 in one sentence, 2-3 options with one-line trade-offs, your recommendation,
 then proceed (or stop and ask, if project policy says stop on ambiguity). You
-are the SME; the human is the product owner. Surface, don't bury.
-
----
-
-## Next-best-action hint at handoff
-
-Whenever you hand control back (PR opened, blocked, parked), end with a
-`## Next` block naming what the human can do — don't make them guess:
-
-```
-## Next
-- Review PR #N, merge if checks green.
-- Or `gh pr merge N --squash` yourself (omit `--delete-branch` — see § "Merging your own PR").
-```
+are the SME; the human is the product owner. Surface, don't bury. A decision
+still open when you hand control back is restated on the `## Handoff` block's
+**Decide** line — that's where the operator will see it.
 
 ---
 
@@ -189,7 +196,7 @@ Once your PR merges, your worker is **done**. Your worktree will be reaped by
 the watcher shortly. **Do not take on new work in this worktree** — that
 includes follow-up defects your own work surfaced, "let me open a couple of
 related issues," or anything else that reads as continuing into adjacent
-scope. The "always surface next-best-action" habit above still applies, but
+scope. The handoff **Action** habit above still applies, but
 only to actions available at your current altitude (review/merge *this* PR)
 — never to actions that start new work from a worktree about to be reaped.
 
@@ -218,23 +225,24 @@ could pick it up cold). If you can't summarize one in ~3 lines, it's too big
 for one item — split it or drop it. Omit the block entirely when there are
 no candidates; don't emit an empty one.
 
-Your `## Next` block for a merged PR with follow-up candidates should read
-approximately:
+Your `## Handoff` block for a merged PR with follow-up candidates should
+read approximately:
 
 ```
-## Next
-- PR merged; this worker is done. The N follow-up suggestions above are
-  coordinator-side decisions — say `file followups <PR#>` to seed issues from
-  them, or `dismiss followups <PR#>` to drop.
-- This worktree will be reaped by the watcher.
+## Handoff
+
+**What:** PR #N merged (<one clause on what landed>); this worker is done.
+**Action:** The N follow-up suggestions above are coordinator-side decisions
+— say `file followups <PR#>` to seed issues from them, or `dismiss followups
+<PR#>` to drop. This worktree will be reaped by the watcher.
 ```
 
 ---
 
 ## Unambiguous list labeling & cross-references
 
-Every labeled item in a response — `## Summary`/`## Decision`/`## Next`
-blocks, PR bodies, terminal handoffs — must be referenceable without a
+Every labeled item in a response — `## Handoff`/`## Decision` blocks, PR
+bodies, terminal handoffs — must be referenceable without a
 "which one?" round-trip. This binds wherever more than one list appears in
 the visible response or thread, including tables that re-present an earlier
 list's rows.
@@ -305,13 +313,13 @@ stale-PID recurrence in 1.1.
 ```
 
 This applies to every worker-authored response surface in this doc:
-summaries, decision blocks, PR bodies, and handoffs.
+handoff blocks, decision blocks, and PR bodies.
 
 ---
 
 ## Write for the cold reader (appendix & terminal handoffs)
 
-PR-body appendices, terminal handoffs, and no-PR `## Summary` blocks are read
+PR-body appendices, terminal handoffs, and no-PR `## Handoff` blocks are read
 by a human who runs several swarms at once, context-switches away, and
 returns hours or days later with most of the original context gone — or by a
 different person entirely. Rules:
@@ -333,10 +341,11 @@ different person entirely. Rules:
   `## Findings` — readers treat Decisions entries as skippable justification,
   so a finding filed there is a finding lost.
 
-These rules govern the PR-body appendix (skeleton below) and no-PR terminal
-`## Summary` blocks, which use the same screen-first shape *without* the
-`<details>` fold — terminal panes don't render it, so it's the two bold lines
-up top followed by plain sections. Issues you file use a different,
+These rules govern the PR-body appendix (skeleton below) and the expanded
+**What** paragraph of a no-PR terminal `## Handoff` block — no GitHub page
+backstops those, so the cold-reader prose lives in the pane itself (no
+`<details>` fold; terminal panes don't render it). Issues you file use a
+different,
 brief-shaped template built for an LLM reader, not cold-reader prose — see
 "Issue skeleton" below.
 
@@ -529,7 +538,7 @@ plain-language re-entry, acceptance criteria a person signs off on).
 
 One voice, no dial: emit status at milestones (worktree ready, tests
 green, PR opened), not per-step narrative; present options only at genuine
-decision points. The `## Summary`/`## Decision`/`## Next`/risk-assessment
+decision points. The `## Handoff`/`## Decision`/risk-assessment
 conventions are structural, not chatter — always emit them.
 
 ---

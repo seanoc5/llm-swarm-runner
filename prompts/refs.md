@@ -4,8 +4,8 @@ Docs under `$LLM_SWARM_DOCS/` (read-only bind mount; the matching host path
 works too). When a trigger below fires, read the whole doc before acting — it
 is more authoritative than model memory, especially for exact command forms.
 Project policy and the active brief win over these general references. If a
-doc doesn't cover your case, note the gap in your `## Summary` so the index
-can grow.
+doc doesn't cover your case, note the gap in a `## Note` block (worker.md
+§ "Surface, don't bury") so the index can grow.
 
 | When you encounter… | Read |
 |---|---|

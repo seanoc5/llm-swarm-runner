@@ -13,7 +13,7 @@
 # mode (which otherwise has no other constraint).
 #
 # A baseline set of communication conventions (PR risk rating, end-of-work
-# summary, decision-point framing, next-best-action hint,
+# handoff block, decision-point framing,
 # "surface don't bury" notes, tiered self-merge by risk) is ALREADY injected
 # before this file via `prompts/worker.md`. You don't need to repeat them;
 # only override in the "Communication overrides" section below if your
@@ -34,7 +34,7 @@ This project **defers to the tiered self-merge convention in `prompts/worker.md`
 
 | PR risk | Default behavior |
 |---|---|
-| 🟢 **low** | Worker MAY propose a quick merge confirmation in the end-of-work summary (e.g. *"Merge PR #555 now? (yes / go / ship)"*). A short unhedged affirmative — `yes` / `y` / `go` / `do it` / `ship` / `merge` / `👍` — from the project lead authorizes self-merge. Hedged or off-topic replies do NOT count. |
+| 🟢 **low** | Worker MAY propose a quick merge confirmation on the `## Handoff` block's **Action** line (e.g. *"Merge PR #555 now? (yes / go / ship)"*). A short unhedged affirmative — `yes` / `y` / `go` / `do it` / `ship` / `merge` / `👍` — from the project lead authorizes self-merge. Hedged or off-topic replies do NOT count. |
 | 🟡 **medium** | Worker MUST NOT propose merge. Run self-review (per `prompts/worker.md`) and surface the verdict in the handoff. **Only** self-merge on an unambiguous in-session instruction that **names the PR number** (e.g. *"merge PR 555"*, *"ship 555"*). A bare `yes` / `go` / `ship` is NOT enough — the user must have typed the PR number so a half-read affirmative can't trigger the merge. |
 | 🔴 **high** | Worker NEVER self-merges, **even on explicit instruction**. Run self-review, then refuse and hand back the exact `gh pr merge` command for the project lead to run. There is no override keyword. |
 
@@ -100,8 +100,8 @@ go here:
 
 - "Skip per-milestone status updates for all workers in this repo — handoff blocks only."
 - "PR risk rating must include a separate `<!-- LIQUIBASE_TOUCHED: yes|no -->` HTML comment when database migrations are present."
-- "End-of-work summary must include a `## Coverage delta` section listing tests added/changed."
-- "Next-best-action hints should always link to the project's runbook (`docs/RUNBOOK.md`) when CI fails."
+- "No-PR `## Handoff` blocks must include a `Coverage delta:` line listing tests added/changed."
+- "`## Handoff` **Action** lines should link to the project's runbook (`docs/RUNBOOK.md`) when CI fails."
 - "**At-rest glyph enabled.** Emit `✅` as your final line when truly at rest, per `prompts/worker.md` § 'At-rest signal'."
 
 Leave empty if the baseline is fine for this project.

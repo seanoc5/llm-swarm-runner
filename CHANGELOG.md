@@ -9,6 +9,9 @@ style when they are written.
 
 ## [Unreleased]
 
+### Changed
+- Worker end-of-task output: the `## Summary` + `## Decision` + `## Next` triad is now a single terminal `## Handoff` block (**What** / **Decide** when a decision is open / **Action** with PR link + risk), emitted last in the pane — bottom line at the end, since the operator reads panes bottom-up and triages on the GitHub PR page. Mid-task `## Decision`/`## Note` blocks and the PR-body skeleton are unchanged. (#280)
+
 ### Removed
 - The four-level `WORKER_VERBOSITY` dial (`verbose`/`normal`/`concise`/`spartan`, ADR 0002) and its plumbing: `provision-worker.sh -v/--verbosity` flag, env resolution chain, per-brief `## Worker verbosity` injection, and the `sandbox.sh`/`llm-start.sh` passthrough entries. Workers now speak with one baked-in voice (`prompts/worker.md` § "Worker voice"): status at milestones, options only at genuine decision points. (#279)
 
