@@ -218,10 +218,10 @@ If the path inside the `gitdir:` line doesn't exist on the host (e.g., the main 
 
 ### Coordinator pane shows old/stale output
 
-`llm-start.sh` re-uses an existing tmux session if one exists for the project. If Window 1 still shows the previous run's output, check whether anything is actually running:
+`llm-start.sh` re-uses an existing tmux session if one exists for the project. If the coordinator window still shows the previous run's output, check whether anything is actually running:
 
 ```bash
-tmux list-panes -t llm-<projbase>:1 -F '#{pane_current_command}'
+tmux -L swarm-<projbase> list-panes -t llm-<projbase>:coordinator -F '#{pane_current_command}'
 ```
 
 If it shows `bash` (idle), you can re-invoke `llm-start.sh` and it will run a new prompt in that pane. If it shows `claude` or `gemini`, the prior coordinator is still alive — wait for it or kill the window.
@@ -231,13 +231,13 @@ If it shows `bash` (idle), you can re-invoke `llm-start.sh` and it will run a ne
 Most common cause: no listener tmux window. `requeue.sh` warns about this — re-read its output. To start one:
 
 ```bash
-tmux new-window -d -t llm-<projbase> -n iss-N \
+tmux -L swarm-<projbase> new-window -d -t llm-<projbase> -n iss-N \
     "$LLM_SWARM_DIR/sandbox.sh /path/to/worktree listener"
 ```
 
 Other causes:
 - Brief was written non-atomically (file starts with `.tmp.` — listener intentionally skips those)
-- Listener is in headless mode and crashed silently — check `tmux capture-pane -p -t llm-<projbase>:iss-N`
+- Listener is in headless mode and crashed silently — check `tmux -L swarm-<projbase> capture-pane -p -t llm-<projbase>:iss-N`
 
 ### Tasks stuck in `processing/`
 

@@ -264,7 +264,7 @@ Format: `<utc-iso8601>  <category>  k=v k=v ...`. Greppable. One line per event.
 2026-05-05T14:32:14Z  cap.refused     issue=178 reason=max_workers alive=2 max=2
 ```
 
-When `cap.refused` fires repeatedly, close finished `iss-*` windows: `tmux kill-window -t llm-<project>:iss-NN`. The watcher won't auto-close them — your scrollback is preserved for review.
+When `cap.refused` fires repeatedly, close finished `iss-*` windows: `tmux -L swarm-<project> kill-window -t llm-<project>:iss-NN`. The watcher won't auto-close them — your scrollback is preserved for review.
 
 For bulk cleanup, use `kill-finished-workers.sh`. Default: parked-only AND PR-safe (workers tied to an open PR are preserved so you can review the scrollback alongside the PR):
 
