@@ -102,6 +102,7 @@ git -C "$PROJECT_DIR" show-ref --verify --quiet refs/heads/fix/issue-99 \
     || red "branch fix/issue-99 not created"
 [ -d "$WT/.swarm/tasks/inbox" ] || red "queue inbox dir not created"
 [ -d "$WT/.swarm/tasks/status" ] || red "queue status dir not created (see #129: worker status-file hand-off)"
+[ -d "$WT/.swarm/tasks/outbox" ] || red "queue outbox dir not created (see #129: worker→coordinator outbox)"
 brief=$(ls "$WT"/.swarm/tasks/inbox/*.md | head -1)
 [ -n "$brief" ] || red "no brief file in inbox"
 grep -q "FAKE-GH issue #99" "$brief" || red "stub gh body not embedded in brief"
@@ -228,6 +229,39 @@ green "polling backend detected new .ok.json, would-wake logged, ONCE=1 exited"
 
 # Clean up the trigger outcome so it doesn't leak into the sweep tests
 rm -f "$WT/.swarm/tasks/done/t1.ok.json"
+
+heading "Test 4b: coordinator-watch.sh detects new outbox message (DRY_RUN, ONCE)"
+# Same fixture as Test 4, but the trigger is a worker→coordinator message
+# file in outbox/ (issue #129) rather than an outcome JSON in done/.
+mkdir -p "$WT/.swarm/tasks/outbox"
+cd "$PROJECT_DIR"
+DRY_RUN=1 ONCE=1 POLL_SECS=1 LLM_START="$FAKE_LLM_START" \
+    "$WATCH" "$PROJECT_DIR" > "$TEST_DIR/watch-outbox.log" 2>&1 &
+WATCH_PID=$!
+sleep 1.5   # let the watch baseline existing files
+
+# Atomic-write convention: temp WITHOUT .md suffix, then mv to the final name.
+TMPMSG="$(mktemp -p "$WT/.swarm/tasks/outbox" .tmp.XXXXXX)"
+printf -- '---\nkind: fyi\ntask_id: t1\nts: 2026-01-01T00:00:00Z\n---\nshape-test message\n' > "$TMPMSG"
+mv "$TMPMSG" "$WT/.swarm/tasks/outbox/20260101T000000Z-shape-test.md"
+
+for ((i=0; i<20; i++)); do
+    if ! kill -0 "$WATCH_PID" 2>/dev/null; then break; fi
+    sleep 0.5
+done
+wait "$WATCH_PID" 2>/dev/null || true
+unset WATCH_PID
+
+grep -q 'waking coordinator (outbox)' "$TEST_DIR/watch-outbox.log" \
+    || red "expected outbox wake line; full log: $(cat $TEST_DIR/watch-outbox.log)"
+grep -q '\[DRY\] would:.*outbox' "$TEST_DIR/watch-outbox.log" \
+    || red "expected dry-run outbox wake prompt naming the outbox; full log: $(cat $TEST_DIR/watch-outbox.log)"
+grep -q "ONCE=1 — exiting after first wake" "$TEST_DIR/watch-outbox.log" \
+    || red "expected ONCE exit message after outbox wake"
+green "polling backend detected new outbox *.md, message wake logged, ONCE=1 exited"
+
+# Clean up so later watcher tests don't baseline-then-ignore a stale message
+rm -f "$WT/.swarm/tasks/outbox/20260101T000000Z-shape-test.md"
 
 heading "Test 5: coordinator-watch.sh rejects missing project dir"
 # realpath bails first under set -e, so we just check non-zero exit + a

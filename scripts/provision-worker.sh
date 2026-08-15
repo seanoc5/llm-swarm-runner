@@ -237,7 +237,10 @@ fi
 #    status/ holds worker-written state files (ready-for-review / blocked /
 #    done-no-pr) so the watcher can react while the worker is still parked
 #    and attachable — see "Worker status file" in prompts/worker.md.
-mkdir -p "$WT/.swarm/tasks/inbox" "$WT/.swarm/tasks/processing" "$WT/.swarm/tasks/done" "$WT/.swarm/tasks/status"
+#    outbox/ holds worker-written message files (fyi / decision-needed /
+#    brief-draft) that wake the coordinator mid-task — the worker→coordinator
+#    channel from issue #129; see "Worker outbox" in prompts/worker.md.
+mkdir -p "$WT/.swarm/tasks/inbox" "$WT/.swarm/tasks/processing" "$WT/.swarm/tasks/done" "$WT/.swarm/tasks/status" "$WT/.swarm/tasks/outbox"
 
 # Hide worker scratch (.swarm/) from the project's git view so `gh pr create`
 # and `git status` don't flag it as an uncommitted/untracked change. Uses the

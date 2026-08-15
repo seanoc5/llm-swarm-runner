@@ -17,6 +17,13 @@
 #                                         (started/finished/duration/exit_code/agent/model
 #                                          + check_cmd/check_exit/check_output_tail)
 #   <wt>/.swarm/tasks/done/<id>.check.log full acceptance-check output (audit)
+#   <wt>/.swarm/tasks/status/<id>.json    worker-written state declaration
+#                                         (not this script — see worker.md)
+#   <wt>/.swarm/tasks/outbox/<ts>-<slug>.md
+#                                         worker-written message to the
+#                                         coordinator (not this script —
+#                                         coordinator-watch.sh wakes on it,
+#                                         issue #129)
 #
 # Coordinator polls done/*.json to know what happened (no need to scrape pane).
 #

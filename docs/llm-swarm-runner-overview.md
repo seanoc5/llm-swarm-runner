@@ -311,7 +311,7 @@ The MCP key is embedded in the URL query string in both `~/.claude.json` and `~/
 
 ### `coordinator-watch.sh` — Event-driven coordinator wake-ups
 
-Long-running daemon that watches every worker's `.swarm/tasks/done/` directory under a project. When a new outcome JSON appears (i.e. a worker finished a task), wakes the coordinator via `llm-start.sh` so it can triage / re-dispatch / merge / etc. Together with the queued protocol, this delivers the **event-driven coordinator** option from the README's "Automating the loop" section without rewriting the agent itself.
+Long-running daemon that watches every worker's `.swarm/tasks/done/` directory under a project. When a new outcome JSON appears (i.e. a worker finished a task), wakes the coordinator via `llm-start.sh` so it can triage / re-dispatch / merge / etc. It also watches every worker's `.swarm/tasks/outbox/` (`WATCH_OUTBOX`, default on — issue #129): a message file a worker drops there wakes the coordinator with a message-triage prompt (`OUTBOX_WAKE_PROMPT` to override), giving workers a mid-task channel to the coordinator without any tmux access. Together with the queued protocol, this delivers the **event-driven coordinator** option from the README's "Automating the loop" section without rewriting the agent itself.
 
 ```bash
 # default — watches $PWD, debounces 30s, blocks on Ctrl-C
@@ -434,6 +434,11 @@ Runs inside the worker sandbox. In **interactive mode** (default), between tasks
   done/         listener mv when finished + writes <id>.{ok,err}.json
   status/       worker writes <id>.json here mid-task (atomic mktemp+mv) to
                 declare state while still parked and attachable
+  outbox/       worker writes <ts>-<slug>.md message files here (atomic
+                mktemp+mv; temp name must not end .md) — fyi /
+                decision-needed / brief-draft; coordinator-watch.sh wakes
+                the coordinator on arrival (issue #129); handled messages
+                are archived to outbox/processed/
 ```
 
 `done/<id>.{ok,err}.json` is a structured outcome record the coordinator can poll without scraping the pane:
