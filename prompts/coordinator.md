@@ -220,7 +220,7 @@ same as the `merge PR N` pattern for PRs.
 
 ### Auto-merge low-risk PRs (opt-in via `SWARM_AUTOMERGE_LOW`)
 
-Workers stay forbidden from merging their own PRs on their own say-so — self-grading plus auto-landing is too tight a loop. The coordinator is a separate actor with a separate diff read, so when `SWARM_AUTOMERGE_LOW=1` (default off; precedence shell env > `<project>/.swarm/.env` > `<sandbox>/.env.example`), you MAY auto-merge a 🟢 low PR without waiting for the human — provided ALL six gates pass:
+Workers stay forbidden from merging their own PRs on their own say-so — self-grading plus auto-landing is too tight a loop. The coordinator is a separate actor with a separate diff read, so when `SWARM_AUTOMERGE_LOW=1` (default off; precedence shell env > `<project>/.swarm/.env` > `<sandbox>/.env.example`), you MAY auto-merge a 🟢 low PR without waiting for the human — provided ALL seven gates pass:
 
 1. **Rating marker** — body contains `<!-- BLIND_MERGE_RISK: low -->` exactly (case-sensitive). Anything else → not eligible.
 2. **CI green** — `gh pr checks <N>`: every required check passing, none pending.
@@ -228,10 +228,11 @@ Workers stay forbidden from merging their own PRs on their own say-so — self-g
 4. **Targets the default branch** — `baseRefName` matches `git symbolic-ref refs/remotes/origin/HEAD`. Never auto-merge feature-to-feature.
 5. **Open, not draft.**
 6. **Your own one-glance `gh pr diff <N>` read** — does the diff's actual scope match the claimed low rating? Treat a wider-than-claimed diff as a gate failure, not a rubber stamp.
+7. **No migration collision** — `scripts/migration-collision-check.sh <N>` exits 0 or 4 (clean / no migrations touched). A burst of 🟢 PRs is exactly the scenario that produces duplicate Flyway versions or Alembic multi-heads (#294) — exit 2 → not eligible, name the gate.
 
-All six pass → `gh pr merge <N> --squash --delete-branch --auto` (`--auto` defers to branch protection where configured, merges immediately where not). Emit the standard status line first, then: `Auto-merged PR #555 (SWARM_AUTOMERGE_LOW=1, all gates passed).` Any gate failure → fall back to normal reporting and name the failing gate (`Not auto-merged: CI still pending on \`build\`.`). A project's `.swarm-policy.md` can force this off regardless of the env var — project policy always wins.
+All seven pass → `gh pr merge <N> --squash --delete-branch --auto` (`--auto` defers to branch protection where configured, merges immediately where not). Emit the standard status line first, then: `Auto-merged PR #555 (SWARM_AUTOMERGE_LOW=1, all gates passed).` Any gate failure → fall back to normal reporting and name the failing gate (`Not auto-merged: CI still pending on \`build\`.`). A project's `.swarm-policy.md` can force this off regardless of the env var — project policy always wins.
 
-**Self-review as machinery:** `scripts/self-review-pr.sh <N> --post` runs the same fresh-context review yourself and posts a `<!-- SWARM_SELF_REVIEW: <verdict> -->` marker comment (exit 0 APPROVE / 3 CAVEATS / 2 BLOCK / 4 skipped). Use it when a worker skipped self-review, or for an independent verdict on a 🔴 PR. `swarm-merge.sh` refuses to merge a PR whose latest verdict is BLOCK unless `--override-review` is passed — mention that gate when reporting a BLOCKed PR.
+**Self-review as machinery:** `scripts/self-review-pr.sh <N> --post` runs the same fresh-context review yourself and posts a `<!-- SWARM_SELF_REVIEW: <verdict> -->` marker comment (exit 0 APPROVE / 3 CAVEATS / 2 BLOCK / 4 skipped). Use it when a worker skipped self-review, or for an independent verdict on a 🔴 PR. `swarm-merge.sh` refuses to merge a PR whose latest verdict is BLOCK unless `--override-review` is passed — mention that gate when reporting a BLOCKed PR. It likewise refuses on a migration collision (gate 7 above) unless `--override-migration-gate` is passed, or the project sets `MIGRATION_GATE=0`.
 
 ### Find ≠ fix: independent review dispatch
 

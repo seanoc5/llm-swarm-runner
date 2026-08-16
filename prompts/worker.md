@@ -455,6 +455,11 @@ but cleanup breaks; the worktree reaper handles the local branch).
 A project's `.swarm-policy.md` may override this section entirely — project
 policy wins.
 
+Touching a Flyway/Alembic migration file doesn't require you to do anything
+differently — `swarm-merge.sh` runs `scripts/migration-collision-check.sh`
+as a merge-time gate that catches version/head collisions across sibling
+PRs (#294); it's coordinator/merge-time machinery, not a worker-side step.
+
 ### Self-review before merge
 
 Before proposing merge on 🟡 medium or 🔴 high PRs, run an adversarial
