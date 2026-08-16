@@ -10,6 +10,7 @@ style when they are written.
 ## [Unreleased]
 
 ### Changed
+- Worker containers now set `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`: claude workers can no longer start background Bash tasks (nor have timed-out foreground commands silently promoted to background), closing the unkillable-poll-loop leak — e.g. an `until gh run list ... | grep -q <sha>; do sleep 5; done` watch left running for 7h+ after the sha was force-pushed away. `prompts/worker.md` now also names CI watching (`gh run watch`, sha-poll loops) as the classic case of the foreground-only rule, which still binds gemini/codex workers. (#301)
 - Worker end-of-task output: the `## Summary` + `## Decision` + `## Next` triad is now a single terminal `## Handoff` block (**What** / **Decide** when a decision is open / **Action** with PR link + risk), emitted last in the pane — bottom line at the end, since the operator reads panes bottom-up and triages on the GitHub PR page. Mid-task `## Decision`/`## Note` blocks and the PR-body skeleton are unchanged. (#280)
 
 ### Removed

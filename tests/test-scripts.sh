@@ -51,6 +51,23 @@ check_script() {
         fi
     fi
 
+    # 4. Specific logic checks for sandbox.sh
+    if [[ "$script" == *"sandbox.sh" ]]; then
+        # Workers are foreground-only: the docker run env must disable claude
+        # background Bash tasks, and the opts array must actually be expanded
+        # in the docker run invocation (#301).
+        if ! grep -q 'CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1' "$script"; then
+            red "  ✗ $script: Missing CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 in worker env"
+            FAIL=$((FAIL + 1))
+            return
+        fi
+        if ! grep -q 'FOREGROUND_ONLY_ENV_OPTS\[@\]' "$script"; then
+            red "  ✗ $script: FOREGROUND_ONLY_ENV_OPTS defined but not passed to docker run"
+            FAIL=$((FAIL + 1))
+            return
+        fi
+    fi
+
     green "  ✓ $script: Passed sanity checks"
     PASS=$((PASS + 1))
 }

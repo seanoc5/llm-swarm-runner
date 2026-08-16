@@ -49,6 +49,18 @@ Bash tool's PID handle has known stall cases under `docker run`. **The default
 2-minute Bash timeout is the trap** — raise `timeout` to the real wall-clock
 budget instead of backgrounding.
 
+**CI watching is the classic leak** — it feels like a lightweight status
+check, not a "long command," but it is exactly this rule. Never `gh run
+watch`, and never a sha-poll loop like
+`until gh run list ... | grep -q <sha>; do sleep 5; done`: if you rebase or
+force-push, that sha vanishes and the loop's exit condition can never come
+true. Check CI with single foreground `gh run list`/`gh pr checks` calls
+between other work, or one bounded foreground wait with an explicit timeout.
+
+(For claude workers the harness also disables background tasks outright —
+`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` — so the option won't exist; this
+rule still fully binds gemini/codex workers and shell-level tricks.)
+
 **Exception:** processes already backgrounded *for you* by the infrastructure
 (worker-listener, coordinator's watcher). Anything you spawn runs foreground.
 
