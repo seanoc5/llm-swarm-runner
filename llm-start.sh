@@ -11,10 +11,11 @@
 #   COORDINATOR_CMD={claude,gemini,codex}   Default: claude
 #   COORDINATOR_MODEL=<id>            Per-coordinator default; see below
 #   COORDINATOR_VERBOSE=1             Stay interactive in coordinator pane
-#   WATCH=1                           Spawn coordinator-watch.sh in a 2nd
-#                                     tmux window (carries POST_OUTCOMES,
-#                                     OUTCOME_HOOK, DEBOUNCE_SECS, etc.
-#                                     from caller env)
+#   WATCH=1                           Spawn coordinator-watch.sh as a pane in
+#                                     the util window (default: on; carries
+#                                     POST_OUTCOMES, OUTCOME_HOOK,
+#                                     DEBOUNCE_SECS, etc. from caller env).
+#                                     Set WATCH=0 to disable.
 #   STATUS=1                          Spawn gh-status-bar.sh in a 'status'
 #                                     tmux window — updates the session's
 #                                     status-right with live open-issue/
@@ -101,8 +102,9 @@ ENV VARS  (precedence: flag > shell env > <project>/.swarm/.env > <sandbox>/.env
     OWNER_LABELS                 (empty)   comma-sep labels = "human-owned"
     INCLUDE_ASSIGNED_TO_OTHERS   0         1 = claim others' tickets
 
-  Watcher (when WATCH=1)
-    WATCH                        0         spawn coordinator-watch.sh
+  Watcher (on by default)
+    WATCH                        1         spawn coordinator-watch.sh as a pane
+                                            in the util window; 0 disables
     DEBOUNCE_SECS                30        wake coalescing window
     POLL_SECS                    2         poll-mode latency
     POST_OUTCOMES                0         run sweep on each outcome

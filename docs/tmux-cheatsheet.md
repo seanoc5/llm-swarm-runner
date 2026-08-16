@@ -111,22 +111,29 @@ tmux list-windows -t <session> -F '#{window_name} idle=#{e|-:#{t:#{window_activi
 
 The `dead=1` flag is what we look for when a watcher pane crashes and shows "Pane is dead (status N)".
 
-## 9. Resurrect a dead pane (rerun the command in-place)
+## 9. Resurrect a dead watcher pane (rerun the command in-place)
 
-When you see `Pane is dead (status 1, ...)`:
+The watcher (`coordinator-watch.sh`) runs as the **second pane in the `util` window**, not a `watch` window of its own — `tmux kill-window -t llm-fand-app:watch` errors with "window not found" on a session started by current `llm-start.sh`.
+
+When you see `Pane is dead (status 1, ...)` in that pane:
 
 ```bash
-# Just close it and re-spawn the window
-tmux kill-window -t llm-fand-app:watch
-tmux new-window -t llm-fand-app -n watch \
-    "/opt/work/llm-swarm-runner/scripts/coordinator-watch.sh /opt/work/oconeco/fand-app"
+# Easiest: re-running llm-start.sh respawns it idempotently (it detects an
+# existing watcher pane via pane_start_command and skips if one is already
+# running, so this is always safe to re-run)
+./llm-start.sh
 
-# OR with the alternative respawn-pane (preserves window number, scrollback gone):
-tmux respawn-pane -k -t llm-fand-app:watch \
+# OR target the pane directly. Find its index first:
+tmux list-panes -t llm-fand-app:util -F '#{pane_index} #{pane_current_command} #{pane_dead}'
+
+# Then respawn-pane -k (kills any process in the pane first; without -k it
+# errors if the pane already has a live process. Preserves pane index,
+# scrollback is gone):
+tmux respawn-pane -k -t llm-fand-app:util.1 \
     "/opt/work/llm-swarm-runner/scripts/coordinator-watch.sh /opt/work/oconeco/fand-app"
 ```
 
-`respawn-pane -k` kills any process in the pane first; without `-k` it errors if the pane already has a live process.
+A watcher revived in a window named `watch` (e.g. by following stale docs) is invisible to `llm-start.sh`'s idempotence check, which only inspects panes inside `util` — the next `./llm-start.sh` run would spawn a second, duplicate watcher.
 
 ## 10. Session groups (independent views across attached clients)
 
