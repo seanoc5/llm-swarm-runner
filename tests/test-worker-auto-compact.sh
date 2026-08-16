@@ -1092,6 +1092,17 @@ WORKER_COMPACT_POLL_SECS=1
 WORKER_COMPACT_THRESHOLD_CAP_TOKENS=100000
 WORKER_COMPACT_THRESHOLD_TOKENS=100000
 : > "$EVENTS_LOG"
+# issue #292 self-review finding: seed a stale failure count from an
+# EARLIER, unrelated attempt (its backoff cooldown already elapsed — a
+# LAST_FAIL timestamp within the cooldown window would make maybe_worker_
+# compact skip this call entirely with reason=backoff, never reaching the
+# replay logic at all) to confirm the replayed branch clears it via
+# worker_compact_record_success — a real compaction genuinely ran here (the
+# busy indicator was observed start->finish above), so this attempt must
+# count as a success, not a no-verdict that leaves prior backoff state
+# untouched and lets it tip into worker.compact.giving_up (#252) early.
+WORKER_COMPACT_FAIL_COUNT[49]=2
+WORKER_COMPACT_LAST_FAIL[49]=$(( $(date +%s) - WORKER_COMPACT_BACKOFF_SECS - 10 ))
 maybe_worker_compact "$WIN7"
 
 if grep -q 'worker.compact.done issue=49' "$EVENTS_LOG"; then got=logged; else got=missing; fi
@@ -1102,6 +1113,9 @@ check "post-compact replayed /compact text detected -> worker.compact.replayed (
 
 if grep -q 'worker.compact.ineffective issue=49' "$EVENTS_LOG"; then got=present; else got=absent; fi
 check "replay tolerated -- no false-positive worker.compact.ineffective despite an unchanged ctx reading" "absent" "$got"
+
+check "replayed verdict clears a stale prior FAIL_COUNT (issue #292 self-review finding)" "" "${WORKER_COMPACT_FAIL_COUNT[49]:-}"
+check "replayed verdict clears a stale prior LAST_FAIL (issue #292 self-review finding)" "" "${WORKER_COMPACT_LAST_FAIL[49]:-}"
 
 echo ""
 green "All worker-auto-compact tests passed ($PASS checks)"

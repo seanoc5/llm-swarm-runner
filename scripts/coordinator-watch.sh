@@ -949,8 +949,11 @@ EVENTS LOG
       worker.compact.replayed  (issue #292) same signal as coord.compact.replayed above — the
                            CLI's post-compact continuation replayed /compact and it rejected
                            harmlessly ("Not enough messages to compact.") within the verify
-                           window; ineffective-compaction check skipped for this attempt
-                           (issue, before)
+                           window; ineffective-compaction check skipped for this attempt, and
+                           counted as a SUCCESS (worker_compact_record_success) — the busy
+                           indicator already confirmed this attempt's own compaction genuinely
+                           ran; the replay is noise in the verify comparison, not evidence of
+                           failure (issue, before)
       worker.compact.ineffective  worker context didn't drop post-compact (issue, before, after) — investigate
       worker.compact.verify_skip  worker's ctx reading never refreshed post-compact — inconclusive, not a failure
       worker.compact.giving_up  (issue #252) N consecutive timeout/ineffective verdicts for this
@@ -3070,6 +3073,15 @@ maybe_worker_compact() {
 
     if [ "$replayed" = "1" ]; then
         log_event worker.compact.replayed "issue=$issue before=$used"
+        # issue #292 self-review: the replay only ever fires after this
+        # attempt's OWN busy indicator was already confirmed to start and
+        # clear above — a real compaction genuinely ran; the replay is just
+        # noise in the verify comparison, not evidence of failure. Treating
+        # it as a no-verdict (neither success nor failure) would leave a
+        # stale WORKER_COMPACT_FAIL_COUNT from an EARLIER, unrelated attempt
+        # uncleared, letting it tip into worker.compact.giving_up (#252) one
+        # failure early despite this attempt having worked.
+        worker_compact_record_success "$issue"
     elif [ -z "$used_after" ]; then
         log_event worker.compact.verify_skip "issue=$issue reason=ctx_not_refreshed waited=${verify_waited}s"
         # Inconclusive, not a confirmed failure — no backoff/failure-count
