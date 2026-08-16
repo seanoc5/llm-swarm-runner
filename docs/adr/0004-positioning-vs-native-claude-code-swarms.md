@@ -22,10 +22,14 @@ survive scrutiny.
 
 Dropped from our positioning; do not use them in demos or posts:
 
-- **"Better model selection."** Native subagents and workflows both support
-  per-agent model choice. What survives is narrower and different: *cross-
-  vendor* heterogeneity (Claude Code, Gemini CLI, Codex CLI workers under one
-  coordinator) — see below.
+- **"Better model selection."** A common assumption (the operator held it
+  too, so demo viewers will) is that native swarms run every agent at one
+  model. They don't: native subagents and workflow calls both take a
+  per-agent model choice, so "expensive coordinator, cheaper workers" is
+  achievable natively. What survives is narrower and different: *cross-
+  vendor* heterogeneity — native agents are Claude-only at both ends, while
+  a swarm-runner worker is just a CLI in a pane (Claude Code, Gemini CLI,
+  Codex CLI under one coordinator, chosen per config) — see below.
 - **"Cheaper by construction."** Both native swarms and swarm-runner workers
   run on the same subscription/API economics. The real economic lever is
   worker-class *routing* (send trivial issues to CI-verified `claude-code-
