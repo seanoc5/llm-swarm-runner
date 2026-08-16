@@ -852,6 +852,7 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     COMPACT_RETRACT_BACKSPACES        12      Backspace keystrokes sent alongside the retraction Escape (coord + worker, shared; issue #265/#290)
     COMPACT_SUBMIT_SETTLE_SECS        1       settle delay around the injection-submit Enter (coord + worker, shared; issue #290); see header comment
     COMPACT_REPLAY_PATTERN            (auto)  post-compact replayed-/compact rejection text tolerated during verify (coord + worker, shared; issue #292); see header comment
+    COMPACT_REPLAY_MIN_REAL_SECS      5       min finish-phase duration to trust a detected replay as real (coord + worker, shared; issue #292); see header comment
 
 DEFAULT WAKE_PROMPT (top-up mode)
     Coordinator triages outcomes, then refills workers toward MAX_WORKERS
@@ -915,9 +916,11 @@ EVENTS LOG
       coord.compact.done   busy indicator cleared — compaction confirmed finished (waited, trigger=poll|wake)
       coord.compact.replayed  (issue #292) the CLI's post-compact continuation replayed the
                            same /compact prompt and it rejected harmlessly ("Not enough messages
-                           to compact.") within the verify window — the ineffective-compaction
-                           check is skipped for this attempt rather than risking a misread
-                           (before, trigger=poll|wake)
+                           to compact.") within the verify window, AND the finish-phase busy
+                           duration cleared COMPACT_REPLAY_MIN_REAL_SECS (rules out the text
+                           instead being an outright rejection of the injection itself — see that
+                           var's header comment) — the ineffective-compaction check is skipped for
+                           this attempt rather than risking a misread (before, trigger=poll|wake)
       coord.compact.ineffective  context didn't drop post-compact (before, after, trigger=poll|wake) — investigate
       coord.compact.verify_skip  probe never refreshed post-compact — inconclusive, not a failure (trigger=poll|wake)
       worker.compact        /compact injected into an iss-* window (issue, used, threshold, wrapup)
@@ -949,9 +952,11 @@ EVENTS LOG
       worker.compact.replayed  (issue #292) same signal as coord.compact.replayed above — the
                            CLI's post-compact continuation replayed /compact and it rejected
                            harmlessly ("Not enough messages to compact.") within the verify
-                           window; ineffective-compaction check skipped for this attempt, and
-                           counted as a SUCCESS (worker_compact_record_success) — the busy
-                           indicator already confirmed this attempt's own compaction genuinely
+                           window, AND the finish-phase busy duration cleared COMPACT_REPLAY_
+                           MIN_REAL_SECS (rules out the text instead being an outright rejection
+                           of the injection itself); ineffective-compaction check skipped for this
+                           attempt, and counted as a SUCCESS (worker_compact_record_success) — the
+                           busy indicator already confirmed this attempt's own compaction genuinely
                            ran; the replay is noise in the verify comparison, not evidence of
                            failure (issue, before)
       worker.compact.ineffective  worker context didn't drop post-compact (issue, before, after) — investigate
@@ -1108,6 +1113,21 @@ COMPACT_RETRACT_BACKSPACES="${COMPACT_RETRACT_BACKSPACES:-12}"
 COMPACT_SUBMIT_SETTLE_SECS="${COMPACT_SUBMIT_SETTLE_SECS:-1}"
 # issue #292 — see this file's COMPACT_REPLAY_PATTERN header comment above.
 COMPACT_REPLAY_PATTERN="${COMPACT_REPLAY_PATTERN:-Not enough messages to compact\.}"
+# issue #292 self-review: minimum finish-phase duration (the same "waited"
+# a coord.compact.done/worker.compact.done event reports) required before a
+# detected replay is trusted as "a real compaction ran, then got harmlessly
+# replayed" rather than "the injected /compact was itself rejected
+# outright, and never compacted at all" — both produce IDENTICAL pane text
+# and an identical brief busy-then-idle transition, so text alone can't
+# tell them apart. A genuine compaction necessarily invokes the model to
+# summarize the conversation (several seconds minimum); an outright
+# rejection is a local CLI-side check with no model call, resolving in a
+# small fraction of a second. Below this floor, a detected replay is
+# ignored entirely and falls through to the normal ineffective/verify_skip
+# path — deliberately NOT logged as a distinct "rejected outright" event,
+# so it still counts as a failure (worker_compact_record_failure) via the
+# same ineffective path a plain unchanged-context compaction would.
+COMPACT_REPLAY_MIN_REAL_SECS="${COMPACT_REPLAY_MIN_REAL_SECS:-5}"
 
 case "$WATCHER_AUTOCLOSE_MODE" in
     merged)    AUTOCLOSE_PR_FLAG="--merged-only" ;;
@@ -2513,7 +2533,12 @@ maybe_auto_compact() {
         # "Not enough messages to compact." rejection that has nothing to do
         # with whether THIS compaction worked. If seen, skip the ineffective
         # check entirely rather than risk a misread while that text is still
-        # on screen.
+        # on screen. issue #292 self-review: a detected replay is only
+        # trusted when the finish-phase "waited" above cleared COMPACT_
+        # REPLAY_MIN_REAL_SECS — otherwise the injected /compact may simply
+        # have been rejected OUTRIGHT (identical pane text, identical brief
+        # busy-then-idle shape) and never compacted anything at all; see
+        # COMPACT_REPLAY_MIN_REAL_SECS's header comment.
         local verify_waited=0 probe_mtime_after used_after="" replayed=0
         while [ "$verify_waited" -lt "$AUTO_COMPACT_VERIFY_TIMEOUT_SECS" ]; do
             sleep "$AUTO_COMPACT_POLL_SECS"
@@ -2529,7 +2554,7 @@ maybe_auto_compact() {
             fi
         done
 
-        if [ "$replayed" = "1" ]; then
+        if [ "$replayed" = "1" ] && [ "$waited" -ge "$COMPACT_REPLAY_MIN_REAL_SECS" ]; then
             log_event coord.compact.replayed "before=$used trigger=$trigger"
         elif [ -z "$used_after" ]; then
             log_event coord.compact.verify_skip "reason=probe_not_refreshed waited=${verify_waited}s trigger=$trigger"
@@ -3060,6 +3085,11 @@ maybe_worker_compact() {
     # replaying this same /compact prompt (see COMPACT_REPLAY_PATTERN's
     # header comment) — a harmless, immediate "Not enough messages to
     # compact." rejection unrelated to whether THIS compaction worked.
+    # issue #292 self-review: only trusted when the finish-phase "waited"
+    # above cleared COMPACT_REPLAY_MIN_REAL_SECS — otherwise the injected
+    # /compact may simply have been rejected OUTRIGHT (identical pane text,
+    # identical brief busy-then-idle shape) and never compacted anything at
+    # all; see COMPACT_REPLAY_MIN_REAL_SECS's header comment.
     local verify_waited=0 used_after="" replayed=0
     while [ "$verify_waited" -lt "$WORKER_COMPACT_VERIFY_TIMEOUT_SECS" ]; do
         sleep "$WORKER_COMPACT_POLL_SECS"
@@ -3071,7 +3101,7 @@ maybe_worker_compact() {
         used_after=""
     done
 
-    if [ "$replayed" = "1" ]; then
+    if [ "$replayed" = "1" ] && [ "$waited" -ge "$COMPACT_REPLAY_MIN_REAL_SECS" ]; then
         log_event worker.compact.replayed "issue=$issue before=$used"
         # issue #292 self-review: the replay only ever fires after this
         # attempt's OWN busy indicator was already confirmed to start and

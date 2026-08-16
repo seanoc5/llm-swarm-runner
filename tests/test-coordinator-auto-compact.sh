@@ -88,6 +88,11 @@ COMPACT_RETRACT_BACKSPACES=3
 COMPACT_SUBMIT_SETTLE_SECS=0
 # issue #292 — must match coordinator-watch.sh's own default.
 COMPACT_REPLAY_PATTERN='Not enough messages to compact\.'
+# issue #292 — lowered from the shipped default (5) so the fixtures below,
+# whose fake "compaction" sleeps only ~2s, still count as long enough to
+# trust a detected replay; Test 19 below overrides this back up locally to
+# exercise the floor itself.
+COMPACT_REPLAY_MIN_REAL_SECS=1
 
 PASS=0
 
@@ -983,6 +988,76 @@ check "post-compact replayed /compact text detected -> coord.compact.replayed (i
 
 if grep -q 'coord.compact.ineffective' "$EVENTS_LOG"; then got=present; else got=absent; fi
 check "replay tolerated -- no false-positive coord.compact.ineffective despite an unchanged probe value" "absent" "$got"
+
+heading "Test 19: maybe_auto_compact — a near-INSTANT 'Not enough messages to compact.' (no real compaction) is NOT treated as a tolerated replay (issue #292 self-review finding)"
+# A self-review on this issue's first pass flagged that compact_replay_
+# detected's pane text alone can't distinguish "a real compaction ran, then
+# got harmlessly replayed" (Test 18 above) from "the injected /compact was
+# itself rejected outright, and nothing ever compacted" — both produce the
+# IDENTICAL rendered text and an identical brief busy-then-idle shape. This
+# fixture models the outright-rejection case: no sleep at all between the
+# busy flash and the rejection text, so the finish-phase "waited" comes out
+# near zero — well under COMPACT_REPLAY_MIN_REAL_SECS (overridden UP to 3
+# here; the global default of 1 above exists only to keep Test 18's
+# genuine ~2s fixture passing). Must fall through to the normal ineffective
+# path (unchanged probe value) rather than being misread as a tolerated
+# replay -- the exact regression the self-review caught.
+FAKE_REPL_INSTANT_REJECT="$TEST_DIR/fake-repl-instant-reject.sh"
+cat > "$FAKE_REPL_INSTANT_REJECT" <<'REPL'
+#!/usr/bin/env bash
+echo "idle-prompt >"
+while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    if [ "$line" = "/compact" ]; then
+        echo "✻ Considering… (esc to interrupt)"
+        # Just long enough for a single AUTO_COMPACT_POLL_SECS=1 poll to
+        # catch it as busy (so this reaches coord.compact.done and the
+        # verify/replay logic at all, unlike a truly zero-length flash,
+        # which would instead miss the busy window entirely and hit a
+        # phase=start timeout — not what this test is exercising), but
+        # still well under COMPACT_REPLAY_MIN_REAL_SECS=3 below.
+        sleep 1
+        clear
+        echo "idle-prompt >"
+        echo "Not enough messages to compact."
+    else
+        echo "unrecognized: $line"
+        echo "idle-prompt >"
+    fi
+done
+REPL
+chmod +x "$FAKE_REPL_INSTANT_REJECT"
+
+REJECT_SESSION="${SESSION_NAME}-instantreject"
+tmux new-session -d -s "$REJECT_SESSION" -n coordinator 2>/dev/null
+tmux send-keys -t "$REJECT_SESSION:coordinator" "exec -a claude bash $FAKE_REPL_INSTANT_REJECT" Enter
+
+ORIG_SESSION_NAME="$SESSION_NAME"
+SESSION_NAME="$REJECT_SESSION"
+check_eventually "instant-reject session: fake REPL foreground -> cli" "cli" 'coordinator_pane_state'
+
+printf '{"context_window":{"context_window_size":200000,"total_input_tokens":170000}}' > "$AUTO_COMPACT_PROBE"
+( sleep 2; printf '{"context_window":{"context_window_size":200000,"total_input_tokens":170000}}' > "$AUTO_COMPACT_PROBE" ) &
+BGPID19=$!
+
+DRY_RUN=0
+AUTO_COMPACT_START_TIMEOUT_SECS=10
+AUTO_COMPACT_FINISH_TIMEOUT_SECS=15
+AUTO_COMPACT_VERIFY_TIMEOUT_SECS=10
+AUTO_COMPACT_POLL_SECS=1
+COMPACT_REPLAY_MIN_REAL_SECS=3
+: > "$EVENTS_LOG"
+maybe_auto_compact wake
+wait "$BGPID19" 2>/dev/null || true
+SESSION_NAME="$ORIG_SESSION_NAME"
+tmux kill-session -t "$REJECT_SESSION" 2>/dev/null || true
+COMPACT_REPLAY_MIN_REAL_SECS=1
+
+if grep -q 'coord.compact.replayed' "$EVENTS_LOG"; then got=present; else got=absent; fi
+check "near-instant rejection -> NOT logged as coord.compact.replayed (below COMPACT_REPLAY_MIN_REAL_SECS)" "absent" "$got"
+
+if grep -q 'coord.compact.ineffective' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "falls through to the normal ineffective path instead -- correctly flagged as a real failure" "logged" "$got"
 
 echo ""
 green "All coordinator-auto-compact tests passed ($PASS checks)"

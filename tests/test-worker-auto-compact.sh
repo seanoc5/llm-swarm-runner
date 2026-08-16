@@ -96,6 +96,11 @@ COMPACT_RETRACT_BACKSPACES=3
 COMPACT_SUBMIT_SETTLE_SECS=0
 # issue #292 — must match coordinator-watch.sh's own default.
 COMPACT_REPLAY_PATTERN='Not enough messages to compact\.'
+# issue #292 — lowered from the shipped default (5) so the fixtures below,
+# whose fake "compaction" sleeps only ~2s, still count as long enough to
+# trust a detected replay; Test 21 below overrides this back up locally to
+# exercise the floor itself.
+COMPACT_REPLAY_MIN_REAL_SECS=1
 declare -A WORKER_COMPACT_LAST_FAIL=()
 declare -A WORKER_COMPACT_FAIL_COUNT=()
 declare -A WORKER_COMPACT_GAVE_UP=()
@@ -1116,6 +1121,66 @@ check "replay tolerated -- no false-positive worker.compact.ineffective despite 
 
 check "replayed verdict clears a stale prior FAIL_COUNT (issue #292 self-review finding)" "" "${WORKER_COMPACT_FAIL_COUNT[49]:-}"
 check "replayed verdict clears a stale prior LAST_FAIL (issue #292 self-review finding)" "" "${WORKER_COMPACT_LAST_FAIL[49]:-}"
+
+heading "Test 21: maybe_worker_compact — a near-INSTANT 'Not enough messages to compact.' (no real compaction) is NOT treated as a tolerated replay (issue #292 self-review finding)"
+# See test-coordinator-auto-compact.sh's Test 19 for the full rationale:
+# compact_replay_detected's pane text alone can't distinguish "a real
+# compaction ran, then got harmlessly replayed" (Test 20 above) from "the
+# injected /compact was itself rejected outright, and nothing ever
+# compacted" — both produce IDENTICAL rendered text and an identical brief
+# busy-then-idle shape. This fixture models the outright-rejection case:
+# just long enough (1s) for a single WORKER_COMPACT_POLL_SECS=1 poll to
+# catch the busy flash at all (so this reaches worker.compact.done and the
+# verify/replay logic), but well under COMPACT_REPLAY_MIN_REAL_SECS
+# (overridden UP to 3 here). Must fall through to the normal ineffective
+# path (unchanged ctx reading) and count as a failure, not be misread as a
+# tolerated replay — the exact regression the self-review caught.
+FAKE_REPL_INSTANT_REJECT="$TEST_DIR/fake-worker-repl-instant-reject.sh"
+cat > "$FAKE_REPL_INSTANT_REJECT" <<'REPL'
+#!/usr/bin/env bash
+echo "sonnet · wt-issue-50 · ctx: 260k/1M (26%)"
+echo "idle-prompt >"
+while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    if [ "$line" = "/compact" ]; then
+        echo "✻ Considering… (esc to interrupt)"
+        sleep 1
+        clear
+        echo "sonnet · wt-issue-50 · ctx: 260k/1M (26%)"
+        echo "idle-prompt >"
+        echo "Not enough messages to compact."
+    else
+        echo "unrecognized: $line"
+        echo "idle-prompt >"
+    fi
+done
+REPL
+chmod +x "$FAKE_REPL_INSTANT_REJECT"
+
+WIN8="iss-50"
+tmux new-window -t "$SESSION_NAME" -n "$WIN8" 2>/dev/null
+tmux send-keys -t "$SESSION_NAME:$WIN8" "exec -a claude bash $FAKE_REPL_INSTANT_REJECT" Enter
+check_eventually "iss-50 window: fake REPL foreground -> cli" "cli" "worker_pane_state '$WIN8'"
+check_eventually "iss-50 window renders initial 260k ctx" "260000" "worker_pane_ctx_used '$WIN8'"
+
+DRY_RUN=0
+WORKER_COMPACT_START_TIMEOUT_SECS=10
+WORKER_COMPACT_FINISH_TIMEOUT_SECS=15
+WORKER_COMPACT_VERIFY_TIMEOUT_SECS=10
+WORKER_COMPACT_POLL_SECS=1
+WORKER_COMPACT_THRESHOLD_CAP_TOKENS=100000
+WORKER_COMPACT_THRESHOLD_TOKENS=100000
+COMPACT_REPLAY_MIN_REAL_SECS=3
+: > "$EVENTS_LOG"
+maybe_worker_compact "$WIN8"
+COMPACT_REPLAY_MIN_REAL_SECS=1
+
+if grep -q 'worker.compact.replayed issue=50' "$EVENTS_LOG"; then got=present; else got=absent; fi
+check "near-instant rejection -> NOT logged as worker.compact.replayed (below COMPACT_REPLAY_MIN_REAL_SECS)" "absent" "$got"
+
+if grep -q 'worker.compact.ineffective issue=50' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "falls through to the normal ineffective path instead -- correctly flagged as a real failure" "logged" "$got"
+unset 'WORKER_COMPACT_LAST_FAIL[50]' 'WORKER_COMPACT_FAIL_COUNT[50]' 'WORKER_COMPACT_GAVE_UP[50]'
 
 echo ""
 green "All worker-auto-compact tests passed ($PASS checks)"
