@@ -5,6 +5,7 @@
 #   swarm-merge.sh <issue#>           # resolves PR from issue, merges, cleans
 #   swarm-merge.sh <issue#> --no-kill # skip the tmux-kill step
 #   swarm-merge.sh <issue#> --override-review  # merge despite a BLOCK verdict
+#   swarm-merge.sh <issue#> --override-migration-gate  # merge despite a migration collision
 #   swarm-merge.sh --sweep-only       # just run the local-branch sweep
 #
 # What it does:
@@ -15,6 +16,10 @@
 #      scripts/self-review-pr.sh) refuses the merge unless --override-review
 #      is given. Verdict-gated merging is a ringer-concept adoption — see
 #      docs/ringer-adoptions.md #2.
+#      Also runs scripts/migration-collision-check.sh, refusing on a
+#      duplicate Flyway version / Alembic multi-head collision unless
+#      --override-migration-gate is given. MIGRATION_GATE=0 disables this
+#      gate entirely (default on) — see #294.
 #   3. cds to the MAIN worktree of the current repo (not the feature one).
 #   4. Runs `gh pr merge --squash --delete-branch`. The local-delete step may
 #      fail silently if the branch is checked out in a sibling worktree —
@@ -34,7 +39,10 @@ GRACE_SECONDS=60
 NO_KILL=0
 SWEEP_ONLY=0
 OVERRIDE_REVIEW=0
+OVERRIDE_MIGRATION_GATE=0
 ISSUE=""
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # --- arg parsing -----------------------------------------------------------
 
@@ -43,6 +51,7 @@ for arg in "$@"; do
     --no-kill)    NO_KILL=1 ;;
     --sweep-only) SWEEP_ONLY=1 ;;
     --override-review) OVERRIDE_REVIEW=1 ;;
+    --override-migration-gate) OVERRIDE_MIGRATION_GATE=1 ;;
     --help|-h)
       sed -n '2,/^# Exits/p' "$0" | sed 's/^# \?//'
       exit 0
@@ -134,6 +143,9 @@ MAIN_WT=$(main_worktree)
 cd "$MAIN_WT"
 echo "[1/7] working in main worktree: $MAIN_WT"
 
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/_load-env.sh" "$MAIN_WT"
+
 # Resolve PR from issue.
 PR_NUM=$(gh issue view "$ISSUE" --json closedByPullRequestsReferences \
            -q '.closedByPullRequestsReferences[0].number' 2>/dev/null || echo "")
@@ -180,6 +192,33 @@ case "$PR_STATE" in
       *)
         echo "       $(c_dim "no self-review verdict comment (optional: scripts/self-review-pr.sh $PR_NUM --post)")" ;;
     esac
+    # Migration collision gate (#294): duplicate Flyway versions / Alembic
+    # multi-heads only exist in the *union* of base + head branches, so this
+    # is the last point they can be reliably caught before merge.
+    if [ "${MIGRATION_GATE:-1}" = "0" ]; then
+      echo "       $(c_dim "migration gate: skipped (MIGRATION_GATE=0)")"
+    else
+      MIGRATION_RC=0
+      "$SCRIPT_DIR/migration-collision-check.sh" "$PR_NUM" || MIGRATION_RC=$?
+      case "$MIGRATION_RC" in
+        0) echo "       $(c_green "migration gate: clean")" ;;
+        4) echo "       $(c_dim "migration gate: no migration files touched")" ;;
+        2)
+          if [ "$OVERRIDE_MIGRATION_GATE" = 0 ]; then
+            echo "ERROR: PR #$PR_NUM has a migration collision (duplicate Flyway" >&2
+            echo "       version or Alembic multi-head). Run" >&2
+            echo "       scripts/migration-collision-check.sh $PR_NUM for details;" >&2
+            echo "       merge with --override-migration-gate if you disagree." >&2
+            exit 1
+          fi
+          echo "       $(c_amber "⚠ overriding migration collision (--override-migration-gate)")"
+          ;;
+        *)
+          echo "ERROR: migration-collision-check.sh failed (exit $MIGRATION_RC)" >&2
+          exit 1
+          ;;
+      esac
+    fi
     echo "[4/7] merging PR #$PR_NUM (squash, delete-branch)…"
     # gh pr merge's local-delete step may fail; tolerate it.
     if ! gh pr merge "$PR_NUM" --squash --delete-branch; then

@@ -23,6 +23,13 @@ for s in "$REVIEW" "$MERGE"; do
     [ -x "$s" ] || red "not executable: $s"
 done
 
+# This suite exercises the self-review verdict gate in isolation; the
+# migration-collision gate (#294) is covered by its own
+# tests/test-shape-migration-check.sh. Disable it here so the fixture repo
+# (which has no real PR base/head branches for migration-collision-check.sh
+# to fetch) doesn't trip an unrelated gate.
+export MIGRATION_GATE=0
+
 TEST_DIR=$(mktemp -d -t shape-review-XXXXXX)
 cleanup() {
     if [ "${KEEP:-0}" = "1" ]; then
