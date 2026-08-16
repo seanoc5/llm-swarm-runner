@@ -180,6 +180,12 @@ heading "Test 4: Alembic multi-head DAG → exit 2"
 git checkout -q master
 git checkout -q -b alembic-branch
 mkdir -p alembic/versions
+# versions/__init__.py has no revision= line at all — a real Alembic
+# project convention, and a regression fixture for a self-review finding
+# (PR #299): grep|head under pipefail still propagates grep's exit 1 on
+# no match even though head succeeds, which killed the whole script via
+# set -e before this file was ever skipped as expected.
+: > alembic/versions/__init__.py
 cat > alembic/versions/aaa.py <<'PYEOF'
 revision = 'aaa111'
 down_revision = None
@@ -192,14 +198,14 @@ cat > alembic/versions/ccc.py <<'PYEOF'
 revision = 'ccc333'
 down_revision = 'aaa111'
 PYEOF
-git add -A; git_commit "two siblings branch from aaa111: two heads"
+git add -A; git_commit "two siblings branch from aaa111: two heads, plus a revision-less __init__.py"
 git push -q origin alembic-branch
 set_pr 4 master alembic-branch
 
 if OUT=$("$CHECK" 4 2>&1); then RC=0; else RC=$?; fi
-[ "$RC" -eq 2 ] || red "expected exit 2 for Alembic multi-head, got $RC"
+[ "$RC" -eq 2 ] || red "expected exit 2 for Alembic multi-head, got $RC (output: $OUT)"
 echo "$OUT" | grep -q "multi-head DAG (2 heads)" || red "multi-head detail missing"
-green "Alembic multi-head DAG → exit 2"
+green "Alembic multi-head DAG → exit 2 (revision-less __init__.py doesn't crash the script)"
 
 # Merge revision joins the heads → back to clean
 git checkout -q alembic-branch

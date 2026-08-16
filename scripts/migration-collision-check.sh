@@ -151,11 +151,17 @@ if [ -n "$ALEMBIC_FILES" ]; then
         else
             content="$(git show "$BASE_LOCAL:$f" 2>/dev/null || true)"
         fi
-        rev_line="$(printf '%s\n' "$content" | grep -E '^[[:space:]]*revision[[:space:]]*(:[^=]*)?=' | head -1)"
-        rev="$(printf '%s\n' "$rev_line" | grep -oE "['\"][A-Za-z0-9_]+['\"]" | head -1 | tr -d "'\"")"
+        # `grep | head` under pipefail still propagates grep's exit 1 on no
+        # match even though head itself succeeds — pipefail reports the
+        # rightmost NON-ZERO stage, not just the last stage's status. A
+        # revision-less file (e.g. versions/__init__.py) would otherwise
+        # kill the whole script via set -e. Each pipeline feeding an
+        # assignment here needs its own `|| true`.
+        rev_line="$(printf '%s\n' "$content" | grep -E '^[[:space:]]*revision[[:space:]]*(:[^=]*)?=' | head -1 || true)"
+        rev="$(printf '%s\n' "$rev_line" | grep -oE "['\"][A-Za-z0-9_]+['\"]" | head -1 | tr -d "'\"" || true)"
         [ -n "$rev" ] || continue
         REVISIONS["$rev"]="$f"
-        down_line="$(printf '%s\n' "$content" | grep -E '^[[:space:]]*down_revision[[:space:]]*(:[^=]*)?=' | head -1)"
+        down_line="$(printf '%s\n' "$content" | grep -E '^[[:space:]]*down_revision[[:space:]]*(:[^=]*)?=' | head -1 || true)"
         while IFS= read -r d; do
             if [ -n "$d" ]; then
                 REFERENCED["$d"]=1
