@@ -34,10 +34,37 @@ Also works as a single-agent sandbox if you don't want the swarm — `sandbox.sh
 - You want a managed or hosted orchestrator — this is local-first and BYO-machine.
 - You don't already have Docker running and `gh` authenticated on the host.
 
+
+## Why this instead of Claude Code's built-in swarms?
+
+Fair question — Claude Code ships subagents, workflow orchestration, and
+cloud agents natively, and for a single-repo burst of parallel work inside
+one session, **native is simpler and you should use it**. This project is
+the layer *above* sessions:
+
+- **The queue is GitHub, not a context window.** Issues in, risk-rated PRs
+  out. Coordinator, watcher, and every worker can die or be upgraded
+  mid-flight; the state survives because it was never in anyone's context.
+- **Workers are full sessions, not subagents** — own context, own lifetime,
+  attachable in tmux mid-task, running for days across multiple projects on
+  one subscription.
+- **Integration is human-gated by protocol**: 🟢/🟡/🔴 blind-merge risk
+  ratings, fresh-context self-review, reviewer≠author separation, explicit
+  merge verbs.
+- **Workers are cross-vendor** (Claude Code, Gemini CLI, Codex CLI under one
+  coordinator) and their behavior is plain versioned text you can tune
+  (`prompts/worker.md`, `.swarm-policy.md`).
+
+The honest trade-off: this costs infrastructure (tmux, Docker, watchers)
+and carries TUI-scraping brittleness that native capabilities don't have.
+Full evaluation, including the claims that did **not** survive scrutiny:
+[ADR 0004](./docs/adr/0004-positioning-vs-native-claude-code-swarms.md).
+
 ---
 
 ## Contents
 
+- [Why this instead of Claude Code's built-in swarms?](#why-this-instead-of-claude-codes-built-in-swarms)
 - [Documentation Index](#documentation-index)
 - [Requirements](#requirements)
 - [Quick Start](#quick-start)
@@ -60,7 +87,7 @@ For deep-dives into specific topics, please refer to the reference documentation
 - 🐱 [**Terminal Emulators**](./docs/terminal-emulators.md) - Which terminal to attach with, and why it matters. kitty (or ghostty/wezterm) is recommended — it's the only way to get Shift+Enter as a newline in Claude workers, plus desktop notifications and OSC 52 over SSH. Covers the config, and an honest look at the kitty/tmux feature overlap: kitty's author considers multiplexers an anti-pattern, but tmux's session persistence across disconnects is exactly what the swarm is built on.
 - 🌿 [**Git & GitHub Tips**](./docs/VCS/git-github.md) - Crib sheet for swarm-flavored git/`gh`: resolving conflicts when merging worker PRs, recovery recipes, pointers to authoritative references (ohshitgit, Pro Git, etc.). Aimed at users whose git skills are thinner than their swarm-orchestration skills.
 - 🗺️ [**Level-5 Roadmap**](./docs/level-5-roadmap.md) - Phased plan for hardening the swarm toward fully autonomous "level 5" agentic workflows: structured project capabilities, judge workers, dependency graphs, sandbox profiles. Pairs with [PRD 0001](./docs/prd/0001-structured-capabilities.md) and [ADR 0003](./docs/adr/0003-capabilities-yaml.md).
-- 🎬 [**Demo Recording**](./docs/demo-recording.md) - End-to-end recipe for capturing the ~75-second demo with SimpleScreenRecorder: capture-rect setup, pre-flight, recording steps, post-processing via `scripts/edit-demo.sh`. Run `scripts/demo-record-setup.sh` once to tune SSR settings.
+- 🎬 [**Demo Recording**](./docs/demo-recording.md) - End-to-end recipe for capturing the ~75-second demo with SimpleScreenRecorder: capture-rect setup, pre-flight, recording steps, post-processing via `scripts/edit-demo.sh`. Run `scripts/demo-record-setup.sh` once to tune SSR settings. Current shot list + narration: [demo-script-2026-08.md](./docs/demo-script-2026-08.md).
 
 ---
 
