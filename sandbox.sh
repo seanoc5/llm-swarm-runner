@@ -244,6 +244,16 @@ fi
 # Get the directory of this script so we can find worker-listener.sh
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 
+# Background Bash tasks in claude have no timeout: a leaked poll loop (e.g.
+# `until gh run list ... | grep -q <sha>; do sleep 5; done` watching a sha the
+# worker later force-pushes away) runs until a human notices. Workers are
+# foreground-only (prompts/worker.md § "Run long commands in the foreground");
+# this env var makes the harness enforce that for claude workers — it removes
+# run_in_background AND the silent promote-to-background when a foreground
+# command hits its timeout. gemini/codex have no equivalent switch; for them
+# the prompt rule remains the only guard. (#301)
+FOREGROUND_ONLY_ENV_OPTS=(-e "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1")
+
 # Worker agent selection. WORKER_CMD chooses the LLM CLI the listener will
 # dispatch to (default claude). The listener picks up the choice from its
 # first arg here; WORKER_MODEL is read by the listener directly from the
@@ -291,5 +301,6 @@ exec docker run "${INTERACTIVE_FLAGS[@]}" --rm --init \
     -e "TERM=$TERM" \
     -e "COLORTERM=${COLORTERM:-}" \
     -e "BROWSER=echo" \
+    "${FOREGROUND_ONLY_ENV_OPTS[@]}" \
     "$IMAGE" \
     "${CMD_ARRAY[@]}"
