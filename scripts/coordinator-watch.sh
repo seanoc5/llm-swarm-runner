@@ -2212,18 +2212,26 @@ compact_confirm_submitted() {
 
 # compact_replay_detected <tmux-target>
 #
-# (issue #292) True (rc 0) if <target>'s pane currently shows
-# COMPACT_REPLAY_PATTERN — the CLI's post-compact continuation replaying the
-# prompt that triggered the compaction, when that prompt was itself
-# "/compact" (see this file's COMPACT_REPLAY_PATTERN header comment for the
-# transcript-verified forensics). Best-effort textual match, same caveats as
-# every other capture-pane heuristic in this file: fails closed (a tmux
-# error just reads as "not detected", never aborts the caller).
+# (issue #292) True (rc 0) if <target>'s pane's LAST rendered line (via
+# compact_last_pane_line, not a whole-pane grep) matches COMPACT_REPLAY_
+# PATTERN — the CLI's post-compact continuation replaying the prompt that
+# triggered the compaction, when that prompt was itself "/compact" (see this
+# file's COMPACT_REPLAY_PATTERN header comment for the transcript-verified
+# forensics). Deliberately scoped to the last line rather than the whole
+# visible pane (self-review finding on this function's first version): a
+# whole-pane grep would still match long after the replay text scrolled to
+# a non-terminal line — including, on THIS repo specifically, a worker pane
+# that's simply viewing/editing this file or its tests, both of which
+# contain the literal string "Not enough messages to compact." as plain
+# source text, nowhere near an actual compaction. Scoping to the last line
+# matches the real incident's actual shape (it WAS the last thing printed)
+# while self-healing the moment anything else renders below it (a new turn,
+# a statusline refresh, an idle prompt redraw) — the same trade-off
+# compact_composer_clear already makes for the same reason.
 compact_replay_detected() {
-    local target="$1" content clean
-    content="$(tmux capture-pane -t "$target" -p 2>/dev/null)" || return 1
-    clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
-    printf '%s\n' "$clean" | LC_ALL=C grep -qE "$COMPACT_REPLAY_PATTERN"
+    local target="$1" last
+    last="$(compact_last_pane_line "$target")" || true
+    printf '%s\n' "$last" | LC_ALL=C grep -qE "$COMPACT_REPLAY_PATTERN"
 }
 
 # compact_retract_queued <tmux-target> <event-prefix> <extra-log-fields> [busy-pattern]
