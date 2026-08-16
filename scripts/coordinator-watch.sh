@@ -2062,13 +2062,35 @@ probe_ctx_used() {
 # common composer chrome (prompt markers ❯/>/|, box-drawing borders) so
 # callers can judge composer content/emptiness. This is a guess at how the
 # CLI frames its composer, not a verified spec — re-check against a live
-# pane if this misclassifies. Echoes empty string and returns 1 on a tmux
-# capture failure.
+# pane if this misclassifies.
+#
+# A self-review on this function's first version flagged that "the
+# composer is the pane's last rendered line" can be wrong on its own: a
+# persistent statusline/hint line below the composer would make this
+# permanently pick THAT line instead, misreading a genuinely-empty composer
+# as non-empty forever. For the worker path this is a KNOWN, not merely
+# hypothetical, risk — worker_pane_ctx_used/worker_pane_ctx_window (above)
+# already parse a persistent "ctx: <used>/<total> (<pct>%)" statusline out
+# of the exact same capture-pane output — so that specific line is excluded
+# before picking the tail. No equivalently well-established coordinator-side
+# persistent-chrome text exists elsewhere in this file to filter the same
+# way; that half of the risk remains a live-pane-unverified guess like the
+# rest of this feature's TUI-chrome parsing.
 compact_last_pane_line() {
     local target="$1" content clean
     content="$(tmux capture-pane -t "$target" -p 2>/dev/null)" || { echo ""; return 1; }
     clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
-    printf '%s\n' "$clean" | sed -e '/^[[:space:]]*$/d' -e 's/^[[:space:]]*[❯>│|╭╮╰╯─]*[[:space:]]*//' -e 's/[[:space:]]*[│|╭╮╰╯─]*[[:space:]]*$//' | tail -1
+    # `|| true` on the whole pipeline: under this file's `set -o pipefail`,
+    # a captured pane whose EVERY line happens to match the ctx: exclusion
+    # below (grep -v then produces zero lines and exits 1) would otherwise
+    # make this function return non-zero for a reason that has nothing to
+    # do with a real failure — and since callers assign the result via a
+    # bare (non-`local`) `last="$(compact_last_pane_line ...)"`, that
+    # non-zero would trip `set -e` and abort the watcher. Only the explicit
+    # capture-pane failure above is a real failure this function reports.
+    printf '%s\n' "$clean" \
+        | LC_ALL=C grep -vE 'ctx: [0-9]+[kM]?/[0-9]+[kM]?[[:space:]]*\([0-9]+%\)' \
+        | sed -e '/^[[:space:]]*$/d' -e 's/^[[:space:]]*[❯>│|╭╮╰╯─]*[[:space:]]*//' -e 's/[[:space:]]*[│|╭╮╰╯─]*[[:space:]]*$//' | tail -1 || true
 }
 
 # compact_composer_clear <tmux-target>
@@ -2100,7 +2122,7 @@ compact_confirm_submitted() {
     content="$(tmux capture-pane -t "$target" -p 2>/dev/null)" || return 1
     clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
     printf '%s\n' "$clean" | LC_ALL=C grep -qE "$busy_pattern" && return 0
-    last="$(compact_last_pane_line "$target")"
+    last="$(compact_last_pane_line "$target")" || true
     case "$last" in
         "$pasted"*) return 1 ;;
         *) return 0 ;;

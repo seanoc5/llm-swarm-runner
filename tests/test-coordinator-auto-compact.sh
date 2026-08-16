@@ -810,5 +810,32 @@ check "retried Enter reaches the CLI -> coord.compact.done (not a false phase=st
 if grep -q 'coord.compact.timeout.*phase=start' "$EVENTS_LOG"; then got=present; else got=absent; fi
 check "no phase=start timeout once the retry lands" "absent" "$got"
 
+heading "Test 16: compact_last_pane_line — a captured pane that's ENTIRELY ctx-statusline lines doesn't abort under set -e/pipefail (issue #290 self-review finding)"
+# A self-review flagged that compact_last_pane_line's internal pipeline
+# (capture -> exclude the ctx: statusline -> trim -> tail) sits under this
+# file's `set -o pipefail`: if EVERY captured line matches the ctx:
+# exclusion (grep -v then emits zero lines and exits 1), the whole pipeline
+# reports non-zero even though nothing actually went wrong -- and since
+# compact_confirm_submitted assigns the result via a bare (non-`local`)
+# `last="$(compact_last_pane_line ...)"`, that non-zero would trip `set -e`
+# and abort the entire watcher process. No live tmux session needed here --
+# this stubs the `tmux` builtin directly so capture-pane returns a single
+# line that's ENTIRELY the ctx: pattern, deterministically forcing the
+# exact grep -v edge case (real captures always have blank padding lines
+# that survive the filter, so this can't be reproduced against a real pane
+# -- see this function's header comment).
+tmux() {
+    if [ "$1" = "capture-pane" ]; then
+        printf 'sonnet · wt-issue-99 · ctx: 900k/1M (90%%)\n'
+        return 0
+    fi
+    command tmux "$@"
+}
+rc=0
+out="$(compact_last_pane_line "fake:target")" || rc=$?
+unset -f tmux
+check "compact_last_pane_line returns 0 even when EVERY line matches the ctx exclusion" "0" "$rc"
+check "compact_last_pane_line echoes empty (nothing survives the exclusion)" "" "$out"
+
 echo ""
 green "All coordinator-auto-compact tests passed ($PASS checks)"
