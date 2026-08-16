@@ -53,7 +53,7 @@ extract_fn() {
 }
 for fn in mtime_epoch coordinator_pane_state coordinator_pane_busy probe_ctx_used maybe_auto_compact \
           auto_compact_poll_pass compact_retract_queued compact_last_pane_line compact_composer_clear \
-          compact_confirm_submitted log_event; do
+          compact_confirm_submitted compact_replay_detected log_event; do
     body="$(extract_fn "$fn")"
     [ -n "$body" ] || red "could not extract function '$fn' from $WATCH — has it been renamed?"
     eval "$body"
@@ -86,6 +86,8 @@ COMPACT_RETRACT_BACKSPACES=3
 # delay; individual tests below override it where the delay itself is
 # what's under test.
 COMPACT_SUBMIT_SETTLE_SECS=0
+# issue #292 — must match coordinator-watch.sh's own default.
+COMPACT_REPLAY_PATTERN='Not enough messages to compact\.'
 
 PASS=0
 
@@ -836,6 +838,151 @@ out="$(compact_last_pane_line "fake:target")" || rc=$?
 unset -f tmux
 check "compact_last_pane_line returns 0 even when EVERY line matches the ctx exclusion" "0" "$rc"
 check "compact_last_pane_line echoes empty (nothing survives the exclusion)" "" "$out"
+
+heading "Test 17: maybe_auto_compact — composer already empty at a phase=start timeout -> coord.compact.delivered_as_text, not a misleading retraction (issue #292)"
+# Models the DISTINCT #292 failure mode from Tests 12/13: the injected
+# /compact reaches the model as a plain chat message rather than executing
+# as a slash command. Unlike a genuine non-submit (Test 12: "/compa" ghost
+# left behind) or a genuinely stuck queue (Test 13: queued marker still
+# visible), here the composer is ALREADY clear by the time the phase=start
+# timeout fires — nothing was ever left un-submitted — yet no busy indicator
+# ever appeared either. This must be recognized as "delivered as text" (a
+# distinct log event), never the misleading "retracted" verdict a composer
+# that's ALREADY empty would otherwise produce for the wrong reason.
+FAKE_DELIVERED_AS_TEXT="$TEST_DIR/fake-repl-delivered-as-text.sh"
+cat > "$FAKE_DELIVERED_AS_TEXT" <<'REPL'
+#!/usr/bin/env bash
+composer=""
+stty raw -echo 2>/dev/null || true
+render() {
+    printf '\033[2J\033[H'
+    echo "idle >"
+    printf '\xe2\x9d\xaf %s\n' "$composer"
+}
+render
+while IFS= read -rn1 -d '' ch; do
+    case "$ch" in
+        # Models the literal "/compact" being delivered to the model as a
+        # plain chat message: the composer clears immediately (accepted),
+        # but nothing busy-shaped ever renders — the fixture never shows the
+        # quick reply, just settles right back to an empty composer, the
+        # same as a real short queued-turn response would once it's done.
+        $'\r'|$'\n') composer=""; render ;;
+        $'\x7f'|$'\x08') composer="${composer%?}"; render ;;
+        $'\x1b') render ;;
+        *) composer="$composer$ch"; render ;;
+    esac
+done
+REPL
+chmod +x "$FAKE_DELIVERED_AS_TEXT"
+
+DAT_SESSION="${SESSION_NAME}-deliveredastext"
+tmux new-session -d -s "$DAT_SESSION" -n coordinator 2>/dev/null
+tmux send-keys -t "$DAT_SESSION:coordinator" "exec -a claude bash $FAKE_DELIVERED_AS_TEXT" Enter
+
+ORIG_SESSION_NAME="$SESSION_NAME"
+SESSION_NAME="$DAT_SESSION"
+check_eventually "delivered-as-text session: fake composer foreground -> cli" "cli" 'coordinator_pane_state'
+
+printf '{"context_window":{"context_window_size":200000,"total_input_tokens":200000}}' > "$AUTO_COMPACT_PROBE"
+
+TMUX_CALL_LOG="$TEST_DIR/tmux-calls-dat.log"
+: > "$TMUX_CALL_LOG"
+tmux() {
+    printf '%s\n' "$*" >> "$TMUX_CALL_LOG"
+    command tmux "$@"
+}
+
+DRY_RUN=0
+AUTO_COMPACT_START_TIMEOUT_SECS=2
+AUTO_COMPACT_POLL_SECS=1
+: > "$EVENTS_LOG"
+maybe_auto_compact wake
+unset -f tmux
+SESSION_NAME="$ORIG_SESSION_NAME"
+tmux kill-session -t "$DAT_SESSION" 2>/dev/null || true
+
+if grep -q 'coord.compact.timeout.*phase=start' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "phase=start timeout still logged (busy indicator never appeared)" "logged" "$got"
+
+if grep -q 'coord.compact.delivered_as_text' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "composer already empty -> coord.compact.delivered_as_text (issue #292)" "logged" "$got"
+
+if grep -q 'coord.compact.retracted' "$EVENTS_LOG"; then got=present; else got=absent; fi
+check "no misleading coord.compact.retracted verdict" "absent" "$got"
+
+if grep -q 'coord.compact.retract_failed' "$EVENTS_LOG"; then got=present; else got=absent; fi
+check "no coord.compact.retract_failed either — retraction was never attempted" "absent" "$got"
+
+if grep -q "send-keys -t $DAT_SESSION:coordinator Escape" "$TMUX_CALL_LOG"; then got=present; else got=absent; fi
+check "NO Escape sent — nothing was left queued to retract" "absent" "$got"
+
+if grep -q "send-keys -t $DAT_SESSION:coordinator BSpace" "$TMUX_CALL_LOG"; then got=present; else got=absent; fi
+check "NO Backspace sent — nothing was left queued to retract" "absent" "$got"
+
+heading "Test 18: maybe_auto_compact — a post-compact replayed /compact ('Not enough messages to compact.') is tolerated, not logged as ineffective (issue #292)"
+# Transcript-verified real-world shape (corpusminder coordinator,
+# 2026-08-16 02:50:04Z, see this file's COMPACT_REPLAY_PATTERN header
+# comment): when the prompt that triggered a compaction was itself
+# "/compact", the CLI's post-compact continuation replays it, producing an
+# immediate second, harmless rejection — "Not enough messages to compact."
+# — that lands within the watcher's own verify window. This fixture always
+# prints that text right after a "compaction" finishes, standing in for
+# that replay; the probe is deliberately left UNCHANGED post-compact (same
+# shape as Test 7's ineffective-detection fixture) to prove the replay
+# check takes precedence over the ineffective check, not just that it
+# happens to agree with it.
+FAKE_REPL_REPLAY="$TEST_DIR/fake-repl-replay.sh"
+cat > "$FAKE_REPL_REPLAY" <<'REPL'
+#!/usr/bin/env bash
+echo "idle-prompt >"
+while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    if [ "$line" = "/compact" ]; then
+        echo "✻ Considering… (esc to interrupt)"
+        sleep 2
+        clear
+        echo "idle-prompt >"
+        echo "Not enough messages to compact."
+    else
+        echo "unrecognized: $line"
+        echo "idle-prompt >"
+    fi
+done
+REPL
+chmod +x "$FAKE_REPL_REPLAY"
+
+REPLAY_SESSION="${SESSION_NAME}-replay"
+tmux new-session -d -s "$REPLAY_SESSION" -n coordinator 2>/dev/null
+tmux send-keys -t "$REPLAY_SESSION:coordinator" "exec -a claude bash $FAKE_REPL_REPLAY" Enter
+
+ORIG_SESSION_NAME="$SESSION_NAME"
+SESSION_NAME="$REPLAY_SESSION"
+check_eventually "replay session: fake REPL foreground -> cli" "cli" 'coordinator_pane_state'
+
+printf '{"context_window":{"context_window_size":200000,"total_input_tokens":170000}}' > "$AUTO_COMPACT_PROBE"
+( sleep 3; printf '{"context_window":{"context_window_size":200000,"total_input_tokens":170000}}' > "$AUTO_COMPACT_PROBE" ) &
+BGPID18=$!
+
+DRY_RUN=0
+AUTO_COMPACT_START_TIMEOUT_SECS=10
+AUTO_COMPACT_FINISH_TIMEOUT_SECS=15
+AUTO_COMPACT_VERIFY_TIMEOUT_SECS=10
+AUTO_COMPACT_POLL_SECS=1
+: > "$EVENTS_LOG"
+maybe_auto_compact wake
+wait "$BGPID18" 2>/dev/null || true
+SESSION_NAME="$ORIG_SESSION_NAME"
+tmux kill-session -t "$REPLAY_SESSION" 2>/dev/null || true
+
+if grep -q 'coord.compact.done' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "compaction still observed start->finish despite the trailing replay" "logged" "$got"
+
+if grep -q 'coord.compact.replayed' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "post-compact replayed /compact text detected -> coord.compact.replayed (issue #292)" "logged" "$got"
+
+if grep -q 'coord.compact.ineffective' "$EVENTS_LOG"; then got=present; else got=absent; fi
+check "replay tolerated -- no false-positive coord.compact.ineffective despite an unchanged probe value" "absent" "$got"
 
 echo ""
 green "All coordinator-auto-compact tests passed ($PASS checks)"

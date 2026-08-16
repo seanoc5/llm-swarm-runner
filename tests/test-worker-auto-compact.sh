@@ -60,7 +60,7 @@ for fn in worker_pane_state worker_pane_busy worker_pane_ctx_used worker_pane_ct
           worker_compact_effective_threshold worker_has_open_pr \
           worker_task_done worker_compact_record_failure worker_compact_record_success \
           maybe_worker_compact compact_retract_queued compact_last_pane_line compact_composer_clear \
-          compact_confirm_submitted log_event; do
+          compact_confirm_submitted compact_replay_detected log_event; do
     body="$(extract_fn "$fn")"
     [ -n "$body" ] || red "could not extract function '$fn' from $WATCH — has it been renamed?"
     eval "$body"
@@ -94,6 +94,8 @@ COMPACT_RETRACT_BACKSPACES=3
 # delay; individual tests below override it where the delay itself is
 # what's under test.
 COMPACT_SUBMIT_SETTLE_SECS=0
+# issue #292 — must match coordinator-watch.sh's own default.
+COMPACT_REPLAY_PATTERN='Not enough messages to compact\.'
 declare -A WORKER_COMPACT_LAST_FAIL=()
 declare -A WORKER_COMPACT_FAIL_COUNT=()
 declare -A WORKER_COMPACT_GAVE_UP=()
@@ -964,6 +966,142 @@ out="$(compact_last_pane_line "fake:target")" || rc=$?
 unset -f tmux
 check "compact_last_pane_line returns 0 even when EVERY line matches the ctx exclusion" "0" "$rc"
 check "compact_last_pane_line echoes empty (nothing survives the exclusion)" "" "$out"
+
+heading "Test 19: maybe_worker_compact — composer already empty at a phase=start timeout -> worker.compact.delivered_as_text, not a misleading retraction (issue #292)"
+# Models the DISTINCT #292 failure mode from Tests 14/15: the injected
+# /compact reaches the model as a plain chat message rather than executing
+# as a slash command. Unlike a genuine non-submit (Test 14: "/compa" ghost
+# left behind) or a genuinely stuck queue (Test 15: queued marker still
+# visible), here the composer is ALREADY clear by the time the phase=start
+# timeout fires — nothing was ever left un-submitted — yet no busy indicator
+# ever appeared either. This must be recognized as "delivered as text" (a
+# distinct log event, still counted as a failure for backoff purposes),
+# never the misleading "retracted" verdict.
+FAKE_DELIVERED_AS_TEXT="$TEST_DIR/fake-repl-delivered-as-text.sh"
+cat > "$FAKE_DELIVERED_AS_TEXT" <<'REPL'
+#!/usr/bin/env bash
+composer=""
+stty raw -echo 2>/dev/null || true
+render() {
+    printf '\033[2J\033[H'
+    echo "sonnet · wt-issue-48 · ctx: 260k/1M (26%)"
+    printf '\xe2\x9d\xaf %s\n' "$composer"
+}
+render
+while IFS= read -rn1 -d '' ch; do
+    case "$ch" in
+        # Models the literal "/compact" being delivered to the model as a
+        # plain chat message: the composer clears immediately (accepted),
+        # but nothing busy-shaped ever renders — settles right back to an
+        # empty composer, same as a real short queued-turn response would
+        # once it's done.
+        $'\r'|$'\n') composer=""; render ;;
+        $'\x7f'|$'\x08') composer="${composer%?}"; render ;;
+        $'\x1b') render ;;
+        *) composer="$composer$ch"; render ;;
+    esac
+done
+REPL
+chmod +x "$FAKE_DELIVERED_AS_TEXT"
+
+WIN6="iss-48"
+tmux new-window -t "$SESSION_NAME" -n "$WIN6" 2>/dev/null
+tmux send-keys -t "$SESSION_NAME:$WIN6" "exec -a claude bash $FAKE_DELIVERED_AS_TEXT" Enter
+check_eventually "iss-48 window: fake composer foreground -> cli" "cli" "worker_pane_state '$WIN6'"
+
+TMUX_CALL_LOG="$TEST_DIR/tmux-calls-dat.log"
+: > "$TMUX_CALL_LOG"
+tmux() {
+    printf '%s\n' "$*" >> "$TMUX_CALL_LOG"
+    command tmux "$@"
+}
+
+DRY_RUN=0
+WORKER_COMPACT_START_TIMEOUT_SECS=2
+WORKER_COMPACT_POLL_SECS=1
+: > "$EVENTS_LOG"
+maybe_worker_compact "$WIN6"
+unset -f tmux
+
+if grep -q 'worker.compact.timeout issue=48 phase=start' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "phase=start timeout still logged (busy indicator never appeared)" "logged" "$got"
+
+if grep -q 'worker.compact.delivered_as_text issue=48' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "composer already empty -> worker.compact.delivered_as_text (issue #292)" "logged" "$got"
+
+if grep -q 'worker.compact.retracted issue=48' "$EVENTS_LOG"; then got=present; else got=absent; fi
+check "no misleading worker.compact.retracted verdict" "absent" "$got"
+
+if grep -q 'worker.compact.retract_failed issue=48' "$EVENTS_LOG"; then got=present; else got=absent; fi
+check "no worker.compact.retract_failed either — retraction was never attempted" "absent" "$got"
+
+if grep -q "send-keys -t $SESSION_NAME:$WIN6 Escape" "$TMUX_CALL_LOG"; then got=present; else got=absent; fi
+check "NO Escape sent — nothing was left queued to retract" "absent" "$got"
+
+if grep -q "send-keys -t $SESSION_NAME:$WIN6 BSpace" "$TMUX_CALL_LOG"; then got=present; else got=absent; fi
+check "NO Backspace sent — nothing was left queued to retract" "absent" "$got"
+
+check "still counted as a backoff failure (no compaction actually ran)" "1" \
+    "$([ "${WORKER_COMPACT_LAST_FAIL[48]:-0}" -gt 0 ] && echo 1 || echo 0)"
+unset 'WORKER_COMPACT_LAST_FAIL[48]' 'WORKER_COMPACT_FAIL_COUNT[48]' 'WORKER_COMPACT_GAVE_UP[48]'
+
+heading "Test 20: maybe_worker_compact — a post-compact replayed /compact ('Not enough messages to compact.') is tolerated, not logged as ineffective (issue #292)"
+# Transcript-verified real-world shape (see this file's COMPACT_REPLAY_
+# PATTERN header comment in coordinator-watch.sh): when the prompt that
+# triggered a compaction was itself "/compact", the CLI's post-compact
+# continuation replays it, producing an immediate second, harmless
+# rejection — "Not enough messages to compact." — landing within the
+# watcher's own verify window. This fixture always prints that text right
+# after a "compaction" finishes, standing in for that replay; the rendered
+# ctx is deliberately left UNCHANGED post-compact (same shape as Test 11's
+# ineffective-detection fixture) to prove the replay check takes precedence
+# over the ineffective check, not just that it happens to agree with it.
+FAKE_REPL_REPLAY="$TEST_DIR/fake-worker-repl-replay.sh"
+cat > "$FAKE_REPL_REPLAY" <<'REPL'
+#!/usr/bin/env bash
+echo "sonnet · wt-issue-49 · ctx: 260k/1M (26%)"
+echo "idle-prompt >"
+while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    if [ "$line" = "/compact" ]; then
+        echo "✻ Considering… (esc to interrupt)"
+        sleep 2
+        clear
+        echo "sonnet · wt-issue-49 · ctx: 260k/1M (26%)"
+        echo "idle-prompt >"
+        echo "Not enough messages to compact."
+    else
+        echo "unrecognized: $line"
+        echo "idle-prompt >"
+    fi
+done
+REPL
+chmod +x "$FAKE_REPL_REPLAY"
+
+WIN7="iss-49"
+tmux new-window -t "$SESSION_NAME" -n "$WIN7" 2>/dev/null
+tmux send-keys -t "$SESSION_NAME:$WIN7" "exec -a claude bash $FAKE_REPL_REPLAY" Enter
+check_eventually "iss-49 window: fake REPL foreground -> cli" "cli" "worker_pane_state '$WIN7'"
+check_eventually "iss-49 window renders initial 260k ctx" "260000" "worker_pane_ctx_used '$WIN7'"
+
+DRY_RUN=0
+WORKER_COMPACT_START_TIMEOUT_SECS=10
+WORKER_COMPACT_FINISH_TIMEOUT_SECS=15
+WORKER_COMPACT_VERIFY_TIMEOUT_SECS=10
+WORKER_COMPACT_POLL_SECS=1
+WORKER_COMPACT_THRESHOLD_CAP_TOKENS=100000
+WORKER_COMPACT_THRESHOLD_TOKENS=100000
+: > "$EVENTS_LOG"
+maybe_worker_compact "$WIN7"
+
+if grep -q 'worker.compact.done issue=49' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "compaction still observed start->finish despite the trailing replay" "logged" "$got"
+
+if grep -q 'worker.compact.replayed issue=49' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "post-compact replayed /compact text detected -> worker.compact.replayed (issue #292)" "logged" "$got"
+
+if grep -q 'worker.compact.ineffective issue=49' "$EVENTS_LOG"; then got=present; else got=absent; fi
+check "replay tolerated -- no false-positive worker.compact.ineffective despite an unchanged ctx reading" "absent" "$got"
 
 echo ""
 green "All worker-auto-compact tests passed ($PASS checks)"

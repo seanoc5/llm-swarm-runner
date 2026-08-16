@@ -717,6 +717,59 @@
 #                           through to the normal start-wait loop. Shared
 #                           between the coordinator and worker injection
 #                           paths; not used by retraction.
+#   COMPACT_REPLAY_PATTERN
+#                           (issue #292) Transcript-verified 2026-08-16
+#                           (corpusminder coordinator, 02:50:04Z): when the
+#                           prompt that triggered a compaction was itself
+#                           "/compact", the CLI's post-compact continuation
+#                           replays that same prompt — {"type":"last-prompt",
+#                           "lastPrompt":"/compact"} — producing an immediate,
+#                           harmless second execution that renders "Not
+#                           enough messages to compact." The watcher's own
+#                           finish-wait was still asleep when this fired (no
+#                           wake, no human input — the flock was held the
+#                           whole time), so this is a genuine CLI quirk, not
+#                           anything maybe_auto_compact/maybe_worker_compact
+#                           themselves inject. Both functions' post-.done
+#                           verify loop now checks for this text; if seen,
+#                           the ineffective-compaction check is skipped
+#                           entirely (coord.compact.replayed/worker.compact.
+#                           replayed logged instead) rather than risking a
+#                           misread if the replay's rejection text is still
+#                           on screen when used_after is sampled.
+#
+#                           A second, DISTINCT #292 failure mode — no shared
+#                           pattern var, just a compact_composer_clear check
+#                           reused at the phase=start timeout site — is the
+#                           "delivered as literal text" case: transcript-
+#                           verified the same night (01:25:10Z) that an
+#                           injected "/compact" can reach the model as a
+#                           plain chat message (no command-name execution
+#                           pair in the transcript) rather than executing as
+#                           a slash command — composer empties, nothing ever
+#                           compacts. Because it was queued behind another
+#                           turn, the busy indicator this file's start-wait
+#                           loop polls for never appeared before
+#                           AUTO_COMPACT_START_TIMEOUT_SECS/WORKER_COMPACT_
+#                           START_TIMEOUT_SECS elapsed, yet the composer is
+#                           ALREADY empty by then (the plain-text message was
+#                           accepted and answered, not left sitting
+#                           un-submitted) — unlike a genuine non-submit (see
+#                           COMPACT_RETRACT_BACKSPACES above), which always
+#                           leaves ghost/un-cleared composer text behind at
+#                           this same checkpoint. maybe_auto_compact/
+#                           maybe_worker_compact now check compact_composer_
+#                           clear BEFORE calling compact_retract_queued at a
+#                           phase=start timeout: composer already clear ->
+#                           log coord.compact.delivered_as_text/worker.
+#                           compact.delivered_as_text (no Escape/Backspace —
+#                           there is nothing queued left to retract) instead
+#                           of the misleading "retracted" verdict the old
+#                           code would have logged (retraction "succeeding"
+#                           for a reason that has nothing to do with
+#                           retraction). Still counts as a failure for the
+#                           worker-side backoff (worker_compact_record_
+#                           failure) — no compaction ran either way.
 #
 # Watch backend (auto-detected):
 #   - inotifywait (preferred): instant response. Install with:
@@ -798,6 +851,7 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     COMPACT_QUEUED_MARKER_PATTERN     (auto)  queued-input marker checked when retracting a stuck phase=start injection; see header comment
     COMPACT_RETRACT_BACKSPACES        12      Backspace keystrokes sent alongside the retraction Escape (coord + worker, shared; issue #265/#290)
     COMPACT_SUBMIT_SETTLE_SECS        1       settle delay around the injection-submit Enter (coord + worker, shared; issue #290); see header comment
+    COMPACT_REPLAY_PATTERN            (auto)  post-compact replayed-/compact rejection text tolerated during verify (coord + worker, shared; issue #292); see header comment
 
 DEFAULT WAKE_PROMPT (top-up mode)
     Coordinator triages outcomes, then refills workers toward MAX_WORKERS
@@ -852,7 +906,18 @@ EVENTS LOG
                            pattern still matched at retraction time (e.g. a compaction that IS
                            genuinely running despite the phase=start timeout — see #274), so no
                            Escape/Backspace was sent (trigger=poll|wake)
+      coord.compact.delivered_as_text  (issue #292) a phase=start timeout fired, but the
+                           composer was ALREADY empty (no ghost text) — no retraction attempted
+                           (nothing queued left to retract). Most likely explanation: the injected
+                           /compact reached the model as a plain chat message instead of executing
+                           as a slash command, so no compaction ran despite looking "submitted"
+                           (trigger=poll|wake)
       coord.compact.done   busy indicator cleared — compaction confirmed finished (waited, trigger=poll|wake)
+      coord.compact.replayed  (issue #292) the CLI's post-compact continuation replayed the
+                           same /compact prompt and it rejected harmlessly ("Not enough messages
+                           to compact.") within the verify window — the ineffective-compaction
+                           check is skipped for this attempt rather than risking a misread
+                           (before, trigger=poll|wake)
       coord.compact.ineffective  context didn't drop post-compact (before, after, trigger=poll|wake) — investigate
       coord.compact.verify_skip  probe never refreshed post-compact — inconclusive, not a failure (trigger=poll|wake)
       worker.compact        /compact injected into an iss-* window (issue, used, threshold, wrapup)
@@ -875,7 +940,17 @@ EVENTS LOG
       worker.compact.retract_skip  (issue #290) retraction skipped entirely — the pane's busy
                            pattern still matched at retraction time (see coord.compact.retract_skip
                            above) — no Escape/Backspace was sent (issue)
+      worker.compact.delivered_as_text  (issue #292) same signal as coord.compact.delivered_as_text
+                           above — composer already empty at a phase=start timeout, no ghost text
+                           to retract; most likely the injected /compact was delivered as a plain
+                           chat message rather than executed as a slash command. Still counted as
+                           a failure (worker_compact_record_failure) — no compaction ran (issue)
       worker.compact.done   worker busy indicator cleared — compaction confirmed finished (issue, waited)
+      worker.compact.replayed  (issue #292) same signal as coord.compact.replayed above — the
+                           CLI's post-compact continuation replayed /compact and it rejected
+                           harmlessly ("Not enough messages to compact.") within the verify
+                           window; ineffective-compaction check skipped for this attempt
+                           (issue, before)
       worker.compact.ineffective  worker context didn't drop post-compact (issue, before, after) — investigate
       worker.compact.verify_skip  worker's ctx reading never refreshed post-compact — inconclusive, not a failure
       worker.compact.giving_up  (issue #252) N consecutive timeout/ineffective verdicts for this
@@ -1028,6 +1103,8 @@ COMPACT_RETRACT_BACKSPACES="${COMPACT_RETRACT_BACKSPACES:-12}"
 # maybe_auto_compact's injection comment for the autocomplete-menu race
 # this closes.
 COMPACT_SUBMIT_SETTLE_SECS="${COMPACT_SUBMIT_SETTLE_SECS:-1}"
+# issue #292 — see this file's COMPACT_REPLAY_PATTERN header comment above.
+COMPACT_REPLAY_PATTERN="${COMPACT_REPLAY_PATTERN:-Not enough messages to compact\.}"
 
 case "$WATCHER_AUTOCLOSE_MODE" in
     merged)    AUTOCLOSE_PR_FLAG="--merged-only" ;;
@@ -1132,7 +1209,9 @@ format_event_line() {
         coord.compact.retracted)          glyph="↩"; color=$'\033[32m' ;;
         coord.compact.retract_failed)      glyph="⚠"; color=$'\033[31m' ;;
         coord.compact.retract_skip)          glyph="·"; color=$'\033[2m'  ;;
+        coord.compact.delivered_as_text)  glyph="⚠"; color=$'\033[33m' ;;
         coord.compact.done)               glyph="◈"; color=$'\033[32m' ;;
+        coord.compact.replayed)             glyph="·"; color=$'\033[2m'  ;;
         coord.compact.ineffective)          glyph="⚠"; color=$'\033[31m' ;;
         coord.compact.verify_skip)            glyph="·"; color=$'\033[2m'  ;;
         worker.compact)                 glyph="◈"; color=$'\033[36m' ;;
@@ -1142,7 +1221,9 @@ format_event_line() {
         worker.compact.retracted)          glyph="↩"; color=$'\033[32m' ;;
         worker.compact.retract_failed)      glyph="⚠"; color=$'\033[31m' ;;
         worker.compact.retract_skip)          glyph="·"; color=$'\033[2m'  ;;
+        worker.compact.delivered_as_text)  glyph="⚠"; color=$'\033[33m' ;;
         worker.compact.done)               glyph="◈"; color=$'\033[32m' ;;
+        worker.compact.replayed)             glyph="·"; color=$'\033[2m'  ;;
         worker.compact.ineffective)          glyph="⚠"; color=$'\033[31m' ;;
         worker.compact.verify_skip)            glyph="·"; color=$'\033[2m'  ;;
         worker.compact.giving_up)                glyph="⚠"; color=$'\033[31m' ;;
@@ -2129,6 +2210,22 @@ compact_confirm_submitted() {
     esac
 }
 
+# compact_replay_detected <tmux-target>
+#
+# (issue #292) True (rc 0) if <target>'s pane currently shows
+# COMPACT_REPLAY_PATTERN — the CLI's post-compact continuation replaying the
+# prompt that triggered the compaction, when that prompt was itself
+# "/compact" (see this file's COMPACT_REPLAY_PATTERN header comment for the
+# transcript-verified forensics). Best-effort textual match, same caveats as
+# every other capture-pane heuristic in this file: fails closed (a tmux
+# error just reads as "not detected", never aborts the caller).
+compact_replay_detected() {
+    local target="$1" content clean
+    content="$(tmux capture-pane -t "$target" -p 2>/dev/null)" || return 1
+    clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
+    printf '%s\n' "$clean" | LC_ALL=C grep -qE "$COMPACT_REPLAY_PATTERN"
+}
+
 # compact_retract_queued <tmux-target> <event-prefix> <extra-log-fields> [busy-pattern]
 #
 # (issue #265) Best-effort retraction of an injected "/compact" that a
@@ -2350,7 +2447,19 @@ maybe_auto_compact() {
             waited=$((waited + AUTO_COMPACT_POLL_SECS))
             if [ "$waited" -ge "$AUTO_COMPACT_START_TIMEOUT_SECS" ]; then
                 log_event coord.compact.timeout "phase=start waited=${waited}s trigger=$trigger"
-                compact_retract_queued "$SESSION_NAME:coordinator" coord.compact "trigger=$trigger" "$AUTO_COMPACT_BUSY_PATTERN" || true
+                # issue #292: an already-empty composer at this checkpoint means
+                # there is nothing queued left to retract — a genuine non-submit
+                # always leaves ghost/un-cleared composer text here (see
+                # COMPACT_RETRACT_BACKSPACES's header comment). The likelier
+                # explanation, transcript-verified, is that the injected
+                # /compact was delivered to the model as a plain chat message
+                # rather than executed as a slash command — see this file's
+                # COMPACT_REPLAY_PATTERN header comment for the full forensics.
+                if compact_composer_clear "$SESSION_NAME:coordinator"; then
+                    log_event coord.compact.delivered_as_text "trigger=$trigger"
+                else
+                    compact_retract_queued "$SESSION_NAME:coordinator" coord.compact "trigger=$trigger" "$AUTO_COMPACT_BUSY_PATTERN" || true
+                fi
                 exit 0
             fi
         done
@@ -2386,10 +2495,21 @@ maybe_auto_compact() {
         # compaction as ineffective. If it never refreshes within
         # AUTO_COMPACT_VERIFY_TIMEOUT_SECS, this is inconclusive (not a
         # failure) — logged as verify_skip, not ineffective.
-        local verify_waited=0 probe_mtime_after used_after=""
+        #
+        # issue #292: also watch for the CLI's own post-compact continuation
+        # replaying this same /compact prompt (transcript-verified — see
+        # COMPACT_REPLAY_PATTERN's header comment) — a harmless, immediate
+        # "Not enough messages to compact." rejection that has nothing to do
+        # with whether THIS compaction worked. If seen, skip the ineffective
+        # check entirely rather than risk a misread while that text is still
+        # on screen.
+        local verify_waited=0 probe_mtime_after used_after="" replayed=0
         while [ "$verify_waited" -lt "$AUTO_COMPACT_VERIFY_TIMEOUT_SECS" ]; do
             sleep "$AUTO_COMPACT_POLL_SECS"
             verify_waited=$((verify_waited + AUTO_COMPACT_POLL_SECS))
+            if compact_replay_detected "$SESSION_NAME:coordinator"; then
+                replayed=1
+            fi
             probe_mtime_after=$(mtime_epoch "$AUTO_COMPACT_PROBE" 2>/dev/null) || probe_mtime_after=0
             [ -n "$probe_mtime_after" ] || probe_mtime_after=0
             if [ "$probe_mtime_after" -gt "$probe_mtime_before" ]; then
@@ -2398,7 +2518,9 @@ maybe_auto_compact() {
             fi
         done
 
-        if [ -z "$used_after" ]; then
+        if [ "$replayed" = "1" ]; then
+            log_event coord.compact.replayed "before=$used trigger=$trigger"
+        elif [ -z "$used_after" ]; then
             log_event coord.compact.verify_skip "reason=probe_not_refreshed waited=${verify_waited}s trigger=$trigger"
         elif [ "$used_after" -ge "$used" ]; then
             echo "[$(date +%T)] WARNING: context did not drop after /compact (before=$used after=$used_after) — the injected command may not have been recognized as a slash command; investigate before this repeats every wake"
@@ -2878,7 +3000,16 @@ maybe_worker_compact() {
         waited=$((waited + WORKER_COMPACT_POLL_SECS))
         if [ "$waited" -ge "$WORKER_COMPACT_START_TIMEOUT_SECS" ]; then
             log_event worker.compact.timeout "issue=$issue phase=start waited=${waited}s"
-            compact_retract_queued "$SESSION_NAME:$win" worker.compact "issue=$issue" "$WORKER_COMPACT_BUSY_PATTERN" || true
+            # issue #292 — see maybe_auto_compact's twin check (this file's
+            # COMPACT_REPLAY_PATTERN header comment has the full forensics):
+            # an already-empty composer here means nothing is left to
+            # retract — most likely the injected /compact was delivered as a
+            # plain chat message rather than executed as a slash command.
+            if compact_composer_clear "$SESSION_NAME:$win"; then
+                log_event worker.compact.delivered_as_text "issue=$issue"
+            else
+                compact_retract_queued "$SESSION_NAME:$win" worker.compact "issue=$issue" "$WORKER_COMPACT_BUSY_PATTERN" || true
+            fi
             worker_compact_record_failure "$issue"
             return 0
         fi
@@ -2913,15 +3044,25 @@ maybe_worker_compact() {
     # unchanged-but-parseable value is treated as evidence the compact
     # didn't help (ineffective), same verdict maybe_auto_compact reaches
     # when its mtime-fresh probe shows an unchanged value.
-    local verify_waited=0 used_after=""
+    #
+    # issue #292: also watch for the CLI's own post-compact continuation
+    # replaying this same /compact prompt (see COMPACT_REPLAY_PATTERN's
+    # header comment) — a harmless, immediate "Not enough messages to
+    # compact." rejection unrelated to whether THIS compaction worked.
+    local verify_waited=0 used_after="" replayed=0
     while [ "$verify_waited" -lt "$WORKER_COMPACT_VERIFY_TIMEOUT_SECS" ]; do
         sleep "$WORKER_COMPACT_POLL_SECS"
         verify_waited=$((verify_waited + WORKER_COMPACT_POLL_SECS))
+        if compact_replay_detected "$SESSION_NAME:$win"; then
+            replayed=1
+        fi
         used_after="$(worker_pane_ctx_used "$win")" && break
         used_after=""
     done
 
-    if [ -z "$used_after" ]; then
+    if [ "$replayed" = "1" ]; then
+        log_event worker.compact.replayed "issue=$issue before=$used"
+    elif [ -z "$used_after" ]; then
         log_event worker.compact.verify_skip "issue=$issue reason=ctx_not_refreshed waited=${verify_waited}s"
         # Inconclusive, not a confirmed failure — no backoff/failure-count
         # bump either way; see WORKER_COMPACT_BACKOFF_SECS's header comment.
