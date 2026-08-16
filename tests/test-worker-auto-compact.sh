@@ -59,7 +59,8 @@ extract_fn() {
 for fn in worker_pane_state worker_pane_busy worker_pane_ctx_used worker_pane_ctx_window \
           worker_compact_effective_threshold worker_has_open_pr \
           worker_task_done worker_compact_record_failure worker_compact_record_success \
-          maybe_worker_compact compact_retract_queued log_event; do
+          maybe_worker_compact compact_retract_queued compact_last_pane_line compact_composer_clear \
+          compact_confirm_submitted log_event; do
     body="$(extract_fn "$fn")"
     [ -n "$body" ] || red "could not extract function '$fn' from $WATCH — has it been renamed?"
     eval "$body"
@@ -74,10 +75,11 @@ WORKER_COMPACT_PCT=75
 WORKER_COMPACT_THRESHOLD_CAP_TOKENS=250000
 WORKER_COMPACT_THRESHOLD_TOKENS=150000
 WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS=300000
-# issue #252: must match coordinator-watch.sh's own default — anchored on
-# the "(esc to interrupt)" hint instead of a spinner-verb list (see that
-# file's AUTO_COMPACT_BUSY_PATTERN header comment for why).
-WORKER_COMPACT_BUSY_PATTERN='\(esc to interrupt\)|Press Ctrl-C again to .xit'
+# issue #252/#274: must match coordinator-watch.sh's own default — anchored
+# on the "(esc to interrupt)" hint instead of a spinner-verb list, plus the
+# "Compacting conversation" in-flight-compaction anchor (see that file's
+# AUTO_COMPACT_BUSY_PATTERN header comment for why).
+WORKER_COMPACT_BUSY_PATTERN='\(esc to interrupt\)|Press Ctrl-C again to .xit|Compacting conversation'
 WORKER_COMPACT_START_TIMEOUT_SECS=15
 WORKER_COMPACT_FINISH_TIMEOUT_SECS=300
 WORKER_COMPACT_VERIFY_TIMEOUT_SECS=30
@@ -88,6 +90,10 @@ WORKER_COMPACT_MAX_FAILURES=3
 # issue #265 — must match coordinator-watch.sh's own default marker text.
 COMPACT_QUEUED_MARKER_PATTERN='Press up to edit queued messages'
 COMPACT_RETRACT_BACKSPACES=3
+# issue #290 — 0 by default so most tests aren't slowed by the settle
+# delay; individual tests below override it where the delay itself is
+# what's under test.
+COMPACT_SUBMIT_SETTLE_SECS=0
 declare -A WORKER_COMPACT_LAST_FAIL=()
 declare -A WORKER_COMPACT_FAIL_COUNT=()
 declare -A WORKER_COMPACT_GAVE_UP=()
@@ -651,23 +657,69 @@ check "default does NOT match finished-turn summary (no token counter)" "nomatch
     "$(match_default '✻ Churned for 13s')"
 check "default does NOT match idle statusline /clear hint" "nomatch" \
     "$(match_default 'sonnet · wt-issue-42 · ctx: 900k/1M (90%) · new task? /clear to save 109.7k tokens')"
+check "default matches an in-flight compaction (issue #274)" "match" \
+    "$(match_default 'Compacting conversation… (1m 49s)')"
 
-heading "Test 14: compact_retract_queued — phase=start timeout retracts a still-queued /compact (issue #265)"
-# The original $WIN pane has been occupied by the exec'd fake REPL since
-# Test 9 (exec'd, so C-c'ing it would kill the pane's only process and take
-# the whole session down — see Test 9's comment), and that fixture always
-# renders the busy-matching "(esc to interrupt)" spinner the instant it
-# sees "/compact", so it could never exercise a phase=start timeout anyway.
-# A fresh window with a plain `cat` foreground sidesteps both problems: cat
-# echoes back whatever it's sent but never renders anything resembling
-# WORKER_COMPACT_BUSY_PATTERN, so injecting "/compact" here deterministically
-# times out at phase=start — exactly the busy-detection blind spot this
-# retraction path defends against (issue #266 was one such regression; this
-# is the safety net for any future one).
+heading "Test 13b: shipped COMPACT_RETRACT_BACKSPACES/COMPACT_SUBMIT_SETTLE_SECS defaults (issue #290)"
+default_backspaces="$(
+    unset COMPACT_RETRACT_BACKSPACES
+    eval "$(grep -m1 '^COMPACT_RETRACT_BACKSPACES=' "$WATCH")"
+    printf '%s' "$COMPACT_RETRACT_BACKSPACES"
+)"
+check "shipped COMPACT_RETRACT_BACKSPACES default covers the full 9-char \"/compact \" ghost" "1" \
+    "$([ "${default_backspaces:-0}" -ge 9 ] && echo 1 || echo 0)"
+default_settle="$(
+    unset COMPACT_SUBMIT_SETTLE_SECS
+    eval "$(grep -m1 '^COMPACT_SUBMIT_SETTLE_SECS=' "$WATCH")"
+    printf '%s' "$COMPACT_SUBMIT_SETTLE_SECS"
+)"
+check "shipped COMPACT_SUBMIT_SETTLE_SECS default is a positive delay" "1" \
+    "$([ "${default_settle:-0}" -gt 0 ] && echo 1 || echo 0)"
+
+# fake-composer-repl.sh (issue #290) — see test-coordinator-auto-compact.sh's
+# copy of this fixture for the full rationale: a bare `cat` scrolls forever
+# and can never show a genuinely EMPTY composer once something's been
+# echoed, so it can't exercise compact_composer_clear meaningfully. This
+# tracks composer state itself and redraws it in place after every
+# keystroke, the way a real Claude Code TUI redraws its input box.
+FAKE_COMPOSER="$TEST_DIR/fake-composer-repl.sh"
+cat > "$FAKE_COMPOSER" <<'REPL'
+#!/usr/bin/env bash
+composer=""
+stty raw -echo 2>/dev/null || true
+render() {
+    printf '\033[2J\033[H'
+    echo "sonnet · wt-issue-43 · ctx: 260k/1M (26%)"
+    printf '\xe2\x9d\xaf %s\n' "$composer"
+}
+render
+while IFS= read -rn1 -d '' ch; do
+    case "$ch" in
+        $'\x7f'|$'\x08') composer="${composer%?}" ;;
+        $'\x1b') : ;;
+        $'\r'|$'\n')
+            case "$composer" in
+                *" ") : ;;
+                *) composer="$composer " ;;
+            esac
+            ;;
+        *) composer="$composer$ch" ;;
+    esac
+    render
+done
+REPL
+chmod +x "$FAKE_COMPOSER"
+
+heading "Test 14a: compact_retract_queued — COMPACT_RETRACT_BACKSPACES=3 (old default) leaves a ghost (issue #290)"
+# Reproduces the reported incident directly: the composer ends up holding
+# "/compact " (9 chars, incl. the autocomplete menu's trailing space) when
+# the phase=start timeout fires, and the OLD default of 3 backspaces
+# reliably left "/compa" behind -- a partial clear that #265/#272's
+# marker-only success check couldn't detect. Must now log retract_failed.
 WIN2="iss-43"
 tmux new-window -t "$SESSION_NAME" -n "$WIN2" 2>/dev/null
-tmux send-keys -t "$SESSION_NAME:$WIN2" "clear; echo 'sonnet · wt-issue-43 · ctx: 260k/1M (26%)'; cat" Enter
-check_eventually "second window: cat foreground w/ 260k ctx -> cli" "cli" "worker_pane_state '$WIN2'"
+tmux send-keys -t "$SESSION_NAME:$WIN2" "exec -a claude bash $FAKE_COMPOSER" Enter
+check_eventually "second window: fake composer foreground -> cli" "cli" "worker_pane_state '$WIN2'"
 
 # Shadow tmux to record every invocation (delegating to the real binary
 # throughout) so the assertions below can confirm the actual Escape/
@@ -682,24 +734,57 @@ tmux() {
 DRY_RUN=0
 WORKER_COMPACT_START_TIMEOUT_SECS=2
 WORKER_COMPACT_POLL_SECS=1
+COMPACT_RETRACT_BACKSPACES=3
 : > "$EVENTS_LOG"
 maybe_worker_compact "$WIN2"
+pane_after_3="$(tmux capture-pane -t "$SESSION_NAME:$WIN2" -p 2>/dev/null)"
 unset -f tmux
 
 if grep -q 'worker.compact.timeout issue=43 phase=start' "$EVENTS_LOG"; then got=logged; else got=missing; fi
 check "phase=start timeout logged for the never-busy pane" "logged" "$got"
 
-if grep -q 'worker.compact.retracted issue=43' "$EVENTS_LOG"; then got=logged; else got=missing; fi
-check "retraction attempted and succeeded (queued marker never present) -> worker.compact.retracted" "logged" "$got"
+if grep -q 'worker.compact.retract_failed issue=43' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "3 backspaces against a 9-char ghost -> worker.compact.retract_failed (issue #290)" "logged" "$got"
 
-if grep -q 'worker.compact.retract_failed' "$EVENTS_LOG"; then got=present; else got=absent; fi
-check "no false-positive retract_failed" "absent" "$got"
+if grep -q 'worker.compact.retracted issue=43' "$EVENTS_LOG"; then got=present; else got=absent; fi
+check "no false-positive retracted verdict" "absent" "$got"
+
+if printf '%s' "$pane_after_3" | grep -q '/compa'; then got=present; else got=missing; fi
+check "composer still shows the exact reported \"/compa\" ghost" "present" "$got"
 
 if grep -q "send-keys -t $SESSION_NAME:$WIN2 Escape" "$TMUX_CALL_LOG"; then got=sent; else got=missing; fi
 check "retraction sent an Escape keystroke to the target pane" "sent" "$got"
 
 bspace_count="$(grep -c "send-keys -t $SESSION_NAME:$WIN2 BSpace" "$TMUX_CALL_LOG" || true)"
-check "retraction sent COMPACT_RETRACT_BACKSPACES (3) Backspace keystrokes" "3" "$bspace_count"
+check "retraction sent 3 Backspace keystrokes" "3" "$bspace_count"
+
+heading "Test 14b: compact_retract_queued — COMPACT_RETRACT_BACKSPACES=12 (shipped default) fully clears the composer (issue #290)"
+WIN2B="iss-45"
+tmux new-window -t "$SESSION_NAME" -n "$WIN2B" 2>/dev/null
+tmux send-keys -t "$SESSION_NAME:$WIN2B" "exec -a claude bash $FAKE_COMPOSER" Enter
+check_eventually "iss-45 window: fake composer foreground -> cli" "cli" "worker_pane_state '$WIN2B'"
+
+: > "$TMUX_CALL_LOG"
+tmux() {
+    printf '%s\n' "$*" >> "$TMUX_CALL_LOG"
+    command tmux "$@"
+}
+
+COMPACT_RETRACT_BACKSPACES=12
+: > "$EVENTS_LOG"
+maybe_worker_compact "$WIN2B"
+pane_after_12="$(tmux capture-pane -t "$SESSION_NAME:$WIN2B" -p 2>/dev/null)"
+unset -f tmux
+COMPACT_RETRACT_BACKSPACES=3
+
+if grep -q 'worker.compact.retracted issue=45' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "12 backspaces against a 9-char ghost -> worker.compact.retracted" "logged" "$got"
+
+if grep -q 'worker.compact.retract_failed issue=45' "$EVENTS_LOG"; then got=present; else got=absent; fi
+check "no false-negative retract_failed" "absent" "$got"
+
+if printf '%s' "$pane_after_12" | grep -qE '/compa|/compact'; then got=present; else got=missing; fi
+check "composer fully cleared -- no \"/compact\" fragment left" "missing" "$got"
 
 heading "Test 15: compact_retract_queued — queued marker still visible -> worker.compact.retract_failed (issue #265)"
 # Same fresh-window technique as Test 14, but this fixture keeps
@@ -749,6 +834,114 @@ check "no false-positive retracted verdict" "absent" "$got"
 
 if grep -q "send-keys -t $SESSION_NAME:$WIN3 Escape" "$TMUX_CALL_LOG"; then got=sent; else got=missing; fi
 check "retraction still sent an Escape keystroke even though it didn't clear the queue" "sent" "$got"
+
+heading "Test 16: compact_retract_queued — never sends Escape into a pane that's genuinely busy (issue #290 reconciliation with #274)"
+# A phase=start timeout can be a FALSE positive: the compaction may
+# actually be running, just missed by a busy-pattern regression (the exact
+# shape of #274's incident). compact_retract_queued must refuse to send
+# ANY keystroke in that case -- called here directly (not through
+# maybe_worker_compact) so the guard itself is exercised in isolation.
+WIN4="iss-46"
+tmux new-window -t "$SESSION_NAME" -n "$WIN4" 2>/dev/null
+tmux send-keys -t "$SESSION_NAME:$WIN4" "clear; echo 'sonnet · wt-issue-46 · ctx: 260k/1M (26%)'; echo 'Compacting conversation… (12s)'; cat" Enter
+check_eventually "busy-guard window: compaction text visible" "busy" \
+    "tmux capture-pane -t '$SESSION_NAME:$WIN4' -p 2>/dev/null | grep -q 'Compacting conversation' && echo busy || echo idle"
+
+: > "$TMUX_CALL_LOG"
+tmux() {
+    printf '%s\n' "$*" >> "$TMUX_CALL_LOG"
+    command tmux "$@"
+}
+
+: > "$EVENTS_LOG"
+if compact_retract_queued "$SESSION_NAME:$WIN4" worker.compact "issue=46" "$WORKER_COMPACT_BUSY_PATTERN"; then
+    rc=0
+else
+    rc=$?
+fi
+unset -f tmux
+
+check "retraction guard returns success (no-op is not a failure)" "0" "$rc"
+if grep -q 'worker.compact.retract_skip.*reason=busy' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "worker.compact.retract_skip reason=busy logged" "logged" "$got"
+if grep -q "send-keys -t $SESSION_NAME:$WIN4 Escape" "$TMUX_CALL_LOG"; then got=present; else got=absent; fi
+check "NO Escape sent into the genuinely-busy pane" "absent" "$got"
+if grep -q "send-keys -t $SESSION_NAME:$WIN4 BSpace" "$TMUX_CALL_LOG"; then got=present; else got=absent; fi
+check "NO Backspace sent into the genuinely-busy pane" "absent" "$got"
+
+heading "Test 17: maybe_worker_compact — Enter eaten by the autocomplete menu is retried once (issue #290)"
+# Same root-cause model as test-coordinator-auto-compact.sh's Test 15: the
+# first Enter after pasting "/compact" is consumed by the CLI's
+# slash-command autocomplete menu (composer becomes "/compact ", NOT
+# submitted) instead of starting a turn. Tracks composer state raw byte by
+# raw byte (a line-buffered `read` loop can't model text still "sitting in
+# the composer" for a later bare Enter to submit), so maybe_worker_compact
+# only reaches worker.compact.done here if its resubmit-once logic
+# actually fires that second Enter.
+FAKE_REPL_EATFIRST="$TEST_DIR/fake-repl-eatfirst.sh"
+cat > "$FAKE_REPL_EATFIRST" <<'REPL'
+#!/usr/bin/env bash
+composer=""
+enters=0
+stty raw -echo 2>/dev/null || true
+render_idle() {
+    printf '\033[2J\033[H'
+    echo "sonnet · wt-issue-47 · ctx: 260k/1M (26%)"
+    printf '\xe2\x9d\xaf %s\n' "$composer"
+}
+render_idle
+while IFS= read -rn1 -d '' ch; do
+    case "$ch" in
+        $'\r'|$'\n')
+            enters=$((enters + 1))
+            if [ "$composer" = "/compact" ] && [ "$enters" -eq 1 ]; then
+                composer="$composer "   # menu eats it: appends a space, no submit
+                render_idle
+                continue
+            fi
+            if [ "$composer" = "/compact" ] || [ "$composer" = "/compact " ]; then
+                composer=""
+                printf '\033[2J\033[H'
+                echo "✻ Considering… (esc to interrupt)"
+                sleep 2
+                printf '\033[2J\033[H'
+                echo "sonnet · wt-issue-47 · ctx: 40k/1M (4%)"
+                printf '\xe2\x9d\xaf \n'
+            else
+                render_idle
+            fi
+            ;;
+        $'\x7f'|$'\x08') composer="${composer%?}"; render_idle ;;
+        $'\x1b') render_idle ;;
+        *) composer="$composer$ch"; render_idle ;;
+    esac
+done
+REPL
+chmod +x "$FAKE_REPL_EATFIRST"
+
+WIN5="iss-47"
+tmux new-window -t "$SESSION_NAME" -n "$WIN5" 2>/dev/null
+tmux send-keys -t "$SESSION_NAME:$WIN5" "exec -a claude bash $FAKE_REPL_EATFIRST" Enter
+check_eventually "eat-first window: fake REPL foreground -> cli" "cli" "worker_pane_state '$WIN5'"
+
+DRY_RUN=0
+WORKER_COMPACT_START_TIMEOUT_SECS=10
+WORKER_COMPACT_FINISH_TIMEOUT_SECS=15
+WORKER_COMPACT_VERIFY_TIMEOUT_SECS=5
+WORKER_COMPACT_POLL_SECS=1
+COMPACT_SUBMIT_SETTLE_SECS=0.2
+: > "$EVENTS_LOG"
+maybe_worker_compact "$WIN5"
+COMPACT_SUBMIT_SETTLE_SECS=0
+
+if grep -q 'worker.compact.resubmit issue=47' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "first Enter eaten -> worker.compact.resubmit logged" "logged" "$got"
+
+if grep -q 'worker.compact.done issue=47' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "retried Enter reaches the CLI -> worker.compact.done (not a false phase=start timeout)" "logged" "$got"
+
+if grep -q 'worker.compact.timeout issue=47 phase=start' "$EVENTS_LOG"; then got=present; else got=absent; fi
+check "no phase=start timeout once the retry lands" "absent" "$got"
 
 echo ""
 green "All worker-auto-compact tests passed ($PASS checks)"
