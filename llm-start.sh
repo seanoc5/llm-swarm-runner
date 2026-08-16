@@ -113,6 +113,10 @@ ENV VARS  (precedence: flag > shell env > <project>/.swarm/.env > <sandbox>/.env
   Misc
     STATUS                       0         spawn gh-status-bar window
     NON_INTERACTIVE              0         don't auto-attach (for tests)
+    COMPACT_SUBMIT_SETTLE_SECS   1         settle delay around the live-REPL
+                                            reprompt's submitting Enter
+                                            (shared with coordinator-watch.sh's
+                                            /compact injection; issue #290/#295)
 
 EXAMPLES
     ./llm-start.sh                              # one-shot triage, defaults
@@ -244,6 +248,115 @@ if [ "$COORD_CMD" = "gemini" ] && [ -z "${GEMINI_API_KEY:-}" ]; then
         echo "      gemini will fail with 'specify the GEMINI_API_KEY' on launch." >&2
     fi
 fi
+
+# --- Reprompt-submit verification (issue #295) ------------------------------
+# The live-REPL reprompt path below (paste-buffer + send-keys Enter) is the
+# exact same injection shape issue #290 found losing the submitting Enter on
+# coordinator-watch.sh's /compact injection, and issue #291 fixed there with
+# a settle-then-verify-then-retry-once sequence. This file has no shared lib
+# with coordinator-watch.sh, so the pieces are duplicated here rather than
+# sourced — kept in sync by hand, same convention that file's own
+# WORKER_COMPACT_BUSY_PATTERN already uses against AUTO_COMPACT_BUSY_PATTERN.
+# Defined here (after flag parsing/--help/env loading, not at file top) so
+# --help and argument errors don't pay for the EVENTS_LOG mkdir below.
+#
+# Append-only structured event log, same format as coordinator-watch.sh's
+# EVENTS_LOG (<utc-iso8601>  <category>  k=v k=v ...) so its pane-echo
+# tooling (format_event_line) can render lines this file appends too.
+EVENTS_LOG="$PWD/.swarm/events.log"
+mkdir -p "$(dirname "$EVENTS_LOG")" 2>/dev/null || true
+log_event() {
+    local cat="$1"; shift
+    local ts
+    ts="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+    printf '%s  %-15s %s\n' "$ts" "$cat" "$*" >> "$EVENTS_LOG" 2>/dev/null || true
+}
+
+# Reused (not re-declared under a new name) so a single knob controls the
+# settle delay around every paste+Enter injection in the swarm — see
+# coordinator-watch.sh's COMPACT_SUBMIT_SETTLE_SECS header comment for why
+# it defaults to a positive delay (issue #290: pasted text is reliably
+# eaten by an immediate Enter with no settle time at all).
+COMPACT_SUBMIT_SETTLE_SECS="${COMPACT_SUBMIT_SETTLE_SECS:-1}"
+
+# issue #295: same busy-indicator anchors as coordinator-watch.sh's
+# AUTO_COMPACT_BUSY_PATTERN (see that file's header comment for the
+# transcript-verified forensics behind each token) — keep in sync.
+COORD_BUSY_PATTERN="${COORD_BUSY_PATTERN:-\(esc to interrupt\)|Press Ctrl-C again to .xit|· ↓ [0-9.,]+k? tokens|Press up to edit queued messages|Compacting conversation}"
+
+# reprompt_last_pane_line <tmux-target>
+#
+# Same technique as coordinator-watch.sh's compact_last_pane_line: echoes
+# the last non-blank rendered line of <target>'s pane, ANSI-stripped and
+# trimmed of common composer chrome, after excluding a persistent ctx:
+# statusline. See that function's header comment for the caveats this
+# inherits (an unverified guess at TUI composer framing).
+reprompt_last_pane_line() {
+    local target="$1" content clean
+    content="$(tmux capture-pane -t "$target" -p 2>/dev/null)" || { echo ""; return 1; }
+    clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
+    printf '%s\n' "$clean" \
+        | LC_ALL=C grep -vE 'ctx: [0-9]+[kM]?/[0-9]+[kM]?[[:space:]]*\([0-9]+%\)' \
+        | sed -e '/^[[:space:]]*$/d' -e 's/^[[:space:]]*[❯>│|╭╮╰╯─]*[[:space:]]*//' -e 's/[[:space:]]*[│|╭╮╰╯─]*[[:space:]]*$//' | tail -1 || true
+}
+
+# reprompt_confirm_submitted <tmux-target> <busy-pattern>
+#
+# Best-effort check that an injected paste + Enter actually submitted,
+# mirroring coordinator-watch.sh's compact_confirm_submitted. True (rc 0,
+# "confirmed submitted") if the pane already matches <busy-pattern> (a turn
+# started) OR the composer's last rendered line is empty. Unlike the
+# /compact case (a short, fixed literal), the pasted prompt here is
+# arbitrary and often multi-line, and a TUI may collapse or re-render it —
+# so this checks composer *emptiness* rather than a literal-prefix match
+# against the pasted text. False (rc 1) only when the composer still
+# visibly holds something — the caller resends Enter once in that case.
+reprompt_confirm_submitted() {
+    local target="$1" busy_pattern="$2" content clean last
+    content="$(tmux capture-pane -t "$target" -p 2>/dev/null)" || return 1
+    clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
+    printf '%s\n' "$clean" | LC_ALL=C grep -qE "$busy_pattern" && return 0
+    last="$(reprompt_last_pane_line "$target")" || true
+    [ -z "$last" ]
+}
+
+# reprompt_inject <tmux-target> <prompt-file>
+#
+# Performs the load-buffer + paste-buffer + settle + Enter + confirm +
+# retry-once sequence for the live-REPL reprompt path below — the wake path
+# every caller (watcher on_outcome, outbox on_message, a manual
+# `llm-start.sh "<prompt>"` re-run) funnels through once the coordinator
+# pane is a live, busy REPL. Mirrors coordinator-watch.sh's
+# maybe_auto_compact /compact injection (issue #290/#291): settle before
+# AND after the submitting Enter, then CONFIRM it actually landed (busy
+# indicator, or an emptied composer) instead of assuming so, retrying once
+# before logging (never silently dropping) a failure. Pulled into its own
+# function — rather than left inline at the call site — so it can be
+# exercised directly against a fake-REPL fixture, the same technique
+# test-coordinator-auto-compact.sh uses against maybe_auto_compact. Returns
+# 1 (after logging coord.wake.submit_failed) only if the retry also fails
+# to confirm; callers should treat that as non-fatal (`|| true`) since the
+# rest of this script's launch/attach flow still needs to run.
+reprompt_inject() {
+    local target="$1" prompt_file="$2"
+    tmux load-buffer -b llm-coord-reprompt "$prompt_file"
+    tmux paste-buffer -b llm-coord-reprompt -t "$target" -d
+
+    sleep "$COMPACT_SUBMIT_SETTLE_SECS"
+    tmux send-keys -t "$target" Enter
+    sleep "$COMPACT_SUBMIT_SETTLE_SECS"
+    if ! reprompt_confirm_submitted "$target" "$COORD_BUSY_PATTERN"; then
+        log_event coord.wake.resubmit "trigger=reprompt"
+        tmux send-keys -t "$target" Enter
+        sleep "$COMPACT_SUBMIT_SETTLE_SECS"
+        if ! reprompt_confirm_submitted "$target" "$COORD_BUSY_PATTERN"; then
+            echo "WARN: reprompt Enter may not have submitted after retry — check pane $target" >&2
+            log_event coord.wake.submit_failed "trigger=reprompt"
+            return 1
+        fi
+    fi
+    return 0
+}
 
 # Check if already inside tmux
 IN_TMUX=false
@@ -480,11 +593,18 @@ elif [ "$COORD_CMD" = "claude" ] && [ "${COORDINATOR_HEADLESS:-0}" != "1" ]; the
     # tmux load-buffer + paste-buffer handles multi-line content correctly
     # (bracketed-paste support in modern terminals), then we press Enter
     # to submit it to claude's input prompt.
+    #
+    # issue #295: every wake path — watcher on_outcome, outbox on_message,
+    # and a manual `llm-start.sh "<prompt>"` re-run — funnels through this
+    # same elif once the coordinator pane is a live, busy REPL, so this is
+    # the single injection site to fix. reprompt_inject (defined above)
+    # applies issue #291's settle-then-verify-then-retry-once sequence
+    # instead of the old bare paste+instant-Enter. A failed-after-retry
+    # submit is logged, not fatal to the rest of this script's launch/
+    # attach flow — hence `|| true`.
     TMP_PROMPT=$(mktemp)
     printf '%s\n' "$INITIAL_PROMPT" > "$TMP_PROMPT"
-    tmux load-buffer -b llm-coord-reprompt "$TMP_PROMPT"
-    tmux paste-buffer -b llm-coord-reprompt -t "$SESSION_NAME:coordinator" -d
-    tmux send-keys -t "$SESSION_NAME:coordinator" Enter
+    reprompt_inject "$SESSION_NAME:coordinator" "$TMP_PROMPT" || true
     rm -f "$TMP_PROMPT"
 fi
 
