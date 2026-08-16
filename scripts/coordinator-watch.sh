@@ -338,11 +338,28 @@
 #                           doesn't false-positive on completed turns left on
 #                           screen) and the "Press up to edit queued messages"
 #                           marker shown while input is queued behind a live
-#                           turn. The "(esc to interrupt)" and Ctrl-C
-#                           alternations are kept for ≤2.0.x compatibility.
-#                           This is still TUI chrome, not a documented API —
-#                           it needs no maintenance for verb-wording changes,
-#                           but MUST be re-verified against real panes after
+#                           turn. issue #274: none of the above anchors
+#                           cover an in-flight COMPACTION specifically — 2.1.x
+#                           renders that as "Compacting conversation…
+#                           (<elapsed>)" plus a progress bar, sharing no text
+#                           with the turn-streaming anchors above. Without a
+#                           dedicated anchor, coordinator_pane_busy/
+#                           worker_pane_busy read idle for a compaction's
+#                           entire duration, so maybe_auto_compact/
+#                           maybe_worker_compact's start-wait loop never sees
+#                           busy and logs a false phase=start timeout even
+#                           though the compaction is genuinely running (see
+#                           #274's incident: a real 1m49s compaction, still
+#                           logged as a 16s start timeout) — which in turn
+#                           makes compact_retract_queued's Escape/Backspace
+#                           fire into a session that is actively compacting.
+#                           A "Compacting conversation" alternation was added
+#                           to close that gap. The "(esc to interrupt)" and
+#                           Ctrl-C alternations are kept for ≤2.0.x
+#                           compatibility. This is still TUI chrome, not a
+#                           documented API — it needs no maintenance for
+#                           verb-wording changes, but MUST be re-verified
+#                           against real panes after
 #                           every Claude Code CLI upgrade, since #266 shows
 #                           the chrome itself (not just the verbs) can change
 #                           out from under it. Keep in sync with
@@ -628,7 +645,7 @@
 #                           this file — so a watcher restart clears them and
 #                           gives every window a fresh start.
 #   COMPACT_QUEUED_MARKER_PATTERN
-#   COMPACT_RETRACT_BACKSPACES=3
+#   COMPACT_RETRACT_BACKSPACES=12
 #                           (issue #265) Shared by BOTH the coordinator and
 #                           per-window retraction paths (see
 #                           compact_retract_queued's header comment): when a
@@ -637,27 +654,69 @@
 #                           behind an already-in-flight turn that AUTO_
 #                           COMPACT_BUSY_PATTERN/WORKER_COMPACT_BUSY_PATTERN
 #                           failed to recognize as busy (a detection blind
-#                           spot — issue #266 was one such regression; this
-#                           is the safety net for ANY future one). Left
-#                           alone, that queued /compact fires whenever the
-#                           real in-flight turn eventually ends, often
-#                           minutes later against a since-stale rationale.
-#                           compact_retract_queued sends one Escape (clears
-#                           a QUEUED follow-up without touching an in-flight
-#                           turn — no Ctrl-C, ever) then this many Backspace
-#                           keystrokes as belt-and-braces cleanup for any
-#                           stray composer text Escape didn't reach, then
-#                           re-captures the pane and checks whether
-#                           COMPACT_QUEUED_MARKER_PATTERN (same literal
-#                           embedded in AUTO_COMPACT_BUSY_PATTERN/WORKER_
-#                           COMPACT_BUSY_PATTERN above — kept as its own var
-#                           since the full busy pattern also matches
-#                           spinner/exit-confirm text irrelevant to "is
-#                           there still something queued") is still visible
-#                           — NEVER assumes the keystrokes worked. Logs
-#                           coord.compact.retracted/retract_failed or
-#                           worker.compact.retracted/retract_failed
-#                           accordingly.
+#                           spot — issue #266 was one such regression; issue
+#                           #290 was another — see COMPACT_SUBMIT_SETTLE_SECS
+#                           below — and this is the safety net for ANY future
+#                           one). Left alone, that queued /compact fires
+#                           whenever the real in-flight turn eventually ends,
+#                           often minutes later against a since-stale
+#                           rationale. compact_retract_queued sends one
+#                           Escape (clears a QUEUED follow-up without
+#                           touching an in-flight turn — no Ctrl-C, ever)
+#                           then this many Backspace keystrokes to clear any
+#                           stray composer text Escape didn't reach.
+#                           issue #290: raised from 3 to 12 — empirically,
+#                           Escape does NOT clear the composer (settling the
+#                           uncertainty #265/#272's original header comment
+#                           flagged); the composer holds "/compact " (9
+#                           chars, including the autocomplete menu's
+#                           trailing space) at the moment a phase=start
+#                           timeout fires, and 3 backspaces reliably left a
+#                           "/compa" ghost sitting there — the symptom that
+#                           motivated this fix. 12 covers the full 9 with
+#                           margin. compact_retract_queued then re-captures
+#                           the pane and requires BOTH: COMPACT_QUEUED_
+#                           MARKER_PATTERN (same literal embedded in AUTO_
+#                           COMPACT_BUSY_PATTERN/WORKER_COMPACT_BUSY_PATTERN
+#                           above — kept as its own var since the full busy
+#                           pattern also matches spinner/exit-confirm text
+#                           irrelevant to "is there still something queued")
+#                           gone, AND the composer's own last rendered line
+#                           genuinely empty (issue #290 — the marker-only
+#                           check could never have caught a partial-clear
+#                           ghost, since nothing about a leftover "/compa"
+#                           matches the queued-marker text) — NEVER assumes
+#                           the keystrokes worked either way. Also refuses to
+#                           send Escape/Backspace at all — logging a no-op
+#                           instead — when the pane's busy pattern still
+#                           matches at retraction time (issue #290's
+#                           reconciliation with #274: a phase=start timeout
+#                           can be FALSE, e.g. a compaction that's genuinely
+#                           running but whose busy anchor a future regression
+#                           misses again, and Escape must never fire into a
+#                           live compaction). Logs coord.compact.retracted/
+#                           retract_failed/retract_skip or worker.compact.
+#                           retracted/retract_failed/retract_skip accordingly.
+#   COMPACT_SUBMIT_SETTLE_SECS=1
+#                           (issue #290) Root cause of the injection never
+#                           submitting: pasting text that starts with "/"
+#                           opens the CLI's slash-command autocomplete menu,
+#                           and an Enter sent immediately afterward (no delay
+#                           at all, previously) is consumed by the menu —
+#                           accepting the completion, which leaves
+#                           "/compact " with a trailing space sitting in the
+#                           composer — instead of submitting. maybe_auto_
+#                           compact/maybe_worker_compact now sleep this many
+#                           seconds after paste-buffer before sending Enter
+#                           (lets the menu resolve/auto-close on the exact,
+#                           unambiguous "/compact" match), sleep it again,
+#                           then re-capture and confirm the Enter actually
+#                           submitted — pane already busy, or the composer's
+#                           last line no longer holds the pasted text —
+#                           retrying the Enter once if not, before falling
+#                           through to the normal start-wait loop. Shared
+#                           between the coordinator and worker injection
+#                           paths; not used by retraction.
 #
 # Watch backend (auto-detected):
 #   - inotifywait (preferred): instant response. Install with:
@@ -737,7 +796,8 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     WORKER_COMPACT_BACKOFF_SECS             600     cooldown for a window after a timeout/ineffective verdict
     WORKER_COMPACT_MAX_FAILURES             3       consecutive failures before giving up on a window entirely
     COMPACT_QUEUED_MARKER_PATTERN     (auto)  queued-input marker checked when retracting a stuck phase=start injection; see header comment
-    COMPACT_RETRACT_BACKSPACES        3       Backspace keystrokes sent alongside the retraction Escape (coord + worker, shared; issue #265)
+    COMPACT_RETRACT_BACKSPACES        12      Backspace keystrokes sent alongside the retraction Escape (coord + worker, shared; issue #265/#290)
+    COMPACT_SUBMIT_SETTLE_SECS        1       settle delay around the injection-submit Enter (coord + worker, shared; issue #290); see header comment
 
 DEFAULT WAKE_PROMPT (top-up mode)
     Coordinator triages outcomes, then refills workers toward MAX_WORKERS
@@ -777,12 +837,21 @@ EVENTS LOG
       coord.compact.skip   auto-compact skipped this cycle (reason=pane_busy|no_fresh_probe|cooldown|...,
                            trigger=poll|wake — reason=cooldown only ever fires trigger=poll)
       coord.compact.timeout  gave up waiting on the busy indicator (phase=start|finish, waited, trigger=poll|wake)
-      coord.compact.retracted  (issue #265) a phase=start timeout's injected /compact was
-                           retracted (Escape/Backspace) — the queued-input marker was gone on
-                           re-capture (trigger=poll|wake)
-      coord.compact.retract_failed  (issue #265) same retraction attempt, but the queued-input
-                           marker was STILL visible after Escape/Backspace — investigate
+      coord.compact.resubmit  (issue #290) the injection Enter didn't appear to submit
+                           (composer still held the pasted text, pane not busy) — resent
+                           it once before falling through to the normal start-wait
                            (trigger=poll|wake)
+      coord.compact.retracted  (issue #265/#290) a phase=start timeout's injected /compact was
+                           retracted (Escape/Backspace) — the queued-input marker was gone AND
+                           the composer's own last line was genuinely empty on re-capture
+                           (trigger=poll|wake)
+      coord.compact.retract_failed  (issue #265/#290) same retraction attempt, but the
+                           queued-input marker was STILL visible, or the composer still held
+                           leftover text, after Escape/Backspace — investigate (trigger=poll|wake)
+      coord.compact.retract_skip  (issue #290) retraction skipped entirely — the pane's busy
+                           pattern still matched at retraction time (e.g. a compaction that IS
+                           genuinely running despite the phase=start timeout — see #274), so no
+                           Escape/Backspace was sent (trigger=poll|wake)
       coord.compact.done   busy indicator cleared — compaction confirmed finished (waited, trigger=poll|wake)
       coord.compact.ineffective  context didn't drop post-compact (before, after, trigger=poll|wake) — investigate
       coord.compact.verify_skip  probe never refreshed post-compact — inconclusive, not a failure (trigger=poll|wake)
@@ -794,11 +863,18 @@ EVENTS LOG
                            logged every sweep it would otherwise have fired, same as
                            coord.compact.skip reason=cooldown)
       worker.compact.timeout  gave up waiting on the worker's busy indicator (issue, phase=start|finish, waited)
-      worker.compact.retracted  (issue #265) a phase=start timeout's injected /compact was
-                           retracted (Escape/Backspace) — the queued-input marker was gone on
-                           re-capture (issue)
-      worker.compact.retract_failed  (issue #265) same retraction attempt, but the queued-input
-                           marker was STILL visible after Escape/Backspace — investigate (issue)
+      worker.compact.resubmit  (issue #290) the injection Enter didn't appear to submit
+                           (composer still held the pasted text, pane not busy) — resent
+                           it once before falling through to the normal start-wait (issue)
+      worker.compact.retracted  (issue #265/#290) a phase=start timeout's injected /compact was
+                           retracted (Escape/Backspace) — the queued-input marker was gone AND
+                           the composer's own last line was genuinely empty on re-capture (issue)
+      worker.compact.retract_failed  (issue #265/#290) same retraction attempt, but the
+                           queued-input marker was STILL visible, or the composer still held
+                           leftover text, after Escape/Backspace — investigate (issue)
+      worker.compact.retract_skip  (issue #290) retraction skipped entirely — the pane's busy
+                           pattern still matched at retraction time (see coord.compact.retract_skip
+                           above) — no Escape/Backspace was sent (issue)
       worker.compact.done   worker busy indicator cleared — compaction confirmed finished (issue, waited)
       worker.compact.ineffective  worker context didn't drop post-compact (issue, before, after) — investigate
       worker.compact.verify_skip  worker's ctx reading never refreshed post-compact — inconclusive, not a failure
@@ -905,7 +981,9 @@ AUTO_COMPACT_PROBE_MAX_AGE_SECS="${AUTO_COMPACT_PROBE_MAX_AGE_SECS:-120}"
 # compact). issue #266: Claude Code 2.1.x dropped the "(esc to interrupt)"
 # hint, so two more anchors (spinner token counter, queued-input marker)
 # were added — see the AUTO_COMPACT_BUSY_PATTERN header comment above.
-AUTO_COMPACT_BUSY_PATTERN="${AUTO_COMPACT_BUSY_PATTERN:-\(esc to interrupt\)|Press Ctrl-C again to .xit|· ↓ [0-9.,]+k? tokens|Press up to edit queued messages}"
+# issue #274: added a "Compacting conversation" anchor — 2.1.x renders an
+# in-flight compaction with none of the turn-streaming anchors above.
+AUTO_COMPACT_BUSY_PATTERN="${AUTO_COMPACT_BUSY_PATTERN:-\(esc to interrupt\)|Press Ctrl-C again to .xit|· ↓ [0-9.,]+k? tokens|Press up to edit queued messages|Compacting conversation}"
 AUTO_COMPACT_START_TIMEOUT_SECS="${AUTO_COMPACT_START_TIMEOUT_SECS:-15}"
 AUTO_COMPACT_FINISH_TIMEOUT_SECS="${AUTO_COMPACT_FINISH_TIMEOUT_SECS:-300}"
 AUTO_COMPACT_VERIFY_TIMEOUT_SECS="${AUTO_COMPACT_VERIFY_TIMEOUT_SECS:-30}"
@@ -923,8 +1001,8 @@ WORKER_COMPACT_PCT="${WORKER_COMPACT_PCT:-75}"
 WORKER_COMPACT_THRESHOLD_CAP_TOKENS="${WORKER_COMPACT_THRESHOLD_CAP_TOKENS:-250000}"
 WORKER_COMPACT_THRESHOLD_TOKENS="${WORKER_COMPACT_THRESHOLD_TOKENS:-150000}"
 WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS="${WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS:-300000}"
-# issue #252/#266: same anchors as AUTO_COMPACT_BUSY_PATTERN above — keep in sync.
-WORKER_COMPACT_BUSY_PATTERN="${WORKER_COMPACT_BUSY_PATTERN:-\(esc to interrupt\)|Press Ctrl-C again to .xit|· ↓ [0-9.,]+k? tokens|Press up to edit queued messages}"
+# issue #252/#266/#274: same anchors as AUTO_COMPACT_BUSY_PATTERN above — keep in sync.
+WORKER_COMPACT_BUSY_PATTERN="${WORKER_COMPACT_BUSY_PATTERN:-\(esc to interrupt\)|Press Ctrl-C again to .xit|· ↓ [0-9.,]+k? tokens|Press up to edit queued messages|Compacting conversation}"
 WORKER_COMPACT_START_TIMEOUT_SECS="${WORKER_COMPACT_START_TIMEOUT_SECS:-15}"
 WORKER_COMPACT_FINISH_TIMEOUT_SECS="${WORKER_COMPACT_FINISH_TIMEOUT_SECS:-300}"
 WORKER_COMPACT_VERIFY_TIMEOUT_SECS="${WORKER_COMPACT_VERIFY_TIMEOUT_SECS:-30}"
@@ -938,7 +1016,18 @@ WORKER_COMPACT_MAX_FAILURES="${WORKER_COMPACT_MAX_FAILURES:-3}"
 # issue #265 — shared between the coordinator and per-window retraction
 # paths; see this file's COMPACT_QUEUED_MARKER_PATTERN header comment above.
 COMPACT_QUEUED_MARKER_PATTERN="${COMPACT_QUEUED_MARKER_PATTERN:-Press up to edit queued messages}"
-COMPACT_RETRACT_BACKSPACES="${COMPACT_RETRACT_BACKSPACES:-3}"
+# issue #290: bumped from 3 to 12 — the composer holds "/compact " (9 chars,
+# including the autocomplete menu's trailing space) when a phase=start
+# timeout fires, and 3 backspaces reliably left a "/compa" ghost behind (see
+# COMPACT_QUEUED_MARKER_PATTERN's header comment above for the full incident
+# this fixes). 12 covers the full 9 with margin for a stray extra char.
+COMPACT_RETRACT_BACKSPACES="${COMPACT_RETRACT_BACKSPACES:-12}"
+# issue #290 — shared settle delay used by the injection-submit path
+# (maybe_auto_compact/maybe_worker_compact): once between paste-buffer and
+# the submitting Enter, and again before checking whether it landed. See
+# maybe_auto_compact's injection comment for the autocomplete-menu race
+# this closes.
+COMPACT_SUBMIT_SETTLE_SECS="${COMPACT_SUBMIT_SETTLE_SECS:-1}"
 
 case "$WATCHER_AUTOCLOSE_MODE" in
     merged)    AUTOCLOSE_PR_FLAG="--merged-only" ;;
@@ -964,7 +1053,7 @@ for _var in AUTO_COMPACT_THRESHOLD_TOKENS AUTO_COMPACT_PROBE_MAX_AGE_SECS \
             WORKER_COMPACT_START_TIMEOUT_SECS WORKER_COMPACT_FINISH_TIMEOUT_SECS \
             WORKER_COMPACT_VERIFY_TIMEOUT_SECS WORKER_COMPACT_SCAN_SECS \
             WORKER_COMPACT_BACKOFF_SECS WORKER_COMPACT_MAX_FAILURES \
-            COMPACT_RETRACT_BACKSPACES; do
+            COMPACT_RETRACT_BACKSPACES COMPACT_SUBMIT_SETTLE_SECS; do
     if ! [[ "${!_var}" =~ ^[0-9]+$ ]]; then
         echo "ERROR: $_var must be a non-negative integer (got: ${!_var})" >&2
         exit 1
@@ -1039,16 +1128,20 @@ format_event_line() {
         coord.compact)                 glyph="◈"; color=$'\033[36m' ;;
         coord.compact.skip)             glyph="·"; color=$'\033[2m'  ;;
         coord.compact.timeout)           glyph="⚠"; color=$'\033[33m' ;;
+        coord.compact.resubmit)          glyph="↻"; color=$'\033[33m' ;;
         coord.compact.retracted)          glyph="↩"; color=$'\033[32m' ;;
         coord.compact.retract_failed)      glyph="⚠"; color=$'\033[31m' ;;
+        coord.compact.retract_skip)          glyph="·"; color=$'\033[2m'  ;;
         coord.compact.done)               glyph="◈"; color=$'\033[32m' ;;
         coord.compact.ineffective)          glyph="⚠"; color=$'\033[31m' ;;
         coord.compact.verify_skip)            glyph="·"; color=$'\033[2m'  ;;
         worker.compact)                 glyph="◈"; color=$'\033[36m' ;;
         worker.compact.skip)             glyph="·"; color=$'\033[2m'  ;;
         worker.compact.timeout)           glyph="⚠"; color=$'\033[33m' ;;
+        worker.compact.resubmit)          glyph="↻"; color=$'\033[33m' ;;
         worker.compact.retracted)          glyph="↩"; color=$'\033[32m' ;;
         worker.compact.retract_failed)      glyph="⚠"; color=$'\033[31m' ;;
+        worker.compact.retract_skip)          glyph="·"; color=$'\033[2m'  ;;
         worker.compact.done)               glyph="◈"; color=$'\033[32m' ;;
         worker.compact.ineffective)          glyph="⚠"; color=$'\033[31m' ;;
         worker.compact.verify_skip)            glyph="·"; color=$'\033[2m'  ;;
@@ -1962,21 +2055,104 @@ probe_ctx_used() {
     echo "$used"
 }
 
-# compact_retract_queued <tmux-target> <event-prefix> <extra-log-fields>
+# compact_last_pane_line <tmux-target>
+#
+# (issue #290) Echoes the last non-blank rendered line of <target>'s pane,
+# ANSI-stripped (same sed chain used throughout this file) and trimmed of
+# common composer chrome (prompt markers ❯/>/|, box-drawing borders) so
+# callers can judge composer content/emptiness. This is a guess at how the
+# CLI frames its composer, not a verified spec — re-check against a live
+# pane if this misclassifies.
+#
+# A self-review on this function's first version flagged that "the
+# composer is the pane's last rendered line" can be wrong on its own: a
+# persistent statusline/hint line below the composer would make this
+# permanently pick THAT line instead, misreading a genuinely-empty composer
+# as non-empty forever. For the worker path this is a KNOWN, not merely
+# hypothetical, risk — worker_pane_ctx_used/worker_pane_ctx_window (above)
+# already parse a persistent "ctx: <used>/<total> (<pct>%)" statusline out
+# of the exact same capture-pane output — so that specific line is excluded
+# before picking the tail. No equivalently well-established coordinator-side
+# persistent-chrome text exists elsewhere in this file to filter the same
+# way; that half of the risk remains a live-pane-unverified guess like the
+# rest of this feature's TUI-chrome parsing.
+compact_last_pane_line() {
+    local target="$1" content clean
+    content="$(tmux capture-pane -t "$target" -p 2>/dev/null)" || { echo ""; return 1; }
+    clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
+    # `|| true` on the whole pipeline: under this file's `set -o pipefail`,
+    # a captured pane whose EVERY line happens to match the ctx: exclusion
+    # below (grep -v then produces zero lines and exits 1) would otherwise
+    # make this function return non-zero for a reason that has nothing to
+    # do with a real failure — and since callers assign the result via a
+    # bare (non-`local`) `last="$(compact_last_pane_line ...)"`, that
+    # non-zero would trip `set -e` and abort the watcher. Only the explicit
+    # capture-pane failure above is a real failure this function reports.
+    printf '%s\n' "$clean" \
+        | LC_ALL=C grep -vE 'ctx: [0-9]+[kM]?/[0-9]+[kM]?[[:space:]]*\([0-9]+%\)' \
+        | sed -e '/^[[:space:]]*$/d' -e 's/^[[:space:]]*[❯>│|╭╮╰╯─]*[[:space:]]*//' -e 's/[[:space:]]*[│|╭╮╰╯─]*[[:space:]]*$//' | tail -1 || true
+}
+
+# compact_composer_clear <tmux-target>
+#
+# (issue #290) True (rc 0) if compact_last_pane_line's trimmed result is
+# empty — i.e. the composer genuinely holds nothing, not just "the queued-
+# input marker is gone" (COMPACT_QUEUED_MARKER_PATTERN alone can never
+# catch a PARTIAL retraction: a leftover "/compa" ghost matches neither
+# that marker nor any prior check, which is exactly how issue #290's
+# ghost-text symptom slipped past #265/#272's retraction success check).
+compact_composer_clear() {
+    local target="$1" last
+    last="$(compact_last_pane_line "$target")" || true
+    [ -z "$last" ]
+}
+
+# compact_confirm_submitted <tmux-target> <busy-pattern> <pasted-text>
+#
+# (issue #290) Best-effort check that an injected <pasted-text> + Enter
+# actually submitted, rather than being consumed by the CLI's slash-command
+# autocomplete menu (see maybe_auto_compact/maybe_worker_compact's
+# injection comment for the race this guards). True (rc 0, "confirmed
+# submitted") if the pane already matches <busy-pattern> (a turn/compaction
+# started) OR the composer's last rendered line no longer starts with
+# <pasted-text>. False (rc 1) only when that exact text is still sitting
+# there un-submitted — the caller resends Enter once in that case.
+compact_confirm_submitted() {
+    local target="$1" busy_pattern="$2" pasted="$3" content clean last
+    content="$(tmux capture-pane -t "$target" -p 2>/dev/null)" || return 1
+    clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
+    printf '%s\n' "$clean" | LC_ALL=C grep -qE "$busy_pattern" && return 0
+    last="$(compact_last_pane_line "$target")" || true
+    case "$last" in
+        "$pasted"*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+# compact_retract_queued <tmux-target> <event-prefix> <extra-log-fields> [busy-pattern]
 #
 # (issue #265) Best-effort retraction of an injected "/compact" that a
 # phase=start timeout suggests never actually started — most likely because
 # it landed queued behind an already-in-flight turn that AUTO_COMPACT_BUSY_
 # PATTERN/WORKER_COMPACT_BUSY_PATTERN failed to recognize as busy (a
-# detection blind spot; issue #266 was one such regression, this is the
-# safety net for any future one). Left alone, that queued "/compact" fires
-# whenever the real in-flight turn eventually ends — often minutes later,
-# well after the reasoning that justified compacting has gone stale, and
-# sometimes stacking with a second stale injection from the very next sweep
-# (the originally reported symptom).
+# detection blind spot; issue #266 was one such regression, issue #290's
+# autocomplete-menu race was another — see COMPACT_SUBMIT_SETTLE_SECS — and
+# this is the safety net for any future one). Left alone, that queued
+# "/compact" fires whenever the real in-flight turn eventually ends — often
+# minutes later, well after the reasoning that justified compacting has
+# gone stale, and sometimes stacking with a second stale injection from the
+# very next sweep (the originally reported symptom).
 #
-# Sends a single Escape — per issue #265, BELIEVED (not independently
-# verified against a live pane; see below) to clear a QUEUED follow-up
+# issue #290/#274: if <busy-pattern> is given and STILL matches the pane at
+# retraction time, this is a no-op — logs "<event-prefix>.retract_skip" and
+# returns without sending a single keystroke. A phase=start timeout can be
+# a FALSE positive (e.g. a compaction that's genuinely running but whose
+# busy anchor some future regression misses, the same shape as #274's
+# incident this file's AUTO_COMPACT_BUSY_PATTERN header comment describes),
+# and Escape/Backspace must never fire into a pane that's actually busy.
+#
+# Otherwise sends a single Escape — per issue #265, BELIEVED (not
+# independently verified against a live pane) to clear a QUEUED follow-up
 # message without touching an in-flight turn. Take that belief with a grain
 # of salt: this same file's AUTO_COMPACT_BUSY_PATTERN/WORKER_COMPACT_BUSY_
 # PATTERN header comments document a persistent "(esc to interrupt)" hint
@@ -1985,22 +2161,37 @@ probe_ctx_used() {
 # turn with nothing queued behind it. Whether a genuinely queued follow-up
 # changes that (cancel-the-queue-first, common in chat TUIs) or Escape just
 # interrupts regardless is exactly the "re-verify against a live pane"
-# uncertainty a self-review flagged on this function's first version — no
-# live 2.1.x pane was available to settle it empirically here. This is why
-# this function must NEVER send Ctrl-C or anything else definitely more
-# destructive than Escape, and why the retraction's actual effect is never
-# assumed either way — only re-capture-and-log decides the verdict, so a
-# wrong assumption here shows up as data (a worse-than-expected retracted/
-# retract_failed ratio, or an operator-visible interrupted turn) instead of
-# silently mis-firing forever. A handful of Backspace keystrokes follow as
-# belt-and-braces cleanup for any stray composer text Escape didn't reach.
-# Then re-captures the pane and checks whether COMPACT_QUEUED_MARKER_PATTERN
-# is still visible, logging "<event-prefix>.retracted" (marker gone) or
-# "<event-prefix>.retract_failed" (still there) accordingly. Fails open
-# like everything else in this file: a tmux error along the way just leaves
-# the re-capture to decide the verdict.
+# uncertainty a self-review flagged on this function's first version. This
+# is why this function must NEVER send Ctrl-C or anything else definitely
+# more destructive than Escape, and why the retraction's actual effect is
+# never assumed either way — only re-capture-and-log decides the verdict.
+# COMPACT_RETRACT_BACKSPACES keystrokes follow as cleanup for any stray
+# composer text Escape didn't reach — issue #290 settled EMPIRICALLY (via
+# the observed "/compa" ghost, a 6-char leftover after only 3 backspaces
+# against a 9-char "/compact " composer) that Escape does NOT clear the
+# composer on its own; see that var's header comment for why the default
+# moved from 3 to 12.
+#
+# Then re-captures the pane and requires BOTH: COMPACT_QUEUED_MARKER_PATTERN
+# gone, AND compact_composer_clear true (issue #290 — the marker-only check
+# used by #265/#272 could never have caught a partial-clear ghost, which is
+# how "coord.compact.retracted" got logged four times on 2026-08-16 against
+# panes that still visibly held "/compa"). Logs "<event-prefix>.retracted"
+# (both hold) or "<event-prefix>.retract_failed" (either doesn't)
+# accordingly. Fails open like everything else in this file: a tmux error
+# along the way just leaves the re-capture to decide the verdict.
 compact_retract_queued() {
-    local target="$1" prefix="$2" extra="$3"
+    local target="$1" prefix="$2" extra="$3" busy_pattern="${4:-}"
+
+    if [ -n "$busy_pattern" ]; then
+        local pre_content pre_clean
+        pre_content="$(tmux capture-pane -t "$target" -p 2>/dev/null)" || pre_content=""
+        pre_clean="$(printf '%s\n' "$pre_content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
+        if printf '%s\n' "$pre_clean" | LC_ALL=C grep -qE "$busy_pattern"; then
+            log_event "${prefix}.retract_skip" "reason=busy $extra"
+            return 0
+        fi
+    fi
 
     tmux send-keys -t "$target" Escape 2>/dev/null || true
     sleep 1
@@ -2014,6 +2205,10 @@ compact_retract_queued() {
     content="$(tmux capture-pane -t "$target" -p 2>/dev/null)" || content=""
     clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
     if printf '%s\n' "$clean" | LC_ALL=C grep -qE "$COMPACT_QUEUED_MARKER_PATTERN"; then
+        log_event "${prefix}.retract_failed" "$extra"
+        return 1
+    fi
+    if ! compact_composer_clear "$target"; then
         log_event "${prefix}.retract_failed" "$extra"
         return 1
     fi
@@ -2121,8 +2316,29 @@ maybe_auto_compact() {
         printf '/compact' > "$tmp_compact" 2>/dev/null || true
         tmux load-buffer -b llm-coord-autocompact "$tmp_compact" 2>/dev/null || true
         tmux paste-buffer -b llm-coord-autocompact -t "$SESSION_NAME:coordinator" -d 2>/dev/null || true
-        tmux send-keys -t "$SESSION_NAME:coordinator" Enter 2>/dev/null || true
         rm -f "$tmp_compact" 2>/dev/null || true
+
+        # issue #290: pasting text that starts with "/" opens the CLI's
+        # slash-command autocomplete menu. Sending Enter immediately (as
+        # this code used to do, with no delay at all) is reliably consumed
+        # by that menu — accepting the completion, which leaves
+        # "/compact " with a trailing space sitting in the composer —
+        # instead of submitting. Runtime-log evidence: nearly every
+        # injection across every project logged a phase=start timeout, and
+        # only 2 ever reached coord.compact.done. Give the menu
+        # COMPACT_SUBMIT_SETTLE_SECS to settle (it auto-resolves once the
+        # typed text is an exact, unambiguous command match) before
+        # pressing Enter, then re-capture and CONFIRM the Enter actually
+        # submitted — never just assume it did — retrying it once if not,
+        # before falling through to the start-wait loop below (which still
+        # owns the authoritative timeout either way).
+        sleep "$COMPACT_SUBMIT_SETTLE_SECS"
+        tmux send-keys -t "$SESSION_NAME:coordinator" Enter 2>/dev/null || true
+        sleep "$COMPACT_SUBMIT_SETTLE_SECS"
+        if ! compact_confirm_submitted "$SESSION_NAME:coordinator" "$AUTO_COMPACT_BUSY_PATTERN" "/compact"; then
+            log_event coord.compact.resubmit "trigger=$trigger"
+            tmux send-keys -t "$SESSION_NAME:coordinator" Enter 2>/dev/null || true
+        fi
 
         # Wait for compaction to actually start (busy indicator appears) —
         # confirms the CLI picked up the input. If it never appears within
@@ -2134,7 +2350,7 @@ maybe_auto_compact() {
             waited=$((waited + AUTO_COMPACT_POLL_SECS))
             if [ "$waited" -ge "$AUTO_COMPACT_START_TIMEOUT_SECS" ]; then
                 log_event coord.compact.timeout "phase=start waited=${waited}s trigger=$trigger"
-                compact_retract_queued "$SESSION_NAME:coordinator" coord.compact "trigger=$trigger" || true
+                compact_retract_queued "$SESSION_NAME:coordinator" coord.compact "trigger=$trigger" "$AUTO_COMPACT_BUSY_PATTERN" || true
                 exit 0
             fi
         done
@@ -2642,8 +2858,18 @@ maybe_worker_compact() {
     printf '/compact' > "$tmp_compact" 2>/dev/null || true
     tmux load-buffer -b "llm-worker-autocompact-$issue" "$tmp_compact" 2>/dev/null || true
     tmux paste-buffer -b "llm-worker-autocompact-$issue" -t "$SESSION_NAME:$win" -d 2>/dev/null || true
-    tmux send-keys -t "$SESSION_NAME:$win" Enter 2>/dev/null || true
     rm -f "$tmp_compact" 2>/dev/null || true
+
+    # issue #290: same autocomplete-menu race as maybe_auto_compact's
+    # injection (see that function's comment) — settle, submit, verify,
+    # retry once if the composer still holds the pasted text.
+    sleep "$COMPACT_SUBMIT_SETTLE_SECS"
+    tmux send-keys -t "$SESSION_NAME:$win" Enter 2>/dev/null || true
+    sleep "$COMPACT_SUBMIT_SETTLE_SECS"
+    if ! compact_confirm_submitted "$SESSION_NAME:$win" "$WORKER_COMPACT_BUSY_PATTERN" "/compact"; then
+        log_event worker.compact.resubmit "issue=$issue"
+        tmux send-keys -t "$SESSION_NAME:$win" Enter 2>/dev/null || true
+    fi
 
     # Wait for compaction to actually start (busy indicator appears).
     local waited=0
@@ -2652,7 +2878,7 @@ maybe_worker_compact() {
         waited=$((waited + WORKER_COMPACT_POLL_SECS))
         if [ "$waited" -ge "$WORKER_COMPACT_START_TIMEOUT_SECS" ]; then
             log_event worker.compact.timeout "issue=$issue phase=start waited=${waited}s"
-            compact_retract_queued "$SESSION_NAME:$win" worker.compact "issue=$issue" || true
+            compact_retract_queued "$SESSION_NAME:$win" worker.compact "issue=$issue" "$WORKER_COMPACT_BUSY_PATTERN" || true
             worker_compact_record_failure "$issue"
             return 0
         fi
