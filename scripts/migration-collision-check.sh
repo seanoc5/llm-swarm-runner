@@ -11,7 +11,17 @@
 #
 # Usage:
 #   migration-collision-check.sh <PR#> [--post]
+#   migration-collision-check.sh --ref <ref>
 #
+#   --ref    post-merge watchdog mode (#305): scan a SINGLE tree (e.g.
+#            origin/master, HEAD) for the same collisions instead of a PR's
+#            base+head union. The merge gate only fires for merges routed
+#            through swarm-merge.sh — manual `gh pr merge`/UI merges bypass
+#            it, and every real-world collision burst so far arrived that
+#            way. Run this against the default branch on each coordinator
+#            wake to catch those within minutes. Needs only git (no gh);
+#            refs under origin/ are freshened with a best-effort fetch.
+#            Not combinable with a PR# or --post.
 #   --post   also post the verdict as a PR comment with a
 #            <!-- SWARM_MIGRATION_GATE: <clean|collision> --> marker.
 #            Idempotent: skips posting when the latest marker comment
@@ -45,18 +55,28 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 PR=""
 POST=0
+REF=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --post) POST=1 ;;
-        -h|--help) sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --ref)
+            shift
+            [ $# -gt 0 ] || { echo "ERROR: --ref needs a ref argument" >&2; exit 1; }
+            REF="$1" ;;
+        -h|--help) sed -n '2,51p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         -*) echo "ERROR: unknown flag '$1'" >&2; exit 1 ;;
         *)  [ -z "$PR" ] || { echo "ERROR: multiple PR numbers" >&2; exit 1; }
             PR="$1" ;;
     esac
     shift
 done
-[ -n "$PR" ] || { echo "Usage: $0 <PR#> [--post]" >&2; exit 1; }
-command -v gh >/dev/null 2>&1 || { echo "ERROR: gh required" >&2; exit 1; }
+if [ -n "$REF" ]; then
+    [ -z "$PR" ] || { echo "ERROR: --ref and a PR# are mutually exclusive" >&2; exit 1; }
+    [ "$POST" = 0 ] || { echo "ERROR: --post needs a PR#; not valid with --ref" >&2; exit 1; }
+else
+    [ -n "$PR" ] || { echo "Usage: $0 <PR#> [--post]  |  $0 --ref <ref>" >&2; exit 1; }
+    command -v gh >/dev/null 2>&1 || { echo "ERROR: gh required" >&2; exit 1; }
+fi
 command -v git >/dev/null 2>&1 || { echo "ERROR: git required" >&2; exit 1; }
 
 PROJECT_DIR="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
@@ -64,31 +84,68 @@ PROJECT_DIR="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 . "$SCRIPT_DIR/_load-env.sh" "$PROJECT_DIR"
 MIGRATION_GLOB="${MIGRATION_GLOB:-**/db/migration/**/V*__*.sql}"
 
-# --- resolve PR base/head refs ----------------------------------------------
+# --- resolve refs to scan ----------------------------------------------------
+#
+# SCAN_REFS holds the tree(s) whose UNION is checked. PR mode: base + head
+# (later entries win when the same path must be read, so head stays
+# preferred for Alembic content). --ref mode: just the one tree.
 
-PR_JSON="$(gh pr view "$PR" --json baseRefName,headRefName)" \
-    || { echo "ERROR: gh pr view $PR failed" >&2; exit 1; }
-BASE_REF="$(printf '%s' "$PR_JSON" | jq -r .baseRefName)"
-HEAD_REF="$(printf '%s' "$PR_JSON" | jq -r .headRefName)"
-[ -n "$BASE_REF" ] && [ "$BASE_REF" != "null" ] || { echo "ERROR: could not resolve base ref for PR #$PR" >&2; exit 1; }
-[ -n "$HEAD_REF" ] && [ "$HEAD_REF" != "null" ] || { echo "ERROR: could not resolve head ref for PR #$PR" >&2; exit 1; }
+SCAN_REFS=()
+if [ -n "$REF" ]; then
+    # Freshen origin/* refs so "watchdog against origin/master" sees the
+    # remote's current tip, not a stale local mirror; best-effort only.
+    case "$REF" in
+        origin/*) git fetch -q origin "${REF#origin/}" 2>/dev/null || true ;;
+    esac
+    git rev-parse --verify --quiet "$REF^{tree}" >/dev/null \
+        || { echo "ERROR: ref '$REF' does not resolve to a tree" >&2; exit 1; }
+    SCAN_REFS=("$REF")
+    SCOPE_DESC="ref $REF"
+else
+    PR_JSON="$(gh pr view "$PR" --json baseRefName,headRefName)" \
+        || { echo "ERROR: gh pr view $PR failed" >&2; exit 1; }
+    BASE_REF="$(printf '%s' "$PR_JSON" | jq -r .baseRefName)"
+    HEAD_REF="$(printf '%s' "$PR_JSON" | jq -r .headRefName)"
+    [ -n "$BASE_REF" ] && [ "$BASE_REF" != "null" ] || { echo "ERROR: could not resolve base ref for PR #$PR" >&2; exit 1; }
+    [ -n "$HEAD_REF" ] && [ "$HEAD_REF" != "null" ] || { echo "ERROR: could not resolve head ref for PR #$PR" >&2; exit 1; }
 
-BASE_LOCAL="refs/migration-collision-check/base-$$"
-HEAD_LOCAL="refs/migration-collision-check/head-$$"
-cleanup() {
-    git update-ref -d "$BASE_LOCAL" >/dev/null 2>&1 || true
-    git update-ref -d "$HEAD_LOCAL" >/dev/null 2>&1 || true
-}
-trap cleanup EXIT
+    BASE_LOCAL="refs/migration-collision-check/base-$$"
+    HEAD_LOCAL="refs/migration-collision-check/head-$$"
+    cleanup() {
+        git update-ref -d "$BASE_LOCAL" >/dev/null 2>&1 || true
+        git update-ref -d "$HEAD_LOCAL" >/dev/null 2>&1 || true
+    }
+    trap cleanup EXIT
 
-git fetch -q origin "$BASE_REF:$BASE_LOCAL" "$HEAD_REF:$HEAD_LOCAL" \
-    || { echo "ERROR: git fetch of $BASE_REF/$HEAD_REF failed" >&2; exit 1; }
+    git fetch -q origin "$BASE_REF:$BASE_LOCAL" "$HEAD_REF:$HEAD_LOCAL" \
+        || { echo "ERROR: git fetch of $BASE_REF/$HEAD_REF failed" >&2; exit 1; }
+    SCAN_REFS=("$BASE_LOCAL" "$HEAD_LOCAL")
+    SCOPE_DESC="the union of $BASE_REF/$HEAD_REF"
+fi
 
 # --- helpers -----------------------------------------------------------------
 
 list_tree_files() {
     # $1 = ref; lists every path in that tree (one per line).
     git ls-tree -r --name-only "$1" 2>/dev/null || true
+}
+
+list_scan_files() {
+    # Union of every SCAN_REFS tree's paths, de-duplicated.
+    local r
+    for r in "${SCAN_REFS[@]}"; do list_tree_files "$r"; done | sort -u
+}
+
+show_scan_file() {
+    # $1 = path. Print the file's content from the LAST SCAN_REFS tree that
+    # has it (PR mode: head preferred over base; --ref mode: the one tree).
+    local f="$1" i
+    for (( i=${#SCAN_REFS[@]}-1; i>=0; i-- )); do
+        if git cat-file -e "${SCAN_REFS[$i]}:$f" 2>/dev/null; then
+            git show "${SCAN_REFS[$i]}:$f" 2>/dev/null || true
+            return
+        fi
+    done
 }
 
 shopt -s extglob
@@ -108,8 +165,7 @@ matches_glob() {
 
 # --- Flyway: duplicate version prefixes -------------------------------------
 
-FLYWAY_FILES="$( { list_tree_files "$BASE_LOCAL"; list_tree_files "$HEAD_LOCAL"; } \
-    | sort -u | while IFS= read -r f; do
+FLYWAY_FILES="$(list_scan_files | while IFS= read -r f; do
         if matches_glob "$f" "$MIGRATION_GLOB"; then
             echo "$f"
         fi
@@ -138,19 +194,14 @@ done
 
 # --- Alembic: multi-head DAG -------------------------------------------------
 
-ALEMBIC_FILES="$( { list_tree_files "$BASE_LOCAL"; list_tree_files "$HEAD_LOCAL"; } \
-    | sort -u | grep -E '(^|/)versions/[^/]+\.py$' || true )"
+ALEMBIC_FILES="$(list_scan_files | grep -E '(^|/)versions/[^/]+\.py$' || true )"
 
 declare -A REVISIONS=()   # revision id -> filename
 declare -A REFERENCED=()  # revision id referenced as someone's down_revision
 
 if [ -n "$ALEMBIC_FILES" ]; then
     while IFS= read -r f; do
-        if git cat-file -e "$HEAD_LOCAL:$f" 2>/dev/null; then
-            content="$(git show "$HEAD_LOCAL:$f" 2>/dev/null || true)"
-        else
-            content="$(git show "$BASE_LOCAL:$f" 2>/dev/null || true)"
-        fi
+        content="$(show_scan_file "$f")"
         # `grep | head` under pipefail still propagates grep's exit 1 on no
         # match even though head itself succeeds — pipefail reports the
         # rightmost NON-ZERO stage, not just the last stage's status. A
@@ -180,7 +231,7 @@ done
 # --- verdict -----------------------------------------------------------------
 
 if [ -z "$FLYWAY_FILES" ] && [ -z "$ALEMBIC_FILES" ]; then
-    echo "migration-collision-check: no migration files found in the union of $BASE_REF/$HEAD_REF — skipped"
+    echo "migration-collision-check: no migration files found in $SCOPE_DESC — skipped"
     exit 4
 fi
 
@@ -205,10 +256,14 @@ if [ "$COLLISION" = "1" ]; then
 else
     VERDICT="clean"
     EXIT=0
-    BODY_LINES+=("No duplicate Flyway versions or Alembic multi-heads in the union of $BASE_REF/$HEAD_REF.")
+    BODY_LINES+=("No duplicate Flyway versions or Alembic multi-heads in $SCOPE_DESC.")
 fi
 
-echo "PR #$PR migration-collision-check verdict: $VERDICT"
+if [ -n "$REF" ]; then
+    echo "$SCOPE_DESC migration-collision-check verdict: $VERDICT"
+else
+    echo "PR #$PR migration-collision-check verdict: $VERDICT"
+fi
 echo "---"
 printf '%s\n' "${BODY_LINES[@]}"
 echo "---"
