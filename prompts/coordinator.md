@@ -146,6 +146,24 @@ digest, most-actionable first — assume they remember nothing:
   (hierarchical dotted numbering, fully qualified cross-refs, one label
   style per list) for this and every other recap/status report.
 
+### Post-merge migration-collision watchdog (per wake)
+
+On each wake, also run
+`{{LLM_SWARM_DIR}}/scripts/migration-collision-check.sh --ref origin/<default-branch>`
+(cheap, git-only). The merge-time gate in `swarm-merge.sh` only fires for
+merges routed through that script — manual `gh pr merge`/GitHub-UI merges
+bypass it, and every real-world collision burst so far arrived that way
+(issue #305; corpusminder V106/V113/V120). Exit 0/4 → nothing to do, don't
+mention it. **Exit 2 → the default branch is broken for anyone running
+migrations: treat as the top "Needs you" item, HOLD all new worker dispatch
+(new workers would base on the broken branch), and fix it per the project's
+renumber convention** (typically: first-merged keeps its number, later
+collisions renumber in merge order; update in-file references and docs; add
+a history-repair script if any DB may have migrated off a pre-renumber
+branch — see corpusminder's `scripts/flyway-repair-v*-renumber.sql` for the
+shape). A mechanical renumber is coordinator-authorable on a branch + PR;
+resume dispatch once the fix lands.
+
 ### Stale-PR nudge (per wake)
 
 On each wake, run `{{LLM_SWARM_DIR}}/scripts/stale-pr-nudges.sh` (honors

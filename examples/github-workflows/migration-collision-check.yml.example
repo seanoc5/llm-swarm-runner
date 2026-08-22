@@ -1,0 +1,78 @@
+# Copy to <your-project>/.github/workflows/migration-collision-check.yml
+#
+# CI layer of the migration-collision guard (llm-swarm-runner #294/#305).
+#
+# Why this exists on top of the swarm-side gates: the merge-time gate in
+# scripts/swarm-merge.sh and the coordinator's per-wake watchdog both live
+# on the swarm host — a merge made from another machine, the GitHub UI, or
+# any context without the swarm running still lands unchecked. This
+# workflow closes that path:
+#   - pull_request: actions/checkout gives the PR *merge commit*, so
+#     scanning HEAD's tree checks the merged result. Caveat: the merge ref
+#     is computed against base at trigger time — if OTHER migration-carrying
+#     PRs merge afterwards, this run is stale (that race is exactly why the
+#     merge-time/watchdog layers exist; enable "require branches to be up
+#     to date" branch protection to make this check authoritative).
+#   - push to the default branch: catches a collision the moment ANY merge
+#     path lands it, stale-merge-ref race included.
+#
+# Self-contained: project repos don't carry the swarm's scripts, so the
+# check is inlined below. It is the Flyway half of
+# scripts/migration-collision-check.sh (duplicate V<version>__ prefixes per
+# directory); Alembic users should port the multi-head half from that
+# script. Keep MIGRATION_GLOB below in sync with the swarm-side setting in
+# <project>/.swarm/.env if you override it there.
+
+name: Migration collision check
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        # Tree scan only — no history needed.
+        with:
+          fetch-depth: 1
+
+      - name: Detect duplicate Flyway migration versions
+        env:
+          # Same default as scripts/migration-collision-check.sh.
+          MIGRATION_GLOB: '**/db/migration/**/V*__*.sql'
+        run: |
+          set -euo pipefail
+          shopt -s extglob globstar nullglob
+          # "**/" must also match zero directories (see the swarm script's
+          # matches_glob rationale).
+          pattern="${MIGRATION_GLOB//\*\*\//?(*/)}"
+          declare -A version_files=()
+          collision=0
+          while IFS= read -r f; do
+            # shellcheck disable=SC2053
+            [[ "$f" == $pattern ]] || continue
+            base="$(basename "$f")"
+            if [[ "$base" =~ ^V([0-9]+(\.[0-9]+)*)__ ]]; then
+              key="$(dirname "$f")/V${BASH_REMATCH[1]}"
+              version_files["$key"]="${version_files[$key]:-}$f"$'\n'
+            fi
+          done < <(git ls-files)
+          for key in "${!version_files[@]}"; do
+            count="$(printf '%s' "${version_files[$key]}" | grep -c .)"
+            if [ "$count" -gt 1 ]; then
+              collision=1
+              echo "::error::Duplicate Flyway version ${key##*/} claimed by:"
+              printf '%s' "${version_files[$key]}" | sed 's/^/::error::  /'
+            fi
+          done
+          if [ "$collision" = 1 ]; then
+            echo "::error::Duplicate migration versions detected — rename the losing file(s) to the next free version (first-merged keeps its number)."
+            exit 1
+          fi
+          echo "No duplicate Flyway migration versions."
