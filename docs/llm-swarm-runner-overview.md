@@ -69,7 +69,7 @@ Running autonomous LLM agents directly on your host is risky: a hallucinated `rm
 
 ### Tmux as substrate, not just a UI
 
-The choice of tmux for the session layer is load-bearing in a way that's easy to miss. Every agent — coordinator and each worker — runs inside a tmux pane rather than as a detached background process, which gives every line every agent ever prints a **persistent, host-readable artifact**: the pane's scrollback. With `history-limit 50000` and `remain-on-exit failed` (see [`examples/tmux.conf.example`](../examples/tmux.conf.example)), even an agent that crashed an hour ago still has its full transcript sitting in a `[dead]` pane, grep-able via:
+The choice of tmux for the session layer is load-bearing in a way that's easy to miss. Every agent — coordinator and each worker — runs inside a tmux pane rather than as a detached background process, which gives every line every agent ever prints a **persistent, host-readable artifact**: the pane's scrollback. `llm-start.sh` sets `history-limit 50000` and `remain-on-exit failed` on the swarm's tmux socket at startup (also mirrored in [`examples/tmux.conf.example`](../examples/tmux.conf.example) for manual/non-`llm-start.sh` tmux use), so even an agent that crashed an hour ago still has its full transcript sitting in a `[dead]` pane, grep-able via:
 
 ```bash
 tmux -L swarm-<repo> capture-pane -t llm-<repo>:iss-N -p -S -50000

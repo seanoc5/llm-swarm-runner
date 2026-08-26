@@ -287,7 +287,7 @@ See also: [Troubleshooting → Ctrl-Z accidentally suspended claude](./troublesh
 
 > Architectural background for *why* this works lives at [overview → "Tmux as substrate"](./llm-swarm-runner-overview.md#tmux-as-substrate-not-just-a-ui). Security implications at [security → "Tmux Scrollback Exposure"](./security.md#tmux-scrollback-exposure). This section is the operational how-to.
 
-Because every agent runs in a tmux pane (not a detached background process), the coordinator pane and every worker pane have **host-readable scrollback** for the life of the session — even after the agent inside has exited. The default config retains 50000 lines and keeps `[dead]` panes around on non-zero exit (`remain-on-exit failed`), so post-mortem inspection of a crashed worker works without rerunning anything.
+Because every agent runs in a tmux pane (not a detached background process), the coordinator pane and every worker pane have **host-readable scrollback** for the life of the session — even after the agent inside has exited. `llm-start.sh` sets a 50000-line scrollback and keeps `[dead]` panes around on non-zero exit (`remain-on-exit failed`) on the swarm's tmux socket automatically, so post-mortem inspection of a crashed worker works without rerunning anything and without any manual tmux config.
 
 ### The one command you'll actually use
 
