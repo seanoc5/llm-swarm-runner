@@ -216,30 +216,33 @@ green "every ps/volume-ls/network-ls/rm call is scoped to this worktree's single
 # ============================================================================
 heading "Test 8: project name is normalized the way docker compose normalizes it"
 # ============================================================================
-# docker compose lowercases the project name and replaces any character
-# outside [a-z0-9_-] with '_' before stamping the label. A worktree/.env
-# name that isn't already lowercase-safe must be normalized the same way,
-# or the sweep's filter never matches what compose actually wrote.
+# docker compose (compose-go's NormalizeProjectName) lowercases the
+# project name, DELETES any character outside [a-z0-9_-] (it does not
+# substitute '_'), then trims leading '_'/'-'. Verified against the real
+# `docker compose` binary: a directory named wt-Upper.Name comes up as
+# project wt-uppername. A worktree/.env name that isn't already
+# lowercase-safe must be normalized exactly the same way, or the sweep's
+# filter never matches what compose actually wrote.
 WTU="$TEST_DIR/wt-Upper.Name"
 mkdir -p "$WTU"
 reset_stub
 OUT=$("$COMPOSE_DOWN" "$WTU" 2>&1) && RC=0 || RC=$?
 [ "$RC" -eq 0 ] || red "expected exit 0, got $RC"
-grep -q "label=com\.docker\.compose\.project=wt-upper_name" "$DOCKER_LOG" \
-    || red "expected the filter to use the normalized name wt-upper_name; got: $(cat "$DOCKER_LOG")"
+grep -q "label=com\.docker\.compose\.project=wt-uppername" "$DOCKER_LOG" \
+    || red "expected the filter to use the normalized name wt-uppername (chars deleted, not underscored); got: $(cat "$DOCKER_LOG")"
 grep -q "label=com\.docker\.compose\.project=wt-Upper.Name" "$DOCKER_LOG" \
     && red "raw un-normalized worktree name leaked into the label filter"
-green "worktree basename wt-Upper.Name normalizes to wt-upper_name for the label filter (hyphens are valid, dots/uppercase are not)"
+green "worktree basename wt-Upper.Name normalizes to wt-uppername (matches the real docker compose binary, not an underscore-substitution guess)"
 
 WTE2="$TEST_DIR/wt-envcase"
 mkdir -p "$WTE2"
-printf 'COMPOSE_PROJECT_NAME=Custom.Proj\n' > "$WTE2/.env"
+printf 'COMPOSE_PROJECT_NAME=--Custom.Proj\n' > "$WTE2/.env"
 reset_stub
 OUT=$("$COMPOSE_DOWN" "$WTE2" 2>&1) && RC=0 || RC=$?
 [ "$RC" -eq 0 ] || red "expected exit 0, got $RC"
-grep -q "label=com\.docker\.compose\.project=custom_proj" "$DOCKER_LOG" \
-    || red "expected the .env project name to normalize to custom_proj too; got: $(cat "$DOCKER_LOG")"
-green ".env COMPOSE_PROJECT_NAME is normalized the same way, not just the worktree-basename fallback"
+grep -q "label=com\.docker\.compose\.project=customproj" "$DOCKER_LOG" \
+    || red "expected the .env project name to normalize to customproj (leading '--' trimmed, '.' deleted); got: $(cat "$DOCKER_LOG")"
+green ".env COMPOSE_PROJECT_NAME is normalized the same way (incl. trimming leading -/_), not just the worktree-basename fallback"
 
 # ============================================================================
 heading "Test 9: label sweep also removes leftover networks"
@@ -337,6 +340,42 @@ EOF
     [ -z "$VOL_AFTER" ] || { "$REAL_DOCKER" volume rm -f $VOL_AFTER >/dev/null 2>&1; red "volume(s) survived teardown: $VOL_AFTER"; }
     [ -z "$CONT_AFTER" ] || { "$REAL_DOCKER" rm -f -v $CONT_AFTER >/dev/null 2>&1; red "container(s) survived teardown: $CONT_AFTER"; }
     green "real docker-compose.yaml stack + named volume: zero volumes/containers remain for project $PROJ"
+fi
+
+# ═════════════ Real-docker regression: punctuated name normalization ═══════
+#
+# Test 8 exercises normalization against the stub, but only proves the
+# script's normalization matches what the SCRIPT'S AUTHOR believes
+# compose-go's algorithm does. This proves it matches what the real
+# `docker compose` binary actually stamps, for a worktree name it has to
+# normalize (no COMPOSE_PROJECT_NAME override — the directory-basename
+# derivation path).
+
+heading "Test 13: real-docker regression — punctuated worktree name still matches compose's own normalization"
+if [ -z "$REAL_DOCKER" ] || ! "$REAL_DOCKER" info >/dev/null 2>&1; then
+    yellow "SKIP: no reachable docker daemon in this environment"
+else
+    RWT2="$TEST_DIR/wt-Regress.Punct-$$"
+    mkdir -p "$RWT2"
+    cat > "$RWT2/compose.yaml" <<'EOF'
+services:
+  app:
+    image: busybox:latest
+    command: ["sleep", "3600"]
+EOF
+    # No .env / COMPOSE_PROJECT_NAME — compose derives the project name
+    # from --project-directory's basename and normalizes it itself.
+    "$REAL_DOCKER" compose -f "$RWT2/compose.yaml" --project-directory "$RWT2" up -d --quiet-pull >/dev/null
+    NORMALIZED=$(basename "$RWT2" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_-]//g; s/^[_-]+//')
+    CONT_BEFORE=$("$REAL_DOCKER" ps -aq --filter "label=com.docker.compose.project=$NORMALIZED")
+    [ -n "$CONT_BEFORE" ] || red "setup failed: expected compose to have stamped project label '$NORMALIZED' (our predicted normalization) — real compose normalizes differently than this script assumes"
+
+    PATH="$(dirname "$REAL_DOCKER"):$PATH" "$COMPOSE_DOWN" "$RWT2" >"$TEST_DIR/regress2-out.log" 2>&1 \
+        || red "compose-down helper exited non-zero: $(cat "$TEST_DIR/regress2-out.log")"
+
+    CONT_AFTER2=$("$REAL_DOCKER" ps -aq --filter "label=com.docker.compose.project=$NORMALIZED")
+    [ -z "$CONT_AFTER2" ] || { "$REAL_DOCKER" rm -f -v $CONT_AFTER2 >/dev/null 2>&1; red "container(s) survived teardown under the real normalized label: $CONT_AFTER2"; }
+    green "punctuated worktree name wt-Regress.Punct-$$ -> real compose project '$NORMALIZED' -> fully torn down"
 fi
 
 # ============================================================================

@@ -60,12 +60,16 @@ if [ -f "$WT/.env" ]; then
     _p=$(grep -sE '^[[:space:]]*COMPOSE_PROJECT_NAME=' "$WT/.env" | tail -1 | cut -d= -f2- | tr -d '"'\'' ')
     [ -n "${_p:-}" ] && PROJECT_NAME="$_p"
 fi
-# `docker compose` normalizes whatever name it's given — lowercase, any
-# character outside [a-z0-9_-] becomes '_' — before stamping it into the
-# com.docker.compose.project label. Match that here, or an uppercase/odd
-# worktree or .env name makes the sweep's filter never match what compose
-# actually wrote, silently recreating the original leak.
-PROJECT_NAME="$(printf '%s' "$PROJECT_NAME" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_-]/_/g')"
+# `docker compose` normalizes whatever name it's given the same way it
+# normalizes a directory-basename-derived default: lowercase, DELETE (not
+# replace) any character outside [a-z0-9_-], then trim leading '_'/'-'
+# (compose-go's NormalizeProjectName; verified against the real binary —
+# `wt-Upper.Name` -> `wt-uppername`, not `wt-upper_name`). Match that here,
+# or an uppercase/punctuated worktree or .env name makes the sweep's
+# filter never match what compose actually wrote — silently recreating
+# the original leak, or worse, colliding with an unrelated project that
+# happens to share the (wrongly-computed) normalized name.
+PROJECT_NAME="$(printf '%s' "$PROJECT_NAME" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_-]//g; s/^[_-]+//')"
 
 if COMPOSE_FILE="$(find_compose_file)"; then
     echo "  compose: found $COMPOSE_FILE (project $PROJECT_NAME) — bringing down..."
