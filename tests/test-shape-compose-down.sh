@@ -406,6 +406,77 @@ EOF
 fi
 
 # ============================================================================
+heading "Test 16: a top-level 'name:' in the compose file resolves the project, .env still wins over it"
+# ============================================================================
+# A self-review pass pointed out that a compose file's own top-level
+# `name:` (compose spec precedence: COMPOSE_PROJECT_NAME > name: >
+# directory basename) was being skipped entirely — the script only ever
+# considered .env and the basename. If `compose down` then failed or
+# timed out, the fallback sweep would filter on the wrong project and
+# silently find nothing, for any project that sets `name:` in its file.
+WTN2="$TEST_DIR/wt-name-key"
+mkdir -p "$WTN2"
+cat > "$WTN2/docker-compose.yml" <<'EOF'
+name: from-compose-file
+services:
+  app:
+    image: busybox
+EOF
+reset_stub
+OUT=$("$COMPOSE_DOWN" "$WTN2" 2>&1) && RC=0 || RC=$?
+[ "$RC" -eq 0 ] || red "expected exit 0, got $RC"
+grep -q "label=com\.docker\.compose\.project=from-compose-file" "$DOCKER_LOG" \
+    || red "expected the compose file's 'name: from-compose-file' to resolve the project; got: $(cat "$DOCKER_LOG")"
+grep -q "^compose -f $WTN2/docker-compose.yml --project-directory $WTN2 down" "$DOCKER_LOG" \
+    || red "expected the compose down invocation itself to have run; got: $(cat "$DOCKER_LOG")"
+green "compose file's top-level name: resolves the project when no .env override is present"
+
+printf 'COMPOSE_PROJECT_NAME=from-env\n' > "$WTN2/.env"
+reset_stub
+OUT=$("$COMPOSE_DOWN" "$WTN2" 2>&1) && RC=0 || RC=$?
+[ "$RC" -eq 0 ] || red "expected exit 0, got $RC"
+grep -q "label=com\.docker\.compose\.project=from-env" "$DOCKER_LOG" \
+    || red "expected .env to still take precedence over the file's name: key; got: $(cat "$DOCKER_LOG")"
+green ".env COMPOSE_PROJECT_NAME still wins over the compose file's name: key, matching real precedence"
+
+# ══════════ Real-docker regression: name: key end-to-end (issue #303) ══════
+#
+# Proves the parsed name: actually matches what the real docker compose
+# binary stamps as the label — not just what this script's author
+# assumes the compose spec's precedence does.
+
+heading "Test 17: real-docker regression — compose file's name: key matches what the real binary stamps"
+if [ -z "$REAL_DOCKER" ] || ! "$REAL_DOCKER" info >/dev/null 2>&1; then
+    yellow "SKIP: no reachable docker daemon in this environment"
+else
+    RWT3="$TEST_DIR/wt-namekey-regress"
+    mkdir -p "$RWT3"
+    NAMED_PROJ="named-in-file-$$"
+    cat > "$RWT3/compose.yaml" <<EOF
+name: $NAMED_PROJ
+services:
+  app:
+    image: busybox:latest
+    command: ["sleep", "3600"]
+EOF
+    # Directory basename (wt-namekey-regress) deliberately does NOT match
+    # NAMED_PROJ, and there's no .env — only the file's name: key should
+    # resolve the project, exactly as compose itself resolves it.
+    "$REAL_DOCKER" compose -f "$RWT3/compose.yaml" --project-directory "$RWT3" up -d --quiet-pull >/dev/null
+    CONT_BEFORE2=$("$REAL_DOCKER" ps -aq --filter "label=com.docker.compose.project=$NAMED_PROJ")
+    [ -n "$CONT_BEFORE2" ] || red "setup failed: expected compose to have stamped project label '$NAMED_PROJ' from the file's name: key"
+
+    PATH="$(dirname "$REAL_DOCKER"):$PATH" "$COMPOSE_DOWN" "$RWT3" >"$TEST_DIR/regress3-out.log" 2>&1 \
+        || red "compose-down helper exited non-zero: $(cat "$TEST_DIR/regress3-out.log")"
+    grep -q "project $NAMED_PROJ" "$TEST_DIR/regress3-out.log" \
+        || red "expected the helper to have resolved and used '$NAMED_PROJ', not the worktree basename; got: $(cat "$TEST_DIR/regress3-out.log")"
+
+    CONT_AFTER3=$("$REAL_DOCKER" ps -aq --filter "label=com.docker.compose.project=$NAMED_PROJ")
+    [ -z "$CONT_AFTER3" ] || { "$REAL_DOCKER" rm -f -v $CONT_AFTER3 >/dev/null 2>&1; red "container(s) survived teardown under the name:-resolved label: $CONT_AFTER3"; }
+    green "compose file's name: key ($NAMED_PROJ, distinct from the worktree basename) resolves correctly end-to-end"
+fi
+
+# ============================================================================
 heading "All compose-down shape tests passed"
 # ============================================================================
 green "discovery / label sweep / .env project name / failure-fallback / kill-worktree.sh wiring"

@@ -19,6 +19,10 @@
 #     and silently exit-0'd for every other name, which leaked 51 GB of
 #     named volumes across projects using `docker-compose.yaml`,
 #     `docker-compose.test.yml` and `compose.yaml` (2026-08-17, issue #303).
+#   - Resolves the project name the same way `docker compose` resolves it:
+#     .env's COMPOSE_PROJECT_NAME, else the compose file's top-level
+#     `name:`, else the worktree's basename — so the label sweep below
+#     looks for what compose actually stamped, not a guess.
 #   - Runs, bounded to 60s:
 #       docker compose -f <file> --project-directory <wt> \
 #           down --remove-orphans --volumes
@@ -55,10 +59,21 @@ find_compose_file() {
     return 1
 }
 
-# COMPOSE_PROJECT_NAME in the worktree's .env wins, matching what compose
-# itself would use when the stack came up — otherwise the label sweep
-# would look for the wrong project and find nothing.
+COMPOSE_FILE="$(find_compose_file)" || COMPOSE_FILE=""
+
+# Project name, in the same precedence order `docker compose` itself
+# resolves it (highest wins): COMPOSE_PROJECT_NAME from the worktree's
+# .env, then a top-level `name:` in the compose file, then the worktree's
+# basename. Getting this wrong means the label sweep looks for the wrong
+# project and silently finds nothing.
 PROJECT_NAME="$(basename "$WT")"
+if [ -n "$COMPOSE_FILE" ]; then
+    # Simple flat `name: foo` line — good enough for the common case;
+    # anchors/multi-doc YAML fall through to the basename default rather
+    # than risk mis-parsing.
+    _n=$(grep -E '^name:[[:space:]]*' "$COMPOSE_FILE" 2>/dev/null | head -1 | cut -d: -f2- | tr -d '"'\'' ')
+    [ -n "${_n:-}" ] && PROJECT_NAME="$_n"
+fi
 if [ -f "$WT/.env" ]; then
     _p=$(grep -sE '^[[:space:]]*COMPOSE_PROJECT_NAME=' "$WT/.env" | tail -1 | cut -d= -f2- | tr -d '"'\'' ')
     [ -n "${_p:-}" ] && PROJECT_NAME="$_p"
@@ -68,13 +83,13 @@ fi
 # replace) any character outside [a-z0-9_-], then trim leading '_'/'-'
 # (compose-go's NormalizeProjectName; verified against the real binary —
 # `wt-Upper.Name` -> `wt-uppername`, not `wt-upper_name`). Match that here,
-# or an uppercase/punctuated worktree or .env name makes the sweep's
-# filter never match what compose actually wrote — silently recreating
-# the original leak, or worse, colliding with an unrelated project that
-# happens to share the (wrongly-computed) normalized name.
+# or an uppercase/punctuated worktree, `name:`, or .env value makes the
+# sweep's filter never match what compose actually wrote — silently
+# recreating the original leak, or worse, colliding with an unrelated
+# project that happens to share the (wrongly-computed) normalized name.
 PROJECT_NAME="$(printf '%s' "$PROJECT_NAME" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_-]//g; s/^[_-]+//')"
 
-if COMPOSE_FILE="$(find_compose_file)"; then
+if [ -n "$COMPOSE_FILE" ]; then
     echo "  compose: found $COMPOSE_FILE (project $PROJECT_NAME) — bringing down..."
     if timeout 60s docker compose -f "$COMPOSE_FILE" --project-directory "$WT" \
             down --remove-orphans --volumes; then
