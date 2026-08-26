@@ -25,12 +25,15 @@
 #   - Then sweeps by compose LABEL for anything the file-based teardown
 #     missed: containers, volumes and networks tagged
 #     com.docker.compose.project=<project> (project name normalized the
-#     same way compose itself does: lowercased, invalid chars -> '_').
-#     This is the belt-and-braces path — it works even when the compose
-#     file is unreadable, the timeout fires, or the stack was started
-#     from a file that has since been deleted along with the worktree.
-#     Removing by that label can only ever touch objects belonging to
-#     this worktree's project, so it is safe to run unconditionally.
+#     same way compose itself does: lowercased, invalid chars deleted,
+#     leading '_'/'-' trimmed). This is the belt-and-braces path — it
+#     works even when the compose file is unreadable, the down times
+#     out, or the stack was started from a file that has since been
+#     deleted along with the worktree. Removing by that label can only
+#     ever touch objects belonging to this worktree's project, so it is
+#     safe to run unconditionally. Each sweep call is independently
+#     bounded (20s) — a wedged daemon must not hang teardown forever any
+#     more than a wedged `compose down` should (see its own 60s bound).
 #   - Always exits 0. Compose failures (daemon down, timeout, stack
 #     error) are logged as warnings, never fatal — half-cleanup beats no
 #     cleanup, and callers must proceed with worktree removal either way.
@@ -89,27 +92,40 @@ fi
 # by that label can only ever touch objects belonging to THIS worktree's
 # project, so it is safe to run unconditionally — including when the
 # file-based teardown above already succeeded (it then finds nothing).
-_filter="label=com.docker.compose.project=$PROJECT_NAME"
+#
+# Each call is bounded so a wedged daemon can't hang worktree removal
+# indefinitely — the same failure mode `compose down`'s own timeout guards
+# against above.
+_dkr() { timeout 20s docker "$@"; }
 
-_containers=$(docker ps -aq --filter "$_filter" 2>/dev/null)
-if [ -n "$_containers" ]; then
-    echo "  sweep: removing $(printf '%s\n' "$_containers" | wc -l) leftover container(s) for project $PROJECT_NAME"
-    # shellcheck disable=SC2086
-    docker rm -f -v $_containers >/dev/null 2>&1 || echo "  WARN: container sweep incomplete" >&2
-fi
+if [ -z "$PROJECT_NAME" ]; then
+    # Normalizes-to-empty is degenerate (e.g. a name of only punctuation);
+    # a filter with no value would match nothing usable, so say so rather
+    # than run pointless docker calls.
+    echo "  WARN: project name normalized to empty for $WT — skipping label sweep" >&2
+else
+    _filter="label=com.docker.compose.project=$PROJECT_NAME"
 
-_volumes=$(docker volume ls -q --filter "$_filter" 2>/dev/null)
-if [ -n "$_volumes" ]; then
-    echo "  sweep: removing $(printf '%s\n' "$_volumes" | wc -l) leftover volume(s) for project $PROJECT_NAME"
-    # shellcheck disable=SC2086
-    docker volume rm -f $_volumes >/dev/null 2>&1 || echo "  WARN: volume sweep incomplete" >&2
-fi
+    _containers=$(_dkr ps -aq --filter "$_filter" 2>/dev/null)
+    if [ -n "$_containers" ]; then
+        echo "  sweep: removing $(printf '%s\n' "$_containers" | wc -l) leftover container(s) for project $PROJECT_NAME"
+        # shellcheck disable=SC2086
+        _dkr rm -f -v $_containers >/dev/null 2>&1 || echo "  WARN: container sweep incomplete" >&2
+    fi
 
-_networks=$(docker network ls -q --filter "$_filter" 2>/dev/null)
-if [ -n "$_networks" ]; then
-    echo "  sweep: removing $(printf '%s\n' "$_networks" | wc -l) leftover network(s) for project $PROJECT_NAME"
-    # shellcheck disable=SC2086
-    docker network rm $_networks >/dev/null 2>&1 || echo "  WARN: network sweep incomplete" >&2
+    _volumes=$(_dkr volume ls -q --filter "$_filter" 2>/dev/null)
+    if [ -n "$_volumes" ]; then
+        echo "  sweep: removing $(printf '%s\n' "$_volumes" | wc -l) leftover volume(s) for project $PROJECT_NAME"
+        # shellcheck disable=SC2086
+        _dkr volume rm -f $_volumes >/dev/null 2>&1 || echo "  WARN: volume sweep incomplete" >&2
+    fi
+
+    _networks=$(_dkr network ls -q --filter "$_filter" 2>/dev/null)
+    if [ -n "$_networks" ]; then
+        echo "  sweep: removing $(printf '%s\n' "$_networks" | wc -l) leftover network(s) for project $PROJECT_NAME"
+        # shellcheck disable=SC2086
+        _dkr network rm $_networks >/dev/null 2>&1 || echo "  WARN: network sweep incomplete" >&2
+    fi
 fi
 
 exit 0

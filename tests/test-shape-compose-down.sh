@@ -259,6 +259,33 @@ green "label sweep removes leftover networks tagged for the project, alongside c
 
 reset_stub
 
+# ============================================================================
+heading "Test 10: sweep calls are individually timeout-bounded"
+# ============================================================================
+# A self-review pass on this PR flagged that the sweep's own docker calls
+# had no bound, unlike compose down's 60s timeout — a wedged daemon would
+# hang worktree teardown forever even though the file-based path is
+# guarded. Assert the fix's shape directly against the script source
+# rather than simulating an actual multi-second hang in a shape test.
+grep -qE 'timeout 20s docker' "$COMPOSE_DOWN" \
+    || red "expected the sweep's docker calls to be wrapped in a bounded timeout"
+green "sweep docker calls are wrapped in a bounded timeout, matching compose down's own guard"
+
+# ============================================================================
+heading "Test 11: a project name that normalizes to empty skips the sweep, doesn't crash"
+# ============================================================================
+WTEMPTY="$TEST_DIR/###"
+mkdir -p "$WTEMPTY"
+reset_stub
+OUT=$("$COMPOSE_DOWN" "$WTEMPTY" 2>&1) && RC=0 || RC=$?
+[ "$RC" -eq 0 ] || red "expected exit 0 even when the normalized project name is empty, got $RC"
+echo "$OUT" | grep -q "WARN: project name normalized to empty" \
+    || red "expected an explicit WARN about the degenerate empty project name, got: $OUT"
+grep -q "^ps -aq" "$DOCKER_LOG" && red "sweep should not have run docker ps with an empty-name filter"
+green "worktree name ### (all punctuation, normalizes to empty) skips the sweep with a WARN instead of matching everything or crashing"
+
+reset_stub
+
 # ─────────────────── kill-worktree.sh --no-compose-down wiring ─────────────
 
 heading "Setup: fixture repo + worktree with a compose file"
@@ -272,7 +299,7 @@ WT="$TEST_DIR/wt-issue-77"
 green "fixture ready: myproject + wt-issue-77 (with docker-compose.yml)"
 
 # ============================================================================
-heading "Test 10: kill-worktree.sh --no-compose-down skips the teardown"
+heading "Test 12: kill-worktree.sh --no-compose-down skips the teardown"
 # ============================================================================
 cd "$TEST_DIR/myproject"
 : > "$DOCKER_LOG"
@@ -284,7 +311,7 @@ grep -q "skipping compose down (--no-compose-down)" "$TEST_DIR/kill-out.log" \
 green "--no-compose-down: teardown skipped, docker never invoked, worktree still removed"
 
 # ============================================================================
-heading "Test 11: kill-worktree.sh (default) runs compose-down before removal"
+heading "Test 13: kill-worktree.sh (default) runs compose-down before removal"
 # ============================================================================
 cd "$TEST_DIR/myproject"
 git worktree add -q -b fix/issue-78 ../wt-issue-78 master
@@ -306,7 +333,7 @@ green "default (no flag): docker compose down invoked, then worktree removed"
 # com.docker.compose.project=<project>. Needs the real docker daemon —
 # skips cleanly when one isn't reachable (e.g. no docker-in-docker here).
 
-heading "Test 12: real-docker regression — named volume is gone after teardown"
+heading "Test 14: real-docker regression — named volume is gone after teardown"
 if [ -z "$REAL_DOCKER" ] || ! "$REAL_DOCKER" info >/dev/null 2>&1; then
     yellow "SKIP: no reachable docker daemon in this environment"
 else
@@ -351,7 +378,7 @@ fi
 # normalize (no COMPOSE_PROJECT_NAME override — the directory-basename
 # derivation path).
 
-heading "Test 13: real-docker regression — punctuated worktree name still matches compose's own normalization"
+heading "Test 15: real-docker regression — punctuated worktree name still matches compose's own normalization"
 if [ -z "$REAL_DOCKER" ] || ! "$REAL_DOCKER" info >/dev/null 2>&1; then
     yellow "SKIP: no reachable docker daemon in this environment"
 else
