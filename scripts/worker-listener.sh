@@ -46,6 +46,23 @@
 #   with WORKER_CHECK_RETRY=0). The first attempt's check output is kept at
 #   done/<id>.check.attempt1.log and the outcome JSON records retried: true.
 #
+# Minimum-interaction floor (issue #287, claude agent only):
+#   An agent exit code of 0 is not proof the agent ever ran the task — an
+#   interactive startup dialog (corrupt config, trust prompt, login screen;
+#   see #286) can idle, get dismissed, and exit 0 having done nothing. When
+#   a task would otherwise be recorded "ok" with NO executed check, NO new
+#   commits ahead of the default branch, and NO worker-authored status file
+#   (worker.md requires one for every terminal state, so its absence means
+#   the worker never got that far), the listener falls back to checking
+#   whether the claude CLI's own session transcript under
+#   ~/.claude/projects/<worktree-slug>/*.jsonl actually grew during this
+#   dispatch. No transcript activity (or only a sliver of it — smaller than
+#   a real task turn) downgrades the outcome to "err" with a
+#   `reason: "agent-startup-failure: ..."` field. A passed check or a
+#   worker-written status file is independent proof of real work and is
+#   never second-guessed. Kill switch: WORKER_NOOP_DETECT=0. Threshold:
+#   WORKER_MIN_TRANSCRIPT_BYTES (default 200).
+#
 # Legacy single-file protocol (v1) — still supported for backward compat:
 #   <wt>/.agent-task.md       drop a task brief here
 #   <wt>/.agent-task-last.md  listener archives to here on pickup
@@ -81,6 +98,8 @@ HEADLESS="${WORKER_HEADLESS:-0}"
 CHECK_ENABLED="${WORKER_CHECK:-1}"
 CHECK_TIMEOUT="${WORKER_CHECK_TIMEOUT:-600}"
 CHECK_RETRY="${WORKER_CHECK_RETRY:-1}"
+NOOP_DETECT_ENABLED="${WORKER_NOOP_DETECT:-1}"
+MIN_TRANSCRIPT_BYTES="${WORKER_MIN_TRANSCRIPT_BYTES:-200}"
 
 # Queue v2 directories (per-worktree)
 QUEUE_ROOT=".swarm/tasks"
@@ -365,6 +384,74 @@ append_eval_log() {
         || echo "WARN: could not append eval row to $log" >&2
 }
 
+# Resolve the current worktree's default-branch ref (e.g. "origin/master"),
+# same resolution order used by refresh_stale_runner_checkout() above but
+# against the worktree itself (cwd) rather than $LLM_SWARM_DIR. Empty output
+# means it couldn't be resolved (no origin, detached checkout, etc.) — callers
+# treat that as "unknown" rather than erroring.
+worktree_default_ref() {
+    local ref
+    ref="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+    if [ -z "$ref" ]; then
+        local cand
+        for cand in main master; do
+            if git show-ref --verify --quiet "refs/remotes/origin/$cand" 2>/dev/null; then
+                ref="origin/$cand"
+                break
+            fi
+        done
+    fi
+    printf '%s' "$ref"
+}
+
+# ── Minimum-interaction floor (issue #287) ──────────────────────────────────
+# A claude agent that never got past an interactive startup dialog (corrupt
+# config, trust prompt, login screen — see #286) can still exit 0 once the
+# dialog is dismissed or times out, producing a false "outcome: ok" with zero
+# actual work performed (#287's incident: 19 idle minutes, no commits, no PR,
+# recorded as ok). Exit code alone can't tell that apart from a real run. The
+# claude CLI's own session transcript JSONL under
+# ~/.claude/projects/<worktree-slug>/ is a liveness signal exit code isn't: a
+# session that never wrote there during this dispatch (or wrote only a
+# sliver — smaller than a real task turn, since worker.md alone is appended
+# as a multi-KB system prompt) did not actually engage with the task. Only
+# implemented for the claude agent — gemini/codex have no equivalent
+# transcript convention here yet. Sets NOOP_REASON (empty = looks like the
+# agent actually ran).
+check_min_interaction() {
+    NOOP_REASON=""
+    [ "$NOOP_DETECT_ENABLED" = "1" ] || return 0
+    [ "$AGENT" = "claude" ] || return 0
+    [ -n "${HOME:-}" ] || return 0
+
+    local slug transcript_dir f m size newest_mtime=0 newest_file=""
+    slug="$(printf '%s' "$PWD" | tr '/' '-')"
+    transcript_dir="$HOME/.claude/projects/$slug"
+    if [ ! -d "$transcript_dir" ]; then
+        NOOP_REASON="no transcript dir for this worktree ($transcript_dir)"
+        return 0
+    fi
+
+    for f in "$transcript_dir"/*.jsonl; do
+        [ -e "$f" ] || continue
+        m=$(stat -c %Y "$f" 2>/dev/null || echo 0)
+        if [ "$m" -ge "$newest_mtime" ]; then
+            newest_mtime=$m
+            newest_file="$f"
+        fi
+    done
+
+    if [ -z "$newest_file" ] || [ "$newest_mtime" -lt "$((STARTED_EPOCH - 2))" ]; then
+        NOOP_REASON="no session transcript written during this dispatch"
+        return 0
+    fi
+
+    size=$(stat -c %s "$newest_file" 2>/dev/null || echo 0)
+    if [ "$size" -lt "$MIN_TRANSCRIPT_BYTES" ]; then
+        NOOP_REASON="session transcript is only ${size}b (< ${MIN_TRANSCRIPT_BYTES}b) — looks like the agent never got past startup"
+    fi
+}
+
 # Write a structured outcome record for v2 tasks. No-op for v1 (no contract).
 # Sets global TASK_OUTCOME ("ok"/"err") so the caller can build the
 # post-task status block without recomputing the check-gating logic.
@@ -377,12 +464,43 @@ write_outcome() {
     TASK_OUTCOME="ok"
     [ "$rc" -ne 0 ] && TASK_OUTCOME="err"
     [ -n "${CHECK_EXIT:-}" ] && [ "$CHECK_EXIT" -ne 0 ] && TASK_OUTCOME="err"
+
+    # Minimum-interaction floor (#287): an apparent "ok" backed by no
+    # executed check is only trustworthy if the agent actually engaged with
+    # the task. A passed check or a worker-written status file is
+    # independent proof of real work and is never second-guessed below —
+    # only reached when neither exists, on top of zero new commits.
+    local reason=""
+    if [ "$TASK_OUTCOME" = "ok" ] && [ -z "${CHECK_EXIT:-}" ]; then
+        local default_ref ahead=0 has_status=0
+        default_ref="$(worktree_default_ref)"
+        [ -n "$default_ref" ] && ahead="$(git rev-list --count "${default_ref}..HEAD" 2>/dev/null || echo 0)"
+        [ -r "$STATUS/${TASK_ID}.json" ] && has_status=1
+        if [ "${ahead:-0}" -eq 0 ] && [ "$has_status" -eq 0 ]; then
+            check_min_interaction
+            if [ -n "$NOOP_REASON" ]; then
+                TASK_OUTCOME="err"
+                reason="agent-startup-failure: $NOOP_REASON"
+            fi
+        fi
+    fi
+
     local outcome="$TASK_OUTCOME"
     local outcome_file="$DONE/${TASK_ID}.${outcome}.json"
 
     # JSON-escape the model field (may be empty)
     local model_json="null"
     [ -n "$MODEL" ] && model_json="\"$MODEL\""
+
+    # JSON-escape the reason field (set only when the noop tripwire fired)
+    local reason_json="null"
+    if [ -n "$reason" ]; then
+        if command -v jq >/dev/null 2>&1; then
+            reason_json=$(printf '%s' "$reason" | jq -Rs .)
+        else
+            reason_json="\"agent-startup-failure\""
+        fi
+    fi
 
     # Check fields: null when no check resolved/ran. check_cmd and the output
     # tail need real JSON escaping (arbitrary shell text) — jq does it; if jq
@@ -404,6 +522,7 @@ write_outcome() {
   "duration_seconds": $duration,
   "exit_code": $rc,
   "outcome": "$outcome",
+  "reason": $reason_json,
   "agent": "$AGENT",
   "model": $model_json,
   "headless": $([ "$HEADLESS" = "1" ] && echo true || echo false),
@@ -432,7 +551,7 @@ print_completion_block() {
 
     # Pull PR/blocked/done-no-pr status from the worker's own status file
     # (queue-v2 protocol: .swarm/tasks/status/<task_id>.json), when present.
-    local pr="" pr_state="" pr_note=""
+    local pr="" pr_state="" pr_note="" outcome_reason=""
     if [ "$is_legacy" != "1" ] && command -v jq >/dev/null 2>&1; then
         local status_file="$STATUS/${TASK_ID}.json"
         if [ -r "$status_file" ]; then
@@ -440,6 +559,8 @@ print_completion_block() {
             pr_state=$(jq -r '.state // empty' "$status_file" 2>/dev/null)
             pr_note=$(jq -r '.note // empty' "$status_file" 2>/dev/null)
         fi
+        local outcome_file="$DONE/${TASK_ID}.${outcome}.json"
+        [ -r "$outcome_file" ] && outcome_reason=$(jq -r '.reason // empty' "$outcome_file" 2>/dev/null)
     fi
 
     echo ""
@@ -448,6 +569,7 @@ print_completion_block() {
         printf '  TASK COMPLETE    exit=%s    duration=%ss\n' "$rc" "$duration"
     else
         printf '  TASK FAILED       exit=%s    duration=%ss\n' "$rc" "$duration"
+        [ -n "$outcome_reason" ] && echo "  Reason: $outcome_reason"
     fi
     if [ -n "$pr" ]; then
         echo "  PR #$pr opened — gh pr view $pr"
