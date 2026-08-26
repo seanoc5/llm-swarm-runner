@@ -425,7 +425,11 @@ check_min_interaction() {
     [ -n "${HOME:-}" ] || return 0
 
     local slug transcript_dir f m size newest_mtime=0 newest_file=""
-    slug="$(printf '%s' "$PWD" | tr '/' '-')"
+    # claude's own project-slug convention replaces every non-alphanumeric
+    # character in the cwd path with '-' (verified empirically against a
+    # real claude session — NOT just '/', so a plain `tr '/' '-'` misses
+    # dots/underscores in the path, e.g. a project dir like "my.project").
+    slug="$(printf '%s' "$PWD" | sed 's/[^A-Za-z0-9]/-/g')"
     transcript_dir="$HOME/.claude/projects/$slug"
     if [ ! -d "$transcript_dir" ]; then
         NOOP_REASON="no transcript dir for this worktree ($transcript_dir)"

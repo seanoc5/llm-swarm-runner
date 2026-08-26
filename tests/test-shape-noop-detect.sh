@@ -68,7 +68,9 @@ drop_v2() {
 mkdir -p "$TEST_DIR/bin"
 cat > "$TEST_DIR/bin/claude" <<'STUB'
 #!/usr/bin/env bash
-slug="$(printf '%s' "$PWD" | tr '/' '-')"
+# Matches the real claude CLI's project-slug convention: every
+# non-alphanumeric character in the cwd path becomes '-' (not just '/').
+slug="$(printf '%s' "$PWD" | sed 's/[^A-Za-z0-9]/-/g')"
 dir="$HOME/.claude/projects/$slug"
 case "${CLAUDE_STUB_MODE:-real}" in
     noop)
@@ -109,11 +111,11 @@ git init -q -b master
 git -c user.email=t@t -c user.name=t commit -q --allow-empty -m "initial"
 cd "$TEST_DIR"
 git clone -q --bare seed origin.git
-for wt in wt-a wt-b wt-c wt-d wt-e wt-f; do
+for wt in wt-a wt-b wt-c wt-d wt-e wt-f "wt.issue_287.sub"; do
     git clone -q origin.git "$wt"
     mkdir -p "$wt/home"
 done
-green "fixture ready: origin.git + wt-a..wt-f clones, each with its own \$HOME"
+green "fixture ready: origin.git + worktree clones (incl. a dotted/underscored name), each with its own \$HOME"
 
 # ============================================================================
 heading "Test A (#287 regression): startup-failure noop → outcome flips to err"
@@ -204,8 +206,26 @@ jq -e '.outcome == "ok" and .check_exit == 0 and .reason == null' .swarm/tasks/d
 green "executed check passed → tripwire never consulted, stays ok"
 
 # ============================================================================
+heading "Test G: slug computation matches a worktree path with dots/underscores"
+# ============================================================================
+# Regression guard: claude's real project-slug convention replaces EVERY
+# non-alphanumeric character with '-', not just '/' (verified empirically
+# against a real claude session during review). A worktree path containing
+# a dot or underscore would silently miss its transcript dir under a naive
+# `tr '/' '-'` and get misclassified as a startup-failure noop.
+start_listener "$TEST_DIR/wt.issue_287.sub" CLAUDE_STUB_MODE=real
+cd "$TEST_DIR/wt.issue_287.sub"
+drop_v2 . "g1" '## Task
+
+Do something.'
+wait_for "g1 outcome" '[ -f .swarm/tasks/done/g1.ok.json ]'
+jq -e '.outcome == "ok" and .reason == null' .swarm/tasks/done/g1.ok.json >/dev/null \
+    || { cat .swarm/tasks/done/g1.ok.json; red "g1: dotted/underscored worktree path broke slug matching"; }
+green "dotted/underscored worktree path: slug still matches the real transcript dir, stays ok"
+
+# ============================================================================
 heading "All noop-detection shape tests passed"
 # ============================================================================
-green "startup-failure caught, real work not flagged, sliver caught, status file trusted, kill switch works, passed check wins"
+green "startup-failure caught, real work not flagged, sliver caught, status file trusted, kill switch works, passed check wins, dotted-path slug matches"
 echo ""
 yellow "Run with KEEP=1 to leave $TEST_DIR for inspection."
