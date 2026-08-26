@@ -62,10 +62,11 @@ find_compose_file() {
 COMPOSE_FILE="$(find_compose_file)" || COMPOSE_FILE=""
 
 # Project name, in the same precedence order `docker compose` itself
-# resolves it (highest wins): COMPOSE_PROJECT_NAME from the worktree's
-# .env, then a top-level `name:` in the compose file, then the worktree's
-# basename. Getting this wrong means the label sweep looks for the wrong
-# project and silently finds nothing.
+# resolves it (highest wins): a COMPOSE_PROJECT_NAME already exported in
+# this script's own environment, else the worktree's .env, else a
+# top-level `name:` in the compose file, else the worktree's basename.
+# Getting this wrong means the label sweep looks for the wrong project
+# and silently finds nothing.
 PROJECT_NAME="$(basename "$WT")"
 if [ -n "$COMPOSE_FILE" ]; then
     # Simple flat `name: foo` line — good enough for the common case;
@@ -80,6 +81,11 @@ if [ -f "$WT/.env" ]; then
     _p=$(grep -sE '^[[:space:]]*COMPOSE_PROJECT_NAME=' "$WT/.env" | tail -1 | cut -d= -f2- | tr -d '"'\'' ')
     [ -n "${_p:-}" ] && PROJECT_NAME="$_p"
 fi
+# An actually-exported COMPOSE_PROJECT_NAME outranks even .env — it's
+# what `docker compose down` itself would honor first, since it inherits
+# this script's environment. No caller in this codebase sets it, but
+# nothing stops an external one from doing so.
+[ -n "${COMPOSE_PROJECT_NAME:-}" ] && PROJECT_NAME="$COMPOSE_PROJECT_NAME"
 # `docker compose` normalizes whatever name it's given the same way it
 # normalizes a directory-basename-derived default: lowercase, DELETE (not
 # replace) any character outside [a-z0-9_-], then trim leading '_'/'-'

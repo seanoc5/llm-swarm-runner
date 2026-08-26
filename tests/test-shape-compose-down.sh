@@ -503,6 +503,31 @@ EOF
 fi
 
 # ============================================================================
+heading "Test 19: an already-exported COMPOSE_PROJECT_NAME outranks .env and name:"
+# ============================================================================
+# A sixth self-review pass noted that docker compose itself would honor
+# a COMPOSE_PROJECT_NAME already present in the calling environment above
+# even .env — this script inherits that same environment for the `down`
+# call, so the label sweep should resolve the project the same way, or a
+# caller that exports it (none in this codebase today, but nothing
+# prevents one) would get a fallback sweep that filters the wrong label.
+WTENV="$TEST_DIR/wt-osenv"
+mkdir -p "$WTENV"
+cat > "$WTENV/docker-compose.yml" <<'EOF'
+name: from-name-key
+services:
+  app:
+    image: busybox
+EOF
+printf 'COMPOSE_PROJECT_NAME=from-dotenv\n' > "$WTENV/.env"
+reset_stub
+OUT=$(COMPOSE_PROJECT_NAME=from-os-env "$COMPOSE_DOWN" "$WTENV" 2>&1) && RC=0 || RC=$?
+[ "$RC" -eq 0 ] || red "expected exit 0, got $RC"
+grep -q "label=com\.docker\.compose\.project=from-os-env" "$DOCKER_LOG" \
+    || red "expected an already-exported COMPOSE_PROJECT_NAME to outrank both .env and name:; got: $(cat "$DOCKER_LOG")"
+green "COMPOSE_PROJECT_NAME already present in the environment outranks .env and the compose file's name:, matching real compose precedence"
+
+# ============================================================================
 heading "All compose-down shape tests passed"
 # ============================================================================
 green "discovery / label sweep / .env project name / failure-fallback / kill-worktree.sh wiring"
