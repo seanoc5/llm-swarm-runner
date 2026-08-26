@@ -70,8 +70,10 @@ PROJECT_NAME="$(basename "$WT")"
 if [ -n "$COMPOSE_FILE" ]; then
     # Simple flat `name: foo` line — good enough for the common case;
     # anchors/multi-doc YAML fall through to the basename default rather
-    # than risk mis-parsing.
-    _n=$(grep -E '^name:[[:space:]]*' "$COMPOSE_FILE" 2>/dev/null | head -1 | cut -d: -f2- | tr -d '"'\'' ')
+    # than risk mis-parsing. Strip a trailing YAML comment (unlike .env,
+    # YAML genuinely supports `name: foo # comment` — without this, the
+    # comment text gets glued onto the name after normalization).
+    _n=$(grep -E '^name:[[:space:]]*' "$COMPOSE_FILE" 2>/dev/null | head -1 | cut -d: -f2- | sed -E 's/#.*//' | tr -d '"'\'' ')
     [ -n "${_n:-}" ] && PROJECT_NAME="$_n"
 fi
 if [ -f "$WT/.env" ]; then

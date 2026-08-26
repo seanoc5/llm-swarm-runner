@@ -439,13 +439,38 @@ grep -q "label=com\.docker\.compose\.project=from-env" "$DOCKER_LOG" \
     || red "expected .env to still take precedence over the file's name: key; got: $(cat "$DOCKER_LOG")"
 green ".env COMPOSE_PROJECT_NAME still wins over the compose file's name: key, matching real precedence"
 
+# ============================================================================
+heading "Test 17: a YAML inline comment on the name: line doesn't get glued onto the project name"
+# ============================================================================
+# Unlike .env (dotenv genuinely has no inline-comment syntax), YAML DOES
+# support 'name: foo # comment' — a fifth self-review pass caught that the
+# name: parse didn't strip it, so 'foo # comment' became 'foo#comment'
+# after space-deletion, verified wrong against the real docker compose
+# binary (which correctly stamps just 'foo').
+WTN3="$TEST_DIR/wt-name-comment"
+mkdir -p "$WTN3"
+cat > "$WTN3/docker-compose.yml" <<'EOF'
+name: commented-proj # this is a yaml comment
+services:
+  app:
+    image: busybox
+EOF
+reset_stub
+OUT=$("$COMPOSE_DOWN" "$WTN3" 2>&1) && RC=0 || RC=$?
+[ "$RC" -eq 0 ] || red "expected exit 0, got $RC"
+grep -q "label=com\.docker\.compose\.project=commented-proj$" "$DOCKER_LOG" \
+    || red "expected the comment to be stripped, leaving just commented-proj; got: $(cat "$DOCKER_LOG")"
+grep -q "commentedproj\|thisisayamlcomment" "$DOCKER_LOG" \
+    && red "the YAML comment text leaked into the project name"
+green "YAML inline comment on the name: line is stripped, not glued onto the project name"
+
 # ══════════ Real-docker regression: name: key end-to-end (issue #303) ══════
 #
 # Proves the parsed name: actually matches what the real docker compose
 # binary stamps as the label — not just what this script's author
 # assumes the compose spec's precedence does.
 
-heading "Test 17: real-docker regression — compose file's name: key matches what the real binary stamps"
+heading "Test 18: real-docker regression — compose file's name: key matches what the real binary stamps"
 if [ -z "$REAL_DOCKER" ] || ! "$REAL_DOCKER" info >/dev/null 2>&1; then
     yellow "SKIP: no reachable docker daemon in this environment"
 else
@@ -453,15 +478,16 @@ else
     mkdir -p "$RWT3"
     NAMED_PROJ="named-in-file-$$"
     cat > "$RWT3/compose.yaml" <<EOF
-name: $NAMED_PROJ
+name: $NAMED_PROJ # trailing yaml comment, must not leak into the project name
 services:
   app:
     image: busybox:latest
     command: ["sleep", "3600"]
 EOF
     # Directory basename (wt-namekey-regress) deliberately does NOT match
-    # NAMED_PROJ, and there's no .env — only the file's name: key should
-    # resolve the project, exactly as compose itself resolves it.
+    # NAMED_PROJ, and there's no .env — only the file's name: key (with a
+    # trailing comment compose itself must strip) should resolve the
+    # project, exactly as compose itself resolves it.
     "$REAL_DOCKER" compose -f "$RWT3/compose.yaml" --project-directory "$RWT3" up -d --quiet-pull >/dev/null
     CONT_BEFORE2=$("$REAL_DOCKER" ps -aq --filter "label=com.docker.compose.project=$NAMED_PROJ")
     [ -n "$CONT_BEFORE2" ] || red "setup failed: expected compose to have stamped project label '$NAMED_PROJ' from the file's name: key"
