@@ -23,13 +23,14 @@
 #       docker compose -f <file> --project-directory <wt> \
 #           down --remove-orphans --volumes
 #   - Then sweeps by compose LABEL for anything the file-based teardown
-#     missed: containers and volumes tagged
-#     com.docker.compose.project=<project>. This is the belt-and-braces
-#     path — it works even when the compose file is unreadable, the
-#     timeout fires, or the stack was started from a file that has since
-#     been deleted along with the worktree. Removing by that label can
-#     only ever touch objects belonging to this worktree's project, so
-#     it is safe to run unconditionally.
+#     missed: containers, volumes and networks tagged
+#     com.docker.compose.project=<project> (project name normalized the
+#     same way compose itself does: lowercased, invalid chars -> '_').
+#     This is the belt-and-braces path — it works even when the compose
+#     file is unreadable, the timeout fires, or the stack was started
+#     from a file that has since been deleted along with the worktree.
+#     Removing by that label can only ever touch objects belonging to
+#     this worktree's project, so it is safe to run unconditionally.
 #   - Always exits 0. Compose failures (daemon down, timeout, stack
 #     error) are logged as warnings, never fatal — half-cleanup beats no
 #     cleanup, and callers must proceed with worktree removal either way.
@@ -59,6 +60,12 @@ if [ -f "$WT/.env" ]; then
     _p=$(grep -sE '^[[:space:]]*COMPOSE_PROJECT_NAME=' "$WT/.env" | tail -1 | cut -d= -f2- | tr -d '"'\'' ')
     [ -n "${_p:-}" ] && PROJECT_NAME="$_p"
 fi
+# `docker compose` normalizes whatever name it's given — lowercase, any
+# character outside [a-z0-9_-] becomes '_' — before stamping it into the
+# com.docker.compose.project label. Match that here, or an uppercase/odd
+# worktree or .env name makes the sweep's filter never match what compose
+# actually wrote, silently recreating the original leak.
+PROJECT_NAME="$(printf '%s' "$PROJECT_NAME" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_-]/_/g')"
 
 if COMPOSE_FILE="$(find_compose_file)"; then
     echo "  compose: found $COMPOSE_FILE (project $PROJECT_NAME) — bringing down..."
@@ -92,6 +99,13 @@ if [ -n "$_volumes" ]; then
     echo "  sweep: removing $(printf '%s\n' "$_volumes" | wc -l) leftover volume(s) for project $PROJECT_NAME"
     # shellcheck disable=SC2086
     docker volume rm -f $_volumes >/dev/null 2>&1 || echo "  WARN: volume sweep incomplete" >&2
+fi
+
+_networks=$(docker network ls -q --filter "$_filter" 2>/dev/null)
+if [ -n "$_networks" ]; then
+    echo "  sweep: removing $(printf '%s\n' "$_networks" | wc -l) leftover network(s) for project $PROJECT_NAME"
+    # shellcheck disable=SC2086
+    docker network rm $_networks >/dev/null 2>&1 || echo "  WARN: network sweep incomplete" >&2
 fi
 
 exit 0

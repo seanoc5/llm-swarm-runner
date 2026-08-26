@@ -45,13 +45,15 @@ trap cleanup EXIT
 #   docker volume ls -q --filter label=com.docker.compose.project=<p>
 #   docker rm -f -v <ids> / docker volume rm -f <ids>
 #
-# STUB_CONTAINERS_FILE / STUB_VOLUMES_FILE (if present) supply the ids the
-# sweep "finds"; FAIL_COMPOSE_FLAG (if present) makes `compose ... down`
-# fail/exit non-zero to exercise the WARN + fallback-to-sweep path.
+# STUB_CONTAINERS_FILE / STUB_VOLUMES_FILE / STUB_NETWORKS_FILE (if
+# present) supply the ids the sweep "finds"; FAIL_COMPOSE_FLAG (if
+# present) makes `compose ... down` fail/exit non-zero to exercise the
+# WARN + fallback-to-sweep path.
 
 export DOCKER_LOG="$TEST_DIR/docker.log"
 export STUB_CONTAINERS_FILE="$TEST_DIR/stub-containers"
 export STUB_VOLUMES_FILE="$TEST_DIR/stub-volumes"
+export STUB_NETWORKS_FILE="$TEST_DIR/stub-networks"
 export FAIL_COMPOSE_FLAG="$TEST_DIR/fail-compose"
 : > "$DOCKER_LOG"
 mkdir -p "$TEST_DIR/bin"
@@ -73,6 +75,12 @@ case "$1" in
         fi
         exit 0
         ;;
+    network)
+        if [ "$2" = "ls" ]; then
+            [ -f "$STUB_NETWORKS_FILE" ] && cat "$STUB_NETWORKS_FILE"
+        fi
+        exit 0
+        ;;
     rm)
         exit 0
         ;;
@@ -86,7 +94,7 @@ export PATH="$TEST_DIR/bin:$PATH"
 
 reset_stub() {
     : > "$DOCKER_LOG"
-    rm -f "$STUB_CONTAINERS_FILE" "$STUB_VOLUMES_FILE" "$FAIL_COMPOSE_FLAG"
+    rm -f "$STUB_CONTAINERS_FILE" "$STUB_VOLUMES_FILE" "$STUB_NETWORKS_FILE" "$FAIL_COMPOSE_FLAG"
 }
 
 # ============================================================================
@@ -203,10 +211,50 @@ COUNT=$(printf '%s\n' "$FILTERS" | grep -c .)
 [ "$COUNT" -eq 1 ] || red "expected every docker call to filter on exactly one project label, got: $FILTERS"
 echo "$FILTERS" | grep -q "^label=com\.docker\.compose\.project=wt-no-compose$" \
     || red "expected the filter to name wt-no-compose, got: $FILTERS"
-green "every ps/volume-ls/rm call is scoped to this worktree's single project label"
+green "every ps/volume-ls/network-ls/rm call is scoped to this worktree's single project label"
+
+# ============================================================================
+heading "Test 8: project name is normalized the way docker compose normalizes it"
+# ============================================================================
+# docker compose lowercases the project name and replaces any character
+# outside [a-z0-9_-] with '_' before stamping the label. A worktree/.env
+# name that isn't already lowercase-safe must be normalized the same way,
+# or the sweep's filter never matches what compose actually wrote.
+WTU="$TEST_DIR/wt-Upper.Name"
+mkdir -p "$WTU"
+reset_stub
+OUT=$("$COMPOSE_DOWN" "$WTU" 2>&1) && RC=0 || RC=$?
+[ "$RC" -eq 0 ] || red "expected exit 0, got $RC"
+grep -q "label=com\.docker\.compose\.project=wt-upper_name" "$DOCKER_LOG" \
+    || red "expected the filter to use the normalized name wt-upper_name; got: $(cat "$DOCKER_LOG")"
+grep -q "label=com\.docker\.compose\.project=wt-Upper.Name" "$DOCKER_LOG" \
+    && red "raw un-normalized worktree name leaked into the label filter"
+green "worktree basename wt-Upper.Name normalizes to wt-upper_name for the label filter (hyphens are valid, dots/uppercase are not)"
+
+WTE2="$TEST_DIR/wt-envcase"
+mkdir -p "$WTE2"
+printf 'COMPOSE_PROJECT_NAME=Custom.Proj\n' > "$WTE2/.env"
+reset_stub
+OUT=$("$COMPOSE_DOWN" "$WTE2" 2>&1) && RC=0 || RC=$?
+[ "$RC" -eq 0 ] || red "expected exit 0, got $RC"
+grep -q "label=com\.docker\.compose\.project=custom_proj" "$DOCKER_LOG" \
+    || red "expected the .env project name to normalize to custom_proj too; got: $(cat "$DOCKER_LOG")"
+green ".env COMPOSE_PROJECT_NAME is normalized the same way, not just the worktree-basename fallback"
+
+# ============================================================================
+heading "Test 9: label sweep also removes leftover networks"
+# ============================================================================
+reset_stub
+printf 'net-deadbeef\n' > "$STUB_NETWORKS_FILE"
+OUT=$("$COMPOSE_DOWN" "$TEST_DIR/wt-no-compose" 2>&1) && RC=0 || RC=$?
+[ "$RC" -eq 0 ] || red "expected exit 0, got $RC"
+echo "$OUT" | grep -q "sweep: removing 1 leftover network(s)" \
+    || red "expected the sweep to report the leftover network, got: $OUT"
+grep -q "^network rm net-deadbeef$" "$DOCKER_LOG" \
+    || red "expected 'docker network rm net-deadbeef'; got: $(cat "$DOCKER_LOG")"
+green "label sweep removes leftover networks tagged for the project, alongside containers/volumes"
 
 reset_stub
-rm -f "$STUB_CONTAINERS_FILE" "$STUB_VOLUMES_FILE" "$FAIL_COMPOSE_FLAG"
 
 # ─────────────────── kill-worktree.sh --no-compose-down wiring ─────────────
 
@@ -221,7 +269,7 @@ WT="$TEST_DIR/wt-issue-77"
 green "fixture ready: myproject + wt-issue-77 (with docker-compose.yml)"
 
 # ============================================================================
-heading "Test 8: kill-worktree.sh --no-compose-down skips the teardown"
+heading "Test 10: kill-worktree.sh --no-compose-down skips the teardown"
 # ============================================================================
 cd "$TEST_DIR/myproject"
 : > "$DOCKER_LOG"
@@ -233,7 +281,7 @@ grep -q "skipping compose down (--no-compose-down)" "$TEST_DIR/kill-out.log" \
 green "--no-compose-down: teardown skipped, docker never invoked, worktree still removed"
 
 # ============================================================================
-heading "Test 9: kill-worktree.sh (default) runs compose-down before removal"
+heading "Test 11: kill-worktree.sh (default) runs compose-down before removal"
 # ============================================================================
 cd "$TEST_DIR/myproject"
 git worktree add -q -b fix/issue-78 ../wt-issue-78 master
@@ -255,7 +303,7 @@ green "default (no flag): docker compose down invoked, then worktree removed"
 # com.docker.compose.project=<project>. Needs the real docker daemon —
 # skips cleanly when one isn't reachable (e.g. no docker-in-docker here).
 
-heading "Test 10: real-docker regression — named volume is gone after teardown"
+heading "Test 12: real-docker regression — named volume is gone after teardown"
 if [ -z "$REAL_DOCKER" ] || ! "$REAL_DOCKER" info >/dev/null 2>&1; then
     yellow "SKIP: no reachable docker daemon in this environment"
 else
