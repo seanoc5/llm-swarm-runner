@@ -508,7 +508,10 @@ merge-now / queue / needs-thought, unexpanded) over a **folded appendix**
 ```markdown
 <!-- BLIND_MERGE_RISK: <low|medium|high> -->
 **What this is:** <1–2 self-contained sentences: what this PR does plus the
-one clause of context that makes it parseable cold. `Closes #N`.>
+one clause of context that makes it parseable cold. End with the literal
+closing keyword — Closes #N — as PLAIN TEXT, never in backticks/code spans:
+GitHub ignores closing keywords inside code formatting, so a backticked
+`Closes #N` silently fails to link the issue and it stays open after merge.>
 **What I need from you:** <one line, ONLY when it fits in one line — e.g.
 "Merge decision only." or "Nothing — FYI." "Nothing" is a claim to verify,
 not a default.>
