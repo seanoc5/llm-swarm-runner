@@ -9,6 +9,9 @@ style when they are written.
 
 ## [Unreleased]
 
+### Fixed
+- The worker-finished coordinator wake channel, silently dead since ~2026-07-20: default interactive workers never exit claude, so `worker-listener.sh` never wrote the `done/*.ok.json` that is `coord.wake`'s only completion trigger — completions were detected (and reaped) by the wake-less pr-poll/check-on-done backstops while the coordinator kept reporting them in flight. `coordinator-watch.sh` now synthesizes the outcome file (`"synthesized": true`, atomic mv, `WATCH_SYNTH_OUTCOME=1` to disable with 0) the moment check-on-done wins its claim, so the whole existing inotify → `on_outcome` → autoclose → debounced-wake pipeline fires again; `prompts/coordinator.md` additionally forbids asserting in-flight status from memory — verify live windows/PR state first, and treat a vanished "in-flight" worker as a missed wake. (#314)
+
 ### Changed
 - Worker containers now set `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`: claude workers can no longer start background Bash tasks (nor have timed-out foreground commands silently promoted to background), closing the unkillable-poll-loop leak — e.g. an `until gh run list ... | grep -q <sha>; do sleep 5; done` watch left running for 7h+ after the sha was force-pushed away. `prompts/worker.md` now also names CI watching (`gh run watch`, sha-poll loops) as the classic case of the foreground-only rule, which still binds gemini/codex workers. (#301)
 - Worker end-of-task output: the `## Summary` + `## Decision` + `## Next` triad is now a single terminal `## Handoff` block (**What** / **Decide** when a decision is open / **Action** with PR link + risk), emitted last in the pane — bottom line at the end, since the operator reads panes bottom-up and triages on the GitHub PR page. Mid-task `## Decision`/`## Note` blocks and the PR-body skeleton are unchanged. (#280)

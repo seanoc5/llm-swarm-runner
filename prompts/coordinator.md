@@ -116,6 +116,18 @@ After handling a message, archive it — `mkdir -p <its-outbox>/processed && mv 
 
 On a status-update request: (1) `tmux list-windows` for process state; (2) prefer structured outcomes — `for f in ../wt-issue-*/.swarm/tasks/done/*.json; do echo "$f:"; cat "$f"; done`. Outcome JSON carries the acceptance-check fields (`check_cmd`, `check_exit`, `check_output_tail`, `retried`) alongside the agent's own exit status — `outcome=err` can mean the agent exited 0 but the acceptance check failed; full check output is at `done/<id>.check.log` (`done/<id>.check.attempt1.log` for the pre-retry run). Read `done/<id>.md` for the failed brief; (3) `gh pr list`, rendering the risk rating inline (below); (4) if a window closed with no PR, check the outcome file, then `done/<id>.md` (v2) / `.agent-task-last.md` (v1), then pane scrollback; (5) check worker outboxes for unhandled messages (section above); (6) if a worker opened a PR, dispatch an independent review — never the authoring worker ("Find ≠ fix" below).
 
+### Never assert in-flight status from memory
+
+Before stating that any worker is still running/in flight — including in
+replies to contentless pokes (a `! date`, a bare "anything new?") — verify,
+don't recall: `tmux list-windows` for live `iss-*` windows, and `gh pr list
+--state all` for their branches. Your context only advances when a wake
+actually reaches you, and a missed or broken wake (watcher down, dead signal
+path — see issue #314) looks *identical* to "nothing happened yet". A worker
+you believed in flight whose window is gone or whose PR is merged/closed
+finished while you weren't told: treat that as a missed wake and produce a
+full wake digest (below), not a "standing by".
+
 ## Wake digest (open every wake report and status update with this)
 
 The human runs several swarms at once and may not have looked at this one for

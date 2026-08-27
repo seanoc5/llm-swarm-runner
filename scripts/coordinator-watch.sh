@@ -180,6 +180,39 @@
 #                           terminal outcome, or after CHECK_CLAIM_STALE_SECS
 #                           (default WORKER_CHECK_TIMEOUT+300s) if the check
 #                           process itself crashed without releasing it.
+#   WATCH_SYNTH_OUTCOME=1   (issue #314) Set to 0 to disable outcome
+#                           synthesis. The coordinator's worker-finished wake
+#                           (on_outcome -> coord.wake) triggers only on a new
+#                           done/<id>.{ok,err}.json — a file worker-listener.sh
+#                           writes only AFTER the agent process exits. Default
+#                           interactive workers finish their task and park at
+#                           the claude REPL indefinitely, so that file never
+#                           arrives and the wake channel is silently dead (in
+#                           real fand-etl logs, no worker.finish fired between
+#                           2026-07-20 and this fix — every completion was
+#                           caught only by the wake-less pr-poll/reap
+#                           backstops). When enabled, maybe_run_check
+#                           synthesizes the outcome file itself the moment it
+#                           wins the check-claim for a done signal: an atomic
+#                           mktemp+mv of done/<task_id>[-<issue>].ok.json
+#                           ("synthesized": true, filename suffixed with
+#                           -<issue> when the task_id doesn't already end in
+#                           it, since on_outcome parses the issue number from
+#                           that trailing position). The write lands in the
+#                           same watched path as a listener-written outcome,
+#                           so the ENTIRE existing pipeline — inotify/poll
+#                           pickup, worker.finish audit event, autoclose pass,
+#                           debounced coord.wake — fires unmodified. Skipped
+#                           (watch.outcome.synth.skip) when an outcome for
+#                           this task_id already exists (headless workers,
+#                           where the listener's own write still happens). If
+#                           the listener later writes its outcome anyway
+#                           (operator exits a parked worker), a same-named
+#                           file is a create-event-free overwrite and a
+#                           differently-named one just causes a debounced
+#                           duplicate wake — both harmless. Gated behind
+#                           WATCH_CHECK_ON_DONE=1, which owns the done
+#                           detection this piggybacks on.
 #   CHECK_RUNNER=<path>     Test-only override: when set, check-on-done runs
 #                           `$CHECK_RUNNER <worktree> <check_cmd>` synchronously
 #                           instead of spawning a real tmux window. Lets tests
@@ -887,6 +920,11 @@ EVENTS LOG
                            (issue #225 — reaped=N); passes that reap nothing
                            are not logged (dry runs always are)
       watch.check_on_done  check-on-done result (issue, task_id, result=running|pass|fail|skipped)
+      watch.outcome.synth  (issue #314) synthesized a done/*.ok.json on done
+                           detection because the parked interactive worker's
+                           listener can't write one (issue, task_id, path);
+                           watch.outcome.synth.skip when an outcome for the
+                           task already exists (reason=outcome_exists)
       cap.refused          provision-worker.sh hit MAX_WORKERS / MAX_TMUX_WINDOWS
       coord.compact        /compact injected before wake (used, threshold, trigger=poll|wake)
       coord.compact.skip   auto-compact skipped this cycle (reason=pane_busy|no_fresh_probe|cooldown|...,
@@ -1035,6 +1073,10 @@ WATCH_PR_POLL_SECS="${WATCH_PR_POLL_SECS:-60}"
 WATCH_ORPHAN_SWEEP_SECS="${WATCH_ORPHAN_SWEEP_SECS:-3600}"
 REAP_ORPHAN="${REAP_ORPHAN:-$LLM_SWARM_DIR/scripts/reap-orphan-worktrees.sh}"
 WATCH_CHECK_ON_DONE="${WATCH_CHECK_ON_DONE:-1}"
+# issue #314 — synthesize done/*.ok.json on done detection (parked
+# interactive workers never exit claude, so the listener's own outcome
+# write — the coordinator's only wake trigger — never happens).
+WATCH_SYNTH_OUTCOME="${WATCH_SYNTH_OUTCOME:-1}"
 CHECK_RUNNER="${CHECK_RUNNER:-}"
 SESSION_NAME="${SESSION_NAME:-llm-$(basename "$PROJECT_DIR")}"
 WATCHER_QUIET="${WATCHER_QUIET:-0}"
@@ -1263,6 +1305,8 @@ format_event_line() {
                 *)                 glyph="·"; color=$'\033[2m'  ;;
             esac ;;
         watch.check_on_done.error)  glyph="✗"; color=$'\033[31m' ;;
+        watch.outcome.synth)         glyph="✉"; color=$'\033[36m' ;;
+        watch.outcome.synth.skip)    glyph="·"; color=$'\033[2m'  ;;
         watch.start|watch.timer.start) glyph="▶"; color=$'\033[36m' ;;
         watch.exit)                     glyph="■"; color=$'\033[2m'  ;;
         sweep.run|sweep.dry)             glyph="↻"; color=$'\033[36m' ;;
@@ -1776,6 +1820,58 @@ check_json_state() {
     sed -n 's/.*"state":"\([a-zA-Z_]*\)".*/\1/p' "$1" 2>/dev/null | head -1
 }
 
+# synth_outcome <worktree-dir> <issue> <task_id>
+#
+# (issue #314) Write the done/<id>.ok.json a parked interactive worker's
+# listener never gets to write (write_outcome only runs after the agent
+# process exits, and default-mode workers idle at their REPL forever) —
+# it's the only trigger for the coordinator's worker-finished wake. Called
+# from maybe_run_check right after the check-claim is won, i.e. exactly
+# once per done task. The file lands via atomic mktemp+mv (the temp name
+# matches neither backend's *.{ok,err}.json filter, the final rename
+# raises moved_to), so the normal on_outcome pipeline — worker.finish
+# event, autoclose pass, debounced coord.wake — fires unmodified.
+#
+# Filename: <task_id>.ok.json, suffixed to <task_id>-<issue>.ok.json when
+# the task_id doesn't already end in -<issue> — on_outcome parses the
+# issue number from that trailing position. Skips when an outcome for
+# this task_id already exists (headless workers: the listener's own write
+# happened or is imminent). See the WATCH_SYNTH_OUTCOME header entry for
+# the duplicate-wake analysis of a listener writing later anyway.
+synth_outcome() {
+    [ "$WATCH_SYNTH_OUTCOME" = "1" ] || return 0
+    local wt_dir="$1" issue="$2" task_id="$3"
+    local done_dir="$wt_dir/.swarm/tasks/done"
+    mkdir -p "$done_dir" 2>/dev/null || return 0
+
+    local base="$task_id"
+    case "$base" in *-"$issue") ;; *) base="${base}-${issue}" ;; esac
+
+    local f
+    for f in "$done_dir/${task_id}.ok.json" "$done_dir/${task_id}.err.json" \
+             "$done_dir/${base}.ok.json"    "$done_dir/${base}.err.json"; do
+        if [ -e "$f" ]; then
+            log_event watch.outcome.synth.skip "issue=$issue task_id=$task_id reason=outcome_exists"
+            return 0
+        fi
+    done
+
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "[$(date +%T)] [DRY] would synthesize outcome: $done_dir/${base}.ok.json"
+        return 0
+    fi
+
+    local tmp
+    tmp=$(mktemp "$done_dir/.synth-XXXXXX" 2>/dev/null) || return 0
+    printf '{"task_id":"%s","finished":"%s","outcome":"ok","synthesized":true,"source":"coordinator-watch.check_on_done"}\n' \
+        "$task_id" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$tmp"
+    if mv "$tmp" "$done_dir/${base}.ok.json" 2>/dev/null; then
+        log_event watch.outcome.synth "issue=$issue task_id=$task_id path=$done_dir/${base}.ok.json"
+    else
+        rm -f "$tmp" 2>/dev/null || true
+    fi
+}
+
 # maybe_run_check <worktree-dir> <issue> [task_id]
 #
 # Resolve + claim + run the acceptance check for a worker that has
@@ -1850,6 +1946,14 @@ maybe_run_check() {
 
     local claim_dir="$status_dir/${task_id}.check-claim"
     mkdir "$claim_dir" 2>/dev/null || return 0   # already claimed (in flight) — nothing to do
+
+    # issue #314: winning the claim is the one moment each done task passes
+    # through exactly once — synthesize the wake-triggering outcome file
+    # here, before any of the skip/return branches below, so EVERY done
+    # detection produces a coordinator wake (including pr_terminal skips:
+    # a merged-while-coordinator-slept PR is precisely a wake the
+    # coordinator missed).
+    synth_outcome "$wt_dir" "$issue" "$task_id"
 
     # issue #181: the PR may already be MERGED/CLOSED by the time we win
     # the claim — the merge already validated the work, so spawning a
