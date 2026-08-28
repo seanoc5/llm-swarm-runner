@@ -171,14 +171,26 @@ done
 # Testcontainers' shaded docker-java (which otherwise defaults to 1.32 — rejected by
 # Docker Engine 25+, minimum 1.40). Projects can override by setting their own
 # systemProperty("api.version", ...) on the test JVM (project-level wins).
+#
+# A caller-set _JAVA_OPTIONS (as documented in docs/advanced-usage.md) is honored
+# in place of the default pin. This is intentionally risky: some IDEs/CI export a
+# host-global _JAVA_OPTIONS (e.g. -Xmx...) that would silently drop the api.version
+# pin and break Testcontainers with a cryptic API-version error, so we warn loudly
+# when the override is active.
 DOCKER_SOCK_OPTS=()
 if [ -S /var/run/docker.sock ]; then
+    if [ -n "${_JAVA_OPTIONS:-}" ]; then
+        echo "WARNING: caller-set _JAVA_OPTIONS='$_JAVA_OPTIONS' is overriding the" \
+             "default -Dapi.version=1.45 Docker API pin. If this wasn't set" \
+             "intentionally (e.g. inherited from an IDE/CI environment), Testcontainers" \
+             "may fail with a cryptic 'client version too old' error." >&2
+    fi
     DOCKER_SOCK_OPTS=(
         -v /var/run/docker.sock:/var/run/docker.sock
         --group-add "$(stat -c '%g' /var/run/docker.sock)"
         -e DOCKER_GID="$(stat -c '%g' /var/run/docker.sock)"
         -e TESTCONTAINERS_HOST_OVERRIDE=localhost
-        -e _JAVA_OPTIONS=-Dapi.version=1.45
+        -e _JAVA_OPTIONS="${_JAVA_OPTIONS:--Dapi.version=1.45}"
     )
 fi
 

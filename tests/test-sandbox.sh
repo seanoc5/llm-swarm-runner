@@ -138,6 +138,25 @@ output=$(bash -c '
     echo "$out"
 ' 2>&1) && [[ "$output" == *"/tmp"* ]] && pass "default PROJECT_DIR = PWD" || fail "default PROJECT_DIR = PWD" "$output"
 
+# Test that an unset caller _JAVA_OPTIONS still gets the default api.version pin
+if [ -S /var/run/docker.sock ]; then
+    output=$(env -u _JAVA_OPTIONS "$REPO_ROOT/sandbox.sh" /tmp printenv _JAVA_OPTIONS 2>&1)
+    [[ "$output" == *"-Dapi.version=1.45"* ]] \
+        && pass "default _JAVA_OPTIONS pin (api.version=1.45)" "$output" \
+        || fail "default _JAVA_OPTIONS pin (api.version=1.45)" "$output"
+
+    # Test that a caller-set _JAVA_OPTIONS overrides the default pin, with a warning.
+    # (The warning text itself mentions "-Dapi.version=1.45" for context, so check the
+    # container's actual env value — the last line of output — rather than the whole blob.)
+    output=$(_JAVA_OPTIONS="-Xmx512m" "$REPO_ROOT/sandbox.sh" /tmp printenv _JAVA_OPTIONS 2>&1)
+    container_value=$(tail -n1 <<< "$output")
+    [[ "$output" == *"WARNING"* && "$container_value" == "-Xmx512m" ]] \
+        && pass "caller _JAVA_OPTIONS override reaches container + warns" "$output" \
+        || fail "caller _JAVA_OPTIONS override reaches container + warns" "$output"
+else
+    skip "_JAVA_OPTIONS pass-through" "/var/run/docker.sock not present"
+fi
+
 # Test EXTRA_MOUNTS same-path shorthand (path:ro → same path in container)
 output=$(EXTRA_MOUNTS="/tmp:ro" docker run --rm \
     --network host \
