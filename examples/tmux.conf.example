@@ -21,6 +21,17 @@ bind C-a send-prefix     # Press Ctrl-a twice to send literal Ctrl-a
 # inspect the full history of a busy worker without losing context.
 set -g history-limit 50000
 
+# Keep a pane around as "[dead]" (instead of the window just closing) when
+# its process exits non-zero — a crashed agent's scrollback is then still
+# readable for a post-mortem, rather than vanishing with the pane. `failed`
+# (as opposed to plain `on`) leaves *clean* exits closing normally, so a
+# worker that finished and exited 0 doesn't leave a dead pane behind.
+# Requires tmux >= 3.2 — on older tmux, use `on` instead (dead on any exit,
+# including clean ones). llm-start.sh sets this automatically on the swarm's
+# own tmux socket regardless of whether this file is installed; add it here
+# too so manual/non-llm-start tmux sessions get the same behavior.
+set -g remain-on-exit failed
+
 # Reduce the escape-time so vim and other terminal apps respond instantly
 # to ESC. Default 500ms makes ESC-based bindings feel laggy.
 set -sg escape-time 10

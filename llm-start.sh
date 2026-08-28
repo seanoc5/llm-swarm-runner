@@ -364,6 +364,43 @@ if [ -n "${TMUX:-}" ]; then
     IN_TMUX=true
 fi
 
+# --- Server-scoped tmux hygiene: remain-on-exit + history-limit (#240) ------
+# Scoped to $SWARM_SOCKET only (the `tmux()` shadow above), so this never
+# touches the user's default tmux server or ~/.tmux.conf.
+#
+# Crashed coordinator/worker panes should stay around as inspectable [dead]
+# panes with a deep scrollback instead of closing and losing the transcript
+# — that's the whole post-mortem story docs/advanced-usage.md,
+# docs/llm-swarm-runner-overview.md, docs/security.md, docs/tmux-as-channel.md
+# and docs/tmux-cheatsheet.md all describe, and code already assumes it: the
+# dead-pane detection a few lines below (PANE_DEAD=1) and
+# check-stuck-workers.sh's DEAD-PANE state only ever fire when it's on.
+# Nothing shipped actually set it before #240 — set-option here (rather than
+# relying on examples/tmux.conf.example, which most users never install) is
+# what makes the promise true unconditionally, every run, cheaply (a no-op
+# re-set on repeat invocations).
+#
+# `remain-on-exit failed` (dead pane only on *non-zero* exit — a clean exit
+# still closes the window normally) needs tmux >= 3.2; older tmux only has
+# the boolean on/off, and passing it 'failed' errors out. Fall back to plain
+# `on` (dead pane on every exit, including clean ones) with a visible warning
+# rather than erroring. Version is resolved here (no tmux socket calls yet —
+# `tmux -V` doesn't touch any server) but the actual `set-option` calls are
+# deferred to REMAIN_ON_EXIT_VALUE's use below, once a session is guaranteed
+# to exist: `set-option -g` on this project's swarm socket errors out with
+# "no server running" if issued before anything has started that socket's
+# tmux server, and has-session/list-windows above are the only tmux calls on
+# a brand-new socket that tolerate a not-yet-running server.
+TMUX_VERSION_RAW="$(tmux -V 2>/dev/null || true)"
+TMUX_VERSION_NUM="$(printf '%s' "$TMUX_VERSION_RAW" | grep -oE '[0-9]+\.[0-9]+' | head -1)"
+if [ -n "$TMUX_VERSION_NUM" ] && \
+   [ "$(printf '%s\n%s\n' "$TMUX_VERSION_NUM" "3.2" | sort -V | head -1)" = "3.2" ]; then
+    REMAIN_ON_EXIT_VALUE="failed"
+else
+    echo "WARN: tmux '${TMUX_VERSION_RAW:-unknown}' predates 3.2 — 'remain-on-exit failed' unsupported. Falling back to 'on' (panes stay [dead] even after a clean exit)." >&2
+    REMAIN_ON_EXIT_VALUE="on"
+fi
+
 # --- Session + coordinator-pane state detection -----------------------------
 # Two boolean flags drive the launch decision below:
 #   session_existed      — was a prior llm-X session already running?
@@ -478,6 +515,16 @@ elif [ "$COORD_CMD" = "claude" ] && [ "${COORDINATOR_HEADLESS:-0}" != "1" ]; the
 else
     echo "Session $SESSION_NAME exists; coordinator is busy (running '$PANE_CMD'). Not interrupting — attaching."
 fi
+
+# Apply the remain-on-exit/history-limit hygiene decided above (#240). Placed
+# here rather than earlier: the swarm socket's tmux server is now guaranteed
+# to be running — either it already was (session_existed branch) or the
+# `tmux new-session` above just started it — so `set-option -g` can't hit the
+# "no server running" error a cold socket gives it. Harmless to re-run on
+# every invocation (idempotent), which also self-heals sessions started
+# before this feature existed.
+tmux set-option -g remain-on-exit "$REMAIN_ON_EXIT_VALUE"
+tmux set-option -g history-limit 50000
 
 # Ensure the 'util' window exists immediately after coordinator (slot 2).
 # Bare bash in $PWD — no sandbox, no container — for ad-hoc inspection
