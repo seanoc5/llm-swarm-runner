@@ -51,7 +51,8 @@ extract_fn() {
     local fn="$1"
     sed -n "/^${fn}() {/,/^}/p" "$WATCH"
 }
-for fn in mtime_epoch coordinator_pane_state coordinator_pane_busy probe_ctx_used maybe_auto_compact \
+for fn in mtime_epoch coordinator_pane_state coordinator_pane_busy probe_ctx_used probe_ctx_window \
+          coordinator_compact_effective_threshold maybe_auto_compact \
           auto_compact_poll_pass compact_retract_queued compact_last_pane_line compact_composer_clear \
           compact_confirm_submitted compact_replay_detected log_event; do
     body="$(extract_fn "$fn")"
@@ -65,6 +66,8 @@ AUTO_COMPACT_LOCK="$TEST_DIR/coord-compact.lock"
 HAVE_JQ=1
 DRY_RUN=1
 AUTO_COMPACT=1
+AUTO_COMPACT_PCT=75
+AUTO_COMPACT_THRESHOLD_CAP_TOKENS=250000
 AUTO_COMPACT_THRESHOLD_TOKENS=150000
 AUTO_COMPACT_PROBE_MAX_AGE_SECS=120
 # issue #252/#274: must match coordinator-watch.sh's own default — anchored
@@ -173,6 +176,41 @@ check "stale probe -> rc1" "1" "$rc"
 printf '{"context_window":{"context_window_size":200000,"total_input_tokens":"garbage"}}' > "$AUTO_COMPACT_PROBE"
 rc=0; out="$(probe_ctx_used)" || rc=$?
 check "non-numeric used -> rc1" "1" "$rc"
+
+heading "Test 3b: probe_ctx_window (parsing the probe's window denominator, issue #273)"
+printf '{"context_window":{"context_window_size":200000,"total_input_tokens":160000}}' > "$AUTO_COMPACT_PROBE"
+rc=0; out="$(probe_ctx_window)" || rc=$?
+check "200k-window probe -> window=200000" "200000" "$out"
+
+printf '{"context_window":{"context_window_size":1000000,"total_input_tokens":260000}}' > "$AUTO_COMPACT_PROBE"
+rc=0; out="$(probe_ctx_window)" || rc=$?
+check "1M-window probe -> window=1000000" "1000000" "$out"
+
+rm -f "$AUTO_COMPACT_PROBE"
+rc=0; out="$(probe_ctx_window)" || rc=$?
+check "missing probe -> rc1" "1" "$rc"
+
+printf '{"context_window":{"total_input_tokens":160000}}' > "$AUTO_COMPACT_PROBE"
+rc=0; out="$(probe_ctx_window)" || rc=$?
+check "no context_window_size field (schema mismatch) -> rc1" "1" "$rc"
+
+printf '{"context_window":{"context_window_size":200000,"total_input_tokens":160000}}' > "$AUTO_COMPACT_PROBE"
+touch -d '@0' "$AUTO_COMPACT_PROBE" 2>/dev/null || touch -t 197001010000 "$AUTO_COMPACT_PROBE"
+rc=0; out="$(probe_ctx_window)" || rc=$?
+check "stale probe -> rc1" "1" "$rc"
+
+heading "Test 3c: coordinator_compact_effective_threshold — min(pct-of-window, cap) (issue #273)"
+printf '{"context_window":{"context_window_size":200000,"total_input_tokens":160000}}' > "$AUTO_COMPACT_PROBE"
+out="$(coordinator_compact_effective_threshold)"
+check "200k window: 75% of window (150000), under the 250000 cap -> today's unchanged behavior" "150000" "$out"
+
+printf '{"context_window":{"context_window_size":1000000,"total_input_tokens":260000}}' > "$AUTO_COMPACT_PROBE"
+out="$(coordinator_compact_effective_threshold)"
+check "1M window: 75% (750000) exceeds the cap -> clamped to 250000" "250000" "$out"
+
+rm -f "$AUTO_COMPACT_PROBE"
+out="$(coordinator_compact_effective_threshold)"
+check "no probe (unparseable window) -> falls back to flat AUTO_COMPACT_THRESHOLD_TOKENS (150000)" "150000" "$out"
 
 heading "Test 4: maybe_auto_compact threshold + pane-state gating (DRY_RUN)"
 printf '{"context_window":{"context_window_size":200000,"total_input_tokens":50000}}' > "$AUTO_COMPACT_PROBE"

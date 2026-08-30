@@ -232,8 +232,10 @@
 #                           box, an actual submitted command, the same
 #                           load-buffer+paste-buffer+Enter mechanism
 #                           llm-start.sh's live-REPL reprompt path uses —
-#                           if it's at/above AUTO_COMPACT_THRESHOLD_TOKENS.
-#                           Blocks (polling capture-pane) until compaction
+#                           if it's at/above the effective threshold (scaled
+#                           to the coordinator's own context window; see
+#                           AUTO_COMPACT_PCT below). Blocks (polling
+#                           capture-pane) until compaction
 #                           visibly starts and finishes before proceeding
 #                           to the normal wake. Requires
 #                           scripts/statusline-with-context.sh to be
@@ -316,8 +318,45 @@
 #                           in-memory by run_auto_compact_poll_loop's own
 #                           process (not a file), so it resets on watcher
 #                           restart.
+#   AUTO_COMPACT_PCT=75
+#   AUTO_COMPACT_THRESHOLD_CAP_TOKENS=250000
+#                           (issue #273, follow-up to #259) The fixed
+#                           AUTO_COMPACT_THRESHOLD_TOKENS below ignores the
+#                           coordinator model's own context window — on a
+#                           1M-context coordinator (Fable 5) the flat 150k
+#                           default triggered a compact at just 15%
+#                           capacity, the exact worker-side waste #259 fixed,
+#                           just not yet mirrored on the coordinator side
+#                           (see the 2026-08-13 fand-guide incident: threshold
+#                           150000, used 150883, on a 1M-window coordinator).
+#                           probe_ctx_window() reads the SAME statusline probe
+#                           file probe_ctx_used() already reads (the
+#                           coordinator's context data comes from that probe,
+#                           not a rendered pane statusline the way workers'
+#                           does — see AUTO_COMPACT above), pulling
+#                           context_window.context_window_size instead of the
+#                           used-tokens field, and
+#                           coordinator_compact_effective_threshold() computes
+#                           the actual trigger as min(AUTO_COMPACT_PCT% of
+#                           that window, AUTO_COMPACT_THRESHOLD_CAP_TOKENS) —
+#                           falling back to the flat AUTO_COMPACT_THRESHOLD_
+#                           TOKENS below when the denominator can't be parsed
+#                           (probe missing/stale, or a schema mismatch none of
+#                           probe_ctx_window()'s jq paths match). Defaults
+#                           yield 150000 on a 200k-window coordinator (today's
+#                           behavior, unchanged) and 250000 on a 1M-window
+#                           coordinator — same 250k cap and same quality
+#                           rationale as WORKER_COMPACT_THRESHOLD_CAP_TOKENS
+#                           above, kept identical on purpose rather than
+#                           tuned separately, since both knobs bound the same
+#                           underlying models' effective context capacity.
 #   AUTO_COMPACT_THRESHOLD_TOKENS=150000
-#                           Used-token threshold that triggers the above.
+#                           Used-token threshold that triggers the above for
+#                           a coordinator whose window size can't be parsed
+#                           from the probe — see AUTO_COMPACT_PCT above. Also
+#                           the threshold used verbatim when AUTO_COMPACT_PCT
+#                           scaling is effectively a no-op (e.g. probe has no
+#                           context_window_size field yet).
 #   AUTO_COMPACT_PROBE=<path>
 #                           Path to the statusline probe file. Defaults to
 #                           the project+role-scoped path
@@ -857,7 +896,9 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     MAX_TMUX_WINDOWS    10        (referenced by default WAKE_PROMPT)
     WATCHER_QUIET       0         suppress human-readable pane echo (banner only); see PANE ECHO
     AUTO_COMPACT        1         inject real /compact into a long-lived coordinator before waking it if over threshold; see header comment
-    AUTO_COMPACT_THRESHOLD_TOKENS     150000  used-token trigger
+    AUTO_COMPACT_PCT                  75      percent of the coordinator's own context window used as the effective threshold; see header comment
+    AUTO_COMPACT_THRESHOLD_CAP_TOKENS 250000  cap on the above (250k on a 1M-window coordinator, not 750k)
+    AUTO_COMPACT_THRESHOLD_TOKENS     150000  used-token trigger; also the fallback when the window can't be parsed
     AUTO_COMPACT_TICK_SECS            60      periodic poll-tick trigger interval (0=off); catches long interactive stretches with no worker completions; see header comment
     AUTO_COMPACT_COOLDOWN_SECS        900     poll-tick-only cooldown after an attempted compact, before it may re-trigger
     AUTO_COMPACT_PROBE                (auto)  statusline probe file path
@@ -1082,6 +1123,12 @@ SESSION_NAME="${SESSION_NAME:-llm-$(basename "$PROJECT_DIR")}"
 WATCHER_QUIET="${WATCHER_QUIET:-0}"
 AUTO_COMPACT="${AUTO_COMPACT:-1}"
 AUTO_COMPACT_THRESHOLD_TOKENS="${AUTO_COMPACT_THRESHOLD_TOKENS:-150000}"
+# issue #273 — scale the effective threshold to the coordinator model's own
+# context window (min(AUTO_COMPACT_PCT% of window, ..._CAP_TOKENS)); see
+# coordinator_compact_effective_threshold() and this file's AUTO_COMPACT_PCT
+# header comment for the full rationale (mirrors WORKER_COMPACT_PCT below).
+AUTO_COMPACT_PCT="${AUTO_COMPACT_PCT:-75}"
+AUTO_COMPACT_THRESHOLD_CAP_TOKENS="${AUTO_COMPACT_THRESHOLD_CAP_TOKENS:-250000}"
 # issue #210 — periodic poll-tick trigger (see header comment). Independent
 # interval and cooldown from WATCH_PR_POLL_SECS/its gate, on purpose.
 AUTO_COMPACT_TICK_SECS="${AUTO_COMPACT_TICK_SECS:-60}"
@@ -1190,6 +1237,7 @@ fi
 for _var in AUTO_COMPACT_THRESHOLD_TOKENS AUTO_COMPACT_PROBE_MAX_AGE_SECS \
             AUTO_COMPACT_START_TIMEOUT_SECS AUTO_COMPACT_FINISH_TIMEOUT_SECS \
             AUTO_COMPACT_VERIFY_TIMEOUT_SECS AUTO_COMPACT_TICK_SECS AUTO_COMPACT_COOLDOWN_SECS \
+            AUTO_COMPACT_PCT AUTO_COMPACT_THRESHOLD_CAP_TOKENS \
             WORKER_COMPACT_PCT WORKER_COMPACT_THRESHOLD_CAP_TOKENS \
             WORKER_COMPACT_THRESHOLD_TOKENS WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS \
             WORKER_COMPACT_START_TIMEOUT_SECS WORKER_COMPACT_FINISH_TIMEOUT_SECS \
@@ -1356,7 +1404,7 @@ autoclose:     $WATCHER_AUTOCLOSE$([ "$WATCHER_AUTOCLOSE" = "1" ] && echo " (mod
 pr-poll:       ${WATCH_PR_POLL_SECS}s$([ "$WATCH_PR_POLL_SECS" = "0" ] && echo " (disabled)")
 orphan-sweep:  ${WATCH_ORPHAN_SWEEP_SECS}s$([ "$WATCH_ORPHAN_SWEEP_SECS" = "0" ] && echo " (disabled)" || echo " (script: $REAP_ORPHAN)")
 check-on-done: $WATCH_CHECK_ON_DONE$([ "$WATCH_CHECK_ON_DONE" = "1" ] && echo " (session: $SESSION_NAME)")
-auto-compact:  $AUTO_COMPACT$([ "$AUTO_COMPACT" = "1" ] && echo " (threshold: ${AUTO_COMPACT_THRESHOLD_TOKENS} tokens, probe: $AUTO_COMPACT_PROBE, poll-tick: ${AUTO_COMPACT_TICK_SECS}s$([ "$AUTO_COMPACT_TICK_SECS" = "0" ] && echo " disabled"), cooldown: ${AUTO_COMPACT_COOLDOWN_SECS}s)")
+auto-compact:  $AUTO_COMPACT$([ "$AUTO_COMPACT" = "1" ] && echo " (threshold: min(${AUTO_COMPACT_PCT}% of window, ${AUTO_COMPACT_THRESHOLD_CAP_TOKENS}), fallback: ${AUTO_COMPACT_THRESHOLD_TOKENS} tokens, probe: $AUTO_COMPACT_PROBE, poll-tick: ${AUTO_COMPACT_TICK_SECS}s$([ "$AUTO_COMPACT_TICK_SECS" = "0" ] && echo " disabled"), cooldown: ${AUTO_COMPACT_COOLDOWN_SECS}s)")
 worker-compact: $WORKER_AUTO_COMPACT$([ "$WORKER_AUTO_COMPACT" = "1" ] && echo " (threshold: min(${WORKER_COMPACT_PCT}% of window, ${WORKER_COMPACT_THRESHOLD_CAP_TOKENS})/wrapup+$(( WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS - WORKER_COMPACT_THRESHOLD_TOKENS )), fallback: ${WORKER_COMPACT_THRESHOLD_TOKENS}/${WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS} tokens, scan: ${WORKER_COMPACT_SCAN_SECS}s)")
 dry-run:       $DRY_RUN
 once:          $ONCE
@@ -2263,6 +2311,64 @@ probe_ctx_used() {
     echo "$used"
 }
 
+# probe_ctx_window
+#
+# Sibling of probe_ctx_used() above, reading the SAME probe file for the
+# DENOMINATOR instead of the numerator — the coordinator model's own
+# context-window size, used by coordinator_compact_effective_threshold() to
+# scale the compact trigger (issue #273, mirroring worker_pane_ctx_window()
+# from issue #259). Echoes the parsed window size and returns 0, or returns
+# 1 with no output, on the same failure modes as probe_ctx_used() (missing/
+# stale/unreadable probe, or nothing parseable at any of the jq paths below
+# — the "?" JSON-schema-mismatch fallback). jq paths mirror
+# statusline-with-context.sh's own ctx_total extraction, since the probe
+# file IS that script's raw stdin payload.
+probe_ctx_window() {
+    [ "$HAVE_JQ" = "1" ] || return 1
+    [ -r "$AUTO_COMPACT_PROBE" ] || return 1
+    local mtime now
+    mtime=$(mtime_epoch "$AUTO_COMPACT_PROBE") || return 1
+    [ -n "$mtime" ] || return 1
+    now=$(date +%s)
+    [ $((now - mtime)) -le "$AUTO_COMPACT_PROBE_MAX_AGE_SECS" ] || return 1
+
+    local window
+    window=$(jq -r '
+        .context_window.context_window_size //
+        .context_window.total //
+        .context.window_size //
+        .context.total //
+        .model_context_window //
+        empty
+    ' "$AUTO_COMPACT_PROBE" 2>/dev/null) || true
+    [[ "$window" =~ ^[0-9]+$ ]] || return 1
+    echo "$window"
+}
+
+# coordinator_compact_effective_threshold
+#
+# Echoes the coordinator's effective compact threshold (always succeeds —
+# pure arithmetic over AUTO_COMPACT_* env vars plus whatever
+# probe_ctx_window() could parse, never a probe/jq failure mode of its own).
+# = min(AUTO_COMPACT_PCT% of the parsed context window,
+# AUTO_COMPACT_THRESHOLD_CAP_TOKENS); falls back to the flat
+# AUTO_COMPACT_THRESHOLD_TOKENS when the window denominator isn't parseable
+# (no fresh probe, or a schema mismatch none of probe_ctx_window()'s jq
+# paths match) — same fail-open contract as every other probe-parsing
+# helper in this file. Mirrors worker_compact_effective_threshold() (issue
+# #259) minus the wrap-up gap, which has no coordinator-side equivalent —
+# see issue #273.
+coordinator_compact_effective_threshold() {
+    local window base
+    if window="$(probe_ctx_window)" && [ -n "$window" ]; then
+        base=$(( window * AUTO_COMPACT_PCT / 100 ))
+        [ "$base" -gt "$AUTO_COMPACT_THRESHOLD_CAP_TOKENS" ] && base="$AUTO_COMPACT_THRESHOLD_CAP_TOKENS"
+    else
+        base="$AUTO_COMPACT_THRESHOLD_TOKENS"
+    fi
+    echo "$base"
+}
+
 # compact_last_pane_line <tmux-target>
 #
 # (issue #290) Echoes the last non-blank rendered line of <target>'s pane,
@@ -2459,8 +2565,11 @@ compact_retract_queued() {
 # EVENTS LOG in the header) but otherwise doesn't change this function's
 # logic at all — the wake path's behavior is identical to before #210.
 # If AUTO_COMPACT is enabled, the coordinator pane holds a live and
-# currently-idle CLI session, and its last-probed context usage is
-# at/above AUTO_COMPACT_THRESHOLD_TOKENS, injects a real `/compact` via
+# currently-idle CLI session, and its last-probed context usage is at/above
+# the effective threshold (coordinator_compact_effective_threshold(), issue
+# #273 — scaled to the coordinator's own context window, falling back to
+# the flat AUTO_COMPACT_THRESHOLD_TOKENS when that can't be parsed),
+# injects a real `/compact` via
 # the same load-buffer + paste-buffer + send-keys-Enter mechanism
 # llm-start.sh's live-REPL reprompt path uses (Enter actually submits it —
 # this is not just populating the input box), then blocks in a poll loop
@@ -2513,10 +2622,16 @@ maybe_auto_compact() {
             exit 0
         }
 
-        [ "$used" -ge "$AUTO_COMPACT_THRESHOLD_TOKENS" ] || exit 0   # under threshold — the common case
+        # issue #273: scale the trigger to the coordinator's own context
+        # window instead of the flat AUTO_COMPACT_THRESHOLD_TOKENS — see
+        # coordinator_compact_effective_threshold().
+        local threshold
+        threshold="$(coordinator_compact_effective_threshold)"
 
-        echo "[$(date +%T)] coordinator context at ${used} tokens (>= ${AUTO_COMPACT_THRESHOLD_TOKENS}) — compacting before wake..."
-        log_event coord.compact "used=$used threshold=$AUTO_COMPACT_THRESHOLD_TOKENS trigger=$trigger"
+        [ "$used" -ge "$threshold" ] || exit 0   # under threshold — the common case
+
+        echo "[$(date +%T)] coordinator context at ${used} tokens (>= ${threshold}) — compacting before wake..."
+        log_event coord.compact "used=$used threshold=$threshold trigger=$trigger"
 
         if [ "$DRY_RUN" = "1" ]; then
             echo "[DRY] would inject /compact into $SESSION_NAME:coordinator and wait for it to finish"
