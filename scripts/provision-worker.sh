@@ -233,6 +233,16 @@ if [ -f "$PROJECT_DIR/.env" ] && [ ! -e "$WT/.env" ]; then
     echo "       linked .env -> $PROJECT_DIR/.env"
 fi
 
+# Same for .sandbox-env: sandbox.sh passes $PROJECT_DIR/.sandbox-env (the
+# WORKTREE, from the worker's perspective) to `docker run --env-file`, but
+# the file is gitignored so fresh worktrees never contain it. Linking the
+# canonical project's copy lets per-project worker-container env (e.g.
+# PRECOMMIT_FAST_TESTS=0, GRADLE_RO_DEP_CACHE) reach every worker.
+if [ -f "$PROJECT_DIR/.sandbox-env" ] && [ ! -e "$WT/.sandbox-env" ]; then
+    ln -s "$PROJECT_DIR/.sandbox-env" "$WT/.sandbox-env"
+    echo "       linked .sandbox-env -> $PROJECT_DIR/.sandbox-env"
+fi
+
 # 2. Queue dirs (idempotent — listener also creates them on startup).
 #    status/ holds worker-written state files (ready-for-review / blocked /
 #    done-no-pr) so the watcher can react while the worker is still parked
