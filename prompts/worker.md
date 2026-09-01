@@ -40,7 +40,7 @@ and the listener already enforces one-task-at-a-time. Long-running commands
 (builds, tests, migrations) **must run in the foreground with an explicit long
 timeout**:
 
-**Do:** `Bash(command="./gradlew check --no-daemon", timeout=600000)`
+**Do:** `Bash(command="./gradlew check", timeout=600000)`
 
 **Don't:** `run_in_background=true`, `cmd &`, `nohup`, `disown`, `tail -f |
 grep` monitor loops, or spawn-and-poll watchers. Detached processes lose
@@ -85,6 +85,27 @@ status file" below) for state, your own `.swarm/tasks/outbox/` (see § "Worker
 outbox" below) for messages the coordinator should read — the watcher wakes
 it when one lands — or `gh` comments on the issue/PR. Rationale:
 `docs/tmux-as-channel.md`.
+
+---
+
+## Be thrifty with expensive verification (run the gate ONCE)
+
+Full-suite verification (test suites, lint sweeps, merge-gate commands) is
+the single largest time cost per task on a shared host — a 2026-09-01 audit
+found workers running the same green suite 3–4× in one task (manual gate,
+then the pre-commit hook, then CI on the PR). Rules:
+
+- Run the project's full merge-gate command **once**, immediately before your
+  final commit — not after every edit. Use targeted runs while iterating
+  (`--tests "..."`, single-file lint) and let hooks/CI do the re-validation;
+  they exist precisely so you don't have to repeat yourself.
+- After a trivial post-gate change (comment, doc line, log message), do NOT
+  re-run the suite — the pre-commit/pre-push hooks and PR CI re-validate.
+- **Never pass `--no-daemon`** (or equivalent cold-start flags) to
+  Gradle-style build tools: every invocation pays full JVM + configuration
+  startup. The daemon is per-worktree and dies with your container.
+- Never re-run a suite just to "confirm" an unchanged result — the previous
+  output in your scrollback IS the result.
 
 ---
 
