@@ -27,6 +27,13 @@
 #   REAP_CAPTURE_LINES (default 500) scrollback lines to
 #   <project>/.swarm/reaped/iss-N-<utc>.txt before the window dies.
 #   Dry runs log nothing.
+#
+# UNPROCESSED BRIEFS (issue #317)
+#   With --with-worktree, kill-worktree.sh salvages any unprocessed
+#   inbox/outbox briefs into <project>/.swarm/salvaged/iss-N/ before
+#   removing the worktree (or, with --refuse-nonempty-inbox, skips that
+#   worktree entirely). --dry-run previews the would-be-salvaged counts
+#   per window without touching anything.
 
 set -euo pipefail
 
@@ -73,6 +80,11 @@ FLAGS
         --no-compose-down   Skip docker compose teardown before worktree
                             removal (preserves containers for inspection;
                             only meaningful with --with-worktree)
+        --refuse-nonempty-inbox
+                            Forwarded to kill-worktree.sh: skip a worktree
+                            entirely (no removal) instead of salvaging
+                            unprocessed inbox/outbox briefs (issue #317).
+                            Only meaningful with --with-worktree.
     -n, --dry-run           List what would be killed; take no action
     -y, --yes               Skip the --all --with-worktree confirmation
     -s, --session NAME      Override session name
@@ -90,6 +102,7 @@ EXAMPLES
     kill-finished-workers.sh --merged-only --with-worktree -y     # safe auto-reap
     kill-finished-workers.sh --pr-finalized --with-worktree -y    # also reap closed-without-merge
     kill-finished-workers.sh --with-worktree --no-compose-down    # keep containers for inspection
+    kill-finished-workers.sh --with-worktree --refuse-nonempty-inbox  # stall instead of salvage
 
 EXIT
     0    success (or nothing to do)
@@ -102,6 +115,7 @@ WITH_WT=0
 DRY=0
 YES=0
 NO_COMPOSE_DOWN=0
+REFUSE_NONEMPTY_INBOX=0
 PR_CHECK=1
 MERGED_ONLY=0
 PR_FINALIZED=0
@@ -146,6 +160,7 @@ while [[ $# -gt 0 ]]; do
         -a|--all)             ALL=1; shift ;;
         -w|--with-worktree)   WITH_WT=1; shift ;;
         --no-compose-down)    NO_COMPOSE_DOWN=1; shift ;;
+        --refuse-nonempty-inbox) REFUSE_NONEMPTY_INBOX=1; shift ;;
         -n|--dry-run)         DRY=1; shift ;;
         -y|--yes)             YES=1; shift ;;
         --no-pr-check)        PR_CHECK=0; shift ;;
@@ -273,6 +288,20 @@ has_open_pr() {
 # self-contained (see scripts/README.md).
 mtime_epoch() {
     stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
+}
+
+# Counts *.md files directly in dir (0 if dir absent/empty). Mirrors
+# kill-worktree.sh's salvage counter (issue #317); kept local per the
+# self-contained-scripts convention (see mtime_epoch above) — used only
+# for the --dry-run preview here, kill-worktree.sh does the real salvage.
+count_md_files() {
+    local dir="$1" n=0 f
+    shopt -s nullglob
+    for f in "$dir"/*.md; do
+        [ -f "$f" ] && n=$((n + 1))
+    done
+    shopt -u nullglob
+    echo "$n"
 }
 
 # worktree_birth_path <worktree-dir>
@@ -477,7 +506,24 @@ fi
 if [ "$DRY" = "1" ]; then
     echo
     echo "DRY-RUN — no action taken. Would kill: ${KILL_LIST[*]}"
-    [ "$WITH_WT" = "1" ] && echo "Would also remove worktrees + branches via kill-worktree.sh"
+    if [ "$WITH_WT" = "1" ]; then
+        echo "Would also remove worktrees + branches via kill-worktree.sh"
+        # issue #317: preview salvage counts per window without touching
+        # anything — mirrors the check kill-worktree.sh performs for real.
+        for w in "${KILL_LIST[@]}"; do
+            issue="${w#iss-}"
+            wt="$(swarm_worktree_dir "$PROJECT_DIR" "$issue")"
+            [ -d "$wt" ] || continue
+            inbox_n=$(count_md_files "$wt/.swarm/tasks/inbox")
+            outbox_n=$(count_md_files "$wt/.swarm/tasks/outbox")
+            total=$((inbox_n + outbox_n))
+            if [ "$total" -gt 0 ]; then
+                echo "  $w: would salvage $total unprocessed brief(s) (inbox=$inbox_n outbox=$outbox_n)"
+            else
+                echo "  $w: no unprocessed briefs"
+            fi
+        done
+    fi
     exit 0
 fi
 
@@ -514,12 +560,18 @@ for w in "${KILL_LIST[@]}"; do
             echo "→ $w (issue #$issue): kill-worktree.sh (window + worktree + branch)"
             KILL_WT_ARGS=("$issue")
             [ "$NO_COMPOSE_DOWN" = "1" ] && KILL_WT_ARGS+=(--no-compose-down)
+            [ "$REFUSE_NONEMPTY_INBOX" = "1" ] && KILL_WT_ARGS+=(--refuse-nonempty-inbox)
             kw_rc=0
             "$KILL_WT" "${KILL_WT_ARGS[@]}" || kw_rc=$?
             # issue #181: exit 75 = deferred (in-flight check-on-done claim),
             # not a real failure — kill-worktree.sh retries cleanly next pass.
+            # issue #317: exit 76 = refused (non-empty inbox/outbox under
+            # --refuse-nonempty-inbox) — also not a real failure, just a
+            # worktree deliberately left in place for a human to drain.
             if [ "$kw_rc" -eq 75 ]; then
                 echo "  ⏸ deferred: in-flight check-on-done claim (retry next reap pass)"
+            elif [ "$kw_rc" -eq 76 ]; then
+                echo "  ✗ refused: non-empty inbox/outbox (retry next reap pass, or drop --refuse-nonempty-inbox to salvage+reap)"
             elif [ "$kw_rc" -ne 0 ]; then
                 echo "  WARN: kill-worktree.sh exited non-zero (continuing)"
             fi

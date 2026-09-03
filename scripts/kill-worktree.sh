@@ -3,7 +3,7 @@
 # kill-worktree.sh — remove a worker worktree, its branch, and tmux window.
 #
 # Usage:
-#   kill-worktree.sh <issue-number> [project-dir] [--no-compose-down]
+#   kill-worktree.sh <issue-number> [project-dir] [--no-compose-down] [--refuse-nonempty-inbox]
 #
 # Removes the worktree at <derived path>/wt-issue-<N>, deletes the branch
 # fix/issue-<N>, and kills the tmux window iss-<N> if any. Idempotent —
@@ -21,6 +21,19 @@
 #
 # WARNING: --force is used. Any uncommitted work in the worktree is lost.
 # The script prints how-much-work-will-be-lost before deletion.
+#
+# issue #317: requeue.sh delivers follow-up briefs into <worktree>/.swarm/
+# tasks/inbox/ between tasks, and workers drop mid-task messages into
+# tasks/outbox/ — but the watcher's auto-reap (kill-finished-workers.sh
+# --pr-finalized --with-worktree --yes) fires as soon as the PR is
+# finalized, which routinely races ahead of the worker draining that
+# queue. Before removal, any *.md still in inbox/ or in outbox/ (excluding
+# outbox/processed/, which the coordinator has already read) is MOVED to
+# <project>/.swarm/salvaged/iss-<N>/{inbox,outbox}/ and a `SALVAGED: ...`
+# line is printed, so an unattended reap preserves the brief instead of
+# silently destroying it. Set --refuse-nonempty-inbox (or
+# SWARM_REAP_INBOX=refuse) to skip the worktree entirely instead (exit 76)
+# for operators who'd rather the reap stall than salvage-and-remove.
 #
 # issue #181: before removing anything, checks for an in-flight check-on-done
 # run (coordinator-watch.sh's maybe_run_check claims a worktree via a
@@ -41,16 +54,48 @@ mtime_epoch() {
 }
 
 NO_COMPOSE_DOWN=0
+REFUSE_NONEMPTY_INBOX=0
 ARGS=()
 for arg in "$@"; do
     case "$arg" in
         --no-compose-down) NO_COMPOSE_DOWN=1 ;;
+        --refuse-nonempty-inbox) REFUSE_NONEMPTY_INBOX=1 ;;
         *) ARGS+=("$arg") ;;
     esac
 done
 set -- "${ARGS[@]+"${ARGS[@]}"}"
+[ "${SWARM_REAP_INBOX:-}" = "refuse" ] && REFUSE_NONEMPTY_INBOX=1
 
-ISSUE="${1:?usage: kill-worktree.sh <issue-number> [project-dir] [--no-compose-down]}"
+# Counts *.md files directly in dir (0 if dir absent/empty). Local per the
+# self-contained-scripts convention (see mtime_epoch above) — mirrored in
+# kill-finished-workers.sh's count_md_files for its --dry-run preview.
+count_md_files() {
+    local dir="$1" n=0 f
+    shopt -s nullglob
+    for f in "$dir"/*.md; do
+        [ -f "$f" ] && n=$((n + 1))
+    done
+    shopt -u nullglob
+    echo "$n"
+}
+
+# Moves every *.md in src/ into dest/, disambiguating a same-named
+# collision (a prior salvage of the same issue) with a UTC timestamp
+# prefix rather than clobbering it.
+salvage_md_files() {
+    local src="$1" dest="$2" f base target
+    shopt -s nullglob
+    for f in "$src"/*.md; do
+        [ -f "$f" ] || continue
+        base="$(basename "$f")"
+        target="$dest/$base"
+        [ -e "$target" ] && target="$dest/$(date -u +%Y%m%dT%H%M%SZ)-$base"
+        mv "$f" "$target"
+    done
+    shopt -u nullglob
+}
+
+ISSUE="${1:?usage: kill-worktree.sh <issue-number> [project-dir] [--no-compose-down] [--refuse-nonempty-inbox]}"
 PROJECT_DIR="${2:-$PWD}"
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
 
@@ -124,6 +169,26 @@ if [ -d "$WT" ]; then
     if [ -n "$ACTIVE_CLAIM" ]; then
         echo "  ⏸ in-flight check ($ACTIVE_CLAIM) — deferring worktree removal, retry next reap pass"
         exit 75
+    fi
+
+    # issue #317: refuse or salvage unprocessed queued briefs before this
+    # worktree is destroyed. inbox/ is requeue.sh's follow-up-brief queue;
+    # outbox/ (minus outbox/processed/, already coordinator-read) is the
+    # worker's mid-task message channel. See header comment for rationale.
+    INBOX_COUNT="$(count_md_files "$WT/.swarm/tasks/inbox")"
+    OUTBOX_COUNT="$(count_md_files "$WT/.swarm/tasks/outbox")"
+    UNPROCESSED=$((INBOX_COUNT + OUTBOX_COUNT))
+    if [ "$UNPROCESSED" -gt 0 ]; then
+        if [ "$REFUSE_NONEMPTY_INBOX" = "1" ]; then
+            echo "  ✗ REFUSED: $UNPROCESSED unprocessed brief(s) in iss-$ISSUE (inbox=$INBOX_COUNT outbox=$OUTBOX_COUNT)"
+            echo "    --refuse-nonempty-inbox / SWARM_REAP_INBOX=refuse is set — worktree, branch, and tmux window left untouched"
+            exit 76
+        fi
+        SALVAGE_DIR="$PROJECT_DIR/.swarm/salvaged/iss-$ISSUE"
+        mkdir -p "$SALVAGE_DIR/inbox" "$SALVAGE_DIR/outbox"
+        salvage_md_files "$WT/.swarm/tasks/inbox" "$SALVAGE_DIR/inbox"
+        salvage_md_files "$WT/.swarm/tasks/outbox" "$SALVAGE_DIR/outbox"
+        echo "  ⚠ SALVAGED: $UNPROCESSED unprocessed brief(s) from iss-$ISSUE (inbox=$INBOX_COUNT outbox=$OUTBOX_COUNT) → $SALVAGE_DIR"
     fi
 
     if [ "$NO_COMPOSE_DOWN" = "1" ]; then
