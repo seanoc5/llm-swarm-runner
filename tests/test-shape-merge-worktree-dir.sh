@@ -72,6 +72,8 @@ mkdir -p "$TEST_DIR/bin"
 cat > "$TEST_DIR/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 case "${1:-} ${2:-}" in
+    "api repos/{owner}/{repo}/issues/943")
+        echo "false"; exit 0 ;;
     "issue view")
         case "$*" in
             *closedByPullRequestsReferences*) echo "77"; exit 0 ;;
