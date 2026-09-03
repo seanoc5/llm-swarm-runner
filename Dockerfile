@@ -2,6 +2,17 @@ FROM buildpack-deps:noble
 
 ARG DEBIAN_FRONTEND=noninteractive
 
+# UTF-8 locale (#323). buildpack-deps:noble ships C.utf8 as a built-in glibc
+# locale already (confirmed via `locale -a` — no locale-gen/apt-get install
+# locales needed), but the container's default locale is still POSIX/C
+# unless LANG/LC_ALL are set. Without this, JVM/Gradle file writers (e.g.
+# the HTML test-report step) crash with "Malformed input or unmappable
+# characters" on any non-ASCII byte — such as an em-dash in a test display
+# name — which taught workers to route around the gate (--no-verify,
+# renaming tests) instead of fixing the real bug.
+ENV LANG=C.utf8
+ENV LC_ALL=C.utf8
+
 # -----------------------------------------------------------------------------
 # Toolchain version pins
 # -----------------------------------------------------------------------------
