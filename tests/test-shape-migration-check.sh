@@ -75,6 +75,7 @@ comments_file="$GH_COMMENTS_DIR/$pr_num.json"
 [ -f "$comments_file" ] || echo '{"comments":[]}' > "$comments_file"
 
 case "$1 $2" in
+    "api repos/{owner}/{repo}/issues/"*) echo "false"; exit 0 ;;
     "pr view")
         if [[ "$*" == *baseRefName* ]]; then
             jq -c --arg n "$pr_num" '.[$n]' "$GH_PR_TABLE"

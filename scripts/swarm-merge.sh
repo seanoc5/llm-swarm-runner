@@ -2,14 +2,21 @@
 # swarm-merge.sh — merge a swarm PR and clean up the local mess.
 #
 # Usage:
-#   swarm-merge.sh <issue#>           # resolves PR from issue, merges, cleans
-#   swarm-merge.sh <issue#> --no-kill # skip the tmux-kill step
-#   swarm-merge.sh <issue#> --override-review  # merge despite a BLOCK verdict
-#   swarm-merge.sh <issue#> --override-migration-gate  # merge despite a migration collision
+#   swarm-merge.sh <issue#|PR#>       # resolves PR from issue (or issue from
+#                                      # PR), merges, cleans
+#   swarm-merge.sh <issue#|PR#> --no-kill # skip the tmux-kill step
+#   swarm-merge.sh <issue#|PR#> --override-review  # merge despite a BLOCK verdict
+#   swarm-merge.sh <issue#|PR#> --override-migration-gate  # merge despite a migration collision
 #   swarm-merge.sh --sweep-only       # just run the local-branch sweep
 #
 # What it does:
-#   1. Resolves the PR linked to the issue.
+#   1. Resolves the given number as either an issue or a PR (GitHub shares
+#      one numbering sequence, so #N is exactly one object). Given an issue,
+#      resolves its linked PR (unchanged pre-#324 behavior). Given a PR,
+#      walks back to its linked issue so the issue-keyed cleanup below
+#      (tmux window, worktree, branch sweep) still knows what to clean —
+#      if the PR has no linked issue, the merge proceeds but that cleanup
+#      is skipped (and said so explicitly) rather than silently no-opped.
 #   2. Verifies the PR is OPEN and MERGEABLE (or already MERGED → just cleans),
 #      and checks the self-review verdict gate: a
 #      <!-- SWARM_SELF_REVIEW: BLOCK --> marker comment (posted by
@@ -130,8 +137,8 @@ fi
 # --- normal mode: require an issue number ---------------------------------
 
 if [ -z "$ISSUE" ]; then
-  echo "ERROR: issue# required (or use --sweep-only)" >&2
-  echo "Usage: $0 <issue#> [--no-kill]" >&2
+  echo "ERROR: issue# or PR# required (or use --sweep-only)" >&2
+  echo "Usage: $0 <issue#|PR#> [--no-kill]" >&2
   exit 2
 fi
 
@@ -146,23 +153,78 @@ echo "[1/7] working in main worktree: $MAIN_WT"
 # shellcheck source=/dev/null
 . "$SCRIPT_DIR/_load-env.sh" "$MAIN_WT"
 
-# Resolve PR from issue.
-PR_NUM=$(gh issue view "$ISSUE" --json closedByPullRequestsReferences \
-           -q '.closedByPullRequestsReferences[0].number' 2>/dev/null || echo "")
-if [ -z "$PR_NUM" ] || [ "$PR_NUM" = "null" ]; then
-  echo "ERROR: no linked PR found for issue #$ISSUE" >&2
-  exit 1
+# Resolve the given number as either an issue or a PR — GitHub shares one
+# numbering sequence, so #N is exactly one object and this is unambiguous.
+INPUT_NUM="$ISSUE"
+ISSUE=""
+PR_NUM=""
+
+IS_PR=$(gh api "repos/{owner}/{repo}/issues/$INPUT_NUM" --jq '.pull_request != null' 2>/dev/null || echo "")
+
+if [ "$IS_PR" = "true" ]; then
+  PR_NUM="$INPUT_NUM"
+  echo "[2/7] #$INPUT_NUM is PR #$PR_NUM"
+elif [ "$IS_PR" = "false" ]; then
+  ISSUE="$INPUT_NUM"
+  PR_NUM=$(gh issue view "$ISSUE" --json closedByPullRequestsReferences \
+             -q '.closedByPullRequestsReferences[0].number' 2>/dev/null || echo "")
+  if [ -z "$PR_NUM" ] || [ "$PR_NUM" = "null" ]; then
+    echo "ERROR: no linked PR found for issue #$ISSUE" >&2
+    exit 1
+  fi
+  echo "[2/7] issue #$ISSUE → PR #$PR_NUM"
+else
+  # The probe itself failed (rate limit, transient network, expired auth) —
+  # distinct from a clean "false" (definitely an issue). Rather than treat
+  # that the same as "definitely not a PR" and abort, retry classification
+  # directly against both endpoints before giving up. Issue-first, since
+  # that's the pre-#324 path every existing invocation relied on; PR second,
+  # so a flaky probe doesn't regress #324's own PR-number case either.
+  echo "       $(c_amber "⚠ could not classify #$INPUT_NUM via gh api (transient failure?) — trying issue and PR lookups directly")"
+  ISSUE="$INPUT_NUM"
+  PR_NUM=$(gh issue view "$ISSUE" --json closedByPullRequestsReferences \
+             -q '.closedByPullRequestsReferences[0].number' 2>/dev/null || echo "")
+  if [ -n "$PR_NUM" ] && [ "$PR_NUM" != "null" ]; then
+    echo "[2/7] issue #$ISSUE → PR #$PR_NUM (resolved via fallback)"
+  elif gh pr view "$INPUT_NUM" --json number >/dev/null 2>&1; then
+    ISSUE=""
+    PR_NUM="$INPUT_NUM"
+    echo "[2/7] #$INPUT_NUM resolved directly as PR #$PR_NUM (resolved via fallback)"
+  else
+    echo "ERROR: could not resolve #$INPUT_NUM as an issue or PR (gh api classification failed, and neither an issue nor PR lookup succeeded)" >&2
+    exit 1
+  fi
 fi
-echo "[2/7] issue #$ISSUE → PR #$PR_NUM"
 
 # Inspect PR state.
-PR_JSON=$(gh pr view "$PR_NUM" --json state,mergeable,headRefName,title)
+PR_JSON=$(gh pr view "$PR_NUM" --json state,mergeable,headRefName,title,closingIssuesReferences)
 PR_STATE=$(echo "$PR_JSON" | jq -r .state)
 PR_MERGEABLE=$(echo "$PR_JSON" | jq -r .mergeable)
 PR_BRANCH=$(echo "$PR_JSON" | jq -r .headRefName)
 PR_TITLE=$(echo "$PR_JSON" | jq -r .title)
 echo "[3/7] PR #$PR_NUM: state=$PR_STATE mergeable=$PR_MERGEABLE branch=$PR_BRANCH"
 echo "       title: $PR_TITLE"
+
+if [ -z "$ISSUE" ]; then
+  # Local artifacts (tmux window, worktree, branch) are keyed on the branch
+  # name provision-worker.sh assigned at spawn time — prefer that as the
+  # stronger signal over closingIssuesReferences, which only reflects
+  # closing keywords in the PR *body* (empty for a title-only "fixes #N")
+  # and, being free-text, could in principle name a different issue than
+  # the one this actual worker branch belongs to.
+  if [[ "$PR_BRANCH" =~ ^fix/issue-([0-9]+) ]]; then
+    ISSUE="${BASH_REMATCH[1]}"
+    echo "       branch name encodes issue #$ISSUE — using it for cleanup"
+  else
+    LINKED_ISSUE=$(echo "$PR_JSON" | jq -r '.closingIssuesReferences[0].number // empty')
+    if [ -n "$LINKED_ISSUE" ]; then
+      ISSUE="$LINKED_ISSUE"
+      echo "       branch name doesn't match fix/issue-N; using closing-issue reference #$ISSUE instead"
+    else
+      echo "       $(c_amber "⚠ no linked issue — issue-keyed cleanup (tmux window / worktree) will be skipped")"
+    fi
+  fi
+fi
 
 case "$PR_STATE" in
   OPEN)
@@ -238,36 +300,41 @@ case "$PR_STATE" in
     ;;
 esac
 
-# Wait for watcher to reap the worktree + tmux window.
-TMUX_WIN="iss-$ISSUE"
-WORKTREE_DIR="$(swarm_worktree_dir "$MAIN_WT" "$ISSUE")"
-echo "[5/7] waiting up to ${GRACE_SECONDS}s for watcher reap of $TMUX_WIN + $(basename "$WORKTREE_DIR")…"
-elapsed=0
-while [ $elapsed -lt $GRACE_SECONDS ]; do
-  tmux_alive=0
-  wt_alive=0
-  tmux list-windows 2>/dev/null | grep -qE ": ${TMUX_WIN}[* -]?\b" && tmux_alive=1
-  [ -e "$WORKTREE_DIR/.git" ] && wt_alive=1
-  if [ $tmux_alive -eq 0 ] && [ $wt_alive -eq 0 ]; then
-    echo "       reaped after ${elapsed}s ✓"
-    break
-  fi
-  sleep 3
-  elapsed=$((elapsed+3))
-done
+if [ -n "$ISSUE" ]; then
+  # Wait for watcher to reap the worktree + tmux window.
+  TMUX_WIN="iss-$ISSUE"
+  WORKTREE_DIR="$(swarm_worktree_dir "$MAIN_WT" "$ISSUE")"
+  echo "[5/7] waiting up to ${GRACE_SECONDS}s for watcher reap of $TMUX_WIN + $(basename "$WORKTREE_DIR")…"
+  elapsed=0
+  while [ $elapsed -lt $GRACE_SECONDS ]; do
+    tmux_alive=0
+    wt_alive=0
+    tmux list-windows 2>/dev/null | grep -qE ": ${TMUX_WIN}[* -]?\b" && tmux_alive=1
+    [ -e "$WORKTREE_DIR/.git" ] && wt_alive=1
+    if [ $tmux_alive -eq 0 ] && [ $wt_alive -eq 0 ]; then
+      echo "       reaped after ${elapsed}s ✓"
+      break
+    fi
+    sleep 3
+    elapsed=$((elapsed+3))
+  done
 
-# If still alive, manually kill (unless --no-kill).
-if [ "$NO_KILL" = 0 ]; then
-  if tmux list-windows 2>/dev/null | grep -qE ": ${TMUX_WIN}[* -]?\b"; then
-    echo "[6/7] watcher didn't reap; killing tmux window $TMUX_WIN"
-    tmux kill-window -t "$TMUX_WIN" 2>/dev/null || true
-  fi
-  if [ -e "$WORKTREE_DIR/.git" ]; then
-    echo "[6/7] watcher didn't reap; removing worktree $WORKTREE_DIR"
-    git worktree remove --force "$WORKTREE_DIR" 2>/dev/null || true
+  # If still alive, manually kill (unless --no-kill).
+  if [ "$NO_KILL" = 0 ]; then
+    if tmux list-windows 2>/dev/null | grep -qE ": ${TMUX_WIN}[* -]?\b"; then
+      echo "[6/7] watcher didn't reap; killing tmux window $TMUX_WIN"
+      tmux kill-window -t "$TMUX_WIN" 2>/dev/null || true
+    fi
+    if [ -e "$WORKTREE_DIR/.git" ]; then
+      echo "[6/7] watcher didn't reap; removing worktree $WORKTREE_DIR"
+      git worktree remove --force "$WORKTREE_DIR" 2>/dev/null || true
+    fi
+  else
+    echo "[6/7] --no-kill set; leaving tmux window / worktree alone"
   fi
 else
-  echo "[6/7] --no-kill set; leaving tmux window / worktree alone"
+  echo "[5/7] no linked issue for PR #$PR_NUM — skipping tmux/worktree reap wait"
+  echo "[6/7] no linked issue for PR #$PR_NUM — skipping tmux/worktree kill"
 fi
 
 # Run the safer local-branch sweep.
@@ -275,4 +342,8 @@ echo "[7/7] running local-branch sweep…"
 run_sweep
 
 echo
-echo "$(c_green "Done.") PR #$PR_NUM merged for issue #$ISSUE."
+if [ -n "$ISSUE" ]; then
+  echo "$(c_green "Done.") PR #$PR_NUM merged for issue #$ISSUE."
+else
+  echo "$(c_green "Done.") PR #$PR_NUM merged (no linked issue)."
+fi

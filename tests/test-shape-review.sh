@@ -52,6 +52,7 @@ cat > "$TEST_DIR/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 echo "$*" >> "$GH_LOG"
 case "${1:-} ${2:-}" in
+    "api repos/{owner}/{repo}/issues/"*) echo "false"; exit 0 ;;
     "pr diff")    echo "diff --git a/f.txt b/f.txt"; exit 0 ;;
     "pr comment") exit 0 ;;
     "pr merge")   exit 0 ;;
