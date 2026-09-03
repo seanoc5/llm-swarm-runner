@@ -240,7 +240,7 @@ esac
 
 # Wait for watcher to reap the worktree + tmux window.
 TMUX_WIN="iss-$ISSUE"
-WORKTREE_DIR="$(dirname "$MAIN_WT")/wt-issue-$ISSUE"
+WORKTREE_DIR="$(swarm_worktree_dir "$MAIN_WT" "$ISSUE")"
 echo "[5/7] waiting up to ${GRACE_SECONDS}s for watcher reap of $TMUX_WIN + $(basename "$WORKTREE_DIR")…"
 elapsed=0
 while [ $elapsed -lt $GRACE_SECONDS ]; do
