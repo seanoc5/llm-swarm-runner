@@ -295,11 +295,17 @@ heading "Test 6: real (non-DRY_RUN) /quit injection against a fake worker REPL"
 FAKE_REPL="$TEST_DIR/fake-worker-repl.sh"
 cat > "$FAKE_REPL" <<'REPL'
 #!/usr/bin/env bash
+# $1: the brief file this session's listener would claim on /quit — mirrors
+# worker-listener.sh's claim_next_task() atomic mv out of inbox/, since that
+# mv (worker_pending_brief() going false) is now what maybe_worker_deliver_
+# brief() actually keys success on (issue #344), not pane state.
+BRIEF="$1"; PROCESSING_TARGET="$2"
 render() { echo 'sonnet · wt-issue-42 · ctx: 20k/1M (2%)'; printf '❯ \n'; }
 render
 while IFS= read -r line; do
     [ -z "$line" ] && continue
     if [ "$line" = "/quit" ]; then
+        mv "$BRIEF" "$PROCESSING_TARGET" 2>/dev/null || true
         exit 0
     fi
     clear
@@ -313,13 +319,15 @@ DRY_RUN=0
 WORKER_DELIVER_END_TIMEOUT_SECS=10
 WORKER_DELIVER_POLL_SECS=1
 : > "$EVENTS_LOG"
-rm -f "$INBOX_DIR"/*.md
-echo "a follow-up brief" > "$INBOX_DIR/20260826-140000-42.md"
+rm -f "$INBOX_DIR"/*.md "$PROCESSING_DIR"/*.md
+BRIEF_FILE="$INBOX_DIR/20260826-140000-42.md"
+echo "a follow-up brief" > "$BRIEF_FILE"
+PROCESSING_TARGET="$PROCESSING_DIR/$(basename "$BRIEF_FILE")"
 set_current_task "t2" "ready-for-review"   # current task already finished
 
 tmux send-keys -t "$SESSION_NAME:$WIN" C-c
 sleep 0.3
-tmux send-keys -t "$SESSION_NAME:$WIN" "bash -c 'exec -a claude bash $FAKE_REPL'" Enter
+tmux send-keys -t "$SESSION_NAME:$WIN" "bash -c 'exec -a claude bash $FAKE_REPL \"$BRIEF_FILE\" \"$PROCESSING_TARGET\"'" Enter
 check_eventually "fake REPL foreground (argv[0]=claude) -> cli" "cli" "worker_pane_state '$WIN'"
 
 maybe_worker_deliver_brief "$WIN"
@@ -337,6 +345,8 @@ else
     green "no false-positive worker.deliver.timeout on a successful exit"
     PASS=$((PASS + 1))
 fi
+rc=0; worker_pending_brief "$WT_DIR" || rc=$?
+check "brief left inbox/ (claimed by the fake listener) -> worker_pending_brief now rc1" "1" "$rc"
 
 heading "Test 7: agent doesn't recognize /quit (e.g. a non-claude CLI) -> times out and fails safe"
 # Same shape as Test 6's fixture, but this fake REPL never treats /quit as
@@ -371,6 +381,73 @@ WORKER_DELIVER_END_TIMEOUT_SECS=3 WORKER_DELIVER_POLL_SECS=1 maybe_worker_delive
 if grep -q 'worker.deliver.timeout' "$EVENTS_LOG"; then got=timedout; else got=nottimedout; fi
 check "agent doesn't recognize /quit -> times out (fails safe)" "timedout" "$got"
 check "pane still 'cli' -> the session was never actually ended" "cli" "$(worker_pane_state "$WIN")"
+
+heading "Test 8: relaunch-race (issue #344) — /quit followed by an IMMEDIATE relaunch must still record success, never a false timeout/retract into the new session"
+# The bug this closes: worker-listener.sh's claim_next_task() atomically
+# claims the brief and dispatch_agent() re-launches claude within the SAME
+# WORKER_DELIVER_POLL_SECS window /quit ended the old session in, so the
+# pane can go cli -> shell -> cli again entirely between two polls and
+# worker_pane_state never observably rests at "shell". Test 6's fixture (a
+# plain `exit 0` on /quit, landing the pane at idle bash forever) cannot
+# exercise this race at all — this fixture relaunches itself the instant
+# /quit lands, via the outer `while true` loop below, the same sequence the
+# real listener produces.
+unset 'WORKER_DELIVER_LAST_FAIL[42]' 'WORKER_DELIVER_FAIL_COUNT[42]' 'WORKER_DELIVER_GAVE_UP[42]'
+FAKE_REPL3="$TEST_DIR/fake-worker-repl-relaunch.sh"
+cat > "$FAKE_REPL3" <<'REPL'
+#!/usr/bin/env bash
+# $1: the brief file this session's listener would claim on /quit.
+# $2: where claim_next_task's atomic mv would land it (processing/).
+BRIEF="$1"; PROCESSING_TARGET="$2"
+render() { echo 'sonnet · wt-issue-42 · ctx: 20k/1M (2%)'; printf '❯ \n'; }
+render
+if [ -f "$BRIEF" ]; then
+    # Pre-/quit session: the one with the pending brief still in inbox/.
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        if [ "$line" = "/quit" ]; then
+            mv "$BRIEF" "$PROCESSING_TARGET" 2>/dev/null || true
+            exit 0
+        fi
+        clear
+        echo "resumed: $line"
+        render
+    done
+else
+    # Relaunched session: the brief is already claimed — sit idle, exactly
+    # like the new agent turn dispatch_agent() just started.
+    while IFS= read -r line; do :; done
+fi
+REPL
+chmod +x "$FAKE_REPL3"
+
+: > "$EVENTS_LOG"
+rm -f "$INBOX_DIR"/*.md "$PROCESSING_DIR"/*.md
+BRIEF_FILE2="$INBOX_DIR/20260826-160000-42.md"
+echo "relaunch-race brief" > "$BRIEF_FILE2"
+PROCESSING_TARGET2="$PROCESSING_DIR/$(basename "$BRIEF_FILE2")"
+set_current_task "t4" "ready-for-review"   # current task already finished
+
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.3
+tmux send-keys -t "$SESSION_NAME:$WIN" "while true; do bash -c 'exec -a claude bash $FAKE_REPL3 \"$BRIEF_FILE2\" \"$PROCESSING_TARGET2\"'; done" Enter
+check_eventually "relaunch-loop fake REPL foreground (argv[0]=claude) -> cli" "cli" "worker_pane_state '$WIN'"
+
+maybe_worker_deliver_brief "$WIN"
+
+rc=0; worker_pending_brief "$WT_DIR" || rc=$?
+check "brief left inbox/ (claimed) despite the instant relaunch" "1" "$rc"
+if grep -q 'worker.deliver.ended' "$EVENTS_LOG"; then got=ended; else got=notended; fi
+check "worker.deliver.ended logged even though the pane never observably rested at 'shell'" "ended" "$got"
+if grep -q 'worker.deliver.timeout' "$EVENTS_LOG"; then got=timedout; else got=nottimedout; fi
+check "no false worker.deliver.timeout on the relaunch race" "nottimedout" "$got"
+if grep -qE 'worker\.deliver\.(retract|delivered_as_text)' "$EVENTS_LOG"; then got=touched; else got=untouched; fi
+check "compact_retract_queued/delivered_as_text never fired into the relaunched live session" "untouched" "$got"
+
+# Stop the relaunch loop — nothing later in the suite reuses $WIN, but leave
+# the pane tidy rather than respawning fake sessions for the rest of the run.
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.2
 
 echo
 green "All $PASS checks passed."
