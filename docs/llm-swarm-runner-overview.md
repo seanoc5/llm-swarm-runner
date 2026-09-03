@@ -275,8 +275,8 @@ Claude and Gemini coordinators/workers can talk to a local **OpenBrain** MCP ser
 
 | Where | Config | Mounted into worker container? |
 |---|---|---|
-| **Claude** (host coordinator) | `~/.claude.json` → `mcpServers.open-brain` (already present) | yes — `~/.claude.json` rw-mounted into sandbox |
-| **Claude** (workers in docker) | inherited via the mount | yes |
+| **Claude** (host coordinator) | `~/.claude.json` → `mcpServers.open-brain` (already present) | yes — inherited into each container's private `~/.claude.json` copy (see [`sandbox.sh`](../sandbox.sh) mount list and [#286](https://github.com/seanoc5/llm-swarm-runner/issues/286)) at that container's *first* launch only, not live afterward |
+| **Claude** (workers in docker) | inherited via that first-seed copy | yes, as of first launch |
 | **Gemini** (host coordinator) | `~/.gemini/settings.json` → `mcpServers.open-brain` (added `gemini mcp add open-brain ... -s user -t http --trust`) | yes when present |
 | **Gemini** (workers in docker) | inherited via mount | yes — `~/.gemini` ro-mounted into sandbox if it exists |
 | **Codex** (host coordinator) | `~/.codex/config.toml` → MCP entry not configured yet | yes — `~/.codex` rw-mounted into sandbox |
