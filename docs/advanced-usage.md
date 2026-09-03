@@ -89,7 +89,7 @@ git worktree remove ../myproject-wt2
 
 Set this **before** any worktrees exist for the project — there is no automatic migration between layouts, so switching it after the fact leaves existing worktrees at the old path while new ones land at the new path.
 
-**The triage/revive examples elsewhere in this doc (and `requeue.sh`) assume `flat` layout** — paths like `../wt-issue-N` or `$(dirname $PWD)/wt-issue-$issue` resolve to the wrong location under `project` grouping. If your project uses `project` grouping, adjust those paths to `<project>-worktrees/wt-issue-N` instead.
+**The triage/revive examples elsewhere in this doc assume `flat` layout** — paths like `../wt-issue-N` or `$(dirname $PWD)/wt-issue-$issue` resolve to the wrong location under `project` grouping. If your project uses `project` grouping, adjust those paths to `<project>-worktrees/wt-issue-N` instead. (`requeue.sh`'s numeric-issue form resolves this itself via `swarm_worktree_dir()` and needs no adjustment — pass an explicit worktree path if you want to bypass grouping resolution.)
 
 ## Custom Configuration
 

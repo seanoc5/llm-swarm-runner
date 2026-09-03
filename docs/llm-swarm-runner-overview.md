@@ -590,7 +590,7 @@ Runs in seconds. Pair with `test-e2e-swarm.sh` for full claude/gemini path cover
 Deterministic coverage for `requeue.sh` and `kill-worktree.sh` — the two destructive/critical helpers in the triage workflow. Sets up a fixture git repo + worktree on issue #99, then exercises both scripts across their main paths.
 
 Covers:
-- `requeue.sh`: numeric-issue arg vs path arg, stdin brief vs file brief, missing-worktree error, missing-brief-file error, no `.tmp.*` leaks on failure
+- `requeue.sh`: numeric-issue arg vs path arg, `SWARM_WORKTREE_GROUPING=project` resolution, stdin brief vs file brief, missing-worktree error, missing-brief-file error, no `.tmp.*` leaks on failure
 - `kill-worktree.sh`: worktree+branch removal, `Worktree state: N commit(s) ahead, M uncommitted` reporting, idempotent re-runs on missing pieces
 
 Runs in seconds. No LLM, no tmux, no network. Use `KEEP=1` to retain the temp dir for inspection.

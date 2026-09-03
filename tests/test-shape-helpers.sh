@@ -55,6 +55,20 @@ basename "${inbox[0]}" | grep -qE '^[0-9]{8}-[0-9]{6}-99\.md$' \
 grep -q "test brief from stdin" "${inbox[0]}" || red "stdin brief content missing"
 green "numeric arg resolves to ../wt-issue-N; stdin brief; filename has -99 hint"
 
+heading "Test 1b: requeue.sh honors SWARM_WORKTREE_GROUPING=project (issue #318)"
+cd "$TEST_DIR/myproject"
+git worktree add -q -b fix/issue-199 ../myproject-worktrees/wt-issue-199 master
+WT_GROUPED="$TEST_DIR/myproject-worktrees/wt-issue-199"
+mkdir -p "$WT_GROUPED/.swarm/tasks/inbox"
+echo "grouped brief" | SWARM_WORKTREE_GROUPING=project "$REQUEUE" 199 - >/tmp/requeue-out 2>&1 \
+    || red "requeue exit non-zero under project grouping: $(cat /tmp/requeue-out)"
+mapfile -t grouped_inbox < <(ls "$WT_GROUPED"/.swarm/tasks/inbox/*.md 2>/dev/null)
+[ "${#grouped_inbox[@]}" -eq 1 ] || red "expected 1 inbox file under project-grouped path, got ${#grouped_inbox[@]}"
+grep -q "grouped brief" "${grouped_inbox[0]}" || red "grouped brief content missing"
+git worktree remove --force "$WT_GROUPED"
+git branch -q -D fix/issue-199
+green "numeric arg resolves to <project>-worktrees/wt-issue-N under SWARM_WORKTREE_GROUPING=project"
+
 heading "Test 2: requeue.sh by path arg, brief from file"
 brief_file=$(mktemp)
 echo "brief from file" > "$brief_file"
@@ -117,6 +131,6 @@ grep -q "branch fix/issue-99 not present (skipped)" /tmp/kill-out \
 green "idempotent re-run succeeds with 'skipped' notes"
 
 heading "All shape-helper tests passed"
-echo "  requeue.sh: numeric+path args, stdin+file briefs, error paths, no .tmp leaks"
+echo "  requeue.sh: numeric+path args, SWARM_WORKTREE_GROUPING=project, stdin+file briefs, error paths, no .tmp leaks"
 echo "  kill-worktree.sh: removal, commits-ahead reporting, idempotency"
 yellow "Run with KEEP=1 to leave $TEST_DIR for inspection."

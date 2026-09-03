@@ -11,7 +11,9 @@
 # half-written brief. Generates a timestamped task id from the wall clock.
 #
 # If the first arg is purely numeric, it's treated as an issue number and
-# resolved to ../wt-issue-<N> relative to PWD. Otherwise it's a path.
+# resolved via swarm_worktree_dir() (honors SWARM_WORKTREE_GROUPING in
+# <PWD>/.swarm/.env — flat: ../wt-issue-<N>, project: ../<project>-worktrees/
+# wt-issue-<N>). Otherwise it's a path.
 #
 # After dropping the brief, prints a hint about whether the listener tmux
 # window exists — so you don't sit waiting for a brief that nothing is
@@ -29,7 +31,9 @@ SOURCE="${2:?usage: requeue.sh <wt-path|issue-N> <brief-file|->}"
 # Resolve target → absolute worktree dir + (optional) issue hint for filename
 ISSUE_HINT=""
 if [[ "$TARGET" =~ ^[0-9]+$ ]]; then
-    WT="$(dirname "$PWD")/wt-issue-$TARGET"
+    # shellcheck source=_load-env.sh
+    . "$SCRIPT_DIR/_load-env.sh" "$PWD"
+    WT="$(swarm_worktree_dir "$PWD" "$TARGET")"
     ISSUE_HINT="-$TARGET"
 else
     WT="$TARGET"
