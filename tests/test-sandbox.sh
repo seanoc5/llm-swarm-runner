@@ -157,6 +157,57 @@ else
     skip "_JAVA_OPTIONS pass-through" "/var/run/docker.sock not present"
 fi
 
+# SANDBOX_DEP_CACHE (#330): shared read-only JVM dependency cache knob.
+if [ -S /var/run/docker.sock ]; then
+    # Fixture MUST live under REPO_ROOT, not /tmp: this test suite itself
+    # typically runs inside a swarm worker sandbox talking to the host
+    # daemon over a mounted docker.sock (DooD), so bind-mount sources
+    # resolve against the real host's filesystem, not this container's.
+    # REPO_ROOT is guaranteed identical on both sides (sandbox.sh's own
+    # same-host-container-path convention for PROJECT_DIR); a bare /tmp
+    # path here would silently resolve to a different, unrelated /tmp on
+    # the host and the mount checks below would test nothing real.
+    _dep_cache_fixture="$(mktemp -d -p "$REPO_ROOT")"
+    mkdir -p "$_dep_cache_fixture/gradle/modules-2"
+
+    # Unset (default): byte-identical to before the knob existed — no
+    # GRADLE_RO_DEP_CACHE reaches the container.
+    output=$(env -u SANDBOX_DEP_CACHE "$REPO_ROOT/sandbox.sh" /tmp printenv GRADLE_RO_DEP_CACHE 2>&1) || true
+    [[ "$output" != *"GRADLE_RO_DEP_CACHE"* && "$output" != *"/gradle"* ]] \
+        && pass "SANDBOX_DEP_CACHE unset -> no GRADLE_RO_DEP_CACHE" "$output" \
+        || fail "SANDBOX_DEP_CACHE unset -> no GRADLE_RO_DEP_CACHE" "$output"
+
+    # Valid path (has <dir>/gradle/modules-2): GRADLE_RO_DEP_CACHE resolves
+    # to <dir>/gradle, and the mount is read-only.
+    output=$(SANDBOX_DEP_CACHE="$_dep_cache_fixture" "$REPO_ROOT/sandbox.sh" /tmp printenv GRADLE_RO_DEP_CACHE 2>&1)
+    container_value=$(tail -n1 <<< "$output")
+    [[ "$container_value" == "$_dep_cache_fixture/gradle" ]] \
+        && pass "SANDBOX_DEP_CACHE valid path -> GRADLE_RO_DEP_CACHE=<dir>/gradle" "$output" \
+        || fail "SANDBOX_DEP_CACHE valid path -> GRADLE_RO_DEP_CACHE=<dir>/gradle" "$output"
+
+    # NOTE: pass the script as a single argument, NOT as separate "bash" "-c"
+    # words — sandbox.sh's AGENT detection only special-cases the literal
+    # tokens claude/gemini/codex/listener, so an explicit "bash" is never
+    # shifted off and gets folded back into the command via "$*", producing
+    # a doubled `bash -c "bash -c ..."` invocation. Passing one pre-built
+    # script string hits the same wildcard `bash -c "$*"` path cleanly.
+    output=$(SANDBOX_DEP_CACHE="$_dep_cache_fixture" "$REPO_ROOT/sandbox.sh" /tmp \
+        "touch '$_dep_cache_fixture/gradle/modules-2/should-fail' 2>&1; echo \"exit=\$?\"" 2>&1)
+    [[ "$output" == *"Read-only file system"* && "$output" == *"exit="* && "$output" != *"exit=0"* ]] \
+        && pass "SANDBOX_DEP_CACHE mount is read-only" "$output" \
+        || fail "SANDBOX_DEP_CACHE mount is read-only" "$output"
+
+    # Invalid path (no <dir>/gradle/modules-2): warns to stderr, still launches.
+    output=$(SANDBOX_DEP_CACHE=/nonexistent-dep-cache-xyz "$REPO_ROOT/sandbox.sh" /tmp "echo LAUNCHED" 2>&1)
+    [[ "$output" == *"WARNING"* && "$output" == *"LAUNCHED"* ]] \
+        && pass "SANDBOX_DEP_CACHE bad path warns + still launches" "$output" \
+        || fail "SANDBOX_DEP_CACHE bad path warns + still launches" "$output"
+
+    rm -rf "$_dep_cache_fixture"
+else
+    skip "SANDBOX_DEP_CACHE" "/var/run/docker.sock not present"
+fi
+
 # Test EXTRA_MOUNTS same-path shorthand (path:ro → same path in container)
 output=$(EXTRA_MOUNTS="/tmp:ro" docker run --rm \
     --network host \

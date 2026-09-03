@@ -156,6 +156,32 @@ docker inspect swarm-llm-<project>-iss-<N> \
 
 The non-`/home`-or-docker-socket lines should be exactly the host paths you put in `EXTRA_MOUNTS`. If a path is missing, the propagation broke somewhere between `.swarm/.env` and the `docker run` invocation. Don't bother with `tmux show-env … EXTRA_MOUNTS` — `EXTRA_MOUNTS` never lands in the tmux session environment; it travels as a prefix on the `tmux new-window` command that starts the worker listener (`provision-worker.sh:412`), not through `tmux new-session -e`/`set-environment`, so `show-env` shows nothing even on a healthy setup. Instead check the listener's actual launch command with `tmux -L swarm-<project> capture-pane -t llm-<project>:iss-<N> -pS -100` (scroll to the top of the pane for the `EXTRA_MOUNTS=...` prefix), or just read `<project>/.swarm/.env` directly.
 
+### Shared read-only JVM dependency cache (`SANDBOX_DEP_CACHE`)
+
+Every fresh worker container starts with an empty `GRADLE_USER_HOME`, so without this knob each worker re-downloads the same jars from Maven Central on every `./gradlew` invocation — slow, and on a swarm running several JVM workers concurrently, redundant N times over. `SANDBOX_DEP_CACHE` points `sandbox.sh` at a host-maintained Gradle module cache that gets bind-mounted **read-only** into every worker and exported as `GRADLE_RO_DEP_CACHE`, which Gradle's [shared read-only dependency cache](https://docs.gradle.org/current/userguide/dependency_resolution.html#sub:shared-readonly-cache) feature reads from before hitting the network. It replaces an earlier per-project stopgap of hand-declaring `EXTRA_MOUNTS` + a `.sandbox-env` line for the same effect.
+
+```bash
+# /opt/work/myproject/.swarm/.env  — gitignored
+SANDBOX_DEP_CACHE=/opt/swarm-cache
+```
+
+`sandbox.sh` expects the Gradle cache under `<dir>/gradle/modules-2/...` — i.e. with `SANDBOX_DEP_CACHE=/opt/swarm-cache`, the mount source is `/opt/swarm-cache/gradle` and `GRADLE_RO_DEP_CACHE` inside the container resolves to that same path (host and container paths always match, so the value is identical on both sides). A successful build prints `Shared read-only dependency cache is an incubating feature.` near the start of the run — that's Gradle confirming it picked up the mount.
+
+**Seed or refresh the cache** from a host Gradle install that already has the dependencies downloaded:
+
+```bash
+rsync -a --exclude='*.lock' --exclude='gc.properties' \
+    ~/.gradle/caches/modules-2/ /opt/swarm-cache/gradle/modules-2/
+```
+
+Re-run the same command any time the seed goes stale (new dependency versions land in projects but not yet in the cache) — this doc does not prescribe scheduling that as a cron/timer job, just the command.
+
+**Nothing may write to `<dir>/gradle` while a build reads it.** Gradle does not lock the read-only dependency cache, so a concurrent writer is undefined behavior — corrupted reads, not just a stale cache. This is also why the cache path must never be `$HOME/.gradle`: the coordinator itself runs unsandboxed directly on the host (`llm-start.sh` → `scripts/coordinator-claude.sh`, no docker), and any Gradle use on the coordinator's side writes `~/.gradle` live — pointing `SANDBOX_DEP_CACHE` there would make the coordinator a concurrent writer to a cache workers are concurrently reading. Keep the cache at a dedicated path like `/opt/swarm-cache` that nothing but the seed/refresh command above ever writes to.
+
+Unset or empty (the default) produces byte-identical `docker run` args to before this knob existed — no extra mount, no `GRADLE_RO_DEP_CACHE`. If the configured path exists but has no `<dir>/gradle/modules-2`, `sandbox.sh` warns to stderr and skips the mount rather than blocking worker launch — a stale or mistyped host config shouldn't make every worker unlaunchable.
+
+This covers the Gradle half only. Maven's local repo (`~/.m2/repository`) isn't safe to mount `:ro` the same way — Maven writes `_remote.repositories`/`.lastUpdated` markers during normal resolution and has no read-only shared-cache mode, so a `:ro` mount reads cache hits but fails hard on the first miss instead of falling back to the network. A Maven-side equivalent, if needed, would be a mirror/proxy rather than a direct mount (tracked separately, not covered by this knob).
+
 ### Memory limit (`SANDBOX_MEM_LIMIT`)
 
 Every sandbox container runs with a memory cap, applied as `--memory` and `--memory-swap` (set equal to each other, so the cgroup can't overflow into swap and stall the host on IO). `SANDBOX_MEM_LIMIT` defaults to `8g`; `SANDBOX_MEM_LIMIT=0` disables the cap entirely (ad-hoc debugging only).
