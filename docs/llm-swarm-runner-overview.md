@@ -91,7 +91,8 @@ For a consolidated treatment of tmux as an inter-agent channel — what works to
 Generalized launcher: `sandbox.sh <project-dir> <agent> [extra-args]`
 
 - `<agent>` ∈ `{claude, gemini, codex, listener, bash}` (default `bash`).
-- Mounts: project dir (rw), `~/.claude` (rw), `~/.claude.json` (rw), `~/.codex` (rw), `~/.ssh` (ro), `~/.gitconfig` (ro), `~/.config/gh` (ro), `~/.npm-global` (rw), `~/.npm` (rw), and the script's own dir (ro, so worker-listener.sh is reachable).
+- Mounts: project dir (rw), `~/.claude` (rw), a per-container copy of `~/.claude.json` (rw — see below), `~/.codex` (rw), `~/.ssh` (ro), `~/.gitconfig` (ro), `~/.config/gh` (ro), `~/.npm-global` (rw), `~/.npm` (rw), and the script's own dir (ro, so worker-listener.sh is reachable).
+- **`~/.claude.json` isolation (#286):** rather than bind-mounting the host's `~/.claude.json` directly (which pinned an inode that the CLI's write-temp-then-rename rewrites and sibling containers' rewrites could orphan or tear), `sandbox.sh` seeds a private copy per container under `~/.claude-sandbox-configs/` — keyed by `WORKER_CONTAINER_NAME` when set, else by `PROJECT_DIR` — and reuses it across relaunches. `SANDBOX_REFRESH_CLAUDE_CONFIG=1` forces a reseed from the host file.
 - Auto-mounts the **git common dir** when invoked on a worktree whose `.git` file points outside the project dir.
 - **Docker-out-of-Docker (DooD):** mounts `/var/run/docker.sock` so Testcontainers / `docker` CLI work inside the sandbox; `--group-add` gives the sandbox user write perms on the socket.
 - **GH token passthrough:** reads `gh auth token` on the host and injects as `GH_TOKEN` (necessary because `gh` stores its token in the system keyring on Linux, not in the mounted config dir).
@@ -274,8 +275,8 @@ Claude and Gemini coordinators/workers can talk to a local **OpenBrain** MCP ser
 
 | Where | Config | Mounted into worker container? |
 |---|---|---|
-| **Claude** (host coordinator) | `~/.claude.json` → `mcpServers.open-brain` (already present) | yes — `~/.claude.json` rw-mounted into sandbox |
-| **Claude** (workers in docker) | inherited via the mount | yes |
+| **Claude** (host coordinator) | `~/.claude.json` → `mcpServers.open-brain` (already present) | yes — inherited into each container's private `~/.claude.json` copy (see [`sandbox.sh`](../sandbox.sh) mount list and [#286](https://github.com/seanoc5/llm-swarm-runner/issues/286)) at that container's *first* launch only, not live afterward |
+| **Claude** (workers in docker) | inherited via that first-seed copy | yes, as of first launch |
 | **Gemini** (host coordinator) | `~/.gemini/settings.json` → `mcpServers.open-brain` (added `gemini mcp add open-brain ... -s user -t http --trust`) | yes when present |
 | **Gemini** (workers in docker) | inherited via mount | yes — `~/.gemini` ro-mounted into sandbox if it exists |
 | **Codex** (host coordinator) | `~/.codex/config.toml` → MCP entry not configured yet | yes — `~/.codex` rw-mounted into sandbox |
