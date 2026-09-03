@@ -48,7 +48,7 @@ Unlocks B (judge has structured signal to gate on), D-α (cost telemetry plugs i
 
 - **Lead artifact:** `tests/fixtures/runs/<scenario>/` directories containing recorded `inbox/*.md`, `done/*.json`, plus an `expects.yml` describing the expected coordinator action.
 - **Mechanism:** `tests/test-replay.sh` feeds a fixture into a coordinator wake with mocked `gh` + `tmux` and asserts the coordinator's *next action* matches expectations.
-- **Lead check:** three starting scenarios — happy path (all green ⇒ expects merge), verify-fail (expects park + comment), judge-dissent (expects park + escalate).
+- **Lead check:** four starting scenarios — happy path (all green ⇒ expects merge), verify-fail (expects park + comment), judge-dissent (expects park + escalate), report-grammar (a canned completion report ⇒ expects the first sentence to contain an outcome verb plus either a quantified number or the literal phrase "nothing needs your action", per `prompts/coordinator.md` § "Report grammar (BLUF)").
 - **Size:** 3 days. The plumbing is small; the work is curating realistic fixtures.
 - **Why this slot:** needed before C ships. C is where most prompt-regression risk concentrates, and we want a regression net under us before we touch the dependency-graph protocol.
 
