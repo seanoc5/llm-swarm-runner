@@ -190,7 +190,7 @@ echo "$OUT" | grep -qi "skipping tmux/worktree" && red "should NOT skip issue-ke
 green "no closing-issue reference but fix/issue-N branch name — falls back, cleanup stays issue-keyed"
 
 # ============================================================================
-heading "Test 4: number resolves as neither issue nor PR (probe fails, no linked PR either) — clear error"
+heading "Test 4: number resolves as neither issue nor PR (probe fails, fallback lookups also fail) — clear error"
 # ============================================================================
 cat > "$TEST_DIR/bin/gh" <<'EOF'
 #!/usr/bin/env bash
@@ -199,6 +199,8 @@ case "${1:-} ${2:-}" in
         exit 1 ;;
     "issue view")
         exit 0 ;;
+    "pr view")
+        exit 1 ;;
 esac
 exit 0
 EOF
@@ -241,10 +243,42 @@ EOF
 chmod +x "$TEST_DIR/bin/gh"
 
 OUT=$(timeout 5 "$MERGE" 512 --no-kill 2>&1) || red "gh-api-probe-fails-but-issue-lookup-succeeds path failed:\n$OUT"
-echo "$OUT" | grep -qi "could not classify.*falling back to issue lookup" || red "expected the probe-failure fallback notice, got:\n$OUT"
+echo "$OUT" | grep -qi "could not classify.*trying issue and PR lookups directly" || red "expected the probe-failure fallback notice, got:\n$OUT"
 echo "$OUT" | grep -q "issue #512 → PR #88" || red "expected the fallback to still resolve issue→PR, got:\n$OUT"
 echo "$OUT" | grep -q "merged for issue #512" || red "expected final line to name issue #512, got:\n$OUT"
 green "transient gh api probe failure falls back to the pre-#324 issue-lookup path instead of erroring"
+
+# ============================================================================
+heading "Test 5b: gh api probe fails transiently, number is NOT an issue but IS a PR — symmetric fallback rescues it"
+# ============================================================================
+# self-review caveat (round 4) on the #324 PR: the round-3 fallback only
+# tried gh issue view, so a probe failure on a genuine PR number (#324's
+# own new capability) hard-failed with a false "could not resolve" error
+# instead of being rescued the same way an issue number was. Try gh pr view
+# too before giving up.
+cat > "$TEST_DIR/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+    "api repos/{owner}/{repo}/issues/513")
+        exit 1 ;;
+    "issue view")
+        exit 1 ;;
+    "pr view")
+        case "$*" in
+            *number*) echo '{"number":513}'; exit 0 ;;
+            *state,mergeable*) echo '{"state":"MERGED","mergeable":"MERGEABLE","headRefName":"fix/issue-77","title":"fake","closingIssuesReferences":[]}'; exit 0 ;;
+        esac
+        exit 0 ;;
+esac
+exit 0
+EOF
+chmod +x "$TEST_DIR/bin/gh"
+
+OUT=$(timeout 5 "$MERGE" 513 --no-kill 2>&1) || red "gh-api-probe-fails-but-pr-lookup-succeeds path failed:\n$OUT"
+echo "$OUT" | grep -q "resolved directly as PR #513 (resolved via fallback)" || red "expected the PR-lookup fallback line, got:\n$OUT"
+echo "$OUT" | grep -q "branch name encodes issue #77" || red "expected the resolved PR to still go through normal branch/issue resolution, got:\n$OUT"
+echo "$OUT" | grep -q "merged for issue #77" || red "expected final line to name issue #77, got:\n$OUT"
+green "probe failure on a genuine PR number is rescued by the symmetric gh pr view fallback"
 
 # ============================================================================
 heading "All swarm-merge PR-number resolution tests passed"

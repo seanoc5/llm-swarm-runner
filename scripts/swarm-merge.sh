@@ -164,29 +164,36 @@ IS_PR=$(gh api "repos/{owner}/{repo}/issues/$INPUT_NUM" --jq '.pull_request != n
 if [ "$IS_PR" = "true" ]; then
   PR_NUM="$INPUT_NUM"
   echo "[2/7] #$INPUT_NUM is PR #$PR_NUM"
-else
-  # IS_PR="false" means the probe cleanly resolved INPUT_NUM as an issue.
-  # IS_PR="" means the probe itself failed (rate limit, transient network,
-  # expired auth, or a genuinely nonexistent number) — rather than treat
-  # that the same as "definitely a PR doesn't exist" and abort, fall back
-  # to the pre-#324 issue-lookup path. That path is exactly what every
-  # issue-number invocation relied on before this probe existed, so a
-  # flaky probe never regresses the case that already worked.
-  if [ "$IS_PR" != "false" ]; then
-    echo "       $(c_amber "⚠ could not classify #$INPUT_NUM via gh api (transient failure?) — falling back to issue lookup")"
-  fi
+elif [ "$IS_PR" = "false" ]; then
   ISSUE="$INPUT_NUM"
   PR_NUM=$(gh issue view "$ISSUE" --json closedByPullRequestsReferences \
              -q '.closedByPullRequestsReferences[0].number' 2>/dev/null || echo "")
   if [ -z "$PR_NUM" ] || [ "$PR_NUM" = "null" ]; then
-    if [ "$IS_PR" = "false" ]; then
-      echo "ERROR: no linked PR found for issue #$ISSUE" >&2
-    else
-      echo "ERROR: could not resolve #$INPUT_NUM as an issue or PR (gh api classification failed, and #$INPUT_NUM has no linked PR as an issue either)" >&2
-    fi
+    echo "ERROR: no linked PR found for issue #$ISSUE" >&2
     exit 1
   fi
   echo "[2/7] issue #$ISSUE → PR #$PR_NUM"
+else
+  # The probe itself failed (rate limit, transient network, expired auth) —
+  # distinct from a clean "false" (definitely an issue). Rather than treat
+  # that the same as "definitely not a PR" and abort, retry classification
+  # directly against both endpoints before giving up. Issue-first, since
+  # that's the pre-#324 path every existing invocation relied on; PR second,
+  # so a flaky probe doesn't regress #324's own PR-number case either.
+  echo "       $(c_amber "⚠ could not classify #$INPUT_NUM via gh api (transient failure?) — trying issue and PR lookups directly")"
+  ISSUE="$INPUT_NUM"
+  PR_NUM=$(gh issue view "$ISSUE" --json closedByPullRequestsReferences \
+             -q '.closedByPullRequestsReferences[0].number' 2>/dev/null || echo "")
+  if [ -n "$PR_NUM" ] && [ "$PR_NUM" != "null" ]; then
+    echo "[2/7] issue #$ISSUE → PR #$PR_NUM (resolved via fallback)"
+  elif gh pr view "$INPUT_NUM" --json number >/dev/null 2>&1; then
+    ISSUE=""
+    PR_NUM="$INPUT_NUM"
+    echo "[2/7] #$INPUT_NUM resolved directly as PR #$PR_NUM (resolved via fallback)"
+  else
+    echo "ERROR: could not resolve #$INPUT_NUM as an issue or PR (gh api classification failed, and neither an issue nor PR lookup succeeded)" >&2
+    exit 1
+  fi
 fi
 
 # Inspect PR state.
