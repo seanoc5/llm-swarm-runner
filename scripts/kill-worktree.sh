@@ -3,7 +3,7 @@
 # kill-worktree.sh — remove a worker worktree, its branch, and tmux window.
 #
 # Usage:
-#   kill-worktree.sh <issue-number> [project-dir] [--no-compose-down]
+#   kill-worktree.sh <issue-number> [project-dir] [--no-compose-down] [--refuse-nonempty-inbox]
 #
 # Removes the worktree at <derived path>/wt-issue-<N>, deletes the branch
 # fix/issue-<N>, and kills the tmux window iss-<N> if any. Idempotent —
@@ -21,6 +21,23 @@
 #
 # WARNING: --force is used. Any uncommitted work in the worktree is lost.
 # The script prints how-much-work-will-be-lost before deletion.
+#
+# issue #317: requeue.sh delivers follow-up briefs into <worktree>/.swarm/
+# tasks/inbox/ between tasks; worker-listener.sh atomically claims one by
+# mv'ing it into tasks/processing/ while it runs; workers drop mid-task
+# messages into tasks/outbox/. But the watcher's auto-reap
+# (kill-finished-workers.sh --pr-finalized --with-worktree --yes) fires as
+# soon as the PR is finalized and deliberately bypasses the "listener
+# parked" check in that mode — so it routinely reaps a worker mid-task,
+# with its claimed brief still sitting in processing/, not just an idle
+# worker with a stale inbox/. Before removal, any queued file still in
+# inbox/, processing/, or outbox/ (excluding outbox/processed/, already
+# coordinator-read) is MOVED to
+# <project>/.swarm/salvaged/iss-<N>/{inbox,processing,outbox}/ and a
+# `SALVAGED: ...` line is printed, so an unattended reap preserves the
+# brief instead of silently destroying it. Set --refuse-nonempty-inbox (or
+# SWARM_REAP_INBOX=refuse) to skip the worktree entirely instead (exit 76)
+# for operators who'd rather the reap stall than salvage-and-remove.
 #
 # issue #181: before removing anything, checks for an in-flight check-on-done
 # run (coordinator-watch.sh's maybe_run_check claims a worktree via a
@@ -41,16 +58,47 @@ mtime_epoch() {
 }
 
 NO_COMPOSE_DOWN=0
+REFUSE_NONEMPTY_INBOX=0
 ARGS=()
 for arg in "$@"; do
     case "$arg" in
         --no-compose-down) NO_COMPOSE_DOWN=1 ;;
+        --refuse-nonempty-inbox) REFUSE_NONEMPTY_INBOX=1 ;;
         *) ARGS+=("$arg") ;;
     esac
 done
 set -- "${ARGS[@]+"${ARGS[@]}"}"
+[ "${SWARM_REAP_INBOX:-}" = "refuse" ] && REFUSE_NONEMPTY_INBOX=1
 
-ISSUE="${1:?usage: kill-worktree.sh <issue-number> [project-dir] [--no-compose-down]}"
+# Counts queued files directly in dir (0 if dir absent/empty): any regular
+# file except a `.tmp.*` in-progress write. Mirrors worker-listener.sh's
+# claim_next_task() selection (`find ... -not -name '.tmp.*'`) exactly —
+# that function doesn't restrict by extension, so neither does this; an
+# earlier *.md-only version undercounted a hand-dropped extension-less
+# brief that claim_next_task would still happily dispatch. Local per the
+# self-contained-scripts convention (see mtime_epoch above) — mirrored in
+# kill-finished-workers.sh's count_queued_files for its --dry-run preview.
+count_queued_files() {
+    local dir="$1"
+    [ -d "$dir" ] || { echo 0; return; }
+    find "$dir" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | wc -l | tr -d ' '
+}
+
+# Moves every queued file (same selection as count_queued_files) from src/
+# into dest/, disambiguating a same-named collision (a prior salvage of the
+# same issue) with a UTC timestamp prefix rather than clobbering it.
+salvage_queued_files() {
+    local src="$1" dest="$2" f base target
+    [ -d "$src" ] || return 0
+    while IFS= read -r f; do
+        base="$(basename "$f")"
+        target="$dest/$base"
+        [ -e "$target" ] && target="$dest/$(date -u +%Y%m%dT%H%M%SZ)-$base"
+        mv "$f" "$target"
+    done < <(find "$src" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null)
+}
+
+ISSUE="${1:?usage: kill-worktree.sh <issue-number> [project-dir] [--no-compose-down] [--refuse-nonempty-inbox]}"
 PROJECT_DIR="${2:-$PWD}"
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
 
@@ -124,6 +172,34 @@ if [ -d "$WT" ]; then
     if [ -n "$ACTIVE_CLAIM" ]; then
         echo "  ⏸ in-flight check ($ACTIVE_CLAIM) — deferring worktree removal, retry next reap pass"
         exit 75
+    fi
+
+    # issue #317: refuse or salvage unprocessed queued briefs before this
+    # worktree is destroyed. inbox/ is requeue.sh's follow-up-brief queue;
+    # processing/ holds a brief the listener has already atomically claimed
+    # (mv'd out of inbox/) but not yet finished — a --pr-finalized /
+    # --merged-only reap bypasses the "parked" check specifically so it can
+    # reap a worker mid-task, which makes processing/ the MOST likely place
+    # to find in-flight work, not an edge case; outbox/ (minus
+    # outbox/processed/, already coordinator-read) is the worker's mid-task
+    # message channel. See header comment for rationale.
+    INBOX_COUNT="$(count_queued_files "$WT/.swarm/tasks/inbox")"
+    PROCESSING_COUNT="$(count_queued_files "$WT/.swarm/tasks/processing")"
+    OUTBOX_COUNT="$(count_queued_files "$WT/.swarm/tasks/outbox")"
+    UNPROCESSED=$((INBOX_COUNT + PROCESSING_COUNT + OUTBOX_COUNT))
+    if [ "$UNPROCESSED" -gt 0 ]; then
+        COUNTS_MSG="inbox=$INBOX_COUNT processing=$PROCESSING_COUNT outbox=$OUTBOX_COUNT"
+        if [ "$REFUSE_NONEMPTY_INBOX" = "1" ]; then
+            echo "  ✗ REFUSED: $UNPROCESSED unprocessed brief(s) in iss-$ISSUE ($COUNTS_MSG)"
+            echo "    --refuse-nonempty-inbox / SWARM_REAP_INBOX=refuse is set — worktree, branch, and tmux window left untouched"
+            exit 76
+        fi
+        SALVAGE_DIR="$PROJECT_DIR/.swarm/salvaged/iss-$ISSUE"
+        mkdir -p "$SALVAGE_DIR/inbox" "$SALVAGE_DIR/processing" "$SALVAGE_DIR/outbox"
+        salvage_queued_files "$WT/.swarm/tasks/inbox" "$SALVAGE_DIR/inbox"
+        salvage_queued_files "$WT/.swarm/tasks/processing" "$SALVAGE_DIR/processing"
+        salvage_queued_files "$WT/.swarm/tasks/outbox" "$SALVAGE_DIR/outbox"
+        echo "  ⚠ SALVAGED: $UNPROCESSED unprocessed brief(s) from iss-$ISSUE ($COUNTS_MSG) → $SALVAGE_DIR"
     fi
 
     if [ "$NO_COMPOSE_DOWN" = "1" ]; then

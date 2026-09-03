@@ -18,6 +18,15 @@
 # After dropping the brief, prints a hint about whether the listener tmux
 # window exists — so you don't sit waiting for a brief that nothing is
 # polling.
+#
+# If the worktree gets reaped (kill-finished-workers.sh --with-worktree)
+# before the worker drains its inbox — or even mid-task, since the reap's
+# --pr-finalized/--merged-only modes bypass the "listener parked" check —
+# the brief is NOT lost: kill-worktree.sh salvages any unprocessed
+# inbox/processing/outbox files into <project>/.swarm/salvaged/iss-<N>/
+# before removing the worktree (issue #317). Check there — and re-dispatch
+# if the work is still relevant — if a queued follow-up seems to have
+# vanished.
 set -euo pipefail
 
 # Self-locate so the printed help text references the actual install path,
