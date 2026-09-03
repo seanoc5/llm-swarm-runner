@@ -161,7 +161,10 @@ Every task ends with a single `## Handoff` block — the last thing in the
 pane (after `## Follow-up suggestions` when present; only the opt-in `∎`
 at-rest marker may follow it). The operator reads panes bottom-up and
 triages on the GitHub PR page, so these few lines must carry the whole
-lede — bottom line at the end:
+lede — bottom line at the end. **What** follows the same BLUF discipline as
+`prompts/coordinator.md` § "Report grammar (BLUF)" (outcome + confidence
+first, no codenames, no process narration before the outcome) — that
+section is written for the coordinator but the grammar binds here too:
 
 ```
 ## Handoff

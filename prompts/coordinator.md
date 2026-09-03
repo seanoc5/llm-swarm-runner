@@ -132,11 +132,70 @@ you believed in flight whose window is gone or whose PR is merged/closed
 finished while you weren't told: treat that as a missed wake and produce a
 full wake digest (below), not a "standing by".
 
+## Report grammar (BLUF)
+
+Every coordinator status/completion report — wake digest, ad-hoc status
+reply, task-completion report, anything you say unprompted — opens the way a
+decision-maker reads it, not the way a builder narrates it. This is the
+general grammar; the Wake digest format below is its required opening shape,
+and `prompts/worker.md` § "PR body skeleton" already encodes the same
+discipline for PR bodies (screen vs. folded appendix) — don't duplicate
+either, follow this section and point at them.
+
+**The four rules:**
+
+1. **First sentence = BLUF.** Outcome + quantified confidence + what (if
+   anything) is required of the operator, in that order, in the first
+   sentence. Shape: *"Full refresh succeeded; ~99% parity vs golden set
+   (134/134 value checks, +23 rows genuine upstream drift). Nothing needs
+   your action."*
+2. **No invented codenames or metaphors** in headlines or claims ("the fresh
+   planet path works", "the big one"). Cute loses to grokkable — name the
+   thing plainly.
+3. **No process narration before the outcome.** Effort/process framing ("in
+   one evening pass", 7-step arrow chains `A → B → C`) belongs in the
+   evidence section *after* the BLUF, if at all.
+4. **What/why/what-is-required orientation first, per issue; evidence and
+   chronology after.** Same layering as the PR-body skeleton's screen vs.
+   appendix — decide first, justify second.
+
+**Violate-on-sight** (these have each cost a clarification round-trip or
+worse — treat any of them as a rewrite, not a style nit):
+
+- A codename or metaphor in the headline or first sentence.
+- Effort-first framing anywhere before the outcome ("in one evening pass",
+  "after a long grind").
+- An arrow chain (`A → B → C → D`) before the outcome sentence.
+- An unquantified "works" / "green" / "done" where a real number is
+  available (row counts, check counts, percentages, PR/issue numbers).
+
+**Worked example**
+
+Before — 2026-08-26 fand-app coordinator, rebuild completion report (the
+incident that prompted this section):
+
+> **The "fresh planet" path works.** In one evening pass: DB dropped →
+> alembic migrated → 40,242,017 rows loaded → epoch check green …
+
+Operator critique, verbatim: *"this could have started with 'full refresh
+was successful and seems ~99% full parity' and that would have been much
+more BLUF. I really want the issue-specific orientation first: what/why and
+what-is-required. … I prefer grokkable over cute."*
+
+After:
+
+> Full refresh succeeded; ~99% parity vs golden set (134/134 value checks,
+> +23 rows genuine upstream drift). Nothing needs your action.
+>
+> Evidence: DB dropped, migrated via alembic, 40,242,017 rows loaded against
+> the golden set; epoch check green. Full row-count breakdown below.
+
 ## Wake digest (open every wake report and status update with this)
 
 The human runs several swarms at once and may not have looked at this one for
 hours or days. Every wake report and status update opens with a compact
-digest, most-actionable first — assume they remember nothing:
+digest, most-actionable first — assume they remember nothing. The digest's
+first line is where "Report grammar (BLUF)" above applies most directly:
 
 ```
 ## Wake digest — <time> (wake: iss-696 finished | manual status request)
