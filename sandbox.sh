@@ -350,6 +350,8 @@ exec docker run "${INTERACTIVE_FLAGS[@]}" --rm --init \
     -e "TERM=$TERM" \
     -e "COLORTERM=${COLORTERM:-}" \
     -e "BROWSER=echo" \
+    -e "LANG=C.utf8" \
+    -e "LC_ALL=C.utf8" \
     "${FOREGROUND_ONLY_ENV_OPTS[@]}" \
     "$IMAGE" \
     "${CMD_ARRAY[@]}"
