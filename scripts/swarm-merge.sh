@@ -164,18 +164,29 @@ IS_PR=$(gh api "repos/{owner}/{repo}/issues/$INPUT_NUM" --jq '.pull_request != n
 if [ "$IS_PR" = "true" ]; then
   PR_NUM="$INPUT_NUM"
   echo "[2/7] #$INPUT_NUM is PR #$PR_NUM"
-elif [ "$IS_PR" = "false" ]; then
+else
+  # IS_PR="false" means the probe cleanly resolved INPUT_NUM as an issue.
+  # IS_PR="" means the probe itself failed (rate limit, transient network,
+  # expired auth, or a genuinely nonexistent number) — rather than treat
+  # that the same as "definitely a PR doesn't exist" and abort, fall back
+  # to the pre-#324 issue-lookup path. That path is exactly what every
+  # issue-number invocation relied on before this probe existed, so a
+  # flaky probe never regresses the case that already worked.
+  if [ "$IS_PR" != "false" ]; then
+    echo "       $(c_amber "⚠ could not classify #$INPUT_NUM via gh api (transient failure?) — falling back to issue lookup")"
+  fi
   ISSUE="$INPUT_NUM"
   PR_NUM=$(gh issue view "$ISSUE" --json closedByPullRequestsReferences \
              -q '.closedByPullRequestsReferences[0].number' 2>/dev/null || echo "")
   if [ -z "$PR_NUM" ] || [ "$PR_NUM" = "null" ]; then
-    echo "ERROR: no linked PR found for issue #$ISSUE" >&2
+    if [ "$IS_PR" = "false" ]; then
+      echo "ERROR: no linked PR found for issue #$ISSUE" >&2
+    else
+      echo "ERROR: could not resolve #$INPUT_NUM as an issue or PR (gh api classification failed, and #$INPUT_NUM has no linked PR as an issue either)" >&2
+    fi
     exit 1
   fi
   echo "[2/7] issue #$ISSUE → PR #$PR_NUM"
-else
-  echo "ERROR: could not resolve #$INPUT_NUM as an issue or PR on this repo" >&2
-  exit 1
 fi
 
 # Inspect PR state.

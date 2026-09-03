@@ -190,13 +190,15 @@ echo "$OUT" | grep -qi "skipping tmux/worktree" && red "should NOT skip issue-ke
 green "no closing-issue reference but fix/issue-N branch name — falls back, cleanup stays issue-keyed"
 
 # ============================================================================
-heading "Test 4: number resolves as neither issue nor PR — clear error, no misleading message"
+heading "Test 4: number resolves as neither issue nor PR (probe fails, no linked PR either) — clear error"
 # ============================================================================
 cat > "$TEST_DIR/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 case "${1:-} ${2:-}" in
     "api repos/{owner}/{repo}/issues/99999")
         exit 1 ;;
+    "issue view")
+        exit 0 ;;
 esac
 exit 0
 EOF
@@ -208,8 +210,41 @@ RC=$?
 set -e
 [ "$RC" -ne 0 ] || red "expected non-zero exit for unresolvable number, got 0:\n$OUT"
 echo "$OUT" | grep -q "could not resolve #99999 as an issue or PR" || red "expected explicit resolution-failure error, got:\n$OUT"
-echo "$OUT" | grep -qi "no linked PR found for issue" && red "must NOT emit the old misleading 'no linked PR' message here:\n$OUT"
-green "unresolvable number fails with a clear, non-misleading error"
+green "gh-api-probe failure with no fallback linked PR fails with a clear error"
+
+# ============================================================================
+heading "Test 5: gh api probe fails transiently, but the number IS a known issue — falls back, old behavior preserved"
+# ============================================================================
+# self-review caveat (round 3) on the #324 PR: the new gh-api classification
+# probe is a hard prerequisite even for what used to be a plain issue-number
+# call. A transient gh failure (rate limit, expired auth, network blip) must
+# not regress an issue number that worked fine pre-#324 — fall back to the
+# old gh issue view lookup instead of erroring immediately.
+cat > "$TEST_DIR/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+    "api repos/{owner}/{repo}/issues/512")
+        exit 1 ;;
+    "issue view")
+        case "$*" in
+            *closedByPullRequestsReferences*) echo "88"; exit 0 ;;
+        esac
+        exit 0 ;;
+    "pr view")
+        case "$*" in
+            *state,mergeable*) echo '{"state":"MERGED","mergeable":"MERGEABLE","headRefName":"fix/issue-512","title":"fake","closingIssuesReferences":[]}'; exit 0 ;;
+        esac
+        exit 0 ;;
+esac
+exit 0
+EOF
+chmod +x "$TEST_DIR/bin/gh"
+
+OUT=$(timeout 5 "$MERGE" 512 --no-kill 2>&1) || red "gh-api-probe-fails-but-issue-lookup-succeeds path failed:\n$OUT"
+echo "$OUT" | grep -qi "could not classify.*falling back to issue lookup" || red "expected the probe-failure fallback notice, got:\n$OUT"
+echo "$OUT" | grep -q "issue #512 → PR #88" || red "expected the fallback to still resolve issue→PR, got:\n$OUT"
+echo "$OUT" | grep -q "merged for issue #512" || red "expected final line to name issue #512, got:\n$OUT"
+green "transient gh api probe failure falls back to the pre-#324 issue-lookup path instead of erroring"
 
 # ============================================================================
 heading "All swarm-merge PR-number resolution tests passed"
