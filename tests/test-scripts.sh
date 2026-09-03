@@ -187,10 +187,10 @@ test_repurposed_worktree_reap
 # and `git rev-parse --git-dir` do). Before this fix, reap-orphan-worktrees.sh
 # had no branch for this — the clean-tree check and branch lookup would just
 # misbehave/skip it forever. Reproduces the corruption by removing the main
-# repo's admin dir for the worktree, then asserts the script reaps it via
-# rm -rf + `git worktree prune` (not kill-worktree.sh's `git worktree
-# remove`, which also needs a working registration) once the dirname-derived
-# branch's PR is finalized.
+# repo's admin dir for the worktree, then asserts the script reaps it by
+# rm -rf'ing the worktree dir plus its own (already-gone) admin dir (not
+# kill-worktree.sh's `git worktree remove`, which also needs a working
+# registration) once the dirname-derived branch's PR is finalized.
 test_dangling_registration_reap() {
     local name="dangling git registration reap"
     echo "Checking $name..."
@@ -281,6 +281,115 @@ FAKEGH
     PASS=$((PASS + 1))
 }
 test_dangling_registration_reap
+
+# --- Functional: dangling-worktree reap leaves sibling worktrees alone ------
+#
+# issue #328: three fand-app incidents (2026-09-01) traced live workers'
+# `.git/worktrees/<name>` admin dirs disappearing mid-task — with no other
+# logged cause — to reap_dangling()'s old cleanup step, a bare
+# `git worktree prune`. That call scans and can remove EVERY worktree's
+# admin dir in the registry, not just the one being reaped, so it was
+# racing concurrent git activity in unrelated, still-active worktrees. The
+# fix replaced it with a targeted `rm -rf` of exactly the dangling
+# worktree's own admin dir (see reap_dangling's issue #328 comment). This
+# test reaps one dangling worktree (wt-issue-747, PR merged) alongside a
+# second, healthy, still-active-PR worktree (wt-issue-800) and asserts the
+# healthy one's registration survives completely intact.
+test_dangling_reap_ignores_sibling_worktree() {
+    local name="dangling reap leaves sibling worktree's registration alone"
+    echo "Checking $name..."
+
+    local tmproot
+    tmproot="$(mktemp -d)"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$tmproot'" RETURN
+
+    local project="$tmproot/project"
+    local wt747="$tmproot/wt-issue-747"
+    local wt800="$tmproot/wt-issue-800"
+
+    git -c init.defaultBranch=main init -q "$project" || { red "  ✗ $name: init failed"; FAIL=$((FAIL + 1)); return; }
+    (
+        cd "$project" &&
+        git config user.email test@example.com &&
+        git config user.name "Test" &&
+        echo x > x && git add x && git commit -qm initial
+    ) >/dev/null 2>&1 || { red "  ✗ $name: initial commit failed"; FAIL=$((FAIL + 1)); return; }
+
+    git -C "$project" worktree add -q -b fix/issue-747 "$wt747" >/dev/null 2>&1 \
+        || { red "  ✗ $name: worktree add (747) failed"; FAIL=$((FAIL + 1)); return; }
+    git -C "$project" worktree add -q -b fix/issue-800 "$wt800" >/dev/null 2>&1 \
+        || { red "  ✗ $name: worktree add (800) failed"; FAIL=$((FAIL + 1)); return; }
+
+    # Corrupt only 747's registration — 800 stays a normal, healthy,
+    # currently-checked-out worktree, standing in for a live worker.
+    rm -rf "$project/.git/worktrees/wt-issue-747"
+    if git -C "$wt747" rev-parse --git-dir >/dev/null 2>&1; then
+        red "  ✗ $name: fixture setup didn't actually corrupt 747's registration"
+        FAIL=$((FAIL + 1))
+        return
+    fi
+    if ! git -C "$wt800" rev-parse --git-dir >/dev/null 2>&1; then
+        red "  ✗ $name: fixture setup broke 800's registration too (bad fixture)"
+        FAIL=$((FAIL + 1))
+        return
+    fi
+
+    # Fake `gh`: 747's PR is MERGED (reap-eligible); 800's is OPEN (must be
+    # left alone — the live-worker stand-in).
+    local fakebin="$tmproot/fakebin"
+    mkdir -p "$fakebin"
+    cat > "$fakebin/gh" <<'FAKEGH'
+#!/usr/bin/env bash
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+    printf 'fix/issue-747\tMERGED\n'
+    printf 'fix/issue-800\tOPEN\n'
+    exit 0
+fi
+exit 1
+FAKEGH
+    chmod +x "$fakebin/gh"
+
+    local out rc
+    out="$(PATH="$fakebin:$PATH" "$LLM_SWARM_DIR/scripts/reap-orphan-worktrees.sh" \
+            --yes --min-age-days 0 --project "$project" 2>&1)" && rc=0 || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        red "  ✗ $name: real run exited $rc"
+        echo "$out"
+        FAIL=$((FAIL + 1))
+        return
+    fi
+    if [ -d "$wt747" ]; then
+        red "  ✗ $name: dangling worktree 747 was not removed"
+        echo "$out"
+        FAIL=$((FAIL + 1))
+        return
+    fi
+
+    # The actual regression check: 800's admin dir and working tree must be
+    # completely untouched by 747's reap.
+    if [ ! -d "$wt800" ]; then
+        red "  ✗ $name: sibling worktree 800's directory was removed (should be untouched)"
+        echo "$out"
+        FAIL=$((FAIL + 1))
+        return
+    fi
+    if ! git -C "$wt800" rev-parse --git-dir >/dev/null 2>&1; then
+        red "  ✗ $name: sibling worktree 800's git registration was corrupted by 747's reap"
+        echo "$out"
+        FAIL=$((FAIL + 1))
+        return
+    fi
+    if ! git -C "$project" worktree list | grep -q "$wt800"; then
+        red "  ✗ $name: sibling worktree 800 no longer listed in git worktree list"
+        FAIL=$((FAIL + 1))
+        return
+    fi
+
+    green "  ✓ $name: Passed"
+    PASS=$((PASS + 1))
+}
+test_dangling_reap_ignores_sibling_worktree
 
 echo ""
 echo "Summary: $PASS passed, $FAIL failed."
