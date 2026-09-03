@@ -91,7 +91,8 @@ For a consolidated treatment of tmux as an inter-agent channel — what works to
 Generalized launcher: `sandbox.sh <project-dir> <agent> [extra-args]`
 
 - `<agent>` ∈ `{claude, gemini, codex, listener, bash}` (default `bash`).
-- Mounts: project dir (rw), `~/.claude` (rw), `~/.claude.json` (rw), `~/.codex` (rw), `~/.ssh` (ro), `~/.gitconfig` (ro), `~/.config/gh` (ro), `~/.npm-global` (rw), `~/.npm` (rw), and the script's own dir (ro, so worker-listener.sh is reachable).
+- Mounts: project dir (rw), `~/.claude` (rw), a per-container copy of `~/.claude.json` (rw — see below), `~/.codex` (rw), `~/.ssh` (ro), `~/.gitconfig` (ro), `~/.config/gh` (ro), `~/.npm-global` (rw), `~/.npm` (rw), and the script's own dir (ro, so worker-listener.sh is reachable).
+- **`~/.claude.json` isolation (#286):** rather than bind-mounting the host's `~/.claude.json` directly (which pinned an inode that the CLI's write-temp-then-rename rewrites and sibling containers' rewrites could orphan or tear), `sandbox.sh` seeds a private copy per container under `~/.claude-sandbox-configs/` — keyed by `WORKER_CONTAINER_NAME` when set, else by `PROJECT_DIR` — and reuses it across relaunches. `SANDBOX_REFRESH_CLAUDE_CONFIG=1` forces a reseed from the host file.
 - Auto-mounts the **git common dir** when invoked on a worktree whose `.git` file points outside the project dir.
 - **Docker-out-of-Docker (DooD):** mounts `/var/run/docker.sock` so Testcontainers / `docker` CLI work inside the sandbox; `--group-add` gives the sandbox user write perms on the socket.
 - **GH token passthrough:** reads `gh auth token` on the host and injects as `GH_TOKEN` (necessary because `gh` stores its token in the system keyring on Linux, not in the mounted config dir).

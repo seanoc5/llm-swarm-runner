@@ -12,6 +12,7 @@ This document covers advanced workflows, custom mounts, and manual Git worktree 
   - [Per-project Environment (.sandbox-env)](#per-project-environment-sandbox-env)
   - [Extra Mounts](#extra-mounts)
   - [Memory limit (SANDBOX_MEM_LIMIT)](#memory-limit-sandbox_mem_limit)
+  - [Per-container claude config isolation (SANDBOX_REFRESH_CLAUDE_CONFIG)](#per-container-claude-config-isolation-sandbox_refresh_claude_config)
 - [Docker Integrations](#docker-integrations)
   - [Testcontainers / Docker CLI](#testcontainers--docker-cli)
   - [Rebuilding the Image](#rebuilding-the-image)
@@ -194,6 +195,18 @@ SANDBOX_MEM_LIMIT=24g
 ```
 
 Some full-suite JVM runs need even more headroom — 40g is not unusual on a beefy host. The symptom of hitting the cap is exit code 137 in the worker log (the cgroup OOM-killed the process inside its own container). See [troubleshooting.md's OOM entry](troubleshooting.md#oom-kills-host-or-container) for how to confirm this is what happened.
+
+### Per-container claude config isolation (`SANDBOX_REFRESH_CLAUDE_CONFIG`)
+
+`~/.claude.json` is not bind-mounted straight from the host into every container. The `claude` CLI rewrites it via write-temp-then-rename, and a file-level bind mount pins the inode present at container start — so a host-side rewrite (or, worse, a sibling *worker's* rewrite when every container shared the same mount) could orphan an already-running container's view of it, producing a torn read (`claude` failing to start with an "invalid JSON" error) or a container silently inheriting a sibling's regenerated, account-less config ([#286](https://github.com/seanoc5/llm-swarm-runner/issues/286)).
+
+Instead, `sandbox.sh` seeds a private copy per container under `~/.claude-sandbox-configs/<key>.claude.json` (the key is `WORKER_CONTAINER_NAME` when set, else derived from `PROJECT_DIR`) the first time it sees that key, and reuses it on every relaunch — preserving that container's own login/onboarding/trust state instead of re-syncing from the host each time. A copy that goes missing or turns out to be invalid JSON is reseeded automatically (self-healing the "invalid JSON" failure above without a manual `docker exec` repair).
+
+The trade-off: a container's copy no longer picks up host-side `~/.claude.json` changes (e.g. re-authenticating `claude` on the host) after its first seed. Force a reseed when that's what you want:
+
+```bash
+SANDBOX_REFRESH_CLAUDE_CONFIG=1 ./sandbox.sh /opt/work/myproject claude
+```
 
 ## Docker Integrations
 

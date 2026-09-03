@@ -33,12 +33,69 @@ if [ ! -f "$HOME/.bash_history_sandbox" ]; then
 fi
 touch "$HOME/.claude.json"
 
+# --- Per-container ~/.claude.json copy (#286) ---
+# ~/.claude.json is CLI-managed via write-temp-then-rename. A FILE-level bind
+# mount pins the inode present at container start, so every host-side rewrite
+# (and, since every container mounted the SAME file, every sibling
+# container's rewrite too) orphans the view every other already-running
+# container has of it. Observed live across a 5-worker swarm: torn reads at
+# launch ("invalid JSON" dialog) and workers silently inheriting a sibling's
+# regenerated, account-less config.
+#
+# Fix: give each container its own private on-disk copy, seeded from the
+# host's current ~/.claude.json the first time we see its key, and left
+# alone after that unless it goes missing or turns out to be invalid JSON
+# (self-heals the exact "invalid JSON" dialog above, without a manual
+# `docker exec` repair). This trades away live cross-container/host config
+# sync for isolation — a deliberate call: those concurrent writers to the
+# one shared file were already racing each other, so the "sync" it gives up
+# was corrupting data, not delivering a real guarantee. A same-container
+# rewrite can still hit the same rename-over-mountpoint EBUSY the CLI works
+# around internally (degrading to an in-place write of just this file), but
+# with no sibling ever sharing the inode there's no reader left for that
+# window to tear.
+#
+# Key: WORKER_CONTAINER_NAME when set (provision-worker.sh always sets one —
+# stable across a worker's restarts, unique per worker). Ad-hoc invocations
+# (no container name) key off PROJECT_DIR instead, so repeated
+# `sandbox.sh <dir> claude` runs against the same project reuse one copy
+# (preserving login/onboarding state) without colliding with worker copies.
+#
+# SANDBOX_REFRESH_CLAUDE_CONFIG=1 forces a reseed from the host file even
+# when the per-container copy looks fine (e.g. after re-authenticating
+# claude on the host) — opt-in only, since the default is to preserve
+# whatever onboarding/trust state that container has accumulated locally.
+CLAUDE_CONFIG_COPY_DIR="$HOME/.claude-sandbox-configs"
+mkdir -p "$CLAUDE_CONFIG_COPY_DIR"
+if [ -n "${WORKER_CONTAINER_NAME:-}" ]; then
+    _claude_cfg_key="$WORKER_CONTAINER_NAME"
+else
+    _claude_cfg_key="adhoc-$(basename "$PROJECT_DIR")-$(printf '%s' "$PROJECT_DIR" | cksum | cut -d' ' -f1)"
+fi
+CLAUDE_CONFIG_COPY="$CLAUDE_CONFIG_COPY_DIR/$_claude_cfg_key.claude.json"
+
+_claude_cfg_needs_seed=0
+if [ ! -s "$CLAUDE_CONFIG_COPY" ]; then
+    _claude_cfg_needs_seed=1
+elif command -v jq &>/dev/null && ! jq empty "$CLAUDE_CONFIG_COPY" &>/dev/null; then
+    echo "WARNING: $CLAUDE_CONFIG_COPY is invalid JSON — reseeding from" \
+         "$HOME/.claude.json (#286)." >&2
+    _claude_cfg_needs_seed=1
+fi
+if [ "${SANDBOX_REFRESH_CLAUDE_CONFIG:-0}" = "1" ]; then
+    _claude_cfg_needs_seed=1
+fi
+if [ "$_claude_cfg_needs_seed" = "1" ]; then
+    cp "$HOME/.claude.json" "$CLAUDE_CONFIG_COPY"
+fi
+unset _claude_cfg_key _claude_cfg_needs_seed
+
 # --- Mount strategy ---
 # Maps host configs into the container's standard home (/home/sandbox)
 MOUNTS=(
     -v "$PROJECT_DIR:$PROJECT_DIR:rw"
     -v "$HOME/.claude:/home/sandbox/.claude:rw"
-    -v "$HOME/.claude.json:/home/sandbox/.claude.json:rw"
+    -v "$CLAUDE_CONFIG_COPY:/home/sandbox/.claude.json:rw"
     -v "$HOME/.codex:/home/sandbox/.codex:rw"
     -v "$HOME/.ssh:$HOME/.ssh:ro"
     -v "$HOME/.ssh:/home/sandbox/.ssh:ro"

@@ -215,6 +215,92 @@ output=$(EXTRA_MOUNTS="/tmp:ro" docker run --rm \
     -v /tmp:/tmp:ro \
     "$IMAGE" bash -c "ls /tmp" 2>&1) && pass "EXTRA_MOUNTS same-path shorthand" || fail "EXTRA_MOUNTS same-path shorthand" "$output"
 
+# Per-container ~/.claude.json isolation (#286): sandbox.sh no longer bind-
+# mounts the host's ~/.claude.json directly (a file-level mount pins the
+# inode present at container start, which the CLI's write-temp-then-rename
+# rewrites — and every sibling container sharing that mount — could orphan
+# or tear). Instead it seeds a private per-key copy under
+# ~/.claude-sandbox-configs/ and reuses it across relaunches.
+#
+# These assertions are all on the HOST-side copy file, not on what a
+# container sees mounted at /home/sandbox/.claude.json: $HOME-sourced bind
+# mounts aren't reliably observable from inside a nested test environment
+# (this suite itself may be running inside a swarm worker sandbox talking to
+# the real host's docker daemon over a mounted docker.sock — see the
+# SANDBOX_DEP_CACHE fixture note above for the same DooD caveat, which is
+# why that fixture lives under REPO_ROOT rather than $HOME). The seed/reseed
+# logic runs as plain host-local `cp`/`mkdir` in sandbox.sh's own shell
+# before any `docker run`, so it's unaffected by that mismatch and safe to
+# assert on directly. `|| true` on each launch guards against the same
+# mismatch making the trailing `docker run` itself fail in this environment
+# for reasons unrelated to the logic under test.
+echo ""
+echo "[ Per-container ~/.claude.json isolation (#286) ]"
+
+CLAUDE_CFG_DIR="$HOME/.claude-sandbox-configs"
+CLAUDE_CFG_TEST_KEY="sandbox-test-cfg-$$"
+CLAUDE_CFG_TEST_FILE="$CLAUDE_CFG_DIR/$CLAUDE_CFG_TEST_KEY.claude.json"
+rm -f "$CLAUDE_CFG_TEST_FILE"
+
+WORKER_CONTAINER_NAME="$CLAUDE_CFG_TEST_KEY" "$REPO_ROOT/sandbox.sh" /tmp true >/dev/null 2>&1 || true
+if [ -f "$CLAUDE_CFG_TEST_FILE" ]; then
+    pass "seeds a private ~/.claude.json copy on first launch" "$CLAUDE_CFG_TEST_FILE"
+else
+    fail "seeds a private ~/.claude.json copy on first launch" "not found: $CLAUDE_CFG_TEST_FILE"
+fi
+
+# Implant a marker directly into the per-worker copy (simulating state a
+# worker accumulated locally, e.g. a completed onboarding flow) and relaunch
+# with the same key — the copy must be reused, not clobbered from the host.
+echo '{"llm_swarm_runner_test_marker":"'"$CLAUDE_CFG_TEST_KEY"'"}' > "$CLAUDE_CFG_TEST_FILE"
+WORKER_CONTAINER_NAME="$CLAUDE_CFG_TEST_KEY" "$REPO_ROOT/sandbox.sh" /tmp true >/dev/null 2>&1 || true
+if grep -q "$CLAUDE_CFG_TEST_KEY" "$CLAUDE_CFG_TEST_FILE" 2>/dev/null; then
+    pass "reuses an existing per-worker copy across relaunches (does not reseed)"
+else
+    fail "reuses an existing per-worker copy across relaunches (does not reseed)" "$(cat "$CLAUDE_CFG_TEST_FILE" 2>&1)"
+fi
+
+# SANDBOX_REFRESH_CLAUDE_CONFIG=1 forces a reseed from the host file even
+# when the existing copy looks fine.
+WORKER_CONTAINER_NAME="$CLAUDE_CFG_TEST_KEY" SANDBOX_REFRESH_CLAUDE_CONFIG=1 \
+    "$REPO_ROOT/sandbox.sh" /tmp true >/dev/null 2>&1 || true
+if ! grep -q "$CLAUDE_CFG_TEST_KEY" "$CLAUDE_CFG_TEST_FILE" 2>/dev/null; then
+    pass "SANDBOX_REFRESH_CLAUDE_CONFIG=1 forces a reseed from the host file"
+else
+    fail "SANDBOX_REFRESH_CLAUDE_CONFIG=1 forces a reseed from the host file" \
+        "marker survived: $(cat "$CLAUDE_CFG_TEST_FILE" 2>&1)"
+fi
+
+# An invalid-JSON copy self-heals: sandbox.sh warns and reseeds it, rather
+# than handing the CLI a broken file (the exact "invalid JSON" failure from
+# the #286 incident).
+if command -v jq &>/dev/null; then
+    echo 'not valid json {' > "$CLAUDE_CFG_TEST_FILE"
+    output=$(WORKER_CONTAINER_NAME="$CLAUDE_CFG_TEST_KEY" "$REPO_ROOT/sandbox.sh" /tmp true 2>&1) || true
+    if [[ "$output" == *"WARNING"* && "$output" == *"invalid JSON"* ]] \
+        && jq empty "$CLAUDE_CFG_TEST_FILE" &>/dev/null; then
+        pass "self-heals an invalid-JSON per-worker copy" "$(grep WARNING <<<"$output")"
+    else
+        fail "self-heals an invalid-JSON per-worker copy" "$output"
+    fi
+else
+    skip "self-heals an invalid-JSON per-worker copy" "jq not installed"
+fi
+
+# Two different WORKER_CONTAINER_NAME values must never share a copy file.
+CLAUDE_CFG_TEST_KEY2="sandbox-test-cfg-$$-b"
+CLAUDE_CFG_TEST_FILE2="$CLAUDE_CFG_DIR/$CLAUDE_CFG_TEST_KEY2.claude.json"
+rm -f "$CLAUDE_CFG_TEST_FILE2"
+WORKER_CONTAINER_NAME="$CLAUDE_CFG_TEST_KEY2" "$REPO_ROOT/sandbox.sh" /tmp true >/dev/null 2>&1 || true
+if [ -f "$CLAUDE_CFG_TEST_FILE2" ] && [ "$CLAUDE_CFG_TEST_FILE" != "$CLAUDE_CFG_TEST_FILE2" ]; then
+    pass "different WORKER_CONTAINER_NAME values get independent copy files"
+else
+    fail "different WORKER_CONTAINER_NAME values get independent copy files" \
+        "expected $CLAUDE_CFG_TEST_FILE2 to exist"
+fi
+
+rm -f "$CLAUDE_CFG_TEST_FILE" "$CLAUDE_CFG_TEST_FILE2"
+
 # ── Host networking ───────────────────────────────────────────────────────────
 
 echo ""
