@@ -45,10 +45,10 @@ extract_fn() {
     local fn="$1"
     sed -n "/^${fn}() {/,/^}/p" "$WATCH"
 }
-for fn in worker_pane_state worker_pane_busy worker_pending_brief worker_current_task_terminal \
-          compact_last_pane_line compact_composer_clear compact_confirm_submitted \
-          compact_retract_queued worker_deliver_record_failure worker_deliver_record_success \
-          maybe_worker_deliver_brief log_event; do
+for fn in worker_pane_state worker_pane_busy worker_pane_ctx_used worker_pending_brief \
+          worker_current_task_terminal compact_last_pane_line compact_composer_clear \
+          compact_confirm_submitted compact_retract_queued worker_deliver_record_failure \
+          worker_deliver_record_success maybe_worker_deliver_brief log_event; do
     body="$(extract_fn "$fn")"
     [ -n "$body" ] || red "could not extract function '$fn' from $WATCH — has it been renamed?"
     eval "$body"
@@ -208,12 +208,34 @@ check "brief pending, task terminal, but pane busy -> skipped as pane_busy (neve
 
 tmux send-keys -t "$SESSION_NAME:$WIN" C-c
 sleep 0.2
-tmux send-keys -t "$SESSION_NAME:$WIN" "clear; printf '❯ \n'; sleep 300" Enter
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'sonnet · wt-issue-42 · ctx: 20k/1M (2%)'; printf '❯ \n'; sleep 300" Enter
 check_eventually "idle, empty-composer pane -> cli" "cli" "worker_pane_state '$WIN'"
 : > "$EVENTS_LOG"
 maybe_worker_deliver_brief "$WIN"
 if grep -q 'worker.deliver.attempt' "$EVENTS_LOG"; then got=attempted; else got=notattempted; fi
 check "idle, brief pending, task terminal, composer empty -> attempts delivery (DRY_RUN, no real injection sent)" "attempted" "$got"
+
+heading "Test 3b: no_ctx_parsed guard — a WORKER_HEADLESS=1 claude -p run renders no busy chrome AND no statusline (self-review finding)"
+# A headless `claude -p` invocation shows plain output, never Claude Code's
+# TUI statusline — worker_pane_busy() never matches it either, so without
+# this gate a still-running headless task could otherwise look identical to
+# an idle interactive one the whole time it runs.
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.2
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'plain -p stdout, no statusline, no busy chrome'; sleep 300" Enter
+check_eventually "headless-like plain-text pane -> cli" "cli" "worker_pane_state '$WIN'"
+: > "$EVENTS_LOG"
+maybe_worker_deliver_brief "$WIN"
+if grep -q 'worker.deliver.skip.*reason=no_ctx_parsed' "$EVENTS_LOG"; then got=skipped; else got=notskipped; fi
+check "no interactive statusline on screen -> skipped as no_ctx_parsed (never touches a live headless run)" "skipped" "$got"
+if grep -q 'worker.deliver.attempt' "$EVENTS_LOG"; then got=attempted; else got=notattempted; fi
+check "no_ctx_parsed -> delivery never attempted" "notattempted" "$got"
+
+# Restore the idle-with-statusline pane for the tests that follow.
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.2
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'sonnet · wt-issue-42 · ctx: 20k/1M (2%)'; printf '❯ \n'; sleep 300" Enter
+check_eventually "idle, empty-composer pane restored -> cli" "cli" "worker_pane_state '$WIN'"
 
 heading "Test 4: composer-not-clear guard (issue #313's observed dimmed-suggestion case)"
 compact_composer_clear() { return 1; }   # simulate unsubmitted composer text
@@ -273,7 +295,7 @@ heading "Test 6: real (non-DRY_RUN) /quit injection against a fake worker REPL"
 FAKE_REPL="$TEST_DIR/fake-worker-repl.sh"
 cat > "$FAKE_REPL" <<'REPL'
 #!/usr/bin/env bash
-render() { printf '❯ \n'; }
+render() { echo 'sonnet · wt-issue-42 · ctx: 20k/1M (2%)'; printf '❯ \n'; }
 render
 while IFS= read -r line; do
     [ -z "$line" ] && continue
@@ -326,7 +348,7 @@ unset 'WORKER_DELIVER_LAST_FAIL[42]' 'WORKER_DELIVER_FAIL_COUNT[42]' 'WORKER_DEL
 FAKE_REPL2="$TEST_DIR/fake-worker-repl-no-quit.sh"
 cat > "$FAKE_REPL2" <<'REPL'
 #!/usr/bin/env bash
-render() { printf '❯ \n'; }
+render() { echo 'sonnet · wt-issue-42 · ctx: 20k/1M (2%)'; printf '❯ \n'; }
 render
 while IFS= read -r line; do
     [ -z "$line" ] && continue

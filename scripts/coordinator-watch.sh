@@ -767,8 +767,17 @@
 #                           session would make worker-listener.sh record a
 #                           false "ok" outcome for a task that never
 #                           actually finished — see that function's header
-#                           comment for the full incident), and (e) has
-#                           nothing unsubmitted sitting in its composer
+#                           comment for the full incident), (e) has a
+#                           rendered statusline confirming a real
+#                           interactive TUI is actually on screen
+#                           (worker_pane_ctx_used — self-review finding: a
+#                           WORKER_HEADLESS=1 `claude -p` run renders no busy
+#                           chrome at all, so it can otherwise sit in state
+#                           "cli" with worker_pane_busy() never true for its
+#                           whole run; this is the same structural guard
+#                           maybe_worker_compact already gets from its own
+#                           ctx-parsing requirement), and (f) has nothing
+#                           unsubmitted sitting in its composer
 #                           (compact_composer_clear — see the observed
 #                           composer-suggestion case in issue #313's
 #                           constraints), maybe_worker_deliver_brief()
@@ -1163,9 +1172,12 @@ EVENTS LOG
       worker.deliver.attempt  (issue #313) a worker window is idle-at-rest inside a live agent
                            session with a brief genuinely waiting in inbox/ — about to inject /quit (issue)
       worker.deliver.skip   parked-brief delivery skipped this cycle (issue, reason=task_not_terminal|
-                           pane_busy|composer_not_clear|backoff|mktemp_failed — task_not_terminal means
-                           the CURRENT processing/ task's status isn't ready-for-review/done-no-pr yet
-                           (e.g. "blocked", or no status file at all) — see worker_current_task_terminal()'s
+                           pane_busy|no_ctx_parsed|composer_not_clear|backoff|mktemp_failed —
+                           task_not_terminal means the CURRENT processing/ task's status isn't
+                           ready-for-review/done-no-pr yet (e.g. "blocked", or no status file at all);
+                           no_ctx_parsed means no interactive statusline is rendered on screen — most
+                           likely a WORKER_HEADLESS=1 worker's `claude -p` run, which never shows busy
+                           chrome for worker_pane_busy() to key off — see worker_current_task_terminal()'s
                            header comment for the false-completion bug this positive gate closes)
       worker.deliver.resubmit  (issue #290-style) the /quit Enter didn't appear to submit
                            (composer still held the pasted text, pane not busy) — resent it
@@ -3437,6 +3449,29 @@ maybe_worker_deliver_brief() {
     if worker_pane_busy "$win"; then
         log_event worker.deliver.skip "issue=$issue reason=pane_busy"
         return 0   # never interrupt a live turn — see docs/tmux-as-channel.md
+    fi
+
+    # Self-review finding: a WORKER_HEADLESS=1 worker's `claude -p` run
+    # renders no interactive TUI chrome at all — worker_pane_busy() never
+    # matches it (no "(esc to interrupt)"/spinner), so worker_pane_state()
+    # reads "cli" for its entire, possibly still-running, duration with no
+    # busy signal to gate on. maybe_worker_compact is structurally immune to
+    # this (it already requires worker_pane_ctx_used() to parse a real
+    # statusline before doing anything); give this feature the same
+    # protection rather than relying solely on compact_composer_clear()'s
+    # last-rendered-line check below, which can coincidentally read as
+    # "empty" for one poll between two lines of a live `-p` run's plain
+    # stdout — nowhere near proof of an actual idle interactive composer.
+    # statusline-with-context.sh's "ctx: <used>/<total> (<pct>%)" only
+    # renders inside the interactive TUI, never in -p's plain output, so
+    # requiring it here is a cheap, already-tested structural gate against
+    # ever touching a live headless run (worst case without it: a wasted
+    # WORKER_DELIVER_END_TIMEOUT_SECS wait and a false backoff — not outcome
+    # corruption, since headless workers write done/*.json themselves the
+    # normal way — but free to close outright).
+    if ! worker_pane_ctx_used "$win" >/dev/null 2>&1; then
+        log_event worker.deliver.skip "issue=$issue reason=no_ctx_parsed"
+        return 0
     fi
 
     # issue #313's constraint: a composer holding unsubmitted text (an
