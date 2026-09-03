@@ -68,13 +68,47 @@ fi
 SESSION_NAME=""
 [ -n "$MAIN_REPO" ] && SESSION_NAME="llm-$(basename "$MAIN_REPO")"
 
+# Window name for THIS worktree, when it follows the wt-issue-<N> convention
+# (used below to check the specific pane's state, not just whether some
+# iss-* window exists).
+WT_BASENAME="$(basename "$WT")"
+WIN=""
+case "$WT_BASENAME" in
+    wt-issue-[0-9]*) WIN="iss-${WT_BASENAME#wt-issue-}" ;;
+esac
+
 # Listener-state hint
 if [ -n "$SESSION_NAME" ] && tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
     LISTENERS=$(tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -c '^iss-' || true)
     if [ "$LISTENERS" -gt 0 ]; then
-        echo "  (tmux session '$SESSION_NAME' has $LISTENERS listener window(s); pickup expected within ~2s"
-        echo "   once that pane is idle — headless workers or an idle interactive shell pick up immediately;"
-        echo "   an interactive shell mid-command finishes that command first, see issue #43)"
+        # issue #313: "pickup within ~2s" only holds when the listener's own
+        # bash loop is in control (headless, or an idle interactive shell —
+        # both poll inbox/ directly). An interactive session that finished
+        # its task but is still parked INSIDE the live agent process (never
+        # ran /quit) is invisible to that loop until the session ends —
+        # worker-listener.sh's dispatch_agent is blocked on it. Check this
+        # window's actual pane state instead of assuming the fast path.
+        PANE_CMD=""
+        if [ -n "$WIN" ]; then
+            PANE_CMD="$(tmux list-panes -t "$SESSION_NAME:$WIN" -F '#{pane_current_command}' 2>/dev/null | head -1)"
+        fi
+        case "$PANE_CMD" in
+            ""|bash|zsh|sh|fish)
+                echo "  (tmux session '$SESSION_NAME' has $LISTENERS listener window(s); pickup expected within ~2s"
+                echo "   once that pane is idle — headless workers or an idle interactive shell pick up immediately;"
+                echo "   an interactive shell mid-command finishes that command first, see issue #43)"
+                ;;
+            *)
+                echo "  NOTE: window '$WIN' is running a live agent process ($PANE_CMD) — if it's an interactive"
+                echo "        session parked at rest (task finished, but /quit was never run), worker-listener.sh's"
+                echo "        own poll loop cannot see this brief until that session ends (issue #313)."
+                echo "        A running coordinator-watch.sh sweep (WORKER_AUTO_DELIVER=1, the default) ends an"
+                echo "        idle parked session automatically within one scan interval (WORKER_COMPACT_SCAN_SECS,"
+                echo "        default 30s) and lets the listener claim this brief normally. If no such watcher is"
+                echo "        running for this swarm, attach and release it by hand:"
+                echo "          tmux attach -t $SESSION_NAME  (switch to window '$WIN', then run /quit)"
+                ;;
+        esac
     else
         echo "  WARN: session '$SESSION_NAME' is alive but has no iss-* listener window."
         echo "        Spawn one with:"
