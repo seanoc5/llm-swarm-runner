@@ -757,10 +757,21 @@
 #                           genuinely idle (NOT worker_pane_busy — never
 #                           interrupt a live turn), (c) has a real brief
 #                           waiting in its inbox/ (worker_pending_brief),
-#                           and (d) has nothing unsubmitted sitting in its
-#                           composer (compact_composer_clear — see the
-#                           observed composer-suggestion case in issue
-#                           #313's constraints), maybe_worker_deliver_brief()
+#                           (d) has POSITIVELY CONFIRMED its current task
+#                           already reached a terminal status —
+#                           "ready-for-review" or "done-no-pr", never
+#                           "blocked" or no status at all — via
+#                           worker_current_task_terminal() (self-review
+#                           finding: a `blocked` worker awaiting a decision
+#                           is idle/cli/composer-empty too, and ending ITS
+#                           session would make worker-listener.sh record a
+#                           false "ok" outcome for a task that never
+#                           actually finished — see that function's header
+#                           comment for the full incident), and (e) has
+#                           nothing unsubmitted sitting in its composer
+#                           (compact_composer_clear — see the observed
+#                           composer-suggestion case in issue #313's
+#                           constraints), maybe_worker_deliver_brief()
 #                           pastes "/quit" and Enter, the same injection
 #                           mechanism as maybe_worker_compact's /compact.
 #                           This does NOT paste the brief's own text —
@@ -786,6 +797,17 @@
 #                           kicks in exactly like a failed /compact
 #                           injection. Never sends anything more aggressive
 #                           than a slash-command paste + Enter.
+#                           Known limitation: a worker parked `blocked`
+#                           (asked a decision-needed question, awaiting the
+#                           coordinator's answer) is deliberately NOT
+#                           released by this feature (see gate (d) above) —
+#                           only a task that already reached a terminal
+#                           status. Answering a blocked worker still needs
+#                           the manual path (attach and type the answer
+#                           directly, continuing that same conversation) or
+#                           a future feature that delivers an answer as a
+#                           continuing chat turn instead of ending the
+#                           session outright.
 #                           Set to 0 to disable; requeue.sh's own hint text
 #                           documents the manual fallback (attach and
 #                           /quit).
@@ -1140,8 +1162,11 @@ EVENTS LOG
                            /compact for it until the watcher restarts; logged once, not every sweep
       worker.deliver.attempt  (issue #313) a worker window is idle-at-rest inside a live agent
                            session with a brief genuinely waiting in inbox/ — about to inject /quit (issue)
-      worker.deliver.skip   parked-brief delivery skipped this cycle (issue, reason=pane_busy|
-                           composer_not_clear|backoff|mktemp_failed)
+      worker.deliver.skip   parked-brief delivery skipped this cycle (issue, reason=task_not_terminal|
+                           pane_busy|composer_not_clear|backoff|mktemp_failed — task_not_terminal means
+                           the CURRENT processing/ task's status isn't ready-for-review/done-no-pr yet
+                           (e.g. "blocked", or no status file at all) — see worker_current_task_terminal()'s
+                           header comment for the false-completion bug this positive gate closes)
       worker.deliver.resubmit  (issue #290-style) the /quit Enter didn't appear to submit
                            (composer still held the pasted text, pane not busy) — resent it
                            once before falling through to the normal end-wait (issue)
@@ -3276,6 +3301,59 @@ worker_pending_brief() {
     [ -n "$(find "$wt_dir/.swarm/tasks/inbox" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | head -1)" ]
 }
 
+# worker_current_task_terminal <worktree-dir>
+#
+# True (rc 0) ONLY if the task currently claimed in <worktree>/.swarm/tasks/
+# processing/ (there is always exactly one there for as long as the agent
+# process is alive — claim_next_task() moves it there on pickup and doesn't
+# move it out again until dispatch_agent returns) has a status file
+# reporting a genuinely terminal state: "ready-for-review" or "done-no-pr".
+#
+# Self-review finding on this feature's first version: gating delivery on
+# pane idleness alone is not enough. A worker parked `blocked` (asked a
+# decision-needed question, awaiting the coordinator's answer — exactly the
+# state prompts/coordinator.md's "unblock it with a requeue.sh follow-up
+# brief" line describes) renders as idle, cli, composer-empty — indistinguishable
+# from a worker that's actually finished. Injecting /quit there would end the
+# session before its current task ever truly concluded; worker-listener.sh's
+# write_outcome() can't tell a natural post-completion /quit from one forced
+# mid-decision — exit code 0 maps straight to "ok", and the #287 minimum-
+# interaction floor doesn't catch it either (a blocked worker already has a
+# status file, so that check's own no-status-file precondition never fires).
+# The result: a real fand-etl-shaped decision-needed task gets recorded as a
+# false, silent success. So this is a positive (fail-CLOSED) gate — the
+# opposite of every other check in this feature, which fail open — because
+# the cost of a missed automatic delivery (falls back to the documented
+# manual /quit) is far lower than the cost of corrupting a task's outcome
+# record. A processing/ entry with no status file yet, or one whose state is
+# "blocked" (or anything else), is treated as NOT confirmed finished and
+# blocks delivery — see worker.deliver.skip reason=task_not_terminal.
+#
+# Deliberately NOT worker_task_done(): that function's (a)/(b) signals are
+# themselves gated on `.swarm/tasks/processing/` being EMPTY (a staleness
+# guard against stale done/status files from an EARLIER, already-concluded
+# task — see its own header comment) — a precondition that can never hold
+# here, since processing/ holds exactly the in-flight task for as long as
+# its agent process is alive, i.e. for every window this function is even
+# called against. This reads the CURRENT processing/ entry's own status file
+# directly instead, with no such guard needed (there's nothing stale to
+# guard against — it's always THIS task's own record or nothing).
+worker_current_task_terminal() {
+    local wt_dir="$1"
+    [ "$HAVE_JQ" = "1" ] || return 1
+    local proc_file task_id status_file state
+    proc_file="$(find "$wt_dir/.swarm/tasks/processing" -maxdepth 1 -type f 2>/dev/null | head -1)"
+    [ -n "$proc_file" ] || return 1
+    task_id="$(basename "$proc_file" .md)"
+    status_file="$wt_dir/.swarm/tasks/status/${task_id}.json"
+    [ -r "$status_file" ] || return 1
+    state="$(jq -r '.state // empty' "$status_file" 2>/dev/null)" || return 1
+    case "$state" in
+        ready-for-review|done-no-pr) return 0 ;;
+        *)                           return 1 ;;
+    esac
+}
+
 # WORKER_DELIVER_LAST_FAIL / WORKER_DELIVER_FAIL_COUNT / WORKER_DELIVER_GAVE_UP
 #
 # Same shape and same rationale as WORKER_COMPACT_LAST_FAIL/FAIL_COUNT/
@@ -3331,6 +3409,18 @@ maybe_worker_deliver_brief() {
     [ "$state" = "cli" ] || return 0
 
     worker_pending_brief "$wt_dir" || return 0
+
+    # Self-review finding: never end a session whose CURRENT task hasn't
+    # positively confirmed finishing — see worker_current_task_terminal()'s
+    # header comment for the false-completion bug this closes (a `blocked`
+    # worker awaiting a decision looks identical to a finished one from pane
+    # state alone). A worker parked `blocked` still needs the documented
+    # manual path (attach and answer it directly) until a future feature can
+    # deliver an answer as a continuing turn instead of ending the session.
+    if ! worker_current_task_terminal "$wt_dir"; then
+        log_event worker.deliver.skip "issue=$issue reason=task_not_terminal"
+        return 0
+    fi
 
     if [ "${WORKER_DELIVER_GAVE_UP[$issue]:-0}" = "1" ]; then
         return 0   # already logged the one worker.deliver.giving_up warning

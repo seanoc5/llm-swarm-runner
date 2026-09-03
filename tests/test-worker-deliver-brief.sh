@@ -7,15 +7,15 @@
 # `claude` process rather than back at worker-listener.sh's own idle bash
 # loop (dispatch_agent blocks on the live agent process, so claim_next_task
 # never runs again). maybe_worker_deliver_brief() closes that gap by ending
-# the session (/quit) once it's verified idle with a real brief waiting.
+# the session (/quit) once it's verified idle, with a real brief waiting,
+# AND its current task has positively confirmed reaching a terminal status
+# (self-review finding: a `blocked` worker awaiting a decision looks
+# identical to a finished one from pane state alone — see
+# worker_current_task_terminal()'s header comment in coordinator-watch.sh).
 #
 # Same extraction-from-the-real-script technique as test-worker-auto-compact.sh
 # (the sibling feature sharing the same background sweep) — see that file's
-# header comment for the full rationale. The tmux() shadow function used in
-# Test 2 (set -e safety) is defined mid-file on purpose; shellcheck's SC2218
-# would flag every call above it as a forward-reference, so it's disabled
-# file-wide here.
-# shellcheck disable=SC2218
+# header comment for the full rationale.
 set -euo pipefail
 
 green()   { printf '\033[32m✓ %s\033[0m\n' "$*"; }
@@ -27,6 +27,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCH="$SCRIPT_DIR/../scripts/coordinator-watch.sh"
 [ -x "$WATCH" ] || red "coordinator-watch.sh not executable: $WATCH"
 command -v tmux >/dev/null 2>&1 || red "tmux not found — required by this feature and this test"
+command -v jq   >/dev/null 2>&1 || red "jq not found — required by this feature and this test"
 
 TEST_DIR=$(mktemp -d -t worker-deliver-brief-XXXXXX)
 SESSION_NAME="test-worker-deliver-$$"
@@ -44,7 +45,7 @@ extract_fn() {
     local fn="$1"
     sed -n "/^${fn}() {/,/^}/p" "$WATCH"
 }
-for fn in worker_pane_state worker_pane_busy worker_pending_brief \
+for fn in worker_pane_state worker_pane_busy worker_pending_brief worker_current_task_terminal \
           compact_last_pane_line compact_composer_clear compact_confirm_submitted \
           compact_retract_queued worker_deliver_record_failure worker_deliver_record_success \
           maybe_worker_deliver_brief log_event; do
@@ -75,8 +76,27 @@ declare -A WORKER_DELIVER_GAVE_UP=()
 WORKSPACE="$TEST_DIR/workspace"
 WT_DIR="$WORKSPACE/wt-issue-42"
 INBOX_DIR="$WT_DIR/.swarm/tasks/inbox"
-mkdir -p "$INBOX_DIR"
+PROCESSING_DIR="$WT_DIR/.swarm/tasks/processing"
+STATUS_DIR="$WT_DIR/.swarm/tasks/status"
+mkdir -p "$INBOX_DIR" "$PROCESSING_DIR" "$STATUS_DIR"
 WIN="iss-42"
+
+# set_current_task <task_id> [state]
+#
+# Simulates worker-listener.sh's claim_next_task having a task claimed in
+# processing/ (always true while the agent is alive), optionally with a
+# worker-written status file at the given state. No status argument leaves
+# processing/ populated but status/ empty — "claimed, no status written
+# yet" (e.g. a task still genuinely in flight).
+set_current_task() {
+    local task_id="$1" state="${2:-}"
+    rm -f "$PROCESSING_DIR"/*.md "$STATUS_DIR"/*.json 2>/dev/null || true
+    echo "the current task brief" > "$PROCESSING_DIR/$task_id.md"
+    if [ -n "$state" ]; then
+        printf '{"task_id":"%s","state":"%s","pr":null,"ts":"2026-01-01T00:00:00Z","note":""}' \
+            "$task_id" "$state" > "$STATUS_DIR/$task_id.json"
+    fi
+}
 
 PASS=0
 
@@ -120,7 +140,28 @@ echo "a follow-up brief" > "$INBOX_DIR/20260826-120000-42.md"
 rc=0; worker_pending_brief "$WT_DIR" || rc=$?
 check "real brief file in inbox -> rc0 (pending)" "0" "$rc"
 
-heading "Test 2: maybe_worker_deliver_brief — gating (DRY_RUN)"
+heading "Test 2: worker_current_task_terminal (self-review finding — the false-completion guard)"
+rm -f "$PROCESSING_DIR"/*.md "$STATUS_DIR"/*.json 2>/dev/null || true
+rc=0; worker_current_task_terminal "$WT_DIR" || rc=$?
+check "nothing claimed in processing/ -> rc1 (not confirmed terminal)" "1" "$rc"
+
+set_current_task "t1"
+rc=0; worker_current_task_terminal "$WT_DIR" || rc=$?
+check "claimed in processing/ but no status file yet -> rc1 (can't confirm; still could be genuinely in flight)" "1" "$rc"
+
+set_current_task "t1" "blocked"
+rc=0; worker_current_task_terminal "$WT_DIR" || rc=$?
+check "status=blocked -> rc1 (awaiting a decision, task did NOT actually conclude)" "1" "$rc"
+
+set_current_task "t1" "ready-for-review"
+rc=0; worker_current_task_terminal "$WT_DIR" || rc=$?
+check "status=ready-for-review -> rc0 (genuinely terminal)" "0" "$rc"
+
+set_current_task "t1" "done-no-pr"
+rc=0; worker_current_task_terminal "$WT_DIR" || rc=$?
+check "status=done-no-pr -> rc0 (genuinely terminal)" "0" "$rc"
+
+heading "Test 3: maybe_worker_deliver_brief — gating (DRY_RUN)"
 tmux new-session -d -s "$SESSION_NAME" -n "$WIN" 2>/dev/null
 check_eventually "fresh window, bash foreground -> shell" "shell" "worker_pane_state '$WIN'"
 
@@ -135,9 +176,27 @@ rm -f "$INBOX_DIR"/*.md
 maybe_worker_deliver_brief "$WIN"
 check "cli state but nothing pending in inbox/ -> nothing logged" "0" "$(wc -l < "$EVENTS_LOG")"
 
+echo "a follow-up brief" > "$INBOX_DIR/20260826-120000-42.md"
+
+# The critical self-review-fixed case: a real brief IS pending, but the
+# CURRENT task is merely "blocked" (a decision-needed worker awaiting the
+# coordinator's answer — the exact incident half prompts/coordinator.md's
+# "unblock it with requeue.sh" line describes). Must NOT be treated the same
+# as a finished-and-parked worker.
+set_current_task "t1" "blocked"
+: > "$EVENTS_LOG"
+maybe_worker_deliver_brief "$WIN"
+if grep -q 'worker.deliver.skip.*reason=task_not_terminal' "$EVENTS_LOG"; then got=skipped; else got=notskipped; fi
+check "current task status=blocked -> skipped as task_not_terminal (never falsely 'completes' unfinished work)" "skipped" "$got"
+if grep -q 'worker.deliver.attempt' "$EVENTS_LOG"; then got=attempted; else got=notattempted; fi
+check "blocked task -> delivery never attempted" "notattempted" "$got"
+
+# From here on, the current task has genuinely finished — the OTHER incident
+# half (a worker that opened its PR, handed off, and simply never ran /quit).
+set_current_task "t1" "ready-for-review"
+
 busy_or_idle() { if worker_pane_busy "$WIN"; then echo busy; else echo idle; fi; }
 
-echo "a follow-up brief" > "$INBOX_DIR/20260826-120000-42.md"
 tmux send-keys -t "$SESSION_NAME:$WIN" C-c
 sleep 0.2
 tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo '✻ Considering… (esc to interrupt)'; sleep 300" Enter
@@ -145,7 +204,7 @@ check_eventually "busy chrome visible -> worker_pane_busy true" "busy" 'busy_or_
 : > "$EVENTS_LOG"
 maybe_worker_deliver_brief "$WIN"
 if grep -q 'worker.deliver.skip.*reason=pane_busy' "$EVENTS_LOG"; then got=skipped; else got=notskipped; fi
-check "brief pending but pane busy -> skipped as pane_busy (never interrupt a live turn)" "skipped" "$got"
+check "brief pending, task terminal, but pane busy -> skipped as pane_busy (never interrupt a live turn)" "skipped" "$got"
 
 tmux send-keys -t "$SESSION_NAME:$WIN" C-c
 sleep 0.2
@@ -154,9 +213,9 @@ check_eventually "idle, empty-composer pane -> cli" "cli" "worker_pane_state '$W
 : > "$EVENTS_LOG"
 maybe_worker_deliver_brief "$WIN"
 if grep -q 'worker.deliver.attempt' "$EVENTS_LOG"; then got=attempted; else got=notattempted; fi
-check "idle, brief pending, composer empty -> attempts delivery (DRY_RUN, no real injection sent)" "attempted" "$got"
+check "idle, brief pending, task terminal, composer empty -> attempts delivery (DRY_RUN, no real injection sent)" "attempted" "$got"
 
-heading "Test 3: composer-not-clear guard (issue #313's observed dimmed-suggestion case)"
+heading "Test 4: composer-not-clear guard (issue #313's observed dimmed-suggestion case)"
 compact_composer_clear() { return 1; }   # simulate unsubmitted composer text
 : > "$EVENTS_LOG"
 maybe_worker_deliver_brief "$WIN"
@@ -167,7 +226,7 @@ check "composer not clear -> delivery never attempted" "notattempted" "$got"
 unset -f compact_composer_clear
 body="$(extract_fn compact_composer_clear)"; eval "$body"   # restore the real function
 
-heading "Test 4: per-window backoff after failed delivery attempts (issue #313, mirrors #252's compact backoff)"
+heading "Test 5: per-window backoff after failed delivery attempts (issue #313, mirrors #252's compact backoff)"
 : > "$EVENTS_LOG"
 unset 'WORKER_DELIVER_LAST_FAIL[42]' 'WORKER_DELIVER_FAIL_COUNT[42]' 'WORKER_DELIVER_GAVE_UP[42]'
 
@@ -201,7 +260,7 @@ check "record_success clears LAST_FAIL" "" "${WORKER_DELIVER_LAST_FAIL[42]:-}"
 check "record_success clears FAIL_COUNT" "" "${WORKER_DELIVER_FAIL_COUNT[42]:-}"
 check "record_success clears GAVE_UP" "" "${WORKER_DELIVER_GAVE_UP[42]:-}"
 
-heading "Test 5: real (non-DRY_RUN) /quit injection against a fake worker REPL"
+heading "Test 6: real (non-DRY_RUN) /quit injection against a fake worker REPL"
 # Stand-in for a live worker Claude Code REPL that recognizes /quit as its
 # own exit command (matching worker-listener.sh's documented convention).
 # Launched as `bash -c 'exec -a claude bash $FAKE_REPL'` — a FOREGROUND
@@ -234,6 +293,7 @@ WORKER_DELIVER_POLL_SECS=1
 : > "$EVENTS_LOG"
 rm -f "$INBOX_DIR"/*.md
 echo "a follow-up brief" > "$INBOX_DIR/20260826-140000-42.md"
+set_current_task "t2" "ready-for-review"   # current task already finished
 
 tmux send-keys -t "$SESSION_NAME:$WIN" C-c
 sleep 0.3
@@ -256,8 +316,8 @@ else
     PASS=$((PASS + 1))
 fi
 
-heading "Test 6: agent doesn't recognize /quit (e.g. a non-claude CLI) -> times out and fails safe"
-# Same shape as Test 5's fixture, but this fake REPL never treats /quit as
+heading "Test 7: agent doesn't recognize /quit (e.g. a non-claude CLI) -> times out and fails safe"
+# Same shape as Test 6's fixture, but this fake REPL never treats /quit as
 # special — it just echoes it back like any other line, the way a CLI with
 # no matching slash/exit command would. maybe_worker_deliver_brief must
 # never escalate beyond the paste+Enter it already sent: it should simply
@@ -279,6 +339,7 @@ chmod +x "$FAKE_REPL2"
 
 : > "$EVENTS_LOG"
 echo "another brief" > "$INBOX_DIR/20260826-150000-42.md"
+set_current_task "t3" "done-no-pr"   # current task already finished
 tmux send-keys -t "$SESSION_NAME:$WIN" C-c
 sleep 0.3
 tmux send-keys -t "$SESSION_NAME:$WIN" "bash -c 'exec -a gemini bash $FAKE_REPL2'" Enter
