@@ -56,6 +56,29 @@ watch`, and never a sha-poll loop like
 force-push, that sha vanishes and the loop's exit condition can never come
 true. Check CI with single foreground `gh run list`/`gh pr checks` calls
 between other work, or one bounded foreground wait with an explicit timeout.
+Prefer `scripts/ci-wait.sh <PR#>` over hand-rolling any of this — it does
+the mergeability check below, then a single bounded foreground poll, and
+exits with a code you can branch on (0 green, 1 red, 2 timeout, 3
+conflicting) instead of a loop you have to reason about yourself.
+
+**CONFLICTING PR ⇒ no run ever fires — silence is not "still pending."**
+`pull_request`-triggered workflows check out the merge-preview ref
+(`refs/pull/N/merge`), which GitHub builds by merging head onto base. When
+the PR has gone `CONFLICTING` against its base branch — easy to hit
+unnoticed in a high-parallelism swarm, since every sibling PR that merges to
+the base can flip yours into conflict — that ref can't be built, so **no
+workflow run is created at all**: not pending, not queued, not failed,
+nothing to poll for. A `gh run list ... | grep <sha>` loop watching for that
+run will cycle forever with no error to catch. Before you start waiting on
+CI for a commit you just pushed, run
+`gh pr view <PR#> --json mergeable,mergeStateStatus` — if that reports
+`CONFLICTING` (or `mergeable: false`), rebase onto the base branch first
+(see "Refresh from the default branch" above) and push, then watch CI on
+the rebased SHA. If you miss this, it's not a dead end: the coordinator's
+stale-PR nudge (`scripts/stale-pr-nudges.sh`, `prompts/coordinator.md` §
+"Stale-PR nudge") checks the same `mergeable`/`mergeStateStatus` fields
+after `STALE_PR_NUDGE_HOURS` of silence and will flag the conflict — but
+that's a multi-hour recovery net, not a substitute for checking up front.
 
 (For claude workers the harness also disables background tasks outright —
 `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` — so the option won't exist; this
