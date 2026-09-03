@@ -163,14 +163,7 @@ IS_PR=$(gh api "repos/{owner}/{repo}/issues/$INPUT_NUM" --jq '.pull_request != n
 
 if [ "$IS_PR" = "true" ]; then
   PR_NUM="$INPUT_NUM"
-  LINKED_ISSUE=$(gh pr view "$PR_NUM" --json closingIssuesReferences \
-                   -q '.closingIssuesReferences[0].number' 2>/dev/null || echo "")
-  if [ -n "$LINKED_ISSUE" ] && [ "$LINKED_ISSUE" != "null" ]; then
-    ISSUE="$LINKED_ISSUE"
-    echo "[2/7] #$INPUT_NUM is PR #$PR_NUM → linked issue #$ISSUE"
-  else
-    echo "[2/7] #$INPUT_NUM is PR #$PR_NUM (no closing-issue reference)"
-  fi
+  echo "[2/7] #$INPUT_NUM is PR #$PR_NUM"
 elif [ "$IS_PR" = "false" ]; then
   ISSUE="$INPUT_NUM"
   PR_NUM=$(gh issue view "$ISSUE" --json closedByPullRequestsReferences \
@@ -186,7 +179,7 @@ else
 fi
 
 # Inspect PR state.
-PR_JSON=$(gh pr view "$PR_NUM" --json state,mergeable,headRefName,title)
+PR_JSON=$(gh pr view "$PR_NUM" --json state,mergeable,headRefName,title,closingIssuesReferences)
 PR_STATE=$(echo "$PR_JSON" | jq -r .state)
 PR_MERGEABLE=$(echo "$PR_JSON" | jq -r .mergeable)
 PR_BRANCH=$(echo "$PR_JSON" | jq -r .headRefName)
@@ -194,15 +187,25 @@ PR_TITLE=$(echo "$PR_JSON" | jq -r .title)
 echo "[3/7] PR #$PR_NUM: state=$PR_STATE mergeable=$PR_MERGEABLE branch=$PR_BRANCH"
 echo "       title: $PR_TITLE"
 
-# closingIssuesReferences only reflects closing keywords in the PR *body*;
-# a title-only "(fixes #N)" leaves it empty. Fall back to the branch name —
-# provision-worker.sh always names it fix/issue-N — before concluding there's
-# truly no linked issue and abandoning the issue-keyed cleanup.
-if [ -z "$ISSUE" ] && [[ "$PR_BRANCH" =~ ^fix/issue-([0-9]+) ]]; then
-  ISSUE="${BASH_REMATCH[1]}"
-  echo "       no closing-issue reference, but branch name encodes issue #$ISSUE — using it for cleanup"
-elif [ -z "$ISSUE" ]; then
-  echo "       $(c_amber "⚠ no linked issue — issue-keyed cleanup (tmux window / worktree) will be skipped")"
+if [ -z "$ISSUE" ]; then
+  # Local artifacts (tmux window, worktree, branch) are keyed on the branch
+  # name provision-worker.sh assigned at spawn time — prefer that as the
+  # stronger signal over closingIssuesReferences, which only reflects
+  # closing keywords in the PR *body* (empty for a title-only "fixes #N")
+  # and, being free-text, could in principle name a different issue than
+  # the one this actual worker branch belongs to.
+  if [[ "$PR_BRANCH" =~ ^fix/issue-([0-9]+) ]]; then
+    ISSUE="${BASH_REMATCH[1]}"
+    echo "       branch name encodes issue #$ISSUE — using it for cleanup"
+  else
+    LINKED_ISSUE=$(echo "$PR_JSON" | jq -r '.closingIssuesReferences[0].number // empty')
+    if [ -n "$LINKED_ISSUE" ]; then
+      ISSUE="$LINKED_ISSUE"
+      echo "       branch name doesn't match fix/issue-N; using closing-issue reference #$ISSUE instead"
+    else
+      echo "       $(c_amber "⚠ no linked issue — issue-keyed cleanup (tmux window / worktree) will be skipped")"
+    fi
+  fi
 fi
 
 case "$PR_STATE" in
