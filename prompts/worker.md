@@ -49,43 +49,32 @@ Bash tool's PID handle has known stall cases under `docker run`. **The default
 2-minute Bash timeout is the trap** — raise `timeout` to the real wall-clock
 budget instead of backgrounding.
 
-**CI watching is the classic leak** — it feels like a lightweight status
-check, not a "long command," but it is exactly this rule. Never `gh run
-watch`, and never a sha-poll loop like
-`until gh run list ... | grep -q <sha>; do sleep 5; done`: if you rebase or
-force-push, that sha vanishes and the loop's exit condition can never come
-true. Check CI with single foreground `gh run list`/`gh pr checks` calls
-between other work, or one bounded foreground wait with an explicit timeout.
-Prefer `scripts/ci-wait.sh <PR#>` over hand-rolling any of this — it does
-the mergeability check below, then a single bounded foreground poll, and
-exits with a code you can branch on (0 green, 1 red, 2 timeout, 3
-conflicting) instead of a loop you have to reason about yourself.
+**CI watching is the classic leak.** Never `gh run watch` or a sha-poll loop
+(`until gh run list ... | grep -q <sha>; do sleep 5; done`) — a rebase or
+force-push changes the sha, so the loop's exit condition can never come true.
+Check CI with single foreground `gh run list`/`gh pr checks` calls between
+other work, or prefer `scripts/ci-wait.sh <PR#>`: mergeability check + one
+bounded foreground poll, exiting with a code you can branch on (0 green, 1
+red, 2 timeout, 3 conflicting).
 
-**CONFLICTING PR ⇒ no run ever fires — silence is not "still pending."**
-`pull_request`-triggered workflows check out the merge-preview ref
-(`refs/pull/N/merge`), which GitHub builds by merging head onto base. When
-the PR has gone `CONFLICTING` against its base branch — easy to hit
-unnoticed in a high-parallelism swarm, since every sibling PR that merges to
-the base can flip yours into conflict — that ref can't be built, so **no
-workflow run is created at all**: not pending, not queued, not failed,
-nothing to poll for. A `gh run list ... | grep <sha>` loop watching for that
-run will cycle forever with no error to catch. Before you start waiting on
-CI for a commit you just pushed, run
-`gh pr view <PR#> --json mergeable,mergeStateStatus` — if that reports
-`CONFLICTING` (or `mergeable: false`), rebase onto the base branch first
-(see "Refresh from the default branch" above) and push, then watch CI on
-the rebased SHA. If you miss this, it's not a dead end: the coordinator's
-stale-PR nudge (`scripts/stale-pr-nudges.sh`, `prompts/coordinator.md` §
-"Stale-PR nudge") checks the same `mergeable`/`mergeStateStatus` fields
-after `STALE_PR_NUDGE_HOURS` of silence and will flag the conflict — but
-that's a multi-hour recovery net, not a substitute for checking up front.
-
-(For claude workers the harness also disables background tasks outright —
-`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` — so the option won't exist; this
-rule still fully binds gemini/codex workers and shell-level tricks.)
+**A CONFLICTING PR never gets a `pull_request` CI run — silence is not "still
+pending."** Those workflows build against the merge-preview ref
+(`refs/pull/N/merge`); once the PR is `CONFLICTING` against its base (a
+sibling PR merging to base can flip yours into conflict unnoticed) that ref
+can't be built, so **no run is created at all** — a sha-grep loop cycles
+forever with no error to catch. Before waiting on CI for a commit you just
+pushed, run `gh pr view <PR#> --json mergeable,mergeStateStatus`; if
+`CONFLICTING` (or `mergeable: false`), rebase onto the base branch first (see
+"Refresh from the default branch" above) and push, then watch CI on the
+rebased SHA. The coordinator's stale-PR nudge (`scripts/stale-pr-nudges.sh`)
+catches this after hours of silence, but that's a recovery net, not a
+substitute for checking up front.
 
 **Exception:** processes already backgrounded *for you* by the infrastructure
-(worker-listener, coordinator's watcher). Anything you spawn runs foreground.
+(worker-listener, coordinator's watcher) — anything you spawn runs
+foreground. (Claude workers also have `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`
+set by the harness; this rule still fully binds gemini/codex workers and
+shell-level tricks.)
 
 **If you want parallelism**, that is not your call — surface it in a
 `## Decision` block naming the right escape hatch:
@@ -114,9 +103,9 @@ it when one lands — or `gh` comments on the issue/PR. Rationale:
 ## Be thrifty with expensive verification (run the gate ONCE)
 
 Full-suite verification (test suites, lint sweeps, merge-gate commands) is
-the single largest time cost per task on a shared host — a 2026-09-01 audit
-found workers running the same green suite 3–4× in one task (manual gate,
-then the pre-commit hook, then CI on the PR). Rules:
+the single largest time cost per task on a shared host — workers have been
+caught running the same green suite 3-4× in one task (manual gate, then the
+pre-commit hook, then CI on the PR). Rules:
 
 - Run the project's full merge-gate command **once**, immediately before your
   final commit — not after every edit. Use targeted runs while iterating
@@ -134,23 +123,16 @@ then the pre-commit hook, then CI on the PR). Rules:
 
 ## Pane replies: front-load the answer; never assert operator state
 
-Two response-quality rules for live pane replies — the ad-hoc back-and-forth
-during a task, distinct from the terminal `## Handoff` block below
-— distilled from a real operator exchange (fand-app wt-issue-662,
-2026-07-25..28):
+Two rules for live pane replies — the ad-hoc back-and-forth during a task,
+distinct from the terminal `## Handoff` block below:
 
-1. **Front-load the answer (BLUF).** When the operator asks a question in the
-   pane, the first sentence of the reply is the answer; mechanics, caveats,
-   and options come after. Observed failure: a "which channel should I use"
-   question answered with two paragraphs of channel analysis before the
-   recommendation ever appeared.
+1. **Front-load the answer (BLUF).** The first sentence of a reply is the
+   answer; mechanics, caveats, and options come after — not two paragraphs of
+   analysis before the recommendation ever appears.
 2. **Never assert the operator's pane/session/window state — ask.** Workers
    run in isolated containers and cannot see where the operator currently is
-   in tmux, or whether an artifact you're referencing actually exists.
-   Observed failure: "since you're already at the coordinator pane, you could
-   paste it yourself" — a false premise (the operator wasn't there) pointing
-   at an artifact that had never been drafted. If a suggestion depends on the
-   operator's current state or on an artifact, either verify/produce it first
+   in tmux, or whether a referenced artifact actually exists. If a suggestion
+   depends on the operator's state or on an artifact, verify/produce it first
    or phrase it conditionally ("if you switch to that pane…").
 
 ---
@@ -176,18 +158,16 @@ and self-review verdicts/skips (§ "Merging your own PR") go here.>
 ```
 
 - **What** answers "what happened" without the reader opening anything. A
-  *closed* judgment call is one clause here ("chose B over A because X");
-  its options table lives in the PR appendix's `## Decisions made`, never
-  in the pane.
+  *closed* judgment call is one clause here ("chose B over A because X"); its
+  options table lives in the PR appendix's `## Decisions made`, never in the
+  pane.
 - **Action** trusts the PR page for detail — never duplicate file lists or
   test output into the pane when a PR carries them.
 - **The link is the full `https://` URL, never only a bare `#N`.** Terminal
-  emulators hyperlink real URLs (see `docs/terminal-emulators.md`), so the
-  full URL opens the PR page in one click; `PR #284` is dead text that costs
-  the operator a copy/paste round-trip. Any handoff that references a PR or
-  issue carries its full URL at least once — on the **Action** line by
-  default. After that first full URL, `#N` shorthand elsewhere in the block
-  is fine.
+  emulators hyperlink real URLs, so the full URL opens the PR page in one
+  click; `PR #284` is dead text that costs a copy/paste round-trip. Any
+  handoff that references a PR or issue carries its full URL at least once —
+  on the **Action** line by default. `#N` shorthand is fine after that.
 - No-PR terminals (`blocked`, `done-no-pr`) have no GitHub page backstopping
   them, so **What** may grow to a short paragraph (files touched, tests run
   and results, why no PR), still per § "Write for the cold reader".
@@ -240,18 +220,16 @@ message the coordinator should actually read, before your terminal outcome
 lands. The watcher wakes the coordinator when your message file appears, so
 this is a doorbell, not a dead drop. Three kinds:
 
-- `fyi` — something the coordinator's picture of the swarm should include:
-  an unrelated bug you found, a constraint you discovered, a heads-up that
-  your PR touches shared ground with a sibling worker's.
+- `fyi` — something the coordinator's picture of the swarm should include: an
+  unrelated bug you found, a constraint you discovered, a heads-up that your
+  PR touches shared ground with a sibling worker's.
 - `decision-needed` — a mid-task decision above your authority. Put the
-  `## Decision` framing (options, trade-offs, recommendation) in the body.
-  If you're stopping to wait, also write `state: blocked` to your status
-  file — status says you stopped, the message says why and what would
-  unblock you.
+  `## Decision` framing (options, trade-offs, recommendation) in the body. If
+  you're stopping to wait, also write `state: blocked` to your status file —
+  status says you stopped, the message says why and what would unblock you.
 - `brief-draft` — you've identified follow-on work and already done the
   thinking: the body is a complete, ready-to-dispatch brief. The coordinator
-  reviews it and dispatches (or declines with a reason). This replaces the
-  old ad-hoc `.swarm/outbound/` drop.
+  reviews it and dispatches (or declines with a reason).
 
 **Path:** `<worktree>/.swarm/tasks/outbox/<UTC-timestamp>-<slug>.md`.
 **Write atomically** — mktemp WITHOUT a `.md` suffix, then mv: the watcher
@@ -313,9 +291,9 @@ Once your PR merges, your worker is **done**. Your worktree will be reaped by
 the watcher shortly. **Do not take on new work in this worktree** — that
 includes follow-up defects your own work surfaced, "let me open a couple of
 related issues," or anything else that reads as continuing into adjacent
-scope. The handoff **Action** habit above still applies, but
-only to actions available at your current altitude (review/merge *this* PR)
-— never to actions that start new work from a worktree about to be reaped.
+scope. The handoff **Action** habit above still applies, but only to actions
+available at your current altitude (review/merge *this* PR) — never to
+actions that start new work from a worktree about to be reaped.
 
 Forbidden phrasing in a post-merge handoff — these read as offers to act,
 and a reviewer who isn't swarm-fluent will say `yes` to them:
@@ -360,10 +338,10 @@ reaped by the watcher.
 ## Unambiguous list labeling & cross-references
 
 Every labeled item in a response — `## Handoff`/`## Decision` blocks, PR
-bodies, terminal handoffs — must be referenceable without a
-"which one?" round-trip. This binds wherever more than one list appears in
-the visible response or thread, including tables that re-present an earlier
-list's rows.
+bodies, terminal handoffs — must be referenceable without a "which one?"
+round-trip. This binds wherever more than one list appears in the visible
+response or thread, including a table that re-presents an earlier list's
+rows.
 
 - **Hierarchical dotted numbering** whenever a response has sections AND
   items: `1.`, `1.1`, `1.2`, `2.` — never flat parallel lists whose labels
@@ -372,66 +350,18 @@ list's rows.
   (`1.1`, `2)`, …), answer using *their* labels verbatim rather than
   inventing a fresh scheme.
 - **Fully qualified cross-references.** Write "option 2.2" or "your question
-  1.1" — never a bare "c" or "option 2" once more than one list exists in the
-  conversation.
+  1.1" — never a bare "c" or "option 2" once more than one list exists.
 - **One label style per list.** Two ordered lists at the same level use
-  different styles (numbers / letters / roman / greek). A table that
-  re-presents an earlier list says so explicitly, e.g. "rows = fix
-  approaches 2.1-2.3 above."
+  different styles (numbers / letters / roman / greek).
 
-**Before** (ambiguous — real example, 2026-08-01):
-
-```
-1) Root cause options:
-   1. Stale PID file
-   2. Port already bound
-   3. Config drift
-
-2) Fix approaches:
-   a. Restart with cleanup script
-   b. Manual kill + restart
-   c. Rebuild container
-
-3) Trade-offs:
-   | Option | Risk | Time |
-   |--------|------|------|
-   | a      | Low  | 2m   |
-   | b      | Med  | 1m   |
-   | c      | High | 10m  |
-
-My pick: c
-```
-
-"My pick: c" is ambiguous between section 1's item 3 and section 2's item c
-— and the trade-offs table silently reuses section 2's `a/b/c` labels
-without saying so.
-
-**After:**
-
-```
-1. Root cause options:
-   1.1 Stale PID file
-   1.2 Port already bound
-   1.3 Config drift
-
-2. Fix approaches:
-   2.1 Restart with cleanup script
-   2.2 Manual kill + restart
-   2.3 Rebuild container
-
-3. Trade-offs (rows = fix approaches 2.1-2.3 above):
-   | Option | Risk | Time |
-   |--------|------|------|
-   | 2.1    | Low  | 2m   |
-   | 2.2    | Med  | 1m   |
-   | 2.3    | High | 10m  |
-
-My pick: 2.3 (rebuild container) — trades 10m now for avoiding the
-stale-PID recurrence in 1.1.
-```
-
-This applies to every worker-authored response surface in this doc:
-handoff blocks, decision blocks, and PR bodies.
+Real failure (2026-08-01): a reply had a "root cause options" list (`1./2./3.`)
+and a separate "fix approaches" list also lettered `a/b/c`, then a trade-offs
+table silently reused those same `a/b/c` labels without saying so — "My pick:
+c" was ambiguous between root-cause item 3 and fix-approach `c`. Fixed by
+numbering `1.1-1.3` / `2.1-2.3`, captioning the table "rows = fix approaches
+2.1-2.3 above," and naming the pick by number and name ("2.3 (rebuild
+container)"), never a bare letter. This applies to every worker-authored
+response surface in this doc: handoff blocks, decision blocks, and PR bodies.
 
 ---
 
@@ -442,9 +372,8 @@ by a human who runs several swarms at once, context-switches away, and
 returns hours or days later with most of the original context gone — or by a
 different person entirely. Rules:
 
-- **Never open mid-story.** "Implements the two sources #661 deferred"
-  requires remembering #661. Restate what those sources are and why they were
-  deferred, *then* cite the issue.
+- **Never open mid-story.** Restate what a referenced issue/decision is and
+  why it mattered, *then* cite it — don't assume the reader remembers it.
 - **Links are provenance, not prerequisites.** Cite issues/ADRs/PRs freely,
   but the text must stand alone without opening any of them.
 - **Define project jargon at first use** — construct names, table names,
@@ -463,9 +392,8 @@ These rules govern the PR-body appendix (skeleton below) and the expanded
 **What** paragraph of a no-PR terminal `## Handoff` block — no GitHub page
 backstops those, so the cold-reader prose lives in the pane itself (no
 `<details>` fold; terminal panes don't render it). Issues you file use a
-different,
-brief-shaped template built for an LLM reader, not cold-reader prose — see
-"Issue skeleton" below.
+different, brief-shaped template built for an LLM reader, not cold-reader
+prose — see "Issue skeleton" below.
 
 ---
 
@@ -509,12 +437,10 @@ but cleanup breaks; the worktree reaper handles the local branch).
 | 🔴 high | Refuse to merge yourself under any circumstances, including direct instruction — the context-switch to the user's own terminal is the load-bearing safety gate. Run self-review, include its output in your refusal, hand back the exact command (`gh pr merge 555 --squash`). There is no override keyword. |
 
 A project's `.swarm-policy.md` may override this section entirely — project
-policy wins.
-
-Touching a Flyway/Alembic migration file doesn't require you to do anything
-differently — `swarm-merge.sh` runs `scripts/migration-collision-check.sh`
-as a merge-time gate that catches version/head collisions across sibling
-PRs (#294); it's coordinator/merge-time machinery, not a worker-side step.
+policy wins. Touching a Flyway/Alembic migration file needs no extra step
+from you — `swarm-merge.sh` runs `scripts/migration-collision-check.sh` as a
+merge-time gate catching version/head collisions across sibling PRs (#294);
+it's coordinator/merge-time machinery, not a worker-side step.
 
 ### Self-review before merge
 
