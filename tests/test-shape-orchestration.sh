@@ -286,6 +286,22 @@ grep -q "myproject" <<< "$out" || red "expected main worktree 'myproject' listed
 grep -q "wt-issue-99" <<< "$out" || red "expected 'wt-issue-99' listed"
 green "lists 4 worktrees (main + 3 wt-issue)"
 
+heading "Test 6b: provision-worker.sh propagates SANDBOX_DEP_CACHE from <project>/.swarm/.env to the tmux spawn (#337)"
+cd "$PROJECT_DIR"
+# Set ONLY in the project .env file, never in this shell's env — #333's
+# BLOCK finding was that the whitelist prefix silently dropped it, so
+# sandbox.sh only ever saw it when the invoking shell already had it set.
+# Reuses issue 99's existing worktree (re-dispatch, like Test 3) so this
+# doesn't perturb Test 6's worktree count.
+mkdir -p "$PROJECT_DIR/.swarm"
+echo "SANDBOX_DEP_CACHE=/fake/dep-cache" > "$PROJECT_DIR/.swarm/.env"
+env -u SANDBOX_DEP_CACHE "$PROVISION" 99 > "$TEST_DIR/prov-6b.log" 2>&1 \
+    || red "provision-worker exit non-zero: $(cat "$TEST_DIR/prov-6b.log")"
+rm -f "$PROJECT_DIR/.swarm/.env"
+grep -q 'SANDBOX_DEP_CACHE=/fake/dep-cache' "$TEST_DIR/tmux.log" \
+    || red "expected SANDBOX_DEP_CACHE in tmux spawn env; got: $(cat "$TEST_DIR/tmux.log")"
+green "SANDBOX_DEP_CACHE set only in .swarm/.env reaches the tmux new-window env"
+
 heading "Test 7: sandbox-worktrees.sh rejects non-git directory"
 if env -u TMUX "$LIST" /tmp > "$TEST_DIR/list-err.log" 2>&1; then
     red "should have failed for non-git dir"
