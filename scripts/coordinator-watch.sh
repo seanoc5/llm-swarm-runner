@@ -716,6 +716,127 @@
 #                           POLL_TRIGGER and ORPHAN_PR_LOGGED elsewhere in
 #                           this file — so a watcher restart clears them and
 #                           gives every window a fresh start.
+#
+#   WORKER_AUTO_DELIVER=1  (issue #313) Fixes the "parked interactive worker
+#                           never gets its requeue.sh follow-up" gap.
+#                           worker-listener.sh's interactive mode dispatches
+#                           the agent as a FOREGROUND process
+#                           (dispatch_agent) and blocks on it until the
+#                           agent exits (/quit) — only then does the
+#                           listener's own bash loop return to
+#                           claim_next_task and notice anything new in
+#                           inbox/. A worker that finishes its task and
+#                           parks at rest INSIDE that still-running agent
+#                           session (never running /quit) is invisible to
+#                           its own listener: a coordinator follow-up
+#                           dropped via requeue.sh just sits in inbox/
+#                           until a human attaches and quits the session by
+#                           hand (see the fand-etl incident this issue was
+#                           filed from — two briefs sat unclaimed for 2.5+
+#                           hours). Distinct from, and complementary to,
+#                           WATCH_SYNTH_OUTCOME (issue #314, above): that
+#                           feature synthesizes the done/*.json outcome
+#                           record for a parked worker's CURRENT (already
+#                           finished) task, for coordinator-wake/monitoring
+#                           purposes — it does nothing about a NEW brief
+#                           waiting behind that still-live session, which is
+#                           this feature's entire job. This reuses the SAME
+#                           background sweep as
+#                           WORKER_AUTO_COMPACT (worker_compact_pass(), see
+#                           above) rather than a dedicated loop — same
+#                           per-window capture-pane cost, same cadence
+#                           (WORKER_COMPACT_SCAN_SECS) is plenty since this
+#                           is a correctness backstop, not something that
+#                           benefits from sub-second responsiveness (the
+#                           inbox write itself is instant; only the STUCK
+#                           case this exists for is slow). For any `iss-*`
+#                           window that is (a) a live agent session
+#                           (worker_pane_state == cli, not the listener's
+#                           own idle bash shell — that case already self-
+#                           heals via run_idle_shell, issue #43), (b)
+#                           genuinely idle (NOT worker_pane_busy — never
+#                           interrupt a live turn), (c) has a real brief
+#                           waiting in its inbox/ (worker_pending_brief),
+#                           (d) has POSITIVELY CONFIRMED its current task
+#                           already reached a terminal status —
+#                           "ready-for-review" or "done-no-pr", never
+#                           "blocked" or no status at all — via
+#                           worker_current_task_terminal() (self-review
+#                           finding: a `blocked` worker awaiting a decision
+#                           is idle/cli/composer-empty too, and ending ITS
+#                           session would make worker-listener.sh record a
+#                           false "ok" outcome for a task that never
+#                           actually finished — see that function's header
+#                           comment for the full incident), (e) has a
+#                           rendered statusline confirming a real
+#                           interactive TUI is actually on screen
+#                           (worker_pane_ctx_used — self-review finding: a
+#                           WORKER_HEADLESS=1 `claude -p` run renders no busy
+#                           chrome at all, so it can otherwise sit in state
+#                           "cli" with worker_pane_busy() never true for its
+#                           whole run; this is the same structural guard
+#                           maybe_worker_compact already gets from its own
+#                           ctx-parsing requirement), and (f) has nothing
+#                           unsubmitted sitting in its composer
+#                           (compact_composer_clear — see the observed
+#                           composer-suggestion case in issue #313's
+#                           constraints), maybe_worker_deliver_brief()
+#                           pastes "/quit" and Enter, the same injection
+#                           mechanism as maybe_worker_compact's /compact.
+#                           This does NOT paste the brief's own text —
+#                           requeue.sh already wrote it to inbox/ atomically;
+#                           ending the session is the only missing step, and
+#                           once the agent exits, worker-listener.sh's
+#                           existing claim_next_task/dispatch_agent/
+#                           write_outcome path runs exactly as it does for
+#                           any other follow-up, so done/*.json outcomes and
+#                           status/*.json files keep working unchanged for
+#                           this class of task too.
+#                           Deliberately claude-only in effect, though not
+#                           gated on agent identity (the pane alone doesn't
+#                           reliably reveal which CLI is running — see
+#                           worker_pane_state()): "/quit" is claude's own
+#                           documented exit command (worker-listener.sh's
+#                           header comment: "/quit (claude) or Ctrl-D
+#                           (gemini)"). Against a gemini/codex pane this
+#                           fails safe — the text is typed but not
+#                           recognized as an exit command, the session stays
+#                           "cli", the WORKER_DELIVER_END_TIMEOUT_SECS wait
+#                           below times out, and the per-window backoff
+#                           kicks in exactly like a failed /compact
+#                           injection. Never sends anything more aggressive
+#                           than a slash-command paste + Enter.
+#                           Known limitation: a worker parked `blocked`
+#                           (asked a decision-needed question, awaiting the
+#                           coordinator's answer) is deliberately NOT
+#                           released by this feature (see gate (d) above) —
+#                           only a task that already reached a terminal
+#                           status. Answering a blocked worker still needs
+#                           the manual path (attach and type the answer
+#                           directly, continuing that same conversation) or
+#                           a future feature that delivers an answer as a
+#                           continuing chat turn instead of ending the
+#                           session outright.
+#                           Set to 0 to disable; requeue.sh's own hint text
+#                           documents the manual fallback (attach and
+#                           /quit).
+#   WORKER_DELIVER_POLL_SECS=2
+#                           capture-pane polling interval while waiting for
+#                           the injected /quit to actually end the session.
+#   WORKER_DELIVER_END_TIMEOUT_SECS=15
+#                           Max wait for worker_pane_state to flip from
+#                           "cli" to "shell" after injecting /quit. Giving
+#                           up here just leaves the brief queued for the
+#                           next sweep (or a human) — never blocks anything.
+#   WORKER_DELIVER_BACKOFF_SECS=600
+#   WORKER_DELIVER_MAX_FAILURES=3
+#                           Same shape as WORKER_COMPACT_BACKOFF_SECS/
+#                           WORKER_COMPACT_MAX_FAILURES above, own in-memory
+#                           associative arrays (WORKER_DELIVER_LAST_FAIL/
+#                           FAIL_COUNT/GAVE_UP) so a run of failed injections
+#                           against one window (e.g. a non-claude agent, or
+#                           a composer that never clears) doesn't retry every
+#                           sweep forever.
 #   COMPACT_QUEUED_MARKER_PATTERN
 #   COMPACT_RETRACT_BACKSPACES=12
 #                           (issue #265) Shared by BOTH the coordinator and
@@ -922,6 +1043,11 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     WORKER_COMPACT_NUDGE_PROMPT       (see header)  text sent to resume the worker after compaction
     WORKER_COMPACT_BACKOFF_SECS             600     cooldown for a window after a timeout/ineffective verdict
     WORKER_COMPACT_MAX_FAILURES             3       consecutive failures before giving up on a window entirely
+    WORKER_AUTO_DELIVER               1       (issue #313) end a parked-at-rest interactive worker session (/quit) so its listener claims an already-queued requeue.sh brief; see header comment
+    WORKER_DELIVER_POLL_SECS                2       capture-pane poll interval while waiting for the session to end
+    WORKER_DELIVER_END_TIMEOUT_SECS         15      max wait for the session to actually end after /quit
+    WORKER_DELIVER_BACKOFF_SECS             600     cooldown for a window after a failed delivery attempt
+    WORKER_DELIVER_MAX_FAILURES             3       consecutive failures before giving up on a window entirely
     COMPACT_QUEUED_MARKER_PATTERN     (auto)  queued-input marker checked when retracting a stuck phase=start injection; see header comment
     COMPACT_RETRACT_BACKSPACES        12      Backspace keystrokes sent alongside the retraction Escape (coord + worker, shared; issue #265/#290)
     COMPACT_SUBMIT_SETTLE_SECS        1       settle delay around the injection-submit Enter (coord + worker, shared; issue #290); see header comment
@@ -1043,6 +1169,33 @@ EVENTS LOG
       worker.compact.giving_up  (issue #252) N consecutive timeout/ineffective verdicts for this
                            window (issue, failures=N) — maybe_worker_compact stops attempting
                            /compact for it until the watcher restarts; logged once, not every sweep
+      worker.deliver.attempt  (issue #313) a worker window is idle-at-rest inside a live agent
+                           session with a brief genuinely waiting in inbox/ — about to inject /quit (issue)
+      worker.deliver.skip   parked-brief delivery skipped this cycle (issue, reason=task_not_terminal|
+                           pane_busy|no_ctx_parsed|composer_not_clear|backoff|mktemp_failed —
+                           task_not_terminal means the CURRENT processing/ task's status isn't
+                           ready-for-review/done-no-pr yet (e.g. "blocked", or no status file at all);
+                           no_ctx_parsed means no interactive statusline is rendered on screen — most
+                           likely a WORKER_HEADLESS=1 worker's `claude -p` run, which never shows busy
+                           chrome for worker_pane_busy() to key off — see worker_current_task_terminal()'s
+                           header comment for the false-completion bug this positive gate closes)
+      worker.deliver.resubmit  (issue #290-style) the /quit Enter didn't appear to submit
+                           (composer still held the pasted text, pane not busy) — resent it
+                           once before falling through to the normal end-wait (issue)
+      worker.deliver.ended  the session ended (worker_pane_state flipped cli -> shell) within
+                           WORKER_DELIVER_END_TIMEOUT_SECS — worker-listener.sh's own loop will
+                           claim the pending brief on its next iteration (issue, waited)
+      worker.deliver.timeout  gave up waiting for the session to end after /quit (issue, waited) —
+                           counted as a failure (worker_deliver_record_failure)
+      worker.deliver.delivered_as_text  composer already empty at the end-timeout — no ghost text
+                           to retract; most likely /quit was delivered as a plain chat message
+                           rather than executed as a slash/exit command (issue)
+      worker.deliver.retracted / .retract_failed / .retract_skip  same shape as the worker.compact.*
+                           retraction events above, applied to a stuck /quit injection (issue)
+      worker.deliver.giving_up  (issue #313) N consecutive failed delivery attempts for this window
+                           (issue, failures=N) — maybe_worker_deliver_brief stops attempting /quit
+                           for it until the watcher restarts; the brief stays queued for a human
+                           to release manually (attach and /quit) — logged once, not every sweep
 
 PANE ECHO (issue #38)
     By default, every line appended to events.log — by this process OR any
@@ -1185,6 +1338,19 @@ WORKER_COMPACT_NUDGE_PROMPT="${WORKER_COMPACT_NUDGE_PROMPT:-Continue your task f
 # injection attempt; see this file's WORKER_AUTO_COMPACT header comment.
 WORKER_COMPACT_BACKOFF_SECS="${WORKER_COMPACT_BACKOFF_SECS:-600}"
 WORKER_COMPACT_MAX_FAILURES="${WORKER_COMPACT_MAX_FAILURES:-3}"
+# issue #313 — parked-brief delivery: a follow-up brief dropped by
+# requeue.sh into a worker's inbox/ never reaches it if that worker's
+# interactive agent session is idle at rest rather than back at
+# worker-listener.sh's own bash loop (dispatch_agent is blocked on the
+# still-running `claude` process, so claim_next_task never runs again).
+# Same background sweep as WORKER_AUTO_COMPACT above; see
+# maybe_worker_deliver_brief()'s header comment for the full design and
+# worker_compact_pass()'s header comment for why this shares that loop.
+WORKER_AUTO_DELIVER="${WORKER_AUTO_DELIVER:-1}"
+WORKER_DELIVER_POLL_SECS="${WORKER_DELIVER_POLL_SECS:-2}"
+WORKER_DELIVER_END_TIMEOUT_SECS="${WORKER_DELIVER_END_TIMEOUT_SECS:-15}"
+WORKER_DELIVER_BACKOFF_SECS="${WORKER_DELIVER_BACKOFF_SECS:-600}"
+WORKER_DELIVER_MAX_FAILURES="${WORKER_DELIVER_MAX_FAILURES:-3}"
 # issue #265 — shared between the coordinator and per-window retraction
 # paths; see this file's COMPACT_QUEUED_MARKER_PATTERN header comment above.
 COMPACT_QUEUED_MARKER_PATTERN="${COMPACT_QUEUED_MARKER_PATTERN:-Press up to edit queued messages}"
@@ -1340,6 +1506,16 @@ format_event_line() {
         worker.compact.ineffective)          glyph="⚠"; color=$'\033[31m' ;;
         worker.compact.verify_skip)            glyph="·"; color=$'\033[2m'  ;;
         worker.compact.giving_up)                glyph="⚠"; color=$'\033[31m' ;;
+        worker.deliver.attempt)          glyph="⏏"; color=$'\033[36m' ;;
+        worker.deliver.skip)               glyph="·"; color=$'\033[2m'  ;;
+        worker.deliver.resubmit)            glyph="↻"; color=$'\033[33m' ;;
+        worker.deliver.ended)                glyph="⏏"; color=$'\033[32m' ;;
+        worker.deliver.timeout)              glyph="⚠"; color=$'\033[33m' ;;
+        worker.deliver.delivered_as_text)  glyph="⚠"; color=$'\033[33m' ;;
+        worker.deliver.retracted)            glyph="↩"; color=$'\033[32m' ;;
+        worker.deliver.retract_failed)        glyph="⚠"; color=$'\033[31m' ;;
+        worker.deliver.retract_skip)            glyph="·"; color=$'\033[2m'  ;;
+        worker.deliver.giving_up)                  glyph="⚠"; color=$'\033[31m' ;;
         watch.autoclose)               glyph="♻"; color=$'\033[36m' ;;
         watch.orphan_sweep)             glyph="♻"; color=$'\033[36m' ;;
         reap.window)                    glyph="✂"; color=$'\033[36m' ;;
@@ -1406,6 +1582,7 @@ orphan-sweep:  ${WATCH_ORPHAN_SWEEP_SECS}s$([ "$WATCH_ORPHAN_SWEEP_SECS" = "0" ]
 check-on-done: $WATCH_CHECK_ON_DONE$([ "$WATCH_CHECK_ON_DONE" = "1" ] && echo " (session: $SESSION_NAME)")
 auto-compact:  $AUTO_COMPACT$([ "$AUTO_COMPACT" = "1" ] && echo " (threshold: min(${AUTO_COMPACT_PCT}% of window, ${AUTO_COMPACT_THRESHOLD_CAP_TOKENS}), fallback: ${AUTO_COMPACT_THRESHOLD_TOKENS} tokens, probe: $AUTO_COMPACT_PROBE, poll-tick: ${AUTO_COMPACT_TICK_SECS}s$([ "$AUTO_COMPACT_TICK_SECS" = "0" ] && echo " disabled"), cooldown: ${AUTO_COMPACT_COOLDOWN_SECS}s)")
 worker-compact: $WORKER_AUTO_COMPACT$([ "$WORKER_AUTO_COMPACT" = "1" ] && echo " (threshold: min(${WORKER_COMPACT_PCT}% of window, ${WORKER_COMPACT_THRESHOLD_CAP_TOKENS})/wrapup+$(( WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS - WORKER_COMPACT_THRESHOLD_TOKENS )), fallback: ${WORKER_COMPACT_THRESHOLD_TOKENS}/${WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS} tokens, scan: ${WORKER_COMPACT_SCAN_SECS}s)")
+worker-deliver: $WORKER_AUTO_DELIVER$([ "$WORKER_AUTO_DELIVER" = "1" ] && echo " (parked-in-agent requeue.sh briefs released via /quit, end-timeout: ${WORKER_DELIVER_END_TIMEOUT_SECS}s, scan: ${WORKER_COMPACT_SCAN_SECS}s — issue #313)")
 dry-run:       $DRY_RUN
 once:          $ONCE
 pane-echo:     $([ "$WATCHER_QUIET" = "1" ] && echo "disabled (WATCHER_QUIET=1)" || echo "enabled (WATCHER_QUIET=1 to silence)")
@@ -3115,6 +3292,246 @@ worker_task_done() {
     printf '%s\n' "$clean" | LC_ALL=C grep -qE '^[[:space:]]*TASK (COMPLETE|FAILED)[[:space:]]+exit='
 }
 
+# ── Parked-brief delivery (issue #313) ──────────────────────────────────────
+# See this file's WORKER_AUTO_DELIVER header comment for the full incident
+# and design. Short version: worker-listener.sh's interactive dispatch_agent
+# blocks on the live `claude` process, so a worker that finishes its task and
+# parks at rest INSIDE that still-running session (rather than running
+# /quit) can never notice a follow-up brief requeue.sh drops into its
+# inbox/ — its own claim_next_task loop simply never runs again. Ending the
+# session (the same action a human would take per worker-listener.sh's own
+# printed instructions) hands control back to that already-correct loop.
+
+# worker_pending_brief <worktree-dir>
+#
+# True (rc 0) if a real (non-tmp) brief is sitting in <worktree>/.swarm/
+# tasks/inbox/, waiting to be claimed. Same non-tmp filter claim_next_task
+# itself uses, so this can never mistake a mid-write requeue.sh temp file
+# for a deliverable brief.
+worker_pending_brief() {
+    local wt_dir="$1"
+    [ -n "$(find "$wt_dir/.swarm/tasks/inbox" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | head -1)" ]
+}
+
+# worker_current_task_terminal <worktree-dir>
+#
+# True (rc 0) ONLY if the task currently claimed in <worktree>/.swarm/tasks/
+# processing/ (there is always exactly one there for as long as the agent
+# process is alive — claim_next_task() moves it there on pickup and doesn't
+# move it out again until dispatch_agent returns) has a status file
+# reporting a genuinely terminal state: "ready-for-review" or "done-no-pr".
+#
+# Self-review finding on this feature's first version: gating delivery on
+# pane idleness alone is not enough. A worker parked `blocked` (asked a
+# decision-needed question, awaiting the coordinator's answer — exactly the
+# state prompts/coordinator.md's "unblock it with a requeue.sh follow-up
+# brief" line describes) renders as idle, cli, composer-empty — indistinguishable
+# from a worker that's actually finished. Injecting /quit there would end the
+# session before its current task ever truly concluded; worker-listener.sh's
+# write_outcome() can't tell a natural post-completion /quit from one forced
+# mid-decision — exit code 0 maps straight to "ok", and the #287 minimum-
+# interaction floor doesn't catch it either (a blocked worker already has a
+# status file, so that check's own no-status-file precondition never fires).
+# The result: a real fand-etl-shaped decision-needed task gets recorded as a
+# false, silent success. So this is a positive (fail-CLOSED) gate — the
+# opposite of every other check in this feature, which fail open — because
+# the cost of a missed automatic delivery (falls back to the documented
+# manual /quit) is far lower than the cost of corrupting a task's outcome
+# record. A processing/ entry with no status file yet, or one whose state is
+# "blocked" (or anything else), is treated as NOT confirmed finished and
+# blocks delivery — see worker.deliver.skip reason=task_not_terminal.
+#
+# Deliberately NOT worker_task_done(): that function's (a)/(b) signals are
+# themselves gated on `.swarm/tasks/processing/` being EMPTY (a staleness
+# guard against stale done/status files from an EARLIER, already-concluded
+# task — see its own header comment) — a precondition that can never hold
+# here, since processing/ holds exactly the in-flight task for as long as
+# its agent process is alive, i.e. for every window this function is even
+# called against. This reads the CURRENT processing/ entry's own status file
+# directly instead, with no such guard needed (there's nothing stale to
+# guard against — it's always THIS task's own record or nothing).
+worker_current_task_terminal() {
+    local wt_dir="$1"
+    [ "$HAVE_JQ" = "1" ] || return 1
+    local proc_file task_id status_file state
+    proc_file="$(find "$wt_dir/.swarm/tasks/processing" -maxdepth 1 -type f 2>/dev/null | head -1)"
+    [ -n "$proc_file" ] || return 1
+    task_id="$(basename "$proc_file" .md)"
+    status_file="$wt_dir/.swarm/tasks/status/${task_id}.json"
+    [ -r "$status_file" ] || return 1
+    state="$(jq -r '.state // empty' "$status_file" 2>/dev/null)" || return 1
+    case "$state" in
+        ready-for-review|done-no-pr) return 0 ;;
+        *)                           return 1 ;;
+    esac
+}
+
+# WORKER_DELIVER_LAST_FAIL / WORKER_DELIVER_FAIL_COUNT / WORKER_DELIVER_GAVE_UP
+#
+# Same shape and same rationale as WORKER_COMPACT_LAST_FAIL/FAIL_COUNT/
+# GAVE_UP just below — per-window backoff bookkeeping, in-memory only, reset
+# on a watcher restart.
+declare -A WORKER_DELIVER_LAST_FAIL=()
+declare -A WORKER_DELIVER_FAIL_COUNT=()
+declare -A WORKER_DELIVER_GAVE_UP=()
+
+# worker_deliver_record_failure <issue>
+#
+# Mirrors worker_compact_record_failure — called after an injected /quit
+# fails to end the session (timeout) or ends up as a harmless plain-text
+# message (delivered_as_text, still a failure: no session was ended).
+worker_deliver_record_failure() {
+    local issue="$1" now count
+    now=$(date +%s)
+    WORKER_DELIVER_LAST_FAIL[$issue]=$now
+    count=$(( ${WORKER_DELIVER_FAIL_COUNT[$issue]:-0} + 1 ))
+    WORKER_DELIVER_FAIL_COUNT[$issue]=$count
+    if [ "$count" -ge "$WORKER_DELIVER_MAX_FAILURES" ]; then
+        WORKER_DELIVER_GAVE_UP[$issue]=1
+        echo "[$(date +%T)] WARNING: worker iss-$issue failed to end its parked session via /quit $count times in a row — giving up on automatic delivery for this window; the queued brief needs a human to attach and /quit manually"
+        log_event worker.deliver.giving_up "issue=$issue failures=$count"
+    fi
+}
+
+# worker_deliver_record_success <issue>
+worker_deliver_record_success() {
+    local issue="$1"
+    unset "WORKER_DELIVER_LAST_FAIL[$issue]" "WORKER_DELIVER_FAIL_COUNT[$issue]" "WORKER_DELIVER_GAVE_UP[$issue]"
+}
+
+# maybe_worker_deliver_brief <window>
+#
+# Called by worker_compact_pass for each `iss-*` window on every
+# WORKER_COMPACT_SCAN_SECS sweep (shares that loop rather than its own —
+# see WORKER_AUTO_DELIVER's header comment). Fails open at every step: a
+# missing precondition, unparseable pane text, or a timeout just leaves the
+# window alone this cycle — the brief stays queued for the next sweep or a
+# human.
+maybe_worker_deliver_brief() {
+    local win="$1" issue wt_dir
+    issue="${win#iss-}"
+    [[ "$issue" =~ ^[0-9]+$ ]] || return 0
+    wt_dir="$WORKSPACE/wt-issue-$issue"
+
+    local state
+    state="$(worker_pane_state "$win")" || state="absent"
+    # "shell": the listener's own idle bash loop is in control and already
+    # self-heals onto a new brief (run_idle_shell/poll_for_brief, issue #43)
+    # — nothing to do. "absent": no such window.
+    [ "$state" = "cli" ] || return 0
+
+    worker_pending_brief "$wt_dir" || return 0
+
+    # Self-review finding: never end a session whose CURRENT task hasn't
+    # positively confirmed finishing — see worker_current_task_terminal()'s
+    # header comment for the false-completion bug this closes (a `blocked`
+    # worker awaiting a decision looks identical to a finished one from pane
+    # state alone). A worker parked `blocked` still needs the documented
+    # manual path (attach and answer it directly) until a future feature can
+    # deliver an answer as a continuing turn instead of ending the session.
+    if ! worker_current_task_terminal "$wt_dir"; then
+        log_event worker.deliver.skip "issue=$issue reason=task_not_terminal"
+        return 0
+    fi
+
+    if [ "${WORKER_DELIVER_GAVE_UP[$issue]:-0}" = "1" ]; then
+        return 0   # already logged the one worker.deliver.giving_up warning
+    fi
+
+    local bo_now bo_last_fail
+    bo_now=$(date +%s)
+    bo_last_fail="${WORKER_DELIVER_LAST_FAIL[$issue]:-0}"
+    if [ "$bo_last_fail" -gt 0 ] && [ $(( bo_now - bo_last_fail )) -lt "$WORKER_DELIVER_BACKOFF_SECS" ]; then
+        log_event worker.deliver.skip "issue=$issue reason=backoff remaining=$(( WORKER_DELIVER_BACKOFF_SECS - (bo_now - bo_last_fail) ))s"
+        return 0
+    fi
+
+    if worker_pane_busy "$win"; then
+        log_event worker.deliver.skip "issue=$issue reason=pane_busy"
+        return 0   # never interrupt a live turn — see docs/tmux-as-channel.md
+    fi
+
+    # Self-review finding: a WORKER_HEADLESS=1 worker's `claude -p` run
+    # renders no interactive TUI chrome at all — worker_pane_busy() never
+    # matches it (no "(esc to interrupt)"/spinner), so worker_pane_state()
+    # reads "cli" for its entire, possibly still-running, duration with no
+    # busy signal to gate on. maybe_worker_compact is structurally immune to
+    # this (it already requires worker_pane_ctx_used() to parse a real
+    # statusline before doing anything); give this feature the same
+    # protection rather than relying solely on compact_composer_clear()'s
+    # last-rendered-line check below, which can coincidentally read as
+    # "empty" for one poll between two lines of a live `-p` run's plain
+    # stdout — nowhere near proof of an actual idle interactive composer.
+    # statusline-with-context.sh's "ctx: <used>/<total> (<pct>%)" only
+    # renders inside the interactive TUI, never in -p's plain output, so
+    # requiring it here is a cheap, already-tested structural gate against
+    # ever touching a live headless run (worst case without it: a wasted
+    # WORKER_DELIVER_END_TIMEOUT_SECS wait and a false backoff — not outcome
+    # corruption, since headless workers write done/*.json themselves the
+    # normal way — but free to close outright).
+    if ! worker_pane_ctx_used "$win" >/dev/null 2>&1; then
+        log_event worker.deliver.skip "issue=$issue reason=no_ctx_parsed"
+        return 0
+    fi
+
+    # issue #313's constraint: a composer holding unsubmitted text (an
+    # observed dimmed suggestion on one parked pane) must never be pasted
+    # over — pasting "/quit" into it would produce garbled, unpredictable
+    # input rather than a clean exit command.
+    local target="$SESSION_NAME:$win"
+    if ! compact_composer_clear "$target"; then
+        log_event worker.deliver.skip "issue=$issue reason=composer_not_clear"
+        return 0
+    fi
+
+    echo "[$(date +%T)] worker $win has a brief waiting in inbox/ but its agent session is parked at rest — ending the session (/quit) so its listener claims it..."
+    log_event worker.deliver.attempt "issue=$issue"
+
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "[DRY] would inject /quit into $target to release the parked session back to worker-listener.sh"
+        return 0
+    fi
+
+    # Same load-buffer + paste-buffer -d + settle + Enter + resubmit-check
+    # mechanism as maybe_worker_compact's /compact injection; own buffer
+    # name so a concurrent compact/deliver pass across windows can't clobber
+    # each other's buffer content.
+    local tmp_quit
+    tmp_quit=$(mktemp) || { log_event worker.deliver.skip "issue=$issue reason=mktemp_failed"; return 0; }
+    printf '/quit' > "$tmp_quit" 2>/dev/null || true
+    tmux load-buffer -b "llm-worker-deliver-$issue" "$tmp_quit" 2>/dev/null || true
+    tmux paste-buffer -b "llm-worker-deliver-$issue" -t "$target" -d 2>/dev/null || true
+    rm -f "$tmp_quit" 2>/dev/null || true
+
+    sleep "$COMPACT_SUBMIT_SETTLE_SECS"
+    tmux send-keys -t "$target" Enter 2>/dev/null || true
+    sleep "$COMPACT_SUBMIT_SETTLE_SECS"
+    if ! compact_confirm_submitted "$target" "$WORKER_COMPACT_BUSY_PATTERN" "/quit"; then
+        log_event worker.deliver.resubmit "issue=$issue"
+        tmux send-keys -t "$target" Enter 2>/dev/null || true
+    fi
+
+    local waited=0
+    while [ "$(worker_pane_state "$win")" = "cli" ]; do
+        sleep "$WORKER_DELIVER_POLL_SECS"
+        waited=$((waited + WORKER_DELIVER_POLL_SECS))
+        if [ "$waited" -ge "$WORKER_DELIVER_END_TIMEOUT_SECS" ]; then
+            log_event worker.deliver.timeout "issue=$issue waited=${waited}s"
+            if compact_composer_clear "$target"; then
+                log_event worker.deliver.delivered_as_text "issue=$issue"
+            else
+                compact_retract_queued "$target" worker.deliver "issue=$issue" "$WORKER_COMPACT_BUSY_PATTERN" || true
+            fi
+            worker_deliver_record_failure "$issue"
+            return 0
+        fi
+    done
+
+    echo "[$(date +%T)] worker $win session ended (${waited}s) — its listener will claim the pending brief within its next poll."
+    log_event worker.deliver.ended "issue=$issue waited=${waited}s"
+    worker_deliver_record_success "$issue"
+}
+
 # WORKER_COMPACT_LAST_FAIL / WORKER_COMPACT_FAIL_COUNT / WORKER_COMPACT_GAVE_UP
 # (issue #252)
 #
@@ -3359,16 +3776,22 @@ maybe_worker_compact() {
 
 # worker_compact_pass
 #
-# Enumerates every `iss-*` window in the session and runs maybe_worker_compact
-# against each. Called from run_worker_compact_loop's own dedicated
+# Enumerates every `iss-*` window in the session and runs
+# maybe_worker_deliver_brief then maybe_worker_compact against each (issue
+# #313 folded parked-brief delivery into this same sweep rather than giving
+# it a dedicated loop — same per-window capture-pane cost either feature
+# would pay alone, and delivery is cheap/fast-path in the common case where
+# nothing is queued). Called from run_worker_compact_loop's own dedicated
 # background process on its own WORKER_COMPACT_SCAN_SECS interval — kept
 # separate from run_watch_timer_loop's tighter status/PR-poll loop because a
 # single compaction can block for minutes; see that function's header
 # comment for the full rationale. A missing session (no workers provisioned
 # yet) or zero iss-* windows is the common case and simply no-ops — this
-# always fails open, same as every other pass in this file.
+# always fails open, same as every other pass in this file. Either feature
+# can be disabled independently (WORKER_AUTO_COMPACT / WORKER_AUTO_DELIVER)
+# without affecting the other.
 worker_compact_pass() {
-    [ "$WORKER_AUTO_COMPACT" = "1" ] || return 0
+    { [ "$WORKER_AUTO_COMPACT" = "1" ] || [ "$WORKER_AUTO_DELIVER" = "1" ]; } || return 0
     tmux has-session -t "$SESSION_NAME" 2>/dev/null || return 0
 
     local windows win
@@ -3377,7 +3800,8 @@ worker_compact_pass() {
 
     while IFS= read -r win; do
         [ -n "$win" ] || continue
-        maybe_worker_compact "$win"
+        [ "$WORKER_AUTO_DELIVER" = "1" ] && maybe_worker_deliver_brief "$win"
+        [ "$WORKER_AUTO_COMPACT" = "1" ] && maybe_worker_compact "$win"
     done <<< "$windows"
 }
 
@@ -3633,10 +4057,10 @@ if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ] || [ "$WA
     WATCH_TIMER_PID=$!
     log_event watch.timer.start "pr_poll_secs=$WATCH_PR_POLL_SECS check_on_done=$WATCH_CHECK_ON_DONE orphan_sweep_secs=$WATCH_ORPHAN_SWEEP_SECS"
 fi
-if [ "$WORKER_AUTO_COMPACT" = "1" ]; then
+if [ "$WORKER_AUTO_COMPACT" = "1" ] || [ "$WORKER_AUTO_DELIVER" = "1" ]; then
     run_worker_compact_loop &
     WORKER_COMPACT_TIMER_PID=$!
-    log_event watch.timer.start "worker_auto_compact=$WORKER_AUTO_COMPACT scan_secs=$WORKER_COMPACT_SCAN_SECS"
+    log_event watch.timer.start "worker_auto_compact=$WORKER_AUTO_COMPACT worker_auto_deliver=$WORKER_AUTO_DELIVER scan_secs=$WORKER_COMPACT_SCAN_SECS"
 fi
 if [ "$AUTO_COMPACT" = "1" ] && [ "$AUTO_COMPACT_TICK_SECS" -gt 0 ]; then
     run_auto_compact_poll_loop &
