@@ -29,7 +29,9 @@
 # is broken — every git command run INSIDE the worktree then fails (exit
 # 128), including the clean-tree check above. These are detected separately
 # (worktree_registration_ok) and, when the dirname-derived fix/issue-N PR is
-# finalized, reaped by removing the directory directly (rm -rf + `git
+# finalized, reaped by removing the directory directly (rm -rf the worktree
+# dir, then rm -rf just its own admin dir under .git/worktrees/ — see
+# reap_dangling's issue #328 comment for why this is never a bare `git
 # worktree prune`) rather than via kill-worktree.sh's `git worktree remove`,
 # which also needs a working registration to succeed. Skipped entirely under
 # --no-pr-check (the cherry check needs a working `git cherry` too).
@@ -215,13 +217,28 @@ worktree_registration_ok() {
 # dangling (worktree_registration_ok returned false) — every git command
 # inside it fails, including the `git worktree remove` that kill-worktree.sh
 # relies on. Bypasses git for the worktree directory itself: best-effort
-# compose-down (mirrors kill-worktree.sh), rm -rf the directory, `git
-# worktree prune` to drop the main repo's now-stale administrative entry,
-# then delete the LOCAL fix/issue-N branch the same way kill-worktree.sh
-# does. Origin is never touched, so a CLOSED-without-merge PR remains
-# recoverable via `gh pr reopen N`. There is no tmux window to kill here —
-# a live window would mean kill-finished-workers.sh could have reaped this
-# already; by definition these are window-less orphans.
+# compose-down (mirrors kill-worktree.sh), rm -rf the directory, remove the
+# main repo's now-stale administrative entry directly, then delete the
+# LOCAL fix/issue-N branch the same way kill-worktree.sh does. Origin is
+# never touched, so a CLOSED-without-merge PR remains recoverable via `gh pr
+# reopen N`. There is no tmux window to kill here — a live window would mean
+# kill-finished-workers.sh could have reaped this already; by definition
+# these are window-less orphans.
+#
+# issue #328: the administrative entry is removed by `rm -rf`'ing exactly
+# the one directory this worktree's own `.git` file points at — NEVER via a
+# bare `git worktree prune`, which scans and can remove EVERY worktree's
+# admin dir, not just this one. Three fand-app incidents (2026-09-01) traced
+# active workers' admin dirs disappearing mid-task, with no other logged
+# cause, to a `worktree prune` call racing their concurrent git activity.
+# The `.git` file is read BEFORE the worktree directory is removed (it's
+# gone right after); if it's missing or unreadable, the admin dir is
+# resolved from `<worktree-basename>` instead, which is what `git worktree
+# add` always uses for the wt-issue-N naming scheme this project relies on
+# (see swarm_worktree_dir) — collisions aren't possible since issue numbers
+# are unique. Either way, the resolved path is required to fall under
+# `<git-common-dir>/worktrees/` before anything is deleted, so a
+# surprising `.git` file content can never point removal somewhere else.
 #
 # REDUCED GUARANTEES vs. the healthy-registration path: a dangling worktree
 # can't run `git status` (is_clean_tree, above), so uncommitted/untracked
@@ -234,17 +251,43 @@ worktree_registration_ok() {
 # registration git itself can't read from — there's no lower-risk way to
 # recover the same information.
 reap_dangling() {
-    local issue="$1" wt
+    local issue="$1" wt common_dir admin_dir
     wt="$(swarm_worktree_dir "$PROJECT_DIR" "$issue")"
     echo "=== reap-dangling #$issue ==="
     echo "  worktree: $wt (dangling git registration)"
+
+    common_dir="$(git -C "$PROJECT_DIR" rev-parse --git-common-dir 2>/dev/null || echo "$PROJECT_DIR/.git")"
+    case "$common_dir" in
+        /*) ;;
+        *) common_dir="$PROJECT_DIR/$common_dir" ;;
+    esac
+
+    admin_dir=""
+    if [ -f "$wt/.git" ]; then
+        admin_dir="$(sed -n 's/^gitdir: //p' "$wt/.git" 2>/dev/null | head -n1)"
+    fi
+    if [ -z "$admin_dir" ]; then
+        admin_dir="$common_dir/worktrees/$(basename "$wt")"
+    fi
+    case "$admin_dir" in
+        "$common_dir/worktrees/"*) ;;
+        *)
+            echo "  WARN: worktree's .git file resolved outside $common_dir/worktrees, ignoring it"
+            admin_dir="$common_dir/worktrees/$(basename "$wt")"
+            ;;
+    esac
+
     if [ "$NO_COMPOSE_DOWN" != "1" ] && [ -x "$SCRIPT_DIR/_compose-down-for-worktree.sh" ]; then
         "$SCRIPT_DIR/_compose-down-for-worktree.sh" "$wt" || echo "  WARN: compose-down helper exited non-zero (continuing)"
     fi
     rm -rf -- "$wt"
     echo "  ✓ removed worktree directory"
-    git -C "$PROJECT_DIR" worktree prune
-    echo "  ✓ pruned stale worktree registration"
+    if [ -e "$admin_dir" ]; then
+        rm -rf -- "$admin_dir"
+        echo "  ✓ removed stale worktree registration ($admin_dir)"
+    else
+        echo "  - worktree registration already absent ($admin_dir)"
+    fi
     local branch="fix/issue-$issue"
     if git -C "$PROJECT_DIR" show-ref --verify --quiet "refs/heads/$branch"; then
         git -C "$PROJECT_DIR" branch -D "$branch"
@@ -346,7 +389,7 @@ for WT in "$PROJECT_PARENT"/wt-issue-*/; do
                 continue
             fi
         fi
-        echo "  $NAME  [dangling git registration, PR $DBRANCH state=$dstate → reap (rm -rf + worktree prune)]"
+        echo "  $NAME  [dangling git registration, PR $DBRANCH state=$dstate → reap (rm -rf worktree dir + its own admin dir)]"
         DANGLING_CANDIDATES+=("$ISSUE")
         continue
     fi
@@ -423,7 +466,7 @@ fi
 if [ "$DRY" = "1" ]; then
     echo
     echo "DRY-RUN — no action taken. Would reap: ${CANDIDATES[*]} ${DANGLING_CANDIDATES[*]}"
-    [ "${#DANGLING_CANDIDATES[@]}" -gt 0 ] && echo "  (of which dangling-registration, rm -rf + worktree prune: ${DANGLING_CANDIDATES[*]})"
+    [ "${#DANGLING_CANDIDATES[@]}" -gt 0 ] && echo "  (of which dangling-registration, rm -rf worktree dir + own admin dir: ${DANGLING_CANDIDATES[*]})"
     exit 0
 fi
 
@@ -437,7 +480,7 @@ screened out above, but --force is still used.
 EOF
     if [ "${#DANGLING_CANDIDATES[@]}" -gt 0 ]; then
         echo "Dangling-registration worktrees (${DANGLING_CANDIDATES[*]}) are removed directly"
-        echo "(rm -rf + git worktree prune) since git itself can't operate on them."
+        echo "(rm -rf worktree dir + its own admin dir) since git itself can't operate on them."
     fi
     echo
     read -r -p "Type 'yes' to proceed: " confirm
