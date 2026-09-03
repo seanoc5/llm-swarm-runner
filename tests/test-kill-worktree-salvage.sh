@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 #
-# test-kill-worktree-salvage.sh — Non-LLM regression test for the inbox/
-# outbox salvage-before-reap behavior in kill-worktree.sh (issue #317).
+# test-kill-worktree-salvage.sh — Non-LLM regression test for the
+# inbox/processing/outbox salvage-before-reap behavior in kill-worktree.sh
+# (issue #317).
 #
 # The #317 bug: kill-worktree.sh ran `git worktree remove --force` with no
 # look at <worktree>/.swarm/tasks/inbox/ (requeue.sh's follow-up-brief
-# queue) or tasks/outbox/ (unread worker messages) — a worktree reaped
-# between tasks silently destroyed any queued-but-not-yet-picked-up brief.
+# queue), tasks/processing/ (a brief worker-listener.sh has atomically
+# claimed but not finished — the likeliest place to find in-flight work,
+# since --pr-finalized/--merged-only reaps deliberately bypass the
+# "listener parked" check), or tasks/outbox/ (unread worker messages) — a
+# worktree reaped between tasks (or mid-task) silently destroyed any
+# queued-but-not-yet-completed brief.
 #
 # Strategy: real git worktree fixtures (no tmux/gh needed — this exercises
 # kill-worktree.sh directly, and separately the dry-run preview in
@@ -57,7 +62,7 @@ new_project() {
 export SWARM_WORKTREE_GROUPING=flat
 
 # ============================================================================
-heading "Test 1: non-empty inbox+outbox is salvaged, worktree still removed"
+heading "Test 1: non-empty inbox+processing+outbox is salvaged, worktree still removed"
 # ============================================================================
 
 PROJ1="$TEST_DIR/proj1"
@@ -65,10 +70,16 @@ new_project "$PROJ1"
 git -C "$PROJ1" worktree add -q -b fix/issue-51 "$TEST_DIR/wt-issue-51"
 WT1="$TEST_DIR/wt-issue-51"
 
-mkdir -p "$WT1/.swarm/tasks/inbox" "$WT1/.swarm/tasks/outbox/processed"
-echo "follow-up brief" > "$WT1/.swarm/tasks/inbox/20260101-000000-51.md"
-echo "worker message"  > "$WT1/.swarm/tasks/outbox/20260101-000001-fyi.md"
-echo "already read"    > "$WT1/.swarm/tasks/outbox/processed/20260101-000002-fyi.md"
+mkdir -p "$WT1/.swarm/tasks/inbox" "$WT1/.swarm/tasks/processing" "$WT1/.swarm/tasks/outbox/processed"
+echo "follow-up brief"  > "$WT1/.swarm/tasks/inbox/20260101-000000-51.md"
+# claim_next_task() (worker-listener.sh) selects any non-.tmp.* regular
+# file, not just *.md — an extensionless queued brief must still count.
+echo "extensionless brief" > "$WT1/.swarm/tasks/inbox/20260101-000000b-51"
+# A half-written mktemp file must never be counted or salvaged.
+echo "half-written"     > "$WT1/.swarm/tasks/inbox/.tmp.abc123.md"
+echo "in-flight brief"  > "$WT1/.swarm/tasks/processing/20259999-999999-51.md"
+echo "worker message"   > "$WT1/.swarm/tasks/outbox/20260101-000001-fyi.md"
+echo "already read"     > "$WT1/.swarm/tasks/outbox/processed/20260101-000002-fyi.md"
 
 RUN1="$TEST_DIR/run1.log"
 set +e
@@ -77,19 +88,25 @@ RC1=$?
 set -e
 [ "$RC1" -eq 0 ] || red "expected exit 0, got $RC1. Output:
 $(cat "$RUN1")"
-green "kill-worktree.sh exited 0 with a non-empty inbox/outbox"
+green "kill-worktree.sh exited 0 with a non-empty inbox/processing/outbox"
 
-grep -q 'SALVAGED: 2 unprocessed brief(s) from iss-51 (inbox=1 outbox=1)' "$RUN1" \
+grep -q 'SALVAGED: 4 unprocessed brief(s) from iss-51 (inbox=2 processing=1 outbox=1)' "$RUN1" \
     || red "expected a SALVAGED summary line naming counts. Output:
 $(cat "$RUN1")"
-green "SALVAGED line printed with correct inbox/outbox counts"
+green "SALVAGED line printed with correct inbox/processing/outbox counts"
 
 SALVAGE_DIR="$PROJ1/.swarm/salvaged/iss-51"
 [ -f "$SALVAGE_DIR/inbox/20260101-000000-51.md" ] \
     || red "queued inbox brief was not salvaged to $SALVAGE_DIR/inbox/"
+[ -f "$SALVAGE_DIR/inbox/20260101-000000b-51" ] \
+    || red "extensionless queued inbox brief was not salvaged (claim_next_task would still dispatch it)"
+[ ! -e "$SALVAGE_DIR/inbox/.tmp.abc123.md" ] \
+    || red "a half-written .tmp.* file must never be salvaged"
+[ -f "$SALVAGE_DIR/processing/20259999-999999-51.md" ] \
+    || red "in-flight (claimed) brief was not salvaged to $SALVAGE_DIR/processing/"
 [ -f "$SALVAGE_DIR/outbox/20260101-000001-fyi.md" ] \
     || red "unread outbox message was not salvaged to $SALVAGE_DIR/outbox/"
-green "both files moved into the salvage dir"
+green "all queued files moved into the salvage dir, tmp/processed files left alone"
 
 [ -d "$WT1" ] && red "worktree dir still present after removal: $WT1"
 git -C "$PROJ1" show-ref --verify --quiet refs/heads/fix/issue-51 \
@@ -117,7 +134,7 @@ set -e
 $(cat "$RUN2")"
 green "kill-worktree.sh exited 76 under --refuse-nonempty-inbox"
 
-grep -q 'REFUSED: 1 unprocessed brief(s) in iss-52' "$RUN2" \
+grep -q 'REFUSED: 1 unprocessed brief(s) in iss-52 (inbox=1 processing=0 outbox=0)' "$RUN2" \
     || red "expected a REFUSED line. Output:
 $(cat "$RUN2")"
 [ -d "$WT2" ] || red "worktree was removed despite --refuse-nonempty-inbox"
@@ -196,7 +213,7 @@ RC4=$?
 set -e
 [ "$RC4" -eq 0 ] || red "expected exit 0, got $RC4. Output:
 $(cat "$RUN4")"
-grep -q 'iss-61: would salvage 1 unprocessed brief(s) (inbox=1 outbox=0)' "$RUN4" \
+grep -q 'iss-61: would salvage 1 unprocessed brief(s) (inbox=1 processing=0 outbox=0)' "$RUN4" \
     || red "expected a per-window salvage preview line. Output:
 $(cat "$RUN4")"
 green "dry-run reported the would-be-salvaged count for iss-61"

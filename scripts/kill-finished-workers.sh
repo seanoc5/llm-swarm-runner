@@ -30,10 +30,10 @@
 #
 # UNPROCESSED BRIEFS (issue #317)
 #   With --with-worktree, kill-worktree.sh salvages any unprocessed
-#   inbox/outbox briefs into <project>/.swarm/salvaged/iss-N/ before
-#   removing the worktree (or, with --refuse-nonempty-inbox, skips that
-#   worktree entirely). --dry-run previews the would-be-salvaged counts
-#   per window without touching anything.
+#   inbox/processing/outbox briefs into <project>/.swarm/salvaged/iss-N/
+#   before removing the worktree (or, with --refuse-nonempty-inbox, skips
+#   that worktree entirely). --dry-run previews the would-be-salvaged
+#   counts per window without touching anything.
 
 set -euo pipefail
 
@@ -290,18 +290,16 @@ mtime_epoch() {
     stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
 }
 
-# Counts *.md files directly in dir (0 if dir absent/empty). Mirrors
-# kill-worktree.sh's salvage counter (issue #317); kept local per the
-# self-contained-scripts convention (see mtime_epoch above) — used only
-# for the --dry-run preview here, kill-worktree.sh does the real salvage.
-count_md_files() {
-    local dir="$1" n=0 f
-    shopt -s nullglob
-    for f in "$dir"/*.md; do
-        [ -f "$f" ] && n=$((n + 1))
-    done
-    shopt -u nullglob
-    echo "$n"
+# Counts queued files directly in dir (0 if dir absent/empty): any regular
+# file except a `.tmp.*` in-progress write — mirrors worker-listener.sh's
+# claim_next_task() selection and kill-worktree.sh's count_queued_files
+# (issue #317) exactly; kept local per the self-contained-scripts
+# convention (see mtime_epoch above). Used only for the --dry-run preview
+# here — kill-worktree.sh does the real count-and-salvage.
+count_queued_files() {
+    local dir="$1"
+    [ -d "$dir" ] || { echo 0; return; }
+    find "$dir" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | wc -l | tr -d ' '
 }
 
 # worktree_birth_path <worktree-dir>
@@ -514,11 +512,12 @@ if [ "$DRY" = "1" ]; then
             issue="${w#iss-}"
             wt="$(swarm_worktree_dir "$PROJECT_DIR" "$issue")"
             [ -d "$wt" ] || continue
-            inbox_n=$(count_md_files "$wt/.swarm/tasks/inbox")
-            outbox_n=$(count_md_files "$wt/.swarm/tasks/outbox")
-            total=$((inbox_n + outbox_n))
+            inbox_n=$(count_queued_files "$wt/.swarm/tasks/inbox")
+            processing_n=$(count_queued_files "$wt/.swarm/tasks/processing")
+            outbox_n=$(count_queued_files "$wt/.swarm/tasks/outbox")
+            total=$((inbox_n + processing_n + outbox_n))
             if [ "$total" -gt 0 ]; then
-                echo "  $w: would salvage $total unprocessed brief(s) (inbox=$inbox_n outbox=$outbox_n)"
+                echo "  $w: would salvage $total unprocessed brief(s) (inbox=$inbox_n processing=$processing_n outbox=$outbox_n)"
             else
                 echo "  $w: no unprocessed briefs"
             fi
