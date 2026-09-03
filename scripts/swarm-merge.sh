@@ -169,8 +169,7 @@ if [ "$IS_PR" = "true" ]; then
     ISSUE="$LINKED_ISSUE"
     echo "[2/7] #$INPUT_NUM is PR #$PR_NUM → linked issue #$ISSUE"
   else
-    echo "[2/7] #$INPUT_NUM is PR #$PR_NUM (no linked issue)"
-    echo "       $(c_amber "⚠ no linked issue — issue-keyed cleanup (tmux window / worktree) will be skipped")"
+    echo "[2/7] #$INPUT_NUM is PR #$PR_NUM (no closing-issue reference)"
   fi
 elif [ "$IS_PR" = "false" ]; then
   ISSUE="$INPUT_NUM"
@@ -194,6 +193,17 @@ PR_BRANCH=$(echo "$PR_JSON" | jq -r .headRefName)
 PR_TITLE=$(echo "$PR_JSON" | jq -r .title)
 echo "[3/7] PR #$PR_NUM: state=$PR_STATE mergeable=$PR_MERGEABLE branch=$PR_BRANCH"
 echo "       title: $PR_TITLE"
+
+# closingIssuesReferences only reflects closing keywords in the PR *body*;
+# a title-only "(fixes #N)" leaves it empty. Fall back to the branch name —
+# provision-worker.sh always names it fix/issue-N — before concluding there's
+# truly no linked issue and abandoning the issue-keyed cleanup.
+if [ -z "$ISSUE" ] && [[ "$PR_BRANCH" =~ ^fix/issue-([0-9]+) ]]; then
+  ISSUE="${BASH_REMATCH[1]}"
+  echo "       no closing-issue reference, but branch name encodes issue #$ISSUE — using it for cleanup"
+elif [ -z "$ISSUE" ]; then
+  echo "       $(c_amber "⚠ no linked issue — issue-keyed cleanup (tmux window / worktree) will be skipped")"
+fi
 
 case "$PR_STATE" in
   OPEN)

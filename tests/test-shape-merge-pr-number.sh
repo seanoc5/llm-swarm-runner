@@ -123,10 +123,41 @@ EOF
 chmod +x "$TEST_DIR/bin/gh"
 
 OUT=$(timeout 5 "$MERGE" 420 --no-kill 2>&1) || red "PR-number-with-no-linked-issue path failed:\n$OUT"
-echo "$OUT" | grep -q "PR #420 (no linked issue)" || red "expected 'no linked issue' resolution line, got:\n$OUT"
+echo "$OUT" | grep -q "PR #420 (no closing-issue reference)" || red "expected 'no closing-issue reference' resolution line, got:\n$OUT"
+echo "$OUT" | grep -qi "no linked issue — issue-keyed cleanup" || red "expected the no-linked-issue amber warning, got:\n$OUT"
 echo "$OUT" | grep -qi "skipping tmux/worktree" || red "expected cleanup-skip lines when no issue is linked, got:\n$OUT"
 echo "$OUT" | grep -q "merged (no linked issue)" || red "expected final line to say 'no linked issue', got:\n$OUT"
 green "PR with no linked issue still merges; issue-keyed cleanup explicitly skipped, not silently no-opped"
+
+# ============================================================================
+heading "Test 3b: PR number given, no closing-issue reference, but branch name encodes the issue — falls back"
+# ============================================================================
+# self-review caveat on the #324 PR: closingIssuesReferences only reflects
+# closing keywords in the PR *body* — a title-only "(fixes #N)" leaves it
+# empty. provision-worker.sh always names the branch fix/issue-N, so that's
+# a cheap, reliable fallback before abandoning the live tmux window/worktree.
+cat > "$TEST_DIR/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+    "api repos/{owner}/{repo}/issues/421")
+        echo "true"; exit 0 ;;
+    "pr view")
+        case "$*" in
+            *closingIssuesReferences*) echo ""; exit 0 ;;
+            *state,mergeable*) echo '{"state":"MERGED","mergeable":"MERGEABLE","headRefName":"fix/issue-333","title":"fake (title-only fixes #333)"}'; exit 0 ;;
+        esac
+        exit 0 ;;
+esac
+exit 0
+EOF
+chmod +x "$TEST_DIR/bin/gh"
+
+OUT=$(timeout 5 "$MERGE" 421 --no-kill 2>&1) || red "PR-number-with-branch-fallback path failed:\n$OUT"
+echo "$OUT" | grep -q "PR #421 (no closing-issue reference)" || red "expected 'no closing-issue reference' resolution line, got:\n$OUT"
+echo "$OUT" | grep -q "branch name encodes issue #333" || red "expected branch-name fallback line, got:\n$OUT"
+echo "$OUT" | grep -q "merged for issue #333" || red "expected final line to name issue #333 (from branch fallback), got:\n$OUT"
+echo "$OUT" | grep -qi "skipping tmux/worktree" && red "should NOT skip issue-keyed cleanup once the branch-name fallback resolves an issue:\n$OUT"
+green "no closing-issue reference but fix/issue-N branch name — falls back, cleanup stays issue-keyed"
 
 # ============================================================================
 heading "Test 4: number resolves as neither issue nor PR — clear error, no misleading message"
