@@ -824,10 +824,22 @@
 #                           capture-pane polling interval while waiting for
 #                           the injected /quit to actually end the session.
 #   WORKER_DELIVER_END_TIMEOUT_SECS=15
-#                           Max wait for worker_pane_state to flip from
-#                           "cli" to "shell" after injecting /quit. Giving
-#                           up here just leaves the brief queued for the
-#                           next sweep (or a human) — never blocks anything.
+#                           Max wait for worker_pending_brief to go false
+#                           (claim_next_task's atomic mv out of inbox/) after
+#                           injecting /quit. Deliberately NOT keyed on
+#                           worker_pane_state flipping "cli" -> "shell"
+#                           (issue #344): worker-listener.sh can claim the
+#                           brief and dispatch_agent() re-launch claude
+#                           within the SAME poll window the old session
+#                           ended in, so the pane goes cli -> shell -> cli
+#                           again entirely between two WORKER_DELIVER_POLL_
+#                           SECS polls and a pane-state-only check would
+#                           misread that normal success as a timeout —
+#                           worst case then running compact_retract_queued's
+#                           Escape/BSpace against the just-relaunched
+#                           session's live first turn. Giving up here just
+#                           leaves the brief queued for the next sweep (or a
+#                           human) — never blocks anything.
 #   WORKER_DELIVER_BACKOFF_SECS=600
 #   WORKER_DELIVER_MAX_FAILURES=3
 #                           Same shape as WORKER_COMPACT_BACKOFF_SECS/
@@ -1182,9 +1194,10 @@ EVENTS LOG
       worker.deliver.resubmit  (issue #290-style) the /quit Enter didn't appear to submit
                            (composer still held the pasted text, pane not busy) — resent it
                            once before falling through to the normal end-wait (issue)
-      worker.deliver.ended  the session ended (worker_pane_state flipped cli -> shell) within
-                           WORKER_DELIVER_END_TIMEOUT_SECS — worker-listener.sh's own loop will
-                           claim the pending brief on its next iteration (issue, waited)
+      worker.deliver.ended  the session ended and its listener claimed the pending brief
+                           (worker_pending_brief went false — issue #344, NOT a worker_pane_state
+                           cli -> shell read, which a same-poll-window relaunch can miss entirely)
+                           within WORKER_DELIVER_END_TIMEOUT_SECS (issue, waited)
       worker.deliver.timeout  gave up waiting for the session to end after /quit (issue, waited) —
                            counted as a failure (worker_deliver_record_failure)
       worker.deliver.delivered_as_text  composer already empty at the end-timeout — no ghost text
@@ -3511,11 +3524,35 @@ maybe_worker_deliver_brief() {
         tmux send-keys -t "$target" Enter 2>/dev/null || true
     fi
 
+    # issue #344: polling worker_pane_state for "cli" -> "shell" misses a
+    # NORMAL SUCCESS. After /quit, worker-listener.sh's claim_next_task()
+    # atomically moves the brief out of inbox/ into processing/ and
+    # dispatch_agent() re-launches claude within the same iteration — well
+    # inside WORKER_DELIVER_END_TIMEOUT_SECS — so the pane can go
+    # cli -> shell -> cli again entirely between two WORKER_DELIVER_POLL_SECS
+    # polls, and this loop would then see "cli" on every single poll, time
+    # out, and (worst case) run compact_retract_queued's Escape/BSpace
+    # against the just-relaunched session's live first turn — keystroke
+    # injection into a running agent, exactly what docs/tmux-as-channel.md
+    # exists to prevent. worker_pending_brief() going false is the fix:
+    # claim_next_task's mv is atomic, so it can never be missed the way a
+    # same-poll-window pane-state flap can, and it's true success — the
+    # brief left inbox/ — independent of whatever the pane happens to be
+    # rendering at that instant.
     local waited=0
-    while [ "$(worker_pane_state "$win")" = "cli" ]; do
+    while worker_pending_brief "$wt_dir"; do
         sleep "$WORKER_DELIVER_POLL_SECS"
         waited=$((waited + WORKER_DELIVER_POLL_SECS))
         if [ "$waited" -ge "$WORKER_DELIVER_END_TIMEOUT_SECS" ]; then
+            # Final re-check right at the boundary: the mv could land in the
+            # gap between the loop's last poll and this instant. Never let a
+            # last-second success get recorded as a timeout, and never let
+            # compact_retract_queued fire against a session that already
+            # moved on to the delivered brief (fix part 2 — the retract path
+            # must not fire once delivery has actually succeeded).
+            if ! worker_pending_brief "$wt_dir"; then
+                break
+            fi
             log_event worker.deliver.timeout "issue=$issue waited=${waited}s"
             if compact_composer_clear "$target"; then
                 log_event worker.deliver.delivered_as_text "issue=$issue"
@@ -3527,7 +3564,7 @@ maybe_worker_deliver_brief() {
         fi
     done
 
-    echo "[$(date +%T)] worker $win session ended (${waited}s) — its listener will claim the pending brief within its next poll."
+    echo "[$(date +%T)] worker $win session ended (${waited}s) — its listener claimed the pending brief."
     log_event worker.deliver.ended "issue=$issue waited=${waited}s"
     worker_deliver_record_success "$issue"
 }
