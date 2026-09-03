@@ -140,6 +140,42 @@ if [ -n "${EXTRA_MOUNTS:-}" ]; then
     done
 fi
 
+# Shared read-only JVM dependency cache (#330). Replaces the two-file
+# EXTRA_MOUNTS + .sandbox-env stopgap previously hand-applied per project:
+# a host-maintained Gradle module cache, bind-mounted :ro into every worker
+# and exported as GRADLE_RO_DEP_CACHE so `./gradlew` reuses it instead of
+# re-downloading the same jars in every container.
+#
+# Layout: $SANDBOX_DEP_CACHE/gradle/modules-2/... . Seed or refresh with:
+#   rsync -a --exclude='*.lock' --exclude='gc.properties' \
+#       ~/.gradle/caches/modules-2/ "$SANDBOX_DEP_CACHE/gradle/modules-2/"
+#
+# MUST NOT default to $HOME/.gradle: the coordinator runs unsandboxed on
+# the host (llm-start.sh -> scripts/coordinator-claude.sh, no docker) and
+# writes ~/.gradle live during its own tool use, which would make it a
+# concurrent writer to a cache workers are reading. Gradle does not lock
+# the read-only dependency cache, so a writer during a read is undefined
+# behavior — hence :ro below, always, with no rw escape hatch.
+#
+# Unset/empty (default): no mount, no GRADLE_RO_DEP_CACHE — byte-identical
+# docker run args to before this knob existed. A configured path that
+# doesn't exist or has no gradle/modules-2 warns and is skipped rather than
+# aborting the launch, so a stale host config can't make every worker
+# unlaunchable.
+DEP_CACHE_OPTS=()
+if [ -n "${SANDBOX_DEP_CACHE:-}" ]; then
+    _dep_cache_gradle="$SANDBOX_DEP_CACHE/gradle"
+    if [ -d "$_dep_cache_gradle/modules-2" ]; then
+        MOUNTS+=(-v "$_dep_cache_gradle:$_dep_cache_gradle:ro")
+        DEP_CACHE_OPTS=(-e "GRADLE_RO_DEP_CACHE=$_dep_cache_gradle")
+    else
+        echo "WARNING: SANDBOX_DEP_CACHE='$SANDBOX_DEP_CACHE' has no" \
+             "$_dep_cache_gradle/modules-2 — skipping dependency cache" \
+             "mount (worker gets no GRADLE_RO_DEP_CACHE)." >&2
+    fi
+    unset _dep_cache_gradle
+fi
+
 # Project-specific environment variables
 ENV_FILE_OPT=()
 if [ -f "$PROJECT_DIR/.sandbox-env" ]; then
@@ -308,6 +344,7 @@ exec docker run "${INTERACTIVE_FLAGS[@]}" --rm --init \
     "${DOCKER_SOCK_OPTS[@]}" \
     "${SSH_OPTS[@]}" \
     "${WORKER_ENV_OPTS[@]}" \
+    "${DEP_CACHE_OPTS[@]}" \
     "${SANDBOX_DOCS_ENV_OPTS[@]}" \
     "${MOUNTS[@]}" \
     -e "TERM=$TERM" \
