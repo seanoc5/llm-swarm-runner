@@ -169,6 +169,93 @@ echo "$OUT" | grep -q "iss-3.*ACTIVE" || red "expected iss-3 row ACTIVE, got: $O
 green "mixed session: both rows present, correctly classified, exit 0"
 
 # ============================================================================
+heading "Test 5: a 2.1.x-style busy pane (rotating spinner glyph, no fixed verb/glyph match) is ACTIVE (issue #267)"
+# ============================================================================
+# Regression fixture for issue #267: real captures against a live
+# Claude Code 2.1.259 session showed the busy spinner rotating through
+# frames (✶ / · / * / ✻ / ✽) within a single turn — none of which is the
+# fixed "Considering…/Sautéed for/Cooked for/Baked for/Simmered for/✻/✶"
+# set the old ACTIVE pattern enumerated. ✽ (U+273D) in particular was
+# observed and is not in that old set, so a capture landing on it used to
+# fall through to UNKNOWN. This fixture pins the ✽ frame directly.
+cat > "$PANE_DIR/iss-5" <<'PANE'
+❯ Explain the history of computing from 1940 to 2020 in extensive detail.
+
+✽ Fiddle-faddling… (5s · ↓ 249 tokens · thought for 2s)
+PANE
+set_windows iss-5
+OUT=$("$CHECK" "$PROJECT_DIR" 2>&1) && RC=0 || RC=$?
+[ "$RC" -eq 0 ] || red "expected exit 0 for ACTIVE-only session, got $RC: $OUT"
+echo "$OUT" | grep -q "iss-5.*ACTIVE" || red "expected iss-5 row ACTIVE (✽ spinner + token counter), got: $OUT"
+green "2.1.x ✽ spinner frame with live token counter → ACTIVE, exit 0"
+
+# ============================================================================
+heading "Test 6: a finished-turn 'done' summary line does NOT falsely match ACTIVE (issue #267)"
+# ============================================================================
+# The old ACTIVE pattern's past-tense verb list ("Cooked for", "Baked for",
+# etc.) was meant to catch busy chrome but actually collides with the
+# FINISHED-turn summary line left in scrollback after a turn ends
+# (observed live: "✻ Crunched for 15s · done 4:32 PM") — a false ACTIVE
+# on what is actually an idle pane. The new token-counter anchor ("· ↓ N
+# tokens") is absent from that summary line, so this must NOT match ACTIVE.
+cat > "$PANE_DIR/iss-6" <<'PANE'
+  Part 2 — done.
+
+✻ Crunched for 15s · done 4:32 PM
+
+❯
+PANE
+set_windows iss-6
+OUT=$("$CHECK" "$PROJECT_DIR" 2>&1) && RC=0 || RC=$?
+echo "$OUT" | grep -q "iss-6.*ACTIVE" && red "finished-turn 'done' summary should NOT match ACTIVE: $OUT"
+echo "$OUT" | grep -q "iss-6.*UNKNOWN" || red "expected iss-6 row UNKNOWN (no recognized pattern), got: $OUT"
+green "finished-turn 'done' summary line → not ACTIVE (correctly falls through to UNKNOWN)"
+
+# ============================================================================
+heading "Test 7: shipped ACTIVE_BUSY_PATTERN default matches 2.1.x busy chrome, not finished/idle chrome (issue #267)"
+# ============================================================================
+# Extracts the actual shipped default straight out of check-stuck-workers.sh
+# (not a hand-copied guess), same technique as
+# test-coordinator-auto-compact.sh Test 11 / test-worker-auto-compact.sh
+# Test 13 for AUTO_COMPACT_BUSY_PATTERN / WORKER_COMPACT_BUSY_PATTERN — so
+# this fails if the shipped default ever regresses again.
+default_pattern="$(
+    unset ACTIVE_BUSY_PATTERN
+    eval "$(grep -m1 '^ACTIVE_BUSY_PATTERN=' "$CHECK")"
+    printf '%s' "$ACTIVE_BUSY_PATTERN"
+)"
+[ -n "$default_pattern" ] || red "could not extract ACTIVE_BUSY_PATTERN default from $CHECK"
+
+match_default() {
+    printf '%s' "$1" | LC_ALL=C grep -qE "$default_pattern" && echo match || echo nomatch
+}
+
+check() {
+    local desc="$1" want="$2" got="$3"
+    [ "$got" = "$want" ] || red "$desc: expected '$want', got '$got'"
+    green "$desc"
+}
+
+check "default matches 2.1.x ✽ spinner + live token counter" "match" \
+    "$(match_default '✽ Fiddle-faddling… (5s · ↓ 249 tokens · thought for 2s)')"
+check "default matches 2.1.x · spinner frame + live token counter" "match" \
+    "$(match_default '· Drizzling… (15s · ↓ 985 tokens)')"
+check "default matches 2.1.x * spinner frame + live token counter" "match" \
+    "$(match_default '* Drizzling… (16s · ↓ 992 tokens)')"
+check "default matches queued-input marker" "match" \
+    "$(match_default '❯ Press up to edit queued messages')"
+check "default still matches legacy esc-to-interrupt hint (<=2.0.x)" "match" \
+    "$(match_default '✻ Considering… (esc to interrupt)')"
+check "default matches an in-flight compaction (issue #274)" "match" \
+    "$(match_default 'Compacting conversation… (1m 49s)')"
+check "default does NOT match finished-turn summary (no live token counter)" "nomatch" \
+    "$(match_default '✻ Crunched for 15s · done 4:32 PM')"
+check "default does NOT match idle statusline /clear hint" "nomatch" \
+    "$(match_default 'sonnet · wt-issue-42 · ctx: 900k/1M (90%) · new task? /clear to save 109.7k tokens')"
+check "default does NOT match the EXIT-CONFIRM-PENDING prompt (own precedence, checked separately)" "nomatch" \
+    "$(match_default 'Press Ctrl-C again to exit')"
+
+# ============================================================================
 heading "All check-stuck-workers shape tests passed"
 # ============================================================================
 green "IDLE-PARKED marker matches success + failure completions, never an active pane"

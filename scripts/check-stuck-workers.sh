@@ -20,7 +20,9 @@
 #                          after a task-complete status block (success or
 #                          failure — a failed task's result belongs to PR/
 #                          outcome-JSON review, not to "is this pane stuck")
-#   ACTIVE                 healthy: spinner glyph (✻/✶) or "Considering…/Sautéed for/Cooked for"
+#   ACTIVE                 healthy: busy-chrome anchor visible (token counter,
+#                          queued-message marker, in-flight compaction, or the
+#                          legacy "(esc to interrupt)" hint) — see ACTIVE_BUSY_PATTERN
 #   EXITED-IDLE            healthy: container gone + clean Task-complete marker
 #   CONTEXT-LARGE          suggestion: "/clear to save Nk tokens" visible
 #   EXIT-CONFIRM-PENDING   needs-help: "Press Ctrl-C again to ?xit" visible
@@ -50,8 +52,12 @@ ARGUMENTS
                     (llm-<basename>).
 
 ENV VARS
-    CAPTURE_LINES   How many trailing lines to capture per pane (default: 50).
-    NO_COLOR        Set to any value to suppress ANSI color in output.
+    CAPTURE_LINES       How many trailing lines to capture per pane (default: 50).
+    NO_COLOR            Set to any value to suppress ANSI color in output.
+    ACTIVE_BUSY_PATTERN (auto)  ACTIVE-state busy-indicator regex. See detect_state()
+                        header comment for rationale; keep in sync with
+                        coordinator-watch.sh's AUTO_COMPACT_BUSY_PATTERN /
+                        WORKER_COMPACT_BUSY_PATTERN (issue #267).
 
 OUTPUT
     A table: WINDOW / PANE / STATE / DETAIL — one row per iss-* window.
@@ -106,6 +112,36 @@ strip_ansi() {
     sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g'
 }
 
+# --- ACTIVE-state busy indicator ---
+# issue #267: the old ACTIVE pattern enumerated a fixed spinner-glyph pair
+# (✻/✶) plus a fixed past/present-tense verb list (Considering…/Sautéed
+# for/Cooked for/Baked for/Simmered for). Two problems, confirmed live
+# against Claude Code 2.1.259:
+#   1. The spinner glyph rotates through more frames than any fixed pair
+#      covers — a live capture cycled ✶ / · / * / ✻ / ✽ within a single
+#      turn, so a capture landing on ✽ (or ·, or *) fell through to UNKNOWN
+#      even though the worker was actively generating.
+#   2. The past-tense verbs ("Cooked for", etc.) were meant to catch busy
+#      chrome but actually collide with the FINISHED-turn summary line
+#      that stays in scrollback after a turn ends (observed: "✻ Crunched
+#      for 15s · done 4:32 PM") — a false ACTIVE match on an idle pane.
+# Fix (same anchor-based approach #252/#266 already landed for
+# coordinator-watch.sh's AUTO_COMPACT_BUSY_PATTERN/WORKER_COMPACT_BUSY_
+# PATTERN): anchor on chrome that is present for the full duration of any
+# in-flight turn regardless of which spinner frame is showing, and that
+# does NOT appear on the finished-turn summary line. The live token
+# counter ("· ↓ NNN tokens") is exactly that — present on every busy frame,
+# absent from the "done" summary. "Press up to edit queued messages" and
+# "Compacting conversation" cover the queued-input and in-flight-compaction
+# cases. "(esc to interrupt)" is kept for backward compatibility with
+# <=2.0.x CLIs that rendered that hint instead of a token counter.
+#
+# Deliberately excludes "Press Ctrl-C again to .xit": that string is
+# EXIT-CONFIRM-PENDING's own anchor, checked at lower precedence below — if
+# ACTIVE matched it too, ACTIVE's higher precedence would swallow every
+# exit-confirm pane and EXIT-CONFIRM-PENDING would never fire.
+ACTIVE_BUSY_PATTERN="${ACTIVE_BUSY_PATTERN:-\(esc to interrupt\)|· ↓ [0-9.,]+k? tokens|Press up to edit queued messages|Compacting conversation}"
+
 # --- State detection on captured pane content ---
 # $1 = clean (ANSI-stripped) content. Echo state label.
 #
@@ -121,7 +157,7 @@ detect_state() {
     if printf '%s\n' "$clean" | LC_ALL=C grep -q '\[polling for next brief'; then
         echo IDLE-PARKED; return
     fi
-    if printf '%s\n' "$clean" | LC_ALL=C grep -qE '(Considering…|Sautéed for|Cooked for|Baked for|Simmered for|✻|✶)'; then
+    if printf '%s\n' "$clean" | LC_ALL=C grep -qE "$ACTIVE_BUSY_PATTERN"; then
         echo ACTIVE; return
     fi
     if printf '%s\n' "$clean" | LC_ALL=C grep -q 'Press Ctrl-C again to .xit'; then
@@ -181,7 +217,7 @@ while IFS= read -r win; do
             # Container alive — flesh out detail per state
             case "$state" in
                 IDLE-PARKED)          detail="listener parked; ready for requeue.sh $REPO briefs" ;;
-                ACTIVE)               detail="claude working (spinner / 'Considering...' visible)" ;;
+                ACTIVE)               detail="claude working (busy chrome: token counter / queued-msg / compacting)" ;;
                 CONTEXT-LARGE)        detail="claude suggesting /clear (token count above threshold)" ;;
                 EXIT-CONFIRM-PENDING) detail="Ctrl-C pressed once; awaiting confirmation or cancel"; EXIT=1 ;;
                 EXITED-IDLE)          detail="claude exited inside container; listener should pick up next brief" ;;
