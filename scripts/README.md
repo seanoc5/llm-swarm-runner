@@ -18,6 +18,7 @@ All scripts here require bash 4.0+; do not run them under `sh` or `dash`.
 | `coordinator-error-tail.sh` | Surfaces truncated gemini-cli API errors by tailing the most recent `/tmp/gemini-*-error-*.json`. No-op for the claude path. |
 | `coordinator-watch.sh` | Daemon that wakes the coordinator via `llm-start.sh` when a worker drops a new outcome JSON. |
 | `demo-driver.sh` | Drives a deterministic ~70-second tmux + swarm demo recording (window switches, splits, PR list). |
+| `dep-proxy.sh` | Controls the local caching Maven/Gradle repository proxy (`up`/`down`/`status`/`logs`) — an nginx container with `proxy_cache_lock` that collapses concurrent cache misses across workers into ~1 upstream fetch. Point workers at it with `SANDBOX_DEP_PROXY_URL` (`sandbox.sh`). See `docs/advanced-usage.md`. |
 | `demo-record-setup.sh` | Idempotent in-place patcher for `~/.ssr/settings.conf` — tunes SimpleScreenRecorder to the demo-friendly capture rect (1920x1080 fixed), codec (h264 CRF 18), and output path (`~/Videos/demo-raw.mkv`). |
 | `demo-segments-pick.sh` | Interactive picker: plays the raw demo in mpv, captures beat-boundary timestamps on `c` keypresses, then prompts for SPEED/LABEL per pair and emits a ready-to-paste `SEGMENTS=(...)` block for `edit-demo.sh`. |
 | `edit-demo.sh` | Post-processes a raw SimpleScreenRecorder demo capture into a Reddit-ready ~75-second MP4 via ffmpeg segment edits. |

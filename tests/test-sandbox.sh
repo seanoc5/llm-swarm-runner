@@ -208,6 +208,45 @@ else
     skip "SANDBOX_DEP_CACHE" "/var/run/docker.sock not present"
 fi
 
+# SANDBOX_DEP_PROXY_URL (#331): local caching Maven/Gradle repository proxy
+# knob. Unlike SANDBOX_DEP_CACHE this isn't a path to validate — it's a URL
+# that a Gradle init script reads at build time — so the shape test here is
+# just: unset -> no mount/no env; set -> both land in the container.
+if [ -S /var/run/docker.sock ]; then
+    output=$(env -u SANDBOX_DEP_PROXY_URL "$REPO_ROOT/sandbox.sh" /tmp printenv SANDBOX_DEP_PROXY_URL 2>&1) || true
+    [[ "$output" != *"SANDBOX_DEP_PROXY_URL"* ]] \
+        && pass "SANDBOX_DEP_PROXY_URL unset -> no env var in container" "$output" \
+        || fail "SANDBOX_DEP_PROXY_URL unset -> no env var in container" "$output"
+
+    output=$(env -u SANDBOX_DEP_PROXY_URL "$REPO_ROOT/sandbox.sh" /tmp \
+        "test -e /home/sandbox/.gradle/init.d/dep-proxy.init.gradle.kts && echo MOUNTED || echo ABSENT" 2>&1)
+    [[ "$output" == *"ABSENT"* ]] \
+        && pass "SANDBOX_DEP_PROXY_URL unset -> no init.d mount" "$output" \
+        || fail "SANDBOX_DEP_PROXY_URL unset -> no init.d mount" "$output"
+
+    output=$(SANDBOX_DEP_PROXY_URL="http://localhost:8081" "$REPO_ROOT/sandbox.sh" /tmp printenv SANDBOX_DEP_PROXY_URL 2>&1)
+    container_value=$(tail -n1 <<< "$output")
+    [[ "$container_value" == "http://localhost:8081" ]] \
+        && pass "SANDBOX_DEP_PROXY_URL set -> env var reaches container" "$output" \
+        || fail "SANDBOX_DEP_PROXY_URL set -> env var reaches container" "$output"
+
+    output=$(SANDBOX_DEP_PROXY_URL="http://localhost:8081" "$REPO_ROOT/sandbox.sh" /tmp \
+        "test -f /home/sandbox/.gradle/init.d/dep-proxy.init.gradle.kts && echo MOUNTED || echo ABSENT" 2>&1)
+    [[ "$output" == *"MOUNTED"* ]] \
+        && pass "SANDBOX_DEP_PROXY_URL set -> init script mounted into GRADLE_USER_HOME/init.d/" "$output" \
+        || fail "SANDBOX_DEP_PROXY_URL set -> init script mounted into GRADLE_USER_HOME/init.d/" "$output"
+
+    # Mount must be read-only — nothing should be able to tamper with the
+    # init script from inside a worker container.
+    output=$(SANDBOX_DEP_PROXY_URL="http://localhost:8081" "$REPO_ROOT/sandbox.sh" /tmp \
+        "echo x >> /home/sandbox/.gradle/init.d/dep-proxy.init.gradle.kts 2>&1; echo \"exit=\$?\"" 2>&1)
+    [[ "$output" == *"Read-only file system"* && "$output" != *"exit=0"* ]] \
+        && pass "SANDBOX_DEP_PROXY_URL init.d mount is read-only" "$output" \
+        || fail "SANDBOX_DEP_PROXY_URL init.d mount is read-only" "$output"
+else
+    skip "SANDBOX_DEP_PROXY_URL" "/var/run/docker.sock not present"
+fi
+
 # Test EXTRA_MOUNTS same-path shorthand (path:ro → same path in container)
 output=$(EXTRA_MOUNTS="/tmp:ro" docker run --rm \
     --network host \
