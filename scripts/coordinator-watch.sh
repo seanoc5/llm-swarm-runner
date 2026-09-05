@@ -12,6 +12,19 @@
 #
 # Usage:
 #   coordinator-watch.sh [project-dir]
+#   coordinator-watch.sh --check-stale [project-dir]
+#                           (issue #296) Cheap, one-shot: print this
+#                           project's watcher state (pid, start time, script
+#                           path, script mtime at launch vs. now) and exit 0
+#                           if it's FRESH (on-disk script unchanged since
+#                           that watcher started) or 1 if STALE. Reads
+#                           <project-dir>/.swarm/coordinator-watch.state,
+#                           written by a live watcher at startup — no tmux,
+#                           no signals, no touching the running daemon. See
+#                           WATCHER_STALE_CHECK below for why a watcher can
+#                           go stale in the first place, and for the
+#                           self-check that normally catches this on its own
+#                           without needing this command run by hand.
 #
 # Env vars:
 #   DEBOUNCE_SECS=30        Window during which repeated events coalesce
@@ -225,6 +238,47 @@
 #                           readable pane echo below, restoring silent-
 #                           stdout (banner only) — for headless runs or
 #                           when piping the watcher's own stdout elsewhere.
+#   WATCHER_STALE_CHECK=1   (issue #296) This script's functions are parsed
+#                           into the running bash process's memory once, at
+#                           startup — a watcher pane, once spawned, keeps
+#                           running whatever code existed at that moment
+#                           forever, even after a fix lands on disk and is
+#                           pulled into the checkout. This is exactly how
+#                           issues #265 and #274 both got silently
+#                           un-fixed in production: a watcher launched
+#                           2026-08-08 misfired a spurious /compact at 16%
+#                           context into a live worker pane on 2026-08-16,
+#                           despite both issues having been closed days
+#                           earlier — the running process simply never
+#                           picked up either fix. With this on, a background
+#                           loop (run_stale_check_loop) periodically compares
+#                           this process's own script file's mtime, as it
+#                           was at launch, against its CURRENT on-disk
+#                           mtime. A mismatch means a fix (or any other
+#                           change) landed since this daemon started; there
+#                           is no way to make an already-running bash
+#                           process start executing a function body it
+#                           already parsed differently, so instead this logs
+#                           watch.stale_daemon loudly and shuts the whole
+#                           daemon down (all timer loops, not just this
+#                           one) — the same effect as Ctrl-C. Nothing
+#                           currently auto-restarts it afterward: a human
+#                           (or the coordinator) needs to notice the dead
+#                           pane and re-run llm-start.sh (WATCH=1, the
+#                           default, is idempotent about spawning the
+#                           watcher — see that script's own comment). Use
+#                           `coordinator-watch.sh --check-stale` (see USAGE
+#                           above) to check this cheaply without waiting for
+#                           the periodic sweep. Set to 0 to disable the
+#                           self-check entirely.
+#   WATCHER_STALE_CHECK_SECS=300
+#                           How often the self-check above runs. Kept
+#                           independent of every other timer interval in
+#                           this file on purpose — this check must keep
+#                           running even when every other feature
+#                           (WATCH_PR_POLL_SECS, WORKER_AUTO_COMPACT, ...)
+#                           is disabled, since a stale daemon can misapply
+#                           ANY of this file's logic, not just auto-compact.
 #   AUTO_COMPACT=1          Before waking a long-lived coordinator (live
 #                           claude REPL still in the pane, not a fresh
 #                           launch), check its context usage and inject a
@@ -357,6 +411,32 @@
 #                           the threshold used verbatim when AUTO_COMPACT_PCT
 #                           scaling is effectively a no-op (e.g. probe has no
 #                           context_window_size field yet).
+#   AUTO_COMPACT_MIN_PCT=60
+#                           (issue #296) Hard floor, independent of the
+#                           threshold computed above: even when `used` is at
+#                           or over that threshold, refuse to inject /compact
+#                           unless the coordinator's context is ALSO at or
+#                           above this percentage of its own window (re-read
+#                           fresh from the probe at injection time, via the
+#                           same probe_ctx_window() the threshold above
+#                           already uses). Exists because the threshold above
+#                           can itself be wrong in ways this doesn't depend
+#                           on — a probe schema mismatch (or a daemon running
+#                           code predating the AUTO_COMPACT_PCT scaling this
+#                           file added in issue #273) silently falls back to
+#                           the flat AUTO_COMPACT_THRESHOLD_TOKENS default of
+#                           150000, which is only 15% of a 1M-token window.
+#                           That is exactly what fired a spurious /compact at
+#                           16% context into a live worker pane on
+#                           2026-08-16, mid-task on an open PR — see this
+#                           file's WATCHER_STALE_CHECK doc (below) for the
+#                           staleness-daemon half of that incident's root
+#                           cause. When the window can't be parsed at all
+#                           (no fresh probe, schema mismatch), this refuses
+#                           rather than guessing — logging
+#                           coord.compact.skip reason=no_window_for_floor —
+#                           since there is no observed value to check the
+#                           floor against.
 #   AUTO_COMPACT_PROBE=<path>
 #                           Path to the statusline probe file. Defaults to
 #                           the project+role-scoped path
@@ -623,6 +703,24 @@
 #                           rather than let it degrade further). Also the
 #                           fallback used verbatim when the window denominator
 #                           can't be parsed — see WORKER_COMPACT_PCT above.
+#   WORKER_COMPACT_MIN_PCT=60
+#                           (issue #296) Worker-side twin of AUTO_COMPACT_MIN_PCT
+#                           above — a hard floor, independent of whichever
+#                           threshold (base or wrap-up) applies: refuse to
+#                           inject /compact into a worker pane unless its
+#                           context is ALSO at or above this percentage of its
+#                           own window (re-parsed fresh from the rendered
+#                           statusline at injection time via
+#                           worker_pane_ctx_window(), the same source the
+#                           threshold above uses). Same rationale as the
+#                           coordinator-side floor: a worker statusline that
+#                           doesn't render a parseable window denominator
+#                           falls back to the flat WORKER_COMPACT_THRESHOLD_TOKENS
+#                           default (150000, only 15% of a 1M window) with
+#                           nothing else to catch an unreasonably early
+#                           compact. When the window can't be parsed at all,
+#                           this refuses rather than guessing — logging
+#                           worker.compact.skip reason=no_window_for_floor.
 #   WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS=300000
 #                           Raised threshold used instead of the above once
 #                           the worker's worktree has an open PR (per its
@@ -1028,10 +1126,13 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     MAX_WORKERS         5         (referenced by default WAKE_PROMPT)
     MAX_TMUX_WINDOWS    10        (referenced by default WAKE_PROMPT)
     WATCHER_QUIET       0         suppress human-readable pane echo (banner only); see PANE ECHO
+    WATCHER_STALE_CHECK 1         periodically self-check for stale on-disk code and shut down if found (issue #296); see header comment
+    WATCHER_STALE_CHECK_SECS 300  how often the self-check above runs
     AUTO_COMPACT        1         inject real /compact into a long-lived coordinator before waking it if over threshold; see header comment
     AUTO_COMPACT_PCT                  75      percent of the coordinator's own context window used as the effective threshold; see header comment
     AUTO_COMPACT_THRESHOLD_CAP_TOKENS 250000  cap on the above (250k on a 1M-window coordinator, not 750k)
     AUTO_COMPACT_THRESHOLD_TOKENS     150000  used-token trigger; also the fallback when the window can't be parsed
+    AUTO_COMPACT_MIN_PCT              60      (issue #296) hard floor — refuse to inject below this % of the coordinator's own window, even if over threshold; see header comment
     AUTO_COMPACT_TICK_SECS            60      periodic poll-tick trigger interval (0=off); catches long interactive stretches with no worker completions; see header comment
     AUTO_COMPACT_COOLDOWN_SECS        900     poll-tick-only cooldown after an attempted compact, before it may re-trigger
     AUTO_COMPACT_PROBE                (auto)  statusline probe file path
@@ -1045,6 +1146,7 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     WORKER_COMPACT_PCT                       75      percent of the worker's own context window used as the effective threshold; see header comment
     WORKER_COMPACT_THRESHOLD_CAP_TOKENS      250000  cap on the above (250k on a 1M-window worker, not 750k)
     WORKER_COMPACT_THRESHOLD_TOKENS         150000  used-token trigger (no PR open yet); also the fallback when the window can't be parsed
+    WORKER_COMPACT_MIN_PCT                  60      (issue #296) hard floor — refuse to inject below this % of the worker's own window, even if over threshold; see header comment
     WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS  300000  raised trigger once the worker's PR is open (scales with the base threshold; see header comment)
     WORKER_COMPACT_BUSY_PATTERN             (auto)  capture-pane busy-indicator regex (per iss-* window)
     WORKER_COMPACT_START_TIMEOUT_SECS       15      max wait for compaction to start
@@ -1087,6 +1189,10 @@ EVENTS LOG
       watch.timer.start    a background timer loop started — pr-poll/check-on-done
                            timer loop, and/or (issue #226) the separate
                            worker-compact loop; up to two lines, one per loop
+      watch.stale_daemon   (issue #296) this process's own script changed on disk since it
+                           started — logged once, immediately before this daemon shuts itself
+                           down entirely (script, launch_mtime, current_mtime, pid, started_at);
+                           see WATCHER_STALE_CHECK in the header comment
       watch.pr_poll        terminal PR detected via periodic gh poll (reap backstop);
                            reason=stale_pr_ignored when the terminal PR
                            predates the worktree (issue #185 — recycled
@@ -1140,6 +1246,9 @@ EVENTS LOG
                            this attempt rather than risking a misread (before, trigger=poll|wake)
       coord.compact.ineffective  context didn't drop post-compact (before, after, trigger=poll|wake) — investigate
       coord.compact.verify_skip  probe never refreshed post-compact — inconclusive, not a failure (trigger=poll|wake)
+      coord.compact.refused_low_ctx  (issue #296) at/over threshold, but the coordinator's freshly
+                           re-read context was below AUTO_COMPACT_MIN_PCT of its own window —
+                           refused to inject (used, window, pct, min_pct, trigger=poll|wake)
       worker.compact        /compact injected into an iss-* window (issue, used, threshold, wrapup)
       worker.compact.skip   worker auto-compact skipped this window this cycle (issue,
                            reason=pane_busy|no_ctx_parsed|task_done|backoff|...; reason=task_done
@@ -1178,6 +1287,8 @@ EVENTS LOG
                            failure (issue, before)
       worker.compact.ineffective  worker context didn't drop post-compact (issue, before, after) — investigate
       worker.compact.verify_skip  worker's ctx reading never refreshed post-compact — inconclusive, not a failure
+      worker.compact.refused_low_ctx  (issue #296) same guard as coord.compact.refused_low_ctx above,
+                           applied to a worker window (issue, used, window, pct, min_pct)
       worker.compact.giving_up  (issue #252) N consecutive timeout/ineffective verdicts for this
                            window (issue, failures=N) — maybe_worker_compact stops attempting
                            /compact for it until the watcher restarts; logged once, not every sweep
@@ -1228,8 +1339,40 @@ EXAMPLES
     coordinator-watch.sh                                # watch \$PWD
     DRY_RUN=1 coordinator-watch.sh                      # log only, no wakes
     POST_OUTCOMES=1 OUTCOME_HOOK=/path coordinator-watch.sh   # + auditing
+    coordinator-watch.sh --check-stale                  # is my watcher stale? (issue #296)
 EOF
         exit 0
+        ;;
+    --check-stale)
+        shift
+        CHECK_PROJECT_DIR="$(realpath "${1:-$PWD}")"
+        CHECK_STATE_FILE="$CHECK_PROJECT_DIR/.swarm/coordinator-watch.state"
+        if [ ! -r "$CHECK_STATE_FILE" ]; then
+            echo "No watcher state file at $CHECK_STATE_FILE — is coordinator-watch.sh running for this project?" >&2
+            exit 2
+        fi
+        # Extracted via grep/cut rather than sourced — script_path could
+        # theoretically contain characters that aren't safe to source as
+        # shell (e.g. a space in the project's path), and this only ever
+        # needs to read four plain key=value lines.
+        state_get() { grep -m1 "^$1=" "$CHECK_STATE_FILE" | cut -d= -f2-; }
+        CHECK_PID="$(state_get pid)"
+        CHECK_STARTED_AT="$(state_get started_at)"
+        CHECK_SCRIPT_PATH="$(state_get script_path)"
+        CHECK_MTIME_AT_LAUNCH="$(state_get script_mtime_at_launch)"
+        CHECK_MTIME_NOW="$(stat -c %Y "$CHECK_SCRIPT_PATH" 2>/dev/null || stat -f %m "$CHECK_SCRIPT_PATH" 2>/dev/null || echo "")"
+        echo "watcher pid:          ${CHECK_PID:-?}"
+        echo "started at:           ${CHECK_STARTED_AT:-?}"
+        echo "script:               ${CHECK_SCRIPT_PATH:-?}"
+        echo "script mtime@launch:  ${CHECK_MTIME_AT_LAUNCH:-?}"
+        echo "script mtime@now:     ${CHECK_MTIME_NOW:-?}"
+        if [ -n "$CHECK_MTIME_AT_LAUNCH" ] && [ -n "$CHECK_MTIME_NOW" ] && [ "$CHECK_MTIME_AT_LAUNCH" = "$CHECK_MTIME_NOW" ]; then
+            echo "status:               FRESH — running code matches the on-disk script"
+            exit 0
+        else
+            echo "status:               STALE — on-disk script changed since this watcher started; re-run llm-start.sh to get a fresh watcher"
+            exit 1
+        fi
         ;;
 esac
 
@@ -1287,8 +1430,14 @@ WATCH_SYNTH_OUTCOME="${WATCH_SYNTH_OUTCOME:-1}"
 CHECK_RUNNER="${CHECK_RUNNER:-}"
 SESSION_NAME="${SESSION_NAME:-llm-$(basename "$PROJECT_DIR")}"
 WATCHER_QUIET="${WATCHER_QUIET:-0}"
+# issue #296 — see this file's WATCHER_STALE_CHECK header comment.
+WATCHER_STALE_CHECK="${WATCHER_STALE_CHECK:-1}"
+WATCHER_STALE_CHECK_SECS="${WATCHER_STALE_CHECK_SECS:-300}"
 AUTO_COMPACT="${AUTO_COMPACT:-1}"
 AUTO_COMPACT_THRESHOLD_TOKENS="${AUTO_COMPACT_THRESHOLD_TOKENS:-150000}"
+# issue #296 — independent hard floor beneath the threshold above; see this
+# file's AUTO_COMPACT_MIN_PCT header comment.
+AUTO_COMPACT_MIN_PCT="${AUTO_COMPACT_MIN_PCT:-60}"
 # issue #273 — scale the effective threshold to the coordinator model's own
 # context window (min(AUTO_COMPACT_PCT% of window, ..._CAP_TOKENS)); see
 # coordinator_compact_effective_threshold() and this file's AUTO_COMPACT_PCT
@@ -1338,6 +1487,9 @@ WORKER_AUTO_COMPACT="${WORKER_AUTO_COMPACT:-1}"
 WORKER_COMPACT_PCT="${WORKER_COMPACT_PCT:-75}"
 WORKER_COMPACT_THRESHOLD_CAP_TOKENS="${WORKER_COMPACT_THRESHOLD_CAP_TOKENS:-250000}"
 WORKER_COMPACT_THRESHOLD_TOKENS="${WORKER_COMPACT_THRESHOLD_TOKENS:-150000}"
+# issue #296 — worker-side twin of AUTO_COMPACT_MIN_PCT; see this file's
+# WORKER_COMPACT_MIN_PCT header comment.
+WORKER_COMPACT_MIN_PCT="${WORKER_COMPACT_MIN_PCT:-60}"
 WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS="${WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS:-300000}"
 # issue #252/#266/#274: same anchors as AUTO_COMPACT_BUSY_PATTERN above — keep in sync.
 WORKER_COMPACT_BUSY_PATTERN="${WORKER_COMPACT_BUSY_PATTERN:-\(esc to interrupt\)|Press Ctrl-C again to .xit|· ↓ [0-9.,]+k? tokens|Press up to edit queued messages|Compacting conversation}"
@@ -1416,13 +1568,14 @@ fi
 for _var in AUTO_COMPACT_THRESHOLD_TOKENS AUTO_COMPACT_PROBE_MAX_AGE_SECS \
             AUTO_COMPACT_START_TIMEOUT_SECS AUTO_COMPACT_FINISH_TIMEOUT_SECS \
             AUTO_COMPACT_VERIFY_TIMEOUT_SECS AUTO_COMPACT_TICK_SECS AUTO_COMPACT_COOLDOWN_SECS \
-            AUTO_COMPACT_PCT AUTO_COMPACT_THRESHOLD_CAP_TOKENS \
-            WORKER_COMPACT_PCT WORKER_COMPACT_THRESHOLD_CAP_TOKENS \
+            AUTO_COMPACT_PCT AUTO_COMPACT_THRESHOLD_CAP_TOKENS AUTO_COMPACT_MIN_PCT \
+            WORKER_COMPACT_PCT WORKER_COMPACT_THRESHOLD_CAP_TOKENS WORKER_COMPACT_MIN_PCT \
             WORKER_COMPACT_THRESHOLD_TOKENS WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS \
             WORKER_COMPACT_START_TIMEOUT_SECS WORKER_COMPACT_FINISH_TIMEOUT_SECS \
             WORKER_COMPACT_VERIFY_TIMEOUT_SECS WORKER_COMPACT_SCAN_SECS \
             WORKER_COMPACT_BACKOFF_SECS WORKER_COMPACT_MAX_FAILURES \
-            COMPACT_RETRACT_BACKSPACES COMPACT_SUBMIT_SETTLE_SECS; do
+            COMPACT_RETRACT_BACKSPACES COMPACT_SUBMIT_SETTLE_SECS \
+            WATCHER_STALE_CHECK_SECS; do
     if ! [[ "${!_var}" =~ ^[0-9]+$ ]]; then
         echo "ERROR: $_var must be a non-negative integer (got: ${!_var})" >&2
         exit 1
@@ -1593,9 +1746,10 @@ autoclose:     $WATCHER_AUTOCLOSE$([ "$WATCHER_AUTOCLOSE" = "1" ] && echo " (mod
 pr-poll:       ${WATCH_PR_POLL_SECS}s$([ "$WATCH_PR_POLL_SECS" = "0" ] && echo " (disabled)")
 orphan-sweep:  ${WATCH_ORPHAN_SWEEP_SECS}s$([ "$WATCH_ORPHAN_SWEEP_SECS" = "0" ] && echo " (disabled)" || echo " (script: $REAP_ORPHAN)")
 check-on-done: $WATCH_CHECK_ON_DONE$([ "$WATCH_CHECK_ON_DONE" = "1" ] && echo " (session: $SESSION_NAME)")
-auto-compact:  $AUTO_COMPACT$([ "$AUTO_COMPACT" = "1" ] && echo " (threshold: min(${AUTO_COMPACT_PCT}% of window, ${AUTO_COMPACT_THRESHOLD_CAP_TOKENS}), fallback: ${AUTO_COMPACT_THRESHOLD_TOKENS} tokens, probe: $AUTO_COMPACT_PROBE, poll-tick: ${AUTO_COMPACT_TICK_SECS}s$([ "$AUTO_COMPACT_TICK_SECS" = "0" ] && echo " disabled"), cooldown: ${AUTO_COMPACT_COOLDOWN_SECS}s)")
-worker-compact: $WORKER_AUTO_COMPACT$([ "$WORKER_AUTO_COMPACT" = "1" ] && echo " (threshold: min(${WORKER_COMPACT_PCT}% of window, ${WORKER_COMPACT_THRESHOLD_CAP_TOKENS})/wrapup+$(( WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS - WORKER_COMPACT_THRESHOLD_TOKENS )), fallback: ${WORKER_COMPACT_THRESHOLD_TOKENS}/${WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS} tokens, scan: ${WORKER_COMPACT_SCAN_SECS}s)")
+auto-compact:  $AUTO_COMPACT$([ "$AUTO_COMPACT" = "1" ] && echo " (threshold: min(${AUTO_COMPACT_PCT}% of window, ${AUTO_COMPACT_THRESHOLD_CAP_TOKENS}), fallback: ${AUTO_COMPACT_THRESHOLD_TOKENS} tokens, min-pct-floor: ${AUTO_COMPACT_MIN_PCT}%, probe: $AUTO_COMPACT_PROBE, poll-tick: ${AUTO_COMPACT_TICK_SECS}s$([ "$AUTO_COMPACT_TICK_SECS" = "0" ] && echo " disabled"), cooldown: ${AUTO_COMPACT_COOLDOWN_SECS}s)")
+worker-compact: $WORKER_AUTO_COMPACT$([ "$WORKER_AUTO_COMPACT" = "1" ] && echo " (threshold: min(${WORKER_COMPACT_PCT}% of window, ${WORKER_COMPACT_THRESHOLD_CAP_TOKENS})/wrapup+$(( WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS - WORKER_COMPACT_THRESHOLD_TOKENS )), fallback: ${WORKER_COMPACT_THRESHOLD_TOKENS}/${WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS} tokens, min-pct-floor: ${WORKER_COMPACT_MIN_PCT}%, scan: ${WORKER_COMPACT_SCAN_SECS}s)")
 worker-deliver: $WORKER_AUTO_DELIVER$([ "$WORKER_AUTO_DELIVER" = "1" ] && echo " (parked-in-agent requeue.sh briefs released via /quit, end-timeout: ${WORKER_DELIVER_END_TIMEOUT_SECS}s, scan: ${WORKER_COMPACT_SCAN_SECS}s — issue #313)")
+stale-check:   $WATCHER_STALE_CHECK$([ "$WATCHER_STALE_CHECK" = "1" ] && echo " (every ${WATCHER_STALE_CHECK_SECS}s — issue #296; check anytime: coordinator-watch.sh --check-stale)")
 dry-run:       $DRY_RUN
 once:          $ONCE
 pane-echo:     $([ "$WATCHER_QUIET" = "1" ] && echo "disabled (WATCHER_QUIET=1)" || echo "enabled (WATCHER_QUIET=1 to silence)")
@@ -1656,11 +1810,13 @@ fi
 WATCH_TIMER_PID=""
 WORKER_COMPACT_TIMER_PID=""
 AUTO_COMPACT_POLL_TIMER_PID=""
+STALE_CHECK_PID=""
 seen_file=""
 cleanup_on_exit() {
     [ -n "${WATCH_TIMER_PID:-}" ] && kill "$WATCH_TIMER_PID" 2>/dev/null || true
     [ -n "${WORKER_COMPACT_TIMER_PID:-}" ] && kill "$WORKER_COMPACT_TIMER_PID" 2>/dev/null || true
     [ -n "${AUTO_COMPACT_POLL_TIMER_PID:-}" ] && kill "$AUTO_COMPACT_POLL_TIMER_PID" 2>/dev/null || true
+    [ -n "${STALE_CHECK_PID:-}" ] && kill "$STALE_CHECK_PID" 2>/dev/null || true
     # WATCHER_ECHO_PID is the `while read` reader — the last stage of the
     # `tail | while` pipeline, and the only PID $! gives us for it. `tail`
     # itself is a separate direct child of this script (pipeline stages
@@ -1823,6 +1979,98 @@ cleanup_eligible_workers() {
 # probe_ctx_used for the auto-compact probe's staleness check.
 mtime_epoch() {
     stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
+}
+
+# --- Stale-daemon self-check (issue #296) -----------------------------------
+#
+# WATCHER_SELF_PATH/WATCHER_LAUNCH_MTIME capture this script's own identity
+# (resolved real path + on-disk mtime) once, here at startup. watcher_is_stale
+# (below, polled periodically by run_stale_check_loop) re-reads the CURRENT
+# mtime of that same path and compares — a mismatch means the file was
+# rewritten on disk since this bash process parsed it into memory, and
+# THIS process's function bodies are the un-rewritten ones; there is no way
+# to make an already-running interpreter start executing new code for an
+# already-defined function. Deliberately mtime, not a content hash: enough
+# to detect "the file changed underneath me" without a sha256sum dependency,
+# and a false positive (e.g. a no-op touch) just costs one harmless restart.
+#
+# Also written to WATCHER_STATE_FILE so `coordinator-watch.sh --check-stale`
+# (see USAGE in the header comment) can answer "is my watcher stale?" from a
+# second terminal without touching this live process.
+WATCHER_SELF_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+WATCHER_LAUNCH_MTIME="$(mtime_epoch "$WATCHER_SELF_PATH" 2>/dev/null || echo 0)"
+[ -n "$WATCHER_LAUNCH_MTIME" ] || WATCHER_LAUNCH_MTIME=0
+WATCHER_STARTED_AT="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+WATCHER_STATE_FILE="$PROJECT_DIR/.swarm/coordinator-watch.state"
+{
+    printf 'pid=%s\n' "$$"
+    printf 'started_at=%s\n' "$WATCHER_STARTED_AT"
+    printf 'script_path=%s\n' "$WATCHER_SELF_PATH"
+    printf 'script_mtime_at_launch=%s\n' "$WATCHER_LAUNCH_MTIME"
+} > "$WATCHER_STATE_FILE" 2>/dev/null || true
+
+# watcher_is_stale
+#
+# Pure predicate, no side effects: rc0 (stale) when the on-disk mtime of
+# this script no longer matches what it was at launch, rc1 (fresh)
+# otherwise. Split out from watcher_check_staleness below so the detection
+# logic is unit-testable without also triggering the shutdown side effects.
+watcher_is_stale() {
+    local current_mtime
+    current_mtime="$(mtime_epoch "$WATCHER_SELF_PATH" 2>/dev/null || echo 0)"
+    [ -n "$current_mtime" ] || current_mtime=0
+    [ "$current_mtime" != "$WATCHER_LAUNCH_MTIME" ]
+}
+
+# watcher_check_staleness
+#
+# Called periodically from run_stale_check_loop's own background process.
+# On staleness (watcher_is_stale above), logs watch.stale_daemon with both
+# mtimes, then shuts the ENTIRE daemon down — every timer loop, not just
+# this one — rather than trying to hot-reload (not possible from inside a
+# running bash process). $$ here still refers to the top-level watcher
+# process's PID even though this function runs inside a backgrounded child
+# (bash's `&`/subshell forking never changes what $$ reports — only
+# $BASHPID does — so this is the same PID cleanup_on_exit's own kills use
+# elsewhere in this file). Signals the process group first (mirrors a
+# manual Ctrl-C's blast radius, reaching a blocked run_inotify/run_poll
+# foreground pipeline too), then the top-level PID directly as a backstop,
+# then calls cleanup_on_exit() directly here too (idempotent, best-effort)
+# so every sibling timer loop dies even if signal delivery to the top-level
+# process is somehow delayed. Relies on something else — a human or the
+# coordinator — noticing the resulting dead pane and re-running
+# llm-start.sh (idempotent about spawning the watcher) to get a fresh
+# process running the current code; see WATCHER_STALE_CHECK's header
+# comment for the incident this closes and --check-stale for a cheap way
+# to notice this happened without waiting on the pane.
+watcher_check_staleness() {
+    [ "$WATCHER_STALE_CHECK" = "1" ] || return 0
+    watcher_is_stale || return 0
+    local current_mtime
+    current_mtime="$(mtime_epoch "$WATCHER_SELF_PATH" 2>/dev/null || echo 0)"
+    [ -n "$current_mtime" ] || current_mtime=0
+    log_event watch.stale_daemon "script=$WATCHER_SELF_PATH launch_mtime=$WATCHER_LAUNCH_MTIME current_mtime=$current_mtime pid=$$ started_at=$WATCHER_STARTED_AT"
+    echo "[$(date +%T)] STALE DAEMON: $WATCHER_SELF_PATH changed on disk since this watcher started ($WATCHER_STARTED_AT, mtime $WATCHER_LAUNCH_MTIME -> $current_mtime)."
+    echo "[$(date +%T)] Shutting down so a fresh process can pick up the current code — re-run llm-start.sh (WATCH=1, the default) to restart the watcher."
+    cleanup_on_exit
+    kill -TERM -$$ 2>/dev/null || true
+    kill -TERM "$$" 2>/dev/null || true
+    exit 0
+}
+
+# run_stale_check_loop
+#
+# Own background process (issue #296), started unconditionally whenever
+# WATCHER_STALE_CHECK=1 — unlike run_watch_timer_loop/run_worker_compact_loop/
+# run_auto_compact_poll_loop above, which only start when their own feature
+# is enabled, this one must keep running regardless of which OTHER features
+# are on, since a stale daemon can misapply any of this file's logic, not
+# just auto-compact.
+run_stale_check_loop() {
+    while true; do
+        sleep "$WATCHER_STALE_CHECK_SECS"
+        watcher_check_staleness
+    done
 }
 
 # worktree_birth_path <worktree-dir>
@@ -2820,6 +3068,29 @@ maybe_auto_compact() {
 
         [ "$used" -ge "$threshold" ] || exit 0   # under threshold — the common case
 
+        # issue #296: independent hard floor beneath the threshold above,
+        # using probe_ctx_window() the same way coordinator_compact_effective_
+        # threshold() does. Exists because the threshold above can itself be
+        # wrong in ways this doesn't depend on — e.g. a probe schema mismatch
+        # (or a daemon running code predating issue #273's window scaling)
+        # silently falls back to the flat AUTO_COMPACT_THRESHOLD_TOKENS
+        # default, only 15% of a 1M-token window — see AUTO_COMPACT_MIN_PCT's
+        # header comment for the incident this closes. Fails CLOSED (refuses
+        # to inject) when the window can't be parsed at all: there's no
+        # observed percentage to check the floor against, and injecting
+        # anyway is exactly the unsafe path this guard exists to prevent.
+        local window pct
+        if ! window="$(probe_ctx_window)" || [ -z "$window" ] || [ "$window" -le 0 ]; then
+            log_event coord.compact.skip "reason=no_window_for_floor trigger=$trigger"
+            exit 0
+        fi
+        pct=$(( used * 100 / window ))
+        if [ "$pct" -lt "$AUTO_COMPACT_MIN_PCT" ]; then
+            log_event coord.compact.refused_low_ctx "used=$used window=$window pct=$pct min_pct=$AUTO_COMPACT_MIN_PCT trigger=$trigger"
+            echo "[$(date +%T)] refusing /compact: coordinator context at ${pct}% (< ${AUTO_COMPACT_MIN_PCT}% floor, used=$used window=$window) — not injecting"
+            exit 0
+        fi
+
         echo "[$(date +%T)] coordinator context at ${used} tokens (>= ${threshold}) — compacting before wake..."
         log_event coord.compact "used=$used threshold=$threshold trigger=$trigger"
 
@@ -3672,6 +3943,23 @@ maybe_worker_compact() {
 
     [ "$used" -ge "$threshold" ] || return 0   # under threshold — the common case
 
+    # issue #296: worker-side twin of maybe_auto_compact's low-context floor
+    # above — see AUTO_COMPACT_MIN_PCT's header comment for the incident and
+    # WORKER_COMPACT_MIN_PCT's for the worker-specific rationale. Fails
+    # CLOSED when the window can't be parsed: no observed percentage to
+    # check the floor against.
+    local window pct
+    if ! window="$(worker_pane_ctx_window "$win")" || [ -z "$window" ] || [ "$window" -le 0 ]; then
+        log_event worker.compact.skip "issue=$issue reason=no_window_for_floor"
+        return 0
+    fi
+    pct=$(( used * 100 / window ))
+    if [ "$pct" -lt "$WORKER_COMPACT_MIN_PCT" ]; then
+        log_event worker.compact.refused_low_ctx "issue=$issue used=$used window=$window pct=$pct min_pct=$WORKER_COMPACT_MIN_PCT"
+        echo "[$(date +%T)] refusing /compact into $win: context at ${pct}% (< ${WORKER_COMPACT_MIN_PCT}% floor, used=$used window=$window) — not injecting"
+        return 0
+    fi
+
     echo "[$(date +%T)] worker $win context at ${used} tokens (>= ${threshold}, wrapup=$wrapup) — compacting before next turn..."
     log_event worker.compact "issue=$issue used=$used threshold=$threshold wrapup=$wrapup"
 
@@ -4103,6 +4391,14 @@ if [ "$AUTO_COMPACT" = "1" ] && [ "$AUTO_COMPACT_TICK_SECS" -gt 0 ]; then
     run_auto_compact_poll_loop &
     AUTO_COMPACT_POLL_TIMER_PID=$!
     log_event watch.timer.start "auto_compact_tick_secs=$AUTO_COMPACT_TICK_SECS auto_compact_cooldown_secs=$AUTO_COMPACT_COOLDOWN_SECS"
+fi
+# issue #296 — unconditional (subject only to its own WATCHER_STALE_CHECK
+# flag), unlike the three loops above which only start when their own
+# feature is enabled; see run_stale_check_loop's header comment.
+if [ "$WATCHER_STALE_CHECK" = "1" ] && [ "$WATCHER_STALE_CHECK_SECS" -gt 0 ]; then
+    run_stale_check_loop &
+    STALE_CHECK_PID=$!
+    log_event watch.timer.start "watcher_stale_check_secs=$WATCHER_STALE_CHECK_SECS"
 fi
 
 case "$BACKEND" in

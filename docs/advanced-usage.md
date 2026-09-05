@@ -413,6 +413,8 @@ On its own timer (`WORKER_COMPACT_SCAN_SECS`, default 30s), it sweeps every `iss
 
 Known limitation: this only catches workers idling *between* turns. A single marathon turn offers no idle window until it ends. See `coordinator-watch.sh`'s header comment for the full knob list (`WORKER_AUTO_COMPACT`, `WORKER_COMPACT_THRESHOLD_TOKENS`, `WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS`, timeouts, `WORKER_COMPACT_NUDGE_PROMPT`, etc.) and `worker_compact_pass()`'s implementation comments for the rest of the design rationale.
 
+Both the coordinator and worker paths also enforce a hard floor (`AUTO_COMPACT_MIN_PCT`/`WORKER_COMPACT_MIN_PCT`, default 60%) independent of the threshold above — issue #296, closing an incident where a long-lived watcher pane misfired `/compact` at just 16% context (see [troubleshooting.md](./troubleshooting.md#watcher-pane-misbehaving-after-a-long-lived-session-issue-296) for the `--check-stale` diagnostic that catches the stale-daemon half of that incident).
+
 ## Triage Workflow
 
 > **Tip:** the triage cycle ends with you merging the READY PRs — which routinely means resolving conflicts because main moved while workers ran. [`VCS/git-github.md`](./VCS/git-github.md) is a focused crib sheet for that step, especially the "resolving conflicts in a PR" section.

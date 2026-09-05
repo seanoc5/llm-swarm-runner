@@ -69,6 +69,11 @@ AUTO_COMPACT=1
 AUTO_COMPACT_PCT=75
 AUTO_COMPACT_THRESHOLD_CAP_TOKENS=250000
 AUTO_COMPACT_THRESHOLD_TOKENS=150000
+# issue #296 — must match coordinator-watch.sh's own default. Every probe
+# fixture used above this test file's Test 20/21 (the tests dedicated to
+# this floor) already sits at or above 60% of its stated window, so the
+# shipped default is safe to use everywhere rather than neutralizing it.
+AUTO_COMPACT_MIN_PCT=60
 AUTO_COMPACT_PROBE_MAX_AGE_SECS=120
 # issue #252/#274: must match coordinator-watch.sh's own default — anchored
 # on the "(esc to interrupt)" hint instead of a spinner-verb list, plus the
@@ -1096,6 +1101,52 @@ check "near-instant rejection -> NOT logged as coord.compact.replayed (below COM
 
 if grep -q 'coord.compact.ineffective' "$EVENTS_LOG"; then got=logged; else got=missing; fi
 check "falls through to the normal ineffective path instead -- correctly flagged as a real failure" "logged" "$got"
+
+heading "Test 20: AUTO_COMPACT_MIN_PCT — hard floor beneath the computed threshold (issue #296)"
+# Reproduces the shape of the 2026-08-16 incident this issue fixes: a 1M
+# context window where the CAPPED threshold (AUTO_COMPACT_THRESHOLD_CAP_TOKENS,
+# 250000 by default) is reached at only 26% of the window — the flat cap
+# alone doesn't scale down with a window this large. Without this floor,
+# maybe_auto_compact would already be past its used>=threshold check and
+# about to inject. DRY_RUN=1 throughout: the floor is checked BEFORE the
+# DRY_RUN branch either way, so this doesn't need a live fake REPL.
+tmux send-keys -t "$SESSION_NAME:coordinator" "clear; echo 'idle >'; cat" Enter
+check_eventually "cat foreground -> cli (sanity check before the floor test)" "cli" 'coordinator_pane_state'
+
+DRY_RUN=1
+printf '{"context_window":{"context_window_size":1000000,"total_input_tokens":260000}}' > "$AUTO_COMPACT_PROBE"
+: > "$EVENTS_LOG"
+maybe_auto_compact wake
+if grep -q 'coord.compact ' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "26% of a 1M window, over the capped threshold -> bare coord.compact NOT logged" "missing" "$got"
+if grep -q 'coord.compact.refused_low_ctx' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "26% of a 1M window -> coord.compact.refused_low_ctx logged" "logged" "$got"
+check "refusal records the observed values" "used=260000 window=1000000 pct=26 min_pct=60 trigger=wake" "$(grep -o 'used=260000 window=1000000 pct=26 min_pct=60 trigger=wake' "$EVENTS_LOG")"
+
+# Sanity check the floor doesn't fire when there's nothing to refuse: same
+# window, comfortably over both the threshold AND the floor.
+printf '{"context_window":{"context_window_size":1000000,"total_input_tokens":800000}}' > "$AUTO_COMPACT_PROBE"
+: > "$EVENTS_LOG"
+maybe_auto_compact wake
+if grep -q 'coord.compact ' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "80% of a 1M window, over threshold and over the floor -> bare coord.compact logged" "logged" "$got"
+if grep -q 'coord.compact.refused_low_ctx' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "80% of a 1M window -> floor does not fire" "missing" "$got"
+
+heading "Test 21: AUTO_COMPACT_MIN_PCT — fails closed when the window can't be parsed (issue #296)"
+# probe has a used field but no context_window_size — same schema-mismatch
+# shape Test 3b/3c already exercise for probe_ctx_window() directly. The
+# threshold falls back to the flat AUTO_COMPACT_THRESHOLD_TOKENS (150000),
+# which used=160000 clears, so this only reaches the floor if the earlier
+# threshold check didn't already reject it — then the floor itself must
+# refuse rather than silently let the injection through unguarded.
+printf '{"context_window":{"total_input_tokens":160000}}' > "$AUTO_COMPACT_PROBE"
+: > "$EVENTS_LOG"
+maybe_auto_compact wake
+if grep -q 'coord.compact ' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "unparseable window -> bare coord.compact NOT logged" "missing" "$got"
+if grep -q 'reason=no_window_for_floor' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "unparseable window -> coord.compact.skip reason=no_window_for_floor logged" "logged" "$got"
 
 echo ""
 green "All coordinator-auto-compact tests passed ($PASS checks)"

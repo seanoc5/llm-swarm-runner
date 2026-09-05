@@ -41,6 +41,7 @@ Common issues and their resolutions. If you hit something not covered here, plea
   - [Worktree mounts but `git status` errors](#worktree-mounts-but-git-status-errors)
 - [Coordinator & Workers](#coordinator--workers)
   - [Coordinator pane shows old/stale output](#coordinator-pane-shows-oldstale-output)
+  - [Watcher pane misbehaving after a long-lived session](#watcher-pane-misbehaving-after-a-long-lived-session-issue-296)
   - [Worker isn't picking up briefs](#worker-isnt-picking-up-briefs)
   - [Tasks stuck in `processing/`](#tasks-stuck-in-processing)
   - [Ctrl-Z accidentally suspended claude inside a worker](#ctrl-z-accidentally-suspended-claude-inside-a-worker)
@@ -225,6 +226,20 @@ tmux -L swarm-<projbase> list-panes -t llm-<projbase>:coordinator -F '#{pane_cur
 ```
 
 If it shows `bash` (idle), you can re-invoke `llm-start.sh` and it will run a new prompt in that pane. If it shows `claude` or `gemini`, the prior coordinator is still alive — wait for it or kill the window.
+
+### Watcher pane misbehaving after a long-lived session (issue #296)
+
+`coordinator-watch.sh` is a long-running daemon: bash parses every function body into memory once, at startup, so a watcher pane spawned days ago keeps running whatever code existed at that moment — even after a fix lands on disk and gets pulled into the checkout. This is exactly how issues #265 and #274 both got silently un-fixed in production: a watcher launched 2026-08-08 misfired a spurious `/compact` at 16% context into a live worker pane on 2026-08-16, despite both issues having been closed days earlier.
+
+Check whether your running watcher is stale:
+
+```bash
+$LLM_SWARM_DIR/scripts/coordinator-watch.sh --check-stale /opt/work/myproject
+```
+
+`FRESH` (exit 0) means its on-disk script still matches what it was at launch; `STALE` (exit 1) means the file has changed since — re-run `llm-start.sh` (`WATCH=1`, the default, is idempotent about spawning the watcher) to get a fresh process. By default the watcher also self-checks every `WATCHER_STALE_CHECK_SECS` (300s) and shuts itself down on a mismatch, logging `watch.stale_daemon` — nothing currently auto-restarts it afterward, so a dead watcher pane after that log line is expected, not a bug: re-run `llm-start.sh`.
+
+Separately, `AUTO_COMPACT_MIN_PCT`/`WORKER_COMPACT_MIN_PCT` (default 60) put a hard floor under `/compact` injection regardless of the computed threshold — see `coordinator-watch.sh`'s own header comment for the full rationale (a probe/statusline schema mismatch can otherwise silently fall back to a flat token threshold that's a much lower percentage of a very large context window).
 
 ### Worker isn't picking up briefs
 
