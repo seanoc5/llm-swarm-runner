@@ -109,6 +109,21 @@ heading "Test 2: watcher_check_staleness — logs, attempts shutdown, exits clea
 # and SHUTDOWN-ATTEMPT logic, which is where the actual risk of a bug
 # lives; the signal-delivery mechanics are three ordinary \`kill\` calls
 # with no logic of their own to get wrong.
+#
+# Uses the REAL cleanup_on_exit (extracted, not stubbed) under the SAME
+# `set -euo pipefail` the real script runs under — self-review caught that
+# an earlier version of this test stubbed cleanup_on_exit to a no-op and
+# ran without `-e`, which hid a real bug: cleanup_on_exit's last line
+# (`[ -n "${seen_file:-}" ] && rm -f -- "$seen_file"`, no trailing `|| true`
+# unlike every other line in that function) fails its `set -e` check
+# whenever seen_file is empty — true for run_stale_check_loop's process,
+# which never sets it — silently aborting THIS caller before either
+# `kill -TERM` line ever ran, and before this function's own `exit 0`.
+# That would have shipped the self-check as a no-op: it logs
+# watch.stale_daemon and prints the shutdown banner, then the daemon just
+# keeps running the stale code forever. Fixed at the source (that line now
+# has `|| true` like its siblings); this test's realistic harness is what
+# catches a regression if it comes back.
 EVENTS_LOG2="$TEST_DIR/events2.log"
 KILL_LOG2="$TEST_DIR/kill2.log"
 FAKE_SCRIPT2="$TEST_DIR/fake-watcher2.sh"
@@ -116,18 +131,24 @@ echo '#!/usr/bin/env bash' > "$FAKE_SCRIPT2"
 sleep 1
 touch "$FAKE_SCRIPT2"   # bump mtime so it's stale relative to a launch mtime captured just before this
 
-STALE_FNS="$(extract_fn mtime_epoch; extract_fn watcher_is_stale; extract_fn watcher_check_staleness; extract_fn log_event)"
+STALE_FNS="$(extract_fn mtime_epoch; extract_fn watcher_is_stale; extract_fn watcher_check_staleness; extract_fn cleanup_on_exit; extract_fn log_event)"
 
 cat > "$TEST_DIR/run-check.sh" <<SCRIPT
 #!/usr/bin/env bash
-set -uo pipefail
+set -euo pipefail
 EVENTS_LOG="$EVENTS_LOG2"
 WATCHER_STALE_CHECK=1
 WATCHER_SELF_PATH="$FAKE_SCRIPT2"
 WATCHER_LAUNCH_MTIME=0
 WATCHER_STARTED_AT="2026-08-08T10:00:00Z"
-CLEANUP_CALLED=0
-cleanup_on_exit() { CLEANUP_CALLED=1; }
+# Realistic empty state, same as run_stale_check_loop's own process would
+# see: no other timer loops/pane-echo/seen_file in this minimal harness.
+WATCH_TIMER_PID=""
+WORKER_COMPACT_TIMER_PID=""
+AUTO_COMPACT_POLL_TIMER_PID=""
+STALE_CHECK_PID=""
+WATCHER_ECHO_PID=""
+seen_file=""
 kill() { printf 'kill %s\n' "\$*" >> "$KILL_LOG2"; return 0; }
 $STALE_FNS
 watcher_check_staleness

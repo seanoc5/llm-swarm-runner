@@ -1882,7 +1882,21 @@ cleanup_on_exit() {
     # unrelated tail a future change might add as another direct child of
     # this script.
     [ -n "${WATCHER_ECHO_PID:-}" ] && pkill -P $$ -f "tail .* -F .*$EVENTS_LOG" 2>/dev/null || true
-    [ -n "${seen_file:-}" ] && rm -f -- "$seen_file"
+    # issue #296 self-review finding: this line was missing the `|| true`
+    # every other line in this function already has. Under `set -e`, a
+    # false `[ -n ... ]` test (seen_file unset — the inotify backend never
+    # sets it at all, and run_poll only sets it inside its OWN process,
+    # after the fork) made the whole `&&` list's exit status non-zero,
+    # which never mattered while this function was ONLY ever invoked via
+    # the EXIT/INT/TERM trap (the process is exiting either way at that
+    # point) — but watcher_check_staleness (below) now also calls this
+    # function directly, as a plain statement, BEFORE its own kill/exit
+    # calls. Without this fix, that failing test aborted the whole calling
+    # context right here under `set -e`, silently skipping every kill
+    # below it — the stale-daemon self-check would log watch.stale_daemon
+    # and print its shutdown banner, then keep running the stale code
+    # forever, exactly the failure mode issue #296 exists to close.
+    [ -n "${seen_file:-}" ] && rm -f -- "$seen_file" || true
 }
 trap cleanup_on_exit EXIT INT TERM
 
