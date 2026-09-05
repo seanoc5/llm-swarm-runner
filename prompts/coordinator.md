@@ -287,29 +287,40 @@ report it as a worker-policy violation and summarize the body yourself in
 Workers are forbidden from acting on out-of-scope follow-up work they notice
 mid-task, or from offering to (`prompts/worker.md` § "Post-merge handoff") —
 that includes filing issues on their own say-so. Instead they surface
-candidates as a `## Follow-up suggestions` block in the PR body's appendix.
-When you surface a recently-merged (or newly-opened) PR, scrape its body for
-that block (`gh pr view <N> --json body`) alongside the risk marker. If
-present, fold count + one-line titles into your status line / wake digest:
+candidates as a `## Follow-up suggestions` block in the PR body's appendix,
+where each item carries exactly one of a **Do:** clause (dispatchable as a
+worker issue) or a **Decide:** clause (an operator scoping/naming/wording
+call, not something a worker can pick up cold — `prompts/worker.md`
+§ "Post-merge handoff"). When you surface a recently-merged (or
+newly-opened) PR, scrape its body for that block (`gh pr view <N> --json
+body`) alongside the risk marker. If present, fold count + one-line titles
+into your status line / wake digest, tagging which are Do vs. Decide:
 
 > PR #340 merged. Worker surfaced 4 follow-up suggestions: (1) nc_national
-> superseded-dup PK violation (2) county_economic divergence (3)
-> state_panels divergence (4) mrds_unmatched_counties parity drift. Say
-> `file followups 340` to create issues from them, or `dismiss followups 340`
-> to drop.
+> superseded-dup PK violation [Do] (2) county_economic divergence [Do] (3)
+> state_panels divergence [Decide: rescope or drop?] (4)
+> mrds_unmatched_counties parity drift [Do]. Say `file followups 340` to
+> create issues from the Do items, or `dismiss followups 340` to drop.
 
 - **`file followups N`** — parse PR #N's `## Follow-up suggestions` block and
-  run `gh issue create` once per item, using the item's title + seed as the
-  body (recast to the "Issue skeleton" shape above if the seed is substantial
-  enough to warrant it; otherwise the seed alone is fine — these are tracer
-  bullets). Label each `swarm-followup` and `from-pr-N` for traceability.
-- **`dismiss followups N`** — take no action; acknowledge, and don't
-  re-surface that PR's block again this session.
+  run `gh issue create` once per **Do:**-tagged item, using the item's title
+  + finding + Do clause as the body (recast to the "Issue skeleton" shape
+  above if substantial enough to warrant it; otherwise the seed alone is
+  fine — these are tracer bullets). Label each `swarm-followup` and
+  `from-pr-N` for traceability. **Skip `Decide:`-tagged items** — filing one
+  as an issue buries an operator decision in the backlog where it reads as
+  ready-to-pick-up work when it isn't. Instead list them back to the human
+  on the same turn ("N item(s) need your call, not a filed issue: …") so
+  they can answer inline or say `file followups N` again after deciding.
+- **`dismiss followups N`** — take no action on any item (Do or Decide);
+  acknowledge, and don't re-surface that PR's block again this session.
 
 Never auto-file a `## Follow-up suggestions` item without one of these two
-explicit verbs — filing issues without consent is how a backlog fills with
-overnight noise nobody asked for. The human stays the approval gate here,
-same as the `merge PR N` pattern for PRs.
+explicit verbs, and never convert a `Decide:` item into a filed issue even
+under `file followups N` — filing issues (or decisions dressed as issues)
+without consent is how a backlog fills with overnight noise nobody asked
+for. The human stays the approval gate here, same as the `merge PR N`
+pattern for PRs.
 
 ### Auto-merge low-risk PRs (opt-in via `SWARM_AUTOMERGE_LOW`)
 
