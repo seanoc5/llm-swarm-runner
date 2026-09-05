@@ -2,7 +2,9 @@
 #
 # test-shape-capture-worker.sh — Non-LLM shape tests for capture-worker.sh
 # (issue #219): tags known UI-chrome lines inline, and --verify checks a
-# fixture session transcript for whether text was actually submitted.
+# fixture session transcript for whether text was actually SUBMITTED BY THE
+# USER (issue #360: a hit in an assistant turn or in a tool_result block
+# nested inside a user-role message must NOT count).
 #
 # Stubs `tmux` via PATH override — no live tmux server. The stub serves
 # canned pane fixtures for iss-* windows and records what it was asked for.
@@ -91,7 +93,7 @@ WT_DIR="$(dirname "$PROJECT_DIR")/wt-issue-2"
 SLUG="$(printf '%s' "$WT_DIR" | tr '/' '-')"
 FAKE_HOME="$TEST_DIR/fakehome"
 mkdir -p "$FAKE_HOME/.claude/projects/$SLUG"
-printf '{"role":"user","content":"please loop in Radesh on this PR"}\n' \
+printf '{"type":"user","message":{"role":"user","content":"please loop in Radesh on this PR"}}\n' \
     > "$FAKE_HOME/.claude/projects/$SLUG/session1.jsonl"
 
 OUT=$(HOME="$FAKE_HOME" "$CAPTURE" "$PROJECT_DIR" iss-2 --verify "loop in Radesh" 2>&1) && RC=0 || RC=$?
@@ -114,6 +116,42 @@ heading "Test 4: --verify against a worktree with no transcript dir is a setup e
 OUT=$(HOME="$FAKE_HOME" "$CAPTURE" "$PROJECT_DIR" iss-999 --verify "anything" 2>&1) && RC=0 || RC=$?
 [ "$RC" -eq 2 ] || red "expected exit 2 for missing transcript dir, got $RC: $OUT"
 green "--verify: no transcript dir for the worktree → usage/setup error, exit 2"
+
+# ============================================================================
+heading "Test 5: --verify misattribution guard (issue #360)"
+# ============================================================================
+# Live failure this reproduces: a worker's own final report invited the
+# operator to say a confirmation phrase ('say "merge PR 356" if you want it
+# in'). That's an ASSISTANT turn — nobody submitted it — but the old
+# implementation grepped the whole transcript file and reported FOUND
+# anyway. A single synthetic 3-turn transcript covers all three shapes a
+# turn's content can take: an assistant turn, a tool_result block nested in
+# a user-role message (e.g. a captured pane dump quoting the phrase), and a
+# genuine user-submitted turn.
+WT_DIR5="$(dirname "$PROJECT_DIR")/wt-issue-5"
+SLUG5="$(printf '%s' "$WT_DIR5" | tr '/' '-')"
+mkdir -p "$FAKE_HOME/.claude/projects/$SLUG5"
+cat > "$FAKE_HOME/.claude/projects/$SLUG5/session1.jsonl" <<'JSONL'
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Say \"PHRASE_ASSISTANT_ONLY\" if you want it in."}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"pane dump: PHRASE_TOOL_RESULT_ONLY"}]}}
+{"type":"user","message":{"role":"user","content":"PHRASE_GENUINE_USER"}}
+JSONL
+
+OUT=$(HOME="$FAKE_HOME" "$CAPTURE" "$PROJECT_DIR" iss-5 --verify "PHRASE_ASSISTANT_ONLY" 2>&1) && RC=0 || RC=$?
+[ "$RC" -eq 1 ] || red "phrase only in an assistant turn must NOT verify, got exit $RC: $OUT"
+echo "$OUT" | grep -q "^NOT FOUND" || red "expected NOT FOUND for assistant-only phrase, got: $OUT"
+green "--verify: phrase present only in an assistant turn → NOT FOUND, exit 1"
+
+OUT=$(HOME="$FAKE_HOME" "$CAPTURE" "$PROJECT_DIR" iss-5 --verify "PHRASE_TOOL_RESULT_ONLY" 2>&1) && RC=0 || RC=$?
+[ "$RC" -eq 1 ] || red "phrase only in a tool_result block must NOT verify, got exit $RC: $OUT"
+echo "$OUT" | grep -q "^NOT FOUND" || red "expected NOT FOUND for tool_result-only phrase, got: $OUT"
+green "--verify: phrase present only in a tool_result block → NOT FOUND, exit 1"
+
+OUT=$(HOME="$FAKE_HOME" "$CAPTURE" "$PROJECT_DIR" iss-5 --verify "PHRASE_GENUINE_USER" 2>&1) && RC=0 || RC=$?
+[ "$RC" -eq 0 ] || red "genuinely submitted user phrase must verify, got exit $RC: $OUT"
+echo "$OUT" | grep -q "^FOUND" || red "expected FOUND for genuine user phrase, got: $OUT"
+echo "$OUT" | grep -qi "submitted by the user" || red "expected output to say submitted by the user, got: $OUT"
+green "--verify: phrase genuinely submitted by the user → FOUND, exit 0"
 
 # ============================================================================
 heading "All capture-worker shape tests passed"
