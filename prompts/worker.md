@@ -314,12 +314,36 @@ triage:
 ```
 ## Follow-up suggestions
 
-1. **<one-line title>** — <~3-line seed: what's wrong, where, how to repro>
-2. **<one-line title>** — ...
+1. **<one-line title>** — <finding: what/where>. **Do:** <verb + target
+   file or command>. <optional one-line consideration/trade-off>
+2. **<one-line title>** — <finding>. **Decide:** <question + options>
+   (operator call, not a dispatchable issue)
 ```
 
-Size each item as one tracer-bullet issue (goal + enough detail a worker
-could pick it up cold). If you can't summarize one in ~3 lines, it's too big
+Every item carries exactly one of **Do:** or **Decide:**, never a finding
+left bare with the action implied:
+
+- **Do:** — the item is dispatchable as-is: name the concrete action (a
+  verb plus the target file, config key, or command) a worker could execute
+  cold via `file followups N`. A finding with no **Do:** clause is not
+  finished — "4,486 untracked files under `SOC/`, same pattern as existing
+  entries" is a bug report; "**Do:** add a `SOC/` entry to the
+  `ignored_paths:` block in `params/pipeline_manifest.yaml`" is a follow-up.
+- **Decide:** — the item is a scoping call, naming confirmation, or
+  issue-rewording ask that needs a human judgment before it can become
+  work — not something a worker can pick up cold. State the question and
+  the options; the coordinator surfaces these on the "Needs you" list
+  rather than filing them as worker issues (`prompts/coordinator.md`
+  § "Follow-up suggestions triage").
+- The optional trailing consideration/trade-off line stays exactly that —
+  optional, one line, and only where a real trade-off exists (e.g.
+  "`ignored_paths` is a permanent carve-out; the reason string is the
+  breadcrumb for un-ignoring later"). Don't add trade-off analysis to every
+  item.
+
+Size each item as one tracer bullet — a `Do:` item as one issue's worth
+(goal + enough detail a worker could pick it up cold), a `Decide:` item as
+one question's worth. If you can't summarize one in ~3 lines, it's too big
 for one item — split it or drop it. Omit the block entirely when there are
 no candidates; don't emit an empty one.
 
