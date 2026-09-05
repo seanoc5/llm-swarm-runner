@@ -69,6 +69,11 @@ AUTO_COMPACT=1
 AUTO_COMPACT_PCT=75
 AUTO_COMPACT_THRESHOLD_CAP_TOKENS=250000
 AUTO_COMPACT_THRESHOLD_TOKENS=150000
+# issue #296 — must match coordinator-watch.sh's own default. Refuses only
+# when the window denominator can't be parsed at all, so every pre-existing
+# fixture below (which always sets a valid context_window_size) is
+# unaffected — only Test 20/21 (dedicated to this guard) exercise it.
+AUTO_COMPACT_REQUIRE_WINDOW=1
 AUTO_COMPACT_PROBE_MAX_AGE_SECS=120
 # issue #252/#274: must match coordinator-watch.sh's own default — anchored
 # on the "(esc to interrupt)" hint instead of a spinner-verb list, plus the
@@ -1096,6 +1101,59 @@ check "near-instant rejection -> NOT logged as coord.compact.replayed (below COM
 
 if grep -q 'coord.compact.ineffective' "$EVENTS_LOG"; then got=logged; else got=missing; fi
 check "falls through to the normal ineffective path instead -- correctly flagged as a real failure" "logged" "$got"
+
+heading "Test 20: AUTO_COMPACT_REQUIRE_WINDOW — does NOT second-guess a properly scaled/capped threshold (issue #296 self-review fix)"
+# An earlier version of this guard compared the OBSERVED percentage of a
+# successfully-parsed window against a fixed floor (e.g. 60%) — code review
+# caught that this actively fights AUTO_COMPACT_PCT/AUTO_COMPACT_THRESHOLD_
+# CAP_TOKENS's own intentional scaling: on a 1M window the cap deliberately
+# targets 250000 tokens (25%, not 60%) to keep compaction frequent enough to
+# avoid the quality-degradation zone past ~512k (see AUTO_COMPACT_PCT's
+# header comment). This test locks in the fix: a 1M window, comfortably over
+# the capped threshold but at just 26% of the window, must still compact
+# normally — the guard must never refuse when the window WAS parsed.
+# DRY_RUN=1 throughout: no live fake REPL needed.
+tmux send-keys -t "$SESSION_NAME:coordinator" "clear; echo 'idle >'; cat" Enter
+check_eventually "cat foreground -> cli (sanity check before this test)" "cli" 'coordinator_pane_state'
+
+DRY_RUN=1
+printf '{"context_window":{"context_window_size":1000000,"total_input_tokens":260000}}' > "$AUTO_COMPACT_PROBE"
+: > "$EVENTS_LOG"
+maybe_auto_compact wake
+if grep -q 'coord.compact ' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "26% of a 1M window, over the capped 250k threshold -> compacts normally (not refused)" "logged" "$got"
+if grep -q 'no_window_for_floor' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "window WAS parsed -> the require-window guard does not fire at all" "missing" "$got"
+
+heading "Test 21: AUTO_COMPACT_REQUIRE_WINDOW — refuses the flat-fallback threshold when the window can't be parsed (issue #296)"
+# probe has a used field but no context_window_size — same schema-mismatch
+# shape Test 3b/3c already exercise for probe_ctx_window() directly. The
+# threshold falls back to the flat AUTO_COMPACT_THRESHOLD_TOKENS (150000),
+# which used=160000 clears, so this only reaches the guard if the earlier
+# threshold check didn't already reject it — then the guard itself must
+# refuse rather than silently trust that flat fallback unguarded (this is
+# the actual mechanism behind the 2026-08-16 incident: a 150000-token flat
+# threshold is only 15% of the coordinator's real 1M-token window, which
+# this specific check has no way to confirm from a schema-mismatched probe).
+printf '{"context_window":{"total_input_tokens":160000}}' > "$AUTO_COMPACT_PROBE"
+: > "$EVENTS_LOG"
+maybe_auto_compact wake
+if grep -q 'coord.compact ' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "unparseable window -> bare coord.compact NOT logged" "missing" "$got"
+if grep -q 'reason=no_window_for_floor' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "unparseable window -> coord.compact.skip reason=no_window_for_floor logged" "logged" "$got"
+
+# AUTO_COMPACT_REQUIRE_WINDOW=0 must restore the pre-#296 behavior of
+# trusting the flat fallback verbatim, for a deployment that deliberately
+# relies on it.
+AUTO_COMPACT_REQUIRE_WINDOW=0
+: > "$EVENTS_LOG"
+maybe_auto_compact wake
+if grep -q 'coord.compact ' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "AUTO_COMPACT_REQUIRE_WINDOW=0 -> unparseable window no longer blocks injection (flat fallback restored)" "logged" "$got"
+if grep -q 'no_window_for_floor' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "AUTO_COMPACT_REQUIRE_WINDOW=0 -> the guard itself is disabled, not just bypassed" "missing" "$got"
+AUTO_COMPACT_REQUIRE_WINDOW=1
 
 echo ""
 green "All coordinator-auto-compact tests passed ($PASS checks)"
