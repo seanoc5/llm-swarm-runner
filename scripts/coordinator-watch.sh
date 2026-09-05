@@ -411,37 +411,46 @@
 #                           the threshold used verbatim when AUTO_COMPACT_PCT
 #                           scaling is effectively a no-op (e.g. probe has no
 #                           context_window_size field yet).
-#   AUTO_COMPACT_MIN_PCT=60
-#                           (issue #296) Hard floor, independent of the
-#                           threshold computed above: even when `used` is at
-#                           or over that threshold, refuse to inject /compact
-#                           unless the coordinator's context is ALSO at or
-#                           above this percentage of its own window (re-read
-#                           fresh from the probe at injection time, via the
-#                           same probe_ctx_window() the threshold above
-#                           already uses). Exists because the threshold above
-#                           can itself be wrong in ways this doesn't depend
-#                           on — a probe schema mismatch (or a daemon running
-#                           code predating the AUTO_COMPACT_PCT scaling this
-#                           file added in issue #273) silently falls back to
-#                           the flat AUTO_COMPACT_THRESHOLD_TOKENS default of
-#                           150000, which is only 15% of a 1M-token window.
-#                           That is exactly what fired a spurious /compact at
-#                           16% context into a live worker pane on
-#                           2026-08-16, mid-task on an open PR — see this
-#                           file's WATCHER_STALE_CHECK doc (below) for the
-#                           staleness-daemon half of that incident's root
-#                           cause. When the window can't be parsed at all
-#                           (no fresh probe, schema mismatch), this refuses
-#                           rather than guessing — logging
-#                           coord.compact.skip reason=no_window_for_floor —
-#                           since there is no observed value to check the
-#                           floor against. Set to 0 to disable this ENTIRE
-#                           floor, including that fail-closed case — restores
-#                           the pre-#296 behavior of trusting the flat
-#                           AUTO_COMPACT_THRESHOLD_TOKENS fallback verbatim,
-#                           for a deployment that deliberately relies on it
-#                           (e.g. a probe that never reports a window size).
+#   AUTO_COMPACT_REQUIRE_WINDOW=1
+#                           (issue #296) Refuse to inject /compact whenever
+#                           the coordinator's context-window SIZE can't be
+#                           confirmed at all (probe_ctx_window() fails: no
+#                           fresh probe, schema mismatch) — rather than
+#                           silently trusting the flat AUTO_COMPACT_THRESHOLD_
+#                           TOKENS fallback the threshold computation above
+#                           degrades to in that same situation (see
+#                           AUTO_COMPACT_PCT above). That flat number (150000
+#                           by default) can be a much lower percentage of
+#                           whatever the coordinator's TRUE window actually is
+#                           than intended — e.g. only 15% of a 1M-token
+#                           window — with no way to tell from here. Logs
+#                           coord.compact.skip reason=no_window_for_floor when
+#                           it refuses this way.
+#
+#                           An earlier version of this guard instead compared
+#                           the window's OBSERVED percentage against a fixed
+#                           floor (e.g. 60%) even when the window WAS
+#                           successfully parsed — code review caught that
+#                           this actively fights AUTO_COMPACT_PCT/
+#                           AUTO_COMPACT_THRESHOLD_CAP_TOKENS's own scaling:
+#                           on a 1M-token window the cap intentionally targets
+#                           250000 tokens (25%, not 60%) specifically to keep
+#                           compaction frequent enough to avoid the model's
+#                           quality-degradation zone past ~512k tokens (see
+#                           AUTO_COMPACT_PCT's header comment) — a flat
+#                           percentage floor would have delayed compaction on
+#                           every large-context-window coordinator until 60%
+#                           regardless of that tuning. This guard therefore
+#                           only ever refuses when the window genuinely can't
+#                           be read at all; it never second-guesses a
+#                           threshold that WAS successfully computed from a
+#                           real window size, since AUTO_COMPACT_PCT/
+#                           _CAP_TOKENS already handles that correctly. Set to
+#                           0 to restore the pre-#296 behavior of trusting the
+#                           flat AUTO_COMPACT_THRESHOLD_TOKENS fallback
+#                           verbatim, for a deployment that deliberately
+#                           relies on it (e.g. a probe that never reports a
+#                           window size).
 #   AUTO_COMPACT_PROBE=<path>
 #                           Path to the statusline probe file. Defaults to
 #                           the project+role-scoped path
@@ -708,27 +717,34 @@
 #                           rather than let it degrade further). Also the
 #                           fallback used verbatim when the window denominator
 #                           can't be parsed — see WORKER_COMPACT_PCT above.
-#   WORKER_COMPACT_MIN_PCT=60
-#                           (issue #296) Worker-side twin of AUTO_COMPACT_MIN_PCT
-#                           above — a hard floor, independent of whichever
-#                           threshold (base or wrap-up) applies: refuse to
-#                           inject /compact into a worker pane unless its
-#                           context is ALSO at or above this percentage of its
-#                           own window (re-parsed fresh from the rendered
-#                           statusline at injection time via
-#                           worker_pane_ctx_window(), the same source the
-#                           threshold above uses). Same rationale as the
-#                           coordinator-side floor: a worker statusline that
-#                           doesn't render a parseable window denominator
-#                           falls back to the flat WORKER_COMPACT_THRESHOLD_TOKENS
-#                           default (150000, only 15% of a 1M window) with
-#                           nothing else to catch an unreasonably early
-#                           compact. When the window can't be parsed at all,
-#                           this refuses rather than guessing — logging
-#                           worker.compact.skip reason=no_window_for_floor.
-#                           Set to 0 to disable this ENTIRE floor, including
-#                           that fail-closed case — restores the pre-#296
-#                           behavior of trusting the flat
+#   WORKER_COMPACT_REQUIRE_WINDOW=1
+#                           (issue #296) Worker-side twin of
+#                           AUTO_COMPACT_REQUIRE_WINDOW above — see that
+#                           knob's header comment for the full rationale,
+#                           including why this is a narrower "refuse only
+#                           when the window can't be read at all" check
+#                           rather than a fixed percentage floor (a flat
+#                           floor would fight WORKER_COMPACT_PCT/
+#                           _CAP_TOKENS's own scaling for large windows the
+#                           same way it would on the coordinator side).
+#                           Refuses (worker.compact.skip
+#                           reason=no_window_for_floor) whenever
+#                           worker_pane_ctx_window() can't parse a window
+#                           size from the rendered statusline — the same
+#                           helper worker_compact_effective_threshold() uses,
+#                           so this only ever fires when that threshold
+#                           computation ALSO had to fall back to the flat
+#                           WORKER_COMPACT_THRESHOLD_TOKENS default. In
+#                           practice this is unreachable today:
+#                           worker_pane_ctx_used() and worker_pane_ctx_window()
+#                           parse numerator and denominator off the SAME
+#                           rendered "ctx: N/N (N%)" line, so if one parses
+#                           the other does too — kept for symmetry with the
+#                           coordinator side (whose probe file genuinely CAN
+#                           have one field present without the other) and as
+#                           a backstop against a future statusline format
+#                           change decoupling them. Set to 0 to restore the
+#                           pre-#296 behavior of trusting the flat
 #                           WORKER_COMPACT_THRESHOLD_TOKENS fallback verbatim.
 #   WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS=300000
 #                           Raised threshold used instead of the above once
@@ -1141,7 +1157,7 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     AUTO_COMPACT_PCT                  75      percent of the coordinator's own context window used as the effective threshold; see header comment
     AUTO_COMPACT_THRESHOLD_CAP_TOKENS 250000  cap on the above (250k on a 1M-window coordinator, not 750k)
     AUTO_COMPACT_THRESHOLD_TOKENS     150000  used-token trigger; also the fallback when the window can't be parsed
-    AUTO_COMPACT_MIN_PCT              60      (issue #296) hard floor — refuse to inject below this % of the coordinator's own window, even if over threshold (0=off); see header comment
+    AUTO_COMPACT_REQUIRE_WINDOW       1       (issue #296) refuse to inject via the flat-fallback threshold when the coordinator's window size can't be confirmed at all (0=off); see header comment
     AUTO_COMPACT_TICK_SECS            60      periodic poll-tick trigger interval (0=off); catches long interactive stretches with no worker completions; see header comment
     AUTO_COMPACT_COOLDOWN_SECS        900     poll-tick-only cooldown after an attempted compact, before it may re-trigger
     AUTO_COMPACT_PROBE                (auto)  statusline probe file path
@@ -1155,7 +1171,7 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     WORKER_COMPACT_PCT                       75      percent of the worker's own context window used as the effective threshold; see header comment
     WORKER_COMPACT_THRESHOLD_CAP_TOKENS      250000  cap on the above (250k on a 1M-window worker, not 750k)
     WORKER_COMPACT_THRESHOLD_TOKENS         150000  used-token trigger (no PR open yet); also the fallback when the window can't be parsed
-    WORKER_COMPACT_MIN_PCT                  60      (issue #296) hard floor — refuse to inject below this % of the worker's own window, even if over threshold (0=off); see header comment
+    WORKER_COMPACT_REQUIRE_WINDOW            1       (issue #296) refuse to inject via the flat-fallback threshold when the worker's window size can't be confirmed at all (0=off); see header comment
     WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS  300000  raised trigger once the worker's PR is open (scales with the base threshold; see header comment)
     WORKER_COMPACT_BUSY_PATTERN             (auto)  capture-pane busy-indicator regex (per iss-* window)
     WORKER_COMPACT_START_TIMEOUT_SECS       15      max wait for compaction to start
@@ -1255,9 +1271,10 @@ EVENTS LOG
                            this attempt rather than risking a misread (before, trigger=poll|wake)
       coord.compact.ineffective  context didn't drop post-compact (before, after, trigger=poll|wake) — investigate
       coord.compact.verify_skip  probe never refreshed post-compact — inconclusive, not a failure (trigger=poll|wake)
-      coord.compact.refused_low_ctx  (issue #296) at/over threshold, but the coordinator's freshly
-                           re-read context was below AUTO_COMPACT_MIN_PCT of its own window —
-                           refused to inject (used, window, pct, min_pct, trigger=poll|wake)
+      coord.compact.skip reason=no_window_for_floor  (issue #296, AUTO_COMPACT_REQUIRE_WINDOW=1
+                           default) at/over the (flat-fallback) threshold, but the coordinator's
+                           window size couldn't be confirmed at all — refused rather than trust that
+                           fallback blindly (trigger=poll|wake); see header comment
       worker.compact        /compact injected into an iss-* window (issue, used, threshold, wrapup)
       worker.compact.skip   worker auto-compact skipped this window this cycle (issue,
                            reason=pane_busy|no_ctx_parsed|task_done|backoff|...; reason=task_done
@@ -1296,8 +1313,10 @@ EVENTS LOG
                            failure (issue, before)
       worker.compact.ineffective  worker context didn't drop post-compact (issue, before, after) — investigate
       worker.compact.verify_skip  worker's ctx reading never refreshed post-compact — inconclusive, not a failure
-      worker.compact.refused_low_ctx  (issue #296) same guard as coord.compact.refused_low_ctx above,
-                           applied to a worker window (issue, used, window, pct, min_pct)
+      worker.compact.skip reason=no_window_for_floor  (issue #296) same guard as
+                           coord.compact.skip reason=no_window_for_floor above, applied to a worker
+                           window (issue) — in practice unreachable today, see
+                           WORKER_COMPACT_REQUIRE_WINDOW's header comment
       worker.compact.giving_up  (issue #252) N consecutive timeout/ineffective verdicts for this
                            window (issue, failures=N) — maybe_worker_compact stops attempting
                            /compact for it until the watcher restarts; logged once, not every sweep
@@ -1444,9 +1463,10 @@ WATCHER_STALE_CHECK="${WATCHER_STALE_CHECK:-1}"
 WATCHER_STALE_CHECK_SECS="${WATCHER_STALE_CHECK_SECS:-300}"
 AUTO_COMPACT="${AUTO_COMPACT:-1}"
 AUTO_COMPACT_THRESHOLD_TOKENS="${AUTO_COMPACT_THRESHOLD_TOKENS:-150000}"
-# issue #296 — independent hard floor beneath the threshold above; see this
-# file's AUTO_COMPACT_MIN_PCT header comment.
-AUTO_COMPACT_MIN_PCT="${AUTO_COMPACT_MIN_PCT:-60}"
+# issue #296 — refuse the flat-fallback threshold above when the window
+# can't be confirmed at all; see this file's AUTO_COMPACT_REQUIRE_WINDOW
+# header comment.
+AUTO_COMPACT_REQUIRE_WINDOW="${AUTO_COMPACT_REQUIRE_WINDOW:-1}"
 # issue #273 — scale the effective threshold to the coordinator model's own
 # context window (min(AUTO_COMPACT_PCT% of window, ..._CAP_TOKENS)); see
 # coordinator_compact_effective_threshold() and this file's AUTO_COMPACT_PCT
@@ -1496,9 +1516,9 @@ WORKER_AUTO_COMPACT="${WORKER_AUTO_COMPACT:-1}"
 WORKER_COMPACT_PCT="${WORKER_COMPACT_PCT:-75}"
 WORKER_COMPACT_THRESHOLD_CAP_TOKENS="${WORKER_COMPACT_THRESHOLD_CAP_TOKENS:-250000}"
 WORKER_COMPACT_THRESHOLD_TOKENS="${WORKER_COMPACT_THRESHOLD_TOKENS:-150000}"
-# issue #296 — worker-side twin of AUTO_COMPACT_MIN_PCT; see this file's
-# WORKER_COMPACT_MIN_PCT header comment.
-WORKER_COMPACT_MIN_PCT="${WORKER_COMPACT_MIN_PCT:-60}"
+# issue #296 — worker-side twin of AUTO_COMPACT_REQUIRE_WINDOW; see this
+# file's WORKER_COMPACT_REQUIRE_WINDOW header comment.
+WORKER_COMPACT_REQUIRE_WINDOW="${WORKER_COMPACT_REQUIRE_WINDOW:-1}"
 WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS="${WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS:-300000}"
 # issue #252/#266/#274: same anchors as AUTO_COMPACT_BUSY_PATTERN above — keep in sync.
 WORKER_COMPACT_BUSY_PATTERN="${WORKER_COMPACT_BUSY_PATTERN:-\(esc to interrupt\)|Press Ctrl-C again to .xit|· ↓ [0-9.,]+k? tokens|Press up to edit queued messages|Compacting conversation}"
@@ -1577,8 +1597,8 @@ fi
 for _var in AUTO_COMPACT_THRESHOLD_TOKENS AUTO_COMPACT_PROBE_MAX_AGE_SECS \
             AUTO_COMPACT_START_TIMEOUT_SECS AUTO_COMPACT_FINISH_TIMEOUT_SECS \
             AUTO_COMPACT_VERIFY_TIMEOUT_SECS AUTO_COMPACT_TICK_SECS AUTO_COMPACT_COOLDOWN_SECS \
-            AUTO_COMPACT_PCT AUTO_COMPACT_THRESHOLD_CAP_TOKENS AUTO_COMPACT_MIN_PCT \
-            WORKER_COMPACT_PCT WORKER_COMPACT_THRESHOLD_CAP_TOKENS WORKER_COMPACT_MIN_PCT \
+            AUTO_COMPACT_PCT AUTO_COMPACT_THRESHOLD_CAP_TOKENS \
+            WORKER_COMPACT_PCT WORKER_COMPACT_THRESHOLD_CAP_TOKENS \
             WORKER_COMPACT_THRESHOLD_TOKENS WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS \
             WORKER_COMPACT_START_TIMEOUT_SECS WORKER_COMPACT_FINISH_TIMEOUT_SECS \
             WORKER_COMPACT_VERIFY_TIMEOUT_SECS WORKER_COMPACT_SCAN_SECS \
@@ -1755,8 +1775,8 @@ autoclose:     $WATCHER_AUTOCLOSE$([ "$WATCHER_AUTOCLOSE" = "1" ] && echo " (mod
 pr-poll:       ${WATCH_PR_POLL_SECS}s$([ "$WATCH_PR_POLL_SECS" = "0" ] && echo " (disabled)")
 orphan-sweep:  ${WATCH_ORPHAN_SWEEP_SECS}s$([ "$WATCH_ORPHAN_SWEEP_SECS" = "0" ] && echo " (disabled)" || echo " (script: $REAP_ORPHAN)")
 check-on-done: $WATCH_CHECK_ON_DONE$([ "$WATCH_CHECK_ON_DONE" = "1" ] && echo " (session: $SESSION_NAME)")
-auto-compact:  $AUTO_COMPACT$([ "$AUTO_COMPACT" = "1" ] && echo " (threshold: min(${AUTO_COMPACT_PCT}% of window, ${AUTO_COMPACT_THRESHOLD_CAP_TOKENS}), fallback: ${AUTO_COMPACT_THRESHOLD_TOKENS} tokens, min-pct-floor: ${AUTO_COMPACT_MIN_PCT}%, probe: $AUTO_COMPACT_PROBE, poll-tick: ${AUTO_COMPACT_TICK_SECS}s$([ "$AUTO_COMPACT_TICK_SECS" = "0" ] && echo " disabled"), cooldown: ${AUTO_COMPACT_COOLDOWN_SECS}s)")
-worker-compact: $WORKER_AUTO_COMPACT$([ "$WORKER_AUTO_COMPACT" = "1" ] && echo " (threshold: min(${WORKER_COMPACT_PCT}% of window, ${WORKER_COMPACT_THRESHOLD_CAP_TOKENS})/wrapup+$(( WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS - WORKER_COMPACT_THRESHOLD_TOKENS )), fallback: ${WORKER_COMPACT_THRESHOLD_TOKENS}/${WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS} tokens, min-pct-floor: ${WORKER_COMPACT_MIN_PCT}%, scan: ${WORKER_COMPACT_SCAN_SECS}s)")
+auto-compact:  $AUTO_COMPACT$([ "$AUTO_COMPACT" = "1" ] && echo " (threshold: min(${AUTO_COMPACT_PCT}% of window, ${AUTO_COMPACT_THRESHOLD_CAP_TOKENS}), fallback: ${AUTO_COMPACT_THRESHOLD_TOKENS} tokens, require-window: ${AUTO_COMPACT_REQUIRE_WINDOW}, probe: $AUTO_COMPACT_PROBE, poll-tick: ${AUTO_COMPACT_TICK_SECS}s$([ "$AUTO_COMPACT_TICK_SECS" = "0" ] && echo " disabled"), cooldown: ${AUTO_COMPACT_COOLDOWN_SECS}s)")
+worker-compact: $WORKER_AUTO_COMPACT$([ "$WORKER_AUTO_COMPACT" = "1" ] && echo " (threshold: min(${WORKER_COMPACT_PCT}% of window, ${WORKER_COMPACT_THRESHOLD_CAP_TOKENS})/wrapup+$(( WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS - WORKER_COMPACT_THRESHOLD_TOKENS )), fallback: ${WORKER_COMPACT_THRESHOLD_TOKENS}/${WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS} tokens, require-window: ${WORKER_COMPACT_REQUIRE_WINDOW}, scan: ${WORKER_COMPACT_SCAN_SECS}s)")
 worker-deliver: $WORKER_AUTO_DELIVER$([ "$WORKER_AUTO_DELIVER" = "1" ] && echo " (parked-in-agent requeue.sh briefs released via /quit, end-timeout: ${WORKER_DELIVER_END_TIMEOUT_SECS}s, scan: ${WORKER_COMPACT_SCAN_SECS}s — issue #313)")
 stale-check:   $WATCHER_STALE_CHECK$([ "$WATCHER_STALE_CHECK" = "1" ] && echo " (every ${WATCHER_STALE_CHECK_SECS}s — issue #296; check anytime: coordinator-watch.sh --check-stale)")
 dry-run:       $DRY_RUN
@@ -3077,36 +3097,27 @@ maybe_auto_compact() {
 
         [ "$used" -ge "$threshold" ] || exit 0   # under threshold — the common case
 
-        # issue #296: independent hard floor beneath the threshold above,
-        # using probe_ctx_window() the same way coordinator_compact_effective_
-        # threshold() does. Exists because the threshold above can itself be
-        # wrong in ways this doesn't depend on — e.g. a probe schema mismatch
-        # (or a daemon running code predating issue #273's window scaling)
-        # silently falls back to the flat AUTO_COMPACT_THRESHOLD_TOKENS
-        # default, only 15% of a 1M-token window — see AUTO_COMPACT_MIN_PCT's
-        # header comment for the incident this closes. AUTO_COMPACT_MIN_PCT=0
-        # disables this ENTIRE block, including the fail-closed branch below
-        # — same "0 disables" convention as AUTO_COMPACT_TICK_SECS/
-        # WATCH_PR_POLL_SECS elsewhere in this file — so a deployment relying
-        # on the flat-fallback-threshold-only behavior documented above
-        # (probe present but missing context_window_size, issue #273's
-        # pre-existing degraded mode) can still opt back into it explicitly.
-        # With the floor enabled (the default), it fails CLOSED when the
-        # window can't be parsed at all: there's no observed percentage to
-        # check the floor against, and injecting anyway is exactly the
-        # unsafe path this guard exists to prevent.
-        if [ "$AUTO_COMPACT_MIN_PCT" -gt 0 ]; then
-            local window pct
-            if ! window="$(probe_ctx_window)" || [ -z "$window" ] || [ "$window" -le 0 ]; then
-                log_event coord.compact.skip "reason=no_window_for_floor trigger=$trigger"
-                exit 0
-            fi
-            pct=$(( used * 100 / window ))
-            if [ "$pct" -lt "$AUTO_COMPACT_MIN_PCT" ]; then
-                log_event coord.compact.refused_low_ctx "used=$used window=$window pct=$pct min_pct=$AUTO_COMPACT_MIN_PCT trigger=$trigger"
-                echo "[$(date +%T)] refusing /compact: coordinator context at ${pct}% (< ${AUTO_COMPACT_MIN_PCT}% floor, used=$used window=$window) — not injecting"
-                exit 0
-            fi
+        # issue #296: refuse to inject via the flat-fallback threshold when
+        # the coordinator's window size can't be confirmed at all —
+        # probe_ctx_window() here is the SAME helper
+        # coordinator_compact_effective_threshold() already called above, so
+        # this only ever fires when that threshold computation ALSO had to
+        # fall back to the flat AUTO_COMPACT_THRESHOLD_TOKENS default rather
+        # than a properly scaled/capped one (e.g. a probe schema mismatch,
+        # or a daemon running code predating issue #273's window scaling) —
+        # see AUTO_COMPACT_REQUIRE_WINDOW's header comment for the incident
+        # this closes, and for why this deliberately does NOT re-check the
+        # computed threshold's percentage-of-window when the window WAS
+        # parsed (an earlier version of this guard did exactly that, and
+        # code review caught that it fights AUTO_COMPACT_PCT/
+        # _CAP_TOKENS's own intentional scaling for large windows).
+        # AUTO_COMPACT_REQUIRE_WINDOW=0 disables this check — same "0
+        # disables" convention as AUTO_COMPACT_TICK_SECS/WATCH_PR_POLL_SECS
+        # elsewhere in this file — restoring the pre-#296 behavior of
+        # trusting the flat fallback verbatim.
+        if [ "$AUTO_COMPACT_REQUIRE_WINDOW" = "1" ] && ! probe_ctx_window >/dev/null 2>&1; then
+            log_event coord.compact.skip "reason=no_window_for_floor trigger=$trigger"
+            exit 0
         fi
 
         echo "[$(date +%T)] coordinator context at ${used} tokens (>= ${threshold}) — compacting before wake..."
@@ -3961,26 +3972,20 @@ maybe_worker_compact() {
 
     [ "$used" -ge "$threshold" ] || return 0   # under threshold — the common case
 
-    # issue #296: worker-side twin of maybe_auto_compact's low-context floor
-    # above — see AUTO_COMPACT_MIN_PCT's header comment for the incident and
-    # WORKER_COMPACT_MIN_PCT's for the worker-specific rationale.
-    # WORKER_COMPACT_MIN_PCT=0 disables this ENTIRE block, including the
-    # fail-closed branch below, same "0 disables" convention as this file's
-    # other *_SECS=0 knobs. With the floor enabled (the default), it fails
-    # CLOSED when the window can't be parsed: no observed percentage to
-    # check the floor against.
-    if [ "$WORKER_COMPACT_MIN_PCT" -gt 0 ]; then
-        local window pct
-        if ! window="$(worker_pane_ctx_window "$win")" || [ -z "$window" ] || [ "$window" -le 0 ]; then
-            log_event worker.compact.skip "issue=$issue reason=no_window_for_floor"
-            return 0
-        fi
-        pct=$(( used * 100 / window ))
-        if [ "$pct" -lt "$WORKER_COMPACT_MIN_PCT" ]; then
-            log_event worker.compact.refused_low_ctx "issue=$issue used=$used window=$window pct=$pct min_pct=$WORKER_COMPACT_MIN_PCT"
-            echo "[$(date +%T)] refusing /compact into $win: context at ${pct}% (< ${WORKER_COMPACT_MIN_PCT}% floor, used=$used window=$window) — not injecting"
-            return 0
-        fi
+    # issue #296: worker-side twin of maybe_auto_compact's window-confirmation
+    # guard above — see AUTO_COMPACT_REQUIRE_WINDOW's header comment for the
+    # incident and design rationale (including why this deliberately does
+    # NOT re-check the computed threshold's percentage-of-window once the
+    # window WAS parsed), and WORKER_COMPACT_REQUIRE_WINDOW's for why this
+    # specific branch is unreachable in practice today. Refuses only when
+    # worker_pane_ctx_window() — the SAME helper
+    # worker_compact_effective_threshold() already called above — can't
+    # parse a window size at all, meaning that threshold ALSO fell back to
+    # the flat WORKER_COMPACT_THRESHOLD_TOKENS default.
+    # WORKER_COMPACT_REQUIRE_WINDOW=0 disables this check.
+    if [ "$WORKER_COMPACT_REQUIRE_WINDOW" = "1" ] && ! worker_pane_ctx_window "$win" >/dev/null 2>&1; then
+        log_event worker.compact.skip "issue=$issue reason=no_window_for_floor"
+        return 0
     fi
 
     echo "[$(date +%T)] worker $win context at ${used} tokens (>= ${threshold}, wrapup=$wrapup) — compacting before next turn..."

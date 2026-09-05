@@ -239,7 +239,7 @@ $LLM_SWARM_DIR/scripts/coordinator-watch.sh --check-stale /opt/work/myproject
 
 `FRESH` (exit 0) means its on-disk script still matches what it was at launch; `STALE` (exit 1) means the file has changed since — re-run `llm-start.sh` (`WATCH=1`, the default, is idempotent about spawning the watcher) to get a fresh process. By default the watcher also self-checks every `WATCHER_STALE_CHECK_SECS` (300s) and shuts itself down on a mismatch, logging `watch.stale_daemon` — nothing currently auto-restarts it afterward, so a dead watcher pane after that log line is expected, not a bug: re-run `llm-start.sh`.
 
-Separately, `AUTO_COMPACT_MIN_PCT`/`WORKER_COMPACT_MIN_PCT` (default 60) put a hard floor under `/compact` injection regardless of the computed threshold — see `coordinator-watch.sh`'s own header comment for the full rationale (a probe/statusline schema mismatch can otherwise silently fall back to a flat token threshold that's a much lower percentage of a very large context window).
+Separately, `AUTO_COMPACT_REQUIRE_WINDOW`/`WORKER_COMPACT_REQUIRE_WINDOW` (default on) refuse to inject `/compact` whenever the pane's actual context-window size can't be confirmed at all (a probe/statusline schema mismatch), rather than silently trusting a flat token threshold that could be a much lower percentage of the real window than intended — see `coordinator-watch.sh`'s own header comment for the full rationale, including why this deliberately does *not* second-guess a threshold that already scaled correctly against a known window size (an earlier design that did was rejected in code review for fighting `AUTO_COMPACT_PCT`'s own intentional scaling on large context windows).
 
 ### Worker isn't picking up briefs
 

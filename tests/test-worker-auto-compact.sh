@@ -87,14 +87,14 @@ WORKER_COMPACT_POLL_SECS=2
 WORKER_COMPACT_NUDGE_PROMPT="Continue your task from where you left off."
 WORKER_COMPACT_BACKOFF_SECS=600
 WORKER_COMPACT_MAX_FAILURES=3
-# issue #296 — 0 (off) by default: several existing fixtures below sit
-# around 26% of a 1M window (well under the shipped 60% default), and
-# raising each of them would perturb threshold math those tests already
-# tuned for other purposes. Test 22/23 below override this UP locally
-# (matching coordinator-watch.sh's own default) to exercise the floor
-# itself, the same `VAR=val maybe_worker_compact ...` scoping already used
-# elsewhere in this file (e.g. Test 12's WORKER_COMPACT_VERIFY_TIMEOUT_SECS=3).
-WORKER_COMPACT_MIN_PCT=0
+# issue #296 — must match coordinator-watch.sh's own default. This guard
+# only refuses when the window denominator can't be parsed from the
+# rendered statusline at all — since worker_pane_ctx_used()/
+# worker_pane_ctx_window() both parse the SAME "ctx: N/N (N%)" line, every
+# fixture below that renders one renders the other too, so this default is
+# safe everywhere (unlike a percentage-based floor would have been — see
+# Test 22's comment for why that design was rejected in code review).
+WORKER_COMPACT_REQUIRE_WINDOW=1
 # issue #265 — must match coordinator-watch.sh's own default marker text.
 COMPACT_QUEUED_MARKER_PATTERN='Press up to edit queued messages'
 COMPACT_RETRACT_BACKSPACES=3
@@ -1190,13 +1190,18 @@ if grep -q 'worker.compact.ineffective issue=50' "$EVENTS_LOG"; then got=logged;
 check "falls through to the normal ineffective path instead -- correctly flagged as a real failure" "logged" "$got"
 unset 'WORKER_COMPACT_LAST_FAIL[50]' 'WORKER_COMPACT_FAIL_COUNT[50]' 'WORKER_COMPACT_GAVE_UP[50]'
 
-heading "Test 22: WORKER_COMPACT_MIN_PCT — hard floor beneath the computed threshold (issue #296)"
-# Worker-side twin of test-coordinator-auto-compact.sh's Test 20 — see that
-# test for the full incident rationale. Own window/wt_dir (issue 51, not
-# reused from earlier tests) so this isn't affected by any per-issue
-# backoff/gave-up state earlier tests left behind for issue 42/50, and
-# threshold vars are set explicitly here rather than relying on whatever
-# earlier tests left them at.
+heading "Test 22: WORKER_COMPACT_REQUIRE_WINDOW — does NOT second-guess a properly scaled/capped threshold (issue #296 self-review fix)"
+# Worker-side twin of test-coordinator-auto-compact.sh's Test 20. An earlier
+# version of this guard compared the OBSERVED percentage of a successfully-
+# parsed window against a fixed floor (e.g. 60%) — code review caught that
+# this actively fights WORKER_COMPACT_PCT/WORKER_COMPACT_THRESHOLD_CAP_TOKENS's
+# own intentional scaling: on a 1M window the cap deliberately targets 250000
+# tokens (25%, not 60%). This test locks in the fix: a 1M window at just 26%
+# but over the capped threshold must still compact normally. Own window/
+# wt_dir (issue 51, not reused from earlier tests) so this isn't affected by
+# any per-issue backoff/gave-up state earlier tests left behind for issue
+# 42/50, and threshold vars are set explicitly here rather than relying on
+# whatever earlier tests left them at.
 WT_DIR9="$WORKSPACE/wt-issue-51"
 mkdir -p "$WT_DIR9/.swarm/tasks/status"
 WIN9="iss-51"
@@ -1210,26 +1215,11 @@ WORKER_COMPACT_THRESHOLD_CAP_TOKENS=250000
 WORKER_COMPACT_THRESHOLD_TOKENS=150000
 WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS=300000
 : > "$EVENTS_LOG"
-WORKER_COMPACT_MIN_PCT=60 maybe_worker_compact "$WIN9"
+maybe_worker_compact "$WIN9"
 if grep -q 'worker.compact ' "$EVENTS_LOG"; then got=logged; else got=missing; fi
-check "26% of a 1M window, over the capped 250k threshold -> bare worker.compact NOT logged" "missing" "$got"
-if grep -q 'worker.compact.refused_low_ctx issue=51' "$EVENTS_LOG"; then got=logged; else got=missing; fi
-check "26% of a 1M window -> worker.compact.refused_low_ctx logged" "logged" "$got"
-check "refusal records the observed values" "issue=51 used=260000 window=1000000 pct=26 min_pct=60" \
-    "$(grep -o 'issue=51 used=260000 window=1000000 pct=26 min_pct=60' "$EVENTS_LOG")"
-
-# Sanity check the floor doesn't fire when there's nothing to refuse: same
-# window, comfortably over both the threshold AND the floor.
-tmux send-keys -t "$SESSION_NAME:$WIN9" C-c
-sleep 0.2
-tmux send-keys -t "$SESSION_NAME:$WIN9" "clear; echo 'sonnet · wt-issue-51 · ctx: 800k/1M (80%)'; cat" Enter
-check_eventually "iss-51 window: cat foreground w/ 800k/1M ctx -> cli" "cli" "worker_pane_state '$WIN9'"
-: > "$EVENTS_LOG"
-WORKER_COMPACT_MIN_PCT=60 maybe_worker_compact "$WIN9"
-if grep -q 'worker.compact ' "$EVENTS_LOG"; then got=logged; else got=missing; fi
-check "80% of a 1M window, over threshold and over the floor -> bare worker.compact logged" "logged" "$got"
-if grep -q 'worker.compact.refused_low_ctx' "$EVENTS_LOG"; then got=logged; else got=missing; fi
-check "80% of a 1M window -> floor does not fire" "missing" "$got"
+check "26% of a 1M window, over the capped 250k threshold -> compacts normally (not refused)" "logged" "$got"
+if grep -q 'no_window_for_floor' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "window WAS parsed -> the require-window guard does not fire at all" "missing" "$got"
 
 echo ""
 green "All worker-auto-compact tests passed ($PASS checks)"
