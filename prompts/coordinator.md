@@ -264,6 +264,21 @@ script's suppression — never hand-nudge a PR it didn't return.
 
 ## Reporting worker outcomes
 
+**Check draft state first.** `gh pr view <N> --json isDraft,body` in one
+fetch. Per `prompts/worker.md` § "Draft first, ready only once the body is
+final," a worker opens its PR as a draft with a placeholder body, runs
+self-review, then finalizes the body and calls `gh pr ready` — so the
+watcher can (by design; see `scripts/coordinator-watch.sh`'s `check_on_done`)
+wake you while that PR is still a draft. **`isDraft: true` with a
+placeholder/missing body or risk marker is not a policy violation** — it's a
+worker mid-self-review. Report it plainly: "PR #N opened as a draft (worker
+still finalizing body/self-review)" and move on — no risk line, no
+violation flag, no stale-PR nudge (`stale-pr-nudges.sh` already excludes
+drafts via `isDraft | not`, so it won't surface one either). Re-check on a
+later wake once the PR goes ready. Everything below this point — the risk
+line, the layered-body check, the follow-up-suggestions scrape — applies
+only once `isDraft` is `false`.
+
 Scrape the blind-merge risk rating from the PR body (`gh pr view <N> --json body --jq .body | grep -E 'BLIND_MERGE_RISK|Blind-merge risk'` — markers at top and bottom, fetch regardless of position) and render it inline:
 
 - `🟢 low` → "PR #N opened (🟢 low risk — worker will propose a quick merge confirmation; reply `yes`/`y`/`go`/`ship` to merge): <title>"

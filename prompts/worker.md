@@ -426,7 +426,21 @@ prose — see "Issue skeleton" below.
 
 ## PR risk assessment (always, on PR open or PR-body update)
 
-Every `gh pr create` and any `gh pr edit --body` MUST include both:
+### Draft first, ready only once the body is final
+
+Open every PR with `gh pr create --draft` — a placeholder body (e.g. "wip,
+finalizing body after self-review") is fine at this point; the PR only needs
+to exist so self-review has something to `gh pr diff`/`gh pr view` against.
+Do the self-review, write the finalized body (risk marker + skeleton, both
+below), then run `gh pr ready <N>` — in that order. A draft with a
+placeholder body reads as "still wrapping up" to anything watching (the
+coordinator, a stale-PR nudge, a human on the wake digest); a *ready* PR
+with a placeholder body reads as a policy violation, because nothing marks
+it as unfinished. `gh pr ready`, not the initial `gh pr create`, is the
+point the risk-marker/skeleton requirement below actually binds.
+
+Every `gh pr create` and any `gh pr edit --body` MUST include both, once the
+PR is (or is about to become) ready — a draft's placeholder body is exempt:
 
 1. **HTML comment** at the top (machine-readable, invisible on github.com):
    `<!-- BLIND_MERGE_RISK: low -->` — values `low`/`medium`/`high`, lowercase exactly.
