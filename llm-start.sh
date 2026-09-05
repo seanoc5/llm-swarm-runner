@@ -86,7 +86,8 @@ YOLO BUNDLE
     --yolo' gives 8 workers. MAX_TMUX_WINDOWS stays at 10 — the runaway
     brake is never disabled by yolo.
 
-ENV VARS  (precedence: flag > shell env > <project>/.swarm/.env > <sandbox>/.env.example)
+ENV VARS  (precedence: flag > shell env > <project>/.swarm/.env > <sandbox>/.env
+           > <sandbox>/.env.example)
 
   Coordinator
     COORDINATOR_CMD              claude    claude | gemini | codex
@@ -98,6 +99,7 @@ ENV VARS  (precedence: flag > shell env > <project>/.swarm/.env > <sandbox>/.env
   Caps & filters  [also loadable from <project>/.swarm/.env]
     MAX_WORKERS                  5         concurrent worker tmux windows
     MAX_TMUX_WINDOWS             10        total session window cap (HARD)
+    HOST_MAX_WORKERS             8         running worker containers, ALL swarms on host (HARD)
     TARGET_AVAILABLE             10        AVAILABLE backlog target
     OWNER_LABELS                 (empty)   comma-sep labels = "human-owned"
     INCLUDE_ASSIGNED_TO_OTHERS   0         1 = claim others' tickets
@@ -136,7 +138,7 @@ EOF
 # Flags export immediately, beating shell env (so --max-workers 10 wins over
 # MAX_WORKERS=8). The env loader (sourced after this loop) only sets unset
 # vars, giving the standard precedence: flag > shell env > project .env >
-# sandbox .env.example.
+# sandbox .env > sandbox .env.example.
 
 require_value() {
     if [ -z "${2:-}" ] || [[ "${2:-}" == -* ]]; then
@@ -181,10 +183,11 @@ fi
 
 INITIAL_PROMPT="${1:-Execute the Initial Startup Checklist.}"
 
-# Load <project>/.swarm/.env then <sandbox>/.env.example. Vars set above by
-# flags or yolo (or by the caller's shell env) survive — the loader only
-# fills in still-unset vars. Final precedence:
-#   flag > shell env > <project>/.swarm/.env > <sandbox>/.env.example
+# Load <project>/.swarm/.env, <sandbox>/.env, then <sandbox>/.env.example.
+# Vars set above by flags or yolo (or by the caller's shell env) survive — the
+# loader only fills in still-unset vars. Final precedence:
+#   flag > shell env > <project>/.swarm/.env > <sandbox>/.env
+#        > <sandbox>/.env.example
 # shellcheck source=scripts/_load-env.sh
 . "$LLM_SWARM_DIR/scripts/_load-env.sh" "$PWD"
 
@@ -480,7 +483,7 @@ if ! $session_existed; then
     # workers reference the same path notation.
     : "${LLM_SWARM_DOCS:=$LLM_SWARM_DIR/docs}"
     export LLM_SWARM_DOCS
-    for _v in MAX_WORKERS MAX_TMUX_WINDOWS TARGET_AVAILABLE OWNER_LABELS \
+    for _v in MAX_WORKERS MAX_TMUX_WINDOWS HOST_MAX_WORKERS TARGET_AVAILABLE OWNER_LABELS \
               INCLUDE_ASSIGNED_TO_OTHERS DEBOUNCE_SECS POLL_SECS \
               WORKER_CMD WORKER_MODEL WORKER_HEADLESS WORKER_SELF_REVIEW \
               LLM_SWARM_DIR LLM_SWARM_DOCS; do

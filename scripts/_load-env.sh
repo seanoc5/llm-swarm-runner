@@ -1,16 +1,22 @@
 #!/usr/bin/env bash
 # _load-env.sh — sourceable env loader for llm-swarm-runner scripts.
 #
-# Applies <project>/.swarm/.env then <sandbox>/.env.example to the current
-# shell, leaving already-set variables untouched. Caller-supplied env wins.
+# Applies <project>/.swarm/.env, then <sandbox>/.env (host-level, gitignored),
+# then <sandbox>/.env.example to the current shell, leaving already-set
+# variables untouched. Caller-supplied env wins.
 #
 # Usage:
 #   . "$LLM_SWARM_DIR/scripts/_load-env.sh" [project-dir]
 #
 # Final precedence (highest wins):
 #   1. shell env (anything already exported)
-#   2. <project-dir>/.swarm/.env
-#   3. <sandbox>/.env.example
+#   2. <project-dir>/.swarm/.env      per-project durable override
+#   3. <sandbox>/.env                 this machine's defaults (gitignored)
+#   4. <sandbox>/.env.example         shipped defaults (tracked)
+#
+# Tier 3 is where a host's physical reality goes -- HOST_MAX_WORKERS sized to
+# this box's RAM, FAND_DATA_ROOT, and so on -- so those values don't have to be
+# repeated in every project's .swarm/.env and never get committed upstream.
 #
 # Parsing rules:
 #   - blanks and # comments skipped
@@ -77,6 +83,7 @@ _load_env_main() {
     sandbox="${LLM_SWARM_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 
     _apply_env_file "$proj/.swarm/.env"        # project override
+    _apply_env_file "$sandbox/.env"            # this host's defaults (gitignored)
     _apply_env_file "$sandbox/.env.example"    # ship defaults
     _expand_extra_mounts                       # resolve ${FAND_DATA_ROOT} sentinel
 }

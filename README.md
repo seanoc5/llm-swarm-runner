@@ -156,7 +156,7 @@ This creates a dedicated `tmux` session, runs the coordinator in Window 1 with t
 ./llm-start.sh -h                            # full reference
 ```
 
-Precedence is the standard chain: **flag > shell env > `<project>/.swarm/.env` > `<sandbox>/.env.example`**. Anything you can do via flag is also doable via env var (and vice-versa for the cap/filter subset). Flags exist for ergonomics; env vars exist for durability + subprocess inheritance.
+Precedence is the standard chain: **flag > shell env > `<project>/.swarm/.env` > `<sandbox>/.env` > `<sandbox>/.env.example`**. Anything you can do via flag is also doable via env var (and vice-versa for the cap/filter subset). Flags exist for ergonomics; env vars exist for durability + subprocess inheritance.
 
 **Common env-only knobs** (no flag equivalent — set per-invocation or in shell rc):
 
@@ -229,11 +229,12 @@ See [`docs/llm-swarm-runner-overview.md`](./docs/llm-swarm-runner-overview.md) f
 
 #### Configuring caps and filters
 
-The coordinator and watcher honor a small set of tunables loaded from three sources, **highest precedence wins**:
+The coordinator and watcher honor a small set of tunables loaded from four sources, **highest precedence wins**:
 
 1. Shell env at invocation time (`MAX_WORKERS=8 ./llm-start.sh ...`)
 2. `<project>/.swarm/.env` — durable per-project overrides (gitignored)
-3. `<sandbox>/.env.example` — shipped defaults, safe-for-strangers
+3. `<sandbox>/.env` — this machine's defaults (gitignored). Host facts that are true of the box, not the project: `HOST_MAX_WORKERS` sized to its RAM, data roots. Keep it short — mirroring `.env.example` here only creates drift.
+4. `<sandbox>/.env.example` — shipped defaults, safe-for-strangers
 
 | Var                          | Default | Purpose                                                                                                          |
 |------------------------------|---------|------------------------------------------------------------------------------------------------------------------|

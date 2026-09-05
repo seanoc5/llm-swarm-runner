@@ -134,7 +134,7 @@ The form above sets `EXTRA_MOUNTS` for one ad-hoc `sandbox.sh` invocation. For t
 EXTRA_MOUNTS=/opt/data/reference:ro,/opt/work/myorg/sibling-repo:ro
 ```
 
-`scripts/_load-env.sh` reads this file (precedence: shell env > `<project>/.swarm/.env` > sandbox `.env.example`) and `provision-worker.sh` injects the value as a prefix on the `tmux new-window` command that starts the worker listener, so the listener's `sandbox.sh` sees it. `${FAND_DATA_ROOT}` (and any other env var resolved earlier in the chain) is expanded via envsubst before docker sees the spec — see `scripts/_load-env.sh:55-72`.
+`scripts/_load-env.sh` reads this file (precedence: shell env > `<project>/.swarm/.env` > sandbox `.env` > sandbox `.env.example`) and `provision-worker.sh` injects the value as a prefix on the `tmux new-window` command that starts the worker listener, so the listener's `sandbox.sh` sees it. `${FAND_DATA_ROOT}` (and any other env var resolved earlier in the chain) is expanded via envsubst before docker sees the spec — see `scripts/_load-env.sh:55-72`.
 
 **Common pattern: cross-project siblings.** When several related repos live under one org dir (e.g. `/opt/work/myorg/{app,guide,poc}`), give each project's workers read-only access to its siblings so they can cross-reference code, ADRs, and docs:
 
