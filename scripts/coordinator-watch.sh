@@ -1395,7 +1395,22 @@ EOF
         # theoretically contain characters that aren't safe to source as
         # shell (e.g. a space in the project's path), and this only ever
         # needs to read four plain key=value lines.
-        state_get() { grep -m1 "^$1=" "$CHECK_STATE_FILE" | cut -d= -f2-; }
+        #
+        # issue #296 self-review finding: the state-file WRITE already
+        # tolerates a partial/failed write (`... || true` at the write
+        # site, above) — a process killed mid-write, or a full disk, can
+        # leave a truncated file missing one or more keys. Without `|| true`
+        # here too, a missing key makes grep return 1 (no match); under
+        # this script's `set -euo pipefail`, and with `pipefail` making a
+        # pipeline's status the FIRST failing stage's status regardless of
+        # what `cut` did with the empty input, that silently aborted this
+        # entire --check-stale invocation before printing anything at all —
+        # exiting 1, which reads as STALE with zero explanation. `|| true`
+        # makes a missing key resolve to an empty string instead, so the
+        # normal "?" placeholders and the liveness check below (empty
+        # CHECK_PID correctly falls into the NOT RUNNING branch) still
+        # produce a coherent, explained verdict.
+        state_get() { grep -m1 "^$1=" "$CHECK_STATE_FILE" | cut -d= -f2- || true; }
         CHECK_PID="$(state_get pid)"
         CHECK_STARTED_AT="$(state_get started_at)"
         CHECK_SCRIPT_PATH="$(state_get script_path)"

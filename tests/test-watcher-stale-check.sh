@@ -287,6 +287,32 @@ check "no state file -> exit 2" "2" "$RC"
 if echo "$OUT" | grep -qi 'No watcher state file'; then got=present; else got=missing; fi
 check "no state file -> explanatory message printed" "present" "$got"
 
+heading "Test 6b: --check-stale CLI — a partial/corrupted state file still produces a coherent verdict (issue #296 self-review finding)"
+# Self-review finding: the state-file WRITE already tolerates a partial
+# write (\`... || true\` at the write site) — a process killed mid-write, or
+# a full disk, can leave a truncated file missing a key. state_get's
+# grep|cut pipeline returning non-zero for a missing key, under this
+# script's set -euo pipefail, silently aborted the WHOLE --check-stale
+# invocation before printing anything — exit 1 with zero output, which
+# reads as STALE with no explanation. This file is missing script_path and
+# script_mtime_at_launch entirely (simulating a write truncated after the
+# first two lines); the fix must still run to completion and report SOME
+# coherent status rather than dying silently mid-read.
+PARTIAL_DIR="$TEST_DIR/partial-state-project"
+mkdir -p "$PARTIAL_DIR/.swarm"
+cat > "$PARTIAL_DIR/.swarm/coordinator-watch.state" <<EOF
+pid=$$
+started_at=2026-08-08T10:00:00Z
+EOF
+set +e
+OUT="$("$WATCH" --check-stale "$PARTIAL_DIR" 2>&1)"; RC=$?
+set -e
+if [ -n "$OUT" ]; then got=produced; else got=empty; fi
+check "partial state file -> --check-stale still produces output (does not die silently)" "produced" "$got"
+check "partial state file -> a live pid but no confirmable script -> exit 1 (STALE: can't confirm freshness)" "1" "$RC"
+if echo "$OUT" | grep -q 'status: *STALE'; then got=stale; else got=notstale; fi
+check "partial state file -> reports STALE, not a bare unexplained failure" "stale" "$got"
+
 heading "Test 7: a live watcher startup writes a state file that --check-stale reads as FRESH while it's running, then NOT RUNNING once it exits"
 # End-to-end sanity check that the real startup code path (not a hand-
 # written fixture) produces a state file --check-stale can read correctly
