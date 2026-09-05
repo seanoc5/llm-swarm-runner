@@ -233,6 +233,36 @@ if [ -n "${SANDBOX_DEP_CACHE:-}" ]; then
     unset _dep_cache_gradle
 fi
 
+# Local caching Maven/Gradle repository proxy (#331). Complements
+# SANDBOX_DEP_CACHE above: that knob only serves what a host-maintained seed
+# already has. It cannot help a fresh cache MISS shared by every worker at
+# once (e.g. a dependency version bump landing in a project the same day N
+# workers pick it up) — exactly the failure mode behind #329, where an
+# unrelated 429 from repo.maven.apache.org stalled a worker for 2+ hours.
+# SANDBOX_DEP_PROXY_URL points every worker's Gradle at a host-run caching
+# reverse proxy (scripts/dep-proxy.sh) instead: concurrent misses for the
+# same not-yet-cached artifact collapse into ~1 upstream fetch (nginx
+# proxy_cache_lock), and a stopped/unreachable proxy degrades to normal
+# direct-upstream resolution (the init script below probes it first and
+# skips all rewiring if it doesn't answer) rather than breaking the build.
+#
+# Delivery mechanism: mount the Gradle init script into
+# GRADLE_USER_HOME/init.d/ (Gradle auto-applies every script there to every
+# build) rather than GRADLE_OPTS — GRADLE_OPTS only carries JVM options
+# (heap size, system properties), it has no channel for loading an init
+# script's body, whereas init.d/ is Gradle's own documented mechanism for
+# exactly this, with no per-invocation flag needed (workers invoke
+# `./gradlew` directly, so a flag couldn't be injected at the call site
+# anyway). The script itself reads the URL back out of this same env var.
+#
+# Unset/empty (default): no mount, no env var — byte-identical docker run
+# args to before this knob existed.
+DEP_PROXY_OPTS=()
+if [ -n "${SANDBOX_DEP_PROXY_URL:-}" ]; then
+    MOUNTS+=(-v "$SCRIPT_DIR/scripts/gradle-init/dep-proxy.init.gradle.kts:/home/sandbox/.gradle/init.d/dep-proxy.init.gradle.kts:ro")
+    DEP_PROXY_OPTS=(-e "SANDBOX_DEP_PROXY_URL=$SANDBOX_DEP_PROXY_URL")
+fi
+
 # Project-specific environment variables
 ENV_FILE_OPT=()
 if [ -f "$PROJECT_DIR/.sandbox-env" ]; then
@@ -402,6 +432,7 @@ exec docker run "${INTERACTIVE_FLAGS[@]}" --rm --init \
     "${SSH_OPTS[@]}" \
     "${WORKER_ENV_OPTS[@]}" \
     "${DEP_CACHE_OPTS[@]}" \
+    "${DEP_PROXY_OPTS[@]}" \
     "${SANDBOX_DOCS_ENV_OPTS[@]}" \
     "${MOUNTS[@]}" \
     -e "TERM=$TERM" \

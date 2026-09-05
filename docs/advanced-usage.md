@@ -183,6 +183,49 @@ Unset or empty (the default) produces byte-identical `docker run` args to before
 
 This covers the Gradle half only. Maven's local repo (`~/.m2/repository`) isn't safe to mount `:ro` the same way — Maven writes `_remote.repositories`/`.lastUpdated` markers during normal resolution and has no read-only shared-cache mode, so a `:ro` mount reads cache hits but fails hard on the first miss instead of falling back to the network. A Maven-side equivalent, if needed, would be a mirror/proxy rather than a direct mount (tracked separately, not covered by this knob).
 
+### Local caching Maven/Gradle repository proxy (`SANDBOX_DEP_PROXY_URL`)
+
+`SANDBOX_DEP_CACHE` above only serves what a host-maintained seed already has. It has no answer for a fresh cache **miss** shared by every worker at once — e.g. a dependency version bump landing in a project the same day N workers pick it up, which stampedes `repo.maven.apache.org` from every one of them simultaneously. That's what happened on 2026-09-03 (#329): a burst of `429`s from Maven Central with no `Retry-After`, unrecovered across hours of backoff, cost one worker 2+ hours and two PRs shipped without a local compile.
+
+`SANDBOX_DEP_PROXY_URL` points every worker's Gradle at a host-run caching reverse proxy instead of straight at the real upstreams. Concurrent misses for the same not-yet-cached artifact collapse into ~1 upstream fetch (nginx's `proxy_cache_lock`: the first request goes upstream, the rest wait on the lock and are served from cache once it lands, rather than each firing its own request) — this is what closes the gap `SANDBOX_DEP_CACHE` cannot.
+
+**Why nginx, not Sonatype Nexus Repository OSS 3.** Both were evaluated. Nexus is a full repository manager — Sonatype's own sizing guidance calls for a multi-GB heap (2-4GB+) before counting off-heap/blobstore overhead, on a host that's already RAM-constrained (`SANDBOX_MEM_LIMIT=8g` per worker; 16 workers exhausted a 128GB host on 2026-09-02). An nginx container with `proxy_cache` runs in a few MB of RAM plus whatever the on-disk cache needs — the cache lives on disk, not in memory, and `proxy_cache_lock` gives the exact concurrent-miss-collapsing behavior this issue needs without the JVM footprint. For a host that's memory-constrained by design, that difference is decisive.
+
+**Start it** (one instance per host, shared by every worker):
+
+```bash
+scripts/dep-proxy.sh up       # idempotent — no-ops if already running
+scripts/dep-proxy.sh status   # running? + a /healthz probe + on-disk cache size
+scripts/dep-proxy.sh logs     # follow the nginx access/error log
+scripts/dep-proxy.sh down     # stop and remove the container
+```
+
+Defaults to `127.0.0.1:8081`, an on-disk cache at `$HOME/.cache/llm-swarm-dep-proxy`, and a container named `llm-swarm-dep-proxy`; override with `DEP_PROXY_PORT` / `DEP_PROXY_CACHE_DIR` / `DEP_PROXY_CONTAINER_NAME`. It proxies two paths: `/maven2/` → `repo.maven.apache.org` (Maven Central) and `/gradle-plugins/` → `plugins.gradle.org` (the Gradle Plugin Portal, so `plugins { id(...) version ... }` resolution is covered, not just `mavenCentral()`).
+
+**Point workers at it** by setting `SANDBOX_DEP_PROXY_URL` before launching (e.g. in `<project>/.swarm/.env`, the same place `SANDBOX_DEP_CACHE` lives):
+
+```bash
+# /opt/work/myproject/.swarm/.env — gitignored
+SANDBOX_DEP_PROXY_URL=http://localhost:8081
+```
+
+`sandbox.sh` reacts to this by bind-mounting `scripts/gradle-init/dep-proxy.init.gradle.kts` into the container at `/home/sandbox/.gradle/init.d/dep-proxy.init.gradle.kts` (read-only) and passing `SANDBOX_DEP_PROXY_URL` through as an env var. Gradle auto-applies every script under `GRADLE_USER_HOME/init.d/` to every build, so no per-invocation flag is needed — which matters because workers invoke `./gradlew` directly, so a `-I <init-script>` couldn't be injected at the call site anyway. (`GRADLE_OPTS` was the other option `sandbox.sh` could have used, but it only carries JVM options — heap size, system properties — with no channel for loading an init script's body, so it wasn't viable here.) No project's `build.gradle.kts`/`settings.gradle.kts` needs editing.
+
+**Degrades to direct upstream resolution when the proxy is down.** Gradle does *not* fall through to a repository declared after one that fails at the network level — only a genuine HTTP 404 triggers its "try the next declared repository" behavior; a connection refused or timeout aborts the build outright (unchanged since Gradle 4.3, see [gradle/gradle#2853](https://github.com/gradle/gradle/issues/2853)). So the init script doesn't rely on repository ordering for failover — it does its own fast TCP reachability probe (500ms timeout) against `SANDBOX_DEP_PROXY_URL` before rewiring anything, and skips all rewiring entirely if the proxy doesn't answer. A stopped or unreachable proxy means the build resolves exactly as if `SANDBOX_DEP_PROXY_URL` were never set — verified directly: `./gradlew help` on a project with an empty `GRADLE_USER_HOME` succeeded against the real upstreams with the proxy container stopped. To disable, unset `SANDBOX_DEP_PROXY_URL` (or stop the proxy — either way, direct resolution).
+
+**Seeding new content and staleness.** There's nothing to seed — unlike `SANDBOX_DEP_CACHE`, this is a live reverse proxy, not a pre-populated snapshot; the first request for any artifact is a real (cache-collapsed) fetch, and every artifact is immutable once published, so `proxy_cache_valid 200 302 30d` is safe. A `404` is cached for only 1 minute (`proxy_cache_valid 404 1m`) so a transient upstream hiccup doesn't turn into a longer-lived false negative.
+
+**Disk/RAM footprint.** RAM: the nginx process itself plus two 10MB shared-memory cache-key zones — tens of MB total, not GB. Disk: unbounded growth is capped per proxied repo (`max_size=20g` for Maven Central, `max_size=5g` for the Plugin Portal in `scripts/dep-proxy/nginx.conf`); nginx evicts least-recently-used entries once a zone hits its cap. Size these against how many distinct dependency versions your projects actually pull, not against `SANDBOX_MEM_LIMIT`.
+
+**Verify it's working** the same way the acceptance criteria for this feature were verified — from the proxy's own access log, not just build success:
+
+```bash
+scripts/dep-proxy.sh logs | grep -oP 'cache=\K[A-Z]+' | sort | uniq -c
+# MISS = real upstream fetch, HIT = served from cache
+```
+
+A cold cache with several concurrent workers hitting the same never-fetched artifact should show exactly one `MISS` for that artifact's URI and the rest `HIT` (or occasionally an independent `MISS` if requests land more than `proxy_cache_lock_age`/`proxy_cache_lock_timeout` — 120s each — apart, since `proxy_cache_lock` only collapses requests that are genuinely in flight at the same time, not ones merely close together).
+
 ### Memory limit (`SANDBOX_MEM_LIMIT`)
 
 Every sandbox container runs with a memory cap, applied as `--memory` and `--memory-swap` (set equal to each other, so the cgroup can't overflow into swap and stall the host on IO). `SANDBOX_MEM_LIMIT` defaults to `8g`; `SANDBOX_MEM_LIMIT=0` disables the cap entirely (ad-hoc debugging only).
