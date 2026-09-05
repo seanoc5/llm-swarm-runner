@@ -247,6 +247,29 @@ else
     skip "SANDBOX_DEP_PROXY_URL" "/var/run/docker.sock not present"
 fi
 
+# SANDBOX_DEP_CACHE + SANDBOX_DEP_PROXY_URL together: the two knobs mount at
+# disjoint paths (SANDBOX_DEP_CACHE at <dir>/gradle, same absolute path on
+# both sides of the mount — nothing under /home/sandbox/.gradle; this knob's
+# init script at /home/sandbox/.gradle/init.d/<file>, a single read-only
+# FILE mount, not the whole .gradle dir) so combining them shouldn't have
+# any interaction. Proven directly rather than assumed, since both do touch
+# Gradle's world and a future refactor of either could change that.
+if [ -S /var/run/docker.sock ]; then
+    _combo_fixture="$(mktemp -d -p "$REPO_ROOT")"
+    mkdir -p "$_combo_fixture/gradle/modules-2"
+
+    output=$(SANDBOX_DEP_CACHE="$_combo_fixture" SANDBOX_DEP_PROXY_URL="http://localhost:8081" \
+        "$REPO_ROOT/sandbox.sh" /tmp \
+        "printenv GRADLE_RO_DEP_CACHE; printenv SANDBOX_DEP_PROXY_URL; test -f /home/sandbox/.gradle/init.d/dep-proxy.init.gradle.kts && echo INIT_MOUNTED" 2>&1)
+    [[ "$output" == *"$_combo_fixture/gradle"* && "$output" == *"http://localhost:8081"* && "$output" == *"INIT_MOUNTED"* ]] \
+        && pass "SANDBOX_DEP_CACHE + SANDBOX_DEP_PROXY_URL together: both mounts/env land" "$output" \
+        || fail "SANDBOX_DEP_CACHE + SANDBOX_DEP_PROXY_URL together: both mounts/env land" "$output"
+
+    rm -rf "$_combo_fixture"
+else
+    skip "SANDBOX_DEP_CACHE + SANDBOX_DEP_PROXY_URL together" "/var/run/docker.sock not present"
+fi
+
 # Test EXTRA_MOUNTS same-path shorthand (path:ro → same path in container)
 output=$(EXTRA_MOUNTS="/tmp:ro" docker run --rm \
     --network host \
