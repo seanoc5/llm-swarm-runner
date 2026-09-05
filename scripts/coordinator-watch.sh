@@ -15,16 +15,28 @@
 #   coordinator-watch.sh --check-stale [project-dir]
 #                           (issue #296) Cheap, one-shot: print this
 #                           project's watcher state (pid, start time, script
-#                           path, script mtime at launch vs. now) and exit 0
-#                           if it's FRESH (on-disk script unchanged since
-#                           that watcher started) or 1 if STALE. Reads
-#                           <project-dir>/.swarm/coordinator-watch.state,
+#                           path, script mtime at launch vs. now) and exit
+#                           0 FRESH (a live watcher, on-disk script unchanged
+#                             since it started),
+#                           1 STALE (a live watcher, but the on-disk script
+#                             has changed since it started — see
+#                             WATCHER_STALE_CHECK below for why this happens
+#                             and for the self-check that normally catches
+#                             it without needing this command run by hand),
+#                           2 no state file at all (no watcher has ever run
+#                             for this project-dir), or
+#                           3 NOT RUNNING (a state file exists, but its
+#                             recorded pid isn't alive — the watcher exited
+#                             since it last wrote that file, e.g. ONCE=1, a
+#                             crash, or WATCHER_STALE_CHECK's own shutdown;
+#                             the state file is never removed on exit, so
+#                             this liveness check is what keeps a corpse
+#                             from reading as FRESH).
+#                           Reads <project-dir>/.swarm/coordinator-watch.state,
 #                           written by a live watcher at startup — no tmux,
-#                           no signals, no touching the running daemon. See
-#                           WATCHER_STALE_CHECK below for why a watcher can
-#                           go stale in the first place, and for the
-#                           self-check that normally catches this on its own
-#                           without needing this command run by hand.
+#                           only a `kill -0` liveness probe (no signal sent,
+#                           just existence), never touching the running
+#                           daemon's actual behavior.
 #
 # Env vars:
 #   DEBOUNCE_SECS=30        Window during which repeated events coalesce
@@ -1394,6 +1406,18 @@ EOF
         echo "script:               ${CHECK_SCRIPT_PATH:-?}"
         echo "script mtime@launch:  ${CHECK_MTIME_AT_LAUNCH:-?}"
         echo "script mtime@now:     ${CHECK_MTIME_NOW:-?}"
+        # This state file is written once at startup and never removed, so
+        # it outlives the watcher itself — a clean ONCE=1 exit, a crash, or
+        # even this daemon's OWN staleness self-check shutting it down all
+        # leave it behind unchanged. Without checking liveness, a dead
+        # watcher whose script hasn't changed since it launched would report
+        # FRESH/exit 0 — telling the operator "nothing to do" when there is
+        # no watcher running here at all. `kill -0` sends no signal, just
+        # tests whether the pid exists and is ours to signal.
+        if [ -z "$CHECK_PID" ] || ! kill -0 "$CHECK_PID" 2>/dev/null; then
+            echo "status:               NOT RUNNING — no live watcher process for this pid; run llm-start.sh to start one"
+            exit 3
+        fi
         if [ -n "$CHECK_MTIME_AT_LAUNCH" ] && [ -n "$CHECK_MTIME_NOW" ] && [ "$CHECK_MTIME_AT_LAUNCH" = "$CHECK_MTIME_NOW" ]; then
             echo "status:               FRESH — running code matches the on-disk script"
             exit 0

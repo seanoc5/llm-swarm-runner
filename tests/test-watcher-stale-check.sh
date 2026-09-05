@@ -40,6 +40,10 @@ WATCH="$SCRIPT_DIR/../scripts/coordinator-watch.sh"
 
 TEST_DIR=$(mktemp -d -t watcher-stale-check-XXXXXX)
 cleanup() {
+    # Test 7 backgrounds a real coordinator-watch.sh; if an earlier check
+    # in this file fails and exits before that test's own kill runs, this
+    # is the backstop that keeps it from leaking past the test run.
+    [ -n "${LIVE_WATCH_PID:-}" ] && kill "$LIVE_WATCH_PID" 2>/dev/null || true
     if [ "${KEEP:-0}" = "1" ]; then
         printf '\033[33mKEEP=1: leaving %s for inspection\033[0m\n' "$TEST_DIR"
     else
@@ -197,13 +201,16 @@ OUT4="$(bash "$TEST_DIR/run-check-disabled.sh")"
 check "WATCHER_STALE_CHECK=0 -> disabled even though the script IS stale" "REACHED — disabled, no shutdown expected" "$OUT4"
 
 heading "Test 5: --check-stale CLI — FRESH/STALE against a hand-written state file (issue #296)"
+# pid=$$ — THIS test script's own pid — so it's guaranteed alive for the
+# whole FRESH/STALE comparison below without needing a real watcher
+# process; the liveness check itself gets its own dedicated Test 5b.
 PROJECT_DIR="$TEST_DIR/myproject"
 mkdir -p "$PROJECT_DIR/.swarm"
 CHECK_SCRIPT="$TEST_DIR/checked-script.sh"
 echo '#!/usr/bin/env bash' > "$CHECK_SCRIPT"
 LAUNCH_MTIME="$(stat -c %Y "$CHECK_SCRIPT" 2>/dev/null || stat -f %m "$CHECK_SCRIPT" 2>/dev/null)"
 cat > "$PROJECT_DIR/.swarm/coordinator-watch.state" <<EOF
-pid=999999
+pid=$$
 started_at=2026-08-08T10:00:00Z
 script_path=$CHECK_SCRIPT
 script_mtime_at_launch=$LAUNCH_MTIME
@@ -225,6 +232,30 @@ check "on-disk script changed -> exit 1" "1" "$RC"
 if echo "$OUT" | grep -q 'status: *STALE'; then got=stale; else got=notstale; fi
 check "changed script -> reports STALE" "stale" "$got"
 
+heading "Test 5b: --check-stale CLI — a dead recorded pid reports NOT RUNNING, never FRESH (issue #296 self-review finding)"
+# Self-review finding: the state file is written once at startup and never
+# removed, so it outlives the watcher itself (clean ONCE=1 exit, a crash, or
+# WATCHER_STALE_CHECK's own shutdown all leave it behind unchanged) — without
+# a liveness check, a dead watcher whose script hasn't since changed would
+# report FRESH/exit 0, telling the operator "nothing to do" when there is no
+# watcher running at all. `sleep 0.2 &` then `wait` for it guarantees a pid
+# that WAS valid but is now genuinely dead, not just an arbitrary guess.
+sleep 0.2 &
+DEAD_PID=$!
+wait "$DEAD_PID" 2>/dev/null || true
+cat > "$PROJECT_DIR/.swarm/coordinator-watch.state" <<EOF
+pid=$DEAD_PID
+started_at=2026-08-08T10:00:00Z
+script_path=$CHECK_SCRIPT
+script_mtime_at_launch=$LAUNCH_MTIME
+EOF
+set +e
+OUT="$("$WATCH" --check-stale "$PROJECT_DIR" 2>&1)"; RC=$?
+set -e
+check "dead recorded pid, unchanged script -> exit 3, NOT the FRESH exit 0 this would have wrongly reported before" "3" "$RC"
+if echo "$OUT" | grep -q 'status: *NOT RUNNING'; then got=present; else got=missing; fi
+check "dead recorded pid -> reports NOT RUNNING" "present" "$got"
+
 heading "Test 6: --check-stale CLI — missing state file (no watcher has run here)"
 NO_WATCHER_DIR="$TEST_DIR/no-watcher-project"
 mkdir -p "$NO_WATCHER_DIR"
@@ -235,11 +266,12 @@ check "no state file -> exit 2" "2" "$RC"
 if echo "$OUT" | grep -qi 'No watcher state file'; then got=present; else got=missing; fi
 check "no state file -> explanatory message printed" "present" "$got"
 
-heading "Test 7: a live watcher startup writes a state file that --check-stale reads as FRESH"
+heading "Test 7: a live watcher startup writes a state file that --check-stale reads as FRESH while it's running, then NOT RUNNING once it exits"
 # End-to-end sanity check that the real startup code path (not a hand-
-# written fixture) produces a state file --check-stale can read. ONCE=1 +
-# DRY_RUN=1 + no worker worktrees means the watcher does exactly one no-op
-# pass and exits on its own — no tmux/inotify required for this.
+# written fixture) produces a state file --check-stale can read correctly
+# both while the watcher is genuinely alive (kept running via ONCE=0 rather
+# than letting it exit immediately — see Test 5b above for why the
+# liveness check makes this distinction matter) and after it's gone.
 LIVE_PROJECT="$TEST_DIR/live-project"
 mkdir -p "$LIVE_PROJECT/.swarm"
 FAKE_LLM_START="$TEST_DIR/fake-llm-start.sh"
@@ -249,18 +281,38 @@ exit 0
 EOF
 chmod +x "$FAKE_LLM_START"
 
-ONCE=1 DRY_RUN=1 WATCHER_QUIET=1 LLM_START="$FAKE_LLM_START" WATCH_PR_POLL_SECS=0 \
+DRY_RUN=1 WATCHER_QUIET=1 LLM_START="$FAKE_LLM_START" WATCH_PR_POLL_SECS=0 \
     WATCH_ORPHAN_SWEEP_SECS=0 WATCH_CHECK_ON_DONE=0 AUTO_COMPACT=0 WORKER_AUTO_COMPACT=0 \
-    WORKER_AUTO_DELIVER=0 WATCHER_STALE_CHECK=0 timeout 5 "$WATCH" "$LIVE_PROJECT" >/dev/null 2>&1 || true
+    WORKER_AUTO_DELIVER=0 WATCHER_STALE_CHECK=0 ONCE=0 "$WATCH" "$LIVE_PROJECT" >/dev/null 2>&1 &
+LIVE_WATCH_PID=$!
 
 STATE_FILE="$LIVE_PROJECT/.swarm/coordinator-watch.state"
+for _i in $(seq 1 50); do
+    [ -r "$STATE_FILE" ] && break
+    sleep 0.1
+done
 if [ -r "$STATE_FILE" ]; then got=written; else got=missing; fi
 check "a real watcher startup writes .swarm/coordinator-watch.state" "written" "$got"
 
 set +e
 OUT="$("$WATCH" --check-stale "$LIVE_PROJECT" 2>&1)"; RC=$?
 set -e
-check "immediately after its own startup, the watcher's own script reads as FRESH" "0" "$RC"
+check "while the real watcher process is still alive, its own script reads as FRESH" "0" "$RC"
+
+kill "$LIVE_WATCH_PID" 2>/dev/null || true
+# Wait for it to actually exit rather than trusting a fixed sleep — racing
+# the check against a kill still in flight would flakily report FRESH.
+for _i in $(seq 1 50); do
+    kill -0 "$LIVE_WATCH_PID" 2>/dev/null || break
+    sleep 0.1
+done
+
+set +e
+OUT="$("$WATCH" --check-stale "$LIVE_PROJECT" 2>&1)"; RC=$?
+set -e
+check "once that real watcher process has exited -> exit 3, not a stale FRESH from its leftover state file" "3" "$RC"
+if echo "$OUT" | grep -q 'status: *NOT RUNNING'; then got=present; else got=missing; fi
+check "exited watcher -> reports NOT RUNNING" "present" "$got"
 
 echo ""
 green "All watcher-stale-check tests passed ($PASS checks)"
