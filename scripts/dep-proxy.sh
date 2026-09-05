@@ -25,6 +25,7 @@
 #   DEP_PROXY_PORT            host port to bind (default: 8081)
 #   DEP_PROXY_CACHE_DIR       on-disk cache dir (default: $HOME/.cache/llm-swarm-dep-proxy)
 #   DEP_PROXY_CONTAINER_NAME  docker container name (default: llm-swarm-dep-proxy)
+#   DEP_PROXY_NETWORK         docker network to run it on (default: llm-swarm-dep-proxy-net)
 #   DEP_PROXY_IMAGE           nginx image to run (default: nginx:1.27-alpine)
 set -euo pipefail
 
@@ -33,6 +34,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 CONTAINER_NAME="${DEP_PROXY_CONTAINER_NAME:-llm-swarm-dep-proxy}"
 PORT="${DEP_PROXY_PORT:-8081}"
 CACHE_DIR="${DEP_PROXY_CACHE_DIR:-$HOME/.cache/llm-swarm-dep-proxy}"
+# nginx.conf resolves the upstream hostnames dynamically (`resolver
+# 127.0.0.11 ...`, Docker's embedded DNS) so it can re-resolve them
+# periodically rather than baking in whatever IP was current at container
+# start. That embedded resolver only exists on a user-defined network —
+# Docker's default bridge network (what a plain `docker run` with no
+# --network gets) has no DNS server at 127.0.0.11 at all, which silently
+# turns every proxied request into a resolver error (caught in testing:
+# nginx logs "recv() failed (111: Connection refused) while resolving" and
+# every fetch 502s, while /healthz — served directly by nginx, not proxied
+# — keeps reporting healthy throughout).
+NETWORK_NAME="${DEP_PROXY_NETWORK:-llm-swarm-dep-proxy-net}"
 IMAGE="${DEP_PROXY_IMAGE:-nginx:1.27-alpine}"
 
 usage() {
@@ -45,6 +57,16 @@ is_running() {
 
 cmd_up() {
     mkdir -p "$CACHE_DIR"
+    # nginx's worker process writes cache entries as its own container-
+    # internal uid (101 in this image), not ours — the master runs as root
+    # and can create the deeper proxy_cache_path subdirectories fine, but
+    # if THIS top-level bind-mount source isn't at least world-traversable,
+    # the worker can't reach anything under it and every request silently
+    # 500s ("open() ... Permission denied" in nginx's error log) despite
+    # /healthz reporting fine. A restrictive umask (or a pre-existing dir
+    # someone locked down by hand) would otherwise hit exactly that, so
+    # force it rather than trust whatever mkdir -p happened to produce.
+    chmod 0755 "$CACHE_DIR"
     if is_running; then
         echo "already running: $CONTAINER_NAME (http://127.0.0.1:$PORT)"
         return 0
@@ -53,9 +75,12 @@ cmd_up() {
     # it so the name isn't taken.
     docker rm -f "$CONTAINER_NAME" &>/dev/null || true
 
+    docker network inspect "$NETWORK_NAME" &>/dev/null || docker network create "$NETWORK_NAME" >/dev/null
+
     docker run -d \
         --name "$CONTAINER_NAME" \
         --restart unless-stopped \
+        --network "$NETWORK_NAME" \
         -p "127.0.0.1:$PORT:8080" \
         -v "$SCRIPT_DIR/dep-proxy/nginx.conf:/etc/nginx/nginx.conf:ro" \
         -v "$CACHE_DIR:/var/cache/nginx" \
@@ -91,6 +116,27 @@ cmd_status() {
         echo "healthz: FAILED (container is up but not answering)"
         exit 1
     fi
+
+    # /healthz is answered by nginx itself and never touches the resolver or
+    # either upstream, so it stays "ok" even when proxying is fully broken
+    # (e.g. the container landed on a network with no DNS resolver for the
+    # `resolver` directive above — every proxied request 502s while healthz
+    # keeps passing). Fetch one small, real, known-stable artifact through
+    # the proxy to catch that class of failure that healthz can't see.
+    probe_code=$(curl -sS -m 10 -o /dev/null -w '%{http_code}' \
+        "http://127.0.0.1:$PORT/maven2/org/apache/maven/maven-core/3.9.6/maven-core-3.9.6.pom" 2>/dev/null || echo "000")
+    case "$probe_code" in
+        200)
+            echo "upstream probe (maven2): ok (200)"
+            ;;
+        000)
+            echo "upstream probe (maven2): skipped (no response — offline, or no network egress from this shell)"
+            ;;
+        *)
+            echo "upstream probe (maven2): FAILED (HTTP $probe_code — proxy is up but can't reach the real upstream; check nginx.conf's resolver / the docker network)"
+            exit 1
+            ;;
+    esac
 }
 
 cmd_logs() {

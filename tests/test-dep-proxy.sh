@@ -33,6 +33,12 @@ DEP_PROXY_CACHE_DIR="$(mktemp -d -p "$REPO_ROOT")"
 
 cleanup() {
     docker rm -f "$DEP_PROXY_CONTAINER_NAME" &>/dev/null || true
+    # nginx creates its cache dirs as its own container-internal uid (not
+    # ours, since dep-proxy.sh doesn't pass --user) — a plain host-side
+    # `rm -rf` fails partway through with "Permission denied" and leaves
+    # the fixture behind under REPO_ROOT. Delete it from a container
+    # instead, which owns those files regardless of host uid.
+    docker run --rm -v "$DEP_PROXY_CACHE_DIR:/scratch" alpine sh -c 'rm -rf /scratch/*' &>/dev/null || true
     rm -rf "$DEP_PROXY_CACHE_DIR"
 }
 trap cleanup EXIT
