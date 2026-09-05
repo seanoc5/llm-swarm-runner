@@ -14,7 +14,7 @@ When the user asks you to "Execute the Initial Startup Checklist" (or you are wo
 4. **Config from env** (loaded by `llm-start.sh` from `.env.example` + optional `<project>/.swarm/.env`; read with `echo`, do NOT hardcode the defaults): `MAX_WORKERS` (default 5), `MAX_TMUX_WINDOWS` (10), `TARGET_AVAILABLE` (10), `OWNER_LABELS` (empty), `INCLUDE_ASSIGNED_TO_OTHERS` (0).
 5. **Remote state:** `gh pr list`, then compute **AVAILABLE** (below). Report: `OPEN=N AVAILABLE=M ALIVE=A/$MAX_WORKERS WINDOWS=W/$MAX_TMUX_WINDOWS`.
 6. **Housekeeping (trigger on AVAILABLE, not OPEN):** if `AVAILABLE < TARGET_AVAILABLE`, create new tmux-friendly issues to fill the gap. Write every issue per `prompts/worker.md` § "Issue skeleton" (`## Goal`, `## Constraints`, `## Acceptance criteria`, `## Pointers`, `## Out of scope`) — the assigned worker gets only the issue body, so be explicit rather than cold-reader-narrative. **Special case:** `AVAILABLE = 0` with `OPEN >> TARGET_AVAILABLE` means the backlog is *stalled* — surface it ("backlog stalled: N open, all blocked/owner-labeled/policy-blocked") and let the user decide; don't silently pile on issues nobody can pick up.
-7. **Provisioning (subject to caps):** `slots = min(MAX_WORKERS - alive_workers, MAX_TMUX_WINDOWS - total_windows)`. If `slots <= 0`, follow "Caps" below. Otherwise route up to `slots` AVAILABLE items (see "Issue Routing") through `provision-worker.sh`; the script re-enforces caps server-side (exit 3) — treat that as a hard stop, don't retry.
+7. **Provisioning (subject to caps):** `slots = min(MAX_WORKERS - alive_workers, MAX_TMUX_WINDOWS - total_windows)`. If `slots <= 0`, follow "Caps" below. Otherwise route up to `slots` AVAILABLE items (see "Issue Routing") through `provision-worker.sh`; the script re-enforces caps server-side (exit 3), including the host-wide `HOST_MAX_WORKERS` — treat that as a hard stop, don't retry.
 
 ## Computing AVAILABLE
 
@@ -40,6 +40,7 @@ The result is the **AVAILABLE** set. Cache it for the rest of this checklist run
 ## Caps (NEVER violate)
 
 - `MAX_WORKERS` — concurrent worker tmux windows alive at once.
+- `HOST_MAX_WORKERS` — running `swarm-*` containers across **all** swarms on this host (`docker ps --filter name=^swarm-`). Other swarms count against it; `provision-worker.sh` refuses with exit 3 when it's reached, and reaping *your* finished workers is the only lever you have — never touch another swarm's windows or containers.
 - `MAX_TMUX_WINDOWS` — total windows: `coordinator` + `util` (always present; hosts the watcher as a second pane when `WATCH=1`, so it doesn't consume its own window slot) + optional `status` + alive workers + leftover finished worker windows.
 
 **Before reporting a cap reached, JIT-reap** (the watcher auto-reaps on wake but can miss events):

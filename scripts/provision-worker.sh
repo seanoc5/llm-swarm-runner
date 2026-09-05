@@ -43,10 +43,14 @@ DESCRIPTION
     the task into inbox/, and spawns a worker tmux window 'iss-N' running
     the sandbox listener.
 
-CAP ENFORCEMENT (exit 3 on either)
+CAP ENFORCEMENT (exit 3 on any)
     MAX_WORKERS         alive iss-* windows < cap         (default 5)
     MAX_TMUX_WINDOWS    total session windows < cap       (default 10)
-    Both are checked just before the new tmux window would be created.
+    HOST_MAX_WORKERS    running swarm-* containers across ALL swarms on this
+                        host < cap                        (default 8)
+    All are checked just before the new tmux window would be created. The
+    host cap exists because per-swarm caps don't add up: 2026-09-02 saw 16
+    workers x 8 GB sandbox limit = all 128 GB of minti9's RAM.
     Re-running for an existing iss-N window does NOT count against caps —
     that path queues a follow-up task without adding capacity.
 
@@ -59,9 +63,11 @@ STALE BRANCH (exit 2)
       - unique commits present                -> refuses, exits 2 with a
                                                    remedy hint (never exit 0)
 
-CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
+CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env
+         > <sandbox>/.env.example)
     MAX_WORKERS         5         worker tmux window cap
     MAX_TMUX_WINDOWS    10        total session window cap
+    HOST_MAX_WORKERS    8         host-wide running worker container cap
     SANDBOX_SH          (auto)    path to sandbox.sh used by the listener
     LLM_SWARM_DIR     (auto)    sandbox install dir
 
@@ -69,7 +75,7 @@ EVENTS LOG
     Appends to <project>/.swarm/events.log:
       worker.start     new iss-N window created (alive=A/MAX, total=W/MAX)
       worker.requeue   existing iss-N window reused for follow-up task
-      cap.refused      MAX_WORKERS or MAX_TMUX_WINDOWS would be exceeded
+      cap.refused      MAX_WORKERS, MAX_TMUX_WINDOWS or HOST_MAX_WORKERS would be exceeded
 
 EXAMPLES
     provision-worker.sh 142                          # dispatch issue #142 from \$PWD
@@ -113,6 +119,7 @@ mkdir -p "$(dirname "$WT")"
 
 MAX_WORKERS="${MAX_WORKERS:-5}"
 MAX_TMUX_WINDOWS="${MAX_TMUX_WINDOWS:-10}"
+HOST_MAX_WORKERS="${HOST_MAX_WORKERS:-8}"
 
 # Worker conventions (`prompts/worker.md`) are delivered as a system prompt
 # by the listener at claude/gemini launch time — see scripts/worker-listener.sh.
@@ -372,6 +379,18 @@ else
         echo "       Or raise MAX_TMUX_WINDOWS in <project>/.swarm/.env." >&2
         log_event cap.refused "issue=$ISSUE reason=max_tmux_windows total=$total_windows max=$MAX_TMUX_WINDOWS"
         exit 3
+    fi
+    # Host-wide cap: every swarm on this box provisions into the same RAM.
+    # Counts running worker containers regardless of session (names are
+    # swarm-<session>-iss-<issue>). Set HOST_MAX_WORKERS=0 to disable.
+    if [ "$HOST_MAX_WORKERS" != "0" ]; then
+        host_workers=$(docker ps --filter 'name=^swarm-' --format '{{.Names}}' 2>/dev/null | wc -l)
+        if [ "$host_workers" -ge "$HOST_MAX_WORKERS" ]; then
+            echo "ERROR: HOST_MAX_WORKERS cap reached (running swarm-* containers=$host_workers, max=$HOST_MAX_WORKERS, all swarms)" >&2
+            echo "       Reap finished workers in every swarm (kill-finished-workers.sh), or raise HOST_MAX_WORKERS." >&2
+            log_event cap.refused "issue=$ISSUE reason=host_max_workers running=$host_workers max=$HOST_MAX_WORKERS"
+            exit 3
+        fi
     fi
 
     # Container name lets the tmux Ctrl-Z binding `docker exec` into this
