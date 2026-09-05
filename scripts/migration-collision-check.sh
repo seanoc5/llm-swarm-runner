@@ -40,9 +40,10 @@
 #            contains everything the PR head tree carries).
 #   Alembic  Revision files under a `versions/` directory in that same
 #            union. Static parse of `revision = ...` / `down_revision = ...`
-#            assignments — no project venv or DB required. A revision id
-#            never referenced as another file's down_revision is a head;
-#            more than one head → collision.
+#            assignments — no project venv or DB required. The same
+#            revision id claimed by more than one file → collision (#350).
+#            A revision id never referenced as another file's down_revision
+#            is a head; more than one head → collision.
 #
 # Exit codes:
 #   0  clean — no collision detected
@@ -196,8 +197,8 @@ done
 
 ALEMBIC_FILES="$(list_scan_files | grep -E '(^|/)versions/[^/]+\.py$' || true )"
 
-declare -A REVISIONS=()   # revision id -> filename
-declare -A REFERENCED=()  # revision id referenced as someone's down_revision
+declare -A REVISION_FILES=()  # revision id -> newline-joined list of files claiming it
+declare -A REFERENCED=()      # revision id referenced as someone's down_revision
 
 if [ -n "$ALEMBIC_FILES" ]; then
     while IFS= read -r f; do
@@ -211,7 +212,11 @@ if [ -n "$ALEMBIC_FILES" ]; then
         rev_line="$(printf '%s\n' "$content" | grep -E '^[[:space:]]*revision[[:space:]]*(:[^=]*)?=' | head -1 || true)"
         rev="$(printf '%s\n' "$rev_line" | grep -oE "['\"][A-Za-z0-9_]+['\"]" | head -1 | tr -d "'\"" || true)"
         [ -n "$rev" ] || continue
-        REVISIONS["$rev"]="$f"
+        # Keep every file claiming this id (not just the last one seen) so a
+        # duplicate revision id — e.g. three files with revision="0075" —
+        # is counted rather than silently overwritten in the map, same
+        # pattern as VERSION_FILES above (#350).
+        REVISION_FILES["$rev"]="${REVISION_FILES[$rev]:-}$f"$'\n'
         down_line="$(printf '%s\n' "$content" | grep -E '^[[:space:]]*down_revision[[:space:]]*(:[^=]*)?=' | head -1 || true)"
         while IFS= read -r d; do
             if [ -n "$d" ]; then
@@ -221,10 +226,21 @@ if [ -n "$ALEMBIC_FILES" ]; then
     done <<< "$ALEMBIC_FILES"
 fi
 
+ALEMBIC_DUP_REVISIONS=()
+for rev in "${!REVISION_FILES[@]}"; do
+    files="${REVISION_FILES[$rev]}"
+    count="$(printf '%s' "$files" | grep -c .)"
+    if [ "$count" -gt 1 ]; then
+        names="$(printf '%s' "$files" | tr '\n' ' ' | sed 's/ $//')"
+        ALEMBIC_DUP_REVISIONS+=("$rev claimed by: $names")
+    fi
+done
+
 ALEMBIC_HEADS=()
-for rev in "${!REVISIONS[@]}"; do
+for rev in "${!REVISION_FILES[@]}"; do
     if [ -z "${REFERENCED[$rev]:-}" ]; then
-        ALEMBIC_HEADS+=("$rev (${REVISIONS[$rev]})")
+        first_file="$(printf '%s' "${REVISION_FILES[$rev]}" | head -1)"
+        ALEMBIC_HEADS+=("$rev ($first_file)")
     fi
 done
 
@@ -242,6 +258,12 @@ if [ "${#FLYWAY_COLLISIONS[@]}" -gt 0 ]; then
     BODY_LINES+=("Duplicate Flyway version(s):")
     for c in "${FLYWAY_COLLISIONS[@]}"; do BODY_LINES+=("- $c"); done
     BODY_LINES+=("Remediation: rename the losing file(s) to the next free version.")
+fi
+if [ "${#ALEMBIC_DUP_REVISIONS[@]}" -gt 0 ]; then
+    COLLISION=1
+    BODY_LINES+=("Duplicate Alembic revision id(s):")
+    for c in "${ALEMBIC_DUP_REVISIONS[@]}"; do BODY_LINES+=("- $c"); done
+    BODY_LINES+=("Remediation: renumber the losing file(s) to a unique revision id.")
 fi
 if [ "${#ALEMBIC_HEADS[@]}" -gt 1 ]; then
     COLLISION=1
