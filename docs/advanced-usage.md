@@ -83,14 +83,14 @@ git worktree remove ../myproject-wt2
 
 `scripts/_load-env.sh` derives every swarm worktree path from `SWARM_WORKTREE_GROUPING`, which supports two layouts:
 
-- **`flat`** (default, for backward compat) — `<parent>/wt-issue-N`, i.e. a worktree sits directly next to the project directory.
-- **`project`** — `<parent>/<project>-worktrees/wt-issue-N`, i.e. worktrees for a given project are grouped under their own subdirectory.
+- **`project`** (shipped default since issue #271) — `<parent>/<project>-worktrees/wt-issue-N`, i.e. worktrees for a given project are grouped under their own subdirectory.
+- **`flat`** (legacy, back-compat) — `<parent>/wt-issue-N`, i.e. a worktree sits directly next to the project directory.
 
-`project` grouping exists to solve a cross-project namespace collision: when several sibling repos live under the same parent directory and each spawns swarm workers, they can all produce a `wt-issue-N` path for the same issue number, and a deleted-then-recreated worktree in one project can clobber a live one in another. Set `SWARM_WORKTREE_GROUPING=project` per project (e.g. in `<project>/.swarm/.env`) to give each project its own worktree namespace.
+`project` grouping exists to solve a cross-project namespace collision: when several sibling repos live under the same parent directory and each spawns swarm workers, they can all produce a `wt-issue-N` path for the same issue number, and a deleted-then-recreated worktree in one project can clobber a live one in another. Set `SWARM_WORKTREE_GROUPING=flat` per project (e.g. in `<project>/.swarm/.env`) if you need the old layout back.
 
-Set this **before** any worktrees exist for the project — there is no automatic migration between layouts, so switching it after the fact leaves existing worktrees at the old path while new ones land at the new path.
+Set this **before** any worktrees exist for the project — there is no automatic migration between layouts, so switching it after the fact leaves existing worktrees at the old path while new ones land at the new path. `llm-start.sh` warns at startup (non-fatal) when it finds legacy flat worktrees for the current project sitting unmanaged under `project` grouping — finish them out or `git worktree move` them onto the new path by hand.
 
-**The triage/revive examples elsewhere in this doc assume `flat` layout** — paths like `../wt-issue-N` or `$(dirname $PWD)/wt-issue-$issue` resolve to the wrong location under `project` grouping. If your project uses `project` grouping, adjust those paths to `<project>-worktrees/wt-issue-N` instead. (`requeue.sh`'s numeric-issue form resolves this itself via `swarm_worktree_dir()` and needs no adjustment — pass an explicit worktree path if you want to bypass grouping resolution.)
+**The triage/revive examples elsewhere in this doc assume `flat` layout** — paths like `../wt-issue-N` or `$(dirname $PWD)/wt-issue-$issue` resolve to the wrong location under `project` grouping (the shipped default). Adjust those paths to `<project>-worktrees/wt-issue-N` instead unless your project has set `SWARM_WORKTREE_GROUPING=flat`. (`requeue.sh`'s numeric-issue form resolves this itself via `swarm_worktree_dir()` and needs no adjustment — pass an explicit worktree path if you want to bypass grouping resolution.)
 
 ## Custom Configuration
 

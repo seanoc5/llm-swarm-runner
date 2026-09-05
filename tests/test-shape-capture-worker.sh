@@ -8,6 +8,14 @@
 # canned pane fixtures for iss-* windows and records what it was asked for.
 set -euo pipefail
 
+# Test 2/3's WT_DIR fixture below is built directly as a flat-layout path
+# (<project-parent>/wt-issue-2) to match what capture-worker.sh's own
+# swarm_worktree_dir() call must derive internally for its slug lookup —
+# pin the grouping so that still holds regardless of the shipped
+# .env.example default (project, since issue #271) or an operator's
+# project-grouped shell env.
+export SWARM_WORKTREE_GROUPING=flat
+
 green()  { printf '\033[32m✓ %s\033[0m\n' "$*"; }
 red()    { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 yellow() { printf '\033[33m%s\033[0m\n' "$*"; }

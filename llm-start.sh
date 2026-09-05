@@ -188,6 +188,48 @@ INITIAL_PROMPT="${1:-Execute the Initial Startup Checklist.}"
 # shellcheck source=scripts/_load-env.sh
 . "$LLM_SWARM_DIR/scripts/_load-env.sh" "$PWD"
 
+# --- Legacy flat-worktree detection (issue #271) ----------------------------
+# SWARM_WORKTREE_GROUPING flipped its shipped default to `project` in #271.
+# A host upgrading onto that default (or a project that already set it) can
+# still have worktrees sitting in the old flat layout (<parent>/wt-issue-N)
+# from before the flip — swarm_worktree_dir()/swarm_worktree_parent()
+# (scripts/_load-env.sh) only ever look at the *current* grouping, so those
+# worktrees become invisible to discovery, reap, and the watcher: unmanaged,
+# and easy to forget about entirely. This is exactly the failure mode #271's
+# real incident (minti9, 2026-08-12) turned on — a stale/orphaned worktree
+# nobody was watching for. Migration stays manual (out of scope for #271);
+# this is the loud, non-fatal detection half of that trade.
+#
+# Detection mirrors provision-worker.sh's existing gitdir-mismatch guard: a
+# candidate <parent>/wt-issue-* path counts as "legacy flat" only if its
+# common gitdir actually resolves back to this project's .git (a same-named
+# worktree belonging to an unrelated sibling repo at the same parent dir is
+# not this project's problem to report).
+warn_legacy_flat_worktrees() {
+    local project_dir="$1" parent expected_common wt existing_common
+    parent="$(dirname "$project_dir")"
+    expected_common="$(cd "$project_dir" && realpath "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null)" || return 0
+    [ -n "$expected_common" ] || return 0
+
+    local -a legacy=()
+    for wt in "$parent"/wt-issue-*; do
+        [ -d "$wt" ] || continue
+        existing_common="$(git -C "$wt" rev-parse --git-common-dir 2>/dev/null || true)"
+        [ -n "$existing_common" ] || continue
+        existing_common="$(cd "$wt" && realpath "$existing_common" 2>/dev/null || true)"
+        [ "$existing_common" = "$expected_common" ] && legacy+=("$wt")
+    done
+
+    if [ "${#legacy[@]}" -gt 0 ]; then
+        echo "WARN: found ${#legacy[@]} legacy flat worktree(s) — unmanaged under project grouping; finish them out or \`git worktree move\` them:" >&2
+        printf '  %s\n' "${legacy[@]}" >&2
+    fi
+}
+
+if [ "${SWARM_WORKTREE_GROUPING:-}" = "project" ]; then
+    warn_legacy_flat_worktrees "$PWD"
+fi
+
 # Allow overriding the coordinator command and model
 COORD_CMD="${COORDINATOR_CMD:-claude}"
 # Default model depends on which coordinator is running:

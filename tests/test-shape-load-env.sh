@@ -35,7 +35,7 @@ mkdir -p "$SANDBOX" "$PROJECT/.swarm"
 
 cat > "$SANDBOX/.env.example" <<'EOF'
 WORKER_MODEL=opus
-SWARM_WORKTREE_GROUPING=flat
+SWARM_WORKTREE_GROUPING=project
 MAX_WORKERS=5
 EOF
 
@@ -49,9 +49,9 @@ rm -f "$PROJECT/.swarm/.env"
     unset "${VARS[@]}" 2>/dev/null || true
     export LLM_SWARM_DIR="$SANDBOX"
     . "$LOAD_ENV" "$PROJECT"
-    [ "$WORKER_MODEL" = "opus" ]             || { echo "WORKER_MODEL=$WORKER_MODEL, want opus" >&2; exit 1; }
-    [ "$SWARM_WORKTREE_GROUPING" = "flat" ]  || { echo "SWARM_WORKTREE_GROUPING=$SWARM_WORKTREE_GROUPING, want flat" >&2; exit 1; }
-    [ "$MAX_WORKERS" = "5" ]                 || { echo "MAX_WORKERS=$MAX_WORKERS, want 5" >&2; exit 1; }
+    [ "$WORKER_MODEL" = "opus" ]               || { echo "WORKER_MODEL=$WORKER_MODEL, want opus" >&2; exit 1; }
+    [ "$SWARM_WORKTREE_GROUPING" = "project" ] || { echo "SWARM_WORKTREE_GROUPING=$SWARM_WORKTREE_GROUPING, want project" >&2; exit 1; }
+    [ "$MAX_WORKERS" = "5" ]                   || { echo "MAX_WORKERS=$MAX_WORKERS, want 5" >&2; exit 1; }
 ) || red "defaults-only layer failed"
 green "no project .env, no shell env → .env.example defaults win"
 
@@ -66,10 +66,10 @@ EOF
     unset "${VARS[@]}" 2>/dev/null || true
     export LLM_SWARM_DIR="$SANDBOX"
     . "$LOAD_ENV" "$PROJECT"
-    [ "$WORKER_MODEL" = "sonnet" ]           || { echo "WORKER_MODEL=$WORKER_MODEL, want sonnet" >&2; exit 1; }
-    [ "$MAX_WORKERS" = "8" ]                 || { echo "MAX_WORKERS=$MAX_WORKERS, want 8" >&2; exit 1; }
+    [ "$WORKER_MODEL" = "sonnet" ]              || { echo "WORKER_MODEL=$WORKER_MODEL, want sonnet" >&2; exit 1; }
+    [ "$MAX_WORKERS" = "8" ]                    || { echo "MAX_WORKERS=$MAX_WORKERS, want 8" >&2; exit 1; }
     # Not overridden by the project file — still falls back to the default.
-    [ "$SWARM_WORKTREE_GROUPING" = "flat" ]  || { echo "SWARM_WORKTREE_GROUPING=$SWARM_WORKTREE_GROUPING, want flat" >&2; exit 1; }
+    [ "$SWARM_WORKTREE_GROUPING" = "project" ]  || { echo "SWARM_WORKTREE_GROUPING=$SWARM_WORKTREE_GROUPING, want project" >&2; exit 1; }
 ) || red "project .env override layer failed"
 green "project .swarm/.env overrides the vars it sets; others still fall back to defaults"
 
