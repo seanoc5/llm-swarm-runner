@@ -436,7 +436,12 @@
 #                           rather than guessing — logging
 #                           coord.compact.skip reason=no_window_for_floor —
 #                           since there is no observed value to check the
-#                           floor against.
+#                           floor against. Set to 0 to disable this ENTIRE
+#                           floor, including that fail-closed case — restores
+#                           the pre-#296 behavior of trusting the flat
+#                           AUTO_COMPACT_THRESHOLD_TOKENS fallback verbatim,
+#                           for a deployment that deliberately relies on it
+#                           (e.g. a probe that never reports a window size).
 #   AUTO_COMPACT_PROBE=<path>
 #                           Path to the statusline probe file. Defaults to
 #                           the project+role-scoped path
@@ -721,6 +726,10 @@
 #                           compact. When the window can't be parsed at all,
 #                           this refuses rather than guessing — logging
 #                           worker.compact.skip reason=no_window_for_floor.
+#                           Set to 0 to disable this ENTIRE floor, including
+#                           that fail-closed case — restores the pre-#296
+#                           behavior of trusting the flat
+#                           WORKER_COMPACT_THRESHOLD_TOKENS fallback verbatim.
 #   WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS=300000
 #                           Raised threshold used instead of the above once
 #                           the worker's worktree has an open PR (per its
@@ -1132,7 +1141,7 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     AUTO_COMPACT_PCT                  75      percent of the coordinator's own context window used as the effective threshold; see header comment
     AUTO_COMPACT_THRESHOLD_CAP_TOKENS 250000  cap on the above (250k on a 1M-window coordinator, not 750k)
     AUTO_COMPACT_THRESHOLD_TOKENS     150000  used-token trigger; also the fallback when the window can't be parsed
-    AUTO_COMPACT_MIN_PCT              60      (issue #296) hard floor — refuse to inject below this % of the coordinator's own window, even if over threshold; see header comment
+    AUTO_COMPACT_MIN_PCT              60      (issue #296) hard floor — refuse to inject below this % of the coordinator's own window, even if over threshold (0=off); see header comment
     AUTO_COMPACT_TICK_SECS            60      periodic poll-tick trigger interval (0=off); catches long interactive stretches with no worker completions; see header comment
     AUTO_COMPACT_COOLDOWN_SECS        900     poll-tick-only cooldown after an attempted compact, before it may re-trigger
     AUTO_COMPACT_PROBE                (auto)  statusline probe file path
@@ -1146,7 +1155,7 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     WORKER_COMPACT_PCT                       75      percent of the worker's own context window used as the effective threshold; see header comment
     WORKER_COMPACT_THRESHOLD_CAP_TOKENS      250000  cap on the above (250k on a 1M-window worker, not 750k)
     WORKER_COMPACT_THRESHOLD_TOKENS         150000  used-token trigger (no PR open yet); also the fallback when the window can't be parsed
-    WORKER_COMPACT_MIN_PCT                  60      (issue #296) hard floor — refuse to inject below this % of the worker's own window, even if over threshold; see header comment
+    WORKER_COMPACT_MIN_PCT                  60      (issue #296) hard floor — refuse to inject below this % of the worker's own window, even if over threshold (0=off); see header comment
     WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS  300000  raised trigger once the worker's PR is open (scales with the base threshold; see header comment)
     WORKER_COMPACT_BUSY_PATTERN             (auto)  capture-pane busy-indicator regex (per iss-* window)
     WORKER_COMPACT_START_TIMEOUT_SECS       15      max wait for compaction to start
@@ -3075,20 +3084,29 @@ maybe_auto_compact() {
         # (or a daemon running code predating issue #273's window scaling)
         # silently falls back to the flat AUTO_COMPACT_THRESHOLD_TOKENS
         # default, only 15% of a 1M-token window — see AUTO_COMPACT_MIN_PCT's
-        # header comment for the incident this closes. Fails CLOSED (refuses
-        # to inject) when the window can't be parsed at all: there's no
-        # observed percentage to check the floor against, and injecting
-        # anyway is exactly the unsafe path this guard exists to prevent.
-        local window pct
-        if ! window="$(probe_ctx_window)" || [ -z "$window" ] || [ "$window" -le 0 ]; then
-            log_event coord.compact.skip "reason=no_window_for_floor trigger=$trigger"
-            exit 0
-        fi
-        pct=$(( used * 100 / window ))
-        if [ "$pct" -lt "$AUTO_COMPACT_MIN_PCT" ]; then
-            log_event coord.compact.refused_low_ctx "used=$used window=$window pct=$pct min_pct=$AUTO_COMPACT_MIN_PCT trigger=$trigger"
-            echo "[$(date +%T)] refusing /compact: coordinator context at ${pct}% (< ${AUTO_COMPACT_MIN_PCT}% floor, used=$used window=$window) — not injecting"
-            exit 0
+        # header comment for the incident this closes. AUTO_COMPACT_MIN_PCT=0
+        # disables this ENTIRE block, including the fail-closed branch below
+        # — same "0 disables" convention as AUTO_COMPACT_TICK_SECS/
+        # WATCH_PR_POLL_SECS elsewhere in this file — so a deployment relying
+        # on the flat-fallback-threshold-only behavior documented above
+        # (probe present but missing context_window_size, issue #273's
+        # pre-existing degraded mode) can still opt back into it explicitly.
+        # With the floor enabled (the default), it fails CLOSED when the
+        # window can't be parsed at all: there's no observed percentage to
+        # check the floor against, and injecting anyway is exactly the
+        # unsafe path this guard exists to prevent.
+        if [ "$AUTO_COMPACT_MIN_PCT" -gt 0 ]; then
+            local window pct
+            if ! window="$(probe_ctx_window)" || [ -z "$window" ] || [ "$window" -le 0 ]; then
+                log_event coord.compact.skip "reason=no_window_for_floor trigger=$trigger"
+                exit 0
+            fi
+            pct=$(( used * 100 / window ))
+            if [ "$pct" -lt "$AUTO_COMPACT_MIN_PCT" ]; then
+                log_event coord.compact.refused_low_ctx "used=$used window=$window pct=$pct min_pct=$AUTO_COMPACT_MIN_PCT trigger=$trigger"
+                echo "[$(date +%T)] refusing /compact: coordinator context at ${pct}% (< ${AUTO_COMPACT_MIN_PCT}% floor, used=$used window=$window) — not injecting"
+                exit 0
+            fi
         fi
 
         echo "[$(date +%T)] coordinator context at ${used} tokens (>= ${threshold}) — compacting before wake..."
@@ -3945,19 +3963,24 @@ maybe_worker_compact() {
 
     # issue #296: worker-side twin of maybe_auto_compact's low-context floor
     # above — see AUTO_COMPACT_MIN_PCT's header comment for the incident and
-    # WORKER_COMPACT_MIN_PCT's for the worker-specific rationale. Fails
+    # WORKER_COMPACT_MIN_PCT's for the worker-specific rationale.
+    # WORKER_COMPACT_MIN_PCT=0 disables this ENTIRE block, including the
+    # fail-closed branch below, same "0 disables" convention as this file's
+    # other *_SECS=0 knobs. With the floor enabled (the default), it fails
     # CLOSED when the window can't be parsed: no observed percentage to
     # check the floor against.
-    local window pct
-    if ! window="$(worker_pane_ctx_window "$win")" || [ -z "$window" ] || [ "$window" -le 0 ]; then
-        log_event worker.compact.skip "issue=$issue reason=no_window_for_floor"
-        return 0
-    fi
-    pct=$(( used * 100 / window ))
-    if [ "$pct" -lt "$WORKER_COMPACT_MIN_PCT" ]; then
-        log_event worker.compact.refused_low_ctx "issue=$issue used=$used window=$window pct=$pct min_pct=$WORKER_COMPACT_MIN_PCT"
-        echo "[$(date +%T)] refusing /compact into $win: context at ${pct}% (< ${WORKER_COMPACT_MIN_PCT}% floor, used=$used window=$window) — not injecting"
-        return 0
+    if [ "$WORKER_COMPACT_MIN_PCT" -gt 0 ]; then
+        local window pct
+        if ! window="$(worker_pane_ctx_window "$win")" || [ -z "$window" ] || [ "$window" -le 0 ]; then
+            log_event worker.compact.skip "issue=$issue reason=no_window_for_floor"
+            return 0
+        fi
+        pct=$(( used * 100 / window ))
+        if [ "$pct" -lt "$WORKER_COMPACT_MIN_PCT" ]; then
+            log_event worker.compact.refused_low_ctx "issue=$issue used=$used window=$window pct=$pct min_pct=$WORKER_COMPACT_MIN_PCT"
+            echo "[$(date +%T)] refusing /compact into $win: context at ${pct}% (< ${WORKER_COMPACT_MIN_PCT}% floor, used=$used window=$window) — not injecting"
+            return 0
+        fi
     fi
 
     echo "[$(date +%T)] worker $win context at ${used} tokens (>= ${threshold}, wrapup=$wrapup) — compacting before next turn..."

@@ -1148,5 +1148,19 @@ check "unparseable window -> bare coord.compact NOT logged" "missing" "$got"
 if grep -q 'reason=no_window_for_floor' "$EVENTS_LOG"; then got=logged; else got=missing; fi
 check "unparseable window -> coord.compact.skip reason=no_window_for_floor logged" "logged" "$got"
 
+# Self-review finding on this issue's first pass: AUTO_COMPACT_MIN_PCT=0
+# must disable the floor ENTIRELY, including the fail-closed branch above —
+# otherwise a deployment relying on the pre-#296 flat-fallback-threshold
+# behavior (documented under AUTO_COMPACT_THRESHOLD_TOKENS above) would find
+# it permanently, silently unreachable with no way to opt back in.
+AUTO_COMPACT_MIN_PCT=0
+: > "$EVENTS_LOG"
+maybe_auto_compact wake
+if grep -q 'coord.compact ' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "AUTO_COMPACT_MIN_PCT=0 -> unparseable window no longer blocks injection (flat fallback restored)" "logged" "$got"
+if grep -q 'no_window_for_floor' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "AUTO_COMPACT_MIN_PCT=0 -> fail-closed branch itself is disabled, not just bypassed" "missing" "$got"
+AUTO_COMPACT_MIN_PCT=60
+
 echo ""
 green "All coordinator-auto-compact tests passed ($PASS checks)"
