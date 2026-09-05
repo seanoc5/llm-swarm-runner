@@ -283,6 +283,17 @@
 #                           above) to check this cheaply without waiting for
 #                           the periodic sweep. Set to 0 to disable the
 #                           self-check entirely.
+#
+#                           Verified end-to-end (issue #296 code review):
+#                           the process-group signal this sends can take
+#                           the watcher's whole tmux pane down along with
+#                           it, since it's the pane's own foreground
+#                           process group — so the human-readable "STALE
+#                           DAEMON" banner this prints right before
+#                           shutting down may never actually be SEEN in the
+#                           pane. events.log's watch.stale_daemon line is
+#                           the durable record either way; don't rely on
+#                           spotting the banner live.
 #   WATCHER_STALE_CHECK_SECS=300
 #                           How often the self-check above runs. Kept
 #                           independent of every other timer interval in
@@ -1385,7 +1396,17 @@ EOF
         ;;
     --check-stale)
         shift
-        CHECK_PROJECT_DIR="$(realpath "${1:-$PWD}")"
+        # issue #296 self-review finding: a missing/typo'd project-dir made
+        # `realpath` fail outright, which — under this script's
+        # `set -euo pipefail` — crashed the whole invocation before it could
+        # reach the "no state file" case below, giving an opaque error
+        # instead of the same clear, distinct exit 2. Validate first.
+        CHECK_PROJECT_ARG="${1:-$PWD}"
+        if [ ! -d "$CHECK_PROJECT_ARG" ]; then
+            echo "'$CHECK_PROJECT_ARG' is not a directory — usage: coordinator-watch.sh --check-stale [project-dir]" >&2
+            exit 2
+        fi
+        CHECK_PROJECT_DIR="$(realpath "$CHECK_PROJECT_ARG")"
         CHECK_STATE_FILE="$CHECK_PROJECT_DIR/.swarm/coordinator-watch.state"
         if [ ! -r "$CHECK_STATE_FILE" ]; then
             echo "No watcher state file at $CHECK_STATE_FILE — is coordinator-watch.sh running for this project?" >&2
@@ -1429,6 +1450,19 @@ EOF
         # FRESH/exit 0 — telling the operator "nothing to do" when there is
         # no watcher running here at all. `kill -0` sends no signal, just
         # tests whether the pid exists and is ours to signal.
+        #
+        # Known limitation (code review, issue #296): `kill -0` alone can't
+        # tell "this is still the same watcher" from "an unrelated process
+        # was later started and happened to reuse this exact pid" — a
+        # narrow race in practice (the OS cycles through a large pid range
+        # before reusing one), and CHECK_STARTED_AT is recorded precisely
+        # so a future version of this check COULD cross-reference it
+        # against the live process's actual start time. Not done here:
+        # there's no portable, dependency-free way to read a process's
+        # start time across the platforms this project already supports
+        # (GNU vs BSD `ps`/`stat` output differs, and `/proc` isn't
+        # available everywhere) — accepted as a rare, low-severity gap
+        # rather than adding a fragile platform-specific parse for it.
         if [ -z "$CHECK_PID" ] || ! kill -0 "$CHECK_PID" 2>/dev/null; then
             echo "status:               NOT RUNNING — no live watcher process for this pid; run llm-start.sh to start one"
             exit 3

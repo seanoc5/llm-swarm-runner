@@ -287,6 +287,18 @@ check "no state file -> exit 2" "2" "$RC"
 if echo "$OUT" | grep -qi 'No watcher state file'; then got=present; else got=missing; fi
 check "no state file -> explanatory message printed" "present" "$got"
 
+heading "Test 6a: --check-stale CLI — a missing/typo'd project-dir gives a clear error, not an opaque crash (issue #296 self-review finding)"
+# Self-review finding: realpath on a nonexistent path used to fail outright
+# and, under set -euo pipefail, crash the whole invocation before it could
+# ever reach the "no state file" check above — an opaque failure instead of
+# the same clear, distinct exit.
+set +e
+OUT="$("$WATCH" --check-stale "$TEST_DIR/does-not-exist-at-all" 2>&1)"; RC=$?
+set -e
+check "nonexistent project-dir -> exit 2 (same family as no-state-file, not a bare crash)" "2" "$RC"
+if echo "$OUT" | grep -qi 'is not a directory'; then got=present; else got=missing; fi
+check "nonexistent project-dir -> explanatory message printed" "present" "$got"
+
 heading "Test 6b: --check-stale CLI — a partial/corrupted state file still produces a coherent verdict (issue #296 self-review finding)"
 # Self-review finding: the state-file WRITE already tolerates a partial
 # write (\`... || true\` at the write site) — a process killed mid-write, or
