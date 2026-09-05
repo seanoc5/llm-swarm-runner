@@ -273,10 +273,17 @@
 #                           already parsed differently, so instead this logs
 #                           watch.stale_daemon loudly and shuts the whole
 #                           daemon down (all timer loops, not just this
-#                           one) — the same effect as Ctrl-C. Nothing
-#                           currently auto-restarts it afterward: a human
-#                           (or the coordinator) needs to notice the dead
-#                           pane and re-run llm-start.sh (WATCH=1, the
+#                           one) via an uncatchable SIGKILL to its process
+#                           group — see watcher_check_staleness()'s own
+#                           header comment for why a plain SIGTERM (or
+#                           Ctrl-C's SIGINT) does NOT reliably work here,
+#                           confirmed by code review: this script's own
+#                           EXIT/INT/TERM trap catches it and never calls
+#                           `exit`, so the poll backend's bare `while true`
+#                           loop just keeps looping past it. Nothing
+#                           currently auto-restarts the daemon afterward: a
+#                           human (or the coordinator) needs to notice the
+#                           dead pane and re-run llm-start.sh (WATCH=1, the
 #                           default, is idempotent about spawning the
 #                           watcher — see that script's own comment). Use
 #                           `coordinator-watch.sh --check-stale` (see USAGE
@@ -284,15 +291,15 @@
 #                           the periodic sweep. Set to 0 to disable the
 #                           self-check entirely.
 #
-#                           Verified end-to-end (issue #296 code review):
-#                           the process-group signal this sends can take
-#                           the watcher's whole tmux pane down along with
-#                           it, since it's the pane's own foreground
-#                           process group — so the human-readable "STALE
-#                           DAEMON" banner this prints right before
-#                           shutting down may never actually be SEEN in the
-#                           pane. events.log's watch.stale_daemon line is
-#                           the durable record either way; don't rely on
+#                           Verified end-to-end against a real tmux pane
+#                           (issue #296 code review): the SIGKILL takes the
+#                           watcher's whole tmux pane down along with it,
+#                           since it's the pane's own foreground process
+#                           group — so the human-readable "STALE DAEMON"
+#                           banner this prints right before shutting down
+#                           may never actually be SEEN in the pane.
+#                           events.log's watch.stale_daemon line is the
+#                           durable record either way; don't rely on
 #                           spotting the banner live.
 #   WATCHER_STALE_CHECK_SECS=300
 #                           How often the self-check above runs. Kept
@@ -2167,15 +2174,35 @@ watcher_is_stale() {
 # process's PID even though this function runs inside a backgrounded child
 # (bash's `&`/subshell forking never changes what $$ reports — only
 # $BASHPID does — so this is the same PID cleanup_on_exit's own kills use
-# elsewhere in this file). Signals the process group first (mirrors a
-# manual Ctrl-C's blast radius, reaching a blocked run_inotify/run_poll
-# foreground pipeline too), then the top-level PID directly as a backstop,
-# then calls cleanup_on_exit() directly here too (idempotent, best-effort)
-# so every sibling timer loop dies even if signal delivery to the top-level
-# process is somehow delayed. Relies on something else — a human or the
-# coordinator — noticing the resulting dead pane and re-running
-# llm-start.sh (idempotent about spawning the watcher) to get a fresh
-# process running the current code; see WATCHER_STALE_CHECK's header
+# elsewhere in this file).
+#
+# Uses SIGKILL, not SIGTERM — deliberately, after a code-review-caught bug
+# in an earlier version of this function proved SIGTERM insufficient here.
+# This script installs `trap cleanup_on_exit EXIT INT TERM` (near the top),
+# and cleanup_on_exit — by design also reused as the plain graceful-
+# shutdown EXIT trap — never calls `exit` itself. Empirically verified
+# (both in a plain bash job and in a real tmux pane): a caught SIGTERM with
+# no `exit` in its handler just runs the trap and resumes whatever was
+# interrupted — the poll backend's bare `while true` loop doesn't even
+# notice its `sleep` was cut short, so it keeps looping past a SIGTERM
+# indefinitely; only the inotify backend's incidental child-death cascade
+# (killing `inotifywait` closes its pipe, ending the `while read` loop
+# naturally) happened to make manual Ctrl-C look like it worked, backend-
+# dependently and by accident. SIGKILL cannot be caught, blocked, or
+# ignored by anyone, so it's the only signal that reliably guarantees
+# termination regardless of backend or trap state. The GROUP form (`-$$`)
+# additionally reaps whichever foreground child (sleep/find/inotifywait) is
+# currently blocking run_poll/run_inotify in the same shot, rather than
+# orphaning it; the direct-PID form right after is a redundant, harmless
+# backstop in case `-$$` somehow doesn't resolve to this process's own
+# group. cleanup_on_exit() is called directly BEFORE either kill — SIGKILL
+# skips traps entirely, so this is the only chance for sibling timer loops
+# (WATCH_TIMER_PID etc.) to be reaped; without it they'd be orphaned rather
+# than cleaned up, even though the group-kill below would still catch any
+# of them that happen to share this process group. Relies on something
+# else — a human or the coordinator — noticing the resulting dead pane and
+# re-running llm-start.sh (idempotent about spawning the watcher) to get a
+# fresh process running the current code; see WATCHER_STALE_CHECK's header
 # comment for the incident this closes and --check-stale for a cheap way
 # to notice this happened without waiting on the pane.
 watcher_check_staleness() {
@@ -2188,8 +2215,8 @@ watcher_check_staleness() {
     echo "[$(date +%T)] STALE DAEMON: $WATCHER_SELF_PATH changed on disk since this watcher started ($WATCHER_STARTED_AT, mtime $WATCHER_LAUNCH_MTIME -> $current_mtime)."
     echo "[$(date +%T)] Shutting down so a fresh process can pick up the current code — re-run llm-start.sh (WATCH=1, the default) to restart the watcher."
     cleanup_on_exit
-    kill -TERM -$$ 2>/dev/null || true
-    kill -TERM "$$" 2>/dev/null || true
+    kill -KILL -$$ 2>/dev/null || true
+    kill -KILL "$$" 2>/dev/null || true
     exit 0
 }
 

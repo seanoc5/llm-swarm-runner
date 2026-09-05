@@ -98,7 +98,7 @@ heading "Test 2: watcher_check_staleness — logs, attempts shutdown, exits clea
 # Run in a genuinely separate \`bash\` process (not eval'd in-process here)
 # so a bug that let a real, unstubbed \`kill\` reach this test's own PID
 # can't take the test harness down with it. The real implementation's
-# self-directed \`kill -TERM "\$\$"\` is exactly right in production —
+# self-directed \`kill -KILL "\$\$"\` is exactly right in production —
 # watcher_check_staleness runs inside run_stale_check_loop's own
 # backgrounded process, and bash's \$\$ does NOT change across a \`&\` fork
 # (only \$BASHPID does), so \$\$ there still names the TOP-LEVEL watcher
@@ -107,8 +107,8 @@ heading "Test 2: watcher_check_staleness — logs, attempts shutdown, exits clea
 # little signal, so \`kill\` is stubbed here to record its argv instead of
 # actually signaling anything — this test verifies the DETECTION, LOGGING,
 # and SHUTDOWN-ATTEMPT logic, which is where the actual risk of a bug
-# lives; the signal-delivery mechanics are three ordinary \`kill\` calls
-# with no logic of their own to get wrong.
+# lives; the signal-delivery mechanics are ordinary \`kill\` calls with no
+# logic of their own to get wrong.
 #
 # Uses the REAL cleanup_on_exit (extracted, not stubbed) under the SAME
 # `set -euo pipefail` the real script runs under — self-review caught that
@@ -117,13 +117,21 @@ heading "Test 2: watcher_check_staleness — logs, attempts shutdown, exits clea
 # (`[ -n "${seen_file:-}" ] && rm -f -- "$seen_file"`, no trailing `|| true`
 # unlike every other line in that function) fails its `set -e` check
 # whenever seen_file is empty — true for run_stale_check_loop's process,
-# which never sets it — silently aborting THIS caller before either
-# `kill -TERM` line ever ran, and before this function's own `exit 0`.
-# That would have shipped the self-check as a no-op: it logs
-# watch.stale_daemon and prints the shutdown banner, then the daemon just
-# keeps running the stale code forever. Fixed at the source (that line now
-# has `|| true` like its siblings); this test's realistic harness is what
-# catches a regression if it comes back.
+# which never sets it — silently aborting THIS caller before either kill
+# line ever ran, and before this function's own `exit 0`. Fixed at the
+# source (that line now has `|| true` like its siblings).
+#
+# A LATER self-review pass (verified end-to-end against a real tmux pane —
+# see this issue's commit history) then caught a second, more serious bug:
+# an earlier version sent SIGTERM, not SIGKILL. This script's own
+# `trap cleanup_on_exit EXIT INT TERM` catches SIGTERM, and cleanup_on_exit
+# never calls `exit` (by design — it's also the plain graceful-shutdown
+# EXIT trap), so a caught SIGTERM just ran the trap and RESUMED the
+# poll/inotify backend's loop — the daemon never actually stopped. Only
+# SIGKILL (uncatchable by anyone) reliably works; Test 2 below asserts on
+# `-KILL`, not `-TERM`, and separately confirms `-TERM` is never sent at
+# all — a regression back to the old signal would still "pass" a test that
+# only checked argument COUNT, not which signal was actually used.
 EVENTS_LOG2="$TEST_DIR/events2.log"
 KILL_LOG2="$TEST_DIR/kill2.log"
 FAKE_SCRIPT2="$TEST_DIR/fake-watcher2.sh"
@@ -171,10 +179,12 @@ if grep -qF "script=$FAKE_SCRIPT2" "$EVENTS_LOG2" && grep -q 'launch_mtime=0' "$
 check "watch.stale_daemon records script path + launch_mtime" "present" "$got"
 if grep -qi 'STALE DAEMON' "$TEST_DIR/run-check.out"; then got=present; else got=missing; fi
 check "human-readable STALE DAEMON banner printed to stdout (visible in the pane)" "present" "$got"
-if grep -qE '^kill -TERM -[0-9]+' "$KILL_LOG2" 2>/dev/null; then got=attempted; else got=missing; fi
-check "attempts a process-group TERM (reaches a blocked run_inotify/run_poll too)" "attempted" "$got"
-if [ "$(grep -c '^kill -TERM' "$KILL_LOG2" 2>/dev/null || echo 0)" -ge 2 ]; then got=both; else got=missing; fi
-check "attempts both the process-group signal and the direct-PID backstop" "both" "$got"
+if grep -qE '^kill -KILL -[0-9]+' "$KILL_LOG2" 2>/dev/null; then got=attempted; else got=missing; fi
+check "attempts an uncatchable process-group KILL (reaches a blocked run_inotify/run_poll child too)" "attempted" "$got"
+if [ "$(grep -c '^kill -KILL' "$KILL_LOG2" 2>/dev/null || echo 0)" -ge 2 ]; then got=both; else got=missing; fi
+check "attempts both the process-group KILL and the direct-PID backstop" "both" "$got"
+if grep -q '^kill -TERM' "$KILL_LOG2" 2>/dev/null; then got=present; else got=missing; fi
+check "never sends a plain TERM (issue #296 self-review: TERM alone is caught by this script's own trap and doesn't stop it)" "missing" "$got"
 
 heading "Test 3: watcher_check_staleness — no-op on a fresh script"
 : > "$EVENTS_LOG2"
