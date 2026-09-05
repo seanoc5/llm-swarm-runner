@@ -3,6 +3,13 @@
 # test-scripts.sh — Sanity checks for the orchestration scripts.
 set -euo pipefail
 
+# The functional reap-orphan-worktrees.sh tests below build their fixture
+# worktrees directly under $tmproot (flat layout: $tmproot/wt-issue-N) —
+# pin the grouping so reap-orphan-worktrees.sh's swarm_worktree_parent()
+# scans that same directory regardless of the shipped .env.example default
+# (project, since issue #271) or an operator's project-grouped shell env.
+export SWARM_WORKTREE_GROUPING=flat
+
 green()  { printf '\033[32m%s\033[0m\n' "$*"; }
 red()    { printf '\033[31m%s\033[0m\n' "$*"; }
 
