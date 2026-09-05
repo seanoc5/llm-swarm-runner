@@ -474,6 +474,25 @@
 #                           verbatim, for a deployment that deliberately
 #                           relies on it (e.g. a probe that never reports a
 #                           window size).
+#
+#                           Known consequence (code review): probe_ctx_used()
+#                           and probe_ctx_window() try DIFFERENT jq field
+#                           paths against the same probe payload, so a probe
+#                           whose schema includes a used-tokens field but
+#                           never a window-size field is a real, reachable
+#                           shape — not just a hypothetical. On that shape,
+#                           this guard refuses EVERY attempt for as long as
+#                           the probe keeps rendering that way: auto-compact
+#                           effectively goes dark for the coordinator's whole
+#                           session rather than ever falling back to the flat
+#                           threshold. That's the intended trade (see the
+#                           2026-08-16 incident above), but it's a real
+#                           functional loss for that specific probe shape,
+#                           not just a one-time skip — events.log will show
+#                           repeating coord.compact.skip reason=
+#                           no_window_for_floor lines the whole time; that
+#                           repetition is itself the signal to either fix the
+#                           probe's schema or set this to 0.
 #   AUTO_COMPACT_PROBE=<path>
 #                           Path to the statusline probe file. Defaults to
 #                           the project+role-scoped path
@@ -3132,7 +3151,22 @@ compact_retract_queued() {
 # Fails open at every step: a missing precondition, a stale/absent probe,
 # or either timeout just returns 0 and falls through to the normal wake —
 # this is strictly an optimization on top of that wake, never a gate on
-# it. Blocking here (a real compaction run is commonly a minute or more)
+# it. ONE deliberate exception (issue #296, AUTO_COMPACT_REQUIRE_WINDOW):
+# when `used` parses but the window denominator doesn't — a real, reachable
+# probe shape, since probe_ctx_used()/probe_ctx_window() try different jq
+# field paths against the same payload — this now fails CLOSED instead
+# (coord.compact.skip reason=no_window_for_floor), and will keep doing so
+# on every subsequent attempt for as long as that probe shape persists:
+# auto-compact effectively goes dark for the session rather than silently
+# trusting the flat AUTO_COMPACT_THRESHOLD_TOKENS fallback against an
+# unknown true window size (see that knob's header comment for the
+# incident this trades off against). The wake itself is NEVER gated by
+# this — only the compaction attempt is skipped, same as any other
+# coord.compact.skip reason. Set AUTO_COMPACT_REQUIRE_WINDOW=0 to restore
+# the old fail-open behavior for a probe shape that's known to trigger
+# this in your environment.
+#
+# Blocking here (a real compaction run is commonly a minute or more)
 # is consistent with the rest of on_outcome, which is already a
 # synchronous, one-outcome-at-a-time call chain. The poll-tick caller
 # blocks the SAME way — it runs from its own dedicated background process
