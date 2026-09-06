@@ -7,6 +7,7 @@
 #   swarm-merge.sh <issue#|PR#> --no-kill # skip the tmux-kill step
 #   swarm-merge.sh <issue#|PR#> --override-review  # merge despite a BLOCK verdict
 #   swarm-merge.sh <issue#|PR#> --override-migration-gate  # merge despite a migration collision
+#   swarm-merge.sh <issue#> --force-cleanup  # housekeep even while the issue is OPEN
 #   swarm-merge.sh --sweep-only       # just run the local-branch sweep
 #
 # What it does:
@@ -17,6 +18,16 @@
 #      (tmux window, worktree, branch sweep) still knows what to clean —
 #      if the PR has no linked issue, the merge proceeds but that cleanup
 #      is skipped (and said so explicitly) rather than silently no-opped.
+#   2a. Housekeeping-only mode (#368): an issue can reach "closed, nothing to
+#      merge, but the worker's mess is still on disk" — closed by another
+#      PR's work, PR closed unmerged and redone elsewhere, or closed by hand.
+#      When there is no PR to merge but the issue is CLOSED, steps 3-4 are
+#      skipped and steps 5-7 (reap wait, tmux/worktree kill, branch sweep)
+#      run as normal: they are keyed on the issue, not the PR, and are valid
+#      on their own. An OPEN issue still refuses, on the same reasoning
+#      run_sweep uses — an OPEN issue is an in-flight worker, and reaping it
+#      would destroy uncommitted work. --force-cleanup overrides that for a
+#      worker known to be dead.
 #   2. Verifies the PR is OPEN and MERGEABLE (or already MERGED → just cleans),
 #      and checks the self-review verdict gate: a
 #      <!-- SWARM_SELF_REVIEW: BLOCK --> marker comment (posted by
@@ -47,6 +58,8 @@ NO_KILL=0
 SWEEP_ONLY=0
 OVERRIDE_REVIEW=0
 OVERRIDE_MIGRATION_GATE=0
+FORCE_CLEANUP=0
+HOUSEKEEP_ONLY=0
 ISSUE=""
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -59,6 +72,7 @@ for arg in "$@"; do
     --sweep-only) SWEEP_ONLY=1 ;;
     --override-review) OVERRIDE_REVIEW=1 ;;
     --override-migration-gate) OVERRIDE_MIGRATION_GATE=1 ;;
+    --force-cleanup) FORCE_CLEANUP=1 ;;
     --help|-h)
       sed -n '2,/^# Exits/p' "$0" | sed 's/^# \?//'
       exit 0
@@ -86,6 +100,33 @@ c_red()   { printf '\033[31m%s\033[0m' "$1"; }
 c_green() { printf '\033[32m%s\033[0m' "$1"; }
 c_amber() { printf '\033[33m%s\033[0m' "$1"; }
 c_dim()   { printf '\033[2m%s\033[0m' "$1"; }
+
+# --- housekeeping-only decision (#368) ------------------------------------
+#
+# Called when there is nothing to merge. Steps 5-7 are keyed on the issue and
+# stand on their own, so the absence of a PR is not a reason to abandon the
+# worker's tmux window and worktree to a manual cleanup.
+#
+# The guard is the one run_sweep already applies to branches: an OPEN issue is
+# an in-flight worker. Reaping its window and force-removing its worktree
+# would destroy uncommitted work, so that case still refuses.
+housekeep_or_die() {
+  local reason="$1" state
+  state=$(gh issue view "$ISSUE" --json state -q .state 2>/dev/null || echo "UNKNOWN")
+  if [ "$state" = "CLOSED" ]; then
+    echo "       $(c_amber "$reason; issue #$ISSUE is CLOSED — housekeeping only, nothing to merge")"
+  elif [ "$FORCE_CLEANUP" = 1 ]; then
+    echo "       $(c_amber "$reason; issue #$ISSUE is $state but --force-cleanup given — housekeeping anyway")"
+  else
+    echo "ERROR: $reason, and issue #$ISSUE is $state." >&2
+    echo "       An issue that is not CLOSED with nothing merged usually means the" >&2
+    echo "       worker is still in flight; reaping its window and worktree now" >&2
+    echo "       would destroy uncommitted work." >&2
+    echo "       Re-run with --force-cleanup if you know the worker is dead." >&2
+    exit 1
+  fi
+  HOUSEKEEP_ONLY=1
+}
 
 # --- safer local-branch sweep ---------------------------------------------
 #
@@ -169,10 +210,11 @@ elif [ "$IS_PR" = "false" ]; then
   PR_NUM=$(gh issue view "$ISSUE" --json closedByPullRequestsReferences \
              -q '.closedByPullRequestsReferences[0].number' 2>/dev/null || echo "")
   if [ -z "$PR_NUM" ] || [ "$PR_NUM" = "null" ]; then
-    echo "ERROR: no linked PR found for issue #$ISSUE" >&2
-    exit 1
+    PR_NUM=""
+    housekeep_or_die "no linked PR found for issue #$ISSUE"
+  else
+    echo "[2/7] issue #$ISSUE → PR #$PR_NUM"
   fi
-  echo "[2/7] issue #$ISSUE → PR #$PR_NUM"
 else
   # The probe itself failed (rate limit, transient network, expired auth) —
   # distinct from a clean "false" (definitely an issue). Rather than treat
@@ -190,115 +232,139 @@ else
     ISSUE=""
     PR_NUM="$INPUT_NUM"
     echo "[2/7] #$INPUT_NUM resolved directly as PR #$PR_NUM (resolved via fallback)"
+  elif [ -n "$(gh issue view "$INPUT_NUM" --json number -q .number 2>/dev/null)" ]; then
+    # It is a real issue with no linked PR. Same housekeeping case as above,
+    # reached through the degraded-classification path.
+    # Require the number to come *back*, not merely a zero exit: in this
+    # branch `gh` is already known to be behaving oddly (the classification
+    # probe just failed), and a success with no output is not evidence the
+    # issue exists. Same rigor the PR_NUM checks above apply.
+    PR_NUM=""
+    housekeep_or_die "no linked PR found for issue #$ISSUE"
   else
     echo "ERROR: could not resolve #$INPUT_NUM as an issue or PR (gh api classification failed, and neither an issue nor PR lookup succeeded)" >&2
     exit 1
   fi
 fi
 
-# Inspect PR state.
-PR_JSON=$(gh pr view "$PR_NUM" --json state,mergeable,headRefName,title,closingIssuesReferences)
-PR_STATE=$(echo "$PR_JSON" | jq -r .state)
-PR_MERGEABLE=$(echo "$PR_JSON" | jq -r .mergeable)
-PR_BRANCH=$(echo "$PR_JSON" | jq -r .headRefName)
-PR_TITLE=$(echo "$PR_JSON" | jq -r .title)
-echo "[3/7] PR #$PR_NUM: state=$PR_STATE mergeable=$PR_MERGEABLE branch=$PR_BRANCH"
-echo "       title: $PR_TITLE"
+if [ "$HOUSEKEEP_ONLY" = 0 ]; then
+  # Inspect PR state.
+  PR_JSON=$(gh pr view "$PR_NUM" --json state,mergeable,headRefName,title,closingIssuesReferences)
+  PR_STATE=$(echo "$PR_JSON" | jq -r .state)
+  PR_MERGEABLE=$(echo "$PR_JSON" | jq -r .mergeable)
+  PR_BRANCH=$(echo "$PR_JSON" | jq -r .headRefName)
+  PR_TITLE=$(echo "$PR_JSON" | jq -r .title)
+  echo "[3/7] PR #$PR_NUM: state=$PR_STATE mergeable=$PR_MERGEABLE branch=$PR_BRANCH"
+  echo "       title: $PR_TITLE"
 
-if [ -z "$ISSUE" ]; then
-  # Local artifacts (tmux window, worktree, branch) are keyed on the branch
-  # name provision-worker.sh assigned at spawn time — prefer that as the
-  # stronger signal over closingIssuesReferences, which only reflects
-  # closing keywords in the PR *body* (empty for a title-only "fixes #N")
-  # and, being free-text, could in principle name a different issue than
-  # the one this actual worker branch belongs to.
-  if [[ "$PR_BRANCH" =~ ^fix/issue-([0-9]+) ]]; then
-    ISSUE="${BASH_REMATCH[1]}"
-    echo "       branch name encodes issue #$ISSUE — using it for cleanup"
-  else
-    LINKED_ISSUE=$(echo "$PR_JSON" | jq -r '.closingIssuesReferences[0].number // empty')
-    if [ -n "$LINKED_ISSUE" ]; then
-      ISSUE="$LINKED_ISSUE"
-      echo "       branch name doesn't match fix/issue-N; using closing-issue reference #$ISSUE instead"
+  if [ -z "$ISSUE" ]; then
+    # Local artifacts (tmux window, worktree, branch) are keyed on the branch
+    # name provision-worker.sh assigned at spawn time — prefer that as the
+    # stronger signal over closingIssuesReferences, which only reflects
+    # closing keywords in the PR *body* (empty for a title-only "fixes #N")
+    # and, being free-text, could in principle name a different issue than
+    # the one this actual worker branch belongs to.
+    if [[ "$PR_BRANCH" =~ ^fix/issue-([0-9]+) ]]; then
+      ISSUE="${BASH_REMATCH[1]}"
+      echo "       branch name encodes issue #$ISSUE — using it for cleanup"
     else
-      echo "       $(c_amber "⚠ no linked issue — issue-keyed cleanup (tmux window / worktree) will be skipped")"
+      LINKED_ISSUE=$(echo "$PR_JSON" | jq -r '.closingIssuesReferences[0].number // empty')
+      if [ -n "$LINKED_ISSUE" ]; then
+        ISSUE="$LINKED_ISSUE"
+        echo "       branch name doesn't match fix/issue-N; using closing-issue reference #$ISSUE instead"
+      else
+        echo "       $(c_amber "⚠ no linked issue — issue-keyed cleanup (tmux window / worktree) will be skipped")"
+      fi
     fi
   fi
-fi
 
-case "$PR_STATE" in
-  OPEN)
-    if [ "$PR_MERGEABLE" = "CONFLICTING" ]; then
-      echo "ERROR: PR #$PR_NUM has merge conflicts. Resolve first." >&2
-      echo "       See \$LLM_SWARM_DOCS/VCS/git-github.md for the playbook." >&2
-      exit 1
-    fi
-    # Self-review verdict gate (ringer concept #2 — docs/ringer-adoptions.md).
-    # Latest SWARM_SELF_REVIEW marker comment (from self-review-pr.sh) wins.
-    VERDICT=$(gh pr view "$PR_NUM" --json comments -q '.comments[].body' 2>/dev/null \
-              | grep -oE 'SWARM_SELF_REVIEW: (APPROVE_WITH_CAVEATS|APPROVE|BLOCK)' \
-              | tail -1 | sed 's/^SWARM_SELF_REVIEW: //' || true)
-    case "$VERDICT" in
-      BLOCK)
-        if [ "$OVERRIDE_REVIEW" = 0 ]; then
-          echo "ERROR: PR #$PR_NUM has a self-review BLOCK verdict. Read the review" >&2
-          echo "       comment on the PR; merge with --override-review if you disagree." >&2
-          exit 1
-        fi
-        echo "       $(c_amber "⚠ overriding self-review BLOCK verdict (--override-review)")"
-        ;;
-      APPROVE_WITH_CAVEATS)
-        echo "       $(c_amber "self-review: APPROVE_WITH_CAVEATS — read the caveat on the PR")" ;;
-      APPROVE)
-        echo "       $(c_green "self-review: APPROVE")" ;;
-      *)
-        echo "       $(c_dim "no self-review verdict comment (optional: scripts/self-review-pr.sh $PR_NUM --post)")" ;;
-    esac
-    # Migration collision gate (#294): duplicate Flyway versions / Alembic
-    # multi-heads only exist in the *union* of base + head branches, so this
-    # is the last point they can be reliably caught before merge.
-    if [ "${MIGRATION_GATE:-1}" = "0" ]; then
-      echo "       $(c_dim "migration gate: skipped (MIGRATION_GATE=0)")"
-    else
-      MIGRATION_RC=0
-      "$SCRIPT_DIR/migration-collision-check.sh" "$PR_NUM" || MIGRATION_RC=$?
-      case "$MIGRATION_RC" in
-        0) echo "       $(c_green "migration gate: clean")" ;;
-        4) echo "       $(c_dim "migration gate: no migration files touched")" ;;
-        2)
-          if [ "$OVERRIDE_MIGRATION_GATE" = 0 ]; then
-            echo "ERROR: PR #$PR_NUM has a migration collision (duplicate Flyway" >&2
-            echo "       version or Alembic multi-head). Run" >&2
-            echo "       scripts/migration-collision-check.sh $PR_NUM for details;" >&2
-            echo "       merge with --override-migration-gate if you disagree." >&2
+  case "$PR_STATE" in
+    OPEN)
+      if [ "$PR_MERGEABLE" = "CONFLICTING" ]; then
+        echo "ERROR: PR #$PR_NUM has merge conflicts. Resolve first." >&2
+        echo "       See \$LLM_SWARM_DOCS/VCS/git-github.md for the playbook." >&2
+        exit 1
+      fi
+      # Self-review verdict gate (ringer concept #2 — docs/ringer-adoptions.md).
+      # Latest SWARM_SELF_REVIEW marker comment (from self-review-pr.sh) wins.
+      VERDICT=$(gh pr view "$PR_NUM" --json comments -q '.comments[].body' 2>/dev/null \
+                | grep -oE 'SWARM_SELF_REVIEW: (APPROVE_WITH_CAVEATS|APPROVE|BLOCK)' \
+                | tail -1 | sed 's/^SWARM_SELF_REVIEW: //' || true)
+      case "$VERDICT" in
+        BLOCK)
+          if [ "$OVERRIDE_REVIEW" = 0 ]; then
+            echo "ERROR: PR #$PR_NUM has a self-review BLOCK verdict. Read the review" >&2
+            echo "       comment on the PR; merge with --override-review if you disagree." >&2
             exit 1
           fi
-          echo "       $(c_amber "⚠ overriding migration collision (--override-migration-gate)")"
+          echo "       $(c_amber "⚠ overriding self-review BLOCK verdict (--override-review)")"
           ;;
+        APPROVE_WITH_CAVEATS)
+          echo "       $(c_amber "self-review: APPROVE_WITH_CAVEATS — read the caveat on the PR")" ;;
+        APPROVE)
+          echo "       $(c_green "self-review: APPROVE")" ;;
         *)
-          echo "ERROR: migration-collision-check.sh failed (exit $MIGRATION_RC)" >&2
-          exit 1
-          ;;
+          echo "       $(c_dim "no self-review verdict comment (optional: scripts/self-review-pr.sh $PR_NUM --post)")" ;;
       esac
-    fi
-    echo "[4/7] merging PR #$PR_NUM (squash, delete-branch)…"
-    # gh pr merge's local-delete step may fail; tolerate it.
-    if ! gh pr merge "$PR_NUM" --squash --delete-branch; then
-      echo "       (local-delete step may have failed; that's expected if branch is still checked out in a worktree — sweep will clean it)"
-    fi
-    ;;
-  MERGED)
-    echo "[4/7] PR #$PR_NUM already MERGED — proceeding to cleanup"
-    ;;
-  CLOSED)
-    echo "ERROR: PR #$PR_NUM is CLOSED (not merged). Nothing to do." >&2
-    exit 1
-    ;;
-  *)
-    echo "ERROR: PR #$PR_NUM in unexpected state: $PR_STATE" >&2
-    exit 1
-    ;;
-esac
+      # Migration collision gate (#294): duplicate Flyway versions / Alembic
+      # multi-heads only exist in the *union* of base + head branches, so this
+      # is the last point they can be reliably caught before merge.
+      if [ "${MIGRATION_GATE:-1}" = "0" ]; then
+        echo "       $(c_dim "migration gate: skipped (MIGRATION_GATE=0)")"
+      else
+        MIGRATION_RC=0
+        "$SCRIPT_DIR/migration-collision-check.sh" "$PR_NUM" || MIGRATION_RC=$?
+        case "$MIGRATION_RC" in
+          0) echo "       $(c_green "migration gate: clean")" ;;
+          4) echo "       $(c_dim "migration gate: no migration files touched")" ;;
+          2)
+            if [ "$OVERRIDE_MIGRATION_GATE" = 0 ]; then
+              echo "ERROR: PR #$PR_NUM has a migration collision (duplicate Flyway" >&2
+              echo "       version or Alembic multi-head). Run" >&2
+              echo "       scripts/migration-collision-check.sh $PR_NUM for details;" >&2
+              echo "       merge with --override-migration-gate if you disagree." >&2
+              exit 1
+            fi
+            echo "       $(c_amber "⚠ overriding migration collision (--override-migration-gate)")"
+            ;;
+          *)
+            echo "ERROR: migration-collision-check.sh failed (exit $MIGRATION_RC)" >&2
+            exit 1
+            ;;
+        esac
+      fi
+      echo "[4/7] merging PR #$PR_NUM (squash, delete-branch)…"
+      # gh pr merge's local-delete step may fail; tolerate it.
+      if ! gh pr merge "$PR_NUM" --squash --delete-branch; then
+        echo "       (local-delete step may have failed; that's expected if branch is still checked out in a worktree — sweep will clean it)"
+      fi
+      ;;
+    MERGED)
+      echo "[4/7] PR #$PR_NUM already MERGED — proceeding to cleanup"
+      ;;
+    CLOSED)
+      # Not "nothing to do": the PR is dead but the worker's tmux window and
+      # worktree are still on disk, and that is precisely what steps 5-7 clean.
+      if [ -n "$ISSUE" ]; then
+        housekeep_or_die "PR #$PR_NUM is CLOSED (not merged)"
+      else
+        echo "ERROR: PR #$PR_NUM is CLOSED (not merged) and has no linked issue," >&2
+        echo "       so there are no issue-keyed artifacts to clean up." >&2
+        exit 1
+      fi
+      ;;
+    *)
+      echo "ERROR: PR #$PR_NUM in unexpected state: $PR_STATE" >&2
+      exit 1
+      ;;
+  esac
+else
+  # Housekeeping-only: no PR exists, so there is nothing to inspect or gate.
+  # Steps 5-7 below are keyed on $ISSUE and run exactly as they would after a
+  # normal merge.
+  echo "[3/7] no PR to inspect for issue #$ISSUE"
+  echo "[4/7] nothing to merge — housekeeping only"
+fi
 
 if [ -n "$ISSUE" ]; then
   # Wait for watcher to reap the worktree + tmux window.
@@ -342,7 +408,13 @@ echo "[7/7] running local-branch sweep…"
 run_sweep
 
 echo
-if [ -n "$ISSUE" ]; then
+if [ "$HOUSEKEEP_ONLY" = 1 ]; then
+  if [ -n "$PR_NUM" ]; then
+    echo "$(c_green "Done.") Housekeeping complete for issue #$ISSUE (PR #$PR_NUM was not merged)."
+  else
+    echo "$(c_green "Done.") Housekeeping complete for issue #$ISSUE (no PR; nothing merged)."
+  fi
+elif [ -n "$ISSUE" ]; then
   echo "$(c_green "Done.") PR #$PR_NUM merged for issue #$ISSUE."
 else
   echo "$(c_green "Done.") PR #$PR_NUM merged (no linked issue)."
