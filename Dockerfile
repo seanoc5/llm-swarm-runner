@@ -126,6 +126,36 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     && apt-get update && apt-get install -y gh \
     && rm -rf /var/lib/apt/lists/*
 
+# Headless Chrome (Selenium / Playwright / Puppeteer browser E2E tests).
+#
+# Why this is in the base image (#371): GitHub's ubuntu-latest runners ship
+# Chrome preinstalled, so a project's browser E2E suite is green in CI and
+# fails only inside the sandbox ("Chrome instance exited" / SessionNotCreated).
+# A worker has no way to tell that apart from a real regression, so it labels
+# the failure "environmental" and ships around the gate — the same failure
+# shape as the missing UTF-8 locale in #323. Costs ~720 MB of image
+# (measured 6.37 GB -> 7.09 GB); the alternative is every JVM/Node project
+# with a browser test permanently unable to run it under the swarm.
+#
+# Not version-pinned, per the apt-managed policy above. chromedriver is NOT
+# installed: Selenium Manager (bundled with selenium-java 4.6+) and
+# Playwright/Puppeteer resolve a driver matching whatever Chrome is present
+# at test time, which is more robust than pinning a pair here.
+RUN curl -fsSL https://dl.google.com/linux/linux_signing_key.pub \
+    | gpg --dearmor -o /usr/share/keyrings/google-chrome-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/google-chrome-keyring.gpg] \
+       https://dl.google.com/linux/chrome/deb/ stable main" \
+    > /etc/apt/sources.list.d/google-chrome.list \
+    && apt-get update && apt-get install -y --no-install-recommends google-chrome-stable \
+    && rm -rf /var/lib/apt/lists/*
+
+# Point the common browser-automation env vars at the installed binary so
+# tool-specific auto-detection never has to guess, and stop Puppeteer from
+# downloading a second private copy of Chromium into every worker's ~/.cache.
+ENV CHROME_BIN=/usr/bin/google-chrome
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome
+ENV PUPPETEER_SKIP_DOWNLOAD=true
+
 # Create non-root user matching host UID
 ARG HOST_UID=1000
 ARG HOST_GID=1000

@@ -15,6 +15,7 @@ This document covers advanced workflows, custom mounts, and manual Git worktree 
   - [Per-container claude config isolation (SANDBOX_REFRESH_CLAUDE_CONFIG)](#per-container-claude-config-isolation-sandbox_refresh_claude_config)
 - [Docker Integrations](#docker-integrations)
   - [Testcontainers / Docker CLI](#testcontainers--docker-cli)
+  - [Headless Chrome / browser E2E tests](#headless-chrome--browser-e2e-tests)
   - [Rebuilding the Image](#rebuilding-the-image)
 - [Worker Escape Hatch (Ctrl-Z opens a sibling bash pane)](#worker-escape-hatch-ctrl-z-opens-a-sibling-bash-pane)
 - [Peering at Workers from the Host (capture-pane)](#peering-at-workers-from-the-host-capture-pane)
@@ -258,6 +259,16 @@ SANDBOX_REFRESH_CLAUDE_CONFIG=1 ./sandbox.sh /opt/work/myproject claude
 The host Docker socket (`/var/run/docker.sock`) is mounted automatically when present. Socket write access is actually granted via `--group-add "$(stat -c '%g' /var/run/docker.sock)"` on the `docker run` line in `sandbox.sh` (sandbox.sh:190); `entrypoint.sh` merely registers a group named `docker` with the host's GID (`sudo groupadd -f -g "$DOCKER_GID" docker`, entrypoint.sh:5) so group-name lookups don't warn — it does not add the sandbox user to any group itself. `TESTCONTAINERS_HOST_OVERRIDE=localhost` is set automatically so Testcontainers resolves mapped ports correctly with `--network host`.
 
 `_JAVA_OPTIONS=-Dapi.version=1.45` is also set automatically so Testcontainers' shaded docker-java client negotiates a Docker Engine API version that modern daemons (Docker 25+, minimum API 1.40) will accept — without this, every `@SpringBootTest` using Testcontainers fails with `client version 1.32 is too old`. Override per-invocation with `_JAVA_OPTIONS=-Dapi.version=<other> ./sandbox.sh …`, or per-project via `systemProperty("api.version", "…")` in your `build.gradle.kts` test block (project-level wins, because it's set on the forked test JVM).
+
+### Headless Chrome / browser E2E tests
+
+`google-chrome-stable` is installed in the image (#371), and `CHROME_BIN`, `PUPPETEER_EXECUTABLE_PATH` and `PUPPETEER_SKIP_DOWNLOAD=true` are set so Selenium Manager, Playwright and Puppeteer all find it without downloading a private copy per worker.
+
+This is here to close a CI-vs-sandbox divergence, not as a convenience. GitHub's `ubuntu-latest` runners ship Chrome preinstalled, so a browser E2E test is green on the authoritative merge gate and structurally impossible inside a worker — a worker hitting it cannot distinguish "no browser in this container" from a real regression, so it labels the failure environmental and ships around the gate. Same shape as the missing UTF-8 locale in #323.
+
+No chromedriver is installed on purpose: Selenium Manager (selenium-java 4.6+) and Playwright/Puppeteer resolve a driver matching whatever Chrome is present at test time. Pinning a Chrome/driver pair in the image would drift out of match.
+
+Note that browser tests bound to a **fixed** port (Spring's `WebEnvironment.DEFINED_PORT`, a hardcoded OIDC redirect URI) still collide across concurrent workers: sandboxes run with `--network host`, so every worker container shares one network namespace. Prefer a random port, or run such a suite one worker at a time.
 
 ### Rebuilding the Image
 
