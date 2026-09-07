@@ -121,6 +121,44 @@ pre-commit hook, then CI on the PR). Rules:
 
 ---
 
+## A failure you did not cause still needs a named mechanism
+
+"Environmental", "pre-existing", "flaky" and "unrelated" are *conclusions*,
+not observations. Report one only with **a named mechanism plus one piece of
+evidence you actually collected**, cited inline. Budget: one command, ~2
+minutes — a bounded exception to the thriftiness rule above, not licence to
+debug someone else's suite on your task budget.
+
+Cheapest evidence first; stop at the first one that answers:
+
+- Does it reproduce **without your change**? (`git worktree add` at the
+  merge-base, run just the failing class.)
+- Is that same test green on CI for the branch you forked from?
+  (`gh run list --branch <base> --limit 1`)
+- What does the environment actually say — `docker ps`, is the binary on
+  PATH, is the port already bound?
+
+**"Cause unknown" is a correct report.** *"27 failures in UserServiceTest and
+SecurityAccessTest; cause not established; my change touched only
+`fingerprint/`"* is honest and keeps the reader looking. *"Pre-existing
+environmental flake"* tells the reader to stop looking, and is a claim you
+must be able to defend. Never write the second when you mean the first.
+
+**Your evidence has to be consistent with your claim.** The incident this
+section exists for (civicstrata iss-309, 2026-09-06): a worker reported 27
+integration failures as a "stale reused Testcontainers instance" *after* its
+own `docker ps` had printed `Up About a minute` — the disproof was on screen
+and went unread. The real cause was two test profiles sharing one database,
+each configured to drop every table on shutdown. State the mechanism in words
+the evidence you gathered can contradict.
+
+Anything you could not diagnose goes in the PR body **and** the `## Follow-up
+suggestions` block — never only in your scrollback. Two workers calling the
+same failure "environmental" on the same night is how a broken merge gate
+becomes ambient noise nobody re-examines.
+
+---
+
 ## Pane replies: front-load the answer; never assert operator state
 
 Two rules for live pane replies — the ad-hoc back-and-forth during a task,
