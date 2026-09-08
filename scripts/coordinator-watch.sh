@@ -2123,6 +2123,17 @@ mtime_epoch() {
     stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
 }
 
+# Portable ctime (epoch seconds — "last metadata change", GNU %Z / BSD %c).
+# Deliberately distinct from mtime_epoch: a same-filesystem `mv` (rename(2))
+# preserves a file's mtime (content unchanged) but always bumps its ctime,
+# which is exactly what worker_current_task_terminal()'s issue #370 fallback
+# needs — "when was this brief actually claimed into processing/", not "when
+# was its content last written" (those can be far apart for a brief that sat
+# queued in inbox/ for a while before being claimed).
+ctime_epoch() {
+    stat -c %Z "$1" 2>/dev/null || stat -f %c "$1" 2>/dev/null
+}
+
 # --- Stale-daemon self-check (issue #296) -----------------------------------
 #
 # WATCHER_SELF_PATH/WATCHER_LAUNCH_MTIME capture this script's own identity
@@ -3826,13 +3837,21 @@ worker_pending_brief() {
 # worker_task_done()'s header comment, nothing ever deletes a requeued
 # worktree's past status files, so a genuinely in-flight NEW task could
 # misread an OLD task's leftover ready-for-review record as its own. Guard
-# with mtime instead: claim_next_task()'s mv preserves the source file's
-# mtime, so proc_file's mtime is ~"when this task became available" — which
-# is always AFTER any prior task's own status file was written (that prior
-# task had to conclude before this brief could even be authored). A
-# mismatched-name record for the CURRENT task can only be written after
-# that same point, so only a status file whose mtime is >= proc_file's
-# mtime is trusted here.
+# with a timestamp instead — but ctime of proc_file, NOT its mtime:
+# requeue.sh can drop a follow-up brief into inbox/ well before it's
+# claimed (worker.md's "mid-task" follow-up case), and claim_next_task()'s
+# same-filesystem mv preserves that brief's mtime (content unchanged) while
+# only bumping its ctime (rename(2) always updates ctime). mtime would
+# therefore read as "when the brief was authored", which can predate a
+# PRIOR task's own conclusion and status write — exactly the false-positive
+# a self-review pass on this fix caught: an in-flight/blocked task B (brief
+# authored before task A even finished) would wrongly inherit A's terminal
+# status. ctime is "when this brief was actually claimed into processing/",
+# which — because dispatch_agent(A) fully returns before the SAME listener
+# process ever calls claim_next_task() again — is always strictly after any
+# prior task's own status write. So: trust a mismatched-name status file
+# only when its mtime (its own write time) is >= proc_file's ctime (this
+# task's claim time).
 worker_current_task_terminal() {
     local wt_dir="$1"
     [ "$HAVE_JQ" = "1" ] || return 1
@@ -3849,14 +3868,14 @@ worker_current_task_terminal() {
         esac
     fi
 
-    local proc_mtime f mtime
-    proc_mtime="$(mtime_epoch "$proc_file")"
-    [ -n "$proc_mtime" ] || return 1
+    local proc_ctime f mtime
+    proc_ctime="$(ctime_epoch "$proc_file")"
+    [ -n "$proc_ctime" ] || return 1
     shopt -s nullglob
     for f in "$wt_dir/.swarm/tasks/status"/*.json; do
         case "$f" in *.check.json) continue ;; esac
         mtime="$(mtime_epoch "$f")"
-        [ -n "$mtime" ] && [ "$mtime" -ge "$proc_mtime" ] || continue
+        [ -n "$mtime" ] && [ "$mtime" -ge "$proc_ctime" ] || continue
         state="$(jq -r '.state // empty' "$f" 2>/dev/null)" || continue
         case "$state" in
             ready-for-review|done-no-pr)

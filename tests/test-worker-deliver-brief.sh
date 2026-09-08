@@ -46,7 +46,7 @@ extract_fn() {
     sed -n "/^${fn}() {/,/^}/p" "$WATCH"
 }
 for fn in worker_pane_state worker_pane_busy worker_pane_ctx_used worker_pending_brief \
-          worker_current_task_terminal mtime_epoch compact_last_pane_line compact_composer_clear \
+          worker_current_task_terminal mtime_epoch ctime_epoch compact_last_pane_line compact_composer_clear \
           compact_confirm_submitted compact_retract_queued worker_deliver_record_failure \
           worker_deliver_record_success maybe_worker_deliver_brief log_event; do
     body="$(extract_fn "$fn")"
@@ -168,12 +168,17 @@ heading "Test 2b: worker_current_task_terminal — issue #370 mismatched task_id
 # status/issue-517.json sitting next to processing/20260906-230823-517.md.
 # Without a fallback, the exact-name miss blocks delivery FOREVER (unlike
 # every other worker.deliver.skip reason, this one never self-heals).
+#
+# Timestamps here use real wall-clock ordering (sleep), not `touch -d`:
+# the fix keys off proc_file's CTIME (bumped by rename(2)/creation, always
+# "now" at the moment of the operation — see the ctime_epoch/mtime_epoch
+# split in worker_current_task_terminal()'s header comment), which can't be
+# backdated the way `touch -d` backdates mtime.
 rm -f "$PROCESSING_DIR"/*.md "$STATUS_DIR"/*.json 2>/dev/null || true
 echo "the current task brief" > "$PROCESSING_DIR/20260906-230823-517.md"
-touch -d "2026-09-06 23:08:23" "$PROCESSING_DIR/20260906-230823-517.md"
+sleep 1.1
 printf '{"task_id":"issue-517","state":"ready-for-review","pr":123,"ts":"2026-09-06T23:10:00Z","note":""}' \
     > "$STATUS_DIR/issue-517.json"
-touch -d "2026-09-06 23:10:00" "$STATUS_DIR/issue-517.json"
 rc=0; worker_current_task_terminal "$WT_DIR" || rc=$?
 check "mismatched task_id, status written AFTER the current claim -> rc0 (fallback trusts it)" "0" "$rc"
 
@@ -181,13 +186,16 @@ check "mismatched task_id, status written AFTER the current claim -> rc0 (fallba
 # EARLIER, already-concluded task in the same (requeued) worktree — which
 # per worker_task_done()'s header comment never gets deleted — must NOT be
 # mistaken for the CURRENT, still-genuinely-in-flight task's own record just
-# because its name happens to collide with a plausible fallback key.
+# because its name happens to collide with a plausible fallback key. Here
+# the stale record is written FIRST, and the current brief is only claimed
+# (echoed into processing/) afterward — mirroring requeue.sh dropping a
+# follow-up brief that then sits queued until claimed, well after some
+# earlier task already concluded and wrote this leftover status file.
 rm -f "$PROCESSING_DIR"/*.md "$STATUS_DIR"/*.json 2>/dev/null || true
 printf '{"task_id":"issue-517","state":"ready-for-review","pr":99,"ts":"2026-09-01T00:00:00Z","note":""}' \
     > "$STATUS_DIR/issue-517.json"
-touch -d "2026-09-01 00:00:00" "$STATUS_DIR/issue-517.json"
+sleep 1.1
 echo "a brand new follow-up brief, still genuinely in flight" > "$PROCESSING_DIR/20260906-230823-517.md"
-touch -d "2026-09-06 23:08:23" "$PROCESSING_DIR/20260906-230823-517.md"
 rc=0; worker_current_task_terminal "$WT_DIR" || rc=$?
 check "mismatched task_id, but status predates the current claim -> rc1 (stale record rejected)" "1" "$rc"
 
