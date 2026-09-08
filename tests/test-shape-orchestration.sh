@@ -302,6 +302,20 @@ grep -q 'SANDBOX_DEP_CACHE=/fake/dep-cache' "$TEST_DIR/tmux.log" \
     || red "expected SANDBOX_DEP_CACHE in tmux spawn env; got: $(cat "$TEST_DIR/tmux.log")"
 green "SANDBOX_DEP_CACHE set only in .swarm/.env reaches the tmux new-window env"
 
+heading "Test 6c: provision-worker.sh propagates SANDBOX_ALLOW_BACKGROUND_TASKS from <project>/.swarm/.env to the tmux spawn (#298)"
+cd "$PROJECT_DIR"
+# Same #333 failure mode as Test 6b, applied to the foreground-only opt-out:
+# set ONLY in the project .env file, never in this shell's env, so a silently
+# dropped whitelist entry can't hide behind an already-exported value.
+mkdir -p "$PROJECT_DIR/.swarm"
+echo "SANDBOX_ALLOW_BACKGROUND_TASKS=1" > "$PROJECT_DIR/.swarm/.env"
+env -u SANDBOX_ALLOW_BACKGROUND_TASKS "$PROVISION" 99 > "$TEST_DIR/prov-6c.log" 2>&1 \
+    || red "provision-worker exit non-zero: $(cat "$TEST_DIR/prov-6c.log")"
+rm -f "$PROJECT_DIR/.swarm/.env"
+grep -q 'SANDBOX_ALLOW_BACKGROUND_TASKS=1' "$TEST_DIR/tmux.log" \
+    || red "expected SANDBOX_ALLOW_BACKGROUND_TASKS in tmux spawn env; got: $(cat "$TEST_DIR/tmux.log")"
+green "SANDBOX_ALLOW_BACKGROUND_TASKS set only in .swarm/.env reaches the tmux new-window env"
+
 heading "Test 7: sandbox-worktrees.sh rejects non-git directory"
 if env -u TMUX "$LIST" /tmp > "$TEST_DIR/list-err.log" 2>&1; then
     red "should have failed for non-git dir"
