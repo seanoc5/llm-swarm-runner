@@ -75,6 +75,25 @@ check_script() {
         fi
     fi
 
+    # 5. Specific logic checks for coordinator-claude.sh
+    if [[ "$script" == *"coordinator-claude.sh" ]]; then
+        # The coordinator is foreground-only too (#383). #301 covered workers
+        # only, and the 20h leaked poll loop that closed this gap was a
+        # coordinator — so this guard exists to stop the same one-role-only
+        # regression happening twice.
+        if ! grep -q 'CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1' "$script"; then
+            red "  ✗ $script: Missing CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 in coordinator env"
+            FAIL=$((FAIL + 1))
+            return
+        fi
+        # Deny by default; opting out is the explicit act (#298 pattern).
+        if ! grep -q 'COORDINATOR_ALLOW_BACKGROUND_TASKS:-0' "$script"; then
+            red "  ✗ $script: COORDINATOR_ALLOW_BACKGROUND_TASKS opt-out missing or doesn't default to deny"
+            FAIL=$((FAIL + 1))
+            return
+        fi
+    fi
+
     green "  ✓ $script: Passed sanity checks"
     PASS=$((PASS + 1))
 }
@@ -86,6 +105,7 @@ LLM_SWARM_DIR="${LLM_SWARM_DIR:-$(dirname "$TESTS_DIR")}"
 echo "=== Script Sanity Checks ==="
 check_script "$LLM_SWARM_DIR/llm-start.sh"
 check_script "$LLM_SWARM_DIR/sandbox.sh"
+check_script "$LLM_SWARM_DIR/scripts/coordinator-claude.sh"
 check_script "$LLM_SWARM_DIR/scripts/coordinator-codex.sh"
 check_script "$LLM_SWARM_DIR/scripts/worker-listener.sh"
 check_script "$LLM_SWARM_DIR/scripts/reap-orphan-worktrees.sh"

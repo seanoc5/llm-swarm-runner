@@ -251,7 +251,7 @@ The trade-off: a container's copy no longer picks up host-side `~/.claude.json` 
 SANDBOX_REFRESH_CLAUDE_CONFIG=1 ./sandbox.sh /opt/work/myproject claude
 ```
 
-### Allowing background Bash tasks in workers (`SANDBOX_ALLOW_BACKGROUND_TASKS`)
+### Foreground-only agents (`SANDBOX_ALLOW_BACKGROUND_TASKS`, `COORDINATOR_ALLOW_BACKGROUND_TASKS`)
 
 Worker containers run claude with `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` by default ([#301](https://github.com/seanoc5/llm-swarm-runner/issues/301)) — a mechanical backstop for the foreground-only rule in `prompts/worker.md`. This removes the `run_in_background` Bash option entirely (and the silent promote-to-background a foreground command gets when it hits its timeout), because a leaked background poll loop can run for hours after the state it was watching (e.g. a force-pushed-away sha) stops mattering ([#298](https://github.com/seanoc5/llm-swarm-runner/issues/298)).
 
@@ -261,6 +261,12 @@ This defaults to deny and is enforced regardless of `--dangerously-skip-permissi
 # /opt/work/myproject/.swarm/.env  — gitignored
 SANDBOX_ALLOW_BACKGROUND_TASKS=1
 ```
+
+**The coordinator is covered too** ([#383](https://github.com/seanoc5/llm-swarm-runner/issues/383)). `scripts/coordinator-claude.sh` exports the same variable unless `COORDINATOR_ALLOW_BACKGROUND_TASKS=1`. #301 originally covered worker containers only, and the incident that closed that gap was a coordinator: an `until tmux capture-pane -t iss-873 | grep -qE 'APPROVE|BLOCK'; do sleep 20; done` loop, started in the *foreground*, promoted to a background task by the harness, outliving the window it was watching (reaped, so the grep could never match) — ~20 hours before anyone noticed the stray `1 shell` indicator.
+
+The switch shuts three doors, and only the first is reachable by a `PreToolUse` hook: `run_in_background` is dropped from the Bash tool schema; `canAutoBackground` goes false, so a timed-out foreground command is not silently promoted; and the manual/deliver-message backgrounding path errors out. A hook sees the outgoing call, never the harness's later decision to detach it — which is why an operator-side hook alone could not have stopped this.
+
+The trade-off is intentional: a long command **blocks the pane in full view** rather than detaching into an indicator whose output nobody reads. Shell-level detachment written into the command itself (`cmd &`, `nohup`, `setsid`, `disown`, `screen -dm`, `tmux new-session -d`, `at`) is plain bash the harness never parses; that belongs in an operator-side `PreToolUse` hook as a literal-token blocklist.
 
 `coordinator-watch.sh` also runs a periodic fallback sweep (`WATCH_BG_VIOLATION_SWEEP_SECS`, on by default) that scans every `iss-*` worker pane for the background-shell UI markers Claude Code leaves behind ("Running in the background", "N shells still running" at rest) and drops a `fyi` message into that worker's outbox so the coordinator surfaces it on its next wake — this catches an opted-out project, a future harness change, or gemini/codex (which have no equivalent env-var switch; the prompt rule remains their only guard). See `scripts/coordinator-watch.sh`'s header comment for the full knob list.
 
