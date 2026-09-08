@@ -76,6 +76,20 @@ foreground. (Claude workers also have `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`
 set by the harness; this rule still fully binds gemini/codex workers and
 shell-level tricks.)
 
+**This is mechanically backstopped, not just prompted (issue #298).**
+`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` removes `run_in_background` from a
+Claude worker's Bash tool entirely, by default — a `run_in_background=true`
+call simply isn't an option to reach for, so there's nothing to retry or
+recover from. A project can opt out of that deny in its own `.swarm/.env`
+(`SANDBOX_ALLOW_BACKGROUND_TASKS=1`), and gemini/codex workers have no
+equivalent switch at all — for those two cases, and as a catch-all for
+shell-level `&`/`nohup`/`disown` tricks the permission layer can't see, the
+coordinator's watcher also sweeps every worker pane for the background-shell
+UI markers Claude Code leaves behind and flags a new sighting to the
+coordinator. If you see your own background attempt get silently declined,
+that's this backstop working as intended — switch to the foreground-with-
+timeout recipe above rather than retrying the same call.
+
 **If you want parallelism**, that is not your call — surface it in a
 `## Decision` block naming the right escape hatch:
 

@@ -251,6 +251,19 @@ The trade-off: a container's copy no longer picks up host-side `~/.claude.json` 
 SANDBOX_REFRESH_CLAUDE_CONFIG=1 ./sandbox.sh /opt/work/myproject claude
 ```
 
+### Allowing background Bash tasks in workers (`SANDBOX_ALLOW_BACKGROUND_TASKS`)
+
+Worker containers run claude with `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` by default ([#301](https://github.com/seanoc5/llm-swarm-runner/issues/301)) — a mechanical backstop for the foreground-only rule in `prompts/worker.md`. This removes the `run_in_background` Bash option entirely (and the silent promote-to-background a foreground command gets when it hits its timeout), because a leaked background poll loop can run for hours after the state it was watching (e.g. a force-pushed-away sha) stops mattering ([#298](https://github.com/seanoc5/llm-swarm-runner/issues/298)).
+
+This defaults to deny and is enforced regardless of `--dangerously-skip-permissions`, since it's an env-var feature switch, not a permission prompt. A project that has a legitimate need for background worker tasks can opt out per-project in `.swarm/.env`:
+
+```bash
+# /opt/work/myproject/.swarm/.env  — gitignored
+SANDBOX_ALLOW_BACKGROUND_TASKS=1
+```
+
+`coordinator-watch.sh` also runs a periodic fallback sweep (`WATCH_BG_VIOLATION_SWEEP_SECS`, on by default) that scans every `iss-*` worker pane for the background-shell UI markers Claude Code leaves behind ("Running in the background", "N shells still running" at rest) and drops a `fyi` message into that worker's outbox so the coordinator surfaces it on its next wake — this catches an opted-out project, a future harness change, or gemini/codex (which have no equivalent env-var switch; the prompt rule remains their only guard). See `scripts/coordinator-watch.sh`'s header comment for the full knob list.
+
 ## Docker Integrations
 
 ### Testcontainers / Docker CLI

@@ -66,6 +66,13 @@ check_script() {
             FAIL=$((FAIL + 1))
             return
         fi
+        # The mechanical deny must default to ON and be a per-project opt-in
+        # to disable, not the reverse (#298).
+        if ! grep -q 'SANDBOX_ALLOW_BACKGROUND_TASKS:-0' "$script"; then
+            red "  ✗ $script: SANDBOX_ALLOW_BACKGROUND_TASKS opt-out missing or doesn't default to deny"
+            FAIL=$((FAIL + 1))
+            return
+        fi
     fi
 
     green "  ✓ $script: Passed sanity checks"

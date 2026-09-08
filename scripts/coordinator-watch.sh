@@ -181,6 +181,44 @@
 #                           min-age-days/clean-tree/PR-finalized predicate is
 #                           what keeps this safe on a frequent-restart dev
 #                           loop, not sweep timing.
+#   WATCH_BG_VIOLATION_SWEEP_SECS=60
+#                           (issue #298) Fallback layer for the foreground-
+#                           only rule (prompts/worker.md § "Run long commands
+#                           in the foreground"). sandbox.sh's
+#                           CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 (#301) is
+#                           the primary, mechanical enforcement for claude
+#                           workers, but a project can opt out of it
+#                           (SANDBOX_ALLOW_BACKGROUND_TASKS=1) and gemini/
+#                           codex have no equivalent switch at all — for
+#                           those the prompt rule remains the only guard.
+#                           This sweep runs from the same background timer
+#                           loop as pr_poll_pass/orphan_sweep_pass above
+#                           (cheap: local capture-pane only, no gh/network
+#                           calls) and greps every iss-* window's rendered
+#                           pane for WATCH_BG_VIOLATION_PATTERN — the
+#                           background-shell UI markers a worker leaves
+#                           behind ("Running in the background", "N shells
+#                           still running" at rest). A NEW sighting (edge-
+#                           triggered via the BG_VIOLATION_LOGGED dedup map,
+#                           so an still-open background shell doesn't re-fire
+#                           every sweep) drops a `kind: fyi` message into
+#                           that worker's own .swarm/tasks/outbox/ — reusing
+#                           the existing WATCH_OUTBOX wake path (on_message)
+#                           instead of inventing a second one, so the
+#                           violation reaches the coordinator's wake report
+#                           the same way a worker-authored outbox message
+#                           does. Set to 0 to disable. See bg_violation_sweep_pass
+#                           for the detection logic and prompts/coordinator.md's
+#                           existing "If a worker backgrounds anyway" guidance
+#                           for what the coordinator does once it sees this
+#                           (flag it — never autoremediate a possibly
+#                           mid-task worker).
+#   WATCH_BG_VIOLATION_PATTERN
+#                           (issue #298) Override the grep -E pattern
+#                           bg_violation_sweep_pass matches against each
+#                           iss-* window's cleaned (ANSI-stripped) pane text.
+#                           Defaults to the two Claude Code UI markers named
+#                           above.
 #   WATCH_CHECK_ON_DONE=1   Set to 0 to disable check-on-done. When enabled,
 #                           the watcher treats a worker as "done" via either
 #                           signal: (a) a `.swarm/tasks/status/<id>.json`
@@ -1194,6 +1232,8 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     WATCHER_AUTOCLOSE_MODE merged which terminal PR states are reap-eligible: merged (MERGED only, default) | finalized (MERGED or CLOSED)
     WATCH_PR_POLL_SECS  60        periodic gh-poll backstop reap (0=off); see header comment
     WATCH_ORPHAN_SWEEP_SECS 3600  periodic reap-orphan-worktrees.sh sweep for window-less worktrees (0=off); see header comment
+    WATCH_BG_VIOLATION_SWEEP_SECS 60  periodic sweep for backgrounded-shell UI markers on iss-* panes (0=off); see header comment
+    WATCH_BG_VIOLATION_PATTERN    (auto)  grep -E pattern for the sweep above
     WATCH_CHECK_ON_DONE 1         run acceptance check when a worker signals done; see header comment
     SESSION_NAME        (auto)    tmux session for chk-N windows (llm-<project-basename>)
     WORKSPACE           (auto)    parent dir for wt-issue-* worktrees
@@ -1549,6 +1589,9 @@ KILL_FINISHED="${KILL_FINISHED:-$LLM_SWARM_DIR/scripts/kill-finished-workers.sh}
 WATCH_PR_POLL_SECS="${WATCH_PR_POLL_SECS:-60}"
 WATCH_ORPHAN_SWEEP_SECS="${WATCH_ORPHAN_SWEEP_SECS:-3600}"
 REAP_ORPHAN="${REAP_ORPHAN:-$LLM_SWARM_DIR/scripts/reap-orphan-worktrees.sh}"
+# issue #298 — fallback detection for the foreground-only rule; see header comment.
+WATCH_BG_VIOLATION_SWEEP_SECS="${WATCH_BG_VIOLATION_SWEEP_SECS:-60}"
+WATCH_BG_VIOLATION_PATTERN="${WATCH_BG_VIOLATION_PATTERN:-Running in the background|[0-9]+ shells? still running}"
 WATCH_CHECK_ON_DONE="${WATCH_CHECK_ON_DONE:-1}"
 # issue #314 — synthesize done/*.ok.json on done detection (parked
 # interactive workers never exit claude, so the listener's own outcome
@@ -1691,6 +1734,10 @@ if ! [[ "$WATCH_PR_POLL_SECS" =~ ^[0-9]+$ ]]; then
 fi
 if ! [[ "$WATCH_ORPHAN_SWEEP_SECS" =~ ^[0-9]+$ ]]; then
     echo "ERROR: WATCH_ORPHAN_SWEEP_SECS must be a non-negative integer (got: $WATCH_ORPHAN_SWEEP_SECS)" >&2
+    exit 1
+fi
+if ! [[ "$WATCH_BG_VIOLATION_SWEEP_SECS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: WATCH_BG_VIOLATION_SWEEP_SECS must be a non-negative integer (got: $WATCH_BG_VIOLATION_SWEEP_SECS)" >&2
     exit 1
 fi
 for _var in AUTO_COMPACT_THRESHOLD_TOKENS AUTO_COMPACT_PROBE_MAX_AGE_SECS \
@@ -1873,6 +1920,7 @@ post-outcomes: $POST_OUTCOMES$([ "$POST_OUTCOMES" = "1" ] && echo " (sweep: $SWE
 autoclose:     $WATCHER_AUTOCLOSE$([ "$WATCHER_AUTOCLOSE" = "1" ] && echo " (mode: $WATCHER_AUTOCLOSE_MODE [$AUTOCLOSE_PR_FLAG], script: $KILL_FINISHED)")
 pr-poll:       ${WATCH_PR_POLL_SECS}s$([ "$WATCH_PR_POLL_SECS" = "0" ] && echo " (disabled)")
 orphan-sweep:  ${WATCH_ORPHAN_SWEEP_SECS}s$([ "$WATCH_ORPHAN_SWEEP_SECS" = "0" ] && echo " (disabled)" || echo " (script: $REAP_ORPHAN)")
+bg-violation:  ${WATCH_BG_VIOLATION_SWEEP_SECS}s$([ "$WATCH_BG_VIOLATION_SWEEP_SECS" = "0" ] && echo " (disabled)" || echo " (foreground-only fallback detection, issue #298)")
 check-on-done: $WATCH_CHECK_ON_DONE$([ "$WATCH_CHECK_ON_DONE" = "1" ] && echo " (session: $SESSION_NAME)")
 auto-compact:  $AUTO_COMPACT$([ "$AUTO_COMPACT" = "1" ] && echo " (threshold: min(${AUTO_COMPACT_PCT}% of window, ${AUTO_COMPACT_THRESHOLD_CAP_TOKENS}), fallback: ${AUTO_COMPACT_THRESHOLD_TOKENS} tokens, require-window: ${AUTO_COMPACT_REQUIRE_WINDOW}, probe: $AUTO_COMPACT_PROBE, poll-tick: ${AUTO_COMPACT_TICK_SECS}s$([ "$AUTO_COMPACT_TICK_SECS" = "0" ] && echo " disabled"), cooldown: ${AUTO_COMPACT_COOLDOWN_SECS}s)")
 worker-compact: $WORKER_AUTO_COMPACT$([ "$WORKER_AUTO_COMPACT" = "1" ] && echo " (threshold: min(${WORKER_COMPACT_PCT}% of window, ${WORKER_COMPACT_THRESHOLD_CAP_TOKENS})/wrapup+$(( WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS - WORKER_COMPACT_THRESHOLD_TOKENS )), fallback: ${WORKER_COMPACT_THRESHOLD_TOKENS}/${WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS} tokens, require-window: ${WORKER_COMPACT_REQUIRE_WINDOW}, scan: ${WORKER_COMPACT_SCAN_SECS}s)")
@@ -1991,6 +2039,14 @@ LAST_MSG_WAKE=0
 # provisioned here) so a future worktree reusing the same issue number isn't
 # permanently suppressed.
 declare -A ORPHAN_PR_LOGGED=()
+
+# issue #298: dedups bg_violation_sweep_pass's outbox drop + log line so a
+# worker window with a still-open background shell doesn't get a fresh
+# violation message every WATCH_BG_VIOLATION_SWEEP_SECS tick forever. Keyed
+# by window name; cleared as soon as a sweep no longer matches
+# WATCH_BG_VIOLATION_PATTERN on that window's pane, so a later, genuinely
+# new occurrence re-fires instead of staying permanently suppressed.
+declare -A BG_VIOLATION_LOGGED=()
 
 # is_our_worktree <outcome-path>
 #
@@ -2417,6 +2473,132 @@ orphan_sweep_pass() {
     fi
 }
 
+# bg_violation_sweep_pass
+#
+# issue #298: fallback layer for the foreground-only rule — see
+# WATCH_BG_VIOLATION_SWEEP_SECS's header comment for the full rationale.
+# Enumerates every iss-* window (same style as worker_compact_pass below),
+# greps its cleaned (ANSI-stripped, same technique as worker_pane_busy)
+# pane text for WATCH_BG_VIOLATION_PATTERN, and on a NEW match (per the
+# BG_VIOLATION_LOGGED dedup map) drops a `kind: fyi` message into that
+# worker's own outbox — mktemp-without-.md-suffix then mv, the exact atomic
+# convention prompts/worker.md documents for worker-authored messages —
+# so the existing WATCH_OUTBOX watcher backend (run_inotify/run_poll,
+# already watching every wt-issue-*/.swarm/tasks/outbox/*.md) picks it up
+# and wakes the coordinator via the normal on_message path. No new wake
+# plumbing needed. Local capture-pane only (no gh/network calls), so this
+# lives in run_watch_timer_loop like orphan_sweep_pass, not its own
+# dedicated background process.
+bg_violation_sweep_pass() {
+    tmux has-session -t "$SESSION_NAME" 2>/dev/null || return 0
+
+    local windows
+    windows="$(tmux list-windows -t "$SESSION_NAME" -F '#{window_name}' 2>/dev/null | grep '^iss-' || true)"
+    [ -n "$windows" ] || return 0
+
+    local win
+    while IFS= read -r win; do
+        [ -n "$win" ] || continue
+        local issue wt_dir content clean matched_lines ml cand_lineno cand lineno matched
+        issue="${win#iss-}"
+        [[ "$issue" =~ ^[0-9]+$ ]] || continue
+        wt_dir="$WORKSPACE/wt-issue-$issue"
+        [ -d "$wt_dir" ] || continue
+
+        content="$(tmux capture-pane -t "$SESSION_NAME:$win" -p -S -200 2>/dev/null)" || continue
+        clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
+        # `-n` (line-numbered) + `-o` (match-only) gives "N:matched-text"
+        # per hit, one per line — every candidate is needed (not just the
+        # latest) because the self-match guard below can disqualify the
+        # most recent one and a real earlier marker would otherwise be
+        # hidden behind it (a self-review finding on the tail-1 version of
+        # this line). `|| true`: under this file's `set -euo pipefail`,
+        # the common no-match case makes grep exit 1 — pipefail then makes
+        # the whole pipeline (and thus this bare assignment) exit
+        # non-zero, which would abort the script under `set -e` on every
+        # ordinary tick. Only this function's sole call site
+        # (`bg_violation_sweep_pass || true`) currently masks that; fix it
+        # here too so a future direct call doesn't silently kill the
+        # watcher on its most common path.
+        matched_lines="$(printf '%s\n' "$clean" | LC_ALL=C grep -noE "$WATCH_BG_VIOLATION_PATTERN" 2>/dev/null)" || true
+
+        if [ -z "$matched_lines" ]; then
+            unset "BG_VIOLATION_LOGGED[$win]" 2>/dev/null || true
+            continue
+        fi
+        # Self-match guard (#298): the marker text this sweep looks for is
+        # quoted verbatim in this project's own docs/comments/PR text
+        # (docs/advanced-usage.md, prompts/worker.md, this file's header,
+        # the issue itself) — a worker that cats/greps those files, or
+        # views this feature's PR, renders the literal marker in its pane
+        # with no real backgrounded shell behind it. Rather than tighten
+        # WATCH_BG_VIOLATION_PATTERN (risking a missed real marker), treat
+        # a self-reference token found NEAR a candidate's line (prose
+        # quotes the marker and the token in the same sentence/paragraph)
+        # as documentation, not a violation for THAT candidate — scoped to
+        # a small window instead of the whole 200-line capture, since an
+        # earlier self-review found scanning the whole capture lets an
+        # unrelated, distant appearance of these tokens (e.g. worker.md's
+        # own description of this feature sitting in scrollback) mask a
+        # real, current violation elsewhere in the pane. Walks candidates
+        # most-recent-first (`tac`) and takes the first one NOT guarded,
+        # so a guarded/quoted latest hit no longer hides a real earlier one.
+        matched=""
+        lineno=""
+        while IFS= read -r ml; do
+            [ -n "$ml" ] || continue
+            cand_lineno="${ml%%:*}"
+            cand="${ml#*:}"
+            if printf '%s\n' "$clean" | sed -n "$((cand_lineno > 3 ? cand_lineno - 3 : 1)),$((cand_lineno + 3))p" \
+                | LC_ALL=C grep -qE 'WATCH_BG_VIOLATION|SANDBOX_ALLOW_BACKGROUND_TASKS|CLAUDE_CODE_DISABLE_BACKGROUND_TASKS'; then
+                continue
+            fi
+            matched="$cand"
+            lineno="$cand_lineno"
+            break
+        done < <(printf '%s\n' "$matched_lines" | tac)
+
+        if [ -z "$matched" ]; then
+            unset "BG_VIOLATION_LOGGED[$win]" 2>/dev/null || true
+            continue
+        fi
+        [ -n "${BG_VIOLATION_LOGGED[$win]:-}" ] && continue
+        BG_VIOLATION_LOGGED[$win]=1
+
+        # DRY_RUN=1 (log-only, like every other side-effecting pass in this
+        # file — autoclose, orphan_sweep_pass above): don't actually drop a
+        # real outbox message into a worker's worktree, just log that this
+        # pass would have.
+        if [ "$DRY_RUN" = "1" ]; then
+            log_event watch.bg_violation "issue=$issue window=$win marker=$matched dry_run=1"
+            continue
+        fi
+        log_event watch.bg_violation "issue=$issue window=$win marker=$matched"
+
+        [ "$WATCH_OUTBOX" = "1" ] || continue
+        local outbox tmp
+        outbox="$wt_dir/.swarm/tasks/outbox"
+        mkdir -p "$outbox" 2>/dev/null || continue
+        tmp="$(mktemp -p "$outbox" .tmp.XXXXXX 2>/dev/null)" || continue
+        # Mentions WATCH_BG_VIOLATION_SWEEP_SECS deliberately: besides
+        # pointing the reader at the config knob, it's one of this
+        # function's own self-match guard tokens (see above) — so if this
+        # message ever gets rendered back into an iss-* pane (a worker
+        # cats its own outbox, or the coordinator relays it), the sweep
+        # recognizes its own output instead of re-triggering on it.
+        cat > "$tmp" <<EOF
+---
+kind: fyi
+task_id: watcher-bg-violation
+ts: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+---
+Automated foreground-only check (issue #298, WATCH_BG_VIOLATION_SWEEP_SECS) detected a background-shell UI marker in iss-$issue's tmux pane: "$matched". This usually means a Bash call ran with run_in_background=true (or a shell-level &/nohup/disown), against prompts/worker.md's "Run long commands in the foreground" rule. Flag it in your next report as a worker-policy violation per prompts/coordinator.md's existing "If a worker backgrounds anyway" guidance — the pane may be mid-task, so don't try to autoremediate, just surface it.
+EOF
+        mv "$tmp" "$outbox/$(date -u +%Y%m%dT%H%M%SZ)-bg-violation-iss-$issue.md" 2>/dev/null \
+            || rm -f "$tmp" 2>/dev/null
+    done <<< "$windows"
+}
+
 # status_poll_pass
 #
 # Behavior B fast path (issue #119): scan every worktree's
@@ -2776,7 +2958,7 @@ SCRIPT
 # run_auto_compact_poll_loop, started as its own background process right
 # after this function.
 run_watch_timer_loop() {
-    local last_pr_poll=0 last_orphan_sweep=0 now
+    local last_pr_poll=0 last_orphan_sweep=0 last_bg_violation_sweep=0 now
     while true; do
         sleep 2
         [ "$WATCH_CHECK_ON_DONE" = "1" ] && { status_poll_pass || true; }
@@ -2792,6 +2974,13 @@ run_watch_timer_loop() {
             if [ $((now - last_orphan_sweep)) -ge "$WATCH_ORPHAN_SWEEP_SECS" ]; then
                 orphan_sweep_pass || true
                 last_orphan_sweep=$now
+            fi
+        fi
+        if [ "$WATCH_BG_VIOLATION_SWEEP_SECS" -gt 0 ]; then
+            now=$(date +%s)
+            if [ $((now - last_bg_violation_sweep)) -ge "$WATCH_BG_VIOLATION_SWEEP_SECS" ]; then
+                bg_violation_sweep_pass || true
+                last_bg_violation_sweep=$now
             fi
         fi
     done
@@ -4553,10 +4742,10 @@ run_poll() {
 # run_auto_compact_poll_loop's header comments for why those sweeps don't
 # share run_watch_timer_loop's process.
 # ---------------------------------------------------------------------------
-if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ] || [ "$WATCH_ORPHAN_SWEEP_SECS" -gt 0 ]; then
+if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ] || [ "$WATCH_ORPHAN_SWEEP_SECS" -gt 0 ] || [ "$WATCH_BG_VIOLATION_SWEEP_SECS" -gt 0 ]; then
     run_watch_timer_loop &
     WATCH_TIMER_PID=$!
-    log_event watch.timer.start "pr_poll_secs=$WATCH_PR_POLL_SECS check_on_done=$WATCH_CHECK_ON_DONE orphan_sweep_secs=$WATCH_ORPHAN_SWEEP_SECS"
+    log_event watch.timer.start "pr_poll_secs=$WATCH_PR_POLL_SECS check_on_done=$WATCH_CHECK_ON_DONE orphan_sweep_secs=$WATCH_ORPHAN_SWEEP_SECS bg_violation_sweep_secs=$WATCH_BG_VIOLATION_SWEEP_SECS"
 fi
 if [ "$WORKER_AUTO_COMPACT" = "1" ] || [ "$WORKER_AUTO_DELIVER" = "1" ]; then
     run_worker_compact_loop &

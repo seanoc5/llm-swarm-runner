@@ -65,10 +65,19 @@ cat > "$TEST_DIR/bin/tmux" <<EOF
 #!/usr/bin/env bash
 # Stub: provision-worker.sh uses has-session + list-windows + new-window.
 # Pretend the session always exists, no windows yet, log new-window calls.
+# list-windows/capture-pane also serve bg_violation_sweep_pass's Test 15
+# fixtures below (\$TEST_DIR/tmux-windows.txt, tmux-pane-<win>.txt) — both
+# are absent for every earlier test, so those two cases fall back to their
+# original no-output behavior until Test 15 populates them.
 TMUX_LOG="$TEST_DIR/tmux.log"
 case "\${1:-}" in
     has-session)   exit 0 ;;
-    list-windows)  exit 0 ;;
+    list-windows)  [ -f "$TEST_DIR/tmux-windows.txt" ] && cat "$TEST_DIR/tmux-windows.txt"; exit 0 ;;
+    capture-pane)
+        win=""; prev=""
+        for a in "\$@"; do [ "\$prev" = "-t" ] && win="\${a##*:}"; prev="\$a"; done
+        [ -f "$TEST_DIR/tmux-pane-\$win.txt" ] && cat "$TEST_DIR/tmux-pane-\$win.txt"
+        exit 0 ;;
     new-window)    echo "\$*" >> "\$TMUX_LOG" ;;
     *)             echo "stub-tmux: ignored: \$*" >> "\$TMUX_LOG" ;;
 esac
@@ -302,6 +311,20 @@ grep -q 'SANDBOX_DEP_CACHE=/fake/dep-cache' "$TEST_DIR/tmux.log" \
     || red "expected SANDBOX_DEP_CACHE in tmux spawn env; got: $(cat "$TEST_DIR/tmux.log")"
 green "SANDBOX_DEP_CACHE set only in .swarm/.env reaches the tmux new-window env"
 
+heading "Test 6c: provision-worker.sh propagates SANDBOX_ALLOW_BACKGROUND_TASKS from <project>/.swarm/.env to the tmux spawn (#298)"
+cd "$PROJECT_DIR"
+# Same #333 failure mode as Test 6b, applied to the foreground-only opt-out:
+# set ONLY in the project .env file, never in this shell's env, so a silently
+# dropped whitelist entry can't hide behind an already-exported value.
+mkdir -p "$PROJECT_DIR/.swarm"
+echo "SANDBOX_ALLOW_BACKGROUND_TASKS=1" > "$PROJECT_DIR/.swarm/.env"
+env -u SANDBOX_ALLOW_BACKGROUND_TASKS "$PROVISION" 99 > "$TEST_DIR/prov-6c.log" 2>&1 \
+    || red "provision-worker exit non-zero: $(cat "$TEST_DIR/prov-6c.log")"
+rm -f "$PROJECT_DIR/.swarm/.env"
+grep -q 'SANDBOX_ALLOW_BACKGROUND_TASKS=1' "$TEST_DIR/tmux.log" \
+    || red "expected SANDBOX_ALLOW_BACKGROUND_TASKS in tmux spawn env; got: $(cat "$TEST_DIR/tmux.log")"
+green "SANDBOX_ALLOW_BACKGROUND_TASKS set only in .swarm/.env reaches the tmux new-window env"
+
 heading "Test 7: sandbox-worktrees.sh rejects non-git directory"
 if env -u TMUX "$LIST" /tmp > "$TEST_DIR/list-err.log" 2>&1; then
     red "should have failed for non-git dir"
@@ -436,6 +459,184 @@ grep -q 'INTEGRATION-HOOK:.*wt-issue-77.*t77.ok.json' "$TEST_DIR/integration-hoo
 [ -f "$TEST_DIR/wt-issue-77/.swarm/tasks/done/t77.ok.json.posted" ] \
     || red ".posted marker missing — sweep should have written it"
 green "POST_OUTCOMES=1 fires sweep on event; hook called; .posted marker written"
+
+heading "Test 15a: bg_violation_sweep_pass flags a real background-shell marker (#298)"
+# Reuses wt-issue-77's worktree (issue number must be numeric, dir must
+# exist) as the sweep's target; iss-77 is a fresh window name not used by
+# any earlier test's tmux new-window assertions. DRY_RUN=0: this test
+# exercises the real outbox write, not just the log line (see Test 15c).
+echo "iss-77" > "$TEST_DIR/tmux-windows.txt"
+echo 'some worker output here' > "$TEST_DIR/tmux-pane-iss-77.txt"
+echo 'Running in the background' >> "$TEST_DIR/tmux-pane-iss-77.txt"
+rm -rf "$TEST_DIR/wt-issue-77/.swarm/tasks/outbox"
+
+cd "$PROJECT_DIR"
+DRY_RUN=0 WATCH_BG_VIOLATION_SWEEP_SECS=1 WATCH_PR_POLL_SECS=0 \
+    WATCH_ORPHAN_SWEEP_SECS=0 WATCH_CHECK_ON_DONE=0 POLL_SECS=1 \
+    "$WATCH" "$PROJECT_DIR" > "$TEST_DIR/watch-bgviol-a.log" 2>&1 &
+WATCH_PID=$!
+
+outbox_file=""
+for ((i=0; i<20; i++)); do
+    outbox_file="$(ls "$TEST_DIR"/wt-issue-77/.swarm/tasks/outbox/*.md 2>/dev/null | head -1)" || true
+    [ -n "$outbox_file" ] && break
+    sleep 0.5
+done
+kill "$WATCH_PID" 2>/dev/null || true
+wait "$WATCH_PID" 2>/dev/null || true
+unset WATCH_PID
+
+[ -n "$outbox_file" ] || red "expected a bg-violation outbox message; log: $(cat "$TEST_DIR/watch-bgviol-a.log")"
+grep -q 'kind: fyi' "$outbox_file" || red "expected kind: fyi in $outbox_file"
+grep -q 'iss-77' "$outbox_file" || red "expected issue reference in $outbox_file"
+green "real background-shell marker -> outbox fyi message dropped for iss-77"
+
+heading "Test 15b: bg_violation_sweep_pass self-match guard suppresses a documentation quote (#298)"
+# Same marker text, but on a line that also carries this feature's own
+# identifying token — as it would if a worker cats/greps docs/advanced-
+# usage.md or this file's own header comment describing the sweep.
+# DRY_RUN=0 (same as 15a) so an outbox file's absence proves the guard,
+# not merely DRY_RUN's own suppression (see Test 15c for that).
+rm -rf "$TEST_DIR/wt-issue-77/.swarm/tasks/outbox"
+cat > "$TEST_DIR/tmux-pane-iss-77.txt" <<'PANE'
+scans every iss-* worker pane for the background-shell UI markers Claude
+Code leaves behind ("Running in the background", "N shells still running"
+at rest) — see SANDBOX_ALLOW_BACKGROUND_TASKS for the opt-out.
+PANE
+
+cd "$PROJECT_DIR"
+DRY_RUN=0 WATCH_BG_VIOLATION_SWEEP_SECS=1 WATCH_PR_POLL_SECS=0 \
+    WATCH_ORPHAN_SWEEP_SECS=0 WATCH_CHECK_ON_DONE=0 POLL_SECS=1 \
+    "$WATCH" "$PROJECT_DIR" > "$TEST_DIR/watch-bgviol-b.log" 2>&1 &
+WATCH_PID=$!
+
+# No positive wait condition here (we're proving absence) — give the sweep
+# several ticks to have fired, same order of magnitude as Test 15a's wait.
+sleep 5
+still_running=0
+kill -0 "$WATCH_PID" 2>/dev/null && still_running=1
+kill "$WATCH_PID" 2>/dev/null || true
+wait "$WATCH_PID" 2>/dev/null || true
+unset WATCH_PID
+
+[ "$still_running" = "1" ] || red "watch process exited unexpectedly; log: $(cat "$TEST_DIR/watch-bgviol-b.log")"
+outbox_file="$(ls "$TEST_DIR"/wt-issue-77/.swarm/tasks/outbox/*.md 2>/dev/null | head -1)" || true
+[ -z "$outbox_file" ] \
+    || red "self-match guard failed to suppress a documentation quote; got: $(cat "$outbox_file")"
+green "documentation quote of the marker text does NOT produce a false-positive outbox message"
+
+heading "Test 15c: bg_violation_sweep_pass under DRY_RUN=1 logs but does not write a real outbox message (#298)"
+# Self-review finding: every other side-effecting pass in this file
+# (autoclose, orphan_sweep_pass) threads DRY_RUN so a log-only watcher run
+# never mutates a worker's worktree — bg_violation_sweep_pass must too.
+rm -rf "$TEST_DIR/wt-issue-77/.swarm/tasks/outbox"
+rm -f "$PROJECT_DIR/.swarm/events.log"
+echo 'iss-77' > "$TEST_DIR/tmux-windows.txt"
+printf 'some worker output here\nRunning in the background\n' > "$TEST_DIR/tmux-pane-iss-77.txt"
+
+cd "$PROJECT_DIR"
+DRY_RUN=1 WATCH_BG_VIOLATION_SWEEP_SECS=1 WATCH_PR_POLL_SECS=0 \
+    WATCH_ORPHAN_SWEEP_SECS=0 WATCH_CHECK_ON_DONE=0 POLL_SECS=1 \
+    "$WATCH" "$PROJECT_DIR" > "$TEST_DIR/watch-bgviol-c.log" 2>&1 &
+WATCH_PID=$!
+
+logged=0
+for ((i=0; i<20; i++)); do
+    if grep -q 'watch.bg_violation.*dry_run=1' "$PROJECT_DIR/.swarm/events.log" 2>/dev/null; then
+        logged=1
+        break
+    fi
+    sleep 0.5
+done
+kill "$WATCH_PID" 2>/dev/null || true
+wait "$WATCH_PID" 2>/dev/null || true
+unset WATCH_PID
+
+[ "$logged" = "1" ] || red "expected a dry_run=1 watch.bg_violation event; log: $(cat "$PROJECT_DIR/.swarm/events.log" 2>/dev/null || echo none)"
+outbox_file="$(ls "$TEST_DIR"/wt-issue-77/.swarm/tasks/outbox/*.md 2>/dev/null | head -1)" || true
+[ -z "$outbox_file" ] \
+    || red "DRY_RUN=1 should not write a real outbox message; got: $(cat "$outbox_file")"
+green "DRY_RUN=1 logs the violation but writes no real outbox message"
+
+heading "Test 15d: self-match guard does not mask a real, distant violation (#298)"
+# Self-review finding on the first guard version: scanning the WHOLE
+# 200-line capture for a guard token would let an unrelated, distant
+# appearance of one — e.g. prompts/worker.md's own description of this
+# feature sitting in scrollback from earlier in the session — mask a real
+# violation happening elsewhere in the same pane. Puts a guard token >3
+# lines away from the marker (outside the windowed check) and asserts the
+# violation still fires.
+rm -rf "$TEST_DIR/wt-issue-77/.swarm/tasks/outbox"
+echo 'iss-77' > "$TEST_DIR/tmux-windows.txt"
+{
+    echo 'earlier in this session the worker read prompts/worker.md,'
+    echo 'which explains SANDBOX_ALLOW_BACKGROUND_TASKS at length here'
+    echo '(filler filler filler filler filler filler filler filler)'
+    echo '(filler filler filler filler filler filler filler filler)'
+    echo '(filler filler filler filler filler filler filler filler)'
+    echo '(filler filler filler filler filler filler filler filler)'
+    echo 'Running in the background'
+} > "$TEST_DIR/tmux-pane-iss-77.txt"
+
+cd "$PROJECT_DIR"
+DRY_RUN=0 WATCH_BG_VIOLATION_SWEEP_SECS=1 WATCH_PR_POLL_SECS=0 \
+    WATCH_ORPHAN_SWEEP_SECS=0 WATCH_CHECK_ON_DONE=0 POLL_SECS=1 \
+    "$WATCH" "$PROJECT_DIR" > "$TEST_DIR/watch-bgviol-d.log" 2>&1 &
+WATCH_PID=$!
+
+outbox_file=""
+for ((i=0; i<20; i++)); do
+    outbox_file="$(ls "$TEST_DIR"/wt-issue-77/.swarm/tasks/outbox/*.md 2>/dev/null | head -1)" || true
+    [ -n "$outbox_file" ] && break
+    sleep 0.5
+done
+kill "$WATCH_PID" 2>/dev/null || true
+wait "$WATCH_PID" 2>/dev/null || true
+unset WATCH_PID
+
+[ -n "$outbox_file" ] \
+    || red "a distant guard-token mention wrongly suppressed a real violation; log: $(cat "$TEST_DIR/watch-bgviol-d.log")"
+green "a guard token more than 3 lines from the marker does not suppress a real violation"
+
+heading "Test 15e: a guarded later match does not hide a real earlier one in the same pane (#298)"
+# Self-review finding: taking only the LAST match (tail -1) meant a real
+# marker earlier in the capture could be hidden behind a LATER
+# documentation quote that the guard correctly disqualifies — the sweep
+# never even looked at the earlier, real one. Puts a real marker first,
+# then a guarded doc quote further down in the same pane, and asserts the
+# earlier real one still gets flagged.
+rm -rf "$TEST_DIR/wt-issue-77/.swarm/tasks/outbox"
+echo 'iss-77' > "$TEST_DIR/tmux-windows.txt"
+cat > "$TEST_DIR/tmux-pane-iss-77.txt" <<'PANE'
+Running in the background
+some worker output here
+some more worker output here
+scans every iss-* worker pane for the background-shell UI markers Claude
+Code leaves behind ("Running in the background", "N shells still running"
+at rest) — see SANDBOX_ALLOW_BACKGROUND_TASKS for the opt-out.
+PANE
+
+cd "$PROJECT_DIR"
+DRY_RUN=0 WATCH_BG_VIOLATION_SWEEP_SECS=1 WATCH_PR_POLL_SECS=0 \
+    WATCH_ORPHAN_SWEEP_SECS=0 WATCH_CHECK_ON_DONE=0 POLL_SECS=1 \
+    "$WATCH" "$PROJECT_DIR" > "$TEST_DIR/watch-bgviol-e.log" 2>&1 &
+WATCH_PID=$!
+
+outbox_file=""
+for ((i=0; i<20; i++)); do
+    outbox_file="$(ls "$TEST_DIR"/wt-issue-77/.swarm/tasks/outbox/*.md 2>/dev/null | head -1)" || true
+    [ -n "$outbox_file" ] && break
+    sleep 0.5
+done
+kill "$WATCH_PID" 2>/dev/null || true
+wait "$WATCH_PID" 2>/dev/null || true
+unset WATCH_PID
+
+[ -n "$outbox_file" ] \
+    || red "an earlier real marker was hidden behind a later guarded match; log: $(cat "$TEST_DIR/watch-bgviol-e.log")"
+green "a guarded later match does not hide an earlier real marker in the same pane"
+
+rm -f "$TEST_DIR/tmux-windows.txt" "$TEST_DIR/tmux-pane-iss-77.txt"
 
 # ────────────────────────── Done ──────────────────────────
 
