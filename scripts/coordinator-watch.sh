@@ -3811,6 +3811,28 @@ worker_pending_brief() {
 # called against. This reads the CURRENT processing/ entry's own status file
 # directly instead, with no such guard needed (there's nothing stale to
 # guard against — it's always THIS task's own record or nothing).
+#
+# issue #370: the exact-name lookup above can miss even when the current
+# task genuinely IS terminal — observed in the wild as
+# status/issue-517.json / status/pr-issue-397.json sitting next to a
+# processing/20260906-230823-517.md brief (written by maybe_run_check()'s
+# task_id fallback and/or a worker session that didn't echo its brief's own
+# inbox filename back as $TASK_ID). Exact-name miss then wedges delivery
+# FOREVER — task_not_terminal never self-heals on its own, unlike this
+# function's every other caller-side skip reason. So on a miss, fall back to
+# scanning status/ for any OTHER terminal record — but naively accepting
+# "any ready-for-review file in this worktree" would reintroduce exactly the
+# false-completion bug this function exists to prevent: per
+# worker_task_done()'s header comment, nothing ever deletes a requeued
+# worktree's past status files, so a genuinely in-flight NEW task could
+# misread an OLD task's leftover ready-for-review record as its own. Guard
+# with mtime instead: claim_next_task()'s mv preserves the source file's
+# mtime, so proc_file's mtime is ~"when this task became available" — which
+# is always AFTER any prior task's own status file was written (that prior
+# task had to conclude before this brief could even be authored). A
+# mismatched-name record for the CURRENT task can only be written after
+# that same point, so only a status file whose mtime is >= proc_file's
+# mtime is trusted here.
 worker_current_task_terminal() {
     local wt_dir="$1"
     [ "$HAVE_JQ" = "1" ] || return 1
@@ -3819,12 +3841,32 @@ worker_current_task_terminal() {
     [ -n "$proc_file" ] || return 1
     task_id="$(basename "$proc_file" .md)"
     status_file="$wt_dir/.swarm/tasks/status/${task_id}.json"
-    [ -r "$status_file" ] || return 1
-    state="$(jq -r '.state // empty' "$status_file" 2>/dev/null)" || return 1
-    case "$state" in
-        ready-for-review|done-no-pr) return 0 ;;
-        *)                           return 1 ;;
-    esac
+    if [ -r "$status_file" ]; then
+        state="$(jq -r '.state // empty' "$status_file" 2>/dev/null)" || return 1
+        case "$state" in
+            ready-for-review|done-no-pr) return 0 ;;
+            *)                           return 1 ;;
+        esac
+    fi
+
+    local proc_mtime f mtime
+    proc_mtime="$(mtime_epoch "$proc_file")"
+    [ -n "$proc_mtime" ] || return 1
+    shopt -s nullglob
+    for f in "$wt_dir/.swarm/tasks/status"/*.json; do
+        case "$f" in *.check.json) continue ;; esac
+        mtime="$(mtime_epoch "$f")"
+        [ -n "$mtime" ] && [ "$mtime" -ge "$proc_mtime" ] || continue
+        state="$(jq -r '.state // empty' "$f" 2>/dev/null)" || continue
+        case "$state" in
+            ready-for-review|done-no-pr)
+                shopt -u nullglob
+                return 0
+                ;;
+        esac
+    done
+    shopt -u nullglob
+    return 1
 }
 
 # WORKER_DELIVER_LAST_FAIL / WORKER_DELIVER_FAIL_COUNT / WORKER_DELIVER_GAVE_UP
