@@ -540,6 +540,32 @@ EOF
     append_eval_log "$outcome" "$finished" "$duration" "$rc"
 }
 
+# issue #375: requeue.sh best-effort posts a `SWARM_PENDING_BRIEF: queued`
+# marker comment on a target PR when it drops a follow-up brief into
+# inbox/ — so a human merging from GitHub doesn't merge past a queued
+# review-fix. Once THIS task (the one that drained that brief) finishes
+# with a PR resolved in its status file, the marker is stale: the fix (or
+# whatever this task delivered) is already reflected in that PR. Post the
+# matching `SWARM_PENDING_BRIEF: cleared` comment so a human reading the
+# PR sees the warning was resolved, not just abandoned. Same
+# last-comment-wins idiom as requeue.sh's notify_pr_pending_brief — skips
+# silently if the latest marker isn't "queued" (nothing to clear) or on
+# any gh/network failure (never affects a task that has already finished).
+clear_pr_pending_brief_marker() {
+    local pr="$1"
+    command -v gh >/dev/null 2>&1 || return 0
+    # See requeue.sh's notify_pr_pending_brief for why this must anchor to
+    # the marker line itself rather than a bare substring match.
+    local last
+    last="$(gh pr view "$pr" --json comments \
+        -q '[.comments[] | select(.body | test("SWARM_PENDING_BRIEF:"))] | last | .body // empty' 2>/dev/null \
+        | grep -oE '^<!-- SWARM_PENDING_BRIEF: (queued|cleared) -->$' \
+        | sed -E 's/^<!-- SWARM_PENDING_BRIEF: (queued|cleared) -->$/\1/' || true)"
+    [ "$last" = "queued" ] || return 0
+    gh pr comment "$pr" --body $'<!-- SWARM_PENDING_BRIEF: cleared -->\n:white_check_mark: Swarm: the previously queued follow-up brief has been delivered — this PR reflects it.\n' \
+        >/dev/null 2>&1 || true
+}
+
 # Print a structured, actionable status block once per completed task —
 # replaces the old one-line "Task complete... Waiting for next brief"
 # message, which was indistinguishable from a hang at a glance (issue #42).
@@ -566,6 +592,7 @@ print_completion_block() {
         local outcome_file="$DONE/${TASK_ID}.${outcome}.json"
         [ -r "$outcome_file" ] && outcome_reason=$(jq -r '.reason // empty' "$outcome_file" 2>/dev/null)
     fi
+    [ -n "$pr" ] && clear_pr_pending_brief_marker "$pr"
 
     echo ""
     echo "$bar"
