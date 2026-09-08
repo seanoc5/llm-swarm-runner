@@ -463,14 +463,15 @@ green "POST_OUTCOMES=1 fires sweep on event; hook called; .posted marker written
 heading "Test 15a: bg_violation_sweep_pass flags a real background-shell marker (#298)"
 # Reuses wt-issue-77's worktree (issue number must be numeric, dir must
 # exist) as the sweep's target; iss-77 is a fresh window name not used by
-# any earlier test's tmux new-window assertions.
+# any earlier test's tmux new-window assertions. DRY_RUN=0: this test
+# exercises the real outbox write, not just the log line (see Test 15c).
 echo "iss-77" > "$TEST_DIR/tmux-windows.txt"
 echo 'some worker output here' > "$TEST_DIR/tmux-pane-iss-77.txt"
 echo 'Running in the background' >> "$TEST_DIR/tmux-pane-iss-77.txt"
 rm -rf "$TEST_DIR/wt-issue-77/.swarm/tasks/outbox"
 
 cd "$PROJECT_DIR"
-DRY_RUN=1 WATCH_BG_VIOLATION_SWEEP_SECS=1 WATCH_PR_POLL_SECS=0 \
+DRY_RUN=0 WATCH_BG_VIOLATION_SWEEP_SECS=1 WATCH_PR_POLL_SECS=0 \
     WATCH_ORPHAN_SWEEP_SECS=0 WATCH_CHECK_ON_DONE=0 POLL_SECS=1 \
     "$WATCH" "$PROJECT_DIR" > "$TEST_DIR/watch-bgviol-a.log" 2>&1 &
 WATCH_PID=$!
@@ -494,6 +495,8 @@ heading "Test 15b: bg_violation_sweep_pass self-match guard suppresses a documen
 # Same marker text, but on a line that also carries this feature's own
 # identifying token — as it would if a worker cats/greps docs/advanced-
 # usage.md or this file's own header comment describing the sweep.
+# DRY_RUN=0 (same as 15a) so an outbox file's absence proves the guard,
+# not merely DRY_RUN's own suppression (see Test 15c for that).
 rm -rf "$TEST_DIR/wt-issue-77/.swarm/tasks/outbox"
 cat > "$TEST_DIR/tmux-pane-iss-77.txt" <<'PANE'
 scans every iss-* worker pane for the background-shell UI markers Claude
@@ -502,7 +505,7 @@ at rest) — see SANDBOX_ALLOW_BACKGROUND_TASKS for the opt-out.
 PANE
 
 cd "$PROJECT_DIR"
-DRY_RUN=1 WATCH_BG_VIOLATION_SWEEP_SECS=1 WATCH_PR_POLL_SECS=0 \
+DRY_RUN=0 WATCH_BG_VIOLATION_SWEEP_SECS=1 WATCH_PR_POLL_SECS=0 \
     WATCH_ORPHAN_SWEEP_SECS=0 WATCH_CHECK_ON_DONE=0 POLL_SECS=1 \
     "$WATCH" "$PROJECT_DIR" > "$TEST_DIR/watch-bgviol-b.log" 2>&1 &
 WATCH_PID=$!
@@ -521,6 +524,39 @@ outbox_file="$(ls "$TEST_DIR"/wt-issue-77/.swarm/tasks/outbox/*.md 2>/dev/null |
 [ -z "$outbox_file" ] \
     || red "self-match guard failed to suppress a documentation quote; got: $(cat "$outbox_file")"
 green "documentation quote of the marker text does NOT produce a false-positive outbox message"
+
+heading "Test 15c: bg_violation_sweep_pass under DRY_RUN=1 logs but does not write a real outbox message (#298)"
+# Self-review finding: every other side-effecting pass in this file
+# (autoclose, orphan_sweep_pass) threads DRY_RUN so a log-only watcher run
+# never mutates a worker's worktree — bg_violation_sweep_pass must too.
+rm -rf "$TEST_DIR/wt-issue-77/.swarm/tasks/outbox"
+rm -f "$PROJECT_DIR/.swarm/events.log"
+echo 'iss-77' > "$TEST_DIR/tmux-windows.txt"
+printf 'some worker output here\nRunning in the background\n' > "$TEST_DIR/tmux-pane-iss-77.txt"
+
+cd "$PROJECT_DIR"
+DRY_RUN=1 WATCH_BG_VIOLATION_SWEEP_SECS=1 WATCH_PR_POLL_SECS=0 \
+    WATCH_ORPHAN_SWEEP_SECS=0 WATCH_CHECK_ON_DONE=0 POLL_SECS=1 \
+    "$WATCH" "$PROJECT_DIR" > "$TEST_DIR/watch-bgviol-c.log" 2>&1 &
+WATCH_PID=$!
+
+logged=0
+for ((i=0; i<20; i++)); do
+    if grep -q 'watch.bg_violation.*dry_run=1' "$PROJECT_DIR/.swarm/events.log" 2>/dev/null; then
+        logged=1
+        break
+    fi
+    sleep 0.5
+done
+kill "$WATCH_PID" 2>/dev/null || true
+wait "$WATCH_PID" 2>/dev/null || true
+unset WATCH_PID
+
+[ "$logged" = "1" ] || red "expected a dry_run=1 watch.bg_violation event; log: $(cat "$PROJECT_DIR/.swarm/events.log" 2>/dev/null || echo none)"
+outbox_file="$(ls "$TEST_DIR"/wt-issue-77/.swarm/tasks/outbox/*.md 2>/dev/null | head -1)" || true
+[ -z "$outbox_file" ] \
+    || red "DRY_RUN=1 should not write a real outbox message; got: $(cat "$outbox_file")"
+green "DRY_RUN=1 logs the violation but writes no real outbox message"
 
 rm -f "$TEST_DIR/tmux-windows.txt" "$TEST_DIR/tmux-pane-iss-77.txt"
 

@@ -2535,6 +2535,15 @@ bg_violation_sweep_pass() {
         fi
         [ -n "${BG_VIOLATION_LOGGED[$win]:-}" ] && continue
         BG_VIOLATION_LOGGED[$win]=1
+
+        # DRY_RUN=1 (log-only, like every other side-effecting pass in this
+        # file — autoclose, orphan_sweep_pass above): don't actually drop a
+        # real outbox message into a worker's worktree, just log that this
+        # pass would have.
+        if [ "$DRY_RUN" = "1" ]; then
+            log_event watch.bg_violation "issue=$issue window=$win marker=$matched dry_run=1"
+            continue
+        fi
         log_event watch.bg_violation "issue=$issue window=$win marker=$matched"
 
         [ "$WATCH_OUTBOX" = "1" ] || continue
@@ -2542,13 +2551,19 @@ bg_violation_sweep_pass() {
         outbox="$wt_dir/.swarm/tasks/outbox"
         mkdir -p "$outbox" 2>/dev/null || continue
         tmp="$(mktemp -p "$outbox" .tmp.XXXXXX 2>/dev/null)" || continue
+        # Mentions WATCH_BG_VIOLATION_SWEEP_SECS deliberately: besides
+        # pointing the reader at the config knob, it's one of this
+        # function's own self-match guard tokens (see above) — so if this
+        # message ever gets rendered back into an iss-* pane (a worker
+        # cats its own outbox, or the coordinator relays it), the sweep
+        # recognizes its own output instead of re-triggering on it.
         cat > "$tmp" <<EOF
 ---
 kind: fyi
 task_id: watcher-bg-violation
 ts: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 ---
-Automated foreground-only check (issue #298) detected a background-shell UI marker in iss-$issue's tmux pane: "$matched". This usually means a Bash call ran with run_in_background=true (or a shell-level &/nohup/disown), against prompts/worker.md's "Run long commands in the foreground" rule. Flag it in your next report as a worker-policy violation per prompts/coordinator.md's existing "If a worker backgrounds anyway" guidance — the pane may be mid-task, so don't try to autoremediate, just surface it.
+Automated foreground-only check (issue #298, WATCH_BG_VIOLATION_SWEEP_SECS) detected a background-shell UI marker in iss-$issue's tmux pane: "$matched". This usually means a Bash call ran with run_in_background=true (or a shell-level &/nohup/disown), against prompts/worker.md's "Run long commands in the foreground" rule. Flag it in your next report as a worker-policy violation per prompts/coordinator.md's existing "If a worker backgrounds anyway" guidance — the pane may be mid-task, so don't try to autoremediate, just surface it.
 EOF
         mv "$tmp" "$outbox/$(date -u +%Y%m%dT%H%M%SZ)-bg-violation-iss-$issue.md" 2>/dev/null \
             || rm -f "$tmp" 2>/dev/null
