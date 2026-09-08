@@ -3864,6 +3864,19 @@ worker_pending_brief() {
 # miss the newer, authoritative blocked state — the false-completion bug
 # all over again. The newest post-claim record is always the worker's most
 # current self-report, whatever its state.
+#
+# mtime_epoch/ctime_epoch resolve to whole seconds, so the boundary compare
+# below is strict (>), not >=: a same-second collision between a PRIOR
+# task's status write and the claim that follows it (both bucket into the
+# same epoch second) must NOT let that prior record satisfy the fallback —
+# false-completion risk again, on the more dangerous side of this fail-
+# CLOSED gate. The cost of the stricter bound falls on the harmless side
+# instead: a same-second write of the CURRENT task's own mismatched-name
+# status just misses this sweep and gets picked up on the next
+# WORKER_COMPACT_SCAN_SECS tick once its mtime reads a full second later —
+# a delay, not a wrong answer, which is exactly the trade this whole
+# function is built to prefer (see this function's very first comment
+# block above).
 worker_current_task_terminal() {
     local wt_dir="$1"
     [ "$HAVE_JQ" = "1" ] || return 1
@@ -3887,7 +3900,7 @@ worker_current_task_terminal() {
     for f in "$wt_dir/.swarm/tasks/status"/*.json; do
         case "$f" in *.check.json) continue ;; esac
         mtime="$(mtime_epoch "$f")"
-        [ -n "$mtime" ] && [ "$mtime" -ge "$proc_ctime" ] || continue
+        [ -n "$mtime" ] && [ "$mtime" -gt "$proc_ctime" ] || continue
         if [ "$mtime" -gt "$best_mtime" ]; then
             best_mtime="$mtime"
             best_f="$f"
