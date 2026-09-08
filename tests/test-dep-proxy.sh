@@ -21,9 +21,35 @@ yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
 pass() { PASS=$((PASS + 1)); green "  ✓ $1"; }
 fail() { FAIL=$((FAIL + 1)); red "  ✗ $1"; [ $# -gt 1 ] && printf '    %s\n' "$2"; }
 
+echo "[ cmd_status probe_code regression (#361) ]"
+
+# Regression pin for #361: curl already writes "000" via -w on a connection
+# failure (and exits non-zero) — dep-proxy.sh's cmd_status upstream probe
+# used to also `|| echo "000"` on that failure, appending a SECOND "000" and
+# producing "000000", which missed the `case`'s `000)` arm and fell through
+# to the `*)` FAILED branch (a host with no network egress got a false
+# proxy-misconfiguration FAILED instead of the intended offline/skipped
+# result). Port 1 is a reserved, essentially-never-bound TCP port, so
+# connecting to it on localhost reliably refuses without needing docker or
+# real network egress — mirrors the exact curl invocation in
+# scripts/dep-proxy.sh's cmd_status upstream probe.
+probe_code=$(curl -sS -m 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:1/regression-361" 2>/dev/null || true)
+[[ "$probe_code" == "000" ]] \
+    && pass "cmd_status probe_code: connection-refused yields bare '000', not '000000'" \
+    || fail "cmd_status probe_code: connection-refused yields bare '000', not '000000'" "probe_code=[$probe_code]"
+
+echo ""
+
 if [ ! -S /var/run/docker.sock ]; then
-    yellow "skipping: /var/run/docker.sock not present"
-    exit 0
+    yellow "skipping remaining (docker-dependent) tests: /var/run/docker.sock not present"
+    echo ""
+    echo "=== Results ==="
+    if [ "$FAIL" -eq 0 ]; then
+        green "  Passed: $PASS / $((PASS + FAIL))"
+    else
+        red "  Passed: $PASS / $((PASS + FAIL))"
+    fi
+    exit $((FAIL > 0 ? 1 : 0))
 fi
 
 export DEP_PROXY_CONTAINER_NAME="llm-swarm-dep-proxy-test-$$"

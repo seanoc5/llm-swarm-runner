@@ -123,8 +123,13 @@ cmd_status() {
     # `resolver` directive above — every proxied request 502s while healthz
     # keeps passing). Fetch one small, real, known-stable artifact through
     # the proxy to catch that class of failure that healthz can't see.
+    # curl already writes "000" via -w on a connection failure (and exits
+    # non-zero) — an `|| echo "000"` fallback here appended a SECOND "000",
+    # producing "000000" (misses the `000)` case below, falls through to the
+    # `*)` FAILED branch). `|| true` just absorbs curl's non-zero exit so
+    # `set -e` doesn't kill the script, without adding any extra output.
     probe_code=$(curl -sS -m 10 -o /dev/null -w '%{http_code}' \
-        "http://127.0.0.1:$PORT/maven2/org/apache/maven/maven-core/3.9.6/maven-core-3.9.6.pom" 2>/dev/null || echo "000")
+        "http://127.0.0.1:$PORT/maven2/org/apache/maven/maven-core/3.9.6/maven-core-3.9.6.pom" 2>/dev/null || true)
     case "$probe_code" in
         200)
             echo "upstream probe (maven2): ok (200)"
