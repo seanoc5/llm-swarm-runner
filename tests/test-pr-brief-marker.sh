@@ -20,11 +20,14 @@
 #      "cleared" comment supersedes it.
 #   2. worker-listener.sh's clear_pr_pending_brief_marker — posts the
 #      matching `SWARM_PENDING_BRIEF: cleared` comment once a task
-#      resolves a PR number; skipped when there's nothing "queued" to
-#      clear. Tested directly (function extracted, not the full dispatch
-#      loop — worker-listener.sh has no other test coverage for the same
-#      reason: the agent-dispatch loop isn't unit-testable without a real
-#      LLM invocation).
+#      resolves a PR number AND the worktree's inbox/processing are both
+#      drained; skipped when there's nothing "queued" to clear, or when
+#      another brief is still queued behind the one that just finished
+#      (clearing then would be a false "resolved" — caught in this PR's
+#      own self-review, see Test 3). Tested directly (function extracted,
+#      not the full dispatch loop — worker-listener.sh has no other test
+#      coverage for the same reason: the agent-dispatch loop isn't
+#      unit-testable without a real LLM invocation).
 #   3. kill-worktree.sh's notify_pr_brief_orphaned — best-effort posts a
 #      `SWARM_BRIEF_ORPHANED` comment on the reaped branch's PR when a
 #      non-empty inbox/processing/outbox gets salvaged.
@@ -168,42 +171,72 @@ echo "another follow-up" | PATH="$SHIM_DIR:$PATH" "$REQUEUE" 90 - \
 [ "$(gh_comment_count)" -eq 1 ] || red "expected still exactly 1 posted comment (idempotent skip), got $(gh_comment_count)"
 green "second requeue skips posting — latest marker already says queued"
 
-# ============================================================================
-heading "Test 3: worker-listener.sh's clear_pr_pending_brief_marker posts 'cleared' when latest is 'queued'"
-# ============================================================================
-
 # Extract just the function under test — worker-listener.sh's main body
 # runs a live poll loop that isn't safe or meaningful to source directly.
 CLEAR_FN="$TEST_DIR/clear_fn.sh"
 sed -n '/^clear_pr_pending_brief_marker() {/,/^}/p' "$LISTENER" > "$CLEAR_FN"
 [ -s "$CLEAR_FN" ] || red "could not extract clear_pr_pending_brief_marker from worker-listener.sh"
 
+EMPTY_INBOX="$TEST_DIR/empty-inbox"
+EMPTY_PROCESSING="$TEST_DIR/empty-processing"
+mkdir -p "$EMPTY_INBOX" "$EMPTY_PROCESSING"
+
+# ============================================================================
+heading "Test 3: clear_pr_pending_brief_marker stays silent while another brief is still queued (self-review catch)"
+# ============================================================================
+
+# Tests 1+2 above each dropped a brief into $WT's real inbox/ via
+# requeue.sh and never drained it (no listener loop runs in this test) —
+# it has 2 files right now. That's exactly the scenario a first version of
+# this function got wrong: task A finishes and resolves a PR, but brief B
+# (a second, independent follow-up — or the same one, just not yet
+# claimed) is still sitting there unclaimed. Clearing the marker in that
+# state would tell a human "resolved" while B is still pending — a false
+# green. Confirm the gate holds: non-empty inbox -> no clear, no new
+# comment, latest marker stays "queued".
+PRE_GATE="$(gh_comment_count)"
 (
     # shellcheck disable=SC1090
     source "$CLEAR_FN"
     PATH="$SHIM_DIR:$PATH"
-    clear_pr_pending_brief_marker 77
+    clear_pr_pending_brief_marker 77 "$WT/.swarm/tasks/inbox" "$EMPTY_PROCESSING"
+)
+[ "$(gh_comment_count)" -eq "$PRE_GATE" ] \
+    || red "expected no new comment while inbox/ still has other queued briefs, went from $PRE_GATE to $(gh_comment_count)"
+gh_last_comment | grep -q 'SWARM_PENDING_BRIEF: queued' \
+    || red "expected the marker to remain 'queued' — a brief is still unclaimed: $(gh_last_comment)"
+green "clear_pr_pending_brief_marker gates on a drained queue — stays silent with another brief still in inbox/"
+
+# ============================================================================
+heading "Test 4: worker-listener.sh's clear_pr_pending_brief_marker posts 'cleared' once the queue is drained"
+# ============================================================================
+
+(
+    # shellcheck disable=SC1090
+    source "$CLEAR_FN"
+    PATH="$SHIM_DIR:$PATH"
+    clear_pr_pending_brief_marker 77 "$EMPTY_INBOX" "$EMPTY_PROCESSING"
 )
 [ "$(gh_comment_count)" -eq 2 ] || red "expected a 2nd posted comment (the clear), got $(gh_comment_count)"
 gh_last_comment | grep -q 'SWARM_PENDING_BRIEF: cleared' \
     || red "expected the latest comment to carry SWARM_PENDING_BRIEF: cleared: $(gh_last_comment)"
-green "clear_pr_pending_brief_marker posts SWARM_PENDING_BRIEF: cleared while latest marker was queued"
+green "clear_pr_pending_brief_marker posts SWARM_PENDING_BRIEF: cleared once inbox/processing are empty"
 
 # ============================================================================
-heading "Test 4: clear_pr_pending_brief_marker is a no-op when latest is already 'cleared'"
+heading "Test 5: clear_pr_pending_brief_marker is a no-op when latest is already 'cleared'"
 # ============================================================================
 
 (
     # shellcheck disable=SC1090
     source "$CLEAR_FN"
     PATH="$SHIM_DIR:$PATH"
-    clear_pr_pending_brief_marker 77
+    clear_pr_pending_brief_marker 77 "$EMPTY_INBOX" "$EMPTY_PROCESSING"
 )
 [ "$(gh_comment_count)" -eq 2 ] || red "expected no new comment (nothing to clear), got $(gh_comment_count) total"
 green "clear is a no-op once the marker is already cleared"
 
 # ============================================================================
-heading "Test 5: a requeue AFTER a clear re-flags the PR (posts 'queued' again)"
+heading "Test 6: a requeue AFTER a clear re-flags the PR (posts 'queued' again)"
 # ============================================================================
 
 echo "yet another follow-up" | PATH="$SHIM_DIR:$PATH" "$REQUEUE" 90 - \
@@ -214,7 +247,7 @@ gh_last_comment | grep -q 'SWARM_PENDING_BRIEF: queued' \
 green "requeue re-flags the PR once the previous marker was cleared"
 
 # ============================================================================
-heading "Test 6: kill-worktree.sh posts SWARM_BRIEF_ORPHANED when salvaging a non-empty inbox"
+heading "Test 7: kill-worktree.sh posts SWARM_BRIEF_ORPHANED when salvaging a non-empty inbox"
 # ============================================================================
 
 # Reuse wt-issue-90 itself — its branch (fix/issue-90) is the one the gh
@@ -239,7 +272,7 @@ grep -q 'pr comment 77' "$GH_LOG" || red "expected the orphan comment posted aga
 green "kill-worktree.sh posts SWARM_BRIEF_ORPHANED on the reaped branch's PR, referencing the salvage dir"
 
 # ============================================================================
-heading "Test 7: requeue.sh posts nothing for a branch with no PR"
+heading "Test 8: requeue.sh posts nothing for a branch with no PR"
 # ============================================================================
 
 git worktree add -q -b fix/issue-91 ../wt-issue-91 master
