@@ -16,7 +16,8 @@
 #   SWEEP_FORCE=1  Re-post outcomes even when a .posted marker already exists.
 #
 # Scope:
-#   Matches sibling worktrees of <project-dir>:
+#   Matches sibling worktrees of <project-dir>, resolved via
+#   swarm_worktree_parent() (honors SWARM_WORKTREE_GROUPING):
 #     <parent>/wt-issue-*/.swarm/tasks/done/*.ok.json
 #     <parent>/wt-issue-*/.swarm/tasks/done/*.err.json
 #   (This is the layout that `provision-worker.sh` creates.)
@@ -32,7 +33,13 @@ set -euo pipefail
 
 PROJECT_DIR="$(realpath "${1:-$PWD}")"
 [ -d "$PROJECT_DIR" ] || { echo "ERROR: not a directory: $PROJECT_DIR" >&2; exit 1; }
-PARENT="$(dirname "$PROJECT_DIR")"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Source the env loader to pick up SWARM_WORKTREE_GROUPING and get
+# swarm_worktree_parent() to derive the scan dir.
+# shellcheck source=_load-env.sh
+. "$SCRIPT_DIR/_load-env.sh" "$PROJECT_DIR"
+PARENT="$(swarm_worktree_parent "$PROJECT_DIR")"
 FORCE="${SWEEP_FORCE:-0}"
 
 # Default hook: dry-run stub that prints what it would do. Cleaned up on exit.
