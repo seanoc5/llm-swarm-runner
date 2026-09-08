@@ -242,6 +242,21 @@ touch -r "$STATUS_DIR/aaa-517.json" "$STATUS_DIR/zzz-517.json"
 rc=0; worker_current_task_terminal "$WT_DIR" || rc=$?
 check "same-second tie between blocked and ready-for-review records -> rc1 (non-terminal wins, fail closed)" "1" "$rc"
 
+# Self-review finding: the tie-break's second pass must not read "nothing
+# confirmed" as an implicit terminal default. Simulates the newest
+# candidate being mid-write (worker truncates with `>` then writes, or the
+# JSON is simply corrupted) — jq fails to parse it, so the loop's only
+# tied-mtime candidate is skipped via `continue` without ever setting
+# saw_terminal. Without that guard this fell through to a bare `return 0`
+# — fail-OPEN on the gate's single most likely race (the current task's own
+# status write, landing right as this sweep runs).
+rm -f "$PROCESSING_DIR"/*.md "$STATUS_DIR"/*.json 2>/dev/null || true
+echo "the current task brief" > "$PROCESSING_DIR/20260906-230823-517.md"
+sleep 1.1
+printf 'not valid json{' > "$STATUS_DIR/issue-517.json"
+rc=0; worker_current_task_terminal "$WT_DIR" || rc=$?
+check "newest post-claim candidate is unparseable -> rc1 (nothing confirmed, fails closed, never a bare return-0 default)" "1" "$rc"
+
 rm -f "$PROCESSING_DIR"/*.md "$STATUS_DIR"/*.json 2>/dev/null || true
 
 heading "Test 3: maybe_worker_deliver_brief — gating (DRY_RUN)"

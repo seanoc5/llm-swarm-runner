@@ -3915,14 +3915,21 @@ worker_current_task_terminal() {
     # strict-> boundary above, applied to the tie-break too (a self-review
     # finding: picking whichever tied file a glob happens to visit first
     # could let a stale ready-for-review beat an equally-timestamped, more
-    # current blocked record).
+    # current blocked record). saw_terminal tracks whether this pass
+    # actually CONFIRMED a terminal record rather than just failing to find
+    # a non-terminal one — another self-review finding: a tied file that's
+    # unreadable or mid-write (jq parse fails, `continue`s) must not read as
+    # an implicit "no objection, must be terminal" default; with nothing
+    # confirmed, this falls through to the same fail-closed return 1 as
+    # every other uncertain case in this function.
+    local saw_terminal=0
     for f in "$wt_dir/.swarm/tasks/status"/*.json; do
         case "$f" in *.check.json) continue ;; esac
         mtime="$(mtime_epoch "$f")"
         [ "$mtime" = "$best_mtime" ] || continue
         state="$(jq -r '.state // empty' "$f" 2>/dev/null)" || continue
         case "$state" in
-            ready-for-review|done-no-pr) ;;
+            ready-for-review|done-no-pr) saw_terminal=1 ;;
             *)
                 shopt -u nullglob
                 return 1
@@ -3930,7 +3937,8 @@ worker_current_task_terminal() {
         esac
     done
     shopt -u nullglob
-    return 0
+    [ "$saw_terminal" = "1" ] && return 0
+    return 1
 }
 
 # WORKER_DELIVER_LAST_FAIL / WORKER_DELIVER_FAIL_COUNT / WORKER_DELIVER_GAVE_UP
