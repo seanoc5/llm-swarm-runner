@@ -2179,6 +2179,17 @@ mtime_epoch() {
     stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
 }
 
+# Portable ctime (epoch seconds — "last metadata change", GNU %Z / BSD %c).
+# Deliberately distinct from mtime_epoch: a same-filesystem `mv` (rename(2))
+# preserves a file's mtime (content unchanged) but always bumps its ctime,
+# which is exactly what worker_current_task_terminal()'s issue #370 fallback
+# needs — "when was this brief actually claimed into processing/", not "when
+# was its content last written" (those can be far apart for a brief that sat
+# queued in inbox/ for a while before being claimed).
+ctime_epoch() {
+    stat -c %Z "$1" 2>/dev/null || stat -f %c "$1" 2>/dev/null
+}
+
 # --- Stale-daemon self-check (issue #296) -----------------------------------
 #
 # WATCHER_SELF_PATH/WATCHER_LAUNCH_MTIME capture this script's own identity
@@ -4000,6 +4011,62 @@ worker_pending_brief() {
 # called against. This reads the CURRENT processing/ entry's own status file
 # directly instead, with no such guard needed (there's nothing stale to
 # guard against — it's always THIS task's own record or nothing).
+#
+# issue #370: the exact-name lookup above can miss even when the current
+# task genuinely IS terminal — observed in the wild as status/issue-517.json
+# / status/pr-issue-397.json sitting next to a
+# processing/20260906-230823-517.md brief (a worker session that didn't
+# echo its brief's own inbox filename back as the $TASK_ID it names its
+# status write after — see prompts/worker.md's "Worker status file"
+# convention; the coordinator side never writes a bare status/<id>.json
+# itself, only <id>.check.json/.check-claim/.check-run.sh, so a mismatched
+# NAME always traces back to the worker). Exact-name miss then wedges
+# delivery FOREVER — task_not_terminal never self-heals on its own, unlike
+# this function's every other caller-side skip reason. So on a miss, fall
+# back to scanning status/ for another record — but naively accepting "any
+# ready-for-review file in this worktree" would reintroduce exactly the
+# false-completion bug this function exists to prevent: per
+# worker_task_done()'s header comment, nothing ever deletes a requeued
+# worktree's past status files, so a genuinely in-flight NEW task could
+# misread an OLD task's leftover ready-for-review record as its own. Guard
+# with a timestamp instead — but ctime of proc_file, NOT its mtime:
+# requeue.sh can drop a follow-up brief into inbox/ well before it's
+# claimed (worker.md's "mid-task" follow-up case), and claim_next_task()'s
+# same-filesystem mv preserves that brief's mtime (content unchanged) while
+# only bumping its ctime (rename(2) always updates ctime). mtime would
+# therefore read as "when the brief was authored", which can predate a
+# PRIOR task's own conclusion and status write — exactly the false-positive
+# a self-review pass on this fix caught: an in-flight/blocked task B (brief
+# authored before task A even finished) would wrongly inherit A's terminal
+# status. ctime is "when this brief was actually claimed into processing/",
+# which — because dispatch_agent(A) fully returns before the SAME listener
+# process ever calls claim_next_task() again — is always strictly after any
+# prior task's own status write.
+#
+# Among candidates newer than proc_file's ctime, trust the newest mtime
+# second, not just the first terminal one a glob happens to visit — another
+# self-review finding: if the same anomalous worker session wrote status
+# under two different mismatched names at different points (e.g. an earlier
+# ready-for-review under one name, then genuinely went `blocked` again and
+# recorded that under another), taking the first terminal match in glob
+# order could pick the STALE ready-for-review one and miss the newer,
+# authoritative blocked state — the false-completion bug all over again.
+# And on a TIE within that newest second (same whole-second resolution
+# problem as the claim boundary above), a non-terminal record wins over a
+# terminal one — see the second loop below.
+#
+# mtime_epoch/ctime_epoch resolve to whole seconds, so the boundary compare
+# below is strict (>), not >=: a same-second collision between a PRIOR
+# task's status write and the claim that follows it (both bucket into the
+# same epoch second) must NOT let that prior record satisfy the fallback —
+# false-completion risk again, on the more dangerous side of this fail-
+# CLOSED gate. The cost of the stricter bound falls on the harmless side
+# instead: a same-second write of the CURRENT task's own mismatched-name
+# status just misses this sweep and gets picked up on the next
+# WORKER_COMPACT_SCAN_SECS tick once its mtime reads a full second later —
+# a delay, not a wrong answer, which is exactly the trade this whole
+# function is built to prefer (see this function's very first comment
+# block above).
 worker_current_task_terminal() {
     local wt_dir="$1"
     [ "$HAVE_JQ" = "1" ] || return 1
@@ -4008,12 +4075,59 @@ worker_current_task_terminal() {
     [ -n "$proc_file" ] || return 1
     task_id="$(basename "$proc_file" .md)"
     status_file="$wt_dir/.swarm/tasks/status/${task_id}.json"
-    [ -r "$status_file" ] || return 1
-    state="$(jq -r '.state // empty' "$status_file" 2>/dev/null)" || return 1
-    case "$state" in
-        ready-for-review|done-no-pr) return 0 ;;
-        *)                           return 1 ;;
-    esac
+    if [ -r "$status_file" ]; then
+        state="$(jq -r '.state // empty' "$status_file" 2>/dev/null)" || return 1
+        case "$state" in
+            ready-for-review|done-no-pr) return 0 ;;
+            *)                           return 1 ;;
+        esac
+    fi
+
+    local proc_ctime f mtime best_mtime=-1
+    proc_ctime="$(ctime_epoch "$proc_file")"
+    [ -n "$proc_ctime" ] || return 1
+    shopt -s nullglob
+    for f in "$wt_dir/.swarm/tasks/status"/*.json; do
+        case "$f" in *.check.json) continue ;; esac
+        mtime="$(mtime_epoch "$f")"
+        [ -n "$mtime" ] && [ "$mtime" -gt "$proc_ctime" ] || continue
+        [ "$mtime" -gt "$best_mtime" ] && best_mtime="$mtime"
+    done
+    if [ "$best_mtime" -eq -1 ]; then
+        shopt -u nullglob
+        return 1
+    fi
+
+    # Second pass, over candidates tied at the newest mtime second only:
+    # whole-second resolution can't order same-second writes, so on a tie a
+    # NON-terminal record wins — the same fail-closed direction as the
+    # strict-> boundary above, applied to the tie-break too (a self-review
+    # finding: picking whichever tied file a glob happens to visit first
+    # could let a stale ready-for-review beat an equally-timestamped, more
+    # current blocked record). saw_terminal tracks whether this pass
+    # actually CONFIRMED a terminal record rather than just failing to find
+    # a non-terminal one — another self-review finding: a tied file that's
+    # unreadable or mid-write (jq parse fails, `continue`s) must not read as
+    # an implicit "no objection, must be terminal" default; with nothing
+    # confirmed, this falls through to the same fail-closed return 1 as
+    # every other uncertain case in this function.
+    local saw_terminal=0
+    for f in "$wt_dir/.swarm/tasks/status"/*.json; do
+        case "$f" in *.check.json) continue ;; esac
+        mtime="$(mtime_epoch "$f")"
+        [ "$mtime" = "$best_mtime" ] || continue
+        state="$(jq -r '.state // empty' "$f" 2>/dev/null)" || continue
+        case "$state" in
+            ready-for-review|done-no-pr) saw_terminal=1 ;;
+            *)
+                shopt -u nullglob
+                return 1
+                ;;
+        esac
+    done
+    shopt -u nullglob
+    [ "$saw_terminal" = "1" ] && return 0
+    return 1
 }
 
 # WORKER_DELIVER_LAST_FAIL / WORKER_DELIVER_FAIL_COUNT / WORKER_DELIVER_GAVE_UP
