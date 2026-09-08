@@ -558,6 +558,46 @@ outbox_file="$(ls "$TEST_DIR"/wt-issue-77/.swarm/tasks/outbox/*.md 2>/dev/null |
     || red "DRY_RUN=1 should not write a real outbox message; got: $(cat "$outbox_file")"
 green "DRY_RUN=1 logs the violation but writes no real outbox message"
 
+heading "Test 15d: self-match guard does not mask a real, distant violation (#298)"
+# Self-review finding on the first guard version: scanning the WHOLE
+# 200-line capture for a guard token would let an unrelated, distant
+# appearance of one — e.g. prompts/worker.md's own description of this
+# feature sitting in scrollback from earlier in the session — mask a real
+# violation happening elsewhere in the same pane. Puts a guard token >3
+# lines away from the marker (outside the windowed check) and asserts the
+# violation still fires.
+rm -rf "$TEST_DIR/wt-issue-77/.swarm/tasks/outbox"
+echo 'iss-77' > "$TEST_DIR/tmux-windows.txt"
+{
+    echo 'earlier in this session the worker read prompts/worker.md,'
+    echo 'which explains SANDBOX_ALLOW_BACKGROUND_TASKS at length here'
+    echo '(filler filler filler filler filler filler filler filler)'
+    echo '(filler filler filler filler filler filler filler filler)'
+    echo '(filler filler filler filler filler filler filler filler)'
+    echo '(filler filler filler filler filler filler filler filler)'
+    echo 'Running in the background'
+} > "$TEST_DIR/tmux-pane-iss-77.txt"
+
+cd "$PROJECT_DIR"
+DRY_RUN=0 WATCH_BG_VIOLATION_SWEEP_SECS=1 WATCH_PR_POLL_SECS=0 \
+    WATCH_ORPHAN_SWEEP_SECS=0 WATCH_CHECK_ON_DONE=0 POLL_SECS=1 \
+    "$WATCH" "$PROJECT_DIR" > "$TEST_DIR/watch-bgviol-d.log" 2>&1 &
+WATCH_PID=$!
+
+outbox_file=""
+for ((i=0; i<20; i++)); do
+    outbox_file="$(ls "$TEST_DIR"/wt-issue-77/.swarm/tasks/outbox/*.md 2>/dev/null | head -1)" || true
+    [ -n "$outbox_file" ] && break
+    sleep 0.5
+done
+kill "$WATCH_PID" 2>/dev/null || true
+wait "$WATCH_PID" 2>/dev/null || true
+unset WATCH_PID
+
+[ -n "$outbox_file" ] \
+    || red "a distant guard-token mention wrongly suppressed a real violation; log: $(cat "$TEST_DIR/watch-bgviol-d.log")"
+green "a guard token more than 3 lines from the marker does not suppress a real violation"
+
 rm -f "$TEST_DIR/tmux-windows.txt" "$TEST_DIR/tmux-pane-iss-77.txt"
 
 # ────────────────────────── Done ──────────────────────────
