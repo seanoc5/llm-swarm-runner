@@ -162,9 +162,9 @@ rc=0; worker_current_task_terminal "$WT_DIR" || rc=$?
 check "status=done-no-pr -> rc0 (genuinely terminal)" "0" "$rc"
 
 heading "Test 2b: worker_current_task_terminal — issue #370 mismatched task_id fallback"
-# The wedge this closes: the worker (or maybe_run_check()'s task_id
-# fallback / the synth path) wrote its status record under a DIFFERENT name
-# than the current processing/ entry's basename — observed in the wild as
+# The wedge this closes: a worker session wrote its status record under a
+# DIFFERENT name than the current processing/ entry's basename (didn't echo
+# its brief's own inbox filename back as $TASK_ID) — observed in the wild as
 # status/issue-517.json sitting next to processing/20260906-230823-517.md.
 # Without a fallback, the exact-name miss blocks delivery FOREVER (unlike
 # every other worker.deliver.skip reason, this one never self-heals).
@@ -198,6 +198,28 @@ sleep 1.1
 echo "a brand new follow-up brief, still genuinely in flight" > "$PROCESSING_DIR/20260906-230823-517.md"
 rc=0; worker_current_task_terminal "$WT_DIR" || rc=$?
 check "mismatched task_id, but status predates the current claim -> rc1 (stale record rejected)" "1" "$rc"
+
+# Self-review finding: among multiple post-claim candidates, trust the
+# NEWEST by mtime, not just the first terminal one a glob happens to visit.
+# Simulates the same anomalous worker session writing under two different
+# mismatched names at different points — first a (wrong) ready-for-review,
+# then genuinely going blocked again and recording THAT under another name.
+# Picking the first terminal match in glob order would wrongly select the
+# stale ready-for-review file and miss the newer, authoritative blocked
+# state — the exact false-completion bug this whole function exists to
+# prevent. "aaa-*"/"zzz-*" prefixes force the stale terminal record to sort
+# first alphabetically, so this only passes if recency (not glob order)
+# decides the outcome.
+rm -f "$PROCESSING_DIR"/*.md "$STATUS_DIR"/*.json 2>/dev/null || true
+echo "the current task brief" > "$PROCESSING_DIR/20260906-230823-517.md"
+sleep 1.1
+printf '{"task_id":"aaa-517","state":"ready-for-review","pr":123,"ts":"2026-09-06T23:09:00Z","note":""}' \
+    > "$STATUS_DIR/aaa-517.json"
+sleep 1.1
+printf '{"task_id":"zzz-517","state":"blocked","pr":123,"ts":"2026-09-06T23:11:00Z","note":"awaiting decision"}' \
+    > "$STATUS_DIR/zzz-517.json"
+rc=0; worker_current_task_terminal "$WT_DIR" || rc=$?
+check "newer mismatched-name record is blocked (supersedes an older stale ready-for-review) -> rc1" "1" "$rc"
 
 rm -f "$PROCESSING_DIR"/*.md "$STATUS_DIR"/*.json 2>/dev/null || true
 

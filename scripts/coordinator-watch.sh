@@ -3824,15 +3824,18 @@ worker_pending_brief() {
 # guard against — it's always THIS task's own record or nothing).
 #
 # issue #370: the exact-name lookup above can miss even when the current
-# task genuinely IS terminal — observed in the wild as
-# status/issue-517.json / status/pr-issue-397.json sitting next to a
-# processing/20260906-230823-517.md brief (written by maybe_run_check()'s
-# task_id fallback and/or a worker session that didn't echo its brief's own
-# inbox filename back as $TASK_ID). Exact-name miss then wedges delivery
-# FOREVER — task_not_terminal never self-heals on its own, unlike this
-# function's every other caller-side skip reason. So on a miss, fall back to
-# scanning status/ for any OTHER terminal record — but naively accepting
-# "any ready-for-review file in this worktree" would reintroduce exactly the
+# task genuinely IS terminal — observed in the wild as status/issue-517.json
+# / status/pr-issue-397.json sitting next to a
+# processing/20260906-230823-517.md brief (a worker session that didn't
+# echo its brief's own inbox filename back as the $TASK_ID it names its
+# status write after — see prompts/worker.md's "Worker status file"
+# convention; the coordinator side never writes a bare status/<id>.json
+# itself, only <id>.check.json/.check-claim/.check-run.sh, so a mismatched
+# NAME always traces back to the worker). Exact-name miss then wedges
+# delivery FOREVER — task_not_terminal never self-heals on its own, unlike
+# this function's every other caller-side skip reason. So on a miss, fall
+# back to scanning status/ for another record — but naively accepting "any
+# ready-for-review file in this worktree" would reintroduce exactly the
 # false-completion bug this function exists to prevent: per
 # worker_task_done()'s header comment, nothing ever deletes a requeued
 # worktree's past status files, so a genuinely in-flight NEW task could
@@ -3849,9 +3852,18 @@ worker_pending_brief() {
 # status. ctime is "when this brief was actually claimed into processing/",
 # which — because dispatch_agent(A) fully returns before the SAME listener
 # process ever calls claim_next_task() again — is always strictly after any
-# prior task's own status write. So: trust a mismatched-name status file
-# only when its mtime (its own write time) is >= proc_file's ctime (this
-# task's claim time).
+# prior task's own status write.
+#
+# Among candidates whose mtime is >= proc_file's ctime, trust the SINGLE
+# newest one by mtime, not just the first terminal one a glob happens to
+# visit — another self-review finding: if the same anomalous worker session
+# wrote status under two different mismatched names at different points
+# (e.g. an earlier ready-for-review under one name, then genuinely went
+# `blocked` again and recorded that under another), taking the first
+# terminal match in glob order could pick the STALE ready-for-review one and
+# miss the newer, authoritative blocked state — the false-completion bug
+# all over again. The newest post-claim record is always the worker's most
+# current self-report, whatever its state.
 worker_current_task_terminal() {
     local wt_dir="$1"
     [ "$HAVE_JQ" = "1" ] || return 1
@@ -3868,7 +3880,7 @@ worker_current_task_terminal() {
         esac
     fi
 
-    local proc_ctime f mtime
+    local proc_ctime f mtime best_f="" best_mtime=-1
     proc_ctime="$(ctime_epoch "$proc_file")"
     [ -n "$proc_ctime" ] || return 1
     shopt -s nullglob
@@ -3876,16 +3888,18 @@ worker_current_task_terminal() {
         case "$f" in *.check.json) continue ;; esac
         mtime="$(mtime_epoch "$f")"
         [ -n "$mtime" ] && [ "$mtime" -ge "$proc_ctime" ] || continue
-        state="$(jq -r '.state // empty' "$f" 2>/dev/null)" || continue
-        case "$state" in
-            ready-for-review|done-no-pr)
-                shopt -u nullglob
-                return 0
-                ;;
-        esac
+        if [ "$mtime" -gt "$best_mtime" ]; then
+            best_mtime="$mtime"
+            best_f="$f"
+        fi
     done
     shopt -u nullglob
-    return 1
+    [ -n "$best_f" ] || return 1
+    state="$(jq -r '.state // empty' "$best_f" 2>/dev/null)" || return 1
+    case "$state" in
+        ready-for-review|done-no-pr) return 0 ;;
+        *)                           return 1 ;;
+    esac
 }
 
 # WORKER_DELIVER_LAST_FAIL / WORKER_DELIVER_FAIL_COUNT / WORKER_DELIVER_GAVE_UP
