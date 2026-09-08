@@ -2499,7 +2499,7 @@ bg_violation_sweep_pass() {
     local win
     while IFS= read -r win; do
         [ -n "$win" ] || continue
-        local issue wt_dir content clean matched_line lineno matched
+        local issue wt_dir content clean matched_lines ml cand_lineno cand lineno matched
         issue="${win#iss-}"
         [[ "$issue" =~ ^[0-9]+$ ]] || continue
         wt_dir="$WORKSPACE/wt-issue-$issue"
@@ -2508,24 +2508,24 @@ bg_violation_sweep_pass() {
         content="$(tmux capture-pane -t "$SESSION_NAME:$win" -p -S -200 2>/dev/null)" || continue
         clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
         # `-n` (line-numbered) + `-o` (match-only) gives "N:matched-text"
-        # per hit — the self-match guard below needs the line number to
-        # scope its check to a window around the match rather than the
-        # whole capture (see that guard's comment for why). `|| true`:
-        # under this file's `set -euo pipefail`, the common no-match case
-        # makes grep exit 1 — pipefail then makes the whole pipeline (and
-        # thus this bare assignment) exit non-zero, which would abort the
-        # script under `set -e` on every ordinary tick. Only this
-        # function's sole call site (`bg_violation_sweep_pass || true`)
-        # currently masks that; fix it here too so a future direct call
-        # doesn't silently kill the watcher on its most common path.
-        matched_line="$(printf '%s\n' "$clean" | LC_ALL=C grep -noE "$WATCH_BG_VIOLATION_PATTERN" 2>/dev/null | tail -1)" || true
+        # per hit, one per line — every candidate is needed (not just the
+        # latest) because the self-match guard below can disqualify the
+        # most recent one and a real earlier marker would otherwise be
+        # hidden behind it (a self-review finding on the tail-1 version of
+        # this line). `|| true`: under this file's `set -euo pipefail`,
+        # the common no-match case makes grep exit 1 — pipefail then makes
+        # the whole pipeline (and thus this bare assignment) exit
+        # non-zero, which would abort the script under `set -e` on every
+        # ordinary tick. Only this function's sole call site
+        # (`bg_violation_sweep_pass || true`) currently masks that; fix it
+        # here too so a future direct call doesn't silently kill the
+        # watcher on its most common path.
+        matched_lines="$(printf '%s\n' "$clean" | LC_ALL=C grep -noE "$WATCH_BG_VIOLATION_PATTERN" 2>/dev/null)" || true
 
-        if [ -z "$matched_line" ]; then
+        if [ -z "$matched_lines" ]; then
             unset "BG_VIOLATION_LOGGED[$win]" 2>/dev/null || true
             continue
         fi
-        lineno="${matched_line%%:*}"
-        matched="${matched_line#*:}"
         # Self-match guard (#298): the marker text this sweep looks for is
         # quoted verbatim in this project's own docs/comments/PR text
         # (docs/advanced-usage.md, prompts/worker.md, this file's header,
@@ -2533,17 +2533,32 @@ bg_violation_sweep_pass() {
         # views this feature's PR, renders the literal marker in its pane
         # with no real backgrounded shell behind it. Rather than tighten
         # WATCH_BG_VIOLATION_PATTERN (risking a missed real marker), treat
-        # a self-reference token found NEAR the matched line (prose quotes
-        # the marker and the token in the same sentence/paragraph) as
-        # documentation, not a violation. Scoped to a small window instead
-        # of the whole 200-line capture: a self-review on this guard's
-        # first version found that scanning the whole capture would let an
+        # a self-reference token found NEAR a candidate's line (prose
+        # quotes the marker and the token in the same sentence/paragraph)
+        # as documentation, not a violation for THAT candidate — scoped to
+        # a small window instead of the whole 200-line capture, since an
+        # earlier self-review found scanning the whole capture lets an
         # unrelated, distant appearance of these tokens (e.g. worker.md's
         # own description of this feature sitting in scrollback) mask a
-        # real, current violation elsewhere in the pane — a false negative
-        # in the fallback layer's own detection.
-        if printf '%s\n' "$clean" | sed -n "$((lineno > 3 ? lineno - 3 : 1)),$((lineno + 3))p" \
-            | LC_ALL=C grep -qE 'WATCH_BG_VIOLATION|SANDBOX_ALLOW_BACKGROUND_TASKS|CLAUDE_CODE_DISABLE_BACKGROUND_TASKS'; then
+        # real, current violation elsewhere in the pane. Walks candidates
+        # most-recent-first (`tac`) and takes the first one NOT guarded,
+        # so a guarded/quoted latest hit no longer hides a real earlier one.
+        matched=""
+        lineno=""
+        while IFS= read -r ml; do
+            [ -n "$ml" ] || continue
+            cand_lineno="${ml%%:*}"
+            cand="${ml#*:}"
+            if printf '%s\n' "$clean" | sed -n "$((cand_lineno > 3 ? cand_lineno - 3 : 1)),$((cand_lineno + 3))p" \
+                | LC_ALL=C grep -qE 'WATCH_BG_VIOLATION|SANDBOX_ALLOW_BACKGROUND_TASKS|CLAUDE_CODE_DISABLE_BACKGROUND_TASKS'; then
+                continue
+            fi
+            matched="$cand"
+            lineno="$cand_lineno"
+            break
+        done < <(printf '%s\n' "$matched_lines" | tac)
+
+        if [ -z "$matched" ]; then
             unset "BG_VIOLATION_LOGGED[$win]" 2>/dev/null || true
             continue
         fi

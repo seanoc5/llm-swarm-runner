@@ -208,6 +208,33 @@ else
     skip "SANDBOX_DEP_CACHE" "/var/run/docker.sock not present"
 fi
 
+# SANDBOX_ALLOW_BACKGROUND_TASKS (#298): per-project opt-out for the
+# CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 deny (#301). A self-review on the
+# PR that added this flagged that FOREGROUND_ONLY_ENV_OPTS becoming an
+# empty array under `set -u` when the opt-out is used had no test —
+# exercising it for real here also proves that empty-array expansion is
+# safe on this script's actual bash (it's already sandbox.sh's established
+# pattern for every other optional docker-run flag: DEP_CACHE_OPTS,
+# DEP_PROXY_OPTS, ENV_FILE_OPT, etc.).
+if [ -S /var/run/docker.sock ]; then
+    # Unset (default): deny is on, CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1
+    # reaches the container.
+    output=$(env -u SANDBOX_ALLOW_BACKGROUND_TASKS "$REPO_ROOT/sandbox.sh" /tmp printenv CLAUDE_CODE_DISABLE_BACKGROUND_TASKS 2>&1)
+    container_value=$(tail -n1 <<< "$output")
+    [[ "$container_value" == "1" ]] \
+        && pass "SANDBOX_ALLOW_BACKGROUND_TASKS unset -> CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1" "$output" \
+        || fail "SANDBOX_ALLOW_BACKGROUND_TASKS unset -> CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1" "$output"
+
+    # SANDBOX_ALLOW_BACKGROUND_TASKS=1: opt-out — no
+    # CLAUDE_CODE_DISABLE_BACKGROUND_TASKS in the container at all.
+    output=$(SANDBOX_ALLOW_BACKGROUND_TASKS=1 "$REPO_ROOT/sandbox.sh" /tmp printenv CLAUDE_CODE_DISABLE_BACKGROUND_TASKS 2>&1) || true
+    [[ "$output" != *"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"* ]] \
+        && pass "SANDBOX_ALLOW_BACKGROUND_TASKS=1 -> no CLAUDE_CODE_DISABLE_BACKGROUND_TASKS in container" "$output" \
+        || fail "SANDBOX_ALLOW_BACKGROUND_TASKS=1 -> no CLAUDE_CODE_DISABLE_BACKGROUND_TASKS in container" "$output"
+else
+    skip "SANDBOX_ALLOW_BACKGROUND_TASKS" "/var/run/docker.sock not present"
+fi
+
 # SANDBOX_DEP_PROXY_URL (#331): local caching Maven/Gradle repository proxy
 # knob. Unlike SANDBOX_DEP_CACHE this isn't a path to validate — it's a URL
 # that a Gradle init script reads at build time — so the shape test here is

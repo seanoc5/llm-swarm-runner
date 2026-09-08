@@ -598,6 +598,44 @@ unset WATCH_PID
     || red "a distant guard-token mention wrongly suppressed a real violation; log: $(cat "$TEST_DIR/watch-bgviol-d.log")"
 green "a guard token more than 3 lines from the marker does not suppress a real violation"
 
+heading "Test 15e: a guarded later match does not hide a real earlier one in the same pane (#298)"
+# Self-review finding: taking only the LAST match (tail -1) meant a real
+# marker earlier in the capture could be hidden behind a LATER
+# documentation quote that the guard correctly disqualifies — the sweep
+# never even looked at the earlier, real one. Puts a real marker first,
+# then a guarded doc quote further down in the same pane, and asserts the
+# earlier real one still gets flagged.
+rm -rf "$TEST_DIR/wt-issue-77/.swarm/tasks/outbox"
+echo 'iss-77' > "$TEST_DIR/tmux-windows.txt"
+cat > "$TEST_DIR/tmux-pane-iss-77.txt" <<'PANE'
+Running in the background
+some worker output here
+some more worker output here
+scans every iss-* worker pane for the background-shell UI markers Claude
+Code leaves behind ("Running in the background", "N shells still running"
+at rest) — see SANDBOX_ALLOW_BACKGROUND_TASKS for the opt-out.
+PANE
+
+cd "$PROJECT_DIR"
+DRY_RUN=0 WATCH_BG_VIOLATION_SWEEP_SECS=1 WATCH_PR_POLL_SECS=0 \
+    WATCH_ORPHAN_SWEEP_SECS=0 WATCH_CHECK_ON_DONE=0 POLL_SECS=1 \
+    "$WATCH" "$PROJECT_DIR" > "$TEST_DIR/watch-bgviol-e.log" 2>&1 &
+WATCH_PID=$!
+
+outbox_file=""
+for ((i=0; i<20; i++)); do
+    outbox_file="$(ls "$TEST_DIR"/wt-issue-77/.swarm/tasks/outbox/*.md 2>/dev/null | head -1)" || true
+    [ -n "$outbox_file" ] && break
+    sleep 0.5
+done
+kill "$WATCH_PID" 2>/dev/null || true
+wait "$WATCH_PID" 2>/dev/null || true
+unset WATCH_PID
+
+[ -n "$outbox_file" ] \
+    || red "an earlier real marker was hidden behind a later guarded match; log: $(cat "$TEST_DIR/watch-bgviol-e.log")"
+green "a guarded later match does not hide an earlier real marker in the same pane"
+
 rm -f "$TEST_DIR/tmux-windows.txt" "$TEST_DIR/tmux-pane-iss-77.txt"
 
 # ────────────────────────── Done ──────────────────────────
