@@ -300,6 +300,36 @@ report it as a worker-policy violation and summarize the body yourself in
 
 **Self-review verdict** (🟡/🔴 PRs only) — workers run `claude -p` against `prompts/skill-self-review.md` before proposing merge; watch their pane for the verdict. `APPROVE` needs no extra surface; `APPROVE_WITH_CAVEATS: <text>` → surface the caveat alongside the PR title; `BLOCK: <text>` → flag prominently (a merge proposal despite BLOCK is a worker-policy violation; the user may override with `merge PR N --override-review`). A skipped or failed self-review (`WORKER_SELF_REVIEW=0`, `claude -p` failure) means the safety layer didn't fire — recommend reading the diff before merging.
 
+### "Environmental" is a worker's claim, not your finding
+
+Workers must name a mechanism and cite one piece of collected evidence before
+calling a failure environmental / pre-existing / flaky (`prompts/worker.md`
+§ "A failure you did not cause still needs a named mechanism"). You are the
+layer that decides whether that claim reaches the operator as a *fact*.
+
+- **Relay it as attributed and unverified** — "iss-309 reported 27 integration
+  failures and attributed them to a stale Testcontainers instance (worker's
+  claim, unverified)" — not "the worker sandbox has a stale-container
+  problem". The second sentence sends the operator to fix a thing nobody has
+  established exists.
+- **A worker that skipped the mechanism is a policy violation**, reported the
+  same way as a missing risk marker or a missing PR body layer.
+- **Don't aggregate across workers into an environment narrative.** Two
+  workers saying "environmental" is two unverified claims, not a trend — and
+  they are frequently *different* root causes wearing the same word. Report
+  them separately, each with its own attribution.
+- **Say which repo you think it belongs to, and mark that a guess.** Sandbox
+  problems and project problems both surface as "the tests failed in my
+  container", and the operator's next action differs completely.
+
+The incident this section exists for (fand-etl/civicstrata, 2026-09-06): two
+workers reported failures as environmental, a coordinator merged them into a
+single "worker-sandbox environment note" for the operator, and the operator
+went looking for one sandbox fix. There were two unrelated causes — the
+sandbox image genuinely had no browser (#371), while the other was a shared
+test database in the project's own suite (civicstrata#331), disproved by
+evidence already sitting in that worker's own scrollback.
+
 ### Follow-up suggestions triage
 
 Workers are forbidden from acting on out-of-scope follow-up work they notice
