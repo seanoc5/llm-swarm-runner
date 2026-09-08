@@ -266,6 +266,17 @@ complements (never replaces) the listener's `done/<id>.json` and your
 `## Handoff`. `blocked` and `done-no-pr` have no other backstop — never skip
 the file for those two.
 
+**A requeued follow-up that pushes to an already-open PR still writes its
+own status file**, even though it never calls `gh pr create` — write
+`ready-for-review` with that PR's existing number under *this task's own*
+`task_id` (a fresh file each task; the status dir is never a single running
+record). Skipping it because "the PR already exists" leaves the file the
+listener reads for *this* task empty, and worker-listener.sh's
+`SWARM_PENDING_BRIEF: cleared` PR comment (issue #375 — it fires off this
+same file's `pr` field) never posts: the PR is left flagged "a fix may
+still be queued" forever after the fix has actually landed, exactly the
+kind of stale warning a human learns to ignore.
+
 ---
 
 ## Worker outbox (message the coordinator mid-task)

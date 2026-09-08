@@ -540,6 +540,47 @@ EOF
     append_eval_log "$outcome" "$finished" "$duration" "$rc"
 }
 
+# issue #375: requeue.sh best-effort posts a `SWARM_PENDING_BRIEF: queued`
+# marker comment on a target PR when it drops a follow-up brief into
+# inbox/ — so a human merging from GitHub doesn't merge past a queued
+# review-fix. Once THIS task (the one that drained that brief) finishes
+# with a PR resolved in its status file, the marker MAY be stale: if this
+# was the only queued brief, the fix this task delivered is already
+# reflected in that PR. Post the matching `SWARM_PENDING_BRIEF: cleared`
+# comment so a human reading the PR sees the warning was resolved, not
+# just abandoned.
+#
+# But a second brief can be queued behind the first (e.g. two independent
+# review-fix follow-ups back to back, or one queued mid-task) — clearing
+# unconditionally on ANY task completion would then tell a human "resolved"
+# while that second brief is still sitting unclaimed, a false green that's
+# worse than staying silent (self-review catch during #375's own PR
+# review). Only clear when this worktree's queue is actually drained:
+# inbox and processing empty. processing/ should already be empty here in
+# practice (this task's own entry was archived to done/ before this runs,
+# and the listener is single-threaded), checked anyway as a cheap belt.
+#
+# Takes inbox/processing dirs as args rather than reading the script's own
+# $INBOX/$PROCESSING globals so the function stays testable in isolation.
+clear_pr_pending_brief_marker() {
+    local pr="$1" inbox="$2" processing="$3"
+    command -v gh >/dev/null 2>&1 || return 0
+    if find "$inbox" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | grep -q . \
+        || find "$processing" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | grep -q .; then
+        return 0
+    fi
+    # See requeue.sh's notify_pr_pending_brief for why this must anchor to
+    # the marker line itself rather than a bare substring match.
+    local last
+    last="$(gh pr view "$pr" --json comments \
+        -q '[.comments[] | select(.body | test("SWARM_PENDING_BRIEF:"))] | last | .body // empty' 2>/dev/null \
+        | grep -oE '^<!-- SWARM_PENDING_BRIEF: (queued|cleared) -->$' \
+        | sed -E 's/^<!-- SWARM_PENDING_BRIEF: (queued|cleared) -->$/\1/' || true)"
+    [ "$last" = "queued" ] || return 0
+    gh pr comment "$pr" --body $'<!-- SWARM_PENDING_BRIEF: cleared -->\n:white_check_mark: Swarm: the previously queued follow-up brief has been delivered — this PR reflects it.\n' \
+        >/dev/null 2>&1 || true
+}
+
 # Print a structured, actionable status block once per completed task —
 # replaces the old one-line "Task complete... Waiting for next brief"
 # message, which was indistinguishable from a hang at a glance (issue #42).
@@ -566,6 +607,7 @@ print_completion_block() {
         local outcome_file="$DONE/${TASK_ID}.${outcome}.json"
         [ -r "$outcome_file" ] && outcome_reason=$(jq -r '.reason // empty' "$outcome_file" 2>/dev/null)
     fi
+    [ -n "$pr" ] && clear_pr_pending_brief_marker "$pr" "$INBOX" "$PROCESSING"
 
     echo ""
     echo "$bar"

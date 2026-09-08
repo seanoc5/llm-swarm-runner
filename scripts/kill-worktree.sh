@@ -39,6 +39,13 @@
 # SWARM_REAP_INBOX=refuse) to skip the worktree entirely instead (exit 76)
 # for operators who'd rather the reap stall than salvage-and-remove.
 #
+# issue #375: salvage alone left the PR itself silent — a human merging
+# from GitHub had no way to know a queued fix brief never reached the
+# worker. A salvage now also best-effort posts a `SWARM_BRIEF_ORPHANED`
+# marker comment on the reaped branch's PR (see notify_pr_brief_orphaned
+# below); pairs with requeue.sh's `SWARM_PENDING_BRIEF` marker, which
+# flags the PR the moment a follow-up brief is queued, before any reap.
+#
 # issue #181: before removing anything, checks for an in-flight check-on-done
 # run (coordinator-watch.sh's maybe_run_check claims a worktree via a
 # `mkdir`'d .swarm/tasks/status/<task_id>.check-claim dir while its
@@ -82,6 +89,29 @@ count_queued_files() {
     local dir="$1"
     [ -d "$dir" ] || { echo 0; return; }
     find "$dir" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | wc -l | tr -d ' '
+}
+
+# issue #375: salvage_queued_files (below) preserves the brief's bytes,
+# but preservation alone left a merge-race blind spot — twice in one
+# civicstrata session a PR merged from GitHub while a coordinator-requeued
+# fix brief (a review BLOCK once, a privacy caveat once) sat orphaned in
+# this exact salvage path, because nothing at the PR itself said a fix was
+# still queued. Best-effort: posts a `<!-- SWARM_BRIEF_ORPHANED -->`
+# comment on the reaped branch's PR (any state — this fires right as the
+# worktree that would have delivered the brief is being destroyed, so the
+# PR is typically already MERGED/CLOSED) naming the salvage location. No
+# gh, no remote, no PR for the branch, or a lookup failure is silently
+# swallowed — this is a signal, never a gate on the reap itself.
+notify_pr_brief_orphaned() {
+    local branch="$1" unprocessed="$2" counts="$3" salvage_dir="$4"
+    command -v gh >/dev/null 2>&1 || return 0
+    local pr
+    pr="$(gh pr view "$branch" --json number -q .number 2>/dev/null)" || return 0
+    [ -n "$pr" ] || return 0
+    local comment
+    comment="$(printf '<!-- SWARM_BRIEF_ORPHANED -->\n:rotating_light: **Swarm: a queued follow-up brief was orphaned by a worker reap**\n\nThis PR'"'"'s worker worktree was reaped (`kill-worktree.sh`, issue #317/#375) while %s unprocessed brief file(s) (%s) still sat in its task queue — they never reached the worker. If this PR was already merged or closed, whatever the queued brief was meant to fix (a review BLOCK, a privacy caveat, superseded numbers, ...) never made it in.\n\nThe brief(s) were preserved, not lost: `%s`. A human should judge whether the queued work is still relevant and, if so, re-dispatch it (`provision-worker.sh` / `requeue.sh`) against a fresh worktree.\n\n<sub>scripts/kill-worktree.sh — issue #375 (reap-race escalation).</sub>\n' \
+        "$unprocessed" "$counts" "$salvage_dir")"
+    gh pr comment "$pr" --body "$comment" >/dev/null 2>&1 || true
 }
 
 # Moves every queued file (same selection as count_queued_files) from src/
@@ -200,6 +230,7 @@ if [ -d "$WT" ]; then
         salvage_queued_files "$WT/.swarm/tasks/processing" "$SALVAGE_DIR/processing"
         salvage_queued_files "$WT/.swarm/tasks/outbox" "$SALVAGE_DIR/outbox"
         echo "  ⚠ SALVAGED: $UNPROCESSED unprocessed brief(s) from iss-$ISSUE ($COUNTS_MSG) → $SALVAGE_DIR"
+        notify_pr_brief_orphaned "${ACTUAL_BRANCH:-$BRANCH}" "$UNPROCESSED" "$COUNTS_MSG" "$SALVAGE_DIR"
     fi
 
     if [ "$NO_COMPOSE_DOWN" = "1" ]; then

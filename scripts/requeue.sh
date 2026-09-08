@@ -27,6 +27,18 @@
 # before removing the worktree (issue #317). Check there — and re-dispatch
 # if the work is still relevant — if a queued follow-up seems to have
 # vanished.
+#
+# issue #375: salvage preserves the brief, but not the PR the brief was
+# meant to fix — nothing tells a human merging from GitHub that a queued
+# fix (a review BLOCK, a privacy caveat, ...) hasn't reached the worker
+# yet, so the PR can merge past it. If the target worktree's checked-out
+# branch has an OPEN PR, this drops a `<!-- SWARM_PENDING_BRIEF: queued -->`
+# marker comment on it. Best-effort (no gh, no network, or a lookup
+# failure never blocks the requeue) and idempotent (skipped if the latest
+# SWARM_PENDING_BRIEF comment already says "queued" — see
+# notify_pr_pending_brief below). worker-listener.sh posts the matching
+# `SWARM_PENDING_BRIEF: cleared` comment once the task that drains this
+# brief finishes with a PR resolved in its status file.
 set -euo pipefail
 
 # Self-locate so the printed help text references the actual install path,
@@ -50,6 +62,44 @@ fi
 [ -d "$WT" ] || { echo "ERROR: worktree not found: $WT" >&2; exit 1; }
 WT="$(cd "$WT" && pwd)"
 
+# issue #375: best-effort PR marker so a human merging from GitHub can see
+# a follow-up brief is queued for this PR's worker. Mirrors the
+# last-comment-wins idiom migration-collision-check.sh uses for
+# SWARM_MIGRATION_GATE: state lives in which marker state was posted most
+# recently, no comment editing required. Silent no-op on any failure (no
+# gh, no remote, branch has no PR, PR not OPEN, or already flagged) — this
+# is a signal, never a gate.
+notify_pr_pending_brief() {
+    local wt="$1" task_id="$2"
+    command -v gh >/dev/null 2>&1 || return 0
+    local branch
+    branch="$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null)" || return 0
+    [ -n "$branch" ] || return 0
+    local json pr_num pr_state
+    json="$(gh pr view "$branch" --json number,state -q '"\(.number)\t\(.state)"' 2>/dev/null)" || return 0
+    [ -n "$json" ] || return 0
+    IFS=$'\t' read -r pr_num pr_state <<< "$json"
+    [ "$pr_state" = "OPEN" ] || return 0
+
+    # Anchored to the HTML-comment marker line itself (start of line,
+    # `-->` close required) — the comment's own body text explains the
+    # OTHER marker state in prose ("...wait for a SWARM_PENDING_BRIEF:
+    # cleared follow-up comment...") which a bare substring match would
+    # also catch, corrupting "last state" detection.
+    local last
+    last="$(gh pr view "$pr_num" --json comments \
+        -q '[.comments[] | select(.body | test("SWARM_PENDING_BRIEF:"))] | last | .body // empty' 2>/dev/null \
+        | grep -oE '^<!-- SWARM_PENDING_BRIEF: (queued|cleared) -->$' \
+        | sed -E 's/^<!-- SWARM_PENDING_BRIEF: (queued|cleared) -->$/\1/' || true)"
+    [ "$last" = "queued" ] && return 0
+
+    local ts comment
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    comment="$(printf '<!-- SWARM_PENDING_BRIEF: queued -->\n:warning: **Swarm: a follow-up brief is queued for this PR'"'"'s worker** (task `%s`, queued %s UTC).\n\nMerging now may ship without this queued fix. This note goes stale once the worker'"'"'s next commit lands — check the PR'"'"'s commit timeline against the queued time above, or wait for a `SWARM_PENDING_BRIEF: cleared` follow-up comment, before treating this as still true.\n\n<sub>scripts/requeue.sh — issue #375 (reap-race signal).</sub>\n' \
+        "$task_id" "$ts")"
+    gh pr comment "$pr_num" --body "$comment" >/dev/null 2>&1 || true
+}
+
 INBOX="$WT/.swarm/tasks/inbox"
 mkdir -p "$INBOX"
 
@@ -67,6 +117,8 @@ fi
 # Atomic claim into the inbox
 mv "$TMP" "$INBOX/$TASK_ID.md"
 echo "✓ requeued: $INBOX/$TASK_ID.md"
+
+notify_pr_pending_brief "$WT" "$TASK_ID"
 
 # Resolve the main repo via git so the session-name guess is robust to
 # unusual layouts (worktrees not parented under the project dir).
