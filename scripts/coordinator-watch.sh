@@ -3854,16 +3854,17 @@ worker_pending_brief() {
 # process ever calls claim_next_task() again — is always strictly after any
 # prior task's own status write.
 #
-# Among candidates whose mtime is >= proc_file's ctime, trust the SINGLE
-# newest one by mtime, not just the first terminal one a glob happens to
-# visit — another self-review finding: if the same anomalous worker session
-# wrote status under two different mismatched names at different points
-# (e.g. an earlier ready-for-review under one name, then genuinely went
-# `blocked` again and recorded that under another), taking the first
-# terminal match in glob order could pick the STALE ready-for-review one and
-# miss the newer, authoritative blocked state — the false-completion bug
-# all over again. The newest post-claim record is always the worker's most
-# current self-report, whatever its state.
+# Among candidates newer than proc_file's ctime, trust the newest mtime
+# second, not just the first terminal one a glob happens to visit — another
+# self-review finding: if the same anomalous worker session wrote status
+# under two different mismatched names at different points (e.g. an earlier
+# ready-for-review under one name, then genuinely went `blocked` again and
+# recorded that under another), taking the first terminal match in glob
+# order could pick the STALE ready-for-review one and miss the newer,
+# authoritative blocked state — the false-completion bug all over again.
+# And on a TIE within that newest second (same whole-second resolution
+# problem as the claim boundary above), a non-terminal record wins over a
+# terminal one — see the second loop below.
 #
 # mtime_epoch/ctime_epoch resolve to whole seconds, so the boundary compare
 # below is strict (>), not >=: a same-second collision between a PRIOR
@@ -3893,7 +3894,7 @@ worker_current_task_terminal() {
         esac
     fi
 
-    local proc_ctime f mtime best_f="" best_mtime=-1
+    local proc_ctime f mtime best_mtime=-1
     proc_ctime="$(ctime_epoch "$proc_file")"
     [ -n "$proc_ctime" ] || return 1
     shopt -s nullglob
@@ -3901,18 +3902,35 @@ worker_current_task_terminal() {
         case "$f" in *.check.json) continue ;; esac
         mtime="$(mtime_epoch "$f")"
         [ -n "$mtime" ] && [ "$mtime" -gt "$proc_ctime" ] || continue
-        if [ "$mtime" -gt "$best_mtime" ]; then
-            best_mtime="$mtime"
-            best_f="$f"
-        fi
+        [ "$mtime" -gt "$best_mtime" ] && best_mtime="$mtime"
+    done
+    if [ "$best_mtime" -eq -1 ]; then
+        shopt -u nullglob
+        return 1
+    fi
+
+    # Second pass, over candidates tied at the newest mtime second only:
+    # whole-second resolution can't order same-second writes, so on a tie a
+    # NON-terminal record wins — the same fail-closed direction as the
+    # strict-> boundary above, applied to the tie-break too (a self-review
+    # finding: picking whichever tied file a glob happens to visit first
+    # could let a stale ready-for-review beat an equally-timestamped, more
+    # current blocked record).
+    for f in "$wt_dir/.swarm/tasks/status"/*.json; do
+        case "$f" in *.check.json) continue ;; esac
+        mtime="$(mtime_epoch "$f")"
+        [ "$mtime" = "$best_mtime" ] || continue
+        state="$(jq -r '.state // empty' "$f" 2>/dev/null)" || continue
+        case "$state" in
+            ready-for-review|done-no-pr) ;;
+            *)
+                shopt -u nullglob
+                return 1
+                ;;
+        esac
     done
     shopt -u nullglob
-    [ -n "$best_f" ] || return 1
-    state="$(jq -r '.state // empty' "$best_f" 2>/dev/null)" || return 1
-    case "$state" in
-        ready-for-review|done-no-pr) return 0 ;;
-        *)                           return 1 ;;
-    esac
+    return 0
 }
 
 # WORKER_DELIVER_LAST_FAIL / WORKER_DELIVER_FAIL_COUNT / WORKER_DELIVER_GAVE_UP

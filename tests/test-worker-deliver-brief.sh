@@ -221,6 +221,27 @@ printf '{"task_id":"zzz-517","state":"blocked","pr":123,"ts":"2026-09-06T23:11:0
 rc=0; worker_current_task_terminal "$WT_DIR" || rc=$?
 check "newer mismatched-name record is blocked (supersedes an older stale ready-for-review) -> rc1" "1" "$rc"
 
+# Self-review finding: mtime_epoch/ctime_epoch resolve to whole seconds, so
+# the "newest wins" tie-break above needs its OWN tie-break for two
+# mismatched-name records landing in the same epoch second — deterministic
+# here via `touch -r` (copies aaa-517.json's exact mtime onto zzz-517.json)
+# rather than relying on two real writes happening to land in the same wall-
+# clock second. On a genuine tie, a non-terminal record must win (fail
+# closed) regardless of which file a glob happens to visit first — reversed
+# alphabetical order from the "newest wins" case above (blocked=aaa-,
+# ready-for-review=zzz-) so this only passes if the tie-break — not glob
+# order — decides the outcome.
+rm -f "$PROCESSING_DIR"/*.md "$STATUS_DIR"/*.json 2>/dev/null || true
+echo "the current task brief" > "$PROCESSING_DIR/20260906-230823-517.md"
+sleep 1.1
+printf '{"task_id":"aaa-517","state":"blocked","pr":123,"ts":"2026-09-06T23:09:00Z","note":"awaiting decision"}' \
+    > "$STATUS_DIR/aaa-517.json"
+printf '{"task_id":"zzz-517","state":"ready-for-review","pr":123,"ts":"2026-09-06T23:09:00Z","note":""}' \
+    > "$STATUS_DIR/zzz-517.json"
+touch -r "$STATUS_DIR/aaa-517.json" "$STATUS_DIR/zzz-517.json"
+rc=0; worker_current_task_terminal "$WT_DIR" || rc=$?
+check "same-second tie between blocked and ready-for-review records -> rc1 (non-terminal wins, fail closed)" "1" "$rc"
+
 rm -f "$PROCESSING_DIR"/*.md "$STATUS_DIR"/*.json 2>/dev/null || true
 
 heading "Test 3: maybe_worker_deliver_brief — gating (DRY_RUN)"
