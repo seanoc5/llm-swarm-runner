@@ -65,10 +65,19 @@ cat > "$TEST_DIR/bin/tmux" <<EOF
 #!/usr/bin/env bash
 # Stub: provision-worker.sh uses has-session + list-windows + new-window.
 # Pretend the session always exists, no windows yet, log new-window calls.
+# list-windows/capture-pane also serve bg_violation_sweep_pass's Test 15
+# fixtures below (\$TEST_DIR/tmux-windows.txt, tmux-pane-<win>.txt) — both
+# are absent for every earlier test, so those two cases fall back to their
+# original no-output behavior until Test 15 populates them.
 TMUX_LOG="$TEST_DIR/tmux.log"
 case "\${1:-}" in
     has-session)   exit 0 ;;
-    list-windows)  exit 0 ;;
+    list-windows)  [ -f "$TEST_DIR/tmux-windows.txt" ] && cat "$TEST_DIR/tmux-windows.txt"; exit 0 ;;
+    capture-pane)
+        win=""; prev=""
+        for a in "\$@"; do [ "\$prev" = "-t" ] && win="\${a##*:}"; prev="\$a"; done
+        [ -f "$TEST_DIR/tmux-pane-\$win.txt" ] && cat "$TEST_DIR/tmux-pane-\$win.txt"
+        exit 0 ;;
     new-window)    echo "\$*" >> "\$TMUX_LOG" ;;
     *)             echo "stub-tmux: ignored: \$*" >> "\$TMUX_LOG" ;;
 esac
@@ -450,6 +459,70 @@ grep -q 'INTEGRATION-HOOK:.*wt-issue-77.*t77.ok.json' "$TEST_DIR/integration-hoo
 [ -f "$TEST_DIR/wt-issue-77/.swarm/tasks/done/t77.ok.json.posted" ] \
     || red ".posted marker missing — sweep should have written it"
 green "POST_OUTCOMES=1 fires sweep on event; hook called; .posted marker written"
+
+heading "Test 15a: bg_violation_sweep_pass flags a real background-shell marker (#298)"
+# Reuses wt-issue-77's worktree (issue number must be numeric, dir must
+# exist) as the sweep's target; iss-77 is a fresh window name not used by
+# any earlier test's tmux new-window assertions.
+echo "iss-77" > "$TEST_DIR/tmux-windows.txt"
+echo 'some worker output here' > "$TEST_DIR/tmux-pane-iss-77.txt"
+echo 'Running in the background' >> "$TEST_DIR/tmux-pane-iss-77.txt"
+rm -rf "$TEST_DIR/wt-issue-77/.swarm/tasks/outbox"
+
+cd "$PROJECT_DIR"
+DRY_RUN=1 WATCH_BG_VIOLATION_SWEEP_SECS=1 WATCH_PR_POLL_SECS=0 \
+    WATCH_ORPHAN_SWEEP_SECS=0 WATCH_CHECK_ON_DONE=0 POLL_SECS=1 \
+    "$WATCH" "$PROJECT_DIR" > "$TEST_DIR/watch-bgviol-a.log" 2>&1 &
+WATCH_PID=$!
+
+outbox_file=""
+for ((i=0; i<20; i++)); do
+    outbox_file="$(ls "$TEST_DIR"/wt-issue-77/.swarm/tasks/outbox/*.md 2>/dev/null | head -1)" || true
+    [ -n "$outbox_file" ] && break
+    sleep 0.5
+done
+kill "$WATCH_PID" 2>/dev/null || true
+wait "$WATCH_PID" 2>/dev/null || true
+unset WATCH_PID
+
+[ -n "$outbox_file" ] || red "expected a bg-violation outbox message; log: $(cat "$TEST_DIR/watch-bgviol-a.log")"
+grep -q 'kind: fyi' "$outbox_file" || red "expected kind: fyi in $outbox_file"
+grep -q 'iss-77' "$outbox_file" || red "expected issue reference in $outbox_file"
+green "real background-shell marker -> outbox fyi message dropped for iss-77"
+
+heading "Test 15b: bg_violation_sweep_pass self-match guard suppresses a documentation quote (#298)"
+# Same marker text, but on a line that also carries this feature's own
+# identifying token — as it would if a worker cats/greps docs/advanced-
+# usage.md or this file's own header comment describing the sweep.
+rm -rf "$TEST_DIR/wt-issue-77/.swarm/tasks/outbox"
+cat > "$TEST_DIR/tmux-pane-iss-77.txt" <<'PANE'
+scans every iss-* worker pane for the background-shell UI markers Claude
+Code leaves behind ("Running in the background", "N shells still running"
+at rest) — see SANDBOX_ALLOW_BACKGROUND_TASKS for the opt-out.
+PANE
+
+cd "$PROJECT_DIR"
+DRY_RUN=1 WATCH_BG_VIOLATION_SWEEP_SECS=1 WATCH_PR_POLL_SECS=0 \
+    WATCH_ORPHAN_SWEEP_SECS=0 WATCH_CHECK_ON_DONE=0 POLL_SECS=1 \
+    "$WATCH" "$PROJECT_DIR" > "$TEST_DIR/watch-bgviol-b.log" 2>&1 &
+WATCH_PID=$!
+
+# No positive wait condition here (we're proving absence) — give the sweep
+# several ticks to have fired, same order of magnitude as Test 15a's wait.
+sleep 5
+still_running=0
+kill -0 "$WATCH_PID" 2>/dev/null && still_running=1
+kill "$WATCH_PID" 2>/dev/null || true
+wait "$WATCH_PID" 2>/dev/null || true
+unset WATCH_PID
+
+[ "$still_running" = "1" ] || red "watch process exited unexpectedly; log: $(cat "$TEST_DIR/watch-bgviol-b.log")"
+outbox_file="$(ls "$TEST_DIR"/wt-issue-77/.swarm/tasks/outbox/*.md 2>/dev/null | head -1)" || true
+[ -z "$outbox_file" ] \
+    || red "self-match guard failed to suppress a documentation quote; got: $(cat "$outbox_file")"
+green "documentation quote of the marker text does NOT produce a false-positive outbox message"
+
+rm -f "$TEST_DIR/tmux-windows.txt" "$TEST_DIR/tmux-pane-iss-77.txt"
 
 # ────────────────────────── Done ──────────────────────────
 

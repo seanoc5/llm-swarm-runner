@@ -2507,9 +2507,29 @@ bg_violation_sweep_pass() {
 
         content="$(tmux capture-pane -t "$SESSION_NAME:$win" -p -S -200 2>/dev/null)" || continue
         clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
-        matched="$(printf '%s\n' "$clean" | LC_ALL=C grep -oE "$WATCH_BG_VIOLATION_PATTERN" 2>/dev/null | tail -1)"
+        # `|| true`: under this file's `set -euo pipefail`, the common
+        # no-match case makes grep exit 1 — pipefail then makes the whole
+        # pipeline (and thus this bare assignment) exit non-zero, which
+        # would abort the script under `set -e` on every ordinary tick.
+        # Only this function's sole call site (`bg_violation_sweep_pass ||
+        # true`) currently masks that; fix it here too so a future direct
+        # call doesn't silently kill the watcher on its most common path.
+        matched="$(printf '%s\n' "$clean" | LC_ALL=C grep -oE "$WATCH_BG_VIOLATION_PATTERN" 2>/dev/null | tail -1)" || true
 
         if [ -z "$matched" ]; then
+            unset "BG_VIOLATION_LOGGED[$win]" 2>/dev/null || true
+            continue
+        fi
+        # Self-match guard (#298): the marker text this sweep looks for is
+        # quoted verbatim in this project's own docs/comments/PR text
+        # (docs/advanced-usage.md, this file's header, the issue itself) —
+        # a worker that cats/greps those files, or views this feature's PR,
+        # renders the literal marker in its pane with no real backgrounded
+        # shell behind it. Rather than tighten WATCH_BG_VIOLATION_PATTERN
+        # (risking a missed real marker), treat a pane that ALSO shows an
+        # unambiguous self-reference to this feature within the same
+        # capture window as documentation, not a violation.
+        if printf '%s\n' "$clean" | LC_ALL=C grep -qE 'WATCH_BG_VIOLATION|SANDBOX_ALLOW_BACKGROUND_TASKS|CLAUDE_CODE_DISABLE_BACKGROUND_TASKS'; then
             unset "BG_VIOLATION_LOGGED[$win]" 2>/dev/null || true
             continue
         fi
