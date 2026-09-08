@@ -8,7 +8,12 @@
 #   swarm-merge.sh <issue#|PR#> --override-review  # merge despite a BLOCK verdict
 #   swarm-merge.sh <issue#|PR#> --override-migration-gate  # merge despite a migration collision
 #   swarm-merge.sh <issue#> --force-cleanup  # housekeep even while the issue is OPEN
+#   swarm-merge.sh <issue#|PR#> --squash  # accepted-and-ignored: squash is the only mode
 #   swarm-merge.sh --sweep-only       # just run the local-branch sweep
+#
+# --squash is accepted as a no-op alias (this script always squashes); it is
+# not a mode selector. --merge and --rebase are deliberately NOT supported
+# and exit non-zero rather than being silently ignored.
 #
 # What it does:
 #   1. Resolves the given number as either an issue or a PR (GitHub shares
@@ -73,6 +78,11 @@ for arg in "$@"; do
     --override-review) OVERRIDE_REVIEW=1 ;;
     --override-migration-gate) OVERRIDE_MIGRATION_GATE=1 ;;
     --force-cleanup) FORCE_CLEANUP=1 ;;
+    --squash)    ;;   # no-op: squash is the only mode this script implements
+    --merge|--rebase)
+      echo "ERROR: swarm-merge.sh always squashes; $arg is not supported" >&2
+      exit 2
+      ;;
     --help|-h)
       sed -n '2,/^# Exits/p' "$0" | sed 's/^# \?//'
       exit 0
