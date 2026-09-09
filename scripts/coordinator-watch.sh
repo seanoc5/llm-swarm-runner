@@ -195,24 +195,40 @@
 #                           loop as pr_poll_pass/orphan_sweep_pass above
 #                           (cheap: local capture-pane only, no gh/network
 #                           calls) and greps every iss-* window's rendered
-#                           pane for WATCH_BG_VIOLATION_PATTERN — the
-#                           background-shell UI markers a worker leaves
-#                           behind ("Running in the background", "N shells
-#                           still running" at rest). A NEW sighting (edge-
-#                           triggered via the BG_VIOLATION_LOGGED dedup map,
-#                           so an still-open background shell doesn't re-fire
-#                           every sweep) drops a `kind: fyi` message into
-#                           that worker's own .swarm/tasks/outbox/ — reusing
-#                           the existing WATCH_OUTBOX wake path (on_message)
-#                           instead of inventing a second one, so the
-#                           violation reaches the coordinator's wake report
-#                           the same way a worker-authored outbox message
-#                           does. Set to 0 to disable. See bg_violation_sweep_pass
-#                           for the detection logic and prompts/coordinator.md's
-#                           existing "If a worker backgrounds anyway" guidance
-#                           for what the coordinator does once it sees this
-#                           (flag it — never autoremediate a possibly
-#                           mid-task worker).
+#                           pane, PLUS the coordinator's own window (issue
+#                           #385 — #383/#384 closed the mechanical switch for
+#                           claude coordinators, but this sweep is the
+#                           backstop for gemini/codex coordinators and any
+#                           future path that reopens the door, and the #298
+#                           incident that motivated this whole sweep was
+#                           itself a coordinator pane, not a worker one), for
+#                           WATCH_BG_VIOLATION_PATTERN — the background-shell
+#                           UI markers Claude Code leaves behind ("Running in
+#                           the background", "N shells still running" at
+#                           rest). A NEW sighting (edge-triggered via the
+#                           BG_VIOLATION_LOGGED dedup map, so a still-open
+#                           background shell doesn't re-fire every sweep) is
+#                           delivered per role: a worker window gets a
+#                           `kind: fyi` message dropped into that worker's
+#                           own .swarm/tasks/outbox/ — reusing the existing
+#                           WATCH_OUTBOX wake path (on_message) instead of
+#                           inventing a second one, so the violation reaches
+#                           the coordinator's wake report the same way a
+#                           worker-authored outbox message does; the
+#                           coordinator window has no outbox of its own, so
+#                           it gets only a watch.bg_violation events.log line
+#                           and relies on prompts/coordinator.md's per-wake
+#                           self-check to surface it on the next wake digest
+#                           (issue #385's chosen delivery — no new wake
+#                           plumbing). Set to 0 to disable. See
+#                           bg_violation_sweep_pass for the detection logic
+#                           and prompts/coordinator.md's existing "If a
+#                           worker backgrounds anyway" / bg-violation
+#                           self-check guidance for what the coordinator does
+#                           once it sees this (flag it — never autoremediate
+#                           a possibly mid-task worker; for its own pane,
+#                           just report the finding, since there's no other
+#                           agent to hand it to).
 #   WATCH_BG_VIOLATION_PATTERN
 #                           (issue #298) Override the grep -E pattern
 #                           bg_violation_sweep_pass matches against each
@@ -1232,7 +1248,7 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     WATCHER_AUTOCLOSE_MODE merged which terminal PR states are reap-eligible: merged (MERGED only, default) | finalized (MERGED or CLOSED)
     WATCH_PR_POLL_SECS  60        periodic gh-poll backstop reap (0=off); see header comment
     WATCH_ORPHAN_SWEEP_SECS 3600  periodic reap-orphan-worktrees.sh sweep for window-less worktrees (0=off); see header comment
-    WATCH_BG_VIOLATION_SWEEP_SECS 60  periodic sweep for backgrounded-shell UI markers on iss-* panes (0=off); see header comment
+    WATCH_BG_VIOLATION_SWEEP_SECS 60  periodic sweep for backgrounded-shell UI markers on iss-* panes + the coordinator pane (0=off); see header comment
     WATCH_BG_VIOLATION_PATTERN    (auto)  grep -E pattern for the sweep above
     WATCH_CHECK_ON_DONE 1         run acceptance check when a worker signals done; see header comment
     SESSION_NAME        (auto)    tmux session for chk-N windows (llm-<project-basename>)
@@ -2563,32 +2579,64 @@ orphan_sweep_pass() {
 #
 # issue #298: fallback layer for the foreground-only rule — see
 # WATCH_BG_VIOLATION_SWEEP_SECS's header comment for the full rationale.
-# Enumerates every iss-* window (same style as worker_compact_pass below),
-# greps its cleaned (ANSI-stripped, same technique as worker_pane_busy)
-# pane text for WATCH_BG_VIOLATION_PATTERN, and on a NEW match (per the
-# BG_VIOLATION_LOGGED dedup map) drops a `kind: fyi` message into that
-# worker's own outbox — mktemp-without-.md-suffix then mv, the exact atomic
-# convention prompts/worker.md documents for worker-authored messages —
-# so the existing WATCH_OUTBOX watcher backend (run_inotify/run_poll,
-# already watching every wt-issue-*/.swarm/tasks/outbox/*.md) picks it up
-# and wakes the coordinator via the normal on_message path. No new wake
-# plumbing needed. Local capture-pane only (no gh/network calls), so this
-# lives in run_watch_timer_loop like orphan_sweep_pass, not its own
-# dedicated background process.
+# Enumerates every iss-* window (same style as worker_compact_pass below)
+# PLUS the coordinator's own window (issue #385 — the incident #298 exists
+# to catch, a ~20h leaked poll loop, happened in a coordinator pane, and the
+# original sweep only ever looked at workers), greps its cleaned
+# (ANSI-stripped, same technique as worker_pane_busy) pane text for
+# WATCH_BG_VIOLATION_PATTERN, and on a NEW match (per the BG_VIOLATION_LOGGED
+# dedup map) delivers it. Delivery differs by role: a worker window gets a
+# `kind: fyi` message dropped into its own outbox — mktemp-without-.md-suffix
+# then mv, the exact atomic convention prompts/worker.md documents for
+# worker-authored messages — so the existing WATCH_OUTBOX watcher backend
+# (run_inotify/run_poll, already watching every wt-issue-*/.swarm/tasks/
+# outbox/*.md) picks it up and wakes the coordinator via the normal
+# on_message path; the coordinator window has no outbox of its own to drop a
+# message into (nor should the watcher send-keys into it — prompts/
+# coordinator.md's "Never tmux send-keys into another agent's pane" applies
+# to the watcher's own restraint here too), so it gets only the log_event
+# call below (category watch.bg_violation, window=coordinator) and relies on
+# prompts/coordinator.md's per-wake self-check to surface it in the next wake
+# digest. Local capture-pane only (no gh/network calls), so this lives in
+# run_watch_timer_loop like orphan_sweep_pass, not its own dedicated
+# background process.
+#
+# Known gap, shared with coordinator_pane_state/coordinator_pane_busy below
+# (pre-existing, not introduced here): `capture-pane -t "$SESSION_NAME:$win"`
+# with no pane index captures the window's ACTIVE pane. If the coordinator
+# window ever gets split with the new pane left active — demo-driver.sh's
+# Beat 6 (`tail -F .swarm/events.log`) does exactly this — this sweep (like
+# every other coordinator-pane probe in this file) is scanning that split
+# pane, not the actual claude coordinator pane, until focus returns. A real
+# coordinator violation during that window would go undetected until the
+# split pane loses focus, not just risk a false positive (the embedded
+# self-match-guard token above handles the false-positive side of that same
+# scenario). Fixing this for every coordinator-pane probe at once (pin
+# `coordinator.0`, or iterate `list-panes`) is out of scope for #385.
 bg_violation_sweep_pass() {
     tmux has-session -t "$SESSION_NAME" 2>/dev/null || return 0
 
     local windows
     windows="$(tmux list-windows -t "$SESSION_NAME" -F '#{window_name}' 2>/dev/null | grep '^iss-' || true)"
+    if tmux list-windows -t "$SESSION_NAME" -F '#{window_name}' 2>/dev/null | grep -qx 'coordinator'; then
+        windows="$(printf '%s\n%s\n' "$windows" 'coordinator' | sed '/^$/d')"
+    fi
     [ -n "$windows" ] || return 0
 
     local win
     while IFS= read -r win; do
         [ -n "$win" ] || continue
-        local issue wt_dir content clean matched_lines ml cand_lineno cand lineno matched
-        issue="${win#iss-}"
-        [[ "$issue" =~ ^[0-9]+$ ]] || continue
-        wt_dir="$(own_wt_dir_for_issue "$issue")" || continue
+        local issue wt_dir is_coordinator content clean matched_lines ml cand_lineno cand lineno matched
+        if [ "$win" = "coordinator" ]; then
+            is_coordinator=1
+            issue="coordinator"
+            wt_dir=""
+        else
+            is_coordinator=0
+            issue="${win#iss-}"
+            [[ "$issue" =~ ^[0-9]+$ ]] || continue
+            wt_dir="$(own_wt_dir_for_issue "$issue")" || continue
+        fi
 
         content="$(tmux capture-pane -t "$SESSION_NAME:$win" -p -S -200 2>/dev/null)" || continue
         clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
@@ -2654,11 +2702,32 @@ bg_violation_sweep_pass() {
         # file — autoclose, orphan_sweep_pass above): don't actually drop a
         # real outbox message into a worker's worktree, just log that this
         # pass would have.
+        #
+        # The "(WATCH_BG_VIOLATION_PATTERN)" tag right next to marker=$matched
+        # (issue #385): demo-driver.sh's Beat 6 tails this project's own
+        # events.log into a pane split off the coordinator window (window 0
+        # is named "coordinator" — see llm-start.sh's `new-session -n
+        # coordinator`), so any WORKER's violation line can end up rendered
+        # inside the very coordinator window bg_violation_sweep_pass now
+        # scans. Without a guard token embedded in the logged line itself,
+        # that tailed line has nothing to stop it from being reattributed as
+        # a fresh window=coordinator sighting on the next sweep tick — the
+        # self-match guard only helps once the candidate match's surrounding
+        # ±3 lines actually carry one of its tokens, and a bare events.log
+        # line otherwise doesn't.
         if [ "$DRY_RUN" = "1" ]; then
-            log_event watch.bg_violation "issue=$issue window=$win marker=$matched dry_run=1"
+            log_event watch.bg_violation "issue=$issue window=$win marker=$matched (WATCH_BG_VIOLATION_PATTERN) dry_run=1"
             continue
         fi
-        log_event watch.bg_violation "issue=$issue window=$win marker=$matched"
+        log_event watch.bg_violation "issue=$issue window=$win marker=$matched (WATCH_BG_VIOLATION_PATTERN)"
+
+        # The coordinator window has no worktree/outbox of its own to drop
+        # a message into, and send-keys'ing a live coordinator pane is
+        # exactly what prompts/coordinator.md forbids doing to any agent's
+        # pane (see this function's header comment) — the log_event call
+        # above is this role's entire delivery. prompts/coordinator.md's
+        # per-wake self-check greps events.log for its own violations.
+        [ "$is_coordinator" = "1" ] && continue
 
         [ "$WATCH_OUTBOX" = "1" ] || continue
         local outbox tmp

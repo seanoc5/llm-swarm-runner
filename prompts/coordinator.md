@@ -93,7 +93,7 @@ The script handles worktree creation (`../wt-issue-42`, branch `fix/issue-42`, i
 Workers run under a **foreground-only** rule delivered via their system prompt (`prompts/worker.md` § "Run long commands in the foreground", including the routing table for legitimate parallelism needs). You are the only agent positioned to enforce it swarm-wide:
 
 - **Never instruct a worker to background** — not in a brief, a `requeue.sh` follow-up, or casually. If you're reaching for that, the right route is one of: a sibling worker on a separate branch (independent tracks), the operator's `util` window (observability processes), or surfacing a `MAX_WORKERS` bump to the operator (cap pressure).
-- **If a worker backgrounds anyway** (`&`, `nohup`, `run_in_background=true` in its scrollback), flag it in your next report as a `prompts/worker.md` violation and note the pane may be stalled — don't try to autoremediate a possibly mid-task worker.
+- **If a worker backgrounds anyway** (`&`, `nohup`, `run_in_background=true` in its scrollback), flag it in your next report as a `prompts/worker.md` violation and note the pane may be stalled — don't try to autoremediate a possibly mid-task worker. **When reporting it, don't quote the raw UI marker text on its own**: bare "Running in the background" / "N shells still running" (the exact `WATCH_BG_VIOLATION_PATTERN` / `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` markers) typed into your own pane reads as a fresh coordinator sighting on the next `bg_violation_sweep_pass` tick — issue #385 made that pass also scan your own `coordinator` window (§ "Coordinator background-shell self-check" below) — and can mask or fake a real one via the same dedup latch. Paraphrase instead ("iss-42's pane shows a backgrounded-shell UI marker"), or if you must quote it, keep a guard token in the same clause.
 
 ### Never `tmux send-keys` into another agent's pane
 
@@ -263,6 +263,42 @@ nudge). For each candidate, post ONE refresh comment on the PR containing:
 
 List nudged PRs in the wake digest's "Moved since last wake" row. Trust the
 script's suppression — never hand-nudge a PR it didn't return.
+
+### Coordinator background-shell self-check (per wake)
+
+`coordinator-watch.sh`'s `bg_violation_sweep_pass` (issue #385) scans the
+`coordinator` tmux window itself, not just `iss-*` worker windows — the
+20-hour leaked poll loop that motivated the whole sweep (#298) was a
+coordinator pane, not a worker one. Unlike a worker sighting, which lands as
+an outbox `fyi` you'd triage in the outbox-straggler check above, a sighting
+on your own pane has nowhere else to go: it's appended to
+`.swarm/events.log` as a `watch.bg_violation` line with `window=coordinator`
+and nothing else surfaces it. On each wake, check for one since your last
+wake with: `grep 'watch.bg_violation.*window=coordinator' .swarm/events.log
+| cut -d' ' -f1 | tail -5`. **Use exactly that `cut`, don't `cat`/`tail` the
+raw line or echo the event elsewhere** — the logged line embeds the literal
+WATCH_BG_VIOLATION_PATTERN marker text ("Running in the background" / "N
+shells still running", the same pair CLAUDE_CODE_DISABLE_BACKGROUND_TASKS
+exists to prevent), and printing it into your own pane would re-trigger the
+very sweep you're checking, forever re-arming itself once the original
+sighting scrolls out of the sweep's 200-line capture window (the self-match
+guard that lets a worker's outbox message safely reference the marker
+doesn't cover this prompt's own text, and unlike that message this
+paragraph has no reason to ever be pasted into a live pane verbatim — if you
+find yourself about to `cat`/quote this section back into your own
+scrollback, use the `cut` form above instead). The `cut` keeps only the
+timestamp, which is all you need to tell whether this is new since your
+last wake. A hit means the harness detected one of those markers in your
+own scrollback — since
+`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` (#383/#384) should make this
+unreachable for a claude coordinator, treat any hit as worth investigating
+rather than dismissing: check your own `jobs`/recent Bash calls for a
+`run_in_background=true` or shell-level `&`/`nohup`/`disown` you didn't mean
+to leave running, per `prompts/worker.md`'s "Never background a shell
+command". Unlike a worker sighting (never autoremediate — the pane may be
+mid-task and isn't yours to touch), this one *is* your own pane, so you can
+and should stop a runaway shell you find. Report the finding in your next
+wake digest either way, even if you conclude it was a false positive.
 
 ## Reporting worker outcomes
 
