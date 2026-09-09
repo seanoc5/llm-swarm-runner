@@ -404,16 +404,27 @@ printf '4000\tDebounce probe\tfix/issue-4000\n' > "$PR_FIXTURE"
 # Simulate "another wake fired 1s ago" — well inside the 2s debounce window
 # — so this call's on_activity is debounced (returns 1).
 LAST_ACTIVITY_WAKE=$(( $(date +%s) - 1 ))
+CURSOR_BEFORE="$LAST_ACTIVITY_POLL_TS"
 activity_poll_pass
 [ -z "${ACTIVITY_ANNOUNCED_PR[4000]:-}" ] \
     || red "PR 4000 was marked ACTIVITY_ANNOUNCED_PR despite its only on_activity call being debounced"
 grep -q 'WAKE:' "$WAKE_LOG" \
     && red "coordinator was woken despite debounce; wake.log: $(cat "$WAKE_LOG")"
 green "a debounced activity wake does NOT mark its items as announced"
+# The critical check (issue #392 self-review, second finding): a real `gh`
+# would stop returning PR 4000 once the cursor moves past its merge time,
+# REGARDLESS of the ACTIVITY_ANNOUNCED_PR dedup map — so it's not enough to
+# check the dedup map here, the cursor itself must not have moved. (An
+# earlier version of this test only checked the dedup map + wake.log
+# against a `gh` stub that ignores --search entirely, which made a broken
+# fix look like it retried correctly — this is what actually proves it.)
+[ "$LAST_ACTIVITY_POLL_TS" = "$CURSOR_BEFORE" ] \
+    || red "LAST_ACTIVITY_POLL_TS advanced despite a debounced (unannounced) pending item — PR 4000 would be permanently unreachable by a real gh query. before=$CURSOR_BEFORE after=$LAST_ACTIVITY_POLL_TS"
+green "the cursor did NOT advance past the debounced, still-unannounced PR"
 
 # Let the debounce window clear, then retry with the SAME fixture — since
-# it was never marked as announced above, this call must still detect and
-# announce it.
+# it was never marked as announced above AND the cursor never moved past
+# it, this call must still detect and announce it.
 sleep 3
 activity_poll_pass
 grep -q 'WAKE:' "$WAKE_LOG" \
@@ -423,7 +434,9 @@ grep -q 'PR #4000 merged' "$WAKE_LOG" \
     || red "wake prompt missing the retried PR #4000 line: $(cat "$WAKE_LOG")"
 [ -n "${ACTIVITY_ANNOUNCED_PR[4000]:-}" ] \
     || red "PR 4000 should now be marked ACTIVITY_ANNOUNCED_PR after a successful (non-debounced) wake"
-green "the same item is retried and announced once the debounce window clears — nothing was permanently lost"
+[ "$LAST_ACTIVITY_POLL_TS" != "$CURSOR_BEFORE" ] \
+    || red "cursor should have advanced past PR 4000's window once it was actually announced"
+green "the same item is retried and announced once the debounce window clears, and the cursor advances only now — nothing was permanently lost"
 
 # ============================================================================
 heading "Test 7: a failed llm-start.sh call is retried too, not just a debounced one (issue #392 self-review finding)"
@@ -449,13 +462,20 @@ printf '#!/usr/bin/env bash\nexit 1\n' > "$FAILING_LLM_START"
 chmod +x "$FAILING_LLM_START"
 LLM_START="$FAILING_LLM_START"
 
+CURSOR_BEFORE="$LAST_ACTIVITY_POLL_TS"
 activity_poll_pass
 [ -z "${ACTIVITY_ANNOUNCED_PR[5000]:-}" ] \
     || red "PR 5000 was marked ACTIVITY_ANNOUNCED_PR despite its llm-start.sh call failing"
 green "a failed llm-start.sh call does NOT mark its items as announced"
+# See Test 6's identical check for why this (not just the dedup map) is
+# the check that actually proves nothing was lost against a real gh.
+[ "$LAST_ACTIVITY_POLL_TS" = "$CURSOR_BEFORE" ] \
+    || red "LAST_ACTIVITY_POLL_TS advanced despite a failed (unannounced) pending item — PR 5000 would be permanently unreachable by a real gh query. before=$CURSOR_BEFORE after=$LAST_ACTIVITY_POLL_TS"
+green "the cursor did NOT advance past the failed, still-unannounced PR"
 
 # Swap in a working LLM_START and retry with the SAME fixture — since it
-# was never marked as announced above, this call must still announce it.
+# was never marked as announced above AND the cursor never moved past it,
+# this call must still announce it.
 LLM_START="$FAKE_LLM_START"
 activity_poll_pass
 grep -q 'WAKE:' "$WAKE_LOG" \
@@ -465,7 +485,9 @@ grep -q 'PR #5000 merged' "$WAKE_LOG" \
     || red "wake prompt missing the retried PR #5000 line: $(cat "$WAKE_LOG")"
 [ -n "${ACTIVITY_ANNOUNCED_PR[5000]:-}" ] \
     || red "PR 5000 should now be marked ACTIVITY_ANNOUNCED_PR after a successful wake"
-green "the same item is retried and announced once llm-start.sh succeeds — a wake failure didn't lose it either"
+[ "$LAST_ACTIVITY_POLL_TS" != "$CURSOR_BEFORE" ] \
+    || red "cursor should have advanced past PR 5000's window once it was actually announced"
+green "the same item is retried and announced once llm-start.sh succeeds, and the cursor advances only now — a wake failure didn't lose it either"
 
 echo
 green "All activity-poll tests passed."

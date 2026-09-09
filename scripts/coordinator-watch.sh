@@ -2766,6 +2766,23 @@ swarm_already_reaped() {
 # have actually succeeded, so a transient gh failure re-tries the same
 # window next tick instead of silently skipping it.
 #
+# issue #392 self-review (second finding): the cursor must also NOT advance
+# past an item that was found but never successfully announced (on_activity
+# returned 1 — debounced, or its llm-start.sh call failed). ACTIVITY_
+# ANNOUNCED_PR/_ISSUE only guards against DOUBLE-announcing something still
+# inside the gh query window; once the cursor moves past an item's merge/
+# close time, gh's `merged:>=cursor` search will never return it again,
+# REGARDLESS of dedup-map state — so advancing unconditionally, before
+# knowing whether the wake actually landed, would drop that item forever
+# (the exact "parked on pending" bug #392 exists to fix — the two ARE the
+# same bug at different layers). So the cursor only advances when every
+# candidate this tick either produced no pending items at all (nothing to
+# lose) or on_activity actually succeeded for the pending ones; a
+# debounced/failed on_activity call leaves LAST_ACTIVITY_POLL_TS exactly
+# where it was, so the identical window (now growing, since $since stays
+# fixed while real time passes) is re-queried — and the item re-found — on
+# the very next tick.
+#
 # issue #392 self-review: swarm_already_reaped only catches a merge the
 # swarm's OWN reap.window pipeline has already LOGGED — there's a real gap
 # between a swarm-driven merge and that log line landing (up to
@@ -2798,20 +2815,26 @@ activity_poll_pass() {
         return 0
     }
 
-    # Both queries succeeded — this tick's window is fully consumed either
-    # way, so advance the cursor now regardless of whether anything turned
-    # up. ACTIVITY_POLL_OVERLAP_SECS BEHIND now, not AT now (issue #392
+    # Both queries succeeded. Compute the candidate next cursor —
+    # ACTIVITY_POLL_OVERLAP_SECS BEHIND now, not AT now (issue #392
     # self-review): gh's search index can lag the actual merge/close by a
     # few seconds, so cutting the cursor exactly at query time risks
     # permanently skipping an item indexed just after this query ran. The
-    # ACTIVITY_ANNOUNCED_PR/_ISSUE maps below absorb the resulting overlap.
+    # ACTIVITY_ANNOUNCED_PR/_ISSUE maps guard the resulting overlap window
+    # against double-announcing — but do NOT assign this to
+    # LAST_ACTIVITY_POLL_TS yet: whether it's safe to advance at all
+    # depends on whether every pending item below actually gets announced
+    # (see this function's header comment, second self-review finding).
     new_cursor="$(date -u -d "@$((now_epoch - ACTIVITY_POLL_OVERLAP_SECS))" +'%Y-%m-%dT%H:%M:%SZ')"
     # Never move backwards — a since that already exceeds the overlapped
     # cursor (WATCH_ACTIVITY_POLL_SECS < ACTIVITY_POLL_OVERLAP_SECS) would
     # otherwise re-query a window this tick already covered.
-    [[ "$new_cursor" > "$since" ]] && LAST_ACTIVITY_POLL_TS="$new_cursor" || true
+    [[ "$new_cursor" > "$since" ]] || new_cursor="$since"
 
-    [ -n "$merged_prs" ] || [ -n "$closed_issues" ] || return 0
+    if [ -z "$merged_prs" ] && [ -z "$closed_issues" ]; then
+        LAST_ACTIVITY_POLL_TS="$new_cursor"
+        return 0
+    fi
 
     # ACTIVITY_ANNOUNCED_PR/_ISSUE are only marked AFTER a successful
     # (non-debounced) on_activity call below — not here, per-item — so a
@@ -2862,13 +2885,24 @@ activity_poll_pass() {
     done <<< "$closed_issues"
 
     lines="${lines#$'\n'}"
-    [ -n "$lines" ] || return 0
+    if [ -z "$lines" ]; then
+        # Every candidate this tick was already handled (self-reaped,
+        # worktree-live, or previously announced) — nothing pending means
+        # nothing to lose, so it's safe to advance past this whole window.
+        LAST_ACTIVITY_POLL_TS="$new_cursor"
+        return 0
+    fi
 
     log_event watch.activity_poll "reason=detected count=$(grep -c . <<< "$lines")"
     if on_activity "$lines"; then
         local p
         for p in "${pending_prs[@]}"; do ACTIVITY_ANNOUNCED_PR[$p]=1; done
         for p in "${pending_issues[@]}"; do ACTIVITY_ANNOUNCED_ISSUE[$p]=1; done
+        # Only NOW is it safe to advance the cursor: every pending item was
+        # actually announced. A debounced/failed on_activity call (return
+        # 1) intentionally leaves LAST_ACTIVITY_POLL_TS untouched — see
+        # this function's header comment.
+        LAST_ACTIVITY_POLL_TS="$new_cursor"
     fi
 }
 
