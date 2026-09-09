@@ -276,18 +276,32 @@
 #                           at most one is ever in flight; see that lock's
 #                           own header comment.
 #
-#                           Noise control: a merged PR whose branch's issue
-#                           number, or a closed issue's own number, already
-#                           has a reap.window event logged at or after the
-#                           poll's cursor was already reaped by this swarm's
-#                           OWN pr_poll_pass/cleanup_eligible_workers
-#                           pipeline in the same window (a merged PR with
-#                           "Closes #N" auto-closes issue #N too, so both
-#                           lists are checked, not just the PR one) — that
-#                           path already knows about it, so this poll skips
-#                           announcing it (reason=skipped_self_reaped)
-#                           rather than waking the
-#                           coordinator over its own action.
+#                           Noise control, two checks (both applied to the
+#                           merged-PR loop AND the closed-issue loop — a
+#                           merged PR with "Closes #N" auto-closes issue #N
+#                           too, so a merge already suppressed by either
+#                           check would otherwise still slip through as a
+#                           same-event "issue closed" line):
+#                             - reason=skipped_self_reaped: a reap.window
+#                               event for this issue number is logged at or
+#                               after the poll's cursor — this swarm's OWN
+#                               pr_poll_pass/cleanup_eligible_workers
+#                               pipeline already reaped it in the same
+#                               window, so it already knows.
+#                             - reason=skipped_worktree_live (issue #392
+#                               self-review): $WORKSPACE/wt-issue-<N> still
+#                               exists — there's a real gap between a
+#                               swarm-driven merge and reap.window's log
+#                               line landing (up to WATCH_PR_POLL_SECS,
+#                               longer if the kill gate defers), and a
+#                               still-live worktree means pr_poll_pass's own
+#                               reap machinery just hasn't reached this one
+#                               yet, not that an operator acted out-of-band
+#                               — exactly the case this feature (workers
+#                               "reaped long ago") isn't meant to cover;
+#                               left for pr_poll_pass's own next tick.
+#                           Either way, this poll skips announcing it rather
+#                           than waking the coordinator over its own action.
 #   ACTIVITY_POLL_OVERLAP_SECS=30
 #                           (issue #392) How far behind the actual query
 #                           time to advance activity_poll_pass's cursor —
@@ -1408,10 +1422,14 @@ EVENTS LOG
       watch.activity_poll  (issue #392) periodic gh-search poll found a PR
                            merged / issue closed with no other wake path —
                            reason=detected (count=N, followed by a
-                           coord.wake trigger=activity_poll) or reason=
-                           skipped_self_reaped (pr, issue — already covered
-                           by this swarm's own reap.window event, not
-                           re-announced)
+                           coord.wake trigger=activity_poll) or a skip
+                           (pr, issue — see WATCH_ACTIVITY_POLL_SECS's
+                           header comment for the full noise-control
+                           rationale): reason=skipped_self_reaped (already
+                           covered by this swarm's own reap.window event)
+                           or reason=skipped_worktree_live ($WORKSPACE/
+                           wt-issue-<N> still exists — pr_poll_pass's own
+                           reap machinery just hasn't reached it yet)
       activity_poll.error  (issue #392) gh pr list/issue list failed this
                            cycle (reason=gh_pr_list_failed|gh_issue_list_failed);
                            cursor is NOT advanced on this path, so the next
@@ -2000,7 +2018,8 @@ format_event_line() {
         pr_poll.error)                   glyph="✗"; color=$'\033[31m' ;;
         watch.activity_poll)
             case "$kv" in
-                *reason=skipped_self_reaped*) glyph="·"; color=$'\033[2m'  ;;
+                *reason=skipped_self_reaped*|*reason=skipped_worktree_live*)
+                    glyph="·"; color=$'\033[2m'  ;;
                 *)                            glyph="⚠"; color=$'\033[33m' ;;
             esac ;;
         activity_poll.error)             glyph="✗"; color=$'\033[31m' ;;
@@ -2730,6 +2749,18 @@ swarm_already_reaped() {
 # separate per-item dedup map. The cursor only advances once BOTH queries
 # have actually succeeded, so a transient gh failure re-tries the same
 # window next tick instead of silently skipping it.
+#
+# issue #392 self-review: swarm_already_reaped only catches a merge the
+# swarm's OWN reap.window pipeline has already LOGGED — there's a real gap
+# between a swarm-driven merge and that log line landing (up to
+# WATCH_PR_POLL_SECS, longer if the kill gate defers), during which this
+# poll would otherwise announce the swarm's own merge as if an operator did
+# it out-of-band. This feature exists for workers "reaped long ago" (see
+# header comment above) — a still-live worktree/window means pr_poll_pass's
+# own reap machinery hasn't gotten to it yet, which is exactly that gap, so
+# a merged PR (or closed issue) whose $WORKSPACE/wt-issue-<N> worktree
+# still exists is skipped here too (reason=skipped_worktree_live) and left
+# for pr_poll_pass to handle on its own next tick.
 activity_poll_pass() {
     local since="$LAST_ACTIVITY_POLL_TS"
     local now_epoch new_cursor
@@ -2766,7 +2797,12 @@ activity_poll_pass() {
 
     [ -n "$merged_prs" ] || [ -n "$closed_issues" ] || return 0
 
-    local pr_number title branch issue lines=""
+    # ACTIVITY_ANNOUNCED_PR/_ISSUE are only marked AFTER a successful
+    # (non-debounced) on_activity call below — not here, per-item — so a
+    # debounced wake (on_activity returns 1) doesn't permanently lose these
+    # items: leaving them unmarked means a later tick, while they're still
+    # inside the gh query's cursor window, gets to retry announcing them.
+    local pr_number title branch issue lines="" pending_prs=() pending_issues=()
     while IFS=$'\t' read -r pr_number title branch; do
         [ -n "$pr_number" ] || continue
         [ -n "${ACTIVITY_ANNOUNCED_PR[$pr_number]:-}" ] && continue
@@ -2781,7 +2817,11 @@ activity_poll_pass() {
             log_event watch.activity_poll "reason=skipped_self_reaped pr=$pr_number issue=$issue"
             continue
         fi
-        ACTIVITY_ANNOUNCED_PR[$pr_number]=1
+        if [ -n "$issue" ] && is_own_worktree_dir "$WORKSPACE/wt-issue-$issue"; then
+            log_event watch.activity_poll "reason=skipped_worktree_live pr=$pr_number issue=$issue"
+            continue
+        fi
+        pending_prs+=("$pr_number")
         lines="$lines"$'\n'"PR #$pr_number merged: $title"
     done <<< "$merged_prs"
 
@@ -2790,13 +2830,18 @@ activity_poll_pass() {
         [ -n "$issue_number" ] || continue
         [ -n "${ACTIVITY_ANNOUNCED_ISSUE[$issue_number]:-}" ] && continue
         # A merged PR with "Closes #N" auto-closes issue #N too — without
-        # this check, a merge already suppressed above (self-reaped) would
-        # still slip through here as a same-event "Issue #N closed" line.
+        # these two checks, a merge already suppressed above (self-reaped
+        # or worktree-live) would still slip through here as a same-event
+        # "Issue #N closed" line.
         if swarm_already_reaped "$issue_number" "$since"; then
             log_event watch.activity_poll "reason=skipped_self_reaped issue=$issue_number"
             continue
         fi
-        ACTIVITY_ANNOUNCED_ISSUE[$issue_number]=1
+        if is_own_worktree_dir "$WORKSPACE/wt-issue-$issue_number"; then
+            log_event watch.activity_poll "reason=skipped_worktree_live issue=$issue_number"
+            continue
+        fi
+        pending_issues+=("$issue_number")
         lines="$lines"$'\n'"Issue #$issue_number closed: $title"
     done <<< "$closed_issues"
 
@@ -2804,7 +2849,11 @@ activity_poll_pass() {
     [ -n "$lines" ] || return 0
 
     log_event watch.activity_poll "reason=detected count=$(grep -c . <<< "$lines")"
-    on_activity "$lines"
+    if on_activity "$lines"; then
+        local p
+        for p in "${pending_prs[@]}"; do ACTIVITY_ANNOUNCED_PR[$p]=1; done
+        for p in "${pending_issues[@]}"; do ACTIVITY_ANNOUNCED_ISSUE[$p]=1; done
+    fi
 }
 
 # bg_violation_sweep_pass
@@ -5109,6 +5158,12 @@ on_message() {
 # run_inotify/run_poll) running forever — a smoke-test footgun, not a real
 # feature. Same reasoning already applies to pr_poll_pass/orphan_sweep_pass/
 # bg_violation_sweep_pass, none of which check ONCE either.
+#
+# Returns 1 on a debounced skip, 0 otherwise (issue #392 self-review): the
+# caller, activity_poll_pass, only marks its ACTIVITY_ANNOUNCED_PR/_ISSUE
+# dedup maps on a 0 return — a debounced item must stay eligible for a
+# later tick to retry, not be marked "announced" for a wake that never
+# actually happened.
 on_activity() {
     local lines="$1"
     local now
@@ -5117,7 +5172,7 @@ on_activity() {
     if [ $((now - LAST_ACTIVITY_WAKE)) -lt "$DEBOUNCE_SECS" ]; then
         echo "[$(date +%T)] activity: within debounce window (${DEBOUNCE_SECS}s), skipping wake"
         log_event coord.wake.skip "reason=debounce window=${DEBOUNCE_SECS}s trigger=activity_poll"
-        return
+        return 1
     fi
 
     maybe_auto_compact wake
@@ -5152,6 +5207,7 @@ Re-check your own picture of outstanding decisions/PRs/issues against this (gh p
         }
     fi
     LAST_ACTIVITY_WAKE=$now
+    return 0
 }
 
 # ---------------------------------------------------------------------------

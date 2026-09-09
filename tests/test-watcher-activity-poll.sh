@@ -53,6 +53,16 @@ PROJECT_DIR="$TEST_DIR/myproject"
 mkdir -p "$PROJECT_DIR/.swarm"
 EVENTS_LOG="$PROJECT_DIR/.swarm/events.log"
 
+# is_own_worktree_dir (issue #392 self-review's skipped_worktree_live check)
+# shells out to `git -C "$PROJECT_DIR" worktree list` and fails OPEN (report
+# "yes, live") on any git error — deliberately, so a transient git hiccup
+# can't make activity_poll_pass silently skip a real announcement. That
+# means PROJECT_DIR needs to be a real (if minimal) git repo here: without
+# one, every candidate would report as "still live" and every Test below
+# would wrongly skip via reason=skipped_worktree_live.
+git -C "$PROJECT_DIR" init -q
+git -C "$PROJECT_DIR" -c user.email=test@test -c user.name=test commit -q --allow-empty -m init
+
 # ────────────────────────── Stubs: gh + llm-start ──────────────────────────
 
 WAKE_LOG="$TEST_DIR/wake.log"
@@ -200,6 +210,36 @@ $(cat "$EVENTS_LOG" 2>/dev/null || echo '(missing)')"
 green "events.log records the skip as reason=skipped_self_reaped for both the merged PR and the closed issue"
 
 # ============================================================================
+heading "Test 2b: a merged PR whose worktree is still live is not announced (issue #392 self-review finding)"
+# ============================================================================
+# The gap this closes: a swarm-driven merge doesn't get a reap.window event
+# until pr_poll_pass's own next tick (up to WATCH_PR_POLL_SECS later) — a
+# still-live $WORKSPACE/wt-issue-<N> worktree is evidence pr_poll_pass just
+# hasn't gotten to it yet, not that an operator merged it out-of-band. Real
+# `git worktree add` (not a fake directory) so is_own_worktree_dir's own
+# `git worktree list` sees it, mirroring pr_poll_pass's own test fixtures.
+: > "$WAKE_LOG"
+: > "$EVENTS_LOG"
+git -C "$PROJECT_DIR" worktree add -q -b fix/issue-3000 "$TEST_DIR/wt-issue-3000" >/dev/null
+printf '3000\tStill being reaped\tfix/issue-3000\n' > "$PR_FIXTURE"
+printf '3000\tStill being reaped\n' > "$ISSUE_FIXTURE"
+
+start_watcher "$TEST_DIR/watch-2b.log" 1
+sleep 3
+stop_watcher
+git -C "$PROJECT_DIR" worktree remove -f "$TEST_DIR/wt-issue-3000" >/dev/null 2>&1 || true
+
+grep -q 'WAKE:' "$WAKE_LOG" && red "activity poll woke the coordinator over a PR/issue whose worktree is still live: $(cat "$WAKE_LOG")"
+green "activity poll did not announce a PR/issue whose worktree still exists"
+grep -q 'watch.activity_poll .*reason=skipped_worktree_live pr=3000 issue=3000' "$EVENTS_LOG" \
+    || red "expected the merged-PR loop's skipped_worktree_live (pr=3000 issue=3000) in events.log; got:
+$(cat "$EVENTS_LOG" 2>/dev/null || echo '(missing)')"
+grep -q 'watch.activity_poll .*reason=skipped_worktree_live issue=3000$' "$EVENTS_LOG" \
+    || red "expected the closed-issue loop's skipped_worktree_live (issue=3000, no pr=) in events.log; got:
+$(cat "$EVENTS_LOG" 2>/dev/null || echo '(missing)')"
+green "events.log records the skip as reason=skipped_worktree_live for both the merged PR and the closed issue"
+
+# ============================================================================
 heading "Test 3: WATCH_ACTIVITY_POLL_SECS=0 disables the poll entirely"
 # ============================================================================
 : > "$WAKE_LOG"
@@ -327,6 +367,62 @@ else
     red "on_outcome and on_activity's llm-start.sh calls OVERLAPPED — COORD_WAKE_LOCK did not serialize them. Timeline:
 $(cat "$CALL_TIMELINE")"
 fi
+
+# ============================================================================
+heading "Test 6: a debounced activity wake is retried on a later tick, not lost (issue #392 self-review finding)"
+# ============================================================================
+# activity_poll_pass only marks ACTIVITY_ANNOUNCED_PR/_ISSUE (and on_activity
+# only advances LAST_ACTIVITY_WAKE) on a NON-debounced on_activity call
+# (return 0) — marking them unconditionally, before checking whether
+# on_activity actually woke anyone, would permanently drop an item that
+# happened to land inside another wake's debounce window. Extracts
+# activity_poll_pass/swarm_already_reaped/is_own_worktree_dir on top of the
+# on_activity/log_event already extracted for Test 5 above, and drives it
+# directly (not through the daemon) so the debounce timing is exact.
+for fn in swarm_already_reaped is_own_worktree_dir activity_poll_pass; do
+    body="$(extract_fn "$fn")"
+    [ -n "$body" ] || red "could not extract function '$fn' from $WATCH — has it been renamed?"
+    eval "$body"
+done
+
+PROJECT_DIR="$TEST_DIR/myproject"          # the original git-initialized repo, not lock-test's
+WORKSPACE="$TEST_DIR"
+EVENTS_LOG="$PROJECT_DIR/.swarm/events.log"
+LLM_START="$FAKE_LLM_START"                # back to the "WAKE:"-into-$WAKE_LOG stub, not lock-test's
+ACTIVITY_WAKE_PROMPT=""                    # so on_activity builds its default prompt (embeds $lines)
+: > "$EVENTS_LOG"
+: > "$WAKE_LOG"
+declare -A ACTIVITY_ANNOUNCED_PR=()
+declare -A ACTIVITY_ANNOUNCED_ISSUE=()
+LAST_ACTIVITY_POLL_TS="1970-01-01T00:00:00Z"
+ACTIVITY_POLL_OVERLAP_SECS=30
+DEBOUNCE_SECS=2
+printf '4000\tDebounce probe\tfix/issue-4000\n' > "$PR_FIXTURE"
+: > "$ISSUE_FIXTURE"
+
+# Simulate "another wake fired 1s ago" — well inside the 2s debounce window
+# — so this call's on_activity is debounced (returns 1).
+LAST_ACTIVITY_WAKE=$(( $(date +%s) - 1 ))
+activity_poll_pass
+[ -z "${ACTIVITY_ANNOUNCED_PR[4000]:-}" ] \
+    || red "PR 4000 was marked ACTIVITY_ANNOUNCED_PR despite its only on_activity call being debounced"
+grep -q 'WAKE:' "$WAKE_LOG" \
+    && red "coordinator was woken despite debounce; wake.log: $(cat "$WAKE_LOG")"
+green "a debounced activity wake does NOT mark its items as announced"
+
+# Let the debounce window clear, then retry with the SAME fixture — since
+# it was never marked as announced above, this call must still detect and
+# announce it.
+sleep 3
+activity_poll_pass
+grep -q 'WAKE:' "$WAKE_LOG" \
+    || red "expected PR 4000 to be retried and woken once the debounce window cleared; wake.log:
+$(cat "$WAKE_LOG")"
+grep -q 'PR #4000 merged' "$WAKE_LOG" \
+    || red "wake prompt missing the retried PR #4000 line: $(cat "$WAKE_LOG")"
+[ -n "${ACTIVITY_ANNOUNCED_PR[4000]:-}" ] \
+    || red "PR 4000 should now be marked ACTIVITY_ANNOUNCED_PR after a successful (non-debounced) wake"
+green "the same item is retried and announced once the debounce window clears — nothing was permanently lost"
 
 echo
 green "All activity-poll tests passed."
