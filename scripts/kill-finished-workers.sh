@@ -103,12 +103,12 @@ FLAGS
                             (default: llm-\$(basename \$PWD))
 
 EXAMPLES
-    kill-finished-workers.sh                          # parked + PR-safe
+    kill-finished-workers.sh                          # (parked or merged) + PR-safe
     kill-finished-workers.sh --dry-run                # preview
     kill-finished-workers.sh --idle-min 5             # at least 5 min idle
     kill-finished-workers.sh --no-pr-check            # don't hit gh
     kill-finished-workers.sh --all                    # include active
-    kill-finished-workers.sh --with-worktree          # parked + worktrees
+    kill-finished-workers.sh --with-worktree          # (parked or merged) + worktrees
     kill-finished-workers.sh --all --with-worktree    # full nuke (prompts)
     kill-finished-workers.sh --all --with-worktree -y # full nuke, no prompt
     kill-finished-workers.sh --merged-only --with-worktree -y     # safe auto-reap
