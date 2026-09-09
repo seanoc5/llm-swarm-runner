@@ -277,14 +277,19 @@ and nothing else surfaces it. On each wake, check for one since your last
 wake with: `grep 'watch.bg_violation.*window=coordinator' .swarm/events.log
 | cut -d' ' -f1 | tail -5`. **Use exactly that `cut`, don't `cat`/`tail` the
 raw line or echo the event elsewhere** — the logged line embeds the literal
-marker text ("Running in the background" / "N shells still running"), and
-printing it into your own pane would re-trigger the very sweep you're
-checking, forever re-arming itself once the original sighting scrolls out of
-the sweep's 200-line capture window (the self-match guard that lets a
-worker's outbox message safely reference the marker doesn't cover this
-prompt's own text). The `cut` keeps only the timestamp, which is all you
-need to tell whether this is new since your last wake. A hit means the
-harness detected one of those markers in your own scrollback — since
+WATCH_BG_VIOLATION_PATTERN marker text ("Running in the background" / "N
+shells still running", the same pair CLAUDE_CODE_DISABLE_BACKGROUND_TASKS
+exists to prevent), and printing it into your own pane would re-trigger the
+very sweep you're checking, forever re-arming itself once the original
+sighting scrolls out of the sweep's 200-line capture window (the self-match
+guard that lets a worker's outbox message safely reference the marker
+doesn't cover this prompt's own text, and unlike that message this
+paragraph has no reason to ever be pasted into a live pane verbatim — if you
+find yourself about to `cat`/quote this section back into your own
+scrollback, use the `cut` form above instead). The `cut` keeps only the
+timestamp, which is all you need to tell whether this is new since your
+last wake. A hit means the harness detected one of those markers in your
+own scrollback — since
 `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` (#383/#384) should make this
 unreachable for a claude coordinator, treat any hit as worth investigating
 rather than dismissing: check your own `jobs`/recent Bash calls for a

@@ -643,6 +643,7 @@ heading "Test 15f: bg_violation_sweep_pass also scans the coordinator's own wind
 # still get flagged, but delivered only via the events.log line (no outbox
 # to drop a message into for a window that isn't a worker's).
 rm -f "$PROJECT_DIR/.swarm/events.log"
+rm -rf "$TEST_DIR/wt-issue-77/.swarm/tasks/outbox"
 echo "coordinator" > "$TEST_DIR/tmux-windows.txt"
 printf 'coordinator scrollback\nRunning in the background\n' > "$TEST_DIR/tmux-pane-coordinator.txt"
 
@@ -668,7 +669,20 @@ unset WATCH_PID
     || red "expected a window=coordinator watch.bg_violation event; log: $(cat "$PROJECT_DIR/.swarm/events.log" 2>/dev/null || echo none)"
 grep -q 'dry_run=1' "$PROJECT_DIR/.swarm/events.log" \
     && red "coordinator sighting logged as dry_run=1 under DRY_RUN=0"
-green "a real background-shell marker on the coordinator's own pane is logged (no outbox to deliver to)"
+# Self-review catch: the log line alone doesn't prove the `is_coordinator`
+# outbox skip in bg_violation_sweep_pass actually fired — a wt_dir="" for
+# the coordinator window makes the (skipped) outbox path
+# "$wt_dir/.swarm/tasks/outbox" evaluate to the absolute "/.swarm/tasks/outbox",
+# so assert directly that nothing landed there, and that no outbox message
+# appeared anywhere under $TEST_DIR (this test's tmux-windows.txt has no
+# iss-* window at all, so an outbox file anywhere would only come from a
+# broken coordinator skip).
+[ -e "/.swarm" ] \
+    && red "coordinator sighting wrote to /.swarm — is_coordinator outbox skip did not fire: $(find /.swarm 2>/dev/null)"
+outbox_stray="$(find "$TEST_DIR" -path '*/outbox/*.md' 2>/dev/null)" || true
+[ -z "$outbox_stray" ] \
+    || red "coordinator sighting unexpectedly wrote an outbox message: $outbox_stray"
+green "a real background-shell marker on the coordinator's own pane is logged, with no outbox write anywhere (is_coordinator skip verified)"
 
 rm -f "$TEST_DIR/tmux-windows.txt" "$TEST_DIR/tmux-pane-iss-77.txt" "$TEST_DIR/tmux-pane-coordinator.txt"
 
