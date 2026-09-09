@@ -315,6 +315,7 @@ PROJECT_DIR="$LOCK_TEST_DIR"
 EVENTS_LOG="$LOCK_TEST_DIR/events.log"
 : > "$EVENTS_LOG"
 COORD_WAKE_LOCK="$LOCK_TEST_DIR/coord-wake.lock"
+COORD_WAKE_LOCK_TIMEOUT_SECS=10
 DEBOUNCE_SECS=0
 WATCHER_AUTOCLOSE=0
 POST_OUTCOMES=0
@@ -423,6 +424,48 @@ grep -q 'PR #4000 merged' "$WAKE_LOG" \
 [ -n "${ACTIVITY_ANNOUNCED_PR[4000]:-}" ] \
     || red "PR 4000 should now be marked ACTIVITY_ANNOUNCED_PR after a successful (non-debounced) wake"
 green "the same item is retried and announced once the debounce window clears — nothing was permanently lost"
+
+# ============================================================================
+heading "Test 7: a failed llm-start.sh call is retried too, not just a debounced one (issue #392 self-review finding)"
+# ============================================================================
+# Same shape as Test 6, but the wake path fails for a DIFFERENT reason: the
+# lock is acquired fine and DEBOUNCE_SECS clears, but llm-start.sh itself
+# exits non-zero (e.g. a COORD_WAKE_LOCK_TIMEOUT_SECS lock timeout, or a
+# genuine llm-start.sh crash) — on_activity must still return 1 here, not
+# fall through to a "success" return 0, or activity_poll_pass would mark
+# the item as announced for a wake that never actually landed.
+: > "$WAKE_LOG"
+: > "$EVENTS_LOG"
+declare -A ACTIVITY_ANNOUNCED_PR=()
+declare -A ACTIVITY_ANNOUNCED_ISSUE=()
+LAST_ACTIVITY_POLL_TS="1970-01-01T00:00:00Z"
+LAST_ACTIVITY_WAKE=0
+DEBOUNCE_SECS=0
+printf '5000\tFailed-wake probe\tfix/issue-5000\n' > "$PR_FIXTURE"
+: > "$ISSUE_FIXTURE"
+
+FAILING_LLM_START="$TEST_DIR/failing-llm-start.sh"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$FAILING_LLM_START"
+chmod +x "$FAILING_LLM_START"
+LLM_START="$FAILING_LLM_START"
+
+activity_poll_pass
+[ -z "${ACTIVITY_ANNOUNCED_PR[5000]:-}" ] \
+    || red "PR 5000 was marked ACTIVITY_ANNOUNCED_PR despite its llm-start.sh call failing"
+green "a failed llm-start.sh call does NOT mark its items as announced"
+
+# Swap in a working LLM_START and retry with the SAME fixture — since it
+# was never marked as announced above, this call must still announce it.
+LLM_START="$FAKE_LLM_START"
+activity_poll_pass
+grep -q 'WAKE:' "$WAKE_LOG" \
+    || red "expected PR 5000 to be retried and woken once llm-start.sh started working; wake.log:
+$(cat "$WAKE_LOG")"
+grep -q 'PR #5000 merged' "$WAKE_LOG" \
+    || red "wake prompt missing the retried PR #5000 line: $(cat "$WAKE_LOG")"
+[ -n "${ACTIVITY_ANNOUNCED_PR[5000]:-}" ] \
+    || red "PR 5000 should now be marked ACTIVITY_ANNOUNCED_PR after a successful wake"
+green "the same item is retried and announced once llm-start.sh succeeds — a wake failure didn't lose it either"
 
 echo
 green "All activity-poll tests passed."

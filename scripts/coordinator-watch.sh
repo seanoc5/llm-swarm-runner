@@ -1334,6 +1334,7 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     WATCH_BG_VIOLATION_PATTERN    (auto)  grep -E pattern for the sweep above
     WATCH_ACTIVITY_POLL_SECS 300  periodic gh poll for PRs/issues resolved out-of-band, e.g. in the GitHub web UI (0=off); see header comment (issue #392)
     ACTIVITY_POLL_OVERLAP_SECS 30  cursor overlap tolerating gh search-index lag; dedup maps prevent re-announcing
+    COORD_WAKE_LOCK_TIMEOUT_SECS 60  max wait to flock COORD_WAKE_LOCK before a wake gives up (see that lock's header comment)
     ACTIVITY_WAKE_PROMPT (built-in) what the coordinator does on an activity-poll wake
     WATCH_CHECK_ON_DONE 1         run acceptance check when a worker signals done; see header comment
     SESSION_NAME        (auto)    tmux session for chk-N windows (llm-<project-basename>)
@@ -1939,6 +1940,21 @@ AUTO_COMPACT_LOCK="$PROJECT_DIR/.swarm/coord-compact.lock"
 # llm-start.sh call so at most one is ever in flight — see each function's
 # call site.
 COORD_WAKE_LOCK="$PROJECT_DIR/.swarm/coord-wake.lock"
+# issue #392 self-review: before this feature, the main watcher process
+# never waited on any lock before its own wake calls — a bounded `flock -w`
+# (not an unbounded blocking flock) keeps a wedged llm-start.sh call in
+# run_watch_timer_loop's background subshell from being able to freeze
+# on_outcome/on_message's wake pipeline in the main process indefinitely.
+# llm-start.sh's own live-REPL reprompt path settles/retries on the order of
+# a few seconds (COMPACT_SUBMIT_SETTLE_SECS-scaled); 60s is generous
+# headroom above that, not a tuned worst case, since a real wedge here means
+# something is already badly wrong (dead tmux server, full disk) and this
+# is a last-resort escape hatch, not a normal-path timing budget.
+COORD_WAKE_LOCK_TIMEOUT_SECS="${COORD_WAKE_LOCK_TIMEOUT_SECS:-60}"
+if ! [[ "$COORD_WAKE_LOCK_TIMEOUT_SECS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: COORD_WAKE_LOCK_TIMEOUT_SECS must be a non-negative integer (got: $COORD_WAKE_LOCK_TIMEOUT_SECS)" >&2
+    exit 1
+fi
 
 # log_event <category> <key=val>...
 # Writes one line: "<utc-iso8601>  <category>  k=v k=v ..."
@@ -5054,8 +5070,11 @@ on_outcome() {
         # NON_INTERACTIVE=1 prevents auto-attach; coordinator runs detached
         # in its tmux session. flock's COORD_WAKE_LOCK (issue #392) so this
         # can't race on_activity's own llm-start.sh call from a different
-        # OS process — see that lock's header comment.
-        ( flock 9; cd "$PROJECT_DIR" && NON_INTERACTIVE=1 "$LLM_START" "$WAKE_PROMPT" ) 9>"$COORD_WAKE_LOCK" || {
+        # OS process — see that lock's header comment. -w (not an unbounded
+        # wait) plus && (not `;`) so EITHER a lock timeout OR a flock error
+        # skips the unlocked llm-start.sh call entirely, falling through to
+        # the same error handling below.
+        ( flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 9 && cd "$PROJECT_DIR" && NON_INTERACTIVE=1 "$LLM_START" "$WAKE_PROMPT" ) 9>"$COORD_WAKE_LOCK" || {
             echo "[$(date +%T)] WARN: coordinator wake exited non-zero (continuing watch)"
             log_event coord.wake.error "issue=$issue"
         }
@@ -5119,8 +5138,9 @@ on_message() {
     if [ "$DRY_RUN" = "1" ]; then
         echo "[DRY] would: cd $PROJECT_DIR && NON_INTERACTIVE=1 $LLM_START \"$wake_prompt\""
     else
-        # flock's COORD_WAKE_LOCK (issue #392) — see its header comment.
-        ( flock 9; cd "$PROJECT_DIR" && NON_INTERACTIVE=1 "$LLM_START" "$wake_prompt" ) 9>"$COORD_WAKE_LOCK" || {
+        # flock's COORD_WAKE_LOCK (issue #392, bounded -w) — see its
+        # header comment and on_outcome's call site above for why -w/&&.
+        ( flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 9 && cd "$PROJECT_DIR" && NON_INTERACTIVE=1 "$LLM_START" "$wake_prompt" ) 9>"$COORD_WAKE_LOCK" || {
             echo "[$(date +%T)] WARN: coordinator wake exited non-zero (continuing watch)"
             log_event coord.wake.error "issue=$issue trigger=outbox"
         }
@@ -5159,11 +5179,14 @@ on_message() {
 # feature. Same reasoning already applies to pr_poll_pass/orphan_sweep_pass/
 # bg_violation_sweep_pass, none of which check ONCE either.
 #
-# Returns 1 on a debounced skip, 0 otherwise (issue #392 self-review): the
-# caller, activity_poll_pass, only marks its ACTIVITY_ANNOUNCED_PR/_ISSUE
-# dedup maps on a 0 return — a debounced item must stay eligible for a
-# later tick to retry, not be marked "announced" for a wake that never
-# actually happened.
+# Returns 1 on a debounced skip OR a failed (non-DRY_RUN) llm-start.sh call
+# — including a COORD_WAKE_LOCK_TIMEOUT_SECS lock timeout — 0 otherwise
+# (issue #392 self-review, both cases). The caller, activity_poll_pass,
+# only marks its ACTIVITY_ANNOUNCED_PR/_ISSUE dedup maps on a 0 return — an
+# item whose wake didn't actually land, for whichever reason, must stay
+# eligible for a later tick to retry rather than being marked "announced"
+# for a wake that never happened. DRY_RUN always counts as success (0),
+# matching every other side-effecting pass in this file.
 on_activity() {
     local lines="$1"
     local now
@@ -5188,24 +5211,26 @@ Re-check your own picture of outstanding decisions/PRs/issues against this (gh p
     echo "[$(date +%T)] waking coordinator (activity poll)..."
     log_event coord.wake "trigger=activity_poll"
 
+    local wake_ok=1
     if [ "$DRY_RUN" = "1" ]; then
         echo "[DRY] would: cd $PROJECT_DIR && NON_INTERACTIVE=1 $LLM_START \"$wake_prompt\""
     else
-        # flock's COORD_WAKE_LOCK (issue #392) — this call runs from
-        # run_watch_timer_loop's own background subshell, a genuinely
+        # flock's COORD_WAKE_LOCK (issue #392, bounded -w) — this call runs
+        # from run_watch_timer_loop's own background subshell, a genuinely
         # separate OS process from on_outcome/on_message's main-process
         # calls above; without this lock both could hit llm-start.sh's
         # single unlocked reprompt-injection tmux buffer at once. See the
-        # lock's header comment for the full race and blocking (not -n)
-        # is deliberate: a wake carries real information, so this waits its
-        # turn rather than dropping it on contention (unlike
-        # maybe_auto_compact's -n, where skipping and retrying next tick is
-        # fine because a compact isn't a message anyone would otherwise miss).
-        ( flock 9; cd "$PROJECT_DIR" && NON_INTERACTIVE=1 "$LLM_START" "$wake_prompt" ) 9>"$COORD_WAKE_LOCK" || {
+        # lock's header comment for the full race, and -w's own header
+        # comment for why this waits (bounded, not unbounded) rather than
+        # skipping outright like maybe_auto_compact's -n does (a compact
+        # isn't a message anyone would otherwise miss; a wake is).
+        ( flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 9 && cd "$PROJECT_DIR" && NON_INTERACTIVE=1 "$LLM_START" "$wake_prompt" ) 9>"$COORD_WAKE_LOCK" || {
             echo "[$(date +%T)] WARN: coordinator wake exited non-zero (continuing watch)"
             log_event coord.wake.error "trigger=activity_poll"
+            wake_ok=0
         }
     fi
+    [ "$wake_ok" = "1" ] || return 1
     LAST_ACTIVITY_WAKE=$now
     return 0
 }
