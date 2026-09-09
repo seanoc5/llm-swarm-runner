@@ -708,12 +708,55 @@ fi
 # you coordinator + watcher + audit posting from a single invocation).
 # Idempotent: detects an existing watcher pane via its pane_start_command
 # and skips the split when one is already running.
+#
+# DEAD panes must not count as "already running" (#391). coordinator-watch
+# self-kills when it detects its own script changed on disk (#296), and the
+# swarm's remain-on-exit leaves the pane in place afterward — still reporting
+# its original pane_start_command. Matching on that alone made this guard
+# suppress exactly the respawn the self-kill exists to prompt: corpusminder-
+# spring and SAMlytics ran ~23h unwatched while every llm-start.sh re-run
+# reported "already running". The louder the self-kill, the more reliably
+# recovery was blocked.
+#
+# Echoes "live" when a RUNNING watcher pane is present in window $1; otherwise
+# echoes the pane index of each DEAD watcher corpse, one per line (nothing at
+# all when the window has no watcher pane in any state).
+watcher_pane_scan() {
+    local target="$1" script="$2"
+    local dead idx startcmd live=0
+    local corpses=()
+    while IFS=' ' read -r dead idx startcmd; do
+        case "$startcmd" in
+            *"$script"*)
+                if [ "$dead" = "1" ]; then
+                    corpses+=("$idx")
+                else
+                    live=1
+                fi
+                ;;
+        esac
+    done < <(tmux list-panes -t "$target" \
+                  -F '#{pane_dead} #{pane_index} #{pane_start_command}' 2>/dev/null)
+
+    if [ "$live" = "1" ]; then
+        echo "live"
+    elif [ ${#corpses[@]} -gt 0 ]; then
+        printf '%s\n' "${corpses[@]}"
+    fi
+}
+
 if [ "${WATCH:-1}" = "1" ]; then
     WATCH_SCRIPT="$LLM_SWARM_DIR/scripts/coordinator-watch.sh"
-    if tmux list-panes -t "$SESSION_NAME:util" -F '#{pane_start_command}' 2>/dev/null \
-            | grep -qF "$WATCH_SCRIPT"; then
+    WATCH_PANE_SCAN="$(watcher_pane_scan "$SESSION_NAME:util" "$WATCH_SCRIPT")"
+    if [ "$WATCH_PANE_SCAN" = "live" ]; then
         echo "coordinator-watch pane already running in '$SESSION_NAME:util' — skipping spawn"
     else
+        # Reap corpses first so the util window doesn't collect one dead pane
+        # per restart cycle.
+        for _corpse in $WATCH_PANE_SCAN; do
+            tmux kill-pane -t "$SESSION_NAME:util.$_corpse" 2>/dev/null \
+                && echo "Removed dead coordinator-watch pane $_corpse in '$SESSION_NAME:util' (#391)"
+        done
         # printf %q makes every value safe for re-parsing in the new shell,
         # which matters for OUTCOME_HOOK paths and prompts that may contain
         # spaces or quotes.
