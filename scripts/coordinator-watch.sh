@@ -2120,6 +2120,36 @@ own_wt_dir_for_issue() {
     echo "$wt_dir"
 }
 
+# own_worktree_dirs_for_scan <project_dir>
+#
+# Fail-open wrapper around swarm_own_worktree_dirs() for the live watcher's
+# outcome/outbox scan (run_poll's scan_outcomes below). swarm_own_worktree_dirs()
+# is deliberately fail-QUIET (see its header in _load-env.sh) — the right
+# default for a cold CLI listing about to act on the result, but wrong here:
+# "no worktrees exist yet" and "git failed against $project_dir" must never
+# look the same, because the watcher's whole job is to not miss events.
+# Falls back to the pre-#357 raw glob (matching is_own_worktree_dir's own
+# documented fail-open policy, used by every other polling pass in this
+# file) instead of silently scanning nothing forever. Real production
+# PROJECT_DIR is always a git checkout — this only guards a broken-install
+# or non-git edge case.
+own_worktree_dirs_for_scan() {
+    local project_dir="$1" dirs
+    dirs="$(swarm_own_worktree_dirs "$project_dir")"
+    if [ -n "$dirs" ]; then
+        printf '%s\n' "$dirs"
+        return 0
+    fi
+    git -C "$project_dir" rev-parse --git-common-dir >/dev/null 2>&1 && return 0
+
+    local cand
+    shopt -s nullglob
+    for cand in "$WORKSPACE"/wt-issue-*/; do
+        echo "${cand%/}"
+    done
+    shopt -u nullglob
+}
+
 # dispatch_outcome <outcome-path>
 #
 # Wrapper around on_outcome that applies the is_our_worktree filter.
@@ -4859,18 +4889,21 @@ run_poll() {
     seen_file=$(mktemp -t coord-watch-seen-XXXXXX)
 
     # Scan only wt-issue-*/.swarm/tasks/done dirs under this project's OWN
-    # worktrees (swarm_own_worktree_dirs(), issue #357 — `git worktree
-    # list` against $PROJECT_DIR's own repo, not a name-glob under
-    # $WORKSPACE that a sibling project's swarm can also populate under
-    # flat grouping). May expand to nothing if no worker worktrees exist
-    # yet — handle that gracefully so the find call gets an empty arg list.
+    # worktrees (own_worktree_dirs_for_scan() -> swarm_own_worktree_dirs(),
+    # issue #357 — `git worktree list` against $PROJECT_DIR's own repo, not
+    # a name-glob under $WORKSPACE that a sibling project's swarm can also
+    # populate under flat grouping; own_worktree_dirs_for_scan() falls back
+    # to that raw glob, fail-open, if $PROJECT_DIR isn't a working git repo
+    # — see its header above). May expand to nothing if no worker worktrees
+    # exist yet — handle that gracefully so the find call gets an empty arg
+    # list.
     scan_outcomes() {
         local done_dirs=() outbox_dirs=() wt
         while IFS= read -r wt; do
             [ -n "$wt" ] || continue
             [ -d "$wt/.swarm/tasks/done" ] && done_dirs+=("$wt/.swarm/tasks/done")
             [ -d "$wt/.swarm/tasks/outbox" ] && outbox_dirs+=("$wt/.swarm/tasks/outbox")
-        done < <(swarm_own_worktree_dirs "$PROJECT_DIR")
+        done < <(own_worktree_dirs_for_scan "$PROJECT_DIR")
         {
             if [ "${#done_dirs[@]}" -gt 0 ]; then
                 find "${done_dirs[@]}" -maxdepth 1 \
