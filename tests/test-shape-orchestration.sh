@@ -636,7 +636,41 @@ unset WATCH_PID
     || red "an earlier real marker was hidden behind a later guarded match; log: $(cat "$TEST_DIR/watch-bgviol-e.log")"
 green "a guarded later match does not hide an earlier real marker in the same pane"
 
-rm -f "$TEST_DIR/tmux-windows.txt" "$TEST_DIR/tmux-pane-iss-77.txt"
+heading "Test 15f: bg_violation_sweep_pass also scans the coordinator's own window (#385)"
+# The #298 incident this whole sweep exists to catch was a coordinator
+# pane, not a worker one — the original sweep only ever looked at iss-*
+# windows. A "coordinator" window (no wt-issue-N worktree behind it) should
+# still get flagged, but delivered only via the events.log line (no outbox
+# to drop a message into for a window that isn't a worker's).
+rm -f "$PROJECT_DIR/.swarm/events.log"
+echo "coordinator" > "$TEST_DIR/tmux-windows.txt"
+printf 'coordinator scrollback\nRunning in the background\n' > "$TEST_DIR/tmux-pane-coordinator.txt"
+
+cd "$PROJECT_DIR"
+DRY_RUN=0 WATCH_BG_VIOLATION_SWEEP_SECS=1 WATCH_PR_POLL_SECS=0 \
+    WATCH_ORPHAN_SWEEP_SECS=0 WATCH_CHECK_ON_DONE=0 POLL_SECS=1 \
+    "$WATCH" "$PROJECT_DIR" > "$TEST_DIR/watch-bgviol-f.log" 2>&1 &
+WATCH_PID=$!
+
+logged=0
+for ((i=0; i<20; i++)); do
+    if grep -q 'watch.bg_violation.*window=coordinator' "$PROJECT_DIR/.swarm/events.log" 2>/dev/null; then
+        logged=1
+        break
+    fi
+    sleep 0.5
+done
+kill "$WATCH_PID" 2>/dev/null || true
+wait "$WATCH_PID" 2>/dev/null || true
+unset WATCH_PID
+
+[ "$logged" = "1" ] \
+    || red "expected a window=coordinator watch.bg_violation event; log: $(cat "$PROJECT_DIR/.swarm/events.log" 2>/dev/null || echo none)"
+grep -q 'dry_run=1' "$PROJECT_DIR/.swarm/events.log" \
+    && red "coordinator sighting logged as dry_run=1 under DRY_RUN=0"
+green "a real background-shell marker on the coordinator's own pane is logged (no outbox to deliver to)"
+
+rm -f "$TEST_DIR/tmux-windows.txt" "$TEST_DIR/tmux-pane-iss-77.txt" "$TEST_DIR/tmux-pane-coordinator.txt"
 
 # ────────────────────────── Done ──────────────────────────
 

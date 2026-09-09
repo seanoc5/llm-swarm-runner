@@ -264,6 +264,29 @@ nudge). For each candidate, post ONE refresh comment on the PR containing:
 List nudged PRs in the wake digest's "Moved since last wake" row. Trust the
 script's suppression — never hand-nudge a PR it didn't return.
 
+### Coordinator background-shell self-check (per wake)
+
+`coordinator-watch.sh`'s `bg_violation_sweep_pass` (issue #385) scans the
+`coordinator` tmux window itself, not just `iss-*` worker windows — the
+20-hour leaked poll loop that motivated the whole sweep (#298) was a
+coordinator pane, not a worker one. Unlike a worker sighting, which lands as
+an outbox `fyi` you'd triage in the outbox-straggler check above, a sighting
+on your own pane has nowhere else to go: it's appended to
+`.swarm/events.log` as a `watch.bg_violation` line with `window=coordinator`
+and nothing else surfaces it. On each wake, check for one since your last
+wake: `grep 'watch.bg_violation.*window=coordinator' .swarm/events.log |
+tail -5`. A hit means the harness detected "Running in the background" or
+"N shells still running" UI markers in your own scrollback — since
+`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` (#383/#384) should make this
+unreachable for a claude coordinator, treat any hit as worth investigating
+rather than dismissing: check your own `jobs`/recent Bash calls for a
+`run_in_background=true` or shell-level `&`/`nohup`/`disown` you didn't mean
+to leave running, per `prompts/worker.md`'s "Never background a shell
+command". Unlike a worker sighting (never autoremediate — the pane may be
+mid-task and isn't yours to touch), this one *is* your own pane, so you can
+and should stop a runaway shell you find. Report the finding in your next
+wake digest either way, even if you conclude it was a false positive.
+
 ## Reporting worker outcomes
 
 **Check draft state first.** `gh pr view <N> --json isDraft,body` in one
