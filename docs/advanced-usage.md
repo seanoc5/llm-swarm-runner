@@ -21,6 +21,7 @@ This document covers advanced workflows, custom mounts, and manual Git worktree 
 - [Peering at Workers from the Host (capture-pane)](#peering-at-workers-from-the-host-capture-pane)
 - [Long-lived coordinator: context monitoring](#long-lived-coordinator-context-monitoring)
   - [Worker auto-compact](#worker-auto-compact)
+  - [Out-of-band GitHub activity (`WATCH_GH_ACTIVITY_SECS`)](#out-of-band-github-activity-watch_gh_activity_secs)
 - [Triage Workflow](#triage-workflow)
   - [The triage cycle](#the-triage-cycle)
   - [Read-only triage prompt](#read-only-triage-prompt)
@@ -487,6 +488,25 @@ On its own timer (`WORKER_COMPACT_SCAN_SECS`, default 30s), it sweeps every `iss
 Known limitation: this only catches workers idling *between* turns. A single marathon turn offers no idle window until it ends. See `coordinator-watch.sh`'s header comment for the full knob list (`WORKER_AUTO_COMPACT`, `WORKER_COMPACT_THRESHOLD_TOKENS`, `WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS`, timeouts, `WORKER_COMPACT_NUDGE_PROMPT`, etc.) and `worker_compact_pass()`'s implementation comments for the rest of the design rationale.
 
 Both the coordinator and worker paths also refuse to inject `/compact` at all when the pane's context-window size can't be confirmed (`AUTO_COMPACT_REQUIRE_WINDOW`/`WORKER_COMPACT_REQUIRE_WINDOW`, default on) — issue #296, closing an incident where a long-lived watcher pane misfired `/compact` at just 16% context (see [troubleshooting.md](./troubleshooting.md#watcher-pane-misbehaving-after-a-long-lived-session-issue-296) for the `--check-stale` diagnostic that catches the stale-daemon half of that incident). This check deliberately never second-guesses a threshold that already scaled correctly against a known window size — only the case where the window is unknown and the threshold silently fell back to a flat number.
+
+### Out-of-band GitHub activity (`WATCH_GH_ACTIVITY_SECS`)
+
+A coordinator wakes when a **worker finishes**. That is the whole wake channel. So when you merge a PR or close an issue yourself — in the GitHub web UI, or from any shell that isn't the swarm — nothing tells it, and a coordinator parked on "pending your call on #1070" stays parked after you have already made that call.
+
+The watcher's other GitHub polling does not cover this. `WATCH_PR_POLL_SECS`'s `pr_poll_pass` exists to *reap*: it walks live worktrees and asks whether their PRs went terminal. A PR whose worker was reaped days ago has nothing left to walk from, and issue state is never consulted at all.
+
+`WATCH_GH_ACTIVITY_SECS` (default 300s, `0` disables) closes that. Each tick asks GitHub two questions — what was merged since the last check, what was closed since the last check — and wakes the coordinator naming anything new, telling it to re-verify whatever decision it is parked on against live state before asking you again.
+
+Behavior worth knowing:
+
+- **The first pass never wakes.** It records the current terminal set and stays quiet, so a freshly started watcher doesn't greet you by announcing everything closed today as news (`watch.gh_activity reason=initialized`).
+- **Anything still owned by a live `iss-*` window is skipped** — the normal outcome channel and the autoclose path already handle those. It's recorded, so it can't re-fire later.
+- **Debounced** by `DEBOUNCE_SECS` like every other wake.
+- **A `gh` failure is non-fatal** — logged as `gh_activity.error`, poll skipped, watcher continues.
+
+Cost is two `gh` calls per tick: 24/hour per swarm at the default interval, ~120/hour across five swarms, against an authenticated budget of 5000/hour. The interval is deliberately slower than `WATCH_PR_POLL_SECS` — a human decision does not need sub-minute latency.
+
+This is intentionally "what went terminal recently" rather than "what is the coordinator waiting for". A declared-pending-set protocol would be quieter and more precise, but it requires the coordinator to maintain that state — and the agent this feature exists to rescue is, by definition, the stuck one.
 
 ## Triage Workflow
 
