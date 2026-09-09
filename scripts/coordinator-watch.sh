@@ -1231,6 +1231,8 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     WATCHER_AUTOCLOSE   1         reap eligible workers (window+worktree+branch) before wake; see WATCHER_AUTOCLOSE_MODE
     WATCHER_AUTOCLOSE_MODE merged which terminal PR states are reap-eligible: merged (MERGED only, default) | finalized (MERGED or CLOSED)
     WATCH_PR_POLL_SECS  60        periodic gh-poll backstop reap (0=off); see header comment
+    WATCH_GH_ACTIVITY_SECS 300    poll for PRs/issues resolved OUTSIDE the swarm (web UI) and
+                                  wake the coordinator so it stops waiting on them (0=off)
     WATCH_ORPHAN_SWEEP_SECS 3600  periodic reap-orphan-worktrees.sh sweep for window-less worktrees (0=off); see header comment
     WATCH_BG_VIOLATION_SWEEP_SECS 60  periodic sweep for backgrounded-shell UI markers on iss-* panes (0=off); see header comment
     WATCH_BG_VIOLATION_PATTERN    (auto)  grep -E pattern for the sweep above
@@ -1307,6 +1309,12 @@ EVENTS LOG
                            started — logged once, immediately before this daemon shuts itself
                            down entirely (script, launch_mtime, current_mtime, pid, started_at);
                            see WATCHER_STALE_CHECK in the header comment
+      watch.gh_activity    (issue #392) a PR/issue went terminal out of band — merged or
+                           closed by the operator rather than through a worker outcome;
+                           reason=initialized on the first pass (records state, no wake),
+                           reason=terminal_detected with count + item list otherwise
+      gh_activity.error    the gh pr/issue list call for the above failed (poll skipped,
+                           watcher continues)
       watch.pr_poll        terminal PR detected via periodic gh poll (reap backstop);
                            reason=stale_pr_ignored when the terminal PR
                            predates the worktree (issue #185 — recycled
@@ -1587,6 +1595,12 @@ WATCHER_AUTOCLOSE="${WATCHER_AUTOCLOSE:-1}"
 WATCHER_AUTOCLOSE_MODE="${WATCHER_AUTOCLOSE_MODE:-merged}"
 KILL_FINISHED="${KILL_FINISHED:-$LLM_SWARM_DIR/scripts/kill-finished-workers.sh}"
 WATCH_PR_POLL_SECS="${WATCH_PR_POLL_SECS:-60}"
+# issue #392 — out-of-band GitHub activity poll (operator merges/closes in the
+# web UI). Deliberately slower than WATCH_PR_POLL_SECS: a human decision does
+# not need sub-minute latency, and this is the only knob here that costs two
+# gh calls per tick. 0 disables.
+WATCH_GH_ACTIVITY_SECS="${WATCH_GH_ACTIVITY_SECS:-300}"
+LAST_GH_ACTIVITY_WAKE=0
 WATCH_ORPHAN_SWEEP_SECS="${WATCH_ORPHAN_SWEEP_SECS:-3600}"
 REAP_ORPHAN="${REAP_ORPHAN:-$LLM_SWARM_DIR/scripts/reap-orphan-worktrees.sh}"
 # issue #298 — fallback detection for the foreground-only rule; see header comment.
@@ -1728,6 +1742,10 @@ case "$WATCHER_AUTOCLOSE_MODE" in
         exit 1
         ;;
 esac
+if ! [[ "$WATCH_GH_ACTIVITY_SECS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: WATCH_GH_ACTIVITY_SECS must be a non-negative integer (got: $WATCH_GH_ACTIVITY_SECS)" >&2
+    exit 1
+fi
 if ! [[ "$WATCH_PR_POLL_SECS" =~ ^[0-9]+$ ]]; then
     echo "ERROR: WATCH_PR_POLL_SECS must be a non-negative integer (got: $WATCH_PR_POLL_SECS)" >&2
     exit 1
@@ -1924,6 +1942,7 @@ llm-start.sh:  $LLM_START
 post-outcomes: $POST_OUTCOMES$([ "$POST_OUTCOMES" = "1" ] && echo " (sweep: $SWEEP, hook: ${OUTCOME_HOOK:-default dry-run stub})")
 autoclose:     $WATCHER_AUTOCLOSE$([ "$WATCHER_AUTOCLOSE" = "1" ] && echo " (mode: $WATCHER_AUTOCLOSE_MODE [$AUTOCLOSE_PR_FLAG], script: $KILL_FINISHED)")
 pr-poll:       ${WATCH_PR_POLL_SECS}s$([ "$WATCH_PR_POLL_SECS" = "0" ] && echo " (disabled)")
+gh-activity:   ${WATCH_GH_ACTIVITY_SECS}s$([ "$WATCH_GH_ACTIVITY_SECS" = "0" ] && echo " (disabled)") (out-of-band merges/closes)
 orphan-sweep:  ${WATCH_ORPHAN_SWEEP_SECS}s$([ "$WATCH_ORPHAN_SWEEP_SECS" = "0" ] && echo " (disabled)" || echo " (script: $REAP_ORPHAN)")
 bg-violation:  ${WATCH_BG_VIOLATION_SWEEP_SECS}s$([ "$WATCH_BG_VIOLATION_SWEEP_SECS" = "0" ] && echo " (disabled)" || echo " (foreground-only fallback detection, issue #298)")
 check-on-done: $WATCH_CHECK_ON_DONE$([ "$WATCH_CHECK_ON_DONE" = "1" ] && echo " (session: $SESSION_NAME)")
@@ -2543,6 +2562,123 @@ orphan_sweep_pass() {
 # already watching every wt-issue-*/.swarm/tasks/outbox/*.md) picks it up
 # and wakes the coordinator via the normal on_message path. No new wake
 # plumbing needed. Local capture-pane only (no gh/network calls), so this
+# gh_activity_pass  (issue #392)
+#
+# The watcher's other GitHub polling (pr_poll_pass) exists to REAP: it walks
+# live worktrees and asks whether their PRs went terminal. That makes it
+# structurally blind to anything the operator resolves out of band —
+# the PR whose worker was reaped days ago, an issue closed by hand, anything
+# touched in the GitHub web UI. Nothing there consults issue state at all.
+#
+# The failure that motivated this: a coordinator parked on "Pending your
+# call: the #1070/#1064 merge decision" while #1070 had been MERGED and
+# #1064 CLOSED in the web UI 35 minutes earlier. The wake channel is driven
+# by worker outcome files; an operator acting on github.com produces none,
+# so the coordinator waits forever on a question already answered.
+#
+# Deliberately shaped as "what went terminal recently", NOT "what is the
+# coordinator waiting for". A declared-pending-set protocol would be more
+# precise and quieter, but it needs the coordinator to maintain state — and
+# the agent this exists to rescue is, by definition, the one that is stuck.
+# This version needs no cooperation from it.
+#
+# Cost: two gh calls per interval. At the 300s default that is 24/hour per
+# swarm; five swarms on a host is ~120/hour against an authenticated budget
+# of 5000/hour.
+gh_activity_pass() {
+    local state="$PROJECT_DIR/.swarm/gh-activity.state"
+    local since seen_file="$state" first_run=0
+
+    # State file layout: line 1 = the date floor for the search (YYYY-MM-DD),
+    # every later line = "pr:N" / "issue:N" already reported. Date rather
+    # than timestamp granularity on purpose — GitHub's search qualifiers
+    # accept both, but a date is immune to clock-skew and format drift, and
+    # dedup by number (below) makes the resulting overlap free.
+    if [ -f "$seen_file" ]; then
+        since="$(head -1 "$seen_file")"
+    else
+        first_run=1
+        since="$(date -u +%F)"
+    fi
+    [[ "$since" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || since="$(date -u +%F)"
+
+    local merged closed
+    merged="$(cd "$PROJECT_DIR" && gh pr list --state merged --limit 50 \
+                --search "merged:>=$since" --json number,title \
+                --jq '.[] | "pr:\(.number)\t\(.title)"' 2>/dev/null)" || {
+        log_event gh_activity.error "reason=gh_pr_list_failed"
+        return 0
+    }
+    closed="$(cd "$PROJECT_DIR" && gh issue list --state closed --limit 50 \
+                --search "closed:>=$since" --json number,title \
+                --jq '.[] | "issue:\(.number)\t\(.title)"' 2>/dev/null)" || {
+        log_event gh_activity.error "reason=gh_issue_list_failed"
+        return 0
+    }
+
+    # First run records the current terminal set WITHOUT waking: a repo with
+    # any history would otherwise greet a fresh watcher with a wake naming
+    # everything closed today, which is noise, not news.
+    if [ "$first_run" = "1" ]; then
+        {
+            echo "$since"
+            printf '%s\n' "$merged" "$closed" | awk -F'\t' 'NF && $1 != "" {print $1}'
+        } > "$seen_file"
+        log_event watch.gh_activity "reason=initialized since=$since"
+        return 0
+    fi
+
+    local key title fresh=() line
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        key="${line%%$'\t'*}"
+        title="${line#*$'\t'}"
+        grep -qxF "$key" "$seen_file" && continue
+        # Skip anything a live worker window still owns — pr_poll_pass and
+        # the autoclose path already handle those, and the coordinator will
+        # hear about them through the normal outcome channel.
+        local num="${key#*:}"
+        if has_live_window "$num"; then
+            echo "$key" >> "$seen_file"
+            continue
+        fi
+        fresh+=("$key ${title:0:80}")
+        echo "$key" >> "$seen_file"
+    done < <(printf '%s\n%s\n' "$merged" "$closed")
+
+    [ ${#fresh[@]} -gt 0 ] || return 0
+
+    local now; now=$(date +%s)
+    if [ $((now - LAST_GH_ACTIVITY_WAKE)) -lt "$DEBOUNCE_SECS" ]; then
+        log_event coord.wake.skip "reason=debounce window=${DEBOUNCE_SECS}s trigger=gh_activity"
+        return 0
+    fi
+
+    local summary
+    summary="$(printf '%s; ' "${fresh[@]}")"
+    summary="${summary%; }"
+    log_event watch.gh_activity "reason=terminal_detected count=${#fresh[@]} items=$(printf '%s,' "${fresh[@]%% *}" | sed 's/,$//')"
+
+    maybe_auto_compact wake
+
+    local wake_prompt
+    wake_prompt="Out-of-band GitHub activity detected (resolved outside the swarm, e.g. by the operator in the web UI): $summary. These did NOT come through a worker outcome, so your in-flight picture may be stale. Re-check any decision you are currently parked on against live state (gh pr view / gh issue view) before asking the operator again — if what you were waiting for is already resolved, act on it and move on."
+
+    echo "[$(date +%T)] gh-activity: ${#fresh[@]} item(s) went terminal out of band"
+    echo "[$(date +%T)] waking coordinator (gh-activity)..."
+    log_event coord.wake "trigger=gh_activity count=${#fresh[@]}"
+
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "[DRY] would: cd $PROJECT_DIR && NON_INTERACTIVE=1 $LLM_START \"$wake_prompt\""
+    else
+        ( cd "$PROJECT_DIR" && NON_INTERACTIVE=1 "$LLM_START" "$wake_prompt" ) || {
+            echo "[$(date +%T)] WARN: coordinator wake exited non-zero (continuing watch)"
+            log_event coord.wake.error "trigger=gh_activity"
+        }
+    fi
+    LAST_GH_ACTIVITY_WAKE=$now
+}
+
 # lives in run_watch_timer_loop like orphan_sweep_pass, not its own
 # dedicated background process.
 bg_violation_sweep_pass() {
@@ -3021,6 +3157,7 @@ SCRIPT
 # after this function.
 run_watch_timer_loop() {
     local last_pr_poll=0 last_orphan_sweep=0 last_bg_violation_sweep=0 now
+    local last_gh_activity=0
     while true; do
         sleep 2
         [ "$WATCH_CHECK_ON_DONE" = "1" ] && { status_poll_pass || true; }
@@ -3043,6 +3180,13 @@ run_watch_timer_loop() {
             if [ $((now - last_bg_violation_sweep)) -ge "$WATCH_BG_VIOLATION_SWEEP_SECS" ]; then
                 bg_violation_sweep_pass || true
                 last_bg_violation_sweep=$now
+            fi
+        fi
+        if [ "$WATCH_GH_ACTIVITY_SECS" -gt 0 ]; then
+            now=$(date +%s)
+            if [ $((now - last_gh_activity)) -ge "$WATCH_GH_ACTIVITY_SECS" ]; then
+                gh_activity_pass || true
+                last_gh_activity=$now
             fi
         fi
     done
