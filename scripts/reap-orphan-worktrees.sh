@@ -6,7 +6,10 @@
 # Complements kill-finished-workers.sh, which iterates LIVE iss-* tmux
 # windows. This script iterates wt-issue-N DIRECTORIES under the project
 # parent, so it catches worktrees that outlived their tmux session (common
-# after a session restart — tmux dies, the on-disk worktrees do not).
+# after a session restart — tmux dies, the on-disk worktrees do not). Each
+# candidate is verified as registered to THIS project's own git before
+# being judged further (issue #357 — a sibling project's swarm can share
+# the same flat-grouping parent dir).
 #
 # Default safety predicate (--pr-finalized mode, three conditions):
 #   1. Worktree dir mtime is at least --min-age-days N (default 2) old
@@ -46,8 +49,12 @@ USAGE
     reap-orphan-worktrees.sh [FLAGS]
 
 DESCRIPTION
-    Iterates wt-issue-N directories under the project's worktree parent.
-    Parent resolution honors SWARM_WORKTREE_GROUPING (shipped default:
+    Iterates wt-issue-N directories under the project's worktree parent,
+    verifying each is actually registered to THIS project's own git before
+    acting on it (issue #357 — a same-numbered directory belonging to a
+    sibling project's swarm under the same shared parent is skipped, never
+    judged against this project's PR/branch state). Parent resolution
+    honors SWARM_WORKTREE_GROUPING (shipped default:
     project, since issue #271):
         project  -> \$(dirname \$PROJECT)/\$(basename \$PROJECT)-worktrees
         flat     -> \$(dirname \$PROJECT)                   (legacy)
@@ -314,16 +321,44 @@ if [ "$PR_CHECK" = "1" ]; then
 fi
 
 # Walk wt-issue-* under the project parent -----------------------------------
+#
+# issue #357: this directory glob CAN match a sibling project's worktree
+# sharing the same flat-grouping parent dir. It's kept as a glob (rather
+# than routed through swarm_own_worktree_dirs()) because this script's
+# whole purpose for the dangling-registration branch below (issue #225) is
+# to find worktrees `git worktree list` has ALREADY LOST TRACK of — those
+# can never appear in that helper's output, since it's sourced from `git
+# worktree list` itself. Instead, every candidate is verified against
+# $PROJECT_DIR's own git before being judged further:
+#   - healthy registration  → must appear in `git worktree list` for
+#     $PROJECT_DIR (OWN_WT_SET below).
+#   - dangling registration → `git worktree list` can't help (the
+#     registration IS the thing that's gone), so its own `.git` file is
+#     read directly and must resolve into $PROJECT_DIR's own
+#     `<common-dir>/worktrees/` — the same ownership fact reap_dangling
+#     itself relies on before removing anything.
+# A same-numbered foreign worktree fails both checks and is skipped before
+# any PR/branch state is looked up for it.
 NOW=$(date +%s)
-shopt -s nullglob
 declare -a CANDIDATES=()
 declare -a DANGLING_CANDIDATES=()
 declare -a SKIPPED=()
 FOUND=0
 
+declare -A OWN_WT_SET=()
+while IFS= read -r _owt; do
+    [ -n "$_owt" ] && OWN_WT_SET["$_owt"]=1
+done < <(git -C "$PROJECT_DIR" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print substr($0, 10)}')
+
+COMMON_DIR="$(git -C "$PROJECT_DIR" rev-parse --git-common-dir 2>/dev/null || echo "$PROJECT_DIR/.git")"
+case "$COMMON_DIR" in
+    /*) ;;
+    *) COMMON_DIR="$PROJECT_DIR/$COMMON_DIR" ;;
+esac
+
 echo "=== reap-orphan-worktrees ==="
 echo "  project:        $PROJECT_DIR"
-echo "  scan dir:       $PROJECT_PARENT  (SWARM_WORKTREE_GROUPING=${SWARM_WORKTREE_GROUPING:-flat})"
+echo "  scan dir:       $PROJECT_PARENT  (SWARM_WORKTREE_GROUPING=${SWARM_WORKTREE_GROUPING:-flat}; own worktrees only — see issue #357)"
 echo "  min-age-days:   $MIN_AGE_DAYS"
 if [ "$MERGED_ONLY" = "1" ]; then
     echo "  preservation:   PR must be MERGED"
@@ -334,6 +369,7 @@ else
 fi
 echo
 
+shopt -s nullglob
 for WT in "$PROJECT_PARENT"/wt-issue-*/; do
     WT="${WT%/}"
     NAME="$(basename "$WT")"
@@ -343,6 +379,34 @@ for WT in "$PROJECT_PARENT"/wt-issue-*/; do
     if ! [[ "$ISSUE" =~ ^[0-9]+$ ]]; then
         echo "  $NAME  [non-numeric issue tag → skip]"
         continue
+    fi
+
+    # Ownership check (issue #357) — see the header comment above this loop.
+    # Run BEFORE the FOUND counter and everything below it: a directory
+    # belonging to a different project's repo is not "found" here at all,
+    # and must never reach a PR/branch lookup keyed off THIS project's own
+    # state.
+    if worktree_registration_ok "$WT"; then
+        if [ -z "${OWN_WT_SET[$WT]:-}" ]; then
+            echo "  $NAME  [registered to a different repo → skip]"
+            continue
+        fi
+    else
+        _admin_dir=""
+        if [ -f "$WT/.git" ]; then
+            _admin_dir="$(sed -n 's/^gitdir: //p' "$WT/.git" 2>/dev/null | head -n1)"
+        fi
+        if [ -n "$_admin_dir" ]; then
+            case "$_admin_dir" in
+                "$COMMON_DIR/worktrees/"*) ;;
+                *)
+                    echo "  $NAME  [.git resolves outside this project's admin dir → skip]"
+                    continue
+                    ;;
+            esac
+        fi
+        # else: .git file missing/unreadable — fall through and judge by
+        # the dirname-derived fix/issue-N convention, same as pre-#357.
     fi
 
     FOUND=$((FOUND + 1))
@@ -451,9 +515,10 @@ for WT in "$PROJECT_PARENT"/wt-issue-*/; do
     echo "  $NAME  [clean, $reason → reap]"
     CANDIDATES+=("$ISSUE")
 done
+shopt -u nullglob
 
 if [ "$FOUND" -eq 0 ]; then
-    echo "No wt-issue-* directories under $PROJECT_PARENT."
+    echo "No wt-issue-* directories found among $PROJECT_DIR's own worktrees."
     exit 0
 fi
 

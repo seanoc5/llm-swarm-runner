@@ -1915,7 +1915,7 @@ fi
 cat <<EOF
 === coordinator-watch.sh ===
 project:       $PROJECT_DIR
-workspace:     $WORKSPACE (scanning $WORKSPACE/wt-issue-*/.swarm/tasks/done/$([ "$WATCH_OUTBOX" = "1" ] && echo " + outbox/"))
+workspace:     $WORKSPACE (scanning this project's own wt-issue-*/.swarm/tasks/done/$([ "$WATCH_OUTBOX" = "1" ] && echo " + outbox/") — see issue #357)
 outbox:        $WATCH_OUTBOX$([ "$WATCH_OUTBOX" = "1" ] && echo " (worker→coordinator messages; wake prompt: ${OUTBOX_WAKE_PROMPT:-built-in scan-all})")
 backend:       $BACKEND$([ "$BACKEND" = "poll" ] && echo " (install inotify-tools for instant response)")
 debounce:      ${DEBOUNCE_SECS}s
@@ -2053,6 +2053,34 @@ declare -A ORPHAN_PR_LOGGED=()
 # new occurrence re-fires instead of staying permanently suppressed.
 declare -A BG_VIOLATION_LOGGED=()
 
+# is_own_worktree_dir <dir>
+#
+# issue #357: the directory-level primitive behind is_our_worktree below —
+# extracted so any pass that builds a "$WORKSPACE/wt-issue-N" path (from a
+# tmux window name or a gh PR branch, both of which are trustworthy on
+# their own) can verify the RESULT of pasting that onto $WORKSPACE before
+# treating it as this project's own. $WORKSPACE can be a parent directory
+# shared with sibling projects' swarms under flat grouping (e.g.
+# /opt/work/ holding wt-issue-* worktrees for several unrelated repos), so
+# a same-numbered foreign worktree can otherwise be mistaken for this
+# project's — see is_our_worktree's header for the sibling-repo scenario
+# this was first written for.
+#
+# Returns 0 if $dir is registered as a worktree of $PROJECT_DIR's git.
+#
+# Fail-open policy: if `git worktree list` errors out (PROJECT_DIR isn't a
+# git repo, git missing, etc.), we treat all dirs as ours. Preserves the
+# pre-patch behavior for non-git or broken-install setups — the filter
+# only adds scoping when it can verify scoping.
+is_own_worktree_dir() {
+    local dir="$1"
+    local wt_list
+    wt_list="$(git -C "$PROJECT_DIR" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2}')" || return 0
+    [ -z "$wt_list" ] && return 0
+
+    grep -Fxq "$dir" <<< "$wt_list"
+}
+
 # is_our_worktree <outcome-path>
 #
 # Filter cross-talk from sibling repos that share the same WORKSPACE parent
@@ -2062,11 +2090,6 @@ declare -A BG_VIOLATION_LOGGED=()
 #
 # Returns 0 (caller treats as "ours, fire") if the outcome's containing
 # worktree is registered with $PROJECT_DIR's git. Returns 1 otherwise.
-#
-# Fail-open policy: if `git worktree list` errors out (PROJECT_DIR isn't a
-# git repo, git missing, etc.), we treat all events as ours. Preserves the
-# pre-patch behavior for non-git or broken-install setups — the filter
-# only adds scoping when it can verify scoping.
 is_our_worktree() {
     local path="$1"
     local worktree_root
@@ -2074,12 +2097,27 @@ is_our_worktree() {
     # "/.swarm/tasks/outbox/<file>.md" (worker message, issue #129) suffix
     # to get the worktree root.
     worktree_root="$(echo "$path" | sed -E 's%/\.swarm/tasks/(done|outbox)/[^/]+$%%')"
+    is_own_worktree_dir "$worktree_root"
+}
 
-    local wt_list
-    wt_list="$(git -C "$PROJECT_DIR" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2}')" || return 0
-    [ -z "$wt_list" ] && return 0
-
-    grep -Fxq "$worktree_root" <<< "$wt_list"
+# own_wt_dir_for_issue <issue>
+#
+# issue #357: resolves the worktree directory for a LOCAL issue number
+# (parsed from this project's own tmux window name "iss-N", or from a `gh
+# pr list` branch on THIS project's repo — both trustworthy on their own).
+# The risk is the next step: string-pasting the issue number onto
+# $WORKSPACE, which is shared with sibling projects under flat grouping
+# (see is_own_worktree_dir above). Verifies the resulting path before
+# handing it back, so callers never act on a same-numbered foreign
+# worktree. Echoes the path and returns 0 on success; returns 1 (echoing
+# nothing) when there's no such directory, or it exists but belongs to a
+# different project's git.
+own_wt_dir_for_issue() {
+    local issue="$1" wt_dir
+    wt_dir="$WORKSPACE/wt-issue-$issue"
+    [ -d "$wt_dir" ] || return 1
+    is_own_worktree_dir "$wt_dir" || return 1
+    echo "$wt_dir"
 }
 
 # dispatch_outcome <outcome-path>
@@ -2406,10 +2444,12 @@ pr_poll_pass() {
         issue="${branch#fix/issue-}"
         [[ "$issue" =~ ^[0-9]+$ ]] || continue
         wt_dir="$WORKSPACE/wt-issue-$issue"
-        if [ ! -d "$wt_dir" ]; then
-            # already reaped, or never provisioned here — drop any stale
-            # dedup entry so a future worktree reusing this issue number
-            # starts fresh (see ORPHAN_PR_LOGGED comment above).
+        if [ ! -d "$wt_dir" ] || ! is_own_worktree_dir "$wt_dir"; then
+            # Already reaped, never provisioned here, or (issue #357) this
+            # PR's issue number happens to collide with a SIBLING project's
+            # worktree under the same flat $WORKSPACE — either way, drop
+            # any stale dedup entry so a future worktree reusing this issue
+            # number starts fresh (see ORPHAN_PR_LOGGED comment above).
             unset "ORPHAN_PR_LOGGED[$issue]" 2>/dev/null || true
             continue
         fi
@@ -2518,8 +2558,7 @@ bg_violation_sweep_pass() {
         local issue wt_dir content clean matched_lines ml cand_lineno cand lineno matched
         issue="${win#iss-}"
         [[ "$issue" =~ ^[0-9]+$ ]] || continue
-        wt_dir="$WORKSPACE/wt-issue-$issue"
-        [ -d "$wt_dir" ] || continue
+        wt_dir="$(own_wt_dir_for_issue "$issue")" || continue
 
         content="$(tmux capture-pane -t "$SESSION_NAME:$win" -p -S -200 2>/dev/null)" || continue
         clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
@@ -2629,6 +2668,13 @@ status_poll_pass() {
     for f in "$WORKSPACE"/wt-issue-*/.swarm/tasks/status/*.json; do
         case "$f" in *.check.json) continue ;; esac
         wt_dir="${f%/.swarm/tasks/status/*}"
+        # issue #357: $WORKSPACE can be shared with sibling projects under
+        # flat grouping, so verify this glob hit is actually registered
+        # against THIS project's git before acting on it (see
+        # is_own_worktree_dir) — a same-numbered foreign worktree's status
+        # file would otherwise trigger maybe_run_check inside SOMEONE
+        # ELSE's worktree.
+        is_own_worktree_dir "$wt_dir" || continue
         issue="$(basename "$wt_dir")"; issue="${issue#wt-issue-}"
         # task_id = filename sans .json, per the #129 status-file path
         # convention (<task_id>.json) — not the JSON body's task_id field,
@@ -4180,7 +4226,7 @@ maybe_worker_deliver_brief() {
     local win="$1" issue wt_dir
     issue="${win#iss-}"
     [[ "$issue" =~ ^[0-9]+$ ]] || return 0
-    wt_dir="$WORKSPACE/wt-issue-$issue"
+    wt_dir="$(own_wt_dir_for_issue "$issue")" || return 0
 
     local state
     state="$(worker_pane_state "$win")" || state="absent"
@@ -4384,7 +4430,7 @@ maybe_worker_compact() {
     local win="$1" issue wt_dir
     issue="${win#iss-}"
     [[ "$issue" =~ ^[0-9]+$ ]] || return 0
-    wt_dir="$WORKSPACE/wt-issue-$issue"
+    wt_dir="$(own_wt_dir_for_issue "$issue")" || return 0
 
     local state
     state="$(worker_pane_state "$win")" || state="absent"
@@ -4727,7 +4773,7 @@ on_message() {
     # what picks up messages that predate this watcher process.
     local wake_prompt="$OUTBOX_WAKE_PROMPT"
     if [ -z "$wake_prompt" ]; then
-        wake_prompt="Worker iss-$issue posted a message to its outbox: $path. List every unprocessed message with: ls $WORKSPACE/wt-issue-*/.swarm/tasks/outbox/*.md — then, oldest first, read each and act on its kind (fyi: note it in your status picture; decision-needed: decide or surface to the operator; brief-draft: review the drafted brief and dispatch it via provision-worker.sh or requeue.sh if warranted, otherwise tell the operator why not). After handling a message, archive it: mkdir -p <its-outbox>/processed && mv <message> <its-outbox>/processed/. Never leave a handled message in outbox/ — unarchived means unread."
+        wake_prompt="Worker iss-$issue posted a message to its outbox: $path. List every unprocessed message with: for wt in \$($LLM_SWARM_DIR/scripts/list-own-worktrees.sh $PROJECT_DIR); do ls \"\$wt\"/.swarm/tasks/outbox/*.md 2>/dev/null; done — then, oldest first, read each and act on its kind (fyi: note it in your status picture; decision-needed: decide or surface to the operator; brief-draft: review the drafted brief and dispatch it via provision-worker.sh or requeue.sh if warranted, otherwise tell the operator why not). After handling a message, archive it: mkdir -p <its-outbox>/processed && mv <message> <its-outbox>/processed/. Never leave a handled message in outbox/ — unarchived means unread."
     fi
 
     echo "[$(date +%T)] message: $path"
@@ -4762,6 +4808,16 @@ run_inotify() {
     # to only outcomes inside wt-issue-*/.swarm/tasks/done/. The listener
     # does `mv processing/X.md done/X.md` followed by writing done/X.json —
     # both surface as create/moved_to events.
+    #
+    # issue #357: this name-glob CAN match a sibling project's worktree
+    # under flat grouping (inotifywait has no equivalent of `git worktree
+    # list` to scope its recursive watch), but that's harmless here — every
+    # matched path is still run through dispatch_outcome/dispatch_message
+    # below, which reject anything not registered as $PROJECT_DIR's own
+    # worktree via is_our_worktree() before any action is taken. Left as a
+    # glob rather than watching each own-worktree dir individually because
+    # inotify has no cheap way to add watches for worktrees created AFTER
+    # this process starts without re-globbing anyway.
     #
     # --exclude noisy dirs to keep watch count low.
     inotifywait -m -r \
@@ -4802,15 +4858,19 @@ run_poll() {
     # silently replace the one that also kills the background timer loop.
     seen_file=$(mktemp -t coord-watch-seen-XXXXXX)
 
-    # Scan only wt-issue-*/.swarm/tasks/done dirs under WORKSPACE. The glob
-    # may expand to nothing if no worker worktrees exist yet — handle that
-    # gracefully via nullglob so the find call gets an empty arg list.
+    # Scan only wt-issue-*/.swarm/tasks/done dirs under this project's OWN
+    # worktrees (swarm_own_worktree_dirs(), issue #357 — `git worktree
+    # list` against $PROJECT_DIR's own repo, not a name-glob under
+    # $WORKSPACE that a sibling project's swarm can also populate under
+    # flat grouping). May expand to nothing if no worker worktrees exist
+    # yet — handle that gracefully so the find call gets an empty arg list.
     scan_outcomes() {
-        local done_dirs=() outbox_dirs=()
-        shopt -s nullglob
-        done_dirs=("$WORKSPACE"/wt-issue-*/.swarm/tasks/done)
-        outbox_dirs=("$WORKSPACE"/wt-issue-*/.swarm/tasks/outbox)
-        shopt -u nullglob
+        local done_dirs=() outbox_dirs=() wt
+        while IFS= read -r wt; do
+            [ -n "$wt" ] || continue
+            [ -d "$wt/.swarm/tasks/done" ] && done_dirs+=("$wt/.swarm/tasks/done")
+            [ -d "$wt/.swarm/tasks/outbox" ] && outbox_dirs+=("$wt/.swarm/tasks/outbox")
+        done < <(swarm_own_worktree_dirs "$PROJECT_DIR")
         {
             if [ "${#done_dirs[@]}" -gt 0 ]; then
                 find "${done_dirs[@]}" -maxdepth 1 \
