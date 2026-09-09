@@ -135,6 +135,14 @@ printf '1070\tFix the thing\tfix/issue-1070\n' > "$PR_FIXTURE"
 printf '1071\tStale request\n' > "$ISSUE_FIXTURE"
 
 start_watcher "$TEST_DIR/watch-1.log" 1
+# poll_secs=1 over this 3s sleep fires several ticks against the SAME
+# static fixture (the fake gh stub ignores --search entirely) — a real gh
+# would naturally stop returning an already-past merge once the cursor
+# moves on, but this stub can't emulate that filtering. The
+# ACTIVITY_ANNOUNCED_PR/_ISSUE dedup maps are what keep repeated ticks from
+# re-waking the coordinator over the same PR/issue (issue #392 self-review:
+# without them, ACTIVITY_POLL_OVERLAP_SECS's cursor overlap alone would
+# cause exactly this repeat-wake bug) — asserted below via WAKE_COUNT.
 sleep 3
 stop_watcher
 
@@ -143,6 +151,11 @@ $(cat "$TEST_DIR/watch-1.log")"
 grep -q 'PR #1070 merged' "$WAKE_LOG" || red "wake prompt missing the merged-PR line: $(cat "$WAKE_LOG")"
 grep -q 'Issue #1071 closed' "$WAKE_LOG" || red "wake prompt missing the closed-issue line: $(cat "$WAKE_LOG")"
 green "activity poll detected an out-of-band PR merge + issue close and woke the coordinator naming both"
+
+WAKE_COUNT=$(grep -c 'WAKE:' "$WAKE_LOG")
+[ "$WAKE_COUNT" = "1" ] || red "expected exactly ONE wake despite several poll ticks against the same static PR/issue (dedup maps should have suppressed the rest); got $WAKE_COUNT. wake.log:
+$(cat "$WAKE_LOG")"
+green "the same PR/issue across multiple poll ticks produced exactly one wake (ACTIVITY_ANNOUNCED_PR/_ISSUE dedup)"
 
 grep -q 'watch.activity_poll .*reason=detected' "$EVENTS_LOG" \
     || red "expected watch.activity_poll reason=detected in events.log; got:
@@ -222,6 +235,98 @@ grep -q 'activity_poll.error .*reason=gh_pr_list_failed' "$EVENTS_LOG" \
 $(cat "$EVENTS_LOG" 2>/dev/null || echo '(missing)')"
 grep -q 'WAKE:' "$WAKE_LOG" && red "coordinator was woken despite the gh pr list failure: $(cat "$WAKE_LOG")"
 green "a gh pr list failure logs activity_poll.error, skips the wake, and leaves the daemon running"
+
+# ============================================================================
+heading "Test 5: COORD_WAKE_LOCK serializes on_activity against on_outcome (issue #392 self-review finding)"
+# ============================================================================
+# Before this issue, every NON_INTERACTIVE=1 "$LLM_START" call ran from the
+# single main watcher process (on_outcome, on_message), so llm-start.sh's
+# reprompt_inject — which pastes through one FIXED, otherwise-unlocked tmux
+# buffer name — was implicitly serialized. on_activity breaks that: it runs
+# from run_watch_timer_loop's own backgrounded subshell, a genuinely
+# separate OS process, so a concurrent on_outcome wake and on_activity wake
+# could both hit that buffer at once. This test doesn't spin up the real
+# daemon (avoiding the outcome-detection backend entirely) — it extracts
+# on_outcome/on_activity/log_event verbatim (sed, not a hand-retyped copy —
+# same technique test-coordinator-auto-compact.sh uses for maybe_auto_compact)
+# and fires them genuinely concurrently, each in its own subshell, against a
+# deliberately slow LLM_START stub that records start/end timestamps —
+# proving COORD_WAKE_LOCK keeps their two calls from overlapping in time.
+extract_fn() {
+    local fn="$1"
+    sed -n "/^${fn}() {/,/^}/p" "$WATCH"
+}
+for fn in log_event on_outcome on_activity; do
+    body="$(extract_fn "$fn")"
+    [ -n "$body" ] || red "could not extract function '$fn' from $WATCH — has it been renamed?"
+    eval "$body"
+done
+# on_outcome/on_activity both call maybe_auto_compact — stubbed to a no-op
+# here since this test is only about the llm-start.sh serialization, not
+# auto-compact behavior (which has its own dedicated test suite).
+maybe_auto_compact() { :; }
+# cleanup_eligible_workers is only reached when WATCHER_AUTOCLOSE=1 below;
+# stubbed for the same reason (out of scope for this test).
+cleanup_eligible_workers() { :; }
+
+LOCK_TEST_DIR="$TEST_DIR/lock-test"
+mkdir -p "$LOCK_TEST_DIR"
+PROJECT_DIR="$LOCK_TEST_DIR"
+EVENTS_LOG="$LOCK_TEST_DIR/events.log"
+: > "$EVENTS_LOG"
+COORD_WAKE_LOCK="$LOCK_TEST_DIR/coord-wake.lock"
+DEBOUNCE_SECS=0
+WATCHER_AUTOCLOSE=0
+POST_OUTCOMES=0
+DRY_RUN=0
+ONCE=0
+WAKE_PROMPT="outcome-wake-prompt"
+ACTIVITY_WAKE_PROMPT="activity-wake-prompt"
+LAST_WAKE=0
+LAST_ACTIVITY_WAKE=0
+
+CALL_TIMELINE="$LOCK_TEST_DIR/call-timeline.log"
+: > "$CALL_TIMELINE"
+LLM_START="$LOCK_TEST_DIR/fake-llm-start.sh"
+cat > "$LLM_START" <<EOF
+#!/usr/bin/env bash
+printf 'START %s %s\n' "\$(date +%s%N)" "\$1" >> "$CALL_TIMELINE"
+sleep 1
+printf 'END   %s %s\n' "\$(date +%s%N)" "\$1" >> "$CALL_TIMELINE"
+EOF
+chmod +x "$LLM_START"
+
+( on_outcome "$LOCK_TEST_DIR/wt-issue-42/.swarm/tasks/done/t42.ok.json" ) &
+OUTCOME_PID=$!
+( on_activity "PR #99 merged: concurrency probe" ) &
+ACTIVITY_PID=$!
+wait "$OUTCOME_PID" 2>/dev/null || true
+wait "$ACTIVITY_PID" 2>/dev/null || true
+
+[ "$(grep -c '^START' "$CALL_TIMELINE")" = "2" ] \
+    || red "expected both on_outcome and on_activity to reach llm-start.sh; call timeline:
+$(cat "$CALL_TIMELINE")"
+
+# Parse the two [start,end] intervals (nanosecond epoch) and assert they do
+# NOT overlap — i.e. one call's start is at/after the other's end. Matched
+# by the wake-prompt label (3rd field), NOT by line position: with the lock
+# NOT held, both START lines can land before either END line, and reading
+# by fixed line number would silently pair a START with the WRONG call's
+# line — exactly the bug an earlier version of this test had (it reported
+# "no overlap" even with COORD_WAKE_LOCK's flock removed entirely).
+start1=$(awk '$1=="START" && $3=="outcome-wake-prompt" {print $2}' "$CALL_TIMELINE")
+end1=$(awk '$1=="END" && $3=="outcome-wake-prompt" {print $2}' "$CALL_TIMELINE")
+start2=$(awk '$1=="START" && $3=="activity-wake-prompt" {print $2}' "$CALL_TIMELINE")
+end2=$(awk '$1=="END" && $3=="activity-wake-prompt" {print $2}' "$CALL_TIMELINE")
+[ -n "$start1" ] && [ -n "$end1" ] && [ -n "$start2" ] && [ -n "$end2" ] \
+    || red "could not parse both calls' start/end timestamps from call timeline:
+$(cat "$CALL_TIMELINE")"
+if [ "$start2" -ge "$end1" ] || [ "$start1" -ge "$end2" ]; then
+    green "on_outcome and on_activity's llm-start.sh calls did not overlap — COORD_WAKE_LOCK serialized them"
+else
+    red "on_outcome and on_activity's llm-start.sh calls OVERLAPPED — COORD_WAKE_LOCK did not serialize them. Timeline:
+$(cat "$CALL_TIMELINE")"
+fi
 
 echo
 green "All activity-poll tests passed."

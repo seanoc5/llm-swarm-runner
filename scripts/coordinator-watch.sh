@@ -244,15 +244,37 @@
 #                           reap pass above: two `gh ... list --search
 #                           "<field>:>=<cursor>"` calls per tick (PRs merged,
 #                           issues closed since the last tick), where the
-#                           cursor is simply "when did we last check" — so
-#                           each merge/close is returned exactly once, no
-#                           per-item dedup map needed. A hit wakes the
-#                           coordinator (its own debounce clock,
-#                           LAST_ACTIVITY_WAKE, so it can't be swallowed by
-#                           an unrelated outcome/outbox wake, or swallow one)
-#                           with a message naming what changed — see
-#                           activity_poll_pass/on_activity. Set to 0 to
-#                           disable.
+#                           cursor is simply "when did we last check" —
+#                           advanced ACTIVITY_POLL_OVERLAP_SECS BEHIND the
+#                           actual query time (issue #392 self-review: gh's
+#                           search index can lag the real merge/close by a
+#                           few seconds, so cutting the cursor exactly at
+#                           query time risks permanently skipping an item
+#                           that isn't indexed yet). That overlap means the
+#                           same item can appear in two consecutive polls —
+#                           the ACTIVITY_ANNOUNCED_PR/_ISSUE maps (process-
+#                           local, reset on watcher restart, same as every
+#                           other timer-loop dedup state here) skip anything
+#                           already announced. A hit wakes the coordinator
+#                           (its own debounce clock, LAST_ACTIVITY_WAKE, so
+#                           it can't be swallowed by an unrelated outcome/
+#                           outbox wake, or swallow one) with a message
+#                           naming what changed — see activity_poll_pass/
+#                           on_activity. Set to 0 to disable.
+#
+#                           Concurrency (issue #392 self-review): unlike
+#                           every prior wake trigger, on_activity fires from
+#                           run_watch_timer_loop's own backgrounded subshell
+#                           — a genuinely separate OS process from the main
+#                           watcher process that on_outcome/on_message run
+#                           in. llm-start.sh's live-REPL reprompt path
+#                           (reprompt_inject) pastes through one FIXED,
+#                           otherwise-unlocked tmux buffer name — safe only
+#                           because every prior caller ran serialized in the
+#                           same process. All three wake functions now flock
+#                           COORD_WAKE_LOCK around their llm-start.sh call so
+#                           at most one is ever in flight; see that lock's
+#                           own header comment.
 #
 #                           Noise control: a merged PR whose branch's issue
 #                           number, or a closed issue's own number, already
@@ -266,6 +288,15 @@
 #                           announcing it (reason=skipped_self_reaped)
 #                           rather than waking the
 #                           coordinator over its own action.
+#   ACTIVITY_POLL_OVERLAP_SECS=30
+#                           (issue #392) How far behind the actual query
+#                           time to advance activity_poll_pass's cursor —
+#                           see WATCH_ACTIVITY_POLL_SECS's header comment for
+#                           why. The ACTIVITY_ANNOUNCED_PR/_ISSUE dedup maps
+#                           make raising this safe against the resulting
+#                           overlap; it should track how long gh's search
+#                           index can realistically lag, not how noisy a
+#                           larger value would be.
 #   ACTIVITY_WAKE_PROMPT=(built-in)
 #                           (issue #392) Override the coordinator prompt used
 #                           for an activity-poll wake. Default names what
@@ -1288,6 +1319,7 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     WATCH_BG_VIOLATION_SWEEP_SECS 60  periodic sweep for backgrounded-shell UI markers on iss-* panes (0=off); see header comment
     WATCH_BG_VIOLATION_PATTERN    (auto)  grep -E pattern for the sweep above
     WATCH_ACTIVITY_POLL_SECS 300  periodic gh poll for PRs/issues resolved out-of-band, e.g. in the GitHub web UI (0=off); see header comment (issue #392)
+    ACTIVITY_POLL_OVERLAP_SECS 30  cursor overlap tolerating gh search-index lag; dedup maps prevent re-announcing
     ACTIVITY_WAKE_PROMPT (built-in) what the coordinator does on an activity-poll wake
     WATCH_CHECK_ON_DONE 1         run acceptance check when a worker signals done; see header comment
     SESSION_NAME        (auto)    tmux session for chk-N windows (llm-<project-basename>)
@@ -1663,6 +1695,13 @@ WATCH_BG_VIOLATION_PATTERN="${WATCH_BG_VIOLATION_PATTERN:-Running in the backgro
 # straight in the GitHub web UI) that no other wake path can ever observe;
 # see header comment.
 WATCH_ACTIVITY_POLL_SECS="${WATCH_ACTIVITY_POLL_SECS:-300}"
+# issue #392 self-review: GitHub's search index can lag the actual merge/
+# close event by a few seconds — advancing the cursor to the exact query
+# time risks permanently skipping an item that isn't indexed yet at query
+# time but would be a few seconds later. This overlaps consecutive polls'
+# windows by that many seconds; the ACTIVITY_ANNOUNCED_PR/_ISSUE dedup maps
+# (see activity_poll_pass) keep the overlap from re-announcing anything.
+ACTIVITY_POLL_OVERLAP_SECS="${ACTIVITY_POLL_OVERLAP_SECS:-30}"
 ACTIVITY_WAKE_PROMPT="${ACTIVITY_WAKE_PROMPT:-}"
 WATCH_CHECK_ON_DONE="${WATCH_CHECK_ON_DONE:-1}"
 # issue #314 — synthesize done/*.ok.json on done detection (parked
@@ -1816,6 +1855,10 @@ if ! [[ "$WATCH_ACTIVITY_POLL_SECS" =~ ^[0-9]+$ ]]; then
     echo "ERROR: WATCH_ACTIVITY_POLL_SECS must be a non-negative integer (got: $WATCH_ACTIVITY_POLL_SECS)" >&2
     exit 1
 fi
+if ! [[ "$ACTIVITY_POLL_OVERLAP_SECS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: ACTIVITY_POLL_OVERLAP_SECS must be a non-negative integer (got: $ACTIVITY_POLL_OVERLAP_SECS)" >&2
+    exit 1
+fi
 for _var in AUTO_COMPACT_THRESHOLD_TOKENS AUTO_COMPACT_PROBE_MAX_AGE_SECS \
             AUTO_COMPACT_START_TIMEOUT_SECS AUTO_COMPACT_FINISH_TIMEOUT_SECS \
             AUTO_COMPACT_VERIFY_TIMEOUT_SECS AUTO_COMPACT_TICK_SECS AUTO_COMPACT_COOLDOWN_SECS \
@@ -1861,6 +1904,23 @@ mkdir -p "$(dirname "$EVENTS_LOG")" 2>/dev/null || true
 # path in run_auto_compact_poll_loop's own background process) — this lock
 # serializes them. See maybe_auto_compact's header comment for why.
 AUTO_COMPACT_LOCK="$PROJECT_DIR/.swarm/coord-compact.lock"
+# issue #392: same problem, one level up. Before this feature, every
+# NON_INTERACTIVE=1 "$LLM_START" wake call (on_outcome, on_message) ran
+# from the single main watcher process, so llm-start.sh's reprompt_inject —
+# which pastes through one FIXED, unlocked tmux buffer name
+# (llm-coord-reprompt) — was implicitly serialized: nothing could call it
+# twice at once. on_activity (activity_poll_pass, run from
+# run_watch_timer_loop's own background subshell — a genuinely separate OS
+# process) breaks that invariant: a concurrent on_outcome/on_message wake
+# from the main process and an on_activity wake from the timer subshell
+# could both touch that buffer within the same tmux load-buffer -> paste-
+# buffer window, corrupting whichever one pastes second (self-review
+# finding on this issue's own PR — the coordinator-claude.sh live-REPL
+# reprompt path llm-start.sh:685-690 funnels every caller through).
+# on_outcome/on_message/on_activity all flock this around their own
+# llm-start.sh call so at most one is ever in flight — see each function's
+# call site.
+COORD_WAKE_LOCK="$PROJECT_DIR/.swarm/coord-wake.lock"
 
 # log_event <category> <key=val>...
 # Writes one line: "<utc-iso8601>  <category>  k=v k=v ..."
@@ -2130,6 +2190,15 @@ LAST_ACTIVITY_WAKE=0
 # started (older history, if still relevant, is what the coordinator's last
 # triage before this watcher started already had a chance to see).
 LAST_ACTIVITY_POLL_TS="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+# issue #392: ACTIVITY_POLL_OVERLAP_SECS makes activity_poll_pass's cursor
+# windows overlap slightly (tolerating gh search-index lag), so the same
+# merged PR / closed issue can legitimately turn up in two consecutive
+# polls. These dedup maps (keyed by PR/issue number, process-local like
+# every other timer-loop dedup state here) make sure it's only ever
+# announced once.
+declare -A ACTIVITY_ANNOUNCED_PR=()
+declare -A ACTIVITY_ANNOUNCED_ISSUE=()
 
 # issue #225: dedups the watch.pr_poll reason=orphan_no_window log line so a
 # window-less worktree with a terminal PR gets logged once, not every
@@ -2663,8 +2732,8 @@ swarm_already_reaped() {
 # window next tick instead of silently skipping it.
 activity_poll_pass() {
     local since="$LAST_ACTIVITY_POLL_TS"
-    local now_ts
-    now_ts="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+    local now_epoch new_cursor
+    now_epoch=$(date +%s)
 
     local merged_prs closed_issues
     merged_prs="$(cd "$PROJECT_DIR" && gh pr list --state merged --limit 100 \
@@ -2683,14 +2752,24 @@ activity_poll_pass() {
     }
 
     # Both queries succeeded — this tick's window is fully consumed either
-    # way, so advance the cursor now regardless of whether anything turned up.
-    LAST_ACTIVITY_POLL_TS="$now_ts"
+    # way, so advance the cursor now regardless of whether anything turned
+    # up. ACTIVITY_POLL_OVERLAP_SECS BEHIND now, not AT now (issue #392
+    # self-review): gh's search index can lag the actual merge/close by a
+    # few seconds, so cutting the cursor exactly at query time risks
+    # permanently skipping an item indexed just after this query ran. The
+    # ACTIVITY_ANNOUNCED_PR/_ISSUE maps below absorb the resulting overlap.
+    new_cursor="$(date -u -d "@$((now_epoch - ACTIVITY_POLL_OVERLAP_SECS))" +'%Y-%m-%dT%H:%M:%SZ')"
+    # Never move backwards — a since that already exceeds the overlapped
+    # cursor (WATCH_ACTIVITY_POLL_SECS < ACTIVITY_POLL_OVERLAP_SECS) would
+    # otherwise re-query a window this tick already covered.
+    [[ "$new_cursor" > "$since" ]] && LAST_ACTIVITY_POLL_TS="$new_cursor" || true
 
     [ -n "$merged_prs" ] || [ -n "$closed_issues" ] || return 0
 
     local pr_number title branch issue lines=""
     while IFS=$'\t' read -r pr_number title branch; do
         [ -n "$pr_number" ] || continue
+        [ -n "${ACTIVITY_ANNOUNCED_PR[$pr_number]:-}" ] && continue
         issue=""
         case "$branch" in
             fix/issue-*)
@@ -2702,12 +2781,14 @@ activity_poll_pass() {
             log_event watch.activity_poll "reason=skipped_self_reaped pr=$pr_number issue=$issue"
             continue
         fi
+        ACTIVITY_ANNOUNCED_PR[$pr_number]=1
         lines="$lines"$'\n'"PR #$pr_number merged: $title"
     done <<< "$merged_prs"
 
     local issue_number
     while IFS=$'\t' read -r issue_number title; do
         [ -n "$issue_number" ] || continue
+        [ -n "${ACTIVITY_ANNOUNCED_ISSUE[$issue_number]:-}" ] && continue
         # A merged PR with "Closes #N" auto-closes issue #N too — without
         # this check, a merge already suppressed above (self-reaped) would
         # still slip through here as a same-event "Issue #N closed" line.
@@ -2715,6 +2796,7 @@ activity_poll_pass() {
             log_event watch.activity_poll "reason=skipped_self_reaped issue=$issue_number"
             continue
         fi
+        ACTIVITY_ANNOUNCED_ISSUE[$issue_number]=1
         lines="$lines"$'\n'"Issue #$issue_number closed: $title"
     done <<< "$closed_issues"
 
@@ -4921,8 +5003,10 @@ on_outcome() {
     else
         # Run llm-start.sh in a subshell so its `set -e` doesn't kill us.
         # NON_INTERACTIVE=1 prevents auto-attach; coordinator runs detached
-        # in its tmux session.
-        ( cd "$PROJECT_DIR" && NON_INTERACTIVE=1 "$LLM_START" "$WAKE_PROMPT" ) || {
+        # in its tmux session. flock's COORD_WAKE_LOCK (issue #392) so this
+        # can't race on_activity's own llm-start.sh call from a different
+        # OS process — see that lock's header comment.
+        ( flock 9; cd "$PROJECT_DIR" && NON_INTERACTIVE=1 "$LLM_START" "$WAKE_PROMPT" ) 9>"$COORD_WAKE_LOCK" || {
             echo "[$(date +%T)] WARN: coordinator wake exited non-zero (continuing watch)"
             log_event coord.wake.error "issue=$issue"
         }
@@ -4986,7 +5070,8 @@ on_message() {
     if [ "$DRY_RUN" = "1" ]; then
         echo "[DRY] would: cd $PROJECT_DIR && NON_INTERACTIVE=1 $LLM_START \"$wake_prompt\""
     else
-        ( cd "$PROJECT_DIR" && NON_INTERACTIVE=1 "$LLM_START" "$wake_prompt" ) || {
+        # flock's COORD_WAKE_LOCK (issue #392) — see its header comment.
+        ( flock 9; cd "$PROJECT_DIR" && NON_INTERACTIVE=1 "$LLM_START" "$wake_prompt" ) 9>"$COORD_WAKE_LOCK" || {
             echo "[$(date +%T)] WARN: coordinator wake exited non-zero (continuing watch)"
             log_event coord.wake.error "issue=$issue trigger=outbox"
         }
@@ -5051,7 +5136,17 @@ Re-check your own picture of outstanding decisions/PRs/issues against this (gh p
     if [ "$DRY_RUN" = "1" ]; then
         echo "[DRY] would: cd $PROJECT_DIR && NON_INTERACTIVE=1 $LLM_START \"$wake_prompt\""
     else
-        ( cd "$PROJECT_DIR" && NON_INTERACTIVE=1 "$LLM_START" "$wake_prompt" ) || {
+        # flock's COORD_WAKE_LOCK (issue #392) — this call runs from
+        # run_watch_timer_loop's own background subshell, a genuinely
+        # separate OS process from on_outcome/on_message's main-process
+        # calls above; without this lock both could hit llm-start.sh's
+        # single unlocked reprompt-injection tmux buffer at once. See the
+        # lock's header comment for the full race and blocking (not -n)
+        # is deliberate: a wake carries real information, so this waits its
+        # turn rather than dropping it on contention (unlike
+        # maybe_auto_compact's -n, where skipping and retrying next tick is
+        # fine because a compact isn't a message anyone would otherwise miss).
+        ( flock 9; cd "$PROJECT_DIR" && NON_INTERACTIVE=1 "$LLM_START" "$wake_prompt" ) 9>"$COORD_WAKE_LOCK" || {
             echo "[$(date +%T)] WARN: coordinator wake exited non-zero (continuing watch)"
             log_event coord.wake.error "trigger=activity_poll"
         }
