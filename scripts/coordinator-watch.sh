@@ -219,6 +219,59 @@
 #                           iss-* window's cleaned (ANSI-stripped) pane text.
 #                           Defaults to the two Claude Code UI markers named
 #                           above.
+#   WATCH_ACTIVITY_POLL_SECS=300
+#                           (issue #392) Every wake trigger above — the
+#                           outcome-driven backend, WATCH_PR_POLL_SECS,
+#                           WATCH_ORPHAN_SWEEP_SECS — either reacts to a file
+#                           a WORKER wrote, or only looks at PRs/worktrees
+#                           this swarm still has a live tmux window or
+#                           worktree directory for. An operator who resolves
+#                           something entirely out-of-band — merging or
+#                           closing a PR, or closing an issue, straight in
+#                           the GitHub web UI, for a worker that was reaped
+#                           long ago — produces none of those: no new
+#                           outcome.json, no live window, no worktree left to
+#                           poll from. The coordinator can sit there
+#                           reporting a decision as "pending your call" for
+#                           however long it takes a human to next look at the
+#                           pane, because nothing ever tells it the human
+#                           already acted (the incident this closes: PR
+#                           #1070 merged / #1064 closed in the web UI,
+#                           coordinator still parked on both ~35 minutes
+#                           later — issue #392).
+#
+#                           This runs on its own timer, independent of every
+#                           reap pass above: two `gh ... list --search
+#                           "<field>:>=<cursor>"` calls per tick (PRs merged,
+#                           issues closed since the last tick), where the
+#                           cursor is simply "when did we last check" — so
+#                           each merge/close is returned exactly once, no
+#                           per-item dedup map needed. A hit wakes the
+#                           coordinator (its own debounce clock,
+#                           LAST_ACTIVITY_WAKE, so it can't be swallowed by
+#                           an unrelated outcome/outbox wake, or swallow one)
+#                           with a message naming what changed — see
+#                           activity_poll_pass/on_activity. Set to 0 to
+#                           disable.
+#
+#                           Noise control: a merged PR whose branch's issue
+#                           number, or a closed issue's own number, already
+#                           has a reap.window event logged at or after the
+#                           poll's cursor was already reaped by this swarm's
+#                           OWN pr_poll_pass/cleanup_eligible_workers
+#                           pipeline in the same window (a merged PR with
+#                           "Closes #N" auto-closes issue #N too, so both
+#                           lists are checked, not just the PR one) — that
+#                           path already knows about it, so this poll skips
+#                           announcing it (reason=skipped_self_reaped)
+#                           rather than waking the
+#                           coordinator over its own action.
+#   ACTIVITY_WAKE_PROMPT=(built-in)
+#                           (issue #392) Override the coordinator prompt used
+#                           for an activity-poll wake. Default names what
+#                           activity_poll_pass found and asks the coordinator
+#                           to reconcile its own picture of outstanding
+#                           decisions/PRs against it.
 #   WATCH_CHECK_ON_DONE=1   Set to 0 to disable check-on-done. When enabled,
 #                           the watcher treats a worker as "done" via either
 #                           signal: (a) a `.swarm/tasks/status/<id>.json`
@@ -1234,6 +1287,8 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     WATCH_ORPHAN_SWEEP_SECS 3600  periodic reap-orphan-worktrees.sh sweep for window-less worktrees (0=off); see header comment
     WATCH_BG_VIOLATION_SWEEP_SECS 60  periodic sweep for backgrounded-shell UI markers on iss-* panes (0=off); see header comment
     WATCH_BG_VIOLATION_PATTERN    (auto)  grep -E pattern for the sweep above
+    WATCH_ACTIVITY_POLL_SECS 300  periodic gh poll for PRs/issues resolved out-of-band, e.g. in the GitHub web UI (0=off); see header comment (issue #392)
+    ACTIVITY_WAKE_PROMPT (built-in) what the coordinator does on an activity-poll wake
     WATCH_CHECK_ON_DONE 1         run acceptance check when a worker signals done; see header comment
     SESSION_NAME        (auto)    tmux session for chk-N windows (llm-<project-basename>)
     WORKSPACE           (auto)    parent dir for wt-issue-* worktrees
@@ -1318,6 +1373,17 @@ EVENTS LOG
       watch.orphan_sweep   reap-orphan-worktrees.sh --pr-finalized sweep ran
                            (issue #225 — reaped=N); passes that reap nothing
                            are not logged (dry runs always are)
+      watch.activity_poll  (issue #392) periodic gh-search poll found a PR
+                           merged / issue closed with no other wake path —
+                           reason=detected (count=N, followed by a
+                           coord.wake trigger=activity_poll) or reason=
+                           skipped_self_reaped (pr, issue — already covered
+                           by this swarm's own reap.window event, not
+                           re-announced)
+      activity_poll.error  (issue #392) gh pr list/issue list failed this
+                           cycle (reason=gh_pr_list_failed|gh_issue_list_failed);
+                           cursor is NOT advanced on this path, so the next
+                           tick retries the same window
       watch.check_on_done  check-on-done result (issue, task_id, result=running|pass|fail|skipped)
       watch.outcome.synth  (issue #314) synthesized a done/*.ok.json on done
                            detection because the parked interactive worker's
@@ -1592,6 +1658,12 @@ REAP_ORPHAN="${REAP_ORPHAN:-$LLM_SWARM_DIR/scripts/reap-orphan-worktrees.sh}"
 # issue #298 — fallback detection for the foreground-only rule; see header comment.
 WATCH_BG_VIOLATION_SWEEP_SECS="${WATCH_BG_VIOLATION_SWEEP_SECS:-60}"
 WATCH_BG_VIOLATION_PATTERN="${WATCH_BG_VIOLATION_PATTERN:-Running in the background|[0-9]+ shells? still running}"
+# issue #392 — periodic backstop for operator actions taken entirely
+# outside this swarm (e.g. merging/closing a PR, or closing an issue,
+# straight in the GitHub web UI) that no other wake path can ever observe;
+# see header comment.
+WATCH_ACTIVITY_POLL_SECS="${WATCH_ACTIVITY_POLL_SECS:-300}"
+ACTIVITY_WAKE_PROMPT="${ACTIVITY_WAKE_PROMPT:-}"
 WATCH_CHECK_ON_DONE="${WATCH_CHECK_ON_DONE:-1}"
 # issue #314 — synthesize done/*.ok.json on done detection (parked
 # interactive workers never exit claude, so the listener's own outcome
@@ -1740,6 +1812,10 @@ if ! [[ "$WATCH_BG_VIOLATION_SWEEP_SECS" =~ ^[0-9]+$ ]]; then
     echo "ERROR: WATCH_BG_VIOLATION_SWEEP_SECS must be a non-negative integer (got: $WATCH_BG_VIOLATION_SWEEP_SECS)" >&2
     exit 1
 fi
+if ! [[ "$WATCH_ACTIVITY_POLL_SECS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: WATCH_ACTIVITY_POLL_SECS must be a non-negative integer (got: $WATCH_ACTIVITY_POLL_SECS)" >&2
+    exit 1
+fi
 for _var in AUTO_COMPACT_THRESHOLD_TOKENS AUTO_COMPACT_PROBE_MAX_AGE_SECS \
             AUTO_COMPACT_START_TIMEOUT_SECS AUTO_COMPACT_FINISH_TIMEOUT_SECS \
             AUTO_COMPACT_VERIFY_TIMEOUT_SECS AUTO_COMPACT_TICK_SECS AUTO_COMPACT_COOLDOWN_SECS \
@@ -1862,6 +1938,12 @@ format_event_line() {
         reap.window)                    glyph="✂"; color=$'\033[36m' ;;
         watch.pr_poll)                  glyph="⚠"; color=$'\033[33m' ;;
         pr_poll.error)                   glyph="✗"; color=$'\033[31m' ;;
+        watch.activity_poll)
+            case "$kv" in
+                *reason=skipped_self_reaped*) glyph="·"; color=$'\033[2m'  ;;
+                *)                            glyph="⚠"; color=$'\033[33m' ;;
+            esac ;;
+        activity_poll.error)             glyph="✗"; color=$'\033[31m' ;;
         watch.check_on_done)
             case "$kv" in
                 *result=pass*)     glyph="✓"; color=$'\033[32m' ;;
@@ -1926,6 +2008,7 @@ autoclose:     $WATCHER_AUTOCLOSE$([ "$WATCHER_AUTOCLOSE" = "1" ] && echo " (mod
 pr-poll:       ${WATCH_PR_POLL_SECS}s$([ "$WATCH_PR_POLL_SECS" = "0" ] && echo " (disabled)")
 orphan-sweep:  ${WATCH_ORPHAN_SWEEP_SECS}s$([ "$WATCH_ORPHAN_SWEEP_SECS" = "0" ] && echo " (disabled)" || echo " (script: $REAP_ORPHAN)")
 bg-violation:  ${WATCH_BG_VIOLATION_SWEEP_SECS}s$([ "$WATCH_BG_VIOLATION_SWEEP_SECS" = "0" ] && echo " (disabled)" || echo " (foreground-only fallback detection, issue #298)")
+activity-poll: ${WATCH_ACTIVITY_POLL_SECS}s$([ "$WATCH_ACTIVITY_POLL_SECS" = "0" ] && echo " (disabled)" || echo " (out-of-band PR/issue resolution backstop, issue #392)")
 check-on-done: $WATCH_CHECK_ON_DONE$([ "$WATCH_CHECK_ON_DONE" = "1" ] && echo " (session: $SESSION_NAME)")
 auto-compact:  $AUTO_COMPACT$([ "$AUTO_COMPACT" = "1" ] && echo " (threshold: min(${AUTO_COMPACT_PCT}% of window, ${AUTO_COMPACT_THRESHOLD_CAP_TOKENS}), fallback: ${AUTO_COMPACT_THRESHOLD_TOKENS} tokens, require-window: ${AUTO_COMPACT_REQUIRE_WINDOW}, probe: $AUTO_COMPACT_PROBE, poll-tick: ${AUTO_COMPACT_TICK_SECS}s$([ "$AUTO_COMPACT_TICK_SECS" = "0" ] && echo " disabled"), cooldown: ${AUTO_COMPACT_COOLDOWN_SECS}s)")
 worker-compact: $WORKER_AUTO_COMPACT$([ "$WORKER_AUTO_COMPACT" = "1" ] && echo " (threshold: min(${WORKER_COMPACT_PCT}% of window, ${WORKER_COMPACT_THRESHOLD_CAP_TOKENS})/wrapup+$(( WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS - WORKER_COMPACT_THRESHOLD_TOKENS )), fallback: ${WORKER_COMPACT_THRESHOLD_TOKENS}/${WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS} tokens, require-window: ${WORKER_COMPACT_REQUIRE_WINDOW}, scan: ${WORKER_COMPACT_SCAN_SECS}s)")
@@ -2036,6 +2119,17 @@ LAST_WAKE=0
 # aren't lost either way — the outbox wake prompt instructs a full scan of
 # every worker outbox, not just the triggering file.
 LAST_MSG_WAKE=0
+# issue #392: same reasoning as LAST_MSG_WAKE above, its own clock so an
+# activity-poll wake can't be swallowed by, or swallow, an outcome/outbox
+# wake.
+LAST_ACTIVITY_WAKE=0
+# Moving cursor for activity_poll_pass's gh search queries — "what went
+# terminal since this timestamp". Starts at watcher-boot time deliberately:
+# this feature exists to catch operator actions taken WHILE the watcher is
+# running that nothing else notices, not to backfill history from before it
+# started (older history, if still relevant, is what the coordinator's last
+# triage before this watcher started already had a chance to see).
+LAST_ACTIVITY_POLL_TS="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 
 # issue #225: dedups the watch.pr_poll reason=orphan_no_window log line so a
 # window-less worktree with a terminal PR gets logged once, not every
@@ -2529,6 +2623,108 @@ orphan_sweep_pass() {
     fi
 }
 
+# swarm_already_reaped <issue> <since-iso8601>
+#
+# issue #392 noise control: true if a reap.window event for this issue was
+# logged at/after $since — i.e. this swarm's OWN pr_poll_pass/
+# cleanup_eligible_workers pipeline already reaped it within the very
+# window activity_poll_pass is looking at, so announcing it again here
+# would just be the swarm waking itself over its own action. String
+# comparison against the log line's leading ISO8601 timestamp field is
+# enough (no date-parsing dependency needed): the format is fixed-width, so
+# lexicographic order matches chronological order.
+swarm_already_reaped() {
+    local issue="$1" since="$2"
+    [ -f "$EVENTS_LOG" ] || return 1
+    awk -v since="$since" -v needle="issue=$issue " '
+        $1 >= since && $2 == "reap.window" && index($0, needle) { found=1; exit }
+        END { exit !found }
+    ' "$EVENTS_LOG"
+}
+
+# activity_poll_pass
+#
+# issue #392: pr_poll_pass/orphan_sweep_pass above exist to REAP — both only
+# ever look at PRs/worktrees this swarm still has a live tmux window or
+# worktree directory for. Once a worker is reaped, its PR/issue drops out of
+# both passes entirely, so an operator action taken later, entirely
+# out-of-band (merging/closing a PR, closing an issue, straight in the
+# GitHub web UI), produces no wake at all: no new outcome.json (the wake
+# channel is worker-outcome-file-driven), no live worktree left to poll
+# from, nothing. See WATCH_ACTIVITY_POLL_SECS's header comment for the
+# incident this closes.
+#
+# Runs on its own timer, independent of the reap passes: two `gh ... list
+# --search "<field>:>=<cursor>"` calls per tick using LAST_ACTIVITY_POLL_TS
+# as a moving cursor, so each merge/close is returned exactly once — the
+# NEXT tick's window starts right after this tick's — rather than needing a
+# separate per-item dedup map. The cursor only advances once BOTH queries
+# have actually succeeded, so a transient gh failure re-tries the same
+# window next tick instead of silently skipping it.
+activity_poll_pass() {
+    local since="$LAST_ACTIVITY_POLL_TS"
+    local now_ts
+    now_ts="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+    local merged_prs closed_issues
+    merged_prs="$(cd "$PROJECT_DIR" && gh pr list --state merged --limit 100 \
+            --search "merged:>=$since" \
+            --json number,title,headRefName \
+            --jq '.[] | "\(.number)\t\(.title)\t\(.headRefName)"' 2>/dev/null)" || {
+        log_event activity_poll.error "reason=gh_pr_list_failed"
+        return 0
+    }
+    closed_issues="$(cd "$PROJECT_DIR" && gh issue list --state closed --limit 100 \
+            --search "closed:>=$since" \
+            --json number,title \
+            --jq '.[] | "\(.number)\t\(.title)"' 2>/dev/null)" || {
+        log_event activity_poll.error "reason=gh_issue_list_failed"
+        return 0
+    }
+
+    # Both queries succeeded — this tick's window is fully consumed either
+    # way, so advance the cursor now regardless of whether anything turned up.
+    LAST_ACTIVITY_POLL_TS="$now_ts"
+
+    [ -n "$merged_prs" ] || [ -n "$closed_issues" ] || return 0
+
+    local pr_number title branch issue lines=""
+    while IFS=$'\t' read -r pr_number title branch; do
+        [ -n "$pr_number" ] || continue
+        issue=""
+        case "$branch" in
+            fix/issue-*)
+                issue="${branch#fix/issue-}"
+                [[ "$issue" =~ ^[0-9]+$ ]] || issue=""
+                ;;
+        esac
+        if [ -n "$issue" ] && swarm_already_reaped "$issue" "$since"; then
+            log_event watch.activity_poll "reason=skipped_self_reaped pr=$pr_number issue=$issue"
+            continue
+        fi
+        lines="$lines"$'\n'"PR #$pr_number merged: $title"
+    done <<< "$merged_prs"
+
+    local issue_number
+    while IFS=$'\t' read -r issue_number title; do
+        [ -n "$issue_number" ] || continue
+        # A merged PR with "Closes #N" auto-closes issue #N too — without
+        # this check, a merge already suppressed above (self-reaped) would
+        # still slip through here as a same-event "Issue #N closed" line.
+        if swarm_already_reaped "$issue_number" "$since"; then
+            log_event watch.activity_poll "reason=skipped_self_reaped issue=$issue_number"
+            continue
+        fi
+        lines="$lines"$'\n'"Issue #$issue_number closed: $title"
+    done <<< "$closed_issues"
+
+    lines="${lines#$'\n'}"
+    [ -n "$lines" ] || return 0
+
+    log_event watch.activity_poll "reason=detected count=$(grep -c . <<< "$lines")"
+    on_activity "$lines"
+}
+
 # bg_violation_sweep_pass
 #
 # issue #298: fallback layer for the foreground-only rule — see
@@ -3020,7 +3216,7 @@ SCRIPT
 # run_auto_compact_poll_loop, started as its own background process right
 # after this function.
 run_watch_timer_loop() {
-    local last_pr_poll=0 last_orphan_sweep=0 last_bg_violation_sweep=0 now
+    local last_pr_poll=0 last_orphan_sweep=0 last_bg_violation_sweep=0 last_activity_poll=0 now
     while true; do
         sleep 2
         [ "$WATCH_CHECK_ON_DONE" = "1" ] && { status_poll_pass || true; }
@@ -3043,6 +3239,13 @@ run_watch_timer_loop() {
             if [ $((now - last_bg_violation_sweep)) -ge "$WATCH_BG_VIOLATION_SWEEP_SECS" ]; then
                 bg_violation_sweep_pass || true
                 last_bg_violation_sweep=$now
+            fi
+        fi
+        if [ "$WATCH_ACTIVITY_POLL_SECS" -gt 0 ]; then
+            now=$(date +%s)
+            if [ $((now - last_activity_poll)) -ge "$WATCH_ACTIVITY_POLL_SECS" ]; then
+                activity_poll_pass || true
+                last_activity_poll=$now
             fi
         fi
     done
@@ -4800,6 +5003,62 @@ on_message() {
     fi
 }
 
+# on_activity <lines>
+#
+# (issue #392) activity_poll_pass found operator activity (PR merge / issue
+# close) with no other wake path — see WATCH_ACTIVITY_POLL_SECS's header
+# comment. Mirrors on_message's shape (debounce -> pre-wake compact ->
+# llm-start), called from the run_watch_timer_loop background process (not
+# the main inotify/poll loop that calls on_outcome/on_message) — its own
+# debounce clock, LAST_ACTIVITY_WAKE, keeps it from being swallowed by, or
+# swallowing, an unrelated outcome/outbox wake. Same maybe_auto_compact/
+# llm-start.sh call as every other wake path (issue #295 — llm-start.sh's
+# live-REPL reprompt path is the single injection site every caller funnels
+# through, by design), invoked from a third process here rather than a new
+# one — nothing about that path is process-specific.
+#
+# Deliberately does NOT honor ONCE, unlike on_outcome/on_message: those run
+# in the main process that ONCE's `exit 0` actually terminates; this runs
+# inside run_watch_timer_loop's own backgrounded subshell, where `exit 0`
+# would only end that subshell, leaving the main process (blocked in
+# run_inotify/run_poll) running forever — a smoke-test footgun, not a real
+# feature. Same reasoning already applies to pr_poll_pass/orphan_sweep_pass/
+# bg_violation_sweep_pass, none of which check ONCE either.
+on_activity() {
+    local lines="$1"
+    local now
+    now=$(date +%s)
+
+    if [ $((now - LAST_ACTIVITY_WAKE)) -lt "$DEBOUNCE_SECS" ]; then
+        echo "[$(date +%T)] activity: within debounce window (${DEBOUNCE_SECS}s), skipping wake"
+        log_event coord.wake.skip "reason=debounce window=${DEBOUNCE_SECS}s trigger=activity_poll"
+        return
+    fi
+
+    maybe_auto_compact wake
+
+    local wake_prompt="$ACTIVITY_WAKE_PROMPT"
+    if [ -z "$wake_prompt" ]; then
+        wake_prompt="A periodic gh-search poll (issue #392) found GitHub activity that didn't come through the usual worker-outcome wake path — most likely the operator resolved it directly in the GitHub web UI while this swarm's workers for it were already reaped:
+$lines
+Re-check your own picture of outstanding decisions/PRs/issues against this (gh pr list / gh issue list) and correct anything you were still reporting as pending on these."
+    fi
+
+    echo "[$(date +%T)] activity: detected"
+    echo "[$(date +%T)] waking coordinator (activity poll)..."
+    log_event coord.wake "trigger=activity_poll"
+
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "[DRY] would: cd $PROJECT_DIR && NON_INTERACTIVE=1 $LLM_START \"$wake_prompt\""
+    else
+        ( cd "$PROJECT_DIR" && NON_INTERACTIVE=1 "$LLM_START" "$wake_prompt" ) || {
+            echo "[$(date +%T)] WARN: coordinator wake exited non-zero (continuing watch)"
+            log_event coord.wake.error "trigger=activity_poll"
+        }
+    fi
+    LAST_ACTIVITY_WAKE=$now
+}
+
 # ---------------------------------------------------------------------------
 # Backend: inotify
 # ---------------------------------------------------------------------------
@@ -4921,10 +5180,10 @@ run_poll() {
 # run_auto_compact_poll_loop's header comments for why those sweeps don't
 # share run_watch_timer_loop's process.
 # ---------------------------------------------------------------------------
-if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ] || [ "$WATCH_ORPHAN_SWEEP_SECS" -gt 0 ] || [ "$WATCH_BG_VIOLATION_SWEEP_SECS" -gt 0 ]; then
+if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ] || [ "$WATCH_ORPHAN_SWEEP_SECS" -gt 0 ] || [ "$WATCH_BG_VIOLATION_SWEEP_SECS" -gt 0 ] || [ "$WATCH_ACTIVITY_POLL_SECS" -gt 0 ]; then
     run_watch_timer_loop &
     WATCH_TIMER_PID=$!
-    log_event watch.timer.start "pr_poll_secs=$WATCH_PR_POLL_SECS check_on_done=$WATCH_CHECK_ON_DONE orphan_sweep_secs=$WATCH_ORPHAN_SWEEP_SECS bg_violation_sweep_secs=$WATCH_BG_VIOLATION_SWEEP_SECS"
+    log_event watch.timer.start "pr_poll_secs=$WATCH_PR_POLL_SECS check_on_done=$WATCH_CHECK_ON_DONE orphan_sweep_secs=$WATCH_ORPHAN_SWEEP_SECS bg_violation_sweep_secs=$WATCH_BG_VIOLATION_SWEEP_SECS activity_poll_secs=$WATCH_ACTIVITY_POLL_SECS"
 fi
 if [ "$WORKER_AUTO_COMPACT" = "1" ] || [ "$WORKER_AUTO_DELIVER" = "1" ]; then
     run_worker_compact_loop &
