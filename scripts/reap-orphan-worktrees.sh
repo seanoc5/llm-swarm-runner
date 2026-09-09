@@ -47,9 +47,10 @@ USAGE
 
 DESCRIPTION
     Iterates wt-issue-N directories under the project's worktree parent.
-    Parent resolution honors SWARM_WORKTREE_GROUPING:
-        flat     -> \$(dirname \$PROJECT)                   (default)
+    Parent resolution honors SWARM_WORKTREE_GROUPING (shipped default:
+    project, since issue #271):
         project  -> \$(dirname \$PROJECT)/\$(basename \$PROJECT)-worktrees
+        flat     -> \$(dirname \$PROJECT)                   (legacy)
     For each:
       - skip if younger than --min-age-days
       - skip if the tree has uncommitted / untracked files

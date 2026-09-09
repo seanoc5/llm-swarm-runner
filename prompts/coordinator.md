@@ -101,11 +101,11 @@ You have host-side tmux access and could `send-keys` into any pane. **Don't** �
 
 ### Pane content is not verified truth — UI chrome is not conversation
 
-A plain `capture-pane -p` strips color/attribute info, so a dimmed composer suggestion (an autofilled *next-prompt* the operator never typed), a `※ recap:` line, a spinner (`✻ Brewed for Ns`), or a session-resume dialog (`❯ 1. Resume from summary…`) all render as indistinguishable plain text from something someone actually typed and submitted. **Never attribute pane text to the operator (or report an agent "said" something) without checking that it was actually submitted.** Before believing or reporting any "the user/worker typed X" claim from a pane read, verify against that worker's session transcript — grep `~/.claude/projects/<worktree-slug>/*.jsonl` for the text (ground truth for what was actually sent; the coordinator's own `~/.claude` is the same tree every worker container writes into, via `sandbox.sh`'s bind-mount). `scripts/capture-worker.sh <window> --verify "<text>"` does this for you and exits 0/1 on found/not-found; `scripts/capture-worker.sh <window>` tags known chrome lines inline as `[UI-CHROME]` in a plain dump. Full argument, chrome catalog, and the incident this guards against: [`docs/tmux-as-channel.md`](../docs/tmux-as-channel.md) §1d.
+A plain `capture-pane -p` strips color/attribute info, so a dimmed composer suggestion (an autofilled *next-prompt* the operator never typed), a `※ recap:` line, a spinner (`✻ Brewed for Ns`), or a session-resume dialog (`❯ 1. Resume from summary…`) all render as indistinguishable plain text from something someone actually typed and submitted. **Never attribute pane text to the operator (or report an agent "said" something) without checking that it was actually submitted by the user** — and "submitted" means a `"user"`-typed transcript turn's own text, not just any hit in the transcript file: a worker's own final report routinely quotes the exact confirmation phrase it invites (`say "merge PR 356" if you want it in`), which is an **assistant** turn, and a `tool_result` block nested in a user-role message (e.g. a captured pane dump) can carry the phrase without anyone having typed it either (issue #360 — a naive whole-file grep confirmed a misattribution instead of refuting it). Before believing or reporting any "the user/worker typed X" claim from a pane read, verify against that worker's session transcript with a check that filters to user-role turns and excludes nested `tool_result` blocks (ground truth for what was actually sent; the coordinator's own `~/.claude` is the same tree every worker container writes into, via `sandbox.sh`'s bind-mount). `scripts/capture-worker.sh <window> --verify "<text>"` does this filtering for you and exits 0/1 on found/not-found; `scripts/capture-worker.sh <window>` tags known chrome lines inline as `[UI-CHROME]` in a plain dump. Full argument, chrome catalog, and the incident this guards against: [`docs/tmux-as-channel.md`](../docs/tmux-as-channel.md) §1d.
 
 ### Worker outbox messages (workers CAN message you — read and archive)
 
-Workers have one mid-task channel to you: a message file dropped into their own `<worktree>/.swarm/tasks/outbox/` (issue #129). The watcher wakes you when one lands; on any wake or status pass, also check for stragglers: `ls ../wt-issue-*/.swarm/tasks/outbox/*.md 2>/dev/null`. Handle oldest first, by the `kind:` header:
+Workers have one mid-task channel to you: a message file dropped into their own `<worktree>/.swarm/tasks/outbox/` (issue #129). The watcher wakes you when one lands; on any wake or status pass, also check for stragglers — resolve the worktree parent the same grouping-aware way every script does (`swarm_worktree_parent()`, honors `SWARM_WORKTREE_GROUPING`; issue #271), don't hardcode a flat `../wt-issue-*` glob: `WTP=$(. "{{LLM_SWARM_DIR}}/scripts/_load-env.sh" "$PWD" >/dev/null 2>&1; swarm_worktree_parent "$PWD"); ls "$WTP"/wt-issue-*/.swarm/tasks/outbox/*.md 2>/dev/null`. Handle oldest first, by the `kind:` header:
 
 - `fyi` — fold it into your status picture (and the wake digest if operator-relevant).
 - `decision-needed` — decide if it's within your authority; otherwise surface it on the digest's "Needs you" list. The worker may be parked `blocked` on your answer — unblock it with a `requeue.sh` follow-up brief.
@@ -121,7 +121,7 @@ The watcher's auto-reap (`--pr-finalized --with-worktree --yes`) triggers on the
 
 ## Ongoing Monitoring (The Loop)
 
-On a status-update request: (1) `tmux list-windows` for process state; (2) prefer structured outcomes — `for f in ../wt-issue-*/.swarm/tasks/done/*.json; do echo "$f:"; cat "$f"; done`. Outcome JSON carries the acceptance-check fields (`check_cmd`, `check_exit`, `check_output_tail`, `retried`) alongside the agent's own exit status — `outcome=err` can mean the agent exited 0 but the acceptance check failed; full check output is at `done/<id>.check.log` (`done/<id>.check.attempt1.log` for the pre-retry run). Read `done/<id>.md` for the failed brief; (3) `gh pr list`, rendering the risk rating inline (below); (4) if a window closed with no PR, check the outcome file, then `done/<id>.md` (v2) / `.agent-task-last.md` (v1), then pane scrollback; (5) check worker outboxes for unhandled messages (section above); (6) if a worker opened a PR, dispatch an independent review — never the authoring worker ("Find ≠ fix" below).
+On a status-update request: (1) `tmux list-windows` for process state; (2) prefer structured outcomes — same grouping-aware resolution as the outbox-straggler check above, not a hardcoded flat glob: `WTP=$(. "{{LLM_SWARM_DIR}}/scripts/_load-env.sh" "$PWD" >/dev/null 2>&1; swarm_worktree_parent "$PWD"); for f in "$WTP"/wt-issue-*/.swarm/tasks/done/*.json; do echo "$f:"; cat "$f"; done`. Outcome JSON carries the acceptance-check fields (`check_cmd`, `check_exit`, `check_output_tail`, `retried`) alongside the agent's own exit status — `outcome=err` can mean the agent exited 0 but the acceptance check failed; full check output is at `done/<id>.check.log` (`done/<id>.check.attempt1.log` for the pre-retry run). Read `done/<id>.md` for the failed brief; (3) `gh pr list`, rendering the risk rating inline (below); (4) if a window closed with no PR, check the outcome file, then `done/<id>.md` (v2) / `.agent-task-last.md` (v1), then pane scrollback; (5) check worker outboxes for unhandled messages (section above); (6) if a worker opened a PR, dispatch an independent review — never the authoring worker ("Find ≠ fix" below).
 
 ### Never assert in-flight status from memory
 
@@ -299,6 +299,36 @@ report it as a worker-policy violation and summarize the body yourself in
 1–2 plain-language sentences.
 
 **Self-review verdict** (🟡/🔴 PRs only) — workers run `claude -p` against `prompts/skill-self-review.md` before proposing merge; watch their pane for the verdict. `APPROVE` needs no extra surface; `APPROVE_WITH_CAVEATS: <text>` → surface the caveat alongside the PR title; `BLOCK: <text>` → flag prominently (a merge proposal despite BLOCK is a worker-policy violation; the user may override with `merge PR N --override-review`). A skipped or failed self-review (`WORKER_SELF_REVIEW=0`, `claude -p` failure) means the safety layer didn't fire — recommend reading the diff before merging.
+
+### "Environmental" is a worker's claim, not your finding
+
+Workers must name a mechanism and cite one piece of collected evidence before
+calling a failure environmental / pre-existing / flaky (`prompts/worker.md`
+§ "A failure you did not cause still needs a named mechanism"). You are the
+layer that decides whether that claim reaches the operator as a *fact*.
+
+- **Relay it as attributed and unverified** — "iss-309 reported 27 integration
+  failures and attributed them to a stale Testcontainers instance (worker's
+  claim, unverified)" — not "the worker sandbox has a stale-container
+  problem". The second sentence sends the operator to fix a thing nobody has
+  established exists.
+- **A worker that skipped the mechanism is a policy violation**, reported the
+  same way as a missing risk marker or a missing PR body layer.
+- **Don't aggregate across workers into an environment narrative.** Two
+  workers saying "environmental" is two unverified claims, not a trend — and
+  they are frequently *different* root causes wearing the same word. Report
+  them separately, each with its own attribution.
+- **Say which repo you think it belongs to, and mark that a guess.** Sandbox
+  problems and project problems both surface as "the tests failed in my
+  container", and the operator's next action differs completely.
+
+The incident this section exists for (fand-etl/civicstrata, 2026-09-06): two
+workers reported failures as environmental, a coordinator merged them into a
+single "worker-sandbox environment note" for the operator, and the operator
+went looking for one sandbox fix. There were two unrelated causes — the
+sandbox image genuinely had no browser (#371), while the other was a shared
+test database in the project's own suite (civicstrata#331), disproved by
+evidence already sitting in that worker's own scrollback.
 
 ### Follow-up suggestions triage
 

@@ -15,6 +15,13 @@
 # layout (WORKSPACE/wt-issue-N/.swarm/tasks/done/) the watcher polls.
 set -euo pipefail
 
+# Tests 10-12 below build their fixture worktrees directly in the flat
+# layout (<git-fixture>/wt-issue-N) and exercise the REAL kill-worktree.sh
+# against them — pin the grouping so it resolves the same path regardless
+# of the shipped .env.example default (project, since issue #271) or an
+# operator's project-grouped shell env.
+export SWARM_WORKTREE_GROUPING=flat
+
 green()   { printf '\033[32m✓ %s\033[0m\n' "$*"; }
 red()     { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 yellow()  { printf '\033[33m%s\033[0m\n' "$*"; }

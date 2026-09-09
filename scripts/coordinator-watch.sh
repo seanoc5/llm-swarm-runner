@@ -1884,6 +1884,11 @@ format_event_line() {
 
 # Validation
 [ -d "$PROJECT_DIR" ] || { echo "ERROR: not a directory: $PROJECT_DIR" >&2; exit 1; }
+# Under SWARM_WORKTREE_GROUPING=project, WORKSPACE is <parent>/<project>-worktrees,
+# which doesn't exist until provision-worker.sh creates the first worktree there
+# (mirrors that script's own `mkdir -p "$(dirname "$WT")"`) — self-heal instead
+# of hard-failing the watcher on a fresh project with no workers provisioned yet.
+mkdir -p "$WORKSPACE" 2>/dev/null
 [ -d "$WORKSPACE" ]   || { echo "ERROR: workspace not a directory: $WORKSPACE" >&2; exit 1; }
 [ -x "$LLM_START" ]   || { echo "ERROR: llm-start.sh not executable: $LLM_START" >&2; exit 1; }
 if [ "$POST_OUTCOMES" = "1" ]; then
