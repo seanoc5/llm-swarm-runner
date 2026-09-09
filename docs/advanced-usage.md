@@ -521,7 +521,9 @@ Triage the existing worker worktrees. READ-ONLY — do NOT push, do NOT
 open PRs, do NOT merge, do NOT close issues, do NOT remove worktrees,
 do NOT provision new workers.
 
-For each ../wt-issue-* worktree relative to this project:
+For each worktree printed by $LLM_SWARM_DIR/scripts/list-own-worktrees.sh
+(never a raw ../wt-issue-* glob — under flat grouping that would also
+match a sibling project's swarm sharing this parent dir; see issue #357):
 
 1. git -C <wt> log --oneline master..HEAD          (commits made)
 2. git -C <wt> diff --stat master..HEAD            (scope of changes)

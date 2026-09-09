@@ -19,11 +19,13 @@
 #   swarm-scoreboard.sh [--json] [file-or-dir ...]
 #
 #   file args  — read as JSONL eval logs
-#   dir args   — glob <dir>/.swarm/eval-log.jsonl plus sibling worktrees,
-#                resolved via swarm_worktree_parent() (honors
-#                SWARM_WORKTREE_GROUPING):
-#                <parent>/wt-issue-*/.swarm/eval-log.jsonl
-#   no args    — same globbing from the current directory
+#   dir args   — <dir>/.swarm/eval-log.jsonl plus <dir>'s OWN worktrees,
+#                resolved via swarm_own_worktree_dirs() (issue #357 —
+#                `git worktree list` against <dir>'s own repo, not a
+#                name-glob under a shared parent dir a sibling project's
+#                swarm can also populate under flat grouping):
+#                <own-worktree>/.swarm/eval-log.jsonl
+#   no args    — same scoping from the current directory
 #   --json     — emit the aggregated groups as JSON instead of a table
 #
 # Columns:
@@ -50,8 +52,8 @@ done
 [ ${#ARGS[@]} -eq 0 ] && ARGS=(.)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Source the env loader to pick up SWARM_WORKTREE_GROUPING and get
-# swarm_worktree_parent() to derive the scan dir.
+# Source the env loader to get swarm_own_worktree_dirs() (issue #357),
+# scoped via `git worktree list` against each dir arg's own repo.
 # shellcheck source=_load-env.sh
 . "$SCRIPT_DIR/_load-env.sh" "${ARGS[0]}"
 
@@ -61,10 +63,11 @@ for a in "${ARGS[@]}"; do
     if [ -f "$a" ]; then
         LOGS+=("$a")
     elif [ -d "$a" ]; then
-        parent="$(swarm_worktree_parent "$a")"
-        for f in "$a/.swarm/eval-log.jsonl" "$parent"/wt-issue-*/.swarm/eval-log.jsonl; do
-            [ -f "$f" ] && LOGS+=("$f")
-        done
+        [ -f "$a/.swarm/eval-log.jsonl" ] && LOGS+=("$a/.swarm/eval-log.jsonl")
+        while IFS= read -r wt; do
+            [ -n "$wt" ] || continue
+            [ -f "$wt/.swarm/eval-log.jsonl" ] && LOGS+=("$wt/.swarm/eval-log.jsonl")
+        done < <(swarm_own_worktree_dirs "$a")
     else
         echo "swarm-scoreboard.sh: no such file or dir: $a" >&2
     fi
