@@ -2659,11 +2659,24 @@ bg_violation_sweep_pass() {
         # file — autoclose, orphan_sweep_pass above): don't actually drop a
         # real outbox message into a worker's worktree, just log that this
         # pass would have.
+        #
+        # The "(WATCH_BG_VIOLATION_PATTERN)" tag right next to marker=$matched
+        # (issue #385): demo-driver.sh's Beat 6 tails this project's own
+        # events.log into a pane split off the coordinator window (window 0
+        # is named "coordinator" — see llm-start.sh's `new-session -n
+        # coordinator`), so any WORKER's violation line can end up rendered
+        # inside the very coordinator window bg_violation_sweep_pass now
+        # scans. Without a guard token embedded in the logged line itself,
+        # that tailed line has nothing to stop it from being reattributed as
+        # a fresh window=coordinator sighting on the next sweep tick — the
+        # self-match guard only helps once the candidate match's surrounding
+        # ±3 lines actually carry one of its tokens, and a bare events.log
+        # line otherwise doesn't.
         if [ "$DRY_RUN" = "1" ]; then
-            log_event watch.bg_violation "issue=$issue window=$win marker=$matched dry_run=1"
+            log_event watch.bg_violation "issue=$issue window=$win marker=$matched (WATCH_BG_VIOLATION_PATTERN) dry_run=1"
             continue
         fi
-        log_event watch.bg_violation "issue=$issue window=$win marker=$matched"
+        log_event watch.bg_violation "issue=$issue window=$win marker=$matched (WATCH_BG_VIOLATION_PATTERN)"
 
         # The coordinator window has no worktree/outbox of its own to drop
         # a message into, and send-keys'ing a live coordinator pane is

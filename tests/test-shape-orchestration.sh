@@ -684,6 +684,50 @@ outbox_stray="$(find "$TEST_DIR" -path '*/outbox/*.md' 2>/dev/null)" || true
     || red "coordinator sighting unexpectedly wrote an outbox message: $outbox_stray"
 green "a real background-shell marker on the coordinator's own pane is logged, with no outbox write anywhere (is_coordinator skip verified)"
 
+heading "Test 15g: a WORKER's logged violation, tailed into the coordinator window, is not reattributed as a coordinator sighting (#385)"
+# demo-driver.sh's Beat 6 (`tmux split-window ... "tail -F .swarm/events.log"`)
+# splits a pane off the coordinator window (window 0, named "coordinator" by
+# llm-start.sh's `new-session -n coordinator`) that live-tails this
+# project's own events.log — so a WORKER's own watch.bg_violation line can
+# end up rendered inside the coordinator window bg_violation_sweep_pass now
+# scans. Simulates that by putting a real events.log-shaped line for
+# iss-77's violation directly into the coordinator's captured pane text (as
+# if `tail -F` had rendered it there) and asserting the sweep does NOT
+# relog it as a fresh window=coordinator sighting — proving the
+# "(WATCH_BG_VIOLATION_PATTERN)" tag embedded in the logged line itself
+# (not just in prompts/coordinator.md's prose) is what keeps this safe
+# regardless of how/where the line gets rendered back into a pane.
+rm -f "$PROJECT_DIR/.swarm/events.log"
+rm -rf "$TEST_DIR/wt-issue-77/.swarm/tasks/outbox"
+printf 'iss-77\ncoordinator\n' > "$TEST_DIR/tmux-windows.txt"
+printf 'some worker output here\nRunning in the background\n' > "$TEST_DIR/tmux-pane-iss-77.txt"
+tailed_line="$(printf '%s  %-15s %s' "2026-09-09T00:00:00Z" "watch.bg_violation" \
+    "issue=77 window=iss-77 marker=Running in the background (WATCH_BG_VIOLATION_PATTERN)")"
+printf '=== .swarm/events.log ===\n%s\n' "$tailed_line" > "$TEST_DIR/tmux-pane-coordinator.txt"
+
+cd "$PROJECT_DIR"
+DRY_RUN=0 WATCH_BG_VIOLATION_SWEEP_SECS=1 WATCH_PR_POLL_SECS=0 \
+    WATCH_ORPHAN_SWEEP_SECS=0 WATCH_CHECK_ON_DONE=0 POLL_SECS=1 \
+    "$WATCH" "$PROJECT_DIR" > "$TEST_DIR/watch-bgviol-g.log" 2>&1 &
+WATCH_PID=$!
+
+# Positive wait: the real iss-77 marker should still fire normally.
+outbox_file=""
+for ((i=0; i<20; i++)); do
+    outbox_file="$(ls "$TEST_DIR"/wt-issue-77/.swarm/tasks/outbox/*.md 2>/dev/null | head -1)" || true
+    [ -n "$outbox_file" ] && break
+    sleep 0.5
+done
+kill "$WATCH_PID" 2>/dev/null || true
+wait "$WATCH_PID" 2>/dev/null || true
+unset WATCH_PID
+
+[ -n "$outbox_file" ] \
+    || red "iss-77's own violation should still fire normally; log: $(cat "$TEST_DIR/watch-bgviol-g.log")"
+grep -q 'window=coordinator' "$PROJECT_DIR/.swarm/events.log" \
+    && red "iss-77's violation, tailed into the coordinator pane, was wrongly reattributed as window=coordinator: $(cat "$PROJECT_DIR/.swarm/events.log")"
+green "a worker's own violation line, rendered inside the coordinator window (as demo-driver.sh's events.log tail would), is not reattributed as a coordinator sighting"
+
 rm -f "$TEST_DIR/tmux-windows.txt" "$TEST_DIR/tmux-pane-iss-77.txt" "$TEST_DIR/tmux-pane-coordinator.txt"
 
 # ────────────────────────── Done ──────────────────────────
