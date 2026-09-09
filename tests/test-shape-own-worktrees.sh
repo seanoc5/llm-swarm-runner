@@ -170,5 +170,34 @@ grep -q '999' "$KFW_LOG" && { cat "$KFW_LOG" >&2; red "kill-finished-workers.sh 
 [ -d "$TEST_DIR/main/wt-issue-999" ] || red "other's wt-issue-999 worktree was removed — cross-project damage!"
 green "kill-finished-workers.sh never references other's colliding wt-issue-999; its worktree survives untouched"
 
+# ============================================================================
+heading "Test 5: dangling-registration worktrees — own recovered, foreign still excluded"
+# ============================================================================
+# A self-review on this issue's own fix caught a regression: routing
+# sweep-swarm-outcomes.sh/swarm-scoreboard.sh through a `git worktree
+# list`-only listing silently stopped them seeing a worktree whose git
+# registration went dangling (issue #225 — the main repo's
+# .git/worktrees/<name> admin dir gone while the directory survives; `git
+# worktree list` no longer lists it at all). swarm_own_worktree_dirs() now
+# recovers a dangling worktree via its own .git file's gitdir: target
+# (same technique reap-orphan-worktrees.sh's reap_dangling() already
+# relies on) — but ONLY when that target resolves into THIS project's own
+# admin dir; a same-numbered foreign dangling worktree must still be
+# excluded, or issue #357's original bug would just reappear via this
+# fallback path.
+git -C "$PROJECT_DIR" worktree add -q -b fix/issue-3 "$TEST_DIR/main/wt-issue-3" master
+rm -rf "$PROJECT_DIR/.git/worktrees/wt-issue-3"
+git -C "$OTHER_DIR" worktree add -q -b fix/issue-998 "$TEST_DIR/main/wt-issue-998" master
+rm -rf "$OTHER_DIR/.git/worktrees/wt-issue-998"
+
+OUT5="$("$LIST_OWN" "$PROJECT_DIR" | sort)"
+EXPECTED5="$(printf '%s\n%s\n%s' "$TEST_DIR/main/wt-issue-1" "$TEST_DIR/main/wt-issue-2" "$TEST_DIR/main/wt-issue-3")"
+[ "$OUT5" = "$EXPECTED5" ] || red "list-own-worktrees.sh with a dangling own worktree present mismatch:
+got:
+$OUT5
+want:
+$EXPECTED5"
+green "dangling own wt-issue-3 recovered; dangling foreign wt-issue-998 (and healthy foreign 999) still excluded"
+
 echo
 green "All own-worktree scoping tests passed (issue #357)."

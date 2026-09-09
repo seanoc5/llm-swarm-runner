@@ -543,7 +543,7 @@ This decouples the coordinator from the workers: the coordinator just drops a ma
 Aggregates the JSONL eval rows the listener appends per completed task (`.swarm/eval-log.jsonl` per worktree, or `$SWARM_EVAL_LOG`) into a per-(agent, model) table: tasks, pass rate, **first-try pass rate** (passed without the retry-once firing), retries, checked count, average duration. Concept adopted from ringer's model log + scoreboard (see [`ringer-adoptions.md`](ringer-adoptions.md) #3) — it makes model-default choices (e.g. Sonnet 5 for workers) empirically checkable.
 
 ```bash
-swarm-scoreboard.sh                       # glob CWD + sibling wt-issue-* worktrees
+swarm-scoreboard.sh                       # CWD + its OWN worktrees (git worktree list — issue #357)
 swarm-scoreboard.sh /opt/work/myproject   # same, from a project root
 swarm-scoreboard.sh --json logs/*.jsonl   # raw aggregation for scripts
 ```

@@ -165,6 +165,24 @@ swarm_worktree_parent() {
 # that merely happens to be named wt-issue-N can never appear here, because
 # it was never `git worktree add`-ed against this repo.
 #
+# Also picks up DANGLING-registration worktrees (issue #225: after a
+# Docker daemon restart, a worktree dir can survive while the main repo's
+# `.git/worktrees/<name>` administrative area backing it is gone — `git
+# worktree list` no longer lists it at all, since that registry entry IS
+# the thing that's missing). A self-review on this issue's own fix caught
+# that routing sweep-swarm-outcomes.sh/swarm-scoreboard.sh through a
+# healthy-only listing silently stopped them seeing outcomes/eval-log rows
+# from a worktree in exactly this state — the same one
+# reap-orphan-worktrees.sh still reaps by design. So both scan roots
+# (flat and project grouping — the caller's SWARM_WORKTREE_GROUPING might
+# differ from whatever a stale worktree was created under) are also
+# globbed for wt-issue-N dirs `git worktree list` didn't already return,
+# each verified by reading its own `.git` file's `gitdir:` target and
+# requiring it resolve under $project_dir's own `<common-dir>/worktrees/`
+# — the same ownership fact reap-orphan-worktrees.sh's reap_dangling()
+# relies on before removing anything, so a foreign dangling worktree still
+# can't be mistaken for this project's.
+#
 # Excludes the project's own main worktree. Restricted to the
 # wt-issue-<N> naming convention this project's tooling creates
 # (provision-worker.sh / swarm_worktree_dir) — pass a second arg of "all"
@@ -179,14 +197,37 @@ swarm_worktree_parent() {
 # preserve, so failing quiet is the safer default for a script about to
 # `rm -rf` or otherwise act on the result.
 swarm_own_worktree_dirs() {
-    local project_dir="$1" mode="${2:-}" main_dir wt wt_real
+    local project_dir="$1" mode="${2:-}"
+    local main_dir common_dir wt wt_real parent1 parent2 cand admin_dir
     main_dir="$(cd "$project_dir" 2>/dev/null && pwd -P)" || return 0
+    common_dir="$(git -C "$project_dir" rev-parse --git-common-dir 2>/dev/null)" || return 0
+    case "$common_dir" in
+        /*) ;;
+        *) common_dir="$project_dir/$common_dir" ;;
+    esac
 
-    git -C "$project_dir" worktree list --porcelain 2>/dev/null | \
-        awk '/^worktree /{print substr($0, 10)}' | \
+    local -A seen=()
     while IFS= read -r wt; do
+        [ -n "$wt" ] || continue
         wt_real="$(cd "$wt" 2>/dev/null && pwd -P)" || wt_real="$wt"
         [ "$wt_real" = "$main_dir" ] && continue
+        seen["$wt"]=1
+    done < <(git -C "$project_dir" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print substr($0, 10)}')
+
+    parent1="$(dirname "$project_dir")"                                # flat
+    parent2="$parent1/$(basename "$project_dir")-worktrees"            # project
+    for cand in "$parent1"/wt-issue-*/ "$parent2"/wt-issue-*/; do
+        cand="${cand%/}"
+        [ -d "$cand" ] || continue
+        [ -n "${seen[$cand]:-}" ] && continue
+        [ -f "$cand/.git" ] || continue
+        admin_dir="$(sed -n 's/^gitdir: //p' "$cand/.git" 2>/dev/null | head -n1)"
+        case "$admin_dir" in
+            "$common_dir/worktrees/"*) seen["$cand"]=1 ;;
+        esac
+    done
+
+    for wt in "${!seen[@]}"; do
         if [ "$mode" = "all" ]; then
             echo "$wt"
         else
