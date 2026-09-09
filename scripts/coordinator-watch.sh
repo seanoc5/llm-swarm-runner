@@ -2570,6 +2570,19 @@ orphan_sweep_pass() {
 # digest. Local capture-pane only (no gh/network calls), so this lives in
 # run_watch_timer_loop like orphan_sweep_pass, not its own dedicated
 # background process.
+#
+# Known gap, shared with coordinator_pane_state/coordinator_pane_busy below
+# (pre-existing, not introduced here): `capture-pane -t "$SESSION_NAME:$win"`
+# with no pane index captures the window's ACTIVE pane. If the coordinator
+# window ever gets split with the new pane left active — demo-driver.sh's
+# Beat 6 (`tail -F .swarm/events.log`) does exactly this — this sweep (like
+# every other coordinator-pane probe in this file) is scanning that split
+# pane, not the actual claude coordinator pane, until focus returns. A real
+# coordinator violation during that window would go undetected until the
+# split pane loses focus, not just risk a false positive (the embedded
+# self-match-guard token above handles the false-positive side of that same
+# scenario). Fixing this for every coordinator-pane probe at once (pin
+# `coordinator.0`, or iterate `list-panes`) is out of scope for #385.
 bg_violation_sweep_pass() {
     tmux has-session -t "$SESSION_NAME" 2>/dev/null || return 0
 
