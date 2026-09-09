@@ -14,6 +14,9 @@
 #   COORD_MODEL                Claude model id (default: claude-fable-5)
 #   COORDINATOR_HEADLESS=1     Use claude -p (exits after the prompt prints)
 #   COORDINATOR_USE_API_KEY=1  Keep ANTHROPIC_API_KEY in env (bills API, not Max OAuth)
+#   COORDINATOR_ALLOW_BACKGROUND_TASKS=1
+#                              Opt out of the foreground-only backstop below.
+#                              Defaults to 0 (deny).
 #   STATUSLINE_PROBE           Path scripts/statusline-with-context.sh (if
 #                              installed as this session's statusLine) dumps
 #                              its raw stdin JSON to. Defaulted below to a
@@ -40,6 +43,33 @@ if [ "${COORDINATOR_USE_API_KEY:-0}" != "1" ]; then
     unset ANTHROPIC_API_KEY
 elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
     echo "coordinator-claude: COORDINATOR_USE_API_KEY=1; ANTHROPIC_API_KEY in effect (billing API account)." >&2
+fi
+
+# Foreground-only backstop, mirroring sandbox.sh for workers (#301/#298).
+# #301 covered worker containers only; the coordinator kept both doors open,
+# and the incident that closed this gap was a coordinator (#383): an
+# `until tmux capture-pane -t iss-873 | grep -qE 'APPROVE|BLOCK'; do sleep 20;
+# done` loop started in the FOREGROUND — so the operator's
+# block-background-shells.sh hook correctly saw nothing, since it only
+# inspects run_in_background — was then promoted to a background task by the
+# harness, outlived the window it was watching (reaped, so the grep could
+# never match), and ran ~20h.
+#
+# The env var shuts all three doors: run_in_background is removed from the
+# Bash tool schema, canAutoBackground goes false so a timed-out foreground
+# command is not silently promoted, and the manual/deliver-message
+# backgrounding path errors out. Door two is the one no PreToolUse hook can
+# reach — a hook sees the outgoing call, not the harness's later decision to
+# detach it.
+#
+# The trade-off is deliberate and is the operator's stated preference: a long
+# command now BLOCKS this pane in full view rather than detaching into a
+# `1 shell` indicator whose output goes nowhere anyone reads.
+#
+# gemini/codex coordinators ignore this var; prompts/coordinator.md remains
+# their only guard, exactly as for workers under #301.
+if [ "${COORDINATOR_ALLOW_BACKGROUND_TASKS:-0}" != "1" ]; then
+    export CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1
 fi
 
 INITIAL_PROMPT="$(cat "$INITIAL_PROMPT_FILE")"
