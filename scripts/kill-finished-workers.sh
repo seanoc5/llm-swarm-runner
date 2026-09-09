@@ -8,10 +8,11 @@
 # (issue #386: the default worker is an interactive claude REPL that never
 # exits on its own, so "parked" alone is structurally unreachable for it —
 # a MERGED PR is at least as strong a "safe to reap" signal). Skips windows
-# tied to an open PR (preserves scrollback for review). A branch whose PR
-# is CLOSED without merging is left alone by default; rerun with
-# --pr-finalized to also reap those. Active workers with no PR at all are
-# left alone.
+# tied to an open PR (preserves scrollback for review). A parked window is
+# reaped regardless of terminal PR state, same as always; the CLOSED-
+# without-merge protection is specific to an ACTIVE window (still running
+# claude) — that one is left alone by default, since neither "parked" nor
+# "merged" hold for it. Rerun with --pr-finalized to also reap those.
 #
 # Use --all to include active windows.
 # Use --merged-only / --pr-finalized to gate on PR state instead of
@@ -58,9 +59,12 @@ DESCRIPTION
       - PR-merged  (the branch's PR is MERGED)
     (issue #386: "parked" alone is unreachable for the default interactive
     worker, which never exits its own REPL — a MERGED PR is an equally
-    strong "safe to reap" signal.) A branch whose PR is CLOSED without
-    merging is left alone by default; rerun with --pr-finalized to also
-    reap those.
+    strong "safe to reap" signal.) A parked window is reaped regardless of
+    terminal PR state, same as always. An ACTIVE window (still running
+    claude) whose PR is CLOSED without merging is the one case left alone
+    by default — rerun with --pr-finalized to also reap those. --idle-min
+    still defaults to 0, so a freshly-merged active window can be reaped
+    immediately with no grace period; pass --idle-min N for one.
 
 FLAGS
     -h, --help              Show this help and exit
