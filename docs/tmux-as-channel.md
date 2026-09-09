@@ -63,11 +63,20 @@ Both are gated by `coordinator_pane_busy()` / `worker_pane_busy()` — a `captur
 **The verification recipe** (what actually disproved the incident above, in order of cheapness):
 
 1. **Location.** Does the suspect line live *only* inside the composer box below the last response, or does it appear as a submitted `>` turn earlier in scrollback? Composer-only placement is a strong tell by itself.
-2. **Transcript grep — the load-bearing check.** Every Claude Code session writes its turns to a JSONL transcript under `~/.claude/projects/<slug>/`, where `<slug>` is the worktree's absolute path with every `/` replaced by `-` (e.g. `/opt/work/wt-issue-219` → `-opt-work-wt-issue-219`). Because `sandbox.sh` bind-mounts `$HOME/.claude` into every worker container (`sandbox.sh:40`), the host coordinator's own `~/.claude/projects/` tree already contains every worker's transcripts — no container exec needed. Grep it:
+2. **Transcript check — the load-bearing check, and it must filter to user-role turns.** Every Claude Code session writes its turns to a JSONL transcript under `~/.claude/projects/<slug>/`, where `<slug>` is the worktree's absolute path with every `/` replaced by `-` (e.g. `/opt/work/wt-issue-219` → `-opt-work-wt-issue-219`). Because `sandbox.sh` bind-mounts `$HOME/.claude` into every worker container (`sandbox.sh:40`), the host coordinator's own `~/.claude/projects/` tree already contains every worker's transcripts — no container exec needed.
+
+   A plain `grep -l` over the whole file is **not enough** and produces its own false positive (issue #360): each JSONL line carries `.type` (`"user"` or `"assistant"`) and, for `"user"` lines, `.message.content` can itself contain a `tool_result` block wrapping arbitrary text (e.g. a captured pane dump). A worker's own report routinely *quotes* the confirmation phrase it's inviting (`say "merge PR 356" if you want it in`) — that's an **assistant** turn, and a `tool_result` embedding pane output that happens to contain the phrase is not user input either. Either shape makes a bare `grep -l` report FOUND for text nobody submitted. The check must restrict to a `"user"`-typed line's own text, excluding nested `tool_result` blocks:
    ```bash
-   grep -l 'Loop in Radesh' ~/.claude/projects/-opt-work-wt-issue-219/*.jsonl
+   jq -e --arg needle 'Loop in Radesh' '
+       select(.type == "user") |
+       .message.content as $c |
+       (if ($c|type) == "string" then $c
+        elif ($c|type) == "array" then ([$c[] | select(.type == "text") | .text] | join("\n"))
+        else empty end) as $text |
+       select($text != null and ($text | contains($needle)))
+   ' ~/.claude/projects/-opt-work-wt-issue-219/session1.jsonl
    ```
-   No hit in any session transcript for that worktree means the text was never actually submitted — full stop. Transcripts are ground truth for what was actually sent; the rendered pane is not. `scripts/capture-worker.sh <window> --verify "<text>"` (see below) automates this step — it derives the worktree path for you via `swarm_worktree_dir`, greps, and exits 0/1 on found/not-found.
+   No hit in any session transcript for that worktree means the text was never actually submitted by the user — full stop, even if it appears elsewhere in the transcript as an assistant turn or tool output. Transcripts are ground truth for what was actually sent; the rendered pane is not. `scripts/capture-worker.sh <window> --verify "<text>"` (see below) automates this step — it derives the worktree path for you via `swarm_worktree_dir`, applies the user-turn filter above across every transcript file, and exits 0/1 on found/not-found.
 3. **Does it persist or change on its own?** Typed-but-unsubmitted text sticks around until the user acts on it. A suggestion can vanish on its own (e.g. the pane idles into a session-resume dialog and the suggestion is gone) — something a human never did. Self-changing content without operator action is corroborating evidence it was chrome, not input.
 
 **Use `scripts/capture-worker.sh` instead of raw `capture-pane`** when the question is "did the operator/worker really say X": it tags every line matching the chrome catalog above as `[UI-CHROME]` inline, and its `--verify TEXT` mode runs check 2 for you:

@@ -16,9 +16,16 @@
 #      reader (human or coordinator LLM) doesn't have to memorize the marker
 #      catalog.
 #   2. `--verify TEXT` answers the actual question that matters — "was this
-#      submitted as a real turn?" — by grepping the worker's own session
-#      transcript JSONL (ground truth for what was actually submitted,
-#      independent of what the pane currently renders).
+#      SUBMITTED BY THE USER?" — by scanning the worker's own session
+#      transcript JSONL for TEXT inside user-role turns only (ground truth
+#      for what was actually typed, independent of what the pane currently
+#      renders). Assistant turns are excluded — a worker's own report text
+#      (e.g. inviting the operator to say a confirmation phrase) does NOT
+#      count as that phrase having been submitted. So are tool_result blocks
+#      nested inside user-role messages — a tool result (e.g. captured pane
+#      output) can contain arbitrary text that was never typed by anyone.
+#      See issue #360 (the false-positive this replaced) and #219 (the
+#      original guard).
 #
 # Usage:
 #   capture-worker.sh [project-dir] <window> [-S lines]
@@ -35,12 +42,16 @@
 #                 pass "-" for full history, same as capture-pane -S -).
 #   --verify TEXT Skip the raw dump. Derive the window's worktree
 #                 (swarm_worktree_dir for iss-N; project-dir for anything
-#                 else), then grep every session transcript under
-#                 ~/.claude/projects/<worktree-slug>/*.jsonl for TEXT.
+#                 else), then scan every session transcript under
+#                 ~/.claude/projects/<worktree-slug>/*.jsonl for TEXT inside
+#                 a user-role turn's own text — not an assistant turn, and
+#                 not a tool_result block nested in a user-role message.
 #                 Prints FOUND (with the matching file) or NOT FOUND. A
-#                 miss means the text exists only as unsubmitted pane
-#                 content (composer suggestion, recap, chrome) — not
-#                 something the operator or agent actually sent.
+#                 miss means the text was never actually submitted by the
+#                 user — it may still appear in the transcript, but only as
+#                 an assistant turn or tool output, or it may exist only as
+#                 unsubmitted pane content (composer suggestion, recap,
+#                 chrome).
 #
 # ENV VARS
 #   CAPTURE_LINES   Default trailing lines when -S is not given (default: 200).
@@ -58,7 +69,7 @@ set -euo pipefail
 
 case "${1:-}" in
     -h|--help)
-        sed -n '2,56p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+        sed -n '2,67p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
         exit 0
         ;;
 esac
@@ -163,15 +174,41 @@ if [ -n "$VERIFY_TEXT" ]; then
         exit 2
     fi
 
-    MATCHES="$(grep -lF -- "$VERIFY_TEXT" "$TRANSCRIPT_DIR"/*.jsonl 2>/dev/null || true)"
+    # Only a user-role turn's own text counts as "submitted by the user".
+    # Excludes assistant turns (a worker report can quote a confirmation
+    # phrase without anyone having sent it) and tool_result blocks nested
+    # inside user-role messages (tool output, e.g. a captured pane dump, can
+    # contain arbitrary text that was never typed by anyone). See #360.
+    USER_TEXT_FILTER='
+        select(.type == "user") |
+        .message.content as $c |
+        (
+            if ($c | type) == "string" then $c
+            elif ($c | type) == "array" then
+                ([$c[] | select(.type == "text") | .text] | join("\n"))
+            else empty
+            end
+        ) as $text |
+        select($text != null and ($text | contains($needle)))
+    '
+
+    MATCHES=""
+    for f in "$TRANSCRIPT_DIR"/*.jsonl; do
+        [ -e "$f" ] || continue
+        if jq -e --arg needle "$VERIFY_TEXT" "$USER_TEXT_FILTER" "$f" >/dev/null 2>&1; then
+            MATCHES="${MATCHES}${MATCHES:+$'\n'}$f"
+        fi
+    done
+
     if [ -n "$MATCHES" ]; then
-        echo "FOUND — text appears in a submitted transcript turn:"
+        echo "FOUND — text was submitted by the user in a transcript turn:"
         printf '%s\n' "$MATCHES"
         exit 0
     else
-        echo "NOT FOUND — text does not appear in any session transcript under $TRANSCRIPT_DIR"
-        echo "This means the text was never actually submitted. Treat it as unsubmitted pane"
-        echo "content (composer suggestion, recap, or other UI chrome) — NOT operator/agent input."
+        echo "NOT FOUND — text was not submitted by the user in any session transcript under $TRANSCRIPT_DIR"
+        echo "It may still appear in the transcript as an assistant turn or tool-result output, or it"
+        echo "may exist only as unsubmitted pane content (composer suggestion, recap, or other UI chrome)."
+        echo "Either way, treat it as NOT operator/agent input."
         exit 1
     fi
 fi
