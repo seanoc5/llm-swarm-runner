@@ -48,7 +48,8 @@ extract_fn() {
 for fn in worker_pane_state worker_pane_busy worker_pane_ctx_used worker_pending_brief \
           worker_current_task_terminal mtime_epoch ctime_epoch compact_last_pane_line compact_composer_clear \
           compact_confirm_submitted compact_retract_queued worker_deliver_record_failure \
-          worker_deliver_record_success maybe_worker_deliver_brief log_event; do
+          worker_deliver_record_success maybe_worker_deliver_brief log_event \
+          is_own_worktree_dir own_wt_dir_for_issue; do
     body="$(extract_fn "$fn")"
     [ -n "$body" ] || red "could not extract function '$fn' from $WATCH — has it been renamed?"
     eval "$body"
@@ -73,6 +74,12 @@ declare -A WORKER_DELIVER_LAST_FAIL=()
 declare -A WORKER_DELIVER_FAIL_COUNT=()
 declare -A WORKER_DELIVER_GAVE_UP=()
 
+# own_wt_dir_for_issue (issue #357/#388) resolves wt_dir via
+# is_own_worktree_dir(), which needs $PROJECT_DIR set to do its `git -C
+# "$PROJECT_DIR" worktree list` check. This fixture has no real git repo —
+# is_own_worktree_dir's fail-open policy (a non-git PROJECT_DIR treats
+# every dir as ours) covers that, so any non-empty path works here.
+PROJECT_DIR="$TEST_DIR/not-a-git-repo"
 WORKSPACE="$TEST_DIR/workspace"
 WT_DIR="$WORKSPACE/wt-issue-42"
 INBOX_DIR="$WT_DIR/.swarm/tasks/inbox"
