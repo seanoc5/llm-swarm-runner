@@ -53,13 +53,13 @@ PROJECT_DIR="$TEST_DIR/myproject"
 mkdir -p "$PROJECT_DIR/.swarm"
 EVENTS_LOG="$PROJECT_DIR/.swarm/events.log"
 
-# is_own_worktree_dir (issue #392 self-review's skipped_worktree_live check)
-# shells out to `git -C "$PROJECT_DIR" worktree list` and fails OPEN (report
-# "yes, live") on any git error — deliberately, so a transient git hiccup
-# can't make activity_poll_pass silently skip a real announcement. That
-# means PROJECT_DIR needs to be a real (if minimal) git repo here: without
-# one, every candidate would report as "still live" and every Test below
-# would wrongly skip via reason=skipped_worktree_live.
+# activity_worktree_still_live (issue #392 self-review's skipped_worktree_
+# live check) shells out to `git -C "$PROJECT_DIR" worktree list` — a real
+# repo is needed so it can actually confirm "not registered" for a
+# candidate rather than erroring. It deliberately fails CLOSED ("not
+# confirmed live" -> proceed to announce) on a git error, the opposite of
+# is_own_worktree_dir's fail-open elsewhere in this file — see that
+# function's own header comment for why.
 git -C "$PROJECT_DIR" init -q
 git -C "$PROJECT_DIR" -c user.email=test@test -c user.name=test commit -q --allow-empty -m init
 
@@ -216,8 +216,9 @@ heading "Test 2b: a merged PR whose worktree is still live is not announced (iss
 # until pr_poll_pass's own next tick (up to WATCH_PR_POLL_SECS later) — a
 # still-live $WORKSPACE/wt-issue-<N> worktree is evidence pr_poll_pass just
 # hasn't gotten to it yet, not that an operator merged it out-of-band. Real
-# `git worktree add` (not a fake directory) so is_own_worktree_dir's own
-# `git worktree list` sees it, mirroring pr_poll_pass's own test fixtures.
+# `git worktree add` (not a fake directory) so activity_worktree_still_
+# live's own `-d` + `git worktree list` checks both see it, mirroring
+# pr_poll_pass's own test fixtures.
 : > "$WAKE_LOG"
 : > "$EVENTS_LOG"
 git -C "$PROJECT_DIR" worktree add -q -b fix/issue-3000 "$TEST_DIR/wt-issue-3000" >/dev/null
@@ -238,6 +239,38 @@ grep -q 'watch.activity_poll .*reason=skipped_worktree_live issue=3000$' "$EVENT
     || red "expected the closed-issue loop's skipped_worktree_live (issue=3000, no pr=) in events.log; got:
 $(cat "$EVENTS_LOG" 2>/dev/null || echo '(missing)')"
 green "events.log records the skip as reason=skipped_worktree_live for both the merged PR and the closed issue"
+
+# ============================================================================
+heading "Test 2c: a PRUNABLE worktree (directory gone, git metadata not yet pruned) is NOT treated as still live (issue #392 self-review finding)"
+# ============================================================================
+# The exact gap self-review flagged: `git worktree list --porcelain` keeps
+# listing an entry until `git worktree prune` runs, even after its
+# directory is `rm -rf`'d directly (which is how kill-worktree.sh actually
+# reaps one, and how provision-worker.sh's own docs describe manual
+# cleanup) — is_own_worktree_dir alone (no `-d` check) would report this
+# as "still live" and this poll would skip announcing a real out-of-band
+# merge forever. activity_worktree_still_live's own `[ -d ]` check must
+# catch this even though `git worktree list` still lists the path.
+: > "$WAKE_LOG"
+: > "$EVENTS_LOG"
+git -C "$PROJECT_DIR" worktree add -q -b fix/issue-3100 "$TEST_DIR/wt-issue-3100" >/dev/null
+rm -rf "$TEST_DIR/wt-issue-3100"
+git -C "$PROJECT_DIR" worktree list --porcelain | grep -qF "$TEST_DIR/wt-issue-3100" \
+    || red "test setup bug: expected git to still list the prunable worktree entry after rm -rf"
+printf '3100\tPrunable worktree probe\tfix/issue-3100\n' > "$PR_FIXTURE"
+: > "$ISSUE_FIXTURE"
+
+start_watcher "$TEST_DIR/watch-2c.log" 1
+sleep 3
+stop_watcher
+git -C "$PROJECT_DIR" worktree prune >/dev/null 2>&1 || true
+
+grep -q 'WAKE:' "$WAKE_LOG" \
+    || red "activity poll wrongly stayed silent on a PR whose worktree directory is gone (only git's prunable metadata remained). Watch log:
+$(cat "$TEST_DIR/watch-2c.log")"
+grep -q 'PR #3100 merged' "$WAKE_LOG" \
+    || red "wake prompt missing the PR #3100 line: $(cat "$WAKE_LOG")"
+green "a prunable (directory-gone) worktree entry does not silence the announcement"
 
 # ============================================================================
 heading "Test 3: WATCH_ACTIVITY_POLL_SECS=0 disables the poll entirely"
@@ -377,10 +410,11 @@ heading "Test 6: a debounced activity wake is retried on a later tick, not lost 
 # (return 0) — marking them unconditionally, before checking whether
 # on_activity actually woke anyone, would permanently drop an item that
 # happened to land inside another wake's debounce window. Extracts
-# activity_poll_pass/swarm_already_reaped/is_own_worktree_dir on top of the
-# on_activity/log_event already extracted for Test 5 above, and drives it
-# directly (not through the daemon) so the debounce timing is exact.
-for fn in swarm_already_reaped is_own_worktree_dir activity_poll_pass; do
+# activity_poll_pass/swarm_already_reaped/activity_worktree_still_live on
+# top of the on_activity/log_event already extracted for Test 5 above, and
+# drives it directly (not through the daemon) so the debounce timing is
+# exact.
+for fn in swarm_already_reaped activity_worktree_still_live activity_poll_pass; do
     body="$(extract_fn "$fn")"
     [ -n "$body" ] || red "could not extract function '$fn' from $WATCH — has it been renamed?"
     eval "$body"

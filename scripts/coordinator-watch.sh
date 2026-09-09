@@ -2746,6 +2746,45 @@ swarm_already_reaped() {
     ' "$EVENTS_LOG"
 }
 
+# activity_worktree_still_live <issue>
+#
+# issue #392 self-review: deliberately NOT is_own_worktree_dir (used by
+# pr_poll_pass et al) for two reasons, both because that helper's
+# safety direction is backwards for THIS caller:
+#   1. is_own_worktree_dir alone never checks `-d` — it only asks git
+#      whether the path is a REGISTERED worktree, which stays true for a
+#      prunable entry whose directory a reap already `rm -rf`'d
+#      (kill-worktree.sh does exactly that; provision-worker.sh's own
+#      operator-facing docs describe manual removal the same way) until a
+#      `git worktree prune` happens to run. pr_poll_pass avoids this with
+#      its own `[ ! -d "$wt_dir" ] || ! is_own_worktree_dir "$wt_dir"`
+#      combination (mirrored in own_wt_dir_for_issue) — replicated here.
+#   2. On a git error (or an empty worktree list), is_own_worktree_dir
+#      fails OPEN — "yes, treat this as live" — which is the right default
+#      for pr_poll_pass/orphan_sweep_pass (uncertain -> don't reap
+#      something real) but the WRONG default here: for this poll, "treat
+#      as live" means "don't announce it," and staying silent on a
+#      genuine out-of-band merge/close is the exact failure #392 exists to
+#      close. So this fails CLOSED instead — on any git error, "not
+#      confirmed live" (proceed to announce) rather than "assume live"
+#      (silently skip forever, since a merge announcement not made this
+#      tick will fall out of the cursor's window and never come back).
+activity_worktree_still_live() {
+    local issue="$1"
+    # Deliberately a SEPARATE `local` from the one above, not `local
+    # issue="$1" wt_dir="...$issue"` (shellcheck SC2318): bash does not
+    # make an earlier name=value in the SAME `local` statement visible to
+    # a later one in that statement, so `wt_dir` would silently pick up
+    # whatever `issue` already meant in an ANCESTOR call frame (bash
+    # locals are dynamically scoped) — under `set -u`, with no such
+    # ancestor variable, that's a hard "unbound variable" crash instead.
+    local wt_dir="$WORKSPACE/wt-issue-$issue"
+    [ -d "$wt_dir" ] || return 1
+    local wt_list
+    wt_list="$(git -C "$PROJECT_DIR" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2}')" || return 1
+    grep -Fxq "$wt_dir" <<< "$wt_list"
+}
+
 # activity_poll_pass
 #
 # issue #392: pr_poll_pass/orphan_sweep_pass above exist to REAP — both only
@@ -2856,7 +2895,7 @@ activity_poll_pass() {
             log_event watch.activity_poll "reason=skipped_self_reaped pr=$pr_number issue=$issue"
             continue
         fi
-        if [ -n "$issue" ] && is_own_worktree_dir "$WORKSPACE/wt-issue-$issue"; then
+        if [ -n "$issue" ] && activity_worktree_still_live "$issue"; then
             log_event watch.activity_poll "reason=skipped_worktree_live pr=$pr_number issue=$issue"
             continue
         fi
@@ -2876,7 +2915,7 @@ activity_poll_pass() {
             log_event watch.activity_poll "reason=skipped_self_reaped issue=$issue_number"
             continue
         fi
-        if is_own_worktree_dir "$WORKSPACE/wt-issue-$issue_number"; then
+        if activity_worktree_still_live "$issue_number"; then
             log_event watch.activity_poll "reason=skipped_worktree_live issue=$issue_number"
             continue
         fi
