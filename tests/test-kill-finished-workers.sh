@@ -55,16 +55,25 @@ exec "$REAL_TMUX" -L "$TEST_SOCK" "\$@"
 EOF
 chmod +x "$SHIM_DIR/tmux"
 
-# gh stub: `gh pr view <branch> --json state -q .state` is the only shape
-# the script uses. fix/issue-42 has a MERGED PR (reap-eligible); anything
-# else has no PR (gh exits 1, like the real CLI's "no pull requests found").
+# gh stub: `gh pr view <branch> --json state,createdAt,number -q '...'`
+# (fetch_pr_state's shape, issue #386) is the only query the script sends;
+# it always outputs a tab-separated "state<TAB>createdAt<TAB>number" triple
+# regardless of the exact --json/-q args, mirroring real gh -q's raw
+# (unquoted) output. fix/issue-42/44/45 have PRs (createdAt set 1h in the
+# future so pr_predates_worktree never blocks them against these
+# just-created fixture worktrees); anything else has no PR (gh exits 1,
+# like the real CLI's "no pull requests found").
 GH_LOG="$TEST_DIR/gh.log"
+FUTURE_ISO="$(date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%SZ)"
 cat > "$SHIM_DIR/gh" <<EOF
 #!/usr/bin/env bash
 echo "\$*" >> "$GH_LOG"
-if [ "\$1" = "pr" ] && [ "\$2" = "view" ] && [ "\$3" = "fix/issue-42" ]; then
-    echo "MERGED"
-    exit 0
+if [ "\$1" = "pr" ] && [ "\$2" = "view" ]; then
+    case "\$3" in
+        fix/issue-42) printf 'MERGED\t$FUTURE_ISO\t542\n'; exit 0 ;;
+        fix/issue-44) printf 'MERGED\t$FUTURE_ISO\t544\n'; exit 0 ;;
+        fix/issue-45) printf 'CLOSED\t$FUTURE_ISO\t545\n'; exit 0 ;;
+    esac
 fi
 exit 1
 EOF
@@ -85,6 +94,8 @@ git -C "$PROJECT_DIR" commit -q -m init
 export SWARM_WORKTREE_GROUPING=flat
 git -C "$PROJECT_DIR" worktree add -q -b fix/issue-42 "$TEST_DIR/wt-issue-42"
 git -C "$PROJECT_DIR" worktree add -q -b fix/issue-43 "$TEST_DIR/wt-issue-43"
+git -C "$PROJECT_DIR" worktree add -q -b fix/issue-44 "$TEST_DIR/wt-issue-44"
+git -C "$PROJECT_DIR" worktree add -q -b fix/issue-45 "$TEST_DIR/wt-issue-45"
 
 # Corrupt #43's registration the same way the wild does it: the metadata
 # dir under .git/worktrees vanishes while the worktree dir survives.
@@ -106,6 +117,10 @@ SESSION="llm-proj"
 "$SHIM_DIR/tmux" new-window -t "$SESSION" -n iss-42
 "$SHIM_DIR/tmux" list-windows -t "$SESSION" -F '#W' | grep -qx 'iss-42' \
     || red "fixture: tmux session/windows did not come up on private socket"
+# iss-44/iss-45 (used by Test 4, default-mode parked-OR-merged) are created
+# later, AFTER Test 1-3 run --pr-finalized — adding them here would also
+# reap them in that earlier pass (--pr-finalized bypasses parked
+# entirely) and break Test 3's exact "Closed 1 window(s)" assertion.
 
 # ============================================================================
 heading "Test 1: corrupt worktree no longer aborts the reap pass (issue #223)"
@@ -149,6 +164,64 @@ green "iss-42 reaped and killed=1 summary emitted despite the corrupt sibling"
 grep -q 'reap\.window .*issue=42' "$PROJECT_DIR/.swarm/events.log" \
     || red "expected a reap.window event for issue 42 in events.log"
 green "reap.window event recorded for issue 42"
+
+# ============================================================================
+heading "Test 4: default mode reaps a non-parked MERGED PR (issue #386)"
+# ============================================================================
+# iss-44/iss-45 are fresh tmux windows (plain shell prompt — never parked,
+# no "[polling for next brief" marker), simulating the interactive claude
+# REPL that never exits on its own. fix/issue-44 has a MERGED PR;
+# fix/issue-45 has a CLOSED-without-merge PR.
+
+"$SHIM_DIR/tmux" new-window -t "$SESSION" -n iss-44
+"$SHIM_DIR/tmux" new-window -t "$SESSION" -n iss-45
+
+RUN_LOG2="$TEST_DIR/run2.log"
+set +e
+(cd "$PROJECT_DIR" && PATH="$SHIM_DIR:$PATH" "$KILL_FINISHED" --idle-min 0) > "$RUN_LOG2" 2>&1
+RC2=$?
+set -e
+[ "$RC2" -eq 0 ] || red "expected exit 0, got $RC2. Output:
+$(cat "$RUN_LOG2")"
+
+if "$SHIM_DIR/tmux" list-windows -t "$SESSION" -F '#W' | grep -qx 'iss-44'; then
+    red "iss-44 (PR MERGED, never parked) survived default mode — the #386 fix isn't reaping parked-OR-merged. Output:
+$(cat "$RUN_LOG2")"
+fi
+green "iss-44 (MERGED, never parked) reaped by DEFAULT mode with no --merged-only/--pr-finalized flag"
+
+grep -q 'iss-44.*PR-merged.*kill' "$RUN_LOG2" \
+    || red "expected iss-44's kill line to cite the PR-merged reason. Output:
+$(cat "$RUN_LOG2")"
+green "kill line cites PR-merged as the reason (not a bare 'parked')"
+
+"$SHIM_DIR/tmux" list-windows -t "$SESSION" -F '#W' | grep -qx 'iss-45' \
+    || red "iss-45 (PR CLOSED, not merged) was killed — default mode must NOT reap a closed-without-merge PR"
+grep -q 'iss-45.*CLOSED (not merged).*skip.*pr-finalized' "$RUN_LOG2" \
+    || red "expected iss-45's skip line to hint at --pr-finalized. Output:
+$(cat "$RUN_LOG2")"
+green "iss-45 (CLOSED, not merged) preserved, skip line hints at --pr-finalized"
+
+# ============================================================================
+heading "Test 5: 'nothing to kill' summary surfaces --pr-finalized when only closed-PR windows remain (issue #386)"
+# ============================================================================
+# Only iss-43 (unresolvable branch) and iss-45 (CLOSED-without-merge) are
+# left — neither is default-mode reap-eligible, so KILL_LIST is empty and
+# the summary line must name --pr-finalized instead of the old bare
+# "Nothing to kill given current filters."
+
+RUN_LOG3="$TEST_DIR/run3.log"
+set +e
+(cd "$PROJECT_DIR" && PATH="$SHIM_DIR:$PATH" "$KILL_FINISHED" --idle-min 0) > "$RUN_LOG3" 2>&1
+RC3=$?
+set -e
+[ "$RC3" -eq 0 ] || red "expected exit 0, got $RC3. Output:
+$(cat "$RUN_LOG3")"
+
+grep -q 'Nothing to kill given current filters\. 1 window(s) have a closed (non-merged) PR — rerun with --pr-finalized to reap them\.' "$RUN_LOG3" \
+    || red "expected the enriched 'nothing to kill' summary naming --pr-finalized. Output:
+$(cat "$RUN_LOG3")"
+green "'nothing to kill' summary correctly points at --pr-finalized instead of staying silent"
 
 echo
 green "ALL TESTS PASSED"

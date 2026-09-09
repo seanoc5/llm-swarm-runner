@@ -2,10 +2,17 @@
 #
 # kill-finished-workers.sh — bulk-close idle iss-* worker tmux windows
 #
-# Defaults to "parked-only mode": kills iss-* windows whose listener has
-# printed the post-task "[polling for next brief" marker (claude exited,
-# listener polling). Skips windows tied to an open PR (preserves scrollback
-# for review). Active workers are left alone.
+# Defaults to "parked-or-merged mode": kills iss-* windows that are EITHER
+# parked (listener has printed the post-task "[polling for next brief"
+# marker — claude exited, listener polling) OR have a MERGED upstream PR
+# (issue #386: the default worker is an interactive claude REPL that never
+# exits on its own, so "parked" alone is structurally unreachable for it —
+# a MERGED PR is at least as strong a "safe to reap" signal). Skips windows
+# tied to an open PR (preserves scrollback for review). A parked window is
+# reaped regardless of terminal PR state, same as always; the CLOSED-
+# without-merge protection is specific to an ACTIVE window (still running
+# claude) — that one is left alone by default, since neither "parked" nor
+# "merged" hold for it. Rerun with --pr-finalized to also reap those.
 #
 # Use --all to include active windows.
 # Use --merged-only / --pr-finalized to gate on PR state instead of
@@ -45,10 +52,19 @@ USAGE
     kill-finished-workers.sh [FLAGS]
 
 DESCRIPTION
-    Default mode kills iss-* windows that are ALL of:
-      - parked  (listener at "[polling for next brief" — claude has exited)
-      - PR-safe (no open GH PR exists for fix/issue-N)
-      - idle for at least --idle-min N (default 0)
+    Default mode kills iss-* windows that are PR-safe (no OPEN GH PR for
+    the branch checked out in that issue's worktree), idle for at least
+    --idle-min N (default 0), and EITHER:
+      - parked     (listener at "[polling for next brief" — claude exited), or
+      - PR-merged  (the branch's PR is MERGED)
+    (issue #386: "parked" alone is unreachable for the default interactive
+    worker, which never exits its own REPL — a MERGED PR is an equally
+    strong "safe to reap" signal.) A parked window is reaped regardless of
+    terminal PR state, same as always. An ACTIVE window (still running
+    claude) whose PR is CLOSED without merging is the one case left alone
+    by default — rerun with --pr-finalized to also reap those. --idle-min
+    still defaults to 0, so a freshly-merged active window can be reaped
+    immediately with no grace period; pass --idle-min N for one.
 
 FLAGS
     -h, --help              Show this help and exit
@@ -91,12 +107,12 @@ FLAGS
                             (default: llm-\$(basename \$PWD))
 
 EXAMPLES
-    kill-finished-workers.sh                          # parked + PR-safe
+    kill-finished-workers.sh                          # (parked or merged) + PR-safe
     kill-finished-workers.sh --dry-run                # preview
     kill-finished-workers.sh --idle-min 5             # at least 5 min idle
     kill-finished-workers.sh --no-pr-check            # don't hit gh
     kill-finished-workers.sh --all                    # include active
-    kill-finished-workers.sh --with-worktree          # parked + worktrees
+    kill-finished-workers.sh --with-worktree          # (parked or merged) + worktrees
     kill-finished-workers.sh --all --with-worktree    # full nuke (prompts)
     kill-finished-workers.sh --all --with-worktree -y # full nuke, no prompt
     kill-finished-workers.sh --merged-only --with-worktree -y     # safe auto-reap
@@ -271,16 +287,31 @@ worktree_branch() {
     echo "fix/issue-$issue"
 }
 
-# Returns 0 if there's an OPEN GH PR for the given branch (i.e., should
-# preserve). Returns 1 otherwise (no PR, merged, closed). Network
-# round-trip; gated by PR_CHECK at call site.
-has_open_pr() {
-    local branch="$1"
-    # `gh pr view <branch>` is the cheapest single-PR query. Output filtered
-    # for state. 2>/dev/null swallows "no pull requests found" noise.
-    local state
-    state=$(gh pr view "$branch" --json state -q .state 2>/dev/null || true)
-    [ "$state" = "OPEN" ]
+# Populates PR_STATE / PR_CREATED_AT / PR_NUMBER for the given branch with a
+# single `gh pr view` round-trip. Returns 1 (all three left empty) when no
+# PR exists for the branch. issue #386: the old code called `gh pr view`
+# separately for the default mode's open-PR guard and again for
+# --merged-only/--pr-finalized — up to twice per window for the same PR.
+# Callers gate the call itself (see the main loop) so plain default mode
+# with --no-pr-check still avoids the network entirely.
+PR_STATE=""
+PR_CREATED_AT=""
+PR_NUMBER=""
+fetch_pr_state() {
+    local branch="$1" json
+    PR_STATE=""
+    PR_CREATED_AT=""
+    PR_NUMBER=""
+    json=$(gh pr view "$branch" --json state,createdAt,number -q '"\(.state)\t\(.createdAt)\t\(.number)"' 2>/dev/null || true)
+    [ -n "$json" ] || return 1
+    IFS=$'\t' read -r PR_STATE PR_CREATED_AT PR_NUMBER <<< "$json"
+    return 0
+}
+
+# True if the last fetch_pr_state() call found an OPEN PR (i.e., should
+# preserve the window/worktree regardless of mode).
+pr_is_open() {
+    [ "$PR_STATE" = "OPEN" ]
 }
 
 # Portable mtime (epoch seconds). GNU coreutils first, BSD fallback. Mirrors
@@ -355,58 +386,53 @@ pr_predates_worktree() {
 # on a 0-return; callers must only read it right after a failed call.
 PR_SKIP_REASON=""
 
-# Returns 0 if the PR for the given branch is MERGED (strict) AND was
-# created after the given worktree came into existence. Returns 1 for
-# OPEN, CLOSED-without-merge, no PR at all, or a MERGED PR that predates
-# the worktree (issue #185 — stale history from a recycled branch name,
-# not evidence about the CURRENT worktree). Used by --merged-only mode so
-# we never reap a worktree whose work hasn't been preserved upstream.
+# Returns 0 if the PR state cached by fetch_pr_state() is MERGED (strict)
+# AND was created after the given worktree came into existence. Returns 1
+# for OPEN, CLOSED-without-merge, no PR at all, or a MERGED PR that
+# predates the worktree (issue #185 — stale history from a recycled branch
+# name, not evidence about the CURRENT worktree). Used by --merged-only
+# mode, and (issue #386) as part of default mode's parked-OR-merged gate,
+# so we never reap a worktree whose work hasn't been preserved upstream.
 pr_is_merged() {
-    local branch="$1" wt="$2"
-    local json state created_at
-    json=$(gh pr view "$branch" --json state,createdAt -q '"\(.state)\t\(.createdAt)"' 2>/dev/null)
-    if [ -z "$json" ]; then
+    local wt="$1"
+    if [ -z "$PR_STATE" ]; then
         PR_SKIP_REASON="no PR found"
         return 1
     fi
-    IFS=$'\t' read -r state created_at <<< "$json"
-    if [ "$state" != "MERGED" ]; then
-        PR_SKIP_REASON="not MERGED (state=$state)"
+    if [ "$PR_STATE" != "MERGED" ]; then
+        PR_SKIP_REASON="not MERGED (state=$PR_STATE)"
         return 1
     fi
-    if pr_predates_worktree "$created_at" "$wt"; then
+    if pr_predates_worktree "$PR_CREATED_AT" "$wt"; then
         PR_SKIP_REASON="terminal state predates this worktree"
         return 1
     fi
     return 0
 }
 
-# Returns 0 if the PR for the given branch is finalized — MERGED or
-# CLOSED — AND was created after the given worktree came into existence.
-# Returns 1 for OPEN, no PR at all, or a finalized PR that predates the
-# worktree (issue #185). Used by --pr-finalized mode so the watcher can
-# also reap PRs the user has rejected/closed without merging (superseded,
-# duplicate, abandoned). Local worktree + branch get removed, but the
-# origin branch is preserved by kill-worktree.sh (it only does `git
-# branch -D`, never `git push --delete`), so accidental closures are
+# Returns 0 if the PR state cached by fetch_pr_state() is finalized —
+# MERGED or CLOSED — AND was created after the given worktree came into
+# existence. Returns 1 for OPEN, no PR at all, or a finalized PR that
+# predates the worktree (issue #185). Used by --pr-finalized mode so the
+# watcher can also reap PRs the user has rejected/closed without merging
+# (superseded, duplicate, abandoned). Local worktree + branch get removed,
+# but the origin branch is preserved by kill-worktree.sh (it only does
+# `git branch -D`, never `git push --delete`), so accidental closures are
 # recoverable via `gh pr reopen N`.
 pr_is_finalized() {
-    local branch="$1" wt="$2"
-    local json state created_at
-    json=$(gh pr view "$branch" --json state,createdAt -q '"\(.state)\t\(.createdAt)"' 2>/dev/null)
-    if [ -z "$json" ]; then
+    local wt="$1"
+    if [ -z "$PR_STATE" ]; then
         PR_SKIP_REASON="no PR found"
         return 1
     fi
-    IFS=$'\t' read -r state created_at <<< "$json"
-    case "$state" in
+    case "$PR_STATE" in
         MERGED|CLOSED) : ;;
         *)
-            PR_SKIP_REASON="not MERGED|CLOSED (state=$state)"
+            PR_SKIP_REASON="not MERGED|CLOSED (state=$PR_STATE)"
             return 1
             ;;
     esac
-    if pr_predates_worktree "$created_at" "$wt"; then
+    if pr_predates_worktree "$PR_CREATED_AT" "$wt"; then
         PR_SKIP_REASON="terminal state predates this worktree"
         return 1
     fi
@@ -416,35 +442,76 @@ pr_is_finalized() {
 # Decide which ones to kill ---------------------------------------------------
 KILL_LIST=()
 declare -A KILL_REASONS KILL_BRANCH
+# Tally of default-mode windows skipped only because their PR is CLOSED
+# without merging — surfaced in the "nothing to kill" summary below so
+# --pr-finalized doesn't stay a silent, undiscoverable escape hatch
+# (issue #386 part 1).
+SKIPPED_FINALIZED=0
 for w in "${WINDOWS[@]}"; do
     issue="${w#iss-}"
     reasons=()
+    branch=""
+    wt=""
+    parked=0
+    merged=0
 
-    # Parked check.
+    # Resolve the worktree's actual branch + fetch PR state ONCE per
+    # window (single `gh pr view` round-trip) whenever any mode needs PR
+    # info: --merged-only/--pr-finalized always do; plain PR_CHECK (the
+    # default and --all) does unless --no-pr-check disabled the network
+    # entirely. Done up front so both the eligibility gate below and the
+    # later PR-safety check can read the same cached PR_STATE instead of
+    # each hitting `gh` separately.
+    if [ "$MERGED_ONLY" = "1" ] || [ "$PR_FINALIZED" = "1" ] || [ "$PR_CHECK" = "1" ]; then
+        branch="$(worktree_branch "$issue")"
+        if [ -z "$branch" ]; then
+            echo "  $w  [can't resolve worktree branch (detached HEAD or corrupt worktree registration) → skip]"
+            continue
+        fi
+        wt="$(swarm_worktree_dir "$PROJECT_DIR" "$issue")"
+        fetch_pr_state "$branch" || true
+    fi
+
+    # Eligibility gate.
     #
-    # Default mode uses pane scrollback ("[polling for next brief" →
-    # listener parked, claude has exited) as a proxy for "safe to reap." But
-    # --merged-only and --pr-finalized provide a strictly stronger
-    # signal — PR state on GitHub. If the upstream PR is MERGED or
-    # CLOSED, the work is preserved (or explicitly rejected) regardless
-    # of whether claude's local REPL is still open, so the parked check
-    # would only block legitimate reaps. Skip it in those modes.
+    # issue #386: default mode used to gate on is_parked() alone — pane
+    # scrollback showing the listener's "[polling for next brief" marker,
+    # printed only after the agent invocation returns (worker-listener.sh's
+    # print_completion_block). The default worker is an interactive claude
+    # REPL that never exits on its own, so that marker — and therefore
+    # "parked" — is structurally unreachable for it; default mode could
+    # never reap a single default-shaped worker, merged PR or not. A
+    # branch whose PR is MERGED is at least as strong a "safe to reap"
+    # signal as parked scrollback (the watcher's --merged-only mode
+    # already treats it that way), so default mode now reaps on parked OR
+    # PR-merged.
     #
-    # --all already bypasses the parked check by design (its whole
-    # purpose is to include active windows).
+    # --merged-only and --pr-finalized use PR state exclusively (parked is
+    # a strictly weaker signal there) and --all bypasses this gate by
+    # design (its whole purpose is to include active windows).
     if [ "$ALL" = "1" ]; then
         reasons+=("--all")
     elif [ "$MERGED_ONLY" = "1" ] || [ "$PR_FINALIZED" = "1" ]; then
         reasons+=("pr-gated")
     else
-        if ! is_parked "$w"; then
-            echo "  $w  [active → skip]"
+        is_parked "$w" && parked=1
+        if [ "$PR_CHECK" = "1" ] && pr_is_merged "$wt"; then
+            merged=1
+        fi
+        if [ "$parked" = "0" ] && [ "$merged" = "0" ]; then
+            if [ "$PR_CHECK" = "1" ] && [ "$PR_STATE" = "CLOSED" ]; then
+                echo "  $w  [active, PR #$PR_NUMBER CLOSED (not merged) → skip (parked-only mode; rerun with --pr-finalized to reap)]"
+                SKIPPED_FINALIZED=$((SKIPPED_FINALIZED + 1))
+            else
+                echo "  $w  [active → skip]"
+            fi
             continue
         fi
-        reasons+=("parked")
+        [ "$parked" = "1" ] && reasons+=("parked")
+        [ "$merged" = "1" ] && reasons+=("PR-merged")
     fi
 
-    # Idle-min check (applied in both modes when N>0)
+    # Idle-min check (applied in all modes when N>0)
     if [ "$IDLE_MIN" -gt 0 ]; then
         idle=$(window_idle_min "$w")
         if [ "$idle" -lt "$IDLE_MIN" ]; then
@@ -454,37 +521,32 @@ for w in "${WINDOWS[@]}"; do
         reasons+=("idle ${idle}m")
     fi
 
-    # PR check (applied in both modes when enabled). Resolved once per
-    # window against the actual checked-out branch (see worktree_branch),
-    # not the dirname-derived fix/issue-N. wt is passed alongside so
+    # PR check (applied in all modes when enabled). Uses the PR_STATE
+    # cached by fetch_pr_state above, resolved once per window against the
+    # actual checked-out branch (see worktree_branch), not the
+    # dirname-derived fix/issue-N. wt is passed alongside so
     # pr_is_merged/pr_is_finalized can ignore a terminal PR that predates
     # this worktree (issue #185).
-    if [ "$MERGED_ONLY" = "1" ] || [ "$PR_FINALIZED" = "1" ] || [ "$PR_CHECK" = "1" ]; then
-        branch="$(worktree_branch "$issue")"
-        if [ -z "$branch" ]; then
-            echo "  $w  [can't resolve worktree branch (detached HEAD or corrupt worktree registration) → skip]"
-            continue
-        fi
-        wt="$(swarm_worktree_dir "$PROJECT_DIR" "$issue")"
-    fi
     if [ "$MERGED_ONLY" = "1" ]; then
-        if ! pr_is_merged "$branch" "$wt"; then
+        if ! pr_is_merged "$wt"; then
             echo "  $w  [PR $branch: ${PR_SKIP_REASON:-unknown reason} → skip (merged-only mode)]"
             continue
         fi
         reasons+=("PR-merged")
     elif [ "$PR_FINALIZED" = "1" ]; then
-        if ! pr_is_finalized "$branch" "$wt"; then
+        if ! pr_is_finalized "$wt"; then
             echo "  $w  [PR $branch: ${PR_SKIP_REASON:-unknown reason} → skip (pr-finalized mode)]"
             continue
         fi
         reasons+=("PR-finalized")
     elif [ "$PR_CHECK" = "1" ]; then
-        if has_open_pr "$branch"; then
+        if pr_is_open; then
             echo "  $w  [PR $branch still OPEN → skip (use --no-pr-check to override)]"
             continue
         fi
-        reasons+=("PR-safe")
+        # Already covered by the eligibility gate's "PR-merged" reason
+        # above — avoid a redundant token in the kill-line/reap.window log.
+        [ "$merged" = "1" ] || reasons+=("PR-safe")
     fi
 
     # Survived all filters → kill
@@ -497,7 +559,11 @@ done
 
 if [ "${#KILL_LIST[@]}" -eq 0 ]; then
     echo
-    echo "Nothing to kill given current filters."
+    if [ "$SKIPPED_FINALIZED" -gt 0 ]; then
+        echo "Nothing to kill given current filters. $SKIPPED_FINALIZED window(s) have a closed (non-merged) PR — rerun with --pr-finalized to reap them."
+    else
+        echo "Nothing to kill given current filters."
+    fi
     exit 0
 fi
 
