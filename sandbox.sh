@@ -327,7 +327,11 @@ fi
 # /proc/<pid>/cmdline, audit logs, and shell history).
 GH_TOKEN_OPTS=()
 if command -v gh &>/dev/null; then
-    _gh_token=$(gh auth token 2>/dev/null)
+    # `|| true`: gh installed but not logged in exits 1, and under `set -e` an
+    # assignment from a failing command substitution takes the whole script
+    # down — silently, before `docker run`. No token is a valid state (the
+    # container just gets no GH_TOKEN), not a fatal one.
+    _gh_token=$(gh auth token 2>/dev/null || true)
     if [ -n "$_gh_token" ]; then
         export GH_TOKEN="$_gh_token"
         GH_TOKEN_OPTS=(-e GH_TOKEN)
@@ -400,6 +404,42 @@ if [ "$SANDBOX_ALLOW_BACKGROUND_TASKS" != "1" ]; then
     FOREGROUND_ONLY_ENV_OPTS=(-e "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1")
 fi
 
+# --- Agent authorship identity (#403) ---
+# Every commit made inside this container is written by an agent, but the
+# container mounts the host's ~/.gitconfig read-only, so without this block
+# `git log` credits the human whose credentials the swarm borrows. Months
+# later there is then no way to answer "did I write this, or did a worker?"
+#
+# The markers that exist can't answer it either: the `[agent]` PR-title
+# prefix is prompt-enforced (a worker that forgets it produces an
+# indistinguishable PR) and lives in one project's .swarm-policy.md, so it
+# never travelled to the sibling repos. This does, because it rides the
+# `docker run` line rather than a prompt — it applies whether or not the
+# agent cooperates, in every project, for every agent CLI.
+#
+# GIT_AUTHOR_* overrides the mounted gitconfig for the AUTHOR field only.
+# The committer is deliberately left as the host identity: the human's
+# credentials really did push it, so `git log --format='%an|%cn'` reads as
+# "agent wrote it, human shipped it" — which is what happened. It also
+# keeps commit signing intact (the signature covers the committer, whose
+# key is the one mounted at ~/.ssh).
+#
+# Name/email are generic on purpose — they mark the swarm, not one vendor's
+# model, so the label stays true when the CLI behind a worker changes.
+#
+# Knobs: SWARM_GIT_AUTHOR_NAME / SWARM_GIT_AUTHOR_EMAIL override the
+# defaults; SWARM_GIT_IDENTITY=0 disables the block entirely, restoring the
+# pre-#403 behaviour of committing as the mounted ~/.gitconfig identity.
+GIT_IDENTITY_OPTS=()
+SANDBOX_GIT_AUTHOR_NAME="${SWARM_GIT_AUTHOR_NAME:-swarm}"
+SANDBOX_GIT_AUTHOR_EMAIL="${SWARM_GIT_AUTHOR_EMAIL:-swarm@oconeco.dev}"
+if [ "${SWARM_GIT_IDENTITY:-1}" != "0" ]; then
+    GIT_IDENTITY_OPTS=(
+        -e "GIT_AUTHOR_NAME=$SANDBOX_GIT_AUTHOR_NAME"
+        -e "GIT_AUTHOR_EMAIL=$SANDBOX_GIT_AUTHOR_EMAIL"
+    )
+fi
+
 # Worker agent selection. WORKER_CMD chooses the LLM CLI the listener will
 # dispatch to (default claude). The listener picks up the choice from its
 # first arg here; WORKER_MODEL is read by the listener directly from the
@@ -429,6 +469,9 @@ fi
 echo "--- LLM Sandbox Session ---"
 echo "Project:  $PROJECT_DIR"
 echo "Agent:    $AGENT"
+if [ "${#GIT_IDENTITY_OPTS[@]}" -gt 0 ]; then
+    echo "Commits:  author $SANDBOX_GIT_AUTHOR_NAME <$SANDBOX_GIT_AUTHOR_EMAIL> (committer = host identity)"
+fi
 echo "---------------------------"
 
 exec docker run "${INTERACTIVE_FLAGS[@]}" --rm --init \
@@ -442,6 +485,7 @@ exec docker run "${INTERACTIVE_FLAGS[@]}" --rm --init \
     "${DOCKER_SOCK_OPTS[@]}" \
     "${SSH_OPTS[@]}" \
     "${WORKER_ENV_OPTS[@]}" \
+    "${GIT_IDENTITY_OPTS[@]}" \
     "${DEP_CACHE_OPTS[@]}" \
     "${DEP_PROXY_OPTS[@]}" \
     "${SANDBOX_DOCS_ENV_OPTS[@]}" \
