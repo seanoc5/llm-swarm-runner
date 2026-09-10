@@ -100,6 +100,7 @@ Generalized launcher: `sandbox.sh <project-dir> <agent> [extra-args]`
 - **Memory cap:** `SANDBOX_MEM_LIMIT` (default `8g`) is applied as `--memory`/`--memory-swap` on every container; set higher (e.g. `24g`) for heavyweight builds or `0` to disable. Exit code 137 inside the sandbox usually means this cap fired — see [advanced-usage.md](./advanced-usage.md#memory-limit-sandbox_mem_limit).
 - `EXTRA_MOUNTS` env var: comma-separated `host:container[:ro|:rw]` extra bind mounts.
 - `.sandbox-env` file in the project dir is auto-loaded as a Docker `--env-file`.
+- **Agent commit authorship (#403):** injects `GIT_AUTHOR_NAME=swarm` / `GIT_AUTHOR_EMAIL=swarm@oconeco.dev` so agent commits are distinguishable from hand-written ones in `git log`. Author only — the committer stays the host identity (your credentials did push it, and signing covers the committer). Riding `docker run` rather than a prompt is the point: a PR-title convention fails silently when a worker forgets it, this can't be forgotten. `SWARM_GIT_AUTHOR_NAME`/`SWARM_GIT_AUTHOR_EMAIL` override; `SWARM_GIT_IDENTITY=0` disables. See [advanced-usage.md](./advanced-usage.md#agent-commit-authorship-swarm_git_identity).
 - Networking: `--network host` (so agents can reach `localhost:5432` Postgres, etc.).
 
 ### `llm-start.sh` — Bootstrap a Coordinator session

@@ -10,6 +10,7 @@ This document covers advanced workflows, custom mounts, and manual Git worktree 
   - [Worktree layout (SWARM_WORKTREE_GROUPING)](#worktree-layout-swarm_worktree_grouping)
 - [Custom Configuration](#custom-configuration)
   - [Per-project Environment (.sandbox-env)](#per-project-environment-sandbox-env)
+  - [Agent Commit Authorship (SWARM_GIT_IDENTITY)](#agent-commit-authorship-swarm_git_identity)
   - [Extra Mounts](#extra-mounts)
   - [Memory limit (SANDBOX_MEM_LIMIT)](#memory-limit-sandbox_mem_limit)
   - [Per-container claude config isolation (SANDBOX_REFRESH_CLAUDE_CONFIG)](#per-container-claude-config-isolation-sandbox_refresh_claude_config)
@@ -110,6 +111,37 @@ APP_URL=http://localhost:8080
 ```
 
 Add `.sandbox-env` to your project's `.gitignore` to avoid committing credentials.
+
+### Agent Commit Authorship (`SWARM_GIT_IDENTITY`)
+
+The sandbox mounts your `~/.gitconfig` read-only, so without this every commit an agent makes is authored by *you* — and months later `git log` cannot tell agent work from hand-written work. `sandbox.sh` therefore injects a git **author** identity on the `docker run` line:
+
+```
+Author:     swarm <swarm@oconeco.dev>      # the agent wrote it
+Committer:  <your ~/.gitconfig identity>   # your credentials shipped it
+```
+
+Only the author is overridden. Keeping the committer as the host identity is deliberate: your credentials really did push the commit, and it leaves commit signing intact (the signature covers the committer, whose key is the one mounted at `~/.ssh`).
+
+Because it rides `docker run` rather than a prompt, it applies whether or not the agent cooperates, in every project, for every agent CLI — unlike a PR-title convention, which fails silently when a worker forgets it.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `SWARM_GIT_AUTHOR_NAME` | `swarm` | Author name on agent commits |
+| `SWARM_GIT_AUTHOR_EMAIL` | `swarm@oconeco.dev` | Author email on agent commits |
+| `SWARM_GIT_IDENTITY` | `1` | `0` disables the override entirely (commits fall back to the mounted `~/.gitconfig`) |
+
+Query it afterwards:
+
+```bash
+git log --author=swarm --oneline            # what the swarm wrote
+git log --perl-regexp --author='^(?!swarm)' # what a human wrote
+git shortlog -sne                            # the split, by count
+```
+
+The name is generic on purpose — it marks *the swarm*, not one vendor's model, so the label stays true when the CLI behind a worker changes.
+
+**Two things it does not cover.** GitHub's squash merge collapses a branch to one commit and takes its author from the commits only when they are uniform, so a worker branch a human amended lands under a single author — per-commit fidelity lives on the branch, and a PR-title marker (e.g. fand-app's `[agent]` prefix) remains the trunk-level signal. And PRs are still opened by the shared `gh` token, so `gh pr list --author` cannot separate agent PRs from yours; that would need a dedicated machine account.
 
 ### Extra Mounts
 
