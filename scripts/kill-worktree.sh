@@ -91,6 +91,34 @@ count_queued_files() {
     find "$dir" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | wc -l | tr -d ' '
 }
 
+# Head of one salvaged brief, so "is this still relevant?" is answerable
+# from the PR page instead of requiring a shell on the swarm host. Prefers
+# inbox/ (never delivered at all) over processing/ (claimed but unfinished)
+# — the former is the more complete loss. Self-contained per the
+# scripts convention; mirrors requeue.sh's brief_excerpt, including the
+# six-backtick fence and the defanging of any six-or-more run in the
+# content so a brief carrying its own code fences cannot break out.
+salvaged_excerpt() {
+    local salvage_dir="$1"
+    local max_lines="${SWARM_PR_BRIEF_LINES:-20}"
+    [ "${SWARM_PR_BRIEF_EXCERPT:-1}" = "1" ] || return 0
+    local file=""
+    local d
+    for d in inbox processing outbox; do
+        file="$(find "$salvage_dir/$d" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | sort | head -1)"
+        [ -n "$file" ] && break
+    done
+    [ -n "$file" ] && [ -r "$file" ] || return 0
+    local total
+    total="$(wc -l < "$file" 2>/dev/null || echo 0)"
+    head -n "$max_lines" "$file" 2>/dev/null \
+        | cut -c1-200 \
+        | sed -e 's/`\{6,\}/[fence]/g'
+    if [ "$total" -gt "$max_lines" ]; then
+        printf '\n… truncated (%s more lines)\n' "$((total - max_lines))"
+    fi
+}
+
 # issue #375: salvage_queued_files (below) preserves the brief's bytes,
 # but preservation alone left a merge-race blind spot — twice in one
 # civicstrata session a PR merged from GitHub while a coordinator-requeued
@@ -102,15 +130,59 @@ count_queued_files() {
 # PR is typically already MERGED/CLOSED) naming the salvage location. No
 # gh, no remote, no PR for the branch, or a lookup failure is silently
 # swallowed — this is a signal, never a gate on the reap itself.
+#
+# issue #397: "a human should judge whether this is still relevant" was
+# the whole of the old guidance, which left the reader with a directory
+# path on a host they may not be sitting at. The comment now carries the
+# brief's own head plus the exact commands for each of the three possible
+# dispositions.
 notify_pr_brief_orphaned() {
-    local branch="$1" unprocessed="$2" counts="$3" salvage_dir="$4"
+    local branch="$1" unprocessed="$2" counts="$3" salvage_dir="$4" issue="${5:-}"
     command -v gh >/dev/null 2>&1 || return 0
     local pr
     pr="$(gh pr view "$branch" --json number -q .number 2>/dev/null)" || return 0
     [ -n "$pr" ] || return 0
+
+    # Assembled line by line rather than as one printf: every static line
+    # is single-quoted, so the many `backtick` code spans stay literal
+    # without an escaping thicket.
+    local -a body=()
+    body+=('<!-- SWARM_BRIEF_ORPHANED -->')
+    body+=(':rotating_light: **Swarm: a queued follow-up brief was orphaned by a worker reap**')
+    body+=('')
+    body+=("$(printf 'This PR'"'"'s worker worktree was reaped (`kill-worktree.sh`, issues #317/#375) while %s unprocessed brief file(s) (%s) still sat in its task queue — they never reached the worker. If this PR is already merged or closed, whatever the queued brief was meant to fix (a review BLOCK, a privacy caveat, superseded numbers, ...) never made it in.' \
+        "$unprocessed" "$counts")")
+    body+=('')
+    body+=("$(printf 'The brief(s) were preserved, not lost: `%s`.' "$salvage_dir")")
+
+    local excerpt
+    excerpt="$(salvaged_excerpt "$salvage_dir")"
+    if [ -n "$excerpt" ]; then
+        body+=('')
+        body+=('<details><summary><b>What was orphaned</b> (head of the first salvaged brief — judge relevance without leaving this page)</summary>')
+        body+=('')
+        body+=('``````text')
+        body+=("$excerpt")
+        body+=('``````')
+        body+=('</details>')
+    fi
+
+    body+=('')
+    body+=('**Next steps — pick one:**')
+    body+=('')
+    body+=("$(printf '1. **Read the rest of it** on the swarm host:\n   ```bash\n   head -n 60 %s/*/*\n   ```' "$salvage_dir")")
+    body+=("$(printf '2. **Still relevant → re-file it.** The worktree is gone, so the brief cannot simply be requeued; the swarm dispatches from issues. Open one quoting the excerpt above and referencing this PR:\n   ```bash\n   gh issue create --title '"'"'follow-up: <what the brief asked for>'"'"' \\\n       --body '"'"'Orphaned brief from PR #%s (salvage: %s). <paste brief>'"'"'\n   ```\n   The coordinator picks it up on its next dispatch pass.' \
+        "$pr" "$salvage_dir")")
+    if [ -n "$issue" ]; then
+        body+=("$(printf '   If issue #%s is still open and the work belongs there, re-provisioning against it also works: `provision-worker.sh %s`.' \
+            "$issue" "$issue")")
+    fi
+    body+=("$(printf '3. **Obsolete → drop it**, so the next reader does not re-litigate the same brief:\n   ```bash\n   rm -rf %s\n   ```' "$salvage_dir")")
+    body+=('')
+    body+=('<sub>scripts/kill-worktree.sh — issue #375 (reap-race escalation), #397 (next steps).</sub>')
+
     local comment
-    comment="$(printf '<!-- SWARM_BRIEF_ORPHANED -->\n:rotating_light: **Swarm: a queued follow-up brief was orphaned by a worker reap**\n\nThis PR'"'"'s worker worktree was reaped (`kill-worktree.sh`, issue #317/#375) while %s unprocessed brief file(s) (%s) still sat in its task queue — they never reached the worker. If this PR was already merged or closed, whatever the queued brief was meant to fix (a review BLOCK, a privacy caveat, superseded numbers, ...) never made it in.\n\nThe brief(s) were preserved, not lost: `%s`. A human should judge whether the queued work is still relevant and, if so, re-dispatch it (`provision-worker.sh` / `requeue.sh`) against a fresh worktree.\n\n<sub>scripts/kill-worktree.sh — issue #375 (reap-race escalation).</sub>\n' \
-        "$unprocessed" "$counts" "$salvage_dir")"
+    comment="$(printf '%s\n' "${body[@]}")"
     gh pr comment "$pr" --body "$comment" >/dev/null 2>&1 || true
 }
 
@@ -230,7 +302,7 @@ if [ -d "$WT" ]; then
         salvage_queued_files "$WT/.swarm/tasks/processing" "$SALVAGE_DIR/processing"
         salvage_queued_files "$WT/.swarm/tasks/outbox" "$SALVAGE_DIR/outbox"
         echo "  ⚠ SALVAGED: $UNPROCESSED unprocessed brief(s) from iss-$ISSUE ($COUNTS_MSG) → $SALVAGE_DIR"
-        notify_pr_brief_orphaned "${ACTUAL_BRANCH:-$BRANCH}" "$UNPROCESSED" "$COUNTS_MSG" "$SALVAGE_DIR"
+        notify_pr_brief_orphaned "${ACTUAL_BRANCH:-$BRANCH}" "$UNPROCESSED" "$COUNTS_MSG" "$SALVAGE_DIR" "$ISSUE"
     fi
 
     if [ "$NO_COMPOSE_DOWN" = "1" ]; then

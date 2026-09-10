@@ -118,6 +118,7 @@ check_script "$LLM_SWARM_DIR/scripts/worker-listener.sh"
 check_script "$LLM_SWARM_DIR/scripts/reap-orphan-worktrees.sh"
 check_script "$LLM_SWARM_DIR/scripts/kill-worktree.sh"
 check_script "$LLM_SWARM_DIR/scripts/kill-finished-workers.sh"
+check_script "$LLM_SWARM_DIR/scripts/requeue.sh"
 
 # --- Functional: repurposed-worktree PR lookup (issue #97) ------------------
 #

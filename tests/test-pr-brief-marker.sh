@@ -162,6 +162,55 @@ gh_last_comment | grep -q "task \`" || red "posted comment missing task-id refer
 grep -q 'pr comment 77' "$GH_LOG" || red "expected gh pr comment against PR #77"
 green "first requeue posts a SWARM_PENDING_BRIEF: queued comment on PR #77"
 
+# issue #397: the warning has to be actionable from the PR page alone —
+# a reader in the GitHub web UI has neither the brief nor a shell on the
+# swarm host. Three things make the difference between a signal and a
+# dead end: whether waiting will work, what was actually queued, and the
+# commands for each disposition.
+heading "Test 1b: the queued comment carries an outlook, an excerpt, and next steps"
+gh_last_comment | grep -q 'Delivery outlook at queue time' \
+    || red "comment missing the delivery-outlook line: $(gh_last_comment)"
+# No tmux session named llm-proj exists here, so the honest verdict is
+# that nothing will ever pick this brief up — the case where "wait for
+# the cleared comment" is advice that never resolves.
+gh_last_comment | grep -q 'nothing is polling this brief' \
+    || red "expected the no-session outlook to say nothing is polling: $(gh_last_comment)"
+gh_last_comment | grep -q 'Do not just wait' \
+    || red "expected an explicit do-not-wait verdict when no listener exists: $(gh_last_comment)"
+gh_last_comment | grep -q 'follow-up: fix the thing' \
+    || red "expected the brief's own text excerpted into the comment: $(gh_last_comment)"
+gh_last_comment | grep -q 'Next steps' \
+    || red "comment missing a next-steps block: $(gh_last_comment)"
+gh_last_comment | grep -q '.swarm/tasks/inbox' \
+    || red "expected a copy-pasteable queue-inspection path: $(gh_last_comment)"
+green "queued comment carries outlook + brief excerpt + next steps"
+
+heading "Test 1c: SWARM_PR_BRIEF_EXCERPT=0 suppresses the excerpt but keeps the guidance"
+git worktree add -q -b fix/issue-92 ../wt-issue-92 master
+mkdir -p "$TEST_DIR/wt-issue-92/.swarm/tasks/inbox"
+# Point the gh stub's known branch at this worktree instead: simpler to
+# assert on a fresh comment than to unpick the idempotency skip.
+echo "secret brief body" | SWARM_PR_BRIEF_EXCERPT=0 PATH="$SHIM_DIR:$PATH" \
+    "$REQUEUE" "$TEST_DIR/wt-issue-90" - > "$TEST_DIR/requeue-noexcerpt.out" 2>&1 \
+    || red "requeue.sh exited non-zero: $(cat "$TEST_DIR/requeue-noexcerpt.out")"
+# Idempotency means no NEW comment here; assert on the rendering function
+# directly instead, which is what the flag actually gates.
+EXCERPT_FN="$TEST_DIR/excerpt_fn.sh"
+sed -n '/^brief_excerpt() {/,/^}/p' "$REQUEUE" > "$EXCERPT_FN"
+[ -s "$EXCERPT_FN" ] || red "could not extract brief_excerpt from requeue.sh"
+# shellcheck source=/dev/null
+. "$EXCERPT_FN"
+echo "visible brief" > "$TEST_DIR/some-brief.md"
+[ -n "$(brief_excerpt "$TEST_DIR/some-brief.md")" ] \
+    || red "brief_excerpt returned nothing with the default (enabled) setting"
+[ -z "$(SWARM_PR_BRIEF_EXCERPT=0 brief_excerpt "$TEST_DIR/some-brief.md")" ] \
+    || red "SWARM_PR_BRIEF_EXCERPT=0 must suppress the excerpt entirely"
+[ -z "$(brief_excerpt "$TEST_DIR/no-such-brief.md")" ] \
+    || red "brief_excerpt must emit nothing for an unreadable file"
+git worktree remove --force "$TEST_DIR/wt-issue-92"
+git branch -q -D fix/issue-92
+green "excerpt is opt-out (SWARM_PR_BRIEF_EXCERPT=0) and silent on an unreadable brief"
+
 # ============================================================================
 heading "Test 2: a second requeue while still 'queued' does NOT re-post (idempotent)"
 # ============================================================================
@@ -270,6 +319,24 @@ gh_last_comment | grep -q 'salvaged/iss-90' \
     || red "expected the orphan comment to reference the salvage dir"
 grep -q 'pr comment 77' "$GH_LOG" || red "expected the orphan comment posted against PR #77"
 green "kill-worktree.sh posts SWARM_BRIEF_ORPHANED on the reaped branch's PR, referencing the salvage dir"
+
+# issue #397: naming a directory on a host the reader may not be sitting
+# at is not guidance. The orphan comment is the LAST signal anyone gets
+# about that brief, so it has to carry enough to decide re-file vs drop.
+gh_last_comment | grep -q 'What was orphaned' \
+    || red "orphan comment missing the excerpt section: $(gh_last_comment)"
+# Deliberately not asserting on THIS test's own brief text: several briefs
+# from the earlier tests are still queued here, and the excerpt renders the
+# first one by design. What matters is that the fenced block is populated.
+[ -n "$(gh_last_comment | awk '/^``````text$/{f=1;next} /^``````$/{f=0} f')" ] \
+    || red "orphan comment's excerpt fence is empty: $(gh_last_comment)"
+gh_last_comment | grep -q 'Next steps' \
+    || red "orphan comment missing a next-steps block: $(gh_last_comment)"
+gh_last_comment | grep -q 'gh issue create' \
+    || red "expected a concrete re-file command in the orphan comment: $(gh_last_comment)"
+gh_last_comment | grep -q 'provision-worker.sh 90' \
+    || red "expected the issue number threaded into the re-provision hint: $(gh_last_comment)"
+green "orphan comment carries the brief excerpt plus re-file / re-provision / drop commands"
 
 # ============================================================================
 heading "Test 8: requeue.sh posts nothing for a branch with no PR"
