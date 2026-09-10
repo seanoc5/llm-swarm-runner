@@ -334,7 +334,7 @@ without opening GitHub. Bodies predating the layered format that have only a
 report it as a worker-policy violation and summarize the body yourself in
 1–2 plain-language sentences.
 
-**Self-review verdict** (🟡/🔴 PRs only) — workers run `claude -p` against `prompts/skill-self-review.md` before proposing merge; watch their pane for the verdict. `APPROVE` needs no extra surface; `APPROVE_WITH_CAVEATS: <text>` → surface the caveat alongside the PR title; `BLOCK: <text>` → flag prominently (a merge proposal despite BLOCK is a worker-policy violation; the user may override with `merge PR N --override-review`). A skipped or failed self-review (`WORKER_SELF_REVIEW=0`, `claude -p` failure) means the safety layer didn't fire — recommend reading the diff before merging.
+**Self-review verdict** (🟡/🔴 PRs only) — workers run `claude -p` against `prompts/skill-self-review.md` before proposing merge; watch their pane for the verdict. `APPROVE` needs no extra surface; `APPROVE_WITH_CAVEATS: <text>` → surface the caveat alongside the PR title, and if you're queuing a fix for the caveat rather than leaving it to the operator's judgment, apply "Draft-as-hold" below *before* requeuing so nothing can merge out from under the fix; `BLOCK: <text>` → flag prominently (a merge proposal despite BLOCK is a worker-policy violation; the user may override with `merge PR N --override-review`). A skipped or failed self-review (`WORKER_SELF_REVIEW=0`, `claude -p` failure) means the safety layer didn't fire — recommend reading the diff before merging.
 
 ### "Environmental" is a worker's claim, not your finding
 
@@ -429,7 +429,18 @@ All seven pass → `gh pr merge <N> --squash --delete-branch --auto` (`--auto` d
 - Never requeue a "review your own PR" brief to the authoring worker; never treat its merge proposal as review evidence.
 - Default independent gate (all 🟡/🔴 PRs): `scripts/self-review-pr.sh <N> --post` — fresh `claude -p`, zero shared context.
 - 🔴 high PRs get a second, *different* pair of eyes on top: a different model (`SELF_REVIEW_MODEL=claude-opus-4-8 scripts/self-review-pr.sh <N> --force --post`) or a read-only review worker ("review PR #N via `gh pr diff N`; do NOT push fixes; report verdict as a PR comment").
-- The reviewer reports; the author (or a third worker) fixes — requeue the *author* with the findings via `requeue.sh N <brief>`; the reviewer stays read-only.
+- The reviewer reports; the author (or a third worker) fixes — **before** requeuing, apply the draft-as-hold convention below, then requeue the *author* with the findings via `requeue.sh N <brief>`; the reviewer stays read-only.
+
+### Draft-as-hold: mark a PR draft while a fix round-trip is queued
+
+`swarm-merge.sh`'s gates are mechanical (BLOCK verdict, migration collision), but an `APPROVE_WITH_CAVEATS` verdict with a queued caveat-fix brief blocks no merge path on its own — the "hold for the fix round-trip" would otherwise live only in digest prose, which the operator can reasonably act past (real incident: corpusminder#543 merged ~20 minutes before a queued scoping fix could be claimed, converting an in-branch fix into a post-merge follow-up; the same race hit corpusminder#542's dead-link fix — issue #382). GitHub refuses to merge a draft PR regardless of which surface someone reaches for — `gh pr merge`, `swarm-merge.sh`, the web UI, or coordinator auto-merge (§ "Auto-merge low-risk PRs" above already gates on "Open, not draft") — so marking the PR draft is a mechanical hold, not a request for restraint.
+
+Whenever you queue a fix round-trip against an open PR — a caveat fix requeued to the author per "Find ≠ fix" above, or any other change you expect to land before merge:
+
+1. `gh pr ready --undo <N>` (marks it draft) + a PR comment stating what's pending and who's on it.
+2. When the fix lands (or you judge it moot), `gh pr ready <N>` + a comment saying so — do this *before* reporting the PR as mergeable again in a wake digest.
+
+This applies only once a brief is actually queued — a fix that's merely proposed or under discussion doesn't warrant drafting the PR. When reporting an `APPROVE_WITH_CAVEATS` verdict (reporting section above) that you're about to act on by requeuing a fix, note in the same breath that you're drafting the PR to hold it.
 
 ### When the user hits a merge conflict
 
