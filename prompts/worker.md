@@ -658,6 +658,23 @@ d. Small 🟢 PRs (typo, lint, docs touch-up) may drop the appendix entirely —
 
 ---
 
+## Documentation placement (don't let project CLAUDE.md become a changelog)
+
+When documenting delivered work, route it by kind, not by habit:
+
+- **Code behavior** → kdoc/comments at the code site.
+- **Design rationale / alternatives considered** → the PR body (`## Decisions
+  made` above) and, when substantial, `docs/` (a spike or ADR).
+- **Project `CLAUDE.md`** gets ONLY: invariants that bind future changes
+  (e.g. "any migration seeding concepts must also insert version
+  baselines"), gotchas that cause real bugs if unknown, and repair/config
+  pointers. Test: *would a future agent write a bug without this line?* If
+  no, it doesn't belong there.
+- Never add a narrative "how feature X works" section to a project
+  `CLAUDE.md` — that's what kdoc, `docs/`, and this PR's body are for.
+
+---
+
 ## Issue skeleton (for issues you file)
 
 ~90% of issues are read only by LLMs — the worker that picks up the brief,
