@@ -300,7 +300,30 @@ check "blocked task -> delivery never attempted" "notattempted" "$got"
 # half (a worker that opened its PR, handed off, and simply never ran /quit).
 set_current_task "t1" "ready-for-review"
 
-busy_or_idle() { if worker_pane_busy "$WIN"; then echo busy; else echo idle; fi; }
+# Gate on BOTH the rendered content AND worker_pane_state()'s process-name
+# read (issue #398): the injected command is "clear; echo '...'; sleep 300"
+# — clear/echo are shell builtins, so the busy TEXT can already be on screen
+# while the pane's foreground process is still bash itself, a heartbeat
+# before it forks the trailing `sleep 300` that actually flips
+# pane_current_command (and therefore worker_pane_state()) to "cli". Content
+# alone settles first; maybe_worker_deliver_brief()'s own gate checks
+# worker_pane_state() before it ever looks at content (see its "cli" guard),
+# so a busy_or_idle() keyed on content alone could report "busy" and let the
+# one-shot maybe_worker_deliver_brief() call below land in that still-"shell"
+# window, hit the state guard, and return without logging anything —
+# "notskipped", not a real pane_busy skip. Reproduced locally by widening the
+# window (a CPU-bound builtin loop between the echo and the fork); harmless
+# in production (fail-open, next sweep tick just tries again) but flaked this
+# one-shot assertion under CI's heavier scheduling load. Requiring both
+# conditions here waits out that same fork, same as production code would
+# see on its next poll.
+busy_or_idle() {
+    if [ "$(worker_pane_state "$WIN")" = "cli" ] && worker_pane_busy "$WIN"; then
+        echo busy
+    else
+        echo idle
+    fi
+}
 
 tmux send-keys -t "$SESSION_NAME:$WIN" C-c
 sleep 0.2
