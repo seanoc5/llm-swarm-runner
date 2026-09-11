@@ -106,8 +106,8 @@ echo "$OUT" | grep -q "stranded worktree wt-issue-298" \
     || red "expected a stranded-worktree warning for wt-issue-298, got: $OUT"
 echo "$OUT" | grep -q "inbox=0 processing=1" \
     || red "expected inbox=0 processing=1 in the warning, got: $OUT"
-echo "$OUT" | grep -qv "wt-issue-101" \
-    || red "expected wt-issue-101 (clean at this point) to stay silent, got: $OUT"
+echo "$OUT" | grep -q "wt-issue-101" \
+    && red "expected wt-issue-101 (clean at this point) to stay silent, got: $OUT"
 green "claimed-but-dead processing/ brief with no live window → warned, counts correct"
 
 # ============================================================================
