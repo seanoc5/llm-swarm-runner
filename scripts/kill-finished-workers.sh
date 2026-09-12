@@ -55,7 +55,10 @@
 #   the exact same terminal-state test before routing removal through
 #   kill-worktree.sh (same salvage/orphan-notify semantics as any other
 #   reap). A worktree with no window and an OPEN (or absent) PR is left
-#   untouched, same as always.
+#   untouched, same as always. --idle-min does NOT apply to these entries
+#   (there is no pane to measure inactivity on — a windowless worktree has
+#   no live process at all), and the closing "Done. Closed N window(s)."
+#   tally counts them alongside actual window kills.
 
 set -euo pipefail
 
