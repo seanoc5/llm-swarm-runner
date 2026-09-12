@@ -223,5 +223,69 @@ grep -q 'Nothing to kill given current filters\. 1 window(s) have a closed (non-
 $(cat "$RUN_LOG3")"
 green "'nothing to kill' summary correctly points at --pr-finalized instead of staying silent"
 
+
+# ============================================================================
+heading "Test 6: windowless worktrees with finalized PRs are reaped (issue #406)"
+# ============================================================================
+# By this point iss-42 and iss-44's tmux windows are already gone (Tests 3
+# and 4 reaped them WITHOUT --with-worktree), but their worktrees
+# (fix/issue-42, fix/issue-44 — both MERGED) still sit on disk untouched —
+# exactly the "tmux session restart" scenario issue #406 describes:
+# nothing keys off tmux windows here, so a windowless worktree with a
+# finalized PR must still be reachable. wt-issue-46 is a fresh worktree
+# with NO PR at all (also windowless) that must be left completely alone.
+
+"$SHIM_DIR/tmux" list-windows -t "$SESSION" -F '#W' | grep -qx 'iss-42' \
+    && red "fixture assumption broken: iss-42 window should already be gone (Test 3)"
+"$SHIM_DIR/tmux" list-windows -t "$SESSION" -F '#W' | grep -qx 'iss-44' \
+    && red "fixture assumption broken: iss-44 window should already be gone (Test 4)"
+
+git -C "$PROJECT_DIR" worktree add -q -b fix/issue-46 "$TEST_DIR/wt-issue-46"
+
+# Leave an unprocessed brief in windowless wt-issue-44 so the salvage
+# acceptance criterion is exercised too, not just removal.
+mkdir -p "$TEST_DIR/wt-issue-44/.swarm/tasks/inbox"
+echo "queued follow-up" > "$TEST_DIR/wt-issue-44/.swarm/tasks/inbox/20260101-000000-44.md"
+
+RUN_LOG6="$TEST_DIR/run6.log"
+set +e
+(cd "$PROJECT_DIR" && PATH="$SHIM_DIR:$PATH" \
+    "$KILL_FINISHED" --pr-finalized --with-worktree --idle-min 0 --yes) > "$RUN_LOG6" 2>&1
+RC6=$?
+set -e
+[ "$RC6" -eq 0 ] || red "expected exit 0, got $RC6. Output:
+$(cat "$RUN_LOG6")"
+green "script exited 0 scanning windowless worktrees"
+
+grep -q 'iss-42.*no-window,PR-finalized.*kill' "$RUN_LOG6" \
+    || red "expected a windowless kill line for iss-42 citing no-window/PR-finalized. Output:
+$(cat "$RUN_LOG6")"
+green "windowless kill line correctly cites the no-window/PR-finalized reasons"
+
+[ -d "$TEST_DIR/wt-issue-42" ] && red "wt-issue-42 (windowless, MERGED) worktree still present after reap"
+git -C "$PROJECT_DIR" show-ref --verify --quiet refs/heads/fix/issue-42 \
+    && red "branch fix/issue-42 still present after reap"
+green "wt-issue-42 (windowless, MERGED) worktree + branch removed"
+
+[ -d "$TEST_DIR/wt-issue-44" ] && red "wt-issue-44 (windowless, MERGED) worktree still present after reap"
+git -C "$PROJECT_DIR" show-ref --verify --quiet refs/heads/fix/issue-44 \
+    && red "branch fix/issue-44 still present after reap"
+green "wt-issue-44 (windowless, MERGED) worktree + branch removed"
+
+SALVAGE_DIR44="$PROJECT_DIR/.swarm/salvaged/iss-44"
+[ -f "$SALVAGE_DIR44/inbox/20260101-000000-44.md" ] \
+    || red "queued brief in windowless wt-issue-44's inbox was not salvaged before removal"
+green "unprocessed brief in windowless wt-issue-44 was salvaged, not destroyed"
+
+[ -d "$TEST_DIR/wt-issue-46" ] \
+    || red "wt-issue-46 (windowless, NO PR) worktree was removed — must be untouched"
+git -C "$PROJECT_DIR" show-ref --verify --quiet refs/heads/fix/issue-46 \
+    || red "branch fix/issue-46 was deleted — a worktree with no PR must never be reaped"
+green "wt-issue-46 (windowless, no PR) left completely untouched"
+
+[ -d "$TEST_DIR/wt-issue-43" ] \
+    || red "wt-issue-43 (corrupt registration, still no resolvable branch) worktree was removed"
+green "wt-issue-43 (corrupt registration) left untouched"
+
 echo
 green "ALL TESTS PASSED"
