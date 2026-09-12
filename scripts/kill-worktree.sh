@@ -10,8 +10,11 @@
 # warns about pieces that don't exist but never errors. Use for ABANDON
 # verdicts from coordinator triage.
 #
-# Path derivation honors SWARM_WORKTREE_GROUPING (flat|project, default
-# flat). See scripts/_load-env.sh swarm_worktree_dir() for the rule.
+# Path derivation prefers wherever git's own worktree registry says branch
+# fix/issue-N actually lives (issue #407), falling back to the
+# SWARM_WORKTREE_GROUPING-derived path (flat|project, default flat; see
+# scripts/_load-env.sh swarm_worktree_dir()) only when git has no
+# registration for it.
 #
 # Before the worktree is removed, brings down any docker compose stack the
 # worker started inside it (see _compose-down-for-worktree.sh) — otherwise
@@ -186,6 +189,37 @@ notify_pr_brief_orphaned() {
     gh pr comment "$pr" --body "$comment" >/dev/null 2>&1 || true
 }
 
+# issue #407: resolves the worktree path for BRANCH from git's own
+# worktree registry rather than trusting the SWARM_WORKTREE_GROUPING-derived
+# path alone. A worktree created under `flat` grouping
+# (<parent>/wt-issue-N) is left exactly where it is if the project later
+# switches to `project` grouping — the branch's worktree is still fully
+# registered and un-deletable while it exists, but swarm_worktree_dir()
+# only ever computes the CURRENT mode's path, so the derived path silently
+# misses it ("worktree dir not present (skipped)"), and the branch delete
+# that follows fails with "cannot delete branch used by worktree".
+#
+# `git worktree list --porcelain` run against $project_dir is inherently
+# scoped to that repo's own registry, so the #357 own-repo guarantee holds
+# for free here — a worktree belonging to a different project's repo can
+# never appear in this project's `git worktree list` output. Falls back to
+# the derived path when git has no registration for the branch (worktree
+# never created, or already removed) — same behavior as before this issue.
+resolve_worktree_path() {
+    local project_dir="$1" branch="$2" derived="$3"
+    local path="" line
+    while IFS= read -r line; do
+        case "$line" in
+            "worktree "*) path="${line#worktree }" ;;
+            "branch refs/heads/$branch")
+                echo "$path"
+                return 0
+                ;;
+        esac
+    done < <(git -C "$project_dir" worktree list --porcelain 2>/dev/null)
+    echo "$derived"
+}
+
 # Moves every queued file (same selection as count_queued_files) from src/
 # into dest/, disambiguating a same-named collision (a prior salvage of the
 # same issue) with a UTC timestamp prefix rather than clobbering it.
@@ -213,6 +247,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 WT="$(swarm_worktree_dir "$PROJECT_DIR" "$ISSUE")"
 BRANCH="fix/issue-$ISSUE"
+WT="$(resolve_worktree_path "$PROJECT_DIR" "$BRANCH" "$WT")"
 SESSION_NAME="llm-$(basename "$PROJECT_DIR")"
 
 cd "$PROJECT_DIR"
