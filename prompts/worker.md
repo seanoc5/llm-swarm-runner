@@ -114,6 +114,52 @@ it when one lands — or `gh` comments on the issue/PR. Rationale:
 
 ---
 
+## Process polling inside worker containers — avoid `pgrep -f`
+
+Your own Claude process is launched with the **entire worker-conventions
+prompt** (this document, plus the project's `.swarm-policy.md`) baked into
+its argv — tens of KB of text containing dozens of English keywords a
+worker would naturally reach for in a process search: `git commit`,
+`git push`, `git rebase`, `gradle`, `java`, `pre-commit`, `gh pr create`,
+`pr merge`, `squash`, `pytest`, `uv venv`, and more.
+
+Any process search that substring-matches full command lines — `pgrep -f`,
+`pgrep -fa`, `ps aux | grep <keyword>`, `pidof -x` against a keyword
+pattern — **will match yourself** on any of those keywords, not just the
+target process. Typical failure, a wait loop for a pre-commit-gated
+`git commit`:
+
+```bash
+until ! kill -0 "$(pgrep -f 'git commit' | head -1)" 2>/dev/null; do
+    sleep 30
+done
+```
+
+`pgrep -f 'git commit'` finds the Claude worker process itself (the phrase
+appears in its own argv); `kill -0 <that-pid>` always succeeds because the
+worker is alive — it's the one running the loop; `! kill -0 …` is
+permanently false; the loop sleeps 30s and retries forever, burning runtime
+and leaving a stuck shell slot until SIGTERM. (This bit fand-app#388 twice
+in the same session before root cause was found — see issue #124.)
+
+**Preferred patterns, in order:**
+
+1. Run the command in the foreground with an adequate `timeout` per
+   § "Run long commands in the foreground" above — no wait loop needed at
+   all.
+2. If a synchronous wait outside the Bash tool's own blocking is genuinely
+   needed, capture the PID at launch instead of searching for it:
+   `mycmd & PID=$!; wait "$PID"`.
+3. If you must search running processes, match on something that can't
+   appear in this prompt, e.g. an absolute path under your worktree
+   (`pgrep -f "/opt/work/<project>/.gradle/daemon"`), never a plain English
+   keyword.
+
+Never `pgrep -f` (or any other cmdline-substring search) on a plain English
+keyword — it collides with your own argv.
+
+---
+
 ## Be thrifty with expensive verification (run the gate ONCE)
 
 Full-suite verification (test suites, lint sweeps, merge-gate commands) is
