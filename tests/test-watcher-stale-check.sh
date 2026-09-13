@@ -144,8 +144,18 @@ STALE_FNS="$(extract_fn mtime_epoch; extract_fn watcher_is_stale; extract_fn wat
 cat > "$TEST_DIR/run-check.sh" <<SCRIPT
 #!/usr/bin/env bash
 set -euo pipefail
+# issue #405: this worker's own shell may itself be running inside a real
+# tmux pane, and TMUX_PANE — an ordinary environment variable — would
+# otherwise leak from this test script into this subprocess unchanged,
+# making the respawn branch below (added for #405) fire against a REAL
+# pane instead of a fake one. Explicitly unsetting it here is what keeps
+# this test exercising the pre-#405 kill-only fallback path deterministically
+# regardless of what environment the test suite itself happens to run in;
+# see Test 2b below for the respawn path, which sets TMUX_PANE deliberately.
+unset TMUX_PANE
 EVENTS_LOG="$EVENTS_LOG2"
 WATCHER_STALE_CHECK=1
+WATCHER_STALE_RESPAWN=1
 WATCHER_SELF_PATH="$FAKE_SCRIPT2"
 WATCHER_LAUNCH_MTIME=0
 WATCHER_STARTED_AT="2026-08-08T10:00:00Z"
@@ -185,6 +195,149 @@ if [ "$(grep -c '^kill -KILL' "$KILL_LOG2" 2>/dev/null || echo 0)" -ge 2 ]; then
 check "attempts both the process-group KILL and the direct-PID backstop" "both" "$got"
 if grep -q '^kill -TERM' "$KILL_LOG2" 2>/dev/null; then got=present; else got=missing; fi
 check "never sends a plain TERM (issue #296 self-review: TERM alone is caught by this script's own trap and doesn't stop it)" "missing" "$got"
+if grep -qi 'Shutting down' "$TEST_DIR/run-check.out"; then got=present; else got=missing; fi
+check "no TMUX_PANE -> old kill-only shutdown message printed (issue #405 fallback path)" "present" "$got"
+if grep -q 'watch.stale_daemon_respawn' "$EVENTS_LOG2"; then got=logged; else got=missing; fi
+check "no TMUX_PANE -> watch.stale_daemon_respawn NOT logged (issue #405)" "missing" "$got"
+
+heading "Test 2b: watcher_check_staleness — issue #405 auto-respawns its own tmux pane when TMUX_PANE is known"
+# Same fixture as Test 2, but with TMUX_PANE set (as it would be for a real
+# watcher spawned by llm-start.sh's `tmux split-window`) and `tmux` stubbed
+# to record its invocation rather than touch any real pane.
+EVENTS_LOG2B="$TEST_DIR/events2b.log"
+KILL_LOG2B="$TEST_DIR/kill2b.log"
+TMUX_LOG2B="$TEST_DIR/tmux2b.log"
+cat > "$TEST_DIR/run-check-respawn.sh" <<SCRIPT
+#!/usr/bin/env bash
+set -euo pipefail
+TMUX_PANE="%37"
+EVENTS_LOG="$EVENTS_LOG2B"
+WATCHER_STALE_CHECK=1
+WATCHER_STALE_RESPAWN=1
+WATCHER_SELF_PATH="$FAKE_SCRIPT2"
+WATCHER_LAUNCH_MTIME=0
+WATCHER_STARTED_AT="2026-08-08T10:00:00Z"
+WATCH_TIMER_PID=""
+WORKER_COMPACT_TIMER_PID=""
+AUTO_COMPACT_POLL_TIMER_PID=""
+STALE_CHECK_PID=""
+WATCHER_ECHO_PID=""
+seen_file=""
+kill() { printf 'kill %s\n' "\$*" >> "$KILL_LOG2B"; return 0; }
+# \`command -v tmux\` finds this shell function directly (bash resolves
+# functions same as external commands for -v), so no need to also stub
+# \`command\` itself.
+tmux() { printf 'tmux %s\n' "\$*" >> "$TMUX_LOG2B"; return 0; }
+$STALE_FNS
+watcher_check_staleness
+echo "UNREACHABLE — watcher_check_staleness should have exited first"
+exit 99
+SCRIPT
+chmod +x "$TEST_DIR/run-check-respawn.sh"
+
+set +e
+bash "$TEST_DIR/run-check-respawn.sh" >"$TEST_DIR/run-check-respawn.out" 2>&1
+RUN_RC2B=$?
+set -e
+
+check "respawn path: watcher_check_staleness exits 0" "0" "$RUN_RC2B"
+if grep -qE '^tmux respawn-pane -k -t %37$' "$TMUX_LOG2B" 2>/dev/null; then got=called; else got=missing; fi
+check "respawn path: calls tmux respawn-pane -k -t <own pane>" "called" "$got"
+if grep -q 'watch.stale_daemon_respawn' "$EVENTS_LOG2B"; then got=logged; else got=missing; fi
+check "respawn path: watch.stale_daemon_respawn logged" "logged" "$got"
+if grep -qF 'pane=%37' "$EVENTS_LOG2B"; then got=present; else got=missing; fi
+check "respawn path: watch.stale_daemon_respawn records the pane id" "present" "$got"
+if grep -qi 'Respawning pane' "$TEST_DIR/run-check-respawn.out"; then got=present; else got=missing; fi
+check "respawn path: human-readable respawn banner printed" "present" "$got"
+if grep -qi 'Shutting down' "$TEST_DIR/run-check-respawn.out"; then got=present; else got=missing; fi
+check "respawn path: old kill-only message NOT printed instead" "missing" "$got"
+if grep -qE '^kill -KILL -[0-9]+' "$KILL_LOG2B" 2>/dev/null && [ "$(grep -c '^kill -KILL' "$KILL_LOG2B" 2>/dev/null || echo 0)" -ge 2 ]; then got=both; else got=missing; fi
+check "respawn path: the uncatchable SIGKILL backstop still fires after the respawn attempt" "both" "$got"
+
+heading "Test 2c: watcher_check_staleness — WATCHER_STALE_RESPAWN=0 keeps the pre-#405 kill-only behavior even with TMUX_PANE set"
+EVENTS_LOG2C="$TEST_DIR/events2c.log"
+KILL_LOG2C="$TEST_DIR/kill2c.log"
+TMUX_LOG2C="$TEST_DIR/tmux2c.log"
+cat > "$TEST_DIR/run-check-respawn-disabled.sh" <<SCRIPT
+#!/usr/bin/env bash
+set -euo pipefail
+TMUX_PANE="%37"
+EVENTS_LOG="$EVENTS_LOG2C"
+WATCHER_STALE_CHECK=1
+WATCHER_STALE_RESPAWN=0
+WATCHER_SELF_PATH="$FAKE_SCRIPT2"
+WATCHER_LAUNCH_MTIME=0
+WATCHER_STARTED_AT="2026-08-08T10:00:00Z"
+WATCH_TIMER_PID=""
+WORKER_COMPACT_TIMER_PID=""
+AUTO_COMPACT_POLL_TIMER_PID=""
+STALE_CHECK_PID=""
+WATCHER_ECHO_PID=""
+seen_file=""
+kill() { printf 'kill %s\n' "\$*" >> "$KILL_LOG2C"; return 0; }
+tmux() { printf 'tmux %s\n' "\$*" >> "$TMUX_LOG2C"; return 0; }
+$STALE_FNS
+watcher_check_staleness
+exit 99
+SCRIPT
+chmod +x "$TEST_DIR/run-check-respawn-disabled.sh"
+bash "$TEST_DIR/run-check-respawn-disabled.sh" >"$TEST_DIR/run-check-respawn-disabled.out" 2>&1 || true
+if [ -s "$TMUX_LOG2C" ]; then got=called; else got=not_called; fi
+check "WATCHER_STALE_RESPAWN=0 -> tmux never invoked even though TMUX_PANE is set" "not_called" "$got"
+if grep -qi 'Shutting down' "$TEST_DIR/run-check-respawn-disabled.out"; then got=present; else got=missing; fi
+check "WATCHER_STALE_RESPAWN=0 -> old kill-only shutdown message printed" "present" "$got"
+
+heading "Test 2d: watcher_check_staleness — a FAILED tmux respawn-pane logs watch.stale_daemon_respawn_failed, never the success event (self-review finding)"
+# Self-review finding on issue #405's first pass: watch.stale_daemon_respawn
+# was logged unconditionally BEFORE the tmux call, so a failed respawn (gone
+# pane id, dead tmux server) still left the "it worked" line in events.log —
+# indistinguishable from a real recovery. This exercises that failure path:
+# the stubbed \`tmux\` here returns non-zero, as the real binary would for a
+# stale/nonexistent pane target.
+EVENTS_LOG2D="$TEST_DIR/events2d.log"
+KILL_LOG2D="$TEST_DIR/kill2d.log"
+TMUX_LOG2D="$TEST_DIR/tmux2d.log"
+cat > "$TEST_DIR/run-check-respawn-failed.sh" <<SCRIPT
+#!/usr/bin/env bash
+set -euo pipefail
+TMUX_PANE="%37"
+EVENTS_LOG="$EVENTS_LOG2D"
+WATCHER_STALE_CHECK=1
+WATCHER_STALE_RESPAWN=1
+WATCHER_SELF_PATH="$FAKE_SCRIPT2"
+WATCHER_LAUNCH_MTIME=0
+WATCHER_STARTED_AT="2026-08-08T10:00:00Z"
+WATCH_TIMER_PID=""
+WORKER_COMPACT_TIMER_PID=""
+AUTO_COMPACT_POLL_TIMER_PID=""
+STALE_CHECK_PID=""
+WATCHER_ECHO_PID=""
+seen_file=""
+kill() { printf 'kill %s\n' "\$*" >> "$KILL_LOG2D"; return 0; }
+tmux() { printf 'tmux %s\n' "\$*" >> "$TMUX_LOG2D"; return 1; }
+$STALE_FNS
+watcher_check_staleness
+echo "UNREACHABLE — watcher_check_staleness should have exited first"
+exit 99
+SCRIPT
+chmod +x "$TEST_DIR/run-check-respawn-failed.sh"
+
+set +e
+bash "$TEST_DIR/run-check-respawn-failed.sh" >"$TEST_DIR/run-check-respawn-failed.out" 2>&1
+RUN_RC2D=$?
+set -e
+
+check "failed respawn: watcher_check_staleness still exits 0 (the SIGKILL backstop still runs)" "0" "$RUN_RC2D"
+if grep -qE '^tmux respawn-pane -k -t %37$' "$TMUX_LOG2D" 2>/dev/null; then got=called; else got=missing; fi
+check "failed respawn: tmux respawn-pane was still attempted" "called" "$got"
+if grep -q 'watch.stale_daemon_respawn_failed' "$EVENTS_LOG2D"; then got=logged; else got=missing; fi
+check "failed respawn: watch.stale_daemon_respawn_failed logged" "logged" "$got"
+if grep -qE 'watch\.stale_daemon_respawn[^_]' "$EVENTS_LOG2D" || grep -qE 'watch\.stale_daemon_respawn$' "$EVENTS_LOG2D"; then got=present; else got=missing; fi
+check "failed respawn: the SUCCESS event is NOT also logged (no false 'it worked' line)" "missing" "$got"
+if grep -qi 'Respawn attempt failed' "$TEST_DIR/run-check-respawn-failed.out"; then got=present; else got=missing; fi
+check "failed respawn: human-readable failure message printed, pointing back at llm-start.sh" "present" "$got"
+if grep -qE '^kill -KILL -[0-9]+' "$KILL_LOG2D" 2>/dev/null && [ "$(grep -c '^kill -KILL' "$KILL_LOG2D" 2>/dev/null || echo 0)" -ge 2 ]; then got=both; else got=missing; fi
+check "failed respawn: the uncatchable SIGKILL backstop still fires" "both" "$got"
 
 heading "Test 3: watcher_check_staleness — no-op on a fresh script"
 : > "$EVENTS_LOG2"

@@ -334,12 +334,18 @@
 #                           confirmed by code review: this script's own
 #                           EXIT/INT/TERM trap catches it and never calls
 #                           `exit`, so the poll backend's bare `while true`
-#                           loop just keeps looping past it. Nothing
-#                           currently auto-restarts the daemon afterward: a
-#                           human (or the coordinator) needs to notice the
-#                           dead pane and re-run llm-start.sh (WATCH=1, the
-#                           default, is idempotent about spawning the
-#                           watcher — see that script's own comment). Use
+#                           loop just keeps looping past it. When
+#                           WATCHER_STALE_RESPAWN=1 (the default, see below)
+#                           and this pane's identity is known, the shutdown
+#                           asks tmux to respawn this same pane before the
+#                           kill lands, so the gap is bounded to seconds, not
+#                           however long it takes a human to notice. Failing
+#                           that (respawn disabled, not running under tmux,
+#                           or the respawn attempt itself fails), a human (or
+#                           the coordinator) needs to notice the dead pane
+#                           and re-run llm-start.sh (WATCH=1, the default, is
+#                           idempotent about spawning the watcher — see that
+#                           script's own comment). Use
 #                           `coordinator-watch.sh --check-stale` (see USAGE
 #                           above) to check this cheaply without waiting for
 #                           the periodic sweep. Set to 0 to disable the
@@ -363,6 +369,50 @@
 #                           (WATCH_PR_POLL_SECS, WORKER_AUTO_COMPACT, ...)
 #                           is disabled, since a stale daemon can misapply
 #                           ANY of this file's logic, not just auto-compact.
+#   WATCHER_STALE_RESPAWN=1  (issue #405) A bare self-kill on staleness left
+#                           a real swarm (fand-etl) wake-dead for ~2 days:
+#                           its tmux session had been up since before the
+#                           watcher pane died, so it never got a fresh
+#                           `llm-start.sh` run to relaunch the watcher, and
+#                           nothing else ever did. With this on (the
+#                           default), watcher_check_staleness — after logging
+#                           watch.stale_daemon and running cleanup_on_exit as
+#                           before — checks $TMUX_PANE (set automatically by
+#                           tmux for every process it spawns, including the
+#                           `split-window` command llm-start.sh uses to
+#                           launch this script) and, when set and a `tmux`
+#                           binary is on PATH, runs
+#                           `tmux respawn-pane -k -t "$TMUX_PANE"`: this
+#                           kills whatever's running in the pane (this
+#                           process) and immediately restarts the pane's
+#                           ORIGINAL start command — the very
+#                           coordinator-watch.sh invocation, with the same
+#                           env, that llm-start.sh built — which reparses the
+#                           now-current script and starts clean (this
+#                           script's state is always re-derived at startup,
+#                           same as any fresh watcher launch, so there's
+#                           nothing to carry across). This is exactly the
+#                           manual recovery issue #405 verified by hand
+#                           (`tmux respawn-pane -t <session>:util.<pane>`
+#                           immediately drained the backlog: synthesized
+#                           outcome files, fired the pending wake) — now
+#                           automatic. watch.stale_daemon_respawn is logged
+#                           only on that command's SUCCESS (exit 0), not
+#                           merely on attempting it — a gone/stale pane id or
+#                           a dead tmux server exits non-zero and logs
+#                           watch.stale_daemon_respawn_failed instead, so the
+#                           events.log distinction actually reflects whether
+#                           the pane came back, not just whether a respawn
+#                           was tried. The uncatchable SIGKILL below still
+#                           always runs right after, unconditionally: it's
+#                           the backstop for when TMUX_PANE is unset (not
+#                           running under tmux — e.g. these tests), `tmux` is
+#                           missing, or the respawn attempt itself fails — in
+#                           every one of those cases this still degrades to
+#                           the old kill-only behavior, never a hang. Set to
+#                           0 to keep the pre-#405 kill-only behavior (a
+#                           human or the coordinator must notice and re-run
+#                           llm-start.sh).
 #   AUTO_COMPACT=1          Before waking a long-lived coordinator (live
 #                           claude REPL still in the pane, not a fresh
 #                           launch), check its context usage and inject a
@@ -1323,6 +1373,18 @@ EVENTS LOG
                            started — logged once, immediately before this daemon shuts itself
                            down entirely (script, launch_mtime, current_mtime, pid, started_at);
                            see WATCHER_STALE_CHECK in the header comment
+      watch.stale_daemon_respawn
+                           (issue #405) logged right after watch.stale_daemon, only when
+                           WATCHER_STALE_RESPAWN=1, this pane's identity (TMUX_PANE) is
+                           known, AND `tmux respawn-pane -k` (asked to restart this pane's
+                           original command under the now-current code) exited 0 — this is
+                           a claim the pane actually came back, not just that a respawn was
+                           attempted; see WATCHER_STALE_RESPAWN in the header comment
+      watch.stale_daemon_respawn_failed
+                           (issue #405) logged instead of watch.stale_daemon_respawn when
+                           `tmux respawn-pane -k` exited non-zero (gone/stale pane id, dead
+                           tmux server) — the pane may still be dead; the old kill-only
+                           recovery (re-run llm-start.sh) applies (pane, pid)
       watch.pr_poll        terminal PR detected via periodic gh poll (reap backstop);
                            reason=stale_pr_ignored when the terminal PR
                            predates the worktree (issue #185 — recycled
@@ -1619,6 +1681,10 @@ WATCHER_QUIET="${WATCHER_QUIET:-0}"
 # issue #296 — see this file's WATCHER_STALE_CHECK header comment.
 WATCHER_STALE_CHECK="${WATCHER_STALE_CHECK:-1}"
 WATCHER_STALE_CHECK_SECS="${WATCHER_STALE_CHECK_SECS:-300}"
+# issue #405 — see this file's WATCHER_STALE_RESPAWN header comment (near
+# WATCHER_STALE_CHECK above): auto-respawn the pane on staleness instead of
+# a bare self-kill that nothing ever un-does.
+WATCHER_STALE_RESPAWN="${WATCHER_STALE_RESPAWN:-1}"
 AUTO_COMPACT="${AUTO_COMPACT:-1}"
 AUTO_COMPACT_THRESHOLD_TOKENS="${AUTO_COMPACT_THRESHOLD_TOKENS:-150000}"
 # issue #296 — refuse the flat-fallback threshold above when the window
@@ -2355,12 +2421,14 @@ watcher_is_stale() {
 # skips traps entirely, so this is the only chance for sibling timer loops
 # (WATCH_TIMER_PID etc.) to be reaped; without it they'd be orphaned rather
 # than cleaned up, even though the group-kill below would still catch any
-# of them that happen to share this process group. Relies on something
-# else — a human or the coordinator — noticing the resulting dead pane and
-# re-running llm-start.sh (idempotent about spawning the watcher) to get a
-# fresh process running the current code; see WATCHER_STALE_CHECK's header
-# comment for the incident this closes and --check-stale for a cheap way
-# to notice this happened without waiting on the pane.
+# of them that happen to share this process group. Before #405,
+# this relied on something else — a human or the coordinator — noticing the
+# resulting dead pane and re-running llm-start.sh to get a fresh process
+# running the current code; see WATCHER_STALE_CHECK's header comment for the
+# incident that closed (fand-etl went wake-dead for ~2 days) and
+# WATCHER_STALE_RESPAWN's header comment (just above) for the tmux
+# respawn-pane call this function now attempts first, and --check-stale for
+# a cheap way to notice a dead watcher without waiting on the pane.
 watcher_check_staleness() {
     [ "$WATCHER_STALE_CHECK" = "1" ] || return 0
     watcher_is_stale || return 0
@@ -2369,8 +2437,31 @@ watcher_check_staleness() {
     [ -n "$current_mtime" ] || current_mtime=0
     log_event watch.stale_daemon "script=$WATCHER_SELF_PATH launch_mtime=$WATCHER_LAUNCH_MTIME current_mtime=$current_mtime pid=$$ started_at=$WATCHER_STARTED_AT"
     echo "[$(date +%T)] STALE DAEMON: $WATCHER_SELF_PATH changed on disk since this watcher started ($WATCHER_STARTED_AT, mtime $WATCHER_LAUNCH_MTIME -> $current_mtime)."
-    echo "[$(date +%T)] Shutting down so a fresh process can pick up the current code — re-run llm-start.sh (WATCH=1, the default) to restart the watcher."
     cleanup_on_exit
+    # issue #405 — respawn our own pane before the unconditional kill below,
+    # so the current code comes back up in seconds instead of leaving the
+    # pane dead until a human (or a fresh llm-start.sh run) notices. See
+    # WATCHER_STALE_RESPAWN's header comment for why this is safe (state is
+    # always re-derived at startup) and why the kill below still always runs
+    # regardless — this is a best-effort head start, not a replacement for
+    # the backstop.
+    if [ "$WATCHER_STALE_RESPAWN" = "1" ] && [ -n "${TMUX_PANE:-}" ] && command -v tmux >/dev/null 2>&1; then
+        echo "[$(date +%T)] Respawning pane $TMUX_PANE so the current code restarts automatically — no human action needed."
+        # Logged AFTER the call, keyed on ITS exit status — not unconditionally
+        # before — so watch.stale_daemon_respawn is a claim the pane actually
+        # came back, not just that a respawn was attempted (self-review
+        # finding: a gone/stale pane id or a dead tmux server exits non-zero
+        # here, and the earlier unconditional log line made that look
+        # identical to success in events.log).
+        if tmux respawn-pane -k -t "$TMUX_PANE" 2>/dev/null; then
+            log_event watch.stale_daemon_respawn "pane=$TMUX_PANE pid=$$"
+        else
+            log_event watch.stale_daemon_respawn_failed "pane=$TMUX_PANE pid=$$"
+            echo "[$(date +%T)] Respawn attempt failed — the pane may stay dead. Re-run llm-start.sh (WATCH=1, the default) if it does."
+        fi
+    else
+        echo "[$(date +%T)] Shutting down so a fresh process can pick up the current code — re-run llm-start.sh (WATCH=1, the default) to restart the watcher."
+    fi
     kill -KILL -$$ 2>/dev/null || true
     kill -KILL "$$" 2>/dev/null || true
     exit 0
