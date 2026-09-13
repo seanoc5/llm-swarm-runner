@@ -112,6 +112,8 @@ APP_URL=http://localhost:8080
 
 Add `.sandbox-env` to your project's `.gitignore` to avoid committing credentials.
 
+A `GH_TOKEN=github_pat_…` line in this file gives that project's workers a **narrower GitHub credential** than your own `gh` login (which is otherwise injected and reaches every repo you can). When the line is present `sandbox.sh` skips the host token, and the session header prints `GH token: .sandbox-env`. Test the token with `scripts/gh-token-probe.sh` before relying on it — see [gh-token-scoping.md](./gh-token-scoping.md) for the permission table and swap procedure. (#418)
+
 ### Agent Commit Authorship (`SWARM_GIT_IDENTITY`)
 
 The sandbox mounts your `~/.gitconfig` read-only, so without this every commit an agent makes is authored by *you* — and months later `git log` cannot tell agent work from hand-written work. `sandbox.sh` therefore injects a git **author** identity on the `docker run` line:

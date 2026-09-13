@@ -325,8 +325,26 @@ fi
 # to docker. Docker then reads the value from our env at run time, so the token
 # never appears in the container's argv (which would be visible via `ps -ef`,
 # /proc/<pid>/cmdline, audit logs, and shell history).
+#
+# SCOPING (#418): the host's `gh` login is the operator's own credential —
+# on this host a classic OAuth grant with `repo` + `workflow`, reaching every
+# repository the operator can. A worker only needs write on the one repo it
+# was provisioned for. To hand workers a narrower credential (a fine-grained
+# PAT limited to the swarm's repos), put `GH_TOKEN=github_pat_…` in
+# <project>/.sandbox-env: it is per-project, gitignored, symlinked into every
+# worktree by provision-worker.sh, and Docker reads it as a FILE
+# (`--env-file`), so the token never appears in any argv. When that line is
+# present the host token is NOT injected — otherwise the `-e GH_TOKEN` below
+# would outrank the env-file value for the same key and silently hand the
+# worker the broad credential anyway. Host-side scripts (the coordinator,
+# coordinator-watch.sh, kill-finished-workers.sh) keep using the operator's
+# login; it is only the agents running arbitrary code whose reach shrinks.
 GH_TOKEN_OPTS=()
-if command -v gh &>/dev/null; then
+GH_TOKEN_SOURCE="none"
+if [ -f "$PROJECT_DIR/.sandbox-env" ] \
+   && grep -qE '^[[:space:]]*GH_TOKEN=' "$PROJECT_DIR/.sandbox-env" 2>/dev/null; then
+    GH_TOKEN_SOURCE=".sandbox-env"
+elif command -v gh &>/dev/null; then
     # `|| true`: gh installed but not logged in exits 1, and under `set -e` an
     # assignment from a failing command substitution takes the whole script
     # down — silently, before `docker run`. No token is a valid state (the
@@ -335,6 +353,7 @@ if command -v gh &>/dev/null; then
     if [ -n "$_gh_token" ]; then
         export GH_TOKEN="$_gh_token"
         GH_TOKEN_OPTS=(-e GH_TOKEN)
+        GH_TOKEN_SOURCE="host gh login"
     fi
     unset _gh_token
 fi
@@ -469,6 +488,7 @@ fi
 echo "--- LLM Sandbox Session ---"
 echo "Project:  $PROJECT_DIR"
 echo "Agent:    $AGENT"
+echo "GH token: $GH_TOKEN_SOURCE"
 if [ "${#GIT_IDENTITY_OPTS[@]}" -gt 0 ]; then
     echo "Commits:  author $SANDBOX_GIT_AUTHOR_NAME <$SANDBOX_GIT_AUTHOR_EMAIL> (committer = host identity)"
 fi
