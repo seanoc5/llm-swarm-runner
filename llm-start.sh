@@ -233,6 +233,65 @@ if [ "${SWARM_WORKTREE_GROUPING:-}" = "project" ]; then
     warn_legacy_flat_worktrees "$PWD"
 fi
 
+# --- Stranded worktree brief detection (issue #376) -------------------------
+# A tmux session restart (server reboot, `tmux kill-server`, etc.) leaves
+# worker worktrees on disk with their branch/queue state intact but with no
+# corresponding `iss-N` window — a brief still sitting in
+# `.swarm/tasks/{inbox,processing}/` for that worktree then has no listener
+# left to drain it, and sits invisible indefinitely. kill-worktree.sh's
+# salvage-on-reap path (issue #317) doesn't help here: it only fires when a
+# worktree is actually reaped, and a session restart never reaps anything.
+# Real incident, 2026-09-08: a 2026-09-05 session restart stranded a queued
+# BLOCK-fix brief in wt-issue-271's inbox/ for 3 days, and a claimed-but-dead
+# brief in wt-issue-298's processing/, with nothing surfacing either.
+#
+# Detection only (this issue's scope) — never auto-respawn or auto-deliver;
+# the coordinator decides re-provision vs. archive (a stranded brief may be
+# moot, e.g. its PR already merged while the session was down). See
+# prompts/coordinator.md's "Stranded worktree briefs" subsection.
+#
+# Uses swarm_own_worktree_dirs (scripts/_load-env.sh, sourced above) rather
+# than a hardcoded `../wt-issue-*` glob — that pattern was PR #356's BLOCK
+# verdict (issue #357: a flat-grouping glob silently matches a same-numbered
+# worktree belonging to a different project's swarm at the same parent dir).
+# swarm_own_worktree_dirs is immune to that regardless of
+# SWARM_WORKTREE_GROUPING, so this check needs no grouping gate of its own
+# (unlike warn_legacy_flat_worktrees above).
+#
+# Live-window check runs BEFORE this script's own session-existence check
+# further below, on purpose: if no swarm session exists yet at all (the
+# exact restart scenario), `tmux list-windows` fails harmlessly (2>/dev/null
+# → empty), which correctly treats every worktree with a queued brief as
+# stranded rather than skipping the check.
+warn_stranded_worktree_briefs() {
+    local project_dir="$1" session_name="$2"
+    local -A live=()
+    local w wt issue inbox_n proc_n
+
+    while IFS= read -r w; do
+        [ -n "$w" ] || continue
+        live["$w"]=1
+    done < <(tmux list-windows -t "$session_name" -F '#W' 2>/dev/null || true)
+
+    while IFS= read -r wt; do
+        [ -n "$wt" ] || continue
+        issue="$(basename "$wt" | sed -n 's/^wt-issue-\([0-9][0-9]*\)$/\1/p')"
+        [ -n "$issue" ] || continue
+        [ -n "${live[iss-$issue]:-}" ] && continue
+
+        inbox_n=0
+        proc_n=0
+        [ -d "$wt/.swarm/tasks/inbox" ] && inbox_n="$(find "$wt/.swarm/tasks/inbox" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')"
+        [ -d "$wt/.swarm/tasks/processing" ] && proc_n="$(find "$wt/.swarm/tasks/processing" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')"
+
+        if [ "${inbox_n:-0}" -gt 0 ] || [ "${proc_n:-0}" -gt 0 ]; then
+            echo "WARN: stranded worktree wt-issue-$issue — no live iss-$issue window; undelivered brief(s) queued (inbox=$inbox_n processing=$proc_n) — re-provision or archive, see prompts/coordinator.md \"Stranded worktree briefs\"" >&2
+        fi
+    done < <(swarm_own_worktree_dirs "$project_dir")
+}
+
+warn_stranded_worktree_briefs "$PWD" "$SESSION_NAME"
+
 # Allow overriding the coordinator command and model
 COORD_CMD="${COORDINATOR_CMD:-claude}"
 # Default model depends on which coordinator is running:
