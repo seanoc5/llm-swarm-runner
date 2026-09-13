@@ -41,6 +41,24 @@
 #   before removing the worktree (or, with --refuse-nonempty-inbox, skips
 #   that worktree entirely). --dry-run previews the would-be-salvaged
 #   counts per window without touching anything.
+#
+# WINDOWLESS WORKTREES (issue #406)
+#   Everything above keys off live `iss-*` tmux windows, so a tmux session
+#   restart (every window gone, worktrees untouched on disk) orphans any
+#   worktree whose PR already finalized while its window was alive.
+#   --with-worktree combined with --merged-only or --pr-finalized (the two
+#   modes that already gate purely on PR state, bypassing "parked"
+#   scrollback a dead window can no longer show) additionally scans this
+#   project's OWN registered worktrees via list-own-worktrees.sh's
+#   swarm_own_worktree_dirs() — never a path glob (issue #357) — for any
+#   whose issue number has no matching `iss-*` window at all, and applies
+#   the exact same terminal-state test before routing removal through
+#   kill-worktree.sh (same salvage/orphan-notify semantics as any other
+#   reap). A worktree with no window and an OPEN (or absent) PR is left
+#   untouched, same as always. --idle-min does NOT apply to these entries
+#   (there is no pane to measure inactivity on — a windowless worktree has
+#   no live process at all), and the closing "Done. Closed N window(s)."
+#   tally counts them alongside actual window kills.
 
 set -euo pipefail
 
@@ -78,7 +96,10 @@ FLAGS
                             parked check is bypassed in this mode (the
                             window is reaped even if claude's REPL is
                             still open — the PR being MERGED means the
-                            work is preserved upstream).
+                            work is preserved upstream). With
+                            --with-worktree, also reaps a registered
+                            worktree with NO matching iss-* window at all
+                            (issue #406 — see WINDOWLESS WORKTREES above).
         --pr-finalized      Reap when PR state is MERGED *or* CLOSED.
                             "Finalized" means GitHub considers the PR done
                             (user merged it, or closed it as
@@ -88,7 +109,10 @@ FLAGS
                             via `gh pr reopen N`. Used by the watcher's
                             autoclose pass for smoother slot reclamation.
                             Parked check is bypassed in this mode for the
-                            same reason as --merged-only.
+                            same reason as --merged-only. With
+                            --with-worktree, also reaps a registered
+                            worktree with NO matching iss-* window at all
+                            (issue #406 — see WINDOWLESS WORKTREES above).
     -i, --idle-min N        Require N+ minutes since last pane activity
                             (default 0 — any parked window is eligible)
     -w, --with-worktree     Also remove git worktree + delete branch
@@ -230,12 +254,26 @@ NOW=$(date +%s)
 # rather than nonzero when no matches.
 mapfile -t WINDOWS < <(tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep '^iss-' || true)
 
-if [ "${#WINDOWS[@]}" -eq 0 ]; then
-    echo "No iss-* windows in session '$SESSION_NAME'."
-    exit 0
+# issue #406: --merged-only/--pr-finalized already gate purely on PR state
+# (bypassing "parked", which needs a live window to observe in the first
+# place), so with --with-worktree these two modes still have windowless
+# worktrees worth scanning even when zero iss-* windows exist at all (a
+# tmux session restart drops every window but leaves worktrees on disk).
+# Every other mode/flag combo keeps the old exit-immediately behavior.
+CHECK_WINDOWLESS=0
+if [ "$WITH_WT" = "1" ] && { [ "$MERGED_ONLY" = "1" ] || [ "$PR_FINALIZED" = "1" ]; }; then
+    CHECK_WINDOWLESS=1
 fi
 
-echo "Found ${#WINDOWS[@]} iss-* window(s) in session '$SESSION_NAME':"
+if [ "${#WINDOWS[@]}" -eq 0 ]; then
+    echo "No iss-* windows in session '$SESSION_NAME'."
+    if [ "$CHECK_WINDOWLESS" = "0" ]; then
+        exit 0
+    fi
+    echo "Scanning for windowless worktrees (--with-worktree + pr-gated mode)..."
+else
+    echo "Found ${#WINDOWS[@]} iss-* window(s) in session '$SESSION_NAME':"
+fi
 
 # Helpers --------------------------------------------------------------------
 
@@ -442,6 +480,13 @@ pr_is_finalized() {
 # Decide which ones to kill ---------------------------------------------------
 KILL_LIST=()
 declare -A KILL_REASONS KILL_BRANCH
+# issue #406: issue numbers already covered by a live iss-* window, so the
+# windowless-worktree scan below never double-processes one whose window
+# just happens to still be around.
+declare -A WINDOW_ISSUES
+for w in "${WINDOWS[@]}"; do
+    WINDOW_ISSUES["${w#iss-}"]=1
+done
 # Tally of default-mode windows skipped only because their PR is CLOSED
 # without merging — surfaced in the "nothing to kill" summary below so
 # --pr-finalized doesn't stay a silent, undiscoverable escape hatch
@@ -556,6 +601,62 @@ for w in "${WINDOWS[@]}"; do
     KILL_REASONS[$w]="${reasons_str// /_}"
     KILL_BRANCH[$w]="${branch:-}"
 done
+
+# Windowless worktrees (issue #406) -------------------------------------------
+#
+# A tmux session restart drops every iss-* window while the worktrees
+# themselves (and whatever PR state their branch reached in the meantime)
+# survive untouched on disk. The loop above can never see one of these —
+# it only ever iterates WINDOWS. --merged-only/--pr-finalized already gate
+# purely on terminal PR state rather than "parked" scrollback (which needs
+# a live window to print into), so those two modes extend naturally to a
+# worktree with no window at all. Discovered via swarm_own_worktree_dirs
+# (sourced from _load-env.sh — same function list-own-worktrees.sh wraps)
+# rather than a path glob (issue #357), and gated on --with-worktree since
+# there is nothing to reap here without it.
+if [ "$CHECK_WINDOWLESS" = "1" ]; then
+    while IFS= read -r wt; do
+        [ -n "$wt" ] || continue
+        issue="$(basename "$wt")"
+        issue="${issue#wt-issue-}"
+        # Already decided above (its iss-* window is still alive) — skip
+        # to avoid a duplicate kill-worktree.sh invocation.
+        [ -n "${WINDOW_ISSUES[$issue]:-}" ] && continue
+
+        w="iss-$issue"
+        reasons=()
+        # Same detached-HEAD/corrupt-registration guard as worktree_branch()
+        # above: print an explicit skip rather than silently falling back
+        # to a dirname-derived branch that may have nothing to do with
+        # what's actually checked out here.
+        branch="$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+        if [ -z "$branch" ]; then
+            echo "  $w  [no window; can't resolve worktree branch (detached HEAD or corrupt worktree registration) → skip]"
+            continue
+        fi
+        fetch_pr_state "$branch" || true
+
+        if [ "$MERGED_ONLY" = "1" ]; then
+            if ! pr_is_merged "$wt"; then
+                echo "  $w  [no window; PR $branch: ${PR_SKIP_REASON:-unknown reason} → skip (merged-only mode)]"
+                continue
+            fi
+            reasons+=("no-window" "PR-merged")
+        else
+            if ! pr_is_finalized "$wt"; then
+                echo "  $w  [no window; PR $branch: ${PR_SKIP_REASON:-unknown reason} → skip (pr-finalized mode)]"
+                continue
+            fi
+            reasons+=("no-window" "PR-finalized")
+        fi
+
+        echo "  $w  [$(IFS=,; echo "${reasons[*]}") → kill]"
+        KILL_LIST+=("$w")
+        reasons_str="$(IFS=,; echo "${reasons[*]}")"
+        KILL_REASONS[$w]="${reasons_str// /_}"
+        KILL_BRANCH[$w]="$branch"
+    done < <(swarm_own_worktree_dirs "$PROJECT_DIR")
+fi
 
 if [ "${#KILL_LIST[@]}" -eq 0 ]; then
     echo
