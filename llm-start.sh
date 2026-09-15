@@ -395,9 +395,21 @@ COORD_BUSY_PATTERN="${COORD_BUSY_PATTERN:-\(esc to interrupt\)|Press Ctrl-C agai
 # trimmed of common composer chrome, after excluding a persistent ctx:
 # statusline. See that function's header comment for the caveats this
 # inherits (an unverified guess at TUI composer framing).
+#
+# `-J` (issue #422 self-review finding): capture-pane WITHOUT it reports
+# one output line per rendered PANE ROW, so a single long logical line
+# that soft-wraps across several rows (the default WAKE_PROMPT is ~300
+# chars — routinely several rows in a normal-width pane) comes back as
+# several separate "lines," and a plain `tail -1` would only see the
+# LAST wrapped fragment, not the composer's actual last logical line. `-J`
+# rejoins tmux's own soft-wrapped rows before this function ever sees
+# them, so `tail -1` below gets the true last logical line regardless of
+# pane width — load-bearing for reprompt_retry_safe's content comparison,
+# below, which would otherwise compare a full pasted prompt against a
+# truncated tail fragment of itself and never match.
 reprompt_last_pane_line() {
     local target="$1" content clean
-    content="$(tmux capture-pane -t "$target" -p 2>/dev/null)" || { echo ""; return 1; }
+    content="$(tmux capture-pane -t "$target" -p -J 2>/dev/null)" || { echo ""; return 1; }
     clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
     printf '%s\n' "$clean" \
         | LC_ALL=C grep -vE 'ctx: [0-9]+[kM]?/[0-9]+[kM]?[[:space:]]*\([0-9]+%\)' \
@@ -468,11 +480,11 @@ reprompt_composer_dirty() {
     return 0
 }
 
-# reprompt_retry_safe <tmux-target> <prompt-first-line>
+# reprompt_retry_safe <tmux-target> <prompt-last-line>
 #
 # (issue #422 constraint: "guard the blind retry-Enter too") Before
 # reprompt_inject's retry-Enter, true (rc 0) only when the composer's
-# trimmed last line still starts with <prompt-first-line> — i.e. what's
+# trimmed last rendered line ENDS WITH <prompt-last-line> — i.e. what's
 # sitting there is plausibly OUR OWN just-pasted prompt, still unsubmitted,
 # and safe to re-Enter. False (rc 1) for anything else, including content
 # that appeared in the ~settle-second window after our paste that isn't
@@ -481,14 +493,22 @@ reprompt_composer_dirty() {
 # paste. reprompt_confirm_submitted already treats an EMPTY composer as
 # confirmed-submitted and never calls this, so the "unrelated content"
 # case is the only one this function has to rule on.
+#
+# Compares against the prompt's LAST line, not its first (issue #422
+# self-review finding on this function's first version): a genuinely
+# multi-line prompt (OUTBOX_WAKE_PROMPT/ACTIVITY_WAKE_PROMPT's defaults
+# both embed real newlines) still submits as a multi-line composer entry,
+# so the pane's LAST rendered line corresponds to the prompt's LAST line,
+# never its first — a first-line comparison would misread every genuine
+# multi-line prompt as foreign content and permanently suppress the
+# retry-Enter for it. `[[ == * ]]` with the pattern side quoted (not a
+# `case` glob) so characters like `*`/`?`/`[` that can legitimately appear
+# in prose don't get interpreted as wildcards.
 reprompt_retry_safe() {
-    local target="$1" prompt_first_line="$2" last
-    [ -n "$prompt_first_line" ] || return 1
+    local target="$1" prompt_last_line="$2" last
+    [ -n "$prompt_last_line" ] || return 1
     last="$(reprompt_last_pane_line "$target")" || true
-    case "$last" in
-        "$prompt_first_line"*) return 0 ;;
-        *)                     return 1 ;;
-    esac
+    [[ "$last" == *"$prompt_last_line" ]]
 }
 
 # reprompt_inject <tmux-target> <prompt-file>
@@ -529,8 +549,12 @@ reprompt_inject() {
         return 2
     fi
 
-    local prompt_first_line
-    prompt_first_line="$(grep -m1 -v '^[[:space:]]*$' "$prompt_file" 2>/dev/null || true)"
+    # Last (not first) non-blank line — see reprompt_retry_safe's header
+    # comment for why: a genuinely multi-line prompt submits as a
+    # multi-line composer entry, so the pane's last rendered line lines up
+    # with the prompt's last line, never its first.
+    local prompt_last_line
+    prompt_last_line="$(grep -v '^[[:space:]]*$' "$prompt_file" 2>/dev/null | tail -1 || true)"
 
     tmux load-buffer -b llm-coord-reprompt "$prompt_file"
     tmux paste-buffer -b llm-coord-reprompt -t "$target" -d
@@ -539,7 +563,7 @@ reprompt_inject() {
     tmux send-keys -t "$target" Enter
     sleep "$COMPACT_SUBMIT_SETTLE_SECS"
     if ! reprompt_confirm_submitted "$target" "$COORD_BUSY_PATTERN"; then
-        if ! reprompt_retry_safe "$target" "$prompt_first_line"; then
+        if ! reprompt_retry_safe "$target" "$prompt_last_line"; then
             echo "WARN: composer holds unrelated content after paste — not force-submitting; check pane $target" >&2
             log_event coord.wake.skip "reason=composer_dirty_after_paste trigger=reprompt"
             return 2

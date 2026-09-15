@@ -305,6 +305,44 @@ check "retried Enter reaches the CLI -> no false submit_failed" "absent" "$got"
 
 tmux kill-session -t "$EATFIRST_SESSION" 2>/dev/null || true
 
+heading "Test 2b: reprompt_inject — eaten-first-Enter retry survives a WRAPPED long prompt (issue #422 self-review finding)"
+# Same fake-repl-eatfirst.sh fixture as Test 2, but with a long single-line
+# prompt (no embedded newline) in a pane fixed to a narrow 80-column width
+# — the exact shape of the real default WAKE_PROMPT (~300 chars, one
+# logical line). Without capture-pane -J in reprompt_last_pane_line, and
+# without comparing against the prompt's LAST line in reprompt_retry_safe,
+# this composer's rendered content soft-wraps across several pane rows and
+# `tail -1` only ever sees the final wrapped fragment — which never starts
+# with (or, pre-fix, matches) the full pasted text, so the eaten-first-
+# Enter retry gets wrongly treated as "foreign content" and reprompt_inject
+# returns 2 instead of 0. Reuses $FAKE_REPL_EATFIRST (already written to
+# $TEST_DIR by Test 2, unchanged) in a fresh, fixed-width session.
+EATFIRST_WRAP_SESSION="${SESSION_NAME}-eatfirst-wrap"
+tmux new-session -d -s "$EATFIRST_WRAP_SESSION" -n coordinator -x 80 -y 24 2>/dev/null
+sleep 0.3   # see Test 1's identical comment on this settle delay
+tmux send-keys -t "$EATFIRST_WRAP_SESSION:coordinator" "exec -a claude bash $FAKE_REPL_EATFIRST" Enter
+check_eventually "eat-first-wrap session: fake REPL foreground" "yes" \
+    "pane_contains '$EATFIRST_WRAP_SESSION:coordinator' 'idle-prompt >'"
+
+PROMPT_FILE2B="$TEST_DIR/prompt2b.txt"
+# ~290 chars, no trailing newline (see Test 2's identical comment on why)
+# — comfortably wraps across multiple rows at 80 columns once rendered
+# behind the "❯ " composer marker.
+printf 'Worker(s) just finished. Triage their outcome JSONs in worktrees/.swarm/tasks/done/, then top up workers per the Initial Startup Checklist (compute AVAILABLE, count alive workers, fill open slots up to MAX_WORKERS subject to MAX_TMUX_WINDOWS).' > "$PROMPT_FILE2B"
+: > "$EVENTS_LOG"
+rc=0
+reprompt_inject "$EATFIRST_WRAP_SESSION:coordinator" "$PROMPT_FILE2B" || rc=$?
+
+check "reprompt_inject succeeds through the retry even when the composer wraps across rows" "0" "$rc"
+
+if grep -q 'coord.wake.resubmit' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "wrapped composer: first Enter eaten -> coord.wake.resubmit logged" "logged" "$got"
+
+if grep -qE 'coord\.wake\.skip.*reason=composer_dirty_after_paste' "$EVENTS_LOG"; then got=present; else got=absent; fi
+check "wrapped composer must NOT be misread as foreign content" "absent" "$got"
+
+tmux kill-session -t "$EATFIRST_WRAP_SESSION" 2>/dev/null || true
+
 heading "Test 3: reprompt_inject — composer clear pre-paste, then stuck post-paste -> coord.wake.submit_failed, not silent (issue #295 acceptance)"
 # Starts with a genuinely EMPTY composer (so issue #422's pre-paste
 # reprompt_composer_dirty check passes and the paste actually happens —
