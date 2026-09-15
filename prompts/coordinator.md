@@ -20,7 +20,7 @@ When the user asks you to "Execute the Initial Startup Checklist" (or you are wo
 
 The AVAILABLE filter is the single source of truth for "issues a worker can pick up right now."
 
-**Mechanical filters** — run the script (it honors `OWNER_LABELS` / `INCLUDE_ASSIGNED_TO_OTHERS`; default scope is assigned-to-me or unassigned, minus stop-labels `blocked`/`deferred`/`awaiting-review`):
+**Mechanical filters** — run the script (it honors `OWNER_LABELS` / `INCLUDE_ASSIGNED_TO_OTHERS` / `EXTRA_STOP_LABELS`; default scope is assigned-to-me or unassigned, minus stop-labels `blocked`/`deferred`/`awaiting-review`, minus `EXTRA_STOP_LABELS` which defaults to `demo` — issues deliberately kept open as `demo-driver.sh` recording fodder, see #409):
 
 ```bash
 {{LLM_SWARM_DIR}}/scripts/available-issues.sh
@@ -35,7 +35,7 @@ The AVAILABLE filter is the single source of truth for "issues a worker can pick
 
 The result is the **AVAILABLE** set. Cache it for the rest of this checklist run.
 
-**Override modes:** user free-text ("grab anything", "include others", "regardless of assignee") → treat as `INCLUDE_ASSIGNED_TO_OTHERS=1` for this run only, and say so. Sticky version: set it in `<project>/.swarm/.env`. A watcher wake (`WAKE_PROMPT`) carries no override intent of its own — use the default filter unless the sticky env is set.
+**Override modes:** user free-text ("grab anything", "include others", "regardless of assignee") → treat as `INCLUDE_ASSIGNED_TO_OTHERS=1` for this run only, and say so. Sticky version: set it in `<project>/.swarm/.env`. A watcher wake (`WAKE_PROMPT`) carries no override intent of its own — use the default filter unless the sticky env is set. Similarly, free-text asking to include demo issues ("include the demo issues too") → `EXTRA_STOP_LABELS=""` for this run only.
 
 ## Caps (NEVER violate)
 
