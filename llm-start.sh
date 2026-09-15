@@ -395,9 +395,48 @@ COORD_BUSY_PATTERN="${COORD_BUSY_PATTERN:-\(esc to interrupt\)|Press Ctrl-C agai
 # trimmed of common composer chrome, after excluding a persistent ctx:
 # statusline. See that function's header comment for the caveats this
 # inherits (an unverified guess at TUI composer framing).
+#
+# `-J` (issue #422 self-review finding): capture-pane WITHOUT it reports
+# one output line per rendered PANE ROW, so a single long logical line
+# that soft-wraps across several rows (the default WAKE_PROMPT is ~300
+# chars — routinely several rows in a normal-width pane) comes back as
+# several separate "lines," and a plain `tail -1` would only see the
+# LAST wrapped fragment, not the composer's actual last logical line. `-J`
+# rejoins tmux's own soft-wrapped rows before this function ever sees
+# them, so `tail -1` below gets the true last logical line — PROVIDED the
+# wrap is actually tmux's own soft-wrap (the terminal auto-wrapping raw
+# unbroken output, which is what `-J` is documented to rejoin).
+#
+# UNVERIFIED (self-review, second round — flag for live-pane verification
+# before trusting the retry-Enter path on a real long prompt): Claude
+# Code's TUI is Ink-based, and Ink-style renderers commonly do their OWN
+# width-aware line-wrapping client-side and emit an explicit hard newline
+# at each wrap point, rather than relying on the terminal's ambient
+# auto-wrap. If that's how the real composer renders a long WAKE_PROMPT,
+# those are hard newlines from tmux's point of view — NOT soft-wrapped
+# rows — and `-J` would not rejoin them; reprompt_retry_safe's exact-
+# equality check (below) would then never match a wrapped multi-row
+# prompt, and the #290/#291 eaten-first-Enter retry would keep reading a
+# still-unsubmitted paste as "foreign," deferring it every retry. This is
+# FAIL-SAFE, not corrupting, if wrong (coord_wake_retry_pass's bounded
+# COORD_WAKE_DEFER_WARN_SECS WARN still fires and nothing is dropped or
+# force-submitted) — but it's an open question this PR could not verify
+# without an attached real Claude Code session. If you can check: paste a
+# long (~300 char) single-line prompt into a real idle coordinator
+# composer and compare `tmux capture-pane -p` against `tmux capture-pane
+# -p -J` — identical output means Ink is hard-newlining (this guess is
+# wrong; the fix would be comparing the whole composer body, not one
+# line); different output confirms tmux soft-wrap (this guess holds).
+#
+# Either way, `-J` is strictly an improvement over no-`-J` here — it's
+# never WRONG to rejoin actual soft-wraps, it just may not be SUFFICIENT
+# on its own if Ink is also hard-newlining. Load-bearing for
+# reprompt_retry_safe's content comparison below, which would otherwise
+# compare a full pasted prompt against a truncated tail fragment of
+# itself and never match.
 reprompt_last_pane_line() {
     local target="$1" content clean
-    content="$(tmux capture-pane -t "$target" -p 2>/dev/null)" || { echo ""; return 1; }
+    content="$(tmux capture-pane -t "$target" -p -J 2>/dev/null)" || { echo ""; return 1; }
     clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
     printf '%s\n' "$clean" \
         | LC_ALL=C grep -vE 'ctx: [0-9]+[kM]?/[0-9]+[kM]?[[:space:]]*\([0-9]+%\)' \
@@ -424,6 +463,118 @@ reprompt_confirm_submitted() {
     [ -z "$last" ]
 }
 
+# REPROMPT_CHROME_PATTERN — known non-input chrome that can legitimately
+# render as the composer's trimmed last line, per docs/tmux-as-channel.md
+# §1d's chrome catalog: the "※ recap:" summary line, and a session-resume
+# picker ("❯ 1. Resume from summary…" / "Resume this session with…"). Text
+# matching this is excluded from consideration by reprompt_composer_dirty
+# below rather than counted as a human draft. The persistent "ctx: N/M
+# (P%)" statusline is already excluded upstream by reprompt_last_pane_line
+# itself. NOT covered here (a known, accepted limitation — see
+# reprompt_composer_dirty's own comment): Claude Code's dimmed suggested-
+# next-prompt autofill renders identically to typed text in a plain-text
+# capture-pane, so it cannot be distinguished from a real draft this way.
+#
+# No leading "❯" alternative in the "N. Resume from" branch (self-review
+# finding on an earlier version that had `^❯?...`): under this function's
+# own LC_ALL=C byte-mode grep, `?` on a multi-byte UTF-8 character like
+# "❯" only makes its LAST byte optional, not the whole 3-byte character —
+# so `^❯?[0-9]+\.` would require the literal first two bytes of "❯" to
+# always be present, silently failing to match a picker line that has no
+# leading marker at all. Not needed anyway: reprompt_last_pane_line's own
+# leading-chrome strip already removes a leading "❯"/">"/etc marker (and
+# surrounding whitespace) before this pattern ever sees the line, so by
+# the time it's checked here any such marker is already gone.
+REPROMPT_CHROME_PATTERN="${REPROMPT_CHROME_PATTERN:-^※ recap:|Resume this session with|^[0-9]+\.[[:space:]]*Resume from}"
+
+# reprompt_composer_dirty <tmux-target> <busy-pattern>
+#
+# (issue #422, #366 part B) Pre-injection guard: true (rc 0, "dirty") if
+# <target>'s composer visibly holds non-whitespace content that isn't
+# recognized UI chrome — i.e. reprompt_last_pane_line's trimmed result is
+# non-empty and doesn't match REPROMPT_CHROME_PATTERN. False (rc 1,
+# "clear") when the composer is genuinely empty or holds only recognized
+# chrome. Callers MUST check this before pasting anything — that's the gap
+# #366 found: every wake path gated on the busy-indicator pattern
+# (COORD_BUSY_PATTERN, checked post-paste by reprompt_confirm_submitted),
+# and "a human typing at an idle prompt" is not busy, so a coordinator
+# wake could paste straight into — and submit — an unsubmitted draft (the
+# corpusminder-spring incident, 2026-09-14: WAKE_PROMPT pasted mid-sentence
+# into an operator's in-progress message, then Enter'd).
+#
+# <busy-pattern> is checked FIRST (self-review finding on this function's
+# first version): a coordinator mid-turn (spinner/"esc to interrupt"
+# visible) is not what #366 is about — pasting a follow-up prompt while
+# busy is the EXISTING, already-safe behavior this PR must not change
+# (Claude Code queues it — "Press up to edit queued messages" — and
+# reprompt_confirm_submitted already treats a busy match as confirmed-
+# submitted for exactly this reason). Without this check, the busy-turn
+# chrome itself (e.g. the spinner line, briefly the pane's only content
+# right after a screen clear) would misread as "a draft" and defer a wake
+# that used to land fine — a real regression, not the gap #366 describes.
+# So: busy match -> always "clear" (proceed to paste/queue), full stop,
+# before any composer-content inspection at all.
+#
+# Known, accepted limitation (docs/tmux-as-channel.md §1d "Pane content is
+# not verified truth"): Claude Code's dimmed suggested-next-prompt autofill
+# renders identically to typed text in a plain-text capture-pane, so it
+# reads as dirty here too. That's a deliberate fail-safe — never paste
+# over what MIGHT be a draft — trading a deferred wake for a lost or
+# garbled one. Callers must not defer silently forever on the strength of
+# that false-positive risk alone; see coordinator-watch.sh's
+# coord_wake_retry_pass for the bounded-warning backstop.
+reprompt_composer_dirty() {
+    local target="$1" busy_pattern="$2" content clean last
+    content="$(tmux capture-pane -t "$target" -p 2>/dev/null)" || return 1
+    clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
+    printf '%s\n' "$clean" | LC_ALL=C grep -qE "$busy_pattern" && return 1
+    last="$(reprompt_last_pane_line "$target")" || true
+    [ -n "$last" ] || return 1
+    printf '%s\n' "$last" | LC_ALL=C grep -qE "$REPROMPT_CHROME_PATTERN" && return 1
+    return 0
+}
+
+# reprompt_retry_safe <tmux-target> <prompt-last-line>
+#
+# (issue #422 constraint: "guard the blind retry-Enter too") Before
+# reprompt_inject's retry-Enter, true (rc 0) only when the composer's
+# trimmed last rendered line EQUALS <prompt-last-line> exactly — i.e.
+# what's sitting there is plausibly OUR OWN just-pasted prompt, still
+# unsubmitted, verbatim, and safe to re-Enter. False (rc 1) for anything
+# else, including content that appeared in the ~settle-second window
+# after our paste that isn't ours (an operator started typing something
+# new, or the TUI re-rendered something unrelated) — never force-submit
+# content this script didn't paste. reprompt_confirm_submitted already
+# treats an EMPTY composer as confirmed-submitted and never calls this,
+# so the "unrelated content" case is the only one this function has to
+# rule on.
+#
+# Exact equality, not a suffix/prefix match (issue #422 self-review
+# finding on an earlier version of this function that used `== *pattern`,
+# a suffix check): "<a human's draft>OUR PASTE" still ENDS WITH our
+# pasted text, so a suffix match would read that concatenation as safe
+# and retry-Enter it — submitting the operator's draft glued to our wake
+# prompt, exactly the corruption #422 exists to prevent, if the pre-paste
+# dirty check ever raced with a keystroke landing in the gap between that
+# check and the paste itself. Equality closes that: ANY extra content
+# before or after our own text — not just unrelated content replacing it
+# — reads as unsafe.
+#
+# Compares against the prompt's LAST line, not its first (issue #422
+# self-review finding on this function's first version): a genuinely
+# multi-line prompt (OUTBOX_WAKE_PROMPT/ACTIVITY_WAKE_PROMPT's defaults
+# both embed real newlines) still submits as a multi-line composer entry,
+# so the pane's LAST rendered line corresponds to the prompt's LAST line,
+# never its first — a first-line comparison would misread every genuine
+# multi-line prompt as foreign content and permanently suppress the
+# retry-Enter for it.
+reprompt_retry_safe() {
+    local target="$1" prompt_last_line="$2" last
+    [ -n "$prompt_last_line" ] || return 1
+    last="$(reprompt_last_pane_line "$target")" || true
+    [ "$last" = "$prompt_last_line" ]
+}
+
 # reprompt_inject <tmux-target> <prompt-file>
 #
 # Performs the load-buffer + paste-buffer + settle + Enter + confirm +
@@ -437,12 +588,38 @@ reprompt_confirm_submitted() {
 # before logging (never silently dropping) a failure. Pulled into its own
 # function — rather than left inline at the call site — so it can be
 # exercised directly against a fake-REPL fixture, the same technique
-# test-coordinator-auto-compact.sh uses against maybe_auto_compact. Returns
-# 1 (after logging coord.wake.submit_failed) only if the retry also fails
-# to confirm; callers should treat that as non-fatal (`|| true`) since the
-# rest of this script's launch/attach flow still needs to run.
+# test-coordinator-auto-compact.sh uses against maybe_auto_compact.
+#
+# (issue #422) Checks reprompt_composer_dirty FIRST, before touching tmux
+# at all — a dirty composer means don't paste, full stop; nothing is
+# loaded/pasted/entered in that case. Returns distinctly from a submit
+# failure so callers can tell "there's a human draft in the way, retry
+# later" (2 — never logged as an error, never fatal) apart from "the paste
+# went in but Enter never landed" (1). Return values:
+#   0  submitted and confirmed
+#   1  submit failed after the resubmit retry (coord.wake.submit_failed
+#      logged) — non-fatal; callers should treat this as `|| true` since
+#      the rest of this script's launch/attach flow still needs to run
+#   2  deferred: composer held unsubmitted content pre-paste, or the
+#      content sitting there after paste+Enter didn't match what was
+#      pasted (coord.wake.skip reason=composer_dirty[_after_paste] logged
+#      either way) — callers must retry this same prompt later rather than
+#      treating it as delivered or dropping it
 reprompt_inject() {
     local target="$1" prompt_file="$2"
+
+    if reprompt_composer_dirty "$target" "$COORD_BUSY_PATTERN"; then
+        log_event coord.wake.skip "reason=composer_dirty trigger=reprompt"
+        return 2
+    fi
+
+    # Last (not first) non-blank line — see reprompt_retry_safe's header
+    # comment for why: a genuinely multi-line prompt submits as a
+    # multi-line composer entry, so the pane's last rendered line lines up
+    # with the prompt's last line, never its first.
+    local prompt_last_line
+    prompt_last_line="$(grep -v '^[[:space:]]*$' "$prompt_file" 2>/dev/null | tail -1 || true)"
+
     tmux load-buffer -b llm-coord-reprompt "$prompt_file"
     tmux paste-buffer -b llm-coord-reprompt -t "$target" -d
 
@@ -450,6 +627,11 @@ reprompt_inject() {
     tmux send-keys -t "$target" Enter
     sleep "$COMPACT_SUBMIT_SETTLE_SECS"
     if ! reprompt_confirm_submitted "$target" "$COORD_BUSY_PATTERN"; then
+        if ! reprompt_retry_safe "$target" "$prompt_last_line"; then
+            echo "WARN: composer holds unrelated content after paste — not force-submitting; check pane $target" >&2
+            log_event coord.wake.skip "reason=composer_dirty_after_paste trigger=reprompt"
+            return 2
+        fi
         log_event coord.wake.resubmit "trigger=reprompt"
         tmux send-keys -t "$target" Enter
         sleep "$COMPACT_SUBMIT_SETTLE_SECS"
@@ -461,6 +643,13 @@ reprompt_inject() {
     fi
     return 0
 }
+
+# issue #422: set by the live-REPL reprompt elif branch below when
+# reprompt_inject defers (rc 2) rather than delivers — read at the very end
+# of this script to give callers a distinct exit status for "retry this
+# wake later" (see that branch's comment, and reprompt_inject's own header
+# comment for the full return-code contract).
+REPROMPT_DEFERRED=0
 
 # Check if already inside tmux
 IN_TMUX=false
@@ -751,12 +940,20 @@ elif [ "$COORD_CMD" = "claude" ] && [ "${COORDINATOR_HEADLESS:-0}" != "1" ]; the
     # the single injection site to fix. reprompt_inject (defined above)
     # applies issue #291's settle-then-verify-then-retry-once sequence
     # instead of the old bare paste+instant-Enter. A failed-after-retry
-    # submit is logged, not fatal to the rest of this script's launch/
-    # attach flow — hence `|| true`.
+    # submit (rc 1) is logged, not fatal to the rest of this script's
+    # launch/attach flow. A deferred submit (rc 2, issue #422 — the
+    # composer held an unsubmitted human draft) is likewise non-fatal here,
+    # but IS surfaced to the caller as this whole script's exit status
+    # (REPROMPT_DEFERRED, checked at the very end) so a caller like
+    # coordinator-watch.sh's wake dispatchers can tell "retry this prompt
+    # later" apart from every other outcome — see that reprompt_inject's
+    # own header comment for the full return-code contract.
     TMP_PROMPT=$(mktemp)
     printf '%s\n' "$INITIAL_PROMPT" > "$TMP_PROMPT"
-    reprompt_inject "$SESSION_NAME:coordinator" "$TMP_PROMPT" || true
+    REPROMPT_RC=0
+    reprompt_inject "$SESSION_NAME:coordinator" "$TMP_PROMPT" || REPROMPT_RC=$?
     rm -f "$TMP_PROMPT"
+    [ "$REPROMPT_RC" = "2" ] && REPROMPT_DEFERRED=1
 fi
 
 # Optionally spawn coordinator-watch.sh as a second pane inside the util
@@ -829,4 +1026,15 @@ if [ "${NON_INTERACTIVE:-0}" != "1" ]; then
 else
     echo "NON_INTERACTIVE is set. Session $SESSION_NAME created but not attaching."
     echo "Attach with: tmux -L $SWARM_SOCKET attach -t $SESSION_NAME"
+fi
+
+# issue #422: a deferred reprompt (composer held an unsubmitted human
+# draft) is the one outcome this script has to report distinctly — see
+# REPROMPT_DEFERRED's declaration above and reprompt_inject's return-code
+# contract. Everything else in this run (session/window setup, the WATCH/
+# STATUS panes, the attach above) already happened normally; this is only
+# about the wake-prompt delivery itself, so it's checked last, as this
+# script's final exit status rather than short-circuiting any of that.
+if [ "$REPROMPT_DEFERRED" = "1" ]; then
+    exit 3
 fi

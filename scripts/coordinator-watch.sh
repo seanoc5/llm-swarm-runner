@@ -333,6 +333,39 @@
 #                           activity_poll_pass found and asks the coordinator
 #                           to reconcile its own picture of outstanding
 #                           decisions/PRs against it.
+#   COORD_WAKE_RETRY_SECS=15
+#                           (issue #422, #366 part B) llm-start.sh's
+#                           reprompt_inject refuses to paste a wake over a
+#                           coordinator composer that holds an unsubmitted
+#                           human draft — it defers instead (exit 3) rather
+#                           than risk pasting mid-sentence into someone's
+#                           in-progress message (the corpusminder-spring
+#                           incident, 2026-09-14, that prompted this: a
+#                           default WAKE_PROMPT landed mid-draft and got
+#                           Enter'd before the operator could stop it).
+#                           on_outcome/on_message/on_activity all persist a
+#                           deferred prompt to COORD_WAKE_PENDING_FILE
+#                           (coord_wake_set_pending) instead of dropping
+#                           it, and this timer — same gate-inside-the-
+#                           tighter-loop shape as WATCH_PR_POLL_SECS —
+#                           retries it (coord_wake_retry_pass) until the
+#                           composer clears and the prompt actually lands.
+#                           Set to 0 to disable retrying (a deferred wake
+#                           then just stays deferred).
+#   COORD_WAKE_DEFER_WARN_SECS=300
+#                           (issue #422) How long a wake can sit deferred
+#                           before coord_wake_retry_pass logs one loud WARN
+#                           (repeated at this same interval, not every
+#                           retry tick) rather than retrying in total
+#                           silence. The retry itself never gives up — a
+#                           deferred wake must not be dropped — but a
+#                           composer that reads dirty on every single retry
+#                           is itself worth a human's attention, especially
+#                           given reprompt_composer_dirty's one known
+#                           false-positive source (Claude Code's dimmed
+#                           autofill suggestion reads identically to a real
+#                           draft in a plain-text capture-pane — see that
+#                           function's header comment in llm-start.sh).
 #   WATCH_CHECK_ON_DONE=1   Set to 0 to disable check-on-done. When enabled,
 #                           the watcher treats a worker as "done" via either
 #                           signal: (a) a `.swarm/tasks/status/<id>.json`
@@ -1401,6 +1434,8 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     WATCH_ACTIVITY_POLL_SECS 300  periodic gh poll for PRs/issues resolved out-of-band, e.g. in the GitHub web UI (0=off); see header comment (issue #392)
     ACTIVITY_POLL_OVERLAP_SECS 30  cursor overlap tolerating gh search-index lag; dedup maps prevent re-announcing
     COORD_WAKE_LOCK_TIMEOUT_SECS 60  max wait to flock COORD_WAKE_LOCK before a wake gives up (see that lock's header comment)
+    COORD_WAKE_RETRY_SECS 15      retry interval for a wake llm-start.sh deferred (composer held an unsubmitted human draft, issue #422); 0=off
+    COORD_WAKE_DEFER_WARN_SECS 300  loud WARN threshold for a wake still deferred this long (issue #422); retries never stop on their own
     ACTIVITY_WAKE_PROMPT (built-in) what the coordinator does on an activity-poll wake
     WATCH_CHECK_ON_DONE 1         run acceptance check when a worker signals done; see header comment
     SESSION_NAME        (auto)    tmux session for chk-N windows (llm-<project-basename>)
@@ -1463,6 +1498,18 @@ EVENTS LOG
       worker.finish.skip   outcome JSON detected for a foreign worktree
                            (sibling repo sharing the same WORKSPACE parent)
       coord.wake           llm-start.sh invoked (or coord.wake.skip on debounce)
+      coord.wake.deferred  (issue #422) llm-start.sh reported a dirty coordinator
+                           composer (rc 3) instead of pasting — reason=composer_dirty;
+                           the prompt is persisted for coord_wake_retry_pass, not dropped
+      coord.wake.retry     (issue #422) coord_wake_retry_pass re-attempted a
+                           previously-deferred wake (age=Ns since it first deferred)
+      coord.wake.deferred_delivered
+                           (issue #422) a retried deferred wake finally landed —
+                           COORD_WAKE_PENDING_FILE cleared
+      coord.wake.deferred_stale
+                           (issue #422) a wake has been deferred ≥COORD_WAKE_DEFER_WARN_SECS
+                           with every retry still reading the composer dirty — loud WARN,
+                           not a give-up (retries continue); see that var's header comment
       sweep.run            sweep-swarm-outcomes.sh fired (when POST_OUTCOMES=1)
       watch.autoclose      kill-finished-workers.sh reaped ≥1 window (trigger=outcome|pr_poll,
                            killed=N); passes that reap nothing are not logged
@@ -2038,6 +2085,59 @@ if ! [[ "$COORD_WAKE_LOCK_TIMEOUT_SECS" =~ ^[0-9]+$ ]]; then
     exit 1
 fi
 
+# issue #422 (#366 part B): llm-start.sh's reprompt_inject now defers
+# (exit 3, see its header comment) rather than pastes when the coordinator
+# composer holds an unsubmitted human draft, instead of blindly pasting
+# over it. A deferred wake must not be dropped — coord_wake_set_pending/
+# coord_wake_retry_pass (below on_activity) persist it here as a FILE, not
+# a plain global: on_outcome/on_message run in the main watcher process,
+# but the retry pass runs from run_watch_timer_loop's own background
+# subshell (a genuinely separate OS process — same cross-process
+# constraint COORD_WAKE_LOCK exists for, see its header comment above),
+# and an in-memory global written in one process is invisible in the
+# other. COORD_WAKE_PENDING_FILE's own mtime doubles as "since when has
+# this been deferred" (mtime_epoch, defined below) rather than embedding a
+# timestamp in the file — the file's content is the prompt text verbatim,
+# which could otherwise collide with any timestamp-parsing convention.
+# COORD_WAKE_PENDING_WARNED_FILE's mtime is "when did we last emit the
+# bounded-deferral WARN" (its own file so touch(1) doesn't disturb the
+# prompt file's mtime). Reads/writes to both are flocked under
+# COORD_WAKE_LOCK — the same lock already serializing every process's
+# llm-start.sh call — rather than a dedicated lock, since the two classes
+# of access never need to be ordered against each other independently.
+COORD_WAKE_PENDING_FILE="$PROJECT_DIR/.swarm/coord-wake-pending.prompt"
+COORD_WAKE_PENDING_WARNED_FILE="$PROJECT_DIR/.swarm/coord-wake-pending.warned"
+
+# COORD_WAKE_RETRY_SECS (issue #422): how often run_watch_timer_loop
+# retries a deferred wake (coord_wake_retry_pass), same gate-inside-the-
+# tighter-loop shape as WATCH_PR_POLL_SECS/WATCH_ACTIVITY_POLL_SECS. 0
+# disables retrying — a deferred wake then simply stays deferred until the
+# next value change, which is never what you want outside a test; not
+# validated against 0 the way AUTO_COMPACT_POLL_SECS is against <1,
+# because "off" is a legitimate (if unusual) choice here, unlike a poll
+# tick that would otherwise busy-loop.
+COORD_WAKE_RETRY_SECS="${COORD_WAKE_RETRY_SECS:-15}"
+if ! [[ "$COORD_WAKE_RETRY_SECS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: COORD_WAKE_RETRY_SECS must be a non-negative integer (got: $COORD_WAKE_RETRY_SECS)" >&2
+    exit 1
+fi
+
+# COORD_WAKE_DEFER_WARN_SECS (issue #422): once a wake has stayed deferred
+# this long, coord_wake_retry_pass logs one loud WARN (repeated every
+# further COORD_WAKE_DEFER_WARN_SECS, not every retry tick) instead of
+# retrying silently forever. This is the bound the issue's own constraint
+# calls for: reprompt_composer_dirty has a known false-positive risk (the
+# composer's dimmed autofill suggestion reads identically to a real draft
+# in a plain-text capture — see that function's header comment in
+# llm-start.sh), so an operator needs a visible signal if a wake is stuck
+# behind a misread rather than a real draft — the retry itself never gives
+# up (the wake must not be dropped), only the SILENCE around it is bounded.
+COORD_WAKE_DEFER_WARN_SECS="${COORD_WAKE_DEFER_WARN_SECS:-300}"
+if ! [[ "$COORD_WAKE_DEFER_WARN_SECS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: COORD_WAKE_DEFER_WARN_SECS must be a non-negative integer (got: $COORD_WAKE_DEFER_WARN_SECS)" >&2
+    exit 1
+fi
+
 # log_event <category> <key=val>...
 # Writes one line: "<utc-iso8601>  <category>  k=v k=v ..."
 # Failures are non-fatal — log writes never break watcher work.
@@ -2074,6 +2174,10 @@ format_event_line() {
         coord.wake)                   glyph="→"; color=$'\033[36m' ;;
         coord.wake.skip)              glyph="⏸"; color=$'\033[33m' ;;
         coord.wake.error)             glyph="✗"; color=$'\033[31m' ;;
+        coord.wake.deferred)          glyph="⏸"; color=$'\033[33m' ;;
+        coord.wake.retry)             glyph="↻"; color=$'\033[36m' ;;
+        coord.wake.deferred_delivered) glyph="→"; color=$'\033[32m' ;;
+        coord.wake.deferred_stale)    glyph="⚠"; color=$'\033[31m' ;;
         coord.compact)                 glyph="◈"; color=$'\033[36m' ;;
         coord.compact.skip)             glyph="·"; color=$'\033[2m'  ;;
         coord.compact.timeout)           glyph="⚠"; color=$'\033[33m' ;;
@@ -2186,6 +2290,7 @@ pr-poll:       ${WATCH_PR_POLL_SECS}s$([ "$WATCH_PR_POLL_SECS" = "0" ] && echo "
 orphan-sweep:  ${WATCH_ORPHAN_SWEEP_SECS}s$([ "$WATCH_ORPHAN_SWEEP_SECS" = "0" ] && echo " (disabled)" || echo " (script: $REAP_ORPHAN)")
 bg-violation:  ${WATCH_BG_VIOLATION_SWEEP_SECS}s$([ "$WATCH_BG_VIOLATION_SWEEP_SECS" = "0" ] && echo " (disabled)" || echo " (foreground-only fallback detection, issue #298)")
 activity-poll: ${WATCH_ACTIVITY_POLL_SECS}s$([ "$WATCH_ACTIVITY_POLL_SECS" = "0" ] && echo " (disabled)" || echo " (out-of-band PR/issue resolution backstop, issue #392)")
+coord-wake-retry: ${COORD_WAKE_RETRY_SECS}s$([ "$COORD_WAKE_RETRY_SECS" = "0" ] && echo " (disabled)" || echo " (retry a dirty-composer-deferred wake, warn after ${COORD_WAKE_DEFER_WARN_SECS}s, issue #422)")
 check-on-done: $WATCH_CHECK_ON_DONE$([ "$WATCH_CHECK_ON_DONE" = "1" ] && echo " (session: $SESSION_NAME)")
 auto-compact:  $AUTO_COMPACT$([ "$AUTO_COMPACT" = "1" ] && echo " (threshold: min(${AUTO_COMPACT_PCT}% of window, ${AUTO_COMPACT_THRESHOLD_CAP_TOKENS}), fallback: ${AUTO_COMPACT_THRESHOLD_TOKENS} tokens, require-window: ${AUTO_COMPACT_REQUIRE_WINDOW}, probe: $AUTO_COMPACT_PROBE, poll-tick: ${AUTO_COMPACT_TICK_SECS}s$([ "$AUTO_COMPACT_TICK_SECS" = "0" ] && echo " disabled"), cooldown: ${AUTO_COMPACT_COOLDOWN_SECS}s)")
 worker-compact: $WORKER_AUTO_COMPACT$([ "$WORKER_AUTO_COMPACT" = "1" ] && echo " (threshold: min(${WORKER_COMPACT_PCT}% of window, ${WORKER_COMPACT_THRESHOLD_CAP_TOKENS})/wrapup+$(( WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS - WORKER_COMPACT_THRESHOLD_TOKENS )), fallback: ${WORKER_COMPACT_THRESHOLD_TOKENS}/${WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS} tokens, require-window: ${WORKER_COMPACT_REQUIRE_WINDOW}, scan: ${WORKER_COMPACT_SCAN_SECS}s)")
@@ -3626,10 +3731,17 @@ SCRIPT
 # run_auto_compact_poll_loop, started as its own background process right
 # after this function.
 run_watch_timer_loop() {
-    local last_pr_poll=0 last_orphan_sweep=0 last_bg_violation_sweep=0 last_activity_poll=0 now
+    local last_pr_poll=0 last_orphan_sweep=0 last_bg_violation_sweep=0 last_activity_poll=0 last_coord_wake_retry=0 now
     while true; do
         sleep 2
         [ "$WATCH_CHECK_ON_DONE" = "1" ] && { status_poll_pass || true; }
+        if [ "$COORD_WAKE_RETRY_SECS" -gt 0 ]; then
+            now=$(date +%s)
+            if [ $((now - last_coord_wake_retry)) -ge "$COORD_WAKE_RETRY_SECS" ]; then
+                coord_wake_retry_pass || true
+                last_coord_wake_retry=$now
+            fi
+        fi
         if [ "$WATCH_PR_POLL_SECS" -gt 0 ]; then
             now=$(date +%s)
             if [ $((now - last_pr_poll)) -ge "$WATCH_PR_POLL_SECS" ]; then
@@ -5273,6 +5385,120 @@ worker_compact_pass() {
     done <<< "$windows"
 }
 
+# coord_wake_set_pending <prompt>
+#
+# (issue #422) Records <prompt> as a wake still owed to the coordinator
+# after llm-start.sh's reprompt_inject deferred it (rc 3 — composer held
+# an unsubmitted human draft; see that function's header comment in
+# llm-start.sh). Writes COORD_WAKE_PENDING_FILE atomically (mktemp + mv)
+# under COORD_WAKE_LOCK, and — deliberately — never overwrites an already-
+# pending prompt: the first deferred wake already instructs a full
+# re-triage/re-scan (every default WAKE_PROMPT/OUTBOX_WAKE_PROMPT/
+# ACTIVITY_WAKE_PROMPT does), so delivering it late is sufficient to catch
+# whatever a second, still-deferred wake would also have said, and
+# overwriting would reset the file's mtime — the "since when has this been
+# deferred" clock coord_wake_retry_pass's bounded warning depends on —
+# for no benefit. Failure to acquire the lock or write the file is
+# non-fatal and silent here on purpose: the ORIGINAL caller (on_outcome/
+# on_message/on_activity) has already logged coord.wake.deferred before
+# calling this, so a lost pending-file write degrades to "wake dropped,
+# but visibly logged" rather than a wholly silent failure — the same
+# fail-open posture every other best-effort write in this file takes.
+coord_wake_set_pending() {
+    local prompt="$1"
+    (
+        flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 9 || exit 0
+        [ -e "$COORD_WAKE_PENDING_FILE" ] && exit 0
+        local tmp
+        tmp="$(mktemp "$(dirname "$COORD_WAKE_PENDING_FILE")/.tmp.coord-wake-pending.XXXXXX")" || exit 0
+        printf '%s' "$prompt" > "$tmp" 2>/dev/null && mv -f "$tmp" "$COORD_WAKE_PENDING_FILE" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+    ) 9>"$COORD_WAKE_LOCK" || true
+}
+
+# coord_wake_clear_pending
+#
+# (issue #422) Removes both pending-wake files under COORD_WAKE_LOCK —
+# called once coord_wake_retry_pass confirms a deferred wake actually
+# landed (rc 0 from the retry's own llm-start.sh call).
+coord_wake_clear_pending() {
+    ( flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 9 && rm -f "$COORD_WAKE_PENDING_FILE" "$COORD_WAKE_PENDING_WARNED_FILE" ) 9>"$COORD_WAKE_LOCK" || true
+}
+
+# coord_wake_retry_pass
+#
+# (issue #422) Re-attempts a wake previously deferred by
+# coord_wake_set_pending, on COORD_WAKE_RETRY_SECS's cadence from
+# run_watch_timer_loop (see COORD_WAKE_RETRY_SECS's header comment). A
+# no-op when nothing is pending. Otherwise re-invokes llm-start.sh with
+# the SAME saved prompt through the SAME single injection site every other
+# wake path uses (llm-start.sh's reprompt_inject) — no new send-keys
+# surface, per this issue's own constraint. A clean delivery (rc 0) clears
+# the pending file; a repeat deferral (rc 3) leaves it in place for the
+# next tick, so the wake is retried indefinitely and never dropped —
+# only the SILENCE around a long-stuck deferral is bounded, via the
+# COORD_WAKE_DEFER_WARN_SECS WARN below (see that var's header comment for
+# why: reprompt_composer_dirty has one known false-positive source — the
+# TUI's dimmed autofill suggestion reads identically to a real draft in a
+# plain-text capture — so a wake CAN get stuck on a misread rather than a
+# genuine draft, and that needs to be visible to a human, not silent).
+coord_wake_retry_pass() {
+    [ -e "$COORD_WAKE_PENDING_FILE" ] || return 0
+
+    local pending_prompt
+    pending_prompt="$(cat "$COORD_WAKE_PENDING_FILE" 2>/dev/null)" || return 0
+    if [ -z "$pending_prompt" ]; then
+        # Empty/unreadable — nothing worth retrying; drop it rather than
+        # retry forever on a file that can never satisfy anything.
+        coord_wake_clear_pending
+        return 0
+    fi
+
+    local since now age
+    since=$(mtime_epoch "$COORD_WAKE_PENDING_FILE") || since=$(date +%s)
+    now=$(date +%s)
+    age=$((now - since))
+
+    if [ "$age" -ge "$COORD_WAKE_DEFER_WARN_SECS" ]; then
+        local warned_at=0
+        if [ -e "$COORD_WAKE_PENDING_WARNED_FILE" ]; then
+            warned_at=$(mtime_epoch "$COORD_WAKE_PENDING_WARNED_FILE" 2>/dev/null || echo 0)
+        fi
+        if [ $((now - warned_at)) -ge "$COORD_WAKE_DEFER_WARN_SECS" ]; then
+            echo "[$(date +%T)] WARNING: coordinator wake has been deferred for ${age}s — composer keeps reading dirty on every retry (every ${COORD_WAKE_RETRY_SECS}s); check pane $SESSION_NAME:coordinator for a stuck human draft, or an autofill suggestion being misread as one (docs/tmux-as-channel.md §1d)"
+            log_event coord.wake.deferred_stale "age=${age}s"
+            touch "$COORD_WAKE_PENDING_WARNED_FILE" 2>/dev/null || true
+        fi
+    fi
+
+    echo "[$(date +%T)] retrying deferred coordinator wake (pending ${age}s)..."
+    log_event coord.wake.retry "age=${age}s"
+
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "[DRY] would retry: cd $PROJECT_DIR && NON_INTERACTIVE=1 $LLM_START <pending prompt, deferred ${age}s>"
+        log_event coord.wake.deferred_delivered "age=${age}s dry_run=1"
+        coord_wake_clear_pending
+        return 0
+    fi
+
+    local wake_rc=0
+    ( flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 9 && cd "$PROJECT_DIR" && NON_INTERACTIVE=1 "$LLM_START" "$pending_prompt" ) 9>"$COORD_WAKE_LOCK" || wake_rc=$?
+
+    case "$wake_rc" in
+        0)
+            echo "[$(date +%T)] deferred coordinator wake delivered."
+            log_event coord.wake.deferred_delivered "age=${age}s"
+            coord_wake_clear_pending
+            ;;
+        3)
+            log_event coord.wake.skip "reason=composer_dirty trigger=retry age=${age}s"
+            ;;
+        *)
+            echo "[$(date +%T)] WARN: deferred coordinator wake retry exited non-zero (continuing watch)"
+            log_event coord.wake.error "trigger=retry rc=$wake_rc age=${age}s"
+            ;;
+    esac
+}
+
 # Trigger logic — called when a NEW outcome JSON path is observed
 on_outcome() {
     local path="$1"
@@ -5337,10 +5563,32 @@ on_outcome() {
         # wait) plus && (not `;`) so EITHER a lock timeout OR a flock error
         # skips the unlocked llm-start.sh call entirely, falling through to
         # the same error handling below.
-        ( flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 9 && cd "$PROJECT_DIR" && NON_INTERACTIVE=1 "$LLM_START" "$WAKE_PROMPT" ) 9>"$COORD_WAKE_LOCK" || {
+        local wake_rc=0
+        ( flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 9 && cd "$PROJECT_DIR" && NON_INTERACTIVE=1 "$LLM_START" "$WAKE_PROMPT" ) 9>"$COORD_WAKE_LOCK" || wake_rc=$?
+        if [ "$wake_rc" = "3" ]; then
+            # issue #422: llm-start.sh's reprompt_inject found the composer
+            # holding an unsubmitted human draft and refused to paste over
+            # it. Not an error — persist the prompt for coord_wake_retry_pass
+            # (run_watch_timer_loop, COORD_WAKE_RETRY_SECS) instead of
+            # dropping it; see coord_wake_set_pending's header comment for
+            # why it's a file, not a plain global.
+            echo "[$(date +%T)] coordinator composer holds an unsubmitted draft — deferring wake, will retry"
+            log_event coord.wake.deferred "issue=$issue reason=composer_dirty"
+            coord_wake_set_pending "$WAKE_PROMPT"
+        elif [ "$wake_rc" != "0" ]; then
             echo "[$(date +%T)] WARN: coordinator wake exited non-zero (continuing watch)"
-            log_event coord.wake.error "issue=$issue"
-        }
+            log_event coord.wake.error "issue=$issue rc=$wake_rc"
+        else
+            # issue #422 self-review finding: this fresh wake just landed
+            # directly — drop any STALE prompt left over from an earlier
+            # deferral (coord_wake_set_pending never overwrites a pending
+            # entry, so one could still be sitting there from before the
+            # composer cleared). Without this, coord_wake_retry_pass would
+            # later deliver that stale prompt as a redundant duplicate wake,
+            # even though the coordinator already has fresher instructions.
+            # No-op (cheap) when nothing was pending.
+            coord_wake_clear_pending
+        fi
     fi
     LAST_WAKE=$now
 
@@ -5403,10 +5651,23 @@ on_message() {
     else
         # flock's COORD_WAKE_LOCK (issue #392, bounded -w) — see its
         # header comment and on_outcome's call site above for why -w/&&.
-        ( flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 9 && cd "$PROJECT_DIR" && NON_INTERACTIVE=1 "$LLM_START" "$wake_prompt" ) 9>"$COORD_WAKE_LOCK" || {
+        local wake_rc=0
+        ( flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 9 && cd "$PROJECT_DIR" && NON_INTERACTIVE=1 "$LLM_START" "$wake_prompt" ) 9>"$COORD_WAKE_LOCK" || wake_rc=$?
+        if [ "$wake_rc" = "3" ]; then
+            # issue #422 — see on_outcome's identical branch for the full
+            # rationale.
+            echo "[$(date +%T)] coordinator composer holds an unsubmitted draft — deferring wake, will retry"
+            log_event coord.wake.deferred "issue=$issue reason=composer_dirty trigger=outbox"
+            coord_wake_set_pending "$wake_prompt"
+        elif [ "$wake_rc" != "0" ]; then
             echo "[$(date +%T)] WARN: coordinator wake exited non-zero (continuing watch)"
-            log_event coord.wake.error "issue=$issue trigger=outbox"
-        }
+            log_event coord.wake.error "issue=$issue trigger=outbox rc=$wake_rc"
+        else
+            # issue #422 self-review finding — see on_outcome's identical
+            # branch for the full rationale (drop a stale pending prompt
+            # now that a fresh one just landed directly).
+            coord_wake_clear_pending
+        fi
     fi
     LAST_MSG_WAKE=$now
 
@@ -5487,11 +5748,29 @@ Re-check your own picture of outstanding decisions/PRs/issues against this (gh p
         # comment for why this waits (bounded, not unbounded) rather than
         # skipping outright like maybe_auto_compact's -n does (a compact
         # isn't a message anyone would otherwise miss; a wake is).
-        ( flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 9 && cd "$PROJECT_DIR" && NON_INTERACTIVE=1 "$LLM_START" "$wake_prompt" ) 9>"$COORD_WAKE_LOCK" || {
-            echo "[$(date +%T)] WARN: coordinator wake exited non-zero (continuing watch)"
-            log_event coord.wake.error "trigger=activity_poll"
+        local wake_rc=0
+        ( flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 9 && cd "$PROJECT_DIR" && NON_INTERACTIVE=1 "$LLM_START" "$wake_prompt" ) 9>"$COORD_WAKE_LOCK" || wake_rc=$?
+        if [ "$wake_rc" = "3" ]; then
+            # issue #422 — see on_outcome's identical branch for the full
+            # rationale. Also persisted here (fast COORD_WAKE_RETRY_SECS
+            # retry) as a complement to, not a replacement for, this
+            # function's existing "return 1 -> cursor doesn't advance"
+            # slow-path safety net a few lines below: whichever lands
+            # first delivers the same $lines content either way.
+            echo "[$(date +%T)] coordinator composer holds an unsubmitted draft — deferring wake, will retry"
+            log_event coord.wake.deferred "reason=composer_dirty trigger=activity_poll"
+            coord_wake_set_pending "$wake_prompt"
             wake_ok=0
-        }
+        elif [ "$wake_rc" != "0" ]; then
+            echo "[$(date +%T)] WARN: coordinator wake exited non-zero (continuing watch)"
+            log_event coord.wake.error "trigger=activity_poll rc=$wake_rc"
+            wake_ok=0
+        else
+            # issue #422 self-review finding — see on_outcome's identical
+            # branch for the full rationale (drop a stale pending prompt
+            # now that a fresh one just landed directly).
+            coord_wake_clear_pending
+        fi
     fi
     [ "$wake_ok" = "1" ] || return 1
     LAST_ACTIVITY_WAKE=$now
