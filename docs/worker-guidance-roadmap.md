@@ -55,14 +55,27 @@ settled. Issues got a separate brief-shaped template (`## Goal` /
 `## Out of scope`) since ~90% of issues are read only by LLMs, not the cold
 human reader the old layering targeted.
 
-### Standardize an "audience statement" on every prompt/skill file
-Every file in `prompts/` should open with one sentence: "this doc is read
-by [WHO] who needs to [DO WHAT]." Forces the author to be honest about
-scope; gives the refactor/trim/focus skill a fixed yardstick.
+**Settled 2026-09-15 via issue #416** ("recast summary surfaces for a
+manager/decision-maker reader, Debrief schema v1"): the two-tier
+screen-over-folded-appendix *structure* from this trial is ratified as-is —
+no further structural changes pending. What #416 changed was the *voice*
+inside that structure: the screen's fields (`**What this is:**` / `**What I
+need from you:**`) were reworded to `**Bottom line:**` / `**Your move:**`
+plus a new `**What surprised me:**` line, per Debrief schema v1
+(`prompts/worker.md` § "Debrief schema v1"). Same fold, same fields'
+purpose, manager-audience wording.
 
 ---
 
 ## Done
+
+- (2026-09-15) **Standardize an "audience statement" on every prompt/skill
+  file** — issue #416. Every file in `prompts/` (`worker.md`,
+  `coordinator.md`, `refs.md`, `skill-self-review.md`,
+  `skill-refactor-trim-focus.md`, `README.md`) now opens with one sentence:
+  "this doc is read by [WHO] who needs to [DO WHAT]." Landed as part of the
+  same PR that recast the PR-body screen, `## Handoff` block, and
+  coordinator report grammar/wake digest around Debrief schema v1.
 
 - (2026-07-25) **Context-first restructure of the PR-body skeleton** — review of 16 recent fand-app/fand-etl PR bodies found reviewer obligations (decisions to make, things to verify, data hazards) consistently landing at 50–90% depth, filed under Decisions/Review-focus. Restructured the skeleton: `## Context` (1–3 sentence advance-organizer frame, always first — context after details does ~nothing for comprehension, per Bransford & Johnson 1972), `## TL;DR`, `## Needs from you` (DECIDE/VERIFY/BEWARE, ≤3 bullets or "Nothing."), new `## Findings` split out of Decisions, Re-entry brief moved below the fold (long-form for cold agents), ~8-line budget on the top block. Coordinator triage-quote updated to match.
 
