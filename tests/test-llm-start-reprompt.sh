@@ -41,7 +41,7 @@ extract_fn() {
     local fn="$1"
     sed -n "/^${fn}() {/,/^}/p" "$LLM_START"
 }
-for fn in log_event reprompt_last_pane_line reprompt_confirm_submitted reprompt_inject; do
+for fn in log_event reprompt_last_pane_line reprompt_confirm_submitted reprompt_composer_dirty reprompt_retry_safe reprompt_inject; do
     body="$(extract_fn "$fn")"
     [ -n "$body" ] || red "could not extract function '$fn' from $LLM_START — has it been renamed?"
     eval "$body"
@@ -61,6 +61,10 @@ COORD_BUSY_PATTERN='\(esc to interrupt\)|Press Ctrl-C again to .xit|· ↓ [0-9.
 # send-keys needs real settle time to avoid flaking, not just correctness
 # under the eaten-Enter races themselves.
 COMPACT_SUBMIT_SETTLE_SECS=0.3
+# issue #422 — must match the shipped default (chrome catalog: "※ recap:"
+# lines and the session-resume picker; see llm-start.sh's
+# reprompt_composer_dirty header comment).
+REPROMPT_CHROME_PATTERN='^※ recap:|Resume this session with|^❯?[[:space:]]*[0-9]+\.[[:space:]]*Resume from'
 
 PASS=0
 
@@ -113,19 +117,28 @@ pane_contains() {
 }
 
 heading "Test 1: reprompt_inject — normal case, Enter submits on the first try"
-# Stand-in for a live Claude Code REPL: prints an idle prompt, reads one
-# line at a time, and on any non-empty line simulates a brief turn (busy
-# indicator, then redraws back to idle).
+# Stand-in for a live Claude Code REPL: prints an idle prompt plus a
+# genuinely-empty composer line, reads one line at a time, and on any
+# non-empty line simulates a brief turn (busy indicator, then redraws back
+# to idle). The composer line is rendered as "❯ " (leading marker + a
+# single trailing space, nothing else) — issue #422's pre-paste dirty
+# check trims that to empty via reprompt_last_pane_line's existing
+# leading-chrome strip, exactly like a real empty Claude Code composer;
+# see reprompt_composer_dirty's header comment.
 FAKE_REPL="$TEST_DIR/fake-claude-repl.sh"
 cat > "$FAKE_REPL" <<'REPL'
 #!/usr/bin/env bash
-echo "idle-prompt >"
+render_idle() {
+    echo "idle-prompt >"
+    printf '\xe2\x9d\xaf \n'
+}
+render_idle
 while IFS= read -r line; do
     [ -z "$line" ] && continue
     echo "✻ Considering… (esc to interrupt)"
     sleep 2
     clear
-    echo "idle-prompt >"
+    render_idle
 done
 REPL
 chmod +x "$FAKE_REPL"
@@ -156,6 +169,61 @@ check "no spurious submit_failed logged on a clean submit" "absent" "$got"
 
 tmux send-keys -t "$SESSION_NAME:coordinator" C-c 2>/dev/null || true
 tmux kill-session -t "$SESSION_NAME" 2>/dev/null || true
+
+heading "Test 1b: reprompt_composer_dirty — pre-existing draft, wake deferred and never pasted (issue #422)"
+# Static fixture: renders a composer that already holds unsubmitted text
+# from the very start (the corpusminder-spring incident's shape — a human
+# was mid-draft before any wake ever fired) and never changes it
+# regardless of what arrives on stdin. reprompt_inject must detect this
+# BEFORE touching tmux at all — no load-buffer, no paste-buffer, no Enter
+# — so this fixture never needs to distinguish "our paste" from anything
+# else; it just has to prove nothing changed.
+FAKE_REPL_DIRTY="$TEST_DIR/fake-repl-dirty.sh"
+cat > "$FAKE_REPL_DIRTY" <<'REPL'
+#!/usr/bin/env bash
+render() {
+    printf '\033[2J\033[H'
+    echo "idle-prompt >"
+    echo "❯ pre-existing unsent human draft"
+}
+render
+while IFS= read -r line; do
+    render
+done
+REPL
+chmod +x "$FAKE_REPL_DIRTY"
+
+DIRTY_SESSION="${SESSION_NAME}-dirty"
+tmux new-session -d -s "$DIRTY_SESSION" -n coordinator 2>/dev/null
+sleep 0.3   # see Test 1's identical comment on this settle delay
+tmux send-keys -t "$DIRTY_SESSION:coordinator" "exec -a claude bash $FAKE_REPL_DIRTY" Enter
+check_eventually "dirty session: fake REPL foreground" "yes" \
+    "pane_contains '$DIRTY_SESSION:coordinator' 'idle-prompt >'"
+
+PROMPT_FILE1B="$TEST_DIR/prompt1b.txt"
+printf 'This must never be pasted over a real draft.\n' > "$PROMPT_FILE1B"
+: > "$EVENTS_LOG"
+rc=0
+reprompt_inject "$DIRTY_SESSION:coordinator" "$PROMPT_FILE1B" || rc=$?
+
+check "reprompt_inject returns 2 (deferred) on a pre-existing dirty composer" "2" "$rc"
+
+if grep -q 'coord.wake.skip' "$EVENTS_LOG" && grep -q 'reason=composer_dirty' "$EVENTS_LOG"; then
+    got=logged
+else
+    got=missing
+fi
+check "dirty composer -> coord.wake.skip reason=composer_dirty logged" "logged" "$got"
+
+if grep -qE 'coord\.wake\.(resubmit|submit_failed)' "$EVENTS_LOG"; then got=present; else got=absent; fi
+check "no paste attempted at all -> no resubmit/submit_failed logged" "absent" "$got"
+
+check "the operator's draft is still there, untouched" "yes" \
+    "$(pane_contains "$DIRTY_SESSION:coordinator" 'pre-existing unsent human draft')"
+check "our prompt text never landed in the pane" "no" \
+    "$(pane_contains "$DIRTY_SESSION:coordinator" 'never be pasted over')"
+
+tmux kill-session -t "$DIRTY_SESSION" 2>/dev/null || true
 
 heading "Test 2: reprompt_inject — first Enter eaten, retried once (issue #290/#295)"
 # Fixture transferred from test-coordinator-auto-compact.sh's Test 15
@@ -237,20 +305,26 @@ check "retried Enter reaches the CLI -> no false submit_failed" "absent" "$got"
 
 tmux kill-session -t "$EATFIRST_SESSION" 2>/dev/null || true
 
-heading "Test 3: reprompt_inject — stuck composer never clears -> coord.wake.submit_failed, not silent (issue #295 acceptance)"
-# This fixture never submits at all (every Enter is a no-op against the
-# rendered text), modeling a race that neither settle nor a single retry
-# can recover from. Must be LOGGED, not dropped silently.
+heading "Test 3: reprompt_inject — composer clear pre-paste, then stuck post-paste -> coord.wake.submit_failed, not silent (issue #295 acceptance)"
+# Starts with a genuinely EMPTY composer (so issue #422's pre-paste
+# reprompt_composer_dirty check passes and the paste actually happens —
+# this fixture is specifically testing the DIFFERENT, older bug: what
+# happens once our own paste is in but never clears), then accumulates
+# whatever it's fed and never submits it — every Enter is a no-op against
+# the rendered text, modeling a race that neither settle nor a single
+# retry can recover from. Must be LOGGED, not dropped silently.
 FAKE_REPL_STUCK="$TEST_DIR/fake-repl-stuck.sh"
 cat > "$FAKE_REPL_STUCK" <<'REPL'
 #!/usr/bin/env bash
+composer=""
 render() {
     printf '\033[2J\033[H'
     echo "idle-prompt >"
-    echo "❯ some prompt text stuck here"
+    printf '\xe2\x9d\xaf %s\n' "$composer"
 }
 render
 while IFS= read -r line; do
+    [ -n "$line" ] && composer="$composer$line"
     render
 done
 REPL
@@ -279,6 +353,58 @@ check "still unconfirmed after retry -> coord.wake.submit_failed logged (not sil
 
 tmux kill-session -t "$STUCK_SESSION" 2>/dev/null || true
 
+heading "Test 3b: reprompt_retry_safe — unrelated content after paste suppresses the blind retry-Enter (issue #422)"
+# Starts with a genuinely EMPTY composer (paste proceeds), but as soon as
+# ANY input lands, jams in unrelated text instead of what was actually
+# pasted — modeling an operator's own draft appearing in the settle window
+# right after our paste, or any other TUI re-render our paste didn't
+# cause. reprompt_inject must NOT blindly re-press Enter against that: the
+# constraint is "only re-press Enter when the composer holds the pasted
+# wake text and nothing else."
+FAKE_REPL_FOREIGN="$TEST_DIR/fake-repl-foreign.sh"
+cat > "$FAKE_REPL_FOREIGN" <<'REPL'
+#!/usr/bin/env bash
+composer=""
+render() {
+    printf '\033[2J\033[H'
+    echo "idle-prompt >"
+    printf '\xe2\x9d\xaf %s\n' "$composer"
+}
+render
+while IFS= read -r line; do
+    [ -n "$line" ] && composer="unrelated human text nothing to do with the wake"
+    render
+done
+REPL
+chmod +x "$FAKE_REPL_FOREIGN"
+
+FOREIGN_SESSION="${SESSION_NAME}-foreign"
+tmux new-session -d -s "$FOREIGN_SESSION" -n coordinator 2>/dev/null
+sleep 0.3   # see Test 1's identical comment on this settle delay
+tmux send-keys -t "$FOREIGN_SESSION:coordinator" "exec -a claude bash $FAKE_REPL_FOREIGN" Enter
+check_eventually "foreign-content session: fake REPL foreground" "yes" \
+    "pane_contains '$FOREIGN_SESSION:coordinator' 'idle-prompt >'"
+
+PROMPT_FILE3B="$TEST_DIR/prompt3b.txt"
+printf 'Top up workers per the Initial Startup Checklist.' > "$PROMPT_FILE3B"
+: > "$EVENTS_LOG"
+rc=0
+reprompt_inject "$FOREIGN_SESSION:coordinator" "$PROMPT_FILE3B" || rc=$?
+
+check "reprompt_inject returns 2 (deferred) rather than force-submitting foreign content" "2" "$rc"
+
+if grep -q 'coord.wake.skip' "$EVENTS_LOG" && grep -q 'reason=composer_dirty_after_paste' "$EVENTS_LOG"; then
+    got=logged
+else
+    got=missing
+fi
+check "foreign content after paste -> coord.wake.skip reason=composer_dirty_after_paste logged" "logged" "$got"
+
+if grep -q 'coord.wake.resubmit' "$EVENTS_LOG"; then got=present; else got=absent; fi
+check "retry-Enter never fires against content that isn't ours" "absent" "$got"
+
+tmux kill-session -t "$FOREIGN_SESSION" 2>/dev/null || true
+
 heading "Test 4: shipped COMPACT_SUBMIT_SETTLE_SECS/COORD_BUSY_PATTERN defaults are wired up in llm-start.sh"
 grep -q '^COMPACT_SUBMIT_SETTLE_SECS="\${COMPACT_SUBMIT_SETTLE_SECS:-1}"' "$LLM_START" \
     && got=present || got=missing
@@ -286,6 +412,9 @@ check "llm-start.sh defaults COMPACT_SUBMIT_SETTLE_SECS to a positive delay (iss
 
 grep -q '^COORD_BUSY_PATTERN=' "$LLM_START" && got=present || got=missing
 check "llm-start.sh defines its own COORD_BUSY_PATTERN" "present" "$got"
+
+grep -q '^REPROMPT_CHROME_PATTERN=' "$LLM_START" && got=present || got=missing
+check "llm-start.sh defines REPROMPT_CHROME_PATTERN for the pre-paste dirty check (issue #422)" "present" "$got"
 
 echo ""
 green "All llm-start.sh reprompt tests passed ($PASS checks)"
