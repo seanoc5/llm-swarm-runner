@@ -449,7 +449,7 @@ reprompt_confirm_submitted() {
 # capture-pane, so it cannot be distinguished from a real draft this way.
 REPROMPT_CHROME_PATTERN="${REPROMPT_CHROME_PATTERN:-^※ recap:|Resume this session with|^❯?[[:space:]]*[0-9]+\.[[:space:]]*Resume from}"
 
-# reprompt_composer_dirty <tmux-target>
+# reprompt_composer_dirty <tmux-target> <busy-pattern>
 #
 # (issue #422, #366 part B) Pre-injection guard: true (rc 0, "dirty") if
 # <target>'s composer visibly holds non-whitespace content that isn't
@@ -464,6 +464,19 @@ REPROMPT_CHROME_PATTERN="${REPROMPT_CHROME_PATTERN:-^※ recap:|Resume this sess
 # corpusminder-spring incident, 2026-09-14: WAKE_PROMPT pasted mid-sentence
 # into an operator's in-progress message, then Enter'd).
 #
+# <busy-pattern> is checked FIRST (self-review finding on this function's
+# first version): a coordinator mid-turn (spinner/"esc to interrupt"
+# visible) is not what #366 is about — pasting a follow-up prompt while
+# busy is the EXISTING, already-safe behavior this PR must not change
+# (Claude Code queues it — "Press up to edit queued messages" — and
+# reprompt_confirm_submitted already treats a busy match as confirmed-
+# submitted for exactly this reason). Without this check, the busy-turn
+# chrome itself (e.g. the spinner line, briefly the pane's only content
+# right after a screen clear) would misread as "a draft" and defer a wake
+# that used to land fine — a real regression, not the gap #366 describes.
+# So: busy match -> always "clear" (proceed to paste/queue), full stop,
+# before any composer-content inspection at all.
+#
 # Known, accepted limitation (docs/tmux-as-channel.md §1d "Pane content is
 # not verified truth"): Claude Code's dimmed suggested-next-prompt autofill
 # renders identically to typed text in a plain-text capture-pane, so it
@@ -473,7 +486,10 @@ REPROMPT_CHROME_PATTERN="${REPROMPT_CHROME_PATTERN:-^※ recap:|Resume this sess
 # that false-positive risk alone; see coordinator-watch.sh's
 # coord_wake_retry_pass for the bounded-warning backstop.
 reprompt_composer_dirty() {
-    local target="$1" last
+    local target="$1" busy_pattern="$2" content clean last
+    content="$(tmux capture-pane -t "$target" -p 2>/dev/null)" || return 1
+    clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
+    printf '%s\n' "$clean" | LC_ALL=C grep -qE "$busy_pattern" && return 1
     last="$(reprompt_last_pane_line "$target")" || true
     [ -n "$last" ] || return 1
     printf '%s\n' "$last" | LC_ALL=C grep -qE "$REPROMPT_CHROME_PATTERN" && return 1
@@ -544,7 +560,7 @@ reprompt_retry_safe() {
 reprompt_inject() {
     local target="$1" prompt_file="$2"
 
-    if reprompt_composer_dirty "$target"; then
+    if reprompt_composer_dirty "$target" "$COORD_BUSY_PATTERN"; then
         log_event coord.wake.skip "reason=composer_dirty trigger=reprompt"
         return 2
     fi

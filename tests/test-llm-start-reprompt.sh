@@ -225,6 +225,49 @@ check "our prompt text never landed in the pane" "no" \
 
 tmux kill-session -t "$DIRTY_SESSION" 2>/dev/null || true
 
+heading "Test 1c: reprompt_composer_dirty — a coordinator mid-turn is not a draft, wake still lands (issue #422 self-review finding)"
+# Fixture that renders ONLY busy/spinner chrome and ignores all input —
+# models a wake landing while the coordinator is mid-turn (the pre-#422
+# behavior this PR must NOT regress): Claude Code queues a pasted
+# follow-up during a busy turn ("Press up to edit queued messages"), and
+# reprompt_confirm_submitted already treats a busy match as confirmed-
+# submitted for exactly that reason. Without checking COORD_BUSY_PATTERN
+# FIRST, reprompt_composer_dirty would misread the spinner/status line
+# itself as "a draft" and defer a wake that used to land fine.
+FAKE_REPL_BUSY="$TEST_DIR/fake-repl-busy.sh"
+cat > "$FAKE_REPL_BUSY" <<'REPL'
+#!/usr/bin/env bash
+render() {
+    printf '\033[2J\033[H'
+    echo "✻ Considering… (esc to interrupt)"
+}
+render
+while IFS= read -r line; do
+    render
+done
+REPL
+chmod +x "$FAKE_REPL_BUSY"
+
+BUSY_SESSION="${SESSION_NAME}-busy"
+tmux new-session -d -s "$BUSY_SESSION" -n coordinator 2>/dev/null
+sleep 0.3   # see Test 1's identical comment on this settle delay
+tmux send-keys -t "$BUSY_SESSION:coordinator" "exec -a claude bash $FAKE_REPL_BUSY" Enter
+check_eventually "busy session: fake REPL foreground" "yes" \
+    "pane_contains '$BUSY_SESSION:coordinator' 'esc to interrupt'"
+
+PROMPT_FILE1C="$TEST_DIR/prompt1c.txt"
+printf 'Worker(s) just finished. Triage their outcomes.\n' > "$PROMPT_FILE1C"
+: > "$EVENTS_LOG"
+rc=0
+reprompt_inject "$BUSY_SESSION:coordinator" "$PROMPT_FILE1C" || rc=$?
+
+check "reprompt_inject queues into a busy (mid-turn) coordinator instead of deferring" "0" "$rc"
+
+if grep -qE 'coord\.wake\.skip.*reason=composer_dirty' "$EVENTS_LOG"; then got=present; else got=absent; fi
+check "a busy turn must NOT be misread as a dirty composer" "absent" "$got"
+
+tmux kill-session -t "$BUSY_SESSION" 2>/dev/null || true
+
 heading "Test 2: reprompt_inject — first Enter eaten, retried once (issue #290/#295)"
 # Fixture transferred from test-coordinator-auto-compact.sh's Test 15
 # (fake-repl-eatfirst.sh): models the ROOT CAUSE bug this issue fixes by
