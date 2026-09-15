@@ -62,6 +62,8 @@ git -C "$CLONE" push -q origin master
 export GH_PR_TABLE="$TEST_DIR/pr-table.json"   # {"<N>": {"base":..,"head":..}}
 export GH_COMMENTS_DIR="$TEST_DIR/comments"    # $GH_COMMENTS_DIR/<N>.json
 export GH_LOG="$TEST_DIR/gh.log"
+export GH_PR_LIST="$TEST_DIR/pr-list.json"     # `gh pr list --json number,files` fixture
+echo '[]' > "$GH_PR_LIST"
 mkdir -p "$GH_COMMENTS_DIR"
 echo '{}' > "$GH_PR_TABLE"
 
@@ -102,6 +104,14 @@ case "$1 $2" in
         mv "$comments_file.tmp" "$comments_file"
         exit 0 ;;
     "pr merge") exit 0 ;;
+    "pr list")
+        query=""
+        args=("$@")
+        for i in "${!args[@]}"; do
+            [ "${args[$i]}" = "--jq" ] && query="${args[$((i+1))]}"
+        done
+        if [ -n "$query" ]; then jq -r "$query" "$GH_PR_LIST"; else cat "$GH_PR_LIST"; fi
+        exit 0 ;;
     "issue view")
         case "$*" in
             *closedByPullRequestsReferences*) echo "$pr_num"; exit 0 ;;
@@ -160,6 +170,47 @@ if OUT=$("$CHECK" 2 2>&1); then RC=0; else RC=$?; fi
 [ "$RC" -eq 2 ] || red "expected exit 2 for Flyway dup, got $RC"
 echo "$OUT" | grep -q "V107 claimed by" || red "collision detail missing"
 green "duplicate Flyway version → exit 2"
+
+# ============================================================================
+heading "Test 2b: remediation recipe — PR-side file loses, next free computed, commands verbatim"
+# ============================================================================
+MIG=src/main/resources/db/migration
+echo "$OUT" | grep -q "V107: master owns V107__master-claims-it.sql" \
+    || red "recipe must name the base-side owner (never the file to move)"
+echo "$OUT" | grep -q "next free version: V108" || red "expected next free V108 (max of V105,V107 + 1)"
+echo "$OUT" | grep -qF "git mv $MIG/V107__worker-claims-it.sql $MIG/V108__worker-claims-it.sql" \
+    || red "git mv line missing or wrong"
+echo "$OUT" | grep -qF 'git commit -m "fix(migration): renumber V107 → V108, V107 taken on master"' \
+    || red "commit line missing"
+echo "$OUT" | grep -qF "git push origin dup-branch" || red "push line must target the PR head branch"
+echo "$OUT" | grep -q "Remediation: rename the losing file" && red "generic remediation line should be replaced by the recipe"
+green "recipe: loser = PR-side file, V108, git mv/commit/push verbatim"
+
+# Another open PR already claims V108 → next free must skip to V109.
+cat > "$GH_PR_LIST" <<'JSON'
+[{"number": 2, "files": [{"path": "src/main/resources/db/migration/V107__worker-claims-it.sql"}]},
+ {"number": 9, "files": [{"path": "src/main/resources/db/migration/V108__sibling-pr.sql"}, {"path": "README.md"}]}]
+JSON
+if OUT=$("$CHECK" 2 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -eq 2 ] || red "expected exit 2, got $RC"
+echo "$OUT" | grep -q "next free version: V109" || red "next free must skip V108 claimed by open PR #9"
+echo "$OUT" | grep -q "and 1 other open PR" || red "other-open-PR count missing"
+echo "$OUT" | grep -qF "$MIG/V109__worker-claims-it.sql" || red "git mv must use V109"
+green "recipe: open-PR sweep bumps next free past a sibling PR's V108"
+echo '[]' > "$GH_PR_LIST"
+
+# PR-internal duplicate (both claimants on the head) → no git mv, says so.
+git checkout -q -b internal-dup master
+echo "select 6;" > "$MIG/V120__one.sql"
+echo "select 7;" > "$MIG/V120__two.sql"
+git add -A; git_commit "worker ships two V120s"
+git push -q origin internal-dup
+set_pr 4 master internal-dup
+if OUT=$("$CHECK" 4 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -eq 2 ] || red "expected exit 2 for PR-internal dup, got $RC"
+echo "$OUT" | grep -q "V120: every claimant is PR-side (PR-internal duplicate" || red "PR-internal dup not called out"
+echo "$OUT" | grep -q "git mv" && red "PR-internal dup must not emit a git mv (which file loses is the worker's call)"
+green "recipe: PR-internal duplicate flagged, no git mv"
 
 # ============================================================================
 heading "Test 3: dotted version is distinct (V107 vs V107.1) → no collision"
@@ -291,6 +342,6 @@ green "MIGRATION_GATE=0 kill switch skips the gate"
 
 # ============================================================================
 heading "All migration-collision-check shape tests passed"
-green "Flyway dup detection, dotted-version distinctness, Alembic multi-head, exit 4 skip, --post idempotency, swarm-merge gate + override + kill switch"
+green "Flyway dup detection + remediation recipe (loser/next-free/open-PR sweep/internal dup), dotted-version distinctness, Alembic multi-head, exit 4 skip, --post idempotency, swarm-merge gate + override + kill switch"
 echo ""
 yellow "Run with KEEP=1 to leave $TEST_DIR for inspection."

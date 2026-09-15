@@ -45,6 +45,17 @@
 #            A revision id never referenced as another file's down_revision
 #            is a head; more than one head → collision.
 #
+# Remediation (Flyway, PR mode): a collision verdict carries the exact fix —
+#            which file loses (the one only the PR head has; base-side files
+#            are already applied downstream and never move), the next free
+#            version (max across base ∪ head ∪ every other open PR's changed
+#            files, so a merge burst doesn't hand out the next PR's number),
+#            and the git mv / commit / push lines to paste on the PR branch.
+#            A PR-internal duplicate (no base-side claimant) is named as
+#            such with no mv line — which one loses is the worker's call.
+#            Deliberately NOT auto-applied: ~1 collision/week across swarms
+#            vs. a branch-mutating code path with its own refuse-list (#162).
+#
 # Exit codes:
 #   0  clean — no collision detected
 #   2  collision — duplicate Flyway version(s) and/or Alembic multi-head
@@ -193,6 +204,84 @@ for ver in "${!VERSION_FILES[@]}"; do
     fi
 done
 
+# --- Flyway: concrete remediation recipe (PR mode only) ---------------------
+#
+# The gate used to say "rename the losing file(s) to the next free version"
+# and leave the operator to work out which file loses and what "next free"
+# is. Both are mechanical, so compute them:
+#   loser     = the claimant that exists ONLY in the PR head. Base-side files
+#               are already applied to every DB tracking the base branch;
+#               renaming one of those forces a `flyway repair` everywhere.
+#   next free = max integer version across base ∪ head ∪ every OTHER open
+#               PR's changed files (gh pr list --json files, best-effort) + 1.
+#               Without the open-PR sweep the recipe hands out the number
+#               the next PR in a merge burst already claimed.
+# Multiple losers get consecutive numbers. A collision with no base-side
+# claimant is PR-internal (the worker shipped two files at one version) —
+# that's a worker bug, so the recipe just says so. --ref mode has no
+# base/head split and keeps the generic line.
+FLYWAY_RECIPE=()
+if [ -z "$REF" ] && [ "${#FLYWAY_COLLISIONS[@]}" -gt 0 ]; then
+    BASE_FLYWAY="$(list_tree_files "$BASE_LOCAL" | while IFS= read -r f; do
+            matches_glob "$f" "$MIGRATION_GLOB" && echo "$f"
+        done; true )"
+    in_base() { printf '%s\n' "$BASE_FLYWAY" | grep -qxF -- "$1"; }
+
+    # Migration files on every other open PR's head — same glob, same
+    # version-prefix parse. gh failures (offline, stubbed, rate-limited)
+    # degrade to "no other PRs considered", noted in the output.
+    OTHER_PR_FILES="$(gh pr list --state open --limit 100 --json number,files \
+        --jq ".[] | select(.number != $PR) | .files[].path" 2>/dev/null || true )"
+    OTHER_PR_COUNT="$(gh pr list --state open --limit 100 --json number \
+        --jq "[.[] | select(.number != $PR)] | length" 2>/dev/null || echo 0)"
+    [[ "$OTHER_PR_COUNT" =~ ^[0-9]+$ ]] || OTHER_PR_COUNT=0
+
+    max_ver=0
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        matches_glob "$f" "$MIGRATION_GLOB" || continue
+        b="$(basename "$f")"
+        if [[ "$b" =~ ^V([0-9]+) ]]; then
+            n="${BASH_REMATCH[1]}"; n=$((10#$n))
+            [ "$n" -gt "$max_ver" ] && max_ver="$n"
+        fi
+    done < <(printf '%s\n%s\n' "$FLYWAY_FILES" "$OTHER_PR_FILES")
+    next_ver=$((max_ver + 1))
+
+    FLYWAY_RECIPE+=("Remediation — rename the PR-side file(s) on branch $HEAD_REF; base-side ($BASE_REF) files are already applied downstream, never move those.")
+    FLYWAY_RECIPE+=("  next free version: V$next_ver (max across $BASE_REF, $HEAD_REF, and $OTHER_PR_COUNT other open PR(s))")
+    for c in "${FLYWAY_COLLISIONS[@]}"; do
+        ver="${c%% claimed by:*}"                    # "V187"
+        claimants="${c#* claimed by: }"              # space-joined paths
+        base_side=(); head_side=()
+        for f in $claimants; do
+            if in_base "$f"; then base_side+=("$f"); else head_side+=("$f"); fi
+        done
+        if [ "${#base_side[@]}" -eq 0 ]; then
+            FLYWAY_RECIPE+=("  $ver: every claimant is PR-side (PR-internal duplicate — the branch shipped two files at one version); renumber one of them to V$next_ver")
+            next_ver=$((next_ver + 1))
+            continue
+        fi
+        FLYWAY_RECIPE+=("  $ver: $BASE_REF owns $(basename "${base_side[0]}")")
+        for f in "${head_side[@]}"; do
+            # V<old>__rest → V<next>__rest; non-greedy on the FIRST "__" so a
+            # description containing "__" survives intact.
+            fb="$(basename "$f")"
+            if [[ "$fb" =~ ^V[0-9.]+__(.*)$ ]]; then rest="${BASH_REMATCH[1]}"; else rest="$fb"; fi
+            newf="$(dirname "$f")/V${next_ver}__${rest}"
+            case "$f" in
+                *.sql) ;;
+                *) FLYWAY_RECIPE+=("    (Java/Kotlin-based migration — the class name must be renamed to match as well)") ;;
+            esac
+            FLYWAY_RECIPE+=("    git mv $f $newf")
+            FLYWAY_RECIPE+=("    git commit -m \"fix(migration): renumber $ver → V$next_ver, $ver taken on $BASE_REF\"")
+            FLYWAY_RECIPE+=("    git push origin $HEAD_REF")
+            next_ver=$((next_ver + 1))
+        done
+    done
+    FLYWAY_RECIPE+=("  then re-run: scripts/migration-collision-check.sh $PR")
+fi
+
 # --- Alembic: multi-head DAG -------------------------------------------------
 
 ALEMBIC_FILES="$(list_scan_files | grep -E '(^|/)versions/[^/]+\.py$' || true )"
@@ -257,7 +346,11 @@ if [ "${#FLYWAY_COLLISIONS[@]}" -gt 0 ]; then
     COLLISION=1
     BODY_LINES+=("Duplicate Flyway version(s):")
     for c in "${FLYWAY_COLLISIONS[@]}"; do BODY_LINES+=("- $c"); done
-    BODY_LINES+=("Remediation: rename the losing file(s) to the next free version.")
+    if [ "${#FLYWAY_RECIPE[@]}" -gt 0 ]; then
+        for c in "${FLYWAY_RECIPE[@]}"; do BODY_LINES+=("$c"); done
+    else
+        BODY_LINES+=("Remediation: rename the losing file(s) to the next free version.")
+    fi
 fi
 if [ "${#ALEMBIC_DUP_REVISIONS[@]}" -gt 0 ]; then
     COLLISION=1
