@@ -447,7 +447,18 @@ reprompt_confirm_submitted() {
 # reprompt_composer_dirty's own comment): Claude Code's dimmed suggested-
 # next-prompt autofill renders identically to typed text in a plain-text
 # capture-pane, so it cannot be distinguished from a real draft this way.
-REPROMPT_CHROME_PATTERN="${REPROMPT_CHROME_PATTERN:-^※ recap:|Resume this session with|^❯?[[:space:]]*[0-9]+\.[[:space:]]*Resume from}"
+#
+# No leading "❯" alternative in the "N. Resume from" branch (self-review
+# finding on an earlier version that had `^❯?...`): under this function's
+# own LC_ALL=C byte-mode grep, `?` on a multi-byte UTF-8 character like
+# "❯" only makes its LAST byte optional, not the whole 3-byte character —
+# so `^❯?[0-9]+\.` would require the literal first two bytes of "❯" to
+# always be present, silently failing to match a picker line that has no
+# leading marker at all. Not needed anyway: reprompt_last_pane_line's own
+# leading-chrome strip already removes a leading "❯"/">"/etc marker (and
+# surrounding whitespace) before this pattern ever sees the line, so by
+# the time it's checked here any such marker is already gone.
+REPROMPT_CHROME_PATTERN="${REPROMPT_CHROME_PATTERN:-^※ recap:|Resume this session with|^[0-9]+\.[[:space:]]*Resume from}"
 
 # reprompt_composer_dirty <tmux-target> <busy-pattern>
 #
@@ -500,15 +511,27 @@ reprompt_composer_dirty() {
 #
 # (issue #422 constraint: "guard the blind retry-Enter too") Before
 # reprompt_inject's retry-Enter, true (rc 0) only when the composer's
-# trimmed last rendered line ENDS WITH <prompt-last-line> — i.e. what's
-# sitting there is plausibly OUR OWN just-pasted prompt, still unsubmitted,
-# and safe to re-Enter. False (rc 1) for anything else, including content
-# that appeared in the ~settle-second window after our paste that isn't
-# ours (an operator started typing something new, or the TUI re-rendered
-# something unrelated) — never force-submit content this script didn't
-# paste. reprompt_confirm_submitted already treats an EMPTY composer as
-# confirmed-submitted and never calls this, so the "unrelated content"
-# case is the only one this function has to rule on.
+# trimmed last rendered line EQUALS <prompt-last-line> exactly — i.e.
+# what's sitting there is plausibly OUR OWN just-pasted prompt, still
+# unsubmitted, verbatim, and safe to re-Enter. False (rc 1) for anything
+# else, including content that appeared in the ~settle-second window
+# after our paste that isn't ours (an operator started typing something
+# new, or the TUI re-rendered something unrelated) — never force-submit
+# content this script didn't paste. reprompt_confirm_submitted already
+# treats an EMPTY composer as confirmed-submitted and never calls this,
+# so the "unrelated content" case is the only one this function has to
+# rule on.
+#
+# Exact equality, not a suffix/prefix match (issue #422 self-review
+# finding on an earlier version of this function that used `== *pattern`,
+# a suffix check): "<a human's draft>OUR PASTE" still ENDS WITH our
+# pasted text, so a suffix match would read that concatenation as safe
+# and retry-Enter it — submitting the operator's draft glued to our wake
+# prompt, exactly the corruption #422 exists to prevent, if the pre-paste
+# dirty check ever raced with a keystroke landing in the gap between that
+# check and the paste itself. Equality closes that: ANY extra content
+# before or after our own text — not just unrelated content replacing it
+# — reads as unsafe.
 #
 # Compares against the prompt's LAST line, not its first (issue #422
 # self-review finding on this function's first version): a genuinely
@@ -517,14 +540,12 @@ reprompt_composer_dirty() {
 # so the pane's LAST rendered line corresponds to the prompt's LAST line,
 # never its first — a first-line comparison would misread every genuine
 # multi-line prompt as foreign content and permanently suppress the
-# retry-Enter for it. `[[ == * ]]` with the pattern side quoted (not a
-# `case` glob) so characters like `*`/`?`/`[` that can legitimately appear
-# in prose don't get interpreted as wildcards.
+# retry-Enter for it.
 reprompt_retry_safe() {
     local target="$1" prompt_last_line="$2" last
     [ -n "$prompt_last_line" ] || return 1
     last="$(reprompt_last_pane_line "$target")" || true
-    [[ "$last" == *"$prompt_last_line" ]]
+    [ "$last" = "$prompt_last_line" ]
 }
 
 # reprompt_inject <tmux-target> <prompt-file>

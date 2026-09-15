@@ -5578,6 +5578,16 @@ on_outcome() {
         elif [ "$wake_rc" != "0" ]; then
             echo "[$(date +%T)] WARN: coordinator wake exited non-zero (continuing watch)"
             log_event coord.wake.error "issue=$issue rc=$wake_rc"
+        else
+            # issue #422 self-review finding: this fresh wake just landed
+            # directly — drop any STALE prompt left over from an earlier
+            # deferral (coord_wake_set_pending never overwrites a pending
+            # entry, so one could still be sitting there from before the
+            # composer cleared). Without this, coord_wake_retry_pass would
+            # later deliver that stale prompt as a redundant duplicate wake,
+            # even though the coordinator already has fresher instructions.
+            # No-op (cheap) when nothing was pending.
+            coord_wake_clear_pending
         fi
     fi
     LAST_WAKE=$now
@@ -5652,6 +5662,11 @@ on_message() {
         elif [ "$wake_rc" != "0" ]; then
             echo "[$(date +%T)] WARN: coordinator wake exited non-zero (continuing watch)"
             log_event coord.wake.error "issue=$issue trigger=outbox rc=$wake_rc"
+        else
+            # issue #422 self-review finding — see on_outcome's identical
+            # branch for the full rationale (drop a stale pending prompt
+            # now that a fresh one just landed directly).
+            coord_wake_clear_pending
         fi
     fi
     LAST_MSG_WAKE=$now
@@ -5750,6 +5765,11 @@ Re-check your own picture of outstanding decisions/PRs/issues against this (gh p
             echo "[$(date +%T)] WARN: coordinator wake exited non-zero (continuing watch)"
             log_event coord.wake.error "trigger=activity_poll rc=$wake_rc"
             wake_ok=0
+        else
+            # issue #422 self-review finding — see on_outcome's identical
+            # branch for the full rationale (drop a stale pending prompt
+            # now that a fresh one just landed directly).
+            coord_wake_clear_pending
         fi
     fi
     [ "$wake_ok" = "1" ] || return 1

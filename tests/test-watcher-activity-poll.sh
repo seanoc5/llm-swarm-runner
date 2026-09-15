@@ -329,7 +329,7 @@ extract_fn() {
     local fn="$1"
     sed -n "/^${fn}() {/,/^}/p" "$WATCH"
 }
-for fn in log_event on_outcome on_activity; do
+for fn in log_event on_outcome on_activity coord_wake_set_pending coord_wake_clear_pending; do
     body="$(extract_fn "$fn")"
     [ -n "$body" ] || red "could not extract function '$fn' from $WATCH — has it been renamed?"
     eval "$body"
@@ -349,6 +349,12 @@ EVENTS_LOG="$LOCK_TEST_DIR/events.log"
 : > "$EVENTS_LOG"
 COORD_WAKE_LOCK="$LOCK_TEST_DIR/coord-wake.lock"
 COORD_WAKE_LOCK_TIMEOUT_SECS=10
+# issue #422: on_outcome/on_activity's success path now calls
+# coord_wake_clear_pending (drops a stale deferred prompt once a fresh
+# wake lands directly) — needs these two paths even though this test's
+# fake LLM_START always exits 0, never exercising a pending prompt.
+COORD_WAKE_PENDING_FILE="$LOCK_TEST_DIR/coord-wake-pending.prompt"
+COORD_WAKE_PENDING_WARNED_FILE="$LOCK_TEST_DIR/coord-wake-pending.warned"
 DEBOUNCE_SECS=0
 WATCHER_AUTOCLOSE=0
 POST_OUTCOMES=0

@@ -64,7 +64,7 @@ COMPACT_SUBMIT_SETTLE_SECS=0.3
 # issue #422 — must match the shipped default (chrome catalog: "※ recap:"
 # lines and the session-resume picker; see llm-start.sh's
 # reprompt_composer_dirty header comment).
-REPROMPT_CHROME_PATTERN='^※ recap:|Resume this session with|^❯?[[:space:]]*[0-9]+\.[[:space:]]*Resume from'
+REPROMPT_CHROME_PATTERN='^※ recap:|Resume this session with|^[0-9]+\.[[:space:]]*Resume from'
 
 PASS=0
 
