@@ -1,5 +1,8 @@
 # Prompts
 
+*This doc is read by a human contributor browsing `prompts/` who needs to
+find the right file.*
+
 System and skill prompts used by the llm-swarm-runner agents.
 
 | File | Purpose |

@@ -1,5 +1,9 @@
 # Skill: Refactor / Trim / Focus a Guidance Document
 
+*This doc is read by an agent invoked to refactor, trim, or focus a
+guidance document who needs to know when and how to do it without losing
+substance.*
+
 **Status**: Draft skeleton — needs sharpening with real examples once it's been used a few times.
 
 ## Purpose
