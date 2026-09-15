@@ -116,12 +116,18 @@ it when one lands — or `gh` comments on the issue/PR. Rationale:
 
 ## Process polling inside worker containers — avoid `pgrep -f`
 
-Your own Claude process is launched with the **entire worker-conventions
-prompt** (this document, plus the project's `.swarm-policy.md`) baked into
-its argv — tens of KB of text containing dozens of English keywords a
-worker would naturally reach for in a process search: `git commit`,
-`git push`, `git rebase`, `gradle`, `java`, `pre-commit`, `gh pr create`,
-`pr merge`, `squash`, `pytest`, `uv venv`, and more.
+A Claude worker's process no longer carries this prompt or its task brief in
+argv (issue #415 fixed the root cause: `worker-listener.sh` now delivers
+this document via `--append-system-prompt-file <path>` and the task brief
+over stdin, so only a file path — never worker-conventions text — reaches
+`/proc/<pid>/cmdline`). gemini and codex workers still receive their task
+brief positionally on argv, and this document's content itself remains full
+of everyday English a worker would naturally reach for in a process
+search: `git commit`, `git push`, `git rebase`, `gradle`, `java`,
+`pre-commit`, `gh pr create`, `pr merge`, `squash`, `pytest`, `uv venv`, and
+more. Treat the rule below as defense in depth, not as conditional on agent
+or delivery mechanism — a future regression in either should not silently
+reopen this failure mode.
 
 Any process search that substring-matches full command lines — `pgrep -f`,
 `pgrep -fa`, `ps aux | grep <keyword>`, `pidof -x` against a keyword
@@ -135,12 +141,14 @@ until ! kill -0 "$(pgrep -f 'git commit' | head -1)" 2>/dev/null; do
 done
 ```
 
-`pgrep -f 'git commit'` finds the Claude worker process itself (the phrase
-appears in its own argv); `kill -0 <that-pid>` always succeeds because the
-worker is alive — it's the one running the loop; `! kill -0 …` is
-permanently false; the loop sleeps 30s and retries forever, burning runtime
-and leaving a stuck shell slot until SIGTERM. (This bit fand-app#388 twice
-in the same session before root cause was found — see issue #124.)
+`pgrep -f 'git commit'` finds the worker's own process (the phrase appears
+in its argv — always true for gemini/codex workers today, and true for
+Claude workers before issue #415 landed); `kill -0 <that-pid>` always
+succeeds because the worker is alive — it's the one running the loop;
+`! kill -0 …` is permanently false; the loop sleeps 30s and retries forever,
+burning runtime and leaving a stuck shell slot until SIGTERM. (This bit
+fand-app#388 twice in the same session before root cause was found — see
+issue #124.)
 
 **Preferred patterns, in order:**
 
