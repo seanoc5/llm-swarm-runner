@@ -403,10 +403,37 @@ COORD_BUSY_PATTERN="${COORD_BUSY_PATTERN:-\(esc to interrupt\)|Press Ctrl-C agai
 # several separate "lines," and a plain `tail -1` would only see the
 # LAST wrapped fragment, not the composer's actual last logical line. `-J`
 # rejoins tmux's own soft-wrapped rows before this function ever sees
-# them, so `tail -1` below gets the true last logical line regardless of
-# pane width — load-bearing for reprompt_retry_safe's content comparison,
-# below, which would otherwise compare a full pasted prompt against a
-# truncated tail fragment of itself and never match.
+# them, so `tail -1` below gets the true last logical line — PROVIDED the
+# wrap is actually tmux's own soft-wrap (the terminal auto-wrapping raw
+# unbroken output, which is what `-J` is documented to rejoin).
+#
+# UNVERIFIED (self-review, second round — flag for live-pane verification
+# before trusting the retry-Enter path on a real long prompt): Claude
+# Code's TUI is Ink-based, and Ink-style renderers commonly do their OWN
+# width-aware line-wrapping client-side and emit an explicit hard newline
+# at each wrap point, rather than relying on the terminal's ambient
+# auto-wrap. If that's how the real composer renders a long WAKE_PROMPT,
+# those are hard newlines from tmux's point of view — NOT soft-wrapped
+# rows — and `-J` would not rejoin them; reprompt_retry_safe's exact-
+# equality check (below) would then never match a wrapped multi-row
+# prompt, and the #290/#291 eaten-first-Enter retry would keep reading a
+# still-unsubmitted paste as "foreign," deferring it every retry. This is
+# FAIL-SAFE, not corrupting, if wrong (coord_wake_retry_pass's bounded
+# COORD_WAKE_DEFER_WARN_SECS WARN still fires and nothing is dropped or
+# force-submitted) — but it's an open question this PR could not verify
+# without an attached real Claude Code session. If you can check: paste a
+# long (~300 char) single-line prompt into a real idle coordinator
+# composer and compare `tmux capture-pane -p` against `tmux capture-pane
+# -p -J` — identical output means Ink is hard-newlining (this guess is
+# wrong; the fix would be comparing the whole composer body, not one
+# line); different output confirms tmux soft-wrap (this guess holds).
+#
+# Either way, `-J` is strictly an improvement over no-`-J` here — it's
+# never WRONG to rejoin actual soft-wraps, it just may not be SUFFICIENT
+# on its own if Ink is also hard-newlining. Load-bearing for
+# reprompt_retry_safe's content comparison below, which would otherwise
+# compare a full pasted prompt against a truncated tail fragment of
+# itself and never match.
 reprompt_last_pane_line() {
     local target="$1" content clean
     content="$(tmux capture-pane -t "$target" -p -J 2>/dev/null)" || { echo ""; return 1; }
