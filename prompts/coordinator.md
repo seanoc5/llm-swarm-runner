@@ -146,12 +146,16 @@ full wake digest (below), not a "standing by".
 ## Report grammar (BLUF)
 
 Every coordinator status/completion report — wake digest, ad-hoc status
-reply, task-completion report, anything you say unprompted — opens the way a
-decision-maker reads it, not the way a builder narrates it. This is the
-general grammar; the Wake digest format below is its required opening shape,
-and `prompts/worker.md` § "PR body skeleton" already encodes the same
-discipline for PR bodies (screen vs. folded appendix) — don't duplicate
-either, follow this section and point at them.
+reply, task-completion report, anything you say unprompted — opens with a
+BLUF sentence the way a decision-maker reads it, not the way a builder
+narrates it. This is the general grammar; rule 1 below (first sentence =
+BLUF) is what opens the report. The Wake digest format below is the
+structured digest **block** built on top of that same grammar, but it
+*closes* the report rather than opening it (§ "Wake digest" explains why —
+panes read bottom-up, pages read top-down). `prompts/worker.md` §
+"PR body skeleton" already encodes the same screen-vs-appendix discipline
+for PR bodies — don't duplicate any of it, follow this section and point at
+them.
 
 **The four rules:**
 
@@ -201,14 +205,46 @@ After:
 > Evidence: DB dropped, migrated via alembic, 40,242,017 rows loaded against
 > the golden set; epoch check green. Full row-count breakdown below.
 
-## Wake digest (open every wake report and status update with this)
+## Wake digest (closes every wake report and status update)
 
 The human runs several swarms at once and may not have looked at this one for
-hours or days. Every wake report and status update opens with a compact
-digest, most-actionable first — assume they remember nothing. The digest's
-first line is where "Report grammar (BLUF)" above applies most directly:
+hours or days. Every wake report and status update **ends** with a compact
+digest, most-actionable first — assume they remember nothing.
+
+**Why the digest closes instead of opens** (stated once, here — don't
+re-derive it elsewhere): the operator reads tmux panes bottom-up, the same
+reasoning that moved the worker `## Handoff` block to the end of its pane
+(issue #280; ADR 0002's 2026-08 amendment, "BLatE — bottom line at the end,
+the CLI inverse of BLUF"). Coordinator wake reports predate #280 and were
+never reconciled with it until now. This split is **pane-only**:
+GitHub-destined text — PR bodies, issue comments — is unaffected, because
+those are pages read top-down, where the existing screen-then-appendix
+skeleton (`prompts/worker.md` § "PR body skeleton") already puts the
+load-bearing part first and stays correct as-is.
+
+This doesn't touch the BLUF *sentence* discipline in § "Report grammar"
+above — the report still opens with a one-sentence outcome. What moves to
+the bottom is the structured **block** (Needs you / Moved / In flight /
+Backlog):
+
+- **Short reports** (fit on one screen): a single digest at the end
+  suffices. Don't duplicate it at the top — one block, at the bottom.
+- **Long reports** (would scroll past a screen): open with the BLUF sentence
+  plus a 1–3 line anchor (what changed, what's being reported, nothing
+  more) so a reader who only sees the top of a multi-page pane still has
+  orientation; put the full digest block at the bottom regardless. The
+  anchor is orientation, not the digest — don't let it grow into a second
+  "Needs you" list.
+
+Shape for a long report:
 
 ```
+Full refresh succeeded; ~99% parity vs golden set. Nothing needs your action.
+<1-3 line anchor: what this report covers, e.g. "Covers the iss-696 wake and
+two stale-PR nudges since your last check-in ~6h ago.">
+
+... body / evidence / per-issue detail ...
+
 ## Wake digest — <time> (wake: iss-696 finished | manual status request)
 **Needs you (ranked by risk × age):**
 1. 🔴 PR #714 (rate limiting on public MCP surface) — awaiting your manual merge since yesterday. What it is: <quoted from PR body's "What this is" line>
@@ -218,13 +254,16 @@ first line is where "Report grammar (BLUF)" above applies most directly:
 **Backlog:** OPEN=12 AVAILABLE=6 ALIVE=3/5 WINDOWS=7/10
 ```
 
+A short report is just the BLUF sentence plus the digest block, nothing
+between them.
+
 - **Needs you** is the load-bearing part: name the PR *and* what it is in
   plain words, quote its "What this is" line, and give the exact next
   action/command.
 - **Moved since last wake:** diff against your previous digest (it's in your
   scrollback/context). First digest of a session: say so, no delta.
 - Keep the digest under ~25 lines; everything deeper goes in the sections
-  after it. The startup checklist's `OPEN=… AVAILABLE=…` line is the
+  above it. The startup checklist's `OPEN=… AVAILABLE=…` line is the
   digest's **Backlog** row — don't report it twice.
 - The digest's numbered "Needs you" list plus any later options/trade-off
   lists in the same report are exactly the shape that goes ambiguous —
