@@ -263,8 +263,14 @@ unset WATCH_PID
 
 grep -q 'waking coordinator (outbox)' "$TEST_DIR/watch-outbox.log" \
     || red "expected outbox wake line; full log: $(cat $TEST_DIR/watch-outbox.log)"
-grep -q '\[DRY\] would:.*outbox' "$TEST_DIR/watch-outbox.log" \
-    || red "expected dry-run outbox wake prompt naming the outbox; full log: $(cat $TEST_DIR/watch-outbox.log)"
+# issue #430: the doorbell paste itself is now a generic one-line inbox
+# nudge (no longer names the outbox path) — the outbox path instead shows
+# up in the coord-inbox DRY-RUN write line, which happens unconditionally
+# before the doorbell is even considered.
+grep -q '\[DRY\] would write coord-inbox entry:.*outbox' "$TEST_DIR/watch-outbox.log" \
+    || red "expected dry-run coord-inbox write naming the outbox; full log: $(cat $TEST_DIR/watch-outbox.log)"
+grep -q '\[DRY\] would:.*Inbox:' "$TEST_DIR/watch-outbox.log" \
+    || red "expected the generic one-line inbox doorbell nudge; full log: $(cat $TEST_DIR/watch-outbox.log)"
 grep -q "ONCE=1 — exiting after first wake" "$TEST_DIR/watch-outbox.log" \
     || red "expected ONCE exit message after outbox wake"
 green "polling backend detected new outbox *.md, message wake logged, ONCE=1 exited"
