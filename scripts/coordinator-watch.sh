@@ -366,6 +366,66 @@
 #                           autofill suggestion reads identically to a real
 #                           draft in a plain-text capture-pane — see that
 #                           function's header comment in llm-start.sh).
+#   COORD_INBOX_DIR=(auto)  (issue #430) <project>/.swarm/coord-inbox/ — every
+#                           outcome/outbox/activity-poll wake writes its full
+#                           payload here (mktemp+mv, mirroring the worker
+#                           outbox convention) BEFORE any doorbell is even
+#                           considered, so a lost or deferred doorbell paste
+#                           never loses the content itself — only the nudge
+#                           to go look. prompts/coordinator.md's "Inbox"
+#                           section has the coordinator-side triage contract
+#                           (scan at the start of every turn and after
+#                           finishing an operator request; archive handled
+#                           items to coord-inbox/processed/). Not itself
+#                           overridable — derived from PROJECT_DIR, same as
+#                           COORD_WAKE_PENDING_FILE.
+#   COORD_INBOX_NUDGE_TEMPLATE=(built-in)
+#                           (issue #430) The ONE-LINE doorbell text pasted
+#                           into the coordinator's composer once the wake is
+#                           allowed to fire — replaces the old practice of
+#                           pasting the FULL WAKE_PROMPT/OUTBOX_WAKE_PROMPT
+#                           text directly (that text is now the inbox
+#                           file's content instead, read on the
+#                           coordinator's own schedule). "%N" is substituted
+#                           with the current count of unprocessed
+#                           coord-inbox/*.md files at paste time.
+#   COORD_WAKE_BUSY_RETRY_SECS=30
+#                           (issue #430) coordinator_pane_busy() gate on the
+#                           doorbell: on_outcome/on_message no longer paste
+#                           a wake into a coordinator pane that's mid-turn —
+#                           doing so used to let Claude Code queue the paste
+#                           and deliver it as an unrelated ❯ user turn
+#                           spliced into the middle of whatever the
+#                           coordinator was already doing (the fand-app
+#                           swarm PR #1108 merge-turn incident, 2026-09-16,
+#                           that prompted this issue). A busy pane instead
+#                           marks coord_wake_busy_retry_pass (below
+#                           on_activity, ticked from run_watch_timer_loop on
+#                           this interval) to keep checking; the doorbell
+#                           fires as soon as the pane goes idle, or once
+#                           COORD_WAKE_BUSY_CEILING_SECS is reached,
+#                           whichever comes first. 0 disables this gate
+#                           entirely — on_outcome/on_message revert to the
+#                           pre-#430 behavior of pasting immediately
+#                           regardless of busy state (an explicit rollback
+#                           switch, not a recommended setting). Deliberately
+#                           a SEPARATE pending file/gate from
+#                           COORD_WAKE_PENDING_FILE's dirty-draft deferral
+#                           above: a busy pane is safe to force a paste into
+#                           (Claude Code queues it) so it gets a ceiling; an
+#                           unsubmitted human draft is NOT safe to paste
+#                           over at any age, so that one never forces and
+#                           only ever warns (COORD_WAKE_DEFER_WARN_SECS).
+#   COORD_WAKE_BUSY_CEILING_SECS=900
+#                           (issue #430) How long (15 minutes by default)
+#                           coord_wake_busy_retry_pass will keep deferring a
+#                           busy-pane wake before delivering it anyway
+#                           (coord.wake.defer_ceiling) so a long-running
+#                           coordinator turn can never starve a wake
+#                           forever. 0 disables the ceiling — a busy-deferred
+#                           wake then waits indefinitely for the pane to go
+#                           idle on its own, same posture as the dirty-draft
+#                           case.
 #   WATCH_CHECK_ON_DONE=1   Set to 0 to disable check-on-done. When enabled,
 #                           the watcher treats a worker as "done" via either
 #                           signal: (a) a `.swarm/tasks/status/<id>.json`
@@ -1436,7 +1496,10 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     COORD_WAKE_LOCK_TIMEOUT_SECS 60  max wait to flock COORD_WAKE_LOCK before a wake gives up (see that lock's header comment)
     COORD_WAKE_RETRY_SECS 15      retry interval for a wake llm-start.sh deferred (composer held an unsubmitted human draft, issue #422); 0=off
     COORD_WAKE_DEFER_WARN_SECS 300  loud WARN threshold for a wake still deferred this long (issue #422); retries never stop on their own
-    ACTIVITY_WAKE_PROMPT (built-in) what the coordinator does on an activity-poll wake
+    COORD_WAKE_BUSY_RETRY_SECS 30  retry interval for a wake deferred because the coordinator pane was mid-turn (issue #430); 0=off (pastes immediately, pre-#430 behavior)
+    COORD_WAKE_BUSY_CEILING_SECS 900  deliver a busy-deferred wake anyway after this long (issue #430, 15min); 0=no ceiling
+    COORD_INBOX_NUDGE_TEMPLATE (built-in) one-line doorbell text pasted once a wake is allowed to fire; %N = live coord-inbox/*.md count (issue #430)
+    ACTIVITY_WAKE_PROMPT (built-in) what the coordinator writes to the inbox on an activity-poll finding (issue #430: inbox-only, no doorbell)
     WATCH_CHECK_ON_DONE 1         run acceptance check when a worker signals done; see header comment
     SESSION_NAME        (auto)    tmux session for chk-N windows (llm-<project-basename>)
     WORKSPACE           (auto)    parent dir for wt-issue-* worktrees
@@ -1497,15 +1560,35 @@ EVENTS LOG
                            for worktrees registered with this PROJECT_DIR
       worker.finish.skip   outcome JSON detected for a foreign worktree
                            (sibling repo sharing the same WORKSPACE parent)
-      coord.wake           llm-start.sh invoked (or coord.wake.skip on debounce)
+      coord.wake           the one-line inbox nudge was pasted via llm-start.sh
+                           (or coord.wake.skip on debounce); the FULL payload for
+                           this wake already landed in coord-inbox/ beforehand —
+                           see coord.inbox.write below (issue #430)
+      coord.inbox.write    (issue #430) a wake payload (outcome/outbox/activity-poll)
+                           was written to <project>/.swarm/coord-inbox/ as its own
+                           .md file — unconditional, fires even when the doorbell
+                           itself is about to be debounced/deferred, and (for
+                           trigger=activity_poll) with NO accompanying coord.wake at
+                           all, since activity-poll findings are inbox-only
+      coord.wake.defer     (issue #430) the coordinator pane was mid-turn
+                           (coordinator_pane_busy) — the doorbell paste was skipped
+                           this cycle (reason=pane_busy); coord_wake_busy_retry_pass
+                           keeps checking every COORD_WAKE_BUSY_RETRY_SECS
+      coord.wake.defer_ceiling
+                           (issue #430) a pane_busy-deferred wake hit
+                           COORD_WAKE_BUSY_CEILING_SECS (15min default) still busy —
+                           delivered anyway so a long coordinator turn can't starve
+                           a wake forever
       coord.wake.deferred  (issue #422) llm-start.sh reported a dirty coordinator
                            composer (rc 3) instead of pasting — reason=composer_dirty;
                            the prompt is persisted for coord_wake_retry_pass, not dropped
       coord.wake.retry     (issue #422) coord_wake_retry_pass re-attempted a
                            previously-deferred wake (age=Ns since it first deferred)
       coord.wake.deferred_delivered
-                           (issue #422) a retried deferred wake finally landed —
-                           COORD_WAKE_PENDING_FILE cleared
+                           (issue #422/#430) a retried deferred wake finally landed —
+                           the dirty-draft pending file is cleared (issue #422), or,
+                           for trigger=pane_busy (issue #430), the pane went idle (or
+                           the ceiling fired) and coord_wake_busy_retry_pass delivered it
       coord.wake.deferred_stale
                            (issue #422) a wake has been deferred ≥COORD_WAKE_DEFER_WARN_SECS
                            with every retry still reading the composer dirty — loud WARN,
@@ -1548,7 +1631,9 @@ EVENTS LOG
       watch.activity_poll  (issue #392) periodic gh-search poll found a PR
                            merged / issue closed with no other wake path —
                            reason=detected (count=N, followed by a
-                           coord.wake trigger=activity_poll) or a skip
+                           coord.inbox.write trigger=activity_poll — issue #430:
+                           activity-poll findings are inbox-only, no doorbell,
+                           so no coord.wake accompanies this) or a skip
                            (pr, issue — see WATCH_ACTIVITY_POLL_SECS's
                            header comment for the full noise-control
                            rationale): reason=skipped_self_reaped (already
@@ -2138,6 +2223,49 @@ if ! [[ "$COORD_WAKE_DEFER_WARN_SECS" =~ ^[0-9]+$ ]]; then
     exit 1
 fi
 
+# --- issue #430: coordinator inbox + busy-pane doorbell deferral ----------
+#
+# COORD_INBOX_DIR mirrors the worker outbox pattern (mktemp+mv, processed/
+# archive subdir) one level up: every wake source (on_outcome, on_message,
+# on_activity) writes its full payload here BEFORE the doorbell is even
+# considered, so a deferred or failed doorbell paste never loses content —
+# only the nudge to go look is at risk, and that nudge is now a cheap,
+# regenerable one-liner (coord_inbox_nudge_text), not the payload itself.
+COORD_INBOX_DIR="$PROJECT_DIR/.swarm/coord-inbox"
+COORD_INBOX_PROCESSED_DIR="$COORD_INBOX_DIR/processed"
+
+# COORD_INBOX_NUDGE_TEMPLATE: the fixed, short doorbell text — "%N" is
+# substituted with the live coord-inbox/*.md count at paste time (never
+# baked into a persisted pending file, so a nudge delivered late after
+# COORD_WAKE_BUSY_CEILING_SECS still reports an accurate count instead of a
+# stale one captured when the defer first started).
+COORD_INBOX_NUDGE_TEMPLATE="${COORD_INBOX_NUDGE_TEMPLATE:-Inbox: %N item(s) in .swarm/coord-inbox/ — read and triage them (see prompts/coordinator.md \"Inbox\").}"
+
+# COORD_WAKE_BUSY_PENDING_FILE: a marker (empty file; content unused) that
+# a doorbell wake is currently withheld because coordinator_pane_busy() was
+# true — deliberately separate from COORD_WAKE_PENDING_FILE (issue #422's
+# dirty-draft deferral) since the two have different retry policies: a busy
+# pane is safe to force a paste into eventually (Claude Code queues it), so
+# this one has a ceiling; an unsubmitted human draft never is, so that one
+# never forces. Its own mtime is "since when has this been busy-deferred",
+# same technique as COORD_WAKE_PENDING_FILE's mtime_epoch use below.
+COORD_WAKE_BUSY_PENDING_FILE="$PROJECT_DIR/.swarm/coord-wake-busy-pending"
+
+# COORD_WAKE_BUSY_RETRY_SECS / COORD_WAKE_BUSY_CEILING_SECS: see their
+# header-comment entries above (near WATCH_CHECK_ON_DONE) for the full
+# rationale. 0 on either disables that half of the gate (see each var's own
+# comment above for what "disabled" means for it specifically).
+COORD_WAKE_BUSY_RETRY_SECS="${COORD_WAKE_BUSY_RETRY_SECS:-30}"
+if ! [[ "$COORD_WAKE_BUSY_RETRY_SECS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: COORD_WAKE_BUSY_RETRY_SECS must be a non-negative integer (got: $COORD_WAKE_BUSY_RETRY_SECS)" >&2
+    exit 1
+fi
+COORD_WAKE_BUSY_CEILING_SECS="${COORD_WAKE_BUSY_CEILING_SECS:-900}"
+if ! [[ "$COORD_WAKE_BUSY_CEILING_SECS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: COORD_WAKE_BUSY_CEILING_SECS must be a non-negative integer (got: $COORD_WAKE_BUSY_CEILING_SECS)" >&2
+    exit 1
+fi
+
 # log_event <category> <key=val>...
 # Writes one line: "<utc-iso8601>  <category>  k=v k=v ..."
 # Failures are non-fatal — log writes never break watcher work.
@@ -2174,10 +2302,13 @@ format_event_line() {
         coord.wake)                   glyph="→"; color=$'\033[36m' ;;
         coord.wake.skip)              glyph="⏸"; color=$'\033[33m' ;;
         coord.wake.error)             glyph="✗"; color=$'\033[31m' ;;
+        coord.wake.defer)             glyph="⏸"; color=$'\033[33m' ;;
+        coord.wake.defer_ceiling)     glyph="→"; color=$'\033[33m' ;;
         coord.wake.deferred)          glyph="⏸"; color=$'\033[33m' ;;
         coord.wake.retry)             glyph="↻"; color=$'\033[36m' ;;
         coord.wake.deferred_delivered) glyph="→"; color=$'\033[32m' ;;
         coord.wake.deferred_stale)    glyph="⚠"; color=$'\033[31m' ;;
+        coord.inbox.write)             glyph="✉"; color=$'\033[36m' ;;
         coord.compact)                 glyph="◈"; color=$'\033[36m' ;;
         coord.compact.skip)             glyph="·"; color=$'\033[2m'  ;;
         coord.compact.timeout)           glyph="⚠"; color=$'\033[33m' ;;
@@ -2291,6 +2422,7 @@ orphan-sweep:  ${WATCH_ORPHAN_SWEEP_SECS}s$([ "$WATCH_ORPHAN_SWEEP_SECS" = "0" ]
 bg-violation:  ${WATCH_BG_VIOLATION_SWEEP_SECS}s$([ "$WATCH_BG_VIOLATION_SWEEP_SECS" = "0" ] && echo " (disabled)" || echo " (foreground-only fallback detection, issue #298)")
 activity-poll: ${WATCH_ACTIVITY_POLL_SECS}s$([ "$WATCH_ACTIVITY_POLL_SECS" = "0" ] && echo " (disabled)" || echo " (out-of-band PR/issue resolution backstop, issue #392)")
 coord-wake-retry: ${COORD_WAKE_RETRY_SECS}s$([ "$COORD_WAKE_RETRY_SECS" = "0" ] && echo " (disabled)" || echo " (retry a dirty-composer-deferred wake, warn after ${COORD_WAKE_DEFER_WARN_SECS}s, issue #422)")
+coord-inbox:   $COORD_INBOX_DIR (issue #430; busy-pane doorbell defer: $([ "$COORD_WAKE_BUSY_RETRY_SECS" = "0" ] && echo "disabled — pastes immediately regardless of busy" || echo "retry ${COORD_WAKE_BUSY_RETRY_SECS}s, ceiling $([ "$COORD_WAKE_BUSY_CEILING_SECS" = "0" ] && echo "none" || echo "${COORD_WAKE_BUSY_CEILING_SECS}s")"))
 check-on-done: $WATCH_CHECK_ON_DONE$([ "$WATCH_CHECK_ON_DONE" = "1" ] && echo " (session: $SESSION_NAME)")
 auto-compact:  $AUTO_COMPACT$([ "$AUTO_COMPACT" = "1" ] && echo " (threshold: min(${AUTO_COMPACT_PCT}% of window, ${AUTO_COMPACT_THRESHOLD_CAP_TOKENS}), fallback: ${AUTO_COMPACT_THRESHOLD_TOKENS} tokens, require-window: ${AUTO_COMPACT_REQUIRE_WINDOW}, probe: $AUTO_COMPACT_PROBE, poll-tick: ${AUTO_COMPACT_TICK_SECS}s$([ "$AUTO_COMPACT_TICK_SECS" = "0" ] && echo " disabled"), cooldown: ${AUTO_COMPACT_COOLDOWN_SECS}s)")
 worker-compact: $WORKER_AUTO_COMPACT$([ "$WORKER_AUTO_COMPACT" = "1" ] && echo " (threshold: min(${WORKER_COMPACT_PCT}% of window, ${WORKER_COMPACT_THRESHOLD_CAP_TOKENS})/wrapup+$(( WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS - WORKER_COMPACT_THRESHOLD_TOKENS )), fallback: ${WORKER_COMPACT_THRESHOLD_TOKENS}/${WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS} tokens, require-window: ${WORKER_COMPACT_REQUIRE_WINDOW}, scan: ${WORKER_COMPACT_SCAN_SECS}s)")
@@ -3731,7 +3863,7 @@ SCRIPT
 # run_auto_compact_poll_loop, started as its own background process right
 # after this function.
 run_watch_timer_loop() {
-    local last_pr_poll=0 last_orphan_sweep=0 last_bg_violation_sweep=0 last_activity_poll=0 last_coord_wake_retry=0 now
+    local last_pr_poll=0 last_orphan_sweep=0 last_bg_violation_sweep=0 last_activity_poll=0 last_coord_wake_retry=0 last_coord_wake_busy_retry=0 now
     while true; do
         sleep 2
         [ "$WATCH_CHECK_ON_DONE" = "1" ] && { status_poll_pass || true; }
@@ -3740,6 +3872,16 @@ run_watch_timer_loop() {
             if [ $((now - last_coord_wake_retry)) -ge "$COORD_WAKE_RETRY_SECS" ]; then
                 coord_wake_retry_pass || true
                 last_coord_wake_retry=$now
+            fi
+        fi
+        # issue #430: independent cadence/state from the dirty-draft retry
+        # above — see COORD_WAKE_BUSY_RETRY_SECS's header comment for why
+        # these are two separate gates rather than one shared retry.
+        if [ "$COORD_WAKE_BUSY_RETRY_SECS" -gt 0 ]; then
+            now=$(date +%s)
+            if [ $((now - last_coord_wake_busy_retry)) -ge "$COORD_WAKE_BUSY_RETRY_SECS" ]; then
+                coord_wake_busy_retry_pass || true
+                last_coord_wake_busy_retry=$now
             fi
         fi
         if [ "$WATCH_PR_POLL_SECS" -gt 0 ]; then
@@ -5385,6 +5527,159 @@ worker_compact_pass() {
     done <<< "$windows"
 }
 
+# coord_inbox_write <kind> <content>
+#
+# (issue #430) Durably records one wake payload to COORD_INBOX_DIR as its
+# own <UTC-timestamp>-<kind>-<pid>-<rand>.md file — atomic mktemp (inside
+# the dir, WITHOUT the .md suffix, so a glob on *.md never matches a
+# half-written temp file) + mv, same convention the worker outbox uses.
+# Unconditional and independent of debounce/defer state: called before any
+# doorbell decision is made, so the payload is on disk even if the doorbell
+# itself is about to be skipped (debounce), deferred (busy pane / dirty
+# composer), or fails to submit — the exact gap that let a
+# coord.wake.submit_failed wake's content exist "nowhere but the failed
+# paste" before this issue (see this file's header comment). Failure here
+# is logged but non-fatal — an inbox write that can't land shouldn't also
+# block the doorbell attempt that follows it.
+coord_inbox_write() {
+    local kind="$1" content="$2" tmp final
+    mkdir -p "$COORD_INBOX_DIR" "$COORD_INBOX_PROCESSED_DIR" 2>/dev/null || true
+    tmp="$(mktemp "$COORD_INBOX_DIR/.tmp.coord-inbox.XXXXXX" 2>/dev/null)" || return 1
+    printf '%s\n' "$content" > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
+    final="$COORD_INBOX_DIR/$(date -u +%Y%m%dT%H%M%SZ)-${kind}-$$-${RANDOM}.md"
+    mv -f "$tmp" "$final" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
+}
+
+# coord_inbox_count
+#
+# (issue #430) Echoes the number of unprocessed coord-inbox/*.md files —
+# "unprocessed" because coord_inbox_write's targets always land directly in
+# COORD_INBOX_DIR, never COORD_INBOX_PROCESSED_DIR, and the coordinator's
+# own triage (prompts/coordinator.md "Inbox") archives each one it handles
+# into processed/ by moving it out of this glob's reach. Used only to
+# render coord_inbox_nudge_text's "%N" live at paste time.
+coord_inbox_count() {
+    # `|| true` on the whole pipeline (not just find's own 2>/dev/null,
+    # which only silences find's stderr, not its exit status) — under this
+    # script's `set -e -o pipefail`, a missing COORD_INBOX_DIR (nothing
+    # written yet) would otherwise make find's non-zero status the
+    # pipeline's status and abort the caller via the `local n; n=$(...)`
+    # two-line assignment pattern (a single-line `local n=$(...)` would
+    # mask it instead — see mtime_epoch's callers for why this file always
+    # splits local/assign, and why that means failures here DO need an
+    # explicit `|| true`, unlike there).
+    find "$COORD_INBOX_DIR" -maxdepth 1 -name '*.md' -type f 2>/dev/null | wc -l | tr -d '[:space:]' || true
+}
+
+# coord_inbox_nudge_text
+#
+# (issue #430) Renders COORD_INBOX_NUDGE_TEMPLATE with "%N" replaced by the
+# CURRENT coord_inbox_count — computed fresh at call time, not captured
+# once and persisted, so a nudge delivered late (after a busy-pane defer or
+# a dirty-composer retry) still reports an accurate count instead of a
+# stale one from whenever the defer first started.
+coord_inbox_nudge_text() {
+    local n
+    n="$(coord_inbox_count)"
+    printf '%s\n' "${COORD_INBOX_NUDGE_TEMPLATE//%N/$n}"
+}
+
+# coord_wake_busy_mark_pending
+#
+# (issue #430) Records "a doorbell wake is currently withheld because the
+# coordinator pane was busy" by touching COORD_WAKE_BUSY_PENDING_FILE — its
+# content is unused (unlike COORD_WAKE_PENDING_FILE, which stores the
+# deferred prompt text itself; this gate's eventual delivery always
+# re-renders coord_inbox_nudge_text fresh, so there's nothing prompt-
+# specific to persist). Never re-touches an already-pending marker — same
+# "earliest defer time wins" reasoning as coord_wake_set_pending, since
+# COORD_WAKE_BUSY_CEILING_SECS counts from when the pane FIRST went busy
+# for this wake, not from the most recent on_outcome/on_message call that
+# found it still busy.
+coord_wake_busy_mark_pending() {
+    (
+        flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 9 || exit 0
+        [ -e "$COORD_WAKE_BUSY_PENDING_FILE" ] && exit 0
+        touch "$COORD_WAKE_BUSY_PENDING_FILE" 2>/dev/null || true
+    ) 9>"$COORD_WAKE_LOCK" || true
+}
+
+# coord_wake_busy_clear_pending
+#
+# (issue #430) Removes COORD_WAKE_BUSY_PENDING_FILE — called once
+# coord_wake_busy_retry_pass has either delivered the wake (pane went idle,
+# or the ceiling fired) or handed it off to the dirty-draft mechanism
+# instead (coord_wake_set_pending).
+coord_wake_busy_clear_pending() {
+    ( flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 9 && rm -f "$COORD_WAKE_BUSY_PENDING_FILE" ) 9>"$COORD_WAKE_LOCK" || true
+}
+
+# coord_wake_busy_retry_pass
+#
+# (issue #430) Ticked from run_watch_timer_loop on COORD_WAKE_BUSY_RETRY_SECS
+# — a no-op when nothing is busy-pending. Otherwise: if the pane is STILL
+# busy and the marker's age hasn't reached COORD_WAKE_BUSY_CEILING_SECS yet,
+# waits for the next tick without logging (per-tick log spam adds nothing —
+# coord.wake.defer already fired once, at first detection, in
+# on_outcome/on_message). Once either the pane goes idle OR the ceiling is
+# reached (logged as coord.wake.defer_ceiling, still-busy case only), it
+# delivers through the SAME single injection site every other wake path
+# uses (llm-start.sh's reprompt_inject via $LLM_START) — no new send-keys
+# surface. A dirty-composer rc 3 from that delivery attempt is handed off
+# to coord_wake_set_pending rather than invented as a second parallel
+# mechanism: once the busy phase is over, a human draft sitting in the
+# composer is exactly issue #422's case, with its own indefinite-retry-
+# without-forcing semantics.
+coord_wake_busy_retry_pass() {
+    [ -e "$COORD_WAKE_BUSY_PENDING_FILE" ] || return 0
+
+    local since now age
+    since=$(mtime_epoch "$COORD_WAKE_BUSY_PENDING_FILE") || since=$(date +%s)
+    now=$(date +%s)
+    age=$((now - since))
+
+    local still_busy=0
+    coordinator_pane_busy && still_busy=1
+
+    if [ "$still_busy" = "1" ] && { [ "$COORD_WAKE_BUSY_CEILING_SECS" -eq 0 ] || [ "$age" -lt "$COORD_WAKE_BUSY_CEILING_SECS" ]; }; then
+        return 0
+    fi
+
+    if [ "$still_busy" = "1" ]; then
+        echo "[$(date +%T)] coordinator busy-deferred wake hit its ${COORD_WAKE_BUSY_CEILING_SECS}s ceiling — delivering anyway"
+        log_event coord.wake.defer_ceiling "age=${age}s"
+    fi
+
+    local nudge
+    nudge="$(coord_inbox_nudge_text)"
+
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "[DRY] would deliver busy-deferred wake: cd $PROJECT_DIR && NON_INTERACTIVE=1 $LLM_START \"$nudge\" (deferred ${age}s)"
+        coord_wake_busy_clear_pending
+        return 0
+    fi
+
+    echo "[$(date +%T)] delivering busy-deferred coordinator wake (pending ${age}s)..."
+    local wake_rc=0
+    ( flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 9 && cd "$PROJECT_DIR" && NON_INTERACTIVE=1 "$LLM_START" "$nudge" ) 9>"$COORD_WAKE_LOCK" || wake_rc=$?
+    coord_wake_busy_clear_pending
+    case "$wake_rc" in
+        0)
+            echo "[$(date +%T)] busy-deferred coordinator wake delivered."
+            log_event coord.wake.deferred_delivered "age=${age}s trigger=pane_busy"
+            ;;
+        3)
+            echo "[$(date +%T)] coordinator composer now holds an unsubmitted draft — handing off to the dirty-composer retry"
+            log_event coord.wake.deferred "reason=composer_dirty trigger=pane_busy_handoff age=${age}s"
+            coord_wake_set_pending "$nudge"
+            ;;
+        *)
+            echo "[$(date +%T)] WARN: busy-deferred coordinator wake retry exited non-zero (continuing watch)"
+            log_event coord.wake.error "trigger=pane_busy_retry rc=$wake_rc age=${age}s"
+            ;;
+    esac
+}
+
 # coord_wake_set_pending <prompt>
 #
 # (issue #422) Records <prompt> as a wake still owed to the coordinator
@@ -5532,6 +5827,23 @@ on_outcome() {
         fi
     fi
 
+    # issue #430: the inbox write is UNCONDITIONAL, before the debounce
+    # check below — a burst of outcomes landing inside one coalesced
+    # doorbell window still produces one coord-inbox/*.md file PER outcome
+    # (only the doorbell paste itself, below, is coalesced to one nudge).
+    # This is also what fixes the "content existed nowhere but the failed
+    # paste" gap a coord.wake.submit_failed used to leave (see this file's
+    # own header comment): the payload is durable before any paste attempt.
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "[$(date +%T)] [DRY] would write coord-inbox entry: issue=$issue outcome=$outcome path=$path"
+    else
+        if coord_inbox_write outcome "$(printf '%s\n\nTriggering outcome: issue=%s outcome=%s path=%s\n' "$WAKE_PROMPT" "$issue" "$outcome" "$path")"; then
+            log_event coord.inbox.write "issue=$issue trigger=outcome:$(basename "$path")"
+        else
+            echo "[$(date +%T)] WARN: failed to write coord-inbox entry for $path" >&2
+        fi
+    fi
+
     if [ $((now - LAST_WAKE)) -lt "$DEBOUNCE_SECS" ]; then
         echo "[$(date +%T)] outcome: $path — within debounce window (${DEBOUNCE_SECS}s), skipping wake"
         log_event coord.wake.skip "issue=$issue reason=debounce window=${DEBOUNCE_SECS}s"
@@ -5546,48 +5858,66 @@ on_outcome() {
         cleanup_eligible_workers outcome
     fi
 
-    maybe_auto_compact wake
-
     echo "[$(date +%T)] outcome: $path"
-    echo "[$(date +%T)] waking coordinator..."
-    log_event coord.wake "issue=$issue trigger=$(basename "$path")"
 
-    if [ "$DRY_RUN" = "1" ]; then
-        echo "[DRY] would: cd $PROJECT_DIR && NON_INTERACTIVE=1 $LLM_START \"$WAKE_PROMPT\""
+    # issue #430: don't paste a doorbell into a mid-turn coordinator pane —
+    # Claude Code queues an ill-timed paste and delivers it as an unrelated
+    # ❯ user turn spliced into whatever the coordinator was already doing
+    # (the fand-app swarm PR #1108 merge-turn incident, 2026-09-16, that
+    # prompted this issue). This gate sits BEFORE maybe_auto_compact too: a
+    # /compact injection is itself a paste into the same composer, so
+    # there's nothing safe to attempt while busy either.
+    # COORD_WAKE_BUSY_RETRY_SECS=0 is the rollback switch back to the
+    # pre-#430 always-paste-immediately behavior.
+    if [ "$COORD_WAKE_BUSY_RETRY_SECS" -gt 0 ] && coordinator_pane_busy; then
+        echo "[$(date +%T)] coordinator pane is mid-turn — deferring wake doorbell, will retry"
+        log_event coord.wake.defer "issue=$issue reason=pane_busy trigger=outcome"
+        coord_wake_busy_mark_pending
     else
-        # Run llm-start.sh in a subshell so its `set -e` doesn't kill us.
-        # NON_INTERACTIVE=1 prevents auto-attach; coordinator runs detached
-        # in its tmux session. flock's COORD_WAKE_LOCK (issue #392) so this
-        # can't race on_activity's own llm-start.sh call from a different
-        # OS process — see that lock's header comment. -w (not an unbounded
-        # wait) plus && (not `;`) so EITHER a lock timeout OR a flock error
-        # skips the unlocked llm-start.sh call entirely, falling through to
-        # the same error handling below.
-        local wake_rc=0
-        ( flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 9 && cd "$PROJECT_DIR" && NON_INTERACTIVE=1 "$LLM_START" "$WAKE_PROMPT" ) 9>"$COORD_WAKE_LOCK" || wake_rc=$?
-        if [ "$wake_rc" = "3" ]; then
-            # issue #422: llm-start.sh's reprompt_inject found the composer
-            # holding an unsubmitted human draft and refused to paste over
-            # it. Not an error — persist the prompt for coord_wake_retry_pass
-            # (run_watch_timer_loop, COORD_WAKE_RETRY_SECS) instead of
-            # dropping it; see coord_wake_set_pending's header comment for
-            # why it's a file, not a plain global.
-            echo "[$(date +%T)] coordinator composer holds an unsubmitted draft — deferring wake, will retry"
-            log_event coord.wake.deferred "issue=$issue reason=composer_dirty"
-            coord_wake_set_pending "$WAKE_PROMPT"
-        elif [ "$wake_rc" != "0" ]; then
-            echo "[$(date +%T)] WARN: coordinator wake exited non-zero (continuing watch)"
-            log_event coord.wake.error "issue=$issue rc=$wake_rc"
+        maybe_auto_compact wake
+
+        echo "[$(date +%T)] waking coordinator..."
+        local nudge
+        nudge="$(coord_inbox_nudge_text)"
+        log_event coord.wake "issue=$issue trigger=$(basename "$path")"
+
+        if [ "$DRY_RUN" = "1" ]; then
+            echo "[DRY] would: cd $PROJECT_DIR && NON_INTERACTIVE=1 $LLM_START \"$nudge\""
         else
-            # issue #422 self-review finding: this fresh wake just landed
-            # directly — drop any STALE prompt left over from an earlier
-            # deferral (coord_wake_set_pending never overwrites a pending
-            # entry, so one could still be sitting there from before the
-            # composer cleared). Without this, coord_wake_retry_pass would
-            # later deliver that stale prompt as a redundant duplicate wake,
-            # even though the coordinator already has fresher instructions.
-            # No-op (cheap) when nothing was pending.
-            coord_wake_clear_pending
+            # Run llm-start.sh in a subshell so its `set -e` doesn't kill us.
+            # NON_INTERACTIVE=1 prevents auto-attach; coordinator runs detached
+            # in its tmux session. flock's COORD_WAKE_LOCK (issue #392) so this
+            # can't race on_activity's own llm-start.sh call from a different
+            # OS process — see that lock's header comment. -w (not an unbounded
+            # wait) plus && (not `;`) so EITHER a lock timeout OR a flock error
+            # skips the unlocked llm-start.sh call entirely, falling through to
+            # the same error handling below.
+            local wake_rc=0
+            ( flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 9 && cd "$PROJECT_DIR" && NON_INTERACTIVE=1 "$LLM_START" "$nudge" ) 9>"$COORD_WAKE_LOCK" || wake_rc=$?
+            if [ "$wake_rc" = "3" ]; then
+                # issue #422: llm-start.sh's reprompt_inject found the composer
+                # holding an unsubmitted human draft and refused to paste over
+                # it. Not an error — persist the prompt for coord_wake_retry_pass
+                # (run_watch_timer_loop, COORD_WAKE_RETRY_SECS) instead of
+                # dropping it; see coord_wake_set_pending's header comment for
+                # why it's a file, not a plain global.
+                echo "[$(date +%T)] coordinator composer holds an unsubmitted draft — deferring wake, will retry"
+                log_event coord.wake.deferred "issue=$issue reason=composer_dirty"
+                coord_wake_set_pending "$nudge"
+            elif [ "$wake_rc" != "0" ]; then
+                echo "[$(date +%T)] WARN: coordinator wake exited non-zero (continuing watch)"
+                log_event coord.wake.error "issue=$issue rc=$wake_rc"
+            else
+                # issue #422 self-review finding: this fresh wake just landed
+                # directly — drop any STALE prompt left over from an earlier
+                # deferral (coord_wake_set_pending never overwrites a pending
+                # entry, so one could still be sitting there from before the
+                # composer cleared). Without this, coord_wake_retry_pass would
+                # later deliver that stale prompt as a redundant duplicate wake,
+                # even though the coordinator already has fresher instructions.
+                # No-op (cheap) when nothing was pending.
+                coord_wake_clear_pending
+            fi
         fi
     fi
     LAST_WAKE=$now
@@ -5615,9 +5945,10 @@ on_outcome() {
 #
 # (issue #129) A worker dropped a message file into its
 # `.swarm/tasks/outbox/`. Wake the coordinator with a message-triage prompt.
-# Mirrors on_outcome's shape (debounce -> pre-wake compact -> llm-start ->
-# ONCE) minus the outcome-only steps: no sweep (nothing to post — the message
-# IS the payload) and no autoclose pass (a message never frees a slot).
+# Mirrors on_outcome's shape (inbox write -> debounce -> busy gate ->
+# pre-wake compact -> llm-start -> ONCE) minus the outcome-only steps: no
+# sweep (nothing to post — the message IS the payload) and no autoclose
+# pass (a message never frees a slot).
 on_message() {
     local path="$1"
     local now issue
@@ -5625,48 +5956,71 @@ on_message() {
     issue=$(msg_issue "$path")
     log_event worker.message "issue=$issue path=$path"
 
-    if [ $((now - LAST_MSG_WAKE)) -lt "$DEBOUNCE_SECS" ]; then
-        echo "[$(date +%T)] message: $path — within debounce window (${DEBOUNCE_SECS}s), skipping wake"
-        log_event coord.wake.skip "issue=$issue reason=debounce window=${DEBOUNCE_SECS}s trigger=outbox"
-        return
-    fi
-
-    maybe_auto_compact wake
-
     # Default prompt is built per-event so it can name the triggering file,
     # but it always instructs a full outbox scan — that's what makes the
-    # debounce above safe (coalesced messages surface on the next wake) and
+    # debounce below safe (coalesced messages surface on the next wake) and
     # what picks up messages that predate this watcher process.
     local wake_prompt="$OUTBOX_WAKE_PROMPT"
     if [ -z "$wake_prompt" ]; then
         wake_prompt="Worker iss-$issue posted a message to its outbox: $path. List every unprocessed message with: for wt in \$($LLM_SWARM_DIR/scripts/list-own-worktrees.sh $PROJECT_DIR); do ls \"\$wt\"/.swarm/tasks/outbox/*.md 2>/dev/null; done — then, oldest first, read each and act on its kind (fyi: note it in your status picture; decision-needed: decide or surface to the operator; brief-draft: review the drafted brief and dispatch it via provision-worker.sh or requeue.sh if warranted, otherwise tell the operator why not). After handling a message, archive it: mkdir -p <its-outbox>/processed && mv <message> <its-outbox>/processed/. Never leave a handled message in outbox/ — unarchived means unread."
     fi
 
-    echo "[$(date +%T)] message: $path"
-    echo "[$(date +%T)] waking coordinator (outbox)..."
-    log_event coord.wake "issue=$issue trigger=outbox:$(basename "$path")"
-
+    # issue #430: unconditional inbox write — see on_outcome's identical
+    # step for the full rationale.
     if [ "$DRY_RUN" = "1" ]; then
-        echo "[DRY] would: cd $PROJECT_DIR && NON_INTERACTIVE=1 $LLM_START \"$wake_prompt\""
+        echo "[$(date +%T)] [DRY] would write coord-inbox entry: issue=$issue path=$path"
     else
-        # flock's COORD_WAKE_LOCK (issue #392, bounded -w) — see its
-        # header comment and on_outcome's call site above for why -w/&&.
-        local wake_rc=0
-        ( flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 9 && cd "$PROJECT_DIR" && NON_INTERACTIVE=1 "$LLM_START" "$wake_prompt" ) 9>"$COORD_WAKE_LOCK" || wake_rc=$?
-        if [ "$wake_rc" = "3" ]; then
-            # issue #422 — see on_outcome's identical branch for the full
-            # rationale.
-            echo "[$(date +%T)] coordinator composer holds an unsubmitted draft — deferring wake, will retry"
-            log_event coord.wake.deferred "issue=$issue reason=composer_dirty trigger=outbox"
-            coord_wake_set_pending "$wake_prompt"
-        elif [ "$wake_rc" != "0" ]; then
-            echo "[$(date +%T)] WARN: coordinator wake exited non-zero (continuing watch)"
-            log_event coord.wake.error "issue=$issue trigger=outbox rc=$wake_rc"
+        if coord_inbox_write outbox "$(printf '%s\n\nTriggering message: %s\n' "$wake_prompt" "$path")"; then
+            log_event coord.inbox.write "issue=$issue trigger=outbox:$(basename "$path")"
         else
-            # issue #422 self-review finding — see on_outcome's identical
-            # branch for the full rationale (drop a stale pending prompt
-            # now that a fresh one just landed directly).
-            coord_wake_clear_pending
+            echo "[$(date +%T)] WARN: failed to write coord-inbox entry for $path" >&2
+        fi
+    fi
+
+    if [ $((now - LAST_MSG_WAKE)) -lt "$DEBOUNCE_SECS" ]; then
+        echo "[$(date +%T)] message: $path — within debounce window (${DEBOUNCE_SECS}s), skipping wake"
+        log_event coord.wake.skip "issue=$issue reason=debounce window=${DEBOUNCE_SECS}s trigger=outbox"
+        return
+    fi
+
+    echo "[$(date +%T)] message: $path"
+
+    # issue #430: same busy-pane doorbell gate as on_outcome — see that
+    # function's identical branch for the full rationale.
+    if [ "$COORD_WAKE_BUSY_RETRY_SECS" -gt 0 ] && coordinator_pane_busy; then
+        echo "[$(date +%T)] coordinator pane is mid-turn — deferring wake doorbell, will retry"
+        log_event coord.wake.defer "issue=$issue reason=pane_busy trigger=outbox"
+        coord_wake_busy_mark_pending
+    else
+        maybe_auto_compact wake
+
+        echo "[$(date +%T)] waking coordinator (outbox)..."
+        local nudge
+        nudge="$(coord_inbox_nudge_text)"
+        log_event coord.wake "issue=$issue trigger=outbox:$(basename "$path")"
+
+        if [ "$DRY_RUN" = "1" ]; then
+            echo "[DRY] would: cd $PROJECT_DIR && NON_INTERACTIVE=1 $LLM_START \"$nudge\""
+        else
+            # flock's COORD_WAKE_LOCK (issue #392, bounded -w) — see its
+            # header comment and on_outcome's call site above for why -w/&&.
+            local wake_rc=0
+            ( flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 9 && cd "$PROJECT_DIR" && NON_INTERACTIVE=1 "$LLM_START" "$nudge" ) 9>"$COORD_WAKE_LOCK" || wake_rc=$?
+            if [ "$wake_rc" = "3" ]; then
+                # issue #422 — see on_outcome's identical branch for the full
+                # rationale.
+                echo "[$(date +%T)] coordinator composer holds an unsubmitted draft — deferring wake, will retry"
+                log_event coord.wake.deferred "issue=$issue reason=composer_dirty trigger=outbox"
+                coord_wake_set_pending "$nudge"
+            elif [ "$wake_rc" != "0" ]; then
+                echo "[$(date +%T)] WARN: coordinator wake exited non-zero (continuing watch)"
+                log_event coord.wake.error "issue=$issue trigger=outbox rc=$wake_rc"
+            else
+                # issue #422 self-review finding — see on_outcome's identical
+                # branch for the full rationale (drop a stale pending prompt
+                # now that a fresh one just landed directly).
+                coord_wake_clear_pending
+            fi
         fi
     fi
     LAST_MSG_WAKE=$now
@@ -5685,94 +6039,62 @@ on_message() {
 #
 # (issue #392) activity_poll_pass found operator activity (PR merge / issue
 # close) with no other wake path — see WATCH_ACTIVITY_POLL_SECS's header
-# comment. Mirrors on_message's shape (debounce -> pre-wake compact ->
-# llm-start), called from the run_watch_timer_loop background process (not
+# comment. Called from the run_watch_timer_loop background process (not
 # the main inotify/poll loop that calls on_outcome/on_message) — its own
 # debounce clock, LAST_ACTIVITY_WAKE, keeps it from being swallowed by, or
-# swallowing, an unrelated outcome/outbox wake. Same maybe_auto_compact/
-# llm-start.sh call as every other wake path (issue #295 — llm-start.sh's
-# live-REPL reprompt path is the single injection site every caller funnels
-# through, by design), invoked from a third process here rather than a new
-# one — nothing about that path is process-specific.
+# swallowing, an unrelated outcome/outbox wake.
 #
-# Deliberately does NOT honor ONCE, unlike on_outcome/on_message: those run
-# in the main process that ONCE's `exit 0` actually terminates; this runs
-# inside run_watch_timer_loop's own backgrounded subshell, where `exit 0`
-# would only end that subshell, leaving the main process (blocked in
-# run_inotify/run_poll) running forever — a smoke-test footgun, not a real
-# feature. Same reasoning already applies to pr_poll_pass/orphan_sweep_pass/
-# bg_violation_sweep_pass, none of which check ONCE either.
+# (issue #430) INBOX-ONLY, no doorbell: unlike on_outcome/on_message, this
+# never calls llm-start.sh at all. An activity-poll finding only matters
+# the next time the coordinator speaks — "something you may be reporting
+# as pending was resolved in the GitHub web UI" is never urgent enough to
+# justify interrupting a live turn or a busy-pane retry/ceiling dance — and
+# prompts/coordinator.md's "Inbox" section already has the coordinator
+# scanning coord-inbox/ at the start of every turn and after finishing an
+# operator request, which is sufficient delivery. This also removes the
+# COORD_WAKE_LOCK cross-process race this function used to need to guard
+# against (issue #392 self-review) — coord_inbox_write's own mktemp+mv is
+# safe against concurrent writers on its own, no lock required.
 #
-# Returns 1 on a debounced skip OR a failed (non-DRY_RUN) llm-start.sh call
-# — including a COORD_WAKE_LOCK_TIMEOUT_SECS lock timeout — 0 otherwise
-# (issue #392 self-review, both cases). The caller, activity_poll_pass,
-# only marks its ACTIVITY_ANNOUNCED_PR/_ISSUE dedup maps on a 0 return — an
-# item whose wake didn't actually land, for whichever reason, must stay
-# eligible for a later tick to retry rather than being marked "announced"
-# for a wake that never happened. DRY_RUN always counts as success (0),
-# matching every other side-effecting pass in this file.
+# Returns 1 on a debounced skip OR a failed inbox write, 0 otherwise — the
+# caller, activity_poll_pass, only marks its ACTIVITY_ANNOUNCED_PR/_ISSUE
+# dedup maps on a 0 return, so a finding that didn't actually get recorded
+# stays eligible for a later tick to retry rather than being marked
+# "announced" for a write that never landed. DRY_RUN always counts as
+# success (0), matching every other side-effecting pass in this file.
 on_activity() {
     local lines="$1"
     local now
     now=$(date +%s)
 
     if [ $((now - LAST_ACTIVITY_WAKE)) -lt "$DEBOUNCE_SECS" ]; then
-        echo "[$(date +%T)] activity: within debounce window (${DEBOUNCE_SECS}s), skipping wake"
+        echo "[$(date +%T)] activity: within debounce window (${DEBOUNCE_SECS}s), skipping"
         log_event coord.wake.skip "reason=debounce window=${DEBOUNCE_SECS}s trigger=activity_poll"
         return 1
     fi
 
-    maybe_auto_compact wake
-
-    local wake_prompt="$ACTIVITY_WAKE_PROMPT"
-    if [ -z "$wake_prompt" ]; then
-        wake_prompt="A periodic gh-search poll (issue #392) found GitHub activity that didn't come through the usual worker-outcome wake path — most likely the operator resolved it directly in the GitHub web UI while this swarm's workers for it were already reaped:
+    local body="$ACTIVITY_WAKE_PROMPT"
+    if [ -z "$body" ]; then
+        body="A periodic gh-search poll (issue #392) found GitHub activity that didn't come through the usual worker-outcome wake path — most likely the operator resolved it directly in the GitHub web UI while this swarm's workers for it were already reaped:
 $lines
 Re-check your own picture of outstanding decisions/PRs/issues against this (gh pr list / gh issue list) and correct anything you were still reporting as pending on these."
     fi
 
-    echo "[$(date +%T)] activity: detected"
-    echo "[$(date +%T)] waking coordinator (activity poll)..."
-    log_event coord.wake "trigger=activity_poll"
+    echo "[$(date +%T)] activity: detected — writing to coordinator inbox (no doorbell, issue #430)"
 
-    local wake_ok=1
+    local write_ok=1
     if [ "$DRY_RUN" = "1" ]; then
-        echo "[DRY] would: cd $PROJECT_DIR && NON_INTERACTIVE=1 $LLM_START \"$wake_prompt\""
+        echo "[DRY] would write coord-inbox activity entry"
     else
-        # flock's COORD_WAKE_LOCK (issue #392, bounded -w) — this call runs
-        # from run_watch_timer_loop's own background subshell, a genuinely
-        # separate OS process from on_outcome/on_message's main-process
-        # calls above; without this lock both could hit llm-start.sh's
-        # single unlocked reprompt-injection tmux buffer at once. See the
-        # lock's header comment for the full race, and -w's own header
-        # comment for why this waits (bounded, not unbounded) rather than
-        # skipping outright like maybe_auto_compact's -n does (a compact
-        # isn't a message anyone would otherwise miss; a wake is).
-        local wake_rc=0
-        ( flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 9 && cd "$PROJECT_DIR" && NON_INTERACTIVE=1 "$LLM_START" "$wake_prompt" ) 9>"$COORD_WAKE_LOCK" || wake_rc=$?
-        if [ "$wake_rc" = "3" ]; then
-            # issue #422 — see on_outcome's identical branch for the full
-            # rationale. Also persisted here (fast COORD_WAKE_RETRY_SECS
-            # retry) as a complement to, not a replacement for, this
-            # function's existing "return 1 -> cursor doesn't advance"
-            # slow-path safety net a few lines below: whichever lands
-            # first delivers the same $lines content either way.
-            echo "[$(date +%T)] coordinator composer holds an unsubmitted draft — deferring wake, will retry"
-            log_event coord.wake.deferred "reason=composer_dirty trigger=activity_poll"
-            coord_wake_set_pending "$wake_prompt"
-            wake_ok=0
-        elif [ "$wake_rc" != "0" ]; then
-            echo "[$(date +%T)] WARN: coordinator wake exited non-zero (continuing watch)"
-            log_event coord.wake.error "trigger=activity_poll rc=$wake_rc"
-            wake_ok=0
+        if coord_inbox_write activity "$body"; then
+            log_event coord.inbox.write "trigger=activity_poll"
         else
-            # issue #422 self-review finding — see on_outcome's identical
-            # branch for the full rationale (drop a stale pending prompt
-            # now that a fresh one just landed directly).
-            coord_wake_clear_pending
+            echo "[$(date +%T)] WARN: failed to write coord-inbox activity entry" >&2
+            write_ok=0
         fi
     fi
-    [ "$wake_ok" = "1" ] || return 1
+
+    [ "$write_ok" = "1" ] || return 1
     LAST_ACTIVITY_WAKE=$now
     return 0
 }
@@ -5901,7 +6223,15 @@ run_poll() {
 # run_auto_compact_poll_loop's header comments for why those sweeps don't
 # share run_watch_timer_loop's process.
 # ---------------------------------------------------------------------------
-if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ] || [ "$WATCH_ORPHAN_SWEEP_SECS" -gt 0 ] || [ "$WATCH_BG_VIOLATION_SWEEP_SECS" -gt 0 ] || [ "$WATCH_ACTIVITY_POLL_SECS" -gt 0 ]; then
+# issue #430: COORD_WAKE_BUSY_RETRY_SECS must also start this loop —
+# coord_wake_busy_retry_pass is ticked from inside it, same as every other
+# pass here — or a deployment with every other timer-loop feature disabled
+# (all plausible in a minimal/test config) would silently never retry a
+# busy-pane-deferred wake at all, leaving it stuck until the process
+# restarts. (COORD_WAKE_RETRY_SECS, issue #422's older dirty-draft retry,
+# has this identical gap and predates this fix — out of scope here, but
+# worth folding in alongside this one if it's ever revisited.)
+if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ] || [ "$WATCH_ORPHAN_SWEEP_SECS" -gt 0 ] || [ "$WATCH_BG_VIOLATION_SWEEP_SECS" -gt 0 ] || [ "$WATCH_ACTIVITY_POLL_SECS" -gt 0 ] || [ "$COORD_WAKE_BUSY_RETRY_SECS" -gt 0 ]; then
     run_watch_timer_loop &
     WATCH_TIMER_PID=$!
     log_event watch.timer.start "pr_poll_secs=$WATCH_PR_POLL_SECS check_on_done=$WATCH_CHECK_ON_DONE orphan_sweep_secs=$WATCH_ORPHAN_SWEEP_SECS bg_violation_sweep_secs=$WATCH_BG_VIOLATION_SWEEP_SECS activity_poll_secs=$WATCH_ACTIVITY_POLL_SECS"
