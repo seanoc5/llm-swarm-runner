@@ -1561,9 +1561,12 @@ EVENTS LOG
       worker.finish.skip   outcome JSON detected for a foreign worktree
                            (sibling repo sharing the same WORKSPACE parent)
       coord.wake           the one-line inbox nudge was pasted via llm-start.sh
-                           (or coord.wake.skip on debounce); the FULL payload for
-                           this wake already landed in coord-inbox/ beforehand —
-                           see coord.inbox.write below (issue #430)
+                           (or coord.wake.skip reason=debounce|pane_busy — the
+                           latter only on a coord_wake_retry_pass dirty-draft
+                           retry finding the pane busy now, issue #430 self-
+                           review); the FULL payload for this wake already
+                           landed in coord-inbox/ beforehand — see
+                           coord.inbox.write below (issue #430)
       coord.inbox.write    (issue #430) a wake payload (outcome/outbox/activity-poll)
                            was written to <project>/.swarm/coord-inbox/ as its own
                            .md file — unconditional, fires even when the doorbell
@@ -5736,6 +5739,15 @@ coord_wake_clear_pending() {
 # TUI's dimmed autofill suggestion reads identically to a real draft in a
 # plain-text capture — so a wake CAN get stuck on a misread rather than a
 # genuine draft, and that needs to be visible to a human, not silent).
+#
+# (issue #430 self-review) Also checks coordinator_pane_busy before
+# retrying: a composer that was dirty (human draft) when first deferred may
+# since have been submitted, making the pane busy rather than idle —
+# retrying blindly through llm-start.sh's busy-always-clears rule would
+# splice this stale wake into that live turn, which is exactly what #430
+# exists to prevent. A busy pane on a retry tick just skips this tick
+# (coord.wake.skip reason=pane_busy) rather than delivering or escalating —
+# the pending file stays in place for the next tick either way.
 coord_wake_retry_pass() {
     [ -e "$COORD_WAKE_PENDING_FILE" ] || return 0
 
@@ -5763,6 +5775,24 @@ coord_wake_retry_pass() {
             log_event coord.wake.deferred_stale "age=${age}s"
             touch "$COORD_WAKE_PENDING_WARNED_FILE" 2>/dev/null || true
         fi
+    fi
+
+    # issue #430 self-review finding: a composer that was DIRTY (human
+    # draft) when this got deferred may since have been SUBMITTED — which
+    # makes the pane BUSY (Claude Code processing that turn), not idle.
+    # llm-start.sh's reprompt_composer_dirty treats a busy match as always
+    # "clear, proceed to paste" (safe for a FRESH wake, since Claude Code
+    # queues it) — but blindly retrying through that same path here would
+    # splice this stale wake into the middle of the turn the human's draft
+    # just started, exactly the incident #430 exists to prevent. Skip this
+    # tick (not a ceiling — a genuinely stuck dirty draft still gets the
+    # existing indefinite-retry-with-WARN treatment above; this only delays
+    # delivery while the pane is ACTIVELY busy) and let the next
+    # COORD_WAKE_RETRY_SECS tick re-check.
+    if [ "$COORD_WAKE_BUSY_RETRY_SECS" -gt 0 ] && coordinator_pane_busy; then
+        echo "[$(date +%T)] deferred coordinator wake still pending (pane now busy) — retrying next tick"
+        log_event coord.wake.skip "reason=pane_busy trigger=retry age=${age}s"
+        return 0
     fi
 
     echo "[$(date +%T)] retrying deferred coordinator wake (pending ${age}s)..."
