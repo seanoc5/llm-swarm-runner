@@ -13,6 +13,10 @@
 #                               authenticated gh login
 #   INCLUDE_ASSIGNED_TO_OTHERS  1 = any assignee (still minus stop/owner
 #                               labels); default scopes to @me or unassigned
+#   EXTRA_STOP_LABELS           comma-separated labels excluded like the
+#                               built-in stop-labels; default "demo" (kept-open
+#                               fodder for demo-driver.sh, see #409). Set to ""
+#                               to re-include them for this run.
 #
 # Output: JSON array of {number,title,assignees,labels}, deduped by number.
 #
@@ -25,6 +29,13 @@ set -euo pipefail
 ME=$(gh api user --jq .login)
 
 SEARCH="-label:blocked -label:deferred -label:awaiting-review"
+
+IFS=',' read -ra _extra_stop_labels <<< "${EXTRA_STOP_LABELS-demo}"
+for L in "${_extra_stop_labels[@]}"; do
+    L="${L// /}"
+    [ -z "$L" ] && continue
+    SEARCH="$SEARCH -label:$L"
+done
 
 if [ -n "${OWNER_LABELS:-}" ]; then
     IFS=',' read -ra _labels <<< "$OWNER_LABELS"
