@@ -287,10 +287,15 @@ dispatch_agent() {
     [ -n "$CODEX_PREFIX" ] && codex_task="$CODEX_PREFIX"$'\n\n---\n\n'"$task_text"
 
     if [[ "$AGENT" == "claude" ]]; then
+        # task_text goes on stdin, never argv (issue #415): claude reads the
+        # initial prompt from stdin when no positional prompt is given, then
+        # (interactive only) reopens /dev/tty for the live REPL, so an
+        # attached human can still type once the piped prompt is consumed.
+        # Confirmed against the installed CLI (2.1.259) before relying on it.
         if [ "$HEADLESS" = "1" ]; then
-            claude "${MODEL_OPTS[@]}" "${WORKER_SYSTEM_PROMPT_OPTS[@]}" -p "$task_text" --dangerously-skip-permissions
+            printf '%s' "$task_text" | claude "${MODEL_OPTS[@]}" "${WORKER_SYSTEM_PROMPT_OPTS[@]}" -p --dangerously-skip-permissions
         else
-            claude "${MODEL_OPTS[@]}" "${WORKER_SYSTEM_PROMPT_OPTS[@]}" "$task_text" --dangerously-skip-permissions
+            printf '%s' "$task_text" | claude "${MODEL_OPTS[@]}" "${WORKER_SYSTEM_PROMPT_OPTS[@]}" --dangerously-skip-permissions
         fi
     elif [[ "$AGENT" == "gemini" ]]; then
         if [ "$HEADLESS" = "1" ]; then
@@ -822,8 +827,14 @@ while true; do
         # rating, refresh-from-master, tiered self-merge). Delivered as a
         # system prompt to both agents for stronger adherence than when it
         # was concatenated into the user message in earlier versions:
-        #   - claude: --append-system-prompt "$(cat worker.md)"
-        #   - gemini: GEMINI_SYSTEM_MD=<path> env var (per gemini-cli docs)
+        #   - claude: --append-system-prompt-file <path> — the file path
+        #     goes on argv, never its content (issue #415; a plain
+        #     --append-system-prompt "$(cat worker.md)" put the entire
+        #     worker-conventions text, keywords and all, into this process's
+        #     argv, where any substring-matching process search inside the
+        #     sandbox could match the worker's own process)
+        #   - gemini: GEMINI_SYSTEM_MD=<path> env var (per gemini-cli docs;
+        #     already file-based, no argv exposure)
         #   - codex: prepend worker.md to the task prompt (codex CLI does not
         #     expose an append-system-prompt flag)
         refresh_stale_runner_checkout
@@ -833,7 +844,7 @@ while true; do
         CODEX_PREFIX=""
         if [ -n "${LLM_SWARM_DIR:-}" ] && [ -r "$WORKER_MD" ]; then
             case "$AGENT" in
-                claude) WORKER_SYSTEM_PROMPT_OPTS=(--append-system-prompt "$(cat "$WORKER_MD")") ;;
+                claude) WORKER_SYSTEM_PROMPT_OPTS=(--append-system-prompt-file "$WORKER_MD") ;;
                 gemini) WORKER_SYSTEM_PROMPT_ENV=(env "GEMINI_SYSTEM_MD=$WORKER_MD") ;;
                 codex) CODEX_PREFIX="$(cat "$WORKER_MD")" ;;
             esac
