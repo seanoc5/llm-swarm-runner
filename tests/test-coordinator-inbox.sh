@@ -262,7 +262,48 @@ $(cat "$EVENTS_LOG" 2>/dev/null || echo '(missing)')"
 green "events.log records the 2 coalesced outcomes as coord.wake.skip reason=debounce"
 
 # ============================================================================
-heading "Test 5: activity-poll finding — inbox-only, no doorbell at all"
+heading "Test 5: a busy-pending marker left over from an earlier defer does not cause a duplicate doorbell (self-review finding)"
+# ============================================================================
+# Race this guards against: outcome A busy-marks a pending doorbell; before
+# coord_wake_busy_retry_pass's next tick, the pane goes idle AND outcome B
+# arrives, pasting its OWN nudge directly (the idle/else branch in
+# on_outcome). If that branch doesn't also clear the busy-pending marker,
+# the next retry tick still finds it, sees the (now idle) pane, and
+# delivers a SECOND, redundant nudge for a wake that already landed.
+mkdir -p "$TEST_DIR/wt-issue-907/.swarm/tasks/done"
+mkdir -p "$TEST_DIR/wt-issue-908/.swarm/tasks/done"
+reset_state
+set_pane_busy
+sleep 0.3
+
+COORD_WAKE_BUSY_RETRY_SECS=5 COORD_WAKE_BUSY_CEILING_SECS=900 DEBOUNCE_SECS=0 start_watcher "$TEST_DIR/watch-5.log"
+echo '{"task_id":"t907","outcome":"ok"}' > "$TEST_DIR/wt-issue-907/.swarm/tasks/done/t907-907.ok.json"
+poll_until 10 0.3 bash -c "grep -q 'coord.wake.defer ' '$EVENTS_LOG' 2>/dev/null" \
+    || red "setup: busy-defer for outcome 907 never landed. watch log:
+$(cat "$TEST_DIR/watch-5.log")"
+
+# Pane goes idle and a second outcome lands immediately, well BEFORE the 5s
+# busy-retry tick — it must paste its own nudge directly (idle branch) and
+# clear the stale busy-pending marker from outcome 907 in the same step.
+set_pane_idle
+echo '{"task_id":"t908","outcome":"ok"}' > "$TEST_DIR/wt-issue-908/.swarm/tasks/done/t908-908.ok.json"
+poll_until 10 0.3 bash -c "[ \"\$(grep -c 'WAKE:' '$WAKE_LOG')\" = '1' ]" \
+    || red "outcome 908's direct idle-path wake never landed. wake.log:
+$(cat "$WAKE_LOG")"
+
+# Wait past the busy-retry tick (5s, started when the watcher booted —
+# comfortably after outcome 908's near-immediate direct delivery above)
+# plus margin — if the marker wasn't cleared, this is when the redundant
+# second nudge would show up.
+sleep 6
+stop_watcher
+
+[ "$(wake_count)" = "1" ] || red "expected exactly ONE doorbell nudge total — a stale busy-pending marker produced a duplicate. wake.log:
+$(cat "$WAKE_LOG")"
+green "a busy-pending marker cleared by a later direct (idle-path) wake does not cause a duplicate doorbell"
+
+# ============================================================================
+heading "Test 6: activity-poll finding — inbox-only, no doorbell at all"
 # ============================================================================
 reset_state
 PROJECT_DIR_ACTIVITY="$TEST_DIR/activity-project"

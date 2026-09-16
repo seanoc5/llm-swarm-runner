@@ -5917,6 +5917,16 @@ on_outcome() {
                 # even though the coordinator already has fresher instructions.
                 # No-op (cheap) when nothing was pending.
                 coord_wake_clear_pending
+                # issue #430 self-review finding, same class as #422's above:
+                # a PRIOR outcome/message could have busy-marked a pending
+                # doorbell (coord_wake_busy_mark_pending) that hasn't been
+                # retried yet — if the pane went idle and THIS wake pasted
+                # directly (this branch) before coord_wake_busy_retry_pass's
+                # next tick, that marker is now stale. Left uncleared,
+                # coord_wake_busy_retry_pass would still deliver a SECOND,
+                # redundant nudge once its tick runs, even though the
+                # coordinator already got one just now.
+                coord_wake_busy_clear_pending
             fi
         fi
     fi
@@ -6020,6 +6030,11 @@ on_message() {
                 # branch for the full rationale (drop a stale pending prompt
                 # now that a fresh one just landed directly).
                 coord_wake_clear_pending
+                # issue #430 self-review finding — see on_outcome's identical
+                # branch for the full rationale (drop a stale busy-pending
+                # marker too, or coord_wake_busy_retry_pass's next tick would
+                # deliver a redundant second nudge).
+                coord_wake_busy_clear_pending
             fi
         fi
     fi
