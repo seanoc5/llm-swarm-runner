@@ -436,10 +436,32 @@ COORD_BUSY_PATTERN="${COORD_BUSY_PATTERN:-\(esc to interrupt\)|Press Ctrl-C agai
 # itself and never match.
 reprompt_last_pane_line() {
     local target="$1" content clean
-    content="$(tmux capture-pane -t "$target" -p -J 2>/dev/null)" || { echo ""; return 1; }
-    clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
+    content="$(tmux capture-pane -e -t "$target" -p -J 2>/dev/null)" || { echo ""; return 1; }
+    clean="$(printf '%s\n' "$content" | LC_ALL=C sed 's/\x1b\[2m[^\x1b]*//g' | LC_ALL=C sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g; s/\xc2\xa0/ /g')"
+    # (issue #440) Three things the pre-#440 version misread as composer
+    # content, each of which made an EMPTY idle composer look "dirty":
+    #   1. Claude Code 2.1.x's persistent mode footer ("⏵⏵ bypass permissions
+    #      on (shift+tab to cycle) · ← for agents", plus accept-edits / plan /
+    #      auto variants) renders BELOW the composer, so it was the pane's
+    #      last non-blank line whenever the composer was empty — every idle
+    #      coordinator deferred (364/367 wakes on corpusminder-spring,
+    #      2026-09-16 → 09-19). Dropped by the "(shift+tab to cycle)" hint,
+    #      which every mode variant carries.
+    #   2. The full-width ─ rule the TUI draws under the composer. Dropped as
+    #      a box-drawing-only line — necessary once (1) is gone, or the rule
+    #      becomes the last line and a REAL draft above it reads as clear.
+    #   3. Framework-generated dim text in the composer itself: the empty-
+    #      composer placeholder (Try "edit <filepath> to...") and the
+    #      suggested-next-prompt autofill (the "known false positive" in
+    #      reprompt_composer_dirty's comment). Verified on live panes: both
+    #      render as ESC[2m dim runs (closed per word, per run, or not
+    #      at all before end-of-line); text a human actually typed carries no
+    #      SGR at all. So capture with -e and strip dim segments BEFORE the
+    #      general ANSI strip — what survives is what a person typed.
+    # The NBSP the TUI emits after ❯ is folded to a space so an empty prompt
+    # trims to a genuinely empty string.
     printf '%s\n' "$clean" \
-        | LC_ALL=C grep -vE 'ctx: [0-9]+[kM]?/[0-9]+[kM]?[[:space:]]*\([0-9]+%\)' \
+        | LC_ALL=C grep -vE 'ctx: [0-9]+[kM]?/[0-9]+[kM]?[[:space:]]*\([0-9]+%\)|\(shift\+tab to cycle\)|^[[:space:]]*[─╭╮╰╯│]+[[:space:]]*$' \
         | sed -e '/^[[:space:]]*$/d' -e 's/^[[:space:]]*[❯>│|╭╮╰╯─]*[[:space:]]*//' -e 's/[[:space:]]*[│|╭╮╰╯─]*[[:space:]]*$//' | tail -1 || true
 }
 

@@ -887,6 +887,34 @@ unset -f tmux
 check "compact_last_pane_line returns 0 even when EVERY line matches the ctx exclusion" "0" "$rc"
 check "compact_last_pane_line echoes empty (nothing survives the exclusion)" "" "$out"
 
+heading "Test 16b: compact_composer_clear — Claude Code 2.1.x idle chrome is not composer content (issue #440)"
+# Stubbed `tmux capture-pane -e` returning the bottom of a REAL 2.1.x pane
+# (captured live 2026-09-19): ─ rule, composer, ─ rule, ctx: statusline,
+# and the persistent mode footer UNDER the composer. Pre-#440 the footer
+# was the last non-blank line on every idle pane, so compact_composer_clear
+# never returned true (worker.deliver.skip reason=composer_not_clear), and
+# llm-start.sh's twin deferred ~99% of coordinator wakes. Framework-
+# generated composer text (the dim placeholder, the dim suggested-next-
+# prompt autofill) must read clear; text a human typed (no SGR) must not.
+cc_pane() {   # <composer line, raw bytes incl. SGR>
+    printf '✻ Cogitated for 2m 45s · done 5:31 PM\n'
+    printf '────────────────────────────────────────\n'
+    printf '%s\n' "$1"
+    printf '────────────────────────────────────────\n'
+    printf '  Fable 5 · corpusminder-spring · ctx: 197k/1M (20%%)\n'
+    printf '  \033[38;5;211m⏵⏵ bypass permissions on\033[38;5;246m (shift+tab to cycle) · ← for agents\033[39m\n'
+}
+NBSP=$'\xc2\xa0'
+for case in "empty|❯${NBSP}$(printf '\033[2m')Try \"edit <filepath> to...\"$(printf '\033[0m')|clear" \
+            "ghost|❯${NBSP}$(printf '\033[2m')merge$(printf '\033[0m') $(printf '\033[2m')PR$(printf '\033[0m') $(printf '\033[2m')645|clear" \
+            "typed|❯${NBSP}nudge the coordinator to re-verify and un-draft it|dirty"; do
+    IFS='|' read -r name line want <<< "$case"
+    tmux() { if [ "$1" = "capture-pane" ]; then cc_pane "$line"; return 0; fi; command tmux "$@"; }
+    if compact_composer_clear "fake:target"; then got=clear; else got=dirty; fi
+    unset -f tmux
+    check "compact_composer_clear: 2.1.x pane with $name composer reads $want (issue #440)" "$want" "$got"
+done
+
 heading "Test 17: maybe_auto_compact — composer already empty at a phase=start timeout -> coord.compact.delivered_as_text, not a misleading retraction (issue #292)"
 # Models the DISTINCT #292 failure mode from Tests 12/13: the injected
 # /compact reaches the model as a plain chat message rather than executing
