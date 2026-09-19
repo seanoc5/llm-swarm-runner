@@ -281,6 +281,21 @@ For one-shot tuning without editing the file, use the equivalent flags:
 ./llm-start.sh --max-workers 5 --owner-labels sean,radesh
 ```
 
+##### Optional: auto-load per-project env with direnv
+
+If you run the swarm across several projects, each with its own `MAX_WORKERS`, `OWNER_LABELS`, etc., remembering to `source` the right `.env` (or forgetting to, and silently running with someone else's caps) gets old fast. [direnv](https://direnv.net/) fixes this by auto-loading a project's env vars on `cd` in and unloading them on `cd` out — no wrapper script, no shell rc edits per project.
+
+Install it (`apt install direnv` on Debian/Ubuntu, `brew install direnv` on macOS; see [direnv's install docs](https://direnv.net/docs/installation.html) for other platforms), hook it into your shell (`eval "$(direnv hook bash)"` / `zsh` — one-time, in your shell rc), then per project:
+
+```bash
+cat > /path/to/project/.envrc <<'EOF'
+dotenv .swarm/.env   # loads the per-project overrides from "Per-project setup" above
+EOF
+direnv allow /path/to/project   # required: .envrc is a shell script, so direnv gates it on explicit trust
+```
+
+Now `cd /path/to/project` exports `MAX_WORKERS`, `OWNER_LABELS`, etc. into your shell automatically, and `cd` out unsets them — nothing to remember, nothing to source by hand. This is purely a convenience layer on top of the precedence chain above; `llm-start.sh` and the coordinator behave identically whether the vars came from direnv or a manual `source`.
+
 ##### One-shot override modes
 
 When you want the swarm to grab everything (including teammates' tickets) for a single run, just say so in the prompt:
