@@ -695,7 +695,8 @@ Open every PR with `gh pr create --draft` — a placeholder body (e.g. "wip,
 finalizing body after self-review") is fine at this point; the PR only needs
 to exist so self-review has something to `gh pr diff`/`gh pr view` against.
 Do the self-review, write the finalized body (risk marker + skeleton, both
-below), then run `gh pr ready <N>` — in that order. A draft with a
+below), run `scripts/lint-pr-screen.sh <N>` until it exits 0, then run
+`gh pr ready <N>` — in that order. A draft with a
 placeholder body reads as "still wrapping up" to anything watching (the
 coordinator, a stale-PR nudge, a human on the wake digest); a *ready* PR
 with a placeholder body reads as a policy violation, because nothing marks
@@ -800,10 +801,12 @@ omit this line entirely only under the no-ceremony rule below.>
   line above whenever there's more than one item>
 
 #### Decide: <question>
-| Option | Pro | Con | |
-|---|---|---|---|
-| A: <name> | <one line> | <one line> | |
-| B: <name> | <one line> | <one line> | ✅ recommended — <one-line why> |
+| Option | Pro | Con |
+|---|---|---|
+| A: <name> | <one line> | <one line> |
+| B: <name> | <one line> | <one line> |
+
+✅ Recommend <A|B> — <one-line why>. Default if silent: <what happens>.
 
 ---
 
@@ -866,6 +869,34 @@ e. **No-ceremony rule** (Debrief schema v1 slot 4): when **Your move** is
    line** plus the risk footer is the whole screen. This generalizes rule
    (d)'s small-🟢-PR exception to any PR, of any size, that genuinely has
    no move and no surprise to report.
+f. **No identifiers above the fold.** The screen names *nothing* in code
+   spans — no class names, file paths, endpoints, migration numbers, gradle
+   commands, table/column names. Say what it means ("the ingest pipeline",
+   "the built-in country list"), not where it lives; the coordinates go in
+   the appendix, where a reviewer with time will find them. The only
+   exception is the plain-text Closes #N. "Define jargon at first use" and
+   "requalify references" both apply to the *appendix* — on the screen they
+   are satisfied by describing the thing in plain words, never by
+   promoting its identifier.
+g. **Word budgets, enforced:** **Bottom line** ≤ 60 words, **Your move**
+   (inline form) ≤ 40, **What surprised me** ≤ 50, whole screen ≤ 25
+   non-blank lines. **What surprised me** is the *implication for the
+   operator* in one line — "the built-in country list can't be used as a
+   fixture for this; a trap for future tests" — never the debugging
+   narrative of how you found it (that is `## Findings`).
+h. **Recommendation lives under the Decide table, never in it.** The
+   table is a pure options comparison; the ✅ line below it names the
+   recommended option and the default-if-silent. A ✅ inside a row is
+   ambiguous the moment the text disagrees with the row it sits on
+   (corpusminder-spring #641: "✅ recommended: A" sitting in row B).
+
+Rules (f)–(h) are checked mechanically: run
+`scripts/lint-pr-screen.sh <PR#>` after writing the final body and before
+`gh pr ready` — exit 0 is the gate; exit 3 lists which rule failed and why.
+Do not `gh pr ready` over a failing lint; rewrite the screen. Born of a
+dozen-plus relapses on the prose-only version of these rules
+(corpusminder-spring #632, 2026-09-18: a 230-word surprise paragraph with
+14 code spans against a template that said "one line").
 
 **Worked example — before/after on the same PR:**
 
@@ -878,7 +909,7 @@ call to fix flaky CI on `IntegrationSuite`. Closes #402
 
 After (Debrief schema v1, manager voice):
 ```markdown
-**Bottom line:** Fixes the `IntegrationSuite` CI flake — 0 failures in 20
+**Bottom line:** Fixes the integration-suite CI flake — 0 failures in 20
 consecutive reruns (was ~3/20 before). Closes #402
 **Your move:** Merge decision only; default: stays open, no auto-merge,
 until you say go.
