@@ -554,10 +554,19 @@ All seven pass → `gh pr merge <N> --squash --delete-branch --auto` (`--auto` d
 
 `swarm-merge.sh`'s gates are mechanical (BLOCK verdict, migration collision), but an `APPROVE_WITH_CAVEATS` verdict with a queued caveat-fix brief blocks no merge path on its own — the "hold for the fix round-trip" would otherwise live only in digest prose, which the operator can reasonably act past (real incident: corpusminder#543 merged ~20 minutes before a queued scoping fix could be claimed, converting an in-branch fix into a post-merge follow-up; the same race hit corpusminder#542's dead-link fix — issue #382). GitHub refuses to merge a draft PR regardless of which surface someone reaches for — `gh pr merge`, `swarm-merge.sh`, the web UI, or coordinator auto-merge (§ "Auto-merge low-risk PRs" above already gates on "Open, not draft") — so marking the PR draft is a mechanical hold, not a request for restraint.
 
+Draft status alone tells a reader "don't merge" but not *why* or *who acts next* — and the PR body, not a down-thread comment, is the page's authoritative surface (real incident: corpusminder-spring, 2026-09-19 — three PRs sat draft-held with fix briefs queued while delivery stalled elsewhere; each body still opened with the worker's pre-hold "**Your move:** merge decision only," the hold notice existed only as a comment, and the operator read all three pages, reasonably concluded they were stuck oversights, and burned a clarification round-trip). So the hold must be stamped into the body itself, not just announced beside it.
+
 Whenever you queue a fix round-trip against an open PR — a caveat fix requeued to the author per "Find ≠ fix" above, or any other change you expect to land before merge:
 
-1. `gh pr ready --undo <N>` (marks it draft) + a PR comment stating what's pending and who's on it.
-2. When the fix lands (or you judge it moot), `gh pr ready <N>` + a comment saying so — do this *before* reporting the PR as mergeable again in a wake digest.
+1. `gh pr ready --undo <N>` (marks it draft).
+2. Stamp a HOLD banner onto the *top* of the PR body — above the existing screen, not replacing it: fetch the current body (`gh pr view <N> --json body -q .body`), prepend
+   ```
+   > ⛔ **COORDINATOR HOLD** — <reason, one line>; fix brief queued to <worker>. Do not merge; the coordinator re-readies when the fix is verified.
+
+   ```
+   and write the combined text back (`gh pr edit <N> --body-file -`, piping the prepended body in). The banner must name the reason, which worker holds the fix brief, and that the coordinator re-readies — that's what lets a cold reader tell "stuck oversight" from "hold working as intended" without opening a comment thread.
+3. Also post a PR comment stating what's pending and who's on it, for the audit trail — the banner and the comment are complementary; the banner is what a skimming reader sees, the comment is the timestamped record.
+4. When the fix lands (or you judge it moot): strip the banner block back out of the body (restore the pre-hold body you fetched in step 2, or re-fetch and remove the `> ⛔ **COORDINATOR HOLD**` block if the body changed since), `gh pr edit <N> --body-file -` with the cleaned body, *then* `gh pr ready <N>`, then a comment saying the hold is lifted — do this *before* reporting the PR as mergeable again in a wake digest. A banner left in place after re-ready is as misleading as no banner at all.
 
 This applies only once a brief is actually queued — a fix that's merely proposed or under discussion doesn't warrant drafting the PR. When reporting an `APPROVE_WITH_CAVEATS` verdict (reporting section above) that you're about to act on by requeuing a fix, note in the same breath that you're drafting the PR to hold it.
 
