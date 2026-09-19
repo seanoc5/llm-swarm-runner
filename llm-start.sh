@@ -515,6 +515,22 @@ REPROMPT_CHROME_PATTERN="${REPROMPT_CHROME_PATTERN:-^※ recap:|Resume this sess
 # So: busy match -> always "clear" (proceed to paste/queue), full stop,
 # before any composer-content inspection at all.
 #
+# (issue #430) That "busy match -> clear" rule is UNCHANGED by #430's
+# busy-pane doorbell deferral — this function still queues a paste into a
+# mid-turn coordinator exactly as it always has. #430's gate lives one
+# layer up instead: coordinator-watch.sh's on_outcome/on_message check its
+# own coordinator_pane_busy() BEFORE ever calling into this script at all,
+# and simply don't invoke it while busy (retrying later via
+# coord_wake_busy_retry_pass, with a 15-minute ceiling that forces the call
+# through regardless of busy state). That split — rather than teaching
+# reprompt_inject a new "defer on busy" mode — keeps this single injection
+# site's contract exactly as simple as it already is (paste, or refuse over
+# a real draft) while putting the multi-minute retry/ceiling bookkeeping
+# where the only long-lived process that can host it already runs: the
+# watcher's own timer loop. A manual `llm-start.sh "<prompt>"` rerun while
+# the coordinator is mid-turn is therefore untouched by #430 — it still
+# queues immediately, as before.
+#
 # Known, accepted limitation (docs/tmux-as-channel.md §1d "Pane content is
 # not verified truth"): Claude Code's dimmed suggested-next-prompt autofill
 # renders identically to typed text in a plain-text capture-pane, so it
