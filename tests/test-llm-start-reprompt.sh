@@ -486,6 +486,53 @@ check "retry-Enter never fires against content that isn't ours" "absent" "$got"
 
 tmux kill-session -t "$FOREIGN_SESSION" 2>/dev/null || true
 
+heading "Test 1d: reprompt_composer_dirty — Claude Code 2.1.x idle chrome is not a draft (issue #440)"
+# Static fixtures shaped like a REAL Claude Code 2.1.x pane bottom, captured
+# live 2026-09-19 (issue #440): a full-width ─ rule above and below the
+# composer, a "ctx:" statusline, and the persistent mode footer UNDER the
+# composer. Three composer states, all framework-generated except the last:
+#   (a) empty composer with the dim placeholder  → must read clear
+#   (b) dim suggested-next-prompt autofill        → must read clear
+#   (c) text a human typed (no SGR at all)        → must read DIRTY
+# Pre-#440, (a) and (b) read dirty — the footer was the last non-blank line
+# on every idle pane — so ~99% of coordinator wakes deferred forever.
+# The fixture renders real SGR (ESC[2m) so `capture-pane -e` sees exactly
+# what the live TUI emits; tmux preserves the attribute across capture.
+mk_cc_fixture() {   # <path> <composer-line-printf-fmt>
+    cat > "$1" <<REPL
+#!/usr/bin/env bash
+render() {
+    printf '\\033[2J\\033[H'
+    echo "✻ Cogitated for 2m 45s · done 5:31 PM"
+    echo "────────────────────────────────────────"
+    printf '$2\\n'
+    echo "────────────────────────────────────────"
+    echo "  Fable 5 · corpusminder-spring · ctx: 197k/1M (20%)"
+    echo "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+}
+render
+while IFS= read -r line; do render; done
+REPL
+    chmod +x "$1"
+}
+NBSP=$'\xc2\xa0'
+mk_cc_fixture "$TEST_DIR/cc-empty.sh"  "❯${NBSP}\\033[2mTry \"edit <filepath> to...\"\\033[0m"
+mk_cc_fixture "$TEST_DIR/cc-ghost.sh"  "❯${NBSP}\\033[2mmerge\\033[0m \\033[2mPR\\033[0m \\033[2m645"
+mk_cc_fixture "$TEST_DIR/cc-typed.sh"  "❯${NBSP}nudge the coordinator to re-verify and un-draft it"
+
+for case in empty:clear ghost:clear typed:dirty; do
+    name="${case%%:*}"; want="${case##*:}"
+    CC_SESSION="${SESSION_NAME}-cc-$name"
+    tmux new-session -d -s "$CC_SESSION" -n coordinator -x 120 -y 20 2>/dev/null
+    sleep 0.3
+    tmux send-keys -t "$CC_SESSION:coordinator" "exec -a claude bash $TEST_DIR/cc-$name.sh" Enter
+    check_eventually "cc-$name: fixture foreground" "yes" \
+        "pane_contains '$CC_SESSION:coordinator' 'shift+tab to cycle'"
+    if reprompt_composer_dirty "$CC_SESSION:coordinator" "$COORD_BUSY_PATTERN"; then got=dirty; else got=clear; fi
+    check "cc-$name composer reads $want (issue #440)" "$want" "$got"
+    tmux kill-session -t "$CC_SESSION" 2>/dev/null || true
+done
+
 heading "Test 4: shipped COMPACT_SUBMIT_SETTLE_SECS/COORD_BUSY_PATTERN defaults are wired up in llm-start.sh"
 grep -q '^COMPACT_SUBMIT_SETTLE_SECS="\${COMPACT_SUBMIT_SETTLE_SECS:-1}"' "$LLM_START" \
     && got=present || got=missing
