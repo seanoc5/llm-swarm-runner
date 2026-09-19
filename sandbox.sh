@@ -224,13 +224,60 @@ if [ -n "${SANDBOX_DEP_CACHE:-}" ]; then
     _dep_cache_gradle="$SANDBOX_DEP_CACHE/gradle"
     if [ -d "$_dep_cache_gradle/modules-2" ]; then
         MOUNTS+=(-v "$_dep_cache_gradle:$_dep_cache_gradle:ro")
-        DEP_CACHE_OPTS=(-e "GRADLE_RO_DEP_CACHE=$_dep_cache_gradle")
+        DEP_CACHE_OPTS+=(-e "GRADLE_RO_DEP_CACHE=$_dep_cache_gradle")
     else
         echo "WARNING: SANDBOX_DEP_CACHE='$SANDBOX_DEP_CACHE' has no" \
              "$_dep_cache_gradle/modules-2 — skipping dependency cache" \
              "mount (worker gets no GRADLE_RO_DEP_CACHE)." >&2
     fi
     unset _dep_cache_gradle
+fi
+
+# Shared uv package cache (#434), same SANDBOX_DEP_CACHE knob as the Gradle
+# cache above but a DIFFERENT mount shape: uv has no read-only shared-cache
+# mode. Verified directly — pointing UV_CACHE_DIR at a :ro mount makes even
+# a pure cache-hit `uv pip install` fail outright ("Failed to initialize
+# cache ... Permission denied"), because uv writes bookkeeping/lock files
+# into the cache dir on every invocation, not only on a miss. So this mounts
+# :rw, not :ro.
+#
+# That's safe here in a way it is NOT for Gradle's modules-2: uv's cache is
+# content-addressed and uv takes its own advisory locks around cache writes,
+# so concurrent writers sharing one cache dir don't corrupt it — this is the
+# same design that already lets many unrelated projects on one host share a
+# single ~/.cache/uv. Verified directly: 5 concurrent `uv pip install` runs
+# (distinct packages) against one shared, initially-empty cache dir all
+# completed cleanly in well under a second, with no corruption, no errors,
+# and no serialization on the cache's own lock file.
+#
+# Layout: $SANDBOX_DEP_CACHE/uv. Unlike Gradle's modules-2, no pre-seed is
+# required — uv creates its own subdirectory structure on first write, so a
+# missing/empty dir just means the first worker to want a given package pays
+# the PyPI fetch and every later worker/container gets a hit. To warm it
+# ahead of time anyway, point UV_CACHE_DIR at it for a one-off install:
+#   UV_CACHE_DIR="$SANDBOX_DEP_CACHE/uv" uv pip install --python <venv> -e ".[dev]"
+#
+# Still never $HOME/.cache/uv, same posture as the Gradle cache even though
+# concurrent writers are verified safe here: keeps the swarm's shared cache
+# a dedicated path, not entangled with the coordinator's own host-side uv
+# state (different uv version, different projects).
+#
+# Unset/empty (default): no mount, no UV_CACHE_DIR — byte-identical docker
+# run args to before this knob existed. A configured base dir that can't be
+# created/written warns to stderr and is skipped rather than blocking
+# worker launch.
+if [ -n "${SANDBOX_DEP_CACHE:-}" ]; then
+    _dep_cache_uv="$SANDBOX_DEP_CACHE/uv"
+    mkdir -p "$_dep_cache_uv" 2>/dev/null || true
+    if [ -d "$_dep_cache_uv" ] && [ -w "$_dep_cache_uv" ]; then
+        MOUNTS+=(-v "$_dep_cache_uv:$_dep_cache_uv:rw")
+        DEP_CACHE_OPTS+=(-e "UV_CACHE_DIR=$_dep_cache_uv")
+    else
+        echo "WARNING: SANDBOX_DEP_CACHE='$SANDBOX_DEP_CACHE' — could not" \
+             "create/write $_dep_cache_uv — skipping uv cache mount (worker" \
+             "gets no UV_CACHE_DIR)." >&2
+    fi
+    unset _dep_cache_uv
 fi
 
 # Local caching Maven/Gradle repository proxy (#331). Complements

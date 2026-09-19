@@ -208,6 +208,59 @@ else
     skip "SANDBOX_DEP_CACHE" "/var/run/docker.sock not present"
 fi
 
+# SANDBOX_DEP_CACHE (#434): the same knob also covers a shared uv package
+# cache, but with a DIFFERENT mount shape than the Gradle half above — uv
+# has no read-only shared-cache mode (verified directly during development:
+# pointing UV_CACHE_DIR at a :ro mount makes even a pure cache-hit
+# `uv pip install` fail outright with a permission error, since uv writes
+# bookkeeping/lock files into the cache dir on every invocation, not only on
+# a miss). So this mount is :rw, and unlike Gradle's modules-2 there's no
+# pre-seeded subdirectory to require — sandbox.sh creates <dir>/uv itself if
+# missing. See docs/advanced-usage.md § "Shared uv package cache".
+if [ -S /var/run/docker.sock ]; then
+    # Same DooD caveat as the Gradle fixture above (this suite may itself be
+    # running inside a swarm worker sandbox talking to the host daemon over
+    # a mounted docker.sock) — fixture MUST live under REPO_ROOT, not /tmp.
+    _uv_cache_fixture="$(mktemp -d -p "$REPO_ROOT")"
+
+    # Unset (default): byte-identical to before the knob existed — no
+    # UV_CACHE_DIR reaches the container.
+    output=$(env -u SANDBOX_DEP_CACHE "$REPO_ROOT/sandbox.sh" /tmp printenv UV_CACHE_DIR 2>&1) || true
+    [[ "$output" != *"UV_CACHE_DIR"* ]] \
+        && pass "SANDBOX_DEP_CACHE unset -> no UV_CACHE_DIR" "$output" \
+        || fail "SANDBOX_DEP_CACHE unset -> no UV_CACHE_DIR" "$output"
+
+    # Set, with NO pre-seed (deliberately, unlike the Gradle fixture above):
+    # sandbox.sh creates <dir>/uv itself, and UV_CACHE_DIR resolves to it.
+    output=$(SANDBOX_DEP_CACHE="$_uv_cache_fixture" "$REPO_ROOT/sandbox.sh" /tmp printenv UV_CACHE_DIR 2>&1)
+    container_value=$(tail -n1 <<< "$output")
+    [[ "$container_value" == "$_uv_cache_fixture/uv" && -d "$_uv_cache_fixture/uv" ]] \
+        && pass "SANDBOX_DEP_CACHE (no pre-seed) -> UV_CACHE_DIR=<dir>/uv, dir auto-created" "$output" \
+        || fail "SANDBOX_DEP_CACHE (no pre-seed) -> UV_CACHE_DIR=<dir>/uv, dir auto-created" "$output"
+
+    # Mount is read-WRITE — the load-bearing difference from the Gradle
+    # mount two tests up.
+    output=$(SANDBOX_DEP_CACHE="$_uv_cache_fixture" "$REPO_ROOT/sandbox.sh" /tmp \
+        "touch '$_uv_cache_fixture/uv/should-succeed' 2>&1; echo \"exit=\$?\"" 2>&1)
+    [[ "$output" == *"exit=0"* ]] \
+        && pass "SANDBOX_DEP_CACHE uv mount is read-write" "$output" \
+        || fail "SANDBOX_DEP_CACHE uv mount is read-write" "$output"
+
+    # Base dir exists but isn't writable (e.g. bad host config): warns to
+    # stderr and still launches, rather than blocking worker launch —
+    # mirrors the Gradle "bad path" behavior above.
+    chmod 555 "$_uv_cache_fixture"
+    output=$(SANDBOX_DEP_CACHE="$_uv_cache_fixture" "$REPO_ROOT/sandbox.sh" /tmp "echo LAUNCHED" 2>&1)
+    [[ "$output" == *"WARNING"* && "$output" == *"LAUNCHED"* ]] \
+        && pass "SANDBOX_DEP_CACHE uv unwritable base dir warns + still launches" "$output" \
+        || fail "SANDBOX_DEP_CACHE uv unwritable base dir warns + still launches" "$output"
+    chmod 755 "$_uv_cache_fixture"
+
+    rm -rf "$_uv_cache_fixture"
+else
+    skip "SANDBOX_DEP_CACHE (uv)" "/var/run/docker.sock not present"
+fi
+
 # SANDBOX_ALLOW_BACKGROUND_TASKS (#298): per-project opt-out for the
 # CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 deny (#301). A self-review on the
 # PR that added this flagged that FOREGROUND_ONLY_ENV_OPTS becoming an
