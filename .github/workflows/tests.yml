@@ -70,6 +70,11 @@ jobs:
         #     exercises llm-start.sh's reprompt_inject/reprompt_confirm_
         #     submitted against a real, throwaway tmux session and fake-REPL
         #     fixtures, not a PATH-stubbable tmux binary.
+        #   - test-shape-watcher-respawn.sh — same story again (issue #391):
+        #     the bug under test IS tmux's own remain-on-exit behavior (a
+        #     dead pane keeps reporting pane_start_command), so a stubbed
+        #     tmux would only encode the belief that was wrong. Needs a real
+        #     (private, -L) tmux server.
         #   - test-e2e-swarm.sh            — spins up a real tmux session
         #     and drives an actual coordinator/worker LLM round-trip; "may
         #     consume agent quota" per its own --help text.
@@ -87,6 +92,7 @@ jobs:
             test-sandbox.sh
             test-coordinator-auto-compact.sh
             test-llm-start-reprompt.sh
+            test-shape-watcher-respawn.sh
             test-worker-auto-compact.sh
             test-e2e-swarm.sh
           )
