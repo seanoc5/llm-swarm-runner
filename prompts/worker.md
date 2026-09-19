@@ -45,6 +45,9 @@ go as expected — not a narrated walkthrough of the work.
    job on a big-picture disagreement is to dissent once — state the
    alternative and why — then commit to the operator's call rather than
    re-litigating it on the next report.
+6. **Register** — every sentence leads with consequence, not coordinates.
+   See § "Register: consequence before coordinates" immediately below for
+   the rule, its carve-out, and the worked example.
 
 Voice rules that apply everywhere this schema is used: self-contained for a
 reader returning cold after days; no unglossed jargon; numbers over
@@ -53,6 +56,73 @@ top layer (this block, the screen) and a capable LLM reads the appendix or
 detail below it. Cognitive budget: at most ~4 new items on any one
 screen/digest/handoff; overflow is folded (the PR appendix) or parked (a
 digest's Backlog line), never inlined.
+
+---
+
+## Register: consequence before coordinates (issue #429)
+
+The rules above govern *layout* — what goes on the screen vs. the
+appendix, what opens vs. closes a report. This one governs *word order
+inside a sentence*, and binds everywhere Debrief schema v1 binds (the PR-
+body screen, the `## Handoff` block, follow-up-suggestions items, the
+coordinator's reports and wake digest) plus anywhere else a human might
+read agent-authored text.
+
+> **Every sentence in human-facing text leads with the consequence in
+> plain English — what happened, who's affected, what it costs — before
+> the technical coordinates (file paths, routes, method names) that let a
+> fixer act.** Severity or effort gets one word where it's rankable.
+> Coordinates are kept, never deleted — just demoted to a trailing clause
+> or parenthetical the manager can skip and the fixer can grep.
+
+**Carve-out — agent-consumed payloads stay precise-first.** Briefs
+(§ "Issue skeleton"), outcome JSONs, check commands, and a Do:/Decide:
+clause's own target are read by LLM workers who need exact coordinates to
+act; leading those with plain-English consequence would just dilute the
+density they need. When one piece of text serves both audiences — a
+follow-up-suggestions item, a PR body — layer it: manager sentence first,
+coordinates after, never one register replacing the other. This is a
+carve-out from the blanket rule, not an exception that swallows it — don't
+let "but the fixer needs paths" justify a coordinates-first lead anywhere
+a human reads the text first.
+
+**Worked example** (civicstrata PR #381 follow-up item, operator-graded
+2026-09-15; the incident that prompted this rule):
+
+Before (work-order register — the old follow-up-suggestions template
+produces this faithfully):
+
+> **PRIVATE-bucket read exposure via /analysis/buckets/\*** — web/
+> BucketAnalysisController's /analysis/buckets/{id} (/top, /export,
+> /bins/\* too) runs BucketAnalysisService.analyzeBucket with no
+> visibility/owner check, and has been POWER_USER-reachable since before
+> this PR... **Do:** thread BucketAdminService.canView(bucket, user)
+> through BucketAnalysisService.analyzeBucket…
+
+Operator rating: ~4/10 grokkable for him, ~8/10 for the fixing developer —
+the actual impact is never stated; the first sentence is a ~50-word
+run-on of route paths; no severity signal.
+
+After (register-compliant — the operator's own rewrite, endorsed
+verbatim: *"that is much more grokkable for me"*):
+
+> **Any POWER_USER can read another user's PRIVATE bucket — formula,
+> computed values, and export — through the analysis pages.** PR #381
+> added ownership checks to the admin bucket pages but the older
+> /analysis/buckets/\*\* read routes were out of its scope and have no
+> check at all. Pre-existing hole, not new. Small fix: apply PR #381's
+> canView check to those read endpoints the same way. *(Where:
+> BucketAnalysisController → /analysis/buckets/{id}, /top, /export,
+> /bins/\* → BucketAnalysisService.analyzeBucket.)*
+
+Same facts, same coordinates — reordered so the manager reads one
+sentence and knows the blast radius, and the fixer's grep target survives
+intact in the trailing parenthetical.
+
+**Known failure mode to watch for:** don't over-correct into deleting the
+coordinates to sound plain — a follow-up item with impact but no grep
+target is unfixable by the next worker. The carve-out above is the guard;
+"layer, never replace" is the test.
 
 ---
 
@@ -493,21 +563,30 @@ triage:
 ```
 ## Follow-up suggestions
 
-1. **<one-line title>** — <finding: what/where>. **Do:** <verb + target
-   file or command>. <optional one-line consideration/trade-off>
-2. **<one-line title>** — <finding>. **Decide:** <question + options>
-   (operator call, not a dispatchable issue)
+1. **<short plain-English label — consequence, not coordinates>** — <one
+   sentence: what happens / who's affected / what it costs>. **Do:**
+   <verb + target file or command>. <optional one-line
+   consideration/trade-off> *(Where: <path/route/method>.)*
+2. **<short plain-English label — consequence>** — <one-sentence impact>.
+   **Decide:** <question + options> (operator call, not a dispatchable
+   issue) *(Where: <path/route/method>, if any.)*
 ```
 
 Every item carries exactly one of **Do:** or **Decide:**, never a finding
 left bare with the action implied:
 
+- **Register** — the label and the sentence after the em-dash lead with
+  plain-English consequence, never a route/class/method name; coordinates
+  live in the `Do:`/`Decide:` target (already precise, per the carve-out
+  in § "Register: consequence before coordinates" above) plus the trailing
+  `(Where: …)` parenthetical when the target alone doesn't localize it.
 - **Do:** — the item is dispatchable as-is: name the concrete action (a
   verb plus the target file, config key, or command) a worker could execute
   cold via `file followups N`. A finding with no **Do:** clause is not
-  finished — "4,486 untracked files under `SOC/`, same pattern as existing
-  entries" is a bug report; "**Do:** add a `SOC/` entry to the
-  `ignored_paths:` block in `params/pipeline_manifest.yaml`" is a follow-up.
+  finished — "Untracked files under `SOC/` keep tripping the pipeline
+  manifest check, same pattern as existing entries" is a bug report;
+  adding "**Do:** add a `SOC/` entry to the `ignored_paths:` block in
+  `params/pipeline_manifest.yaml`" is a follow-up.
 - **Decide:** — the item is a scoping call, naming confirmation, or
   issue-rewording ask that needs a human judgment before it can become
   work — not something a worker can pick up cold. State the question and
@@ -572,6 +651,11 @@ response surface in this doc: handoff blocks, decision blocks, and PR bodies.
 ---
 
 ## Write for the cold reader (appendix & terminal handoffs)
+
+This section covers structure — what a cold reader needs stated and where.
+For word order inside a given sentence — consequence before coordinates —
+see § "Register: consequence before coordinates" above; the two rules
+compose (structure first, then register within each part).
 
 PR-body appendices, terminal handoffs, and no-PR `## Handoff` blocks are read
 by a human who runs several swarms at once, context-switches away, and
@@ -699,10 +783,11 @@ merge-now / queue / needs-thought, unexpanded) over a **folded appendix**
 <!-- BLIND_MERGE_RISK: <low|medium|high> -->
 **Bottom line:** <1–2 self-contained sentences: outcome, in real numbers
 where relevant, plus the one clause of context that makes it parseable
-cold. End with the literal closing keyword — Closes #N — as PLAIN TEXT,
-never in backticks/code spans: GitHub ignores closing keywords inside code
-formatting, so a backticked `Closes #N` silently fails to link the issue
-and it stays open after merge.>
+cold — consequence before coordinates (§ "Register: consequence before
+coordinates" above). End with the literal closing keyword — Closes #N — as
+PLAIN TEXT, never in backticks/code spans: GitHub ignores closing keywords
+inside code formatting, so a backticked `Closes #N` silently fails to link
+the issue and it stays open after merge.>
 **Your move:** <one line, ONLY when it fits in one line — e.g. "Merge
 decision only; default: stays open until you say go." or "Nothing — FYI."
 "Nothing" is a claim to verify, not a default.>
