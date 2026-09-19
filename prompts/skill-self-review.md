@@ -40,7 +40,9 @@ output, with the literal token (no markdown, no prefix):
 - `APPROVE_WITH_CAVEATS: <one-line issue>` — the change is mergeable
   but you found something the author should know about. Examples:
   *"no test exercises the timeout path"*, *"error message exposes the
-  internal table name"*, *"return type changed but no callers checked"*.
+  internal table name"*, *"return type changed but no callers checked"*,
+  *"Bottom line leads with a route path, not the impact — see register
+  check below"*.
 - `BLOCK: <one-line reason>` — there is a real problem that should
   prevent merge. Wrong logic, missing critical case, broken invariant,
   contradicts the stated PR intent. The reason MUST be specific enough
@@ -70,6 +72,16 @@ self-explanatory.
    lines is a red flag. A "🔴 high — auth rewrite" diff with 12
    lines is also a red flag (probably missing test coverage or
    missing a related change).
+6. **Register check on the PR body itself (~10 seconds, cheap).** Does the
+   **Bottom line** sentence, and each `## Follow-up suggestions` item's
+   label/lead sentence, open with plain-English consequence (what happens,
+   who's affected, what it costs) before technical coordinates (a route,
+   class, method, or file path)? A coordinates-first lead
+   (`prompts/worker.md` § "Register: consequence before coordinates") isn't
+   a mergeability problem — don't BLOCK on it — but it is exactly the kind
+   of thing a fresh reader catches and the author, deep in the diff,
+   doesn't: worth an `APPROVE_WITH_CAVEATS` line naming which sentence to
+   reorder.
 
 ## Calibration
 

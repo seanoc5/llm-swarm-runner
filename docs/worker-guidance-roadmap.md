@@ -69,6 +69,30 @@ purpose, manager-audience wording.
 
 ## Done
 
+- (2026-09-19) **One blanket register rule: consequence before coordinates**
+  — issue #429. Added `prompts/worker.md` § "Register: consequence before
+  coordinates": every sentence in human-facing text (the PR-body screen,
+  `## Handoff` block, follow-up-suggestions items, coordinator
+  reports/wake digest) now leads with plain-English impact — what
+  happened, who's affected, what it costs — before file paths, routes, or
+  method names, which are demoted to a trailing clause/parenthetical
+  instead of deleted. Carve-out: agent-consumed payloads (briefs, outcome
+  JSONs, a Do:/Decide: clause's own target) stay precise-first, since
+  those are read by LLM workers who need exact coordinates to act.
+  Composes with, rather than replaces, the existing layout rules (Debrief
+  schema v1, `prompts/coordinator.md` § "Report grammar") — BLUF picks
+  which sentence leads a report, register picks what that sentence leads
+  with. Prompted by an operator-graded incident on a sibling swarm
+  (civicstrata PR #381, 2026-09-15): a coordinates-first follow-up item
+  rated ~4/10 grokkable for the operator despite following the
+  then-current template faithfully — a template gap, not guidance
+  ignored. Follow-up-suggestions item template reordered to a
+  plain-English label first; `skill-self-review.md` gained a cheap
+  (~10s) register check (`APPROVE_WITH_CAVEATS` only, never `BLOCK`);
+  coordinator's follow-up-suggestions triage now paraphrases pre-rule,
+  coordinates-first PR bodies into register before quoting them in a
+  digest, flagging the paraphrase as such.
+
 - (2026-09-15) **Standardize an "audience statement" on every prompt/skill
   file** — issue #416. Every file in `prompts/` (`worker.md`,
   `coordinator.md`, `refs.md`, `skill-self-review.md`,

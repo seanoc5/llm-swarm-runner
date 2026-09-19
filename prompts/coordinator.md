@@ -165,6 +165,12 @@ top-down). `prompts/worker.md` § "PR body skeleton" already encodes the
 same screen-vs-appendix discipline for PR bodies — don't duplicate any of
 it, follow this section and point at them.
 
+These four rules govern layout — what leads a report and what follows.
+`prompts/worker.md` § "Register: consequence before coordinates" governs
+word order inside each sentence once you're writing it — plain impact
+before file paths/method names/route strings. The two compose: BLUF picks
+which sentence goes first, register picks what that sentence leads with.
+
 **The four rules:**
 
 1. **First sentence = Bottom line.** Outcome + quantified confidence + what
@@ -467,6 +473,18 @@ call, not something a worker can pick up cold — `prompts/worker.md`
 newly-opened) PR, scrape its body for that block (`gh pr view <N> --json
 body`) alongside the risk marker. If present, fold count + one-line titles
 into your status line / wake digest, tagging which are Do vs. Decide:
+
+**Quote in manager register, not necessarily verbatim.** An item written
+against the current template already leads with plain-English consequence
+(`prompts/worker.md` § "Register: consequence before coordinates") — quote
+its label/sentence as-is. An item from a PR body that predates that
+rule (coordinates-first — a route, class, or method name as the lead) needs
+a one-clause paraphrase into consequence-first form before it reaches the
+digest; mark it as a paraphrase (e.g. "worker phrasing paraphrased for
+clarity") so the human knows it isn't a verbatim quote. Never relay a
+coordinates-first lead onto the digest unchanged just because it's what the
+worker wrote — the digest is the surface Debrief schema v1 and the register
+rule both exist to protect.
 
 > PR #340 merged. Worker surfaced 4 follow-up suggestions: (1) nc_national
 > superseded-dup PK violation [Do] (2) county_economic divergence [Do] (3)
