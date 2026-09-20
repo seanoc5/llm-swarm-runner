@@ -275,8 +275,10 @@ SHIM_DIR="$TEST_DIR/shims"
 mkdir -p "$SHIM_DIR"
 GH_LOG="$TEST_DIR/gh.log"
 COMMENTS_LOG="$TEST_DIR/comments.log"
+GH_FAIL_COMMENTS="$TEST_DIR/gh-fail-comments"
 : > "$GH_LOG"
 : > "$COMMENTS_LOG"
+rm -f "$GH_FAIL_COMMENTS"
 
 # fix/issue-90 -> PR #77, OPEN. Every other branch -> no PR.
 cat > "$SHIM_DIR/gh" <<EOF
@@ -296,6 +298,7 @@ if [ "\$1" = "pr" ] && [ "\$2" = "view" ]; then
             exit 1
             ;;
         comments)
+            [ -f "$GH_FAIL_COMMENTS" ] && exit 1
             [ "\$target" = "77" ] || exit 1
             if [ -s "$COMMENTS_LOG" ]; then
                 tail -n1 "$COMMENTS_LOG" | base64 -d
@@ -355,7 +358,26 @@ PATH="$SHIM_DIR:$PATH" pending_brief_marker_sweep_pass
 green "sweep is idempotent — does not re-post while the marker already says queued"
 
 # ============================================================================
-heading "Test 10: empty inbox -> sweep does not post anything"
+heading "Test 10: a failed comments lookup does NOT get treated as 'no marker' (no repost storm)"
+# ============================================================================
+# Self-review round 9 finding: folding a failed \`gh pr view --json
+# comments\` into the same bucket as "genuinely no marker yet" would
+# repost a fresh queued comment every tick gh has a transient hiccup, for
+# as long as the hiccup lasts. A fresh comment-state (no prior marker at
+# all) makes this observable: if the failure were mishandled as "no
+# marker", it would post; the fix means it must stay silent instead.
+: > "$COMMENTS_LOG"
+: > "$EVENTS_LOG"
+: > "$GH_FAIL_COMMENTS"
+PATH="$SHIM_DIR:$PATH" pending_brief_marker_sweep_pass
+rm -f "$GH_FAIL_COMMENTS"
+[ "$(gh_comment_count)" -eq 0 ] || red "expected NO comment posted while the comments lookup itself is failing, got $(gh_comment_count)"
+[ -z "$(grep 'watch.pending_brief_sweep' "$EVENTS_LOG" || true)" ] \
+    || red "expected no watch.pending_brief_sweep line while the comments lookup is failing"
+green "a failed comments lookup is treated as 'skip this tick', never as 'no marker, post one'"
+
+# ============================================================================
+heading "Test 11: empty inbox -> sweep does not post anything"
 # ============================================================================
 rm -f "$TEST_DIR/wt-issue-90/.swarm/tasks/inbox"/*.md
 : > "$COMMENTS_LOG"

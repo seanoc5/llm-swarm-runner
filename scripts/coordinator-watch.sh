@@ -3833,7 +3833,7 @@ post_pending_brief_marker_sweep() {
 pending_brief_marker_sweep_pass() {
     command -v gh >/dev/null 2>&1 || return 0
 
-    local wt branch json pr_num pr_state last brief_file issue
+    local wt branch json pr_num pr_state last brief_file issue comments_raw comments_rc
     local -a dirs=()
     while IFS= read -r wt; do
         [ -n "$wt" ] && dirs+=("$wt")
@@ -3853,11 +3853,21 @@ pending_brief_marker_sweep_pass() {
         IFS=$'\t' read -r pr_num pr_state <<< "$json"
         [ "$pr_state" = "OPEN" ] || continue
 
+        # issue #439 self-review (round 9): the comments lookup's success
+        # is checked SEPARATELY from whether it found a marker. Folding a
+        # failed `gh pr view` into the same "no marker found" bucket as a
+        # genuinely marker-less PR would repost a fresh "queued" comment
+        # on every tick gh has a transient hiccup, for as long as the
+        # hiccup lasts — worse than round 7's harmless one-time race.
+        comments_rc=0
+        comments_raw="$(cd "$wt" && gh pr view "$pr_num" --json comments \
+            -q '[.comments[] | select(.body | test("SWARM_PENDING_BRIEF:"))] | last | .body // empty' 2>/dev/null)" \
+            || comments_rc=$?
+        [ "$comments_rc" -eq 0 ] || continue
         # Anchored to the marker line itself, same reason as requeue.sh's
         # notify_pr_pending_brief (its body text mentions the OTHER state
         # in prose, which a bare substring match would also catch).
-        last="$(cd "$wt" && gh pr view "$pr_num" --json comments \
-            -q '[.comments[] | select(.body | test("SWARM_PENDING_BRIEF:"))] | last | .body // empty' 2>/dev/null \
+        last="$(printf '%s' "$comments_raw" \
             | grep -oE '^<!-- SWARM_PENDING_BRIEF: (queued|cleared) -->$' \
             | sed -E 's/^<!-- SWARM_PENDING_BRIEF: (queued|cleared) -->$/\1/' || true)"
         [ "$last" = "queued" ] && continue
