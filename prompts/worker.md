@@ -705,14 +705,14 @@ create`, is the point the risk-marker/skeleton requirement below actually
 binds.
 
 `scripts/pr-ready.sh <N>` wraps `gh pr ready` with one addition (issue
-#439): for a 🟡/🔴 PR it runs `self-review-pr.sh --post` first, so the
-verdict marker lands on the PR itself BEFORE it goes ready — visible to
-swarm-merge.sh's BLOCK gate and to a human merging straight from the
-GitHub web UI, with zero coordinator involvement either way. A BLOCK
-verdict refuses to ready at all (exit 2); this replaces, not supplements,
-the manual `--post` step under § "Self-review before merge" below — you no
-longer need to run self-review-pr.sh yourself for this purpose, only if you
-want to see the verdict before writing your handoff.
+#439): for a 🟡/🔴 PR it runs `self-review-pr.sh --post` first, printing the
+full verdict to your terminal and landing the marker on the PR itself
+BEFORE it goes ready — visible to swarm-merge.sh's BLOCK gate and to a
+human merging straight from the GitHub web UI, with zero coordinator
+involvement either way. A BLOCK verdict refuses to ready at all (exit 2).
+This replaces the manual snippet under § "Self-review before merge"
+below entirely for the normal flow — see that section for when the
+manual fallback still applies.
 
 Every `gh pr create` and any `gh pr edit --body` MUST include both, once the
 PR is (or is about to become) ready — a draft's placeholder body is exempt:
@@ -760,8 +760,30 @@ it's coordinator/merge-time machinery, not a worker-side step.
 
 ### Self-review before merge
 
-Before proposing merge on 🟡 medium or 🔴 high PRs, run an adversarial
-self-review via a fresh Claude session with zero shared context:
+Before proposing merge on 🟡 medium or 🔴 high PRs, an adversarial
+self-review runs via a fresh Claude session with zero shared context.
+
+**Normal path: let `scripts/pr-ready.sh <N>` do it.** It already runs this
+exact review (`self-review-pr.sh --post --force`) for every 🟡/🔴 PR at
+ready time and prints the full verdict text to your terminal as it runs —
+so once you've called it (§ "Draft first, ready only once the body is
+final" above), you already have the verdict; there is nothing further to
+run. Running the manual snippet below *in addition* pays for a second full
+review with no new information — don't.
+
+First line of the verdict: `APPROVE` → proceed; `APPROVE_WITH_CAVEATS: <text>`
+→ proceed with the caveat visible in your handoff; `BLOCK: <text>` →
+`pr-ready.sh` already refused to ready (exit 2) — fix the finding and
+re-run it, don't propose merge in the meantime.
+
+Skipped for 🟢 low, and when `WORKER_SELF_REVIEW=0` (kill switch). Any skip —
+including a failed `claude -p` call — must be **flagged in the handoff**
+(*"self-review: skipped — WORKER_SELF_REVIEW=0"*); never silently bypass the layer.
+
+**Manual fallback** (only if `scripts/pr-ready.sh` is unavailable, or you
+need a verdict before the PR is ready-able at all): run the review directly
+and read `$REVIEW` yourself — this posts nothing, so it never conflicts
+with `pr-ready.sh`'s own posting pass:
 
 ```bash
 DIFF="$(gh pr diff <N>)"
@@ -773,20 +795,6 @@ REVIEW="$(printf '%s\n\n--- PR ---\n%s\n\n--- DIFF ---\n%s\n' \
     | claude -p --dangerously-skip-permissions 2>/dev/null)"
 echo "Self-review verdict: $REVIEW"
 ```
-
-First line of `$REVIEW`: `APPROVE` → proceed; `APPROVE_WITH_CAVEATS: <text>` →
-proceed with the caveat visible in your handoff; `BLOCK: <text>` → do NOT
-propose merge, surface the block and ask for direction.
-
-Skipped for 🟢 low, and when `WORKER_SELF_REVIEW=0` (kill switch). Any skip —
-including a failed `claude -p` call — must be **flagged in the handoff**
-(*"self-review: skipped — WORKER_SELF_REVIEW=0"*); never silently bypass the layer.
-
-`scripts/pr-ready.sh` (§ "Draft first, ready only once the body is final"
-above) already runs this exact review with `--post` for every 🟡/🔴 PR at
-ready time, so the verdict marker is already on the PR by the time you get
-here — this manual snippet is for reading the verdict yourself before
-writing your handoff, not for posting it a second time.
 
 ### PR body skeleton
 
