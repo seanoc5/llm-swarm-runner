@@ -1756,6 +1756,25 @@ EVENTS LOG
                            (worker_pending_brief went false — issue #344, NOT a worker_pane_state
                            cli -> shell read, which a same-poll-window relaunch can miss entirely)
                            within WORKER_DELIVER_END_TIMEOUT_SECS (issue, waited)
+      worker.deliver.ok     (issue #437) a queued brief was actually delivered/claimed — the
+                           positive counterpart to worker.deliver.skip, so a stall's eventual
+                           recovery is attributable after the fact instead of vanishing into
+                           silence once the skip lines stop (issue, brief=<inbox filename>,
+                           release=auto_deliver|listener_claim_after_quit[, waited] —
+                           auto_deliver: this script's own /quit injection above ended the
+                           session and its listener claimed the brief, logged right alongside
+                           worker.deliver.ended; listener_claim_after_quit: worker_deliver_
+                           detect_claim() noticed, on a LATER sweep, that a brief it had
+                           previously seen genuinely pending while the window sat parked in
+                           "cli" state has since vanished WITHOUT this script's own auto_deliver
+                           path having claimed credit for it — i.e. something else released the
+                           parked session, almost always a human attaching and running /quit by
+                           hand per the documented manual fallback. Never logged for a "shell"-
+                           state window's routine self-heal (issue #43) — only for a brief this
+                           script had already flagged as stuck in the exact parked-session
+                           scenario worker.deliver.attempt/.skip describe, so this event's
+                           presence or absence answers "did WORKER_AUTO_DELIVER=1 do its job, or
+                           did a human have to intervene?" for every such stall)
       worker.deliver.timeout  gave up waiting for the session to end after /quit (issue, waited) —
                            counted as a failure (worker_deliver_record_failure)
       worker.deliver.delivered_as_text  composer already empty at the end-timeout — no ghost text
@@ -2341,6 +2360,7 @@ format_event_line() {
         worker.deliver.skip)               glyph="·"; color=$'\033[2m'  ;;
         worker.deliver.resubmit)            glyph="↻"; color=$'\033[33m' ;;
         worker.deliver.ended)                glyph="⏏"; color=$'\033[32m' ;;
+        worker.deliver.ok)                    glyph="✓"; color=$'\033[32m' ;;
         worker.deliver.timeout)              glyph="⚠"; color=$'\033[33m' ;;
         worker.deliver.delivered_as_text)  glyph="⚠"; color=$'\033[33m' ;;
         worker.deliver.retracted)            glyph="↩"; color=$'\033[32m' ;;
@@ -4906,15 +4926,25 @@ worker_task_done() {
 # session (the same action a human would take per worker-listener.sh's own
 # printed instructions) hands control back to that already-correct loop.
 
+# worker_pending_brief_path <worktree-dir>
+#
+# Prints the path of the oldest real (non-tmp) brief sitting in
+# <worktree>/.swarm/tasks/inbox/, or nothing if none. Same non-tmp filter
+# and oldest-first ordering claim_next_task() itself uses, so the filename
+# this reports is always the one claim_next_task would actually pick up
+# next — needed so issue #437's worker.deliver.ok event can name the brief
+# it's reporting on, not just "something".
+worker_pending_brief_path() {
+    local wt_dir="$1"
+    find "$wt_dir/.swarm/tasks/inbox" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | sort | head -1
+}
+
 # worker_pending_brief <worktree-dir>
 #
 # True (rc 0) if a real (non-tmp) brief is sitting in <worktree>/.swarm/
-# tasks/inbox/, waiting to be claimed. Same non-tmp filter claim_next_task
-# itself uses, so this can never mistake a mid-write requeue.sh temp file
-# for a deliverable brief.
+# tasks/inbox/, waiting to be claimed.
 worker_pending_brief() {
-    local wt_dir="$1"
-    [ -n "$(find "$wt_dir/.swarm/tasks/inbox" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | head -1)" ]
+    [ -n "$(worker_pending_brief_path "$1")" ]
 }
 
 # worker_current_task_terminal <worktree-dir>
@@ -5106,6 +5136,63 @@ worker_deliver_record_success() {
     unset "WORKER_DELIVER_LAST_FAIL[$issue]" "WORKER_DELIVER_FAIL_COUNT[$issue]" "WORKER_DELIVER_GAVE_UP[$issue]"
 }
 
+# WORKER_DELIVER_PENDING_SEEN (issue #437)
+#
+# Cross-sweep bookkeeping keyed by issue: the pending brief's basename last
+# observed while the window sat parked in "cli" state (empty string once
+# nothing is pending, or once the window isn't parked). In-memory only,
+# same reset-on-restart contract as WORKER_DELIVER_LAST_FAIL et al above.
+declare -A WORKER_DELIVER_PENDING_SEEN=()
+
+# worker_deliver_detect_claim <issue> <worktree-dir> <pane-state>
+#
+# The events-log stall this closes (issue #437): a 2026-09-19 delivery
+# stall logged 1,812 worker.deliver.skip lines and nothing else, so once it
+# finally cleared there was no record of WHETHER it cleared because this
+# script's own /quit injection (below, "auto_deliver") finally succeeded,
+# or because a human noticed and attached to run /quit by hand
+# ("listener_claim_after_quit") — both leave the exact same end state (the
+# brief moved out of inbox/), and only maybe_worker_deliver_brief's own
+# synchronous wait loop can tell the two apart from the inside. This
+# function is that outside observer: called on every sweep a window sits in
+# "cli" state (mirroring exactly the scenario maybe_worker_deliver_brief
+# itself gates on — a worker parked at rest with a brief genuinely queued),
+# it remembers the pending brief's name and, if a PREVIOUSLY remembered
+# brief has since vanished, logs the generic success event for it — unless
+# maybe_worker_deliver_brief's own auto_deliver path already logged that
+# exact transition itself (it clears WORKER_DELIVER_PENDING_SEEN on success
+# before this function ever gets a chance to see the "vanished" half of the
+# transition, so the two can never double-log the same delivery).
+#
+# Deliberately scoped to state="cli" only (never called for "shell"): a
+# "shell" window is the listener's own idle poll loop already in control
+# and self-healing onto new briefs as ordinary, un-ambiguous operation
+# (issue #43) — logging every one of *those* routine claims as
+# "listener_claim_after_quit" would be false attribution (no /quit, manual
+# or otherwise, was ever involved) and would drown the genuinely-ambiguous
+# recoveries this event exists to surface in noise from normal traffic.
+#
+# Self-review finding: "prior brief no longer pending" alone isn't proof it
+# was actually claimed — a DRY_RUN=1 sweep (which intentionally never
+# delivers anything) still records a $prior, and if the worktree's queue
+# state is later disturbed some other way (an operator deleting the stale
+# brief outright, a test fixture resetting inbox/) that same $prior would
+# read as "vanished" with nothing to do with a real delivery. Requiring the
+# exact brief to actually be sitting in processing/ — claim_next_task's own
+# atomic mv target, which per worker_current_task_terminal()'s header
+# comment stays populated for the task's entire in-flight lifetime — is
+# cheap positive confirmation a genuine claim happened, not just an absence.
+worker_deliver_detect_claim() {
+    local issue="$1" wt_dir="$2" state="$3"
+    local current="" prior
+    [ "$state" = "cli" ] && current="$(basename "$(worker_pending_brief_path "$wt_dir")" 2>/dev/null || true)"
+    prior="${WORKER_DELIVER_PENDING_SEEN[$issue]:-}"
+    if [ -n "$prior" ] && [ "$prior" != "$current" ] && [ -e "$wt_dir/.swarm/tasks/processing/$prior" ]; then
+        log_event worker.deliver.ok "issue=$issue brief=$prior release=listener_claim_after_quit"
+    fi
+    WORKER_DELIVER_PENDING_SEEN[$issue]="$current"
+}
+
 # maybe_worker_deliver_brief <window>
 #
 # Called by worker_compact_pass for each `iss-*` window on every
@@ -5127,7 +5214,11 @@ maybe_worker_deliver_brief() {
     # — nothing to do. "absent": no such window.
     [ "$state" = "cli" ] || return 0
 
-    worker_pending_brief "$wt_dir" || return 0
+    worker_deliver_detect_claim "$issue" "$wt_dir" "$state"
+
+    local brief_before
+    brief_before="$(basename "$(worker_pending_brief_path "$wt_dir")" 2>/dev/null || true)"
+    [ -n "$brief_before" ] || return 0
 
     # Self-review finding: never end a session whose CURRENT task hasn't
     # positively confirmed finishing — see worker_current_task_terminal()'s
@@ -5260,6 +5351,13 @@ maybe_worker_deliver_brief() {
 
     echo "[$(date +%T)] worker $win session ended (${waited}s) — its listener claimed the pending brief."
     log_event worker.deliver.ended "issue=$issue waited=${waited}s"
+    log_event worker.deliver.ok "issue=$issue brief=$brief_before release=auto_deliver waited=${waited}s"
+    # Clears the transition worker_deliver_detect_claim would otherwise see
+    # on its NEXT sweep (prior=$brief_before, current=empty) — this success
+    # is already fully attributed above; without this, that next sweep
+    # would log the exact same delivery a second time as
+    # release=listener_claim_after_quit.
+    WORKER_DELIVER_PENDING_SEEN[$issue]=""
     worker_deliver_record_success "$issue"
 }
 

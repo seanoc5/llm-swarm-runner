@@ -45,10 +45,10 @@ extract_fn() {
     local fn="$1"
     sed -n "/^${fn}() {/,/^}/p" "$WATCH"
 }
-for fn in worker_pane_state worker_pane_busy worker_pane_ctx_used worker_pending_brief \
+for fn in worker_pane_state worker_pane_busy worker_pane_ctx_used worker_pending_brief_path worker_pending_brief \
           worker_current_task_terminal mtime_epoch ctime_epoch compact_last_pane_line compact_composer_clear \
           compact_confirm_submitted compact_retract_queued worker_deliver_record_failure \
-          worker_deliver_record_success maybe_worker_deliver_brief log_event \
+          worker_deliver_record_success worker_deliver_detect_claim maybe_worker_deliver_brief log_event \
           is_own_worktree_dir own_wt_dir_for_issue; do
     body="$(extract_fn "$fn")"
     [ -n "$body" ] || red "could not extract function '$fn' from $WATCH — has it been renamed?"
@@ -73,6 +73,7 @@ COMPACT_SUBMIT_SETTLE_SECS=0
 declare -A WORKER_DELIVER_LAST_FAIL=()
 declare -A WORKER_DELIVER_FAIL_COUNT=()
 declare -A WORKER_DELIVER_GAVE_UP=()
+declare -A WORKER_DELIVER_PENDING_SEEN=()
 
 # own_wt_dir_for_issue (issue #357/#388) resolves wt_dir via
 # is_own_worktree_dir(), which needs $PROJECT_DIR set to do its `git -C
@@ -476,6 +477,37 @@ fi
 rc=0; worker_pending_brief "$WT_DIR" || rc=$?
 check "brief left inbox/ (claimed by the fake listener) -> worker_pending_brief now rc1" "1" "$rc"
 
+# issue #437: the positive counterpart to worker.deliver.skip — names the
+# exact brief and attributes this success to the watcher's own /quit
+# injection, not a human's manual one.
+if grep -qF "worker.deliver.ok" "$EVENTS_LOG" \
+    && grep -qF "brief=$(basename "$BRIEF_FILE") release=auto_deliver" "$EVENTS_LOG"; then
+    got=logged
+else
+    got=missing
+fi
+check "worker.deliver.ok logged with the delivered brief's filename and release=auto_deliver (issue #437)" "logged" "$got"
+
+# A LATER sweep that again finds this window parked in "cli" state (its
+# relaunched agent going idle, say) must NOT re-attribute the delivery this
+# test already logged as auto_deliver to a second, false
+# listener_claim_after_quit event. Without clearing WORKER_DELIVER_
+# PENDING_SEEN on auto_deliver success, worker_deliver_detect_claim would
+# see prior=<the just-delivered brief> (still set from the sweep above) and
+# current="" (nothing pending now) on this next cli-state sweep, and
+# wrongly log it a second time.
+tmux send-keys -t "$SESSION_NAME:$WIN" "sleep 300" Enter
+check_eventually "pane parked in cli again (e.g. next task's agent going idle)" "cli" "worker_pane_state '$WIN'"
+maybe_worker_deliver_brief "$WIN"
+if grep -qF "listener_claim_after_quit" "$EVENTS_LOG"; then
+    red "auto_deliver success was double-logged as listener_claim_after_quit on a later cli-state sweep; events.log: $(cat "$EVENTS_LOG")"
+else
+    green "no double-log: a later cli-state sweep stays silent on this issue (WORKER_DELIVER_PENDING_SEEN cleared on auto_deliver success)"
+    PASS=$((PASS + 1))
+fi
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.2
+
 heading "Test 7: agent doesn't recognize /quit (e.g. a non-claude CLI) -> times out and fails safe"
 # Same shape as Test 6's fixture, but this fake REPL never treats /quit as
 # special — it just echoes it back like any other line, the way a CLI with
@@ -571,6 +603,69 @@ if grep -q 'worker.deliver.timeout' "$EVENTS_LOG"; then got=timedout; else got=n
 check "no false worker.deliver.timeout on the relaunch race" "nottimedout" "$got"
 if grep -qE 'worker\.deliver\.(retract|delivered_as_text)' "$EVENTS_LOG"; then got=touched; else got=untouched; fi
 check "compact_retract_queued/delivered_as_text never fired into the relaunched live session" "untouched" "$got"
+
+heading "Test 9: listener_claim_after_quit — issue #437's second attribution path (a human's manual /quit, not this script's own injection)"
+# worker_deliver_detect_claim() is the only piece of this feature that can
+# ever observe this path: it never sends /quit itself, it just notices,
+# across sweeps, that a brief it previously saw genuinely pending while the
+# window sat parked in "cli" state has since vanished without
+# maybe_worker_deliver_brief's own auto_deliver success having claimed
+# credit for it (that path clears WORKER_DELIVER_PENDING_SEEN itself — see
+# Test 6's double-log check above). Simulated here by moving the brief out
+# of inbox/ directly — standing in for the operator attaching and running
+# /quit by hand, which is indistinguishable from any other release of the
+# parked session from this script's point of view.
+unset 'WORKER_DELIVER_LAST_FAIL[42]' 'WORKER_DELIVER_FAIL_COUNT[42]' 'WORKER_DELIVER_GAVE_UP[42]' 'WORKER_DELIVER_PENDING_SEEN[42]'
+: > "$EVENTS_LOG"
+rm -f "$INBOX_DIR"/*.md "$PROCESSING_DIR"/*.md
+BRIEF_FILE3="$INBOX_DIR/20260826-170000-42.md"
+echo "a brief a human will manually release" > "$BRIEF_FILE3"
+set_current_task "t5" "ready-for-review"   # current task already finished
+
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.3
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'sonnet · wt-issue-42 · ctx: 20k/1M (2%)'; printf '❯ \n'; sleep 300" Enter
+check_eventually "idle, empty-composer pane, brief pending -> cli" "cli" "worker_pane_state '$WIN'"
+
+# First sweep: DRY_RUN, so this only observes and remembers the pending
+# brief via worker_deliver_detect_claim — it never actually delivers it.
+DRY_RUN=1 maybe_worker_deliver_brief "$WIN"
+if grep -q 'worker.deliver.ok' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "first sweep just observes the pending brief -> no worker.deliver.ok yet" "missing" "$got"
+
+# The human's manual /quit + the listener's own claim_next_task, standing in
+# for keystrokes this test never actually sends.
+mv "$BRIEF_FILE3" "$PROCESSING_DIR/$(basename "$BRIEF_FILE3")"
+
+# Second sweep: the window is still (or again) parked in "cli" — e.g. the
+# listener's freshly relaunched agent going idle — but the brief this
+# script itself never touched is now gone.
+maybe_worker_deliver_brief "$WIN"
+if grep -qF "worker.deliver.ok" "$EVENTS_LOG" \
+    && grep -qF "brief=$(basename "$BRIEF_FILE3") release=listener_claim_after_quit" "$EVENTS_LOG"; then
+    got=logged
+else
+    got=missing
+fi
+check "worker.deliver.ok logged with release=listener_claim_after_quit once the brief vanishes on its own (issue #437)" "logged" "$got"
+
+heading "Test 9b: worker.deliver.ok never fires for a 'shell'-state window's routine self-heal (issue #43 traffic, not a stall recovery)"
+unset 'WORKER_DELIVER_PENDING_SEEN[42]'
+: > "$EVENTS_LOG"
+rm -f "$INBOX_DIR"/*.md "$PROCESSING_DIR"/*.md
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.3
+tmux send-keys -t "$SESSION_NAME:$WIN" "sleep 300" Enter
+sleep 0.3
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+check_eventually "back to the listener's own idle bash shell -> shell" "shell" "worker_pane_state '$WIN'"
+BRIEF_FILE4="$INBOX_DIR/20260826-180000-42.md"
+echo "a brief the listener's own idle loop claims on its own" > "$BRIEF_FILE4"
+maybe_worker_deliver_brief "$WIN"   # sweep #1: sees "shell" -> never calls detect_claim at all
+mv "$BRIEF_FILE4" "$PROCESSING_DIR/$(basename "$BRIEF_FILE4")"   # the idle loop's own ordinary claim
+maybe_worker_deliver_brief "$WIN"   # sweep #2: still "shell" -> same, nothing to detect
+if grep -q 'worker.deliver.ok' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "a 'shell'-state window's own routine claim is never mislabeled listener_claim_after_quit" "missing" "$got"
 
 # Stop the relaunch loop — nothing later in the suite reuses $WIN, but leave
 # the pane tidy rather than respawning fake sessions for the rest of the run.
