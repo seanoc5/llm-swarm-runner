@@ -333,6 +333,57 @@
 #                           activity_poll_pass found and asks the coordinator
 #                           to reconcile its own picture of outstanding
 #                           decisions/PRs against it.
+#   WATCH_WORKTREE_SWEEP_SECS=60
+#                           (issue #439) Detects a worktree that vanished
+#                           without going through any blessed reap path — the
+#                           SAMlytics incident: a bare `git worktree remove`
+#                           (or `rm -rf`) run outside kill-worktree.sh and
+#                           its callers destroys any brief still queued in
+#                           that worktree's .swarm/tasks/{inbox,processing,
+#                           outbox}/ with no salvage and no record at all,
+#                           and today nothing notices. kill-worktree.sh now
+#                           logs a `reap.worktree` event on every removal it
+#                           performs (regardless of caller — see its own
+#                           header comment), so this sweep can diff `git
+#                           worktree list` against its own in-memory
+#                           inventory (seeded on the first tick — a worktree
+#                           already gone before the watcher started is never
+#                           flagged) and treat a disappearance with no
+#                           matching reap.worktree/reap.window event logged
+#                           since it was last confirmed present as
+#                           unblessed. Local-only (git + events.log, no
+#                           network), so this runs on the same cheap cadence
+#                           as WATCH_BG_VIOLATION_SWEEP_SECS. The runtime
+#                           analog of llm-start.sh's stranded-worktree
+#                           warning (issue #376), which only ever fires once
+#                           at session/watcher startup. A hit writes a
+#                           coord-inbox entry (issue #430 idiom: durable, no
+#                           doorbell — the worktree is already gone, so
+#                           nothing here is urgent enough to interrupt a live
+#                           turn) pointing at .swarm/salvaged/ and this
+#                           issue's PR history. Set to 0 to disable. See
+#                           worktree_vanish_sweep_pass.
+#   WATCH_PENDING_BRIEF_SWEEP_SECS=300
+#                           (issue #439) Backstop for requeue.sh's
+#                           `SWARM_PENDING_BRIEF: queued` PR marker
+#                           (notify_pr_pending_brief), which can only post
+#                           at the moment a brief is queued — if the target
+#                           branch has no PR yet (the SAMlytics timeline: a
+#                           follow-up queued at 18:36, PR opened at 18:45),
+#                           the marker never posts, and nothing ever catches
+#                           up once the PR exists. On this timer, every own
+#                           worktree with a real (non-tmp) file sitting in
+#                           .swarm/tasks/inbox/ (worker_pending_brief) and an
+#                           OPEN PR whose latest SWARM_PENDING_BRIEF marker
+#                           isn't already "queued" gets one posted now — same
+#                           anchor comment and idempotency contract as
+#                           requeue.sh's own marker, so worker-listener.sh's
+#                           clear_pr_pending_brief_marker clears it exactly
+#                           the same way once the queue drains. Does real
+#                           `gh` calls per own worktree, so this runs on a
+#                           slower cadence than the local-only sweep above —
+#                           comparable to WATCH_ACTIVITY_POLL_SECS. Set to 0
+#                           to disable. See pending_brief_marker_sweep_pass.
 #   COORD_WAKE_RETRY_SECS=15
 #                           (issue #422, #366 part B) llm-start.sh's
 #                           reprompt_inject refuses to paste a wake over a
@@ -1572,6 +1623,8 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     WATCH_BG_VIOLATION_PATTERN    (auto)  grep -E pattern for the sweep above
     WATCH_ACTIVITY_POLL_SECS 300  periodic gh poll for PRs/issues resolved out-of-band, e.g. in the GitHub web UI (0=off); see header comment (issue #392)
     ACTIVITY_POLL_OVERLAP_SECS 30  cursor overlap tolerating gh search-index lag; dedup maps prevent re-announcing
+    WATCH_WORKTREE_SWEEP_SECS 60  periodic detection of a worktree removed outside every blessed reap path (0=off); see header comment (issue #439)
+    WATCH_PENDING_BRIEF_SWEEP_SECS 300  periodic backstop posting SWARM_PENDING_BRIEF when a queued brief predates its PR (0=off); see header comment (issue #439)
     COORD_WAKE_LOCK_TIMEOUT_SECS 60  max wait to flock COORD_WAKE_LOCK before a wake gives up (see that lock's header comment)
     COORD_WAKE_RETRY_SECS 15      retry interval for a wake llm-start.sh deferred (composer held an unsubmitted human draft, issue #422); 0=off
     COORD_WAKE_DEFER_WARN_SECS 300  loud WARN threshold for a wake still deferred this long (issue #422); retries never stop on their own
@@ -1682,6 +1735,13 @@ EVENTS LOG
                            killed=N); passes that reap nothing are not logged
       reap.window          per-target kill record written by kill-finished-workers.sh
                            (issue, window, branch, reasons, capture=<pane snapshot path>)
+      reap.worktree        (issue #439) kill-worktree.sh actually removed a worktree
+                           (issue, branch, dir) — logged inside kill-worktree.sh itself so
+                           EVERY caller (this script directly, reap-orphan-worktrees.sh,
+                           kill-finished-workers.sh's --with-worktree path) is covered by one
+                           line, regardless of which one triggered the removal; this is what
+                           worktree_vanish_sweep_pass below checks for before flagging a
+                           disappearance as unblessed
       watch.timer.start    a background timer loop started — pr-poll/check-on-done
                            timer loop, and/or (issue #226) the separate
                            worker-compact loop; up to two lines, one per loop
@@ -1729,6 +1789,19 @@ EVENTS LOG
                            cycle (reason=gh_pr_list_failed|gh_issue_list_failed);
                            cursor is NOT advanced on this path, so the next
                            tick retries the same window
+      watch.worktree_vanished  (issue #439) a tracked worktree disappeared with no
+                           reap.worktree/reap.window event logged for it since it was last
+                           confirmed present (issue, dir, reason=no_reap_event) — the
+                           signature of a bare `git worktree remove`/`rm -rf` run outside
+                           every blessed reap path; followed by a coord.inbox.write
+                           trigger=worktree_vanished (no doorbell — the worktree is already
+                           gone, nothing here is urgent)
+      watch.pending_brief_sweep  (issue #439) pending_brief_marker_sweep_pass posted a
+                           SWARM_PENDING_BRIEF: queued PR comment for an own worktree whose
+                           inbox/ has a real unclaimed brief and whose PR's marker wasn't
+                           already "queued" (pr, dir, reason=posted) — the backstop for a
+                           brief queued before its PR existed, so requeue.sh's own marker
+                           post never fired
       watch.check_on_done  check-on-done result (issue, task_id, result=running|pass|fail|skipped)
       watch.outcome.synth  (issue #314) synthesized a done/*.ok.json on done
                            detection because the parked interactive worker's
@@ -2056,6 +2129,9 @@ WATCH_ACTIVITY_POLL_SECS="${WATCH_ACTIVITY_POLL_SECS:-300}"
 # (see activity_poll_pass) keep the overlap from re-announcing anything.
 ACTIVITY_POLL_OVERLAP_SECS="${ACTIVITY_POLL_OVERLAP_SECS:-30}"
 ACTIVITY_WAKE_PROMPT="${ACTIVITY_WAKE_PROMPT:-}"
+# issue #439 — see header comment for both.
+WATCH_WORKTREE_SWEEP_SECS="${WATCH_WORKTREE_SWEEP_SECS:-60}"
+WATCH_PENDING_BRIEF_SWEEP_SECS="${WATCH_PENDING_BRIEF_SWEEP_SECS:-300}"
 WATCH_CHECK_ON_DONE="${WATCH_CHECK_ON_DONE:-1}"
 # issue #314 — synthesize done/*.ok.json on done detection (parked
 # interactive workers never exit claude, so the listener's own outcome
@@ -2270,6 +2346,14 @@ if ! [[ "$WATCH_ACTIVITY_POLL_SECS" =~ ^[0-9]+$ ]]; then
 fi
 if ! [[ "$ACTIVITY_POLL_OVERLAP_SECS" =~ ^[0-9]+$ ]]; then
     echo "ERROR: ACTIVITY_POLL_OVERLAP_SECS must be a non-negative integer (got: $ACTIVITY_POLL_OVERLAP_SECS)" >&2
+    exit 1
+fi
+if ! [[ "$WATCH_WORKTREE_SWEEP_SECS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: WATCH_WORKTREE_SWEEP_SECS must be a non-negative integer (got: $WATCH_WORKTREE_SWEEP_SECS)" >&2
+    exit 1
+fi
+if ! [[ "$WATCH_PENDING_BRIEF_SWEEP_SECS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: WATCH_PENDING_BRIEF_SWEEP_SECS must be a non-negative integer (got: $WATCH_PENDING_BRIEF_SWEEP_SECS)" >&2
     exit 1
 fi
 for _var in AUTO_COMPACT_THRESHOLD_TOKENS AUTO_COMPACT_PROBE_MAX_AGE_SECS \
@@ -2529,6 +2613,9 @@ format_event_line() {
         watch.autoclose)               glyph="♻"; color=$'\033[36m' ;;
         watch.orphan_sweep)             glyph="♻"; color=$'\033[36m' ;;
         reap.window)                    glyph="✂"; color=$'\033[36m' ;;
+        reap.worktree)                  glyph="✂"; color=$'\033[36m' ;;
+        watch.worktree_vanished)        glyph="⚠"; color=$'\033[31m' ;;
+        watch.pending_brief_sweep)      glyph="✉"; color=$'\033[33m' ;;
         watch.pr_poll)                  glyph="⚠"; color=$'\033[33m' ;;
         pr_poll.error)                   glyph="✗"; color=$'\033[31m' ;;
         watch.activity_poll)
@@ -2603,6 +2690,8 @@ pr-poll:       ${WATCH_PR_POLL_SECS}s$([ "$WATCH_PR_POLL_SECS" = "0" ] && echo "
 orphan-sweep:  ${WATCH_ORPHAN_SWEEP_SECS}s$([ "$WATCH_ORPHAN_SWEEP_SECS" = "0" ] && echo " (disabled)" || echo " (script: $REAP_ORPHAN)")
 bg-violation:  ${WATCH_BG_VIOLATION_SWEEP_SECS}s$([ "$WATCH_BG_VIOLATION_SWEEP_SECS" = "0" ] && echo " (disabled)" || echo " (foreground-only fallback detection, issue #298)")
 activity-poll: ${WATCH_ACTIVITY_POLL_SECS}s$([ "$WATCH_ACTIVITY_POLL_SECS" = "0" ] && echo " (disabled)" || echo " (out-of-band PR/issue resolution backstop, issue #392)")
+worktree-sweep: ${WATCH_WORKTREE_SWEEP_SECS}s$([ "$WATCH_WORKTREE_SWEEP_SECS" = "0" ] && echo " (disabled)" || echo " (unblessed worktree-removal detection, issue #439)")
+pending-brief-sweep: ${WATCH_PENDING_BRIEF_SWEEP_SECS}s$([ "$WATCH_PENDING_BRIEF_SWEEP_SECS" = "0" ] && echo " (disabled)" || echo " (SWARM_PENDING_BRIEF marker-gap backstop, issue #439)")
 coord-wake-retry: ${COORD_WAKE_RETRY_SECS}s$([ "$COORD_WAKE_RETRY_SECS" = "0" ] && echo " (disabled)" || echo " (retry a dirty-composer-deferred wake, warn after ${COORD_WAKE_DEFER_WARN_SECS}s, issue #422)")
 coord-inbox:   $COORD_INBOX_DIR (issue #430; busy-pane doorbell defer: $([ "$COORD_WAKE_BUSY_RETRY_SECS" = "0" ] && echo "disabled — pastes immediately regardless of busy" || echo "retry ${COORD_WAKE_BUSY_RETRY_SECS}s, ceiling $([ "$COORD_WAKE_BUSY_CEILING_SECS" = "0" ] && echo "none" || echo "${COORD_WAKE_BUSY_CEILING_SECS}s")"))
 check-on-done: $WATCH_CHECK_ON_DONE$([ "$WATCH_CHECK_ON_DONE" = "1" ] && echo " (session: $SESSION_NAME)")
@@ -2751,6 +2840,14 @@ declare -A ORPHAN_PR_LOGGED=()
 # WATCH_BG_VIOLATION_PATTERN on that window's pane, so a later, genuinely
 # new occurrence re-fires instead of staying permanently suppressed.
 declare -A BG_VIOLATION_LOGGED=()
+
+# issue #439: worktree_vanish_sweep_pass's own inventory — dir -> epoch it
+# was last confirmed present. Seeded whole on the first tick (WT_INVENTORY_
+# SEEDED below) so a worktree already gone before the watcher started is
+# never treated as "vanished"; this sweep only catches a disappearance that
+# happens WHILE the watcher is running and watching for it.
+declare -A KNOWN_WORKTREE_SEEN=()
+WT_INVENTORY_SEEDED=0
 
 # is_own_worktree_dir <dir>
 #
@@ -3501,6 +3598,196 @@ activity_poll_pass() {
     fi
 }
 
+# wt_reap_event_since <issue> <since-iso8601>
+#
+# True if a `reap.worktree` (kill-worktree.sh, issue #439) or `reap.window`
+# (kill-finished-workers.sh) event for this issue was logged at/after
+# $since. Mirrors swarm_already_reaped's exact awk/cursor idiom above —
+# events.log's fixed-width ISO8601 timestamp field sorts lexicographically,
+# so no date-parsing dependency is needed.
+wt_reap_event_since() {
+    local issue="$1" since="$2"
+    [ -f "$EVENTS_LOG" ] || return 1
+    awk -v since="$since" -v needle="issue=$issue " '
+        $1 >= since && ($2 == "reap.window" || $2 == "reap.worktree") && index($0, needle) { found=1; exit }
+        END { exit !found }
+    ' "$EVENTS_LOG"
+}
+
+# unblessed_worktree_vanish_notify <issue> <dir>
+#
+# issue #439: writes a coord-inbox entry (issue #430 idiom — durable, no
+# doorbell) pointing at the same salvage/PR-history trail a human would
+# have to check by hand. By the time this fires the worktree is already
+# gone, so there's nothing left here to act on urgently — the value is
+# making sure the coordinator goes and checks .swarm/salvaged/ and the
+# issue's own PR history before trusting that nothing was lost.
+unblessed_worktree_vanish_notify() {
+    local issue="$1" dir="$2"
+    local body
+    body="A worktree this swarm was tracking (issue #$issue, $dir) disappeared with no reap.worktree/reap.window event logged for it since it was last confirmed present. That's the signature of a bare \`git worktree remove\` or \`rm -rf\` run outside every blessed reap path (kill-worktree.sh and its callers all log reap.worktree on removal — issue #439) — no salvage ran, so any brief still sitting in that worktree's .swarm/tasks/{inbox,processing,outbox}/ was destroyed, not preserved under .swarm/salvaged/iss-$issue/.
+Check .swarm/salvaged/iss-$issue/ (won't exist if nothing was queued), check issue #$issue's PR history for a SWARM_PENDING_BRIEF marker that never got a matching cleared/orphaned follow-up, and re-file any lost work as a fresh issue if the PR already merged past it."
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "[DRY] would write coord-inbox worktree-vanished entry for issue #$issue"
+        return 0
+    fi
+    if coord_inbox_write worktree_vanished "$body"; then
+        log_event coord.inbox.write "trigger=worktree_vanished issue=$issue"
+    else
+        echo "[$(date +%T)] WARN: failed to write coord-inbox worktree-vanished entry for issue #$issue" >&2
+    fi
+}
+
+# worktree_vanish_sweep_pass
+#
+# issue #439: detects a worktree removed outside every blessed reap path —
+# see WATCH_WORKTREE_SWEEP_SECS's header comment for the full incident
+# (SAMlytics wt-issue-296: a queued follow-up brief destroyed with no event
+# and no salvage). Diffs the current own-worktree inventory
+# (own_worktree_dirs_for_scan, the same #357-safe enumeration pr_poll_pass/
+# activity_poll_pass use) against KNOWN_WORKTREE_SEEN. The first tick only
+# seeds the map — a worktree already gone before the watcher started was
+# never "watched" disappear, so it's not this sweep's business. Every dir
+# still present each tick gets its last-seen timestamp bumped, which is
+# also what bounds wt_reap_event_since's search window tightly (only needs
+# to cover the gap since the previous tick, not this worktree's entire
+# life).
+worktree_vanish_sweep_pass() {
+    local dir issue now_epoch since found seen
+    now_epoch=$(date +%s)
+
+    local -a current=()
+    while IFS= read -r dir; do
+        [ -n "$dir" ] && current+=("$dir")
+    done < <(own_worktree_dirs_for_scan "$PROJECT_DIR")
+
+    if [ "$WT_INVENTORY_SEEDED" != "1" ]; then
+        for dir in "${current[@]}"; do
+            KNOWN_WORKTREE_SEEN["$dir"]=$now_epoch
+        done
+        WT_INVENTORY_SEEDED=1
+        return 0
+    fi
+
+    for dir in "${!KNOWN_WORKTREE_SEEN[@]}"; do
+        found=0
+        for seen in "${current[@]}"; do
+            [ "$seen" = "$dir" ] && { found=1; break; }
+        done
+        [ "$found" = "1" ] && continue
+
+        issue="$(basename "$dir" | sed -nE 's/^wt-issue-([0-9]+)$/\1/p')"
+        since="$(date -u -d "@${KNOWN_WORKTREE_SEEN[$dir]}" +'%Y-%m-%dT%H:%M:%SZ')"
+        if [ -z "$issue" ] || ! wt_reap_event_since "$issue" "$since"; then
+            log_event watch.worktree_vanished "issue=${issue:-?} dir=$dir reason=no_reap_event"
+            unblessed_worktree_vanish_notify "${issue:-?}" "$dir"
+        fi
+        unset 'KNOWN_WORKTREE_SEEN[$dir]'
+    done
+
+    for dir in "${current[@]}"; do
+        KNOWN_WORKTREE_SEEN["$dir"]=$now_epoch
+    done
+}
+
+# post_pending_brief_marker_sweep <pr#> <worktree-dir> <brief-file>
+#
+# issue #439: posts the same `<!-- SWARM_PENDING_BRIEF: queued -->` anchor
+# comment/idempotency contract as requeue.sh's notify_pr_pending_brief —
+# worker-listener.sh's clear_pr_pending_brief_marker clears either one the
+# same way — but written from the watcher's own vantage point: it doesn't
+# know which requeue.sh call is responsible or what the listener's pane
+# state was at queue time, only that a real brief is sitting unclaimed
+# right now. Mirrors kill-worktree.sh's notify_pr_brief_orphaned in
+# independently composing its own body rather than sourcing requeue.sh's —
+# same self-contained-scripts convention as this file's other local
+# helpers (see e.g. mtime_epoch elsewhere in this codebase).
+post_pending_brief_marker_sweep() {
+    local pr="$1" wt="$2" brief_file="$3"
+    local -a body=()
+    body+=('<!-- SWARM_PENDING_BRIEF: queued -->')
+    body+=(':warning: **Swarm: a follow-up brief is queued for the worker on this PR** (found by coordinator-watch.sh'"'"'s periodic sweep, issue #439 — most likely queued before this PR existed, so requeue.sh'"'"'s own marker never posted).')
+    body+=('')
+    body+=('Merging now may ship without that queued fix.')
+
+    if [ -r "$brief_file" ]; then
+        local max_lines=20 total excerpt
+        total="$(wc -l < "$brief_file" 2>/dev/null || echo 0)"
+        excerpt="$(head -n "$max_lines" "$brief_file" 2>/dev/null | cut -c1-200 | sed -e 's/`\{6,\}/[fence]/g')"
+        if [ -n "$excerpt" ]; then
+            body+=('')
+            body+=('<details><summary><b>What was queued</b> (head of the brief — judge severity without leaving this page)</summary>')
+            body+=('')
+            body+=('``````text')
+            body+=("$excerpt")
+            [ "${total:-0}" -gt "$max_lines" ] && body+=("$(printf '… truncated (%s more lines)' "$((total - max_lines))")")
+            body+=('``````')
+            body+=('</details>')
+        fi
+    fi
+
+    body+=('')
+    body+=('**Next steps — pick one:**')
+    body+=('')
+    body+=("$(printf '1. **Check whether it is still pending** — on the swarm host:\n   ```bash\n   ls -1 %s/.swarm/tasks/{inbox,processing}\n   ```\n   A file in `inbox/` means not yet claimed; in `processing/` means the worker is on it.' "$wt")")
+    body+=('2. **Merge anyway.** Nothing re-dispatches the brief for you. If the worktree is later reaped, the brief is salvaged and a `SWARM_BRIEF_ORPHANED` comment appears here — but that is a record, not a fix.')
+    body+=("$(printf '3. **Cancel it** if the brief is obsolete — remove the file(s) listed above from `%s/.swarm/tasks/inbox/`.' "$wt")")
+    body+=('')
+    body+=('<sub>scripts/coordinator-watch.sh pending_brief_marker_sweep_pass — issue #439 (marker gap when a brief predates its PR).</sub>')
+
+    local comment
+    comment="$(printf '%s\n' "${body[@]}")"
+    gh pr comment "$pr" --body "$comment" >/dev/null 2>&1
+}
+
+# pending_brief_marker_sweep_pass
+#
+# issue #439: backstop for requeue.sh's SWARM_PENDING_BRIEF marker — see
+# WATCH_PENDING_BRIEF_SWEEP_SECS's header comment for the SAMlytics gap
+# this closes (a brief queued before its target PR existed never gets a
+# marker at all). For every own worktree with a real unclaimed brief
+# (worker_pending_brief) and an OPEN PR whose latest SWARM_PENDING_BRIEF
+# marker isn't already "queued", posts one now.
+pending_brief_marker_sweep_pass() {
+    command -v gh >/dev/null 2>&1 || return 0
+
+    local wt branch json pr_num pr_state last brief_file issue
+    local -a dirs=()
+    while IFS= read -r wt; do
+        [ -n "$wt" ] && dirs+=("$wt")
+    done < <(own_worktree_dirs_for_scan "$PROJECT_DIR")
+
+    for wt in "${dirs[@]}"; do
+        [ -d "$wt" ] || continue
+        worker_pending_brief "$wt" || continue
+        branch="$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null)" || continue
+        [ -n "$branch" ] || continue
+        json="$(gh pr view "$branch" --json number,state -q '"\(.number)\t\(.state)"' 2>/dev/null)" || continue
+        [ -n "$json" ] || continue
+        IFS=$'\t' read -r pr_num pr_state <<< "$json"
+        [ "$pr_state" = "OPEN" ] || continue
+
+        # Anchored to the marker line itself, same reason as requeue.sh's
+        # notify_pr_pending_brief (its body text mentions the OTHER state
+        # in prose, which a bare substring match would also catch).
+        last="$(gh pr view "$pr_num" --json comments \
+            -q '[.comments[] | select(.body | test("SWARM_PENDING_BRIEF:"))] | last | .body // empty' 2>/dev/null \
+            | grep -oE '^<!-- SWARM_PENDING_BRIEF: (queued|cleared) -->$' \
+            | sed -E 's/^<!-- SWARM_PENDING_BRIEF: (queued|cleared) -->$/\1/' || true)"
+        [ "$last" = "queued" ] && continue
+
+        issue="$(basename "$wt" | sed -nE 's/^wt-issue-([0-9]+)$/\1/p')"
+        if [ "$DRY_RUN" = "1" ]; then
+            echo "[DRY] would post SWARM_PENDING_BRIEF: queued on PR #$pr_num (issue #${issue:-?})"
+            continue
+        fi
+        brief_file="$(worker_pending_brief_path "$wt")"
+        if post_pending_brief_marker_sweep "$pr_num" "$wt" "$brief_file"; then
+            log_event watch.pending_brief_sweep "pr=$pr_num dir=$wt reason=posted"
+        fi
+    done
+}
+
 # bg_violation_sweep_pass
 #
 # issue #298: fallback layer for the foreground-only rule — see
@@ -4045,7 +4332,7 @@ SCRIPT
 # run_auto_compact_poll_loop, started as its own background process right
 # after this function.
 run_watch_timer_loop() {
-    local last_pr_poll=0 last_orphan_sweep=0 last_bg_violation_sweep=0 last_activity_poll=0 last_coord_wake_retry=0 last_coord_wake_busy_retry=0 now
+    local last_pr_poll=0 last_orphan_sweep=0 last_bg_violation_sweep=0 last_activity_poll=0 last_coord_wake_retry=0 last_coord_wake_busy_retry=0 last_worktree_sweep=0 last_pending_brief_sweep=0 now
     while true; do
         sleep 2
         [ "$WATCH_CHECK_ON_DONE" = "1" ] && { status_poll_pass || true; }
@@ -4092,6 +4379,20 @@ run_watch_timer_loop() {
             if [ $((now - last_activity_poll)) -ge "$WATCH_ACTIVITY_POLL_SECS" ]; then
                 activity_poll_pass || true
                 last_activity_poll=$now
+            fi
+        fi
+        if [ "$WATCH_WORKTREE_SWEEP_SECS" -gt 0 ]; then
+            now=$(date +%s)
+            if [ $((now - last_worktree_sweep)) -ge "$WATCH_WORKTREE_SWEEP_SECS" ]; then
+                worktree_vanish_sweep_pass || true
+                last_worktree_sweep=$now
+            fi
+        fi
+        if [ "$WATCH_PENDING_BRIEF_SWEEP_SECS" -gt 0 ]; then
+            now=$(date +%s)
+            if [ $((now - last_pending_brief_sweep)) -ge "$WATCH_PENDING_BRIEF_SWEEP_SECS" ]; then
+                pending_brief_marker_sweep_pass || true
+                last_pending_brief_sweep=$now
             fi
         fi
     done
@@ -6692,10 +6993,10 @@ run_poll() {
 # restarts. (COORD_WAKE_RETRY_SECS, issue #422's older dirty-draft retry,
 # has this identical gap and predates this fix — out of scope here, but
 # worth folding in alongside this one if it's ever revisited.)
-if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ] || [ "$WATCH_ORPHAN_SWEEP_SECS" -gt 0 ] || [ "$WATCH_BG_VIOLATION_SWEEP_SECS" -gt 0 ] || [ "$WATCH_ACTIVITY_POLL_SECS" -gt 0 ] || [ "$COORD_WAKE_BUSY_RETRY_SECS" -gt 0 ]; then
+if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ] || [ "$WATCH_ORPHAN_SWEEP_SECS" -gt 0 ] || [ "$WATCH_BG_VIOLATION_SWEEP_SECS" -gt 0 ] || [ "$WATCH_ACTIVITY_POLL_SECS" -gt 0 ] || [ "$WATCH_WORKTREE_SWEEP_SECS" -gt 0 ] || [ "$WATCH_PENDING_BRIEF_SWEEP_SECS" -gt 0 ] || [ "$COORD_WAKE_BUSY_RETRY_SECS" -gt 0 ]; then
     run_watch_timer_loop &
     WATCH_TIMER_PID=$!
-    log_event watch.timer.start "pr_poll_secs=$WATCH_PR_POLL_SECS check_on_done=$WATCH_CHECK_ON_DONE orphan_sweep_secs=$WATCH_ORPHAN_SWEEP_SECS bg_violation_sweep_secs=$WATCH_BG_VIOLATION_SWEEP_SECS activity_poll_secs=$WATCH_ACTIVITY_POLL_SECS"
+    log_event watch.timer.start "pr_poll_secs=$WATCH_PR_POLL_SECS check_on_done=$WATCH_CHECK_ON_DONE orphan_sweep_secs=$WATCH_ORPHAN_SWEEP_SECS bg_violation_sweep_secs=$WATCH_BG_VIOLATION_SWEEP_SECS activity_poll_secs=$WATCH_ACTIVITY_POLL_SECS worktree_sweep_secs=$WATCH_WORKTREE_SWEEP_SECS pending_brief_sweep_secs=$WATCH_PENDING_BRIEF_SWEEP_SECS"
 fi
 if [ "$WORKER_AUTO_COMPACT" = "1" ] || [ "$WORKER_AUTO_DELIVER" = "1" ]; then
     run_worker_compact_loop &

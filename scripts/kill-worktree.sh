@@ -245,6 +245,24 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=_load-env.sh
 . "$SCRIPT_DIR/_load-env.sh" "$PROJECT_DIR"
 
+# Append-only structured event log — same format/location as
+# coordinator-watch.sh / kill-finished-workers.sh (EVENTS_LOG, log_event).
+# issue #439: this is the ONE place an actual `git worktree remove` for an
+# issue happens, regardless of caller — a human running this script
+# directly, reap-orphan-worktrees.sh, or kill-finished-workers.sh's
+# --with-worktree path all route through here. Logging it here rather than
+# in each caller is what lets coordinator-watch.sh's worktree-vanish sweep
+# (worktree_vanish_sweep_pass) tell a script-driven removal apart from a
+# bare `git worktree remove` run outside all of this tooling — the failure
+# mode issue #439 exists to catch.
+EVENTS_LOG="$PROJECT_DIR/.swarm/events.log"
+log_event() {
+    local cat="$1"; shift
+    local ts
+    ts="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+    printf '%s  %-15s %s\n' "$ts" "$cat" "$*" >> "$EVENTS_LOG" 2>/dev/null || true
+}
+
 WT="$(swarm_worktree_dir "$PROJECT_DIR" "$ISSUE")"
 BRANCH="fix/issue-$ISSUE"
 WT="$(resolve_worktree_path "$PROJECT_DIR" "$BRANCH" "$WT")"
@@ -347,6 +365,7 @@ if [ -d "$WT" ]; then
     fi
     git worktree remove --force "$WT"
     echo "  ✓ removed worktree"
+    log_event reap.worktree "issue=$ISSUE branch=${ACTUAL_BRANCH:-$BRANCH} dir=$WT"
 else
     echo "  - worktree dir not present (skipped)"
 fi
