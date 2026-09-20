@@ -1492,11 +1492,19 @@
 #                           attempted), so it's invisible to the WORKER_
 #                           DELIVER_BACKOFF_SECS/MAX_FAILURES machinery that
 #                           already escalates every OTHER stuck-delivery
-#                           shape. Once the SAME pending brief has been
-#                           skipped for reason=composer_not_clear this many
-#                           consecutive sweeps in a row, worker_deliver_
-#                           record_composer_stall logs one loud, distinct
-#                           worker.deliver.composer_stalled event (never
+#                           shape. Once the SAME pending brief has racked up
+#                           this many reason=composer_not_clear skips —
+#                           counted since the brief started stalling, NOT
+#                           reset by an intervening sweep that skips for a
+#                           DIFFERENT reason (pane_busy, backoff,
+#                           task_not_terminal): only a different BRIEF
+#                           resets the count, so a genuinely stuck composer
+#                           interleaved with the occasional busy/backoff
+#                           sweep still escalates on schedule instead of
+#                           the threshold silently never being reached —
+#                           worker_deliver_record_composer_stall logs one
+#                           loud, distinct worker.deliver.composer_stalled
+#                           event (never
 #                           repeated for the same streak) and durably writes
 #                           it to the coordinator inbox (coord_inbox_write,
 #                           issue #430) so it surfaces on the coordinator's
@@ -1607,7 +1615,7 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     WORKER_DELIVER_END_TIMEOUT_SECS         15      max wait for the session to actually end after /quit
     WORKER_DELIVER_BACKOFF_SECS             600     cooldown for a window after a failed delivery attempt
     WORKER_DELIVER_MAX_FAILURES             3       consecutive failures before giving up on a window entirely
-    WORKER_DELIVER_COMPOSER_STALL_THRESHOLD 20      (issue #436) consecutive composer_not_clear skips for the same pending brief before a loud, once-only escalation; see header comment
+    WORKER_DELIVER_COMPOSER_STALL_THRESHOLD 20      (issue #436) composer_not_clear skips racked up against the same pending brief (not reset by an interleaved skip for a different reason) before a loud, once-only escalation; see header comment
     COMPACT_QUEUED_MARKER_PATTERN     (auto)  queued-input marker checked when retracting a stuck phase=start injection; see header comment
     COMPACT_RETRACT_BACKSPACES        12      Backspace keystrokes sent alongside the retraction Escape (coord + worker, shared; issue #265/#290)
     COMPACT_SUBMIT_SETTLE_SECS        1       settle delay around the injection-submit Enter (coord + worker, shared; issue #290); see header comment
@@ -1860,8 +1868,13 @@ EVENTS LOG
                            for it until the watcher restarts; the brief stays queued for a human
                            to release manually (attach and /quit) — logged once, not every sweep
       worker.deliver.composer_stalled  (issue #436) WORKER_DELIVER_COMPOSER_STALL_THRESHOLD
-                           consecutive worker.deliver.skip reason=composer_not_clear against the
-                           SAME pending brief (issue, brief=<inbox filename>, skips=N) — unlike
+                           worker.deliver.skip reason=composer_not_clear events racked up against
+                           the SAME pending brief (issue, brief=<inbox filename>, skips=N) — a
+                           sweep that skips for a DIFFERENT reason in between (pane_busy, backoff,
+                           task_not_terminal) does not reset this count, only a different brief
+                           does, so it's not strictly "N consecutive sweeps" but does mean the
+                           threshold is always eventually reached rather than reset away by
+                           routine interleaved traffic. Unlike
                            worker.deliver.giving_up, this never stops maybe_worker_deliver_brief
                            from retrying (composer_not_clear can still self-heal on its own,
                            e.g. a human submits or clears their draft): it's a loud, once-per-
@@ -5254,18 +5267,23 @@ worker_deliver_record_success() {
 
 # WORKER_DELIVER_COMPOSER_STALL_BRIEF / _COUNT / _ESCALATED (issue #436)
 #
-# Cross-sweep bookkeeping keyed by issue: how many CONSECUTIVE sweeps in a
-# row have skipped delivery for the SAME pending brief with
-# reason=composer_not_clear specifically. This is deliberately separate
-# from WORKER_DELIVER_LAST_FAIL/FAIL_COUNT/GAVE_UP above — that trio only
-# ever gets touched by worker_deliver_record_failure, which is called after
-# a real /quit injection times out or lands as text; composer_not_clear
-# returns BEFORE maybe_worker_deliver_brief ever attempts an injection, so
-# it's structurally invisible to that machinery. Without this, a stuck
-# composer-clear read can skip forever with nothing escalating it — exactly
-# the corpusminder-spring 2026-09-18/19 incident (1,812 consecutive skips,
-# ~14h) this issue exists for. In-memory only, reset on a watcher restart,
-# same contract as every other WORKER_DELIVER_* tracker.
+# Cross-sweep bookkeeping keyed by issue: how many times in a row
+# reason=composer_not_clear has fired for the SAME pending brief — NOT
+# strictly "consecutive sweeps": a sweep that skips for a DIFFERENT reason
+# in between (pane_busy, backoff, task_not_terminal) leaves this count
+# untouched rather than resetting it, since none of those mean the
+# composer-clear problem went away. Only a different BRIEF resets it (see
+# worker_deliver_record_composer_stall below). This is deliberately
+# separate from WORKER_DELIVER_LAST_FAIL/FAIL_COUNT/GAVE_UP above — that
+# trio only ever gets touched by worker_deliver_record_failure, which is
+# called after a real /quit injection times out or lands as text;
+# composer_not_clear returns BEFORE maybe_worker_deliver_brief ever
+# attempts an injection, so it's structurally invisible to that machinery.
+# Without this, a stuck composer-clear read can skip forever with nothing
+# escalating it — exactly the corpusminder-spring 2026-09-18/19 incident
+# (1,812 consecutive skips, ~14h) this issue exists for. In-memory only,
+# reset on a watcher restart, same contract as every other WORKER_DELIVER_*
+# tracker.
 declare -A WORKER_DELIVER_COMPOSER_STALL_BRIEF=()
 declare -A WORKER_DELIVER_COMPOSER_STALL_COUNT=()
 declare -A WORKER_DELIVER_COMPOSER_STALL_ESCALATED=()
@@ -5314,9 +5332,9 @@ worker_deliver_record_composer_stall() {
     WORKER_DELIVER_COMPOSER_STALL_COUNT[$issue]=$count
     if [ "$count" -ge "$WORKER_DELIVER_COMPOSER_STALL_THRESHOLD" ] && [ -z "${WORKER_DELIVER_COMPOSER_STALL_ESCALATED[$issue]:-}" ]; then
         WORKER_DELIVER_COMPOSER_STALL_ESCALATED[$issue]=1
-        echo "[$(date +%T)] WARNING: worker iss-$issue has skipped brief delivery $count times in a row (reason=composer_not_clear) for the same queued brief ($brief) — its composer may be misread as dirty (see COMPACT_COMPOSER_CHROME_PATTERN's header comment), or a real draft/decision is genuinely sitting there; investigate with scripts/capture-worker.sh iss-$issue"
+        echo "[$(date +%T)] WARNING: worker iss-$issue has skipped brief delivery $count times (reason=composer_not_clear) for the same queued brief ($brief) — its composer may be misread as dirty (see COMPACT_COMPOSER_CHROME_PATTERN's header comment), or a real draft/decision is genuinely sitting there; investigate with scripts/capture-worker.sh iss-$issue"
         log_event worker.deliver.composer_stalled "issue=$issue brief=$brief skips=$count"
-        coord_inbox_write deliver_stall "$(printf 'Worker iss-%s: brief delivery has skipped %s times in a row (reason=composer_not_clear) for the queued brief %s.\n\nCheck: scripts/capture-worker.sh iss-%s\n\nThe composer-clear check may be misreading UI chrome as a draft (docs/tmux-as-channel.md §1d), or a human/decision is genuinely blocking the pane. If the pane really is stuck, attach and either clear the composer or run /quit manually so the queued brief can be claimed.\n' "$issue" "$count" "$brief" "$issue")" || true
+        coord_inbox_write deliver_stall "$(printf 'Worker iss-%s: brief delivery has skipped %s times (reason=composer_not_clear) for the queued brief %s.\n\nCheck: scripts/capture-worker.sh iss-%s\n\nThe composer-clear check may be misreading UI chrome as a draft (docs/tmux-as-channel.md §1d), or a human/decision is genuinely blocking the pane. If the pane really is stuck, attach and either clear the composer or run /quit manually so the queued brief can be claimed.\n' "$issue" "$count" "$brief" "$issue")" || true
     fi
 }
 

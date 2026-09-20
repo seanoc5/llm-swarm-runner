@@ -829,10 +829,39 @@ check "no second coord-inbox write for the same streak" "1" "$(find "$COORD_INBO
 # resets rather than inheriting the count, and does not immediately
 # re-escalate on its first skip.
 rm -f "$INBOX_DIR"/*.md
-echo "a different, fresh brief" > "$INBOX_DIR/20260919-010000-42.md"
+NEW_BRIEF="$INBOX_DIR/20260919-010000-42.md"
+echo "a different, fresh brief" > "$NEW_BRIEF"
 maybe_worker_deliver_brief "$WIN"
 check "new brief resets the streak to 1" "1" "${WORKER_DELIVER_COMPOSER_STALL_COUNT[42]}"
 check "no re-escalation on the first skip against a new brief" "1" "$(grep -cF 'worker.deliver.composer_stalled' "$EVENTS_LOG")"
+
+# Self-review finding: the streak is NOT reset by a sweep that skips for a
+# DIFFERENT reason (pane_busy here) — only a different brief resets it.
+# Without this, an occasional busy tick interleaved with an otherwise-stuck
+# composer would keep pushing the threshold out of reach.
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.2
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo '✻ Considering… (esc to interrupt)'; sleep 300" Enter
+check_eventually "busy chrome visible -> worker_pane_busy true" "busy" 'busy_or_idle'
+maybe_worker_deliver_brief "$WIN"
+if grep -q 'worker.deliver.skip.*reason=pane_busy' "$EVENTS_LOG"; then got=skipped; else got=notskipped; fi
+check "interleaved pane_busy skip logged" "skipped" "$got"
+check "pane_busy skip leaves the composer-stall streak untouched (still 1, not reset to 0)" "1" "${WORKER_DELIVER_COMPOSER_STALL_COUNT[42]}"
+
+# Back to idle+empty-composer (still stubbed dirty): the streak resumes from
+# where it left off (1 -> 2 -> 3) and re-escalates for this NEW brief once
+# it independently reaches the threshold — a second, distinct escalation,
+# not a stale re-fire of the first brief's already-handled one.
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.2
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'sonnet · wt-issue-42 · ctx: 20k/1M (2%)'; printf '❯ \n'; sleep 300" Enter
+check_eventually "idle, empty-composer pane restored -> cli" "cli" "worker_pane_state '$WIN'"
+maybe_worker_deliver_brief "$WIN"
+maybe_worker_deliver_brief "$WIN"
+check "streak resumed across the interleaved busy skip -> reached 3 for the new brief" "3" "${WORKER_DELIVER_COMPOSER_STALL_COUNT[42]}"
+check "new brief's own stall escalates independently -> 2 distinct composer_stalled events total" "2" "$(grep -cF 'worker.deliver.composer_stalled' "$EVENTS_LOG")"
+if grep -qF "issue=42 brief=$(basename "$NEW_BRIEF") skips=3" "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "the second escalation names the NEW brief, not the original stalled one" "logged" "$got"
 
 unset -f compact_composer_clear
 body="$(extract_fn compact_composer_clear)"; eval "$body"   # restore the real function
