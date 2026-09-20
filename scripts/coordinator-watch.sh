@@ -3817,6 +3817,14 @@ post_pending_brief_marker_sweep() {
 # marker at all). For every own worktree with a real unclaimed brief
 # (worker_pending_brief) and an OPEN PR whose latest SWARM_PENDING_BRIEF
 # marker isn't already "queued", posts one now.
+#
+# issue #439 self-review (round 7): requeue.sh writes the inbox file
+# BEFORE posting its own marker (mktemp+mv, then the PR comment) — a
+# sweep tick landing in that narrow window sees a real brief and an OPEN
+# PR with no "queued" marker yet, and posts its own. Harmless (both
+# comments say the same thing, and worker-listener.sh's clear step
+# handles either), just not perfectly idempotent — a rare double "queued"
+# comment on the PR, not a functional bug.
 pending_brief_marker_sweep_pass() {
     command -v gh >/dev/null 2>&1 || return 0
 

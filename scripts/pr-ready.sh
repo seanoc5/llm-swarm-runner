@@ -98,9 +98,17 @@ case "$RISK" in
                     : # APPROVE / APPROVE_WITH_CAVEATS — proceed
                     ;;
                 2)
-                    echo "pr-ready: REFUSED — self-review returned BLOCK on PR #$PR. Fix the finding and re-push," >&2
-                    echo "          then re-run pr-ready.sh, or bypass this wrapper entirely with:" >&2
-                    echo "            gh pr ready $PR" >&2
+                    # issue #439 self-review (round 7): deliberately does
+                    # NOT print a bypass command. worker.md tells workers
+                    # to call this wrapper instead of bare `gh pr ready`
+                    # specifically so a BLOCK can't be readied past —
+                    # handing that exact bypass to the worker the gate
+                    # exists to slow down would defeat the whole point.
+                    # Fix the finding and re-run; an operator who
+                    # genuinely wants to override already knows they can
+                    # run gh directly.
+                    echo "pr-ready: REFUSED — self-review returned BLOCK on PR #$PR." >&2
+                    echo "          Fix the finding and re-push, then re-run pr-ready.sh." >&2
                     exit 2
                     ;;
                 *)
