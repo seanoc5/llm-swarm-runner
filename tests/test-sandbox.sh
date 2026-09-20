@@ -256,14 +256,21 @@ if [ -S /var/run/docker.sock ]; then
     # and only the Gradle block's unrelated "no modules-2" warning would
     # match a bare `*"WARNING"*` check, passing vacuously without ever
     # exercising the uv skip path. Match the uv-specific warning text too.
-    _uv_cache_fixture_ro="$(mktemp -d -p "$REPO_ROOT")"
-    chmod 555 "$_uv_cache_fixture_ro"
-    output=$(SANDBOX_DEP_CACHE="$_uv_cache_fixture_ro" "$REPO_ROOT/sandbox.sh" /tmp "echo LAUNCHED" 2>&1)
-    [[ "$output" == *"skipping uv cache mount"* && "$output" == *"LAUNCHED"* ]] \
-        && pass "SANDBOX_DEP_CACHE uv unwritable base dir warns + still launches" "$output" \
-        || fail "SANDBOX_DEP_CACHE uv unwritable base dir warns + still launches" "$output"
-    chmod 755 "$_uv_cache_fixture_ro"
-    rm -rf "$_uv_cache_fixture_ro"
+    if [ "$(id -u)" -eq 0 ]; then
+        # chmod 555 doesn't constrain root (a root shell, or a DooD worker
+        # running as root, can still mkdir under it) — this test would fail
+        # loudly instead of exercising the skip path.
+        skip "SANDBOX_DEP_CACHE uv unwritable base dir warns + still launches" "running as root"
+    else
+        _uv_cache_fixture_ro="$(mktemp -d -p "$REPO_ROOT")"
+        chmod 555 "$_uv_cache_fixture_ro"
+        output=$(SANDBOX_DEP_CACHE="$_uv_cache_fixture_ro" "$REPO_ROOT/sandbox.sh" /tmp "echo LAUNCHED" 2>&1)
+        [[ "$output" == *"skipping uv cache mount"* && "$output" == *"LAUNCHED"* ]] \
+            && pass "SANDBOX_DEP_CACHE uv unwritable base dir warns + still launches" "$output" \
+            || fail "SANDBOX_DEP_CACHE uv unwritable base dir warns + still launches" "$output"
+        chmod 755 "$_uv_cache_fixture_ro"
+        rm -rf "$_uv_cache_fixture_ro"
+    fi
 
     rm -rf "$_uv_cache_fixture"
 else
