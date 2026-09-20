@@ -1760,21 +1760,27 @@ EVENTS LOG
                            positive counterpart to worker.deliver.skip, so a stall's eventual
                            recovery is attributable after the fact instead of vanishing into
                            silence once the skip lines stop (issue, brief=<inbox filename>,
-                           release=auto_deliver|listener_claim_after_quit[, waited] —
+                           release=auto_deliver|listener_claim_after_quit[, waited][, late=1] —
                            auto_deliver: this script's own /quit injection above ended the
                            session and its listener claimed the brief, logged right alongside
-                           worker.deliver.ended; listener_claim_after_quit: worker_deliver_
-                           detect_claim() noticed, on a LATER sweep, that a brief it had
-                           previously seen genuinely pending while the window sat parked in
-                           "cli" state has since vanished WITHOUT this script's own auto_deliver
-                           path having claimed credit for it — i.e. something else released the
-                           parked session, almost always a human attaching and running /quit by
-                           hand per the documented manual fallback. Never logged for a "shell"-
-                           state window's routine self-heal (issue #43) — only for a brief this
-                           script had already flagged as stuck in the exact parked-session
-                           scenario worker.deliver.attempt/.skip describe, so this event's
-                           presence or absence answers "did WORKER_AUTO_DELIVER=1 do its job, or
-                           did a human have to intervene?" for every such stall)
+                           worker.deliver.ended; auto_deliver with late=1 (self-review, round 2):
+                           the same /quit injection, but its effect only landed on a LATER sweep,
+                           after this script's own synchronous wait had already given up and
+                           logged worker.deliver.timeout — worker_deliver_detect_claim() ties the
+                           eventual departure back to WORKER_DELIVER_TIMED_OUT_BRIEF's record of
+                           exactly which brief that timed-out attempt was waiting on, however many
+                           sweeps late the departure is observed; listener_claim_after_quit:
+                           worker_deliver_detect_claim() noticed, on a LATER sweep, that a brief it
+                           had previously seen genuinely pending while the window sat parked in
+                           "cli" state has since vanished WITHOUT either of the above having
+                           claimed credit for it — i.e. something else released the parked
+                           session, almost always a human attaching and running /quit by hand per
+                           the documented manual fallback. Never logged for a "shell"-state
+                           window's routine self-heal (issue #43) — only for a brief this script
+                           had already flagged as stuck in the exact parked-session scenario
+                           worker.deliver.attempt/.skip describe, so this event's presence or
+                           absence answers "did WORKER_AUTO_DELIVER=1 do its job, or did a human
+                           have to intervene?" for every such stall)
       worker.deliver.timeout  gave up waiting for the session to end after /quit (issue, waited) —
                            counted as a failure (worker_deliver_record_failure)
       worker.deliver.delivered_as_text  composer already empty at the end-timeout — no ghost text
@@ -5133,16 +5139,34 @@ worker_deliver_record_failure() {
 # worker_deliver_record_success <issue>
 worker_deliver_record_success() {
     local issue="$1"
-    unset "WORKER_DELIVER_LAST_FAIL[$issue]" "WORKER_DELIVER_FAIL_COUNT[$issue]" "WORKER_DELIVER_GAVE_UP[$issue]"
+    unset "WORKER_DELIVER_LAST_FAIL[$issue]" "WORKER_DELIVER_FAIL_COUNT[$issue]" "WORKER_DELIVER_GAVE_UP[$issue]" "WORKER_DELIVER_TIMED_OUT_BRIEF[$issue]"
 }
 
 # WORKER_DELIVER_PENDING_SEEN (issue #437)
 #
 # Cross-sweep bookkeeping keyed by issue: the pending brief's basename last
 # observed while the window sat parked in "cli" state (empty string once
-# nothing is pending, or once the window isn't parked). In-memory only,
-# same reset-on-restart contract as WORKER_DELIVER_LAST_FAIL et al above.
+# nothing is pending). Only ever touched from worker_deliver_detect_claim,
+# which maybe_worker_deliver_brief calls only after its own
+# `[ "$state" = "cli" ]` gate — so a "busy" or "shell" sweep never reaches
+# that call at all, and this tracker just holds its last cli-observed value
+# unchanged straight through those sweeps rather than being cleared. In-memory
+# only, same reset-on-restart contract as WORKER_DELIVER_LAST_FAIL et al above.
 declare -A WORKER_DELIVER_PENDING_SEEN=()
+
+# WORKER_DELIVER_TIMED_OUT_BRIEF (issue #437 self-review)
+#
+# Cross-sweep bookkeeping keyed by issue: the basename of the brief this
+# script's OWN /quit injection most recently gave up waiting on (maybe_
+# worker_deliver_brief's timeout branch below), kept until worker_deliver_
+# detect_claim actually observes that exact brief leave inbox/ for
+# processing/ — no matter how many sweeps later that turns out to be.
+# Without this, only the very next sweep after a timeout was protected from
+# misattributing a late-landing effect of our own /quit to a human's manual
+# one (release=listener_claim_after_quit); a second or third late sweep
+# would wrongly credit the human path. See worker_deliver_detect_claim's
+# header comment for how this is consumed.
+declare -A WORKER_DELIVER_TIMED_OUT_BRIEF=()
 
 # worker_deliver_detect_claim <issue> <worktree-dir> <pane-state>
 #
@@ -5182,13 +5206,27 @@ declare -A WORKER_DELIVER_PENDING_SEEN=()
 # atomic mv target, which per worker_current_task_terminal()'s header
 # comment stays populated for the task's entire in-flight lifetime — is
 # cheap positive confirmation a genuine claim happened, not just an absence.
+#
+# Self-review finding (round 2): a vanished-and-now-claimed $prior is
+# ambiguous between two causes — a human attaching and running /quit by
+# hand, or this script's OWN earlier /quit finally taking effect after
+# maybe_worker_deliver_brief's synchronous wait already gave up and logged
+# worker.deliver.timeout. Checking WORKER_DELIVER_TIMED_OUT_BRIEF (set by
+# that timeout branch) tells the two apart correctly no matter how many
+# sweeps late the effect surfaces, instead of only the one sweep immediately
+# following the timeout.
 worker_deliver_detect_claim() {
     local issue="$1" wt_dir="$2" state="$3"
     local current="" prior
     [ "$state" = "cli" ] && current="$(basename "$(worker_pending_brief_path "$wt_dir")" 2>/dev/null || true)"
     prior="${WORKER_DELIVER_PENDING_SEEN[$issue]:-}"
     if [ -n "$prior" ] && [ "$prior" != "$current" ] && [ -e "$wt_dir/.swarm/tasks/processing/$prior" ]; then
-        log_event worker.deliver.ok "issue=$issue brief=$prior release=listener_claim_after_quit"
+        if [ -n "${WORKER_DELIVER_TIMED_OUT_BRIEF[$issue]:-}" ] && [ "$prior" = "${WORKER_DELIVER_TIMED_OUT_BRIEF[$issue]}" ]; then
+            log_event worker.deliver.ok "issue=$issue brief=$prior release=auto_deliver late=1"
+            unset "WORKER_DELIVER_TIMED_OUT_BRIEF[$issue]"
+        else
+            log_event worker.deliver.ok "issue=$issue brief=$prior release=listener_claim_after_quit"
+        fi
     fi
     WORKER_DELIVER_PENDING_SEEN[$issue]="$current"
 }
@@ -5347,18 +5385,17 @@ maybe_worker_deliver_brief() {
             worker_deliver_record_failure "$issue"
             # Self-review finding (issue #437): if this /quit's effect lands
             # LATE — just past this timeout, e.g. a slow-to-render CLI
-            # finally processing it a beat after we gave up waiting — the
-            # next cli-state sweep's worker_deliver_detect_claim would
-            # otherwise see prior=$brief_before still set, current=empty,
-            # and misattribute this script's own (merely late) success to
-            # release=listener_claim_after_quit. Clearing here trades that
-            # false attribution for a quieter, already-existing gap
-            # instead — worker.deliver.ok simply doesn't fire for a
-            # brief this attempt gave up on, same as before this feature
-            # existed, and worker.deliver.timeout right above still marks
-            # the moment for a reader piecing the sequence together by
-            # hand. Wrong attribution is worse than none.
-            WORKER_DELIVER_PENDING_SEEN[$issue]=""
+            # finally processing it a beat after we gave up waiting — a
+            # future cli-state sweep's worker_deliver_detect_claim would
+            # otherwise see $brief_before vanish and, with nothing to say
+            # otherwise, misattribute this script's own (merely late)
+            # success to release=listener_claim_after_quit. Recording it
+            # here (rather than blindly clearing WORKER_DELIVER_PENDING_SEEN,
+            # which only protected the very next sweep — see that tracker's
+            # header comment) lets detect_claim correctly credit
+            # release=auto_deliver whenever this exact brief's departure is
+            # finally observed, however many sweeps late that is.
+            WORKER_DELIVER_TIMED_OUT_BRIEF[$issue]="$brief_before"
             return 0
         fi
     done

@@ -542,13 +542,13 @@ if grep -q 'worker.deliver.timeout' "$EVENTS_LOG"; then got=timedout; else got=n
 check "agent doesn't recognize /quit -> times out (fails safe)" "timedout" "$got"
 check "pane still 'cli' -> the session was never actually ended" "cli" "$(worker_pane_state "$WIN")"
 
-# Self-review finding (issue #437): a /quit that only takes effect LATE —
-# just past this timeout — must not have that eventual, still-this-
-# script's-own success misattributed to release=listener_claim_after_quit
-# on the next sweep. Simulated here by having the brief vanish (mimicking a
-# delayed effect of the /quit this script already sent) with no further
-# maybe_worker_deliver_brief call in between to re-arm tracking.
-mv "$INBOX_DIR/20260826-150000-42.md" "$PROCESSING_DIR/20260826-150000-42.md" 2>/dev/null || true
+# Self-review finding (issue #437, round 2): a /quit that only takes effect
+# LATE — just past this timeout — must be credited to release=auto_deliver
+# (this script's own delayed success), not misattributed to
+# release=listener_claim_after_quit (a human's manual /quit). Simulated here
+# by having the brief vanish (mimicking a delayed effect of the /quit this
+# script already sent).
+mv "$INBOX_DIR/20260826-150000-42.md" "$PROCESSING_DIR/20260826-150000-42.md"
 tmux send-keys -t "$SESSION_NAME:$WIN" C-c
 sleep 0.2
 tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'sonnet · wt-issue-42 · ctx: 20k/1M (2%)'; printf '❯ \n'; sleep 300" Enter
@@ -556,9 +556,66 @@ check_eventually "pane parked in cli again after the timed-out attempt" "cli" "w
 maybe_worker_deliver_brief "$WIN"
 if grep -qF "listener_claim_after_quit" "$EVENTS_LOG"; then
     red "a late self-effected /quit was misattributed to listener_claim_after_quit; events.log: $(cat "$EVENTS_LOG")"
-else
-    green "no misattribution: WORKER_DELIVER_PENDING_SEEN cleared on timeout, so a late own-success stays unlabeled rather than wrongly labeled"
+elif grep -qF "worker.deliver.ok" "$EVENTS_LOG" \
+    && grep -qF "brief=20260826-150000-42.md release=auto_deliver late=1" "$EVENTS_LOG"; then
+    green "correct attribution: a late own-effect /quit is credited to release=auto_deliver, not listener_claim_after_quit"
     PASS=$((PASS + 1))
+else
+    red "no attribution at all was logged for the late own-effect departure; events.log: $(cat "$EVENTS_LOG")"
+fi
+
+heading "Test 7b: the tightened guard survives MORE than one intervening idle sweep (issue #437 self-review, round 2)"
+# The original guard (blindly clearing WORKER_DELIVER_PENDING_SEEN on
+# timeout) only protected the ONE sweep immediately following a timeout —
+# a second consecutive idle sweep before the late departure would re-arm
+# tracking and the eventual departure would misattribute to
+# release=listener_claim_after_quit. WORKER_DELIVER_TIMED_OUT_BRIEF must
+# survive an extra idle sweep (nothing changed yet) in between.
+unset 'WORKER_DELIVER_LAST_FAIL[42]' 'WORKER_DELIVER_FAIL_COUNT[42]' 'WORKER_DELIVER_GAVE_UP[42]'
+: > "$EVENTS_LOG"
+rm -f "$INBOX_DIR"/*.md "$PROCESSING_DIR"/*.md
+BRIEF_FILE_LATE="$INBOX_DIR/20260826-155000-42.md"
+echo "another late brief" > "$BRIEF_FILE_LATE"
+set_current_task "t3b" "done-no-pr"   # current task already finished
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.3
+tmux send-keys -t "$SESSION_NAME:$WIN" "bash -c 'exec -a gemini bash $FAKE_REPL2'" Enter
+check_eventually "fake non-quitting REPL foreground -> cli" "cli" "worker_pane_state '$WIN'"
+
+WORKER_DELIVER_END_TIMEOUT_SECS=3 WORKER_DELIVER_POLL_SECS=1 maybe_worker_deliver_brief "$WIN"
+if grep -q 'worker.deliver.timeout' "$EVENTS_LOG"; then got=timedout; else got=nottimedout; fi
+check "second scenario's timeout logged" "timedout" "$got"
+
+# One intervening idle sweep: nothing has changed yet (brief still pending
+# in inbox/) — this must leave WORKER_DELIVER_TIMED_OUT_BRIEF intact.
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.2
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'sonnet · wt-issue-42 · ctx: 20k/1M (2%)'; printf '❯ \n'; sleep 300" Enter
+check_eventually "pane parked in cli for the intervening sweep" "cli" "worker_pane_state '$WIN'"
+maybe_worker_deliver_brief "$WIN"
+if grep -q 'worker.deliver.ok' "$EVENTS_LOG"; then
+    red "an idle sweep with nothing changed should log nothing yet; events.log: $(cat "$EVENTS_LOG")"
+else
+    green "intervening idle sweep (brief still pending) stays silent, as expected"
+    PASS=$((PASS + 1))
+fi
+
+# NOW the late effect actually lands — two sweeps after the original timeout,
+# exactly the gap the original one-sweep-only guard didn't cover.
+mv "$BRIEF_FILE_LATE" "$PROCESSING_DIR/$(basename "$BRIEF_FILE_LATE")"
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.2
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'sonnet · wt-issue-42 · ctx: 20k/1M (2%)'; printf '❯ \n'; sleep 300" Enter
+check_eventually "pane parked in cli for the actual late departure" "cli" "worker_pane_state '$WIN'"
+maybe_worker_deliver_brief "$WIN"
+if grep -qF "listener_claim_after_quit" "$EVENTS_LOG"; then
+    red "a late self-effected /quit, two sweeps out, was misattributed to listener_claim_after_quit; events.log: $(cat "$EVENTS_LOG")"
+elif grep -qF "worker.deliver.ok" "$EVENTS_LOG" \
+    && grep -qF "brief=$(basename "$BRIEF_FILE_LATE") release=auto_deliver late=1" "$EVENTS_LOG"; then
+    green "correct attribution survives more than one intervening sweep (issue #437 self-review, round 2)"
+    PASS=$((PASS + 1))
+else
+    red "no attribution logged for the two-sweeps-late departure; events.log: $(cat "$EVENTS_LOG")"
 fi
 
 heading "Test 8: relaunch-race (issue #344) — /quit followed by an IMMEDIATE relaunch must still record success, never a false timeout/retract into the new session"
