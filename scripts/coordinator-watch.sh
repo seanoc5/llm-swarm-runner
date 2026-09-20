@@ -1737,12 +1737,14 @@ EVENTS LOG
                            killed=N); passes that reap nothing are not logged
       reap.window          per-target kill record written by kill-finished-workers.sh
                            (issue, window, branch, reasons, capture=<pane snapshot path>)
-      reap.worktree        (issue #439) kill-worktree.sh actually removed a worktree
-                           (issue, branch, dir) — logged inside kill-worktree.sh itself so
-                           EVERY caller (this script directly, reap-orphan-worktrees.sh,
-                           kill-finished-workers.sh's --with-worktree path) is covered by one
-                           line, regardless of which one triggered the removal; this is what
-                           worktree_vanish_sweep_pass below checks for before flagging a
+      reap.worktree        (issue #439) a worktree was actually removed (issue, branch, dir)
+                           — logged, right before the removal, by each of the three sites in
+                           this codebase that ever do it: kill-worktree.sh (covering this
+                           script and kill-finished-workers.sh's --with-worktree path, its
+                           only callers), reap-orphan-worktrees.sh's own dangling-registration
+                           path, and swarm-merge.sh's own fallback removal — three call sites,
+                           same event shape, so worktree_vanish_sweep_pass below can check for
+                           it regardless of which one triggered the removal, before flagging a
                            disappearance as unblessed
       watch.timer.start    a background timer loop started — pr-poll/check-on-done
                            timer loop, and/or (issue #226) the separate

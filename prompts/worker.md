@@ -692,12 +692,12 @@ prose — see "Issue skeleton" below.
 ### Draft first, ready only once the body is final
 
 Open every PR with `gh pr create --draft` — a placeholder body (e.g. "wip,
-finalizing body after self-review") is fine at this point; the PR only needs
-to exist so self-review has something to `gh pr diff`/`gh pr view` against.
-Do the self-review, write the finalized body (risk marker + skeleton, both
-below), run `scripts/lint-pr-screen.sh <N>` until it exits 0, then run
-`scripts/pr-ready.sh <N>` (NOT bare `gh pr ready <N>` — see below) — in that
-order. A draft with a placeholder body reads as "still wrapping up" to
+finalizing body after self-review") is fine at this point. Write the
+finalized body (risk marker + skeleton, both below), run
+`scripts/lint-pr-screen.sh <N>` until it exits 0, then run
+`scripts/pr-ready.sh <N>` (NOT bare `gh pr ready <N>` — see below), which
+runs self-review for you on a 🟡/🔴 PR — in that order. A draft with a
+placeholder body reads as "still wrapping up" to
 anything watching (the coordinator, a stale-PR nudge, a human on the wake
 digest); a *ready* PR with a placeholder body reads as a policy violation,
 because nothing marks it as unfinished. Readying, not the initial `gh pr
