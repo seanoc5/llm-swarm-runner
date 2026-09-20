@@ -256,6 +256,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # bare `git worktree remove` run outside all of this tooling — the failure
 # mode issue #439 exists to catch.
 EVENTS_LOG="$PROJECT_DIR/.swarm/events.log"
+mkdir -p "$(dirname "$EVENTS_LOG")" 2>/dev/null || true
 log_event() {
     local cat="$1"; shift
     local ts

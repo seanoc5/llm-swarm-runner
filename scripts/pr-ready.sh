@@ -104,6 +104,12 @@ case "$RISK" in
                     exit 2
                     ;;
                 *)
+                    # self-review-pr.sh's own exit 4 (skipped,
+                    # WORKER_SELF_REVIEW=0) is unreachable here — we always
+                    # pass --force once we've decided to call it at all, and
+                    # the WORKER_SELF_REVIEW=0 case is handled above, before
+                    # this call, instead. So anything landing here is a
+                    # genuine error (gh/claude failure, exit 1).
                     echo "pr-ready: WARN: self-review-pr.sh failed (exit $rc) — could not post a verdict marker. Readying anyway; flag this in your handoff." >&2
                     ;;
             esac

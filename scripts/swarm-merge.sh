@@ -211,6 +211,7 @@ echo "[1/7] working in main worktree: $MAIN_WT"
 # fallback removal as an unblessed disappearance. Same EVENTS_LOG/log_event
 # shape as kill-worktree.sh/kill-finished-workers.sh.
 EVENTS_LOG="$MAIN_WT/.swarm/events.log"
+mkdir -p "$(dirname "$EVENTS_LOG")" 2>/dev/null || true
 log_event() {
     local cat="$1"; shift
     local ts
