@@ -73,6 +73,9 @@ EVENTS_LOG="$PROJECT_DIR/.swarm/events.log"
 COORD_INBOX_DIR="$PROJECT_DIR/.swarm/coord-inbox"
 COORD_INBOX_PROCESSED_DIR="$COORD_INBOX_DIR/processed"
 DRY_RUN=0
+# worktree_vanish_sweep_pass's since-buffer (round 6 self-review) reads
+# this directly; the real script only ever calls the function with it set.
+WATCH_WORKTREE_SWEEP_SECS=60
 : > "$EVENTS_LOG"
 
 # Minimal stand-in matching the real log_event's on-disk contract exactly
@@ -231,6 +234,38 @@ grep -q 'watch.worktree_vanished' "$EVENTS_LOG" \
     || red "expected wt-issue-300 to remain tracked (untouched) after a skipped tick"
 green "a transient git failure skips the whole tick instead of mass-flagging every known worktree"
 
+# ============================================================================
+heading "Test 7: a slow removal spanning a tick is NOT misread as unblessed"
+# ============================================================================
+# Self-review round 6 finding: kill-worktree.sh logs reap.worktree BEFORE
+# `git worktree remove`, which can itself take real wall-clock time on a
+# big worktree — long enough for a sweep tick to land WHILE it's still
+# running (dir still present, so last-seen keeps advancing past the
+# already-logged event's timestamp). Reproduced directly here: seed,
+# manually log reap.worktree for issue 301, then advance its last-seen
+# timestamp PAST that log line (simulating exactly that mid-removal tick)
+# before the directory actually disappears.
+git -C "$PROJECT_DIR" worktree add -q -b fix/issue-301 "$TEST_DIR/wt-issue-301" master
+declare -A KNOWN_WORKTREE_SEEN=()
+WT_INVENTORY_SEEDED=0
+worktree_vanish_sweep_pass   # seed
+: > "$EVENTS_LOG"
+
+reap_epoch=$(date +%s)
+log_event reap.worktree "issue=301 branch=fix/issue-301 dir=$TEST_DIR/wt-issue-301"
+# Simulate a last-seen bump 45s after the log line (within the
+# WATCH_WORKTREE_SWEEP_SECS=60 buffer, but still later than reap_epoch) —
+# without the round-6 padding fix this alone reproduces the false alarm.
+KNOWN_WORKTREE_SEEN["$TEST_DIR/wt-issue-301"]=$(( reap_epoch + 45 ))
+rm -rf "$TEST_DIR/wt-issue-301"
+git -C "$PROJECT_DIR" worktree prune 2>/dev/null || true
+
+worktree_vanish_sweep_pass
+
+grep -q 'watch.worktree_vanished.*issue=301' "$EVENTS_LOG" \
+    && red "a slow-but-blessed removal (last-seen bumped past its own reap.worktree log) must NOT be flagged, events.log: $(cat "$EVENTS_LOG")"
+green "the since-buffer tolerates a last-seen bump landing after the removal's own reap.worktree log"
+
 # ─────────────────────────── gh stub (ask 2) ────────────────────────────────
 
 SHIM_DIR="$TEST_DIR/shims"
@@ -288,7 +323,7 @@ git -C "$PROJECT_DIR" worktree add -q -b fix/issue-90 "$TEST_DIR/wt-issue-90" ma
 mkdir -p "$TEST_DIR/wt-issue-90/.swarm/tasks/inbox"
 
 # ============================================================================
-heading "Test 7: pending brief + OPEN PR + no existing marker -> posts SWARM_PENDING_BRIEF: queued"
+heading "Test 8: pending brief + OPEN PR + no existing marker -> posts SWARM_PENDING_BRIEF: queued"
 # ============================================================================
 echo "follow-up: fix the thing" > "$TEST_DIR/wt-issue-90/.swarm/tasks/inbox/20260919-183600-90.md"
 : > "$EVENTS_LOG"
@@ -307,7 +342,7 @@ grep -q 'watch.pending_brief_sweep.*pr=77.*reason=posted' "$EVENTS_LOG" \
 green "an inbox brief queued before its PR existed gets caught up by the sweep"
 
 # ============================================================================
-heading "Test 8: a second sweep tick while still 'queued' does NOT re-post (idempotent)"
+heading "Test 9: a second sweep tick while still 'queued' does NOT re-post (idempotent)"
 # ============================================================================
 : > "$EVENTS_LOG"
 PATH="$SHIM_DIR:$PATH" pending_brief_marker_sweep_pass
@@ -317,7 +352,7 @@ PATH="$SHIM_DIR:$PATH" pending_brief_marker_sweep_pass
 green "sweep is idempotent — does not re-post while the marker already says queued"
 
 # ============================================================================
-heading "Test 9: empty inbox -> sweep does not post anything"
+heading "Test 10: empty inbox -> sweep does not post anything"
 # ============================================================================
 rm -f "$TEST_DIR/wt-issue-90/.swarm/tasks/inbox"/*.md
 : > "$COMMENTS_LOG"

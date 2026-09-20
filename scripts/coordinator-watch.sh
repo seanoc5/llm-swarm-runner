@@ -3727,7 +3727,20 @@ worktree_vanish_sweep_pass() {
         [ "$found" = "1" ] && continue
 
         issue="$(basename "$dir" | sed -nE 's/^wt-issue-([0-9]+)$/\1/p')"
-        since="$(date -u -d "@${KNOWN_WORKTREE_SEEN[$dir]}" +'%Y-%m-%dT%H:%M:%SZ')"
+        # issue #439 self-review (round 6): padded back by one sweep
+        # interval, not the bare last-seen timestamp. A `git worktree
+        # remove` on a large worktree can take real wall-clock time — long
+        # enough to span a tick — during which the directory still exists
+        # (still "current"), so its last-seen timestamp keeps advancing
+        # PAST the reap.worktree event kill-worktree.sh already logged
+        # right before starting the removal. Without this buffer, the
+        # eventual tick that finally sees the dir gone computes a `since`
+        # that's already later than that event's own timestamp, and
+        # wt_reap_event_since's `$1 >= since` then misses it — a blessed,
+        # merely slow removal would get flagged as unblessed. Same
+        # bounded-overlap idiom as ACTIVITY_POLL_OVERLAP_SECS elsewhere in
+        # this file.
+        since="$(date -u -d "@$(( KNOWN_WORKTREE_SEEN[$dir] - WATCH_WORKTREE_SWEEP_SECS ))" +'%Y-%m-%dT%H:%M:%SZ')"
         if [ -z "$issue" ] || ! wt_reap_event_since "$issue" "$since"; then
             log_event watch.worktree_vanished "issue=${issue:-?} dir=$dir reason=no_reap_event"
             unblessed_worktree_vanish_notify "${issue:-?}" "$dir"
@@ -3787,7 +3800,13 @@ post_pending_brief_marker_sweep() {
 
     local comment
     comment="$(printf '%s\n' "${body[@]}")"
-    gh pr comment "$pr" --body "$comment" >/dev/null 2>&1
+    # issue #439 self-review (round 6): `cd "$wt" &&`, matching every other
+    # gh call in this file (e.g. activity_poll_pass) — gh resolves the
+    # target repo from the CALLER's cwd absent -R, so a coordinator-watch.sh
+    # invoked against a project dir different from wherever it happens to
+    # be running from would otherwise silently query the wrong repo (or
+    # fail) for every one of this pass's PR lookups.
+    (cd "$wt" && gh pr comment "$pr" --body "$comment") >/dev/null 2>&1
 }
 
 # pending_brief_marker_sweep_pass
@@ -3812,7 +3831,11 @@ pending_brief_marker_sweep_pass() {
         worker_pending_brief "$wt" || continue
         branch="$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null)" || continue
         [ -n "$branch" ] || continue
-        json="$(gh pr view "$branch" --json number,state -q '"\(.number)\t\(.state)"' 2>/dev/null)" || continue
+        # cd "$wt" && for both gh calls below: gh resolves the target repo
+        # from the caller's cwd absent -R (self-review round 6) — every
+        # own worktree here belongs to the same repo as PROJECT_DIR, so
+        # either cwd works, but $wt is already at hand.
+        json="$(cd "$wt" && gh pr view "$branch" --json number,state -q '"\(.number)\t\(.state)"' 2>/dev/null)" || continue
         [ -n "$json" ] || continue
         IFS=$'\t' read -r pr_num pr_state <<< "$json"
         [ "$pr_state" = "OPEN" ] || continue
@@ -3820,7 +3843,7 @@ pending_brief_marker_sweep_pass() {
         # Anchored to the marker line itself, same reason as requeue.sh's
         # notify_pr_pending_brief (its body text mentions the OTHER state
         # in prose, which a bare substring match would also catch).
-        last="$(gh pr view "$pr_num" --json comments \
+        last="$(cd "$wt" && gh pr view "$pr_num" --json comments \
             -q '[.comments[] | select(.body | test("SWARM_PENDING_BRIEF:"))] | last | .body // empty' 2>/dev/null \
             | grep -oE '^<!-- SWARM_PENDING_BRIEF: (queued|cleared) -->$' \
             | sed -E 's/^<!-- SWARM_PENDING_BRIEF: (queued|cleared) -->$/\1/' || true)"
