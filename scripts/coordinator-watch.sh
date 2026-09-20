@@ -1443,6 +1443,85 @@
 #                           worker-side backoff (worker_compact_record_
 #                           failure) — no compaction ran either way.
 #
+#   COMPACT_COMPOSER_CHROME_PATTERN
+#                           (issue #436) compact_last_pane_line's own
+#                           exclusion list (ctx:/shift+tab hint/box-drawing
+#                           rule, added for issue #440) didn't cover every
+#                           shape of non-input chrome that can render as a
+#                           pane's LAST line while the composer itself is
+#                           genuinely empty — corpusminder-spring, 2026-09-18/
+#                           19: a parked worker's composer read "dirty" on
+#                           worker.deliver.skip reason=composer_not_clear
+#                           1,812 consecutive times (~14h) with a read-only
+#                           capture-worker.sh dump showing an empty `❯`
+#                           composer, but a "※ recap:" line, "Baked for 31m"
+#                           spinner residue, and a "new task? /clear to save
+#                           257.5k tokens" hint also on screen — any one of
+#                           which lands as the trimmed last line whenever the
+#                           coordinator's own statusline-wrap or a narrower
+#                           terminal width splits it off the "ctx: N/M (P%)"
+#                           line the existing exclusion already drops whole.
+#                           This is the SAME chrome catalog docs/tmux-as-
+#                           channel.md §1d and capture-worker.sh's tag_chrome
+#                           already tag as non-conversation (recap chrome,
+#                           the spinner past/present-tense verb list, and the
+#                           "/clear to save Nk tokens" hint) — added here as
+#                           its OWN pattern (not folded into AUTO_COMPACT_
+#                           BUSY_PATTERN/WORKER_COMPACT_BUSY_PATTERN above)
+#                           because those anchor "a turn is actively
+#                           running", a different question from "this line
+#                           isn't something a human typed", and conflating
+#                           the two would make a genuinely busy pane
+#                           misread as an idle empty composer. Lines matching
+#                           this are dropped by compact_last_pane_line the
+#                           same way the ctx:/shift+tab/box-drawing
+#                           exclusions already are — never kept-but-
+#                           recognized at a call site, so every consumer
+#                           (compact_composer_clear, compact_confirm_
+#                           submitted, compact_replay_detected, compact_
+#                           retract_queued) benefits identically. The verb
+#                           list is anchored behind the spinner glyph
+#                           (independent-review finding, same PR): see the
+#                           variable's own assignment comment below for why
+#                           an unanchored substring match would have let a
+#                           human draft mentioning one of those phrases
+#                           misread as chrome.
+#   WORKER_DELIVER_COMPOSER_STALL_THRESHOLD
+#                           (issue #436) The composer-clear fix above closes
+#                           the false-positive that caused the observed
+#                           1,812-skip stall, but a GENUINE stall (a real
+#                           human draft sitting in the composer, or a future
+#                           unrecognized chrome shape) must not go silent
+#                           forever the same way — worker.deliver.skip
+#                           reason=composer_not_clear never calls worker_
+#                           deliver_record_failure (no /quit was ever
+#                           attempted), so it's invisible to the WORKER_
+#                           DELIVER_BACKOFF_SECS/MAX_FAILURES machinery that
+#                           already escalates every OTHER stuck-delivery
+#                           shape. Once the SAME pending brief has racked up
+#                           this many reason=composer_not_clear skips —
+#                           counted since the brief started stalling, NOT
+#                           reset by an intervening sweep that skips for a
+#                           DIFFERENT reason (pane_busy, backoff,
+#                           task_not_terminal): only a different BRIEF
+#                           resets the count, so a genuinely stuck composer
+#                           interleaved with the occasional busy/backoff
+#                           sweep still escalates on schedule instead of
+#                           the threshold silently never being reached —
+#                           worker_deliver_record_composer_stall logs one
+#                           loud, distinct worker.deliver.composer_stalled
+#                           event (never
+#                           repeated for the same streak) and durably writes
+#                           it to the coordinator inbox (coord_inbox_write,
+#                           issue #430) so it surfaces on the coordinator's
+#                           NEXT wake — triage per prompts/coordinator.md
+#                           "Inbox" — rather than requiring a human to
+#                           notice the silent skip lines on their own. Scoped
+#                           per (issue, brief) pair, not just per issue: a
+#                           NEW brief landing means whatever was stalling
+#                           before is moot, so the streak resets rather than
+#                           inheriting an unrelated prior count.
+#
 # Watch backend (auto-detected):
 #   - inotifywait (preferred): instant response. Install with:
 #       sudo apt install inotify-tools
@@ -1542,11 +1621,13 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     WORKER_DELIVER_END_TIMEOUT_SECS         15      max wait for the session to actually end after /quit
     WORKER_DELIVER_BACKOFF_SECS             600     cooldown for a window after a failed delivery attempt
     WORKER_DELIVER_MAX_FAILURES             3       consecutive failures before giving up on a window entirely
+    WORKER_DELIVER_COMPOSER_STALL_THRESHOLD 20      (issue #436) composer_not_clear skips racked up against the same pending brief (not reset by an interleaved skip for a different reason) before a loud, once-only escalation; see header comment
     COMPACT_QUEUED_MARKER_PATTERN     (auto)  queued-input marker checked when retracting a stuck phase=start injection; see header comment
     COMPACT_RETRACT_BACKSPACES        12      Backspace keystrokes sent alongside the retraction Escape (coord + worker, shared; issue #265/#290)
     COMPACT_SUBMIT_SETTLE_SECS        1       settle delay around the injection-submit Enter (coord + worker, shared; issue #290); see header comment
     COMPACT_REPLAY_PATTERN            (auto)  post-compact replayed-/compact rejection text tolerated during verify (coord + worker, shared; issue #292); see header comment
     COMPACT_REPLAY_MIN_REAL_SECS      5       min finish-phase duration to trust a detected replay as real (coord + worker, shared; issue #292); see header comment
+    COMPACT_COMPOSER_CHROME_PATTERN   (auto)  non-input UI chrome (recap/spinner-verb/"clear to save" hint) excluded from compact_last_pane_line's result (issue #436); see header comment
 
 DEFAULT WAKE_PROMPT (top-up mode)
     Coordinator triages outcomes, then refills workers toward MAX_WORKERS
@@ -1792,6 +1873,21 @@ EVENTS LOG
                            (issue, failures=N) — maybe_worker_deliver_brief stops attempting /quit
                            for it until the watcher restarts; the brief stays queued for a human
                            to release manually (attach and /quit) — logged once, not every sweep
+      worker.deliver.composer_stalled  (issue #436) WORKER_DELIVER_COMPOSER_STALL_THRESHOLD
+                           worker.deliver.skip reason=composer_not_clear events racked up against
+                           the SAME pending brief (issue, brief=<inbox filename>, skips=N) — a
+                           sweep that skips for a DIFFERENT reason in between (pane_busy, backoff,
+                           task_not_terminal) does not reset this count, only a different brief
+                           does, so it's not strictly "N consecutive sweeps" but does mean the
+                           threshold is always eventually reached rather than reset away by
+                           routine interleaved traffic. Unlike
+                           worker.deliver.giving_up, this never stops maybe_worker_deliver_brief
+                           from retrying (composer_not_clear can still self-heal on its own,
+                           e.g. a human submits or clears their draft): it's a loud, once-per-
+                           streak WARNING plus a durable coord_inbox_write so the stall surfaces
+                           on the coordinator's next wake instead of aging silently behind
+                           routine .skip lines; the streak resets (and can re-escalate) if a
+                           DIFFERENT brief starts pending for this window
 
 PANE ECHO (issue #38)
     By default, every line appended to events.log — by this process OR any
@@ -2059,6 +2155,11 @@ WORKER_DELIVER_POLL_SECS="${WORKER_DELIVER_POLL_SECS:-2}"
 WORKER_DELIVER_END_TIMEOUT_SECS="${WORKER_DELIVER_END_TIMEOUT_SECS:-15}"
 WORKER_DELIVER_BACKOFF_SECS="${WORKER_DELIVER_BACKOFF_SECS:-600}"
 WORKER_DELIVER_MAX_FAILURES="${WORKER_DELIVER_MAX_FAILURES:-3}"
+# issue #436 — see this file's WORKER_DELIVER_COMPOSER_STALL_THRESHOLD header
+# comment above (near COMPACT_COMPOSER_CHROME_PATTERN's) for the gap this
+# closes: reason=composer_not_clear skips never touch WORKER_DELIVER_
+# BACKOFF_SECS/MAX_FAILURES above at all, so they need their own counter.
+WORKER_DELIVER_COMPOSER_STALL_THRESHOLD="${WORKER_DELIVER_COMPOSER_STALL_THRESHOLD:-20}"
 # issue #265 — shared between the coordinator and per-window retraction
 # paths; see this file's COMPACT_QUEUED_MARKER_PATTERN header comment above.
 COMPACT_QUEUED_MARKER_PATTERN="${COMPACT_QUEUED_MARKER_PATTERN:-Press up to edit queued messages}"
@@ -2091,6 +2192,57 @@ COMPACT_REPLAY_PATTERN="${COMPACT_REPLAY_PATTERN:-Not enough messages to compact
 # so it still counts as a failure (worker_compact_record_failure) via the
 # same ineffective path a plain unchanged-context compaction would.
 COMPACT_REPLAY_MIN_REAL_SECS="${COMPACT_REPLAY_MIN_REAL_SECS:-5}"
+# issue #436 — see this file's COMPACT_COMPOSER_CHROME_PATTERN header comment
+# above for the full incident (corpusminder-spring, 2026-09-18/19: a
+# 1,812-skip/~14h composer_not_clear stall against a pane whose composer was
+# genuinely empty). Same catalog docs/tmux-as-channel.md §1d and capture-
+# worker.sh's tag_chrome already recognize: the "※ recap:" summary line, the
+# spinner's past/present-tense verb residue (the SAME fixed list check-
+# stuck-workers.sh's detect_state()/capture-worker.sh's tag_chrome use —
+# deliberately NOT the "(esc to interrupt)"-anchored AUTO_COMPACT_BUSY_
+# PATTERN/WORKER_COMPACT_BUSY_PATTERN, which answers "is a turn actively
+# running", a different question from "is this line something a human
+# typed"), and the "/clear to save Nk tokens" hint that can render as its
+# own pane line once terminal width or a longer token count wraps it off
+# the "ctx: N/M (P%)" line compact_last_pane_line's own exclusion already
+# drops whole.
+#
+# Independent-review finding (issue #436): the past/present-tense verb list
+# (Considering…/Sautéed for/.../Crunched for) was originally an UNANCHORED
+# substring match, same as bare "✻"/"✶" — so a genuine human draft that
+# happened to contain one of those phrases ("❯ I baked for hours on this
+# bug, need a second pair of eyes") would read as chrome, get dropped by
+# compact_last_pane_line, and make an occupied composer look clear —
+# exactly the false-clear direction issue #436 exists to close, just
+# triggered by draft text instead of scrollback residue. Every real
+# rendering of this chrome (verified against Test 10's fixtures below and
+# the live corpusminder-spring capture) puts the spinner glyph at the very
+# start of its OWN pane line, never sharing a line with composer content
+# (which is prefixed by "❯"/other box-drawing chars, not the glyph) — so
+# anchoring the verb group behind "^[[:space:]]*(✻|✶)" keeps every genuine
+# chrome shape matched while a human line (always ❯-prefixed at this point
+# in the pipeline, since the leading-prompt-char strip happens AFTER this
+# filter) can no longer match on phrase content alone. The verb group
+# itself stays optional so a bare glyph-only line (no verb text captured,
+# e.g. if only the glyph survived truncation) still matches, same as
+# before.
+#
+# Self-caught bug while implementing the above: the glyph alternation MUST
+# be a group "(✻|✶)", never a bracket class "[✻✶]". grep runs under
+# LC_ALL=C throughout this function (multi-byte-unsafe on purpose, per
+# compact_last_pane_line's own header comment), and under the C locale a
+# bracket expression matches byte-by-byte, not character-by-character — the
+# 3-byte UTF-8 encodings of ✻ (E2 9C BB) and ✶ (E2 9C B6) share their
+# leading byte (E2) with the composer's own "❯" prompt glyph (E2 9D AF), so
+# "[✻✶]" anchored at line start matched a genuinely empty "❯ " composer
+# line too (byte E2 alone satisfied the class), making an OCCUPIED-looking
+# composer line vanish and misreading a real draft as clear — caught by
+# this PR's own Test 6 regression (a bare "❯ " composer line was being
+# dropped instead of surviving to sed's prompt-char strip). "(✻|✶)" as a
+# literal alternation matches the full 3-byte sequence in order like any
+# other literal text, which is safe under LC_ALL=C the same way the
+# pattern's other literal strings (e.g. "Baked for") already are.
+COMPACT_COMPOSER_CHROME_PATTERN="${COMPACT_COMPOSER_CHROME_PATTERN:-^※ recap:|^[[:space:]]*(✻|✶)[[:space:]]*(Considering…|Sautéed for|Cooked for|Baked for|Simmered for|Brewed for|Crunched for)?|/clear to save [0-9.]+k tokens}"
 
 case "$WATCHER_AUTOCLOSE_MODE" in
     merged)    AUTOCLOSE_PR_FLAG="--merged-only" ;;
@@ -2373,6 +2525,7 @@ format_event_line() {
         worker.deliver.retract_failed)        glyph="⚠"; color=$'\033[31m' ;;
         worker.deliver.retract_skip)            glyph="·"; color=$'\033[2m'  ;;
         worker.deliver.giving_up)                  glyph="⚠"; color=$'\033[31m' ;;
+        worker.deliver.composer_stalled)   glyph="⚠"; color=$'\033[31m' ;;
         watch.autoclose)               glyph="♻"; color=$'\033[36m' ;;
         watch.orphan_sweep)             glyph="♻"; color=$'\033[36m' ;;
         reap.window)                    glyph="✂"; color=$'\033[36m' ;;
@@ -4169,10 +4322,21 @@ compact_last_pane_line() {
     #      at all before end-of-line); text a human actually typed carries no
     #      SGR at all. So capture with -e and strip dim segments BEFORE the
     #      general ANSI strip — what survives is what a person typed.
+    # (issue #436) A fourth chrome shape, distinct from the three above: the
+    # "※ recap:" line, the spinner's past/present-tense verb residue, and
+    # the "/clear to save Nk tokens" hint can each independently land as the
+    # pane's own LAST line — not just below a composer whose ctx: line is
+    # intact, but also when line-wrap (a longer token count, a narrower
+    # terminal) splits the hint off the "ctx: N/M (P%)" line this function
+    # already drops whole, so the ctx: exclusion above never sees it as part
+    # of the same line. See COMPACT_COMPOSER_CHROME_PATTERN's header comment
+    # for the full incident (a 1,812-skip/~14h stall against a genuinely
+    # empty composer) and why this is its own pattern rather than folded
+    # into the ctx:/shift-tab exclusion above.
     # The NBSP the TUI emits after ❯ is folded to a space so an empty prompt
     # trims to a genuinely empty string.
     printf '%s\n' "$clean" \
-        | LC_ALL=C grep -vE 'ctx: [0-9]+[kM]?/[0-9]+[kM]?[[:space:]]*\([0-9]+%\)|\(shift\+tab to cycle\)|^[[:space:]]*[─╭╮╰╯│]+[[:space:]]*$' \
+        | LC_ALL=C grep -vE "ctx: [0-9]+[kM]?/[0-9]+[kM]?[[:space:]]*\([0-9]+%\)|\(shift\+tab to cycle\)|^[[:space:]]*[─╭╮╰╯│]+[[:space:]]*\$|$COMPACT_COMPOSER_CHROME_PATTERN" \
         | sed -e '/^[[:space:]]*$/d' -e 's/^[[:space:]]*[❯>│|╭╮╰╯─]*[[:space:]]*//' -e 's/[[:space:]]*[│|╭╮╰╯─]*[[:space:]]*$//' | tail -1 || true
 }
 
@@ -5140,6 +5304,80 @@ worker_deliver_record_failure() {
 worker_deliver_record_success() {
     local issue="$1"
     unset "WORKER_DELIVER_LAST_FAIL[$issue]" "WORKER_DELIVER_FAIL_COUNT[$issue]" "WORKER_DELIVER_GAVE_UP[$issue]" "WORKER_DELIVER_TIMED_OUT_BRIEF[$issue]"
+    worker_deliver_composer_stall_clear "$issue"
+}
+
+# WORKER_DELIVER_COMPOSER_STALL_BRIEF / _COUNT / _ESCALATED (issue #436)
+#
+# Cross-sweep bookkeeping keyed by issue: how many times in a row
+# reason=composer_not_clear has fired for the SAME pending brief — NOT
+# strictly "consecutive sweeps": a sweep that skips for a DIFFERENT reason
+# in between (pane_busy, backoff, task_not_terminal) leaves this count
+# untouched rather than resetting it, since none of those mean the
+# composer-clear problem went away. Only a different BRIEF resets it (see
+# worker_deliver_record_composer_stall below). This is deliberately
+# separate from WORKER_DELIVER_LAST_FAIL/FAIL_COUNT/GAVE_UP above — that
+# trio only ever gets touched by worker_deliver_record_failure, which is
+# called after a real /quit injection times out or lands as text;
+# composer_not_clear returns BEFORE maybe_worker_deliver_brief ever
+# attempts an injection, so it's structurally invisible to that machinery.
+# Without this, a stuck composer-clear read can skip forever with nothing
+# escalating it — exactly the corpusminder-spring 2026-09-18/19 incident
+# (1,812 consecutive skips, ~14h) this issue exists for. In-memory only,
+# reset on a watcher restart, same contract as every other WORKER_DELIVER_*
+# tracker.
+declare -A WORKER_DELIVER_COMPOSER_STALL_BRIEF=()
+declare -A WORKER_DELIVER_COMPOSER_STALL_COUNT=()
+declare -A WORKER_DELIVER_COMPOSER_STALL_ESCALATED=()
+
+# worker_deliver_composer_stall_clear <issue>
+#
+# Drops this issue's composer-stall bookkeeping entirely — called once a
+# delivery actually succeeds (worker_deliver_record_success) or
+# worker_deliver_detect_claim confirms the previously-stalled brief was
+# claimed some other way (a human's manual /quit). Distinct from the
+# per-brief reset inside worker_deliver_record_composer_stall itself (which
+# only fires on the NEXT composer_not_clear skip, keyed by comparing against
+# whatever brief is pending then) — this is the positive, success-side
+# cleanup so a resolved stall doesn't leave a stale WORKER_DELIVER_COMPOSER_
+# STALL_ESCALATED flag sitting around under this issue.
+worker_deliver_composer_stall_clear() {
+    local issue="$1"
+    unset "WORKER_DELIVER_COMPOSER_STALL_BRIEF[$issue]" "WORKER_DELIVER_COMPOSER_STALL_COUNT[$issue]" "WORKER_DELIVER_COMPOSER_STALL_ESCALATED[$issue]"
+}
+
+# worker_deliver_record_composer_stall <issue> <brief>
+#
+# Called on every worker.deliver.skip reason=composer_not_clear, right
+# alongside that log_event call. Resets the streak to 1 whenever <brief>
+# differs from the last one counted against for this issue — a NEW brief
+# landing means whatever was stalling before is moot, not a continuation of
+# the same stall (see this section's header comment). Once the streak
+# reaches WORKER_DELIVER_COMPOSER_STALL_THRESHOLD, logs ONE loud, distinct
+# worker.deliver.composer_stalled event — never repeated for the same
+# streak (WORKER_DELIVER_COMPOSER_STALL_ESCALATED) — and durably records it
+# to the coordinator inbox (coord_inbox_write, issue #430) so it surfaces on
+# the coordinator's NEXT wake even if nothing else wakes it in the
+# meantime, per prompts/coordinator.md's "Inbox" triage. Deliberately does
+# NOT set WORKER_DELIVER_GAVE_UP or otherwise stop maybe_worker_deliver_
+# brief from retrying — unlike a failed /quit injection, composer_not_clear
+# can still self-heal on its own (a human submits or clears their draft),
+# so there's nothing to "give up" on, only something to escalate.
+worker_deliver_record_composer_stall() {
+    local issue="$1" brief="$2" count
+    if [ "${WORKER_DELIVER_COMPOSER_STALL_BRIEF[$issue]:-}" != "$brief" ]; then
+        WORKER_DELIVER_COMPOSER_STALL_BRIEF[$issue]="$brief"
+        WORKER_DELIVER_COMPOSER_STALL_COUNT[$issue]=0
+        unset "WORKER_DELIVER_COMPOSER_STALL_ESCALATED[$issue]"
+    fi
+    count=$(( ${WORKER_DELIVER_COMPOSER_STALL_COUNT[$issue]:-0} + 1 ))
+    WORKER_DELIVER_COMPOSER_STALL_COUNT[$issue]=$count
+    if [ "$count" -ge "$WORKER_DELIVER_COMPOSER_STALL_THRESHOLD" ] && [ -z "${WORKER_DELIVER_COMPOSER_STALL_ESCALATED[$issue]:-}" ]; then
+        WORKER_DELIVER_COMPOSER_STALL_ESCALATED[$issue]=1
+        echo "[$(date +%T)] WARNING: worker iss-$issue has skipped brief delivery $count times (reason=composer_not_clear) for the same queued brief ($brief) — its composer may be misread as dirty (see COMPACT_COMPOSER_CHROME_PATTERN's header comment), or a real draft/decision is genuinely sitting there; investigate with scripts/capture-worker.sh iss-$issue"
+        log_event worker.deliver.composer_stalled "issue=$issue brief=$brief skips=$count"
+        coord_inbox_write deliver_stall "$(printf 'Worker iss-%s: brief delivery has skipped %s times (reason=composer_not_clear) for the queued brief %s.\n\nCheck: scripts/capture-worker.sh iss-%s\n\nThe composer-clear check may be misreading UI chrome as a draft (docs/tmux-as-channel.md §1d), or a human/decision is genuinely blocking the pane. If the pane really is stuck, attach and either clear the composer or run /quit manually so the queued brief can be claimed.\n' "$issue" "$count" "$brief" "$issue")" || true
+    fi
 }
 
 # WORKER_DELIVER_PENDING_SEEN (issue #437)
@@ -5227,6 +5465,12 @@ worker_deliver_detect_claim() {
         else
             log_event worker.deliver.ok "issue=$issue brief=$prior release=listener_claim_after_quit"
         fi
+        # issue #436: whatever composer-stall streak was counted against
+        # $prior is moot now that it's actually been claimed — clear it here
+        # too (not just on worker_deliver_record_success's auto_deliver
+        # path) so a listener_claim_after_quit resolution also drops a
+        # stale WORKER_DELIVER_COMPOSER_STALL_ESCALATED flag.
+        worker_deliver_composer_stall_clear "$issue"
     fi
     WORKER_DELIVER_PENDING_SEEN[$issue]="$current"
 }
@@ -5317,6 +5561,7 @@ maybe_worker_deliver_brief() {
     local target="$SESSION_NAME:$win"
     if ! compact_composer_clear "$target"; then
         log_event worker.deliver.skip "issue=$issue reason=composer_not_clear"
+        worker_deliver_record_composer_stall "$issue" "$brief_before"
         return 0
     fi
 

@@ -49,7 +49,8 @@ for fn in worker_pane_state worker_pane_busy worker_pane_ctx_used worker_pending
           worker_current_task_terminal mtime_epoch ctime_epoch compact_last_pane_line compact_composer_clear \
           compact_confirm_submitted compact_retract_queued worker_deliver_record_failure \
           worker_deliver_record_success worker_deliver_detect_claim maybe_worker_deliver_brief log_event \
-          is_own_worktree_dir own_wt_dir_for_issue; do
+          is_own_worktree_dir own_wt_dir_for_issue worker_deliver_composer_stall_clear \
+          worker_deliver_record_composer_stall coord_inbox_write; do
     body="$(extract_fn "$fn")"
     [ -n "$body" ] || red "could not extract function '$fn' from $WATCH — has it been renamed?"
     eval "$body"
@@ -67,13 +68,28 @@ WORKER_DELIVER_POLL_SECS=1
 WORKER_DELIVER_END_TIMEOUT_SECS=10
 WORKER_DELIVER_BACKOFF_SECS=600
 WORKER_DELIVER_MAX_FAILURES=3
+WORKER_DELIVER_COMPOSER_STALL_THRESHOLD=20
 COMPACT_QUEUED_MARKER_PATTERN='Press up to edit queued messages'
 COMPACT_RETRACT_BACKSPACES=3
 COMPACT_SUBMIT_SETTLE_SECS=0
+# issue #436: must match coordinator-watch.sh's own default — see the
+# WORKER_COMPACT_BUSY_PATTERN comment just above for why these fixtures
+# copy real defaults instead of leaving the var unset (this file's own
+# `set -u` would otherwise abort the moment compact_last_pane_line
+# references it).
+COMPACT_COMPOSER_CHROME_PATTERN='^※ recap:|^[[:space:]]*(✻|✶)[[:space:]]*(Considering…|Sautéed for|Cooked for|Baked for|Simmered for|Brewed for|Crunched for)?|/clear to save [0-9.]+k tokens'
 declare -A WORKER_DELIVER_LAST_FAIL=()
 declare -A WORKER_DELIVER_FAIL_COUNT=()
 declare -A WORKER_DELIVER_GAVE_UP=()
 declare -A WORKER_DELIVER_PENDING_SEEN=()
+declare -A WORKER_DELIVER_COMPOSER_STALL_BRIEF=()
+declare -A WORKER_DELIVER_COMPOSER_STALL_COUNT=()
+declare -A WORKER_DELIVER_COMPOSER_STALL_ESCALATED=()
+# coord_inbox_write (issue #430) is exercised by worker_deliver_record_
+# composer_stall's escalation path (Test 10 below) — same fixture
+# convention as test-watcher-activity-poll.sh's copy of these two vars.
+COORD_INBOX_DIR="$TEST_DIR/coord-inbox"
+COORD_INBOX_PROCESSED_DIR="$COORD_INBOX_DIR/processed"
 
 # own_wt_dir_for_issue (issue #357/#388) resolves wt_dir via
 # is_own_worktree_dir(), which needs $PROJECT_DIR set to do its `git -C
@@ -742,6 +758,127 @@ mv "$BRIEF_FILE4" "$PROCESSING_DIR/$(basename "$BRIEF_FILE4")"   # the idle loop
 maybe_worker_deliver_brief "$WIN"   # sweep #2: still "shell" -> same, nothing to detect
 if grep -q 'worker.deliver.ok' "$EVENTS_LOG"; then got=logged; else got=missing; fi
 check "a 'shell'-state window's own routine claim is never mislabeled listener_claim_after_quit" "missing" "$got"
+
+heading "Test 10: composer chrome recognition (issue #436) — recap/spinner residue/clear-hint below an empty composer must not read as a human draft"
+# The corpusminder-spring 2026-09-18/19 incident this closes: a read-only
+# capture-worker.sh dump during a 1,812-skip/~14h stall showed an apparently
+# EMPTY composer (❯), with a "※ recap:" line, "Baked for 31m" spinner
+# residue, and a "new task? /clear to save 257.5k tokens" hint ALSO on
+# screen — any one of which can land as the pane's own trimmed LAST line
+# (below the composer, same shape issue #440 fixed for the mode-footer/
+# box-drawing-rule case) and make compact_composer_clear misread a
+# genuinely empty composer as dirty forever.
+render_pane() {
+    tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+    sleep 0.2
+    tmux send-keys -t "$SESSION_NAME:$WIN" "clear; printf '$1'; sleep 300" Enter
+    check_eventually "pane renders the fixture -> cli" "cli" "worker_pane_state '$WIN'"
+}
+
+render_pane '❯ \n✻ Baked for 31m\n'
+rc=0; compact_composer_clear "$SESSION_NAME:$WIN" || rc=$?
+check "spinner past-tense residue below an empty composer -> still reads clear" "0" "$rc"
+
+render_pane '❯ \n※ recap: did some stuff\n'
+rc=0; compact_composer_clear "$SESSION_NAME:$WIN" || rc=$?
+check "recap line below an empty composer -> still reads clear" "0" "$rc"
+
+render_pane '❯ \nnew task? /clear to save 257.5k tokens\n'
+rc=0; compact_composer_clear "$SESSION_NAME:$WIN" || rc=$?
+check "wrapped '/clear to save Nk tokens' hint below an empty composer -> still reads clear" "0" "$rc"
+
+render_pane '※ recap: did some stuff\n✻ Baked for 31m\n❯ \nnew task? /clear to save 257.5k tokens\n'
+rc=0; compact_composer_clear "$SESSION_NAME:$WIN" || rc=$?
+check "the full observed incident shape (recap + spinner + empty composer + clear-hint) -> reads clear" "0" "$rc"
+
+# Regression guard: none of the above may over-match a GENUINE typed draft.
+render_pane '❯ please review PR 42\n'
+rc=0; compact_composer_clear "$SESSION_NAME:$WIN" || rc=$?
+check "a real typed draft still reads dirty (no over-matching from the new chrome patterns)" "1" "$rc"
+
+# Independent-review finding (issue #436): the verb list above was
+# originally an UNANCHORED substring match, so a genuine human draft that
+# happened to CONTAIN one of those phrases (not just render below an
+# actually-empty composer) would itself read as chrome and get dropped —
+# the inverse failure from the one this issue exists to fix: a real draft
+# misread as clear, papered over by an auto-/quit. Anchoring the verb group
+# behind the spinner glyph (COMPACT_COMPOSER_CHROME_PATTERN's own comment)
+# closes this without giving up matching the genuine chrome shapes above.
+render_pane '❯ I baked for hours on this bug, need a second pair of eyes\n'
+rc=0; compact_composer_clear "$SESSION_NAME:$WIN" || rc=$?
+check "a draft merely MENTIONING a spinner-verb phrase still reads dirty (verb list is anchored to the glyph, not a bare substring match)" "1" "$rc"
+unset -f render_pane
+
+heading "Test 11: composer_not_clear escalation (issue #436) — N consecutive skips against the SAME brief escalate exactly once"
+unset 'WORKER_DELIVER_COMPOSER_STALL_BRIEF[42]' 'WORKER_DELIVER_COMPOSER_STALL_COUNT[42]' 'WORKER_DELIVER_COMPOSER_STALL_ESCALATED[42]'
+rm -rf "$COORD_INBOX_DIR"; mkdir -p "$COORD_INBOX_DIR"
+rm -f "$INBOX_DIR"/*.md "$PROCESSING_DIR"/*.md "$STATUS_DIR"/*.json
+: > "$EVENTS_LOG"
+STALL_BRIEF="$INBOX_DIR/20260919-000000-42.md"
+echo "a stuck brief" > "$STALL_BRIEF"
+set_current_task "tstall" "ready-for-review"   # current task already finished, so this reaches the composer check
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.2
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'sonnet · wt-issue-42 · ctx: 20k/1M (2%)'; printf '❯ \n'; sleep 300" Enter
+check_eventually "idle, empty-composer pane, stuck brief pending -> cli" "cli" "worker_pane_state '$WIN'"
+
+compact_composer_clear() { return 1; }   # force composer_not_clear every sweep, same trick as Test 4
+WORKER_DELIVER_COMPOSER_STALL_THRESHOLD=3
+
+for i in 1 2 3; do maybe_worker_deliver_brief "$WIN"; done
+check "3 consecutive skips logged" "3" "$(grep -c 'worker.deliver.skip.*reason=composer_not_clear' "$EVENTS_LOG")"
+check "escalation logged exactly once, with skips=3" "1" "$(grep -cF 'worker.deliver.composer_stalled' "$EVENTS_LOG")"
+if grep -qF "issue=42 brief=$(basename "$STALL_BRIEF") skips=3" "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "escalation event names the stuck issue, brief, and skip count" "logged" "$got"
+check "escalation durably written to the coordinator inbox (issue #430)" "1" "$(find "$COORD_INBOX_DIR" -maxdepth 1 -name '*.md' -type f | wc -l | tr -d '[:space:]')"
+
+# A 4th consecutive skip against the SAME brief must not re-escalate.
+maybe_worker_deliver_brief "$WIN"
+check "4th consecutive skip -> escalation still logged only once (not every sweep)" "1" "$(grep -cF 'worker.deliver.composer_stalled' "$EVENTS_LOG")"
+check "no second coord-inbox write for the same streak" "1" "$(find "$COORD_INBOX_DIR" -maxdepth 1 -name '*.md' -type f | wc -l | tr -d '[:space:]')"
+
+# A DIFFERENT brief landing means the prior stall is moot — the streak
+# resets rather than inheriting the count, and does not immediately
+# re-escalate on its first skip.
+rm -f "$INBOX_DIR"/*.md
+NEW_BRIEF="$INBOX_DIR/20260919-010000-42.md"
+echo "a different, fresh brief" > "$NEW_BRIEF"
+maybe_worker_deliver_brief "$WIN"
+check "new brief resets the streak to 1" "1" "${WORKER_DELIVER_COMPOSER_STALL_COUNT[42]}"
+check "no re-escalation on the first skip against a new brief" "1" "$(grep -cF 'worker.deliver.composer_stalled' "$EVENTS_LOG")"
+
+# Self-review finding: the streak is NOT reset by a sweep that skips for a
+# DIFFERENT reason (pane_busy here) — only a different brief resets it.
+# Without this, an occasional busy tick interleaved with an otherwise-stuck
+# composer would keep pushing the threshold out of reach.
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.2
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo '✻ Considering… (esc to interrupt)'; sleep 300" Enter
+check_eventually "busy chrome visible -> worker_pane_busy true" "busy" 'busy_or_idle'
+maybe_worker_deliver_brief "$WIN"
+if grep -q 'worker.deliver.skip.*reason=pane_busy' "$EVENTS_LOG"; then got=skipped; else got=notskipped; fi
+check "interleaved pane_busy skip logged" "skipped" "$got"
+check "pane_busy skip leaves the composer-stall streak untouched (still 1, not reset to 0)" "1" "${WORKER_DELIVER_COMPOSER_STALL_COUNT[42]}"
+
+# Back to idle+empty-composer (still stubbed dirty): the streak resumes from
+# where it left off (1 -> 2 -> 3) and re-escalates for this NEW brief once
+# it independently reaches the threshold — a second, distinct escalation,
+# not a stale re-fire of the first brief's already-handled one.
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.2
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'sonnet · wt-issue-42 · ctx: 20k/1M (2%)'; printf '❯ \n'; sleep 300" Enter
+check_eventually "idle, empty-composer pane restored -> cli" "cli" "worker_pane_state '$WIN'"
+maybe_worker_deliver_brief "$WIN"
+maybe_worker_deliver_brief "$WIN"
+check "streak resumed across the interleaved busy skip -> reached 3 for the new brief" "3" "${WORKER_DELIVER_COMPOSER_STALL_COUNT[42]}"
+check "new brief's own stall escalates independently -> 2 distinct composer_stalled events total" "2" "$(grep -cF 'worker.deliver.composer_stalled' "$EVENTS_LOG")"
+if grep -qF "issue=42 brief=$(basename "$NEW_BRIEF") skips=3" "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "the second escalation names the NEW brief, not the original stalled one" "logged" "$got"
+
+unset -f compact_composer_clear
+body="$(extract_fn compact_composer_clear)"; eval "$body"   # restore the real function
+unset 'WORKER_DELIVER_COMPOSER_STALL_BRIEF[42]' 'WORKER_DELIVER_COMPOSER_STALL_COUNT[42]' 'WORKER_DELIVER_COMPOSER_STALL_ESCALATED[42]'
+WORKER_DELIVER_COMPOSER_STALL_THRESHOLD=20
 
 # Stop the relaunch loop — nothing later in the suite reuses $WIN, but leave
 # the pane tidy rather than respawning fake sessions for the rest of the run.
