@@ -4,13 +4,16 @@
 # two coordinator-watch.sh sweeps:
 #
 #   1. worktree_vanish_sweep_pass / wt_reap_event_since — detects a
-#      worktree removed OUTSIDE every blessed reap path (kill-worktree.sh
-#      and its callers all now log a `reap.worktree` event on removal —
+#      worktree removed OUTSIDE every blessed reap path (kill-worktree.sh,
+#      reap-orphan-worktrees.sh's dangling path, and swarm-merge.sh's
+#      fallback removal all now log a `reap.worktree` event on removal —
 #      see kill-worktree.sh's own header comment). A disappearance with no
-#      matching reap.worktree/reap.window event since it was last seen is
-#      the signature of a bare `git worktree remove`/`rm -rf` run outside
-#      all of this tooling (the SAMlytics wt-issue-296 incident this issue
+#      matching reap.worktree event since it was last seen is the
+#      signature of a bare `git worktree remove`/`rm -rf` run outside all
+#      of this tooling (the SAMlytics wt-issue-296 incident this issue
 #      exists to catch), and gets flagged via a coord-inbox write.
+#      Deliberately NOT reap.window too — see wt_reap_event_since's own
+#      header comment for why that would be a false-negative risk.
 #
 #   2. pending_brief_marker_sweep_pass / post_pending_brief_marker_sweep —
 #      backstop for requeue.sh's SWARM_PENDING_BRIEF marker: a brief queued
@@ -198,6 +201,36 @@ green "a bare 'rm -rf' (git registration left dangling) is detected exactly like
 
 git -C "$PROJECT_DIR" worktree prune 2>/dev/null || true
 
+# ============================================================================
+heading "Test 6: a transient git failure does NOT flag every tracked worktree as vanished"
+# ============================================================================
+# Self-review round 5 finding: own_worktree_dirs_for_scan can legitimately
+# return empty with rc 0 when git is healthy but there truly are zero
+# worktrees (its own git-common-dir check) — this test instead breaks git
+# itself for PROJECT_DIR, which is the failure mode the guard exists for.
+git -C "$PROJECT_DIR" worktree add -q -b fix/issue-300 "$TEST_DIR/wt-issue-300" master
+declare -A KNOWN_WORKTREE_SEEN=()
+WT_INVENTORY_SEEDED=0
+worktree_vanish_sweep_pass   # seed
+[ -n "${KNOWN_WORKTREE_SEEN[$TEST_DIR/wt-issue-300]:-}" ] || red "test setup: expected wt-issue-300 seeded before breaking git"
+: > "$EVENTS_LOG"
+rm -rf "$COORD_INBOX_DIR"
+
+mv "$PROJECT_DIR/.git" "$PROJECT_DIR/.git.disabled"
+rc=0; worktree_vanish_sweep_pass || rc=$?
+mv "$PROJECT_DIR/.git.disabled" "$PROJECT_DIR/.git"
+
+[ "$rc" -ne 0 ] || red "expected worktree_vanish_sweep_pass to return non-zero when git is unavailable"
+grep -q 'watch.worktree_sweep.error.*reason=git_unavailable' "$EVENTS_LOG" \
+    || red "expected watch.worktree_sweep.error logged, events.log: $(cat "$EVENTS_LOG")"
+grep -q 'watch.worktree_vanished' "$EVENTS_LOG" \
+    && red "a transient git failure must NOT flag anything as vanished, events.log: $(cat "$EVENTS_LOG")"
+[ -z "$(find "$COORD_INBOX_DIR" -maxdepth 1 -type f 2>/dev/null)" ] \
+    || red "a transient git failure must not write any coord-inbox entry"
+[ -n "${KNOWN_WORKTREE_SEEN[$TEST_DIR/wt-issue-300]:-}" ] \
+    || red "expected wt-issue-300 to remain tracked (untouched) after a skipped tick"
+green "a transient git failure skips the whole tick instead of mass-flagging every known worktree"
+
 # ─────────────────────────── gh stub (ask 2) ────────────────────────────────
 
 SHIM_DIR="$TEST_DIR/shims"
@@ -255,7 +288,7 @@ git -C "$PROJECT_DIR" worktree add -q -b fix/issue-90 "$TEST_DIR/wt-issue-90" ma
 mkdir -p "$TEST_DIR/wt-issue-90/.swarm/tasks/inbox"
 
 # ============================================================================
-heading "Test 6: pending brief + OPEN PR + no existing marker -> posts SWARM_PENDING_BRIEF: queued"
+heading "Test 7: pending brief + OPEN PR + no existing marker -> posts SWARM_PENDING_BRIEF: queued"
 # ============================================================================
 echo "follow-up: fix the thing" > "$TEST_DIR/wt-issue-90/.swarm/tasks/inbox/20260919-183600-90.md"
 : > "$EVENTS_LOG"
@@ -274,7 +307,7 @@ grep -q 'watch.pending_brief_sweep.*pr=77.*reason=posted' "$EVENTS_LOG" \
 green "an inbox brief queued before its PR existed gets caught up by the sweep"
 
 # ============================================================================
-heading "Test 7: a second sweep tick while still 'queued' does NOT re-post (idempotent)"
+heading "Test 8: a second sweep tick while still 'queued' does NOT re-post (idempotent)"
 # ============================================================================
 : > "$EVENTS_LOG"
 PATH="$SHIM_DIR:$PATH" pending_brief_marker_sweep_pass
@@ -284,7 +317,7 @@ PATH="$SHIM_DIR:$PATH" pending_brief_marker_sweep_pass
 green "sweep is idempotent — does not re-post while the marker already says queued"
 
 # ============================================================================
-heading "Test 8: empty inbox -> sweep does not post anything"
+heading "Test 9: empty inbox -> sweep does not post anything"
 # ============================================================================
 rm -f "$TEST_DIR/wt-issue-90/.swarm/tasks/inbox"/*.md
 : > "$COMMENTS_LOG"

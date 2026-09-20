@@ -2617,6 +2617,7 @@ format_event_line() {
         reap.window)                    glyph="✂"; color=$'\033[36m' ;;
         reap.worktree)                  glyph="✂"; color=$'\033[36m' ;;
         watch.worktree_vanished)        glyph="⚠"; color=$'\033[31m' ;;
+        watch.worktree_sweep.error)     glyph="✗"; color=$'\033[31m' ;;
         watch.pending_brief_sweep)      glyph="✉"; color=$'\033[33m' ;;
         watch.pr_poll)                  glyph="⚠"; color=$'\033[33m' ;;
         pr_poll.error)                   glyph="✗"; color=$'\033[31m' ;;
@@ -3616,10 +3617,10 @@ activity_poll_pass() {
 # Trusting reap.window here would let an unrelated window-only kill for
 # this issue mask a genuinely unblessed worktree removal that happened to
 # land in the same lookback window — every path that actually removes a
-# worktree already logs reap.worktree (kill-worktree.sh is the only
-# `git worktree remove`/dangling-`rm -rf` call site left standing after
-# this issue's fix), so reap.window brings no additional real coverage,
-# only a false-negative risk.
+# worktree (kill-worktree.sh, reap-orphan-worktrees.sh's dangling `rm -rf`,
+# swarm-merge.sh's fallback removal) already logs reap.worktree itself, so
+# reap.window brings no additional real coverage, only a false-negative
+# risk.
 wt_reap_event_since() {
     local issue="$1" since="$2"
     [ -f "$EVENTS_LOG" ] || return 1
@@ -3680,9 +3681,30 @@ Check .swarm/salvaged/iss-$issue/ (won't exist if nothing was queued), check iss
 # diff forever, and the eventual dangling-registration cleanup
 # (reap_dangling) would then log a blessed reap.worktree for it, silently
 # retconning a real unblessed removal into a non-event.
+#
+# issue #439 self-review (round 5): guards against a transient git
+# failure being misread as "every tracked worktree vanished in the same
+# tick". own_worktree_dirs_for_scan can legitimately return EMPTY with no
+# error at all when git itself is healthy but this project genuinely has
+# zero registered worktrees right now (its own git-common-dir check) — a
+# real, common tick this sweep must still process correctly (e.g. a bulk
+# `kill-finished-workers.sh --all --with-worktree` reaping everything at
+# once is exactly this case, and every one of those removals already has
+# its own reap.worktree event). The DIFFERENT failure this guards against
+# is `git worktree list` itself glitching for a tick while the repo is
+# otherwise fine — own_worktree_dirs_for_scan has no way to signal that
+# distinction back to its caller, so this runs the same cheap git-health
+# probe it uses internally, BEFORE trusting an empty/partial "current",
+# and skips the whole tick (touching neither KNOWN_WORKTREE_SEEN nor
+# logging anything) rather than flag a burst of false vanishes.
 worktree_vanish_sweep_pass() {
     local dir issue now_epoch since found seen
     now_epoch=$(date +%s)
+
+    if ! git -C "$PROJECT_DIR" rev-parse --git-common-dir >/dev/null 2>&1; then
+        log_event watch.worktree_sweep.error "reason=git_unavailable"
+        return 1
+    fi
 
     local -a current=()
     while IFS= read -r dir; do
