@@ -349,9 +349,11 @@
 #                           inventory (seeded on the first tick — a worktree
 #                           already gone before the watcher started is never
 #                           flagged) and treat a disappearance with no
-#                           matching reap.worktree/reap.window event logged
-#                           since it was last confirmed present as
-#                           unblessed. Local-only (git + events.log, no
+#                           matching reap.worktree event logged since it was
+#                           last confirmed present as unblessed
+#                           (deliberately NOT reap.window too — see
+#                           wt_reap_event_since's own header comment).
+#                           Local-only (git + events.log, no
 #                           network), so this runs on the same cheap cadence
 #                           as WATCH_BG_VIOLATION_SWEEP_SECS. The runtime
 #                           analog of llm-start.sh's stranded-worktree
@@ -1790,7 +1792,7 @@ EVENTS LOG
                            cursor is NOT advanced on this path, so the next
                            tick retries the same window
       watch.worktree_vanished  (issue #439) a tracked worktree disappeared with no
-                           reap.worktree/reap.window event logged for it since it was last
+                           reap.worktree event logged for it since it was last
                            confirmed present (issue, dir, reason=no_reap_event) — the
                            signature of a bare `git worktree remove`/`rm -rf` run outside
                            every blessed reap path; followed by a coord.inbox.write
@@ -3600,16 +3602,29 @@ activity_poll_pass() {
 
 # wt_reap_event_since <issue> <since-iso8601>
 #
-# True if a `reap.worktree` (kill-worktree.sh, issue #439) or `reap.window`
-# (kill-finished-workers.sh) event for this issue was logged at/after
-# $since. Mirrors swarm_already_reaped's exact awk/cursor idiom above —
-# events.log's fixed-width ISO8601 timestamp field sorts lexicographically,
-# so no date-parsing dependency is needed.
+# True if a `reap.worktree` event (kill-worktree.sh, and now
+# reap-orphan-worktrees.sh's dangling path / swarm-merge.sh's fallback
+# removal — all three log it, issue #439) for this issue was logged
+# at/after $since. Mirrors swarm_already_reaped's exact awk/cursor idiom
+# above — events.log's fixed-width ISO8601 timestamp field sorts
+# lexicographically, so no date-parsing dependency is needed.
+#
+# issue #439 self-review (round 4): deliberately `reap.worktree` ONLY, not
+# `reap.window` too, despite kill-finished-workers.sh logging reap.window
+# for EVERY kill (including its default window-only mode, with no
+# --with-worktree, which never touches the worktree directory at all).
+# Trusting reap.window here would let an unrelated window-only kill for
+# this issue mask a genuinely unblessed worktree removal that happened to
+# land in the same lookback window — every path that actually removes a
+# worktree already logs reap.worktree (kill-worktree.sh is the only
+# `git worktree remove`/dangling-`rm -rf` call site left standing after
+# this issue's fix), so reap.window brings no additional real coverage,
+# only a false-negative risk.
 wt_reap_event_since() {
     local issue="$1" since="$2"
     [ -f "$EVENTS_LOG" ] || return 1
     awk -v since="$since" -v needle="issue=$issue " '
-        $1 >= since && ($2 == "reap.window" || $2 == "reap.worktree") && index($0, needle) { found=1; exit }
+        $1 >= since && $2 == "reap.worktree" && index($0, needle) { found=1; exit }
         END { exit !found }
     ' "$EVENTS_LOG"
 }
@@ -3625,7 +3640,7 @@ wt_reap_event_since() {
 unblessed_worktree_vanish_notify() {
     local issue="$1" dir="$2"
     local body
-    body="A worktree this swarm was tracking (issue #$issue, $dir) disappeared with no reap.worktree/reap.window event logged for it since it was last confirmed present. That's the signature of a bare \`git worktree remove\` or \`rm -rf\` run outside every blessed reap path (kill-worktree.sh and its callers all log reap.worktree on removal — issue #439) — no salvage ran, so any brief still sitting in that worktree's .swarm/tasks/{inbox,processing,outbox}/ was destroyed, not preserved under .swarm/salvaged/iss-$issue/.
+    body="A worktree this swarm was tracking (issue #$issue, $dir) disappeared with no reap.worktree event logged for it since it was last confirmed present. That's the signature of a bare \`git worktree remove\` or \`rm -rf\` run outside every blessed reap path (kill-worktree.sh and its callers all log reap.worktree on removal — issue #439) — no salvage ran, so any brief still sitting in that worktree's .swarm/tasks/{inbox,processing,outbox}/ was destroyed, not preserved under .swarm/salvaged/iss-$issue/.
 Check .swarm/salvaged/iss-$issue/ (won't exist if nothing was queued), check issue #$issue's PR history for a SWARM_PENDING_BRIEF marker that never got a matching cleared/orphaned follow-up, and re-file any lost work as a fresh issue if the PR already merged past it."
     if [ "$DRY_RUN" = "1" ]; then
         echo "[DRY] would write coord-inbox worktree-vanished entry for issue #$issue"

@@ -418,12 +418,14 @@ if [ -n "$ISSUE" ]; then
     fi
     if [ -e "$WORKTREE_DIR/.git" ]; then
       echo "[6/7] watcher didn't reap; removing worktree $WORKTREE_DIR"
-      if git worktree remove --force "$WORKTREE_DIR" 2>/dev/null; then
-        # issue #439: log the same reap.worktree event kill-worktree.sh
-        # logs on removal, so this fallback path isn't mistaken for an
-        # unblessed `git worktree remove` by the watcher's vanish sweep.
-        log_event reap.worktree "issue=$ISSUE branch=fix/issue-$ISSUE dir=$WORKTREE_DIR caller=swarm-merge.sh"
-      fi
+      # issue #439: logged BEFORE the removal, not after (self-review round
+      # 4 caught this ordering was inconsistent with kill-worktree.sh's own
+      # fix for the identical sub-second race) — the same reap.worktree
+      # event kill-worktree.sh logs on removal, so this fallback path isn't
+      # mistaken for an unblessed `git worktree remove` by the watcher's
+      # vanish sweep.
+      log_event reap.worktree "issue=$ISSUE branch=fix/issue-$ISSUE dir=$WORKTREE_DIR caller=swarm-merge.sh"
+      git worktree remove --force "$WORKTREE_DIR" 2>/dev/null || true
     fi
   else
     echo "[6/7] --no-kill set; leaving tmux window / worktree alone"
