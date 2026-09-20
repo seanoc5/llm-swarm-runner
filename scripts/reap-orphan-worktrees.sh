@@ -308,9 +308,11 @@ reap_dangling() {
     if [ "$NO_COMPOSE_DOWN" != "1" ] && [ -x "$SCRIPT_DIR/_compose-down-for-worktree.sh" ]; then
         "$SCRIPT_DIR/_compose-down-for-worktree.sh" "$wt" || echo "  WARN: compose-down helper exited non-zero (continuing)"
     fi
+    # issue #439 self-review: logged BEFORE the rm -rf, same race-closing
+    # reason as kill-worktree.sh's own reap.worktree call.
+    log_event reap.worktree "issue=$issue branch=fix/issue-$issue dir=$wt caller=reap-orphan-worktrees.sh(dangling)"
     rm -rf -- "$wt"
     echo "  ✓ removed worktree directory"
-    log_event reap.worktree "issue=$issue branch=fix/issue-$issue dir=$wt caller=reap-orphan-worktrees.sh(dangling)"
     if [ -e "$admin_dir" ]; then
         rm -rf -- "$admin_dir"
         echo "  ✓ removed stale worktree registration ($admin_dir)"

@@ -166,6 +166,38 @@ grep -q 'watch.worktree_vanished.*issue=298' "$EVENTS_LOG" \
     || red "DRY_RUN=1 must not write a real coord-inbox entry"
 green "DRY_RUN=1 still detects and logs, but writes no coord-inbox entry"
 
+# ============================================================================
+heading "Test 5: worktree destroyed via bare 'rm -rf' (registration left dangling) -> still flagged"
+# ============================================================================
+# Self-review round 3 finding: 'git worktree list' (what
+# own_worktree_dirs_for_scan reads) keeps listing a worktree whose
+# directory was rm -rf'd directly until something prunes the registration —
+# the earlier tests only ever exercised the 'git worktree remove' path,
+# where git's own registry drops the entry immediately.
+git -C "$PROJECT_DIR" worktree add -q -b fix/issue-299 "$TEST_DIR/wt-issue-299" master
+declare -A KNOWN_WORKTREE_SEEN=()
+WT_INVENTORY_SEEDED=0
+worktree_vanish_sweep_pass   # seed
+: > "$EVENTS_LOG"
+
+git -C "$PROJECT_DIR" worktree list --porcelain | grep -q "wt-issue-299" \
+    || red "test setup: expected wt-issue-299 registered before the rm -rf"
+rm -rf "$TEST_DIR/wt-issue-299"
+git -C "$PROJECT_DIR" worktree list --porcelain | grep -q "wt-issue-299" \
+    || red "test setup: registration should still list wt-issue-299 right after a bare rm -rf (that's the whole point of this test)"
+
+worktree_vanish_sweep_pass
+
+grep -q 'watch.worktree_vanished.*issue=299.*reason=no_reap_event' "$EVENTS_LOG" \
+    || red "expected a bare 'rm -rf' (registration still present) to be flagged as vanished, events.log: $(cat "$EVENTS_LOG")"
+inbox_file="$(find "$COORD_INBOX_DIR" -maxdepth 1 -type f -newer "$EVENTS_LOG" 2>/dev/null | head -1)"
+[ -n "$inbox_file" ] || inbox_file="$(find "$COORD_INBOX_DIR" -maxdepth 1 -type f 2>/dev/null | grep -v 297 | tail -1)"
+[ -n "$inbox_file" ] || red "expected a coord-inbox entry for the rm -rf'd worktree"
+grep -q 'issue #299' "$inbox_file" || red "coord-inbox entry should name issue #299: $(cat "$inbox_file")"
+green "a bare 'rm -rf' (git registration left dangling) is detected exactly like 'git worktree remove'"
+
+git -C "$PROJECT_DIR" worktree prune 2>/dev/null || true
+
 # ─────────────────────────── gh stub (ask 2) ────────────────────────────────
 
 SHIM_DIR="$TEST_DIR/shims"
@@ -223,7 +255,7 @@ git -C "$PROJECT_DIR" worktree add -q -b fix/issue-90 "$TEST_DIR/wt-issue-90" ma
 mkdir -p "$TEST_DIR/wt-issue-90/.swarm/tasks/inbox"
 
 # ============================================================================
-heading "Test 5: pending brief + OPEN PR + no existing marker -> posts SWARM_PENDING_BRIEF: queued"
+heading "Test 6: pending brief + OPEN PR + no existing marker -> posts SWARM_PENDING_BRIEF: queued"
 # ============================================================================
 echo "follow-up: fix the thing" > "$TEST_DIR/wt-issue-90/.swarm/tasks/inbox/20260919-183600-90.md"
 : > "$EVENTS_LOG"
@@ -242,7 +274,7 @@ grep -q 'watch.pending_brief_sweep.*pr=77.*reason=posted' "$EVENTS_LOG" \
 green "an inbox brief queued before its PR existed gets caught up by the sweep"
 
 # ============================================================================
-heading "Test 6: a second sweep tick while still 'queued' does NOT re-post (idempotent)"
+heading "Test 7: a second sweep tick while still 'queued' does NOT re-post (idempotent)"
 # ============================================================================
 : > "$EVENTS_LOG"
 PATH="$SHIM_DIR:$PATH" pending_brief_marker_sweep_pass
@@ -252,7 +284,7 @@ PATH="$SHIM_DIR:$PATH" pending_brief_marker_sweep_pass
 green "sweep is idempotent — does not re-post while the marker already says queued"
 
 # ============================================================================
-heading "Test 7: empty inbox -> sweep does not post anything"
+heading "Test 8: empty inbox -> sweep does not post anything"
 # ============================================================================
 rm -f "$TEST_DIR/wt-issue-90/.swarm/tasks/inbox"/*.md
 : > "$COMMENTS_LOG"

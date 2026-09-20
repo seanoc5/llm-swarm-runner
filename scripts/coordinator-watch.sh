@@ -3652,13 +3652,26 @@ Check .swarm/salvaged/iss-$issue/ (won't exist if nothing was queued), check iss
 # also what bounds wt_reap_event_since's search window tightly (only needs
 # to cover the gap since the previous tick, not this worktree's entire
 # life).
+#
+# issue #439 self-review (round 3): "current" REQUIRES `[ -d "$dir" ]`, not
+# just git's own registration. `git worktree list` (what
+# own_worktree_dirs_for_scan reads) keeps listing a worktree whose
+# directory was `rm -rf`'d directly — as opposed to `git worktree
+# remove`d — until something runs `git worktree prune` or otherwise
+# touches the registration, which can be long after the directory itself
+# (and anything queued inside it) is already gone. Without this check, a
+# bare `rm -rf` — the SAMlytics incident's actual leading hypothesis,
+# alongside `git worktree remove --force` — would stay "present" in this
+# diff forever, and the eventual dangling-registration cleanup
+# (reap_dangling) would then log a blessed reap.worktree for it, silently
+# retconning a real unblessed removal into a non-event.
 worktree_vanish_sweep_pass() {
     local dir issue now_epoch since found seen
     now_epoch=$(date +%s)
 
     local -a current=()
     while IFS= read -r dir; do
-        [ -n "$dir" ] && current+=("$dir")
+        [ -n "$dir" ] && [ -d "$dir" ] && current+=("$dir")
     done < <(own_worktree_dirs_for_scan "$PROJECT_DIR")
 
     if [ "$WT_INVENTORY_SEEDED" != "1" ]; then

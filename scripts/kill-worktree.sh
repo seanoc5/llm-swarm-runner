@@ -364,9 +364,13 @@ if [ -d "$WT" ]; then
     else
         "$SCRIPT_DIR/_compose-down-for-worktree.sh" "$WT" || echo "  WARN: compose-down helper exited non-zero (continuing)"
     fi
+    # issue #439 self-review: logged BEFORE the removal, not after — closes
+    # a sub-second race where coordinator-watch.sh's worktree_vanish_sweep_pass
+    # could observe the directory already gone but the reap.worktree event
+    # not yet written, misreading a perfectly blessed removal as unblessed.
+    log_event reap.worktree "issue=$ISSUE branch=${ACTUAL_BRANCH:-$BRANCH} dir=$WT"
     git worktree remove --force "$WT"
     echo "  ✓ removed worktree"
-    log_event reap.worktree "issue=$ISSUE branch=${ACTUAL_BRANCH:-$BRANCH} dir=$WT"
 else
     echo "  - worktree dir not present (skipped)"
 fi
