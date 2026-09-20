@@ -77,7 +77,7 @@ COMPACT_SUBMIT_SETTLE_SECS=0
 # copy real defaults instead of leaving the var unset (this file's own
 # `set -u` would otherwise abort the moment compact_last_pane_line
 # references it).
-COMPACT_COMPOSER_CHROME_PATTERN='^※ recap:|Considering…|Sautéed for|Cooked for|Baked for|Simmered for|Brewed for|Crunched for|✻|✶|/clear to save [0-9.]+k tokens'
+COMPACT_COMPOSER_CHROME_PATTERN='^※ recap:|^[[:space:]]*(✻|✶)[[:space:]]*(Considering…|Sautéed for|Cooked for|Baked for|Simmered for|Brewed for|Crunched for)?|/clear to save [0-9.]+k tokens'
 declare -A WORKER_DELIVER_LAST_FAIL=()
 declare -A WORKER_DELIVER_FAIL_COUNT=()
 declare -A WORKER_DELIVER_GAVE_UP=()
@@ -795,6 +795,18 @@ check "the full observed incident shape (recap + spinner + empty composer + clea
 render_pane '❯ please review PR 42\n'
 rc=0; compact_composer_clear "$SESSION_NAME:$WIN" || rc=$?
 check "a real typed draft still reads dirty (no over-matching from the new chrome patterns)" "1" "$rc"
+
+# Independent-review finding (issue #436): the verb list above was
+# originally an UNANCHORED substring match, so a genuine human draft that
+# happened to CONTAIN one of those phrases (not just render below an
+# actually-empty composer) would itself read as chrome and get dropped —
+# the inverse failure from the one this issue exists to fix: a real draft
+# misread as clear, papered over by an auto-/quit. Anchoring the verb group
+# behind the spinner glyph (COMPACT_COMPOSER_CHROME_PATTERN's own comment)
+# closes this without giving up matching the genuine chrome shapes above.
+render_pane '❯ I baked for hours on this bug, need a second pair of eyes\n'
+rc=0; compact_composer_clear "$SESSION_NAME:$WIN" || rc=$?
+check "a draft merely MENTIONING a spinner-verb phrase still reads dirty (verb list is anchored to the glyph, not a bare substring match)" "1" "$rc"
 unset -f render_pane
 
 heading "Test 11: composer_not_clear escalation (issue #436) — N consecutive skips against the SAME brief escalate exactly once"

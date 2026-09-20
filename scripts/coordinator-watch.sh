@@ -1479,7 +1479,13 @@
 #                           recognized at a call site, so every consumer
 #                           (compact_composer_clear, compact_confirm_
 #                           submitted, compact_replay_detected, compact_
-#                           retract_queued) benefits identically.
+#                           retract_queued) benefits identically. The verb
+#                           list is anchored behind the spinner glyph
+#                           (independent-review finding, same PR): see the
+#                           variable's own assignment comment below for why
+#                           an unanchored substring match would have let a
+#                           human draft mentioning one of those phrases
+#                           misread as chrome.
 #   WORKER_DELIVER_COMPOSER_STALL_THRESHOLD
 #                           (issue #436) The composer-clear fix above closes
 #                           the false-positive that caused the observed
@@ -2200,7 +2206,43 @@ COMPACT_REPLAY_MIN_REAL_SECS="${COMPACT_REPLAY_MIN_REAL_SECS:-5}"
 # own pane line once terminal width or a longer token count wraps it off
 # the "ctx: N/M (P%)" line compact_last_pane_line's own exclusion already
 # drops whole.
-COMPACT_COMPOSER_CHROME_PATTERN="${COMPACT_COMPOSER_CHROME_PATTERN:-^※ recap:|Considering…|Sautéed for|Cooked for|Baked for|Simmered for|Brewed for|Crunched for|✻|✶|/clear to save [0-9.]+k tokens}"
+#
+# Independent-review finding (issue #436): the past/present-tense verb list
+# (Considering…/Sautéed for/.../Crunched for) was originally an UNANCHORED
+# substring match, same as bare "✻"/"✶" — so a genuine human draft that
+# happened to contain one of those phrases ("❯ I baked for hours on this
+# bug, need a second pair of eyes") would read as chrome, get dropped by
+# compact_last_pane_line, and make an occupied composer look clear —
+# exactly the false-clear direction issue #436 exists to close, just
+# triggered by draft text instead of scrollback residue. Every real
+# rendering of this chrome (verified against Test 10's fixtures below and
+# the live corpusminder-spring capture) puts the spinner glyph at the very
+# start of its OWN pane line, never sharing a line with composer content
+# (which is prefixed by "❯"/other box-drawing chars, not the glyph) — so
+# anchoring the verb group behind "^[[:space:]]*(✻|✶)" keeps every genuine
+# chrome shape matched while a human line (always ❯-prefixed at this point
+# in the pipeline, since the leading-prompt-char strip happens AFTER this
+# filter) can no longer match on phrase content alone. The verb group
+# itself stays optional so a bare glyph-only line (no verb text captured,
+# e.g. if only the glyph survived truncation) still matches, same as
+# before.
+#
+# Self-caught bug while implementing the above: the glyph alternation MUST
+# be a group "(✻|✶)", never a bracket class "[✻✶]". grep runs under
+# LC_ALL=C throughout this function (multi-byte-unsafe on purpose, per
+# compact_last_pane_line's own header comment), and under the C locale a
+# bracket expression matches byte-by-byte, not character-by-character — the
+# 3-byte UTF-8 encodings of ✻ (E2 9C BB) and ✶ (E2 9C B6) share their
+# leading byte (E2) with the composer's own "❯" prompt glyph (E2 9D AF), so
+# "[✻✶]" anchored at line start matched a genuinely empty "❯ " composer
+# line too (byte E2 alone satisfied the class), making an OCCUPIED-looking
+# composer line vanish and misreading a real draft as clear — caught by
+# this PR's own Test 6 regression (a bare "❯ " composer line was being
+# dropped instead of surviving to sed's prompt-char strip). "(✻|✶)" as a
+# literal alternation matches the full 3-byte sequence in order like any
+# other literal text, which is safe under LC_ALL=C the same way the
+# pattern's other literal strings (e.g. "Baked for") already are.
+COMPACT_COMPOSER_CHROME_PATTERN="${COMPACT_COMPOSER_CHROME_PATTERN:-^※ recap:|^[[:space:]]*(✻|✶)[[:space:]]*(Considering…|Sautéed for|Cooked for|Baked for|Simmered for|Brewed for|Crunched for)?|/clear to save [0-9.]+k tokens}"
 
 case "$WATCHER_AUTOCLOSE_MODE" in
     merged)    AUTOCLOSE_PR_FLAG="--merged-only" ;;

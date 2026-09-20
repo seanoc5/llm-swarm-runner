@@ -107,7 +107,7 @@ COMPACT_REPLAY_PATTERN='Not enough messages to compact\.'
 # issue #436 — must match coordinator-watch.sh's own default; compact_last_
 # pane_line references this directly, and this file's `set -u` aborts if
 # it's left unset.
-COMPACT_COMPOSER_CHROME_PATTERN='^※ recap:|Considering…|Sautéed for|Cooked for|Baked for|Simmered for|Brewed for|Crunched for|✻|✶|/clear to save [0-9.]+k tokens'
+COMPACT_COMPOSER_CHROME_PATTERN='^※ recap:|^[[:space:]]*(✻|✶)[[:space:]]*(Considering…|Sautéed for|Cooked for|Baked for|Simmered for|Brewed for|Crunched for)?|/clear to save [0-9.]+k tokens'
 # issue #292 — lowered from the shipped default (5) so the fixtures below,
 # whose fake "compaction" sleeps only ~2s, still count as long enough to
 # trust a detected replay; Test 21 below overrides this back up locally to
