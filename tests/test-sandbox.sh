@@ -248,13 +248,22 @@ if [ -S /var/run/docker.sock ]; then
 
     # Base dir exists but isn't writable (e.g. bad host config): warns to
     # stderr and still launches, rather than blocking worker launch —
-    # mirrors the Gradle "bad path" behavior above.
-    chmod 555 "$_uv_cache_fixture"
-    output=$(SANDBOX_DEP_CACHE="$_uv_cache_fixture" "$REPO_ROOT/sandbox.sh" /tmp "echo LAUNCHED" 2>&1)
-    [[ "$output" == *"WARNING"* && "$output" == *"LAUNCHED"* ]] \
+    # mirrors the Gradle "bad path" behavior above. MUST be a fresh fixture
+    # with no <dir>/uv yet: reusing the fixture above (whose <dir>/uv was
+    # already created+writable by the prior tests) makes mkdir -p a silent
+    # no-op even after chmod 555 on the parent, since the existing <dir>/uv
+    # itself is untouched by that chmod — the uv mount would still succeed
+    # and only the Gradle block's unrelated "no modules-2" warning would
+    # match a bare `*"WARNING"*` check, passing vacuously without ever
+    # exercising the uv skip path. Match the uv-specific warning text too.
+    _uv_cache_fixture_ro="$(mktemp -d -p "$REPO_ROOT")"
+    chmod 555 "$_uv_cache_fixture_ro"
+    output=$(SANDBOX_DEP_CACHE="$_uv_cache_fixture_ro" "$REPO_ROOT/sandbox.sh" /tmp "echo LAUNCHED" 2>&1)
+    [[ "$output" == *"skipping uv cache mount"* && "$output" == *"LAUNCHED"* ]] \
         && pass "SANDBOX_DEP_CACHE uv unwritable base dir warns + still launches" "$output" \
         || fail "SANDBOX_DEP_CACHE uv unwritable base dir warns + still launches" "$output"
-    chmod 755 "$_uv_cache_fixture"
+    chmod 755 "$_uv_cache_fixture_ro"
+    rm -rf "$_uv_cache_fixture_ro"
 
     rm -rf "$_uv_cache_fixture"
 else
