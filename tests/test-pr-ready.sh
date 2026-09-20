@@ -77,7 +77,7 @@ run_pr_ready() {
     : > "$GH_LOG"
     : > "$FAKE_REVIEW_LOG"
     rc=0
-    PATH="$SHIM_DIR:$PATH" SELF_REVIEW_SCRIPT="$FAKE_REVIEW" "$PR_READY" 42 \
+    PATH="$SHIM_DIR:$PATH" SELF_REVIEW_SCRIPT="$FAKE_REVIEW" WORKER_SELF_REVIEW="${WORKER_SELF_REVIEW:-1}" "$PR_READY" 42 \
         > "$TEST_DIR/out.log" 2>&1 || rc=$?
     return "$rc"
 }
@@ -100,9 +100,9 @@ printf '<!-- BLIND_MERGE_RISK: medium -->\nsome change\n' > "$BODY_FILE"
 make_fake_review 0
 rc=0; run_pr_ready || rc=$?
 [ "$rc" -eq 0 ] || red "expected exit 0 for APPROVE, got $rc: $(cat "$TEST_DIR/out.log")"
-grep -q '42 --post' "$FAKE_REVIEW_LOG" || red "expected self-review invoked with '42 --post', log: $(cat "$FAKE_REVIEW_LOG")"
+grep -q '42 --post --force' "$FAKE_REVIEW_LOG" || red "expected self-review invoked with '42 --post --force' (issue #439 self-review finding: --force is mandatory so a post-BLOCK retry doesn't post nothing over a stale marker), log: $(cat "$FAKE_REVIEW_LOG")"
 gh_ready_called || red "expected gh pr ready to run after APPROVE"
-green "risk=medium + APPROVE runs self-review --post then readies"
+green "risk=medium + APPROVE runs self-review --post --force then readies"
 
 # ============================================================================
 heading "Test 3: risk=high, self-review APPROVE_WITH_CAVEATS (3) — readies"
@@ -126,14 +126,17 @@ grep -qi 'REFUSED' "$TEST_DIR/out.log" || red "expected a REFUSED message in out
 green "a BLOCK verdict refuses to ready the PR at all"
 
 # ============================================================================
-heading "Test 5: self-review skipped (WORKER_SELF_REVIEW=0, exit 4) — readies anyway"
+heading "Test 5: WORKER_SELF_REVIEW=0 — self-review never invoked, readies anyway"
 # ============================================================================
 printf '<!-- BLIND_MERGE_RISK: medium -->\nsome change\n' > "$BODY_FILE"
-make_fake_review 4
+make_fake_review 0
+WORKER_SELF_REVIEW=0
 rc=0; run_pr_ready || rc=$?
-[ "$rc" -eq 0 ] || red "expected exit 0 when self-review is skipped, got $rc: $(cat "$TEST_DIR/out.log")"
-gh_ready_called || red "expected gh pr ready to still run when self-review was skipped"
-green "a skipped self-review (exit 4) still readies, doesn't block on missing infra"
+WORKER_SELF_REVIEW=1
+[ "$rc" -eq 0 ] || red "expected exit 0 when WORKER_SELF_REVIEW=0, got $rc: $(cat "$TEST_DIR/out.log")"
+[ ! -s "$FAKE_REVIEW_LOG" ] || red "expected self-review NOT invoked at all under WORKER_SELF_REVIEW=0, log: $(cat "$FAKE_REVIEW_LOG")"
+gh_ready_called || red "expected gh pr ready to still run when WORKER_SELF_REVIEW=0"
+green "WORKER_SELF_REVIEW=0 skips the call entirely (never reaches --force) and still readies"
 
 # ============================================================================
 heading "Test 6: self-review errors (exit 1) — WARNs, readies anyway (fail open)"

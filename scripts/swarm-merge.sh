@@ -204,6 +204,20 @@ echo "[1/7] working in main worktree: $MAIN_WT"
 # shellcheck source=/dev/null
 . "$SCRIPT_DIR/_load-env.sh" "$MAIN_WT"
 
+# issue #439 self-review finding: the fallback worktree removal below (when
+# the watcher hasn't reaped within GRACE_SECONDS) used to call `git worktree
+# remove` directly, bypassing kill-worktree.sh entirely — which meant
+# coordinator-watch.sh's worktree_vanish_sweep_pass would flag every such
+# fallback removal as an unblessed disappearance. Same EVENTS_LOG/log_event
+# shape as kill-worktree.sh/kill-finished-workers.sh.
+EVENTS_LOG="$MAIN_WT/.swarm/events.log"
+log_event() {
+    local cat="$1"; shift
+    local ts
+    ts="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+    printf '%s  %-15s %s\n' "$ts" "$cat" "$*" >> "$EVENTS_LOG" 2>/dev/null || true
+}
+
 # Resolve the given number as either an issue or a PR — GitHub shares one
 # numbering sequence, so #N is exactly one object and this is unambiguous.
 INPUT_NUM="$ISSUE"
@@ -403,7 +417,12 @@ if [ -n "$ISSUE" ]; then
     fi
     if [ -e "$WORKTREE_DIR/.git" ]; then
       echo "[6/7] watcher didn't reap; removing worktree $WORKTREE_DIR"
-      git worktree remove --force "$WORKTREE_DIR" 2>/dev/null || true
+      if git worktree remove --force "$WORKTREE_DIR" 2>/dev/null; then
+        # issue #439: log the same reap.worktree event kill-worktree.sh
+        # logs on removal, so this fallback path isn't mistaken for an
+        # unblessed `git worktree remove` by the watcher's vanish sweep.
+        log_event reap.worktree "issue=$ISSUE branch=fix/issue-$ISSUE dir=$WORKTREE_DIR caller=swarm-merge.sh"
+      fi
     fi
   else
     echo "[6/7] --no-kill set; leaving tmux window / worktree alone"

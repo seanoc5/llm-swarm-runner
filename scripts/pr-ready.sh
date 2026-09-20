@@ -20,11 +20,17 @@
 # (prompts/worker.md § "PR risk assessment") to decide whether self-review
 # applies at all, mirroring that doc's own rubric exactly:
 #   low            self-review not required — readies immediately.
-#   medium/high    runs `self-review-pr.sh <PR#> --post` first.
-#                    BLOCK                -> refuses to ready, exit 2
-#                    APPROVE / WITH_CAVEATS -> proceeds to `gh pr ready`
-#                    skipped (WORKER_SELF_REVIEW=0) -> proceeds anyway
-#                    error (gh/claude failure)      -> WARNs, proceeds anyway
+#   medium/high    checks WORKER_SELF_REVIEW itself (same kill switch
+#                  self-review-pr.sh honors) BEFORE calling it, then runs
+#                  `self-review-pr.sh <PR#> --post --force` (--force: see
+#                  the code comment at the call site for why this is
+#                  mandatory, not optional, once we've decided to run at
+#                  all — WORKER_SELF_REVIEW=0 is handled here instead, so
+#                  --force never bypasses that kill switch).
+#                    WORKER_SELF_REVIEW=0    -> skips the call, proceeds anyway
+#                    BLOCK                   -> refuses to ready, exit 2
+#                    APPROVE / WITH_CAVEATS  -> proceeds to `gh pr ready`
+#                    error (gh/claude failure) -> WARNs, proceeds anyway
 #                      (fail open: self-review infra being down must never
 #                      silently block a PR from ever going ready — but this
 #                      is printed loudly, not swallowed, per worker.md's
@@ -61,26 +67,47 @@ case "$RISK" in
             echo "pr-ready: WARN: no BLIND_MERGE_RISK marker found on PR #$PR's body — treating as medium (fail toward requiring review)" >&2
             RISK="medium"
         fi
-        echo "pr-ready: risk=$RISK — running self-review ($SELF_REVIEW $PR --post)..."
-        rc=0
-        "$SELF_REVIEW" "$PR" --post || rc=$?
-        case "$rc" in
-            0|3)
-                : # APPROVE / APPROVE_WITH_CAVEATS — proceed
-                ;;
-            2)
-                echo "pr-ready: REFUSED — self-review returned BLOCK on PR #$PR. Fix the finding and re-push," >&2
-                echo "          then re-run pr-ready.sh, or bypass this wrapper entirely with:" >&2
-                echo "            gh pr ready $PR" >&2
-                exit 2
-                ;;
-            4)
-                echo "pr-ready: self-review skipped (WORKER_SELF_REVIEW=0) — readying anyway. Flag this in your handoff."
-                ;;
-            *)
-                echo "pr-ready: WARN: self-review-pr.sh failed (exit $rc) — could not post a verdict marker. Readying anyway; flag this in your handoff." >&2
-                ;;
-        esac
+        if [ "${WORKER_SELF_REVIEW:-1}" = "0" ]; then
+            # Checked HERE, before ever invoking self-review-pr.sh, rather
+            # than relying on its own exit-4 "skipped" path: --force below
+            # is mandatory for the retry case (see that comment), and
+            # self-review-pr.sh's --force also bypasses ITS OWN
+            # WORKER_SELF_REVIEW=0 check (--force means "run even when
+            # WORKER_SELF_REVIEW=0" by its own docs) — passing --force
+            # unconditionally would silently defeat the kill switch worker.md
+            # documents. Gating on the same env var here, before the call,
+            # keeps the kill switch intact while still letting --force do
+            # its actual job once we've already decided to run.
+            echo "pr-ready: self-review skipped (WORKER_SELF_REVIEW=0) — readying anyway. Flag this in your handoff."
+        else
+            echo "pr-ready: risk=$RISK — running self-review ($SELF_REVIEW $PR --post --force)..."
+            rc=0
+            # --force is required, not optional (self-review's own
+            # self-review finding on this script's first version):
+            # self-review-pr.sh's --post skips posting whenever ANY
+            # SWARM_SELF_REVIEW comment already exists, regardless of
+            # verdict (see its own header comment). Without --force, a
+            # worker's documented retry path (BLOCK -> fix -> re-run
+            # pr-ready.sh) would get a fresh APPROVE here but post
+            # nothing — the PR would ready with a stale BLOCK marker as
+            # its latest verdict, which is exactly the gate this script
+            # exists to keep accurate.
+            "$SELF_REVIEW" "$PR" --post --force || rc=$?
+            case "$rc" in
+                0|3)
+                    : # APPROVE / APPROVE_WITH_CAVEATS — proceed
+                    ;;
+                2)
+                    echo "pr-ready: REFUSED — self-review returned BLOCK on PR #$PR. Fix the finding and re-push," >&2
+                    echo "          then re-run pr-ready.sh, or bypass this wrapper entirely with:" >&2
+                    echo "            gh pr ready $PR" >&2
+                    exit 2
+                    ;;
+                *)
+                    echo "pr-ready: WARN: self-review-pr.sh failed (exit $rc) — could not post a verdict marker. Readying anyway; flag this in your handoff." >&2
+                    ;;
+            esac
+        fi
         ;;
 esac
 
