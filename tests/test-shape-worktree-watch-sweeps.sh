@@ -235,16 +235,19 @@ grep -q 'watch.worktree_vanished' "$EVENTS_LOG" \
 green "a transient git failure skips the whole tick instead of mass-flagging every known worktree"
 
 # ============================================================================
-heading "Test 7: a slow removal spanning a tick is NOT misread as unblessed"
+heading "Test 7: a removal spanning nearly two ticks is NOT misread as unblessed"
 # ============================================================================
-# Self-review round 6 finding: kill-worktree.sh logs reap.worktree BEFORE
-# `git worktree remove`, which can itself take real wall-clock time on a
-# big worktree — long enough for a sweep tick to land WHILE it's still
-# running (dir still present, so last-seen keeps advancing past the
-# already-logged event's timestamp). Reproduced directly here: seed,
-# manually log reap.worktree for issue 301, then advance its last-seen
-# timestamp PAST that log line (simulating exactly that mid-removal tick)
-# before the directory actually disappears.
+# Self-review round 6 finding (widened in round 7): kill-worktree.sh logs
+# reap.worktree BEFORE `git worktree remove`, which can itself take real
+# wall-clock time on a big worktree — long enough for one OR TWO sweep
+# ticks to land WHILE it's still running (dir still present, so last-seen
+# keeps advancing past the already-logged event's timestamp). Round 6's
+# fix only padded back one interval; round 7 found a removal spanning two
+# still slipped through, hence the 2x buffer this test now exercises.
+# Reproduced directly here: seed, manually log reap.worktree for issue
+# 301, then advance its last-seen timestamp PAST that log line by nearly
+# two full WATCH_WORKTREE_SWEEP_SECS intervals (simulating exactly that
+# multi-tick mid-removal window) before the directory actually disappears.
 git -C "$PROJECT_DIR" worktree add -q -b fix/issue-301 "$TEST_DIR/wt-issue-301" master
 declare -A KNOWN_WORKTREE_SEEN=()
 WT_INVENTORY_SEEDED=0
@@ -253,18 +256,18 @@ worktree_vanish_sweep_pass   # seed
 
 reap_epoch=$(date +%s)
 log_event reap.worktree "issue=301 branch=fix/issue-301 dir=$TEST_DIR/wt-issue-301"
-# Simulate a last-seen bump 45s after the log line (within the
-# WATCH_WORKTREE_SWEEP_SECS=60 buffer, but still later than reap_epoch) —
-# without the round-6 padding fix this alone reproduces the false alarm.
-KNOWN_WORKTREE_SEEN["$TEST_DIR/wt-issue-301"]=$(( reap_epoch + 45 ))
+# Simulate a last-seen bump 100s after the log line — within the 2x
+# (120s) buffer, but past what a 1x buffer (60s) would have tolerated —
+# without the round-7 widening this reproduces the false alarm again.
+KNOWN_WORKTREE_SEEN["$TEST_DIR/wt-issue-301"]=$(( reap_epoch + 100 ))
 rm -rf "$TEST_DIR/wt-issue-301"
 git -C "$PROJECT_DIR" worktree prune 2>/dev/null || true
 
 worktree_vanish_sweep_pass
 
 grep -q 'watch.worktree_vanished.*issue=301' "$EVENTS_LOG" \
-    && red "a slow-but-blessed removal (last-seen bumped past its own reap.worktree log) must NOT be flagged, events.log: $(cat "$EVENTS_LOG")"
-green "the since-buffer tolerates a last-seen bump landing after the removal's own reap.worktree log"
+    && red "a slow-but-blessed removal spanning nearly two ticks must NOT be flagged, events.log: $(cat "$EVENTS_LOG")"
+green "the 2x since-buffer tolerates a last-seen bump spanning nearly two sweep intervals"
 
 # ─────────────────────────── gh stub (ask 2) ────────────────────────────────
 

@@ -3727,20 +3727,25 @@ worktree_vanish_sweep_pass() {
         [ "$found" = "1" ] && continue
 
         issue="$(basename "$dir" | sed -nE 's/^wt-issue-([0-9]+)$/\1/p')"
-        # issue #439 self-review (round 6): padded back by one sweep
-        # interval, not the bare last-seen timestamp. A `git worktree
-        # remove` on a large worktree can take real wall-clock time — long
-        # enough to span a tick — during which the directory still exists
-        # (still "current"), so its last-seen timestamp keeps advancing
-        # PAST the reap.worktree event kill-worktree.sh already logged
-        # right before starting the removal. Without this buffer, the
-        # eventual tick that finally sees the dir gone computes a `since`
-        # that's already later than that event's own timestamp, and
-        # wt_reap_event_since's `$1 >= since` then misses it — a blessed,
-        # merely slow removal would get flagged as unblessed. Same
-        # bounded-overlap idiom as ACTIVITY_POLL_OVERLAP_SECS elsewhere in
-        # this file.
-        since="$(date -u -d "@$(( KNOWN_WORKTREE_SEEN[$dir] - WATCH_WORKTREE_SWEEP_SECS ))" +'%Y-%m-%dT%H:%M:%SZ')"
+        # issue #439 self-review (round 6, widened in round 7): padded
+        # back by TWO sweep intervals, not the bare last-seen timestamp.
+        # A `git worktree remove` on a large worktree can take real
+        # wall-clock time — long enough to span a tick or two — during
+        # which the directory still exists (still "current"), so its
+        # last-seen timestamp keeps advancing PAST the reap.worktree event
+        # kill-worktree.sh already logged right before starting the
+        # removal. A single interval of padding (round 6) only tolerates a
+        # removal spanning ONE tick; round 7 self-review found a removal
+        # spanning two still slipped through, hence 2x here. Without
+        # enough buffer, the eventual tick that finally sees the dir gone
+        # computes a `since` already later than that event's own
+        # timestamp, and wt_reap_event_since's `$1 >= since` then misses
+        # it — a blessed, merely slow removal gets flagged as unblessed
+        # (noise: one spurious coord-inbox entry, not data loss — the
+        # worktree and its salvage state are exactly what they'd be
+        # either way). Same bounded-overlap idiom as
+        # ACTIVITY_POLL_OVERLAP_SECS elsewhere in this file.
+        since="$(date -u -d "@$(( KNOWN_WORKTREE_SEEN[$dir] - 2 * WATCH_WORKTREE_SWEEP_SECS ))" +'%Y-%m-%dT%H:%M:%SZ')"
         if [ -z "$issue" ] || ! wt_reap_event_since "$issue" "$since"; then
             log_event watch.worktree_vanished "issue=${issue:-?} dir=$dir reason=no_reap_event"
             unblessed_worktree_vanish_notify "${issue:-?}" "$dir"
