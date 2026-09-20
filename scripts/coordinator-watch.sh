@@ -5345,6 +5345,20 @@ maybe_worker_deliver_brief() {
                 compact_retract_queued "$target" worker.deliver "issue=$issue" "$WORKER_COMPACT_BUSY_PATTERN" || true
             fi
             worker_deliver_record_failure "$issue"
+            # Self-review finding (issue #437): if this /quit's effect lands
+            # LATE — just past this timeout, e.g. a slow-to-render CLI
+            # finally processing it a beat after we gave up waiting — the
+            # next cli-state sweep's worker_deliver_detect_claim would
+            # otherwise see prior=$brief_before still set, current=empty,
+            # and misattribute this script's own (merely late) success to
+            # release=listener_claim_after_quit. Clearing here trades that
+            # false attribution for a quieter, already-existing gap
+            # instead — worker.deliver.ok simply doesn't fire for a
+            # brief this attempt gave up on, same as before this feature
+            # existed, and worker.deliver.timeout right above still marks
+            # the moment for a reader piecing the sequence together by
+            # hand. Wrong attribution is worse than none.
+            WORKER_DELIVER_PENDING_SEEN[$issue]=""
             return 0
         fi
     done

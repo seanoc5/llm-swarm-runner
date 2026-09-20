@@ -542,6 +542,25 @@ if grep -q 'worker.deliver.timeout' "$EVENTS_LOG"; then got=timedout; else got=n
 check "agent doesn't recognize /quit -> times out (fails safe)" "timedout" "$got"
 check "pane still 'cli' -> the session was never actually ended" "cli" "$(worker_pane_state "$WIN")"
 
+# Self-review finding (issue #437): a /quit that only takes effect LATE —
+# just past this timeout — must not have that eventual, still-this-
+# script's-own success misattributed to release=listener_claim_after_quit
+# on the next sweep. Simulated here by having the brief vanish (mimicking a
+# delayed effect of the /quit this script already sent) with no further
+# maybe_worker_deliver_brief call in between to re-arm tracking.
+mv "$INBOX_DIR/20260826-150000-42.md" "$PROCESSING_DIR/20260826-150000-42.md" 2>/dev/null || true
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.2
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'sonnet · wt-issue-42 · ctx: 20k/1M (2%)'; printf '❯ \n'; sleep 300" Enter
+check_eventually "pane parked in cli again after the timed-out attempt" "cli" "worker_pane_state '$WIN'"
+maybe_worker_deliver_brief "$WIN"
+if grep -qF "listener_claim_after_quit" "$EVENTS_LOG"; then
+    red "a late self-effected /quit was misattributed to listener_claim_after_quit; events.log: $(cat "$EVENTS_LOG")"
+else
+    green "no misattribution: WORKER_DELIVER_PENDING_SEEN cleared on timeout, so a late own-success stays unlabeled rather than wrongly labeled"
+    PASS=$((PASS + 1))
+fi
+
 heading "Test 8: relaunch-race (issue #344) — /quit followed by an IMMEDIATE relaunch must still record success, never a false timeout/retract into the new session"
 # The bug this closes: worker-listener.sh's claim_next_task() atomically
 # claims the brief and dispatch_agent() re-launches claude within the SAME
