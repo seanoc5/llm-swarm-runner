@@ -3682,37 +3682,44 @@ Check .swarm/salvaged/iss-$issue/ (won't exist if nothing was queued), check iss
 # (reap_dangling) would then log a blessed reap.worktree for it, silently
 # retconning a real unblessed removal into a non-event.
 #
-# issue #439 self-review (round 5): guards against a transient git
-# failure being misread as "every tracked worktree vanished in the same
-# tick". own_worktree_dirs_for_scan can legitimately return EMPTY with no
-# error at all when git itself is healthy but this project genuinely has
-# zero registered worktrees right now (its own git-common-dir check) — a
-# real, common tick this sweep must still process correctly (e.g. a bulk
+# issue #439 self-review (round 5, corrected round 10): guards against a
+# transient git failure being misread as "every tracked worktree vanished
+# in the same tick". own_worktree_dirs_for_scan can legitimately return
+# EMPTY with no error at all when git itself is healthy but this project
+# genuinely has zero registered worktrees right now — a real, common tick
+# this sweep must still process correctly (e.g. a bulk
 # `kill-finished-workers.sh --all --with-worktree` reaping everything at
 # once is exactly this case, and every one of those removals already has
 # its own reap.worktree event). The DIFFERENT failure this guards against
 # is `git worktree list` itself glitching for a tick while the repo is
-# otherwise fine — own_worktree_dirs_for_scan has no way to signal that
-# distinction back to its caller, so this runs the same cheap git-health
-# probe it uses internally, BEFORE trusting an empty/partial "current",
-# and skips the whole tick (touching neither KNOWN_WORKTREE_SEEN nor
-# logging anything) rather than flag a burst of false vanishes.
+# otherwise fine.
+#
+# Round 10: probes `git worktree list` directly, not `rev-parse
+# --git-common-dir` (round 5's original probe). Those are different git
+# operations that fail independently — a round-9 self-review caveat
+# confirmed a `worktree list`-specific glitch could return empty with
+# rc 0 while `rev-parse --git-common-dir` (much cheaper plumbing, no
+# worktree-registry read at all) still succeeds fine, defeating the whole
+# point of this guard. own_worktree_dirs_for_scan's own health probe
+# (used only on ITS empty-fallback path) has the same mismatch, but that
+# path already has a second fallback (the raw wt-issue-* glob) covering
+# it; this sweep has no such fallback, so it needs the precise probe.
 worktree_vanish_sweep_pass() {
     local dir issue now_epoch since found seen
     now_epoch=$(date +%s)
 
-    if ! git -C "$PROJECT_DIR" rev-parse --git-common-dir >/dev/null 2>&1; then
+    if ! git -C "$PROJECT_DIR" worktree list >/dev/null 2>&1; then
         log_event watch.worktree_sweep.error "reason=git_unavailable"
         return 1
     fi
 
-    local -a current=()
+    local -a current_dirs=()
     while IFS= read -r dir; do
-        [ -n "$dir" ] && [ -d "$dir" ] && current+=("$dir")
+        [ -n "$dir" ] && [ -d "$dir" ] && current_dirs+=("$dir")
     done < <(own_worktree_dirs_for_scan "$PROJECT_DIR")
 
     if [ "$WT_INVENTORY_SEEDED" != "1" ]; then
-        for dir in "${current[@]}"; do
+        for dir in "${current_dirs[@]}"; do
             KNOWN_WORKTREE_SEEN["$dir"]=$now_epoch
         done
         WT_INVENTORY_SEEDED=1
@@ -3721,7 +3728,7 @@ worktree_vanish_sweep_pass() {
 
     for dir in "${!KNOWN_WORKTREE_SEEN[@]}"; do
         found=0
-        for seen in "${current[@]}"; do
+        for seen in "${current_dirs[@]}"; do
             [ "$seen" = "$dir" ] && { found=1; break; }
         done
         [ "$found" = "1" ] && continue
@@ -3731,7 +3738,8 @@ worktree_vanish_sweep_pass() {
         # back by TWO sweep intervals, not the bare last-seen timestamp.
         # A `git worktree remove` on a large worktree can take real
         # wall-clock time — long enough to span a tick or two — during
-        # which the directory still exists (still "current"), so its
+        # which the directory still exists (still present in this tick's
+        # scan), so its
         # last-seen timestamp keeps advancing PAST the reap.worktree event
         # kill-worktree.sh already logged right before starting the
         # removal. A single interval of padding (round 6) only tolerates a
@@ -3753,7 +3761,7 @@ worktree_vanish_sweep_pass() {
         unset 'KNOWN_WORKTREE_SEEN[$dir]'
     done
 
-    for dir in "${current[@]}"; do
+    for dir in "${current_dirs[@]}"; do
         KNOWN_WORKTREE_SEEN["$dir"]=$now_epoch
     done
 }
@@ -3772,39 +3780,39 @@ worktree_vanish_sweep_pass() {
 # helpers (see e.g. mtime_epoch elsewhere in this codebase).
 post_pending_brief_marker_sweep() {
     local pr="$1" wt="$2" brief_file="$3"
-    local -a body=()
-    body+=('<!-- SWARM_PENDING_BRIEF: queued -->')
-    body+=(':warning: **Swarm: a follow-up brief is queued for the worker on this PR** (found by coordinator-watch.sh'"'"'s periodic sweep, issue #439 — most likely queued before this PR existed, so requeue.sh'"'"'s own marker never posted).')
-    body+=('')
-    body+=('Merging now may ship without that queued fix.')
+    local -a comment_body=()
+    comment_body+=('<!-- SWARM_PENDING_BRIEF: queued -->')
+    comment_body+=(':warning: **Swarm: a follow-up brief is queued for the worker on this PR** (found by coordinator-watch.sh'"'"'s periodic sweep, issue #439 — most likely queued before this PR existed, so requeue.sh'"'"'s own marker never posted).')
+    comment_body+=('')
+    comment_body+=('Merging now may ship without that queued fix.')
 
     if [ -r "$brief_file" ]; then
         local max_lines=20 total excerpt
         total="$(wc -l < "$brief_file" 2>/dev/null || echo 0)"
         excerpt="$(head -n "$max_lines" "$brief_file" 2>/dev/null | cut -c1-200 | sed -e 's/`\{6,\}/[fence]/g')"
         if [ -n "$excerpt" ]; then
-            body+=('')
-            body+=('<details><summary><b>What was queued</b> (head of the brief — judge severity without leaving this page)</summary>')
-            body+=('')
-            body+=('``````text')
-            body+=("$excerpt")
-            [ "${total:-0}" -gt "$max_lines" ] && body+=("$(printf '… truncated (%s more lines)' "$((total - max_lines))")")
-            body+=('``````')
-            body+=('</details>')
+            comment_body+=('')
+            comment_body+=('<details><summary><b>What was queued</b> (head of the brief — judge severity without leaving this page)</summary>')
+            comment_body+=('')
+            comment_body+=('``````text')
+            comment_body+=("$excerpt")
+            [ "${total:-0}" -gt "$max_lines" ] && comment_body+=("$(printf '… truncated (%s more lines)' "$((total - max_lines))")")
+            comment_body+=('``````')
+            comment_body+=('</details>')
         fi
     fi
 
-    body+=('')
-    body+=('**Next steps — pick one:**')
-    body+=('')
-    body+=("$(printf '1. **Check whether it is still pending** — on the swarm host:\n   ```bash\n   ls -1 %s/.swarm/tasks/{inbox,processing}\n   ```\n   A file in `inbox/` means not yet claimed; in `processing/` means the worker is on it.' "$wt")")
-    body+=('2. **Merge anyway.** Nothing re-dispatches the brief for you. If the worktree is later reaped, the brief is salvaged and a `SWARM_BRIEF_ORPHANED` comment appears here — but that is a record, not a fix.')
-    body+=("$(printf '3. **Cancel it** if the brief is obsolete — remove the file(s) listed above from `%s/.swarm/tasks/inbox/`.' "$wt")")
-    body+=('')
-    body+=('<sub>scripts/coordinator-watch.sh pending_brief_marker_sweep_pass — issue #439 (marker gap when a brief predates its PR).</sub>')
+    comment_body+=('')
+    comment_body+=('**Next steps — pick one:**')
+    comment_body+=('')
+    comment_body+=("$(printf '1. **Check whether it is still pending** — on the swarm host:\n   ```bash\n   ls -1 %s/.swarm/tasks/{inbox,processing}\n   ```\n   A file in `inbox/` means not yet claimed; in `processing/` means the worker is on it.' "$wt")")
+    comment_body+=('2. **Merge anyway.** Nothing re-dispatches the brief for you. If the worktree is later reaped, the brief is salvaged and a `SWARM_BRIEF_ORPHANED` comment appears here — but that is a record, not a fix.')
+    comment_body+=("$(printf '3. **Cancel it** if the brief is obsolete — remove the file(s) listed above from `%s/.swarm/tasks/inbox/`.' "$wt")")
+    comment_body+=('')
+    comment_body+=('<sub>scripts/coordinator-watch.sh pending_brief_marker_sweep_pass — issue #439 (marker gap when a brief predates its PR).</sub>')
 
     local comment
-    comment="$(printf '%s\n' "${body[@]}")"
+    comment="$(printf '%s\n' "${comment_body[@]}")"
     # issue #439 self-review (round 6): `cd "$wt" &&`, matching every other
     # gh call in this file (e.g. activity_poll_pass) — gh resolves the
     # target repo from the CALLER's cwd absent -R, so a coordinator-watch.sh
