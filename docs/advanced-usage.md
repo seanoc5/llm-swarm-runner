@@ -216,7 +216,34 @@ Re-run the same command any time the seed goes stale (new dependency versions la
 
 Unset or empty (the default) produces byte-identical `docker run` args to before this knob existed — no extra mount, no `GRADLE_RO_DEP_CACHE`. If the configured path exists but has no `<dir>/gradle/modules-2`, `sandbox.sh` warns to stderr and skips the mount rather than blocking worker launch — a stale or mistyped host config shouldn't make every worker unlaunchable.
 
-This covers the Gradle half only. Maven's local repo (`~/.m2/repository`) isn't safe to mount `:ro` the same way — Maven writes `_remote.repositories`/`.lastUpdated` markers during normal resolution and has no read-only shared-cache mode, so a `:ro` mount reads cache hits but fails hard on the first miss instead of falling back to the network. A Maven-side equivalent, if needed, would be a mirror/proxy rather than a direct mount (tracked separately, not covered by this knob).
+This covers the Gradle half only. Maven's local repo (`~/.m2/repository`) isn't safe to mount `:ro` the same way — Maven writes `_remote.repositories`/`.lastUpdated` markers during normal resolution and has no read-only shared-cache mode, so a `:ro` mount reads cache hits but fails hard on the first miss instead of falling back to the network. A Maven-side equivalent, if needed, would be a mirror/proxy rather than a direct mount (tracked separately, not covered by this knob). The Python/uv half is covered by the same `SANDBOX_DEP_CACHE` knob, next.
+
+### Shared uv package cache (`SANDBOX_DEP_CACHE`)
+
+The same `SANDBOX_DEP_CACHE` knob above also wires up a shared cache for `uv`-based Python swarms (`uv venv` + `uv pip install`/`uv sync`), so a fresh worktree doesn't re-download the same wheels from PyPI in every worker container ([#434](https://github.com/seanoc5/llm-swarm-runner/issues/434)). Set it once — no separate variable needed:
+
+```bash
+# /opt/work/myproject/.swarm/.env  — gitignored
+SANDBOX_DEP_CACHE=/opt/swarm-cache
+```
+
+`sandbox.sh` mounts `<dir>/uv` (`/opt/swarm-cache/uv` in the example above) into the container at that same path and exports `UV_CACHE_DIR` pointing at it, so `uv` reads/writes it instead of the container's empty default `~/.cache/uv`.
+
+**This mount is `:rw`, not `:ro` — deliberately, and unlike the Gradle mount above.** uv has no read-only shared-cache mode: verified directly, pointing `UV_CACHE_DIR` at a `:ro` mount makes even a pure cache-hit `uv pip install` fail outright (`Failed to initialize cache ... Permission denied`), because uv writes bookkeeping/lock files into the cache dir on every invocation, not only on a miss. A straight read-only mount — the Gradle shape — simply does not work here.
+
+Making it writable from every worker container at once is safe *for uv specifically*, in a way it is **not** for Gradle's `modules-2`: uv's cache is content-addressed and uv takes its own advisory locks around cache writes, so concurrent writers sharing one cache dir don't corrupt it — this is the same design that already lets many unrelated projects on a single laptop safely share one `~/.cache/uv`. Verified directly (this issue's acceptance criteria): 5 concurrent `uv pip install` runs of distinct packages against one shared, initially-empty cache directory all completed in well under a second, with no corruption, no errors, and no serialization on the cache's own lock file; a follow-up run against the same seeded cache with `--offline` succeeded with zero network access, confirming the cache hit path end-to-end.
+
+**No pre-seed required.** Unlike Gradle's `modules-2`, uv creates its own subdirectory structure (`wheels-v*`, `archive-v0`, `simple-v*`, etc. — the version suffixes are uv's own cache-format versioning, not something to hand-track) on first write, so a missing or empty `<dir>/uv` just means the first worker to want a given package pays the PyPI fetch and every later worker/container gets a hit; `sandbox.sh` creates the directory itself if it doesn't already exist. To warm it ahead of time anyway (e.g. right after bumping `SANDBOX_DEP_CACHE` to a fresh path), point `UV_CACHE_DIR` at it for a one-off host-side install:
+
+```bash
+UV_CACHE_DIR=/opt/swarm-cache/uv uv pip install --python <path-to-a-venv> -e ".[dev]"
+```
+
+**Still never `$HOME/.cache/uv`**, same posture as the Gradle cache even though concurrent writers are verified safe here: keep the swarm's shared cache at a dedicated path, not entangled with the coordinator's own host-side uv state (which may be a different uv version, resolving different projects). The coordinator itself is unaffected either way unless something points its own `UV_CACHE_DIR` at the same shared path.
+
+Unset or empty (the default) produces byte-identical `docker run` args to before this knob existed — no extra mount, no `UV_CACHE_DIR`. If the configured base path can't be created or written, `sandbox.sh` warns to stderr and skips the mount rather than blocking worker launch, mirroring the Gradle behavior.
+
+**Performance note, not a correctness issue:** `uv` prefers to hardlink wheels from its cache into a venv rather than copy them. Since the cache mount and the project mount are two independent bind mounts, expect `warning: Failed to hardlink files; falling back to full copy` on every install — harmless, but if the extra copy time matters at your scale, set `UV_LINK_MODE=copy` (e.g. in `.sandbox-env`) to make the fallback explicit and silence the warning.
 
 ### Local caching Maven/Gradle repository proxy (`SANDBOX_DEP_PROXY_URL`)
 
