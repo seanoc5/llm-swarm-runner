@@ -308,11 +308,19 @@ reap_dangling() {
     if [ "$NO_COMPOSE_DOWN" != "1" ] && [ -x "$SCRIPT_DIR/_compose-down-for-worktree.sh" ]; then
         "$SCRIPT_DIR/_compose-down-for-worktree.sh" "$wt" || echo "  WARN: compose-down helper exited non-zero (continuing)"
     fi
-    # issue #439 self-review: logged BEFORE the rm -rf, same race-closing
-    # reason as kill-worktree.sh's own reap.worktree call.
-    log_event reap.worktree "issue=$issue branch=fix/issue-$issue dir=$wt caller=reap-orphan-worktrees.sh(dangling)"
-    rm -rf -- "$wt"
-    echo "  ✓ removed worktree directory"
+    # issue #446 self-review: logged AFTER a successful rm -rf, not before —
+    # see kill-worktree.sh's matching comment. Logging first (the original
+    # issue #439 rationale) would leave a blessed reap.worktree event on
+    # record even when `rm -rf` fails (set -euo pipefail aborts right
+    # after), masking a genuinely unblessed removal of the same directory.
+    if rm -rf -- "$wt"; then
+        log_event reap.worktree "issue=$issue branch=fix/issue-$issue dir=$wt caller=reap-orphan-worktrees.sh(dangling)"
+        echo "  ✓ removed worktree directory"
+    else
+        log_event reap.worktree.error "issue=$issue branch=fix/issue-$issue dir=$wt caller=reap-orphan-worktrees.sh(dangling) reason=rm_failed"
+        echo "  ✗ ERROR: rm -rf failed for $wt — no reap.worktree event logged" >&2
+        exit 1
+    fi
     if [ -e "$admin_dir" ]; then
         rm -rf -- "$admin_dir"
         echo "  ✓ removed stale worktree registration ($admin_dir)"

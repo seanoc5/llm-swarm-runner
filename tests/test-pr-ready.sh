@@ -139,15 +139,15 @@ gh_ready_called || red "expected gh pr ready to still run when WORKER_SELF_REVIE
 green "WORKER_SELF_REVIEW=0 skips the call entirely (never reaches --force) and still readies"
 
 # ============================================================================
-heading "Test 6: self-review errors (exit 1) — WARNs, readies anyway (fail open)"
+heading "Test 6: self-review errors (exit 1) — REFUSES, gh pr ready NEVER runs (fail closed, issue #446)"
 # ============================================================================
 printf '<!-- BLIND_MERGE_RISK: medium -->\nsome change\n' > "$BODY_FILE"
 make_fake_review 1
 rc=0; run_pr_ready || rc=$?
-[ "$rc" -eq 0 ] || red "expected exit 0 when self-review errors, got $rc: $(cat "$TEST_DIR/out.log")"
-gh_ready_called || red "expected gh pr ready to still run when self-review errored"
-grep -qi 'WARN' "$TEST_DIR/out.log" || red "expected a WARN in output for a self-review failure: $(cat "$TEST_DIR/out.log")"
-green "a self-review infra failure WARNs loudly but fails open (never silently blocks readiness)"
+[ "$rc" -eq 2 ] || red "expected exit 2 when self-review errors, got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called && red "expected gh pr ready NOT to run when self-review errored (exit 1 conflates infra failure with an unparseable verdict that could be a real BLOCK)"
+grep -qi 'REFUSED' "$TEST_DIR/out.log" || red "expected a REFUSED message in output: $(cat "$TEST_DIR/out.log")"
+green "a self-review exit 1 (infra failure or unparseable verdict) fails closed, same as an explicit BLOCK"
 
 # ============================================================================
 heading "Test 7: no BLIND_MERGE_RISK marker at all — treated as medium"

@@ -247,11 +247,18 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Append-only structured event log — same format/location as
 # coordinator-watch.sh / kill-finished-workers.sh (EVENTS_LOG, log_event).
-# issue #439: this is the ONE place an actual `git worktree remove` for an
-# issue happens, regardless of caller — a human running this script
-# directly, reap-orphan-worktrees.sh, or kill-finished-workers.sh's
-# --with-worktree path all route through here. Logging it here rather than
-# in each caller is what lets coordinator-watch.sh's worktree-vanish sweep
+# issue #439: this is where a `git worktree remove` for a healthy
+# (non-dangling) registration happens for every caller that reaps one — a
+# human running this script directly, reap-orphan-worktrees.sh's
+# healthy-registration path, or kill-finished-workers.sh's --with-worktree
+# path all route through here. It is NOT the only site in this codebase
+# that removes a worktree, though: reap-orphan-worktrees.sh's reap_dangling
+# bypasses this script entirely for a dangling registration (git commands
+# don't work inside one), and swarm-merge.sh has its own fallback removal
+# for when the watcher hasn't reaped in time — both log their own
+# `reap.worktree` event directly, same shape as this one (issue #446).
+# Logging it at each of those three independent sites, all with the same
+# event shape, is what lets coordinator-watch.sh's worktree-vanish sweep
 # (worktree_vanish_sweep_pass) tell a script-driven removal apart from a
 # bare `git worktree remove` run outside all of this tooling — the failure
 # mode issue #439 exists to catch.
@@ -364,13 +371,27 @@ if [ -d "$WT" ]; then
     else
         "$SCRIPT_DIR/_compose-down-for-worktree.sh" "$WT" || echo "  WARN: compose-down helper exited non-zero (continuing)"
     fi
-    # issue #439 self-review: logged BEFORE the removal, not after — closes
-    # a sub-second race where coordinator-watch.sh's worktree_vanish_sweep_pass
-    # could observe the directory already gone but the reap.worktree event
-    # not yet written, misreading a perfectly blessed removal as unblessed.
-    log_event reap.worktree "issue=$ISSUE branch=${ACTUAL_BRANCH:-$BRANCH} dir=$WT"
-    git worktree remove --force "$WT"
-    echo "  ✓ removed worktree"
+    # issue #446 self-review: logged AFTER a successful removal, not before.
+    # An earlier issue #439 self-review moved this ahead of the removal to
+    # close a sub-second race against coordinator-watch.sh's
+    # worktree_vanish_sweep_pass (dir gone, event not yet written) — but
+    # that traded a rare false positive for a real false negative: under
+    # `set -euo pipefail`, a `git worktree remove` failure here would abort
+    # the script right after a blessed reap.worktree event was already on
+    # record for a worktree that's still sitting there, masking a
+    # genuinely unblessed removal of the same directory within the sweep's
+    # lookback window. The sweep already pads that lookback by 2x
+    # WATCH_WORKTREE_SWEEP_SECS (round 7) to absorb a removal taking real
+    # wall-clock time, which comfortably covers the sub-second gap this
+    # reordering reopens.
+    if git worktree remove --force "$WT"; then
+        log_event reap.worktree "issue=$ISSUE branch=${ACTUAL_BRANCH:-$BRANCH} dir=$WT"
+        echo "  ✓ removed worktree"
+    else
+        log_event reap.worktree.error "issue=$ISSUE branch=${ACTUAL_BRANCH:-$BRANCH} dir=$WT reason=remove_failed"
+        echo "  ✗ ERROR: git worktree remove failed for $WT — left in place, no reap.worktree event logged" >&2
+        exit 1
+    fi
 else
     echo "  - worktree dir not present (skipped)"
 fi

@@ -30,16 +30,27 @@
 #                    WORKER_SELF_REVIEW=0    -> skips the call, proceeds anyway
 #                    BLOCK                   -> refuses to ready, exit 2
 #                    APPROVE / WITH_CAVEATS  -> proceeds to `gh pr ready`
-#                    error (gh/claude failure) -> WARNs, proceeds anyway
-#                      (fail open: self-review infra being down must never
-#                      silently block a PR from ever going ready — but this
-#                      is printed loudly, not swallowed, per worker.md's
-#                      "never silently bypass the layer")
-#   missing/unparseable  treated as medium (fail toward requiring review)
+#                    self-review-pr.sh exit 1 -> refuses to ready, exit 2
+#                      (fail CLOSED, issue #446: self-review-pr.sh's own exit
+#                      1 conflates a genuine gh/claude infra failure with an
+#                      UNPARSEABLE VERDICT — a real BLOCK the review session
+#                      failed to emit in the exact expected form. This
+#                      script can't tell those two apart from the exit code
+#                      alone, and a swallowed BLOCK is worse than an
+#                      inconvenient refusal, so both now block readying the
+#                      same as an explicit BLOCK — printed loudly, not
+#                      swallowed, per worker.md's "never silently bypass the
+#                      layer". Inspect the review output above, then either
+#                      fix the real finding or re-run once the infra issue
+#                      clears.)
+#   missing/unparseable BLIND_MERGE_RISK marker: treated as medium (fail
+#                      toward requiring review)
 #
 # Exit codes:
 #   0  readied (gh pr ready ran)
-#   2  refused — self-review returned BLOCK
+#   2  refused — self-review returned BLOCK, or self-review-pr.sh exited 1
+#      (infra failure or an unparseable verdict, indistinguishable from the
+#      exit code alone — issue #446, treated as blocking either way)
 #   1  usage / gh error resolving the PR body
 set -euo pipefail
 
@@ -116,9 +127,18 @@ case "$RISK" in
                     # WORKER_SELF_REVIEW=0) is unreachable here — we always
                     # pass --force once we've decided to call it at all, and
                     # the WORKER_SELF_REVIEW=0 case is handled above, before
-                    # this call, instead. So anything landing here is a
-                    # genuine error (gh/claude failure, exit 1).
-                    echo "pr-ready: WARN: self-review-pr.sh failed (exit $rc) — could not post a verdict marker. Readying anyway; flag this in your handoff." >&2
+                    # this call, instead. So anything landing here is exit 1:
+                    # per self-review-pr.sh's own header, that's EITHER a
+                    # genuine gh/claude infra failure OR an unparseable
+                    # verdict — a real BLOCK the review session failed to
+                    # emit in the exact expected form. issue #446
+                    # self-review: fails CLOSED here instead of WARNing and
+                    # readying anyway — an unparseable verdict could be
+                    # hiding a real BLOCK, and this gate exists precisely
+                    # for the ambiguous cases.
+                    echo "pr-ready: REFUSED — self-review-pr.sh exited $rc for PR #$PR (infra failure or an unparseable verdict — can't tell which from the exit code, so treating it as blocking)." >&2
+                    echo "          Inspect the review output above, then fix the finding or re-run once the infra issue has cleared." >&2
+                    exit 2
                     ;;
             esac
         fi

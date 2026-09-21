@@ -341,10 +341,15 @@
 #                           its callers destroys any brief still queued in
 #                           that worktree's .swarm/tasks/{inbox,processing,
 #                           outbox}/ with no salvage and no record at all,
-#                           and today nothing notices. kill-worktree.sh now
-#                           logs a `reap.worktree` event on every removal it
-#                           performs (regardless of caller — see its own
-#                           header comment), so this sweep can diff `git
+#                           and today nothing notices. Every one of the
+#                           three sites in this codebase that actually
+#                           remove a worktree — kill-worktree.sh (covering
+#                           this script's callers), reap-orphan-worktrees.sh's
+#                           reap_dangling, and swarm-merge.sh's fallback
+#                           removal (issue #446; see kill-worktree.sh's own
+#                           header comment for the full topology) — now logs
+#                           a `reap.worktree` event on a successful removal,
+#                           so this sweep can diff `git
 #                           worktree list` against its own in-memory
 #                           inventory (seeded on the first tick — a worktree
 #                           already gone before the watcher started is never
@@ -1738,7 +1743,9 @@ EVENTS LOG
       reap.window          per-target kill record written by kill-finished-workers.sh
                            (issue, window, branch, reasons, capture=<pane snapshot path>)
       reap.worktree        (issue #439) a worktree was actually removed (issue, branch, dir)
-                           — logged, right before the removal, by each of the three sites in
+                           — logged, right after the removal SUCCEEDS (issue #446: moved from
+                           before to after so a failed removal can't leave a blessed event on
+                           record for a still-present worktree), by each of the three sites in
                            this codebase that ever do it: kill-worktree.sh (covering this
                            script and kill-finished-workers.sh's --with-worktree path, its
                            only callers), reap-orphan-worktrees.sh's own dangling-registration
@@ -1746,6 +1753,11 @@ EVENTS LOG
                            same event shape, so worktree_vanish_sweep_pass below can check for
                            it regardless of which one triggered the removal, before flagging a
                            disappearance as unblessed
+      reap.worktree.error  (issue #446) the removal at one of those same three call sites
+                           failed (issue, branch, dir, reason=remove_failed|rm_failed) — no
+                           reap.worktree event was logged for it, so the worktree stays
+                           "known" and a later genuine disappearance still gets caught by
+                           worktree_vanish_sweep_pass
       watch.timer.start    a background timer loop started — pr-poll/check-on-done
                            timer loop, and/or (issue #226) the separate
                            worker-compact loop; up to two lines, one per loop
@@ -2618,6 +2630,7 @@ format_event_line() {
         watch.orphan_sweep)             glyph="♻"; color=$'\033[36m' ;;
         reap.window)                    glyph="✂"; color=$'\033[36m' ;;
         reap.worktree)                  glyph="✂"; color=$'\033[36m' ;;
+        reap.worktree.error)            glyph="✗"; color=$'\033[31m' ;;
         watch.worktree_vanished)        glyph="⚠"; color=$'\033[31m' ;;
         watch.worktree_sweep.error)     glyph="✗"; color=$'\033[31m' ;;
         watch.pending_brief_sweep)      glyph="✉"; color=$'\033[33m' ;;

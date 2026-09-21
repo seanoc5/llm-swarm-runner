@@ -709,7 +709,10 @@ binds.
 full verdict to your terminal and landing the marker on the PR itself
 BEFORE it goes ready — visible to swarm-merge.sh's BLOCK gate and to a
 human merging straight from the GitHub web UI, with zero coordinator
-involvement either way. A BLOCK verdict refuses to ready at all (exit 2).
+involvement either way. A BLOCK verdict refuses to ready at all (exit 2) —
+and so does self-review-pr.sh erroring or emitting an unparseable verdict
+(issue #446: that exit code can't be told apart from a real BLOCK the
+review session failed to emit in the expected form, so it's treated as one).
 This replaces the manual snippet under § "Self-review before merge"
 below entirely for the normal flow — see that section for when the
 manual fallback still applies.
