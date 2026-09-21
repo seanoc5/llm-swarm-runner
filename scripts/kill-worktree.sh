@@ -380,10 +380,18 @@ if [ -d "$WT" ]; then
     # the script right after a blessed reap.worktree event was already on
     # record for a worktree that's still sitting there, masking a
     # genuinely unblessed removal of the same directory within the sweep's
-    # lookback window. The sweep already pads that lookback by 2x
-    # WATCH_WORKTREE_SWEEP_SECS (round 7) to absorb a removal taking real
-    # wall-clock time, which comfortably covers the sub-second gap this
-    # reordering reopens.
+    # lookback window. That's strictly worse than reopening the sub-second
+    # race: this reordering brings back a tiny window where a sweep tick
+    # landing between `git worktree remove` completing and this log line
+    # executing sees the dir gone with no event yet — the sweep's 2x
+    # WATCH_WORKTREE_SWEEP_SECS lookback padding (round 7) doesn't close
+    # that (it can't find an event that hasn't been written yet, no matter
+    # how far back `since` is padded), so worst case is one spurious
+    # coord-inbox "worktree vanished" entry for a perfectly blessed
+    # removal — noise, not data loss (the salvage/removal itself already
+    # happened correctly by this point). Accepted trade: a rare false
+    # positive here beats a false negative that could hide a real
+    # unblessed removal.
     if git worktree remove --force "$WT"; then
         log_event reap.worktree "issue=$ISSUE branch=${ACTUAL_BRANCH:-$BRANCH} dir=$WT"
         echo "  ✓ removed worktree"

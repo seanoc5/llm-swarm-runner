@@ -237,17 +237,26 @@ green "a transient git failure skips the whole tick instead of mass-flagging eve
 # ============================================================================
 heading "Test 7: a removal spanning nearly two ticks is NOT misread as unblessed"
 # ============================================================================
-# Self-review round 6 finding (widened in round 7): kill-worktree.sh logs
-# reap.worktree BEFORE `git worktree remove`, which can itself take real
-# wall-clock time on a big worktree — long enough for one OR TWO sweep
-# ticks to land WHILE it's still running (dir still present, so last-seen
-# keeps advancing past the already-logged event's timestamp). Round 6's
-# fix only padded back one interval; round 7 found a removal spanning two
-# still slipped through, hence the 2x buffer this test now exercises.
+# Self-review round 6 finding (widened in round 7): a `git worktree
+# remove` (or the compose-down step immediately before it) can itself take
+# real wall-clock time on a big worktree — long enough for one OR TWO
+# sweep ticks to land WHILE it's still running (dir still present, so
+# last-seen keeps advancing). issue #446 self-review moved kill-worktree.sh's
+# reap.worktree logging to AFTER a successful removal, not before as this
+# comment used to say — so the event and the directory's actual
+# disappearance now land close together in real time, rather than the
+# event sitting on record however long the removal then takes. The 2x
+# buffer this test exercises is still worth keeping as defense-in-depth
+# against ordinary tick-cadence slop between the sweep's
+# last-confirmed-present bookkeeping and the moment the event is actually
+# written, not (as originally) tolerance for a removal that finishes long
+# after an early-logged event. Round 6's fix only padded back one
+# interval; round 7 found a removal spanning two still slipped through,
+# hence the 2x buffer.
 # Reproduced directly here: seed, manually log reap.worktree for issue
 # 301, then advance its last-seen timestamp PAST that log line by nearly
-# two full WATCH_WORKTREE_SWEEP_SECS intervals (simulating exactly that
-# multi-tick mid-removal window) before the directory actually disappears.
+# two full WATCH_WORKTREE_SWEEP_SECS intervals (simulating that tick-cadence
+# slop) before the directory actually disappears.
 git -C "$PROJECT_DIR" worktree add -q -b fix/issue-301 "$TEST_DIR/wt-issue-301" master
 declare -A KNOWN_WORKTREE_SEEN=()
 WT_INVENTORY_SEEDED=0
