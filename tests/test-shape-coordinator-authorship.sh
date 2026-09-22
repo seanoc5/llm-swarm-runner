@@ -162,6 +162,9 @@ case "$1 $2" in
             exit 1
         fi
         exit "${GH_CHECKS_RC:-0}" ;;
+    "api repos/{owner}/{repo}/actions/workflows")
+        echo "${GH_WORKFLOW_COUNT:-1}"
+        exit 0 ;;
     "pr merge") exit 0 ;;
     "pr list")
         cat "$GH_PR_LIST"; exit 0 ;;
@@ -394,11 +397,15 @@ heading "Test 17: swarm-merge.sh --auto-low treats 'no CI checks configured' as 
 # CI-less repo shouldn't silently lose auto-merge (gh pr checks exits
 # non-zero with "no checks reported..." when nothing is configured at all,
 # indistinguishable by exit code alone from a real failure) — proceed, but
-# log it loudly as a merge.gate event rather than refuse.
+# log it loudly as a merge.gate event rather than refuse. GH_WORKFLOW_COUNT=0
+# is the repo-level, timing-independent signal ci-wait.sh actually keys
+# this on (see ci-wait.sh's own race-condition test) — "no checks reported"
+# alone isn't enough, since that same text also fires mid-race for a repo
+# that DOES have CI configured.
 : > "$GH_LOG"
 EVENTS_LOG="$CLONE/.swarm/events.log"
 rm -f "$EVENTS_LOG"
-if OUT=$(GH_CHECKS_NO_CHECKS=1 "$MERGE" 501 --auto-low 2>&1); then RC=0; else RC=$?; fi
+if OUT=$(GH_CHECKS_NO_CHECKS=1 GH_WORKFLOW_COUNT=0 "$MERGE" 501 --auto-low 2>&1); then RC=0; else RC=$?; fi
 [ "$RC" -eq 0 ] || red "swarm-merge --auto-low should proceed on a CI-less repo (rc=$RC, output: $OUT)"
 echo "$OUT" | grep -qi "no ci checks configured" || red "must warn loudly about the CI absence"
 grep -q "pr merge 501" "$GH_LOG" || red "gh pr merge 501 was not called despite the CI-less pass-with-warning"
