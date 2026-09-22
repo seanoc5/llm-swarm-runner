@@ -67,8 +67,14 @@
 # (worker-listener.sh's exit-triggered write is the only completion
 # record, and the coordinator's status/PR-poll signals just log
 # watch.reconcile with no synthesized record and no wake) — degraded, not
-# wedged: the task still finishes correctly, it just doesn't wake the
-# coordinator until the agent process actually exits. Update
+# wedged: the task still finishes correctly. If the agent process later
+# does exit, the wake still fires then, just later than usual. But if the
+# worktree gets REAPED first (a merged PR triggers pr_poll_pass's reap
+# before the process ever exits — see this PR's own "Follow-up
+# suggestions" for the tracking issue), that wake is lost permanently,
+# not merely delayed: the reap removes the worktree the write would have
+# needed, and activity_poll_pass's own live-worktree skip plus cursor
+# advance mean it is never retroactively announced either. Update
 # $LLM_SWARM_DIR to pick up this script.
 set -euo pipefail
 
