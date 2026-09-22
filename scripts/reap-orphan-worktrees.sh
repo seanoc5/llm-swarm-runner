@@ -150,6 +150,26 @@ if [ ! -d "$PROJECT_DIR/.git" ] && ! git -C "$PROJECT_DIR" rev-parse --git-dir >
     exit 1
 fi
 
+# Append-only structured event log — same format/location as
+# kill-worktree.sh/kill-finished-workers.sh. issue #439 self-review: the
+# healthy-registration reap path below already gets a `reap.worktree` event
+# for free (it calls kill-worktree.sh, which logs one on every removal), but
+# reap_dangling()'s own direct `rm -rf` bypasses kill-worktree.sh entirely —
+# without logging one here too, coordinator-watch.sh's worktree_vanish_sweep_pass
+# would flag every dangling-worktree reap as an unblessed removal, even
+# though own_worktree_dirs_for_scan (swarm_own_worktree_dirs) explicitly
+# tracks dangling worktrees as part of this project's own inventory. Placed
+# after PROJECT_DIR's final resolution above (not up with the other
+# defaults) since -p/--project can override it.
+EVENTS_LOG="$PROJECT_DIR/.swarm/events.log"
+mkdir -p "$(dirname "$EVENTS_LOG")" 2>/dev/null || true
+log_event() {
+    local cat="$1"; shift
+    local ts
+    ts="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+    printf '%s  %-15s %s\n' "$ts" "$cat" "$*" >> "$EVENTS_LOG" 2>/dev/null || true
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KILL_WT="$SCRIPT_DIR/kill-worktree.sh"
 
@@ -288,8 +308,19 @@ reap_dangling() {
     if [ "$NO_COMPOSE_DOWN" != "1" ] && [ -x "$SCRIPT_DIR/_compose-down-for-worktree.sh" ]; then
         "$SCRIPT_DIR/_compose-down-for-worktree.sh" "$wt" || echo "  WARN: compose-down helper exited non-zero (continuing)"
     fi
-    rm -rf -- "$wt"
-    echo "  ✓ removed worktree directory"
+    # issue #446 self-review: logged AFTER a successful rm -rf, not before —
+    # see kill-worktree.sh's matching comment. Logging first (the original
+    # issue #439 rationale) would leave a blessed reap.worktree event on
+    # record even when `rm -rf` fails (set -euo pipefail aborts right
+    # after), masking a genuinely unblessed removal of the same directory.
+    if rm -rf -- "$wt"; then
+        log_event reap.worktree "issue=$issue branch=fix/issue-$issue dir=$wt caller=reap-orphan-worktrees.sh(dangling)"
+        echo "  ✓ removed worktree directory"
+    else
+        log_event reap.worktree.error "issue=$issue branch=fix/issue-$issue dir=$wt caller=reap-orphan-worktrees.sh(dangling) reason=rm_failed"
+        echo "  ✗ ERROR: rm -rf failed for $wt — no reap.worktree event logged" >&2
+        exit 1
+    fi
     if [ -e "$admin_dir" ]; then
         rm -rf -- "$admin_dir"
         echo "  ✓ removed stale worktree registration ($admin_dir)"

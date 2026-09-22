@@ -692,16 +692,30 @@ prose — see "Issue skeleton" below.
 ### Draft first, ready only once the body is final
 
 Open every PR with `gh pr create --draft` — a placeholder body (e.g. "wip,
-finalizing body after self-review") is fine at this point; the PR only needs
-to exist so self-review has something to `gh pr diff`/`gh pr view` against.
-Do the self-review, write the finalized body (risk marker + skeleton, both
-below), run `scripts/lint-pr-screen.sh <N>` until it exits 0, then run
-`gh pr ready <N>` — in that order. A draft with a
-placeholder body reads as "still wrapping up" to anything watching (the
-coordinator, a stale-PR nudge, a human on the wake digest); a *ready* PR
-with a placeholder body reads as a policy violation, because nothing marks
-it as unfinished. `gh pr ready`, not the initial `gh pr create`, is the
-point the risk-marker/skeleton requirement below actually binds.
+finalizing body after self-review") is fine at this point. Write the
+finalized body (risk marker + skeleton, both below), run
+`scripts/lint-pr-screen.sh <N>` until it exits 0, then run
+`scripts/pr-ready.sh <N>` (NOT bare `gh pr ready <N>` — see below), which
+runs self-review for you on a 🟡/🔴 PR — in that order. A draft with a
+placeholder body reads as "still wrapping up" to
+anything watching (the coordinator, a stale-PR nudge, a human on the wake
+digest); a *ready* PR with a placeholder body reads as a policy violation,
+because nothing marks it as unfinished. Readying, not the initial `gh pr
+create`, is the point the risk-marker/skeleton requirement below actually
+binds.
+
+`scripts/pr-ready.sh <N>` wraps `gh pr ready` with one addition (issue
+#439): for a 🟡/🔴 PR it runs `self-review-pr.sh --post` first, printing the
+full verdict to your terminal and landing the marker on the PR itself
+BEFORE it goes ready — visible to swarm-merge.sh's BLOCK gate and to a
+human merging straight from the GitHub web UI, with zero coordinator
+involvement either way. A BLOCK verdict refuses to ready at all (exit 2) —
+and so does self-review-pr.sh erroring or emitting an unparseable verdict
+(issue #446: that exit code can't be told apart from a real BLOCK the
+review session failed to emit in the expected form, so it's treated as one).
+This replaces the manual snippet under § "Self-review before merge"
+below entirely for the normal flow — see that section for when the
+manual fallback still applies.
 
 Every `gh pr create` and any `gh pr edit --body` MUST include both, once the
 PR is (or is about to become) ready — a draft's placeholder body is exempt:
@@ -749,8 +763,30 @@ it's coordinator/merge-time machinery, not a worker-side step.
 
 ### Self-review before merge
 
-Before proposing merge on 🟡 medium or 🔴 high PRs, run an adversarial
-self-review via a fresh Claude session with zero shared context:
+Before proposing merge on 🟡 medium or 🔴 high PRs, an adversarial
+self-review runs via a fresh Claude session with zero shared context.
+
+**Normal path: let `scripts/pr-ready.sh <N>` do it.** It already runs this
+exact review (`self-review-pr.sh --post --force`) for every 🟡/🔴 PR at
+ready time and prints the full verdict text to your terminal as it runs —
+so once you've called it (§ "Draft first, ready only once the body is
+final" above), you already have the verdict; there is nothing further to
+run. Running the manual snippet below *in addition* pays for a second full
+review with no new information — don't.
+
+First line of the verdict: `APPROVE` → proceed; `APPROVE_WITH_CAVEATS: <text>`
+→ proceed with the caveat visible in your handoff; `BLOCK: <text>` →
+`pr-ready.sh` already refused to ready (exit 2) — fix the finding and
+re-run it, don't propose merge in the meantime.
+
+Skipped for 🟢 low, and when `WORKER_SELF_REVIEW=0` (kill switch). Any skip —
+including a failed `claude -p` call — must be **flagged in the handoff**
+(*"self-review: skipped — WORKER_SELF_REVIEW=0"*); never silently bypass the layer.
+
+**Manual fallback** (only if `scripts/pr-ready.sh` is unavailable, or you
+need a verdict before the PR is ready-able at all): run the review directly
+and read `$REVIEW` yourself — this posts nothing, so it never conflicts
+with `pr-ready.sh`'s own posting pass:
 
 ```bash
 DIFF="$(gh pr diff <N>)"
@@ -762,14 +798,6 @@ REVIEW="$(printf '%s\n\n--- PR ---\n%s\n\n--- DIFF ---\n%s\n' \
     | claude -p --dangerously-skip-permissions 2>/dev/null)"
 echo "Self-review verdict: $REVIEW"
 ```
-
-First line of `$REVIEW`: `APPROVE` → proceed; `APPROVE_WITH_CAVEATS: <text>` →
-proceed with the caveat visible in your handoff; `BLOCK: <text>` → do NOT
-propose merge, surface the block and ask for direction.
-
-Skipped for 🟢 low, and when `WORKER_SELF_REVIEW=0` (kill switch). Any skip —
-including a failed `claude -p` call — must be **flagged in the handoff**
-(*"self-review: skipped — WORKER_SELF_REVIEW=0"*); never silently bypass the layer.
 
 ### PR body skeleton
 
@@ -892,8 +920,8 @@ h. **Recommendation lives under the Decide table, never in it.** The
 
 Rules (f)–(h) are checked mechanically: run
 `scripts/lint-pr-screen.sh <PR#>` after writing the final body and before
-`gh pr ready` — exit 0 is the gate; exit 3 lists which rule failed and why.
-Do not `gh pr ready` over a failing lint; rewrite the screen. Born of a
+`scripts/pr-ready.sh` — exit 0 is the gate; exit 3 lists which rule failed
+and why. Do not ready over a failing lint; rewrite the screen. Born of a
 dozen-plus relapses on the prose-only version of these rules
 (corpusminder-spring #632, 2026-09-18: a 230-word surprise paragraph with
 14 code spans against a template that said "one line").

@@ -312,6 +312,17 @@ FAKEGH
         return
     fi
 
+    # issue #439 self-review: reap_dangling's rm -rf bypasses
+    # kill-worktree.sh entirely, so it must log its own reap.worktree event
+    # or coordinator-watch.sh's worktree_vanish_sweep_pass would flag every
+    # dangling-worktree reap as an unblessed removal.
+    if ! grep -qE 'reap\.worktree.*issue=747' "$project/.swarm/events.log" 2>/dev/null; then
+        red "  ✗ $name: expected a reap.worktree event logged for issue 747"
+        cat "$project/.swarm/events.log" 2>/dev/null
+        FAIL=$((FAIL + 1))
+        return
+    fi
+
     green "  ✓ $name: Passed"
     PASS=$((PASS + 1))
 }
