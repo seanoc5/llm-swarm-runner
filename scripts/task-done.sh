@@ -24,7 +24,7 @@
 # Now: the worker calls THIS script itself, as the mandatory last step of
 # every task (prompts/worker.md § "Task completion"). coordinator-watch.sh
 # no longer creates completion records at all — see its
-# reconcile_missing_outcome(), which only logs + nudges.
+# reconcile_missing_outcome(), which only logs (watch.reconcile).
 #
 # This record is PROVISIONAL, not final, whenever a check is coming:
 # worker-listener.sh's write_outcome() — called unconditionally after the

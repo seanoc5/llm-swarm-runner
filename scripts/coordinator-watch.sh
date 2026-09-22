@@ -621,17 +621,21 @@
 #                           with no coordinator-side synthesis needed.
 #                           maybe_run_check now calls
 #                           reconcile_missing_outcome() where synth_outcome
-#                           used to fire — it only logs watch.reconcile
-#                           (+ WATCH_RECONCILE_NUDGE below) and never writes
-#                           done/*.json. See task-done.sh's own header for
-#                           the pre-#451-worktree migration story.
-#   WATCH_RECONCILE_NUDGE=1  Set to 0 to disable the one-time inbox reminder
-#                           reconcile_missing_outcome() drops (nudge-<task_id>.md,
-#                           "call task-done.sh") when a done signal has no
-#                           outcome record yet. The watch.reconcile log line
-#                           itself is never gated by this — only the inbox
-#                           write is. At most one nudge per task_id
-#                           (status/<task_id>.nudge-sent marks it sent).
+#                           used to fire — it only logs watch.reconcile and
+#                           never writes done/*.json. See task-done.sh's own
+#                           header for the pre-#451-worktree migration
+#                           story. (An earlier version of this PR also had
+#                           reconcile_missing_outcome() drop a one-time
+#                           inbox reminder brief — removed on self-review:
+#                           that file is indistinguishable from a real task
+#                           brief to claim_next_task()/WORKER_AUTO_DELIVER,
+#                           so it could get "claimed" and dispatched as a
+#                           full extra agent session, and a synthesized
+#                           "pr-issue-N" task_id in its instructions would
+#                           defeat on_outcome's issue-number parser. Pure
+#                           logging fully closes the duplicate-record gap
+#                           this issue exists for; a safer proactive nudge
+#                           is future scope.)
 #   CHECK_RUNNER=<path>     Test-only override: when set, check-on-done runs
 #                           `$CHECK_RUNNER <worktree> <check_cmd>` synchronously
 #                           instead of spawning a real tmux window. Lets tests
@@ -1934,11 +1938,8 @@ EVENTS LOG
                            writes done/*.json — the worker is the only writer
                            now (scripts/task-done.sh). Usually means the
                            worker hasn't reached its task-done.sh step yet;
-                           self-heals on the next poll once it does.
-      watch.reconcile.nudge  a watch.reconcile above also dropped a one-time
-                           reminder brief into the worktree's inbox/ pointing
-                           the worker at task-done.sh (issue, task_id) —
-                           see WATCH_RECONCILE_NUDGE below
+                           self-heals on the next poll once it does. Pure
+                           observability — takes no other action.
       cap.refused          provision-worker.sh hit MAX_WORKERS / MAX_TMUX_WINDOWS
       coord.compact        /compact injected before wake (used, threshold, trigger=poll|wake)
       coord.compact.skip   auto-compact skipped this cycle (reason=pane_busy|no_fresh_probe|cooldown|...,
@@ -2264,10 +2265,6 @@ ACTIVITY_WAKE_PROMPT="${ACTIVITY_WAKE_PROMPT:-}"
 WATCH_WORKTREE_SWEEP_SECS="${WATCH_WORKTREE_SWEEP_SECS:-60}"
 WATCH_PENDING_BRIEF_SWEEP_SECS="${WATCH_PENDING_BRIEF_SWEEP_SECS:-300}"
 WATCH_CHECK_ON_DONE="${WATCH_CHECK_ON_DONE:-1}"
-# issue #451 (superseded #314's WATCH_SYNTH_OUTCOME — see its header entry
-# above): reconcile_missing_outcome() logs+nudges on a done signal with no
-# outcome record; it never writes done/*.json itself.
-WATCH_RECONCILE_NUDGE="${WATCH_RECONCILE_NUDGE:-1}"
 CHECK_RUNNER="${CHECK_RUNNER:-}"
 SESSION_NAME="${SESSION_NAME:-llm-$(basename "$PROJECT_DIR")}"
 WATCHER_QUIET="${WATCHER_QUIET:-0}"
@@ -2851,7 +2848,6 @@ format_event_line() {
             esac ;;
         watch.check_on_done.error)  glyph="✗"; color=$'\033[31m' ;;
         watch.reconcile)             glyph="?"; color=$'\033[33m' ;;
-        watch.reconcile.nudge)       glyph="✉"; color=$'\033[36m' ;;
         watch.start|watch.timer.start) glyph="▶"; color=$'\033[36m' ;;
         watch.exit)                     glyph="■"; color=$'\033[2m'  ;;
         sweep.run|sweep.dry)             glyph="↻"; color=$'\033[36m' ;;
@@ -4357,7 +4353,7 @@ check_json_state() {
     sed -n 's/.*"state":"\([a-zA-Z_]*\)".*/\1/p' "$1" 2>/dev/null | head -1
 }
 
-# reconcile_missing_outcome <worktree-dir> <issue> <task_id> <reason> [task_id_is_real]
+# reconcile_missing_outcome <worktree-dir> <issue> <task_id> <reason>
 #
 # (issue #451, α of #450 finding 1 — supersedes #314's synth_outcome)
 # Called from maybe_run_check right after the check-claim is won, i.e. the
@@ -4375,25 +4371,26 @@ check_json_state() {
 # outcome record yet is not itself a problem — it usually just means the
 # worker hasn't reached its task-done.sh step yet, or (pre-#451 worktree)
 # never will on its own; see task-done.sh's header for that migration
-# story. Log it (watch.reconcile) for visibility, then no-op if an outcome
-# already exists (duplicate suppression: this — or a second call — seeing
-# an existing record does nothing), else best-effort drop ONE reminder
-# brief into the worktree's inbox/ pointing the worker at task-done.sh
-# (WATCH_RECONCILE_NUDGE=0 disables the nudge; the log line is unconditional).
+# story. Log it (watch.reconcile) for visibility and no-op otherwise:
+# duplicate suppression (this — or a second call — seeing an existing
+# record does nothing) plus this function deliberately taking NO other
+# action.
 #
-# task_id_is_real (default 1, i.e. trust the caller unless told otherwise)
-# — issue #451 self-review finding: maybe_run_check's PR-open backstop can
-# fall back to a SYNTHESIZED task_id ("pr-issue-$issue") when a worktree
-# has no status file at all. Nudging a worker to run
-# `task-done.sh pr-issue-$issue ok` would make it write a completion
-# record under an id that traces back to nothing real — a second,
-# fabricated-id record for the same completion, exactly what this issue
-# removes. Pass 0 for a synthesized id: the log line still fires (the gap
-# is still worth knowing about), but the nudge — which would only ever
-# mislead — is skipped.
+# An earlier version of this also dropped a one-time reminder brief into
+# the worktree's inbox/. Removed (self-review finding on this PR): that
+# file is indistinguishable from a real task brief to claim_next_task()
+# AND to WORKER_AUTO_DELIVER's worker_pending_brief() — a parked worker
+# whose current task is already status=ready-for-review gets /quit'd to
+# "claim" it, burning a full extra agent dispatch on what was meant to be
+# a one-line reminder, and (when maybe_run_check's PR-open backstop had
+# fallen back to a synthesized task_id like "pr-issue-N", which isn't
+# purely digits) the resulting done/nudge-pr-issue-N.ok.json defeats
+# on_outcome's `-<issue>` filename parser. Logging alone fully solves the
+# duplicate-record problem this issue exists for; a safer proactive nudge
+# (a channel claim_next_task never treats as claimable work) is future
+# scope, not this α slice.
 reconcile_missing_outcome() {
     local wt_dir="$1" issue="$2" task_id="$3" reason="${4:-check_claim_won}"
-    local task_id_is_real="${5:-1}"
     local done_dir="$wt_dir/.swarm/tasks/done"
 
     local f
@@ -4402,42 +4399,6 @@ reconcile_missing_outcome() {
     done
 
     log_event watch.reconcile "issue=$issue task_id=$task_id reason=$reason"
-
-    [ "$task_id_is_real" = "1" ] || return 0
-    [ "$WATCH_RECONCILE_NUDGE" = "1" ] || return 0
-    [ "$DRY_RUN" = "1" ] && return 0
-
-    local status_dir="$wt_dir/.swarm/tasks/status"
-    local nudge_marker="$status_dir/${task_id}.nudge-sent"
-    [ -e "$nudge_marker" ] && return 0   # already nudged once — don't spam
-
-    local inbox_dir="$wt_dir/.swarm/tasks/inbox"
-    mkdir -p "$inbox_dir" "$status_dir" 2>/dev/null || return 0
-    local nudge_file="$inbox_dir/nudge-${task_id}.md"
-    [ -e "$nudge_file" ] && return 0   # already queued, not yet claimed
-
-    local tmp
-    tmp=$(mktemp "$inbox_dir/.tmp.nudge-XXXXXX" 2>/dev/null) || return 0
-    cat > "$tmp" <<BRIEF
-## Reminder: no completion record found for this task
-
-Issue #$issue looks done from the outside (reason: $reason) but
-.swarm/tasks/done/${task_id}.{ok,err}.json doesn't exist yet.
-
-If you already finished this task, run this now as your last step:
-
-    \$LLM_SWARM_DIR/scripts/task-done.sh $task_id ok
-
-(substitute \`err\` for a failed task, and add a third arg for a short
-reason). If you're still actively working on it, ignore this — you will
-not be reminded again for this task.
-BRIEF
-    if mv "$tmp" "$nudge_file" 2>/dev/null; then
-        touch "$nudge_marker" 2>/dev/null || true
-        log_event watch.reconcile.nudge "issue=$issue task_id=$task_id"
-    else
-        rm -f "$tmp" 2>/dev/null || true
-    fi
 }
 
 # maybe_run_check <worktree-dir> <issue> [task_id]
@@ -4479,18 +4440,6 @@ maybe_run_check() {
     local reconcile_reason="pr_open_no_outcome"
     [ -n "$task_id" ] && reconcile_reason="status_ready_no_outcome"
 
-    # issue #451 self-review finding: task_id_is_real distinguishes a
-    # task_id that traces back to an actual worker-written status file
-    # (this arg, or the "unclaimed" scan below finding one) from the
-    # "pr-issue-$issue" fallback synthesized a few lines down when NO
-    # status file exists in this worktree at all. Only the former is safe
-    # to hand the worker in a nudge — telling a worker to
-    # `task-done.sh pr-issue-$issue ok` would make it write a completion
-    # record under an id nothing else recognizes as its own, creating
-    # exactly the kind of second, fabricated-id record this issue removes.
-    local task_id_is_real=1
-    [ -n "$task_id" ] || task_id_is_real=0
-
     if [ -z "$task_id" ]; then
         # Distinguish "no status file exists at all" (synthesize a key —
         # this is the literal backstop case) from "a status file exists
@@ -4518,7 +4467,6 @@ maybe_run_check() {
         shopt -u nullglob
         if [ -n "$unclaimed" ]; then
             task_id="$unclaimed"
-            task_id_is_real=1   # traced back to a real status file after all
         elif [ "$any_status" = "1" ]; then
             return 0
         fi
@@ -4538,13 +4486,11 @@ maybe_run_check() {
     # issue #451 (was #314's synth_outcome call): winning the claim is the
     # one moment each done task passes through exactly once — reconcile
     # here, before any of the skip/return branches below, so EVERY done
-    # detection that still lacks an outcome record gets logged (and
-    # nudged, when task_id_is_real — see reconcile_missing_outcome's own
-    # header for why a synthesized id is never nudged), including
+    # detection that still lacks an outcome record gets logged, including
     # pr_terminal skips: a merged-while-coordinator-slept PR with no
     # outcome yet is precisely a gap worth flagging. Never writes
     # done/*.json itself.
-    reconcile_missing_outcome "$wt_dir" "$issue" "$task_id" "$reconcile_reason" "$task_id_is_real"
+    reconcile_missing_outcome "$wt_dir" "$issue" "$task_id" "$reconcile_reason"
 
     # issue #181: the PR may already be MERGED/CLOSED by the time we win
     # the claim — the merge already validated the work, so spawning a

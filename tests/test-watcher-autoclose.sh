@@ -912,15 +912,18 @@ green "WATCHER_AUTOCLOSE=0 disables the orphan sweep too (single kill switch for
 make_reap_orphan_stub "Done. Reaped 0 worktree(s) (skipped 0 of 0 scanned)."
 
 # ============================================================================
-heading "Test 19: done detection with no outcome yet reconciles — logs + nudges, never fabricates (issue #451)"
+heading "Test 19: done detection with no outcome yet reconciles — logs only, never fabricates (issue #451)"
 # ============================================================================
 # Supersedes #314's synth_outcome test. The worker is now the only writer
 # of done/*.json (scripts/task-done.sh) — a done signal (ready-for-review
 # status) with no outcome record yet must produce a watch.reconcile event
-# and a one-time inbox nudge, and must NOT fabricate an outcome file or
-# fire a wake. No check.sh / WORKER_CHECK_CMD here on purpose — the check
-# resolving to "skipped" must not suppress reconciliation (it runs before
-# check resolution, same ordering synth_outcome used to rely on).
+# and MUST NOT fabricate an outcome file, fire a wake, or touch inbox/ (an
+# earlier version of this dropped a one-time inbox reminder brief there;
+# removed on self-review — indistinguishable from a real task brief to
+# claim_next_task()/WORKER_AUTO_DELIVER, risking a wasted extra dispatch).
+# No check.sh / WORKER_CHECK_CMD here on purpose — the check resolving to
+# "skipped" must not suppress reconciliation (it runs before check
+# resolution, same ordering synth_outcome used to rely on).
 : > "$WAKE_LOG"
 rm -f "$PROJECT_DIR/.swarm/events.log"
 : > "$GH_PR_LIST_FILE"
@@ -952,15 +955,9 @@ $(cat "$EVENTS_LOG")"
 [ ! -s "$WAKE_LOG" ] || red "no real outcome exists — llm-start.sh should NOT have been invoked; got: $(cat "$WAKE_LOG")"
 green "no worker.finish, no coord.wake — reconcile is observation-only"
 
-NUDGE_FILE="$TEST_DIR/wt-issue-190/.swarm/tasks/inbox/nudge-t190.md"
-[ -f "$NUDGE_FILE" ] || red "expected a one-time reminder brief at $NUDGE_FILE"
-grep -q 'task-done.sh t190 ok' "$NUDGE_FILE" \
-    || red "nudge brief should tell the worker exactly how to call task-done.sh; got:
-$(cat "$NUDGE_FILE")"
-grep -q 'watch\.reconcile\.nudge .*issue=190 task_id=t190' "$EVENTS_LOG" \
-    || red "expected watch.reconcile.nudge event; got:
-$(cat "$EVENTS_LOG")"
-green "one-time inbox nudge dropped, pointing the worker at task-done.sh"
+[ -z "$(find "$TEST_DIR/wt-issue-190/.swarm/tasks/inbox" -maxdepth 1 -type f 2>/dev/null)" ] \
+    || red "reconcile must never write to inbox/ — found: $(find "$TEST_DIR/wt-issue-190/.swarm/tasks/inbox" -maxdepth 1 -type f)"
+green "inbox/ untouched — reconcile takes no action beyond the log line"
 
 # ============================================================================
 heading "Test 19b: an existing outcome record suppresses reconcile entirely (issue #451)"
@@ -992,42 +989,17 @@ $(cat "$PROJECT_DIR/.swarm/events.log")"
 green "existing worker-written outcome suppresses reconcile entirely — no event, no nudge, no duplicate file"
 
 # ============================================================================
-heading "Test 19c: WATCH_RECONCILE_NUDGE=0 disables the inbox nudge, not the log line (issue #451)"
-# ============================================================================
-: > "$WAKE_LOG"
-rm -f "$PROJECT_DIR/.swarm/events.log"
-mkdir -p "$TEST_DIR/wt-issue-192/.swarm/tasks/status"
-mkdir -p "$TEST_DIR/wt-issue-192/.swarm/tasks/done"
-mkdir -p "$TEST_DIR/wt-issue-192/.swarm/tasks/inbox"
-echo '{"task_id":"t192","state":"ready-for-review","pr":101,"ts":"2026-08-27T00:00:00Z"}' \
-    > "$TEST_DIR/wt-issue-192/.swarm/tasks/status/t192.json"
-
-ONCE=0 WATCH_CHECK_ON_DONE=1 WATCH_RECONCILE_NUDGE=0 start_watcher 0 "$TEST_DIR/watch-19c.log"
-sleep 5
-stop_watcher
-
-[ ! -f "$TEST_DIR/wt-issue-192/.swarm/tasks/done/t192.ok.json" ] \
-    && [ ! -f "$TEST_DIR/wt-issue-192/.swarm/tasks/done/t192-192.ok.json" ] \
-    || red "coordinator should never write done/*.json regardless of WATCH_RECONCILE_NUDGE"
-grep -q 'watch\.reconcile .*issue=192 task_id=t192 reason=status_ready_no_outcome' "$PROJECT_DIR/.swarm/events.log" \
-    || red "watch.reconcile should still log even with the nudge disabled; got:
-$(cat "$PROJECT_DIR/.swarm/events.log" 2>/dev/null || echo '(missing)')"
-[ ! -f "$TEST_DIR/wt-issue-192/.swarm/tasks/inbox/nudge-t192.md" ] \
-    || red "WATCH_RECONCILE_NUDGE=0 should have suppressed the inbox nudge"
-[ ! -s "$WAKE_LOG" ] || red "no wake expected with no real outcome; got: $(cat "$WAKE_LOG")"
-green "WATCH_RECONCILE_NUDGE=0 kill switch: reconcile still logs, nudge suppressed, no fabricated outcome, no wake"
-
-# ============================================================================
-heading "Test 19d: PR-open backstop with NO status file never nudges a synthesized task_id (issue #451 self-review finding)"
+heading "Test 19c: PR-open backstop with NO status file still reconciles cleanly under a synthesized task_id (issue #451 self-review finding)"
 # ============================================================================
 # The regression this guards: when a worktree has a PR but wrote no status
 # file at all, maybe_run_check falls back to a SYNTHESIZED task_id
 # ("pr-issue-$issue") — nothing the worker itself would ever recognize as
-# its own. Nudging it to run `task-done.sh pr-issue-193 ok` would make a
-# compliant worker write a completion record under that fabricated id
-# ALONGSIDE its real one once it finishes for real — exactly the kind of
-# second, wrong-id record this issue removes. The log line must still
-# fire (the gap is real and worth knowing about); only the nudge must not.
+# its own. reconcile_missing_outcome must handle this cleanly: log the gap
+# (still real and worth knowing about) and touch nothing else — no
+# fabricated done/*.json, no inbox write of any kind (an earlier version
+# of this PR nudged here, which would have told a worker to write a
+# completion record under a fabricated id it doesn't own — removed on
+# self-review, see reconcile_missing_outcome's own header).
 : > "$WAKE_LOG"
 rm -f "$PROJECT_DIR/.swarm/events.log"
 mkdir -p "$TEST_DIR/wt-issue-193/.swarm/tasks/done"
@@ -1035,7 +1007,7 @@ mkdir -p "$TEST_DIR/wt-issue-193/.swarm/tasks/inbox"
 # Deliberately NO .swarm/tasks/status/ file for this worktree.
 printf 'fix/issue-193\tOPEN\t102\n' > "$GH_PR_LIST_FILE"
 
-ONCE=0 WATCH_PR_POLL_SECS=2 WATCH_CHECK_ON_DONE=1 start_watcher 0 "$TEST_DIR/watch-19d.log"
+ONCE=0 WATCH_PR_POLL_SECS=2 WATCH_CHECK_ON_DONE=1 start_watcher 0 "$TEST_DIR/watch-19c.log"
 sleep 5
 stop_watcher
 
@@ -1046,12 +1018,9 @@ grep -q 'watch\.reconcile .*issue=193 task_id=pr-issue-193 reason=pr_open_no_out
 $(cat "$PROJECT_DIR/.swarm/events.log" 2>/dev/null || echo '(missing)')"
 green "watch.reconcile still logs the gap for the synthesized-id case"
 
-[ ! -f "$TEST_DIR/wt-issue-193/.swarm/tasks/inbox/nudge-pr-issue-193.md" ] \
-    || red "must NEVER nudge a worker to write a completion record under a fabricated task_id"
-grep -q 'watch\.reconcile\.nudge .*issue=193' "$PROJECT_DIR/.swarm/events.log" \
-    && red "no nudge event should have fired for the synthesized-id case; got:
-$(cat "$PROJECT_DIR/.swarm/events.log")"
-green "no nudge dropped for a task_id that traces back to no real status file — log only, never a fabricated-id instruction"
+[ -z "$(find "$TEST_DIR/wt-issue-193/.swarm/tasks/inbox" -maxdepth 1 -type f 2>/dev/null)" ] \
+    || red "must never write to inbox/ under a fabricated task_id — found: $(find "$TEST_DIR/wt-issue-193/.swarm/tasks/inbox" -maxdepth 1 -type f)"
+green "inbox/ untouched for the synthesized-id case too — log only, never a fabricated-id instruction"
 
 # ────────────────────────── Done ──────────────────────────
 
@@ -1076,7 +1045,7 @@ echo "  #185: kill-finished-workers.sh --pr-finalized preserves a fresh worktree
 echo "  #225: pr-poll never reaps a window-less worktree; logs orphan_no_window once, not every tick"
 echo "  #225: orphan_sweep_pass runs reap-orphan-worktrees.sh on its own timer, gated by WATCHER_AUTOCLOSE"
 echo "  #237: WATCHER_AUTOCLOSE_MODE=merged (default) leaves CLOSED-without-merge workers open; =finalized reaps MERGED-or-CLOSED like before"
-echo "  #451: done detection with no outcome yet logs watch.reconcile + nudges the worker's inbox once — never fabricates done/*.json"
-echo "  #451: an existing (worker-written) outcome suppresses reconcile entirely; WATCH_RECONCILE_NUDGE=0 disables the nudge only"
-echo "  #451: a PR-open backstop with no status file logs watch.reconcile but never nudges a synthesized task_id"
+echo "  #451: done detection with no outcome yet logs watch.reconcile — never fabricates done/*.json, never touches inbox/"
+echo "  #451: an existing (worker-written) outcome suppresses reconcile entirely — no event, no side effects"
+echo "  #451: a PR-open backstop with no status file (synthesized task_id) still reconciles cleanly — log only"
 yellow "Run with KEEP=1 to leave $TEST_DIR for inspection."
