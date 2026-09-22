@@ -421,7 +421,12 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
         # marker lives as the FIRST `<!-- BLIND_MERGE_RISK: ... -->` HTML
         # comment in the body (prompts/worker.md "PR risk assessment"); take
         # only that one, whatever rating it names, not any later mention.
-        RATING_MARKER="$(grep -m1 -oE -- '<!-- BLIND_MERGE_RISK: [a-z]+ -->' <<<"$PR_BODY" || true)"
+        # The capture uses [^>]* (not [a-z]+) deliberately: a restrictive
+        # class would let a malformed/uppercase first marker (which should
+        # fail the exact-match check below) get skipped over in favor of a
+        # later, correctly-lowercase mention elsewhere in the body — the
+        # same "wrong occurrence wins" bug this fix exists to close.
+        RATING_MARKER="$(grep -m1 -oE -- '<!-- BLIND_MERGE_RISK: [^>]* -->' <<<"$PR_BODY" || true)"
         if [ "$RATING_MARKER" != "<!-- BLIND_MERGE_RISK: low -->" ]; then
           echo "ERROR: PR #$PR_NUM refused by --auto-low Gate 1 (rating marker)." >&2
           echo "       First '<!-- BLIND_MERGE_RISK: ... -->' marker in the body is" >&2

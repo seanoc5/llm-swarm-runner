@@ -359,6 +359,27 @@ grep -q "pr merge" "$GH_LOG" && red "gh pr merge was called despite the real mar
 green "--auto-low refuses on the first marker occurrence (medium), not a later prose mention of 'low' (Gate 1)"
 
 # ============================================================================
+heading "Test 13c: swarm-merge.sh --auto-low refuses a malformed first marker, not a later correctly-cased mention"
+# ============================================================================
+# Self-review finding: an earlier cut of the fix used grep -oE '[a-z]+' to
+# capture the marker's rating word, which is restrictive enough to skip
+# right over a malformed/uppercase FIRST marker and match a later, correctly
+# lowercase 'low' mentioned in prose — reproducing the exact "wrong
+# occurrence wins" class of bug Test 13b already closed, just via the
+# character class instead of an unanchored substring search.
+: > "$GH_LOG"
+BODY_MALFORMED_THEN_LOW_PROSE="<!-- BLIND_MERGE_RISK: Medium -->
+Bottom line: some PR.
+
+## Follow-up suggestions
+1. Mechanize gate 1 — grep the body for the exact \`<!-- BLIND_MERGE_RISK: low -->\` marker."
+if OUT=$(GH_PR_BODY="$BODY_MALFORMED_THEN_LOW_PROSE" "$MERGE" 501 --auto-low 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -ne 0 ] || red "swarm-merge --auto-low should refuse when the FIRST marker is malformed/uppercase, even if a correctly-cased low marker appears later in prose"
+echo "$OUT" | grep -qi "gate 1" || red "refusal must name Gate 1"
+grep -q "pr merge" "$GH_LOG" && red "gh pr merge was called despite a malformed first marker"
+green "--auto-low refuses on a malformed first marker, not a later well-formed 'low' mention (Gate 1)"
+
+# ============================================================================
 heading "Test 14: swarm-merge.sh --auto-low refuses on CHANGES_REQUESTED (Gate 3)"
 # ============================================================================
 : > "$GH_LOG"
