@@ -9,11 +9,71 @@
 #   swarm-merge.sh <issue#|PR#> --override-migration-gate  # merge despite a migration collision
 #   swarm-merge.sh <issue#> --force-cleanup  # housekeep even while the issue is OPEN
 #   swarm-merge.sh <issue#|PR#> --squash  # accepted-and-ignored: squash is the only mode
+#   swarm-merge.sh <issue#|PR#> --auto-low  # unattended low-risk auto-merge path (#452)
 #   swarm-merge.sh --sweep-only       # just run the local-branch sweep
 #
 # --squash is accepted as a no-op alias (this script always squashes); it is
 # not a mode selector. --merge and --rebase are deliberately NOT supported
 # and exit non-zero rather than being silently ignored.
+#
+# --auto-low is for the coordinator's unattended SWARM_AUTOMERGE_LOW path
+# ONLY (prompts/coordinator.md "Auto-merge low-risk PRs") — a human calling
+# this script directly (or a plain `swarm-merge.sh <N>`) never needs it. It
+# adds hard, non-overridable gates (gate numbers match the 8-gate list in
+# prompts/coordinator.md; gates 6 (diff-scope read) and 7 (migration
+# collision, pre-existing) are not listed again here), fail-closed on any
+# error, ordered so the cheap ones refuse before anything spends real
+# wall-clock time: Gates 0, 1, 3, 4, 5 first (cheap — single `gh pr view`
+# lookups), then the pre-existing self-review/migration gates, then Gate 2
+# last, immediately before the `gh pr merge` call (so a PR any earlier gate
+# would refuse anyway never sits through ci-wait.sh's full timeout first,
+# and the window between "CI confirmed green" and the actual merge stays as
+# narrow as possible):
+#   Gate 0 (authorship)  scripts/check-coordinator-authorship.sh <N> — refuse
+#                         if any head-only commit carries a
+#                         `Swarm-Role: coordinator` git trailer. The
+#                         coordinator must never auto-merge a PR it authored
+#                         itself (#452, carved from #450 finding 4:
+#                         corpusminder-spring PR #713 was coordinator-
+#                         authored and coordinator-merged with no authorship
+#                         check at all). No override flag exists for this
+#                         gate — a coordinator-authored PR always goes to
+#                         the operator; a human can still merge it by hand
+#                         with a plain `swarm-merge.sh <N>` (no --auto-low).
+#                         Note: this only catches a commit that was actually
+#                         stamped with the trailer — it protects future
+#                         coordinator commits, not commits that predate the
+#                         convention (PR #713 itself wouldn't have carried
+#                         it; Gate 2 below is what would have caught that
+#                         specific incident).
+#   Gate 1 (rating marker) body contains the exact marker
+#                         `<!-- BLIND_MERGE_RISK: low -->`. Absent, or any
+#                         other value (medium/high/malformed) → refused.
+#   Gate 2 (CI wait)      scripts/ci-wait.sh <N> — a real bounded poll of
+#                         `gh pr checks` to a concluded state, replacing the
+#                         old `gh pr merge --auto` prescription, which
+#                         merged immediately because these repos have no
+#                         branch protection for --auto to defer to. A repo
+#                         with NO CI checks configured at all (ci-wait.sh
+#                         exit 5) is treated as pass-with-a-loud-warning, not
+#                         a refusal — logged as a `merge.gate` event noting
+#                         the CI absence — because "no checks exist" is not
+#                         evidence of a failure, and refusing here would
+#                         silently strand every CI-less project's auto-merge
+#                         path and point whoever investigates at the wrong
+#                         culprit.
+#   Gate 3 (review decision) `gh pr view`'s `reviewDecision` is not
+#                         `CHANGES_REQUESTED`.
+#   Gate 4 (base branch)  `baseRefName` matches the repo's resolved default
+#                         branch (`origin/HEAD`, falling back to `main`/
+#                         `master`). Never auto-merges feature-to-feature.
+#   Gate 5 (draft)        `isDraft` is false.
+#
+# --auto-low also refuses outright (usage error, before any gate runs) if
+# combined with --override-review or --override-migration-gate: the
+# unattended path must never accept an override flag — those exist for a
+# human who has read the PR and disagrees with a gate, which is precisely
+# the judgment --auto-low is not allowed to make on its own.
 #
 # What it does:
 #   1. Resolves the given number as either an issue or a PR (GitHub shares
@@ -65,6 +125,7 @@ OVERRIDE_REVIEW=0
 OVERRIDE_MIGRATION_GATE=0
 FORCE_CLEANUP=0
 HOUSEKEEP_ONLY=0
+AUTO_LOW=0
 ISSUE=""
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -78,6 +139,7 @@ for arg in "$@"; do
     --override-review) OVERRIDE_REVIEW=1 ;;
     --override-migration-gate) OVERRIDE_MIGRATION_GATE=1 ;;
     --force-cleanup) FORCE_CLEANUP=1 ;;
+    --auto-low)  AUTO_LOW=1 ;;
     --squash)    ;;   # no-op: squash is the only mode this script implements
     --merge|--rebase)
       echo "ERROR: swarm-merge.sh always squashes; $arg is not supported" >&2
@@ -97,6 +159,16 @@ for arg in "$@"; do
       ;;
   esac
 done
+
+# --auto-low is the coordinator's unattended path; it must never accept an
+# override flag — those exist for a human who read the PR and disagrees
+# with a specific gate, a judgment call --auto-low doesn't get to make.
+if [ "$AUTO_LOW" = 1 ] && { [ "$OVERRIDE_REVIEW" = 1 ] || [ "$OVERRIDE_MIGRATION_GATE" = 1 ]; }; then
+  echo "ERROR: --auto-low may not be combined with --override-review or" >&2
+  echo "       --override-migration-gate. The unattended path must not accept" >&2
+  echo "       overrides — re-run without --auto-low if a human is making this call." >&2
+  exit 2
+fi
 
 # --- helpers ---------------------------------------------------------------
 
@@ -274,11 +346,15 @@ fi
 
 if [ "$HOUSEKEEP_ONLY" = 0 ]; then
   # Inspect PR state.
-  PR_JSON=$(gh pr view "$PR_NUM" --json state,mergeable,headRefName,title,closingIssuesReferences)
+  PR_JSON=$(gh pr view "$PR_NUM" --json state,mergeable,headRefName,title,closingIssuesReferences,body,isDraft,reviewDecision,baseRefName)
   PR_STATE=$(echo "$PR_JSON" | jq -r .state)
   PR_MERGEABLE=$(echo "$PR_JSON" | jq -r .mergeable)
   PR_BRANCH=$(echo "$PR_JSON" | jq -r .headRefName)
   PR_TITLE=$(echo "$PR_JSON" | jq -r .title)
+  PR_BODY=$(echo "$PR_JSON" | jq -r '.body // ""')
+  PR_IS_DRAFT=$(echo "$PR_JSON" | jq -r '.isDraft // false')
+  PR_REVIEW_DECISION=$(echo "$PR_JSON" | jq -r '.reviewDecision // ""')
+  PR_BASE=$(echo "$PR_JSON" | jq -r '.baseRefName // ""')
   echo "[3/7] PR #$PR_NUM: state=$PR_STATE mergeable=$PR_MERGEABLE branch=$PR_BRANCH"
   echo "       title: $PR_TITLE"
 
@@ -309,6 +385,98 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
         echo "ERROR: PR #$PR_NUM has merge conflicts. Resolve first." >&2
         echo "       See \$LLM_SWARM_DOCS/VCS/git-github.md for the playbook." >&2
         exit 1
+      fi
+      # --auto-low Gate 0 (#452): authorship, hard and non-overridable. Only
+      # active on the coordinator's unattended SWARM_AUTOMERGE_LOW path; a
+      # plain `swarm-merge.sh <N>` skips it. Checked here, first and cheap,
+      # before anything that costs real wall-clock time below.
+      if [ "$AUTO_LOW" = 1 ]; then
+        echo "       auto-low gate 0 (authorship): checking…"
+        AUTH_RC=0
+        "$SCRIPT_DIR/check-coordinator-authorship.sh" "$PR_NUM" || AUTH_RC=$?
+        if [ "$AUTH_RC" = 1 ]; then
+          echo "ERROR: PR #$PR_NUM refused by --auto-low Gate 0 (authorship)." >&2
+          echo "       This PR carries a coordinator-authored commit and must go to" >&2
+          echo "       the operator — there is no override for this gate. A human can" >&2
+          echo "       still merge it directly: swarm-merge.sh $PR_NUM (no --auto-low)." >&2
+          exit 1
+        elif [ "$AUTH_RC" != 0 ]; then
+          echo "ERROR: PR #$PR_NUM refused by --auto-low Gate 0 (authorship, exit $AUTH_RC)." >&2
+          echo "       check-coordinator-authorship.sh errored rather than returning a clean" >&2
+          echo "       verdict (see its output above) — failing closed, not eligible." >&2
+          exit 1
+        fi
+
+        # --auto-low Gates 1, 3, 4, 5 (#454 follow-up to #452): cheap,
+        # non-overridable checks off the same PR_JSON fetch above — no extra
+        # `gh` calls. Matches prompts/coordinator.md's 8-gate list; gates 6
+        # (diff-scope read) and 7 (migration collision, pre-existing below)
+        # aren't repeated here.
+        echo "       auto-low gate 1 (rating marker): checking…"
+        # Self-review finding on this PR: an unanchored substring grep for
+        # the exact low marker also matches a PR whose body merely quotes
+        # that marker in prose elsewhere (e.g. this PR's own Follow-up/
+        # Findings sections, while its real top-of-body marker is medium) —
+        # a mis-rated PR would still clear this gate. The convention is the
+        # marker lives as the FIRST `<!-- BLIND_MERGE_RISK: ... -->` HTML
+        # comment in the body (prompts/worker.md "PR risk assessment"); take
+        # only that one, whatever rating it names, not any later mention.
+        # Two self-review rounds narrowed this down to "match on the token,
+        # not on any part of the expected format": matching on a pattern
+        # anchored to `<!-- BLIND_MERGE_RISK: ... -->` (spaces, comment
+        # delimiters, or a restrictive value class) lets a first marker that
+        # deviates from that exact shape (e.g. `<!--BLIND_MERGE_RISK:
+        # medium-->`, no interior spaces) get skipped over in favor of a
+        # later, well-formed mention elsewhere in the body — the same
+        # "wrong occurrence wins" bug in a new costume each time. Instead:
+        # take the first LINE containing the literal token `BLIND_MERGE_RISK`
+        # at all, trim it, and exact-compare THAT against the canonical
+        # marker — a malformed first marker then simply fails the exact
+        # match (refused) rather than being invisible to the search.
+        RATING_MARKER="$(grep -m1 -- 'BLIND_MERGE_RISK' <<<"$PR_BODY" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' || true)"
+        if [ "$RATING_MARKER" != "<!-- BLIND_MERGE_RISK: low -->" ]; then
+          echo "ERROR: PR #$PR_NUM refused by --auto-low Gate 1 (rating marker)." >&2
+          echo "       First '<!-- BLIND_MERGE_RISK: ... -->' marker in the body is" >&2
+          echo "       '${RATING_MARKER:-<absent>}', not the exact low marker — not" >&2
+          echo "       eligible for unattended merge." >&2
+          exit 1
+        fi
+
+        echo "       auto-low gate 3 (review decision): checking…"
+        if [ "$PR_REVIEW_DECISION" = "CHANGES_REQUESTED" ]; then
+          echo "ERROR: PR #$PR_NUM refused by --auto-low Gate 3 (review decision)." >&2
+          echo "       reviewDecision is CHANGES_REQUESTED — not eligible for unattended merge." >&2
+          exit 1
+        fi
+
+        echo "       auto-low gate 4 (base branch): checking…"
+        DEFAULT_BRANCH="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+        DEFAULT_BRANCH="${DEFAULT_BRANCH#origin/}"
+        if [ -z "$DEFAULT_BRANCH" ]; then
+          for candidate in main master; do
+            git show-ref --verify --quiet "refs/remotes/origin/$candidate" &&
+              DEFAULT_BRANCH="$candidate" && break
+          done
+        fi
+        if [ -z "$DEFAULT_BRANCH" ]; then
+          echo "ERROR: PR #$PR_NUM refused by --auto-low Gate 4 (base branch)." >&2
+          echo "       Could not resolve the repo's default branch to compare against —" >&2
+          echo "       failing closed rather than guessing." >&2
+          exit 1
+        fi
+        if [ "$PR_BASE" != "$DEFAULT_BRANCH" ]; then
+          echo "ERROR: PR #$PR_NUM refused by --auto-low Gate 4 (base branch)." >&2
+          echo "       base is '$PR_BASE', default branch is '$DEFAULT_BRANCH' — never" >&2
+          echo "       auto-merge feature-to-feature." >&2
+          exit 1
+        fi
+
+        echo "       auto-low gate 5 (draft): checking…"
+        if [ "$PR_IS_DRAFT" = "true" ]; then
+          echo "ERROR: PR #$PR_NUM refused by --auto-low Gate 5 (draft)." >&2
+          echo "       PR is still a draft — not eligible for unattended merge." >&2
+          exit 1
+        fi
       fi
       # Self-review verdict gate (ringer concept #2 — docs/ringer-adoptions.md).
       # Latest SWARM_SELF_REVIEW marker comment (from self-review-pr.sh) wins.
@@ -357,6 +525,29 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
             exit 1
             ;;
         esac
+      fi
+      # --auto-low Gate 2 (#452): a real CI wait, hard and non-overridable.
+      # Deliberately last, right before the merge call — the self-review and
+      # migration gates above are cheap, already-decided lookups (an instant
+      # BLOCK verdict or Flyway collision), so a PR that's going to be
+      # refused anyway is refused before burning ci-wait.sh's full timeout,
+      # and the window between "CI confirmed green" and the actual merge
+      # stays as narrow as possible.
+      if [ "$AUTO_LOW" = 1 ]; then
+        echo "       auto-low gate 2 (CI wait): waiting for a real conclusion…"
+        CI_RC=0
+        "$SCRIPT_DIR/ci-wait.sh" "$PR_NUM" || CI_RC=$?
+        if [ "$CI_RC" = 5 ]; then
+          # No CI checks configured on this repo at all — pass-with-warning,
+          # not a refusal (see the Gate 2 note in the header comment above).
+          echo "       $(c_amber "⚠ auto-low gate 2: no CI checks configured on this repo — proceeding (pass-with-warning)")"
+          log_event merge.gate "pr=$PR_NUM gate=2-ci-wait result=no-checks-configured action=proceed"
+        elif [ "$CI_RC" != 0 ]; then
+          echo "ERROR: PR #$PR_NUM refused by --auto-low Gate 2 (CI wait, exit $CI_RC)." >&2
+          echo "       See ci-wait.sh's output above for which case fired (red checks," >&2
+          echo "       timeout, or CONFLICTING/DIRTY needing a rebase)." >&2
+          exit 1
+        fi
       fi
       echo "[4/7] merging PR #$PR_NUM (squash, delete-branch)…"
       # gh pr merge's local-delete step may fail; tolerate it.

@@ -79,12 +79,17 @@ comments_file="$GH_COMMENTS_DIR/$pr_num.json"
 case "$1 $2" in
     "api repos/{owner}/{repo}/issues/"*) echo "false"; exit 0 ;;
     "pr view")
-        if [[ "$*" == *baseRefName* ]]; then
-            jq -c --arg n "$pr_num" '.[$n]' "$GH_PR_TABLE"
-        elif [[ "$*" == *state,mergeable* ]]; then
+        if [[ "$*" == *state,mergeable* ]]; then
+            # swarm-merge.sh's main PR_JSON call. It also requests
+            # body/isDraft/reviewDecision/baseRefName (for --auto-low's
+            # gates 1/3/4/5, unused by this test file's plain-merge path);
+            # jq's `// default` fallbacks on the reading side handle their
+            # absence here without needing this stub to fake them.
             base_head="$(jq -c --arg n "$pr_num" '.[$n]' "$GH_PR_TABLE")"
             head="$(jq -r '.headRefName' <<<"$base_head")"
             echo "{\"state\":\"OPEN\",\"mergeable\":\"MERGEABLE\",\"headRefName\":\"$head\",\"title\":\"fake\"}"
+        elif [[ "$*" == *baseRefName* ]]; then
+            jq -c --arg n "$pr_num" '.[$n]' "$GH_PR_TABLE"
         elif [[ "$*" == *comments* ]]; then
             query=""
             args=("$@")
