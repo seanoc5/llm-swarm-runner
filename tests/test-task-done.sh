@@ -297,8 +297,47 @@ rm -f "$TEST_DIR/repo/.swarm/tasks/done/t5.ok.json"
 green "SWARM_WORKTREE_DIR unset: falls back to git rev-parse --show-toplevel (cwd) unchanged, for callers not dispatched by worker-listener.sh"
 
 # ============================================================================
+heading "Test 9 (wrong task_id self-correction): recovers from a mis-derived id instead of producing a second record (issue #451 self-review finding)"
+# ============================================================================
+# The regression this guards: a worker that mis-derives its own task_id
+# (#370's documented drift — a status file written under one name next to
+# a processing/ brief actually claimed under another) would otherwise
+# write its completion record under a name nothing else recognizes,
+# leaving the REAL brief stuck in processing/ (the SWARM_BRIEF_ORPHANED
+# false alarm persists for it) and setting up worker-listener.sh's own
+# later, CORRECTLY-id'd write to produce a SECOND completion record for
+# the same task — the exact duplicate this whole issue removes.
+rm -f .swarm/tasks/processing/*.md .swarm/tasks/done/*.json .swarm/tasks/done/*.md 2>/dev/null || true
+echo '## Task
+
+Do something.' > .swarm/tasks/processing/20260906-230823-517.md
+
+"$TASK_DONE" issue-517 ok >/dev/null
+
+[ ! -e .swarm/tasks/processing/20260906-230823-517.md ] \
+    || red "issue-517: the real brief should have been recognized and moved despite the wrong task_id argument"
+[ -f .swarm/tasks/done/20260906-230823-517.md ] \
+    || red "issue-517: the real brief should be archived under ITS OWN (correct) name"
+[ -f .swarm/tasks/done/20260906-230823-517.ok.json ] \
+    || red "issue-517: outcome should be recorded under the recovered, correct task_id"
+[ ! -e .swarm/tasks/done/issue-517.ok.json ] \
+    || red "issue-517: no record should exist under the WRONG task_id that was passed in — that's the duplicate this test guards against"
+jq -e '.task_id == "20260906-230823-517"' .swarm/tasks/done/20260906-230823-517.ok.json >/dev/null \
+    || { cat .swarm/tasks/done/20260906-230823-517.ok.json; red "issue-517: recorded task_id field should be the recovered one, not the wrong argument"; }
+green "wrong task_id + exactly one real brief in processing/ -> self-corrects to the real one, exactly one record, no duplicate"
+
+# Ambiguous case (more than one file in processing/, or none at all)
+# must NOT guess — falls back to the original behavior (proceed under the
+# given task_id, tolerate a missing brief), same as Test 4.
+rm -f .swarm/tasks/processing/*.md .swarm/tasks/done/*.json .swarm/tasks/done/*.md 2>/dev/null || true
+"$TASK_DONE" totally-unrelated-id ok >/dev/null
+[ -f .swarm/tasks/done/totally-unrelated-id.ok.json ] \
+    || red "totally-unrelated-id: with processing/ genuinely empty, should proceed under the given task_id unchanged (no self-correction possible)"
+green "processing/ genuinely empty (nothing to recover from) -> proceeds under the given task_id, same as before this fix"
+
+# ============================================================================
 heading "All task-done.sh tests passed"
 # ============================================================================
-green "happy path, duplicate suppression, err+reason, missing-brief tolerance, usage errors, interactive-worker flow, check-correction, SWARM_WORKTREE_DIR precedence"
+green "happy path, duplicate suppression, err+reason, missing-brief tolerance, usage errors, interactive-worker flow, check-correction, SWARM_WORKTREE_DIR precedence, wrong-task_id self-correction"
 echo ""
 yellow "Run with KEEP=1 to leave $TEST_DIR for inspection."

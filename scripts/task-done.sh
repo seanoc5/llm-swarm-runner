@@ -49,6 +49,11 @@
 # Idempotent: if an outcome record for <task-id> already exists, this is a
 # no-op (exit 0, one line to stderr) — safe to call more than once.
 #
+# Self-correcting against a wrong <task-id>: if it doesn't match anything
+# in processing/ but exactly one real brief is sitting there, that one is
+# used instead (with a warning) rather than silently producing a second,
+# wrong-id completion record — see the self-review-finding comment below.
+#
 # MIGRATION (v1/older worktrees without this script): a worktree
 # provisioned before issue #451 landed has no scripts/task-done.sh of its
 # own, but every worker invocation this project's swarm dispatches runs
@@ -111,6 +116,40 @@ PROCESSING="$QUEUE_ROOT/processing"
 DONE="$QUEUE_ROOT/done"
 mkdir -p "$DONE"
 
+BRIEF="$PROCESSING/${TASK_ID}.md"
+
+# issue #451 self-review finding: a worker that mis-derives its own
+# task_id (the same #370 drift coordinator-watch.sh's
+# worker_current_task_terminal() already documents seeing in the wild —
+# a status file written under one name next to a processing/ brief
+# actually claimed under another) would otherwise write its completion
+# record under a name nothing else recognizes: the real brief never
+# leaves processing/ (the SWARM_BRIEF_ORPHANED false alarm this PR exists
+# to fix would persist for it), and worker-listener.sh's own later write
+# — which always knows the CORRECT task_id, derived from
+# claim_next_task()'s own inbox filename, independent of whatever gets
+# passed here — produces a SECOND record under a DIFFERENT id. Exactly
+# the duplicate-record problem this whole issue removes, just relocated
+# from the coordinator side to here.
+#
+# When the given task_id doesn't match anything in processing/ but
+# EXACTLY ONE real (non-tmp) file is actually sitting there, trust THAT
+# file over the possibly-wrong argument — same "the filesystem is more
+# trustworthy than a self-report" principle worker_current_task_terminal's
+# own #370 fallback already applies. Ambiguous cases (processing/ empty,
+# or more than one file — shouldn't normally happen, since a worktree
+# only ever has one task claimed at a time) are left alone: proceed with
+# the given task_id as before, tolerating a missing brief (see below).
+if [ ! -f "$BRIEF" ]; then
+    REAL_BRIEFS="$(find "$PROCESSING" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null || true)"
+    if [ -n "$REAL_BRIEFS" ] && [ "$(printf '%s\n' "$REAL_BRIEFS" | wc -l)" -eq 1 ]; then
+        REAL_TASK_ID="$(basename "$REAL_BRIEFS" .md)"
+        echo "task-done.sh: WARNING: processing/${TASK_ID}.md not found, but processing/$(basename "$REAL_BRIEFS") is — using task_id=$REAL_TASK_ID instead (you passed the wrong task_id; use the exact inbox filename, per prompts/worker.md)" >&2
+        TASK_ID="$REAL_TASK_ID"
+        BRIEF="$REAL_BRIEFS"
+    fi
+fi
+
 OK_FILE="$DONE/${TASK_ID}.ok.json"
 ERR_FILE="$DONE/${TASK_ID}.err.json"
 
@@ -128,10 +167,9 @@ fi
 # salvages + posts SWARM_BRIEF_ORPHANED whenever processing/ is non-empty
 # at reap time — which used to be EVERY interactive worker, since nothing
 # ever emptied it before the agent process exited). Tolerate the brief
-# already being gone (worker-listener.sh's own fallback path, or a legacy
+# still being gone (worker-listener.sh's own fallback path, or a legacy
 # v1 task with no processing/<id>.md at all) — the outcome record below is
 # what actually matters.
-BRIEF="$PROCESSING/${TASK_ID}.md"
 if [ -f "$BRIEF" ]; then
     mv "$BRIEF" "$DONE/${TASK_ID}.md"
 fi
