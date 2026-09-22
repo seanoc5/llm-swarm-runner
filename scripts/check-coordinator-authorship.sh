@@ -65,8 +65,11 @@ git fetch -q origin "$BASE_REF:$BASE_LOCAL" "$HEAD_REF:$HEAD_LOCAL" \
 HIT_SHAS=""
 while IFS= read -r sha; do
     [ -n "$sha" ] || continue
+    # A commit can carry the same trailer key more than once, in which case
+    # `valueonly` emits one line per occurrence — match any line, not the
+    # whole (possibly multi-line) string.
     val="$(git log -1 --format="%(trailers:key=${TRAILER_KEY},valueonly)" "$sha")"
-    if [ "$val" = "$TRAILER_VALUE" ]; then
+    if grep -qx "$TRAILER_VALUE" <<<"$val"; then
         HIT_SHAS+="$(git log -1 --format='  %h %s' "$sha")"$'\n'
     fi
 done < <(git rev-list "${BASE_LOCAL}..${HEAD_LOCAL}")

@@ -72,6 +72,17 @@ git -C "$CLONE" -c user.email=t@t -c user.name=t commit -q --allow-empty \
     --trailer "Swarm-Role: coordinator" -m "fix(migration): mechanical renumber"
 git -C "$CLONE" push -q origin fix/issue-502
 
+# PR 503 / issue 503: the SAME trailer given twice on one commit — a
+# regression fixture for a self-review finding on this PR: `%(trailers:
+# key=...,valueonly)` emits one line per occurrence, so a naive
+# `[ "$val" = "coordinator" ]` string-equality check would miss this commit
+# (the captured value is "coordinator\ncoordinator", not "coordinator").
+git -C "$CLONE" checkout -q -b fix/issue-503 master
+git -C "$CLONE" -c user.email=t@t -c user.name=t commit -q --allow-empty \
+    --trailer "Swarm-Role: coordinator" --trailer "Swarm-Role: coordinator" \
+    -m "fix(migration): duplicate-trailer edge case"
+git -C "$CLONE" push -q origin fix/issue-503
+
 # ─────────────────────────── gh stub ────────────────────────────────────────
 
 export GH_PR_TABLE="$TEST_DIR/pr-table.json"   # {"<N>": {"baseRefName":..,"headRefName":..}}
@@ -82,7 +93,8 @@ echo '[]' > "$GH_PR_LIST"
 mkdir -p "$GH_COMMENTS_DIR"
 cat > "$GH_PR_TABLE" <<'JSON'
 {"501": {"baseRefName": "master", "headRefName": "fix/issue-501"},
- "502": {"baseRefName": "master", "headRefName": "fix/issue-502"}}
+ "502": {"baseRefName": "master", "headRefName": "fix/issue-502"},
+ "503": {"baseRefName": "master", "headRefName": "fix/issue-503"}}
 JSON
 
 mkdir -p "$TEST_DIR/bin"
@@ -149,6 +161,14 @@ if OUT=$("$AUTH" 502 2>&1); then RC=0; else RC=$?; fi
 echo "$OUT" | grep -q "REFUSED (Gate 0" || red "refusal must name Gate 0"
 echo "$OUT" | grep -q "mechanical renumber" || red "refusal must cite the offending commit"
 green "coordinator-trailer PR → exit 1, names Gate 0 and the commit"
+
+# ============================================================================
+heading "Test 2b: check-coordinator-authorship.sh — trailer repeated on one commit → still refused"
+# ============================================================================
+if OUT=$("$AUTH" 503 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -eq 1 ] || red "expected exit 1 for duplicate-trailer commit, got $RC (output: $OUT)"
+echo "$OUT" | grep -q "REFUSED (Gate 0" || red "refusal must name Gate 0"
+green "duplicate-trailer-on-one-commit edge case still refused (exit 1, not missed by string equality)"
 
 # ============================================================================
 heading "Test 3: check-coordinator-authorship.sh — unresolvable PR → exit 2 (fail closed)"
