@@ -98,6 +98,10 @@ while true; do
             if grep -qi "no checks reported" <<<"$CHECKS_OUT"; then
                 if [ -z "$WORKFLOW_COUNT" ]; then
                     WORKFLOW_COUNT="$(gh api repos/{owner}/{repo}/actions/workflows --jq '.total_count' 2>/dev/null || true)"
+                    # A failed lookup must still count as "resolved" (just
+                    # not "0") — otherwise a persistently-failing `gh api`
+                    # call gets re-run on every single poll instead of once.
+                    [ -n "$WORKFLOW_COUNT" ] || WORKFLOW_COUNT="unknown"
                 fi
                 if [ "$WORKFLOW_COUNT" = "0" ]; then
                     echo "ci-wait: PR #$PR has no CI checks configured on this repo at all (0 workflows) — nothing ran, so nothing failed." >&2
