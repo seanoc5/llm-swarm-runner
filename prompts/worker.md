@@ -252,18 +252,25 @@ worker-finished wake, so it used to guess: five different places
 fallbacks, plus the listener's own eventual write) could each decide your
 task was done and record it independently, producing the same completion
 2-3 times under different task ids. Calling `task-done.sh` yourself removes
-the guessing — it's the ONE authoritative completion record, and it also
-empties `.swarm/tasks/processing/` immediately, which is what stops a later
-reap from mistaking your already-finished work for an abandoned brief and
-salvaging it with a false `SWARM_BRIEF_ORPHANED` PR comment.
+the guessing and, just as importantly, empties `.swarm/tasks/processing/`
+immediately — what stops a later reap from mistaking your already-finished
+work for an abandoned brief and salvaging it with a false
+`SWARM_BRIEF_ORPHANED` PR comment.
+
+**This record is provisional, not final, when a check is configured.** If
+the project runs an executed acceptance check (`<!-- SWARM_CHECK: ... -->`,
+`.swarm/check.sh`, or `WORKER_CHECK_CMD`), that check only runs AFTER your
+dispatched process exits — i.e. after this call. `worker-listener.sh`'s own
+`write_outcome()` always still runs at that point and has the final say: if
+the check disagrees with what you called `ok`, it corrects the record (your
+provisional file is removed, the corrected one takes its place) — you don't
+need to predict the check result, just report what you believe right now.
 
 **Ordering:** call it after your status file and any outbox message are
 written (it's a terminal action, not a status update), and before your
 final `## Handoff` block text — it's a real tool call, so it has to happen
 while you can still call tools, not as part of the text you print at the
-very end. Calling it a second time, or after the listener already wrote an
-outcome on your behalf (a headless dispatch that exited before you got
-here), is a safe no-op — it never overwrites an existing record.
+very end. Calling it a second time is a safe no-op.
 
 If `$LLM_SWARM_DIR/scripts/task-done.sh` doesn't exist (a swarm tooling
 checkout from before issue #451), skip this step — there's nothing to call.

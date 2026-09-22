@@ -21,13 +21,20 @@
 #                                         structured outcome (started/
 #                                         finished/duration/exit_code/agent/
 #                                         model + check_cmd/check_exit/
-#                                         check_output_tail) — same writer
-#                                         split as above. Exactly ONE record
-#                                         per task_id; whichever writer gets
-#                                         there first wins, the other no-ops
-#                                         (see write_outcome's caller below
-#                                         and task-done.sh's own duplicate
-#                                         guard).
+#                                         check_output_tail). task-done.sh
+#                                         may write a PROVISIONAL record
+#                                         first (unblocks the coordinator's
+#                                         wake for an interactive dispatch
+#                                         that may not exit for a long
+#                                         time) — but write_outcome() below
+#                                         always still runs afterward and is
+#                                         the sole authority: it applies the
+#                                         executed-check gate and the #287
+#                                         minimum-interaction floor, and
+#                                         reconciles/replaces the
+#                                         provisional record if the real
+#                                         outcome differs, so exactly ONE
+#                                         file survives per task_id.
 #   <wt>/.swarm/tasks/done/<id>.check.log full acceptance-check output (audit)
 #   <wt>/.swarm/tasks/status/<id>.json    worker-written state declaration
 #                                         (not this script — see worker.md)
@@ -509,6 +516,26 @@ write_outcome() {
     local outcome="$TASK_OUTCOME"
     local outcome_file="$DONE/${TASK_ID}.${outcome}.json"
 
+    # issue #451: this call may be reconciling a PROVISIONAL record the
+    # worker itself already wrote via scripts/task-done.sh (its mandatory
+    # last step, called mid-session — i.e. before this executed check even
+    # ran). That self-report is a best guess, not the final word: THIS
+    # function, with the actual check result in hand, is still the sole
+    # authority on ok vs err. If the provisional record picked the other
+    # outcome level (different filename — .ok.json vs .err.json), remove
+    # it here before writing the corrected one, so exactly one outcome
+    # file survives per task_id — never both. Also drop its
+    # sweep-swarm-outcomes.sh `.posted` marker, if any, so a hook that
+    # already announced the premature "ok" gets a chance to announce the
+    # correction instead of staying silently wrong forever.
+    local stale
+    for stale in "$DONE/${TASK_ID}.ok.json" "$DONE/${TASK_ID}.err.json"; do
+        [ "$stale" = "$outcome_file" ] && continue
+        if [ -e "$stale" ]; then
+            rm -f "$stale" "$stale.posted" 2>/dev/null || true
+        fi
+    done
+
     # JSON-escape the model field (may be empty)
     local model_json="null"
     [ -n "$MODEL" ] && model_json="\"$MODEL\""
@@ -929,28 +956,23 @@ $TASK"
         # interactive dispatch, since this loop only reaches this point
         # once the agent process actually exits, which for a default
         # (non-headless) claude session means a human/agent typed /quit,
-        # something that may never happen on its own. When that already
-        # happened, $DONE/${TASK_ID}.{ok,err}.json exists and the brief is
-        # already sitting in $DONE — this fallback becomes a no-op read of
-        # what the worker already recorded, rather than a second write.
-        # Exactly one of task-done.sh / this fallback ever actually writes
-        # the outcome record for a given task_id.
+        # something that may never happen on its own. That write is
+        # PROVISIONAL, not final — it landed BEFORE the executed check
+        # above even ran, so write_outcome() below still runs
+        # UNCONDITIONALLY: it is the only place the check result (and the
+        # #287 minimum-interaction floor, and the eval-log row) actually
+        # gets applied, and it reconciles/corrects task-done.sh's guess
+        # rather than leaving it as final (see write_outcome's own stale-
+        # record cleanup). The mv here tolerates task-done.sh having
+        # already moved the brief into $DONE.
         BRIEF_REF=""
         if [ "$IS_LEGACY" = "1" ]; then
             mv "$TASK_PATH" ".agent-task-last.md"
             TASK_OUTCOME="ok"
             [ "$RC" -ne 0 ] && TASK_OUTCOME="err"
             BRIEF_REF=".agent-task-last.md"
-        elif [ -f "$DONE/${TASK_ID}.ok.json" ] || [ -f "$DONE/${TASK_ID}.err.json" ]; then
-            if [ -f "$DONE/${TASK_ID}.ok.json" ]; then
-                TASK_OUTCOME="ok"
-            else
-                TASK_OUTCOME="err"
-            fi
-            BRIEF_REF="$DONE/$(basename "$TASK_PATH")"
-            echo "[$(date +%T)] Outcome already recorded by task-done.sh (task_id=$TASK_ID) — skipping duplicate write."
         else
-            mv "$TASK_PATH" "$DONE/$(basename "$TASK_PATH")"
+            mv "$TASK_PATH" "$DONE/$(basename "$TASK_PATH")" 2>/dev/null || true
             write_outcome "$RC" "$STARTED" "$FINISHED" "$DURATION"
             BRIEF_REF="$DONE/$(basename "$TASK_PATH")"
         fi

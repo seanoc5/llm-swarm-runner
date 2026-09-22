@@ -125,18 +125,38 @@ heading "Test 5 (usage errors): bad args exit non-zero without touching the queu
     || red "t4: a rejected invocation should not have written anything"
 green "missing task_id / invalid outcome word both rejected, nothing written"
 
+drop_v2() {
+    local dir="$1" task_id="$2" body="$3"
+    local tmp
+    tmp=$(mktemp -p "$dir/.swarm/tasks/inbox" .tmp.XXXX.md)
+    printf '%s\n' "$body" > "$tmp"
+    mv "$tmp" "$dir/.swarm/tasks/inbox/$task_id.md"
+}
+
 # ============================================================================
 heading "Test 6 (interactive-worker flow): worker calls task-done.sh mid-session"
 # ============================================================================
-# Stub `claude` CLI: on launch, calls task-done.sh itself (simulating the
-# worker's own mandatory last step, prompts/worker.md § "Task completion"),
-# THEN sleeps briefly before exiting — modeling the real gap between an
-# interactive worker finishing its bookkeeping and a human eventually
-# typing /quit. While it sleeps, processing/ must already be empty and the
-# outcome record must already exist — well before dispatch_agent returns.
+# Stub `claude` CLI: on launch, writes a worker status file (the real
+# worker.md convention — needed so write_outcome's #287 minimum-interaction
+# floor doesn't flag this fixture run as a startup-failure noop, same as a
+# real worker's status file always would) and calls task-done.sh itself
+# (simulating the worker's own mandatory last step, prompts/worker.md
+# § "Task completion"), THEN sleeps briefly before exiting — modeling the
+# real gap between an interactive worker finishing its bookkeeping and a
+# human eventually typing /quit. While it sleeps, processing/ must already
+# be empty and a PROVISIONAL outcome record must already exist — well
+# before dispatch_agent returns. Once the stub finally exits,
+# worker-listener.sh's write_outcome() must ALWAYS still run and reconcile
+# that provisional record into the final one (issue #451 self-review
+# finding: skipping write_outcome entirely once a record exists would
+# silently disable the executed-check gate and stop populating
+# eval-log.jsonl for every future task).
 mkdir -p "$TEST_DIR/bin"
 cat > "$TEST_DIR/bin/claude" <<STUB
 #!/usr/bin/env bash
+mkdir -p .swarm/tasks/status
+echo '{"task_id":"\$SWARM_TEST_TASK_ID","state":"done-no-pr","pr":null,"ts":"2026-01-01T00:00:00Z","note":"test"}' \\
+    > ".swarm/tasks/status/\$SWARM_TEST_TASK_ID.json"
 "$TASK_DONE" "\$SWARM_TEST_TASK_ID" ok >/dev/null
 sleep 1
 exit 0
@@ -146,14 +166,6 @@ chmod +x "$TEST_DIR/bin/claude"
 WT="$TEST_DIR/wt-interactive"
 git clone -q "$TEST_DIR/repo" "$WT"
 mkdir -p "$WT/.swarm/tasks/inbox" "$WT/.swarm/tasks/processing" "$WT/.swarm/tasks/done" "$WT/.swarm/tasks/status" "$WT/home"
-
-drop_v2() {
-    local dir="$1" task_id="$2" body="$3"
-    local tmp
-    tmp=$(mktemp -p "$dir/.swarm/tasks/inbox" .tmp.XXXX.md)
-    printf '%s\n' "$body" > "$tmp"
-    mv "$tmp" "$dir/.swarm/tasks/inbox/$task_id.md"
-}
 
 (
     cd "$WT" && env PATH="$TEST_DIR/bin:$PATH" WORKER_HEADLESS=1 \
@@ -174,21 +186,74 @@ wait_for "i1 processing/ emptied by task-done.sh" \
     '[ -z "$(find "'"$WT"'/.swarm/tasks/processing" -maxdepth 1 -type f 2>/dev/null)" ]'
 wait_for "i1 outcome recorded" '[ -f "'"$WT"'/.swarm/tasks/done/i1.ok.json" ]'
 jq -e '.source == "task-done.sh"' "$WT/.swarm/tasks/done/i1.ok.json" >/dev/null \
-    || red "i1: outcome record should be task-done.sh's, not the listener's fallback"
-green "processing/ emptied and outcome recorded by task-done.sh before the dispatched process even exited"
+    || red "i1: outcome record should be task-done.sh's provisional one at this point"
+green "processing/ emptied and a provisional outcome recorded before the dispatched process even exited"
 
 # Now let the stub finish (it's mid-sleep) and let the listener's own
-# post-dispatch fallback run — it must detect the existing record and
-# skip, not overwrite it or double-log a second write.
+# post-dispatch write_outcome() run. No check was configured and outcome
+# stays ok, so this reconciles the SAME file in place with the full
+# listener-produced record (started/agent/model/etc — task-done.sh's
+# provisional record never has these) rather than leaving the provisional
+# one as final.
 sleep 1.5
-grep -q "Outcome already recorded by task-done.sh" "$WT/listener.log" \
-    || { cat "$WT/listener.log"; red "i1: listener did not recognize the pre-existing task-done.sh record"; }
+[ -f "$WT/.swarm/tasks/done/i1.ok.json" ] || red "i1: reconciled outcome missing"
+[ ! -f "$WT/.swarm/tasks/done/i1.err.json" ] || red "i1: no err.json should exist — outcome never flipped"
+jq -e '.outcome == "ok" and .started != null and .agent == "claude" and .reason == null' \
+    "$WT/.swarm/tasks/done/i1.ok.json" >/dev/null \
+    || { cat "$WT/.swarm/tasks/done/i1.ok.json"; red "i1: write_outcome should have reconciled the provisional record with full fields"; }
 [ -f "$WT/.swarm/tasks/done/i1.md" ] || red "i1: brief was not archived to done/"
-green "listener's own fallback recognized the existing record and skipped the duplicate write"
+green "write_outcome always reconciles afterward — provisional record replaced with the full one, exactly one file"
+
+# ============================================================================
+heading "Test 7 (check-correction): a failing check flips a provisional ok to err (issue #451 self-review finding)"
+# ============================================================================
+# The regression this specifically guards: task-done.sh's provisional "ok"
+# must NOT be the final word when an acceptance check is configured and
+# later fails. Stub claude calls task-done.sh with ok, same as Test 6; the
+# worktree's .swarm/check.sh always fails, and WORKER_CHECK_RETRY=0 so the
+# retry-once dispatch doesn't mask this with a second attempt.
+WT2="$TEST_DIR/wt-check-correction"
+git clone -q "$TEST_DIR/repo" "$WT2"
+mkdir -p "$WT2/.swarm/tasks/inbox" "$WT2/.swarm/tasks/processing" "$WT2/.swarm/tasks/done" "$WT2/.swarm/tasks/status" "$WT2/home"
+cat > "$WT2/.swarm/check.sh" <<'CHECK'
+#!/usr/bin/env bash
+echo "simulated acceptance check failure"
+exit 1
+CHECK
+chmod +x "$WT2/.swarm/check.sh"
+
+(
+    cd "$WT2" && env PATH="$TEST_DIR/bin:$PATH" WORKER_HEADLESS=1 \
+        HOME="$WT2/home" SWARM_TEST_TASK_ID=i2 WORKER_CHECK=1 WORKER_CHECK_RETRY=0 \
+        "$LISTENER" claude > listener.log 2>&1
+) &
+LISTENER_PIDS+=($!)
+sleep 0.3
+
+drop_v2 "$WT2" "i2" '## Task
+
+Do something.'
+
+wait_for "i2 provisional ok recorded" '[ -f "'"$WT2"'/.swarm/tasks/done/i2.ok.json" ]'
+green "task-done.sh recorded a provisional ok before the check ever ran"
+
+wait_for "i2 corrected to err once the check fails" '[ -f "'"$WT2"'/.swarm/tasks/done/i2.err.json" ]'
+[ ! -f "$WT2/.swarm/tasks/done/i2.ok.json" ] \
+    || red "i2: the stale provisional ok.json should have been removed once the check corrected the outcome"
+jq -e '.outcome == "err" and .check_exit == 1 and (.check_output_tail | test("simulated acceptance check failure"))' \
+    "$WT2/.swarm/tasks/done/i2.err.json" >/dev/null \
+    || { cat "$WT2/.swarm/tasks/done/i2.err.json"; red "i2: corrected record should carry the real check_exit/check_output_tail"; }
+green "a failing executed check corrects a provisional ok to err — exactly one file survives, carrying the real check result"
+
+if [ -f "$WT2/.swarm/eval-log.jsonl" ]; then
+    grep -q '"task_id":"i2"' "$WT2/.swarm/eval-log.jsonl" \
+        || red "i2: eval-log.jsonl should have gained a row for the reconciled task"
+    green "eval-log.jsonl still gains a row (append_eval_log runs as part of the always-on write_outcome pass)"
+fi
 
 # ============================================================================
 heading "All task-done.sh tests passed"
 # ============================================================================
-green "happy path, duplicate suppression, err+reason, missing-brief tolerance, usage errors, interactive-worker flow"
+green "happy path, duplicate suppression, err+reason, missing-brief tolerance, usage errors, interactive-worker flow, check-correction"
 echo ""
 yellow "Run with KEEP=1 to leave $TEST_DIR for inspection."

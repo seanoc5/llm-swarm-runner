@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# task-done.sh — the ONE place a worker declares "this task is finished."
+# task-done.sh — the worker's own "this task is finished" declaration.
 #
 # Usage:
 #   task-done.sh <task-id> <ok|err> [reason]
@@ -22,12 +22,23 @@
 # one finish).
 #
 # Now: the worker calls THIS script itself, as the mandatory last step of
-# every task (prompts/worker.md § "Task completion"). It is the single
-# authoritative writer. worker-listener.sh's own exit-triggered write
-# becomes a backstop for workers that forget (or a v1/pre-#451 worktree
-# that predates this script — see MIGRATION below) and no-ops if this
-# script already ran. coordinator-watch.sh no longer creates completion
-# records at all — see coordinator-watch.sh's reconcile_missing_outcome().
+# every task (prompts/worker.md § "Task completion"). coordinator-watch.sh
+# no longer creates completion records at all — see its
+# reconcile_missing_outcome(), which only logs + nudges.
+#
+# This record is PROVISIONAL, not final, whenever a check is coming:
+# worker-listener.sh's write_outcome() — called unconditionally after the
+# dispatched process exits and the project's acceptance check (if any) has
+# run — is still the sole authority on ok vs err, and RECONCILES whatever
+# this script already wrote (removing it first if the real outcome differs
+# — see write_outcome's own stale-record cleanup) rather than leaving it
+# as final. This script's job is narrower than "decide the outcome": (a)
+# empty processing/ immediately, so a reap never mistakes your
+# already-finished task for an abandoned brief (the false-alarm half of
+# #450 finding 3), and (b) unblock the coordinator's wake right away for a
+# dispatch that may not exit for a long time — not to override an executed
+# check. Pass the outcome you actually believe right now; if a check later
+# disagrees, worker-listener.sh corrects the record for you.
 #
 # What it does, atomically:
 #   1. mv .swarm/tasks/processing/<task-id>.md  ->  .swarm/tasks/done/
@@ -36,9 +47,7 @@
 #      same technique every other writer in this queue protocol uses)
 #
 # Idempotent: if an outcome record for <task-id> already exists, this is a
-# no-op (exit 0, one line to stderr) — safe to call more than once, and
-# safe to call after worker-listener.sh's own fallback write already ran
-# (e.g. a headless dispatch that finished before the worker got here).
+# no-op (exit 0, one line to stderr) — safe to call more than once.
 #
 # MIGRATION (v1/older worktrees without this script): a worktree
 # provisioned before issue #451 landed has no scripts/task-done.sh of its
