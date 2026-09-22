@@ -256,6 +256,27 @@ grep -q "pr merge" "$GH_LOG" && red "gh pr merge was called despite a Gate 0 err
 green "Gate 0 error (exit 2) reported distinctly from a Gate 0 refusal (exit 1)"
 
 # ============================================================================
+heading "Test 11: swarm-merge.sh --auto-low — Gate 2 (CI wait) runs last, not before cheaper gates"
+# ============================================================================
+# A self-review finding on this PR: Gate 2 originally ran right after Gate 0,
+# ahead of the already-existing self-review/migration gates — so a PR that
+# was going to be refused anyway (e.g. a self-review BLOCK verdict) still
+# burned ci-wait.sh's full poll first. Reordered so Gate 2 is the very last
+# check before `gh pr merge`. Prove it: seed PR 501 (authorship-clean) with
+# a SWARM_SELF_REVIEW: BLOCK marker comment and confirm swarm-merge.sh
+# refuses WITHOUT ever calling `gh pr checks` (i.e. ci-wait.sh never ran).
+echo '{"comments":[{"body":"<!-- SWARM_SELF_REVIEW: BLOCK -->\nblocked for test"}]}' \
+    > "$GH_COMMENTS_DIR/501.json"
+: > "$GH_LOG"
+if OUT=$(GH_CHECKS_RC=0 "$MERGE" 501 --auto-low 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -ne 0 ] || red "swarm-merge --auto-low should refuse on a self-review BLOCK verdict"
+echo "$OUT" | grep -qi "self-review BLOCK" || red "must name the self-review BLOCK gate"
+grep -q "pr checks" "$GH_LOG" && red "gh pr checks (ci-wait.sh) ran despite an earlier, cheaper gate already refusing"
+grep -q "pr merge" "$GH_LOG" && red "gh pr merge was called despite a self-review BLOCK verdict"
+green "Gate 2 (CI wait) never runs when a cheaper gate already refused"
+echo '{"comments":[]}' > "$GH_COMMENTS_DIR/501.json"
+
+# ============================================================================
 heading "All coordinator-authorship shape tests passed"
 green "Gate 0 (authorship) refusal/pass/fail-closed, Gate 2 (real CI wait) refusal/pass, --auto-low scoping vs plain merge"
 echo ""

@@ -19,8 +19,13 @@
 # --auto-low is for the coordinator's unattended SWARM_AUTOMERGE_LOW path
 # ONLY (prompts/coordinator.md "Auto-merge low-risk PRs") — a human calling
 # this script directly (or a plain `swarm-merge.sh <N>`) never needs it. It
-# adds two hard, non-overridable gates ahead of the existing ones, both
-# fail-closed on any error:
+# adds two hard, non-overridable gates, both fail-closed on any error, at
+# opposite ends of the existing gate sequence: Gate 0 first (cheap — refuse
+# before spending any time on the rest), Gate 2 last, immediately before the
+# `gh pr merge` call (so a PR the self-review/migration gates would refuse
+# anyway never sits through ci-wait.sh's full timeout first, and the window
+# between "CI confirmed green" and the actual merge stays as narrow as
+# possible):
 #   Gate 0 (authorship)  scripts/check-coordinator-authorship.sh <N> — refuse
 #                         if any head-only commit carries a
 #                         `Swarm-Role: coordinator` git trailer. The
@@ -32,6 +37,12 @@
 #                         gate — a coordinator-authored PR always goes to
 #                         the operator; a human can still merge it by hand
 #                         with a plain `swarm-merge.sh <N>` (no --auto-low).
+#                         Note: this only catches a commit that was actually
+#                         stamped with the trailer — it protects future
+#                         coordinator commits, not commits that predate the
+#                         convention (PR #713 itself wouldn't have carried
+#                         it; Gate 2 below is what would have caught that
+#                         specific incident).
 #   Gate 2 (CI wait)      scripts/ci-wait.sh <N> — a real bounded poll of
 #                         `gh pr checks` to a concluded state, replacing the
 #                         old `gh pr merge --auto` prescription, which
@@ -335,9 +346,10 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
         echo "       See \$LLM_SWARM_DOCS/VCS/git-github.md for the playbook." >&2
         exit 1
       fi
-      # --auto-low gates (#452): authorship (0) and a real CI wait (2), both
-      # hard and non-overridable. Only active on the coordinator's unattended
-      # SWARM_AUTOMERGE_LOW path; a plain `swarm-merge.sh <N>` skips both.
+      # --auto-low Gate 0 (#452): authorship, hard and non-overridable. Only
+      # active on the coordinator's unattended SWARM_AUTOMERGE_LOW path; a
+      # plain `swarm-merge.sh <N>` skips it. Checked here, first and cheap,
+      # before anything that costs real wall-clock time below.
       if [ "$AUTO_LOW" = 1 ]; then
         echo "       auto-low gate 0 (authorship): checking…"
         AUTH_RC=0
@@ -352,15 +364,6 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
           echo "ERROR: PR #$PR_NUM refused by --auto-low Gate 0 (authorship, exit $AUTH_RC)." >&2
           echo "       check-coordinator-authorship.sh errored rather than returning a clean" >&2
           echo "       verdict (see its output above) — failing closed, not eligible." >&2
-          exit 1
-        fi
-        echo "       auto-low gate 2 (CI wait): waiting for a real conclusion…"
-        CI_RC=0
-        "$SCRIPT_DIR/ci-wait.sh" "$PR_NUM" || CI_RC=$?
-        if [ "$CI_RC" != 0 ]; then
-          echo "ERROR: PR #$PR_NUM refused by --auto-low Gate 2 (CI wait, exit $CI_RC)." >&2
-          echo "       See ci-wait.sh's output above for which case fired (red checks," >&2
-          echo "       timeout, or CONFLICTING/DIRTY needing a rebase)." >&2
           exit 1
         fi
       fi
@@ -411,6 +414,24 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
             exit 1
             ;;
         esac
+      fi
+      # --auto-low Gate 2 (#452): a real CI wait, hard and non-overridable.
+      # Deliberately last, right before the merge call — the self-review and
+      # migration gates above are cheap, already-decided lookups (an instant
+      # BLOCK verdict or Flyway collision), so a PR that's going to be
+      # refused anyway is refused before burning ci-wait.sh's full timeout,
+      # and the window between "CI confirmed green" and the actual merge
+      # stays as narrow as possible.
+      if [ "$AUTO_LOW" = 1 ]; then
+        echo "       auto-low gate 2 (CI wait): waiting for a real conclusion…"
+        CI_RC=0
+        "$SCRIPT_DIR/ci-wait.sh" "$PR_NUM" || CI_RC=$?
+        if [ "$CI_RC" != 0 ]; then
+          echo "ERROR: PR #$PR_NUM refused by --auto-low Gate 2 (CI wait, exit $CI_RC)." >&2
+          echo "       See ci-wait.sh's output above for which case fired (red checks," >&2
+          echo "       timeout, or CONFLICTING/DIRTY needing a rebase)." >&2
+          exit 1
+        fi
       fi
       echo "[4/7] merging PR #$PR_NUM (squash, delete-branch)…"
       # gh pr merge's local-delete step may fail; tolerate it.
