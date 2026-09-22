@@ -5783,11 +5783,16 @@ worker_pending_brief() {
 
 # worker_current_task_terminal <worktree-dir>
 #
-# True (rc 0) ONLY if the task currently claimed in <worktree>/.swarm/tasks/
-# processing/ (there is always exactly one there for as long as the agent
-# process is alive — claim_next_task() moves it there on pickup and doesn't
-# move it out again until dispatch_agent returns) has a status file
-# reporting a genuinely terminal state: "ready-for-review" or "done-no-pr".
+# True (rc 0) ONLY if the task currently claimed — normally the one entry
+# in <worktree>/.swarm/tasks/processing/ (claim_next_task() moves it there
+# on pickup and doesn't move it out again until dispatch_agent returns),
+# OR, since issue #451, the most recently archived done/*.md when
+# processing/ is already empty because scripts/task-done.sh moved it
+# there while the agent process is still alive (see this function's own
+# "if [ -z "$proc_file" ]" branch below for why processing/-empty can no
+# longer mean "nothing in flight" the way it always used to) — has a
+# status file reporting a genuinely terminal state: "ready-for-review" or
+# "done-no-pr".
 #
 # Self-review finding on this feature's first version: gating delivery on
 # pane idleness alone is not enough. A worker parked `blocked` (asked a
@@ -5812,12 +5817,18 @@ worker_pending_brief() {
 # Deliberately NOT worker_task_done(): that function's (a)/(b) signals are
 # themselves gated on `.swarm/tasks/processing/` being EMPTY (a staleness
 # guard against stale done/status files from an EARLIER, already-concluded
-# task — see its own header comment) — a precondition that can never hold
-# here, since processing/ holds exactly the in-flight task for as long as
-# its agent process is alive, i.e. for every window this function is even
-# called against. This reads the CURRENT processing/ entry's own status file
-# directly instead, with no such guard needed (there's nothing stale to
-# guard against — it's always THIS task's own record or nothing).
+# task — see its own header comment) — a precondition that, pre-#451,
+# could never hold while this function's primary (processing/-non-empty)
+# branch is the one running, since processing/ then holds exactly the
+# in-flight task for as long as its agent process is alive. This reads
+# the CURRENT processing/ entry's own status file directly instead, with
+# no such guard needed (there's nothing stale to guard against — it's
+# always THIS task's own record or nothing). The issue #451 fallback
+# branch below, which DOES run with processing/ empty, still doesn't
+# reuse worker_task_done() — it targets one specific archived task_id
+# (the most recently moved done/*.md) rather than accepting any
+# ready-for-review status file in the worktree, avoiding exactly the
+# stale-record risk worker_task_done()'s own guard exists for.
 #
 # issue #370: the exact-name lookup above can miss even when the current
 # task genuinely IS terminal — observed in the wild as status/issue-517.json
@@ -5879,7 +5890,55 @@ worker_current_task_terminal() {
     [ "$HAVE_JQ" = "1" ] || return 1
     local proc_file task_id status_file state
     proc_file="$(find "$wt_dir/.swarm/tasks/processing" -maxdepth 1 -type f 2>/dev/null | head -1)"
-    [ -n "$proc_file" ] || return 1
+    if [ -z "$proc_file" ]; then
+        # issue #451 self-review finding: scripts/task-done.sh (the
+        # worker's own mandatory last step) moves processing/<id>.md into
+        # done/ WHILE the dispatched agent process may still be alive —
+        # that's the entire point of task-done.sh (see its own header).
+        # Pre-#451, "processing/ is empty" only ever meant "no task in
+        # flight", so returning 1 (not confirmed terminal) here was safe.
+        # Now it doesn't: a worker that correctly calls task-done.sh would
+        # make this function return 1 FOREVER for that window, and per
+        # this function's own #370 comment above, task_not_terminal never
+        # self-heals on its own — permanently wedging WORKER_AUTO_DELIVER,
+        # the exact 2.5-hour fand-etl stall it exists to prevent. Recover
+        # the task_id from the most recently ARCHIVED brief in done/
+        # instead (ctime, same "when was this actually claimed/moved"
+        # signal the #370 fallback below already relies on — task-done.sh's
+        # mv bumps it same as claim_next_task's mv does) and apply the
+        # same terminal check against it. Deliberately NOT replicating
+        # #370's mismatched-status-filename fallback machinery below for
+        # this branch — that edge case is orthogonal and stays scoped to
+        # the processing/-based path; a done/*.{ok,err}.json's mere
+        # existence is checked instead, which needs no such fallback since
+        # (unlike a still-in-progress processing/ entry) task-done.sh only
+        # ever writes one once the worker has actually declared done.
+        local done_dir="$wt_dir/.swarm/tasks/done" f fctime best_ctime=-1
+        shopt -s nullglob
+        for f in "$done_dir"/*.md; do
+            fctime="$(ctime_epoch "$f")"
+            [ -n "$fctime" ] || continue
+            if [ "$fctime" -gt "$best_ctime" ]; then
+                best_ctime="$fctime"
+                proc_file="$f"
+            fi
+        done
+        shopt -u nullglob
+        [ -n "$proc_file" ] || return 1
+        task_id="$(basename "$proc_file" .md)"
+        status_file="$wt_dir/.swarm/tasks/status/${task_id}.json"
+        if [ -r "$status_file" ]; then
+            state="$(jq -r '.state // empty' "$status_file" 2>/dev/null)" || return 1
+            case "$state" in
+                ready-for-review|done-no-pr) return 0 ;;
+                *)                           return 1 ;;
+            esac
+        fi
+        if [ -f "$done_dir/${task_id}.ok.json" ] || [ -f "$done_dir/${task_id}.err.json" ]; then
+            return 0
+        fi
+        return 1
+    fi
     task_id="$(basename "$proc_file" .md)"
     status_file="$wt_dir/.swarm/tasks/status/${task_id}.json"
     if [ -r "$status_file" ]; then
