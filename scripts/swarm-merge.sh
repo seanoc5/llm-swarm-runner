@@ -340,11 +340,18 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
       # SWARM_AUTOMERGE_LOW path; a plain `swarm-merge.sh <N>` skips both.
       if [ "$AUTO_LOW" = 1 ]; then
         echo "       auto-low gate 0 (authorship): checking…"
-        if ! "$SCRIPT_DIR/check-coordinator-authorship.sh" "$PR_NUM"; then
+        AUTH_RC=0
+        "$SCRIPT_DIR/check-coordinator-authorship.sh" "$PR_NUM" || AUTH_RC=$?
+        if [ "$AUTH_RC" = 1 ]; then
           echo "ERROR: PR #$PR_NUM refused by --auto-low Gate 0 (authorship)." >&2
           echo "       This PR carries a coordinator-authored commit and must go to" >&2
           echo "       the operator — there is no override for this gate. A human can" >&2
           echo "       still merge it directly: swarm-merge.sh $PR_NUM (no --auto-low)." >&2
+          exit 1
+        elif [ "$AUTH_RC" != 0 ]; then
+          echo "ERROR: PR #$PR_NUM refused by --auto-low Gate 0 (authorship, exit $AUTH_RC)." >&2
+          echo "       check-coordinator-authorship.sh errored rather than returning a clean" >&2
+          echo "       verdict (see its output above) — failing closed, not eligible." >&2
           exit 1
         fi
         echo "       auto-low gate 2 (CI wait): waiting for a real conclusion…"

@@ -239,6 +239,23 @@ grep -q "pr merge 501" "$GH_LOG" || red "gh pr merge 501 was not called"
 green "--auto-low merges once authorship is clean and CI is verified green"
 
 # ============================================================================
+heading "Test 10: swarm-merge.sh --auto-low distinguishes a Gate 0 error (exit 2) from a refusal (exit 1)"
+# ============================================================================
+# A self-review finding on this PR: the refusal message used to say "carries
+# a coordinator-authored commit" even when check-coordinator-authorship.sh
+# had actually errored (exit 2, e.g. an unresolvable PR) rather than found a
+# trailer (exit 1) — misleading for whoever reads the log. PR 999 is absent
+# from GH_PR_TABLE, so check-coordinator-authorship.sh can't resolve a base
+# ref and fails closed with exit 2.
+: > "$GH_LOG"
+if OUT=$("$MERGE" 999 --auto-low 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -ne 0 ] || red "swarm-merge --auto-low should refuse on a Gate 0 error"
+echo "$OUT" | grep -qi "gate 0.*exit 2" || red "must name Gate 0 and the exit 2 error, not a false refusal"
+echo "$OUT" | grep -q "carries a coordinator-authored commit" && red "must not claim a trailer was found when Gate 0 actually errored"
+grep -q "pr merge" "$GH_LOG" && red "gh pr merge was called despite a Gate 0 error"
+green "Gate 0 error (exit 2) reported distinctly from a Gate 0 refusal (exit 1)"
+
+# ============================================================================
 heading "All coordinator-authorship shape tests passed"
 green "Gate 0 (authorship) refusal/pass/fail-closed, Gate 2 (real CI wait) refusal/pass, --auto-low scoping vs plain merge"
 echo ""
