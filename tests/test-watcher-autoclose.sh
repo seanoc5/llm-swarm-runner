@@ -364,6 +364,53 @@ $(cat "$TEST_DIR/watch-4.log")"
 green ".err.json outcomes trigger autoclose + wake (parity with .ok.json)"
 
 # ============================================================================
+heading "Test 4b: on_outcome derives the issue number from the wt-issue-N path, not the filename (issue #451 self-review finding)"
+# ============================================================================
+# The regression this guards: on_outcome used to parse the issue number
+# from the outcome FILENAME's trailing "-<issue>" before .ok/.err.json —
+# reliable only because #314's synth_outcome (removed by this PR)
+# defensively appended it. scripts/task-done.sh and write_outcome() both
+# use the bare task_id with no such suffixing, and real task_ids don't
+# always end in a plain "-<issue>": requeue.sh's <wt-path> form produces a
+# bare timestamp, and provision-worker.sh's collision suffix lands AFTER
+# the issue number ("<ts>-<issue>-2"). Both shapes are exercised here.
+: > "$KILL_LOG"
+: > "$WAKE_LOG"
+rm -f "$PROJECT_DIR/.swarm/events.log"
+mkdir -p "$TEST_DIR/wt-issue-47/.swarm/tasks/done"
+
+start_watcher 1 "$TEST_DIR/watch-4b.log"
+# Shape 1: a bare timestamp task_id (requeue.sh <wt-path> form) — no
+# trailing "-<issue>" at all.
+echo '{"task_id":"20260922-101530","outcome":"ok"}' \
+    > "$TEST_DIR/wt-issue-47/.swarm/tasks/done/20260922-101530.ok.json"
+wait_for_watcher_exit
+
+EVENTS_LOG="$PROJECT_DIR/.swarm/events.log"
+grep -q 'worker\.finish .*issue=47 outcome=ok' "$EVENTS_LOG" \
+    || red "expected worker.finish issue=47 (from the wt-issue-47 path) for a bare-timestamp task_id; got:
+$(cat "$EVENTS_LOG" 2>/dev/null || echo '(missing)')"
+green "bare-timestamp task_id (no trailing -<issue> at all) still resolves issue=47 from the path"
+
+: > "$KILL_LOG"
+: > "$WAKE_LOG"
+rm -f "$PROJECT_DIR/.swarm/events.log"
+make_kill_stub "Done. Closed 1 window(s)."
+start_watcher 1 "$TEST_DIR/watch-4b2.log"
+# Shape 2: provision-worker.sh's collision-suffix id — "-2" lands AFTER
+# the real issue number, so the OLD filename-trailing-digits parse would
+# have misread this as issue=2.
+echo '{"task_id":"20260922-101530-47-2","outcome":"ok"}' \
+    > "$TEST_DIR/wt-issue-47/.swarm/tasks/done/20260922-101530-47-2.ok.json"
+wait_for_watcher_exit
+
+EVENTS_LOG="$PROJECT_DIR/.swarm/events.log"
+grep -q 'worker\.finish .*issue=47 outcome=ok' "$EVENTS_LOG" \
+    || red "expected worker.finish issue=47 for a collision-suffixed task_id ending in -47-2, not issue=2; got:
+$(cat "$EVENTS_LOG" 2>/dev/null || echo '(missing)')"
+green "collision-suffixed task_id (...-47-2) resolves issue=47 from the path, not the misleading trailing '-2'"
+
+# ============================================================================
 heading "Test 5: pr-poll backstop reaps a merged PR with NO outcome.json ever arriving (issue #119)"
 # ============================================================================
 # The bug: on_outcome only fires from a NEW outcome.json write, but
@@ -1048,4 +1095,5 @@ echo "  #237: WATCHER_AUTOCLOSE_MODE=merged (default) leaves CLOSED-without-merg
 echo "  #451: done detection with no outcome yet logs watch.reconcile — never fabricates done/*.json, never touches inbox/"
 echo "  #451: an existing (worker-written) outcome suppresses reconcile entirely — no event, no side effects"
 echo "  #451: a PR-open backstop with no status file (synthesized task_id) still reconciles cleanly — log only"
+echo "  #451: on_outcome derives the issue number from the wt-issue-N path, not a fragile filename-trailing-digits parse"
 yellow "Run with KEEP=1 to leave $TEST_DIR for inspection."

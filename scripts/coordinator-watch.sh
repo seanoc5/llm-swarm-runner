@@ -3168,6 +3168,38 @@ own_worktree_dirs_for_scan() {
     shopt -u nullglob
 }
 
+# outcome_path_issue <outcome-path>
+#
+# Issue number for a done/*.{ok,err}.json path. Prefers the path's own
+# "wt-issue-<N>" directory segment — always present for any outcome file
+# that reached here (every own-worktree layout in this codebase is
+# WORKSPACE/wt-issue-<N>/...) — over the OLD convention of parsing the
+# FILENAME's trailing "-<issue>" before .ok/.err.json.
+#
+# issue #451 self-review finding: that filename-trailing-digits parse was
+# only ever reliable because #314's synth_outcome (removed by this PR)
+# defensively appended "-$issue" to every filename it wrote, using the
+# issue number it was called with directly — never by parsing task_id.
+# scripts/task-done.sh and worker-listener.sh's write_outcome() both use
+# the BARE task_id with no such suffixing (matching write_outcome's own
+# long-standing convention, unchanged by this PR) — a task_id that
+# doesn't happen to end in "-<issue>" (requeue.sh's <wt-path> form, or
+# provision-worker.sh's "-2"/"-3" collision suffix landing AFTER the
+# issue number) parses wrong under the old filename-only method. The path
+# itself was always the more reliable source and needs no writer-side
+# change to fix.
+outcome_path_issue() {
+    local path="$1"
+    local issue
+    issue=$(printf '%s' "$path" | sed -nE 's#.*/wt-issue-([0-9]+)/.*#\1#p')
+    if [ -z "$issue" ]; then
+        # Fallback for a path shape that doesn't match the convention at
+        # all (e.g. a test fixture) — the old filename-trailing-digits parse.
+        issue=$(basename "$path" | sed -E 's/.*-([0-9]+)\.(ok|err)\.json$/\1/')
+    fi
+    printf '%s' "$issue"
+}
+
 # dispatch_outcome <outcome-path>
 #
 # Wrapper around on_outcome that applies the is_our_worktree filter.
@@ -3178,9 +3210,7 @@ dispatch_outcome() {
     if is_our_worktree "$path"; then
         on_outcome "$path"
     else
-        local issue
-        issue=$(basename "$path" | sed -E 's/.*-([0-9]+)\.(ok|err)\.json$/\1/')
-        log_event worker.finish.skip "issue=$issue reason=foreign_worktree path=$path"
+        log_event worker.finish.skip "issue=$(outcome_path_issue "$path") reason=foreign_worktree path=$path"
     fi
 }
 
@@ -7217,8 +7247,7 @@ on_outcome() {
     local now issue outcome
     now=$(date +%s)
 
-    # Parse outcome filename: <task-id>-<issue>.<ok|err>.json
-    issue=$(basename "$path" | sed -E 's/.*-([0-9]+)\.(ok|err)\.json$/\1/')
+    issue=$(outcome_path_issue "$path")
     case "$path" in
         *.ok.json)  outcome=ok ;;
         *.err.json) outcome=err ;;
