@@ -54,6 +54,10 @@ case "$1 $2" in
         fi
         exit 0 ;;
     "pr checks")
+        if [ "${GH_CHECKS_NO_CHECKS:-0}" = "1" ]; then
+            echo "no checks reported on the 'main' branch" >&2
+            exit 1
+        fi
         exit "${GH_CHECKS_RC:-0}" ;;
 esac
 exit 0
@@ -116,6 +120,15 @@ heading "Test 6: no PR# argument → usage error"
 rc=0
 "$CI_WAIT" >/dev/null 2>&1 || rc=$?
 check "exits 4 with no arguments" '[ "$rc" -eq 4 ]'
+
+# ─────────────── Test 7: no CI checks configured ⇒ exit 5 (distinct from a real failure) ─
+
+heading "Test 7: mergeable PR, repo has no CI checks configured at all → exit 5"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_NO_CHECKS=1 \
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
+check "exits 5, distinct from exit 1 (real failure)" '[ "$rc" -eq 5 ]'
+check "message explains nothing ran, so nothing failed" 'grep -qi "no CI checks configured" <<<"$out"'
 
 heading "Results: $PASS checks passed"
 green "All checks passed."

@@ -28,6 +28,13 @@
 #   3  PR is CONFLICTING/DIRTY against its base — no run will ever fire;
 #      rebase onto the base branch and re-push before waiting again
 #   4  usage / gh error
+#   5  no CI checks are configured on this repo at all (`gh pr checks`
+#      reports "no checks reported on the ... branch") — distinct from a
+#      real failure (1): nothing ran, so nothing failed. A caller that wants
+#      "pass with a loud warning" instead of "refuse" for a CI-less project
+#      (swarm-merge.sh --auto-low Gate 2 does exactly this) should treat 5
+#      separately from 1; a caller that wants any non-green to refuse can
+#      still treat 5 like any other non-zero exit.
 #
 # Run this in the foreground with an explicit Bash timeout that covers the
 # deadline below (e.g. timeout-seconds + ~30s of slack for gh calls).
@@ -72,7 +79,12 @@ while true; do
     set -e
     case "$CHECKS_RC" in
         0) echo "ci-wait: PR #$PR checks green."; exit 0 ;;
-        1) echo "ci-wait: PR #$PR has failing checks:"; echo "$CHECKS_OUT" >&2; exit 1 ;;
+        1)
+            if grep -qi "no checks reported" <<<"$CHECKS_OUT"; then
+                echo "ci-wait: PR #$PR has no CI checks configured on this repo at all — nothing ran, so nothing failed." >&2
+                exit 5
+            fi
+            echo "ci-wait: PR #$PR has failing checks:"; echo "$CHECKS_OUT" >&2; exit 1 ;;
         8) : ;; # pending — fall through to deadline/sleep below
         *) echo "ci-wait: gh pr checks $PR exited $CHECKS_RC:"; echo "$CHECKS_OUT" >&2; exit 4 ;;
     esac

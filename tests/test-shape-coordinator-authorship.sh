@@ -17,6 +17,19 @@
 #                                        — this only guards the unattended
 #                                        SWARM_AUTOMERGE_LOW path.
 #
+# #454 (follow-up to #452) mechanizes the rest of the 8-gate list from
+# prompts/coordinator.md that was still prose-only after #452 landed:
+#   - Gate 1 (rating marker), Gate 3 (review decision), Gate 4 (base
+#     branch), Gate 5 (draft) — each a hard, non-overridable refusal.
+#   - Gate 2 (CI wait) on a repo with NO checks configured at all: a
+#     pass-with-loud-warning, not a refusal (ci-wait.sh exit 5) — logged as
+#     a `merge.gate` event, since "no checks exist" isn't evidence of a
+#     failure and refusing here would silently strand every CI-less
+#     project's auto-merge path.
+#   - --auto-low refuses outright (usage error) if combined with
+#     --override-review or --override-migration-gate — the unattended path
+#     must never accept an override flag.
+#
 # Uses a REAL git fixture repo (bare "origin" + a clone) for the trailer
 # scan, same reasoning as test-shape-migration-check.sh: a commit trailer
 # only exists in real git commit objects, not something worth faking.
@@ -83,6 +96,16 @@ git -C "$CLONE" -c user.email=t@t -c user.name=t commit -q --allow-empty \
     -m "fix(migration): duplicate-trailer edge case"
 git -C "$CLONE" push -q origin fix/issue-503
 
+# PR 504 / issue 504: authorship-clean, but targets a non-default branch —
+# fixture for Gate 4 (base branch). "feature-x" must exist in origin too, or
+# Gate 0's fetch of base/head would fail closed (exit 2) before Gate 4 ever runs.
+git -C "$CLONE" checkout -q -b feature-x master
+git -C "$CLONE" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "feature branch base"
+git -C "$CLONE" push -q origin feature-x
+git -C "$CLONE" checkout -q -b fix/issue-504 feature-x
+git -C "$CLONE" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "worker fix targeting a feature branch"
+git -C "$CLONE" push -q origin fix/issue-504
+
 # ─────────────────────────── gh stub ────────────────────────────────────────
 
 export GH_PR_TABLE="$TEST_DIR/pr-table.json"   # {"<N>": {"baseRefName":..,"headRefName":..}}
@@ -94,7 +117,8 @@ mkdir -p "$GH_COMMENTS_DIR"
 cat > "$GH_PR_TABLE" <<'JSON'
 {"501": {"baseRefName": "master", "headRefName": "fix/issue-501"},
  "502": {"baseRefName": "master", "headRefName": "fix/issue-502"},
- "503": {"baseRefName": "master", "headRefName": "fix/issue-503"}}
+ "503": {"baseRefName": "master", "headRefName": "fix/issue-503"},
+ "504": {"baseRefName": "feature-x", "headRefName": "fix/issue-504"}}
 JSON
 
 mkdir -p "$TEST_DIR/bin"
@@ -112,17 +136,31 @@ case "$1 $2" in
         if [[ "$*" == *"mergeable,mergeStateStatus,headRefOid"* ]]; then
             # ci-wait.sh's call shape.
             echo "{\"mergeable\":\"${GH_MERGEABLE:-MERGEABLE}\",\"mergeStateStatus\":\"${GH_MERGE_STATE:-CLEAN}\",\"headRefOid\":\"deadbeef\"}"
-        elif [[ "$*" == *baseRefName* ]]; then
-            jq -c --arg n "$pr_num" '.[$n]' "$GH_PR_TABLE"
         elif [[ "$*" == *state,mergeable* ]]; then
+            # swarm-merge.sh's main PR_JSON call shape. Defaults make every
+            # gate-1/3/4/5 check pass unless a test explicitly overrides one
+            # of the GH_PR_* env vars below.
             base_head="$(jq -c --arg n "$pr_num" '.[$n]' "$GH_PR_TABLE")"
             head="$(jq -r '.headRefName' <<<"$base_head")"
-            echo "{\"state\":\"OPEN\",\"mergeable\":\"MERGEABLE\",\"headRefName\":\"$head\",\"title\":\"fake\"}"
+            base="$(jq -r '.baseRefName' <<<"$base_head")"
+            jq -n -c \
+                --arg head "$head" --arg base "$base" \
+                --arg body "${GH_PR_BODY:-<!-- BLIND_MERGE_RISK: low -->}" \
+                --arg review "${GH_PR_REVIEW_DECISION:-}" \
+                --argjson draft "${GH_PR_IS_DRAFT:-false}" \
+                '{state:"OPEN", mergeable:"MERGEABLE", headRefName:$head, baseRefName:$base, title:"fake", body:$body, isDraft:$draft, reviewDecision:$review}'
+        elif [[ "$*" == *baseRefName,headRefName* ]]; then
+            # check-coordinator-authorship.sh's call shape (Gate 0 only).
+            jq -c --arg n "$pr_num" '.[$n]' "$GH_PR_TABLE"
         elif [[ "$*" == *comments* ]]; then
             cat "$comments_file"
         fi
         exit 0 ;;
     "pr checks")
+        if [ "${GH_CHECKS_NO_CHECKS:-0}" = "1" ]; then
+            echo "no checks reported on the 'fix/issue-501' branch" >&2
+            exit 1
+        fi
         exit "${GH_CHECKS_RC:-0}" ;;
     "pr merge") exit 0 ;;
     "pr list")
@@ -277,7 +315,99 @@ green "Gate 2 (CI wait) never runs when a cheaper gate already refused"
 echo '{"comments":[]}' > "$GH_COMMENTS_DIR/501.json"
 
 # ============================================================================
+heading "Test 12: swarm-merge.sh --auto-low refuses a PR with no rating marker (Gate 1)"
+# ============================================================================
+: > "$GH_LOG"
+if OUT=$(GH_PR_BODY="no marker here" "$MERGE" 501 --auto-low 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -ne 0 ] || red "swarm-merge --auto-low should refuse a PR with no rating marker"
+echo "$OUT" | grep -qi "gate 1" || red "refusal must name Gate 1"
+grep -q "pr checks" "$GH_LOG" && red "gh pr checks ran despite an earlier, cheaper gate already refusing"
+grep -q "pr merge" "$GH_LOG" && red "gh pr merge was called despite a missing rating marker"
+green "--auto-low refuses a PR with no rating marker (Gate 1), gh pr merge never called"
+
+# ============================================================================
+heading "Test 13: swarm-merge.sh --auto-low refuses a medium-rated PR (Gate 1)"
+# ============================================================================
+: > "$GH_LOG"
+if OUT=$(GH_PR_BODY="<!-- BLIND_MERGE_RISK: medium -->" "$MERGE" 501 --auto-low 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -ne 0 ] || red "swarm-merge --auto-low should refuse a medium-rated PR"
+echo "$OUT" | grep -qi "gate 1" || red "refusal must name Gate 1"
+grep -q "pr merge" "$GH_LOG" && red "gh pr merge was called despite a medium rating"
+green "--auto-low refuses a medium-rated PR (Gate 1), gh pr merge never called"
+
+# ============================================================================
+heading "Test 14: swarm-merge.sh --auto-low refuses on CHANGES_REQUESTED (Gate 3)"
+# ============================================================================
+: > "$GH_LOG"
+if OUT=$(GH_PR_REVIEW_DECISION=CHANGES_REQUESTED "$MERGE" 501 --auto-low 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -ne 0 ] || red "swarm-merge --auto-low should refuse a PR with CHANGES_REQUESTED"
+echo "$OUT" | grep -qi "gate 3" || red "refusal must name Gate 3"
+grep -q "pr merge" "$GH_LOG" && red "gh pr merge was called despite CHANGES_REQUESTED"
+green "--auto-low refuses a PR with reviewDecision=CHANGES_REQUESTED (Gate 3), gh pr merge never called"
+
+# ============================================================================
+heading "Test 15: swarm-merge.sh --auto-low refuses a PR targeting a non-default branch (Gate 4)"
+# ============================================================================
+# PR 504: authorship-clean, base is 'feature-x', not the repo's resolved
+# default branch ('master'). Never auto-merge feature-to-feature.
+: > "$GH_LOG"
+if OUT=$("$MERGE" 504 --auto-low 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -ne 0 ] || red "swarm-merge --auto-low should refuse a PR targeting a non-default branch"
+echo "$OUT" | grep -qi "gate 4" || red "refusal must name Gate 4"
+grep -q "pr merge" "$GH_LOG" && red "gh pr merge was called despite a non-default base branch"
+green "--auto-low refuses feature-to-feature (Gate 4: base != default branch), gh pr merge never called"
+
+# ============================================================================
+heading "Test 16: swarm-merge.sh --auto-low refuses a draft PR (Gate 5)"
+# ============================================================================
+: > "$GH_LOG"
+if OUT=$(GH_PR_IS_DRAFT=true "$MERGE" 501 --auto-low 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -ne 0 ] || red "swarm-merge --auto-low should refuse a draft PR"
+echo "$OUT" | grep -qi "gate 5" || red "refusal must name Gate 5"
+grep -q "pr merge" "$GH_LOG" && red "gh pr merge was called despite the PR still being a draft"
+green "--auto-low refuses a draft PR (Gate 5), gh pr merge never called"
+
+# ============================================================================
+heading "Test 17: swarm-merge.sh --auto-low treats 'no CI checks configured' as pass-with-warning (Gate 2)"
+# ============================================================================
+# Coordinator's call on the reviewer's zero-configured-checks finding: a
+# CI-less repo shouldn't silently lose auto-merge (gh pr checks exits
+# non-zero with "no checks reported..." when nothing is configured at all,
+# indistinguishable by exit code alone from a real failure) — proceed, but
+# log it loudly as a merge.gate event rather than refuse.
+: > "$GH_LOG"
+EVENTS_LOG="$CLONE/.swarm/events.log"
+rm -f "$EVENTS_LOG"
+if OUT=$(GH_CHECKS_NO_CHECKS=1 "$MERGE" 501 --auto-low 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -eq 0 ] || red "swarm-merge --auto-low should proceed on a CI-less repo (rc=$RC, output: $OUT)"
+echo "$OUT" | grep -qi "no ci checks configured" || red "must warn loudly about the CI absence"
+grep -q "pr merge 501" "$GH_LOG" || red "gh pr merge 501 was not called despite the CI-less pass-with-warning"
+[ -f "$EVENTS_LOG" ] || red "no .swarm/events.log written"
+grep -q "merge.gate.*pr=501.*no-checks-configured" "$EVENTS_LOG" || red "merge.gate event for the CI absence was not logged"
+green "--auto-low proceeds on a CI-less repo (Gate 2 pass-with-warning), merge.gate event logged"
+
+# ============================================================================
+heading "Test 18: --auto-low + --override-review is a hard usage error, no gh calls at all"
+# ============================================================================
+: > "$GH_LOG"
+if OUT=$("$MERGE" 501 --auto-low --override-review 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -eq 2 ] || red "expected exit 2 (usage error) for --auto-low + --override-review, got $RC"
+echo "$OUT" | grep -qi "override" || red "usage error must name the override flag"
+[ ! -s "$GH_LOG" ] || red "gh was called despite the usage error (should fail before any gate runs)"
+green "--auto-low + --override-review is refused as a usage error before any gate runs"
+
+# ============================================================================
+heading "Test 19: --auto-low + --override-migration-gate is a hard usage error, no gh calls at all"
+# ============================================================================
+: > "$GH_LOG"
+if OUT=$("$MERGE" 501 --auto-low --override-migration-gate 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -eq 2 ] || red "expected exit 2 (usage error) for --auto-low + --override-migration-gate, got $RC"
+echo "$OUT" | grep -qi "override" || red "usage error must name the override flag"
+[ ! -s "$GH_LOG" ] || red "gh was called despite the usage error (should fail before any gate runs)"
+green "--auto-low + --override-migration-gate is refused as a usage error before any gate runs"
+
+# ============================================================================
 heading "All coordinator-authorship shape tests passed"
-green "Gate 0 (authorship) refusal/pass/fail-closed, Gate 2 (real CI wait) refusal/pass, --auto-low scoping vs plain merge"
+green "Gates 0/1/2/3/4/5 refusal/pass/fail-closed, no-CI-configured pass-with-warning, --auto-low scoping vs plain merge, override-flag rejection"
 echo ""
 yellow "Run with KEEP=1 to leave $TEST_DIR for inspection."
