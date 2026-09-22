@@ -336,6 +336,26 @@ grep -q "pr merge" "$GH_LOG" && red "gh pr merge was called despite a medium rat
 green "--auto-low refuses a medium-rated PR (Gate 1), gh pr merge never called"
 
 # ============================================================================
+heading "Test 13b: swarm-merge.sh --auto-low refuses a medium PR whose prose elsewhere quotes the low marker"
+# ============================================================================
+# Self-review finding on this PR: an earlier cut of Gate 1 used an unanchored
+# substring grep, so a PR whose real (first, top-of-body) marker is medium
+# but which quotes the exact low marker text somewhere later in prose (this
+# PR's own body does exactly this, in its Follow-up and Findings sections)
+# would incorrectly clear the gate. Only the FIRST marker occurrence counts.
+: > "$GH_LOG"
+BODY_MEDIUM_THEN_LOW_PROSE="<!-- BLIND_MERGE_RISK: medium -->
+Bottom line: some PR.
+
+## Follow-up suggestions
+1. Mechanize gate 1 — grep the body for the exact \`<!-- BLIND_MERGE_RISK: low -->\` marker."
+if OUT=$(GH_PR_BODY="$BODY_MEDIUM_THEN_LOW_PROSE" "$MERGE" 501 --auto-low 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -ne 0 ] || red "swarm-merge --auto-low should refuse when the REAL marker is medium, even if the low marker text appears later in prose"
+echo "$OUT" | grep -qi "gate 1" || red "refusal must name Gate 1"
+grep -q "pr merge" "$GH_LOG" && red "gh pr merge was called despite the real marker being medium"
+green "--auto-low refuses on the first marker occurrence (medium), not a later prose mention of 'low' (Gate 1)"
+
+# ============================================================================
 heading "Test 14: swarm-merge.sh --auto-low refuses on CHANGES_REQUESTED (Gate 3)"
 # ============================================================================
 : > "$GH_LOG"

@@ -413,10 +413,20 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
         # (diff-scope read) and 7 (migration collision, pre-existing below)
         # aren't repeated here.
         echo "       auto-low gate 1 (rating marker): checking…"
-        if ! grep -qF -- '<!-- BLIND_MERGE_RISK: low -->' <<<"$PR_BODY"; then
+        # Self-review finding on this PR: an unanchored substring grep for
+        # the exact low marker also matches a PR whose body merely quotes
+        # that marker in prose elsewhere (e.g. this PR's own Follow-up/
+        # Findings sections, while its real top-of-body marker is medium) —
+        # a mis-rated PR would still clear this gate. The convention is the
+        # marker lives as the FIRST `<!-- BLIND_MERGE_RISK: ... -->` HTML
+        # comment in the body (prompts/worker.md "PR risk assessment"); take
+        # only that one, whatever rating it names, not any later mention.
+        RATING_MARKER="$(grep -m1 -oE -- '<!-- BLIND_MERGE_RISK: [a-z]+ -->' <<<"$PR_BODY" || true)"
+        if [ "$RATING_MARKER" != "<!-- BLIND_MERGE_RISK: low -->" ]; then
           echo "ERROR: PR #$PR_NUM refused by --auto-low Gate 1 (rating marker)." >&2
-          echo "       Body is missing the exact '<!-- BLIND_MERGE_RISK: low -->' marker" >&2
-          echo "       (absent, or rated medium/high) — not eligible for unattended merge." >&2
+          echo "       First '<!-- BLIND_MERGE_RISK: ... -->' marker in the body is" >&2
+          echo "       '${RATING_MARKER:-<absent>}', not the exact low marker — not" >&2
+          echo "       eligible for unattended merge." >&2
           exit 1
         fi
 
