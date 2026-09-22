@@ -111,6 +111,18 @@
 #                        spawned (there's no operator to hand it to, and
 #                        `bash -i` needs a real tty).
 
+# issue #451 self-review finding: scripts/task-done.sh resolves its queue
+# root via `git rev-parse --show-toplevel`, which is cwd-dependent — a
+# worker that `cd`s into a scratch clone mid-task and calls task-done.sh
+# from there without cd'ing back would silently write its completion
+# record into the WRONG repo (no error, no wake, indistinguishable from
+# having simply forgotten the call). This process's own cwd IS always the
+# correct worktree root (worker-listener.sh never cd's away from it once
+# started) and is inherited by every dispatched agent subprocess
+# regardless of what THAT process later does with its own cwd — export it
+# once, here, so task-done.sh can prefer it over `git rev-parse` when set.
+export SWARM_WORKTREE_DIR="$PWD"
+
 AGENT="${1:-claude}"
 MODEL="${WORKER_MODEL:-}"
 HEADLESS="${WORKER_HEADLESS:-0}"

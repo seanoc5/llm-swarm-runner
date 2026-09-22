@@ -15,6 +15,9 @@
 #      no-op once the worker already recorded the outcome, and that
 #      processing/ is empty (the false-alarm half of #450 finding 3) well
 #      before the dispatched process ever returns.
+#   4. Check-correction: a provisional "ok" gets corrected to "err" when
+#      an executed check later disagrees.
+#   5. SWARM_WORKTREE_DIR precedence over cwd-dependent git rev-parse.
 set -euo pipefail
 
 green()  { printf '\033[32m✓ %s\033[0m\n' "$*"; }
@@ -252,8 +255,38 @@ if [ -f "$WT2/.swarm/eval-log.jsonl" ]; then
 fi
 
 # ============================================================================
+heading "Test 8 (SWARM_WORKTREE_DIR): the correct worktree is used even when cwd points elsewhere (self-review finding)"
+# ============================================================================
+# The regression this guards: task-done.sh's queue-root resolution used to
+# be `git rev-parse --show-toplevel` alone — cwd-dependent. A worker that
+# `cd`s into a scratch clone mid-task (to inspect a dependency, test
+# something, etc.) and calls task-done.sh from there without cd'ing back
+# would silently write its completion record into that OTHER repo instead
+# of its real worktree — no error, indistinguishable from having simply
+# forgotten the call. worker-listener.sh now exports SWARM_WORKTREE_DIR
+# (its own cwd, captured once at listener startup, immune to whatever the
+# dispatched agent later does with its own cwd) — task-done.sh must prefer
+# it over `git rev-parse` whenever it's set.
+SCRATCH="$TEST_DIR/scratch-clone"
+git clone -q "$TEST_DIR/repo" "$SCRATCH"
+
+( cd "$SCRATCH" && SWARM_WORKTREE_DIR="$TEST_DIR/repo" "$TASK_DONE" t5 ok >/dev/null )
+
+[ -f "$TEST_DIR/repo/.swarm/tasks/done/t5.ok.json" ] \
+    || red "t5: outcome should have landed in the real worktree named by \$SWARM_WORKTREE_DIR"
+[ ! -e "$SCRATCH/.swarm/tasks/done/t5.ok.json" ] \
+    || red "t5: outcome should NOT have landed in the scratch clone (cwd) — \$SWARM_WORKTREE_DIR was ignored"
+green "SWARM_WORKTREE_DIR set: record lands in the real worktree, not whatever repo cwd happens to point at"
+
+rm -f "$TEST_DIR/repo/.swarm/tasks/done/t5.ok.json"
+( cd "$SCRATCH" && "$TASK_DONE" t5 ok >/dev/null )
+[ -f "$SCRATCH/.swarm/tasks/done/t5.ok.json" ] \
+    || red "t5: without \$SWARM_WORKTREE_DIR, should fall back to git rev-parse (cwd's own repo)"
+green "SWARM_WORKTREE_DIR unset: falls back to git rev-parse --show-toplevel (cwd) unchanged, for callers not dispatched by worker-listener.sh"
+
+# ============================================================================
 heading "All task-done.sh tests passed"
 # ============================================================================
-green "happy path, duplicate suppression, err+reason, missing-brief tolerance, usage errors, interactive-worker flow, check-correction"
+green "happy path, duplicate suppression, err+reason, missing-brief tolerance, usage errors, interactive-worker flow, check-correction, SWARM_WORKTREE_DIR precedence"
 echo ""
 yellow "Run with KEEP=1 to leave $TEST_DIR for inspection."

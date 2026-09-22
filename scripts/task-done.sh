@@ -81,10 +81,31 @@ case "$OUTCOME" in
     *) usage ;;
 esac
 
-REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
-    echo "task-done.sh: not inside a git worktree (run this from your task's worktree)" >&2
-    exit 1
-}
+# issue #451 self-review finding: prefer worker-listener.sh's own exported
+# worktree path over `git rev-parse --show-toplevel` — the latter is
+# cwd-dependent, so calling this from a scratch clone made mid-task
+# (without cd'ing back to the actual worktree first) would silently write
+# the completion record into the WRONG repo, with no error and no
+# indication anything went wrong. $SWARM_WORKTREE_DIR is always the
+# worktree this task was actually dispatched into, regardless of what the
+# current shell's cwd happens to be right now. Only falls back to
+# `git rev-parse` when that env var isn't set at all (a caller not
+# dispatched by worker-listener.sh, e.g. manual testing) — never silently
+# ignored just because it doesn't look like a valid worktree right now, so
+# a stale/wrong value still surfaces as a clear error rather than quietly
+# resolving to some OTHER directory's git root instead.
+if [ -n "${SWARM_WORKTREE_DIR:-}" ]; then
+    REPO_ROOT="$SWARM_WORKTREE_DIR"
+    [ -d "$REPO_ROOT/.git" ] || [ -f "$REPO_ROOT/.git" ] || {
+        echo "task-done.sh: \$SWARM_WORKTREE_DIR ($REPO_ROOT) is not a git worktree" >&2
+        exit 1
+    }
+else
+    REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+        echo "task-done.sh: not inside a git worktree (run this from your task's worktree)" >&2
+        exit 1
+    }
+fi
 QUEUE_ROOT="$REPO_ROOT/.swarm/tasks"
 PROCESSING="$QUEUE_ROOT/processing"
 DONE="$QUEUE_ROOT/done"
