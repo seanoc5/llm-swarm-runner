@@ -536,17 +536,30 @@ write_outcome() {
     # authority on ok vs err. If the provisional record picked the other
     # outcome level (different filename — .ok.json vs .err.json), remove
     # it here before writing the corrected one, so exactly one outcome
-    # file survives per task_id — never both. Also drop its
-    # sweep-swarm-outcomes.sh `.posted` marker, if any, so a hook that
-    # already announced the premature "ok" gets a chance to announce the
-    # correction instead of staying silently wrong forever.
+    # file survives per task_id — never both.
     local stale
     for stale in "$DONE/${TASK_ID}.ok.json" "$DONE/${TASK_ID}.err.json"; do
         [ "$stale" = "$outcome_file" ] && continue
-        if [ -e "$stale" ]; then
-            rm -f "$stale" "$stale.posted" 2>/dev/null || true
-        fi
+        [ -e "$stale" ] && rm -f "$stale" 2>/dev/null
     done
+
+    # self-review finding: sweep-swarm-outcomes.sh's `.posted` marker must
+    # be cleared unconditionally, not just on a level flip — even the
+    # SAME-level case (task-done.sh's provisional "ok" and the real,
+    # check-gated "ok" below) has materially different content
+    # (duration_seconds/agent/model/check_exit go from null to real
+    # values). Pre-#451, a POST_OUTCOMES=1 hook always eventually saw the
+    # real record because the coordinator's synthesized file had a
+    # DIFFERENT name from the listener's own write; now both can share the
+    # SAME filename by design (that's the whole point — one record per
+    # task_id), so if the marker survives from an earlier post of the
+    # provisional content, the real content this write is about to record
+    # (fuller, or a corrected outcome level) never gets announced. Clear
+    # it for whichever file is about to be (re)written, every time — cheap
+    # (sweep-swarm-outcomes.sh only re-posts a handful of finished tasks
+    # per run) and never wrong (re-posting a genuinely-unchanged record is
+    # harmless idempotent noise, not a correctness issue).
+    rm -f "$outcome_file.posted" 2>/dev/null
 
     # JSON-escape the model field (may be empty)
     local model_json="null"

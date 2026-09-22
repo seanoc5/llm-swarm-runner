@@ -192,6 +192,14 @@ jq -e '.source == "task-done.sh"' "$WT/.swarm/tasks/done/i1.ok.json" >/dev/null 
     || red "i1: outcome record should be task-done.sh's provisional one at this point"
 green "processing/ emptied and a provisional outcome recorded before the dispatched process even exited"
 
+# Simulates a POST_OUTCOMES=1 sweep-swarm-outcomes.sh hook having already
+# posted the provisional record the instant it appeared (self-review
+# finding: it can share the SAME filename as the final record by design,
+# unlike pre-#451's differently-named synthesized file — a stale
+# `.posted` marker surviving reconciliation would silently prevent the
+# real, fuller record from ever being announced).
+touch "$WT/.swarm/tasks/done/i1.ok.json.posted"
+
 # Now let the stub finish (it's mid-sleep) and let the listener's own
 # post-dispatch write_outcome() run. No check was configured and outcome
 # stays ok, so this reconciles the SAME file in place with the full
@@ -206,6 +214,10 @@ jq -e '.outcome == "ok" and .started != null and .agent == "claude" and .reason 
     || { cat "$WT/.swarm/tasks/done/i1.ok.json"; red "i1: write_outcome should have reconciled the provisional record with full fields"; }
 [ -f "$WT/.swarm/tasks/done/i1.md" ] || red "i1: brief was not archived to done/"
 green "write_outcome always reconciles afterward — provisional record replaced with the full one, exactly one file"
+
+[ ! -f "$WT/.swarm/tasks/done/i1.ok.json.posted" ] \
+    || red "i1: the provisional record's .posted marker must be cleared on reconciliation, even same-level (ok->ok) — otherwise the real record never gets posted"
+green ".posted marker cleared on reconciliation — a sweep hook gets a chance to announce the real record"
 
 # ============================================================================
 heading "Test 7 (check-correction): a failing check flips a provisional ok to err (issue #451 self-review finding)"
