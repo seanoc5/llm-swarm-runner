@@ -421,12 +421,19 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
         # marker lives as the FIRST `<!-- BLIND_MERGE_RISK: ... -->` HTML
         # comment in the body (prompts/worker.md "PR risk assessment"); take
         # only that one, whatever rating it names, not any later mention.
-        # The capture uses [^>]* (not [a-z]+) deliberately: a restrictive
-        # class would let a malformed/uppercase first marker (which should
-        # fail the exact-match check below) get skipped over in favor of a
-        # later, correctly-lowercase mention elsewhere in the body — the
-        # same "wrong occurrence wins" bug this fix exists to close.
-        RATING_MARKER="$(grep -m1 -oE -- '<!-- BLIND_MERGE_RISK: [^>]* -->' <<<"$PR_BODY" || true)"
+        # Two self-review rounds narrowed this down to "match on the token,
+        # not on any part of the expected format": matching on a pattern
+        # anchored to `<!-- BLIND_MERGE_RISK: ... -->` (spaces, comment
+        # delimiters, or a restrictive value class) lets a first marker that
+        # deviates from that exact shape (e.g. `<!--BLIND_MERGE_RISK:
+        # medium-->`, no interior spaces) get skipped over in favor of a
+        # later, well-formed mention elsewhere in the body — the same
+        # "wrong occurrence wins" bug in a new costume each time. Instead:
+        # take the first LINE containing the literal token `BLIND_MERGE_RISK`
+        # at all, trim it, and exact-compare THAT against the canonical
+        # marker — a malformed first marker then simply fails the exact
+        # match (refused) rather than being invisible to the search.
+        RATING_MARKER="$(grep -m1 -- 'BLIND_MERGE_RISK' <<<"$PR_BODY" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' || true)"
         if [ "$RATING_MARKER" != "<!-- BLIND_MERGE_RISK: low -->" ]; then
           echo "ERROR: PR #$PR_NUM refused by --auto-low Gate 1 (rating marker)." >&2
           echo "       First '<!-- BLIND_MERGE_RISK: ... -->' marker in the body is" >&2

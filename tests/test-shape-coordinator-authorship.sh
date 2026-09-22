@@ -380,6 +380,30 @@ grep -q "pr merge" "$GH_LOG" && red "gh pr merge was called despite a malformed 
 green "--auto-low refuses on a malformed first marker, not a later well-formed 'low' mention (Gate 1)"
 
 # ============================================================================
+heading "Test 13d: swarm-merge.sh --auto-low refuses a first marker with non-canonical spacing, not a later well-formed mention"
+# ============================================================================
+# Self-review finding (round 5): the malformed-marker fix still anchored the
+# capture pattern to '<!-- BLIND_MERGE_RISK: ... -->' with exact delimiter
+# spacing, so a first marker written WITHOUT the interior spaces (e.g.
+# '<!--BLIND_MERGE_RISK: medium-->') wouldn't match the pattern at all and
+# the capture would fall through to a later, correctly-spaced 'low' mention
+# in prose — the same "wrong occurrence wins" bug in a third costume. Fixed
+# by matching on the literal token alone (first line containing it, trimmed)
+# and exact-comparing that whole line, so a malformed marker fails the
+# comparison directly instead of being invisible to the search.
+: > "$GH_LOG"
+BODY_NOSPACE_MARKER_THEN_LOW_PROSE="<!--BLIND_MERGE_RISK: medium-->
+Bottom line: some PR.
+
+## Follow-up suggestions
+1. Mechanize gate 1 — grep the body for the exact \`<!-- BLIND_MERGE_RISK: low -->\` marker."
+if OUT=$(GH_PR_BODY="$BODY_NOSPACE_MARKER_THEN_LOW_PROSE" "$MERGE" 501 --auto-low 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -ne 0 ] || red "swarm-merge --auto-low should refuse when the FIRST marker has non-canonical spacing, even if a correctly-formed low marker appears later in prose"
+echo "$OUT" | grep -qi "gate 1" || red "refusal must name Gate 1"
+grep -q "pr merge" "$GH_LOG" && red "gh pr merge was called despite a non-canonically-spaced first marker"
+green "--auto-low refuses on a non-canonically-spaced first marker, not a later well-formed 'low' mention (Gate 1)"
+
+# ============================================================================
 heading "Test 14: swarm-merge.sh --auto-low refuses on CHANGES_REQUESTED (Gate 3)"
 # ============================================================================
 : > "$GH_LOG"
