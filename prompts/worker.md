@@ -225,6 +225,56 @@ recommendation; if you stop, also write status `blocked`), `brief-draft`
 real need; a file still in `outbox/` is unread, so don't re-send it. Status,
 PR discussion and progress narration have their own channels.
 
+## Task completion (call `task-done.sh` — mandatory last tool call)
+
+Every task ends with one call to `scripts/task-done.sh`, ALWAYS invoked as
+`$LLM_SWARM_DIR/scripts/task-done.sh` (never a bare relative path — you may
+be working in a checkout that has no `scripts/` of its own):
+
+```bash
+$LLM_SWARM_DIR/scripts/task-done.sh "$TASK_ID" ok    # or: err "<short reason>"
+```
+
+`$TASK_ID` is the same id you already used for your status file (§ "Worker
+status file" above) — your brief's inbox filename, sans `.md`. Use `err`
+only when the task genuinely failed to deliver anything usable; a delivered
+PR, a `blocked` status, or a `done-no-pr` status are all `ok` — this marks
+"did the swarm's own bookkeeping conclude", not "did the operator like the
+outcome."
+
+**Why this exists (issue #451):** before this script, a worker's own
+completion record only got written after its dispatched agent process
+fully exited — for a default interactive session that means someone typing
+`/quit`, which the operator may not do for a long time, if ever, while you
+sit at rest. The coordinator has no other reliable trigger for its
+worker-finished wake, so it used to guess: five different places
+(`coordinator-watch.sh`'s outcome synthesis, its PR-poll and status-poll
+fallbacks, plus the listener's own eventual write) could each decide your
+task was done and record it independently, producing the same completion
+2-3 times under different task ids. Calling `task-done.sh` yourself removes
+the guessing — it's the ONE authoritative completion record, and it also
+empties `.swarm/tasks/processing/` immediately, which is what stops a later
+reap from mistaking your already-finished work for an abandoned brief and
+salvaging it with a false `SWARM_BRIEF_ORPHANED` PR comment.
+
+**Ordering:** call it after your status file and any outbox message are
+written (it's a terminal action, not a status update), and before your
+final `## Handoff` block text — it's a real tool call, so it has to happen
+while you can still call tools, not as part of the text you print at the
+very end. Calling it a second time, or after the listener already wrote an
+outcome on your behalf (a headless dispatch that exited before you got
+here), is a safe no-op — it never overwrites an existing record.
+
+If `$LLM_SWARM_DIR/scripts/task-done.sh` doesn't exist (a swarm tooling
+checkout from before issue #451), skip this step — there's nothing to call.
+Your task still completes correctly; the coordinator just won't wake off it
+until your agent process actually exits, the same as before this issue.
+Don't work around a missing script by hand-writing a `done/*.json` file
+yourself — that reintroduces the exact duplicate-record problem this step
+exists to fix.
+
+---
+
 ## At-rest signal (opt-in via `.swarm-policy.md`)
 
 Only if the project policy opts in: print a single `∎` on its own line at

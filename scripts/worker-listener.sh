@@ -11,11 +11,23 @@
 #   <wt>/.swarm/tasks/inbox/<id>.md       coordinator writes here (atomic
 #                                         via mktemp+mv); listener reads
 #   <wt>/.swarm/tasks/processing/<id>.md  listener mv on pickup (atomic claim)
-#   <wt>/.swarm/tasks/done/<id>.md        listener mv when finished (audit trail)
+#   <wt>/.swarm/tasks/done/<id>.md        mv'd here when finished (audit trail)
+#                                         — by scripts/task-done.sh (issue
+#                                         #451, the worker's own mandatory
+#                                         last step) if the worker got there,
+#                                         else by this listener's fallback
+#                                         below once the agent process exits
 #   <wt>/.swarm/tasks/done/<id>.{ok,err}.json
-#                                         listener writes structured outcome
-#                                         (started/finished/duration/exit_code/agent/model
-#                                          + check_cmd/check_exit/check_output_tail)
+#                                         structured outcome (started/
+#                                         finished/duration/exit_code/agent/
+#                                         model + check_cmd/check_exit/
+#                                         check_output_tail) — same writer
+#                                         split as above. Exactly ONE record
+#                                         per task_id; whichever writer gets
+#                                         there first wins, the other no-ops
+#                                         (see write_outcome's caller below
+#                                         and task-done.sh's own duplicate
+#                                         guard).
 #   <wt>/.swarm/tasks/done/<id>.check.log full acceptance-check output (audit)
 #   <wt>/.swarm/tasks/status/<id>.json    worker-written state declaration
 #                                         (not this script — see worker.md)
@@ -910,12 +922,33 @@ $TASK"
         DURATION=$(( $(date +%s) - STARTED_EPOCH ))
 
         # Move brief into the appropriate archive location, then write outcome.
+        #
+        # issue #451: for a v2 task, the worker itself may already have
+        # called scripts/task-done.sh as its mandatory last step (see
+        # prompts/worker.md § "Task completion") — the common case for an
+        # interactive dispatch, since this loop only reaches this point
+        # once the agent process actually exits, which for a default
+        # (non-headless) claude session means a human/agent typed /quit,
+        # something that may never happen on its own. When that already
+        # happened, $DONE/${TASK_ID}.{ok,err}.json exists and the brief is
+        # already sitting in $DONE — this fallback becomes a no-op read of
+        # what the worker already recorded, rather than a second write.
+        # Exactly one of task-done.sh / this fallback ever actually writes
+        # the outcome record for a given task_id.
         BRIEF_REF=""
         if [ "$IS_LEGACY" = "1" ]; then
             mv "$TASK_PATH" ".agent-task-last.md"
             TASK_OUTCOME="ok"
             [ "$RC" -ne 0 ] && TASK_OUTCOME="err"
             BRIEF_REF=".agent-task-last.md"
+        elif [ -f "$DONE/${TASK_ID}.ok.json" ] || [ -f "$DONE/${TASK_ID}.err.json" ]; then
+            if [ -f "$DONE/${TASK_ID}.ok.json" ]; then
+                TASK_OUTCOME="ok"
+            else
+                TASK_OUTCOME="err"
+            fi
+            BRIEF_REF="$DONE/$(basename "$TASK_PATH")"
+            echo "[$(date +%T)] Outcome already recorded by task-done.sh (task_id=$TASK_ID) — skipping duplicate write."
         else
             mv "$TASK_PATH" "$DONE/$(basename "$TASK_PATH")"
             write_outcome "$RC" "$STARTED" "$FINISHED" "$DURATION"

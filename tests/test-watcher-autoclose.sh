@@ -912,20 +912,21 @@ green "WATCHER_AUTOCLOSE=0 disables the orphan sweep too (single kill switch for
 make_reap_orphan_stub "Done. Reaped 0 worktree(s) (skipped 0 of 0 scanned)."
 
 # ============================================================================
-heading "Test 19: done detection synthesizes an outcome file and the coordinator wake fires (issue #314)"
+heading "Test 19: done detection with no outcome yet reconciles — logs + nudges, never fabricates (issue #451)"
 # ============================================================================
-# The regression this guards: interactive workers never exit claude, so
-# worker-listener.sh never writes done/*.ok.json — the only trigger for the
-# worker-finished coord.wake. maybe_run_check must synthesize the outcome
-# the moment it wins the check-claim, and the normal on_outcome pipeline
-# (worker.finish event + wake) must fire off the synthesized file. No
-# check.sh / WORKER_CHECK_CMD here on purpose — the check resolving to
-# "skipped" must NOT suppress synthesis (it runs before check resolution).
+# Supersedes #314's synth_outcome test. The worker is now the only writer
+# of done/*.json (scripts/task-done.sh) — a done signal (ready-for-review
+# status) with no outcome record yet must produce a watch.reconcile event
+# and a one-time inbox nudge, and must NOT fabricate an outcome file or
+# fire a wake. No check.sh / WORKER_CHECK_CMD here on purpose — the check
+# resolving to "skipped" must not suppress reconciliation (it runs before
+# check resolution, same ordering synth_outcome used to rely on).
 : > "$WAKE_LOG"
 rm -f "$PROJECT_DIR/.swarm/events.log"
 : > "$GH_PR_LIST_FILE"
 mkdir -p "$TEST_DIR/wt-issue-190/.swarm/tasks/status"
 mkdir -p "$TEST_DIR/wt-issue-190/.swarm/tasks/done"
+mkdir -p "$TEST_DIR/wt-issue-190/.swarm/tasks/inbox"
 echo '{"task_id":"t190","state":"ready-for-review","pr":99,"ts":"2026-08-27T00:00:00Z"}' \
     > "$TEST_DIR/wt-issue-190/.swarm/tasks/status/t190.json"
 
@@ -933,37 +934,47 @@ ONCE=0 WATCH_CHECK_ON_DONE=1 start_watcher 0 "$TEST_DIR/watch-19.log"
 sleep 5
 stop_watcher
 
-SYNTH_JSON="$TEST_DIR/wt-issue-190/.swarm/tasks/done/t190-190.ok.json"
-[ -f "$SYNTH_JSON" ] || red "expected synthesized outcome at $SYNTH_JSON. Watch log:
+[ ! -f "$TEST_DIR/wt-issue-190/.swarm/tasks/done/t190.ok.json" ] \
+    && [ ! -f "$TEST_DIR/wt-issue-190/.swarm/tasks/done/t190-190.ok.json" ] \
+    || red "coordinator should never write done/*.json itself — found one. Watch log:
 $(cat "$TEST_DIR/watch-19.log")"
-grep -q '"synthesized":true' "$SYNTH_JSON" \
-    || red "synthesized outcome should carry \"synthesized\":true; got: $(cat "$SYNTH_JSON")"
-green "done detection synthesized done/t190-190.ok.json (issue suffix appended for on_outcome's parser)"
+green "no outcome file fabricated for a done-but-unrecorded task"
 
 EVENTS_LOG="$PROJECT_DIR/.swarm/events.log"
-grep -q 'watch\.outcome\.synth .*issue=190' "$EVENTS_LOG" \
-    || red "expected watch.outcome.synth event; got:
+grep -q 'watch\.reconcile .*issue=190 task_id=t190 reason=status_ready_no_outcome' "$EVENTS_LOG" \
+    || red "expected watch.reconcile issue=190 task_id=t190 reason=status_ready_no_outcome; got:
 $(cat "$EVENTS_LOG" 2>/dev/null || echo '(missing)')"
+green "watch.reconcile logged with the status-file reason"
+
 grep -q 'worker\.finish .*issue=190' "$EVENTS_LOG" \
-    || red "expected worker.finish for the synthesized outcome; got:
+    && red "no outcome file exists — worker.finish should never have fired; got:
 $(cat "$EVENTS_LOG")"
-grep -q 'coord\.wake .*issue=190' "$EVENTS_LOG" \
-    || red "expected coord.wake off the synthesized outcome; got:
+[ ! -s "$WAKE_LOG" ] || red "no real outcome exists — llm-start.sh should NOT have been invoked; got: $(cat "$WAKE_LOG")"
+green "no worker.finish, no coord.wake — reconcile is observation-only"
+
+NUDGE_FILE="$TEST_DIR/wt-issue-190/.swarm/tasks/inbox/nudge-t190.md"
+[ -f "$NUDGE_FILE" ] || red "expected a one-time reminder brief at $NUDGE_FILE"
+grep -q 'task-done.sh t190 ok' "$NUDGE_FILE" \
+    || red "nudge brief should tell the worker exactly how to call task-done.sh; got:
+$(cat "$NUDGE_FILE")"
+grep -q 'watch\.reconcile\.nudge .*issue=190 task_id=t190' "$EVENTS_LOG" \
+    || red "expected watch.reconcile.nudge event; got:
 $(cat "$EVENTS_LOG")"
-[ -s "$WAKE_LOG" ] || red "llm-start.sh stub was NOT invoked — the synthesized outcome did not produce a wake. Watch log:
-$(cat "$TEST_DIR/watch-19.log")"
-green "synthesized outcome rode the normal pipeline: worker.finish + coord.wake + llm-start invoked"
+green "one-time inbox nudge dropped, pointing the worker at task-done.sh"
 
 # ============================================================================
-heading "Test 19b: synthesis skips when the listener already wrote an outcome (issue #314)"
+heading "Test 19b: an existing outcome record suppresses reconcile entirely (issue #451)"
 # ============================================================================
-# Headless workers DO exit, so the listener's own outcome write still
-# happens — synthesis must not clobber it or double-wake.
+# Simulates a worker that already called task-done.sh (or a headless
+# worker whose listener already wrote its own record) — reconcile must be
+# a complete no-op: no event, no nudge, no duplicate file.
 : > "$WAKE_LOG"
 rm -f "$PROJECT_DIR/.swarm/events.log"
 mkdir -p "$TEST_DIR/wt-issue-191/.swarm/tasks/status"
 mkdir -p "$TEST_DIR/wt-issue-191/.swarm/tasks/done"
-echo '{"task_id":"t191","outcome":"ok"}' > "$TEST_DIR/wt-issue-191/.swarm/tasks/done/t191.ok.json"
+mkdir -p "$TEST_DIR/wt-issue-191/.swarm/tasks/inbox"
+echo '{"task_id":"t191","outcome":"ok","source":"task-done.sh"}' \
+    > "$TEST_DIR/wt-issue-191/.swarm/tasks/done/t191.ok.json"
 echo '{"task_id":"t191","state":"ready-for-review","pr":100,"ts":"2026-08-27T00:00:00Z"}' \
     > "$TEST_DIR/wt-issue-191/.swarm/tasks/status/t191.json"
 
@@ -972,30 +983,39 @@ sleep 5
 stop_watcher
 
 [ ! -f "$TEST_DIR/wt-issue-191/.swarm/tasks/done/t191-191.ok.json" ] \
-    || red "synthesis should have been skipped — a listener-written t191.ok.json already exists"
-grep -q 'watch\.outcome\.synth\.skip .*reason=outcome_exists' "$PROJECT_DIR/.swarm/events.log" \
-    || red "expected watch.outcome.synth.skip reason=outcome_exists; got:
-$(cat "$PROJECT_DIR/.swarm/events.log" 2>/dev/null || echo '(missing)')"
-green "existing listener outcome suppresses synthesis (watch.outcome.synth.skip reason=outcome_exists)"
+    || red "no second outcome file should ever be written alongside the worker's own"
+[ ! -f "$TEST_DIR/wt-issue-191/.swarm/tasks/inbox/nudge-t191.md" ] \
+    || red "no nudge should be dropped — an outcome already exists"
+grep -q 'watch\.reconcile .*issue=191' "$PROJECT_DIR/.swarm/events.log" 2>/dev/null \
+    && red "no watch.reconcile expected — the outcome already exists; got:
+$(cat "$PROJECT_DIR/.swarm/events.log")"
+green "existing worker-written outcome suppresses reconcile entirely — no event, no nudge, no duplicate file"
 
 # ============================================================================
-heading "Test 19c: WATCH_SYNTH_OUTCOME=0 disables synthesis entirely (issue #314)"
+heading "Test 19c: WATCH_RECONCILE_NUDGE=0 disables the inbox nudge, not the log line (issue #451)"
 # ============================================================================
 : > "$WAKE_LOG"
 rm -f "$PROJECT_DIR/.swarm/events.log"
 mkdir -p "$TEST_DIR/wt-issue-192/.swarm/tasks/status"
 mkdir -p "$TEST_DIR/wt-issue-192/.swarm/tasks/done"
+mkdir -p "$TEST_DIR/wt-issue-192/.swarm/tasks/inbox"
 echo '{"task_id":"t192","state":"ready-for-review","pr":101,"ts":"2026-08-27T00:00:00Z"}' \
     > "$TEST_DIR/wt-issue-192/.swarm/tasks/status/t192.json"
 
-ONCE=0 WATCH_CHECK_ON_DONE=1 WATCH_SYNTH_OUTCOME=0 start_watcher 0 "$TEST_DIR/watch-19c.log"
+ONCE=0 WATCH_CHECK_ON_DONE=1 WATCH_RECONCILE_NUDGE=0 start_watcher 0 "$TEST_DIR/watch-19c.log"
 sleep 5
 stop_watcher
 
-[ ! -f "$TEST_DIR/wt-issue-192/.swarm/tasks/done/t192-192.ok.json" ] \
-    || red "WATCH_SYNTH_OUTCOME=0 should disable synthesis"
-[ ! -s "$WAKE_LOG" ] || red "no wake expected with synthesis disabled and no real outcome; got: $(cat "$WAKE_LOG")"
-green "WATCH_SYNTH_OUTCOME=0 kill switch works (no synthesis, no wake)"
+[ ! -f "$TEST_DIR/wt-issue-192/.swarm/tasks/done/t192.ok.json" ] \
+    && [ ! -f "$TEST_DIR/wt-issue-192/.swarm/tasks/done/t192-192.ok.json" ] \
+    || red "coordinator should never write done/*.json regardless of WATCH_RECONCILE_NUDGE"
+grep -q 'watch\.reconcile .*issue=192 task_id=t192 reason=status_ready_no_outcome' "$PROJECT_DIR/.swarm/events.log" \
+    || red "watch.reconcile should still log even with the nudge disabled; got:
+$(cat "$PROJECT_DIR/.swarm/events.log" 2>/dev/null || echo '(missing)')"
+[ ! -f "$TEST_DIR/wt-issue-192/.swarm/tasks/inbox/nudge-t192.md" ] \
+    || red "WATCH_RECONCILE_NUDGE=0 should have suppressed the inbox nudge"
+[ ! -s "$WAKE_LOG" ] || red "no wake expected with no real outcome; got: $(cat "$WAKE_LOG")"
+green "WATCH_RECONCILE_NUDGE=0 kill switch: reconcile still logs, nudge suppressed, no fabricated outcome, no wake"
 
 # ────────────────────────── Done ──────────────────────────
 
@@ -1020,6 +1040,6 @@ echo "  #185: kill-finished-workers.sh --pr-finalized preserves a fresh worktree
 echo "  #225: pr-poll never reaps a window-less worktree; logs orphan_no_window once, not every tick"
 echo "  #225: orphan_sweep_pass runs reap-orphan-worktrees.sh on its own timer, gated by WATCHER_AUTOCLOSE"
 echo "  #237: WATCHER_AUTOCLOSE_MODE=merged (default) leaves CLOSED-without-merge workers open; =finalized reaps MERGED-or-CLOSED like before"
-echo "  #314: done detection synthesizes done/*.ok.json (parked workers never exit claude) and the normal coord.wake fires off it"
-echo "  #314: synthesis skipped when a listener-written outcome exists; WATCH_SYNTH_OUTCOME=0 disables it"
+echo "  #451: done detection with no outcome yet logs watch.reconcile + nudges the worker's inbox once — never fabricates done/*.json"
+echo "  #451: an existing (worker-written) outcome suppresses reconcile entirely; WATCH_RECONCILE_NUDGE=0 disables the nudge only"
 yellow "Run with KEEP=1 to leave $TEST_DIR for inspection."
