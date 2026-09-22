@@ -9,11 +9,34 @@
 #   swarm-merge.sh <issue#|PR#> --override-migration-gate  # merge despite a migration collision
 #   swarm-merge.sh <issue#> --force-cleanup  # housekeep even while the issue is OPEN
 #   swarm-merge.sh <issue#|PR#> --squash  # accepted-and-ignored: squash is the only mode
+#   swarm-merge.sh <issue#|PR#> --auto-low  # unattended low-risk auto-merge path (#452)
 #   swarm-merge.sh --sweep-only       # just run the local-branch sweep
 #
 # --squash is accepted as a no-op alias (this script always squashes); it is
 # not a mode selector. --merge and --rebase are deliberately NOT supported
 # and exit non-zero rather than being silently ignored.
+#
+# --auto-low is for the coordinator's unattended SWARM_AUTOMERGE_LOW path
+# ONLY (prompts/coordinator.md "Auto-merge low-risk PRs") — a human calling
+# this script directly (or a plain `swarm-merge.sh <N>`) never needs it. It
+# adds two hard, non-overridable gates ahead of the existing ones, both
+# fail-closed on any error:
+#   Gate 0 (authorship)  scripts/check-coordinator-authorship.sh <N> — refuse
+#                         if any head-only commit carries a
+#                         `Swarm-Role: coordinator` git trailer. The
+#                         coordinator must never auto-merge a PR it authored
+#                         itself (#452, carved from #450 finding 4:
+#                         corpusminder-spring PR #713 was coordinator-
+#                         authored and coordinator-merged with no authorship
+#                         check at all). No override flag exists for this
+#                         gate — a coordinator-authored PR always goes to
+#                         the operator; a human can still merge it by hand
+#                         with a plain `swarm-merge.sh <N>` (no --auto-low).
+#   Gate 2 (CI wait)      scripts/ci-wait.sh <N> — a real bounded poll of
+#                         `gh pr checks` to a concluded state, replacing the
+#                         old `gh pr merge --auto` prescription, which
+#                         merged immediately because these repos have no
+#                         branch protection for --auto to defer to.
 #
 # What it does:
 #   1. Resolves the given number as either an issue or a PR (GitHub shares
@@ -65,6 +88,7 @@ OVERRIDE_REVIEW=0
 OVERRIDE_MIGRATION_GATE=0
 FORCE_CLEANUP=0
 HOUSEKEEP_ONLY=0
+AUTO_LOW=0
 ISSUE=""
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -78,6 +102,7 @@ for arg in "$@"; do
     --override-review) OVERRIDE_REVIEW=1 ;;
     --override-migration-gate) OVERRIDE_MIGRATION_GATE=1 ;;
     --force-cleanup) FORCE_CLEANUP=1 ;;
+    --auto-low)  AUTO_LOW=1 ;;
     --squash)    ;;   # no-op: squash is the only mode this script implements
     --merge|--rebase)
       echo "ERROR: swarm-merge.sh always squashes; $arg is not supported" >&2
@@ -309,6 +334,28 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
         echo "ERROR: PR #$PR_NUM has merge conflicts. Resolve first." >&2
         echo "       See \$LLM_SWARM_DOCS/VCS/git-github.md for the playbook." >&2
         exit 1
+      fi
+      # --auto-low gates (#452): authorship (0) and a real CI wait (2), both
+      # hard and non-overridable. Only active on the coordinator's unattended
+      # SWARM_AUTOMERGE_LOW path; a plain `swarm-merge.sh <N>` skips both.
+      if [ "$AUTO_LOW" = 1 ]; then
+        echo "       auto-low gate 0 (authorship): checking…"
+        if ! "$SCRIPT_DIR/check-coordinator-authorship.sh" "$PR_NUM"; then
+          echo "ERROR: PR #$PR_NUM refused by --auto-low Gate 0 (authorship)." >&2
+          echo "       This PR carries a coordinator-authored commit and must go to" >&2
+          echo "       the operator — there is no override for this gate. A human can" >&2
+          echo "       still merge it directly: swarm-merge.sh $PR_NUM (no --auto-low)." >&2
+          exit 1
+        fi
+        echo "       auto-low gate 2 (CI wait): waiting for a real conclusion…"
+        CI_RC=0
+        "$SCRIPT_DIR/ci-wait.sh" "$PR_NUM" || CI_RC=$?
+        if [ "$CI_RC" != 0 ]; then
+          echo "ERROR: PR #$PR_NUM refused by --auto-low Gate 2 (CI wait, exit $CI_RC)." >&2
+          echo "       See ci-wait.sh's output above for which case fired (red checks," >&2
+          echo "       timeout, or CONFLICTING/DIRTY needing a rebase)." >&2
+          exit 1
+        fi
       fi
       # Self-review verdict gate (ringer concept #2 — docs/ringer-adoptions.md).
       # Latest SWARM_SELF_REVIEW marker comment (from self-review-pr.sh) wins.

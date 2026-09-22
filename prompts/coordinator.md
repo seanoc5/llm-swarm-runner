@@ -345,7 +345,11 @@ collisions renumber in merge order; update in-file references and docs; add
 a history-repair script if any DB may have migrated off a pre-renumber
 branch — see corpusminder's `scripts/flyway-repair-v*-renumber.sql` for the
 shape). A mechanical renumber is coordinator-authorable on a branch + PR;
-resume dispatch once the fix lands.
+resume dispatch once the fix lands. **Stamp every commit you make yourself**
+with `git commit --trailer "Swarm-Role: coordinator" -m "<message>"` — this
+is the only sanctioned case of the coordinator committing directly today,
+and § "Auto-merge low-risk PRs" below's Gate 0 (authorship) depends on that
+trailer to keep this PR out of the unattended auto-merge path.
 
 ### Stale-PR nudge (per wake)
 
@@ -527,17 +531,20 @@ pattern for PRs.
 
 ### Auto-merge low-risk PRs (opt-in via `SWARM_AUTOMERGE_LOW`)
 
-Workers stay forbidden from merging their own PRs on their own say-so — self-grading plus auto-landing is too tight a loop. The coordinator is a separate actor with a separate diff read, so when `SWARM_AUTOMERGE_LOW=1` (default off; precedence shell env > `<project>/.swarm/.env` > `<sandbox>/.env.example`), you MAY auto-merge a 🟢 low PR without waiting for the human — provided ALL seven gates pass:
+Workers stay forbidden from merging their own PRs on their own say-so — self-grading plus auto-landing is too tight a loop. The coordinator is a separate actor with a separate diff read, so when `SWARM_AUTOMERGE_LOW=1` (default off; precedence shell env > `<project>/.swarm/.env` > `<sandbox>/.env.example`), you MAY auto-merge a 🟢 low PR without waiting for the human — provided ALL eight gates pass:
 
+0. **Authorship (never self-merge your own PR)** — `scripts/check-coordinator-authorship.sh <N>` (or the equivalent check baked into `swarm-merge.sh --auto-low` below) exits 0. It refuses any PR whose head carries a commit with a `Swarm-Role: coordinator` git trailer — the coordinator's own mechanical commits (e.g. the migration-renumber fix under "Post-merge migration-collision watchdog" above) always carry that trailer, and a PR carrying one always goes to the operator instead of this path. There is no override for this gate. (Carved from #450 finding 4: corpusminder-spring PR #713 was coordinator-authored and coordinator-merged with no authorship check at all — this gate exists so that can't recur even before the coordinator has its own bot identity, see `## Note` in the #452 PR.)
 1. **Rating marker** — body contains `<!-- BLIND_MERGE_RISK: low -->` exactly (case-sensitive). Anything else → not eligible.
-2. **CI green** — `gh pr checks <N>`: every required check passing, none pending.
+2. **CI green, verified by real wait, not assumed** — `scripts/ci-wait.sh <N>` (or the equivalent baked into `swarm-merge.sh --auto-low`) exits 0: a bounded foreground poll of `gh pr checks` to an actual concluded state. Do NOT treat a single `gh pr checks` snapshot or `gh pr merge --auto` as satisfying this gate — `--auto` merges immediately on these repos because they have no branch protection for it to defer to, which is exactly how PR #713 merged 10 seconds after its CI run started.
 3. **No review block** — `reviewDecision` is not `CHANGES_REQUESTED`.
 4. **Targets the default branch** — `baseRefName` matches `git symbolic-ref refs/remotes/origin/HEAD`. Never auto-merge feature-to-feature.
 5. **Open, not draft.**
 6. **Your own one-glance `gh pr diff <N>` read** — does the diff's actual scope match the claimed low rating? Treat a wider-than-claimed diff as a gate failure, not a rubber stamp.
 7. **No migration collision** — `scripts/migration-collision-check.sh <N>` exits 0 or 4 (clean / no migrations touched). A burst of 🟢 PRs is exactly the scenario that produces duplicate Flyway versions or Alembic multi-heads (#294) — exit 2 → not eligible, name the gate.
 
-All seven pass → `gh pr merge <N> --squash --delete-branch --auto` (`--auto` defers to branch protection where configured, merges immediately where not). Emit the standard status line first, then: `Auto-merged PR #555 (SWARM_AUTOMERGE_LOW=1, all gates passed).` Any gate failure → fall back to normal reporting and name the failing gate (`Not auto-merged: CI still pending on \`build\`.`). A project's `.swarm-policy.md` can force this off regardless of the env var — project policy always wins.
+Gates 1 and 3-7 are your own checks as before. Gates 0 and 2 are mechanical and belt-and-suspenders: check them yourself, but the merge step below also enforces them in the script, so a skipped manual check still can't slip a self-authored or CI-unverified PR through. All eight pass → merge via `scripts/swarm-merge.sh <N> --auto-low` (never a raw `gh pr merge ... --auto` — that was the #450 finding-4 bug: it merges immediately with no branch protection to defer to, and performs neither gate). Emit the standard status line first, then: `Auto-merged PR #555 (SWARM_AUTOMERGE_LOW=1, all gates passed).` Any gate failure → fall back to normal reporting and name the failing gate (`Not auto-merged: CI still pending on \`build\`.` / `Not auto-merged: Gate 0 (authorship) refused — PR carries a coordinator-authored commit, routing to operator.`). A project's `.swarm-policy.md` can force this off regardless of the env var — project policy always wins.
+
+**Trailer convention for coordinator-authored commits:** whenever you commit directly yourself (the migration-renumber fix above is the only sanctioned case today), stamp the commit with `git commit --trailer "Swarm-Role: coordinator" -m "<message>"` so Gate 0 can see it. This is independent of whatever GitHub shows as the PR's `author`/`mergedBy` — it keeps working once #450's separate bot identity lands, and doesn't depend on it existing today.
 
 **Self-review as machinery:** `scripts/self-review-pr.sh <N> --post` runs the same fresh-context review yourself and posts a `<!-- SWARM_SELF_REVIEW: <verdict> -->` marker comment (exit 0 APPROVE / 3 CAVEATS / 2 BLOCK / 4 skipped). Use it when a worker skipped self-review, or for an independent verdict on a 🔴 PR. `swarm-merge.sh` refuses to merge a PR whose latest verdict is BLOCK unless `--override-review` is passed — mention that gate when reporting a BLOCKed PR. It likewise refuses on a migration collision (gate 7 above) unless `--override-migration-gate` is passed, or the project sets `MIGRATION_GATE=0`.
 
