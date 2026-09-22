@@ -267,6 +267,57 @@ if [ -f "$WT2/.swarm/eval-log.jsonl" ]; then
 fi
 
 # ============================================================================
+heading "Test 7b (honest err, no check configured): a worker's genuine failure must NOT be silently flipped to ok (self-review BLOCK finding)"
+# ============================================================================
+# The regression this specifically guards: write_outcome() derived
+# TASK_OUTCOME purely from $rc (the dispatched CLI process's own exit
+# code) and $CHECK_EXIT — never consulting a pre-existing task-done.sh
+# record at all. A claude/gemini/codex process almost always exits 0
+# regardless of whether the AGENT itself believes the task failed, so for
+# any project with NO acceptance check configured, an honest
+# `task-done.sh <id> err "<reason>"` declaration got silently deleted and
+# replaced with a wrong "ok" the moment write_outcome's always-on
+# reconciliation pass ran — corrupting the record, not just duplicating
+# it. Stub claude here calls task-done.sh with err (not ok) and WORKER_CHECK=0.
+WT3="$TEST_DIR/wt-honest-err"
+git clone -q "$TEST_DIR/repo" "$WT3"
+mkdir -p "$WT3/.swarm/tasks/inbox" "$WT3/.swarm/tasks/processing" "$WT3/.swarm/tasks/done" "$WT3/.swarm/tasks/status" "$WT3/home"
+
+cat > "$TEST_DIR/bin/claude-err-stub" <<STUB
+#!/usr/bin/env bash
+"$TASK_DONE" "\$SWARM_TEST_TASK_ID" err "the task genuinely could not be completed" >/dev/null
+sleep 1
+exit 0
+STUB
+chmod +x "$TEST_DIR/bin/claude-err-stub"
+ln -sf "$TEST_DIR/bin/claude-err-stub" "$TEST_DIR/bin/claude"
+
+(
+    cd "$WT3" && env PATH="$TEST_DIR/bin:$PATH" WORKER_HEADLESS=1 \
+        HOME="$WT3/home" SWARM_TEST_TASK_ID=i3 WORKER_CHECK=0 \
+        "$LISTENER" claude > listener.log 2>&1
+) &
+LISTENER_PIDS+=($!)
+sleep 0.3
+
+drop_v2 "$WT3" "i3" '## Task
+
+Do something.'
+
+wait_for "i3 provisional err recorded" '[ -f "'"$WT3"'/.swarm/tasks/done/i3.err.json" ]'
+green "task-done.sh recorded the worker's honest err declaration"
+
+sleep 1.5
+[ -f "$WT3/.swarm/tasks/done/i3.err.json" ] \
+    || red "i3: the worker's honest err declaration must survive reconciliation — no check exists to say otherwise"
+[ ! -f "$WT3/.swarm/tasks/done/i3.ok.json" ] \
+    || red "i3: CORRUPTED — a genuine failure was silently recorded as ok because no check was configured"
+jq -e '.outcome == "err" and (.reason | test("the task genuinely could not be completed"))' \
+    "$WT3/.swarm/tasks/done/i3.err.json" >/dev/null \
+    || { cat "$WT3/.swarm/tasks/done/i3.err.json"; red "i3: reconciled record should stay err and carry the worker's own reason forward"; }
+green "no check configured: the worker's own err declaration is trusted, not silently overwritten by the process's bare exit code"
+
+# ============================================================================
 heading "Test 8 (SWARM_WORKTREE_DIR): the correct worktree is used even when cwd points elsewhere (self-review finding)"
 # ============================================================================
 # The regression this guards: task-done.sh's queue-root resolution used to
@@ -338,6 +389,6 @@ green "processing/ genuinely empty (nothing to recover from) -> proceeds under t
 # ============================================================================
 heading "All task-done.sh tests passed"
 # ============================================================================
-green "happy path, duplicate suppression, err+reason, missing-brief tolerance, usage errors, interactive-worker flow, check-correction, SWARM_WORKTREE_DIR precedence, wrong-task_id self-correction"
+green "happy path, duplicate suppression, err+reason, missing-brief tolerance, usage errors, interactive-worker flow, check-correction, honest-err-no-check preservation, SWARM_WORKTREE_DIR precedence, wrong-task_id self-correction"
 echo ""
 yellow "Run with KEEP=1 to leave $TEST_DIR for inspection."

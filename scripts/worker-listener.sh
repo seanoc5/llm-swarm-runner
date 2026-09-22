@@ -505,12 +505,36 @@ write_outcome() {
     [ "$rc" -ne 0 ] && TASK_OUTCOME="err"
     [ -n "${CHECK_EXIT:-}" ] && [ "$CHECK_EXIT" -ne 0 ] && TASK_OUTCOME="err"
 
+    # self-review finding: with no executed check configured, $rc (the
+    # dispatched CLI process's bare exit code) is a much weaker signal
+    # than the worker's own explicit self-report via scripts/task-done.sh
+    # — a claude/gemini/codex process almost always exits 0 regardless of
+    # whether the AGENT itself believes the task failed, so trusting $rc
+    # alone would silently turn an honest task-done.sh err declaration
+    # into a recorded "ok" the moment this reconciliation pass runs (the
+    # stale-file cleanup below would delete the worker's own err.json and
+    # replace it with a wrong ok.json — a corrupted record, not merely a
+    # duplicate one). Only applies with NO check configured — a check
+    # result stays the overriding ground truth over a self-report when
+    # both exist, per this feature's whole "an executed check, not a
+    # self-report, is what actually verifies" design (see this file's
+    # header comment). Carries the worker's own reason forward so it
+    # isn't lost in the reconciled record.
+    local prior_err_reason=""
+    if [ -z "${CHECK_EXIT:-}" ] && [ -f "$DONE/${TASK_ID}.err.json" ]; then
+        TASK_OUTCOME="err"
+        if command -v jq >/dev/null 2>&1; then
+            prior_err_reason="$(jq -r '.reason // empty' "$DONE/${TASK_ID}.err.json" 2>/dev/null)"
+        fi
+    fi
+
     # Minimum-interaction floor (#287): an apparent "ok" backed by no
     # executed check is only trustworthy if the agent actually engaged with
     # the task. A passed check or a worker-written status file is
     # independent proof of real work and is never second-guessed below —
     # only reached when neither exists, on top of zero new commits.
     local reason=""
+    [ -n "$prior_err_reason" ] && reason="worker-reported: $prior_err_reason"
     if [ "$TASK_OUTCOME" = "ok" ] && [ -z "${CHECK_EXIT:-}" ]; then
         local default_ref ahead=0 has_status=0
         default_ref="$(worktree_default_ref)"
