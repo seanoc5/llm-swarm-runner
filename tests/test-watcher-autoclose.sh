@@ -1017,6 +1017,42 @@ $(cat "$PROJECT_DIR/.swarm/events.log" 2>/dev/null || echo '(missing)')"
 [ ! -s "$WAKE_LOG" ] || red "no wake expected with no real outcome; got: $(cat "$WAKE_LOG")"
 green "WATCH_RECONCILE_NUDGE=0 kill switch: reconcile still logs, nudge suppressed, no fabricated outcome, no wake"
 
+# ============================================================================
+heading "Test 19d: PR-open backstop with NO status file never nudges a synthesized task_id (issue #451 self-review finding)"
+# ============================================================================
+# The regression this guards: when a worktree has a PR but wrote no status
+# file at all, maybe_run_check falls back to a SYNTHESIZED task_id
+# ("pr-issue-$issue") — nothing the worker itself would ever recognize as
+# its own. Nudging it to run `task-done.sh pr-issue-193 ok` would make a
+# compliant worker write a completion record under that fabricated id
+# ALONGSIDE its real one once it finishes for real — exactly the kind of
+# second, wrong-id record this issue removes. The log line must still
+# fire (the gap is real and worth knowing about); only the nudge must not.
+: > "$WAKE_LOG"
+rm -f "$PROJECT_DIR/.swarm/events.log"
+mkdir -p "$TEST_DIR/wt-issue-193/.swarm/tasks/done"
+mkdir -p "$TEST_DIR/wt-issue-193/.swarm/tasks/inbox"
+# Deliberately NO .swarm/tasks/status/ file for this worktree.
+printf 'fix/issue-193\tOPEN\t102\n' > "$GH_PR_LIST_FILE"
+
+ONCE=0 WATCH_PR_POLL_SECS=2 WATCH_CHECK_ON_DONE=1 start_watcher 0 "$TEST_DIR/watch-19d.log"
+sleep 5
+stop_watcher
+
+[ ! -f "$TEST_DIR/wt-issue-193/.swarm/tasks/done/pr-issue-193.ok.json" ] \
+    || red "coordinator should never write done/*.json under the synthesized fallback id either"
+grep -q 'watch\.reconcile .*issue=193 task_id=pr-issue-193 reason=pr_open_no_outcome' "$PROJECT_DIR/.swarm/events.log" \
+    || red "expected watch.reconcile for the PR-open-no-status-file backstop case; got:
+$(cat "$PROJECT_DIR/.swarm/events.log" 2>/dev/null || echo '(missing)')"
+green "watch.reconcile still logs the gap for the synthesized-id case"
+
+[ ! -f "$TEST_DIR/wt-issue-193/.swarm/tasks/inbox/nudge-pr-issue-193.md" ] \
+    || red "must NEVER nudge a worker to write a completion record under a fabricated task_id"
+grep -q 'watch\.reconcile\.nudge .*issue=193' "$PROJECT_DIR/.swarm/events.log" \
+    && red "no nudge event should have fired for the synthesized-id case; got:
+$(cat "$PROJECT_DIR/.swarm/events.log")"
+green "no nudge dropped for a task_id that traces back to no real status file — log only, never a fabricated-id instruction"
+
 # ────────────────────────── Done ──────────────────────────
 
 heading "All watcher-autoclose tests passed"
@@ -1042,4 +1078,5 @@ echo "  #225: orphan_sweep_pass runs reap-orphan-worktrees.sh on its own timer, 
 echo "  #237: WATCHER_AUTOCLOSE_MODE=merged (default) leaves CLOSED-without-merge workers open; =finalized reaps MERGED-or-CLOSED like before"
 echo "  #451: done detection with no outcome yet logs watch.reconcile + nudges the worker's inbox once — never fabricates done/*.json"
 echo "  #451: an existing (worker-written) outcome suppresses reconcile entirely; WATCH_RECONCILE_NUDGE=0 disables the nudge only"
+echo "  #451: a PR-open backstop with no status file logs watch.reconcile but never nudges a synthesized task_id"
 yellow "Run with KEEP=1 to leave $TEST_DIR for inspection."

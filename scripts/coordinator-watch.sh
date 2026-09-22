@@ -4357,7 +4357,7 @@ check_json_state() {
     sed -n 's/.*"state":"\([a-zA-Z_]*\)".*/\1/p' "$1" 2>/dev/null | head -1
 }
 
-# reconcile_missing_outcome <worktree-dir> <issue> <task_id> <reason>
+# reconcile_missing_outcome <worktree-dir> <issue> <task_id> <reason> [task_id_is_real]
 #
 # (issue #451, α of #450 finding 1 — supersedes #314's synth_outcome)
 # Called from maybe_run_check right after the check-claim is won, i.e. the
@@ -4380,8 +4380,20 @@ check_json_state() {
 # an existing record does nothing), else best-effort drop ONE reminder
 # brief into the worktree's inbox/ pointing the worker at task-done.sh
 # (WATCH_RECONCILE_NUDGE=0 disables the nudge; the log line is unconditional).
+#
+# task_id_is_real (default 1, i.e. trust the caller unless told otherwise)
+# — issue #451 self-review finding: maybe_run_check's PR-open backstop can
+# fall back to a SYNTHESIZED task_id ("pr-issue-$issue") when a worktree
+# has no status file at all. Nudging a worker to run
+# `task-done.sh pr-issue-$issue ok` would make it write a completion
+# record under an id that traces back to nothing real — a second,
+# fabricated-id record for the same completion, exactly what this issue
+# removes. Pass 0 for a synthesized id: the log line still fires (the gap
+# is still worth knowing about), but the nudge — which would only ever
+# mislead — is skipped.
 reconcile_missing_outcome() {
     local wt_dir="$1" issue="$2" task_id="$3" reason="${4:-check_claim_won}"
+    local task_id_is_real="${5:-1}"
     local done_dir="$wt_dir/.swarm/tasks/done"
 
     local f
@@ -4391,6 +4403,7 @@ reconcile_missing_outcome() {
 
     log_event watch.reconcile "issue=$issue task_id=$task_id reason=$reason"
 
+    [ "$task_id_is_real" = "1" ] || return 0
     [ "$WATCH_RECONCILE_NUDGE" = "1" ] || return 0
     [ "$DRY_RUN" = "1" ] && return 0
 
@@ -4466,6 +4479,18 @@ maybe_run_check() {
     local reconcile_reason="pr_open_no_outcome"
     [ -n "$task_id" ] && reconcile_reason="status_ready_no_outcome"
 
+    # issue #451 self-review finding: task_id_is_real distinguishes a
+    # task_id that traces back to an actual worker-written status file
+    # (this arg, or the "unclaimed" scan below finding one) from the
+    # "pr-issue-$issue" fallback synthesized a few lines down when NO
+    # status file exists in this worktree at all. Only the former is safe
+    # to hand the worker in a nudge — telling a worker to
+    # `task-done.sh pr-issue-$issue ok` would make it write a completion
+    # record under an id nothing else recognizes as its own, creating
+    # exactly the kind of second, fabricated-id record this issue removes.
+    local task_id_is_real=1
+    [ -n "$task_id" ] || task_id_is_real=0
+
     if [ -z "$task_id" ]; then
         # Distinguish "no status file exists at all" (synthesize a key —
         # this is the literal backstop case) from "a status file exists
@@ -4493,6 +4518,7 @@ maybe_run_check() {
         shopt -u nullglob
         if [ -n "$unclaimed" ]; then
             task_id="$unclaimed"
+            task_id_is_real=1   # traced back to a real status file after all
         elif [ "$any_status" = "1" ]; then
             return 0
         fi
@@ -4512,11 +4538,13 @@ maybe_run_check() {
     # issue #451 (was #314's synth_outcome call): winning the claim is the
     # one moment each done task passes through exactly once — reconcile
     # here, before any of the skip/return branches below, so EVERY done
-    # detection that still lacks an outcome record gets logged/nudged
-    # (including pr_terminal skips: a merged-while-coordinator-slept PR
-    # with no outcome yet is precisely a gap worth flagging). Never writes
-    # done/*.json — see reconcile_missing_outcome's own header.
-    reconcile_missing_outcome "$wt_dir" "$issue" "$task_id" "$reconcile_reason"
+    # detection that still lacks an outcome record gets logged (and
+    # nudged, when task_id_is_real — see reconcile_missing_outcome's own
+    # header for why a synthesized id is never nudged), including
+    # pr_terminal skips: a merged-while-coordinator-slept PR with no
+    # outcome yet is precisely a gap worth flagging. Never writes
+    # done/*.json itself.
+    reconcile_missing_outcome "$wt_dir" "$issue" "$task_id" "$reconcile_reason" "$task_id_is_real"
 
     # issue #181: the PR may already be MERGED/CLOSED by the time we win
     # the claim — the merge already validated the work, so spawning a
