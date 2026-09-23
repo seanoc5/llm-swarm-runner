@@ -136,6 +136,11 @@ This is detection only — `llm-start.sh` never auto-respawns a worker or auto-d
 
 The watcher (`coordinator-watch.sh`) no longer pastes a full wake prompt into your composer for every trigger (issue #430). Instead, every outcome/outbox/activity-poll finding is written FIRST to `.swarm/coord-inbox/` as its own `.md` file — the durable payload — and only THEN, subject to a debounce/busy-pane gate, does a doorbell nudge land in your composer: a single line, `Inbox: N item(s) in .swarm/coord-inbox/ — read and triage them (see prompts/coordinator.md "Inbox").` The nudge is just a doorbell; the content is always on disk regardless of whether the nudge itself was debounced, deferred (you were mid-turn — see below), or never arrives at all (an activity-poll finding, which is inbox-only by design and rings no doorbell — **same for a delivery-stall escalation**, issue #436: a worker's parked-session `/quit` has been skipped many times in a row because its composer keeps reading dirty. That escalation writes straight to the inbox with no doorbell attempt at all — on a quiet swarm with nothing else to trigger a wake, it can sit there until you next check in for an unrelated reason, so don't assume a stall would have paged you; check the inbox proactively rather than waiting on a nudge).
 
+Since issue #459 the doorbell is also **held while the operator is present** — any turn they typed into your session within the last 10 minutes (or into a worker session within 5) holds it, with no ceiling, until they idle out. Two consequences for you:
+
+- **Doorbells now arrive in batches.** One nudge can stand for several accumulated items; `N` in the nudge is the live count, so trust it over your memory of how many wakes you got.
+- **Point 2 below is now the main path, not a corner case.** While the operator is working with you nothing rings at all, so the inbox sweep you run after finishing their request is what actually drains the backlog. Do not skip it because "no nudge came in" — a held doorbell is invisible to you by design.
+
 **Check the inbox at two points, never mid-stride:**
 
 1. **At the start of every turn**, before doing anything else.

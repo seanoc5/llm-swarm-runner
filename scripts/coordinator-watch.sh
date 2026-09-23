@@ -457,7 +457,7 @@
 #                           coordinator was already doing (the fand-app
 #                           swarm PR #1108 merge-turn incident, 2026-09-16,
 #                           that prompted this issue). A busy pane instead
-#                           marks coord_wake_busy_retry_pass (below
+#                           marks coord_wake_hold_retry_pass (below
 #                           on_activity, ticked from run_watch_timer_loop on
 #                           this interval) to keep checking; the doorbell
 #                           fires as soon as the pane goes idle, or once
@@ -476,7 +476,7 @@
 #                           only ever warns (COORD_WAKE_DEFER_WARN_SECS).
 #   COORD_WAKE_BUSY_CEILING_SECS=900
 #                           (issue #430) How long (15 minutes by default)
-#                           coord_wake_busy_retry_pass will keep deferring a
+#                           coord_wake_hold_retry_pass will keep deferring a
 #                           busy-pane wake before delivering it anyway
 #                           (coord.wake.defer_ceiling) so a long-running
 #                           coordinator turn can never starve a wake
@@ -484,6 +484,89 @@
 #                           wake then waits indefinitely for the pane to go
 #                           idle on its own, same posture as the dirty-draft
 #                           case.
+#   COORD_HUMAN_IDLE_SECS=600
+#                           (issue #459) Hold EVERY doorbell while the
+#                           operator has typed into the coordinator's own
+#                           Claude Code session within this many seconds.
+#                           The #430 gate above only covers a pane that is
+#                           mid-turn; a pane BETWEEN turns reads idle, which
+#                           is precisely when a human is sitting there
+#                           reading and thinking. The operator-reported
+#                           symptom this exists for: seven doorbells landing
+#                           in twelve minutes while they were working through
+#                           a request with the coordinator, each a
+#                           legitimately new worker outcome.
+#
+#                           Unlike every other hold, this one has NO CEILING.
+#                           A busy pane is safe to force a paste into
+#                           eventually (Claude Code queues it); a session
+#                           someone is actively working in is not — forcing
+#                           there IS the interruption. Nothing is lost by
+#                           waiting: inbox payloads are written
+#                           unconditionally (#430), so only the regenerable
+#                           nudge waits, and it renders a live count when it
+#                           finally rings.
+#
+#                           0 disables the gate (pre-#459 behavior).
+#
+#                           Detection is NOT simply "read the last user turn"
+#                           — see coord_human_present / human_typed_since. A
+#                           pasted doorbell is recorded in the transcript
+#                           with origin {kind: human} and promptSource
+#                           "typed", identical in shape to a human typing it
+#                           (verified on live fand-app transcripts,
+#                           2026-09-23). The watcher's own pastes have to be
+#                           subtracted, or the gate reads itself as a present
+#                           human and mutes the swarm permanently.
+#   WORKER_HUMAN_IDLE_SECS=300
+#                           (issue #459) Same gate, applied to any of this
+#                           project's OWN worker sessions (scoped via the
+#                           #357 enumeration, never a flat glob, so a sibling
+#                           project's swarm can't hold this one's doorbells).
+#                           An operator driving a worker pane by hand is
+#                           still the operator being present, and a
+#                           coordinator that wakes and re-dispatches
+#                           underneath them is the same interruption. Shorter
+#                           window than the coordinator's because direct
+#                           worker interaction is usually a quick look, not a
+#                           conversation. In practice nearly always false,
+#                           and costs one mtime check per worktree.
+#                           0 disables.
+#   COORD_HUMAN_PASTE_GRACE_SECS=15
+#                           (issue #459) How far either side of a paste the
+#                           watcher recorded in its own events.log a typed
+#                           turn may land and still be attributed to that
+#                           paste rather than to a human. See
+#                           human_typed_since for why this correlation is
+#                           needed alongside the text match, and why erring
+#                           large is the safe direction (a turn misread as
+#                           machine means the doorbell rings, never that the
+#                           swarm goes quiet).
+#   WAKE_DEFER_ON_SWARM_BUSY=0
+#                           (issue #459) Opt-in: also hold doorbells while
+#                           any own worker is mid-turn or has a brief queued
+#                           and unclaimed in its tasks/inbox/.
+#
+#                           OFF by default, deliberately. Holding doorbells
+#                           on worker BUSYNESS was considered for #459 and
+#                           rejected: the moment one worker finishes while
+#                           others churn, it parks idle needing a top-up, and
+#                           this gate suppresses precisely the wake that
+#                           would dispatch its next brief. On a long run the
+#                           swarm never goes fully quiet, so triage never
+#                           re-engages and worker slots bleed. Human presence
+#                           is the lever that matches the reported problem;
+#                           this knob exists for operators who want the
+#                           stricter whole-swarm quiescence rule anyway, and
+#                           is ceilinged like pane_busy so it can't starve a
+#                           wake forever.
+#
+#                           Note the asymmetry in what counts as busy: a
+#                           brief ALREADY WRITTEN into a worker's inbox and
+#                           not yet claimed is busy (dispatched; nothing owed
+#                           by the coordinator). A worker parked with an
+#                           EMPTY inbox is the opposite — idle and demanding
+#                           attention — and never registers as busy here.
 #   WATCH_CHECK_ON_DONE=1   Set to 0 to disable check-on-done. When enabled,
 #                           the watcher treats a worker as "done" via either
 #                           signal: (a) a `.swarm/tasks/status/<id>.json`
@@ -1636,7 +1719,11 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     COORD_WAKE_RETRY_SECS 15      retry interval for a wake llm-start.sh deferred (composer held an unsubmitted human draft, issue #422); 0=off
     COORD_WAKE_DEFER_WARN_SECS 300  loud WARN threshold for a wake still deferred this long (issue #422); retries never stop on their own
     COORD_WAKE_BUSY_RETRY_SECS 30  retry interval for a wake deferred because the coordinator pane was mid-turn (issue #430); 0=off (pastes immediately, pre-#430 behavior)
-    COORD_WAKE_BUSY_CEILING_SECS 900  deliver a busy-deferred wake anyway after this long (issue #430, 15min); 0=no ceiling
+    COORD_WAKE_BUSY_CEILING_SECS 900  deliver a busy-deferred wake anyway after this long (issue #430, 15min); 0=no ceiling; never applies to a human_present hold
+    COORD_HUMAN_IDLE_SECS 600     hold every doorbell while the operator has typed into the COORDINATOR session this recently (issue #459); 0=off
+    WORKER_HUMAN_IDLE_SECS 300    same, for any of this project's own WORKER sessions (issue #459); 0=off
+    COORD_HUMAN_PASTE_GRACE_SECS 15  how close to a watcher paste recorded in events.log a typed turn counts as that paste, not a human (issue #459)
+    WAKE_DEFER_ON_SWARM_BUSY 0    also hold doorbells while any worker is mid-turn or has a queued unclaimed brief; OFF by default — see header comment for why worker busyness is the wrong lever (issue #459)
     COORD_INBOX_NUDGE_TEMPLATE (built-in) one-line doorbell text pasted once a wake is allowed to fire; %N = live coord-inbox/*.md count (issue #430)
     ACTIVITY_WAKE_PROMPT (built-in) what the coordinator writes to the inbox on an activity-poll finding (issue #430: inbox-only, no doorbell)
     WATCH_CHECK_ON_DONE 1         run acceptance check when a worker signals done; see header comment
@@ -1714,15 +1801,26 @@ EVENTS LOG
                            itself is about to be debounced/deferred, and (for
                            trigger=activity_poll) with NO accompanying coord.wake at
                            all, since activity-poll findings are inbox-only
-      coord.wake.defer     (issue #430) the coordinator pane was mid-turn
-                           (coordinator_pane_busy) — the doorbell paste was skipped
-                           this cycle (reason=pane_busy); coord_wake_busy_retry_pass
-                           keeps checking every COORD_WAKE_BUSY_RETRY_SECS
+      coord.wake.defer     the doorbell paste was held this cycle and marked pending;
+                           coord_wake_hold_retry_pass keeps checking every
+                           COORD_WAKE_BUSY_RETRY_SECS. reason= says which gate held it:
+                             pane_busy     (issue #430) coordinator mid-turn
+                             human_present (issue #459) the operator typed into the
+                                           coordinator session within COORD_HUMAN_IDLE_SECS,
+                                           or a worker session within WORKER_HUMAN_IDLE_SECS
+                             debounce      (issue #456) another doorbell rang inside
+                                           DEBOUNCE_SECS. Pre-#456 this was a
+                                           coord.wake.skip that dropped the doorbell
+                                           permanently; it is now held and re-rung
+                             swarm_busy    (issue #459) WAKE_DEFER_ON_SWARM_BUSY=1 and a
+                                           worker is mid-turn or holds a queued brief
       coord.wake.defer_ceiling
-                           (issue #430) a pane_busy-deferred wake hit
-                           COORD_WAKE_BUSY_CEILING_SECS (15min default) still busy —
-                           delivered anyway so a long coordinator turn can't starve
-                           a wake forever
+                           (issue #430) a held wake hit COORD_WAKE_BUSY_CEILING_SECS
+                           (15min default) with its gate still closed — delivered anyway
+                           so a long coordinator turn can't starve a wake forever.
+                           reason= names the gate. NEVER fires for human_present
+                           (issue #459): a present operator is never forced over, so
+                           that hold has no ceiling and waits them out
       coord.wake.deferred  (issue #422) llm-start.sh reported a dirty coordinator
                            composer (rc 3) instead of pasting — reason=composer_dirty;
                            the prompt is persisted for coord_wake_retry_pass, not dropped
@@ -1732,7 +1830,7 @@ EVENTS LOG
                            (issue #422/#430) a retried deferred wake finally landed —
                            the dirty-draft pending file is cleared (issue #422), or,
                            for trigger=pane_busy (issue #430), the pane went idle (or
-                           the ceiling fired) and coord_wake_busy_retry_pass delivered it
+                           the ceiling fired) and coord_wake_hold_retry_pass delivered it
       coord.wake.deferred_stale
                            (issue #422) a wake has been deferred ≥COORD_WAKE_DEFER_WARN_SECS
                            with every retry still reading the composer dirty — loud WARN,
@@ -2521,15 +2619,85 @@ COORD_INBOX_PROCESSED_DIR="$COORD_INBOX_DIR/processed"
 # stale one captured when the defer first started).
 COORD_INBOX_NUDGE_TEMPLATE="${COORD_INBOX_NUDGE_TEMPLATE:-Inbox: %N item(s) in .swarm/coord-inbox/ — read and triage them (see prompts/coordinator.md \"Inbox\").}"
 
-# COORD_WAKE_BUSY_PENDING_FILE: a marker (empty file; content unused) that
-# a doorbell wake is currently withheld because coordinator_pane_busy() was
-# true — deliberately separate from COORD_WAKE_PENDING_FILE (issue #422's
-# dirty-draft deferral) since the two have different retry policies: a busy
-# pane is safe to force a paste into eventually (Claude Code queues it), so
-# this one has a ceiling; an unsubmitted human draft never is, so that one
-# never forces. Its own mtime is "since when has this been busy-deferred",
-# same technique as COORD_WAKE_PENDING_FILE's mtime_epoch use below.
-COORD_WAKE_BUSY_PENDING_FILE="$PROJECT_DIR/.swarm/coord-wake-busy-pending"
+# COORD_WAKE_HOLD_PENDING_FILE: a marker that a doorbell wake is currently
+# withheld, whose CONTENT is the reason it's being held (issue #459 widened
+# this from #430's empty content-unused marker — see coord_wake_hold_reason
+# for the reason vocabulary and each reason's retry policy). Deliberately
+# separate from COORD_WAKE_PENDING_FILE (issue #422's dirty-draft deferral)
+# since the two have different retry policies: the reasons recorded here are
+# either safe to force a paste past eventually (a busy pane — Claude Code
+# queues it) or self-clearing on a clock (debounce, human presence), whereas
+# an unsubmitted human draft is never safe to paste over, so that one never
+# forces. Its own mtime is "since when has this been held", same technique
+# as COORD_WAKE_PENDING_FILE's mtime_epoch use below.
+#
+# Filename kept stable across the #430 → #459 rename so a watcher upgraded
+# in place doesn't orphan a live marker; an empty file (pre-#459 writer)
+# reads back as reason "pane_busy", which is what it always meant.
+COORD_WAKE_HOLD_PENDING_FILE="$PROJECT_DIR/.swarm/coord-wake-busy-pending"
+
+# COORD_WAKE_LAST_FILE: (issue #456) the doorbell debounce clock, on disk
+# rather than in a shell global. Two reasons it has to be a file:
+#
+#   1. It is now SHARED between the outcome and outbox-message wake paths
+#      (issue #459 collapsed LAST_WAKE and LAST_MSG_WAKE — see on_outcome's
+#      debounce check for why one clock, not two).
+#   2. run_watch_timer_loop runs as a separate OS process from the inotify
+#      reader that calls on_outcome/on_message, so a global set in one is
+#      invisible to the other. coord_wake_hold_retry_pass both reads this
+#      (has the debounce window passed?) and writes it (it just rang) —
+#      pre-#456 it did neither, so a busy-deferred delivery didn't reset the
+#      debounce window at all and the next outcome could ring 2s later.
+#
+# Being a file, it also survives a watcher restart, where the old globals
+# reset to 0. That is the better behavior, not an accident: a watcher
+# respawn loop no longer gets a free doorbell per restart. The cost is that
+# the first outcome after a restart can be held for up to DEBOUNCE_SECS —
+# held, not dropped, so it still rings.
+COORD_WAKE_LAST_FILE="$PROJECT_DIR/.swarm/coord-wake-last"
+
+# --- issue #459: human-presence gate --------------------------------------
+#
+# COORD_HUMAN_IDLE_SECS / WORKER_HUMAN_IDLE_SECS: how recently a HUMAN turn
+# must have landed in a session for that session to count as "the operator
+# is here right now", holding every doorbell. See their header-comment
+# entries above for the full rationale, and coord_human_present /
+# swarm_human_present for the detection (which is not as simple as reading
+# the last user turn — the watcher's own pastes look identical).
+COORD_HUMAN_IDLE_SECS="${COORD_HUMAN_IDLE_SECS:-600}"
+if ! [[ "$COORD_HUMAN_IDLE_SECS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: COORD_HUMAN_IDLE_SECS must be a non-negative integer (got: $COORD_HUMAN_IDLE_SECS)" >&2
+    exit 1
+fi
+WORKER_HUMAN_IDLE_SECS="${WORKER_HUMAN_IDLE_SECS:-300}"
+if ! [[ "$WORKER_HUMAN_IDLE_SECS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: WORKER_HUMAN_IDLE_SECS must be a non-negative integer (got: $WORKER_HUMAN_IDLE_SECS)" >&2
+    exit 1
+fi
+
+# COORD_HUMAN_PASTE_GRACE_SECS: how far either side of a paste the watcher
+# itself recorded in events.log a typed turn can land and still be treated
+# as that paste rather than as a human typing. 15s covers llm-start.sh's
+# paste→Enter→transcript-flush path with room to spare; too large starts
+# swallowing a human who typed immediately after reading a nudge, which is
+# the safe direction anyway (it reads as machine, so the doorbell rings).
+COORD_HUMAN_PASTE_GRACE_SECS="${COORD_HUMAN_PASTE_GRACE_SECS:-15}"
+# COORD_HUMAN_MAX_TYPED_CHARS: a "typed" turn longer than this is treated as
+# a machine paste (see human_typed_since exclusion 3). Set very high rather
+# than tight: the cost of misreading a long operator paste as machine is one
+# doorbell ringing while they read, whereas misreading a delivered brief as
+# an operator holds doorbells for a whole idle window.
+COORD_HUMAN_MAX_TYPED_CHARS="${COORD_HUMAN_MAX_TYPED_CHARS:-2000}"
+if ! [[ "$COORD_HUMAN_PASTE_GRACE_SECS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: COORD_HUMAN_PASTE_GRACE_SECS must be a non-negative integer (got: $COORD_HUMAN_PASTE_GRACE_SECS)" >&2
+    exit 1
+fi
+
+# WAKE_DEFER_ON_SWARM_BUSY: opt-in, default OFF. See its header-comment
+# entry above for why worker BUSYNESS deliberately does not gate
+# dispatch-bearing doorbells by default.
+WAKE_DEFER_ON_SWARM_BUSY="${WAKE_DEFER_ON_SWARM_BUSY:-0}"
+
 
 # COORD_WAKE_BUSY_RETRY_SECS / COORD_WAKE_BUSY_CEILING_SECS: see their
 # header-comment entries above (near WATCH_CHECK_ON_DONE) for the full
@@ -2544,6 +2712,20 @@ COORD_WAKE_BUSY_CEILING_SECS="${COORD_WAKE_BUSY_CEILING_SECS:-900}"
 if ! [[ "$COORD_WAKE_BUSY_CEILING_SECS" =~ ^[0-9]+$ ]]; then
     echo "ERROR: COORD_WAKE_BUSY_CEILING_SECS must be a non-negative integer (got: $COORD_WAKE_BUSY_CEILING_SECS)" >&2
     exit 1
+fi
+# COORD_WAKE_HOLD_RETRY_SECS: the EFFECTIVE retry cadence for
+# coord_wake_hold_retry_pass, derived rather than configured. It follows
+# COORD_WAKE_BUSY_RETRY_SECS (the #430 knob operators already know), but
+# #430's rollback switch — setting that to 0 — must no longer switch off the
+# whole retry loop: the human-presence (#459) and debounce (#456) holds now
+# ride the same pass, and a held doorbell with no tick to deliver it is a
+# permanently muted swarm, the one outcome every gate here fails open to
+# avoid. So when the busy gate is rolled back but another hold can still
+# fire, fall back to a 30s tick.
+COORD_WAKE_HOLD_RETRY_SECS="$COORD_WAKE_BUSY_RETRY_SECS"
+if [ "$COORD_WAKE_HOLD_RETRY_SECS" -eq 0 ] && \
+   { [ "$COORD_HUMAN_IDLE_SECS" -gt 0 ] || [ "$WORKER_HUMAN_IDLE_SECS" -gt 0 ] || [ "$DEBOUNCE_SECS" -gt 0 ]; }; then
+    COORD_WAKE_HOLD_RETRY_SECS=30
 fi
 
 # log_event <category> <key=val>...
@@ -2712,6 +2894,7 @@ worktree-sweep: ${WATCH_WORKTREE_SWEEP_SECS}s$([ "$WATCH_WORKTREE_SWEEP_SECS" = 
 pending-brief-sweep: ${WATCH_PENDING_BRIEF_SWEEP_SECS}s$([ "$WATCH_PENDING_BRIEF_SWEEP_SECS" = "0" ] && echo " (disabled)" || echo " (SWARM_PENDING_BRIEF marker-gap backstop, issue #439)")
 coord-wake-retry: ${COORD_WAKE_RETRY_SECS}s$([ "$COORD_WAKE_RETRY_SECS" = "0" ] && echo " (disabled)" || echo " (retry a dirty-composer-deferred wake, warn after ${COORD_WAKE_DEFER_WARN_SECS}s, issue #422)")
 coord-inbox:   $COORD_INBOX_DIR (issue #430; busy-pane doorbell defer: $([ "$COORD_WAKE_BUSY_RETRY_SECS" = "0" ] && echo "disabled — pastes immediately regardless of busy" || echo "retry ${COORD_WAKE_BUSY_RETRY_SECS}s, ceiling $([ "$COORD_WAKE_BUSY_CEILING_SECS" = "0" ] && echo "none" || echo "${COORD_WAKE_BUSY_CEILING_SECS}s")"))
+human-gate:    $([ "$COORD_HUMAN_IDLE_SECS" = "0" ] && [ "$WORKER_HUMAN_IDLE_SECS" = "0" ] && echo "disabled (issue #459)" || echo "coordinator ${COORD_HUMAN_IDLE_SECS}s / workers ${WORKER_HUMAN_IDLE_SECS}s, no ceiling (issue #459)"); swarm-busy hold: $([ "$WAKE_DEFER_ON_SWARM_BUSY" = "1" ] && echo "on" || echo "off")$([ "$HAVE_JQ" = "1" ] || echo " [no jq — human gate inert, doorbells always ring]")
 check-on-done: $WATCH_CHECK_ON_DONE$([ "$WATCH_CHECK_ON_DONE" = "1" ] && echo " (session: $SESSION_NAME)")
 auto-compact:  $AUTO_COMPACT$([ "$AUTO_COMPACT" = "1" ] && echo " (threshold: min(${AUTO_COMPACT_PCT}% of window, ${AUTO_COMPACT_THRESHOLD_CAP_TOKENS}), fallback: ${AUTO_COMPACT_THRESHOLD_TOKENS} tokens, require-window: ${AUTO_COMPACT_REQUIRE_WINDOW}, probe: $AUTO_COMPACT_PROBE, poll-tick: ${AUTO_COMPACT_TICK_SECS}s$([ "$AUTO_COMPACT_TICK_SECS" = "0" ] && echo " disabled"), cooldown: ${AUTO_COMPACT_COOLDOWN_SECS}s)")
 worker-compact: $WORKER_AUTO_COMPACT$([ "$WORKER_AUTO_COMPACT" = "1" ] && echo " (threshold: min(${WORKER_COMPACT_PCT}% of window, ${WORKER_COMPACT_THRESHOLD_CAP_TOKENS})/wrapup+$(( WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS - WORKER_COMPACT_THRESHOLD_TOKENS )), fallback: ${WORKER_COMPACT_THRESHOLD_TOKENS}/${WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS} tokens, require-window: ${WORKER_COMPACT_REQUIRE_WINDOW}, scan: ${WORKER_COMPACT_SCAN_SECS}s)")
@@ -2815,16 +2998,24 @@ cleanup_on_exit() {
 trap cleanup_on_exit EXIT INT TERM
 
 # Shared state
-LAST_WAKE=0
-# Separate debounce clock for outbox-message wakes (issue #129): a message
-# wake must not be swallowed by a just-fired outcome wake (whose top-up
-# prompt says nothing about outboxes), and vice versa. Coalesced messages
-# aren't lost either way — the outbox wake prompt instructs a full scan of
-# every worker outbox, not just the triggering file.
-LAST_MSG_WAKE=0
-# issue #392: same reasoning as LAST_MSG_WAKE above, its own clock so an
-# activity-poll wake can't be swallowed by, or swallow, an outcome/outbox
-# wake.
+# issue #459: the outcome and outbox-message doorbell clocks were separate
+# globals (LAST_WAKE / LAST_MSG_WAKE) until this issue collapsed them into
+# one on-disk clock, COORD_WAKE_LAST_FILE — see wake_clock_get.
+#
+# The #129 argument for keeping them apart was that an outbox-message wake
+# must not be swallowed by a just-fired outcome wake, since the two carried
+# DIFFERENT prompts and the outcome's top-up prompt said nothing about
+# outboxes. That argument died with #430: both paths now paste the identical
+# one-line inbox doorbell, and the payload that used to differ lives in
+# coord-inbox/ where the coordinator reads every item regardless of which
+# trigger rang. Two clocks simply meant two sources could each ring inside
+# the same 30s window — half the "wake storm" the operator reported.
+#
+# issue #392's activity clock deliberately stays separate below, and is NOT
+# a doorbell clock: activity-poll findings are inbox-only and never ring, so
+# what it debounces is the inbox WRITE. Folding it in would let an unrelated
+# doorbell suppress a payload write and lose content outright — the opposite
+# of what the doorbell clocks do, which is delay a regenerable nudge.
 LAST_ACTIVITY_WAKE=0
 # Moving cursor for activity_poll_pass's gh search queries — "what went
 # terminal since this timestamp". Starts at watcher-boot time deliberately:
@@ -4471,10 +4662,10 @@ run_watch_timer_loop() {
         # issue #430: independent cadence/state from the dirty-draft retry
         # above — see COORD_WAKE_BUSY_RETRY_SECS's header comment for why
         # these are two separate gates rather than one shared retry.
-        if [ "$COORD_WAKE_BUSY_RETRY_SECS" -gt 0 ]; then
+        if [ "$COORD_WAKE_HOLD_RETRY_SECS" -gt 0 ]; then
             now=$(date +%s)
-            if [ $((now - last_coord_wake_busy_retry)) -ge "$COORD_WAKE_BUSY_RETRY_SECS" ]; then
-                coord_wake_busy_retry_pass || true
+            if [ $((now - last_coord_wake_busy_retry)) -ge "$COORD_WAKE_HOLD_RETRY_SECS" ]; then
+                coord_wake_hold_retry_pass || true
                 last_coord_wake_busy_retry=$now
             fi
         fi
@@ -6429,37 +6620,342 @@ coord_inbox_nudge_text() {
     printf '%s\n' "${COORD_INBOX_NUDGE_TEMPLATE//%N/$n}"
 }
 
-# coord_wake_busy_mark_pending
+# ── issue #456: the doorbell debounce clock, on disk ─────────────────────────
 #
-# (issue #430) Records "a doorbell wake is currently withheld because the
-# coordinator pane was busy" by touching COORD_WAKE_BUSY_PENDING_FILE — its
-# content is unused (unlike COORD_WAKE_PENDING_FILE, which stores the
-# deferred prompt text itself; this gate's eventual delivery always
-# re-renders coord_inbox_nudge_text fresh, so there's nothing prompt-
-# specific to persist). Never re-touches an already-pending marker — same
-# "earliest defer time wins" reasoning as coord_wake_set_pending, since
-# COORD_WAKE_BUSY_CEILING_SECS counts from when the pane FIRST went busy
-# for this wake, not from the most recent on_outcome/on_message call that
-# found it still busy.
-coord_wake_busy_mark_pending() {
+# wake_clock_get echoes the epoch seconds of the last doorbell actually
+# delivered (0 when none ever was, or the file is missing/unparseable —
+# fail-open, i.e. "debounce window has long passed, ring it").
+# wake_clock_set stamps it. See COORD_WAKE_LAST_FILE's declaration for why
+# this is a file and not the pre-#456 pair of shell globals.
+wake_clock_get() {
+    local v
+    v="$(cat "$COORD_WAKE_LAST_FILE" 2>/dev/null)" || v=""
+    [[ "$v" =~ ^[0-9]+$ ]] || v=0
+    printf '%s\n' "$v"
+}
+
+wake_clock_set() {
+    printf '%s\n' "${1:-$(date +%s)}" > "$COORD_WAKE_LAST_FILE" 2>/dev/null || true
+}
+
+# wake_debounced
+#
+# True (rc 0) if a doorbell right now would fall inside DEBOUNCE_SECS of the
+# last one. DEBOUNCE_SECS=0 disables the window entirely.
+#
+# Never true under ONCE=1. Coalescing only makes sense when there is a later
+# tick to deliver the held doorbell on, and ONCE=1 exits after the first
+# wake — so a debounce hold there would strand the doorbell AND swallow the
+# exit, leaving the smoke-test watcher running forever. (Pre-#456 this was
+# latent: the clock was a per-process global, so a fresh ONCE=1 watcher
+# always started at 0 and never debounced. Making it a file, which is what
+# lets the retry pass in another process see it, is what exposed it.)
+wake_debounced() {
+    [ "$ONCE" = "1" ] && return 1
+    [ "$DEBOUNCE_SECS" -gt 0 ] || return 1
+    local last now
+    last="$(wake_clock_get)"
+    now=$(date +%s)
+    [ $((now - last)) -lt "$DEBOUNCE_SECS" ]
+}
+
+# ── issue #459: human-presence detection ────────────────────────────────────
+#
+# watcher_paste_epochs
+#
+# Echoes, one per line, the epoch seconds of every paste THIS WATCHER made
+# into a Claude Code pane recently enough to still matter — read back out of
+# its own events.log. Used by human_typed_since to subtract the watcher's own
+# pastes from "someone typed into this session".
+#
+# Why this is needed at all: a pasted doorbell is recorded in the session
+# transcript with `origin: {kind: "human"}` and `promptSource: "typed"` —
+# byte-identical in shape to the operator typing it by hand (verified on live
+# fand-app transcripts, 2026-09-23; worker brief deliveries land the same
+# way). There is no metadata field that distinguishes them, so the only
+# ground truth available is the watcher's own record of what it sent and when.
+#
+# Bounded by `tail -n $WATCHER_PASTE_SCAN_LINES` rather than reading the whole
+# log: only pastes inside the largest idle window can possibly correlate, and
+# events.log grows without bound over a swarm's life. 2000 lines is generous
+# on purpose — the window that matters is the largest idle window (10 min by
+# default), and a busy swarm mid-storm can log hundreds of events in that
+# time. Undershooting here is the one direction with a bad failure mode: a
+# paste whose event has scrolled out of the tail reads as a human, and the
+# doorbell stays held.
+WATCHER_PASTE_SCAN_LINES="${WATCHER_PASTE_SCAN_LINES:-2000}"
+watcher_paste_epochs() {
+    [ -r "$EVENTS_LOG" ] || return 0
+    tail -n "$WATCHER_PASTE_SCAN_LINES" "$EVENTS_LOG" 2>/dev/null \
+        | LC_ALL=C grep -E '(coord\.wake|coord\.wake\.deferred_delivered|worker\.deliver\.(ok|attempt))[[:space:]]' \
+        | awk '{print $1}' \
+        | while read -r ts; do
+              date -u -d "$ts" +%s 2>/dev/null || true
+          done
+}
+
+# human_typed_since <transcript-dir> <cutoff-epoch> <paste-epochs>
+#
+# True (rc 0) if that Claude Code session has a typed turn newer than
+# <cutoff-epoch> that is NOT one of this watcher's own pastes. <paste-epochs>
+# is watcher_paste_epochs' output, passed in so a sweep over many worker
+# sessions computes it once.
+#
+# Two independent exclusions, either of which marks a turn machine-origin:
+#
+#   1. Text match — the turn reads as the rendered inbox nudge (the template
+#      with its "%N" wildcarded) or opens with a known wake-prompt line.
+#   2. Event correlation — the turn's timestamp lands within
+#      COORD_HUMAN_PASTE_GRACE_SECS of a paste in <paste-epochs>.
+#   3. Length — the turn is longer than COORD_HUMAN_MAX_TYPED_CHARS. Worker
+#      brief deliveries are thousands of characters and match neither of the
+#      above (a brief is not the nudge, and its delivery event can scroll out
+#      of the tail); nobody types 2000 characters into a pane by hand.
+#
+# All three, not any one: text match alone misses operator-customised
+# templates (COORD_INBOX_NUDGE_TEMPLATE / WAKE_PROMPT are env-overridable),
+# event correlation alone misses a paste whose event has scrolled out of the
+# log tail, and length alone would misread a long pasted spec as machine.
+# Each exclusion only ever moves a turn from "human" to "machine", i.e.
+# toward ringing the doorbell — the safe direction.
+#
+# Fails OPEN throughout (rc 1 — "no human here") on a missing transcript dir,
+# absent jq, or an unreadable file. A muted swarm is a far worse failure than
+# a doorbell that rings while the operator is reading, so every uncertainty
+# resolves toward ringing.
+human_typed_since() {
+    local dir="$1" cutoff="$2" pastes="$3"
+    [ "$HAVE_JQ" = "1" ] || return 1
+    [ -d "$dir" ] || return 1
+
+    # Every transcript in this dir touched since the cutoff, not just the
+    # newest one. A single working dir routinely holds several concurrent
+    # session files — subagent runs write their own (promptSource "sdk", no
+    # typed turns at all), and a resumed session starts a fresh file — so
+    # "newest file" can easily be a subagent's while the operator is typing
+    # in the main session next to it, which would read as nobody here.
+    #
+    # The mtime pre-filter keeps this cheap: a dir with no recent activity
+    # costs one stat per file and no reads at all.
+    local candidates=() f fmtime
+    for f in "$dir"/*.jsonl; do
+        [ -r "$f" ] || continue
+        fmtime=$(mtime_epoch "$f") || fmtime=0
+        # mtime_epoch can echo nothing (both stat spellings failed); an empty
+        # operand makes `[ -ge ]` a syntax error under `set -e`, so normalize
+        # to 0 = "far older than any cutoff" rather than let it through.
+        [[ "$fmtime" =~ ^[0-9]+$ ]] || fmtime=0
+        [ "$fmtime" -ge "$cutoff" ] && candidates+=("$f")
+    done
+    [ "${#candidates[@]}" -gt 0 ] || return 1
+
+    # The nudge template with "%N" turned into a digit wildcard, anchored —
+    # so an operator quoting a nudge back mid-sentence doesn't match. The
+    # wildcard is ERE ("[0-9]+", not BRE's "[0-9]\+") because the matcher
+    # below is grep -E; getting that wrong makes the pattern match nothing,
+    # which reads every pasted doorbell as a human and mutes the swarm.
+    local nudge_re
+    nudge_re="^$(printf '%s' "$COORD_INBOX_NUDGE_TEMPLATE" \
+        | sed 's/[][\.^$*+?(){}|\\]/\\&/g; s/%N/[0-9]+/')"
+
+    # Walk each candidate's typed turns newest-first and stop at the first
+    # one that survives both exclusions. tac + grep on the raw line keeps jq
+    # off every line of what can be a very large transcript.
+    local line ts epoch text p wake_head
+    wake_head="$(printf '%s' "$WAKE_PROMPT" | head -1)"
+    for f in "${candidates[@]}"; do
+        while IFS= read -r line; do
+            ts="$(printf '%s' "$line" | jq -r '.timestamp // empty' 2>/dev/null)" || continue
+            [ -n "$ts" ] || continue
+            epoch=$(date -u -d "$ts" +%s 2>/dev/null) || continue
+            # Turns are appended in order, so once we are past the cutoff
+            # going backwards, every remaining turn in THIS file is older
+            # still — move on to the next candidate.
+            [ "$epoch" -ge "$cutoff" ] || break
+
+            text="$(printf '%s' "$line" | jq -r '
+                .message.content as $c |
+                if ($c | type) == "string" then $c
+                elif ($c | type) == "array" then ([$c[] | select(.type == "text") | .text] | join("\n"))
+                else "" end' 2>/dev/null)" || text=""
+
+            # Exclusion 3 — too long to have been typed by a person. Cheapest
+            # of the three, so it runs first.
+            [ "${#text}" -gt "$COORD_HUMAN_MAX_TYPED_CHARS" ] && continue
+
+            # Exclusion 1 — this is the watcher's own doorbell or wake prompt.
+            printf '%s' "$text" | LC_ALL=C grep -qE "$nudge_re" && continue
+            [ -n "$wake_head" ] && \
+                printf '%s' "$text" | LC_ALL=C grep -qF -- "$wake_head" && continue
+
+            # Exclusion 2 — it coincides with a paste the watcher logged.
+            local matched=0
+            for p in $pastes; do
+                local delta=$((epoch - p))
+                [ "$delta" -lt 0 ] && delta=$((-delta))
+                if [ "$delta" -le "$COORD_HUMAN_PASTE_GRACE_SECS" ]; then matched=1; break; fi
+            done
+            [ "$matched" = "1" ] && continue
+
+            return 0
+        # Whitespace-tolerant: the CLI writes compact JSON today, but a
+        # pretty-printed or re-spaced line must not silently read as "no
+        # typed turns here" — that direction ends in a permanently held
+        # doorbell. (A miss the other way just rings.)
+        done < <(LC_ALL=C grep -E '"promptSource"[[:space:]]*:[[:space:]]*"typed"' "$f" 2>/dev/null | tac)
+    done
+
+    return 1
+}
+
+# transcript_dir_for <dir>
+#
+# Echoes the Claude Code session-transcript directory for a working dir,
+# using the CLI's own slug convention (path with "/" → "-"). Same derivation
+# as scripts/capture-worker.sh's --verify path (issue #360) and
+# worker-listener.sh's no-op detector.
+transcript_dir_for() {
+    printf '%s\n' "$HOME/.claude/projects/$(printf '%s' "$1" | tr '/' '-')"
+}
+
+# coord_human_present
+#
+# True (rc 0) if the operator has typed into the COORDINATOR session within
+# COORD_HUMAN_IDLE_SECS. 0 disables the gate (pre-#459 behavior).
+coord_human_present() {
+    [ "$COORD_HUMAN_IDLE_SECS" -gt 0 ] || return 1
+    local cutoff
+    cutoff=$(( $(date +%s) - COORD_HUMAN_IDLE_SECS ))
+    human_typed_since "$(transcript_dir_for "$PROJECT_DIR")" "$cutoff" "$(watcher_paste_epochs)"
+}
+
+# worker_human_present
+#
+# True (rc 0) if the operator has typed into ANY of this project's own worker
+# sessions within WORKER_HUMAN_IDLE_SECS — the operator driving a worker pane
+# by hand is still the operator being present, and a coordinator that wakes
+# and re-dispatches underneath them is the same interruption. Scoped through
+# list-own-worktrees.sh (issue #357), never a flat glob, so a sibling
+# project's swarm in the same workspace can't hold this one's doorbells.
+#
+# In practice this is nearly always false and costs one mtime check per
+# worktree (human_typed_since's pre-filter) — worker sessions get very little
+# direct human input.
+worker_human_present() {
+    [ "$WORKER_HUMAN_IDLE_SECS" -gt 0 ] || return 1
+    local cutoff pastes wt
+    cutoff=$(( $(date +%s) - WORKER_HUMAN_IDLE_SECS ))
+    pastes="$(watcher_paste_epochs)"
+    while read -r wt; do
+        [ -n "$wt" ] || continue
+        human_typed_since "$(transcript_dir_for "$wt")" "$cutoff" "$pastes" && return 0
+    done < <(own_worktree_dirs_for_scan "$PROJECT_DIR" 2>/dev/null || true)
+    return 1
+}
+
+# swarm_busy
+#
+# True (rc 0) if any own worker is mid-turn, or has a brief sitting queued
+# and unclaimed in its tasks/inbox/ — i.e. work is already in flight and the
+# coordinator is not what it's waiting on.
+#
+# Deliberately NOT consulted by default (WAKE_DEFER_ON_SWARM_BUSY=0). Holding
+# doorbells while workers are busy was considered for issue #459 and rejected:
+# the moment one worker finishes while others churn, it parks idle needing a
+# top-up, and a swarm-busy gate suppresses precisely the wake that would
+# dispatch its next brief. On a long run the swarm never goes fully quiet, so
+# triage never re-engages and slots bleed. Human presence is the lever that
+# matches the reported problem; this one is kept behind a flag for the
+# low-value paths and for operators who want the stricter quiescence rule.
+#
+# Note the asymmetry in what counts: a brief ALREADY WRITTEN into a worker's
+# inbox and not yet claimed is busy (the work is dispatched; nothing is owed
+# by the coordinator). A worker parked with an EMPTY inbox is the opposite —
+# idle and demanding attention — and must never register as busy here, or the
+# gate would suppress the very doorbell that feeds it.
+swarm_busy() {
+    local wt issue
+    while read -r wt; do
+        [ -n "$wt" ] || continue
+        worker_pending_brief "$wt" && return 0
+        issue="$(basename "$wt" | sed -nE 's/^wt-issue-([0-9]+)$/\1/p')"
+        [ -n "$issue" ] || continue
+        worker_pane_busy "iss-$issue" && return 0
+    done < <(own_worktree_dirs_for_scan "$PROJECT_DIR" 2>/dev/null || true)
+    return 1
+}
+
+# coord_wake_hold_reason
+#
+# (issue #459) The single gate every doorbell path consults. Echoes the
+# reason this doorbell must be HELD right now, or nothing at all when it is
+# clear to ring. Reason vocabulary, and each one's retry policy in
+# coord_wake_hold_retry_pass:
+#
+#   human_present  the operator typed into the coordinator (or a worker)
+#                  session inside its idle window. NO CEILING — a present
+#                  human is never forced over; the doorbell waits for them
+#                  to leave. Durability is unaffected: inbox payloads are
+#                  written unconditionally (#430), so nothing is lost.
+#   pane_busy      the coordinator is mid-turn (#430). Ceilinged by
+#                  COORD_WAKE_BUSY_CEILING_SECS — Claude Code queues a paste
+#                  into a busy pane, so forcing eventually is safe.
+#   debounce       another doorbell rang inside DEBOUNCE_SECS (#456). Clears
+#                  on its own once the window passes.
+#   swarm_busy     opt-in only (WAKE_DEFER_ON_SWARM_BUSY=1), ceilinged the
+#                  same way pane_busy is.
+#
+# Order matters: the reason reported is the one a human reading the log most
+# needs to see, so human presence outranks a busy pane outranks the clock.
+coord_wake_hold_reason() {
+    coord_human_present && { printf 'human_present\n'; return 0; }
+    worker_human_present && { printf 'human_present\n'; return 0; }
+    if [ "$COORD_WAKE_BUSY_RETRY_SECS" -gt 0 ] && coordinator_pane_busy; then
+        printf 'pane_busy\n'; return 0
+    fi
+    if [ "$WAKE_DEFER_ON_SWARM_BUSY" = "1" ] && swarm_busy; then
+        printf 'swarm_busy\n'; return 0
+    fi
+    wake_debounced && { printf 'debounce\n'; return 0; }
+    return 0
+}
+
+# coord_wake_hold_mark_pending <reason>
+#
+# (issue #430; #459 added the reason) Records "a doorbell wake is currently
+# withheld, for <reason>" by writing COORD_WAKE_HOLD_PENDING_FILE. Only the
+# reason is persisted, not the nudge text (unlike COORD_WAKE_PENDING_FILE,
+# which stores the deferred prompt itself) — this gate's eventual delivery
+# always re-renders coord_inbox_nudge_text fresh, so a nudge held for an
+# hour still reports an accurate live inbox count.
+#
+# Never overwrites an already-pending marker — same "earliest defer time
+# wins" reasoning as coord_wake_set_pending, since COORD_WAKE_BUSY_CEILING_
+# SECS counts from when this wake was FIRST held, not from the most recent
+# on_outcome/on_message call that found it still held. The first reason
+# recorded therefore sticks even if the cause has since changed; that only
+# affects the log line and the ceiling, and coord_wake_hold_retry_pass
+# re-evaluates the LIVE reason on every tick before deciding anything.
+coord_wake_hold_mark_pending() {
+    local reason="${1:-pane_busy}"
     (
         flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 9 || exit 0
-        [ -e "$COORD_WAKE_BUSY_PENDING_FILE" ] && exit 0
-        touch "$COORD_WAKE_BUSY_PENDING_FILE" 2>/dev/null || true
+        [ -e "$COORD_WAKE_HOLD_PENDING_FILE" ] && exit 0
+        printf '%s\n' "$reason" > "$COORD_WAKE_HOLD_PENDING_FILE" 2>/dev/null || true
     ) 9>"$COORD_WAKE_LOCK" || true
 }
 
-# coord_wake_busy_clear_pending
+# coord_wake_hold_clear_pending
 #
-# (issue #430) Removes COORD_WAKE_BUSY_PENDING_FILE — called once
-# coord_wake_busy_retry_pass has either delivered the wake (pane went idle,
+# (issue #430) Removes COORD_WAKE_HOLD_PENDING_FILE — called once
+# coord_wake_hold_retry_pass has either delivered the wake (pane went idle,
 # or the ceiling fired) or handed it off to the dirty-draft mechanism
 # instead (coord_wake_set_pending).
-coord_wake_busy_clear_pending() {
-    ( flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 9 && rm -f "$COORD_WAKE_BUSY_PENDING_FILE" ) 9>"$COORD_WAKE_LOCK" || true
+coord_wake_hold_clear_pending() {
+    ( flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 9 && rm -f "$COORD_WAKE_HOLD_PENDING_FILE" ) 9>"$COORD_WAKE_LOCK" || true
 }
 
-# coord_wake_busy_retry_pass
+# coord_wake_hold_retry_pass
 #
 # (issue #430) Ticked from run_watch_timer_loop on COORD_WAKE_BUSY_RETRY_SECS
 # — a no-op when nothing is busy-pending. Otherwise: if the pane is STILL
@@ -6475,52 +6971,75 @@ coord_wake_busy_clear_pending() {
 # mechanism: once the busy phase is over, a human draft sitting in the
 # composer is exactly issue #422's case, with its own indefinite-retry-
 # without-forcing semantics.
-coord_wake_busy_retry_pass() {
-    [ -e "$COORD_WAKE_BUSY_PENDING_FILE" ] || return 0
+coord_wake_hold_retry_pass() {
+    [ -e "$COORD_WAKE_HOLD_PENDING_FILE" ] || return 0
 
-    local since now age
-    since=$(mtime_epoch "$COORD_WAKE_BUSY_PENDING_FILE") || since=$(date +%s)
+    local since now age held_for
+    since=$(mtime_epoch "$COORD_WAKE_HOLD_PENDING_FILE") || since=$(date +%s)
     now=$(date +%s)
     age=$((now - since))
+    # Pre-#459 writers left this file empty; empty always meant pane_busy.
+    held_for="$(cat "$COORD_WAKE_HOLD_PENDING_FILE" 2>/dev/null | tr -d '[:space:]')" || held_for=""
+    [ -n "$held_for" ] || held_for="pane_busy"
 
-    local still_busy=0
-    coordinator_pane_busy && still_busy=1
+    # Re-evaluate LIVE — the reason recorded at mark time may have cleared,
+    # or been replaced by a different one (the operator started typing while
+    # the pane was busy, say). The recorded reason only decides the ceiling.
+    local reason_now
+    reason_now="$(coord_wake_hold_reason)"
 
-    if [ "$still_busy" = "1" ] && { [ "$COORD_WAKE_BUSY_CEILING_SECS" -eq 0 ] || [ "$age" -lt "$COORD_WAKE_BUSY_CEILING_SECS" ]; }; then
-        return 0
-    fi
-
-    if [ "$still_busy" = "1" ]; then
-        echo "[$(date +%T)] coordinator busy-deferred wake hit its ${COORD_WAKE_BUSY_CEILING_SECS}s ceiling — delivering anyway"
-        log_event coord.wake.defer_ceiling "age=${age}s"
+    if [ -n "$reason_now" ]; then
+        # issue #459: a present human is NEVER forced over. Unlike a busy
+        # pane (Claude Code queues a paste into one, so forcing eventually is
+        # safe), pasting into a session someone is actively working in is the
+        # exact interruption this gate exists to prevent — so no ceiling
+        # applies while a human is here, however long that lasts. The inbox
+        # payload is already durable (#430); only the nudge waits.
+        if [ "$reason_now" = "human_present" ]; then
+            return 0
+        fi
+        # Every other reason is self-clearing (debounce) or ceilinged.
+        if [ "$reason_now" = "debounce" ]; then
+            return 0
+        fi
+        if [ "$COORD_WAKE_BUSY_CEILING_SECS" -eq 0 ] || [ "$age" -lt "$COORD_WAKE_BUSY_CEILING_SECS" ]; then
+            return 0
+        fi
+        echo "[$(date +%T)] coordinator wake held for ${reason_now} hit its ${COORD_WAKE_BUSY_CEILING_SECS}s ceiling — delivering anyway"
+        log_event coord.wake.defer_ceiling "age=${age}s reason=$reason_now"
     fi
 
     local nudge
     nudge="$(coord_inbox_nudge_text)"
 
     if [ "$DRY_RUN" = "1" ]; then
-        echo "[DRY] would deliver busy-deferred wake: cd $PROJECT_DIR && NON_INTERACTIVE=1 $LLM_START \"$nudge\" (deferred ${age}s)"
-        coord_wake_busy_clear_pending
+        echo "[DRY] would deliver held wake: cd $PROJECT_DIR && NON_INTERACTIVE=1 $LLM_START \"$nudge\" (held ${age}s, reason=$held_for)"
+        coord_wake_hold_clear_pending
+        wake_clock_set "$now"
         return 0
     fi
 
-    echo "[$(date +%T)] delivering busy-deferred coordinator wake (pending ${age}s)..."
+    echo "[$(date +%T)] delivering held coordinator wake (pending ${age}s, reason=$held_for)..."
     local wake_rc=0
     ( flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 9 && cd "$PROJECT_DIR" && NON_INTERACTIVE=1 "$LLM_START" "$nudge" ) 9>"$COORD_WAKE_LOCK" || wake_rc=$?
-    coord_wake_busy_clear_pending
+    coord_wake_hold_clear_pending
     case "$wake_rc" in
         0)
-            echo "[$(date +%T)] busy-deferred coordinator wake delivered."
-            log_event coord.wake.deferred_delivered "age=${age}s trigger=pane_busy"
+            echo "[$(date +%T)] held coordinator wake delivered."
+            log_event coord.wake.deferred_delivered "age=${age}s trigger=$held_for"
+            # issue #456: stamp the shared debounce clock. Pre-#456 this path
+            # didn't, so a held delivery left the window looking stale and the
+            # next outcome could ring again seconds later.
+            wake_clock_set "$now"
             ;;
         3)
             echo "[$(date +%T)] coordinator composer now holds an unsubmitted draft — handing off to the dirty-composer retry"
-            log_event coord.wake.deferred "reason=composer_dirty trigger=pane_busy_handoff age=${age}s"
+            log_event coord.wake.deferred "reason=composer_dirty trigger=${held_for}_handoff age=${age}s"
             coord_wake_set_pending "$nudge"
             ;;
         *)
-            echo "[$(date +%T)] WARN: busy-deferred coordinator wake retry exited non-zero (continuing watch)"
-            log_event coord.wake.error "trigger=pane_busy_retry rc=$wake_rc age=${age}s"
+            echo "[$(date +%T)] WARN: held coordinator wake retry exited non-zero (continuing watch)"
+            log_event coord.wake.error "trigger=${held_for}_retry rc=$wake_rc age=${age}s"
             ;;
     esac
 }
@@ -6631,9 +7150,18 @@ coord_wake_retry_pass() {
     # existing indefinite-retry-with-WARN treatment above; this only delays
     # delivery while the pane is ACTIVELY busy) and let the next
     # COORD_WAKE_RETRY_SECS tick re-check.
-    if [ "$COORD_WAKE_BUSY_RETRY_SECS" -gt 0 ] && coordinator_pane_busy; then
-        echo "[$(date +%T)] deferred coordinator wake still pending (pane now busy) — retrying next tick"
-        log_event coord.wake.skip "reason=pane_busy trigger=retry age=${age}s"
+    #
+    # issue #459 widened this from coordinator_pane_busy to the full hold
+    # gate: an operator who submitted that draft and is now mid-conversation
+    # is the same "don't splice a stale wake into their turn" case, and a
+    # dirty composer that has since been submitted is exactly how a session
+    # with a live human looks. Same skip-this-tick treatment, whatever the
+    # reason.
+    local hold_reason
+    hold_reason="$(coord_wake_hold_reason)"
+    if [ -n "$hold_reason" ]; then
+        echo "[$(date +%T)] deferred coordinator wake still pending (held: $hold_reason) — retrying next tick"
+        log_event coord.wake.skip "reason=$hold_reason trigger=retry age=${age}s"
         return 0
     fi
 
@@ -6716,9 +7244,18 @@ on_outcome() {
         fi
     fi
 
-    if [ $((now - LAST_WAKE)) -lt "$DEBOUNCE_SECS" ]; then
-        echo "[$(date +%T)] outcome: $path — within debounce window (${DEBOUNCE_SECS}s), skipping wake"
-        log_event coord.wake.skip "issue=$issue reason=debounce window=${DEBOUNCE_SECS}s"
+    # issue #456: a debounced doorbell is HELD, not dropped. Pre-#456 this
+    # returned outright, so when two workers finished inside one window the
+    # second outcome's inbox item had no doorbell attached at all and could
+    # sit unread until some unrelated later wake — measured at ~11h in the
+    # 2026-09-22 SAMlytics incident. Marking it pending hands it to
+    # coord_wake_hold_retry_pass, which rings once the window passes; N
+    # skipped doorbells coalesce into one "Inbox: N item(s)" nudge, which is
+    # the intended outcome. Zero doorbells was the bug.
+    if wake_debounced; then
+        echo "[$(date +%T)] outcome: $path — within debounce window (${DEBOUNCE_SECS}s), holding doorbell for retry"
+        log_event coord.wake.defer "issue=$issue reason=debounce window=${DEBOUNCE_SECS}s trigger=outcome"
+        coord_wake_hold_mark_pending debounce
         return
     fi
 
@@ -6732,19 +7269,24 @@ on_outcome() {
 
     echo "[$(date +%T)] outcome: $path"
 
-    # issue #430: don't paste a doorbell into a mid-turn coordinator pane —
-    # Claude Code queues an ill-timed paste and delivers it as an unrelated
-    # ❯ user turn spliced into whatever the coordinator was already doing
-    # (the fand-app swarm PR #1108 merge-turn incident, 2026-09-16, that
-    # prompted this issue). This gate sits BEFORE maybe_auto_compact too: a
-    # /compact injection is itself a paste into the same composer, so
-    # there's nothing safe to attempt while busy either.
-    # COORD_WAKE_BUSY_RETRY_SECS=0 is the rollback switch back to the
-    # pre-#430 always-paste-immediately behavior.
-    if [ "$COORD_WAKE_BUSY_RETRY_SECS" -gt 0 ] && coordinator_pane_busy; then
-        echo "[$(date +%T)] coordinator pane is mid-turn — deferring wake doorbell, will retry"
-        log_event coord.wake.defer "issue=$issue reason=pane_busy trigger=outcome"
-        coord_wake_busy_mark_pending
+    # issue #430/#459: don't paste a doorbell into a coordinator pane that
+    # isn't free to take it. #430 covered "mid-turn" — Claude Code queues an
+    # ill-timed paste and delivers it as an unrelated ❯ user turn spliced
+    # into whatever the coordinator was already doing (the fand-app swarm PR
+    # #1108 merge-turn incident, 2026-09-16). #459 added "the operator is
+    # sitting here working" — a pane between turns reads idle, which is
+    # exactly when someone is reading and thinking. coord_wake_hold_reason
+    # is the single gate; see its header for the reason vocabulary.
+    #
+    # This gate sits BEFORE maybe_auto_compact too: a /compact injection is
+    # itself a paste into the same composer, so there's nothing safe to
+    # attempt while held either.
+    local hold_reason
+    hold_reason="$(coord_wake_hold_reason)"
+    if [ -n "$hold_reason" ]; then
+        echo "[$(date +%T)] coordinator not free to take a doorbell ($hold_reason) — deferring, will retry"
+        log_event coord.wake.defer "issue=$issue reason=$hold_reason trigger=outcome"
+        coord_wake_hold_mark_pending "$hold_reason"
     else
         maybe_auto_compact wake
 
@@ -6791,18 +7333,18 @@ on_outcome() {
                 coord_wake_clear_pending
                 # issue #430 self-review finding, same class as #422's above:
                 # a PRIOR outcome/message could have busy-marked a pending
-                # doorbell (coord_wake_busy_mark_pending) that hasn't been
+                # doorbell (coord_wake_hold_mark_pending) that hasn't been
                 # retried yet — if the pane went idle and THIS wake pasted
-                # directly (this branch) before coord_wake_busy_retry_pass's
+                # directly (this branch) before coord_wake_hold_retry_pass's
                 # next tick, that marker is now stale. Left uncleared,
-                # coord_wake_busy_retry_pass would still deliver a SECOND,
+                # coord_wake_hold_retry_pass would still deliver a SECOND,
                 # redundant nudge once its tick runs, even though the
                 # coordinator already got one just now.
-                coord_wake_busy_clear_pending
+                coord_wake_hold_clear_pending
             fi
         fi
     fi
-    LAST_WAKE=$now
+    wake_clock_set "$now"
 
     if [ "$ONCE" = "1" ]; then
         echo "[$(date +%T)] ONCE=1 — exiting after first wake."
@@ -6859,20 +7401,25 @@ on_message() {
         fi
     fi
 
-    if [ $((now - LAST_MSG_WAKE)) -lt "$DEBOUNCE_SECS" ]; then
-        echo "[$(date +%T)] message: $path — within debounce window (${DEBOUNCE_SECS}s), skipping wake"
-        log_event coord.wake.skip "issue=$issue reason=debounce window=${DEBOUNCE_SECS}s trigger=outbox"
+    # issue #456 — see on_outcome's identical branch for the full rationale
+    # (hold, don't drop; the outbox path had the same hole).
+    if wake_debounced; then
+        echo "[$(date +%T)] message: $path — within debounce window (${DEBOUNCE_SECS}s), holding doorbell for retry"
+        log_event coord.wake.defer "issue=$issue reason=debounce window=${DEBOUNCE_SECS}s trigger=outbox"
+        coord_wake_hold_mark_pending debounce
         return
     fi
 
     echo "[$(date +%T)] message: $path"
 
-    # issue #430: same busy-pane doorbell gate as on_outcome — see that
+    # issue #430/#459: same doorbell hold gate as on_outcome — see that
     # function's identical branch for the full rationale.
-    if [ "$COORD_WAKE_BUSY_RETRY_SECS" -gt 0 ] && coordinator_pane_busy; then
-        echo "[$(date +%T)] coordinator pane is mid-turn — deferring wake doorbell, will retry"
-        log_event coord.wake.defer "issue=$issue reason=pane_busy trigger=outbox"
-        coord_wake_busy_mark_pending
+    local hold_reason
+    hold_reason="$(coord_wake_hold_reason)"
+    if [ -n "$hold_reason" ]; then
+        echo "[$(date +%T)] coordinator not free to take a doorbell ($hold_reason) — deferring, will retry"
+        log_event coord.wake.defer "issue=$issue reason=$hold_reason trigger=outbox"
+        coord_wake_hold_mark_pending "$hold_reason"
     else
         maybe_auto_compact wake
 
@@ -6904,13 +7451,13 @@ on_message() {
                 coord_wake_clear_pending
                 # issue #430 self-review finding — see on_outcome's identical
                 # branch for the full rationale (drop a stale busy-pending
-                # marker too, or coord_wake_busy_retry_pass's next tick would
+                # marker too, or coord_wake_hold_retry_pass's next tick would
                 # deliver a redundant second nudge).
-                coord_wake_busy_clear_pending
+                coord_wake_hold_clear_pending
             fi
         fi
     fi
-    LAST_MSG_WAKE=$now
+    wake_clock_set "$now"
 
     if [ "$ONCE" = "1" ]; then
         echo "[$(date +%T)] ONCE=1 — exiting after first wake."
@@ -7111,14 +7658,14 @@ run_poll() {
 # share run_watch_timer_loop's process.
 # ---------------------------------------------------------------------------
 # issue #430: COORD_WAKE_BUSY_RETRY_SECS must also start this loop —
-# coord_wake_busy_retry_pass is ticked from inside it, same as every other
+# coord_wake_hold_retry_pass is ticked from inside it, same as every other
 # pass here — or a deployment with every other timer-loop feature disabled
 # (all plausible in a minimal/test config) would silently never retry a
 # busy-pane-deferred wake at all, leaving it stuck until the process
 # restarts. (COORD_WAKE_RETRY_SECS, issue #422's older dirty-draft retry,
 # has this identical gap and predates this fix — out of scope here, but
 # worth folding in alongside this one if it's ever revisited.)
-if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ] || [ "$WATCH_ORPHAN_SWEEP_SECS" -gt 0 ] || [ "$WATCH_BG_VIOLATION_SWEEP_SECS" -gt 0 ] || [ "$WATCH_ACTIVITY_POLL_SECS" -gt 0 ] || [ "$WATCH_WORKTREE_SWEEP_SECS" -gt 0 ] || [ "$WATCH_PENDING_BRIEF_SWEEP_SECS" -gt 0 ] || [ "$COORD_WAKE_BUSY_RETRY_SECS" -gt 0 ]; then
+if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ] || [ "$WATCH_ORPHAN_SWEEP_SECS" -gt 0 ] || [ "$WATCH_BG_VIOLATION_SWEEP_SECS" -gt 0 ] || [ "$WATCH_ACTIVITY_POLL_SECS" -gt 0 ] || [ "$WATCH_WORKTREE_SWEEP_SECS" -gt 0 ] || [ "$WATCH_PENDING_BRIEF_SWEEP_SECS" -gt 0 ] || [ "$COORD_WAKE_HOLD_RETRY_SECS" -gt 0 ]; then
     run_watch_timer_loop &
     WATCH_TIMER_PID=$!
     log_event watch.timer.start "pr_poll_secs=$WATCH_PR_POLL_SECS check_on_done=$WATCH_CHECK_ON_DONE orphan_sweep_secs=$WATCH_ORPHAN_SWEEP_SECS bg_violation_sweep_secs=$WATCH_BG_VIOLATION_SWEEP_SECS activity_poll_secs=$WATCH_ACTIVITY_POLL_SECS worktree_sweep_secs=$WATCH_WORKTREE_SWEEP_SECS pending_brief_sweep_secs=$WATCH_PENDING_BRIEF_SWEEP_SECS"
