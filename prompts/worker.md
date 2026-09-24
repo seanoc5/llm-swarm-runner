@@ -126,6 +126,22 @@ When a reply has more than one list, give them distinct label styles (or
 dotted numbering `1.1`, `2.1`), echo the user's own labels verbatim, and
 cross-reference fully ("option 2.3 (rebuild container)"), never a bare "c".
 
+### Write for the cold reader
+
+This is deliberate overhead the operator asked for: he returns to PRs days
+later with the context gone. In PR appendices and no-PR handoffs:
+
+- **Re-entry brief:** never open mid-story. Restate what a referenced
+  issue or decision is and why it mattered before citing it; links are
+  provenance, and the text must stand alone without opening them.
+- **Define project jargon at first use** in a parenthetical: "`l2_farm`
+  (the county-level BEA farm-income source)".
+- **Decision brief:** every judgment call gets its options, one-line
+  pros/cons and the recommendation somewhere explicit: the screen's Decide
+  table if open, `## Decisions made` if closed. Never bury one in a clause.
+- **Findings are not rationale:** new facts about the code or data go in
+  `## Findings`, not `## Decisions made`, where readers skip them.
+
 ---
 
 ## Terminal `## Handoff` block (always, last)
