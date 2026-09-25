@@ -7417,6 +7417,18 @@ on_outcome() {
     # (any trigger), per #430's "the inbox is durable, the paste is just a
     # nudge" design. Stopping here also skips autoclose/debounce/hold-state
     # bookkeeping below, none of which a correction should touch.
+    #
+    # KNOWN TRADEOFF (self-review of this PR, not yet acted on): unlike the
+    # debounce/hold-busy paths below, a correction never marks
+    # COORD_WAKE_HOLD_PENDING_FILE — so if this correction's outcome is the
+    # LAST event of the watcher's session (nothing else ever wakes the
+    # coordinator again), its coord-inbox entry can sit unread indefinitely.
+    # Same failure shape #456 fixed for debounce collisions ("zero doorbells
+    # was the bug"), deliberately left open here because closing it would
+    # need a bounded, correction-specific eventual-delivery timer distinct
+    # from the debounce/busy retry machinery (which exists to coalesce
+    # bursts, not to guarantee a single deferred delivery) — worth a
+    # follow-up issue, not a same-session fix on top of two other findings.
     if [ "$is_correction" = "1" ]; then
         echo "[$(date +%T)] outcome: $path — correction of an already-announced task_id=$task_id, no second wake"
         return
