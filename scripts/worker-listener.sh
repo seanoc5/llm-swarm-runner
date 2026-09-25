@@ -983,6 +983,23 @@ while true; do
             if [ -n "$CHECK_EXIT" ] && [ "$CHECK_EXIT" -ne 0 ] && [ "$CHECK_RETRY" = "1" ]; then
                 echo "[$(date +%T)] Check failed — retrying once with failure output injected."
                 mv "$DONE/${TASK_ID}.check.log" "$DONE/${TASK_ID}.check.attempt1.log" 2>/dev/null || true
+
+                # issue #468 self-review finding: a provisional outcome record
+                # task-done.sh already wrote for attempt 1 (most commonly an
+                # honest err — the worker believed it failed) must not leak
+                # into write_outcome()'s reconciliation of attempt 2. Left in
+                # place, the honest-err guard above would honor attempt 1's
+                # belief forever, even after the retry fixes the problem and
+                # the check goes on to pass — permanently misrecording a
+                # successful retry as err. Archive it (never delete outright —
+                # it's real signal about what attempt 1 believed, kept for
+                # audit) so (a) the guard only ever sees the LATEST attempt's
+                # declaration, and (b) task-done.sh's duplicate-suppression
+                # doesn't block attempt 2 from calling it again fresh.
+                for stale in "$DONE/${TASK_ID}.ok.json" "$DONE/${TASK_ID}.err.json"; do
+                    [ -e "$stale" ] && mv "$stale" "${stale%.json}.attempt1.json" 2>/dev/null || true
+                done
+
                 RETRY_TASK="## Retry — previous attempt failed the acceptance check
 
 A previous attempt at the task below did not pass its acceptance check.
