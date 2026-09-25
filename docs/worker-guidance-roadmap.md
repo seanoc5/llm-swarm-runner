@@ -29,6 +29,55 @@ once they prove out across projects, and vice versa.
 
 ---
 
+## Guidance hygiene: reviewing against the current model generation
+
+Guidance in `prompts/` accumulates fastest right after a model transition —
+each new failure mode earns a new rule, few old rules get re-examined, and
+a few months in, prose calibrated for one model generation actively hurts
+the next: over-prescriptive scaffolding produces rigid literal-following
+and dilutes the rules that actually matter (2026-08 corpusminder-spring
+audit finding; issue #320 applied it here to `prompts/coordinator.md` and
+`prompts/worker.md`; issue #463 went further on the same two files, see
+the Done entries below).
+
+**Trigger:** operator-initiated, typically on a major model transition —
+not a recurring calendar job.
+
+**When adding a new rule to either prompt file, state two things inline so
+a future audit can classify it cheaply without archaeology:**
+
+1. **Incident of origin** — the issue number, PR, or dated incident that
+   motivated the rule. A rule with no traceable origin is hard to judge
+   later: real recurring failure, or a one-off overcorrection?
+2. **Category** (framework from issue #320):
+   - **Infrastructure contract** — caps, file-bus protocols, atomic-write
+     patterns, sandbox facts, exit-code semantics. Encodes the
+     environment, not the model. Compress prose freely; never trim substance.
+   - **Fact the agent can't discover** — script paths, env-var names,
+     marker strings, repair flows. Keep, compress.
+   - **Incident-born operator preference** — merge gates, consent verbs,
+     risk-rating rendering. Keep the rule; cut rationale essays to a
+     one-line citation (or move to `docs/` with a pointer).
+   - **Model-era scaffolding** — step-by-step choreography of things a
+     current model already does unprompted, repeated emphasis of the same
+     rule, defensive over-specification. Prime removal target next audit.
+   - **Stale** — references a file/flag/flow that no longer exists.
+     Verify, then delete.
+
+A one-line imperative with a bare issue number already satisfies this —
+the goal is traceability, not ceremony.
+
+**Audit history:** 2026-09-20, issue #320 — first pass, ~20% trim, both
+files kept in a verbose incident-narrative style. 2026-09-24, issue #463
+— second pass on the same two files, ~65-70% trim (worker.md 52KB→17KB,
+coordinator.md 58KB→23KB): collapsed overlapping format sections into one
+debrief schema + one worked example, merged repeated recovery-sweep
+prose, cut incident narratives to one clause. #463 is the current
+baseline; treat its structure (not #320's) as the pattern for future
+additions.
+
+---
+
 ## Open ideas
 
 > Append to the bottom. Use a short headline + 1-3 lines of context.
@@ -68,6 +117,36 @@ purpose, manager-audience wording.
 ---
 
 ## Done
+
+- (2026-09-24) **Deeper 5.x trim of `prompts/coordinator.md` and
+  `prompts/worker.md`, superseding the 2026-09-20 pass** — issue #463.
+  Where #320 kept each file's existing section structure and compressed
+  prose within it (landing ~20%), #463 restructured: one debrief schema
+  plus one worked, lint-verified PR example replaced six overlapping
+  format sections in `worker.md`; four separate recovery sweeps in
+  `coordinator.md` merged into one wake sweep; incident narratives cut to
+  a single clause each. Net: `worker.md` 52KB→17KB, `coordinator.md`
+  58KB→23KB. Every machine contract preserved verbatim (markers,
+  status/outbox schema, section titles other files cite,
+  `{{LLM_SWARM_DIR}}` placeholders, auto-merge gates 0-7, doorbell text).
+  Also added `tests/test-shape-prompt-budget.sh` to catch future regrowth.
+  #320's own word-count deltas (7836→6203, 7634→6250) are superseded by
+  this pass and no longer describe the current files — see "Guidance
+  hygiene" above for both audits' history.
+
+- (2026-09-20) **5.x-era guidance audit of `prompts/coordinator.md` and
+  `prompts/worker.md`** — issue #320. Applied the classification framework
+  above (contract / undiscoverable fact / incident-born preference /
+  model-era scaffolding / stale) section-by-section to both files.
+  Category-1/2 substance (env vars, script paths, JSON schemas, exact
+  bash, PR-body/handoff templates, marker strings, the auto-merge gate
+  list, the self-merge risk table) kept verbatim or compressed-only.
+  Landed a ~20% trim (worker.md 7836→6203 words, coordinator.md
+  7634→6250) — short of the ≥30-40% guideline because a section-by-section
+  compress-in-place pass couldn't cut as deep as #463's later restructure
+  (see the 2026-09-24 entry above, which superseded this pass's actual
+  file contents four days later). This entry's lasting contribution is
+  the "Guidance hygiene" framework above, not the specific word counts.
 
 - (2026-09-19) **One blanket register rule: consequence before coordinates**
   — issue #429. Added `prompts/worker.md` § "Register: consequence before
