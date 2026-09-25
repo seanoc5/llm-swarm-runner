@@ -14,7 +14,9 @@
   [`docs/tmux-as-channel.md`](../tmux-as-channel.md) (the standing file-bus-
   over-send-keys argument this ADR extends to the watcher's own injections),
   [ADR 0002](./0002-worker-communication-baseline.md) (worker outbox/status
-  file-bus conventions, unchanged by this ADR).
+  file-bus conventions, unchanged by this ADR), [#421](https://github.com/seanoc5/llm-swarm-runner/issues/421)
+  (Option 1 implementation + residual spikes), [#453](https://github.com/seanoc5/llm-swarm-runner/issues/453)
+  (γ of #450 — `Stop`/`UserPromptSubmit` hook spike, see "Addendum" below).
 
 ## Context
 
@@ -88,7 +90,9 @@ greenfield end:
    points like a raw `inotifywait` hit) calls `SendMessage` to the
    coordinator's session. The file bus stays exactly as it is — inbox/
    outbox/done/status are unchanged; the doorbell just stops being a
-   keystroke.
+   keystroke. **Layer this with `Stop`/`UserPromptSubmit` hooks** for the
+   surfacing half of the problem — see "Addendum (2026-09-25)" below; the
+   two are complementary, not alternatives.
 2. **Treat Option 2 (self-watching coordinator) as the next rung, gated on
    a restructuring spike**, not an incremental addition to today's
    coordinator. S4 found that `ScheduleWakeup` is `/loop` dynamic mode's own
@@ -341,6 +345,137 @@ of proportion for this spike.
    committing to Option 2, confirm `ScheduleWakeup`/`/loop` dynamic-mode
    re-entry composes with an operator interactively driving the same
    coordinator lineage mid-loop, and survives `--resume`.
+
+## Addendum (2026-09-25) — `Stop`/`UserPromptSubmit` hooks as a surfacing layer
+
+Spiked for issue [#453](https://github.com/seanoc5/llm-swarm-runner/issues/453)
+(γ of #450's review), which proposed retiring the paste channel via Claude
+Code's `Stop`/`UserPromptSubmit` hooks instead of (or in addition to) this
+ADR's Option 1. Per #453's own scope fence: **spike only, no behavior
+change** — this section is the full deliverable; findings are live-tested
+from inside a real worker sandbox for this exact issue (`claude --version`
+→ `2.1.282 (Claude Code)`, newer than S1–S5's `2.1.259`), not assumed.
+
+### Q1 — Do the hooks fire reliably under `--dangerously-skip-permissions`?
+
+**Confirmed, live, twice**, matching the coordinator's own launch shape
+(`scripts/coordinator-claude.sh`: `claude --model <id> --append-system-prompt
+<file> --dangerously-skip-permissions <prompt>`):
+
+1. **Print mode** (`claude -p "Reply with exactly the single word: banana"
+   --dangerously-skip-permissions`): a `Stop` hook fired, received a JSON
+   payload including `"permission_mode":"bypassPermissions"` and
+   `"stop_hook_active":false`, exited 2 with `Inbox: 1 item(s) — read and
+   triage` on stderr — and the model's next turn responded to that message
+   instead of finishing silently. A second `Stop` event then arrived with
+   `"stop_hook_active":true`; the hook's own loop guard (matching #453's
+   suggested pattern) read that field and exited 0. **Exactly two**
+   `Stop` events fired, not zero and not a runaway loop.
+2. **Real interactive REPL, real pty** (no tmux; `python3`'s `pty.openpty()`
+   driving `claude --dangerously-skip-permissions --model
+   claude-haiku-4-5-20251001` directly, dismissing the one-time trust
+   dialog first) — same two-call pattern, same loop-guard behavior,
+   confirming the print-mode result isn't an artifact of `-p`'s different
+   turn model.
+
+`UserPromptSubmit` fired once per submitted prompt in both modes, with a
+payload including the literal `prompt` text.
+
+**Caveat:** this used a raw pty, not a pty behind a tmux pane (the actual
+coordinator's transport). Claude Code's hook execution doesn't branch on
+what's attached to its pty, so this is not expected to matter, but it is
+the one piece of the coordinator's exact production shape not literally
+reproduced here — flagged, not asserted away.
+
+### Q2 — Does a Stop-hook continuation collide with an operator's unsubmitted draft?
+
+**No — disproven live**, in the worst-case timing #366/#422 exist to guard
+against. In the real-pty test above, the instant the first `Stop` event
+fired (wall-clock offset ~26.7s), the driver typed a literal marker string
+into the composer **without pressing Enter** — simulating an operator mid-
+draft at the exact moment a wake would land. The forced continuation then
+ran for several seconds (multiple tool calls, `ctx` grew 0 → 37k tokens),
+and the marker string was still sitting in the composer, byte-identical
+and unsubmitted, in the final pane snapshot after that continuation and
+the loop-guarded second `Stop` both completed. Log evidence: exactly 2
+`STOP-HOOK-FIRED` lines for the whole run (no extra collision-triggered
+turns), and the marker string never appears anywhere except the composer
+region of every intermediate redraw.
+
+Mechanism: the harness delivers `Stop`-hook feedback (its stderr, on exit
+2) as context attached to the model's own next turn — it is never written
+into the TUI's editable text buffer, so there is structurally nothing for
+a concurrent keystroke to race. This is the same category of guarantee
+S4 found for `Monitor` (harness-tagged, composer-blind), reached here by a
+different route (hook stdout/stderr plumbing vs. tool-notification
+framing) — not a busy-pattern heuristic that can misfire, which is the
+actual defect class behind #290/#292/#296/#366B/#440.
+
+`UserPromptSubmit`'s stdout injection was verified separately: a hook that
+printed `Inbox: 3 item(s) — read and triage before answering.` to stdout
+and exited 0, ahead of a human prompt that never mentioned an inbox at
+all, produced a reply that opened with *"There are 3 items in your inbox
+that need to be read and triaged before I answer"* — direct evidence the
+hook's line reaches the model as context, not merely as a logged event.
+
+### Q3 — Cost model: does the loop guard keep quiet periods at zero LLM cost?
+
+**Confirmed, with a real limit worth stating plainly.** `Stop` only fires
+as a side effect of a turn that is already ending — it is not a
+freestanding timer. The loop-guard tests above show exactly 2 hook
+invocations per triggered wake (never a 3rd, never a runaway), so a
+session that *is* taking turns costs nothing extra beyond the one forced
+continuation per genuine inbox item. But the flip side is structural:
+**a coordinator sitting fully idle at an empty prompt, with no in-flight
+turn and no submitted prompt, never generates a `Stop` event at all** —
+there is no turn for one to be a side effect of. So these hooks cannot,
+by themselves, originate a wake into a truly idle pane; they can only
+guarantee that a turn which is *already happening* (or a prompt that is
+*already being submitted*) cannot finish, or start, without surfacing the
+inbox. This does not conflict with #366 Part A's stall heartbeat — they
+operate at different layers (Part A originates a turn into an idle pane on
+a timer; these hooks act only once a turn already exists) — and Part A
+remains necessary, unchanged, for that reason.
+
+### Q4 — How does this compare with #421's `SendMessage` doorbell?
+
+**Complementary, not competing — different layers of the same problem,**
+and the boundary is exactly Q3's finding:
+
+- **#421 (`SendMessage` doorbell)** is the *origination* mechanism: getting
+  a wake into a session from outside, per ADR Option 1. It still carries
+  its own unresolved residual question (this ADR's "Residual spike work"
+  item 1, owned by #421, **not re-tested here** to avoid duplicating that
+  issue's scope) — specifically, whether cross-session delivery can start
+  a turn in a pane with literally nothing in flight, or only drains into a
+  turn already running. That gap, whichever way it resolves, is unaffected
+  by anything in this addendum.
+- **`Stop`/`UserPromptSubmit` hooks (#453)** are the *surfacing*
+  mechanism inside a turn that is already happening or about to be
+  submitted. They cannot originate a wake (Q3), but for the case they do
+  cover, they are a strictly stronger guarantee than today's shipped
+  design (`.swarm/coord-inbox/` + debounced doorbell nudge, #431/#460):
+  no composer paste, no `reprompt_composer_dirty`/busy-gate check, nothing
+  for a human draft to race with (Q2) — which directly removes the
+  `coord.wake.skip reason=composer_dirty` failure class that #440 and
+  #450 (finding 2: 1,100–1,800 such skips per swarm in ~3.5h) both
+  document, for the already-mid-turn/just-prompted case, by construction
+  rather than by a heuristic getting fixed yet again.
+
+**Recommendation: adopt both, layered, once #421 ships an origination
+path.** Use `Stop`/`UserPromptSubmit` hooks to replace the *nudge-paste*
+step of the current inbox design (`prompts/coordinator.md` "Inbox"
+section; the doorbell call sites in `scripts/coordinator-watch.sh`) for
+Claude-Code coordinators — the inbox files themselves
+(`.swarm/coord-inbox/`, written unconditionally per #431) are untouched, only how the
+coordinator is told to look changes. Keep `llm-start.sh`'s
+`reprompt_composer_dirty`/`reprompt_retry_safe`/`COORD_WAKE_BUSY_CEILING_SECS`
+machinery exactly where ADR S5 already places it: permanently for
+non-Claude coordinators, and — until #421's own residual origination
+question is answered — as the only thing that can wake a truly idle Claude
+coordinator pane at all. Do not remove that machinery on the strength of
+this addendum alone; removing it before #421's origination gap is closed
+would silently regress to "nothing wakes a fully idle Claude coordinator."
 
 ## Out of scope
 
