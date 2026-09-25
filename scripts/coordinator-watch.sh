@@ -1800,6 +1800,13 @@ EVENTS LOG
                            for worktrees registered with this PROJECT_DIR
       worker.finish.skip   outcome JSON detected for a foreign worktree
                            (sibling repo sharing the same WORKSPACE parent)
+      worker.finish.corrected  a SECOND outcome JSON for a task_id already
+                           announced via worker.finish — a check-fail retry
+                           or other write_outcome() reconciliation flipping
+                           ok<->err after the first wake already fired
+                           (issue #468). Logged and durably recorded (sweep
+                           post + coord-inbox write still run) but never
+                           fires a second coord.wake — see on_outcome.
       coord.wake           the one-line inbox nudge was pasted via llm-start.sh
                            (or coord.wake.skip reason=debounce|pane_busy — the
                            latter only on a coord_wake_retry_pass dirty-draft
@@ -2772,6 +2779,7 @@ format_event_line() {
                 *)             glyph="✗"; color=$'\033[31m' ;;
             esac ;;
         worker.finish.skip)        glyph="·"; color=$'\033[2m'  ;;
+        worker.finish.corrected)   glyph="↻"; color=$'\033[33m' ;;
         worker.start)               glyph="◐"; color=$'\033[33m' ;;
         worker.requeue)              glyph="↺"; color=$'\033[36m' ;;
         cap.refused)                  glyph="⚠"; color=$'\033[33m' ;;
@@ -3071,6 +3079,22 @@ declare -A BG_VIOLATION_LOGGED=()
 declare -A KNOWN_WORKTREE_SEEN=()
 WT_INVENTORY_SEEDED=0
 
+# issue #468: a check-fail retry (or any later reconciliation in
+# worker-listener.sh's write_outcome()) can flip a task's outcome level
+# after its FIRST record already fired a real coord.wake — the corrected
+# record lands under a DIFFERENT filename (.ok.json <-> .err.json;
+# write_outcome's own stale-file cleanup leaves only the new one on disk),
+# which both backends' create/moved_to-or-new-path detection sees as a
+# brand new outcome. Keyed by task_id (not path — the whole point is
+# recognizing the SAME brief under its two possible filenames) so on_outcome
+# can tell "first completion" from "correction of one already announced"
+# and fire a real coordinator wake only for the former — see on_outcome's
+# own comment for what still happens on a correction. Process-local, same
+# as every other timer-loop dedup map here; unbounded growth over a long
+# watcher lifetime is the same accepted tradeoff ACTIVITY_ANNOUNCED_PR/
+# _ISSUE above already make.
+declare -A OUTCOME_TASK_ANNOUNCED=()
+
 # is_own_worktree_dir <dir>
 #
 # issue #357: the directory-level primitive behind is_our_worktree below —
@@ -3198,6 +3222,25 @@ outcome_path_issue() {
         issue=$(basename "$path" | sed -E 's/.*-([0-9]+)\.(ok|err)\.json$/\1/')
     fi
     printf '%s' "$issue"
+}
+
+# outcome_path_task_id <outcome-path>
+#
+# The bare task_id an outcome path was written under — the filename minus
+# its .ok.json/.err.json suffix. Both scripts/task-done.sh and
+# worker-listener.sh's write_outcome() name every outcome file
+# "${TASK_ID}.${outcome}.json" with no other decoration (see
+# outcome_path_issue's comment above), so this is a plain suffix strip, not
+# a guess. Used by on_outcome (issue #468) to recognize a check-fail retry's
+# corrected record — a DIFFERENT filename from the same task_id's earlier
+# provisional one — as a correction of an already-announced completion
+# rather than a brand new one.
+outcome_path_task_id() {
+    local base
+    base="$(basename "$1")"
+    base="${base%.ok.json}"
+    base="${base%.err.json}"
+    printf '%s' "$base"
 }
 
 # dispatch_outcome <outcome-path>
@@ -7303,16 +7346,34 @@ coord_wake_retry_pass() {
 # Trigger logic — called when a NEW outcome JSON path is observed
 on_outcome() {
     local path="$1"
-    local now issue outcome
+    local now issue outcome task_id is_correction
     now=$(date +%s)
 
     issue=$(outcome_path_issue "$path")
+    task_id=$(outcome_path_task_id "$path")
     case "$path" in
         *.ok.json)  outcome=ok ;;
         *.err.json) outcome=err ;;
         *)          outcome=unknown ;;
     esac
-    log_event worker.finish "issue=$issue outcome=$outcome path=$path"
+
+    # issue #468: recognize a check-fail retry's corrected record (a
+    # DIFFERENT filename for a task_id already announced once — see
+    # OUTCOME_TASK_ANNOUNCED's and outcome_path_task_id's own comments)
+    # before it can fire a second real coordinator wake for the same brief.
+    # Marked immediately, not after any of the work below, so this task_id
+    # is "announced" the instant its FIRST completion is seen — regardless
+    # of whether that first wake ends up held/deferred by debounce further
+    # down; a correction must never get to add a second episode.
+    is_correction=0
+    [ -n "${OUTCOME_TASK_ANNOUNCED[$task_id]:-}" ] && is_correction=1
+    OUTCOME_TASK_ANNOUNCED["$task_id"]=1
+
+    if [ "$is_correction" = "1" ]; then
+        log_event worker.finish.corrected "issue=$issue outcome=$outcome task_id=$task_id path=$path"
+    else
+        log_event worker.finish "issue=$issue outcome=$outcome path=$path"
+    fi
 
     # Audit posting fires for EVERY outcome (not gated by wake-debounce).
     # The sweep is idempotent via .posted markers, so repeated calls are
@@ -7347,6 +7408,18 @@ on_outcome() {
         else
             echo "[$(date +%T)] WARN: failed to write coord-inbox entry for $path" >&2
         fi
+    fi
+
+    # issue #468: a correction gets logged (above) and durably recorded (the
+    # sweep post + coord-inbox write above already ran) but never a second
+    # doorbell paste — the coordinator already got a real wake for this
+    # task_id and will pick up the corrected content on its own next wake
+    # (any trigger), per #430's "the inbox is durable, the paste is just a
+    # nudge" design. Stopping here also skips autoclose/debounce/hold-state
+    # bookkeeping below, none of which a correction should touch.
+    if [ "$is_correction" = "1" ]; then
+        echo "[$(date +%T)] outcome: $path — correction of an already-announced task_id=$task_id, no second wake"
+        return
     fi
 
     # issue #456: a debounced doorbell is HELD, not dropped. Pre-#456 this

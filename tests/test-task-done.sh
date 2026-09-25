@@ -18,6 +18,9 @@
 #   4. Check-correction: a provisional "ok" gets corrected to "err" when
 #      an executed check later disagrees.
 #   5. SWARM_WORKTREE_DIR precedence over cwd-dependent git rev-parse.
+#   6. Honest-err preservation (issue #468): an explicit worker err must
+#      never be silently upgraded to ok, whether no check is configured
+#      (Test 7b) or a configured check PASSES (Test 7c).
 set -euo pipefail
 
 green()  { printf '\033[32m✓ %s\033[0m\n' "$*"; }
@@ -318,6 +321,57 @@ jq -e '.outcome == "err" and (.reason | test("the task genuinely could not be co
 green "no check configured: the worker's own err declaration is trusted, not silently overwritten by the process's bare exit code"
 
 # ============================================================================
+heading "Test 7c (honest err, PASSING check configured): a passing check must NOT silently erase an explicit worker err (issue #468, mirrors Test 7b)"
+# ============================================================================
+# The regression this specifically guards: write_outcome()'s honest-err
+# guard used to be gated on "no check configured" ([ -z "${CHECK_EXIT:-}" ]),
+# on the theory that an executed check is always the stronger signal. True
+# when the check FAILS, but not when it PASSES — a check that exits 0 on a
+# tree the worker never actually touched (it gave up before delivering
+# anything) proves nothing, yet the old guard let that passing check
+# silently flip an explicit `task-done.sh <id> err` into `outcome: ok,
+# reason: null`, and the stale-file cleanup deleted the worker's err.json
+# with no trace left. Same claude-err-stub as Test 7b (calls task-done.sh
+# with err), but WT4's .swarm/check.sh always PASSES and WORKER_CHECK=1 —
+# the direction Test 7b's no-check fixture doesn't cover.
+WT4="$TEST_DIR/wt-honest-err-passing-check"
+git clone -q "$TEST_DIR/repo" "$WT4"
+mkdir -p "$WT4/.swarm/tasks/inbox" "$WT4/.swarm/tasks/processing" "$WT4/.swarm/tasks/done" "$WT4/.swarm/tasks/status" "$WT4/home"
+cat > "$WT4/.swarm/check.sh" <<'CHECK'
+#!/usr/bin/env bash
+echo "simulated acceptance check pass (trivial: nothing to verify on an untouched tree)"
+exit 0
+CHECK
+chmod +x "$WT4/.swarm/check.sh"
+
+(
+    cd "$WT4" && env PATH="$TEST_DIR/bin:$PATH" WORKER_HEADLESS=1 \
+        HOME="$WT4/home" SWARM_TEST_TASK_ID=i4 WORKER_CHECK=1 WORKER_CHECK_RETRY=0 \
+        "$LISTENER" claude > listener.log 2>&1
+) &
+LISTENER_PIDS+=($!)
+sleep 0.3
+
+drop_v2 "$WT4" "i4" '## Task
+
+Do something.'
+
+wait_for "i4 provisional err recorded" '[ -f "'"$WT4"'/.swarm/tasks/done/i4.err.json" ]'
+green "task-done.sh recorded the worker's honest err declaration"
+
+sleep 1.5
+[ -f "$WT4/.swarm/tasks/done/i4.err.json" ] \
+    || red "i4: the worker's honest err declaration must survive reconciliation even though the configured check PASSED"
+[ ! -f "$WT4/.swarm/tasks/done/i4.ok.json" ] \
+    || red "i4: CORRUPTED — a passing check silently erased the worker's explicit err and upgraded it to ok"
+jq -e '.outcome == "err" and .check_exit == 0 and (.reason | test("the task genuinely could not be completed"))' \
+    "$WT4/.swarm/tasks/done/i4.err.json" >/dev/null \
+    || { cat "$WT4/.swarm/tasks/done/i4.err.json"; red "i4: reconciled record should stay err (carrying the worker's own reason) even with check_exit == 0"; }
+grep -q "OVERRIDE: acceptance check passed" "$WT4/listener.log" \
+    || red "i4: expected a loud OVERRIDE line in the listener's own log when a passing check disagreed with the worker's err"
+green "passing check configured: the worker's own err declaration is trusted, not silently overwritten by a check that proves nothing on an untouched tree"
+
+# ============================================================================
 heading "Test 8 (SWARM_WORKTREE_DIR): the correct worktree is used even when cwd points elsewhere (self-review finding)"
 # ============================================================================
 # The regression this guards: task-done.sh's queue-root resolution used to
@@ -389,6 +443,6 @@ green "processing/ genuinely empty (nothing to recover from) -> proceeds under t
 # ============================================================================
 heading "All task-done.sh tests passed"
 # ============================================================================
-green "happy path, duplicate suppression, err+reason, missing-brief tolerance, usage errors, interactive-worker flow, check-correction, honest-err-no-check preservation, SWARM_WORKTREE_DIR precedence, wrong-task_id self-correction"
+green "happy path, duplicate suppression, err+reason, missing-brief tolerance, usage errors, interactive-worker flow, check-correction, honest-err-no-check preservation, honest-err-passing-check preservation, SWARM_WORKTREE_DIR precedence, wrong-task_id self-correction"
 echo ""
 yellow "Run with KEEP=1 to leave $TEST_DIR for inspection."

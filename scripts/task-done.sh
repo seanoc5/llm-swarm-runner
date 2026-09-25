@@ -29,16 +29,21 @@
 # This record is PROVISIONAL, not final, whenever a check is coming:
 # worker-listener.sh's write_outcome() — called unconditionally after the
 # dispatched process exits and the project's acceptance check (if any) has
-# run — is still the sole authority on ok vs err, and RECONCILES whatever
-# this script already wrote (removing it first if the real outcome differs
-# — see write_outcome's own stale-record cleanup) rather than leaving it
-# as final. This script's job is narrower than "decide the outcome": (a)
-# empty processing/ immediately, so a reap never mistakes your
-# already-finished task for an abandoned brief (the false-alarm half of
-# #450 finding 3), and (b) unblock the coordinator's wake right away for a
-# dispatch that may not exit for a long time — not to override an executed
-# check. Pass the outcome you actually believe right now; if a check later
-# disagrees, worker-listener.sh corrects the record for you.
+# run — RECONCILES whatever this script already wrote (removing it first
+# if the real outcome differs — see write_outcome's own stale-record
+# cleanup) rather than leaving it as final. This script's job is narrower
+# than "decide the outcome": (a) empty processing/ immediately, so a reap
+# never mistakes your already-finished task for an abandoned brief (the
+# false-alarm half of #450 finding 3), and (b) unblock the coordinator's
+# wake right away for a dispatch that may not exit for a long time — not
+# to override an executed check. Pass the outcome you actually believe
+# right now; if a check later disagrees, worker-listener.sh corrects the
+# record for you — UNLESS you passed "err": an executed check is the
+# stronger signal over a bare process exit code, but never over your own
+# explicit err declaration (issue #468) — a check that happens to pass
+# (e.g. on a tree you never actually touched) does not get to silently
+# overwrite "I could not complete this" with "ok". If you believe the
+# task failed, pass err; don't rely on the check to catch it for you.
 #
 # What it does, atomically:
 #   1. mv .swarm/tasks/processing/<task-id>.md  ->  .swarm/tasks/done/

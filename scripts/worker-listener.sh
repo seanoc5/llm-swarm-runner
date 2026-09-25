@@ -505,8 +505,8 @@ write_outcome() {
     [ "$rc" -ne 0 ] && TASK_OUTCOME="err"
     [ -n "${CHECK_EXIT:-}" ] && [ "$CHECK_EXIT" -ne 0 ] && TASK_OUTCOME="err"
 
-    # self-review finding: with no executed check configured, $rc (the
-    # dispatched CLI process's bare exit code) is a much weaker signal
+    # self-review finding: $rc (the dispatched CLI process's bare exit
+    # code) and an executed check's exit code are both much weaker signals
     # than the worker's own explicit self-report via scripts/task-done.sh
     # — a claude/gemini/codex process almost always exits 0 regardless of
     # whether the AGENT itself believes the task failed, so trusting $rc
@@ -514,14 +514,26 @@ write_outcome() {
     # into a recorded "ok" the moment this reconciliation pass runs (the
     # stale-file cleanup below would delete the worker's own err.json and
     # replace it with a wrong ok.json — a corrupted record, not merely a
-    # duplicate one). Only applies with NO check configured — a check
-    # result stays the overriding ground truth over a self-report when
-    # both exist, per this feature's whole "an executed check, not a
-    # self-report, is what actually verifies" design (see this file's
-    # header comment). Carries the worker's own reason forward so it
-    # isn't lost in the reconciled record.
+    # duplicate one).
+    #
+    # issue #468: this used to be gated on "no check configured"
+    # ([ -z "${CHECK_EXIT:-}" ]), on the theory that an executed check is
+    # always the stronger ground truth. That's true when the check FAILS
+    # (TASK_OUTCOME is already "err" from the block above either way), but
+    # not when it PASSES — a check that exits 0 on an untouched tree (the
+    # common shape: the worker gave up before touching anything, or before
+    # its change could matter) proves nothing was actually delivered, and
+    # prompts/worker.md's `err` contract means "nothing usable delivered",
+    # not "blocked, please double-check". A passing check must never
+    # silently upgrade an explicit err to ok — so this now applies
+    # unconditionally, regardless of whether a check ran or what it found.
+    # Carries the worker's own reason forward so it isn't lost in the
+    # reconciled record.
     local prior_err_reason=""
-    if [ -z "${CHECK_EXIT:-}" ] && [ -f "$DONE/${TASK_ID}.err.json" ]; then
+    if [ -f "$DONE/${TASK_ID}.err.json" ]; then
+        if [ -n "${CHECK_EXIT:-}" ] && [ "$CHECK_EXIT" -eq 0 ] && [ "$TASK_OUTCOME" = "ok" ]; then
+            echo "[$(date +%T)] OVERRIDE: acceptance check passed (exit 0) but the worker's own err declaration stands — an explicit err is never silently upgraded by a passing check (issue #468)."
+        fi
         TASK_OUTCOME="err"
         if command -v jq >/dev/null 2>&1; then
             prior_err_reason="$(jq -r '.reason // empty' "$DONE/${TASK_ID}.err.json" 2>/dev/null)"
