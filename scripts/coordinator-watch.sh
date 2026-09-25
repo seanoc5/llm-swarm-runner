@@ -591,39 +591,51 @@
 #                           terminal outcome, or after CHECK_CLAIM_STALE_SECS
 #                           (default WORKER_CHECK_TIMEOUT+300s) if the check
 #                           process itself crashed without releasing it.
-#   WATCH_SYNTH_OUTCOME=1   (issue #314) Set to 0 to disable outcome
-#                           synthesis. The coordinator's worker-finished wake
-#                           (on_outcome -> coord.wake) triggers only on a new
-#                           done/<id>.{ok,err}.json — a file worker-listener.sh
-#                           writes only AFTER the agent process exits. Default
-#                           interactive workers finish their task and park at
-#                           the claude REPL indefinitely, so that file never
-#                           arrives and the wake channel is silently dead (in
-#                           real fand-etl logs, no worker.finish fired between
-#                           2026-07-20 and this fix — every completion was
-#                           caught only by the wake-less pr-poll/reap
-#                           backstops). When enabled, maybe_run_check
-#                           synthesizes the outcome file itself the moment it
-#                           wins the check-claim for a done signal: an atomic
-#                           mktemp+mv of done/<task_id>[-<issue>].ok.json
-#                           ("synthesized": true, filename suffixed with
-#                           -<issue> when the task_id doesn't already end in
-#                           it, since on_outcome parses the issue number from
-#                           that trailing position). The write lands in the
-#                           same watched path as a listener-written outcome,
-#                           so the ENTIRE existing pipeline — inotify/poll
-#                           pickup, worker.finish audit event, autoclose pass,
-#                           debounced coord.wake — fires unmodified. Skipped
-#                           (watch.outcome.synth.skip) when an outcome for
-#                           this task_id already exists (headless workers,
-#                           where the listener's own write still happens). If
-#                           the listener later writes its outcome anyway
-#                           (operator exits a parked worker), a same-named
-#                           file is a create-event-free overwrite and a
-#                           differently-named one just causes a debounced
-#                           duplicate wake — both harmless. Gated behind
-#                           WATCH_CHECK_ON_DONE=1, which owns the done
-#                           detection this piggybacks on.
+#   WATCH_SYNTH_OUTCOME     REMOVED (issue #451, α of #450's finding 1). Used
+#                           to (issue #314) fabricate a done/<id>.ok.json the
+#                           moment maybe_run_check won a check-claim for a
+#                           done signal, because the coordinator's
+#                           worker-finished wake only triggers on a NEW
+#                           done/<id>.{ok,err}.json and default interactive
+#                           workers park at the claude REPL indefinitely
+#                           without ever making worker-listener.sh write one.
+#                           That fix worked but put FIVE independent places
+#                           in a position to each decide a task was "done"
+#                           and write their own outcome file under a
+#                           different task_id — status_poll_pass's real
+#                           task_id, pr_poll_pass's invented
+#                           "pr-issue-$issue" fallback, and (once the
+#                           listener eventually did exit) worker-listener.sh
+#                           itself — the same completion recorded 2-3x, each
+#                           copy independently re-triggering worker.finish +
+#                           coord.wake (#450's corpusminder #708 case: four
+#                           ok.json files over 15 minutes for one finish).
+#                           Fixed at the source instead: the worker now
+#                           writes its own outcome via scripts/task-done.sh
+#                           as the mandatory last step of every task
+#                           (prompts/worker.md § "Task completion") — that
+#                           file lands in the SAME watched path a listener
+#                           write always did, so the existing inotify/poll
+#                           pickup -> worker.finish -> autoclose ->
+#                           debounced coord.wake pipeline fires unmodified,
+#                           with no coordinator-side synthesis needed.
+#                           maybe_run_check now calls
+#                           reconcile_missing_outcome() where synth_outcome
+#                           used to fire — it only logs watch.reconcile and
+#                           never writes done/*.json. See task-done.sh's own
+#                           header for the pre-#451-worktree migration
+#                           story. (An earlier version of this PR also had
+#                           reconcile_missing_outcome() drop a one-time
+#                           inbox reminder brief — removed on self-review:
+#                           that file is indistinguishable from a real task
+#                           brief to claim_next_task()/WORKER_AUTO_DELIVER,
+#                           so it could get "claimed" and dispatched as a
+#                           full extra agent session, and a synthesized
+#                           "pr-issue-N" task_id in its instructions would
+#                           defeat on_outcome's issue-number parser. Pure
+#                           logging fully closes the duplicate-record gap
+#                           this issue exists for; a safer proactive nudge
+#                           is future scope.)
 #   CHECK_RUNNER=<path>     Test-only override: when set, check-on-done runs
 #                           `$CHECK_RUNNER <worktree> <check_cmd>` synchronously
 #                           instead of spawning a real tmux window. Lets tests
@@ -1342,13 +1354,13 @@
 #                           hand (see the fand-etl incident this issue was
 #                           filed from — two briefs sat unclaimed for 2.5+
 #                           hours). Distinct from, and complementary to,
-#                           WATCH_SYNTH_OUTCOME (issue #314, above): that
-#                           feature synthesizes the done/*.json outcome
-#                           record for a parked worker's CURRENT (already
-#                           finished) task, for coordinator-wake/monitoring
-#                           purposes — it does nothing about a NEW brief
-#                           waiting behind that still-live session, which is
-#                           this feature's entire job. This reuses the SAME
+#                           task-done.sh (issue #451, above): that script
+#                           records the done/*.json outcome for a parked
+#                           worker's CURRENT (already finished) task, for
+#                           coordinator-wake/monitoring purposes — it does
+#                           nothing about a NEW brief waiting behind that
+#                           still-live session, which is this feature's
+#                           entire job. This reuses the SAME
 #                           background sweep as
 #                           WORKER_AUTO_COMPACT (worker_compact_pass(), see
 #                           above) rather than a dedicated loop — same
@@ -1917,11 +1929,17 @@ EVENTS LOG
                            brief queued before its PR existed, so requeue.sh's own marker
                            post never fired
       watch.check_on_done  check-on-done result (issue, task_id, result=running|pass|fail|skipped)
-      watch.outcome.synth  (issue #314) synthesized a done/*.ok.json on done
-                           detection because the parked interactive worker's
-                           listener can't write one (issue, task_id, path);
-                           watch.outcome.synth.skip when an outcome for the
-                           task already exists (reason=outcome_exists)
+      watch.reconcile      (issue #451, superseded issue #314's watch.outcome.synth
+                           — see WATCH_SYNTH_OUTCOME's removal note below) a
+                           done-ish signal (ready-for-review status, or a PR
+                           appearing) was seen with no completion record for
+                           that task_id yet (issue, task_id, reason=
+                           status_ready_no_outcome|pr_open_no_outcome). Never
+                           writes done/*.json — the worker is the only writer
+                           now (scripts/task-done.sh). Usually means the
+                           worker hasn't reached its task-done.sh step yet;
+                           self-heals on the next poll once it does. Pure
+                           observability — takes no other action.
       cap.refused          provision-worker.sh hit MAX_WORKERS / MAX_TMUX_WINDOWS
       coord.compact        /compact injected before wake (used, threshold, trigger=poll|wake)
       coord.compact.skip   auto-compact skipped this cycle (reason=pane_busy|no_fresh_probe|cooldown|...,
@@ -2247,10 +2265,6 @@ ACTIVITY_WAKE_PROMPT="${ACTIVITY_WAKE_PROMPT:-}"
 WATCH_WORKTREE_SWEEP_SECS="${WATCH_WORKTREE_SWEEP_SECS:-60}"
 WATCH_PENDING_BRIEF_SWEEP_SECS="${WATCH_PENDING_BRIEF_SWEEP_SECS:-300}"
 WATCH_CHECK_ON_DONE="${WATCH_CHECK_ON_DONE:-1}"
-# issue #314 — synthesize done/*.ok.json on done detection (parked
-# interactive workers never exit claude, so the listener's own outcome
-# write — the coordinator's only wake trigger — never happens).
-WATCH_SYNTH_OUTCOME="${WATCH_SYNTH_OUTCOME:-1}"
 CHECK_RUNNER="${CHECK_RUNNER:-}"
 SESSION_NAME="${SESSION_NAME:-llm-$(basename "$PROJECT_DIR")}"
 WATCHER_QUIET="${WATCHER_QUIET:-0}"
@@ -2833,8 +2847,7 @@ format_event_line() {
                 *)                 glyph="·"; color=$'\033[2m'  ;;
             esac ;;
         watch.check_on_done.error)  glyph="✗"; color=$'\033[31m' ;;
-        watch.outcome.synth)         glyph="✉"; color=$'\033[36m' ;;
-        watch.outcome.synth.skip)    glyph="·"; color=$'\033[2m'  ;;
+        watch.reconcile)             glyph="?"; color=$'\033[33m' ;;
         watch.start|watch.timer.start) glyph="▶"; color=$'\033[36m' ;;
         watch.exit)                     glyph="■"; color=$'\033[2m'  ;;
         sweep.run|sweep.dry)             glyph="↻"; color=$'\033[36m' ;;
@@ -3155,6 +3168,38 @@ own_worktree_dirs_for_scan() {
     shopt -u nullglob
 }
 
+# outcome_path_issue <outcome-path>
+#
+# Issue number for a done/*.{ok,err}.json path. Prefers the path's own
+# "wt-issue-<N>" directory segment — always present for any outcome file
+# that reached here (every own-worktree layout in this codebase is
+# WORKSPACE/wt-issue-<N>/...) — over the OLD convention of parsing the
+# FILENAME's trailing "-<issue>" before .ok/.err.json.
+#
+# issue #451 self-review finding: that filename-trailing-digits parse was
+# only ever reliable because #314's synth_outcome (removed by this PR)
+# defensively appended "-$issue" to every filename it wrote, using the
+# issue number it was called with directly — never by parsing task_id.
+# scripts/task-done.sh and worker-listener.sh's write_outcome() both use
+# the BARE task_id with no such suffixing (matching write_outcome's own
+# long-standing convention, unchanged by this PR) — a task_id that
+# doesn't happen to end in "-<issue>" (requeue.sh's <wt-path> form, or
+# provision-worker.sh's "-2"/"-3" collision suffix landing AFTER the
+# issue number) parses wrong under the old filename-only method. The path
+# itself was always the more reliable source and needs no writer-side
+# change to fix.
+outcome_path_issue() {
+    local path="$1"
+    local issue
+    issue=$(printf '%s' "$path" | sed -nE 's#.*/wt-issue-([0-9]+)/.*#\1#p')
+    if [ -z "$issue" ]; then
+        # Fallback for a path shape that doesn't match the convention at
+        # all (e.g. a test fixture) — the old filename-trailing-digits parse.
+        issue=$(basename "$path" | sed -E 's/.*-([0-9]+)\.(ok|err)\.json$/\1/')
+    fi
+    printf '%s' "$issue"
+}
+
 # dispatch_outcome <outcome-path>
 #
 # Wrapper around on_outcome that applies the is_our_worktree filter.
@@ -3165,9 +3210,7 @@ dispatch_outcome() {
     if is_our_worktree "$path"; then
         on_outcome "$path"
     else
-        local issue
-        issue=$(basename "$path" | sed -E 's/.*-([0-9]+)\.(ok|err)\.json$/\1/')
-        log_event worker.finish.skip "issue=$issue reason=foreign_worktree path=$path"
+        log_event worker.finish.skip "issue=$(outcome_path_issue "$path") reason=foreign_worktree path=$path"
     fi
 }
 
@@ -4340,56 +4383,52 @@ check_json_state() {
     sed -n 's/.*"state":"\([a-zA-Z_]*\)".*/\1/p' "$1" 2>/dev/null | head -1
 }
 
-# synth_outcome <worktree-dir> <issue> <task_id>
+# reconcile_missing_outcome <worktree-dir> <issue> <task_id> <reason>
 #
-# (issue #314) Write the done/<id>.ok.json a parked interactive worker's
-# listener never gets to write (write_outcome only runs after the agent
-# process exits, and default-mode workers idle at their REPL forever) —
-# it's the only trigger for the coordinator's worker-finished wake. Called
-# from maybe_run_check right after the check-claim is won, i.e. exactly
-# once per done task. The file lands via atomic mktemp+mv (the temp name
-# matches neither backend's *.{ok,err}.json filter, the final rename
-# raises moved_to), so the normal on_outcome pipeline — worker.finish
-# event, autoclose pass, debounced coord.wake — fires unmodified.
+# (issue #451, α of #450 finding 1 — supersedes #314's synth_outcome)
+# Called from maybe_run_check right after the check-claim is won, i.e. the
+# same one-per-done-task moment synth_outcome used to fire. Where that
+# function FABRICATED a done/<id>.ok.json so the coordinator's
+# worker-finished wake (on_outcome -> coord.wake, which only triggers on a
+# new done/<id>.{ok,err}.json) had something to trigger on, this function
+# never writes one — the worker is now the sole writer, via
+# scripts/task-done.sh (prompts/worker.md § "Task completion"), so a
+# genuine completion record lands in the SAME watched path on its own and
+# the existing inotify/poll -> worker.finish -> coord.wake pipeline fires
+# unmodified with no coordinator help needed.
 #
-# Filename: <task_id>.ok.json, suffixed to <task_id>-<issue>.ok.json when
-# the task_id doesn't already end in -<issue> — on_outcome parses the
-# issue number from that trailing position. Skips when an outcome for
-# this task_id already exists (headless workers: the listener's own write
-# happened or is imminent). See the WATCH_SYNTH_OUTCOME header entry for
-# the duplicate-wake analysis of a listener writing later anyway.
-synth_outcome() {
-    [ "$WATCH_SYNTH_OUTCOME" = "1" ] || return 0
-    local wt_dir="$1" issue="$2" task_id="$3"
+# A done signal (ready-for-review status, or a PR appearing) with no
+# outcome record yet is not itself a problem — it usually just means the
+# worker hasn't reached its task-done.sh step yet, or (pre-#451 worktree)
+# never will on its own; see task-done.sh's header for that migration
+# story. Log it (watch.reconcile) for visibility and no-op otherwise:
+# duplicate suppression (this — or a second call — seeing an existing
+# record does nothing) plus this function deliberately taking NO other
+# action.
+#
+# An earlier version of this also dropped a one-time reminder brief into
+# the worktree's inbox/. Removed (self-review finding on this PR): that
+# file is indistinguishable from a real task brief to claim_next_task()
+# AND to WORKER_AUTO_DELIVER's worker_pending_brief() — a parked worker
+# whose current task is already status=ready-for-review gets /quit'd to
+# "claim" it, burning a full extra agent dispatch on what was meant to be
+# a one-line reminder, and (when maybe_run_check's PR-open backstop had
+# fallen back to a synthesized task_id like "pr-issue-N", which isn't
+# purely digits) the resulting done/nudge-pr-issue-N.ok.json defeats
+# on_outcome's `-<issue>` filename parser. Logging alone fully solves the
+# duplicate-record problem this issue exists for; a safer proactive nudge
+# (a channel claim_next_task never treats as claimable work) is future
+# scope, not this α slice.
+reconcile_missing_outcome() {
+    local wt_dir="$1" issue="$2" task_id="$3" reason="${4:-check_claim_won}"
     local done_dir="$wt_dir/.swarm/tasks/done"
-    mkdir -p "$done_dir" 2>/dev/null || return 0
-
-    local base="$task_id"
-    case "$base" in *-"$issue") ;; *) base="${base}-${issue}" ;; esac
 
     local f
-    for f in "$done_dir/${task_id}.ok.json" "$done_dir/${task_id}.err.json" \
-             "$done_dir/${base}.ok.json"    "$done_dir/${base}.err.json"; do
-        if [ -e "$f" ]; then
-            log_event watch.outcome.synth.skip "issue=$issue task_id=$task_id reason=outcome_exists"
-            return 0
-        fi
+    for f in "$done_dir/${task_id}.ok.json" "$done_dir/${task_id}.err.json"; do
+        [ -e "$f" ] && return 0   # already recorded — nothing to reconcile
     done
 
-    if [ "$DRY_RUN" = "1" ]; then
-        echo "[$(date +%T)] [DRY] would synthesize outcome: $done_dir/${base}.ok.json"
-        return 0
-    fi
-
-    local tmp
-    tmp=$(mktemp "$done_dir/.synth-XXXXXX" 2>/dev/null) || return 0
-    printf '{"task_id":"%s","finished":"%s","outcome":"ok","synthesized":true,"source":"coordinator-watch.check_on_done"}\n' \
-        "$task_id" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$tmp"
-    if mv "$tmp" "$done_dir/${base}.ok.json" 2>/dev/null; then
-        log_event watch.outcome.synth "issue=$issue task_id=$task_id path=$done_dir/${base}.ok.json"
-    else
-        rm -f "$tmp" 2>/dev/null || true
-    fi
+    log_event watch.reconcile "issue=$issue task_id=$task_id reason=$reason"
 }
 
 # maybe_run_check <worktree-dir> <issue> [task_id]
@@ -4423,6 +4462,13 @@ maybe_run_check() {
     local wt_dir="$1" issue="$2" task_id="${3:-}"
     local status_dir="$wt_dir/.swarm/tasks/status"
     mkdir -p "$status_dir" 2>/dev/null || return 0
+
+    # Reason for reconcile_missing_outcome below, fixed BEFORE task_id gets
+    # resolved/defaulted a few lines down: status_poll_pass always passes
+    # an explicit task_id (it just read the status file); pr_poll_pass
+    # never does (PR-open backstop, issue-only).
+    local reconcile_reason="pr_open_no_outcome"
+    [ -n "$task_id" ] && reconcile_reason="status_ready_no_outcome"
 
     if [ -z "$task_id" ]; then
         # Distinguish "no status file exists at all" (synthesize a key —
@@ -4467,13 +4513,14 @@ maybe_run_check() {
     local claim_dir="$status_dir/${task_id}.check-claim"
     mkdir "$claim_dir" 2>/dev/null || return 0   # already claimed (in flight) — nothing to do
 
-    # issue #314: winning the claim is the one moment each done task passes
-    # through exactly once — synthesize the wake-triggering outcome file
+    # issue #451 (was #314's synth_outcome call): winning the claim is the
+    # one moment each done task passes through exactly once — reconcile
     # here, before any of the skip/return branches below, so EVERY done
-    # detection produces a coordinator wake (including pr_terminal skips:
-    # a merged-while-coordinator-slept PR is precisely a wake the
-    # coordinator missed).
-    synth_outcome "$wt_dir" "$issue" "$task_id"
+    # detection that still lacks an outcome record gets logged, including
+    # pr_terminal skips: a merged-while-coordinator-slept PR with no
+    # outcome yet is precisely a gap worth flagging. Never writes
+    # done/*.json itself.
+    reconcile_missing_outcome "$wt_dir" "$issue" "$task_id" "$reconcile_reason"
 
     # issue #181: the PR may already be MERGED/CLOSED by the time we win
     # the claim — the merge already validated the work, so spawning a
@@ -5736,11 +5783,16 @@ worker_pending_brief() {
 
 # worker_current_task_terminal <worktree-dir>
 #
-# True (rc 0) ONLY if the task currently claimed in <worktree>/.swarm/tasks/
-# processing/ (there is always exactly one there for as long as the agent
-# process is alive — claim_next_task() moves it there on pickup and doesn't
-# move it out again until dispatch_agent returns) has a status file
-# reporting a genuinely terminal state: "ready-for-review" or "done-no-pr".
+# True (rc 0) ONLY if the task currently claimed — normally the one entry
+# in <worktree>/.swarm/tasks/processing/ (claim_next_task() moves it there
+# on pickup and doesn't move it out again until dispatch_agent returns),
+# OR, since issue #451, the most recently archived done/*.md when
+# processing/ is already empty because scripts/task-done.sh moved it
+# there while the agent process is still alive (see this function's own
+# "if [ -z "$proc_file" ]" branch below for why processing/-empty can no
+# longer mean "nothing in flight" the way it always used to) — has a
+# status file reporting a genuinely terminal state: "ready-for-review" or
+# "done-no-pr".
 #
 # Self-review finding on this feature's first version: gating delivery on
 # pane idleness alone is not enough. A worker parked `blocked` (asked a
@@ -5765,12 +5817,18 @@ worker_pending_brief() {
 # Deliberately NOT worker_task_done(): that function's (a)/(b) signals are
 # themselves gated on `.swarm/tasks/processing/` being EMPTY (a staleness
 # guard against stale done/status files from an EARLIER, already-concluded
-# task — see its own header comment) — a precondition that can never hold
-# here, since processing/ holds exactly the in-flight task for as long as
-# its agent process is alive, i.e. for every window this function is even
-# called against. This reads the CURRENT processing/ entry's own status file
-# directly instead, with no such guard needed (there's nothing stale to
-# guard against — it's always THIS task's own record or nothing).
+# task — see its own header comment) — a precondition that, pre-#451,
+# could never hold while this function's primary (processing/-non-empty)
+# branch is the one running, since processing/ then holds exactly the
+# in-flight task for as long as its agent process is alive. This reads
+# the CURRENT processing/ entry's own status file directly instead, with
+# no such guard needed (there's nothing stale to guard against — it's
+# always THIS task's own record or nothing). The issue #451 fallback
+# branch below, which DOES run with processing/ empty, still doesn't
+# reuse worker_task_done() — it targets one specific archived task_id
+# (the most recently moved done/*.md) rather than accepting any
+# ready-for-review status file in the worktree, avoiding exactly the
+# stale-record risk worker_task_done()'s own guard exists for.
 #
 # issue #370: the exact-name lookup above can miss even when the current
 # task genuinely IS terminal — observed in the wild as status/issue-517.json
@@ -5832,7 +5890,55 @@ worker_current_task_terminal() {
     [ "$HAVE_JQ" = "1" ] || return 1
     local proc_file task_id status_file state
     proc_file="$(find "$wt_dir/.swarm/tasks/processing" -maxdepth 1 -type f 2>/dev/null | head -1)"
-    [ -n "$proc_file" ] || return 1
+    if [ -z "$proc_file" ]; then
+        # issue #451 self-review finding: scripts/task-done.sh (the
+        # worker's own mandatory last step) moves processing/<id>.md into
+        # done/ WHILE the dispatched agent process may still be alive —
+        # that's the entire point of task-done.sh (see its own header).
+        # Pre-#451, "processing/ is empty" only ever meant "no task in
+        # flight", so returning 1 (not confirmed terminal) here was safe.
+        # Now it doesn't: a worker that correctly calls task-done.sh would
+        # make this function return 1 FOREVER for that window, and per
+        # this function's own #370 comment above, task_not_terminal never
+        # self-heals on its own — permanently wedging WORKER_AUTO_DELIVER,
+        # the exact 2.5-hour fand-etl stall it exists to prevent. Recover
+        # the task_id from the most recently ARCHIVED brief in done/
+        # instead (ctime, same "when was this actually claimed/moved"
+        # signal the #370 fallback below already relies on — task-done.sh's
+        # mv bumps it same as claim_next_task's mv does) and apply the
+        # same terminal check against it. Deliberately NOT replicating
+        # #370's mismatched-status-filename fallback machinery below for
+        # this branch — that edge case is orthogonal and stays scoped to
+        # the processing/-based path; a done/*.{ok,err}.json's mere
+        # existence is checked instead, which needs no such fallback since
+        # (unlike a still-in-progress processing/ entry) task-done.sh only
+        # ever writes one once the worker has actually declared done.
+        local done_dir="$wt_dir/.swarm/tasks/done" f fctime best_ctime=-1
+        shopt -s nullglob
+        for f in "$done_dir"/*.md; do
+            fctime="$(ctime_epoch "$f")"
+            [ -n "$fctime" ] || continue
+            if [ "$fctime" -gt "$best_ctime" ]; then
+                best_ctime="$fctime"
+                proc_file="$f"
+            fi
+        done
+        shopt -u nullglob
+        [ -n "$proc_file" ] || return 1
+        task_id="$(basename "$proc_file" .md)"
+        status_file="$wt_dir/.swarm/tasks/status/${task_id}.json"
+        if [ -r "$status_file" ]; then
+            state="$(jq -r '.state // empty' "$status_file" 2>/dev/null)" || return 1
+            case "$state" in
+                ready-for-review|done-no-pr) return 0 ;;
+                *)                           return 1 ;;
+            esac
+        fi
+        if [ -f "$done_dir/${task_id}.ok.json" ] || [ -f "$done_dir/${task_id}.err.json" ]; then
+            return 0
+        fi
+        return 1
+    fi
     task_id="$(basename "$proc_file" .md)"
     status_file="$wt_dir/.swarm/tasks/status/${task_id}.json"
     if [ -r "$status_file" ]; then
@@ -7200,8 +7306,7 @@ on_outcome() {
     local now issue outcome
     now=$(date +%s)
 
-    # Parse outcome filename: <task-id>-<issue>.<ok|err>.json
-    issue=$(basename "$path" | sed -E 's/.*-([0-9]+)\.(ok|err)\.json$/\1/')
+    issue=$(outcome_path_issue "$path")
     case "$path" in
         *.ok.json)  outcome=ok ;;
         *.err.json) outcome=err ;;

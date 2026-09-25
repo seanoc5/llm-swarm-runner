@@ -360,7 +360,7 @@ extract_fn() {
     local fn="$1"
     sed -n "/^${fn}() {/,/^}/p" "$WATCH"
 }
-for fn in log_event on_outcome coord_wake_set_pending coord_wake_clear_pending \
+for fn in log_event on_outcome outcome_path_issue coord_wake_set_pending coord_wake_clear_pending \
           coord_inbox_write coord_inbox_count coord_inbox_nudge_text \
           coord_wake_hold_mark_pending coord_wake_hold_clear_pending coord_wake_hold_retry_pass \
           coord_wake_hold_reason coord_human_present worker_human_present swarm_busy \

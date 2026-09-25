@@ -11,11 +11,30 @@
 #   <wt>/.swarm/tasks/inbox/<id>.md       coordinator writes here (atomic
 #                                         via mktemp+mv); listener reads
 #   <wt>/.swarm/tasks/processing/<id>.md  listener mv on pickup (atomic claim)
-#   <wt>/.swarm/tasks/done/<id>.md        listener mv when finished (audit trail)
+#   <wt>/.swarm/tasks/done/<id>.md        mv'd here when finished (audit trail)
+#                                         — by scripts/task-done.sh (issue
+#                                         #451, the worker's own mandatory
+#                                         last step) if the worker got there,
+#                                         else by this listener's fallback
+#                                         below once the agent process exits
 #   <wt>/.swarm/tasks/done/<id>.{ok,err}.json
-#                                         listener writes structured outcome
-#                                         (started/finished/duration/exit_code/agent/model
-#                                          + check_cmd/check_exit/check_output_tail)
+#                                         structured outcome (started/
+#                                         finished/duration/exit_code/agent/
+#                                         model + check_cmd/check_exit/
+#                                         check_output_tail). task-done.sh
+#                                         may write a PROVISIONAL record
+#                                         first (unblocks the coordinator's
+#                                         wake for an interactive dispatch
+#                                         that may not exit for a long
+#                                         time) — but write_outcome() below
+#                                         always still runs afterward and is
+#                                         the sole authority: it applies the
+#                                         executed-check gate and the #287
+#                                         minimum-interaction floor, and
+#                                         reconciles/replaces the
+#                                         provisional record if the real
+#                                         outcome differs, so exactly ONE
+#                                         file survives per task_id.
 #   <wt>/.swarm/tasks/done/<id>.check.log full acceptance-check output (audit)
 #   <wt>/.swarm/tasks/status/<id>.json    worker-written state declaration
 #                                         (not this script — see worker.md)
@@ -91,6 +110,18 @@
 #                        silent `sleep 2` poll — no interactive shell is
 #                        spawned (there's no operator to hand it to, and
 #                        `bash -i` needs a real tty).
+
+# issue #451 self-review finding: scripts/task-done.sh resolves its queue
+# root via `git rev-parse --show-toplevel`, which is cwd-dependent — a
+# worker that `cd`s into a scratch clone mid-task and calls task-done.sh
+# from there without cd'ing back would silently write its completion
+# record into the WRONG repo (no error, no wake, indistinguishable from
+# having simply forgotten the call). This process's own cwd IS always the
+# correct worktree root (worker-listener.sh never cd's away from it once
+# started) and is inherited by every dispatched agent subprocess
+# regardless of what THAT process later does with its own cwd — export it
+# once, here, so task-done.sh can prefer it over `git rev-parse` when set.
+export SWARM_WORKTREE_DIR="$PWD"
 
 AGENT="${1:-claude}"
 MODEL="${WORKER_MODEL:-}"
@@ -474,12 +505,36 @@ write_outcome() {
     [ "$rc" -ne 0 ] && TASK_OUTCOME="err"
     [ -n "${CHECK_EXIT:-}" ] && [ "$CHECK_EXIT" -ne 0 ] && TASK_OUTCOME="err"
 
+    # self-review finding: with no executed check configured, $rc (the
+    # dispatched CLI process's bare exit code) is a much weaker signal
+    # than the worker's own explicit self-report via scripts/task-done.sh
+    # — a claude/gemini/codex process almost always exits 0 regardless of
+    # whether the AGENT itself believes the task failed, so trusting $rc
+    # alone would silently turn an honest task-done.sh err declaration
+    # into a recorded "ok" the moment this reconciliation pass runs (the
+    # stale-file cleanup below would delete the worker's own err.json and
+    # replace it with a wrong ok.json — a corrupted record, not merely a
+    # duplicate one). Only applies with NO check configured — a check
+    # result stays the overriding ground truth over a self-report when
+    # both exist, per this feature's whole "an executed check, not a
+    # self-report, is what actually verifies" design (see this file's
+    # header comment). Carries the worker's own reason forward so it
+    # isn't lost in the reconciled record.
+    local prior_err_reason=""
+    if [ -z "${CHECK_EXIT:-}" ] && [ -f "$DONE/${TASK_ID}.err.json" ]; then
+        TASK_OUTCOME="err"
+        if command -v jq >/dev/null 2>&1; then
+            prior_err_reason="$(jq -r '.reason // empty' "$DONE/${TASK_ID}.err.json" 2>/dev/null)"
+        fi
+    fi
+
     # Minimum-interaction floor (#287): an apparent "ok" backed by no
     # executed check is only trustworthy if the agent actually engaged with
     # the task. A passed check or a worker-written status file is
     # independent proof of real work and is never second-guessed below —
     # only reached when neither exists, on top of zero new commits.
     local reason=""
+    [ -n "$prior_err_reason" ] && reason="worker-reported: $prior_err_reason"
     if [ "$TASK_OUTCOME" = "ok" ] && [ -z "${CHECK_EXIT:-}" ]; then
         local default_ref ahead=0 has_status=0
         default_ref="$(worktree_default_ref)"
@@ -496,6 +551,39 @@ write_outcome() {
 
     local outcome="$TASK_OUTCOME"
     local outcome_file="$DONE/${TASK_ID}.${outcome}.json"
+
+    # issue #451: this call may be reconciling a PROVISIONAL record the
+    # worker itself already wrote via scripts/task-done.sh (its mandatory
+    # last step, called mid-session — i.e. before this executed check even
+    # ran). That self-report is a best guess, not the final word: THIS
+    # function, with the actual check result in hand, is still the sole
+    # authority on ok vs err. If the provisional record picked the other
+    # outcome level (different filename — .ok.json vs .err.json), remove
+    # it here before writing the corrected one, so exactly one outcome
+    # file survives per task_id — never both.
+    local stale
+    for stale in "$DONE/${TASK_ID}.ok.json" "$DONE/${TASK_ID}.err.json"; do
+        [ "$stale" = "$outcome_file" ] && continue
+        [ -e "$stale" ] && rm -f "$stale" 2>/dev/null
+    done
+
+    # self-review finding: sweep-swarm-outcomes.sh's `.posted` marker must
+    # be cleared unconditionally, not just on a level flip — even the
+    # SAME-level case (task-done.sh's provisional "ok" and the real,
+    # check-gated "ok" below) has materially different content
+    # (duration_seconds/agent/model/check_exit go from null to real
+    # values). Pre-#451, a POST_OUTCOMES=1 hook always eventually saw the
+    # real record because the coordinator's synthesized file had a
+    # DIFFERENT name from the listener's own write; now both can share the
+    # SAME filename by design (that's the whole point — one record per
+    # task_id), so if the marker survives from an earlier post of the
+    # provisional content, the real content this write is about to record
+    # (fuller, or a corrected outcome level) never gets announced. Clear
+    # it for whichever file is about to be (re)written, every time — cheap
+    # (sweep-swarm-outcomes.sh only re-posts a handful of finished tasks
+    # per run) and never wrong (re-posting a genuinely-unchanged record is
+    # harmless idempotent noise, not a correctness issue).
+    rm -f "$outcome_file.posted" 2>/dev/null
 
     # JSON-escape the model field (may be empty)
     local model_json="null"
@@ -910,6 +998,22 @@ $TASK"
         DURATION=$(( $(date +%s) - STARTED_EPOCH ))
 
         # Move brief into the appropriate archive location, then write outcome.
+        #
+        # issue #451: for a v2 task, the worker itself may already have
+        # called scripts/task-done.sh as its mandatory last step (see
+        # prompts/worker.md § "Task completion") — the common case for an
+        # interactive dispatch, since this loop only reaches this point
+        # once the agent process actually exits, which for a default
+        # (non-headless) claude session means a human/agent typed /quit,
+        # something that may never happen on its own. That write is
+        # PROVISIONAL, not final — it landed BEFORE the executed check
+        # above even ran, so write_outcome() below still runs
+        # UNCONDITIONALLY: it is the only place the check result (and the
+        # #287 minimum-interaction floor, and the eval-log row) actually
+        # gets applied, and it reconciles/corrects task-done.sh's guess
+        # rather than leaving it as final (see write_outcome's own stale-
+        # record cleanup). The mv here tolerates task-done.sh having
+        # already moved the brief into $DONE.
         BRIEF_REF=""
         if [ "$IS_LEGACY" = "1" ]; then
             mv "$TASK_PATH" ".agent-task-last.md"
@@ -917,7 +1021,7 @@ $TASK"
             [ "$RC" -ne 0 ] && TASK_OUTCOME="err"
             BRIEF_REF=".agent-task-last.md"
         else
-            mv "$TASK_PATH" "$DONE/$(basename "$TASK_PATH")"
+            mv "$TASK_PATH" "$DONE/$(basename "$TASK_PATH")" 2>/dev/null || true
             write_outcome "$RC" "$STARTED" "$FINISHED" "$DURATION"
             BRIEF_REF="$DONE/$(basename "$TASK_PATH")"
         fi

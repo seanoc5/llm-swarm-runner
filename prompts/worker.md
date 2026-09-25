@@ -225,6 +225,28 @@ recommendation; if you stop, also write status `blocked`), `brief-draft`
 real need; a file still in `outbox/` is unread, so don't re-send it. Status,
 PR discussion and progress narration have their own channels.
 
+## Task completion (`task-done.sh`, mandatory last call)
+
+Last tool call of every task, after your status file and any outbox
+message are written:
+
+```bash
+$LLM_SWARM_DIR/scripts/task-done.sh "$TASK_ID" ok    # or: err "<short reason>"
+```
+
+Always the `$LLM_SWARM_DIR`-prefixed path (your checkout may have no
+`scripts/` of its own). `$TASK_ID` matches your status file. `ok` covers
+any concluded outcome — PR, `blocked`, `done-no-pr`; use `err` only when
+nothing usable was delivered. This is the coordinator's one reliable
+"worker finished" signal for an interactive session that never exits on
+its own — without it, several detectors used to each guess and
+double-record completions (#451). If the project runs an executed check,
+`worker-listener.sh` reconciles this record against it afterward, so
+report what you believe now. Script missing (pre-#451 checkout) → skip;
+don't hand-write a `done/*.json` yourself.
+
+---
+
 ## At-rest signal (opt-in via `.swarm-policy.md`)
 
 Only if the project policy opts in: print a single `∎` on its own line at

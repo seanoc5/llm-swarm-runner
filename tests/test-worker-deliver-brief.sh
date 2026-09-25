@@ -102,7 +102,8 @@ WT_DIR="$WORKSPACE/wt-issue-42"
 INBOX_DIR="$WT_DIR/.swarm/tasks/inbox"
 PROCESSING_DIR="$WT_DIR/.swarm/tasks/processing"
 STATUS_DIR="$WT_DIR/.swarm/tasks/status"
-mkdir -p "$INBOX_DIR" "$PROCESSING_DIR" "$STATUS_DIR"
+DONE_DIR="$WT_DIR/.swarm/tasks/done"
+mkdir -p "$INBOX_DIR" "$PROCESSING_DIR" "$STATUS_DIR" "$DONE_DIR"
 WIN="iss-42"
 
 # set_current_task <task_id> [state]
@@ -282,6 +283,46 @@ rc=0; worker_current_task_terminal "$WT_DIR" || rc=$?
 check "newest post-claim candidate is unparseable -> rc1 (nothing confirmed, fails closed, never a bare return-0 default)" "1" "$rc"
 
 rm -f "$PROCESSING_DIR"/*.md "$STATUS_DIR"/*.json 2>/dev/null || true
+
+heading "Test 2c: worker_current_task_terminal — processing/ already emptied by scripts/task-done.sh (issue #451 self-review finding)"
+# The regression this guards: scripts/task-done.sh (the worker's own
+# mandatory last step, prompts/worker.md § "Task completion") moves
+# processing/<id>.md into done/ WHILE the dispatched agent process may
+# still be alive — that's the entire point of task-done.sh. Before this
+# fix, an empty processing/ always meant "no task in flight" and this
+# function correctly returned 1; now it doesn't, and every worker that
+# correctly calls task-done.sh would wedge WORKER_AUTO_DELIVER forever
+# (task_not_terminal never self-heals on its own — see this function's
+# own #370 comment above).
+rm -f "$PROCESSING_DIR"/*.md "$STATUS_DIR"/*.json "$DONE_DIR"/*.md "$DONE_DIR"/*.json 2>/dev/null || true
+rc=0; worker_current_task_terminal "$WT_DIR" || rc=$?
+check "empty processing/, nothing archived in done/ either -> rc1 (nothing to check)" "1" "$rc"
+
+# task-done.sh's own archive move + a matching status file.
+echo "the current task brief" > "$DONE_DIR/t451.md"
+printf '{"task_id":"t451","state":"blocked","pr":null,"ts":"2026-01-01T00:00:00Z","note":""}' \
+    > "$STATUS_DIR/t451.json"
+rc=0; worker_current_task_terminal "$WT_DIR" || rc=$?
+check "processing/ empty, archived brief's OWN status file says blocked -> rc1 (not actually done)" "1" "$rc"
+
+printf '{"task_id":"t451","state":"ready-for-review","pr":null,"ts":"2026-01-01T00:00:00Z","note":""}' \
+    > "$STATUS_DIR/t451.json"
+rc=0; worker_current_task_terminal "$WT_DIR" || rc=$?
+check "processing/ empty, archived brief's status says ready-for-review -> rc0 (task-done.sh's worker genuinely finished)" "0" "$rc"
+
+# No status file at all under the archived task_id's name — task-done.sh's
+# own outcome record (which it always writes as part of the same action
+# that empties processing/) is sufficient on its own.
+rm -f "$STATUS_DIR"/*.json
+rc=0; worker_current_task_terminal "$WT_DIR" || rc=$?
+check "processing/ empty, archived brief but no status file and no outcome record yet -> rc1 (can't confirm)" "1" "$rc"
+
+printf '{"task_id":"t451","outcome":"ok","finished":"2026-01-01T00:00:00Z","source":"task-done.sh"}' \
+    > "$DONE_DIR/t451.ok.json"
+rc=0; worker_current_task_terminal "$WT_DIR" || rc=$?
+check "processing/ empty, archived brief, done/t451.ok.json exists (task-done.sh's own record) -> rc0" "0" "$rc"
+
+rm -f "$PROCESSING_DIR"/*.md "$STATUS_DIR"/*.json "$DONE_DIR"/*.md "$DONE_DIR"/*.json 2>/dev/null || true
 
 heading "Test 3: maybe_worker_deliver_brief — gating (DRY_RUN)"
 tmux new-session -d -s "$SESSION_NAME" -n "$WIN" 2>/dev/null
