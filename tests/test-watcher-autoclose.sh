@@ -1069,6 +1069,68 @@ green "watch.reconcile still logs the gap for the synthesized-id case"
     || red "must never write to inbox/ under a fabricated task_id — found: $(find "$TEST_DIR/wt-issue-193/.swarm/tasks/inbox" -maxdepth 1 -type f)"
 green "inbox/ untouched for the synthesized-id case too — log only, never a fabricated-id instruction"
 
+# ============================================================================
+heading "Test 20: a check-fail retry's corrected outcome does NOT fire a second wake (issue #468)"
+# ============================================================================
+# Reproduces the #455 post-merge finding: task-done.sh's provisional ok.json
+# (attempt 1, written before the acceptance check even runs) already fires
+# a real worker.finish + coord.wake. If the check later fails, worker-
+# listener.sh's write_outcome() removes the stale ok.json and writes a
+# DIFFERENTLY-NAMED err.json (see write_outcome's own stale-record
+# cleanup) — a brand new path to both backends' create/new-path detection.
+# Pre-#468 that fired a SECOND worker.finish + coord.wake for the exact
+# same brief, breaking the "one wake per task" invariant #451 exists to
+# hold. We simulate the two writes directly (same shape write_outcome's
+# rm+write produces) rather than running the real listener, matching this
+# file's existing strategy of dropping raw outcome JSONs into the fake
+# worktree layout.
+: > "$KILL_LOG"
+: > "$WAKE_LOG"
+rm -f "$PROJECT_DIR/.swarm/events.log"
+mkdir -p "$TEST_DIR/wt-issue-194/.swarm/tasks/done"
+
+ONCE=0 start_watcher 1 "$TEST_DIR/watch-20.log"
+
+# Attempt 1's provisional record — must fire the one real wake.
+echo '{"task_id":"t194","outcome":"ok"}' \
+    > "$TEST_DIR/wt-issue-194/.swarm/tasks/done/t194.ok.json"
+
+wake_count() { wc -l < "$WAKE_LOG" 2>/dev/null || echo 0; }
+i=0
+while [ "$(wake_count)" -lt 1 ] && [ "$i" -lt 20 ]; do sleep 0.5; i=$((i+1)); done
+[ "$(wake_count)" -eq 1 ] \
+    || red "provisional ok.json should have fired exactly one coord.wake by now (got $(wake_count)). Watch log:
+$(cat "$TEST_DIR/watch-20.log")"
+green "provisional ok.json fired one real coord.wake"
+
+# The check-fail retry's correction: same shape as write_outcome()'s own
+# stale-cleanup — remove the stale level, write the new one under a
+# DIFFERENT filename for the SAME task_id.
+rm -f "$TEST_DIR/wt-issue-194/.swarm/tasks/done/t194.ok.json"
+echo '{"task_id":"t194","outcome":"err","exit_code":1}' \
+    > "$TEST_DIR/wt-issue-194/.swarm/tasks/done/t194.err.json"
+
+# Give the poll backend several ticks to (wrongly, pre-#468) fire a second
+# wake if it were going to.
+sleep 4
+stop_watcher
+
+[ "$(wake_count)" -eq 1 ] \
+    || red "the check-corrected err.json should NOT have fired a second coord.wake (got $(wake_count) total). Wake log:
+$(cat "$WAKE_LOG")
+Watch log:
+$(cat "$TEST_DIR/watch-20.log")"
+green "the corrected err.json did not fire a second coord.wake — exactly one wake for the whole brief"
+
+EVENTS_LOG="$PROJECT_DIR/.swarm/events.log"
+[ "$(grep -c 'worker\.finish  *issue=194' "$EVENTS_LOG" 2>/dev/null || echo 0)" -eq 1 ] \
+    || red "expected exactly one worker.finish issue=194 event (the provisional record); got:
+$(grep 'issue=194' "$EVENTS_LOG" 2>/dev/null)"
+grep -q 'worker\.finish\.corrected .*issue=194 outcome=err task_id=t194' "$EVENTS_LOG" \
+    || red "expected a worker.finish.corrected event for the flipped record; got:
+$(cat "$EVENTS_LOG" 2>/dev/null)"
+green "events.log shows one worker.finish + one worker.finish.corrected — the correction is logged, just never re-wakes"
+
 # ────────────────────────── Done ──────────────────────────
 
 heading "All watcher-autoclose tests passed"
@@ -1096,4 +1158,5 @@ echo "  #451: done detection with no outcome yet logs watch.reconcile — never 
 echo "  #451: an existing (worker-written) outcome suppresses reconcile entirely — no event, no side effects"
 echo "  #451: a PR-open backstop with no status file (synthesized task_id) still reconciles cleanly — log only"
 echo "  #451: on_outcome derives the issue number from the wt-issue-N path, not a fragile filename-trailing-digits parse"
+echo "  #468: a check-fail retry's corrected outcome (same task_id, different filename) logs worker.finish.corrected but never fires a second coord.wake"
 yellow "Run with KEEP=1 to leave $TEST_DIR for inspection."
