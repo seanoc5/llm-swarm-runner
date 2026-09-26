@@ -55,6 +55,7 @@ Both are gated by `coordinator_pane_busy()` / `worker_pane_busy()` — a `captur
 - **`※ recap:` lines** — Claude Code's own recap/summary chrome, not something either party wrote as a turn.
 - **Spinner/status lines** — `✻`/`✶` glyphs, `Considering…`, `Sautéed for Ns`, `Cooked for Ns`, `Baked for Ns`, `Simmered for Ns`, `Brewed for Ns`, `Crunched for Ns` (the same catalog `check-stuck-workers.sh`'s `detect_state` matches on) — transient progress chrome, not conversation.
 - **Session-resume dialogs** — `❯ 1. Resume from summary…`, `Resume this session with…` — a picker UI, not a submitted message.
+- **The "new task? /clear to save Nk tokens" hint** — part of the persistent statusline (`check-stuck-workers.sh`'s CONTEXT-LARGE suggestion), which can render as its OWN pane line once terminal width or a longer token count wraps it off the `ctx: N/M (P%)` line it normally rides on — not a message either party wrote (issue #436: this landed as a worker pane's trimmed last line, misreading a genuinely empty composer as holding a human draft for ~14h/1,812 sweeps before `coordinator-watch.sh`'s `COMPACT_COMPOSER_CHROME_PATTERN` learned to exclude it, the same way `Considering…`/`Baked for Ns`/`※ recap:` already were).
 
 **The incident this section exists for** (oconeco-site swarm, 2026-08-01): a coordinator read a worker pane, saw a dimmed composer suggestion sitting below the last response, and reported it to the operator as "you've asked that worker to…" — attributing UI chrome to the human. The report was wrong; the operator had typed nothing of the sort.
 

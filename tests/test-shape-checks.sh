@@ -15,6 +15,9 @@
 #   6. WORKER_CHECK_CMD env fallback
 #   7. retry-once: failing check → re-dispatch with failure context → pass
 #   8. WORKER_CHECK_RETRY=0 disables the retry
+#   9. issue #468 self-review finding: a stale attempt-1 task-done.sh err
+#      declaration must not outlive a successful retry — write_outcome()'s
+#      honest-err guard must only ever see the LATEST attempt's declaration
 set -euo pipefail
 
 green()  { printf '\033[32m✓ %s\033[0m\n' "$*"; }
@@ -29,6 +32,8 @@ LISTENER="$SCRIPT_DIR/../scripts/worker-listener.sh"
 [ -x "$LISTENER" ] || red "worker-listener.sh not executable: $LISTENER"
 SCOREBOARD="$SCRIPT_DIR/../scripts/swarm-scoreboard.sh"
 [ -x "$SCOREBOARD" ] || red "swarm-scoreboard.sh not executable: $SCOREBOARD"
+TASK_DONE="$SCRIPT_DIR/../scripts/task-done.sh"
+[ -x "$TASK_DONE" ] || red "task-done.sh not executable: $TASK_DONE"
 
 TEST_DIR=$(mktemp -d -t shape-checks-XXXXXX)
 LISTENER_PIDS=()
@@ -175,6 +180,36 @@ jq -e '.outcome == "ok" and .check_exit == 0 and .retried == true' \
 [ "$(wc -l < attempts.txt)" -ge 2 ] || red "c7: agent was not re-dispatched"
 [ -f .swarm/tasks/done/c7.check.attempt1.log ] || red "c7: attempt1 check log missing"
 green "retry-once: check fail → re-dispatch with failure context → check pass → ok.json (retried: true)"
+
+# --- Test 9 (issue #468 self-review finding): a stale attempt-1 err must
+# not survive a retry that goes on to pass its check. Self-review of this
+# PR's own fix flagged that the new unconditional honest-err guard in
+# write_outcome() would otherwise honor attempt 1's task-done.sh err
+# declaration FOREVER, even after the retry fixes the problem — the guard
+# must only ever see the worker's LATEST declaration, not a stale one from
+# a superseded attempt. Attempt 1 declares err via task-done.sh (guarded by
+# a marker file so it fires exactly once, not again on retry) and appends
+# one line; the check needs two, so it fails and triggers a retry; attempt
+# 2 appends the second line (no task-done.sh call this time) and the check
+# passes. -----------------------------------------------------------------
+# task-done.sh refuses to run outside a real git worktree; wt-d has never
+# needed to be one until now (the other Listener D test drives the check
+# purely through file/line counts).
+git -C "$TEST_DIR/wt-d" init -q 2>/dev/null || true
+drop_v2 "c9" "if [ ! -f attempt1-marker ]; then
+    touch attempt1-marker
+    \"$TASK_DONE\" c9 err \"attempt 1 believed this failed\" 2>/dev/null || true
+fi
+echo try >> attempts9.txt
+# <!-- SWARM_CHECK: test \"\$(wc -l < attempts9.txt)\" -ge 2 -->"
+wait_for "c9 outcome" '[ -f .swarm/tasks/done/c9.ok.json ] || [ -f .swarm/tasks/done/c9.err.json ]'
+jq -e '.outcome == "ok" and .check_exit == 0 and .retried == true' \
+    .swarm/tasks/done/c9.ok.json >/dev/null 2>&1 \
+    || { cat .swarm/tasks/done/c9.ok.json 2>/dev/null || cat .swarm/tasks/done/c9.err.json; \
+         red "c9: a successful retry must clear attempt 1's stale err, not be permanently pinned to it"; }
+[ ! -f .swarm/tasks/done/c9.err.json ] || red "c9: stale attempt-1 err.json should have been archived, not left in place"
+[ -f .swarm/tasks/done/c9.err.attempt1.json ] || red "c9: archived attempt-1 outcome record missing (audit trail)"
+green "retry that fixes the problem clears a stale attempt-1 err declaration instead of pinning outcome to it forever"
 
 # ============================================================================
 heading "Listener E: WORKER_CHECK_RETRY=0 disables the retry"

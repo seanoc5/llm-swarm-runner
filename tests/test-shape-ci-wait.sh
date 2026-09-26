@@ -54,7 +54,18 @@ case "$1 $2" in
         fi
         exit 0 ;;
     "pr checks")
+        cn=0
+        if [ -f "${GH_CHECKS_CALL_COUNT_FILE:-/dev/null}" ]; then cn="$(cat "$GH_CHECKS_CALL_COUNT_FILE")"; fi
+        cn=$((cn + 1))
+        [ -n "${GH_CHECKS_CALL_COUNT_FILE:-}" ] && echo "$cn" > "$GH_CHECKS_CALL_COUNT_FILE"
+        if [ "$cn" -le "${GH_CHECKS_NO_CHECKS_UNTIL:-0}" ] || [ "${GH_CHECKS_NO_CHECKS:-0}" = "1" ]; then
+            echo "no checks reported on the 'main' branch" >&2
+            exit 1
+        fi
         exit "${GH_CHECKS_RC:-0}" ;;
+    "api repos/{owner}/{repo}/actions/workflows")
+        echo "${GH_WORKFLOW_COUNT:-1}"
+        exit 0 ;;
 esac
 exit 0
 EOF
@@ -116,6 +127,37 @@ heading "Test 6: no PR# argument → usage error"
 rc=0
 "$CI_WAIT" >/dev/null 2>&1 || rc=$?
 check "exits 4 with no arguments" '[ "$rc" -eq 4 ]'
+
+# ─────────────── Test 7: zero workflows configured ⇒ exit 5 (distinct from a real failure) ─
+
+heading "Test 7: mergeable PR, repo has ZERO workflows configured at all → exit 5"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_NO_CHECKS=1 GH_WORKFLOW_COUNT=0 \
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
+check "exits 5, distinct from exit 1 (real failure)" '[ "$rc" -eq 5 ]'
+check "message explains nothing ran, so nothing failed" 'grep -qi "no CI checks configured" <<<"$out"'
+
+# ── Test 8: 'no checks reported' with workflows configured is a race, not absence ──
+#
+# Self-review finding on this PR: `gh pr checks` prints the exact same "no
+# checks reported" text in the real, ordinary window after a push before
+# GitHub has registered the workflow run — trusting that message alone
+# would let --auto-low merge an unverified PR, the #713 failure mode this
+# script exists to close. The repo-level workflow count (not the message
+# text) is what decides absence; when workflows ARE configured, "no checks
+# reported" must be treated as pending and keep polling until a real result
+# — never silently exit 5.
+
+heading "Test 8: 'no checks reported' with workflows configured is treated as pending, not absence (the run-not-registered-yet race)"
+rc=0
+CHECKS_COUNT_FILE="$TEST_DIR/checks-call-count"
+rm -f "$CHECKS_COUNT_FILE"
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_WORKFLOW_COUNT=1 \
+    GH_CHECKS_CALL_COUNT_FILE="$CHECKS_COUNT_FILE" GH_CHECKS_NO_CHECKS_UNTIL=2 \
+    CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 10 2>&1)" || rc=$?
+check "resolves to green once the real check run registers (not a false exit 5)" '[ "$rc" -eq 0 ]'
+check "message names the pending-not-absent distinction" 'grep -qi "treating as pending, not absent" <<<"$out"'
+check "gh pr checks was actually polled more than once (the race was real)" '[ "$(cat "$CHECKS_COUNT_FILE")" -ge 3 ]'
 
 heading "Results: $PASS checks passed"
 green "All checks passed."

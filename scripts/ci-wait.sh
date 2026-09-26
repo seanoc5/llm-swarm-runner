@@ -28,6 +28,27 @@
 #   3  PR is CONFLICTING/DIRTY against its base — no run will ever fire;
 #      rebase onto the base branch and re-push before waiting again
 #   4  usage / gh error
+#   5  no CI checks are configured on this repo at all — distinct from a
+#      real failure (1): nothing ran, so nothing failed. A caller that wants
+#      "pass with a loud warning" instead of "refuse" for a CI-less project
+#      (swarm-merge.sh --auto-low Gate 2 does exactly this) should treat 5
+#      separately from 1; a caller that wants any non-green to refuse can
+#      still treat 5 like any other non-zero exit.
+#
+#      `gh pr checks` reporting "no checks reported on the ... branch" is
+#      NOT by itself proof of 5 — that same message also fires in the real,
+#      ordinary race where CI *is* configured but this push's workflow run
+#      hasn't been registered by GitHub yet (a window of seconds after
+#      `git push`, sometimes longer). Trusting the message on its own would
+#      recreate the exact failure this script exists to close (#452: PR #713
+#      merged before its CI had actually run). So a "no checks reported"
+#      reading is resolved against a repo-level, timing-independent signal —
+#      the workflow count from `gh api .../actions/workflows` — instead of
+#      the message text alone: zero workflows configured → 5, immediately.
+#      One or more workflows configured but this snapshot still shows no
+#      checks → treated as PENDING (keeps polling, same as gh pr checks
+#      exit 8), not as absence; it either resolves to a real check result or
+#      times out (2) like any other slow-to-start CI.
 #
 # Run this in the foreground with an explicit Bash timeout that covers the
 # deadline below (e.g. timeout-seconds + ~30s of slack for gh calls).
@@ -65,6 +86,7 @@ fi
 echo "ci-wait: PR #$PR mergeable ($MERGE_STATE), watching checks on ${SHA:0:12} (deadline ${TIMEOUT}s, poll ${POLL}s)"
 
 DEADLINE=$(( $(date -u +%s) + TIMEOUT ))
+WORKFLOW_COUNT=""   # lazily resolved at most once, only if "no checks" is ever seen
 while true; do
     set +e
     CHECKS_OUT="$(gh pr checks "$PR" 2>&1)"
@@ -72,7 +94,28 @@ while true; do
     set -e
     case "$CHECKS_RC" in
         0) echo "ci-wait: PR #$PR checks green."; exit 0 ;;
-        1) echo "ci-wait: PR #$PR has failing checks:"; echo "$CHECKS_OUT" >&2; exit 1 ;;
+        1)
+            if grep -qi "no checks reported" <<<"$CHECKS_OUT"; then
+                if [ -z "$WORKFLOW_COUNT" ]; then
+                    WORKFLOW_COUNT="$(gh api repos/{owner}/{repo}/actions/workflows --jq '.total_count' 2>/dev/null || true)"
+                    # A failed lookup must still count as "resolved" (just
+                    # not "0") — otherwise a persistently-failing `gh api`
+                    # call gets re-run on every single poll instead of once.
+                    [ -n "$WORKFLOW_COUNT" ] || WORKFLOW_COUNT="unknown"
+                fi
+                if [ "$WORKFLOW_COUNT" = "0" ]; then
+                    echo "ci-wait: PR #$PR has no CI checks configured on this repo at all (0 workflows) — nothing ran, so nothing failed." >&2
+                    exit 5
+                fi
+                # Workflows exist (or the workflow-count lookup itself
+                # failed, in which case failing closed means NOT assuming
+                # absence) — this is the run-not-registered-yet race, not a
+                # CI-less repo. Treat as pending, same as exit 8 below.
+                echo "ci-wait: PR #$PR shows no checks yet, but the repo has CI configured — treating as pending, not absent." >&2
+            else
+                echo "ci-wait: PR #$PR has failing checks:"; echo "$CHECKS_OUT" >&2; exit 1
+            fi
+            ;;
         8) : ;; # pending — fall through to deadline/sleep below
         *) echo "ci-wait: gh pr checks $PR exited $CHECKS_RC:"; echo "$CHECKS_OUT" >&2; exit 4 ;;
     esac

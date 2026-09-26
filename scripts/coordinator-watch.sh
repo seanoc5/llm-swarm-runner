@@ -333,6 +333,64 @@
 #                           activity_poll_pass found and asks the coordinator
 #                           to reconcile its own picture of outstanding
 #                           decisions/PRs against it.
+#   WATCH_WORKTREE_SWEEP_SECS=60
+#                           (issue #439) Detects a worktree that vanished
+#                           without going through any blessed reap path — the
+#                           SAMlytics incident: a bare `git worktree remove`
+#                           (or `rm -rf`) run outside kill-worktree.sh and
+#                           its callers destroys any brief still queued in
+#                           that worktree's .swarm/tasks/{inbox,processing,
+#                           outbox}/ with no salvage and no record at all,
+#                           and today nothing notices. Every one of the
+#                           three sites in this codebase that actually
+#                           remove a worktree — kill-worktree.sh (covering
+#                           this script's callers), reap-orphan-worktrees.sh's
+#                           reap_dangling, and swarm-merge.sh's fallback
+#                           removal (issue #446; see kill-worktree.sh's own
+#                           header comment for the full topology) — now logs
+#                           a `reap.worktree` event on a successful removal,
+#                           so this sweep can diff `git
+#                           worktree list` against its own in-memory
+#                           inventory (seeded on the first tick — a worktree
+#                           already gone before the watcher started is never
+#                           flagged) and treat a disappearance with no
+#                           matching reap.worktree event logged since it was
+#                           last confirmed present as unblessed
+#                           (deliberately NOT reap.window too — see
+#                           wt_reap_event_since's own header comment).
+#                           Local-only (git + events.log, no
+#                           network), so this runs on the same cheap cadence
+#                           as WATCH_BG_VIOLATION_SWEEP_SECS. The runtime
+#                           analog of llm-start.sh's stranded-worktree
+#                           warning (issue #376), which only ever fires once
+#                           at session/watcher startup. A hit writes a
+#                           coord-inbox entry (issue #430 idiom: durable, no
+#                           doorbell — the worktree is already gone, so
+#                           nothing here is urgent enough to interrupt a live
+#                           turn) pointing at .swarm/salvaged/ and this
+#                           issue's PR history. Set to 0 to disable. See
+#                           worktree_vanish_sweep_pass.
+#   WATCH_PENDING_BRIEF_SWEEP_SECS=300
+#                           (issue #439) Backstop for requeue.sh's
+#                           `SWARM_PENDING_BRIEF: queued` PR marker
+#                           (notify_pr_pending_brief), which can only post
+#                           at the moment a brief is queued — if the target
+#                           branch has no PR yet (the SAMlytics timeline: a
+#                           follow-up queued at 18:36, PR opened at 18:45),
+#                           the marker never posts, and nothing ever catches
+#                           up once the PR exists. On this timer, every own
+#                           worktree with a real (non-tmp) file sitting in
+#                           .swarm/tasks/inbox/ (worker_pending_brief) and an
+#                           OPEN PR whose latest SWARM_PENDING_BRIEF marker
+#                           isn't already "queued" gets one posted now — same
+#                           anchor comment and idempotency contract as
+#                           requeue.sh's own marker, so worker-listener.sh's
+#                           clear_pr_pending_brief_marker clears it exactly
+#                           the same way once the queue drains. Does real
+#                           `gh` calls per own worktree, so this runs on a
+#                           slower cadence than the local-only sweep above —
+#                           comparable to WATCH_ACTIVITY_POLL_SECS. Set to 0
+#                           to disable. See pending_brief_marker_sweep_pass.
 #   COORD_WAKE_RETRY_SECS=15
 #                           (issue #422, #366 part B) llm-start.sh's
 #                           reprompt_inject refuses to paste a wake over a
@@ -399,7 +457,7 @@
 #                           coordinator was already doing (the fand-app
 #                           swarm PR #1108 merge-turn incident, 2026-09-16,
 #                           that prompted this issue). A busy pane instead
-#                           marks coord_wake_busy_retry_pass (below
+#                           marks coord_wake_hold_retry_pass (below
 #                           on_activity, ticked from run_watch_timer_loop on
 #                           this interval) to keep checking; the doorbell
 #                           fires as soon as the pane goes idle, or once
@@ -418,7 +476,7 @@
 #                           only ever warns (COORD_WAKE_DEFER_WARN_SECS).
 #   COORD_WAKE_BUSY_CEILING_SECS=900
 #                           (issue #430) How long (15 minutes by default)
-#                           coord_wake_busy_retry_pass will keep deferring a
+#                           coord_wake_hold_retry_pass will keep deferring a
 #                           busy-pane wake before delivering it anyway
 #                           (coord.wake.defer_ceiling) so a long-running
 #                           coordinator turn can never starve a wake
@@ -426,6 +484,89 @@
 #                           wake then waits indefinitely for the pane to go
 #                           idle on its own, same posture as the dirty-draft
 #                           case.
+#   COORD_HUMAN_IDLE_SECS=600
+#                           (issue #459) Hold EVERY doorbell while the
+#                           operator has typed into the coordinator's own
+#                           Claude Code session within this many seconds.
+#                           The #430 gate above only covers a pane that is
+#                           mid-turn; a pane BETWEEN turns reads idle, which
+#                           is precisely when a human is sitting there
+#                           reading and thinking. The operator-reported
+#                           symptom this exists for: seven doorbells landing
+#                           in twelve minutes while they were working through
+#                           a request with the coordinator, each a
+#                           legitimately new worker outcome.
+#
+#                           Unlike every other hold, this one has NO CEILING.
+#                           A busy pane is safe to force a paste into
+#                           eventually (Claude Code queues it); a session
+#                           someone is actively working in is not — forcing
+#                           there IS the interruption. Nothing is lost by
+#                           waiting: inbox payloads are written
+#                           unconditionally (#430), so only the regenerable
+#                           nudge waits, and it renders a live count when it
+#                           finally rings.
+#
+#                           0 disables the gate (pre-#459 behavior).
+#
+#                           Detection is NOT simply "read the last user turn"
+#                           — see coord_human_present / human_typed_since. A
+#                           pasted doorbell is recorded in the transcript
+#                           with origin {kind: human} and promptSource
+#                           "typed", identical in shape to a human typing it
+#                           (verified on live fand-app transcripts,
+#                           2026-09-23). The watcher's own pastes have to be
+#                           subtracted, or the gate reads itself as a present
+#                           human and mutes the swarm permanently.
+#   WORKER_HUMAN_IDLE_SECS=300
+#                           (issue #459) Same gate, applied to any of this
+#                           project's OWN worker sessions (scoped via the
+#                           #357 enumeration, never a flat glob, so a sibling
+#                           project's swarm can't hold this one's doorbells).
+#                           An operator driving a worker pane by hand is
+#                           still the operator being present, and a
+#                           coordinator that wakes and re-dispatches
+#                           underneath them is the same interruption. Shorter
+#                           window than the coordinator's because direct
+#                           worker interaction is usually a quick look, not a
+#                           conversation. In practice nearly always false,
+#                           and costs one mtime check per worktree.
+#                           0 disables.
+#   COORD_HUMAN_PASTE_GRACE_SECS=15
+#                           (issue #459) How far either side of a paste the
+#                           watcher recorded in its own events.log a typed
+#                           turn may land and still be attributed to that
+#                           paste rather than to a human. See
+#                           human_typed_since for why this correlation is
+#                           needed alongside the text match, and why erring
+#                           large is the safe direction (a turn misread as
+#                           machine means the doorbell rings, never that the
+#                           swarm goes quiet).
+#   WAKE_DEFER_ON_SWARM_BUSY=0
+#                           (issue #459) Opt-in: also hold doorbells while
+#                           any own worker is mid-turn or has a brief queued
+#                           and unclaimed in its tasks/inbox/.
+#
+#                           OFF by default, deliberately. Holding doorbells
+#                           on worker BUSYNESS was considered for #459 and
+#                           rejected: the moment one worker finishes while
+#                           others churn, it parks idle needing a top-up, and
+#                           this gate suppresses precisely the wake that
+#                           would dispatch its next brief. On a long run the
+#                           swarm never goes fully quiet, so triage never
+#                           re-engages and worker slots bleed. Human presence
+#                           is the lever that matches the reported problem;
+#                           this knob exists for operators who want the
+#                           stricter whole-swarm quiescence rule anyway, and
+#                           is ceilinged like pane_busy so it can't starve a
+#                           wake forever.
+#
+#                           Note the asymmetry in what counts as busy: a
+#                           brief ALREADY WRITTEN into a worker's inbox and
+#                           not yet claimed is busy (dispatched; nothing owed
+#                           by the coordinator). A worker parked with an
+#                           EMPTY inbox is the opposite — idle and demanding
+#                           attention — and never registers as busy here.
 #   WATCH_CHECK_ON_DONE=1   Set to 0 to disable check-on-done. When enabled,
 #                           the watcher treats a worker as "done" via either
 #                           signal: (a) a `.swarm/tasks/status/<id>.json`
@@ -450,39 +591,51 @@
 #                           terminal outcome, or after CHECK_CLAIM_STALE_SECS
 #                           (default WORKER_CHECK_TIMEOUT+300s) if the check
 #                           process itself crashed without releasing it.
-#   WATCH_SYNTH_OUTCOME=1   (issue #314) Set to 0 to disable outcome
-#                           synthesis. The coordinator's worker-finished wake
-#                           (on_outcome -> coord.wake) triggers only on a new
-#                           done/<id>.{ok,err}.json — a file worker-listener.sh
-#                           writes only AFTER the agent process exits. Default
-#                           interactive workers finish their task and park at
-#                           the claude REPL indefinitely, so that file never
-#                           arrives and the wake channel is silently dead (in
-#                           real fand-etl logs, no worker.finish fired between
-#                           2026-07-20 and this fix — every completion was
-#                           caught only by the wake-less pr-poll/reap
-#                           backstops). When enabled, maybe_run_check
-#                           synthesizes the outcome file itself the moment it
-#                           wins the check-claim for a done signal: an atomic
-#                           mktemp+mv of done/<task_id>[-<issue>].ok.json
-#                           ("synthesized": true, filename suffixed with
-#                           -<issue> when the task_id doesn't already end in
-#                           it, since on_outcome parses the issue number from
-#                           that trailing position). The write lands in the
-#                           same watched path as a listener-written outcome,
-#                           so the ENTIRE existing pipeline — inotify/poll
-#                           pickup, worker.finish audit event, autoclose pass,
-#                           debounced coord.wake — fires unmodified. Skipped
-#                           (watch.outcome.synth.skip) when an outcome for
-#                           this task_id already exists (headless workers,
-#                           where the listener's own write still happens). If
-#                           the listener later writes its outcome anyway
-#                           (operator exits a parked worker), a same-named
-#                           file is a create-event-free overwrite and a
-#                           differently-named one just causes a debounced
-#                           duplicate wake — both harmless. Gated behind
-#                           WATCH_CHECK_ON_DONE=1, which owns the done
-#                           detection this piggybacks on.
+#   WATCH_SYNTH_OUTCOME     REMOVED (issue #451, α of #450's finding 1). Used
+#                           to (issue #314) fabricate a done/<id>.ok.json the
+#                           moment maybe_run_check won a check-claim for a
+#                           done signal, because the coordinator's
+#                           worker-finished wake only triggers on a NEW
+#                           done/<id>.{ok,err}.json and default interactive
+#                           workers park at the claude REPL indefinitely
+#                           without ever making worker-listener.sh write one.
+#                           That fix worked but put FIVE independent places
+#                           in a position to each decide a task was "done"
+#                           and write their own outcome file under a
+#                           different task_id — status_poll_pass's real
+#                           task_id, pr_poll_pass's invented
+#                           "pr-issue-$issue" fallback, and (once the
+#                           listener eventually did exit) worker-listener.sh
+#                           itself — the same completion recorded 2-3x, each
+#                           copy independently re-triggering worker.finish +
+#                           coord.wake (#450's corpusminder #708 case: four
+#                           ok.json files over 15 minutes for one finish).
+#                           Fixed at the source instead: the worker now
+#                           writes its own outcome via scripts/task-done.sh
+#                           as the mandatory last step of every task
+#                           (prompts/worker.md § "Task completion") — that
+#                           file lands in the SAME watched path a listener
+#                           write always did, so the existing inotify/poll
+#                           pickup -> worker.finish -> autoclose ->
+#                           debounced coord.wake pipeline fires unmodified,
+#                           with no coordinator-side synthesis needed.
+#                           maybe_run_check now calls
+#                           reconcile_missing_outcome() where synth_outcome
+#                           used to fire — it only logs watch.reconcile and
+#                           never writes done/*.json. See task-done.sh's own
+#                           header for the pre-#451-worktree migration
+#                           story. (An earlier version of this PR also had
+#                           reconcile_missing_outcome() drop a one-time
+#                           inbox reminder brief — removed on self-review:
+#                           that file is indistinguishable from a real task
+#                           brief to claim_next_task()/WORKER_AUTO_DELIVER,
+#                           so it could get "claimed" and dispatched as a
+#                           full extra agent session, and a synthesized
+#                           "pr-issue-N" task_id in its instructions would
+#                           defeat on_outcome's issue-number parser. Pure
+#                           logging fully closes the duplicate-record gap
+#                           this issue exists for; a safer proactive nudge
+#                           is future scope.)
 #   CHECK_RUNNER=<path>     Test-only override: when set, check-on-done runs
 #                           `$CHECK_RUNNER <worktree> <check_cmd>` synchronously
 #                           instead of spawning a real tmux window. Lets tests
@@ -1201,13 +1354,13 @@
 #                           hand (see the fand-etl incident this issue was
 #                           filed from — two briefs sat unclaimed for 2.5+
 #                           hours). Distinct from, and complementary to,
-#                           WATCH_SYNTH_OUTCOME (issue #314, above): that
-#                           feature synthesizes the done/*.json outcome
-#                           record for a parked worker's CURRENT (already
-#                           finished) task, for coordinator-wake/monitoring
-#                           purposes — it does nothing about a NEW brief
-#                           waiting behind that still-live session, which is
-#                           this feature's entire job. This reuses the SAME
+#                           task-done.sh (issue #451, above): that script
+#                           records the done/*.json outcome for a parked
+#                           worker's CURRENT (already finished) task, for
+#                           coordinator-wake/monitoring purposes — it does
+#                           nothing about a NEW brief waiting behind that
+#                           still-live session, which is this feature's
+#                           entire job. This reuses the SAME
 #                           background sweep as
 #                           WORKER_AUTO_COMPACT (worker_compact_pass(), see
 #                           above) rather than a dedicated loop — same
@@ -1443,6 +1596,131 @@
 #                           worker-side backoff (worker_compact_record_
 #                           failure) — no compaction ran either way.
 #
+#   COMPACT_COMPOSER_CHROME_PATTERN
+#                           (issue #436) compact_last_pane_line's own
+#                           exclusion list (ctx:/shift+tab hint/box-drawing
+#                           rule, added for issue #440) didn't cover every
+#                           shape of non-input chrome that can render as a
+#                           pane's LAST line while the composer itself is
+#                           genuinely empty — corpusminder-spring, 2026-09-18/
+#                           19: a parked worker's composer read "dirty" on
+#                           worker.deliver.skip reason=composer_not_clear
+#                           1,812 consecutive times (~14h) with a read-only
+#                           capture-worker.sh dump showing an empty `❯`
+#                           composer, but a "※ recap:" line, "Baked for 31m"
+#                           spinner residue, and a "new task? /clear to save
+#                           257.5k tokens" hint also on screen — any one of
+#                           which lands as the trimmed last line whenever the
+#                           coordinator's own statusline-wrap or a narrower
+#                           terminal width splits it off the "ctx: N/M (P%)"
+#                           line the existing exclusion already drops whole.
+#                           This is the SAME chrome catalog docs/tmux-as-
+#                           channel.md §1d and capture-worker.sh's tag_chrome
+#                           already tag as non-conversation (recap chrome,
+#                           the spinner past/present-tense verb list, and the
+#                           "/clear to save Nk tokens" hint) — added here as
+#                           its OWN pattern (not folded into AUTO_COMPACT_
+#                           BUSY_PATTERN/WORKER_COMPACT_BUSY_PATTERN above)
+#                           because those anchor "a turn is actively
+#                           running", a different question from "this line
+#                           isn't something a human typed", and conflating
+#                           the two would make a genuinely busy pane
+#                           misread as an idle empty composer. Lines matching
+#                           this are dropped by compact_last_pane_line the
+#                           same way the ctx:/shift+tab/box-drawing
+#                           exclusions already are — never kept-but-
+#                           recognized at a call site, so every consumer
+#                           (compact_composer_clear, compact_confirm_
+#                           submitted, compact_replay_detected, compact_
+#                           retract_queued) benefits identically. The verb
+#                           list is anchored behind the spinner glyph
+#                           (independent-review finding, same PR): see the
+#                           variable's own assignment comment below for why
+#                           an unanchored substring match would have let a
+#                           human draft mentioning one of those phrases
+#                           misread as chrome.
+#   WORKER_DELIVER_COMPOSER_STALL_THRESHOLD
+#                           (issue #436) The composer-clear fix above closes
+#                           the false-positive that caused the observed
+#                           1,812-skip stall, but a GENUINE stall (a real
+#                           human draft sitting in the composer, or a future
+#                           unrecognized chrome shape) must not go silent
+#                           forever the same way — worker.deliver.skip
+#                           reason=composer_not_clear never calls worker_
+#                           deliver_record_failure (no /quit was ever
+#                           attempted), so it's invisible to the WORKER_
+#                           DELIVER_BACKOFF_SECS/MAX_FAILURES machinery that
+#                           already escalates every OTHER stuck-delivery
+#                           shape. Once the SAME pending brief has racked up
+#                           this many reason=composer_not_clear skips —
+#                           counted since the brief started stalling, NOT
+#                           reset by an intervening sweep that skips for a
+#                           DIFFERENT reason (pane_busy, backoff,
+#                           task_not_terminal): only a different BRIEF
+#                           resets the count, so a genuinely stuck composer
+#                           interleaved with the occasional busy/backoff
+#                           sweep still escalates on schedule instead of
+#                           the threshold silently never being reached —
+#                           worker_deliver_record_composer_stall logs one
+#                           loud, distinct worker.deliver.composer_stalled
+#                           event (never
+#                           repeated for the same streak) and durably writes
+#                           it to the coordinator inbox (coord_inbox_write,
+#                           issue #430) so it surfaces on the coordinator's
+#                           NEXT wake — triage per prompts/coordinator.md
+#                           "Inbox" — rather than requiring a human to
+#                           notice the silent skip lines on their own. Scoped
+#                           per (issue, brief) pair, not just per issue: a
+#                           NEW brief landing means whatever was stalling
+#                           before is moot, so the streak resets rather than
+#                           inheriting an unrelated prior count.
+#   STALL_WAKE_SECS=0       (issue #366 Part A) Every wake path above is
+#                           triggered by something a WORKER did — a swarm
+#                           with zero live workers and an idle coordinator
+#                           (right after startup, or once everything queued
+#                           has finished and nothing new was dispatched)
+#                           never reaches any of them and stays silent
+#                           forever. Set this to a nonzero number of seconds
+#                           (suggested: 3600) to start an independent tick,
+#                           own background process (run_stall_wake_loop, same
+#                           reasoning as AUTO_COMPACT_TICK_SECS's dedicated
+#                           process — see its header comment) that fires a
+#                           coordinator wake once no real wake of ANY kind
+#                           (outcome, outbox message, or a previous stall
+#                           wake) has landed for this long. 0 (the default)
+#                           starts no process at all — a swarm that never
+#                           sets this sees no behavior change. Goes through
+#                           the exact same coord-inbox write + busy/human/
+#                           debounce hold gate + llm-start.sh injection every
+#                           other wake path uses (stall_wake_pass), so it is
+#                           automatically safe against a present operator or
+#                           an unsubmitted composer draft (issue #366 Part B,
+#                           shipped as #431/#440/#460) with no extra code
+#                           here. Deliberately does NOT also require "the
+#                           swarm plausibly has outstanding work" — the one
+#                           scenario this exists to fix (zero live workers)
+#                           has no local signal to check that against without
+#                           the watcher computing something AVAILABLE-shaped,
+#                           which is explicitly out of scope; the coordinator
+#                           judges that for itself once woken, same as the
+#                           issue's own "or unconditionally" fallback asks
+#                           for. See stall_wake_pass's header comment for the
+#                           full design writeup.
+#   STALL_WAKE_PROMPT=<text>
+#                           Override the instructions written to coord-inbox/
+#                           on a stall wake (default: a quiet-period check-in
+#                           asking for a wake digest and next steps, or an
+#                           explicit "nothing to do"). The pane doorbell
+#                           itself is unchanged — the same short, generic
+#                           coord_inbox_nudge_text every wake path pastes.
+#   SWARM_PARKED_FILE=<project>/.swarm/parked (fixed path, not overridable)
+#                           Touch this file to suppress stall wakes without
+#                           losing the configured STALL_WAKE_SECS value —
+#                           the operator's park switch for a deliberately
+#                           idled swarm. Checked only by stall_wake_pass;
+#                           every other wake path (a worker actually
+#                           finishing something) is unaffected.
+#
 # Watch backend (auto-detected):
 #   - inotifywait (preferred): instant response. Install with:
 #       sudo apt install inotify-tools
@@ -1493,11 +1771,17 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     WATCH_BG_VIOLATION_PATTERN    (auto)  grep -E pattern for the sweep above
     WATCH_ACTIVITY_POLL_SECS 300  periodic gh poll for PRs/issues resolved out-of-band, e.g. in the GitHub web UI (0=off); see header comment (issue #392)
     ACTIVITY_POLL_OVERLAP_SECS 30  cursor overlap tolerating gh search-index lag; dedup maps prevent re-announcing
+    WATCH_WORKTREE_SWEEP_SECS 60  periodic detection of a worktree removed outside every blessed reap path (0=off); see header comment (issue #439)
+    WATCH_PENDING_BRIEF_SWEEP_SECS 300  periodic backstop posting SWARM_PENDING_BRIEF when a queued brief predates its PR (0=off); see header comment (issue #439)
     COORD_WAKE_LOCK_TIMEOUT_SECS 60  max wait to flock COORD_WAKE_LOCK before a wake gives up (see that lock's header comment)
     COORD_WAKE_RETRY_SECS 15      retry interval for a wake llm-start.sh deferred (composer held an unsubmitted human draft, issue #422); 0=off
     COORD_WAKE_DEFER_WARN_SECS 300  loud WARN threshold for a wake still deferred this long (issue #422); retries never stop on their own
     COORD_WAKE_BUSY_RETRY_SECS 30  retry interval for a wake deferred because the coordinator pane was mid-turn (issue #430); 0=off (pastes immediately, pre-#430 behavior)
-    COORD_WAKE_BUSY_CEILING_SECS 900  deliver a busy-deferred wake anyway after this long (issue #430, 15min); 0=no ceiling
+    COORD_WAKE_BUSY_CEILING_SECS 900  deliver a busy-deferred wake anyway after this long (issue #430, 15min); 0=no ceiling; never applies to a human_present hold
+    COORD_HUMAN_IDLE_SECS 600     hold every doorbell while the operator has typed into the COORDINATOR session this recently (issue #459); 0=off
+    WORKER_HUMAN_IDLE_SECS 300    same, for any of this project's own WORKER sessions (issue #459); 0=off
+    COORD_HUMAN_PASTE_GRACE_SECS 15  how close to a watcher paste recorded in events.log a typed turn counts as that paste, not a human (issue #459)
+    WAKE_DEFER_ON_SWARM_BUSY 0    also hold doorbells while any worker is mid-turn or has a queued unclaimed brief; OFF by default — see header comment for why worker busyness is the wrong lever (issue #459)
     COORD_INBOX_NUDGE_TEMPLATE (built-in) one-line doorbell text pasted once a wake is allowed to fire; %N = live coord-inbox/*.md count (issue #430)
     ACTIVITY_WAKE_PROMPT (built-in) what the coordinator writes to the inbox on an activity-poll finding (issue #430: inbox-only, no doorbell)
     WATCH_CHECK_ON_DONE 1         run acceptance check when a worker signals done; see header comment
@@ -1542,11 +1826,16 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     WORKER_DELIVER_END_TIMEOUT_SECS         15      max wait for the session to actually end after /quit
     WORKER_DELIVER_BACKOFF_SECS             600     cooldown for a window after a failed delivery attempt
     WORKER_DELIVER_MAX_FAILURES             3       consecutive failures before giving up on a window entirely
+    WORKER_DELIVER_COMPOSER_STALL_THRESHOLD 20      (issue #436) composer_not_clear skips racked up against the same pending brief (not reset by an interleaved skip for a different reason) before a loud, once-only escalation; see header comment
     COMPACT_QUEUED_MARKER_PATTERN     (auto)  queued-input marker checked when retracting a stuck phase=start injection; see header comment
     COMPACT_RETRACT_BACKSPACES        12      Backspace keystrokes sent alongside the retraction Escape (coord + worker, shared; issue #265/#290)
     COMPACT_SUBMIT_SETTLE_SECS        1       settle delay around the injection-submit Enter (coord + worker, shared; issue #290); see header comment
     COMPACT_REPLAY_PATTERN            (auto)  post-compact replayed-/compact rejection text tolerated during verify (coord + worker, shared; issue #292); see header comment
     COMPACT_REPLAY_MIN_REAL_SECS      5       min finish-phase duration to trust a detected replay as real (coord + worker, shared; issue #292); see header comment
+    COMPACT_COMPOSER_CHROME_PATTERN   (auto)  non-input UI chrome (recap/spinner-verb/"clear to save" hint) excluded from compact_last_pane_line's result (issue #436); see header comment
+    STALL_WAKE_SECS     0         (issue #366) periodic quiet-period check-in wake for a fully idle swarm (0=off; suggested 3600); see header comment
+    STALL_WAKE_PROMPT   (built-in) coord-inbox instructions written on a stall wake
+    SWARM_PARKED_FILE   (auto)    <project>/.swarm/parked — operator park switch, suppresses stall wakes only
 
 DEFAULT WAKE_PROMPT (top-up mode)
     Coordinator triages outcomes, then refills workers toward MAX_WORKERS
@@ -1560,6 +1849,13 @@ EVENTS LOG
                            for worktrees registered with this PROJECT_DIR
       worker.finish.skip   outcome JSON detected for a foreign worktree
                            (sibling repo sharing the same WORKSPACE parent)
+      worker.finish.corrected  a SECOND outcome JSON for a task_id already
+                           announced via worker.finish — a check-fail retry
+                           or other write_outcome() reconciliation flipping
+                           ok<->err after the first wake already fired
+                           (issue #468). Logged and durably recorded (sweep
+                           post + coord-inbox write still run) but never
+                           fires a second coord.wake — see on_outcome.
       coord.wake           the one-line inbox nudge was pasted via llm-start.sh
                            (or coord.wake.skip reason=debounce|pane_busy — the
                            latter only on a coord_wake_retry_pass dirty-draft
@@ -1573,15 +1869,26 @@ EVENTS LOG
                            itself is about to be debounced/deferred, and (for
                            trigger=activity_poll) with NO accompanying coord.wake at
                            all, since activity-poll findings are inbox-only
-      coord.wake.defer     (issue #430) the coordinator pane was mid-turn
-                           (coordinator_pane_busy) — the doorbell paste was skipped
-                           this cycle (reason=pane_busy); coord_wake_busy_retry_pass
-                           keeps checking every COORD_WAKE_BUSY_RETRY_SECS
+      coord.wake.defer     the doorbell paste was held this cycle and marked pending;
+                           coord_wake_hold_retry_pass keeps checking every
+                           COORD_WAKE_BUSY_RETRY_SECS. reason= says which gate held it:
+                             pane_busy     (issue #430) coordinator mid-turn
+                             human_present (issue #459) the operator typed into the
+                                           coordinator session within COORD_HUMAN_IDLE_SECS,
+                                           or a worker session within WORKER_HUMAN_IDLE_SECS
+                             debounce      (issue #456) another doorbell rang inside
+                                           DEBOUNCE_SECS. Pre-#456 this was a
+                                           coord.wake.skip that dropped the doorbell
+                                           permanently; it is now held and re-rung
+                             swarm_busy    (issue #459) WAKE_DEFER_ON_SWARM_BUSY=1 and a
+                                           worker is mid-turn or holds a queued brief
       coord.wake.defer_ceiling
-                           (issue #430) a pane_busy-deferred wake hit
-                           COORD_WAKE_BUSY_CEILING_SECS (15min default) still busy —
-                           delivered anyway so a long coordinator turn can't starve
-                           a wake forever
+                           (issue #430) a held wake hit COORD_WAKE_BUSY_CEILING_SECS
+                           (15min default) with its gate still closed — delivered anyway
+                           so a long coordinator turn can't starve a wake forever.
+                           reason= names the gate. NEVER fires for human_present
+                           (issue #459): a present operator is never forced over, so
+                           that hold has no ceiling and waits them out
       coord.wake.deferred  (issue #422) llm-start.sh reported a dirty coordinator
                            composer (rc 3) instead of pasting — reason=composer_dirty;
                            the prompt is persisted for coord_wake_retry_pass, not dropped
@@ -1591,7 +1898,7 @@ EVENTS LOG
                            (issue #422/#430) a retried deferred wake finally landed —
                            the dirty-draft pending file is cleared (issue #422), or,
                            for trigger=pane_busy (issue #430), the pane went idle (or
-                           the ceiling fired) and coord_wake_busy_retry_pass delivered it
+                           the ceiling fired) and coord_wake_hold_retry_pass delivered it
       coord.wake.deferred_stale
                            (issue #422) a wake has been deferred ≥COORD_WAKE_DEFER_WARN_SECS
                            with every retry still reading the composer dirty — loud WARN,
@@ -1601,9 +1908,27 @@ EVENTS LOG
                            killed=N); passes that reap nothing are not logged
       reap.window          per-target kill record written by kill-finished-workers.sh
                            (issue, window, branch, reasons, capture=<pane snapshot path>)
+      reap.worktree        (issue #439) a worktree was actually removed (issue, branch, dir)
+                           — logged, right after the removal SUCCEEDS (issue #446: moved from
+                           before to after so a failed removal can't leave a blessed event on
+                           record for a still-present worktree), by each of the three sites in
+                           this codebase that ever do it: kill-worktree.sh (covering this
+                           script and kill-finished-workers.sh's --with-worktree path, its
+                           only callers), reap-orphan-worktrees.sh's own dangling-registration
+                           path, and swarm-merge.sh's own fallback removal — three call sites,
+                           same event shape, so worktree_vanish_sweep_pass below can check for
+                           it regardless of which one triggered the removal, before flagging a
+                           disappearance as unblessed
+      reap.worktree.error  (issue #446) the removal at one of those same three call sites
+                           failed (issue, branch, dir, reason=remove_failed|rm_failed) — no
+                           reap.worktree event was logged for it, so the worktree stays
+                           "known" and a later genuine disappearance still gets caught by
+                           worktree_vanish_sweep_pass
       watch.timer.start    a background timer loop started — pr-poll/check-on-done
                            timer loop, and/or (issue #226) the separate
-                           worker-compact loop; up to two lines, one per loop
+                           worker-compact loop, and/or (issue #366 Part A) the
+                           separate stall-wake loop (stall_wake_secs=); one line
+                           per loop actually started
       watch.stale_daemon   (issue #296) this process's own script changed on disk since it
                            started — logged once, immediately before this daemon shuts itself
                            down entirely (script, launch_mtime, current_mtime, pid, started_at);
@@ -1648,12 +1973,36 @@ EVENTS LOG
                            cycle (reason=gh_pr_list_failed|gh_issue_list_failed);
                            cursor is NOT advanced on this path, so the next
                            tick retries the same window
+      stall.check          (issue #366 Part A) run_stall_wake_loop's tick found the swarm
+                           quiet long enough (quiet_secs, threshold=STALL_WAKE_SECS) and is
+                           about to write the coord-inbox entry + attempt a wake — followed
+                           by the same coord.inbox.write/coord.wake/coord.wake.defer* events
+                           every other wake path logs, with trigger=stall
+      watch.worktree_vanished  (issue #439) a tracked worktree disappeared with no
+                           reap.worktree event logged for it since it was last
+                           confirmed present (issue, dir, reason=no_reap_event) — the
+                           signature of a bare `git worktree remove`/`rm -rf` run outside
+                           every blessed reap path; followed by a coord.inbox.write
+                           trigger=worktree_vanished (no doorbell — the worktree is already
+                           gone, nothing here is urgent)
+      watch.pending_brief_sweep  (issue #439) pending_brief_marker_sweep_pass posted a
+                           SWARM_PENDING_BRIEF: queued PR comment for an own worktree whose
+                           inbox/ has a real unclaimed brief and whose PR's marker wasn't
+                           already "queued" (pr, dir, reason=posted) — the backstop for a
+                           brief queued before its PR existed, so requeue.sh's own marker
+                           post never fired
       watch.check_on_done  check-on-done result (issue, task_id, result=running|pass|fail|skipped)
-      watch.outcome.synth  (issue #314) synthesized a done/*.ok.json on done
-                           detection because the parked interactive worker's
-                           listener can't write one (issue, task_id, path);
-                           watch.outcome.synth.skip when an outcome for the
-                           task already exists (reason=outcome_exists)
+      watch.reconcile      (issue #451, superseded issue #314's watch.outcome.synth
+                           — see WATCH_SYNTH_OUTCOME's removal note below) a
+                           done-ish signal (ready-for-review status, or a PR
+                           appearing) was seen with no completion record for
+                           that task_id yet (issue, task_id, reason=
+                           status_ready_no_outcome|pr_open_no_outcome). Never
+                           writes done/*.json — the worker is the only writer
+                           now (scripts/task-done.sh). Usually means the
+                           worker hasn't reached its task-done.sh step yet;
+                           self-heals on the next poll once it does. Pure
+                           observability — takes no other action.
       cap.refused          provision-worker.sh hit MAX_WORKERS / MAX_TMUX_WINDOWS
       coord.compact        /compact injected before wake (used, threshold, trigger=poll|wake)
       coord.compact.skip   auto-compact skipped this cycle (reason=pane_busy|no_fresh_probe|cooldown|...,
@@ -1756,6 +2105,31 @@ EVENTS LOG
                            (worker_pending_brief went false — issue #344, NOT a worker_pane_state
                            cli -> shell read, which a same-poll-window relaunch can miss entirely)
                            within WORKER_DELIVER_END_TIMEOUT_SECS (issue, waited)
+      worker.deliver.ok     (issue #437) a queued brief was actually delivered/claimed — the
+                           positive counterpart to worker.deliver.skip, so a stall's eventual
+                           recovery is attributable after the fact instead of vanishing into
+                           silence once the skip lines stop (issue, brief=<inbox filename>,
+                           release=auto_deliver|listener_claim_after_quit[, waited][, late=1] —
+                           auto_deliver: this script's own /quit injection above ended the
+                           session and its listener claimed the brief, logged right alongside
+                           worker.deliver.ended; auto_deliver with late=1 (self-review, round 2):
+                           the same /quit injection, but its effect only landed on a LATER sweep,
+                           after this script's own synchronous wait had already given up and
+                           logged worker.deliver.timeout — worker_deliver_detect_claim() ties the
+                           eventual departure back to WORKER_DELIVER_TIMED_OUT_BRIEF's record of
+                           exactly which brief that timed-out attempt was waiting on, however many
+                           sweeps late the departure is observed; listener_claim_after_quit:
+                           worker_deliver_detect_claim() noticed, on a LATER sweep, that a brief it
+                           had previously seen genuinely pending while the window sat parked in
+                           "cli" state has since vanished WITHOUT either of the above having
+                           claimed credit for it — i.e. something else released the parked
+                           session, almost always a human attaching and running /quit by hand per
+                           the documented manual fallback. Never logged for a "shell"-state
+                           window's routine self-heal (issue #43) — only for a brief this script
+                           had already flagged as stuck in the exact parked-session scenario
+                           worker.deliver.attempt/.skip describe, so this event's presence or
+                           absence answers "did WORKER_AUTO_DELIVER=1 do its job, or did a human
+                           have to intervene?" for every such stall)
       worker.deliver.timeout  gave up waiting for the session to end after /quit (issue, waited) —
                            counted as a failure (worker_deliver_record_failure)
       worker.deliver.delivered_as_text  composer already empty at the end-timeout — no ghost text
@@ -1767,6 +2141,21 @@ EVENTS LOG
                            (issue, failures=N) — maybe_worker_deliver_brief stops attempting /quit
                            for it until the watcher restarts; the brief stays queued for a human
                            to release manually (attach and /quit) — logged once, not every sweep
+      worker.deliver.composer_stalled  (issue #436) WORKER_DELIVER_COMPOSER_STALL_THRESHOLD
+                           worker.deliver.skip reason=composer_not_clear events racked up against
+                           the SAME pending brief (issue, brief=<inbox filename>, skips=N) — a
+                           sweep that skips for a DIFFERENT reason in between (pane_busy, backoff,
+                           task_not_terminal) does not reset this count, only a different brief
+                           does, so it's not strictly "N consecutive sweeps" but does mean the
+                           threshold is always eventually reached rather than reset away by
+                           routine interleaved traffic. Unlike
+                           worker.deliver.giving_up, this never stops maybe_worker_deliver_brief
+                           from retrying (composer_not_clear can still self-heal on its own,
+                           e.g. a human submits or clears their draft): it's a loud, once-per-
+                           streak WARNING plus a durable coord_inbox_write so the stall surfaces
+                           on the coordinator's next wake instead of aging silently behind
+                           routine .skip lines; the streak resets (and can re-escalate) if a
+                           DIFFERENT brief starts pending for this window
 
 PANE ECHO (issue #38)
     By default, every line appended to events.log — by this process OR any
@@ -1935,11 +2324,10 @@ WATCH_ACTIVITY_POLL_SECS="${WATCH_ACTIVITY_POLL_SECS:-300}"
 # (see activity_poll_pass) keep the overlap from re-announcing anything.
 ACTIVITY_POLL_OVERLAP_SECS="${ACTIVITY_POLL_OVERLAP_SECS:-30}"
 ACTIVITY_WAKE_PROMPT="${ACTIVITY_WAKE_PROMPT:-}"
+# issue #439 — see header comment for both.
+WATCH_WORKTREE_SWEEP_SECS="${WATCH_WORKTREE_SWEEP_SECS:-60}"
+WATCH_PENDING_BRIEF_SWEEP_SECS="${WATCH_PENDING_BRIEF_SWEEP_SECS:-300}"
 WATCH_CHECK_ON_DONE="${WATCH_CHECK_ON_DONE:-1}"
-# issue #314 — synthesize done/*.ok.json on done detection (parked
-# interactive workers never exit claude, so the listener's own outcome
-# write — the coordinator's only wake trigger — never happens).
-WATCH_SYNTH_OUTCOME="${WATCH_SYNTH_OUTCOME:-1}"
 CHECK_RUNNER="${CHECK_RUNNER:-}"
 SESSION_NAME="${SESSION_NAME:-llm-$(basename "$PROJECT_DIR")}"
 WATCHER_QUIET="${WATCHER_QUIET:-0}"
@@ -2034,6 +2422,11 @@ WORKER_DELIVER_POLL_SECS="${WORKER_DELIVER_POLL_SECS:-2}"
 WORKER_DELIVER_END_TIMEOUT_SECS="${WORKER_DELIVER_END_TIMEOUT_SECS:-15}"
 WORKER_DELIVER_BACKOFF_SECS="${WORKER_DELIVER_BACKOFF_SECS:-600}"
 WORKER_DELIVER_MAX_FAILURES="${WORKER_DELIVER_MAX_FAILURES:-3}"
+# issue #436 — see this file's WORKER_DELIVER_COMPOSER_STALL_THRESHOLD header
+# comment above (near COMPACT_COMPOSER_CHROME_PATTERN's) for the gap this
+# closes: reason=composer_not_clear skips never touch WORKER_DELIVER_
+# BACKOFF_SECS/MAX_FAILURES above at all, so they need their own counter.
+WORKER_DELIVER_COMPOSER_STALL_THRESHOLD="${WORKER_DELIVER_COMPOSER_STALL_THRESHOLD:-20}"
 # issue #265 — shared between the coordinator and per-window retraction
 # paths; see this file's COMPACT_QUEUED_MARKER_PATTERN header comment above.
 COMPACT_QUEUED_MARKER_PATTERN="${COMPACT_QUEUED_MARKER_PATTERN:-Press up to edit queued messages}"
@@ -2066,6 +2459,57 @@ COMPACT_REPLAY_PATTERN="${COMPACT_REPLAY_PATTERN:-Not enough messages to compact
 # so it still counts as a failure (worker_compact_record_failure) via the
 # same ineffective path a plain unchanged-context compaction would.
 COMPACT_REPLAY_MIN_REAL_SECS="${COMPACT_REPLAY_MIN_REAL_SECS:-5}"
+# issue #436 — see this file's COMPACT_COMPOSER_CHROME_PATTERN header comment
+# above for the full incident (corpusminder-spring, 2026-09-18/19: a
+# 1,812-skip/~14h composer_not_clear stall against a pane whose composer was
+# genuinely empty). Same catalog docs/tmux-as-channel.md §1d and capture-
+# worker.sh's tag_chrome already recognize: the "※ recap:" summary line, the
+# spinner's past/present-tense verb residue (the SAME fixed list check-
+# stuck-workers.sh's detect_state()/capture-worker.sh's tag_chrome use —
+# deliberately NOT the "(esc to interrupt)"-anchored AUTO_COMPACT_BUSY_
+# PATTERN/WORKER_COMPACT_BUSY_PATTERN, which answers "is a turn actively
+# running", a different question from "is this line something a human
+# typed"), and the "/clear to save Nk tokens" hint that can render as its
+# own pane line once terminal width or a longer token count wraps it off
+# the "ctx: N/M (P%)" line compact_last_pane_line's own exclusion already
+# drops whole.
+#
+# Independent-review finding (issue #436): the past/present-tense verb list
+# (Considering…/Sautéed for/.../Crunched for) was originally an UNANCHORED
+# substring match, same as bare "✻"/"✶" — so a genuine human draft that
+# happened to contain one of those phrases ("❯ I baked for hours on this
+# bug, need a second pair of eyes") would read as chrome, get dropped by
+# compact_last_pane_line, and make an occupied composer look clear —
+# exactly the false-clear direction issue #436 exists to close, just
+# triggered by draft text instead of scrollback residue. Every real
+# rendering of this chrome (verified against Test 10's fixtures below and
+# the live corpusminder-spring capture) puts the spinner glyph at the very
+# start of its OWN pane line, never sharing a line with composer content
+# (which is prefixed by "❯"/other box-drawing chars, not the glyph) — so
+# anchoring the verb group behind "^[[:space:]]*(✻|✶)" keeps every genuine
+# chrome shape matched while a human line (always ❯-prefixed at this point
+# in the pipeline, since the leading-prompt-char strip happens AFTER this
+# filter) can no longer match on phrase content alone. The verb group
+# itself stays optional so a bare glyph-only line (no verb text captured,
+# e.g. if only the glyph survived truncation) still matches, same as
+# before.
+#
+# Self-caught bug while implementing the above: the glyph alternation MUST
+# be a group "(✻|✶)", never a bracket class "[✻✶]". grep runs under
+# LC_ALL=C throughout this function (multi-byte-unsafe on purpose, per
+# compact_last_pane_line's own header comment), and under the C locale a
+# bracket expression matches byte-by-byte, not character-by-character — the
+# 3-byte UTF-8 encodings of ✻ (E2 9C BB) and ✶ (E2 9C B6) share their
+# leading byte (E2) with the composer's own "❯" prompt glyph (E2 9D AF), so
+# "[✻✶]" anchored at line start matched a genuinely empty "❯ " composer
+# line too (byte E2 alone satisfied the class), making an OCCUPIED-looking
+# composer line vanish and misreading a real draft as clear — caught by
+# this PR's own Test 6 regression (a bare "❯ " composer line was being
+# dropped instead of surviving to sed's prompt-char strip). "(✻|✶)" as a
+# literal alternation matches the full 3-byte sequence in order like any
+# other literal text, which is safe under LC_ALL=C the same way the
+# pattern's other literal strings (e.g. "Baked for") already are.
+COMPACT_COMPOSER_CHROME_PATTERN="${COMPACT_COMPOSER_CHROME_PATTERN:-^※ recap:|^[[:space:]]*(✻|✶)[[:space:]]*(Considering…|Sautéed for|Cooked for|Baked for|Simmered for|Brewed for|Crunched for)?|/clear to save [0-9.]+k tokens}"
 
 case "$WATCHER_AUTOCLOSE_MODE" in
     merged)    AUTOCLOSE_PR_FLAG="--merged-only" ;;
@@ -2093,6 +2537,14 @@ if ! [[ "$WATCH_ACTIVITY_POLL_SECS" =~ ^[0-9]+$ ]]; then
 fi
 if ! [[ "$ACTIVITY_POLL_OVERLAP_SECS" =~ ^[0-9]+$ ]]; then
     echo "ERROR: ACTIVITY_POLL_OVERLAP_SECS must be a non-negative integer (got: $ACTIVITY_POLL_OVERLAP_SECS)" >&2
+    exit 1
+fi
+if ! [[ "$WATCH_WORKTREE_SWEEP_SECS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: WATCH_WORKTREE_SWEEP_SECS must be a non-negative integer (got: $WATCH_WORKTREE_SWEEP_SECS)" >&2
+    exit 1
+fi
+if ! [[ "$WATCH_PENDING_BRIEF_SWEEP_SECS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: WATCH_PENDING_BRIEF_SWEEP_SECS must be a non-negative integer (got: $WATCH_PENDING_BRIEF_SWEEP_SECS)" >&2
     exit 1
 fi
 for _var in AUTO_COMPACT_THRESHOLD_TOKENS AUTO_COMPACT_PROBE_MAX_AGE_SECS \
@@ -2244,15 +2696,85 @@ COORD_INBOX_PROCESSED_DIR="$COORD_INBOX_DIR/processed"
 # stale one captured when the defer first started).
 COORD_INBOX_NUDGE_TEMPLATE="${COORD_INBOX_NUDGE_TEMPLATE:-Inbox: %N item(s) in .swarm/coord-inbox/ — read and triage them (see prompts/coordinator.md \"Inbox\").}"
 
-# COORD_WAKE_BUSY_PENDING_FILE: a marker (empty file; content unused) that
-# a doorbell wake is currently withheld because coordinator_pane_busy() was
-# true — deliberately separate from COORD_WAKE_PENDING_FILE (issue #422's
-# dirty-draft deferral) since the two have different retry policies: a busy
-# pane is safe to force a paste into eventually (Claude Code queues it), so
-# this one has a ceiling; an unsubmitted human draft never is, so that one
-# never forces. Its own mtime is "since when has this been busy-deferred",
-# same technique as COORD_WAKE_PENDING_FILE's mtime_epoch use below.
-COORD_WAKE_BUSY_PENDING_FILE="$PROJECT_DIR/.swarm/coord-wake-busy-pending"
+# COORD_WAKE_HOLD_PENDING_FILE: a marker that a doorbell wake is currently
+# withheld, whose CONTENT is the reason it's being held (issue #459 widened
+# this from #430's empty content-unused marker — see coord_wake_hold_reason
+# for the reason vocabulary and each reason's retry policy). Deliberately
+# separate from COORD_WAKE_PENDING_FILE (issue #422's dirty-draft deferral)
+# since the two have different retry policies: the reasons recorded here are
+# either safe to force a paste past eventually (a busy pane — Claude Code
+# queues it) or self-clearing on a clock (debounce, human presence), whereas
+# an unsubmitted human draft is never safe to paste over, so that one never
+# forces. Its own mtime is "since when has this been held", same technique
+# as COORD_WAKE_PENDING_FILE's mtime_epoch use below.
+#
+# Filename kept stable across the #430 → #459 rename so a watcher upgraded
+# in place doesn't orphan a live marker; an empty file (pre-#459 writer)
+# reads back as reason "pane_busy", which is what it always meant.
+COORD_WAKE_HOLD_PENDING_FILE="$PROJECT_DIR/.swarm/coord-wake-busy-pending"
+
+# COORD_WAKE_LAST_FILE: (issue #456) the doorbell debounce clock, on disk
+# rather than in a shell global. Two reasons it has to be a file:
+#
+#   1. It is now SHARED between the outcome and outbox-message wake paths
+#      (issue #459 collapsed LAST_WAKE and LAST_MSG_WAKE — see on_outcome's
+#      debounce check for why one clock, not two).
+#   2. run_watch_timer_loop runs as a separate OS process from the inotify
+#      reader that calls on_outcome/on_message, so a global set in one is
+#      invisible to the other. coord_wake_hold_retry_pass both reads this
+#      (has the debounce window passed?) and writes it (it just rang) —
+#      pre-#456 it did neither, so a busy-deferred delivery didn't reset the
+#      debounce window at all and the next outcome could ring 2s later.
+#
+# Being a file, it also survives a watcher restart, where the old globals
+# reset to 0. That is the better behavior, not an accident: a watcher
+# respawn loop no longer gets a free doorbell per restart. The cost is that
+# the first outcome after a restart can be held for up to DEBOUNCE_SECS —
+# held, not dropped, so it still rings.
+COORD_WAKE_LAST_FILE="$PROJECT_DIR/.swarm/coord-wake-last"
+
+# --- issue #459: human-presence gate --------------------------------------
+#
+# COORD_HUMAN_IDLE_SECS / WORKER_HUMAN_IDLE_SECS: how recently a HUMAN turn
+# must have landed in a session for that session to count as "the operator
+# is here right now", holding every doorbell. See their header-comment
+# entries above for the full rationale, and coord_human_present /
+# swarm_human_present for the detection (which is not as simple as reading
+# the last user turn — the watcher's own pastes look identical).
+COORD_HUMAN_IDLE_SECS="${COORD_HUMAN_IDLE_SECS:-600}"
+if ! [[ "$COORD_HUMAN_IDLE_SECS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: COORD_HUMAN_IDLE_SECS must be a non-negative integer (got: $COORD_HUMAN_IDLE_SECS)" >&2
+    exit 1
+fi
+WORKER_HUMAN_IDLE_SECS="${WORKER_HUMAN_IDLE_SECS:-300}"
+if ! [[ "$WORKER_HUMAN_IDLE_SECS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: WORKER_HUMAN_IDLE_SECS must be a non-negative integer (got: $WORKER_HUMAN_IDLE_SECS)" >&2
+    exit 1
+fi
+
+# COORD_HUMAN_PASTE_GRACE_SECS: how far either side of a paste the watcher
+# itself recorded in events.log a typed turn can land and still be treated
+# as that paste rather than as a human typing. 15s covers llm-start.sh's
+# paste→Enter→transcript-flush path with room to spare; too large starts
+# swallowing a human who typed immediately after reading a nudge, which is
+# the safe direction anyway (it reads as machine, so the doorbell rings).
+COORD_HUMAN_PASTE_GRACE_SECS="${COORD_HUMAN_PASTE_GRACE_SECS:-15}"
+# COORD_HUMAN_MAX_TYPED_CHARS: a "typed" turn longer than this is treated as
+# a machine paste (see human_typed_since exclusion 3). Set very high rather
+# than tight: the cost of misreading a long operator paste as machine is one
+# doorbell ringing while they read, whereas misreading a delivered brief as
+# an operator holds doorbells for a whole idle window.
+COORD_HUMAN_MAX_TYPED_CHARS="${COORD_HUMAN_MAX_TYPED_CHARS:-2000}"
+if ! [[ "$COORD_HUMAN_PASTE_GRACE_SECS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: COORD_HUMAN_PASTE_GRACE_SECS must be a non-negative integer (got: $COORD_HUMAN_PASTE_GRACE_SECS)" >&2
+    exit 1
+fi
+
+# WAKE_DEFER_ON_SWARM_BUSY: opt-in, default OFF. See its header-comment
+# entry above for why worker BUSYNESS deliberately does not gate
+# dispatch-bearing doorbells by default.
+WAKE_DEFER_ON_SWARM_BUSY="${WAKE_DEFER_ON_SWARM_BUSY:-0}"
+
 
 # COORD_WAKE_BUSY_RETRY_SECS / COORD_WAKE_BUSY_CEILING_SECS: see their
 # header-comment entries above (near WATCH_CHECK_ON_DONE) for the full
@@ -2268,6 +2790,75 @@ if ! [[ "$COORD_WAKE_BUSY_CEILING_SECS" =~ ^[0-9]+$ ]]; then
     echo "ERROR: COORD_WAKE_BUSY_CEILING_SECS must be a non-negative integer (got: $COORD_WAKE_BUSY_CEILING_SECS)" >&2
     exit 1
 fi
+# COORD_WAKE_HOLD_RETRY_SECS: the EFFECTIVE retry cadence for
+# coord_wake_hold_retry_pass, derived rather than configured. It follows
+# COORD_WAKE_BUSY_RETRY_SECS (the #430 knob operators already know), but
+# #430's rollback switch — setting that to 0 — must no longer switch off the
+# whole retry loop: the human-presence (#459) and debounce (#456) holds now
+# ride the same pass, and a held doorbell with no tick to deliver it is a
+# permanently muted swarm, the one outcome every gate here fails open to
+# avoid. So when the busy gate is rolled back but another hold can still
+# fire, fall back to a 30s tick.
+COORD_WAKE_HOLD_RETRY_SECS="$COORD_WAKE_BUSY_RETRY_SECS"
+if [ "$COORD_WAKE_HOLD_RETRY_SECS" -eq 0 ] && \
+   { [ "$COORD_HUMAN_IDLE_SECS" -gt 0 ] || [ "$WORKER_HUMAN_IDLE_SECS" -gt 0 ] || [ "$DEBOUNCE_SECS" -gt 0 ]; }; then
+    COORD_WAKE_HOLD_RETRY_SECS=30
+fi
+
+# --- issue #366 Part A: stall heartbeat for a fully idle swarm --------------
+#
+# Every wake path above (on_outcome, on_message, on_activity) is triggered
+# by something a WORKER did. A swarm with zero live workers and an idle
+# coordinator — e.g. right after startup, before anything has been
+# dispatched, or after every worker has finished and nothing new was queued
+# — never reaches any of them, so it stays silent forever with no human
+# ever notified. STALL_WAKE_SECS starts an independent tick (own background
+# process, run_stall_wake_loop, same "a single call can block on
+# llm-start.sh's full injection path" reasoning as run_auto_compact_poll_loop
+# — see that function's header comment) that fires a coordinator wake once
+# no real wake of ANY kind (outcome, outbox message, or a previous stall
+# wake — anything that calls wake_clock_set) has landed for this many
+# seconds. 0 (default) disables the whole feature — existing swarms that
+# never set this see no new process, no new tick, and no behavior change.
+#
+# Deliberately ONE knob, not a tick/threshold pair like AUTO_COMPACT_TICK_SECS
+# — there is no separate "attempted but on cooldown" state to distinguish
+# here, so the interval IS the threshold: stall_wake_pass wakes, sleeps
+# STALL_WAKE_SECS, and checks whether that much quiet has passed since
+# wake_clock_get's timestamp.
+#
+# Deliberately does NOT gate on "does the swarm plausibly have outstanding
+# work" beyond the park switch below. The issue this implements offers that
+# check as one option among "or unconditionally, letting the coordinator
+# judge" — computing it here would mean either the watcher reading enough
+# local/GitHub state to reintroduce the AVAILABLE-style computation the
+# issue's Out of scope section forbids it from doing, or missing the exact
+# scenario the feature exists for (a swarm with zero live workers has no
+# local signal — no live iss-* window, no worker PR — to check at all). The
+# coordinator is the one positioned to judge "is there really nothing to
+# do" once woken; the cost is one LLM turn per STALL_WAKE_SECS for a swarm
+# that opted in, which is exactly the constraint the default of 0 keeps at
+# zero for everyone who didn't.
+STALL_WAKE_SECS="${STALL_WAKE_SECS:-0}"
+if ! [[ "$STALL_WAKE_SECS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: STALL_WAKE_SECS must be a non-negative integer (got: $STALL_WAKE_SECS)" >&2
+    exit 1
+fi
+
+# STALL_WAKE_PROMPT: the instructions written to coord-inbox/ on a stall
+# wake (issue #430's inbox, same as every other wake source — see
+# coord_inbox_write). The pane doorbell itself stays the same short, generic
+# coord_inbox_nudge_text every wake path uses; only the inbox payload names
+# what kind of wake this was.
+STALL_WAKE_PROMPT="${STALL_WAKE_PROMPT:-Quiet-period check-in: no worker or wake activity for a while. Produce a short wake digest (swarm state: live workers, open PRs/issues, anything blocked) and suggest next steps — or say plainly that there is nothing to do right now.}"
+
+# SWARM_PARKED_FILE: the operator's park switch (issue #366's other
+# suppression knob besides STALL_WAKE_SECS=0) — touch this file to keep a
+# deliberately idled swarm silent without having to also flip
+# STALL_WAKE_SECS back to 0 and lose the value if left set. Checked only by
+# stall_wake_pass; every other wake path is unaffected, since a worker
+# actually finishing something is never something to suppress.
+SWARM_PARKED_FILE="$PROJECT_DIR/.swarm/parked"
 
 # log_event <category> <key=val>...
 # Writes one line: "<utc-iso8601>  <category>  k=v k=v ..."
@@ -2299,6 +2890,7 @@ format_event_line() {
                 *)             glyph="✗"; color=$'\033[31m' ;;
             esac ;;
         worker.finish.skip)        glyph="·"; color=$'\033[2m'  ;;
+        worker.finish.corrected)   glyph="↻"; color=$'\033[33m' ;;
         worker.start)               glyph="◐"; color=$'\033[33m' ;;
         worker.requeue)              glyph="↺"; color=$'\033[36m' ;;
         cap.refused)                  glyph="⚠"; color=$'\033[33m' ;;
@@ -2341,15 +2933,22 @@ format_event_line() {
         worker.deliver.skip)               glyph="·"; color=$'\033[2m'  ;;
         worker.deliver.resubmit)            glyph="↻"; color=$'\033[33m' ;;
         worker.deliver.ended)                glyph="⏏"; color=$'\033[32m' ;;
+        worker.deliver.ok)                    glyph="✓"; color=$'\033[32m' ;;
         worker.deliver.timeout)              glyph="⚠"; color=$'\033[33m' ;;
         worker.deliver.delivered_as_text)  glyph="⚠"; color=$'\033[33m' ;;
         worker.deliver.retracted)            glyph="↩"; color=$'\033[32m' ;;
         worker.deliver.retract_failed)        glyph="⚠"; color=$'\033[31m' ;;
         worker.deliver.retract_skip)            glyph="·"; color=$'\033[2m'  ;;
         worker.deliver.giving_up)                  glyph="⚠"; color=$'\033[31m' ;;
+        worker.deliver.composer_stalled)   glyph="⚠"; color=$'\033[31m' ;;
         watch.autoclose)               glyph="♻"; color=$'\033[36m' ;;
         watch.orphan_sweep)             glyph="♻"; color=$'\033[36m' ;;
         reap.window)                    glyph="✂"; color=$'\033[36m' ;;
+        reap.worktree)                  glyph="✂"; color=$'\033[36m' ;;
+        reap.worktree.error)            glyph="✗"; color=$'\033[31m' ;;
+        watch.worktree_vanished)        glyph="⚠"; color=$'\033[31m' ;;
+        watch.worktree_sweep.error)     glyph="✗"; color=$'\033[31m' ;;
+        watch.pending_brief_sweep)      glyph="✉"; color=$'\033[33m' ;;
         watch.pr_poll)                  glyph="⚠"; color=$'\033[33m' ;;
         pr_poll.error)                   glyph="✗"; color=$'\033[31m' ;;
         watch.activity_poll)
@@ -2367,8 +2966,7 @@ format_event_line() {
                 *)                 glyph="·"; color=$'\033[2m'  ;;
             esac ;;
         watch.check_on_done.error)  glyph="✗"; color=$'\033[31m' ;;
-        watch.outcome.synth)         glyph="✉"; color=$'\033[36m' ;;
-        watch.outcome.synth.skip)    glyph="·"; color=$'\033[2m'  ;;
+        watch.reconcile)             glyph="?"; color=$'\033[33m' ;;
         watch.start|watch.timer.start) glyph="▶"; color=$'\033[36m' ;;
         watch.exit)                     glyph="■"; color=$'\033[2m'  ;;
         sweep.run|sweep.dry)             glyph="↻"; color=$'\033[36m' ;;
@@ -2424,13 +3022,17 @@ pr-poll:       ${WATCH_PR_POLL_SECS}s$([ "$WATCH_PR_POLL_SECS" = "0" ] && echo "
 orphan-sweep:  ${WATCH_ORPHAN_SWEEP_SECS}s$([ "$WATCH_ORPHAN_SWEEP_SECS" = "0" ] && echo " (disabled)" || echo " (script: $REAP_ORPHAN)")
 bg-violation:  ${WATCH_BG_VIOLATION_SWEEP_SECS}s$([ "$WATCH_BG_VIOLATION_SWEEP_SECS" = "0" ] && echo " (disabled)" || echo " (foreground-only fallback detection, issue #298)")
 activity-poll: ${WATCH_ACTIVITY_POLL_SECS}s$([ "$WATCH_ACTIVITY_POLL_SECS" = "0" ] && echo " (disabled)" || echo " (out-of-band PR/issue resolution backstop, issue #392)")
+worktree-sweep: ${WATCH_WORKTREE_SWEEP_SECS}s$([ "$WATCH_WORKTREE_SWEEP_SECS" = "0" ] && echo " (disabled)" || echo " (unblessed worktree-removal detection, issue #439)")
+pending-brief-sweep: ${WATCH_PENDING_BRIEF_SWEEP_SECS}s$([ "$WATCH_PENDING_BRIEF_SWEEP_SECS" = "0" ] && echo " (disabled)" || echo " (SWARM_PENDING_BRIEF marker-gap backstop, issue #439)")
 coord-wake-retry: ${COORD_WAKE_RETRY_SECS}s$([ "$COORD_WAKE_RETRY_SECS" = "0" ] && echo " (disabled)" || echo " (retry a dirty-composer-deferred wake, warn after ${COORD_WAKE_DEFER_WARN_SECS}s, issue #422)")
 coord-inbox:   $COORD_INBOX_DIR (issue #430; busy-pane doorbell defer: $([ "$COORD_WAKE_BUSY_RETRY_SECS" = "0" ] && echo "disabled — pastes immediately regardless of busy" || echo "retry ${COORD_WAKE_BUSY_RETRY_SECS}s, ceiling $([ "$COORD_WAKE_BUSY_CEILING_SECS" = "0" ] && echo "none" || echo "${COORD_WAKE_BUSY_CEILING_SECS}s")"))
+human-gate:    $([ "$COORD_HUMAN_IDLE_SECS" = "0" ] && [ "$WORKER_HUMAN_IDLE_SECS" = "0" ] && echo "disabled (issue #459)" || echo "coordinator ${COORD_HUMAN_IDLE_SECS}s / workers ${WORKER_HUMAN_IDLE_SECS}s, no ceiling (issue #459)"); swarm-busy hold: $([ "$WAKE_DEFER_ON_SWARM_BUSY" = "1" ] && echo "on" || echo "off")$([ "$HAVE_JQ" = "1" ] || echo " [no jq — human gate inert, doorbells always ring]")
 check-on-done: $WATCH_CHECK_ON_DONE$([ "$WATCH_CHECK_ON_DONE" = "1" ] && echo " (session: $SESSION_NAME)")
 auto-compact:  $AUTO_COMPACT$([ "$AUTO_COMPACT" = "1" ] && echo " (threshold: min(${AUTO_COMPACT_PCT}% of window, ${AUTO_COMPACT_THRESHOLD_CAP_TOKENS}), fallback: ${AUTO_COMPACT_THRESHOLD_TOKENS} tokens, require-window: ${AUTO_COMPACT_REQUIRE_WINDOW}, probe: $AUTO_COMPACT_PROBE, poll-tick: ${AUTO_COMPACT_TICK_SECS}s$([ "$AUTO_COMPACT_TICK_SECS" = "0" ] && echo " disabled"), cooldown: ${AUTO_COMPACT_COOLDOWN_SECS}s)")
 worker-compact: $WORKER_AUTO_COMPACT$([ "$WORKER_AUTO_COMPACT" = "1" ] && echo " (threshold: min(${WORKER_COMPACT_PCT}% of window, ${WORKER_COMPACT_THRESHOLD_CAP_TOKENS})/wrapup+$(( WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS - WORKER_COMPACT_THRESHOLD_TOKENS )), fallback: ${WORKER_COMPACT_THRESHOLD_TOKENS}/${WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS} tokens, require-window: ${WORKER_COMPACT_REQUIRE_WINDOW}, scan: ${WORKER_COMPACT_SCAN_SECS}s)")
 worker-deliver: $WORKER_AUTO_DELIVER$([ "$WORKER_AUTO_DELIVER" = "1" ] && echo " (parked-in-agent requeue.sh briefs released via /quit, end-timeout: ${WORKER_DELIVER_END_TIMEOUT_SECS}s, scan: ${WORKER_COMPACT_SCAN_SECS}s — issue #313)")
 stale-check:   $WATCHER_STALE_CHECK$([ "$WATCHER_STALE_CHECK" = "1" ] && echo " (every ${WATCHER_STALE_CHECK_SECS}s — issue #296; check anytime: coordinator-watch.sh --check-stale)")
+stall-wake:    $([ "$STALL_WAKE_SECS" -gt 0 ] && echo "${STALL_WAKE_SECS}s (park switch: $SWARM_PARKED_FILE — issue #366)" || echo "disabled")
 dry-run:       $DRY_RUN
 once:          $ONCE
 pane-echo:     $([ "$WATCHER_QUIET" = "1" ] && echo "disabled (WATCHER_QUIET=1)" || echo "enabled (WATCHER_QUIET=1 to silence)")
@@ -2492,12 +3094,14 @@ WATCH_TIMER_PID=""
 WORKER_COMPACT_TIMER_PID=""
 AUTO_COMPACT_POLL_TIMER_PID=""
 STALE_CHECK_PID=""
+STALL_WAKE_TIMER_PID=""
 seen_file=""
 cleanup_on_exit() {
     [ -n "${WATCH_TIMER_PID:-}" ] && kill "$WATCH_TIMER_PID" 2>/dev/null || true
     [ -n "${WORKER_COMPACT_TIMER_PID:-}" ] && kill "$WORKER_COMPACT_TIMER_PID" 2>/dev/null || true
     [ -n "${AUTO_COMPACT_POLL_TIMER_PID:-}" ] && kill "$AUTO_COMPACT_POLL_TIMER_PID" 2>/dev/null || true
     [ -n "${STALE_CHECK_PID:-}" ] && kill "$STALE_CHECK_PID" 2>/dev/null || true
+    [ -n "${STALL_WAKE_TIMER_PID:-}" ] && kill "$STALL_WAKE_TIMER_PID" 2>/dev/null || true
     # WATCHER_ECHO_PID is the `while read` reader — the last stage of the
     # `tail | while` pipeline, and the only PID $! gives us for it. `tail`
     # itself is a separate direct child of this script (pipeline stages
@@ -2529,16 +3133,24 @@ cleanup_on_exit() {
 trap cleanup_on_exit EXIT INT TERM
 
 # Shared state
-LAST_WAKE=0
-# Separate debounce clock for outbox-message wakes (issue #129): a message
-# wake must not be swallowed by a just-fired outcome wake (whose top-up
-# prompt says nothing about outboxes), and vice versa. Coalesced messages
-# aren't lost either way — the outbox wake prompt instructs a full scan of
-# every worker outbox, not just the triggering file.
-LAST_MSG_WAKE=0
-# issue #392: same reasoning as LAST_MSG_WAKE above, its own clock so an
-# activity-poll wake can't be swallowed by, or swallow, an outcome/outbox
-# wake.
+# issue #459: the outcome and outbox-message doorbell clocks were separate
+# globals (LAST_WAKE / LAST_MSG_WAKE) until this issue collapsed them into
+# one on-disk clock, COORD_WAKE_LAST_FILE — see wake_clock_get.
+#
+# The #129 argument for keeping them apart was that an outbox-message wake
+# must not be swallowed by a just-fired outcome wake, since the two carried
+# DIFFERENT prompts and the outcome's top-up prompt said nothing about
+# outboxes. That argument died with #430: both paths now paste the identical
+# one-line inbox doorbell, and the payload that used to differ lives in
+# coord-inbox/ where the coordinator reads every item regardless of which
+# trigger rang. Two clocks simply meant two sources could each ring inside
+# the same 30s window — half the "wake storm" the operator reported.
+#
+# issue #392's activity clock deliberately stays separate below, and is NOT
+# a doorbell clock: activity-poll findings are inbox-only and never ring, so
+# what it debounces is the inbox WRITE. Folding it in would let an unrelated
+# doorbell suppress a payload write and lose content outright — the opposite
+# of what the doorbell clocks do, which is delay a regenerable nudge.
 LAST_ACTIVITY_WAKE=0
 # Moving cursor for activity_poll_pass's gh search queries — "what went
 # terminal since this timestamp". Starts at watcher-boot time deliberately:
@@ -2572,6 +3184,30 @@ declare -A ORPHAN_PR_LOGGED=()
 # WATCH_BG_VIOLATION_PATTERN on that window's pane, so a later, genuinely
 # new occurrence re-fires instead of staying permanently suppressed.
 declare -A BG_VIOLATION_LOGGED=()
+
+# issue #439: worktree_vanish_sweep_pass's own inventory — dir -> epoch it
+# was last confirmed present. Seeded whole on the first tick (WT_INVENTORY_
+# SEEDED below) so a worktree already gone before the watcher started is
+# never treated as "vanished"; this sweep only catches a disappearance that
+# happens WHILE the watcher is running and watching for it.
+declare -A KNOWN_WORKTREE_SEEN=()
+WT_INVENTORY_SEEDED=0
+
+# issue #468: a check-fail retry (or any later reconciliation in
+# worker-listener.sh's write_outcome()) can flip a task's outcome level
+# after its FIRST record already fired a real coord.wake — the corrected
+# record lands under a DIFFERENT filename (.ok.json <-> .err.json;
+# write_outcome's own stale-file cleanup leaves only the new one on disk),
+# which both backends' create/moved_to-or-new-path detection sees as a
+# brand new outcome. Keyed by task_id (not path — the whole point is
+# recognizing the SAME brief under its two possible filenames) so on_outcome
+# can tell "first completion" from "correction of one already announced"
+# and fire a real coordinator wake only for the former — see on_outcome's
+# own comment for what still happens on a correction. Process-local, same
+# as every other timer-loop dedup map here; unbounded growth over a long
+# watcher lifetime is the same accepted tradeoff ACTIVITY_ANNOUNCED_PR/
+# _ISSUE above already make.
+declare -A OUTCOME_TASK_ANNOUNCED=()
 
 # is_own_worktree_dir <dir>
 #
@@ -2670,6 +3306,57 @@ own_worktree_dirs_for_scan() {
     shopt -u nullglob
 }
 
+# outcome_path_issue <outcome-path>
+#
+# Issue number for a done/*.{ok,err}.json path. Prefers the path's own
+# "wt-issue-<N>" directory segment — always present for any outcome file
+# that reached here (every own-worktree layout in this codebase is
+# WORKSPACE/wt-issue-<N>/...) — over the OLD convention of parsing the
+# FILENAME's trailing "-<issue>" before .ok/.err.json.
+#
+# issue #451 self-review finding: that filename-trailing-digits parse was
+# only ever reliable because #314's synth_outcome (removed by this PR)
+# defensively appended "-$issue" to every filename it wrote, using the
+# issue number it was called with directly — never by parsing task_id.
+# scripts/task-done.sh and worker-listener.sh's write_outcome() both use
+# the BARE task_id with no such suffixing (matching write_outcome's own
+# long-standing convention, unchanged by this PR) — a task_id that
+# doesn't happen to end in "-<issue>" (requeue.sh's <wt-path> form, or
+# provision-worker.sh's "-2"/"-3" collision suffix landing AFTER the
+# issue number) parses wrong under the old filename-only method. The path
+# itself was always the more reliable source and needs no writer-side
+# change to fix.
+outcome_path_issue() {
+    local path="$1"
+    local issue
+    issue=$(printf '%s' "$path" | sed -nE 's#.*/wt-issue-([0-9]+)/.*#\1#p')
+    if [ -z "$issue" ]; then
+        # Fallback for a path shape that doesn't match the convention at
+        # all (e.g. a test fixture) — the old filename-trailing-digits parse.
+        issue=$(basename "$path" | sed -E 's/.*-([0-9]+)\.(ok|err)\.json$/\1/')
+    fi
+    printf '%s' "$issue"
+}
+
+# outcome_path_task_id <outcome-path>
+#
+# The bare task_id an outcome path was written under — the filename minus
+# its .ok.json/.err.json suffix. Both scripts/task-done.sh and
+# worker-listener.sh's write_outcome() name every outcome file
+# "${TASK_ID}.${outcome}.json" with no other decoration (see
+# outcome_path_issue's comment above), so this is a plain suffix strip, not
+# a guess. Used by on_outcome (issue #468) to recognize a check-fail retry's
+# corrected record — a DIFFERENT filename from the same task_id's earlier
+# provisional one — as a correction of an already-announced completion
+# rather than a brand new one.
+outcome_path_task_id() {
+    local base
+    base="$(basename "$1")"
+    base="${base%.ok.json}"
+    base="${base%.err.json}"
+    printf '%s' "$base"
+}
+
 # dispatch_outcome <outcome-path>
 #
 # Wrapper around on_outcome that applies the is_our_worktree filter.
@@ -2680,9 +3367,7 @@ dispatch_outcome() {
     if is_our_worktree "$path"; then
         on_outcome "$path"
     else
-        local issue
-        issue=$(basename "$path" | sed -E 's/.*-([0-9]+)\.(ok|err)\.json$/\1/')
-        log_event worker.finish.skip "issue=$issue reason=foreign_worktree path=$path"
+        log_event worker.finish.skip "issue=$(outcome_path_issue "$path") reason=foreign_worktree path=$path"
     fi
 }
 
@@ -2803,6 +3488,19 @@ WATCHER_SELF_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH
 WATCHER_LAUNCH_MTIME="$(mtime_epoch "$WATCHER_SELF_PATH" 2>/dev/null || echo 0)"
 [ -n "$WATCHER_LAUNCH_MTIME" ] || WATCHER_LAUNCH_MTIME=0
 WATCHER_STARTED_AT="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+# issue #366 Part A: epoch twin of WATCHER_STARTED_AT above, so
+# stall_wake_pass has a real baseline for "quiet since when" on a freshly
+# started watcher — wake_clock_get fails open to 0 ("no wake ever"), which
+# would otherwise read as quiet since the Unix epoch and fire on the very
+# first tick regardless of STALL_WAKE_SECS.
+#
+# This ONLY covers that true-zero case. COORD_WAKE_LAST_FILE (issue #456) is
+# deliberately NOT reset here and survives a watcher restart, so a watcher
+# that restarts after a genuinely long quiet stretch can still fire on its
+# very first tick post-restart — same as the debounce clock it shares the
+# file with. That is intended, not a bug: "no wake of any kind for
+# STALL_WAKE_SECS" is meant to span restarts, not be reset by them.
+WATCHER_STARTED_AT_EPOCH="$(date +%s)"
 WATCHER_STATE_FILE="$PROJECT_DIR/.swarm/coordinator-watch.state"
 {
     printf 'pid=%s\n' "$$"
@@ -3322,6 +4020,303 @@ activity_poll_pass() {
     fi
 }
 
+# wt_reap_event_since <issue> <since-iso8601>
+#
+# True if a `reap.worktree` event (kill-worktree.sh, and now
+# reap-orphan-worktrees.sh's dangling path / swarm-merge.sh's fallback
+# removal — all three log it, issue #439) for this issue was logged
+# at/after $since. Mirrors swarm_already_reaped's exact awk/cursor idiom
+# above — events.log's fixed-width ISO8601 timestamp field sorts
+# lexicographically, so no date-parsing dependency is needed.
+#
+# issue #439 self-review (round 4): deliberately `reap.worktree` ONLY, not
+# `reap.window` too, despite kill-finished-workers.sh logging reap.window
+# for EVERY kill (including its default window-only mode, with no
+# --with-worktree, which never touches the worktree directory at all).
+# Trusting reap.window here would let an unrelated window-only kill for
+# this issue mask a genuinely unblessed worktree removal that happened to
+# land in the same lookback window — every path that actually removes a
+# worktree (kill-worktree.sh, reap-orphan-worktrees.sh's dangling `rm -rf`,
+# swarm-merge.sh's fallback removal) already logs reap.worktree itself, so
+# reap.window brings no additional real coverage, only a false-negative
+# risk.
+wt_reap_event_since() {
+    local issue="$1" since="$2"
+    [ -f "$EVENTS_LOG" ] || return 1
+    awk -v since="$since" -v needle="issue=$issue " '
+        $1 >= since && $2 == "reap.worktree" && index($0, needle) { found=1; exit }
+        END { exit !found }
+    ' "$EVENTS_LOG"
+}
+
+# unblessed_worktree_vanish_notify <issue> <dir>
+#
+# issue #439: writes a coord-inbox entry (issue #430 idiom — durable, no
+# doorbell) pointing at the same salvage/PR-history trail a human would
+# have to check by hand. By the time this fires the worktree is already
+# gone, so there's nothing left here to act on urgently — the value is
+# making sure the coordinator goes and checks .swarm/salvaged/ and the
+# issue's own PR history before trusting that nothing was lost.
+unblessed_worktree_vanish_notify() {
+    local issue="$1" dir="$2"
+    local body
+    body="A worktree this swarm was tracking (issue #$issue, $dir) disappeared with no reap.worktree event logged for it since it was last confirmed present. That's the signature of a bare \`git worktree remove\` or \`rm -rf\` run outside every blessed reap path (kill-worktree.sh and its callers all log reap.worktree on removal — issue #439) — no salvage ran, so any brief still sitting in that worktree's .swarm/tasks/{inbox,processing,outbox}/ was destroyed, not preserved under .swarm/salvaged/iss-$issue/.
+Check .swarm/salvaged/iss-$issue/ (won't exist if nothing was queued), check issue #$issue's PR history for a SWARM_PENDING_BRIEF marker that never got a matching cleared/orphaned follow-up, and re-file any lost work as a fresh issue if the PR already merged past it."
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "[DRY] would write coord-inbox worktree-vanished entry for issue #$issue"
+        return 0
+    fi
+    if coord_inbox_write worktree_vanished "$body"; then
+        log_event coord.inbox.write "trigger=worktree_vanished issue=$issue"
+    else
+        echo "[$(date +%T)] WARN: failed to write coord-inbox worktree-vanished entry for issue #$issue" >&2
+    fi
+}
+
+# worktree_vanish_sweep_pass
+#
+# issue #439: detects a worktree removed outside every blessed reap path —
+# see WATCH_WORKTREE_SWEEP_SECS's header comment for the full incident
+# (SAMlytics wt-issue-296: a queued follow-up brief destroyed with no event
+# and no salvage). Diffs the current own-worktree inventory
+# (own_worktree_dirs_for_scan, the same #357-safe enumeration pr_poll_pass/
+# activity_poll_pass use) against KNOWN_WORKTREE_SEEN. The first tick only
+# seeds the map — a worktree already gone before the watcher started was
+# never "watched" disappear, so it's not this sweep's business. Every dir
+# still present each tick gets its last-seen timestamp bumped, which is
+# also what bounds wt_reap_event_since's search window tightly (only needs
+# to cover the gap since the previous tick, not this worktree's entire
+# life).
+#
+# issue #439 self-review (round 3): "current" REQUIRES `[ -d "$dir" ]`, not
+# just git's own registration. `git worktree list` (what
+# own_worktree_dirs_for_scan reads) keeps listing a worktree whose
+# directory was `rm -rf`'d directly — as opposed to `git worktree
+# remove`d — until something runs `git worktree prune` or otherwise
+# touches the registration, which can be long after the directory itself
+# (and anything queued inside it) is already gone. Without this check, a
+# bare `rm -rf` — the SAMlytics incident's actual leading hypothesis,
+# alongside `git worktree remove --force` — would stay "present" in this
+# diff forever, and the eventual dangling-registration cleanup
+# (reap_dangling) would then log a blessed reap.worktree for it, silently
+# retconning a real unblessed removal into a non-event.
+#
+# issue #439 self-review (round 5, corrected round 10): guards against a
+# transient git failure being misread as "every tracked worktree vanished
+# in the same tick". own_worktree_dirs_for_scan can legitimately return
+# EMPTY with no error at all when git itself is healthy but this project
+# genuinely has zero registered worktrees right now — a real, common tick
+# this sweep must still process correctly (e.g. a bulk
+# `kill-finished-workers.sh --all --with-worktree` reaping everything at
+# once is exactly this case, and every one of those removals already has
+# its own reap.worktree event). The DIFFERENT failure this guards against
+# is `git worktree list` itself glitching for a tick while the repo is
+# otherwise fine.
+#
+# Round 10: probes `git worktree list` directly, not `rev-parse
+# --git-common-dir` (round 5's original probe). Those are different git
+# operations that fail independently — a round-9 self-review caveat
+# confirmed a `worktree list`-specific glitch could return empty with
+# rc 0 while `rev-parse --git-common-dir` (much cheaper plumbing, no
+# worktree-registry read at all) still succeeds fine, defeating the whole
+# point of this guard. own_worktree_dirs_for_scan's own health probe
+# (used only on ITS empty-fallback path) has the same mismatch, but that
+# path already has a second fallback (the raw wt-issue-* glob) covering
+# it; this sweep has no such fallback, so it needs the precise probe.
+worktree_vanish_sweep_pass() {
+    local dir issue now_epoch since found seen
+    now_epoch=$(date +%s)
+
+    if ! git -C "$PROJECT_DIR" worktree list >/dev/null 2>&1; then
+        log_event watch.worktree_sweep.error "reason=git_unavailable"
+        return 1
+    fi
+
+    local -a current_dirs=()
+    while IFS= read -r dir; do
+        [ -n "$dir" ] && [ -d "$dir" ] && current_dirs+=("$dir")
+    done < <(own_worktree_dirs_for_scan "$PROJECT_DIR")
+
+    if [ "$WT_INVENTORY_SEEDED" != "1" ]; then
+        for dir in "${current_dirs[@]}"; do
+            KNOWN_WORKTREE_SEEN["$dir"]=$now_epoch
+        done
+        WT_INVENTORY_SEEDED=1
+        return 0
+    fi
+
+    for dir in "${!KNOWN_WORKTREE_SEEN[@]}"; do
+        found=0
+        for seen in "${current_dirs[@]}"; do
+            [ "$seen" = "$dir" ] && { found=1; break; }
+        done
+        [ "$found" = "1" ] && continue
+
+        issue="$(basename "$dir" | sed -nE 's/^wt-issue-([0-9]+)$/\1/p')"
+        # issue #439 self-review (round 6, widened in round 7): padded
+        # back by TWO sweep intervals, not the bare last-seen timestamp.
+        # A `git worktree remove` on a large worktree (or the compose-down
+        # step immediately before it) can take real wall-clock time — long
+        # enough to span a tick or two — during which the directory still
+        # exists (still present in this tick's scan), so its last-seen
+        # timestamp keeps advancing while the removal is still in flight.
+        # issue #446 self-review moved kill-worktree.sh's reap.worktree
+        # logging to AFTER a successful removal, not before as this
+        # comment originally said — so the event now lands essentially
+        # back-to-back with the directory's actual disappearance, rather
+        # than sitting on record however long the removal then takes. The
+        # 2x buffer is no longer load-bearing for that original multi-tick
+        # scenario, but it's kept anyway as cheap defense-in-depth against
+        # ordinary tick-cadence slop and the sub-second gap between the
+        # removal finishing and the log line executing (see
+        # kill-worktree.sh's own comment on that trade-off). Without
+        # enough buffer, the eventual tick that finally sees the dir gone
+        # could compute a `since` later than that event's own timestamp,
+        # and wt_reap_event_since's `$1 >= since` would then miss it — a
+        # blessed removal gets flagged as unblessed (noise: one spurious
+        # coord-inbox entry, not data loss — the worktree and its salvage
+        # state are exactly what they'd be either way). Same
+        # bounded-overlap idiom as ACTIVITY_POLL_OVERLAP_SECS elsewhere in
+        # this file.
+        since="$(date -u -d "@$(( KNOWN_WORKTREE_SEEN[$dir] - 2 * WATCH_WORKTREE_SWEEP_SECS ))" +'%Y-%m-%dT%H:%M:%SZ')"
+        if [ -z "$issue" ] || ! wt_reap_event_since "$issue" "$since"; then
+            log_event watch.worktree_vanished "issue=${issue:-?} dir=$dir reason=no_reap_event"
+            unblessed_worktree_vanish_notify "${issue:-?}" "$dir"
+        fi
+        unset 'KNOWN_WORKTREE_SEEN[$dir]'
+    done
+
+    for dir in "${current_dirs[@]}"; do
+        KNOWN_WORKTREE_SEEN["$dir"]=$now_epoch
+    done
+}
+
+# post_pending_brief_marker_sweep <pr#> <worktree-dir> <brief-file>
+#
+# issue #439: posts the same `<!-- SWARM_PENDING_BRIEF: queued -->` anchor
+# comment/idempotency contract as requeue.sh's notify_pr_pending_brief —
+# worker-listener.sh's clear_pr_pending_brief_marker clears either one the
+# same way — but written from the watcher's own vantage point: it doesn't
+# know which requeue.sh call is responsible or what the listener's pane
+# state was at queue time, only that a real brief is sitting unclaimed
+# right now. Mirrors kill-worktree.sh's notify_pr_brief_orphaned in
+# independently composing its own body rather than sourcing requeue.sh's —
+# same self-contained-scripts convention as this file's other local
+# helpers (see e.g. mtime_epoch elsewhere in this codebase).
+post_pending_brief_marker_sweep() {
+    local pr="$1" wt="$2" brief_file="$3"
+    local -a comment_body=()
+    comment_body+=('<!-- SWARM_PENDING_BRIEF: queued -->')
+    comment_body+=(':warning: **Swarm: a follow-up brief is queued for the worker on this PR** (found by coordinator-watch.sh'"'"'s periodic sweep, issue #439 — most likely queued before this PR existed, so requeue.sh'"'"'s own marker never posted).')
+    comment_body+=('')
+    comment_body+=('Merging now may ship without that queued fix.')
+
+    if [ -r "$brief_file" ]; then
+        local max_lines=20 total excerpt
+        total="$(wc -l < "$brief_file" 2>/dev/null || echo 0)"
+        excerpt="$(head -n "$max_lines" "$brief_file" 2>/dev/null | cut -c1-200 | sed -e 's/`\{6,\}/[fence]/g')"
+        if [ -n "$excerpt" ]; then
+            comment_body+=('')
+            comment_body+=('<details><summary><b>What was queued</b> (head of the brief — judge severity without leaving this page)</summary>')
+            comment_body+=('')
+            comment_body+=('``````text')
+            comment_body+=("$excerpt")
+            [ "${total:-0}" -gt "$max_lines" ] && comment_body+=("$(printf '… truncated (%s more lines)' "$((total - max_lines))")")
+            comment_body+=('``````')
+            comment_body+=('</details>')
+        fi
+    fi
+
+    comment_body+=('')
+    comment_body+=('**Next steps — pick one:**')
+    comment_body+=('')
+    comment_body+=("$(printf '1. **Check whether it is still pending** — on the swarm host:\n   ```bash\n   ls -1 %s/.swarm/tasks/{inbox,processing}\n   ```\n   A file in `inbox/` means not yet claimed; in `processing/` means the worker is on it.' "$wt")")
+    comment_body+=('2. **Merge anyway.** Nothing re-dispatches the brief for you. If the worktree is later reaped, the brief is salvaged and a `SWARM_BRIEF_ORPHANED` comment appears here — but that is a record, not a fix.')
+    comment_body+=("$(printf '3. **Cancel it** if the brief is obsolete — remove the file(s) listed above from `%s/.swarm/tasks/inbox/`.' "$wt")")
+    comment_body+=('')
+    comment_body+=('<sub>scripts/coordinator-watch.sh pending_brief_marker_sweep_pass — issue #439 (marker gap when a brief predates its PR).</sub>')
+
+    local comment
+    comment="$(printf '%s\n' "${comment_body[@]}")"
+    # issue #439 self-review (round 6): `cd "$wt" &&`, matching every other
+    # gh call in this file (e.g. activity_poll_pass) — gh resolves the
+    # target repo from the CALLER's cwd absent -R, so a coordinator-watch.sh
+    # invoked against a project dir different from wherever it happens to
+    # be running from would otherwise silently query the wrong repo (or
+    # fail) for every one of this pass's PR lookups.
+    (cd "$wt" && gh pr comment "$pr" --body "$comment") >/dev/null 2>&1
+}
+
+# pending_brief_marker_sweep_pass
+#
+# issue #439: backstop for requeue.sh's SWARM_PENDING_BRIEF marker — see
+# WATCH_PENDING_BRIEF_SWEEP_SECS's header comment for the SAMlytics gap
+# this closes (a brief queued before its target PR existed never gets a
+# marker at all). For every own worktree with a real unclaimed brief
+# (worker_pending_brief) and an OPEN PR whose latest SWARM_PENDING_BRIEF
+# marker isn't already "queued", posts one now.
+#
+# issue #439 self-review (round 7): requeue.sh writes the inbox file
+# BEFORE posting its own marker (mktemp+mv, then the PR comment) — a
+# sweep tick landing in that narrow window sees a real brief and an OPEN
+# PR with no "queued" marker yet, and posts its own. Harmless (both
+# comments say the same thing, and worker-listener.sh's clear step
+# handles either), just not perfectly idempotent — a rare double "queued"
+# comment on the PR, not a functional bug.
+pending_brief_marker_sweep_pass() {
+    command -v gh >/dev/null 2>&1 || return 0
+
+    local wt branch json pr_num pr_state last brief_file issue comments_raw comments_rc
+    local -a dirs=()
+    while IFS= read -r wt; do
+        [ -n "$wt" ] && dirs+=("$wt")
+    done < <(own_worktree_dirs_for_scan "$PROJECT_DIR")
+
+    for wt in "${dirs[@]}"; do
+        [ -d "$wt" ] || continue
+        worker_pending_brief "$wt" || continue
+        branch="$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null)" || continue
+        [ -n "$branch" ] || continue
+        # cd "$wt" && for both gh calls below: gh resolves the target repo
+        # from the caller's cwd absent -R (self-review round 6) — every
+        # own worktree here belongs to the same repo as PROJECT_DIR, so
+        # either cwd works, but $wt is already at hand.
+        json="$(cd "$wt" && gh pr view "$branch" --json number,state -q '"\(.number)\t\(.state)"' 2>/dev/null)" || continue
+        [ -n "$json" ] || continue
+        IFS=$'\t' read -r pr_num pr_state <<< "$json"
+        [ "$pr_state" = "OPEN" ] || continue
+
+        # issue #439 self-review (round 9): the comments lookup's success
+        # is checked SEPARATELY from whether it found a marker. Folding a
+        # failed `gh pr view` into the same "no marker found" bucket as a
+        # genuinely marker-less PR would repost a fresh "queued" comment
+        # on every tick gh has a transient hiccup, for as long as the
+        # hiccup lasts — worse than round 7's harmless one-time race.
+        comments_rc=0
+        comments_raw="$(cd "$wt" && gh pr view "$pr_num" --json comments \
+            -q '[.comments[] | select(.body | test("SWARM_PENDING_BRIEF:"))] | last | .body // empty' 2>/dev/null)" \
+            || comments_rc=$?
+        [ "$comments_rc" -eq 0 ] || continue
+        # Anchored to the marker line itself, same reason as requeue.sh's
+        # notify_pr_pending_brief (its body text mentions the OTHER state
+        # in prose, which a bare substring match would also catch).
+        last="$(printf '%s' "$comments_raw" \
+            | grep -oE '^<!-- SWARM_PENDING_BRIEF: (queued|cleared) -->$' \
+            | sed -E 's/^<!-- SWARM_PENDING_BRIEF: (queued|cleared) -->$/\1/' || true)"
+        [ "$last" = "queued" ] && continue
+
+        issue="$(basename "$wt" | sed -nE 's/^wt-issue-([0-9]+)$/\1/p')"
+        if [ "$DRY_RUN" = "1" ]; then
+            echo "[DRY] would post SWARM_PENDING_BRIEF: queued on PR #$pr_num (issue #${issue:-?})"
+            continue
+        fi
+        brief_file="$(worker_pending_brief_path "$wt")"
+        if post_pending_brief_marker_sweep "$pr_num" "$wt" "$brief_file"; then
+            log_event watch.pending_brief_sweep "pr=$pr_num dir=$wt reason=posted"
+        fi
+    done
+}
+
 # bg_violation_sweep_pass
 #
 # issue #298: fallback layer for the foreground-only rule — see
@@ -3558,56 +4553,52 @@ check_json_state() {
     sed -n 's/.*"state":"\([a-zA-Z_]*\)".*/\1/p' "$1" 2>/dev/null | head -1
 }
 
-# synth_outcome <worktree-dir> <issue> <task_id>
+# reconcile_missing_outcome <worktree-dir> <issue> <task_id> <reason>
 #
-# (issue #314) Write the done/<id>.ok.json a parked interactive worker's
-# listener never gets to write (write_outcome only runs after the agent
-# process exits, and default-mode workers idle at their REPL forever) —
-# it's the only trigger for the coordinator's worker-finished wake. Called
-# from maybe_run_check right after the check-claim is won, i.e. exactly
-# once per done task. The file lands via atomic mktemp+mv (the temp name
-# matches neither backend's *.{ok,err}.json filter, the final rename
-# raises moved_to), so the normal on_outcome pipeline — worker.finish
-# event, autoclose pass, debounced coord.wake — fires unmodified.
+# (issue #451, α of #450 finding 1 — supersedes #314's synth_outcome)
+# Called from maybe_run_check right after the check-claim is won, i.e. the
+# same one-per-done-task moment synth_outcome used to fire. Where that
+# function FABRICATED a done/<id>.ok.json so the coordinator's
+# worker-finished wake (on_outcome -> coord.wake, which only triggers on a
+# new done/<id>.{ok,err}.json) had something to trigger on, this function
+# never writes one — the worker is now the sole writer, via
+# scripts/task-done.sh (prompts/worker.md § "Task completion"), so a
+# genuine completion record lands in the SAME watched path on its own and
+# the existing inotify/poll -> worker.finish -> coord.wake pipeline fires
+# unmodified with no coordinator help needed.
 #
-# Filename: <task_id>.ok.json, suffixed to <task_id>-<issue>.ok.json when
-# the task_id doesn't already end in -<issue> — on_outcome parses the
-# issue number from that trailing position. Skips when an outcome for
-# this task_id already exists (headless workers: the listener's own write
-# happened or is imminent). See the WATCH_SYNTH_OUTCOME header entry for
-# the duplicate-wake analysis of a listener writing later anyway.
-synth_outcome() {
-    [ "$WATCH_SYNTH_OUTCOME" = "1" ] || return 0
-    local wt_dir="$1" issue="$2" task_id="$3"
+# A done signal (ready-for-review status, or a PR appearing) with no
+# outcome record yet is not itself a problem — it usually just means the
+# worker hasn't reached its task-done.sh step yet, or (pre-#451 worktree)
+# never will on its own; see task-done.sh's header for that migration
+# story. Log it (watch.reconcile) for visibility and no-op otherwise:
+# duplicate suppression (this — or a second call — seeing an existing
+# record does nothing) plus this function deliberately taking NO other
+# action.
+#
+# An earlier version of this also dropped a one-time reminder brief into
+# the worktree's inbox/. Removed (self-review finding on this PR): that
+# file is indistinguishable from a real task brief to claim_next_task()
+# AND to WORKER_AUTO_DELIVER's worker_pending_brief() — a parked worker
+# whose current task is already status=ready-for-review gets /quit'd to
+# "claim" it, burning a full extra agent dispatch on what was meant to be
+# a one-line reminder, and (when maybe_run_check's PR-open backstop had
+# fallen back to a synthesized task_id like "pr-issue-N", which isn't
+# purely digits) the resulting done/nudge-pr-issue-N.ok.json defeats
+# on_outcome's `-<issue>` filename parser. Logging alone fully solves the
+# duplicate-record problem this issue exists for; a safer proactive nudge
+# (a channel claim_next_task never treats as claimable work) is future
+# scope, not this α slice.
+reconcile_missing_outcome() {
+    local wt_dir="$1" issue="$2" task_id="$3" reason="${4:-check_claim_won}"
     local done_dir="$wt_dir/.swarm/tasks/done"
-    mkdir -p "$done_dir" 2>/dev/null || return 0
-
-    local base="$task_id"
-    case "$base" in *-"$issue") ;; *) base="${base}-${issue}" ;; esac
 
     local f
-    for f in "$done_dir/${task_id}.ok.json" "$done_dir/${task_id}.err.json" \
-             "$done_dir/${base}.ok.json"    "$done_dir/${base}.err.json"; do
-        if [ -e "$f" ]; then
-            log_event watch.outcome.synth.skip "issue=$issue task_id=$task_id reason=outcome_exists"
-            return 0
-        fi
+    for f in "$done_dir/${task_id}.ok.json" "$done_dir/${task_id}.err.json"; do
+        [ -e "$f" ] && return 0   # already recorded — nothing to reconcile
     done
 
-    if [ "$DRY_RUN" = "1" ]; then
-        echo "[$(date +%T)] [DRY] would synthesize outcome: $done_dir/${base}.ok.json"
-        return 0
-    fi
-
-    local tmp
-    tmp=$(mktemp "$done_dir/.synth-XXXXXX" 2>/dev/null) || return 0
-    printf '{"task_id":"%s","finished":"%s","outcome":"ok","synthesized":true,"source":"coordinator-watch.check_on_done"}\n' \
-        "$task_id" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$tmp"
-    if mv "$tmp" "$done_dir/${base}.ok.json" 2>/dev/null; then
-        log_event watch.outcome.synth "issue=$issue task_id=$task_id path=$done_dir/${base}.ok.json"
-    else
-        rm -f "$tmp" 2>/dev/null || true
-    fi
+    log_event watch.reconcile "issue=$issue task_id=$task_id reason=$reason"
 }
 
 # maybe_run_check <worktree-dir> <issue> [task_id]
@@ -3641,6 +4632,13 @@ maybe_run_check() {
     local wt_dir="$1" issue="$2" task_id="${3:-}"
     local status_dir="$wt_dir/.swarm/tasks/status"
     mkdir -p "$status_dir" 2>/dev/null || return 0
+
+    # Reason for reconcile_missing_outcome below, fixed BEFORE task_id gets
+    # resolved/defaulted a few lines down: status_poll_pass always passes
+    # an explicit task_id (it just read the status file); pr_poll_pass
+    # never does (PR-open backstop, issue-only).
+    local reconcile_reason="pr_open_no_outcome"
+    [ -n "$task_id" ] && reconcile_reason="status_ready_no_outcome"
 
     if [ -z "$task_id" ]; then
         # Distinguish "no status file exists at all" (synthesize a key —
@@ -3685,13 +4683,14 @@ maybe_run_check() {
     local claim_dir="$status_dir/${task_id}.check-claim"
     mkdir "$claim_dir" 2>/dev/null || return 0   # already claimed (in flight) — nothing to do
 
-    # issue #314: winning the claim is the one moment each done task passes
-    # through exactly once — synthesize the wake-triggering outcome file
+    # issue #451 (was #314's synth_outcome call): winning the claim is the
+    # one moment each done task passes through exactly once — reconcile
     # here, before any of the skip/return branches below, so EVERY done
-    # detection produces a coordinator wake (including pr_terminal skips:
-    # a merged-while-coordinator-slept PR is precisely a wake the
-    # coordinator missed).
-    synth_outcome "$wt_dir" "$issue" "$task_id"
+    # detection that still lacks an outcome record gets logged, including
+    # pr_terminal skips: a merged-while-coordinator-slept PR with no
+    # outcome yet is precisely a gap worth flagging. Never writes
+    # done/*.json itself.
+    reconcile_missing_outcome "$wt_dir" "$issue" "$task_id" "$reconcile_reason"
 
     # issue #181: the PR may already be MERGED/CLOSED by the time we win
     # the claim — the merge already validated the work, so spawning a
@@ -3866,7 +4865,7 @@ SCRIPT
 # run_auto_compact_poll_loop, started as its own background process right
 # after this function.
 run_watch_timer_loop() {
-    local last_pr_poll=0 last_orphan_sweep=0 last_bg_violation_sweep=0 last_activity_poll=0 last_coord_wake_retry=0 last_coord_wake_busy_retry=0 now
+    local last_pr_poll=0 last_orphan_sweep=0 last_bg_violation_sweep=0 last_activity_poll=0 last_coord_wake_retry=0 last_coord_wake_busy_retry=0 last_worktree_sweep=0 last_pending_brief_sweep=0 now
     while true; do
         sleep 2
         [ "$WATCH_CHECK_ON_DONE" = "1" ] && { status_poll_pass || true; }
@@ -3880,10 +4879,10 @@ run_watch_timer_loop() {
         # issue #430: independent cadence/state from the dirty-draft retry
         # above — see COORD_WAKE_BUSY_RETRY_SECS's header comment for why
         # these are two separate gates rather than one shared retry.
-        if [ "$COORD_WAKE_BUSY_RETRY_SECS" -gt 0 ]; then
+        if [ "$COORD_WAKE_HOLD_RETRY_SECS" -gt 0 ]; then
             now=$(date +%s)
-            if [ $((now - last_coord_wake_busy_retry)) -ge "$COORD_WAKE_BUSY_RETRY_SECS" ]; then
-                coord_wake_busy_retry_pass || true
+            if [ $((now - last_coord_wake_busy_retry)) -ge "$COORD_WAKE_HOLD_RETRY_SECS" ]; then
+                coord_wake_hold_retry_pass || true
                 last_coord_wake_busy_retry=$now
             fi
         fi
@@ -3915,6 +4914,20 @@ run_watch_timer_loop() {
                 last_activity_poll=$now
             fi
         fi
+        if [ "$WATCH_WORKTREE_SWEEP_SECS" -gt 0 ]; then
+            now=$(date +%s)
+            if [ $((now - last_worktree_sweep)) -ge "$WATCH_WORKTREE_SWEEP_SECS" ]; then
+                worktree_vanish_sweep_pass || true
+                last_worktree_sweep=$now
+            fi
+        fi
+        if [ "$WATCH_PENDING_BRIEF_SWEEP_SECS" -gt 0 ]; then
+            now=$(date +%s)
+            if [ $((now - last_pending_brief_sweep)) -ge "$WATCH_PENDING_BRIEF_SWEEP_SECS" ]; then
+                pending_brief_marker_sweep_pass || true
+                last_pending_brief_sweep=$now
+            fi
+        fi
     done
 }
 
@@ -3936,6 +4949,21 @@ run_auto_compact_poll_loop() {
     while true; do
         sleep "$AUTO_COMPACT_TICK_SECS"
         auto_compact_poll_pass || true
+    done
+}
+
+# run_stall_wake_loop
+#
+# issue #366 Part A: own background process, own STALL_WAKE_SECS interval —
+# same blocking-duration reasoning as run_auto_compact_poll_loop's header
+# comment above (a single stall_wake_pass call can go all the way through
+# llm-start.sh's flock'd injection path, which run_watch_timer_loop's other
+# passes can't afford to wait behind). Only started when STALL_WAKE_SECS>0
+# — see the loop-startup section near the bottom of this script.
+run_stall_wake_loop() {
+    while true; do
+        sleep "$STALL_WAKE_SECS"
+        stall_wake_pass || true
     done
 }
 
@@ -4143,10 +5171,21 @@ compact_last_pane_line() {
     #      at all before end-of-line); text a human actually typed carries no
     #      SGR at all. So capture with -e and strip dim segments BEFORE the
     #      general ANSI strip — what survives is what a person typed.
+    # (issue #436) A fourth chrome shape, distinct from the three above: the
+    # "※ recap:" line, the spinner's past/present-tense verb residue, and
+    # the "/clear to save Nk tokens" hint can each independently land as the
+    # pane's own LAST line — not just below a composer whose ctx: line is
+    # intact, but also when line-wrap (a longer token count, a narrower
+    # terminal) splits the hint off the "ctx: N/M (P%)" line this function
+    # already drops whole, so the ctx: exclusion above never sees it as part
+    # of the same line. See COMPACT_COMPOSER_CHROME_PATTERN's header comment
+    # for the full incident (a 1,812-skip/~14h stall against a genuinely
+    # empty composer) and why this is its own pattern rather than folded
+    # into the ctx:/shift-tab exclusion above.
     # The NBSP the TUI emits after ❯ is folded to a space so an empty prompt
     # trims to a genuinely empty string.
     printf '%s\n' "$clean" \
-        | LC_ALL=C grep -vE 'ctx: [0-9]+[kM]?/[0-9]+[kM]?[[:space:]]*\([0-9]+%\)|\(shift\+tab to cycle\)|^[[:space:]]*[─╭╮╰╯│]+[[:space:]]*$' \
+        | LC_ALL=C grep -vE "ctx: [0-9]+[kM]?/[0-9]+[kM]?[[:space:]]*\([0-9]+%\)|\(shift\+tab to cycle\)|^[[:space:]]*[─╭╮╰╯│]+[[:space:]]*\$|$COMPACT_COMPOSER_CHROME_PATTERN" \
         | sed -e '/^[[:space:]]*$/d' -e 's/^[[:space:]]*[❯>│|╭╮╰╯─]*[[:space:]]*//' -e 's/[[:space:]]*[│|╭╮╰╯─]*[[:space:]]*$//' | tail -1 || true
 }
 
@@ -4908,24 +5947,39 @@ worker_task_done() {
 # session (the same action a human would take per worker-listener.sh's own
 # printed instructions) hands control back to that already-correct loop.
 
+# worker_pending_brief_path <worktree-dir>
+#
+# Prints the path of the oldest real (non-tmp) brief sitting in
+# <worktree>/.swarm/tasks/inbox/, or nothing if none. Same non-tmp filter
+# and oldest-first ordering claim_next_task() itself uses, so the filename
+# this reports is always the one claim_next_task would actually pick up
+# next — needed so issue #437's worker.deliver.ok event can name the brief
+# it's reporting on, not just "something".
+worker_pending_brief_path() {
+    local wt_dir="$1"
+    find "$wt_dir/.swarm/tasks/inbox" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | sort | head -1
+}
+
 # worker_pending_brief <worktree-dir>
 #
 # True (rc 0) if a real (non-tmp) brief is sitting in <worktree>/.swarm/
-# tasks/inbox/, waiting to be claimed. Same non-tmp filter claim_next_task
-# itself uses, so this can never mistake a mid-write requeue.sh temp file
-# for a deliverable brief.
+# tasks/inbox/, waiting to be claimed.
 worker_pending_brief() {
-    local wt_dir="$1"
-    [ -n "$(find "$wt_dir/.swarm/tasks/inbox" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | head -1)" ]
+    [ -n "$(worker_pending_brief_path "$1")" ]
 }
 
 # worker_current_task_terminal <worktree-dir>
 #
-# True (rc 0) ONLY if the task currently claimed in <worktree>/.swarm/tasks/
-# processing/ (there is always exactly one there for as long as the agent
-# process is alive — claim_next_task() moves it there on pickup and doesn't
-# move it out again until dispatch_agent returns) has a status file
-# reporting a genuinely terminal state: "ready-for-review" or "done-no-pr".
+# True (rc 0) ONLY if the task currently claimed — normally the one entry
+# in <worktree>/.swarm/tasks/processing/ (claim_next_task() moves it there
+# on pickup and doesn't move it out again until dispatch_agent returns),
+# OR, since issue #451, the most recently archived done/*.md when
+# processing/ is already empty because scripts/task-done.sh moved it
+# there while the agent process is still alive (see this function's own
+# "if [ -z "$proc_file" ]" branch below for why processing/-empty can no
+# longer mean "nothing in flight" the way it always used to) — has a
+# status file reporting a genuinely terminal state: "ready-for-review" or
+# "done-no-pr".
 #
 # Self-review finding on this feature's first version: gating delivery on
 # pane idleness alone is not enough. A worker parked `blocked` (asked a
@@ -4950,12 +6004,18 @@ worker_pending_brief() {
 # Deliberately NOT worker_task_done(): that function's (a)/(b) signals are
 # themselves gated on `.swarm/tasks/processing/` being EMPTY (a staleness
 # guard against stale done/status files from an EARLIER, already-concluded
-# task — see its own header comment) — a precondition that can never hold
-# here, since processing/ holds exactly the in-flight task for as long as
-# its agent process is alive, i.e. for every window this function is even
-# called against. This reads the CURRENT processing/ entry's own status file
-# directly instead, with no such guard needed (there's nothing stale to
-# guard against — it's always THIS task's own record or nothing).
+# task — see its own header comment) — a precondition that, pre-#451,
+# could never hold while this function's primary (processing/-non-empty)
+# branch is the one running, since processing/ then holds exactly the
+# in-flight task for as long as its agent process is alive. This reads
+# the CURRENT processing/ entry's own status file directly instead, with
+# no such guard needed (there's nothing stale to guard against — it's
+# always THIS task's own record or nothing). The issue #451 fallback
+# branch below, which DOES run with processing/ empty, still doesn't
+# reuse worker_task_done() — it targets one specific archived task_id
+# (the most recently moved done/*.md) rather than accepting any
+# ready-for-review status file in the worktree, avoiding exactly the
+# stale-record risk worker_task_done()'s own guard exists for.
 #
 # issue #370: the exact-name lookup above can miss even when the current
 # task genuinely IS terminal — observed in the wild as status/issue-517.json
@@ -5017,7 +6077,55 @@ worker_current_task_terminal() {
     [ "$HAVE_JQ" = "1" ] || return 1
     local proc_file task_id status_file state
     proc_file="$(find "$wt_dir/.swarm/tasks/processing" -maxdepth 1 -type f 2>/dev/null | head -1)"
-    [ -n "$proc_file" ] || return 1
+    if [ -z "$proc_file" ]; then
+        # issue #451 self-review finding: scripts/task-done.sh (the
+        # worker's own mandatory last step) moves processing/<id>.md into
+        # done/ WHILE the dispatched agent process may still be alive —
+        # that's the entire point of task-done.sh (see its own header).
+        # Pre-#451, "processing/ is empty" only ever meant "no task in
+        # flight", so returning 1 (not confirmed terminal) here was safe.
+        # Now it doesn't: a worker that correctly calls task-done.sh would
+        # make this function return 1 FOREVER for that window, and per
+        # this function's own #370 comment above, task_not_terminal never
+        # self-heals on its own — permanently wedging WORKER_AUTO_DELIVER,
+        # the exact 2.5-hour fand-etl stall it exists to prevent. Recover
+        # the task_id from the most recently ARCHIVED brief in done/
+        # instead (ctime, same "when was this actually claimed/moved"
+        # signal the #370 fallback below already relies on — task-done.sh's
+        # mv bumps it same as claim_next_task's mv does) and apply the
+        # same terminal check against it. Deliberately NOT replicating
+        # #370's mismatched-status-filename fallback machinery below for
+        # this branch — that edge case is orthogonal and stays scoped to
+        # the processing/-based path; a done/*.{ok,err}.json's mere
+        # existence is checked instead, which needs no such fallback since
+        # (unlike a still-in-progress processing/ entry) task-done.sh only
+        # ever writes one once the worker has actually declared done.
+        local done_dir="$wt_dir/.swarm/tasks/done" f fctime best_ctime=-1
+        shopt -s nullglob
+        for f in "$done_dir"/*.md; do
+            fctime="$(ctime_epoch "$f")"
+            [ -n "$fctime" ] || continue
+            if [ "$fctime" -gt "$best_ctime" ]; then
+                best_ctime="$fctime"
+                proc_file="$f"
+            fi
+        done
+        shopt -u nullglob
+        [ -n "$proc_file" ] || return 1
+        task_id="$(basename "$proc_file" .md)"
+        status_file="$wt_dir/.swarm/tasks/status/${task_id}.json"
+        if [ -r "$status_file" ]; then
+            state="$(jq -r '.state // empty' "$status_file" 2>/dev/null)" || return 1
+            case "$state" in
+                ready-for-review|done-no-pr) return 0 ;;
+                *)                           return 1 ;;
+            esac
+        fi
+        if [ -f "$done_dir/${task_id}.ok.json" ] || [ -f "$done_dir/${task_id}.err.json" ]; then
+            return 0
+        fi
+        return 1
+    fi
     task_id="$(basename "$proc_file" .md)"
     status_file="$wt_dir/.swarm/tasks/status/${task_id}.json"
     if [ -r "$status_file" ]; then
@@ -5105,7 +6213,176 @@ worker_deliver_record_failure() {
 # worker_deliver_record_success <issue>
 worker_deliver_record_success() {
     local issue="$1"
-    unset "WORKER_DELIVER_LAST_FAIL[$issue]" "WORKER_DELIVER_FAIL_COUNT[$issue]" "WORKER_DELIVER_GAVE_UP[$issue]"
+    unset "WORKER_DELIVER_LAST_FAIL[$issue]" "WORKER_DELIVER_FAIL_COUNT[$issue]" "WORKER_DELIVER_GAVE_UP[$issue]" "WORKER_DELIVER_TIMED_OUT_BRIEF[$issue]"
+    worker_deliver_composer_stall_clear "$issue"
+}
+
+# WORKER_DELIVER_COMPOSER_STALL_BRIEF / _COUNT / _ESCALATED (issue #436)
+#
+# Cross-sweep bookkeeping keyed by issue: how many times in a row
+# reason=composer_not_clear has fired for the SAME pending brief — NOT
+# strictly "consecutive sweeps": a sweep that skips for a DIFFERENT reason
+# in between (pane_busy, backoff, task_not_terminal) leaves this count
+# untouched rather than resetting it, since none of those mean the
+# composer-clear problem went away. Only a different BRIEF resets it (see
+# worker_deliver_record_composer_stall below). This is deliberately
+# separate from WORKER_DELIVER_LAST_FAIL/FAIL_COUNT/GAVE_UP above — that
+# trio only ever gets touched by worker_deliver_record_failure, which is
+# called after a real /quit injection times out or lands as text;
+# composer_not_clear returns BEFORE maybe_worker_deliver_brief ever
+# attempts an injection, so it's structurally invisible to that machinery.
+# Without this, a stuck composer-clear read can skip forever with nothing
+# escalating it — exactly the corpusminder-spring 2026-09-18/19 incident
+# (1,812 consecutive skips, ~14h) this issue exists for. In-memory only,
+# reset on a watcher restart, same contract as every other WORKER_DELIVER_*
+# tracker.
+declare -A WORKER_DELIVER_COMPOSER_STALL_BRIEF=()
+declare -A WORKER_DELIVER_COMPOSER_STALL_COUNT=()
+declare -A WORKER_DELIVER_COMPOSER_STALL_ESCALATED=()
+
+# worker_deliver_composer_stall_clear <issue>
+#
+# Drops this issue's composer-stall bookkeeping entirely — called once a
+# delivery actually succeeds (worker_deliver_record_success) or
+# worker_deliver_detect_claim confirms the previously-stalled brief was
+# claimed some other way (a human's manual /quit). Distinct from the
+# per-brief reset inside worker_deliver_record_composer_stall itself (which
+# only fires on the NEXT composer_not_clear skip, keyed by comparing against
+# whatever brief is pending then) — this is the positive, success-side
+# cleanup so a resolved stall doesn't leave a stale WORKER_DELIVER_COMPOSER_
+# STALL_ESCALATED flag sitting around under this issue.
+worker_deliver_composer_stall_clear() {
+    local issue="$1"
+    unset "WORKER_DELIVER_COMPOSER_STALL_BRIEF[$issue]" "WORKER_DELIVER_COMPOSER_STALL_COUNT[$issue]" "WORKER_DELIVER_COMPOSER_STALL_ESCALATED[$issue]"
+}
+
+# worker_deliver_record_composer_stall <issue> <brief>
+#
+# Called on every worker.deliver.skip reason=composer_not_clear, right
+# alongside that log_event call. Resets the streak to 1 whenever <brief>
+# differs from the last one counted against for this issue — a NEW brief
+# landing means whatever was stalling before is moot, not a continuation of
+# the same stall (see this section's header comment). Once the streak
+# reaches WORKER_DELIVER_COMPOSER_STALL_THRESHOLD, logs ONE loud, distinct
+# worker.deliver.composer_stalled event — never repeated for the same
+# streak (WORKER_DELIVER_COMPOSER_STALL_ESCALATED) — and durably records it
+# to the coordinator inbox (coord_inbox_write, issue #430) so it surfaces on
+# the coordinator's NEXT wake even if nothing else wakes it in the
+# meantime, per prompts/coordinator.md's "Inbox" triage. Deliberately does
+# NOT set WORKER_DELIVER_GAVE_UP or otherwise stop maybe_worker_deliver_
+# brief from retrying — unlike a failed /quit injection, composer_not_clear
+# can still self-heal on its own (a human submits or clears their draft),
+# so there's nothing to "give up" on, only something to escalate.
+worker_deliver_record_composer_stall() {
+    local issue="$1" brief="$2" count
+    if [ "${WORKER_DELIVER_COMPOSER_STALL_BRIEF[$issue]:-}" != "$brief" ]; then
+        WORKER_DELIVER_COMPOSER_STALL_BRIEF[$issue]="$brief"
+        WORKER_DELIVER_COMPOSER_STALL_COUNT[$issue]=0
+        unset "WORKER_DELIVER_COMPOSER_STALL_ESCALATED[$issue]"
+    fi
+    count=$(( ${WORKER_DELIVER_COMPOSER_STALL_COUNT[$issue]:-0} + 1 ))
+    WORKER_DELIVER_COMPOSER_STALL_COUNT[$issue]=$count
+    if [ "$count" -ge "$WORKER_DELIVER_COMPOSER_STALL_THRESHOLD" ] && [ -z "${WORKER_DELIVER_COMPOSER_STALL_ESCALATED[$issue]:-}" ]; then
+        WORKER_DELIVER_COMPOSER_STALL_ESCALATED[$issue]=1
+        echo "[$(date +%T)] WARNING: worker iss-$issue has skipped brief delivery $count times (reason=composer_not_clear) for the same queued brief ($brief) — its composer may be misread as dirty (see COMPACT_COMPOSER_CHROME_PATTERN's header comment), or a real draft/decision is genuinely sitting there; investigate with scripts/capture-worker.sh iss-$issue"
+        log_event worker.deliver.composer_stalled "issue=$issue brief=$brief skips=$count"
+        coord_inbox_write deliver_stall "$(printf 'Worker iss-%s: brief delivery has skipped %s times (reason=composer_not_clear) for the queued brief %s.\n\nCheck: scripts/capture-worker.sh iss-%s\n\nThe composer-clear check may be misreading UI chrome as a draft (docs/tmux-as-channel.md §1d), or a human/decision is genuinely blocking the pane. If the pane really is stuck, attach and either clear the composer or run /quit manually so the queued brief can be claimed.\n' "$issue" "$count" "$brief" "$issue")" || true
+    fi
+}
+
+# WORKER_DELIVER_PENDING_SEEN (issue #437)
+#
+# Cross-sweep bookkeeping keyed by issue: the pending brief's basename last
+# observed while the window sat parked in "cli" state (empty string once
+# nothing is pending). Only ever touched from worker_deliver_detect_claim,
+# which maybe_worker_deliver_brief calls only after its own
+# `[ "$state" = "cli" ]` gate — so a "busy" or "shell" sweep never reaches
+# that call at all, and this tracker just holds its last cli-observed value
+# unchanged straight through those sweeps rather than being cleared. In-memory
+# only, same reset-on-restart contract as WORKER_DELIVER_LAST_FAIL et al above.
+declare -A WORKER_DELIVER_PENDING_SEEN=()
+
+# WORKER_DELIVER_TIMED_OUT_BRIEF (issue #437 self-review)
+#
+# Cross-sweep bookkeeping keyed by issue: the basename of the brief this
+# script's OWN /quit injection most recently gave up waiting on (maybe_
+# worker_deliver_brief's timeout branch below), kept until worker_deliver_
+# detect_claim actually observes that exact brief leave inbox/ for
+# processing/ — no matter how many sweeps later that turns out to be.
+# Without this, only the very next sweep after a timeout was protected from
+# misattributing a late-landing effect of our own /quit to a human's manual
+# one (release=listener_claim_after_quit); a second or third late sweep
+# would wrongly credit the human path. See worker_deliver_detect_claim's
+# header comment for how this is consumed.
+declare -A WORKER_DELIVER_TIMED_OUT_BRIEF=()
+
+# worker_deliver_detect_claim <issue> <worktree-dir> <pane-state>
+#
+# The events-log stall this closes (issue #437): a 2026-09-19 delivery
+# stall logged 1,812 worker.deliver.skip lines and nothing else, so once it
+# finally cleared there was no record of WHETHER it cleared because this
+# script's own /quit injection (below, "auto_deliver") finally succeeded,
+# or because a human noticed and attached to run /quit by hand
+# ("listener_claim_after_quit") — both leave the exact same end state (the
+# brief moved out of inbox/), and only maybe_worker_deliver_brief's own
+# synchronous wait loop can tell the two apart from the inside. This
+# function is that outside observer: called on every sweep a window sits in
+# "cli" state (mirroring exactly the scenario maybe_worker_deliver_brief
+# itself gates on — a worker parked at rest with a brief genuinely queued),
+# it remembers the pending brief's name and, if a PREVIOUSLY remembered
+# brief has since vanished, logs the generic success event for it — unless
+# maybe_worker_deliver_brief's own auto_deliver path already logged that
+# exact transition itself (it clears WORKER_DELIVER_PENDING_SEEN on success
+# before this function ever gets a chance to see the "vanished" half of the
+# transition, so the two can never double-log the same delivery).
+#
+# Deliberately scoped to state="cli" only (never called for "shell"): a
+# "shell" window is the listener's own idle poll loop already in control
+# and self-healing onto new briefs as ordinary, un-ambiguous operation
+# (issue #43) — logging every one of *those* routine claims as
+# "listener_claim_after_quit" would be false attribution (no /quit, manual
+# or otherwise, was ever involved) and would drown the genuinely-ambiguous
+# recoveries this event exists to surface in noise from normal traffic.
+#
+# Self-review finding: "prior brief no longer pending" alone isn't proof it
+# was actually claimed — a DRY_RUN=1 sweep (which intentionally never
+# delivers anything) still records a $prior, and if the worktree's queue
+# state is later disturbed some other way (an operator deleting the stale
+# brief outright, a test fixture resetting inbox/) that same $prior would
+# read as "vanished" with nothing to do with a real delivery. Requiring the
+# exact brief to actually be sitting in processing/ — claim_next_task's own
+# atomic mv target, which per worker_current_task_terminal()'s header
+# comment stays populated for the task's entire in-flight lifetime — is
+# cheap positive confirmation a genuine claim happened, not just an absence.
+#
+# Self-review finding (round 2): a vanished-and-now-claimed $prior is
+# ambiguous between two causes — a human attaching and running /quit by
+# hand, or this script's OWN earlier /quit finally taking effect after
+# maybe_worker_deliver_brief's synchronous wait already gave up and logged
+# worker.deliver.timeout. Checking WORKER_DELIVER_TIMED_OUT_BRIEF (set by
+# that timeout branch) tells the two apart correctly no matter how many
+# sweeps late the effect surfaces, instead of only the one sweep immediately
+# following the timeout.
+worker_deliver_detect_claim() {
+    local issue="$1" wt_dir="$2" state="$3"
+    local current="" prior
+    [ "$state" = "cli" ] && current="$(basename "$(worker_pending_brief_path "$wt_dir")" 2>/dev/null || true)"
+    prior="${WORKER_DELIVER_PENDING_SEEN[$issue]:-}"
+    if [ -n "$prior" ] && [ "$prior" != "$current" ] && [ -e "$wt_dir/.swarm/tasks/processing/$prior" ]; then
+        if [ -n "${WORKER_DELIVER_TIMED_OUT_BRIEF[$issue]:-}" ] && [ "$prior" = "${WORKER_DELIVER_TIMED_OUT_BRIEF[$issue]}" ]; then
+            log_event worker.deliver.ok "issue=$issue brief=$prior release=auto_deliver late=1"
+            unset "WORKER_DELIVER_TIMED_OUT_BRIEF[$issue]"
+        else
+            log_event worker.deliver.ok "issue=$issue brief=$prior release=listener_claim_after_quit"
+        fi
+        # issue #436: whatever composer-stall streak was counted against
+        # $prior is moot now that it's actually been claimed — clear it here
+        # too (not just on worker_deliver_record_success's auto_deliver
+        # path) so a listener_claim_after_quit resolution also drops a
+        # stale WORKER_DELIVER_COMPOSER_STALL_ESCALATED flag.
+        worker_deliver_composer_stall_clear "$issue"
+    fi
+    WORKER_DELIVER_PENDING_SEEN[$issue]="$current"
 }
 
 # maybe_worker_deliver_brief <window>
@@ -5129,7 +6406,11 @@ maybe_worker_deliver_brief() {
     # — nothing to do. "absent": no such window.
     [ "$state" = "cli" ] || return 0
 
-    worker_pending_brief "$wt_dir" || return 0
+    worker_deliver_detect_claim "$issue" "$wt_dir" "$state"
+
+    local brief_before
+    brief_before="$(basename "$(worker_pending_brief_path "$wt_dir")" 2>/dev/null || true)"
+    [ -n "$brief_before" ] || return 0
 
     # Self-review finding: never end a session whose CURRENT task hasn't
     # positively confirmed finishing — see worker_current_task_terminal()'s
@@ -5190,6 +6471,7 @@ maybe_worker_deliver_brief() {
     local target="$SESSION_NAME:$win"
     if ! compact_composer_clear "$target"; then
         log_event worker.deliver.skip "issue=$issue reason=composer_not_clear"
+        worker_deliver_record_composer_stall "$issue" "$brief_before"
         return 0
     fi
 
@@ -5256,12 +6538,32 @@ maybe_worker_deliver_brief() {
                 compact_retract_queued "$target" worker.deliver "issue=$issue" "$WORKER_COMPACT_BUSY_PATTERN" || true
             fi
             worker_deliver_record_failure "$issue"
+            # Self-review finding (issue #437): if this /quit's effect lands
+            # LATE — just past this timeout, e.g. a slow-to-render CLI
+            # finally processing it a beat after we gave up waiting — a
+            # future cli-state sweep's worker_deliver_detect_claim would
+            # otherwise see $brief_before vanish and, with nothing to say
+            # otherwise, misattribute this script's own (merely late)
+            # success to release=listener_claim_after_quit. Recording it
+            # here (rather than blindly clearing WORKER_DELIVER_PENDING_SEEN,
+            # which only protected the very next sweep — see that tracker's
+            # header comment) lets detect_claim correctly credit
+            # release=auto_deliver whenever this exact brief's departure is
+            # finally observed, however many sweeps late that is.
+            WORKER_DELIVER_TIMED_OUT_BRIEF[$issue]="$brief_before"
             return 0
         fi
     done
 
     echo "[$(date +%T)] worker $win session ended (${waited}s) — its listener claimed the pending brief."
     log_event worker.deliver.ended "issue=$issue waited=${waited}s"
+    log_event worker.deliver.ok "issue=$issue brief=$brief_before release=auto_deliver waited=${waited}s"
+    # Clears the transition worker_deliver_detect_claim would otherwise see
+    # on its NEXT sweep (prior=$brief_before, current=empty) — this success
+    # is already fully attributed above; without this, that next sweep
+    # would log the exact same delivery a second time as
+    # release=listener_claim_after_quit.
+    WORKER_DELIVER_PENDING_SEEN[$issue]=""
     worker_deliver_record_success "$issue"
 }
 
@@ -5611,37 +6913,342 @@ coord_inbox_nudge_text() {
     printf '%s\n' "${COORD_INBOX_NUDGE_TEMPLATE//%N/$n}"
 }
 
-# coord_wake_busy_mark_pending
+# ── issue #456: the doorbell debounce clock, on disk ─────────────────────────
 #
-# (issue #430) Records "a doorbell wake is currently withheld because the
-# coordinator pane was busy" by touching COORD_WAKE_BUSY_PENDING_FILE — its
-# content is unused (unlike COORD_WAKE_PENDING_FILE, which stores the
-# deferred prompt text itself; this gate's eventual delivery always
-# re-renders coord_inbox_nudge_text fresh, so there's nothing prompt-
-# specific to persist). Never re-touches an already-pending marker — same
-# "earliest defer time wins" reasoning as coord_wake_set_pending, since
-# COORD_WAKE_BUSY_CEILING_SECS counts from when the pane FIRST went busy
-# for this wake, not from the most recent on_outcome/on_message call that
-# found it still busy.
-coord_wake_busy_mark_pending() {
+# wake_clock_get echoes the epoch seconds of the last doorbell actually
+# delivered (0 when none ever was, or the file is missing/unparseable —
+# fail-open, i.e. "debounce window has long passed, ring it").
+# wake_clock_set stamps it. See COORD_WAKE_LAST_FILE's declaration for why
+# this is a file and not the pre-#456 pair of shell globals.
+wake_clock_get() {
+    local v
+    v="$(cat "$COORD_WAKE_LAST_FILE" 2>/dev/null)" || v=""
+    [[ "$v" =~ ^[0-9]+$ ]] || v=0
+    printf '%s\n' "$v"
+}
+
+wake_clock_set() {
+    printf '%s\n' "${1:-$(date +%s)}" > "$COORD_WAKE_LAST_FILE" 2>/dev/null || true
+}
+
+# wake_debounced
+#
+# True (rc 0) if a doorbell right now would fall inside DEBOUNCE_SECS of the
+# last one. DEBOUNCE_SECS=0 disables the window entirely.
+#
+# Never true under ONCE=1. Coalescing only makes sense when there is a later
+# tick to deliver the held doorbell on, and ONCE=1 exits after the first
+# wake — so a debounce hold there would strand the doorbell AND swallow the
+# exit, leaving the smoke-test watcher running forever. (Pre-#456 this was
+# latent: the clock was a per-process global, so a fresh ONCE=1 watcher
+# always started at 0 and never debounced. Making it a file, which is what
+# lets the retry pass in another process see it, is what exposed it.)
+wake_debounced() {
+    [ "$ONCE" = "1" ] && return 1
+    [ "$DEBOUNCE_SECS" -gt 0 ] || return 1
+    local last now
+    last="$(wake_clock_get)"
+    now=$(date +%s)
+    [ $((now - last)) -lt "$DEBOUNCE_SECS" ]
+}
+
+# ── issue #459: human-presence detection ────────────────────────────────────
+#
+# watcher_paste_epochs
+#
+# Echoes, one per line, the epoch seconds of every paste THIS WATCHER made
+# into a Claude Code pane recently enough to still matter — read back out of
+# its own events.log. Used by human_typed_since to subtract the watcher's own
+# pastes from "someone typed into this session".
+#
+# Why this is needed at all: a pasted doorbell is recorded in the session
+# transcript with `origin: {kind: "human"}` and `promptSource: "typed"` —
+# byte-identical in shape to the operator typing it by hand (verified on live
+# fand-app transcripts, 2026-09-23; worker brief deliveries land the same
+# way). There is no metadata field that distinguishes them, so the only
+# ground truth available is the watcher's own record of what it sent and when.
+#
+# Bounded by `tail -n $WATCHER_PASTE_SCAN_LINES` rather than reading the whole
+# log: only pastes inside the largest idle window can possibly correlate, and
+# events.log grows without bound over a swarm's life. 2000 lines is generous
+# on purpose — the window that matters is the largest idle window (10 min by
+# default), and a busy swarm mid-storm can log hundreds of events in that
+# time. Undershooting here is the one direction with a bad failure mode: a
+# paste whose event has scrolled out of the tail reads as a human, and the
+# doorbell stays held.
+WATCHER_PASTE_SCAN_LINES="${WATCHER_PASTE_SCAN_LINES:-2000}"
+watcher_paste_epochs() {
+    [ -r "$EVENTS_LOG" ] || return 0
+    tail -n "$WATCHER_PASTE_SCAN_LINES" "$EVENTS_LOG" 2>/dev/null \
+        | LC_ALL=C grep -E '(coord\.wake|coord\.wake\.deferred_delivered|worker\.deliver\.(ok|attempt))[[:space:]]' \
+        | awk '{print $1}' \
+        | while read -r ts; do
+              date -u -d "$ts" +%s 2>/dev/null || true
+          done
+}
+
+# human_typed_since <transcript-dir> <cutoff-epoch> <paste-epochs>
+#
+# True (rc 0) if that Claude Code session has a typed turn newer than
+# <cutoff-epoch> that is NOT one of this watcher's own pastes. <paste-epochs>
+# is watcher_paste_epochs' output, passed in so a sweep over many worker
+# sessions computes it once.
+#
+# Two independent exclusions, either of which marks a turn machine-origin:
+#
+#   1. Text match — the turn reads as the rendered inbox nudge (the template
+#      with its "%N" wildcarded) or opens with a known wake-prompt line.
+#   2. Event correlation — the turn's timestamp lands within
+#      COORD_HUMAN_PASTE_GRACE_SECS of a paste in <paste-epochs>.
+#   3. Length — the turn is longer than COORD_HUMAN_MAX_TYPED_CHARS. Worker
+#      brief deliveries are thousands of characters and match neither of the
+#      above (a brief is not the nudge, and its delivery event can scroll out
+#      of the tail); nobody types 2000 characters into a pane by hand.
+#
+# All three, not any one: text match alone misses operator-customised
+# templates (COORD_INBOX_NUDGE_TEMPLATE / WAKE_PROMPT are env-overridable),
+# event correlation alone misses a paste whose event has scrolled out of the
+# log tail, and length alone would misread a long pasted spec as machine.
+# Each exclusion only ever moves a turn from "human" to "machine", i.e.
+# toward ringing the doorbell — the safe direction.
+#
+# Fails OPEN throughout (rc 1 — "no human here") on a missing transcript dir,
+# absent jq, or an unreadable file. A muted swarm is a far worse failure than
+# a doorbell that rings while the operator is reading, so every uncertainty
+# resolves toward ringing.
+human_typed_since() {
+    local dir="$1" cutoff="$2" pastes="$3"
+    [ "$HAVE_JQ" = "1" ] || return 1
+    [ -d "$dir" ] || return 1
+
+    # Every transcript in this dir touched since the cutoff, not just the
+    # newest one. A single working dir routinely holds several concurrent
+    # session files — subagent runs write their own (promptSource "sdk", no
+    # typed turns at all), and a resumed session starts a fresh file — so
+    # "newest file" can easily be a subagent's while the operator is typing
+    # in the main session next to it, which would read as nobody here.
+    #
+    # The mtime pre-filter keeps this cheap: a dir with no recent activity
+    # costs one stat per file and no reads at all.
+    local candidates=() f fmtime
+    for f in "$dir"/*.jsonl; do
+        [ -r "$f" ] || continue
+        fmtime=$(mtime_epoch "$f") || fmtime=0
+        # mtime_epoch can echo nothing (both stat spellings failed); an empty
+        # operand makes `[ -ge ]` a syntax error under `set -e`, so normalize
+        # to 0 = "far older than any cutoff" rather than let it through.
+        [[ "$fmtime" =~ ^[0-9]+$ ]] || fmtime=0
+        [ "$fmtime" -ge "$cutoff" ] && candidates+=("$f")
+    done
+    [ "${#candidates[@]}" -gt 0 ] || return 1
+
+    # The nudge template with "%N" turned into a digit wildcard, anchored —
+    # so an operator quoting a nudge back mid-sentence doesn't match. The
+    # wildcard is ERE ("[0-9]+", not BRE's "[0-9]\+") because the matcher
+    # below is grep -E; getting that wrong makes the pattern match nothing,
+    # which reads every pasted doorbell as a human and mutes the swarm.
+    local nudge_re
+    nudge_re="^$(printf '%s' "$COORD_INBOX_NUDGE_TEMPLATE" \
+        | sed 's/[][\.^$*+?(){}|\\]/\\&/g; s/%N/[0-9]+/')"
+
+    # Walk each candidate's typed turns newest-first and stop at the first
+    # one that survives both exclusions. tac + grep on the raw line keeps jq
+    # off every line of what can be a very large transcript.
+    local line ts epoch text p wake_head
+    wake_head="$(printf '%s' "$WAKE_PROMPT" | head -1)"
+    for f in "${candidates[@]}"; do
+        while IFS= read -r line; do
+            ts="$(printf '%s' "$line" | jq -r '.timestamp // empty' 2>/dev/null)" || continue
+            [ -n "$ts" ] || continue
+            epoch=$(date -u -d "$ts" +%s 2>/dev/null) || continue
+            # Turns are appended in order, so once we are past the cutoff
+            # going backwards, every remaining turn in THIS file is older
+            # still — move on to the next candidate.
+            [ "$epoch" -ge "$cutoff" ] || break
+
+            text="$(printf '%s' "$line" | jq -r '
+                .message.content as $c |
+                if ($c | type) == "string" then $c
+                elif ($c | type) == "array" then ([$c[] | select(.type == "text") | .text] | join("\n"))
+                else "" end' 2>/dev/null)" || text=""
+
+            # Exclusion 3 — too long to have been typed by a person. Cheapest
+            # of the three, so it runs first.
+            [ "${#text}" -gt "$COORD_HUMAN_MAX_TYPED_CHARS" ] && continue
+
+            # Exclusion 1 — this is the watcher's own doorbell or wake prompt.
+            printf '%s' "$text" | LC_ALL=C grep -qE "$nudge_re" && continue
+            [ -n "$wake_head" ] && \
+                printf '%s' "$text" | LC_ALL=C grep -qF -- "$wake_head" && continue
+
+            # Exclusion 2 — it coincides with a paste the watcher logged.
+            local matched=0
+            for p in $pastes; do
+                local delta=$((epoch - p))
+                [ "$delta" -lt 0 ] && delta=$((-delta))
+                if [ "$delta" -le "$COORD_HUMAN_PASTE_GRACE_SECS" ]; then matched=1; break; fi
+            done
+            [ "$matched" = "1" ] && continue
+
+            return 0
+        # Whitespace-tolerant: the CLI writes compact JSON today, but a
+        # pretty-printed or re-spaced line must not silently read as "no
+        # typed turns here" — that direction ends in a permanently held
+        # doorbell. (A miss the other way just rings.)
+        done < <(LC_ALL=C grep -E '"promptSource"[[:space:]]*:[[:space:]]*"typed"' "$f" 2>/dev/null | tac)
+    done
+
+    return 1
+}
+
+# transcript_dir_for <dir>
+#
+# Echoes the Claude Code session-transcript directory for a working dir,
+# using the CLI's own slug convention (path with "/" → "-"). Same derivation
+# as scripts/capture-worker.sh's --verify path (issue #360) and
+# worker-listener.sh's no-op detector.
+transcript_dir_for() {
+    printf '%s\n' "$HOME/.claude/projects/$(printf '%s' "$1" | tr '/' '-')"
+}
+
+# coord_human_present
+#
+# True (rc 0) if the operator has typed into the COORDINATOR session within
+# COORD_HUMAN_IDLE_SECS. 0 disables the gate (pre-#459 behavior).
+coord_human_present() {
+    [ "$COORD_HUMAN_IDLE_SECS" -gt 0 ] || return 1
+    local cutoff
+    cutoff=$(( $(date +%s) - COORD_HUMAN_IDLE_SECS ))
+    human_typed_since "$(transcript_dir_for "$PROJECT_DIR")" "$cutoff" "$(watcher_paste_epochs)"
+}
+
+# worker_human_present
+#
+# True (rc 0) if the operator has typed into ANY of this project's own worker
+# sessions within WORKER_HUMAN_IDLE_SECS — the operator driving a worker pane
+# by hand is still the operator being present, and a coordinator that wakes
+# and re-dispatches underneath them is the same interruption. Scoped through
+# list-own-worktrees.sh (issue #357), never a flat glob, so a sibling
+# project's swarm in the same workspace can't hold this one's doorbells.
+#
+# In practice this is nearly always false and costs one mtime check per
+# worktree (human_typed_since's pre-filter) — worker sessions get very little
+# direct human input.
+worker_human_present() {
+    [ "$WORKER_HUMAN_IDLE_SECS" -gt 0 ] || return 1
+    local cutoff pastes wt
+    cutoff=$(( $(date +%s) - WORKER_HUMAN_IDLE_SECS ))
+    pastes="$(watcher_paste_epochs)"
+    while read -r wt; do
+        [ -n "$wt" ] || continue
+        human_typed_since "$(transcript_dir_for "$wt")" "$cutoff" "$pastes" && return 0
+    done < <(own_worktree_dirs_for_scan "$PROJECT_DIR" 2>/dev/null || true)
+    return 1
+}
+
+# swarm_busy
+#
+# True (rc 0) if any own worker is mid-turn, or has a brief sitting queued
+# and unclaimed in its tasks/inbox/ — i.e. work is already in flight and the
+# coordinator is not what it's waiting on.
+#
+# Deliberately NOT consulted by default (WAKE_DEFER_ON_SWARM_BUSY=0). Holding
+# doorbells while workers are busy was considered for issue #459 and rejected:
+# the moment one worker finishes while others churn, it parks idle needing a
+# top-up, and a swarm-busy gate suppresses precisely the wake that would
+# dispatch its next brief. On a long run the swarm never goes fully quiet, so
+# triage never re-engages and slots bleed. Human presence is the lever that
+# matches the reported problem; this one is kept behind a flag for the
+# low-value paths and for operators who want the stricter quiescence rule.
+#
+# Note the asymmetry in what counts: a brief ALREADY WRITTEN into a worker's
+# inbox and not yet claimed is busy (the work is dispatched; nothing is owed
+# by the coordinator). A worker parked with an EMPTY inbox is the opposite —
+# idle and demanding attention — and must never register as busy here, or the
+# gate would suppress the very doorbell that feeds it.
+swarm_busy() {
+    local wt issue
+    while read -r wt; do
+        [ -n "$wt" ] || continue
+        worker_pending_brief "$wt" && return 0
+        issue="$(basename "$wt" | sed -nE 's/^wt-issue-([0-9]+)$/\1/p')"
+        [ -n "$issue" ] || continue
+        worker_pane_busy "iss-$issue" && return 0
+    done < <(own_worktree_dirs_for_scan "$PROJECT_DIR" 2>/dev/null || true)
+    return 1
+}
+
+# coord_wake_hold_reason
+#
+# (issue #459) The single gate every doorbell path consults. Echoes the
+# reason this doorbell must be HELD right now, or nothing at all when it is
+# clear to ring. Reason vocabulary, and each one's retry policy in
+# coord_wake_hold_retry_pass:
+#
+#   human_present  the operator typed into the coordinator (or a worker)
+#                  session inside its idle window. NO CEILING — a present
+#                  human is never forced over; the doorbell waits for them
+#                  to leave. Durability is unaffected: inbox payloads are
+#                  written unconditionally (#430), so nothing is lost.
+#   pane_busy      the coordinator is mid-turn (#430). Ceilinged by
+#                  COORD_WAKE_BUSY_CEILING_SECS — Claude Code queues a paste
+#                  into a busy pane, so forcing eventually is safe.
+#   debounce       another doorbell rang inside DEBOUNCE_SECS (#456). Clears
+#                  on its own once the window passes.
+#   swarm_busy     opt-in only (WAKE_DEFER_ON_SWARM_BUSY=1), ceilinged the
+#                  same way pane_busy is.
+#
+# Order matters: the reason reported is the one a human reading the log most
+# needs to see, so human presence outranks a busy pane outranks the clock.
+coord_wake_hold_reason() {
+    coord_human_present && { printf 'human_present\n'; return 0; }
+    worker_human_present && { printf 'human_present\n'; return 0; }
+    if [ "$COORD_WAKE_BUSY_RETRY_SECS" -gt 0 ] && coordinator_pane_busy; then
+        printf 'pane_busy\n'; return 0
+    fi
+    if [ "$WAKE_DEFER_ON_SWARM_BUSY" = "1" ] && swarm_busy; then
+        printf 'swarm_busy\n'; return 0
+    fi
+    wake_debounced && { printf 'debounce\n'; return 0; }
+    return 0
+}
+
+# coord_wake_hold_mark_pending <reason>
+#
+# (issue #430; #459 added the reason) Records "a doorbell wake is currently
+# withheld, for <reason>" by writing COORD_WAKE_HOLD_PENDING_FILE. Only the
+# reason is persisted, not the nudge text (unlike COORD_WAKE_PENDING_FILE,
+# which stores the deferred prompt itself) — this gate's eventual delivery
+# always re-renders coord_inbox_nudge_text fresh, so a nudge held for an
+# hour still reports an accurate live inbox count.
+#
+# Never overwrites an already-pending marker — same "earliest defer time
+# wins" reasoning as coord_wake_set_pending, since COORD_WAKE_BUSY_CEILING_
+# SECS counts from when this wake was FIRST held, not from the most recent
+# on_outcome/on_message call that found it still held. The first reason
+# recorded therefore sticks even if the cause has since changed; that only
+# affects the log line and the ceiling, and coord_wake_hold_retry_pass
+# re-evaluates the LIVE reason on every tick before deciding anything.
+coord_wake_hold_mark_pending() {
+    local reason="${1:-pane_busy}"
     (
         flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 9 || exit 0
-        [ -e "$COORD_WAKE_BUSY_PENDING_FILE" ] && exit 0
-        touch "$COORD_WAKE_BUSY_PENDING_FILE" 2>/dev/null || true
+        [ -e "$COORD_WAKE_HOLD_PENDING_FILE" ] && exit 0
+        printf '%s\n' "$reason" > "$COORD_WAKE_HOLD_PENDING_FILE" 2>/dev/null || true
     ) 9>"$COORD_WAKE_LOCK" || true
 }
 
-# coord_wake_busy_clear_pending
+# coord_wake_hold_clear_pending
 #
-# (issue #430) Removes COORD_WAKE_BUSY_PENDING_FILE — called once
-# coord_wake_busy_retry_pass has either delivered the wake (pane went idle,
+# (issue #430) Removes COORD_WAKE_HOLD_PENDING_FILE — called once
+# coord_wake_hold_retry_pass has either delivered the wake (pane went idle,
 # or the ceiling fired) or handed it off to the dirty-draft mechanism
 # instead (coord_wake_set_pending).
-coord_wake_busy_clear_pending() {
-    ( flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 9 && rm -f "$COORD_WAKE_BUSY_PENDING_FILE" ) 9>"$COORD_WAKE_LOCK" || true
+coord_wake_hold_clear_pending() {
+    ( flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 9 && rm -f "$COORD_WAKE_HOLD_PENDING_FILE" ) 9>"$COORD_WAKE_LOCK" || true
 }
 
-# coord_wake_busy_retry_pass
+# coord_wake_hold_retry_pass
 #
 # (issue #430) Ticked from run_watch_timer_loop on COORD_WAKE_BUSY_RETRY_SECS
 # — a no-op when nothing is busy-pending. Otherwise: if the pane is STILL
@@ -5657,52 +7264,75 @@ coord_wake_busy_clear_pending() {
 # mechanism: once the busy phase is over, a human draft sitting in the
 # composer is exactly issue #422's case, with its own indefinite-retry-
 # without-forcing semantics.
-coord_wake_busy_retry_pass() {
-    [ -e "$COORD_WAKE_BUSY_PENDING_FILE" ] || return 0
+coord_wake_hold_retry_pass() {
+    [ -e "$COORD_WAKE_HOLD_PENDING_FILE" ] || return 0
 
-    local since now age
-    since=$(mtime_epoch "$COORD_WAKE_BUSY_PENDING_FILE") || since=$(date +%s)
+    local since now age held_for
+    since=$(mtime_epoch "$COORD_WAKE_HOLD_PENDING_FILE") || since=$(date +%s)
     now=$(date +%s)
     age=$((now - since))
+    # Pre-#459 writers left this file empty; empty always meant pane_busy.
+    held_for="$(cat "$COORD_WAKE_HOLD_PENDING_FILE" 2>/dev/null | tr -d '[:space:]')" || held_for=""
+    [ -n "$held_for" ] || held_for="pane_busy"
 
-    local still_busy=0
-    coordinator_pane_busy && still_busy=1
+    # Re-evaluate LIVE — the reason recorded at mark time may have cleared,
+    # or been replaced by a different one (the operator started typing while
+    # the pane was busy, say). The recorded reason only decides the ceiling.
+    local reason_now
+    reason_now="$(coord_wake_hold_reason)"
 
-    if [ "$still_busy" = "1" ] && { [ "$COORD_WAKE_BUSY_CEILING_SECS" -eq 0 ] || [ "$age" -lt "$COORD_WAKE_BUSY_CEILING_SECS" ]; }; then
-        return 0
-    fi
-
-    if [ "$still_busy" = "1" ]; then
-        echo "[$(date +%T)] coordinator busy-deferred wake hit its ${COORD_WAKE_BUSY_CEILING_SECS}s ceiling — delivering anyway"
-        log_event coord.wake.defer_ceiling "age=${age}s"
+    if [ -n "$reason_now" ]; then
+        # issue #459: a present human is NEVER forced over. Unlike a busy
+        # pane (Claude Code queues a paste into one, so forcing eventually is
+        # safe), pasting into a session someone is actively working in is the
+        # exact interruption this gate exists to prevent — so no ceiling
+        # applies while a human is here, however long that lasts. The inbox
+        # payload is already durable (#430); only the nudge waits.
+        if [ "$reason_now" = "human_present" ]; then
+            return 0
+        fi
+        # Every other reason is self-clearing (debounce) or ceilinged.
+        if [ "$reason_now" = "debounce" ]; then
+            return 0
+        fi
+        if [ "$COORD_WAKE_BUSY_CEILING_SECS" -eq 0 ] || [ "$age" -lt "$COORD_WAKE_BUSY_CEILING_SECS" ]; then
+            return 0
+        fi
+        echo "[$(date +%T)] coordinator wake held for ${reason_now} hit its ${COORD_WAKE_BUSY_CEILING_SECS}s ceiling — delivering anyway"
+        log_event coord.wake.defer_ceiling "age=${age}s reason=$reason_now"
     fi
 
     local nudge
     nudge="$(coord_inbox_nudge_text)"
 
     if [ "$DRY_RUN" = "1" ]; then
-        echo "[DRY] would deliver busy-deferred wake: cd $PROJECT_DIR && NON_INTERACTIVE=1 $LLM_START \"$nudge\" (deferred ${age}s)"
-        coord_wake_busy_clear_pending
+        echo "[DRY] would deliver held wake: cd $PROJECT_DIR && NON_INTERACTIVE=1 $LLM_START \"$nudge\" (held ${age}s, reason=$held_for)"
+        coord_wake_hold_clear_pending
+        wake_clock_set "$now"
         return 0
     fi
 
-    echo "[$(date +%T)] delivering busy-deferred coordinator wake (pending ${age}s)..."
+    echo "[$(date +%T)] delivering held coordinator wake (pending ${age}s, reason=$held_for)..."
     local wake_rc=0
     ( flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 9 && cd "$PROJECT_DIR" && NON_INTERACTIVE=1 "$LLM_START" "$nudge" ) 9>"$COORD_WAKE_LOCK" || wake_rc=$?
-    coord_wake_busy_clear_pending
+    coord_wake_hold_clear_pending
     case "$wake_rc" in
         0)
-            echo "[$(date +%T)] busy-deferred coordinator wake delivered."
-            log_event coord.wake.deferred_delivered "age=${age}s trigger=pane_busy"
+            echo "[$(date +%T)] held coordinator wake delivered."
+            log_event coord.wake.deferred_delivered "age=${age}s trigger=$held_for"
+            # issue #456: stamp the shared debounce clock. Pre-#456 this path
+            # didn't, so a held delivery left the window looking stale and the
+            # next outcome could ring again seconds later.
+            wake_clock_set "$now"
             ;;
         3)
             echo "[$(date +%T)] coordinator composer now holds an unsubmitted draft — handing off to the dirty-composer retry"
-            log_event coord.wake.deferred "reason=composer_dirty trigger=pane_busy_handoff age=${age}s"
+            log_event coord.wake.deferred "reason=composer_dirty trigger=${held_for}_handoff age=${age}s"
             coord_wake_set_pending "$nudge"
             ;;
         *)
-            echo "[$(date +%T)] WARN: busy-deferred coordinator wake retry exited non-zero (continuing watch)"
-            log_event coord.wake.error "trigger=pane_busy_retry rc=$wake_rc age=${age}s"
+            echo "[$(date +%T)] WARN: held coordinator wake retry exited non-zero (continuing watch)"
+            log_event coord.wake.error "trigger=${held_for}_retry rc=$wake_rc age=${age}s"
             ;;
     esac
 }
@@ -5813,9 +7443,18 @@ coord_wake_retry_pass() {
     # existing indefinite-retry-with-WARN treatment above; this only delays
     # delivery while the pane is ACTIVELY busy) and let the next
     # COORD_WAKE_RETRY_SECS tick re-check.
-    if [ "$COORD_WAKE_BUSY_RETRY_SECS" -gt 0 ] && coordinator_pane_busy; then
-        echo "[$(date +%T)] deferred coordinator wake still pending (pane now busy) — retrying next tick"
-        log_event coord.wake.skip "reason=pane_busy trigger=retry age=${age}s"
+    #
+    # issue #459 widened this from coordinator_pane_busy to the full hold
+    # gate: an operator who submitted that draft and is now mid-conversation
+    # is the same "don't splice a stale wake into their turn" case, and a
+    # dirty composer that has since been submitted is exactly how a session
+    # with a live human looks. Same skip-this-tick treatment, whatever the
+    # reason.
+    local hold_reason
+    hold_reason="$(coord_wake_hold_reason)"
+    if [ -n "$hold_reason" ]; then
+        echo "[$(date +%T)] deferred coordinator wake still pending (held: $hold_reason) — retrying next tick"
+        log_event coord.wake.skip "reason=$hold_reason trigger=retry age=${age}s"
         return 0
     fi
 
@@ -5851,17 +7490,34 @@ coord_wake_retry_pass() {
 # Trigger logic — called when a NEW outcome JSON path is observed
 on_outcome() {
     local path="$1"
-    local now issue outcome
+    local now issue outcome task_id is_correction
     now=$(date +%s)
 
-    # Parse outcome filename: <task-id>-<issue>.<ok|err>.json
-    issue=$(basename "$path" | sed -E 's/.*-([0-9]+)\.(ok|err)\.json$/\1/')
+    issue=$(outcome_path_issue "$path")
+    task_id=$(outcome_path_task_id "$path")
     case "$path" in
         *.ok.json)  outcome=ok ;;
         *.err.json) outcome=err ;;
         *)          outcome=unknown ;;
     esac
-    log_event worker.finish "issue=$issue outcome=$outcome path=$path"
+
+    # issue #468: recognize a check-fail retry's corrected record (a
+    # DIFFERENT filename for a task_id already announced once — see
+    # OUTCOME_TASK_ANNOUNCED's and outcome_path_task_id's own comments)
+    # before it can fire a second real coordinator wake for the same brief.
+    # Marked immediately, not after any of the work below, so this task_id
+    # is "announced" the instant its FIRST completion is seen — regardless
+    # of whether that first wake ends up held/deferred by debounce further
+    # down; a correction must never get to add a second episode.
+    is_correction=0
+    [ -n "${OUTCOME_TASK_ANNOUNCED[$task_id]:-}" ] && is_correction=1
+    OUTCOME_TASK_ANNOUNCED["$task_id"]=1
+
+    if [ "$is_correction" = "1" ]; then
+        log_event worker.finish.corrected "issue=$issue outcome=$outcome task_id=$task_id path=$path"
+    else
+        log_event worker.finish "issue=$issue outcome=$outcome path=$path"
+    fi
 
     # Audit posting fires for EVERY outcome (not gated by wake-debounce).
     # The sweep is idempotent via .posted markers, so repeated calls are
@@ -5898,9 +7554,42 @@ on_outcome() {
         fi
     fi
 
-    if [ $((now - LAST_WAKE)) -lt "$DEBOUNCE_SECS" ]; then
-        echo "[$(date +%T)] outcome: $path — within debounce window (${DEBOUNCE_SECS}s), skipping wake"
-        log_event coord.wake.skip "issue=$issue reason=debounce window=${DEBOUNCE_SECS}s"
+    # issue #468: a correction gets logged (above) and durably recorded (the
+    # sweep post + coord-inbox write above already ran) but never a second
+    # doorbell paste — the coordinator already got a real wake for this
+    # task_id and will pick up the corrected content on its own next wake
+    # (any trigger), per #430's "the inbox is durable, the paste is just a
+    # nudge" design. Stopping here also skips autoclose/debounce/hold-state
+    # bookkeeping below, none of which a correction should touch.
+    #
+    # KNOWN TRADEOFF (self-review of this PR, not yet acted on): unlike the
+    # debounce/hold-busy paths below, a correction never marks
+    # COORD_WAKE_HOLD_PENDING_FILE — so if this correction's outcome is the
+    # LAST event of the watcher's session (nothing else ever wakes the
+    # coordinator again), its coord-inbox entry can sit unread indefinitely.
+    # Same failure shape #456 fixed for debounce collisions ("zero doorbells
+    # was the bug"), deliberately left open here because closing it would
+    # need a bounded, correction-specific eventual-delivery timer distinct
+    # from the debounce/busy retry machinery (which exists to coalesce
+    # bursts, not to guarantee a single deferred delivery) — worth a
+    # follow-up issue, not a same-session fix on top of two other findings.
+    if [ "$is_correction" = "1" ]; then
+        echo "[$(date +%T)] outcome: $path — correction of an already-announced task_id=$task_id, no second wake"
+        return
+    fi
+
+    # issue #456: a debounced doorbell is HELD, not dropped. Pre-#456 this
+    # returned outright, so when two workers finished inside one window the
+    # second outcome's inbox item had no doorbell attached at all and could
+    # sit unread until some unrelated later wake — measured at ~11h in the
+    # 2026-09-22 SAMlytics incident. Marking it pending hands it to
+    # coord_wake_hold_retry_pass, which rings once the window passes; N
+    # skipped doorbells coalesce into one "Inbox: N item(s)" nudge, which is
+    # the intended outcome. Zero doorbells was the bug.
+    if wake_debounced; then
+        echo "[$(date +%T)] outcome: $path — within debounce window (${DEBOUNCE_SECS}s), holding doorbell for retry"
+        log_event coord.wake.defer "issue=$issue reason=debounce window=${DEBOUNCE_SECS}s trigger=outcome"
+        coord_wake_hold_mark_pending debounce
         return
     fi
 
@@ -5914,19 +7603,24 @@ on_outcome() {
 
     echo "[$(date +%T)] outcome: $path"
 
-    # issue #430: don't paste a doorbell into a mid-turn coordinator pane —
-    # Claude Code queues an ill-timed paste and delivers it as an unrelated
-    # ❯ user turn spliced into whatever the coordinator was already doing
-    # (the fand-app swarm PR #1108 merge-turn incident, 2026-09-16, that
-    # prompted this issue). This gate sits BEFORE maybe_auto_compact too: a
-    # /compact injection is itself a paste into the same composer, so
-    # there's nothing safe to attempt while busy either.
-    # COORD_WAKE_BUSY_RETRY_SECS=0 is the rollback switch back to the
-    # pre-#430 always-paste-immediately behavior.
-    if [ "$COORD_WAKE_BUSY_RETRY_SECS" -gt 0 ] && coordinator_pane_busy; then
-        echo "[$(date +%T)] coordinator pane is mid-turn — deferring wake doorbell, will retry"
-        log_event coord.wake.defer "issue=$issue reason=pane_busy trigger=outcome"
-        coord_wake_busy_mark_pending
+    # issue #430/#459: don't paste a doorbell into a coordinator pane that
+    # isn't free to take it. #430 covered "mid-turn" — Claude Code queues an
+    # ill-timed paste and delivers it as an unrelated ❯ user turn spliced
+    # into whatever the coordinator was already doing (the fand-app swarm PR
+    # #1108 merge-turn incident, 2026-09-16). #459 added "the operator is
+    # sitting here working" — a pane between turns reads idle, which is
+    # exactly when someone is reading and thinking. coord_wake_hold_reason
+    # is the single gate; see its header for the reason vocabulary.
+    #
+    # This gate sits BEFORE maybe_auto_compact too: a /compact injection is
+    # itself a paste into the same composer, so there's nothing safe to
+    # attempt while held either.
+    local hold_reason
+    hold_reason="$(coord_wake_hold_reason)"
+    if [ -n "$hold_reason" ]; then
+        echo "[$(date +%T)] coordinator not free to take a doorbell ($hold_reason) — deferring, will retry"
+        log_event coord.wake.defer "issue=$issue reason=$hold_reason trigger=outcome"
+        coord_wake_hold_mark_pending "$hold_reason"
     else
         maybe_auto_compact wake
 
@@ -5973,18 +7667,18 @@ on_outcome() {
                 coord_wake_clear_pending
                 # issue #430 self-review finding, same class as #422's above:
                 # a PRIOR outcome/message could have busy-marked a pending
-                # doorbell (coord_wake_busy_mark_pending) that hasn't been
+                # doorbell (coord_wake_hold_mark_pending) that hasn't been
                 # retried yet — if the pane went idle and THIS wake pasted
-                # directly (this branch) before coord_wake_busy_retry_pass's
+                # directly (this branch) before coord_wake_hold_retry_pass's
                 # next tick, that marker is now stale. Left uncleared,
-                # coord_wake_busy_retry_pass would still deliver a SECOND,
+                # coord_wake_hold_retry_pass would still deliver a SECOND,
                 # redundant nudge once its tick runs, even though the
                 # coordinator already got one just now.
-                coord_wake_busy_clear_pending
+                coord_wake_hold_clear_pending
             fi
         fi
     fi
-    LAST_WAKE=$now
+    wake_clock_set "$now"
 
     if [ "$ONCE" = "1" ]; then
         echo "[$(date +%T)] ONCE=1 — exiting after first wake."
@@ -6041,20 +7735,25 @@ on_message() {
         fi
     fi
 
-    if [ $((now - LAST_MSG_WAKE)) -lt "$DEBOUNCE_SECS" ]; then
-        echo "[$(date +%T)] message: $path — within debounce window (${DEBOUNCE_SECS}s), skipping wake"
-        log_event coord.wake.skip "issue=$issue reason=debounce window=${DEBOUNCE_SECS}s trigger=outbox"
+    # issue #456 — see on_outcome's identical branch for the full rationale
+    # (hold, don't drop; the outbox path had the same hole).
+    if wake_debounced; then
+        echo "[$(date +%T)] message: $path — within debounce window (${DEBOUNCE_SECS}s), holding doorbell for retry"
+        log_event coord.wake.defer "issue=$issue reason=debounce window=${DEBOUNCE_SECS}s trigger=outbox"
+        coord_wake_hold_mark_pending debounce
         return
     fi
 
     echo "[$(date +%T)] message: $path"
 
-    # issue #430: same busy-pane doorbell gate as on_outcome — see that
+    # issue #430/#459: same doorbell hold gate as on_outcome — see that
     # function's identical branch for the full rationale.
-    if [ "$COORD_WAKE_BUSY_RETRY_SECS" -gt 0 ] && coordinator_pane_busy; then
-        echo "[$(date +%T)] coordinator pane is mid-turn — deferring wake doorbell, will retry"
-        log_event coord.wake.defer "issue=$issue reason=pane_busy trigger=outbox"
-        coord_wake_busy_mark_pending
+    local hold_reason
+    hold_reason="$(coord_wake_hold_reason)"
+    if [ -n "$hold_reason" ]; then
+        echo "[$(date +%T)] coordinator not free to take a doorbell ($hold_reason) — deferring, will retry"
+        log_event coord.wake.defer "issue=$issue reason=$hold_reason trigger=outbox"
+        coord_wake_hold_mark_pending "$hold_reason"
     else
         maybe_auto_compact wake
 
@@ -6086,13 +7785,13 @@ on_message() {
                 coord_wake_clear_pending
                 # issue #430 self-review finding — see on_outcome's identical
                 # branch for the full rationale (drop a stale busy-pending
-                # marker too, or coord_wake_busy_retry_pass's next tick would
+                # marker too, or coord_wake_hold_retry_pass's next tick would
                 # deliver a redundant second nudge).
-                coord_wake_busy_clear_pending
+                coord_wake_hold_clear_pending
             fi
         fi
     fi
-    LAST_MSG_WAKE=$now
+    wake_clock_set "$now"
 
     if [ "$ONCE" = "1" ]; then
         echo "[$(date +%T)] ONCE=1 — exiting after first wake."
@@ -6166,6 +7865,124 @@ Re-check your own picture of outstanding decisions/PRs/issues against this (gh p
     [ "$write_ok" = "1" ] || return 1
     LAST_ACTIVITY_WAKE=$now
     return 0
+}
+
+# stall_wake_pass
+#
+# (issue #366 Part A) Ticked from its own background loop, run_stall_wake_loop,
+# on STALL_WAKE_SECS — not from any worker event, since the whole point is to
+# resurface a swarm where no worker event is ever going to arrive. Mirrors
+# on_message's shape (inbox write -> debounce/hold gate -> pre-wake compact ->
+# llm-start -> ONCE) with no triggering path to name and no autoclose/sweep
+# (nothing finished; there's nothing to post or reap).
+#
+# "No wake of any kind delivered for STALL_WAKE_SECS" is read off
+# wake_clock_get — the same on-disk clock on_outcome/on_message already stamp
+# on every real wake (delivered OR hold-deferred; see their own wake_clock_set
+# call sites) via wake_debounced's DEBOUNCE_SECS window. Reusing it here means
+# a real outcome/message wake, at ANY point, pushes the next stall check out
+# by a full STALL_WAKE_SECS with no extra bookkeeping — exactly the "timer
+# reset by any real wake" the issue's constraints ask for. A stall wake that
+# itself gets delivered also stamps the clock (same call site, below), which
+# is what keeps this to "at most one stall wake per interval" rather than
+# firing again on every subsequent tick until something else resets it.
+stall_wake_pass() {
+    [ "$STALL_WAKE_SECS" -gt 0 ] || return 0
+    # Operator park switch (issue #366): a marker file, not just
+    # STALL_WAKE_SECS=0, so a deliberately idled swarm can go quiet without
+    # losing the configured interval.
+    [ -e "$SWARM_PARKED_FILE" ] && return 0
+
+    local now last_wake quiet_secs
+    now=$(date +%s)
+    last_wake="$(wake_clock_get)"
+    # wake_clock_get fails open to 0 ("no wake ever") — on a freshly started
+    # watcher that reads as quiet since the Unix epoch, which would fire on
+    # the very first tick regardless of STALL_WAKE_SECS. Anchor "never" to
+    # this watcher's own start time instead (see WATCHER_STARTED_AT_EPOCH's
+    # header comment).
+    [ "$last_wake" -gt 0 ] || last_wake="$WATCHER_STARTED_AT_EPOCH"
+    quiet_secs=$((now - last_wake))
+    [ "$quiet_secs" -ge "$STALL_WAKE_SECS" ] || return 0
+
+    log_event stall.check "quiet_secs=$quiet_secs threshold=${STALL_WAKE_SECS}s"
+
+    # issue #430: unconditional inbox write before any debounce/hold check —
+    # see on_outcome's identical step for the full rationale.
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "[$(date +%T)] [DRY] would write coord-inbox entry: trigger=stall quiet_secs=$quiet_secs"
+    else
+        if coord_inbox_write stall "$STALL_WAKE_PROMPT"; then
+            log_event coord.inbox.write "trigger=stall quiet_secs=$quiet_secs"
+        else
+            echo "[$(date +%T)] WARN: failed to write coord-inbox entry for stall wake" >&2
+        fi
+    fi
+
+    # issue #456 — hold, don't drop; see on_outcome's identical branch. Note
+    # this does NOT call wake_clock_set: a debounce skip must leave the clock
+    # exactly where the wake it's coalescing behind left it, or a run of
+    # skips would keep pushing the window forward and the debounce would
+    # never actually clear (same reasoning as on_outcome's own debounce
+    # branch, which returns before its wake_clock_set call too).
+    if wake_debounced; then
+        echo "[$(date +%T)] stall: within debounce window (${DEBOUNCE_SECS}s), holding doorbell for retry"
+        log_event coord.wake.defer "reason=debounce window=${DEBOUNCE_SECS}s trigger=stall"
+        coord_wake_hold_mark_pending debounce
+        return
+    fi
+
+    echo "[$(date +%T)] stall: quiet for ${quiet_secs}s (>= ${STALL_WAKE_SECS}s) — waking coordinator..."
+
+    # issue #430/#459: same doorbell hold gate as on_outcome/on_message — see
+    # coord_wake_hold_reason's header for the reason vocabulary. This is what
+    # makes a stall wake safe against a present operator or an unsubmitted
+    # composer draft (issue #366 Part B, already shipped as #431/#440/#460)
+    # without this function needing to know anything about either.
+    local hold_reason
+    hold_reason="$(coord_wake_hold_reason)"
+    if [ -n "$hold_reason" ]; then
+        echo "[$(date +%T)] coordinator not free to take a doorbell ($hold_reason) — deferring, will retry"
+        log_event coord.wake.defer "reason=$hold_reason trigger=stall"
+        coord_wake_hold_mark_pending "$hold_reason"
+    else
+        maybe_auto_compact wake
+
+        echo "[$(date +%T)] waking coordinator (stall)..."
+        local nudge
+        nudge="$(coord_inbox_nudge_text)"
+        log_event coord.wake "trigger=stall quiet_secs=$quiet_secs"
+
+        if [ "$DRY_RUN" = "1" ]; then
+            echo "[DRY] would: cd $PROJECT_DIR && NON_INTERACTIVE=1 $LLM_START \"$nudge\""
+        else
+            # Same flock'd single injection site every other wake path uses
+            # — see on_outcome's identical call site for the full rationale.
+            local wake_rc=0
+            ( flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 9 && cd "$PROJECT_DIR" && NON_INTERACTIVE=1 "$LLM_START" "$nudge" ) 9>"$COORD_WAKE_LOCK" || wake_rc=$?
+            if [ "$wake_rc" = "3" ]; then
+                # issue #422 — see on_outcome's identical branch.
+                echo "[$(date +%T)] coordinator composer holds an unsubmitted draft — deferring wake, will retry"
+                log_event coord.wake.deferred "reason=composer_dirty trigger=stall"
+                coord_wake_set_pending "$nudge"
+            elif [ "$wake_rc" != "0" ]; then
+                echo "[$(date +%T)] WARN: coordinator wake exited non-zero (continuing watch)"
+                log_event coord.wake.error "trigger=stall rc=$wake_rc"
+            else
+                coord_wake_clear_pending
+                coord_wake_hold_clear_pending
+            fi
+        fi
+    fi
+    wake_clock_set "$now"
+    # No ONCE=1 exit branch here, unlike on_outcome/on_message: this function
+    # runs inside run_stall_wake_loop's OWN backgrounded process (`&`), so an
+    # `exit` here would only kill that background timer — not the watcher —
+    # while still logging a misleading "whole daemon exited" event. ONCE=1's
+    # smoke-test semantics belong to the foreground dispatch loop that owns
+    # process lifetime; every other background-loop pass (auto_compact_poll_
+    # pass, coord_wake_retry_pass, coord_wake_hold_retry_pass, pr_poll_pass)
+    # follows the same rule and has no ONCE handling either.
 }
 
 # ---------------------------------------------------------------------------
@@ -6293,17 +8110,17 @@ run_poll() {
 # share run_watch_timer_loop's process.
 # ---------------------------------------------------------------------------
 # issue #430: COORD_WAKE_BUSY_RETRY_SECS must also start this loop —
-# coord_wake_busy_retry_pass is ticked from inside it, same as every other
+# coord_wake_hold_retry_pass is ticked from inside it, same as every other
 # pass here — or a deployment with every other timer-loop feature disabled
 # (all plausible in a minimal/test config) would silently never retry a
 # busy-pane-deferred wake at all, leaving it stuck until the process
 # restarts. (COORD_WAKE_RETRY_SECS, issue #422's older dirty-draft retry,
 # has this identical gap and predates this fix — out of scope here, but
 # worth folding in alongside this one if it's ever revisited.)
-if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ] || [ "$WATCH_ORPHAN_SWEEP_SECS" -gt 0 ] || [ "$WATCH_BG_VIOLATION_SWEEP_SECS" -gt 0 ] || [ "$WATCH_ACTIVITY_POLL_SECS" -gt 0 ] || [ "$COORD_WAKE_BUSY_RETRY_SECS" -gt 0 ]; then
+if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ] || [ "$WATCH_ORPHAN_SWEEP_SECS" -gt 0 ] || [ "$WATCH_BG_VIOLATION_SWEEP_SECS" -gt 0 ] || [ "$WATCH_ACTIVITY_POLL_SECS" -gt 0 ] || [ "$WATCH_WORKTREE_SWEEP_SECS" -gt 0 ] || [ "$WATCH_PENDING_BRIEF_SWEEP_SECS" -gt 0 ] || [ "$COORD_WAKE_HOLD_RETRY_SECS" -gt 0 ]; then
     run_watch_timer_loop &
     WATCH_TIMER_PID=$!
-    log_event watch.timer.start "pr_poll_secs=$WATCH_PR_POLL_SECS check_on_done=$WATCH_CHECK_ON_DONE orphan_sweep_secs=$WATCH_ORPHAN_SWEEP_SECS bg_violation_sweep_secs=$WATCH_BG_VIOLATION_SWEEP_SECS activity_poll_secs=$WATCH_ACTIVITY_POLL_SECS"
+    log_event watch.timer.start "pr_poll_secs=$WATCH_PR_POLL_SECS check_on_done=$WATCH_CHECK_ON_DONE orphan_sweep_secs=$WATCH_ORPHAN_SWEEP_SECS bg_violation_sweep_secs=$WATCH_BG_VIOLATION_SWEEP_SECS activity_poll_secs=$WATCH_ACTIVITY_POLL_SECS worktree_sweep_secs=$WATCH_WORKTREE_SWEEP_SECS pending_brief_sweep_secs=$WATCH_PENDING_BRIEF_SWEEP_SECS"
 fi
 if [ "$WORKER_AUTO_COMPACT" = "1" ] || [ "$WORKER_AUTO_DELIVER" = "1" ]; then
     run_worker_compact_loop &
@@ -6314,6 +8131,13 @@ if [ "$AUTO_COMPACT" = "1" ] && [ "$AUTO_COMPACT_TICK_SECS" -gt 0 ]; then
     run_auto_compact_poll_loop &
     AUTO_COMPACT_POLL_TIMER_PID=$!
     log_event watch.timer.start "auto_compact_tick_secs=$AUTO_COMPACT_TICK_SECS auto_compact_cooldown_secs=$AUTO_COMPACT_COOLDOWN_SECS"
+fi
+# issue #366 Part A — opt-in only; a swarm that never sets STALL_WAKE_SECS
+# gets no new process and no behavior change at all.
+if [ "$STALL_WAKE_SECS" -gt 0 ]; then
+    run_stall_wake_loop &
+    STALL_WAKE_TIMER_PID=$!
+    log_event watch.timer.start "stall_wake_secs=$STALL_WAKE_SECS"
 fi
 # issue #296 — unconditional (subject only to its own WATCHER_STALE_CHECK
 # flag), unlike the three loops above which only start when their own

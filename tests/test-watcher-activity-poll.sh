@@ -338,7 +338,7 @@ grep -q 'WAKE:' "$WAKE_LOG" && red "coordinator was woken despite the gh pr list
 green "a gh pr list failure logs activity_poll.error, skips the wake/inbox-write, and leaves the daemon running"
 
 # ============================================================================
-heading "Test 5: COORD_WAKE_LOCK serializes on_outcome against coord_wake_busy_retry_pass (issue #430, successor to #392's on_activity pairing)"
+heading "Test 5: COORD_WAKE_LOCK serializes on_outcome against coord_wake_hold_retry_pass (issue #430, successor to #392's on_activity pairing)"
 # ============================================================================
 # Before issue #430, on_activity was the OTHER process that could call
 # llm-start.sh concurrently with on_outcome/on_message (it ran from
@@ -350,7 +350,7 @@ heading "Test 5: COORD_WAKE_LOCK serializes on_outcome against coord_wake_busy_r
 # pass (issue #430's busy-pane doorbell retry) now runs from that exact
 # same backgrounded subshell and DOES call llm-start.sh, so the identical
 # concern applies to the new pairing. This test extracts on_outcome/
-# coord_wake_busy_retry_pass/coordinator_pane_busy/log_event verbatim (sed,
+# coord_wake_hold_retry_pass/coordinator_pane_busy/log_event verbatim (sed,
 # not a hand-retyped copy — same technique test-coordinator-auto-compact.sh
 # uses for maybe_auto_compact) and fires them genuinely concurrently, each
 # in its own subshell, against a deliberately slow LLM_START stub that
@@ -360,9 +360,12 @@ extract_fn() {
     local fn="$1"
     sed -n "/^${fn}() {/,/^}/p" "$WATCH"
 }
-for fn in log_event on_outcome coord_wake_set_pending coord_wake_clear_pending \
+for fn in log_event on_outcome outcome_path_issue outcome_path_task_id coord_wake_set_pending coord_wake_clear_pending \
           coord_inbox_write coord_inbox_count coord_inbox_nudge_text \
-          coord_wake_busy_mark_pending coord_wake_busy_clear_pending coord_wake_busy_retry_pass \
+          coord_wake_hold_mark_pending coord_wake_hold_clear_pending coord_wake_hold_retry_pass \
+          coord_wake_hold_reason coord_human_present worker_human_present swarm_busy \
+          human_typed_since transcript_dir_for watcher_paste_epochs \
+          wake_clock_get wake_clock_set wake_debounced \
           coordinator_pane_busy mtime_epoch; do
     body="$(extract_fn "$fn")"
     [ -n "$body" ] || red "could not extract function '$fn' from $WATCH — has it been renamed?"
@@ -375,6 +378,11 @@ maybe_auto_compact() { :; }
 # cleanup_eligible_workers is only reached when WATCHER_AUTOCLOSE=1 below;
 # stubbed for the same reason (out of scope for this test).
 cleanup_eligible_workers() { :; }
+# on_outcome's retry-correction dedup (issue #468) keys this associative
+# array; the watcher declares it at top level, which function extraction
+# never copies — without the declare, bash treats the non-numeric task_id
+# subscript arithmetically and the eval'd on_outcome dies under set -u.
+declare -A OUTCOME_TASK_ANNOUNCED=()
 
 LOCK_TEST_DIR="$TEST_DIR/lock-test"
 mkdir -p "$LOCK_TEST_DIR"
@@ -390,14 +398,24 @@ COORD_WAKE_LOCK_TIMEOUT_SECS=10
 COORD_WAKE_PENDING_FILE="$LOCK_TEST_DIR/coord-wake-pending.prompt"
 COORD_WAKE_PENDING_WARNED_FILE="$LOCK_TEST_DIR/coord-wake-pending.warned"
 # issue #430: this test's busy-pane pairing needs its own pending marker
-# and inbox dir; COORD_WAKE_BUSY_RETRY_SECS=0 makes on_outcome's OWN busy
-# check a no-op (it always proceeds straight to llm-start.sh, exercising
-# the exact same race the old on_outcome/on_activity pairing had) — the
-# busy-pane-retry side of the race comes entirely from the separately
-# invoked coord_wake_busy_retry_pass call below, which is unconditional.
-COORD_WAKE_BUSY_PENDING_FILE="$LOCK_TEST_DIR/coord-wake-busy-pending"
+# and inbox dir; every hold gate is switched OFF below so on_outcome's own
+# coord_wake_hold_reason check is a no-op (it always proceeds straight to
+# llm-start.sh, exercising the exact same race the old on_outcome/on_activity
+# pairing had) — the retry side of the race comes entirely from the
+# separately invoked coord_wake_hold_retry_pass call below, which is
+# unconditional.
+COORD_WAKE_HOLD_PENDING_FILE="$LOCK_TEST_DIR/coord-wake-busy-pending"
+COORD_WAKE_LAST_FILE="$LOCK_TEST_DIR/coord-wake-last"
 COORD_WAKE_BUSY_RETRY_SECS=0
 COORD_WAKE_BUSY_CEILING_SECS=900
+# issue #459/#456: the rest of the hold vocabulary, all disabled here.
+COORD_HUMAN_IDLE_SECS=0
+WORKER_HUMAN_IDLE_SECS=0
+COORD_HUMAN_PASTE_GRACE_SECS=15
+COORD_HUMAN_MAX_TYPED_CHARS=2000
+WATCHER_PASTE_SCAN_LINES=2000
+WAKE_DEFER_ON_SWARM_BUSY=0
+DEBOUNCE_SECS=0
 COORD_INBOX_DIR="$LOCK_TEST_DIR/coord-inbox"
 COORD_INBOX_PROCESSED_DIR="$COORD_INBOX_DIR/processed"
 COORD_INBOX_NUDGE_TEMPLATE="Inbox: %N item(s) probe"
@@ -414,7 +432,6 @@ POST_OUTCOMES=0
 DRY_RUN=0
 ONCE=0
 WAKE_PROMPT="outcome-wake-prompt-probe"
-LAST_WAKE=0
 
 CALL_TIMELINE="$LOCK_TEST_DIR/call-timeline.log"
 : > "$CALL_TIMELINE"
@@ -427,18 +444,20 @@ printf 'END   %s\n' "\$(date +%s%N)" >> "$CALL_TIMELINE"
 EOF
 chmod +x "$LLM_START"
 
-# Simulate "already deferred" for the busy-retry side of the race.
-touch "$COORD_WAKE_BUSY_PENDING_FILE"
+# Simulate "already held" for the retry side of the race. The marker's
+# CONTENT is the hold reason since issue #459 — "pane_busy" here, matching
+# what the pre-#459 empty marker always meant.
+printf 'pane_busy\n' > "$COORD_WAKE_HOLD_PENDING_FILE"
 
 ( on_outcome "$LOCK_TEST_DIR/wt-issue-42/.swarm/tasks/done/t42-42.ok.json" ) &
 OUTCOME_PID=$!
-( coord_wake_busy_retry_pass ) &
+( coord_wake_hold_retry_pass ) &
 RETRY_PID=$!
 wait "$OUTCOME_PID" 2>/dev/null || true
 wait "$RETRY_PID" 2>/dev/null || true
 
 [ "$(grep -c '^START' "$CALL_TIMELINE")" = "2" ] \
-    || red "expected both on_outcome and coord_wake_busy_retry_pass to reach llm-start.sh; call timeline:
+    || red "expected both on_outcome and coord_wake_hold_retry_pass to reach llm-start.sh; call timeline:
 $(cat "$CALL_TIMELINE")"
 
 # Both calls now paste the SAME generic inbox nudge (issue #430), so
@@ -452,9 +471,9 @@ sort -k2,2n "$CALL_TIMELINE" > "$CALL_TIMELINE.sorted"
 mapfile -t TYPES < <(awk '{print $1}' "$CALL_TIMELINE.sorted")
 if [ "${#TYPES[@]}" = "4" ] && [ "${TYPES[0]}" = "START" ] && [ "${TYPES[1]}" = "END" ] \
         && [ "${TYPES[2]}" = "START" ] && [ "${TYPES[3]}" = "END" ]; then
-    green "on_outcome and coord_wake_busy_retry_pass's llm-start.sh calls did not overlap — COORD_WAKE_LOCK serialized them"
+    green "on_outcome and coord_wake_hold_retry_pass's llm-start.sh calls did not overlap — COORD_WAKE_LOCK serialized them"
 else
-    red "on_outcome and coord_wake_busy_retry_pass's llm-start.sh calls OVERLAPPED — COORD_WAKE_LOCK did not serialize them. Timeline (sorted):
+    red "on_outcome and coord_wake_hold_retry_pass's llm-start.sh calls OVERLAPPED — COORD_WAKE_LOCK did not serialize them. Timeline (sorted):
 $(cat "$CALL_TIMELINE.sorted")"
 fi
 

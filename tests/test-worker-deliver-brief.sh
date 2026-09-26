@@ -45,11 +45,12 @@ extract_fn() {
     local fn="$1"
     sed -n "/^${fn}() {/,/^}/p" "$WATCH"
 }
-for fn in worker_pane_state worker_pane_busy worker_pane_ctx_used worker_pending_brief \
+for fn in worker_pane_state worker_pane_busy worker_pane_ctx_used worker_pending_brief_path worker_pending_brief \
           worker_current_task_terminal mtime_epoch ctime_epoch compact_last_pane_line compact_composer_clear \
           compact_confirm_submitted compact_retract_queued worker_deliver_record_failure \
-          worker_deliver_record_success maybe_worker_deliver_brief log_event \
-          is_own_worktree_dir own_wt_dir_for_issue; do
+          worker_deliver_record_success worker_deliver_detect_claim maybe_worker_deliver_brief log_event \
+          is_own_worktree_dir own_wt_dir_for_issue worker_deliver_composer_stall_clear \
+          worker_deliver_record_composer_stall coord_inbox_write; do
     body="$(extract_fn "$fn")"
     [ -n "$body" ] || red "could not extract function '$fn' from $WATCH — has it been renamed?"
     eval "$body"
@@ -67,12 +68,28 @@ WORKER_DELIVER_POLL_SECS=1
 WORKER_DELIVER_END_TIMEOUT_SECS=10
 WORKER_DELIVER_BACKOFF_SECS=600
 WORKER_DELIVER_MAX_FAILURES=3
+WORKER_DELIVER_COMPOSER_STALL_THRESHOLD=20
 COMPACT_QUEUED_MARKER_PATTERN='Press up to edit queued messages'
 COMPACT_RETRACT_BACKSPACES=3
 COMPACT_SUBMIT_SETTLE_SECS=0
+# issue #436: must match coordinator-watch.sh's own default — see the
+# WORKER_COMPACT_BUSY_PATTERN comment just above for why these fixtures
+# copy real defaults instead of leaving the var unset (this file's own
+# `set -u` would otherwise abort the moment compact_last_pane_line
+# references it).
+COMPACT_COMPOSER_CHROME_PATTERN='^※ recap:|^[[:space:]]*(✻|✶)[[:space:]]*(Considering…|Sautéed for|Cooked for|Baked for|Simmered for|Brewed for|Crunched for)?|/clear to save [0-9.]+k tokens'
 declare -A WORKER_DELIVER_LAST_FAIL=()
 declare -A WORKER_DELIVER_FAIL_COUNT=()
 declare -A WORKER_DELIVER_GAVE_UP=()
+declare -A WORKER_DELIVER_PENDING_SEEN=()
+declare -A WORKER_DELIVER_COMPOSER_STALL_BRIEF=()
+declare -A WORKER_DELIVER_COMPOSER_STALL_COUNT=()
+declare -A WORKER_DELIVER_COMPOSER_STALL_ESCALATED=()
+# coord_inbox_write (issue #430) is exercised by worker_deliver_record_
+# composer_stall's escalation path (Test 10 below) — same fixture
+# convention as test-watcher-activity-poll.sh's copy of these two vars.
+COORD_INBOX_DIR="$TEST_DIR/coord-inbox"
+COORD_INBOX_PROCESSED_DIR="$COORD_INBOX_DIR/processed"
 
 # own_wt_dir_for_issue (issue #357/#388) resolves wt_dir via
 # is_own_worktree_dir(), which needs $PROJECT_DIR set to do its `git -C
@@ -85,7 +102,8 @@ WT_DIR="$WORKSPACE/wt-issue-42"
 INBOX_DIR="$WT_DIR/.swarm/tasks/inbox"
 PROCESSING_DIR="$WT_DIR/.swarm/tasks/processing"
 STATUS_DIR="$WT_DIR/.swarm/tasks/status"
-mkdir -p "$INBOX_DIR" "$PROCESSING_DIR" "$STATUS_DIR"
+DONE_DIR="$WT_DIR/.swarm/tasks/done"
+mkdir -p "$INBOX_DIR" "$PROCESSING_DIR" "$STATUS_DIR" "$DONE_DIR"
 WIN="iss-42"
 
 # set_current_task <task_id> [state]
@@ -265,6 +283,46 @@ rc=0; worker_current_task_terminal "$WT_DIR" || rc=$?
 check "newest post-claim candidate is unparseable -> rc1 (nothing confirmed, fails closed, never a bare return-0 default)" "1" "$rc"
 
 rm -f "$PROCESSING_DIR"/*.md "$STATUS_DIR"/*.json 2>/dev/null || true
+
+heading "Test 2c: worker_current_task_terminal — processing/ already emptied by scripts/task-done.sh (issue #451 self-review finding)"
+# The regression this guards: scripts/task-done.sh (the worker's own
+# mandatory last step, prompts/worker.md § "Task completion") moves
+# processing/<id>.md into done/ WHILE the dispatched agent process may
+# still be alive — that's the entire point of task-done.sh. Before this
+# fix, an empty processing/ always meant "no task in flight" and this
+# function correctly returned 1; now it doesn't, and every worker that
+# correctly calls task-done.sh would wedge WORKER_AUTO_DELIVER forever
+# (task_not_terminal never self-heals on its own — see this function's
+# own #370 comment above).
+rm -f "$PROCESSING_DIR"/*.md "$STATUS_DIR"/*.json "$DONE_DIR"/*.md "$DONE_DIR"/*.json 2>/dev/null || true
+rc=0; worker_current_task_terminal "$WT_DIR" || rc=$?
+check "empty processing/, nothing archived in done/ either -> rc1 (nothing to check)" "1" "$rc"
+
+# task-done.sh's own archive move + a matching status file.
+echo "the current task brief" > "$DONE_DIR/t451.md"
+printf '{"task_id":"t451","state":"blocked","pr":null,"ts":"2026-01-01T00:00:00Z","note":""}' \
+    > "$STATUS_DIR/t451.json"
+rc=0; worker_current_task_terminal "$WT_DIR" || rc=$?
+check "processing/ empty, archived brief's OWN status file says blocked -> rc1 (not actually done)" "1" "$rc"
+
+printf '{"task_id":"t451","state":"ready-for-review","pr":null,"ts":"2026-01-01T00:00:00Z","note":""}' \
+    > "$STATUS_DIR/t451.json"
+rc=0; worker_current_task_terminal "$WT_DIR" || rc=$?
+check "processing/ empty, archived brief's status says ready-for-review -> rc0 (task-done.sh's worker genuinely finished)" "0" "$rc"
+
+# No status file at all under the archived task_id's name — task-done.sh's
+# own outcome record (which it always writes as part of the same action
+# that empties processing/) is sufficient on its own.
+rm -f "$STATUS_DIR"/*.json
+rc=0; worker_current_task_terminal "$WT_DIR" || rc=$?
+check "processing/ empty, archived brief but no status file and no outcome record yet -> rc1 (can't confirm)" "1" "$rc"
+
+printf '{"task_id":"t451","outcome":"ok","finished":"2026-01-01T00:00:00Z","source":"task-done.sh"}' \
+    > "$DONE_DIR/t451.ok.json"
+rc=0; worker_current_task_terminal "$WT_DIR" || rc=$?
+check "processing/ empty, archived brief, done/t451.ok.json exists (task-done.sh's own record) -> rc0" "0" "$rc"
+
+rm -f "$PROCESSING_DIR"/*.md "$STATUS_DIR"/*.json "$DONE_DIR"/*.md "$DONE_DIR"/*.json 2>/dev/null || true
 
 heading "Test 3: maybe_worker_deliver_brief — gating (DRY_RUN)"
 tmux new-session -d -s "$SESSION_NAME" -n "$WIN" 2>/dev/null
@@ -476,6 +534,37 @@ fi
 rc=0; worker_pending_brief "$WT_DIR" || rc=$?
 check "brief left inbox/ (claimed by the fake listener) -> worker_pending_brief now rc1" "1" "$rc"
 
+# issue #437: the positive counterpart to worker.deliver.skip — names the
+# exact brief and attributes this success to the watcher's own /quit
+# injection, not a human's manual one.
+if grep -qF "worker.deliver.ok" "$EVENTS_LOG" \
+    && grep -qF "brief=$(basename "$BRIEF_FILE") release=auto_deliver" "$EVENTS_LOG"; then
+    got=logged
+else
+    got=missing
+fi
+check "worker.deliver.ok logged with the delivered brief's filename and release=auto_deliver (issue #437)" "logged" "$got"
+
+# A LATER sweep that again finds this window parked in "cli" state (its
+# relaunched agent going idle, say) must NOT re-attribute the delivery this
+# test already logged as auto_deliver to a second, false
+# listener_claim_after_quit event. Without clearing WORKER_DELIVER_
+# PENDING_SEEN on auto_deliver success, worker_deliver_detect_claim would
+# see prior=<the just-delivered brief> (still set from the sweep above) and
+# current="" (nothing pending now) on this next cli-state sweep, and
+# wrongly log it a second time.
+tmux send-keys -t "$SESSION_NAME:$WIN" "sleep 300" Enter
+check_eventually "pane parked in cli again (e.g. next task's agent going idle)" "cli" "worker_pane_state '$WIN'"
+maybe_worker_deliver_brief "$WIN"
+if grep -qF "listener_claim_after_quit" "$EVENTS_LOG"; then
+    red "auto_deliver success was double-logged as listener_claim_after_quit on a later cli-state sweep; events.log: $(cat "$EVENTS_LOG")"
+else
+    green "no double-log: a later cli-state sweep stays silent on this issue (WORKER_DELIVER_PENDING_SEEN cleared on auto_deliver success)"
+    PASS=$((PASS + 1))
+fi
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.2
+
 heading "Test 7: agent doesn't recognize /quit (e.g. a non-claude CLI) -> times out and fails safe"
 # Same shape as Test 6's fixture, but this fake REPL never treats /quit as
 # special — it just echoes it back like any other line, the way a CLI with
@@ -509,6 +598,82 @@ WORKER_DELIVER_END_TIMEOUT_SECS=3 WORKER_DELIVER_POLL_SECS=1 maybe_worker_delive
 if grep -q 'worker.deliver.timeout' "$EVENTS_LOG"; then got=timedout; else got=nottimedout; fi
 check "agent doesn't recognize /quit -> times out (fails safe)" "timedout" "$got"
 check "pane still 'cli' -> the session was never actually ended" "cli" "$(worker_pane_state "$WIN")"
+
+# Self-review finding (issue #437, round 2): a /quit that only takes effect
+# LATE — just past this timeout — must be credited to release=auto_deliver
+# (this script's own delayed success), not misattributed to
+# release=listener_claim_after_quit (a human's manual /quit). Simulated here
+# by having the brief vanish (mimicking a delayed effect of the /quit this
+# script already sent).
+mv "$INBOX_DIR/20260826-150000-42.md" "$PROCESSING_DIR/20260826-150000-42.md"
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.2
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'sonnet · wt-issue-42 · ctx: 20k/1M (2%)'; printf '❯ \n'; sleep 300" Enter
+check_eventually "pane parked in cli again after the timed-out attempt" "cli" "worker_pane_state '$WIN'"
+maybe_worker_deliver_brief "$WIN"
+if grep -qF "listener_claim_after_quit" "$EVENTS_LOG"; then
+    red "a late self-effected /quit was misattributed to listener_claim_after_quit; events.log: $(cat "$EVENTS_LOG")"
+elif grep -qF "worker.deliver.ok" "$EVENTS_LOG" \
+    && grep -qF "brief=20260826-150000-42.md release=auto_deliver late=1" "$EVENTS_LOG"; then
+    green "correct attribution: a late own-effect /quit is credited to release=auto_deliver, not listener_claim_after_quit"
+    PASS=$((PASS + 1))
+else
+    red "no attribution at all was logged for the late own-effect departure; events.log: $(cat "$EVENTS_LOG")"
+fi
+
+heading "Test 7b: the tightened guard survives MORE than one intervening idle sweep (issue #437 self-review, round 2)"
+# The original guard (blindly clearing WORKER_DELIVER_PENDING_SEEN on
+# timeout) only protected the ONE sweep immediately following a timeout —
+# a second consecutive idle sweep before the late departure would re-arm
+# tracking and the eventual departure would misattribute to
+# release=listener_claim_after_quit. WORKER_DELIVER_TIMED_OUT_BRIEF must
+# survive an extra idle sweep (nothing changed yet) in between.
+unset 'WORKER_DELIVER_LAST_FAIL[42]' 'WORKER_DELIVER_FAIL_COUNT[42]' 'WORKER_DELIVER_GAVE_UP[42]'
+: > "$EVENTS_LOG"
+rm -f "$INBOX_DIR"/*.md "$PROCESSING_DIR"/*.md
+BRIEF_FILE_LATE="$INBOX_DIR/20260826-155000-42.md"
+echo "another late brief" > "$BRIEF_FILE_LATE"
+set_current_task "t3b" "done-no-pr"   # current task already finished
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.3
+tmux send-keys -t "$SESSION_NAME:$WIN" "bash -c 'exec -a gemini bash $FAKE_REPL2'" Enter
+check_eventually "fake non-quitting REPL foreground -> cli" "cli" "worker_pane_state '$WIN'"
+
+WORKER_DELIVER_END_TIMEOUT_SECS=3 WORKER_DELIVER_POLL_SECS=1 maybe_worker_deliver_brief "$WIN"
+if grep -q 'worker.deliver.timeout' "$EVENTS_LOG"; then got=timedout; else got=nottimedout; fi
+check "second scenario's timeout logged" "timedout" "$got"
+
+# One intervening idle sweep: nothing has changed yet (brief still pending
+# in inbox/) — this must leave WORKER_DELIVER_TIMED_OUT_BRIEF intact.
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.2
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'sonnet · wt-issue-42 · ctx: 20k/1M (2%)'; printf '❯ \n'; sleep 300" Enter
+check_eventually "pane parked in cli for the intervening sweep" "cli" "worker_pane_state '$WIN'"
+maybe_worker_deliver_brief "$WIN"
+if grep -q 'worker.deliver.ok' "$EVENTS_LOG"; then
+    red "an idle sweep with nothing changed should log nothing yet; events.log: $(cat "$EVENTS_LOG")"
+else
+    green "intervening idle sweep (brief still pending) stays silent, as expected"
+    PASS=$((PASS + 1))
+fi
+
+# NOW the late effect actually lands — two sweeps after the original timeout,
+# exactly the gap the original one-sweep-only guard didn't cover.
+mv "$BRIEF_FILE_LATE" "$PROCESSING_DIR/$(basename "$BRIEF_FILE_LATE")"
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.2
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'sonnet · wt-issue-42 · ctx: 20k/1M (2%)'; printf '❯ \n'; sleep 300" Enter
+check_eventually "pane parked in cli for the actual late departure" "cli" "worker_pane_state '$WIN'"
+maybe_worker_deliver_brief "$WIN"
+if grep -qF "listener_claim_after_quit" "$EVENTS_LOG"; then
+    red "a late self-effected /quit, two sweeps out, was misattributed to listener_claim_after_quit; events.log: $(cat "$EVENTS_LOG")"
+elif grep -qF "worker.deliver.ok" "$EVENTS_LOG" \
+    && grep -qF "brief=$(basename "$BRIEF_FILE_LATE") release=auto_deliver late=1" "$EVENTS_LOG"; then
+    green "correct attribution survives more than one intervening sweep (issue #437 self-review, round 2)"
+    PASS=$((PASS + 1))
+else
+    red "no attribution logged for the two-sweeps-late departure; events.log: $(cat "$EVENTS_LOG")"
+fi
 
 heading "Test 8: relaunch-race (issue #344) — /quit followed by an IMMEDIATE relaunch must still record success, never a false timeout/retract into the new session"
 # The bug this closes: worker-listener.sh's claim_next_task() atomically
@@ -571,6 +736,190 @@ if grep -q 'worker.deliver.timeout' "$EVENTS_LOG"; then got=timedout; else got=n
 check "no false worker.deliver.timeout on the relaunch race" "nottimedout" "$got"
 if grep -qE 'worker\.deliver\.(retract|delivered_as_text)' "$EVENTS_LOG"; then got=touched; else got=untouched; fi
 check "compact_retract_queued/delivered_as_text never fired into the relaunched live session" "untouched" "$got"
+
+heading "Test 9: listener_claim_after_quit — issue #437's second attribution path (a human's manual /quit, not this script's own injection)"
+# worker_deliver_detect_claim() is the only piece of this feature that can
+# ever observe this path: it never sends /quit itself, it just notices,
+# across sweeps, that a brief it previously saw genuinely pending while the
+# window sat parked in "cli" state has since vanished without
+# maybe_worker_deliver_brief's own auto_deliver success having claimed
+# credit for it (that path clears WORKER_DELIVER_PENDING_SEEN itself — see
+# Test 6's double-log check above). Simulated here by moving the brief out
+# of inbox/ directly — standing in for the operator attaching and running
+# /quit by hand, which is indistinguishable from any other release of the
+# parked session from this script's point of view.
+unset 'WORKER_DELIVER_LAST_FAIL[42]' 'WORKER_DELIVER_FAIL_COUNT[42]' 'WORKER_DELIVER_GAVE_UP[42]' 'WORKER_DELIVER_PENDING_SEEN[42]'
+: > "$EVENTS_LOG"
+rm -f "$INBOX_DIR"/*.md "$PROCESSING_DIR"/*.md
+BRIEF_FILE3="$INBOX_DIR/20260826-170000-42.md"
+echo "a brief a human will manually release" > "$BRIEF_FILE3"
+set_current_task "t5" "ready-for-review"   # current task already finished
+
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.3
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'sonnet · wt-issue-42 · ctx: 20k/1M (2%)'; printf '❯ \n'; sleep 300" Enter
+check_eventually "idle, empty-composer pane, brief pending -> cli" "cli" "worker_pane_state '$WIN'"
+
+# First sweep: DRY_RUN, so this only observes and remembers the pending
+# brief via worker_deliver_detect_claim — it never actually delivers it.
+DRY_RUN=1 maybe_worker_deliver_brief "$WIN"
+if grep -q 'worker.deliver.ok' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "first sweep just observes the pending brief -> no worker.deliver.ok yet" "missing" "$got"
+
+# The human's manual /quit + the listener's own claim_next_task, standing in
+# for keystrokes this test never actually sends.
+mv "$BRIEF_FILE3" "$PROCESSING_DIR/$(basename "$BRIEF_FILE3")"
+
+# Second sweep: the window is still (or again) parked in "cli" — e.g. the
+# listener's freshly relaunched agent going idle — but the brief this
+# script itself never touched is now gone.
+maybe_worker_deliver_brief "$WIN"
+if grep -qF "worker.deliver.ok" "$EVENTS_LOG" \
+    && grep -qF "brief=$(basename "$BRIEF_FILE3") release=listener_claim_after_quit" "$EVENTS_LOG"; then
+    got=logged
+else
+    got=missing
+fi
+check "worker.deliver.ok logged with release=listener_claim_after_quit once the brief vanishes on its own (issue #437)" "logged" "$got"
+
+heading "Test 9b: worker.deliver.ok never fires for a 'shell'-state window's routine self-heal (issue #43 traffic, not a stall recovery)"
+unset 'WORKER_DELIVER_PENDING_SEEN[42]'
+: > "$EVENTS_LOG"
+rm -f "$INBOX_DIR"/*.md "$PROCESSING_DIR"/*.md
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.3
+tmux send-keys -t "$SESSION_NAME:$WIN" "sleep 300" Enter
+sleep 0.3
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+check_eventually "back to the listener's own idle bash shell -> shell" "shell" "worker_pane_state '$WIN'"
+BRIEF_FILE4="$INBOX_DIR/20260826-180000-42.md"
+echo "a brief the listener's own idle loop claims on its own" > "$BRIEF_FILE4"
+maybe_worker_deliver_brief "$WIN"   # sweep #1: sees "shell" -> never calls detect_claim at all
+mv "$BRIEF_FILE4" "$PROCESSING_DIR/$(basename "$BRIEF_FILE4")"   # the idle loop's own ordinary claim
+maybe_worker_deliver_brief "$WIN"   # sweep #2: still "shell" -> same, nothing to detect
+if grep -q 'worker.deliver.ok' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "a 'shell'-state window's own routine claim is never mislabeled listener_claim_after_quit" "missing" "$got"
+
+heading "Test 10: composer chrome recognition (issue #436) — recap/spinner residue/clear-hint below an empty composer must not read as a human draft"
+# The corpusminder-spring 2026-09-18/19 incident this closes: a read-only
+# capture-worker.sh dump during a 1,812-skip/~14h stall showed an apparently
+# EMPTY composer (❯), with a "※ recap:" line, "Baked for 31m" spinner
+# residue, and a "new task? /clear to save 257.5k tokens" hint ALSO on
+# screen — any one of which can land as the pane's own trimmed LAST line
+# (below the composer, same shape issue #440 fixed for the mode-footer/
+# box-drawing-rule case) and make compact_composer_clear misread a
+# genuinely empty composer as dirty forever.
+render_pane() {
+    tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+    sleep 0.2
+    tmux send-keys -t "$SESSION_NAME:$WIN" "clear; printf '$1'; sleep 300" Enter
+    check_eventually "pane renders the fixture -> cli" "cli" "worker_pane_state '$WIN'"
+}
+
+render_pane '❯ \n✻ Baked for 31m\n'
+rc=0; compact_composer_clear "$SESSION_NAME:$WIN" || rc=$?
+check "spinner past-tense residue below an empty composer -> still reads clear" "0" "$rc"
+
+render_pane '❯ \n※ recap: did some stuff\n'
+rc=0; compact_composer_clear "$SESSION_NAME:$WIN" || rc=$?
+check "recap line below an empty composer -> still reads clear" "0" "$rc"
+
+render_pane '❯ \nnew task? /clear to save 257.5k tokens\n'
+rc=0; compact_composer_clear "$SESSION_NAME:$WIN" || rc=$?
+check "wrapped '/clear to save Nk tokens' hint below an empty composer -> still reads clear" "0" "$rc"
+
+render_pane '※ recap: did some stuff\n✻ Baked for 31m\n❯ \nnew task? /clear to save 257.5k tokens\n'
+rc=0; compact_composer_clear "$SESSION_NAME:$WIN" || rc=$?
+check "the full observed incident shape (recap + spinner + empty composer + clear-hint) -> reads clear" "0" "$rc"
+
+# Regression guard: none of the above may over-match a GENUINE typed draft.
+render_pane '❯ please review PR 42\n'
+rc=0; compact_composer_clear "$SESSION_NAME:$WIN" || rc=$?
+check "a real typed draft still reads dirty (no over-matching from the new chrome patterns)" "1" "$rc"
+
+# Independent-review finding (issue #436): the verb list above was
+# originally an UNANCHORED substring match, so a genuine human draft that
+# happened to CONTAIN one of those phrases (not just render below an
+# actually-empty composer) would itself read as chrome and get dropped —
+# the inverse failure from the one this issue exists to fix: a real draft
+# misread as clear, papered over by an auto-/quit. Anchoring the verb group
+# behind the spinner glyph (COMPACT_COMPOSER_CHROME_PATTERN's own comment)
+# closes this without giving up matching the genuine chrome shapes above.
+render_pane '❯ I baked for hours on this bug, need a second pair of eyes\n'
+rc=0; compact_composer_clear "$SESSION_NAME:$WIN" || rc=$?
+check "a draft merely MENTIONING a spinner-verb phrase still reads dirty (verb list is anchored to the glyph, not a bare substring match)" "1" "$rc"
+unset -f render_pane
+
+heading "Test 11: composer_not_clear escalation (issue #436) — N consecutive skips against the SAME brief escalate exactly once"
+unset 'WORKER_DELIVER_COMPOSER_STALL_BRIEF[42]' 'WORKER_DELIVER_COMPOSER_STALL_COUNT[42]' 'WORKER_DELIVER_COMPOSER_STALL_ESCALATED[42]'
+rm -rf "$COORD_INBOX_DIR"; mkdir -p "$COORD_INBOX_DIR"
+rm -f "$INBOX_DIR"/*.md "$PROCESSING_DIR"/*.md "$STATUS_DIR"/*.json
+: > "$EVENTS_LOG"
+STALL_BRIEF="$INBOX_DIR/20260919-000000-42.md"
+echo "a stuck brief" > "$STALL_BRIEF"
+set_current_task "tstall" "ready-for-review"   # current task already finished, so this reaches the composer check
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.2
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'sonnet · wt-issue-42 · ctx: 20k/1M (2%)'; printf '❯ \n'; sleep 300" Enter
+check_eventually "idle, empty-composer pane, stuck brief pending -> cli" "cli" "worker_pane_state '$WIN'"
+
+compact_composer_clear() { return 1; }   # force composer_not_clear every sweep, same trick as Test 4
+WORKER_DELIVER_COMPOSER_STALL_THRESHOLD=3
+
+for i in 1 2 3; do maybe_worker_deliver_brief "$WIN"; done
+check "3 consecutive skips logged" "3" "$(grep -c 'worker.deliver.skip.*reason=composer_not_clear' "$EVENTS_LOG")"
+check "escalation logged exactly once, with skips=3" "1" "$(grep -cF 'worker.deliver.composer_stalled' "$EVENTS_LOG")"
+if grep -qF "issue=42 brief=$(basename "$STALL_BRIEF") skips=3" "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "escalation event names the stuck issue, brief, and skip count" "logged" "$got"
+check "escalation durably written to the coordinator inbox (issue #430)" "1" "$(find "$COORD_INBOX_DIR" -maxdepth 1 -name '*.md' -type f | wc -l | tr -d '[:space:]')"
+
+# A 4th consecutive skip against the SAME brief must not re-escalate.
+maybe_worker_deliver_brief "$WIN"
+check "4th consecutive skip -> escalation still logged only once (not every sweep)" "1" "$(grep -cF 'worker.deliver.composer_stalled' "$EVENTS_LOG")"
+check "no second coord-inbox write for the same streak" "1" "$(find "$COORD_INBOX_DIR" -maxdepth 1 -name '*.md' -type f | wc -l | tr -d '[:space:]')"
+
+# A DIFFERENT brief landing means the prior stall is moot — the streak
+# resets rather than inheriting the count, and does not immediately
+# re-escalate on its first skip.
+rm -f "$INBOX_DIR"/*.md
+NEW_BRIEF="$INBOX_DIR/20260919-010000-42.md"
+echo "a different, fresh brief" > "$NEW_BRIEF"
+maybe_worker_deliver_brief "$WIN"
+check "new brief resets the streak to 1" "1" "${WORKER_DELIVER_COMPOSER_STALL_COUNT[42]}"
+check "no re-escalation on the first skip against a new brief" "1" "$(grep -cF 'worker.deliver.composer_stalled' "$EVENTS_LOG")"
+
+# Self-review finding: the streak is NOT reset by a sweep that skips for a
+# DIFFERENT reason (pane_busy here) — only a different brief resets it.
+# Without this, an occasional busy tick interleaved with an otherwise-stuck
+# composer would keep pushing the threshold out of reach.
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.2
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo '✻ Considering… (esc to interrupt)'; sleep 300" Enter
+check_eventually "busy chrome visible -> worker_pane_busy true" "busy" 'busy_or_idle'
+maybe_worker_deliver_brief "$WIN"
+if grep -q 'worker.deliver.skip.*reason=pane_busy' "$EVENTS_LOG"; then got=skipped; else got=notskipped; fi
+check "interleaved pane_busy skip logged" "skipped" "$got"
+check "pane_busy skip leaves the composer-stall streak untouched (still 1, not reset to 0)" "1" "${WORKER_DELIVER_COMPOSER_STALL_COUNT[42]}"
+
+# Back to idle+empty-composer (still stubbed dirty): the streak resumes from
+# where it left off (1 -> 2 -> 3) and re-escalates for this NEW brief once
+# it independently reaches the threshold — a second, distinct escalation,
+# not a stale re-fire of the first brief's already-handled one.
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.2
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'sonnet · wt-issue-42 · ctx: 20k/1M (2%)'; printf '❯ \n'; sleep 300" Enter
+check_eventually "idle, empty-composer pane restored -> cli" "cli" "worker_pane_state '$WIN'"
+maybe_worker_deliver_brief "$WIN"
+maybe_worker_deliver_brief "$WIN"
+check "streak resumed across the interleaved busy skip -> reached 3 for the new brief" "3" "${WORKER_DELIVER_COMPOSER_STALL_COUNT[42]}"
+check "new brief's own stall escalates independently -> 2 distinct composer_stalled events total" "2" "$(grep -cF 'worker.deliver.composer_stalled' "$EVENTS_LOG")"
+if grep -qF "issue=42 brief=$(basename "$NEW_BRIEF") skips=3" "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "the second escalation names the NEW brief, not the original stalled one" "logged" "$got"
+
+unset -f compact_composer_clear
+body="$(extract_fn compact_composer_clear)"; eval "$body"   # restore the real function
+unset 'WORKER_DELIVER_COMPOSER_STALL_BRIEF[42]' 'WORKER_DELIVER_COMPOSER_STALL_COUNT[42]' 'WORKER_DELIVER_COMPOSER_STALL_ESCALATED[42]'
+WORKER_DELIVER_COMPOSER_STALL_THRESHOLD=20
 
 # Stop the relaunch loop — nothing later in the suite reuses $WIN, but leave
 # the pane tidy rather than respawning fake sessions for the rest of the run.

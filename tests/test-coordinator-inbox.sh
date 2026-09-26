@@ -112,6 +112,12 @@ reset_state() {
     : > "$WAKE_LOG"
     rm -f "$EVENTS_LOG"
     rm -rf "$INBOX_DIR"
+    # issue #456: the debounce clock and the hold marker are FILES under
+    # .swarm/ now, not shell globals, so they survive a watcher restart —
+    # deliberately (see COORD_WAKE_LAST_FILE), but that also means a test
+    # which rang a doorbell leaks its clock into the next test's first
+    # outcome and gets it debounced.
+    rm -f "$PROJECT_DIR/.swarm/coord-wake-last" "$PROJECT_DIR/.swarm/coord-wake-busy-pending"
 }
 
 inbox_count() {
@@ -225,7 +231,7 @@ $(cat "$EVENTS_LOG" 2>/dev/null || echo '(missing)')"
 green "a wake stuck busy past COORD_WAKE_BUSY_CEILING_SECS is delivered anyway (coord.wake.defer_ceiling), still busy"
 
 # ============================================================================
-heading "Test 4: a burst of 3 outcomes inside the debounce window — one nudge, three inbox files"
+heading "Test 4: a burst of 3 outcomes inside the debounce window — one nudge now, three inbox files, two doorbells HELD (issue #456)"
 # ============================================================================
 mkdir -p "$TEST_DIR/wt-issue-904/.swarm/tasks/done"
 mkdir -p "$TEST_DIR/wt-issue-905/.swarm/tasks/done"
@@ -256,16 +262,28 @@ green "burst of 3 outcomes inside DEBOUNCE_SECS produced exactly one doorbell nu
 [ "$(inbox_count)" = "3" ] || red "expected 3 coord-inbox/*.md files (one per outcome, unconditional on debounce); got $(inbox_count)"
 green "burst of 3 outcomes produced 3 coord-inbox files despite the coalesced doorbell"
 
-SKIP_COUNT=$(grep -c 'coord.wake.skip .*reason=debounce' "$EVENTS_LOG" 2>/dev/null || true)
-[ "$SKIP_COUNT" = "2" ] || red "expected 2 debounce-skip events (outcomes 2 and 3); got $SKIP_COUNT. events.log:
+# issue #456 changed these from SKIPS to HOLDS. Coalescing to one nudge
+# inside the window is still correct and still asserted above; what changed
+# is what happens afterwards. Pre-#456 the 2nd and 3rd doorbells were
+# dropped outright (coord.wake.skip) and their inbox items could sit unread
+# until some unrelated later wake — ~11h in the 2026-09-22 SAMlytics
+# incident. They are now held (coord.wake.defer reason=debounce) and re-rung
+# once the window passes; tests/test-wake-presence-gate.sh Test 4 is the
+# end-to-end guard that the held doorbell actually rings.
+HOLD_COUNT=$(grep -c 'coord.wake.defer .*reason=debounce' "$EVENTS_LOG" 2>/dev/null || true)
+[ "$HOLD_COUNT" = "2" ] || red "expected 2 debounce HOLD events (outcomes 2 and 3); got $HOLD_COUNT. events.log:
 $(cat "$EVENTS_LOG" 2>/dev/null || echo '(missing)')"
-green "events.log records the 2 coalesced outcomes as coord.wake.skip reason=debounce"
+green "events.log records the 2 coalesced outcomes as coord.wake.defer reason=debounce (held, not dropped)"
+
+grep -q 'coord.wake.skip .*reason=debounce' "$EVENTS_LOG" \
+    && red "a debounced doorbell was SKIPPED rather than held — issue #456's silent-drop bug is back"
+green "no debounced doorbell was dropped"
 
 # ============================================================================
 heading "Test 5: a busy-pending marker left over from an earlier defer does not cause a duplicate doorbell (self-review finding)"
 # ============================================================================
 # Race this guards against: outcome A busy-marks a pending doorbell; before
-# coord_wake_busy_retry_pass's next tick, the pane goes idle AND outcome B
+# coord_wake_hold_retry_pass's next tick, the pane goes idle AND outcome B
 # arrives, pasting its OWN nudge directly (the idle/else branch in
 # on_outcome). If that branch doesn't also clear the busy-pending marker,
 # the next retry tick still finds it, sees the (now idle) pane, and
