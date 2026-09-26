@@ -1674,6 +1674,52 @@
 #                           NEW brief landing means whatever was stalling
 #                           before is moot, so the streak resets rather than
 #                           inheriting an unrelated prior count.
+#   STALL_WAKE_SECS=0       (issue #366 Part A) Every wake path above is
+#                           triggered by something a WORKER did — a swarm
+#                           with zero live workers and an idle coordinator
+#                           (right after startup, or once everything queued
+#                           has finished and nothing new was dispatched)
+#                           never reaches any of them and stays silent
+#                           forever. Set this to a nonzero number of seconds
+#                           (suggested: 3600) to start an independent tick,
+#                           own background process (run_stall_wake_loop, same
+#                           reasoning as AUTO_COMPACT_TICK_SECS's dedicated
+#                           process — see its header comment) that fires a
+#                           coordinator wake once no real wake of ANY kind
+#                           (outcome, outbox message, or a previous stall
+#                           wake) has landed for this long. 0 (the default)
+#                           starts no process at all — a swarm that never
+#                           sets this sees no behavior change. Goes through
+#                           the exact same coord-inbox write + busy/human/
+#                           debounce hold gate + llm-start.sh injection every
+#                           other wake path uses (stall_wake_pass), so it is
+#                           automatically safe against a present operator or
+#                           an unsubmitted composer draft (issue #366 Part B,
+#                           shipped as #431/#440/#460) with no extra code
+#                           here. Deliberately does NOT also require "the
+#                           swarm plausibly has outstanding work" — the one
+#                           scenario this exists to fix (zero live workers)
+#                           has no local signal to check that against without
+#                           the watcher computing something AVAILABLE-shaped,
+#                           which is explicitly out of scope; the coordinator
+#                           judges that for itself once woken, same as the
+#                           issue's own "or unconditionally" fallback asks
+#                           for. See stall_wake_pass's header comment for the
+#                           full design writeup.
+#   STALL_WAKE_PROMPT=<text>
+#                           Override the instructions written to coord-inbox/
+#                           on a stall wake (default: a quiet-period check-in
+#                           asking for a wake digest and next steps, or an
+#                           explicit "nothing to do"). The pane doorbell
+#                           itself is unchanged — the same short, generic
+#                           coord_inbox_nudge_text every wake path pastes.
+#   SWARM_PARKED_FILE=<project>/.swarm/parked (fixed path, not overridable)
+#                           Touch this file to suppress stall wakes without
+#                           losing the configured STALL_WAKE_SECS value —
+#                           the operator's park switch for a deliberately
+#                           idled swarm. Checked only by stall_wake_pass;
+#                           every other wake path (a worker actually
+#                           finishing something) is unaffected.
 #
 # Watch backend (auto-detected):
 #   - inotifywait (preferred): instant response. Install with:
@@ -1787,6 +1833,9 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     COMPACT_REPLAY_PATTERN            (auto)  post-compact replayed-/compact rejection text tolerated during verify (coord + worker, shared; issue #292); see header comment
     COMPACT_REPLAY_MIN_REAL_SECS      5       min finish-phase duration to trust a detected replay as real (coord + worker, shared; issue #292); see header comment
     COMPACT_COMPOSER_CHROME_PATTERN   (auto)  non-input UI chrome (recap/spinner-verb/"clear to save" hint) excluded from compact_last_pane_line's result (issue #436); see header comment
+    STALL_WAKE_SECS     0         (issue #366) periodic quiet-period check-in wake for a fully idle swarm (0=off; suggested 3600); see header comment
+    STALL_WAKE_PROMPT   (built-in) coord-inbox instructions written on a stall wake
+    SWARM_PARKED_FILE   (auto)    <project>/.swarm/parked — operator park switch, suppresses stall wakes only
 
 DEFAULT WAKE_PROMPT (top-up mode)
     Coordinator triages outcomes, then refills workers toward MAX_WORKERS
@@ -1877,7 +1926,9 @@ EVENTS LOG
                            worktree_vanish_sweep_pass
       watch.timer.start    a background timer loop started — pr-poll/check-on-done
                            timer loop, and/or (issue #226) the separate
-                           worker-compact loop; up to two lines, one per loop
+                           worker-compact loop, and/or (issue #366 Part A) the
+                           separate stall-wake loop (stall_wake_secs=); one line
+                           per loop actually started
       watch.stale_daemon   (issue #296) this process's own script changed on disk since it
                            started — logged once, immediately before this daemon shuts itself
                            down entirely (script, launch_mtime, current_mtime, pid, started_at);
@@ -1922,6 +1973,11 @@ EVENTS LOG
                            cycle (reason=gh_pr_list_failed|gh_issue_list_failed);
                            cursor is NOT advanced on this path, so the next
                            tick retries the same window
+      stall.check          (issue #366 Part A) run_stall_wake_loop's tick found the swarm
+                           quiet long enough (quiet_secs, threshold=STALL_WAKE_SECS) and is
+                           about to write the coord-inbox entry + attempt a wake — followed
+                           by the same coord.inbox.write/coord.wake/coord.wake.defer* events
+                           every other wake path logs, with trigger=stall
       watch.worktree_vanished  (issue #439) a tracked worktree disappeared with no
                            reap.worktree event logged for it since it was last
                            confirmed present (issue, dir, reason=no_reap_event) — the
@@ -2749,6 +2805,61 @@ if [ "$COORD_WAKE_HOLD_RETRY_SECS" -eq 0 ] && \
     COORD_WAKE_HOLD_RETRY_SECS=30
 fi
 
+# --- issue #366 Part A: stall heartbeat for a fully idle swarm --------------
+#
+# Every wake path above (on_outcome, on_message, on_activity) is triggered
+# by something a WORKER did. A swarm with zero live workers and an idle
+# coordinator — e.g. right after startup, before anything has been
+# dispatched, or after every worker has finished and nothing new was queued
+# — never reaches any of them, so it stays silent forever with no human
+# ever notified. STALL_WAKE_SECS starts an independent tick (own background
+# process, run_stall_wake_loop, same "a single call can block on
+# llm-start.sh's full injection path" reasoning as run_auto_compact_poll_loop
+# — see that function's header comment) that fires a coordinator wake once
+# no real wake of ANY kind (outcome, outbox message, or a previous stall
+# wake — anything that calls wake_clock_set) has landed for this many
+# seconds. 0 (default) disables the whole feature — existing swarms that
+# never set this see no new process, no new tick, and no behavior change.
+#
+# Deliberately ONE knob, not a tick/threshold pair like AUTO_COMPACT_TICK_SECS
+# — there is no separate "attempted but on cooldown" state to distinguish
+# here, so the interval IS the threshold: stall_wake_pass wakes, sleeps
+# STALL_WAKE_SECS, and checks whether that much quiet has passed since
+# wake_clock_get's timestamp.
+#
+# Deliberately does NOT gate on "does the swarm plausibly have outstanding
+# work" beyond the park switch below. The issue this implements offers that
+# check as one option among "or unconditionally, letting the coordinator
+# judge" — computing it here would mean either the watcher reading enough
+# local/GitHub state to reintroduce the AVAILABLE-style computation the
+# issue's Out of scope section forbids it from doing, or missing the exact
+# scenario the feature exists for (a swarm with zero live workers has no
+# local signal — no live iss-* window, no worker PR — to check at all). The
+# coordinator is the one positioned to judge "is there really nothing to
+# do" once woken; the cost is one LLM turn per STALL_WAKE_SECS for a swarm
+# that opted in, which is exactly the constraint the default of 0 keeps at
+# zero for everyone who didn't.
+STALL_WAKE_SECS="${STALL_WAKE_SECS:-0}"
+if ! [[ "$STALL_WAKE_SECS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: STALL_WAKE_SECS must be a non-negative integer (got: $STALL_WAKE_SECS)" >&2
+    exit 1
+fi
+
+# STALL_WAKE_PROMPT: the instructions written to coord-inbox/ on a stall
+# wake (issue #430's inbox, same as every other wake source — see
+# coord_inbox_write). The pane doorbell itself stays the same short, generic
+# coord_inbox_nudge_text every wake path uses; only the inbox payload names
+# what kind of wake this was.
+STALL_WAKE_PROMPT="${STALL_WAKE_PROMPT:-Quiet-period check-in: no worker or wake activity for a while. Produce a short wake digest (swarm state: live workers, open PRs/issues, anything blocked) and suggest next steps — or say plainly that there is nothing to do right now.}"
+
+# SWARM_PARKED_FILE: the operator's park switch (issue #366's other
+# suppression knob besides STALL_WAKE_SECS=0) — touch this file to keep a
+# deliberately idled swarm silent without having to also flip
+# STALL_WAKE_SECS back to 0 and lose the value if left set. Checked only by
+# stall_wake_pass; every other wake path is unaffected, since a worker
+# actually finishing something is never something to suppress.
+SWARM_PARKED_FILE="$PROJECT_DIR/.swarm/parked"
+
 # log_event <category> <key=val>...
 # Writes one line: "<utc-iso8601>  <category>  k=v k=v ..."
 # Failures are non-fatal — log writes never break watcher work.
@@ -2921,6 +3032,7 @@ auto-compact:  $AUTO_COMPACT$([ "$AUTO_COMPACT" = "1" ] && echo " (threshold: mi
 worker-compact: $WORKER_AUTO_COMPACT$([ "$WORKER_AUTO_COMPACT" = "1" ] && echo " (threshold: min(${WORKER_COMPACT_PCT}% of window, ${WORKER_COMPACT_THRESHOLD_CAP_TOKENS})/wrapup+$(( WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS - WORKER_COMPACT_THRESHOLD_TOKENS )), fallback: ${WORKER_COMPACT_THRESHOLD_TOKENS}/${WORKER_COMPACT_WRAPUP_THRESHOLD_TOKENS} tokens, require-window: ${WORKER_COMPACT_REQUIRE_WINDOW}, scan: ${WORKER_COMPACT_SCAN_SECS}s)")
 worker-deliver: $WORKER_AUTO_DELIVER$([ "$WORKER_AUTO_DELIVER" = "1" ] && echo " (parked-in-agent requeue.sh briefs released via /quit, end-timeout: ${WORKER_DELIVER_END_TIMEOUT_SECS}s, scan: ${WORKER_COMPACT_SCAN_SECS}s — issue #313)")
 stale-check:   $WATCHER_STALE_CHECK$([ "$WATCHER_STALE_CHECK" = "1" ] && echo " (every ${WATCHER_STALE_CHECK_SECS}s — issue #296; check anytime: coordinator-watch.sh --check-stale)")
+stall-wake:    $([ "$STALL_WAKE_SECS" -gt 0 ] && echo "${STALL_WAKE_SECS}s (park switch: $SWARM_PARKED_FILE — issue #366)" || echo "disabled")
 dry-run:       $DRY_RUN
 once:          $ONCE
 pane-echo:     $([ "$WATCHER_QUIET" = "1" ] && echo "disabled (WATCHER_QUIET=1)" || echo "enabled (WATCHER_QUIET=1 to silence)")
@@ -2982,12 +3094,14 @@ WATCH_TIMER_PID=""
 WORKER_COMPACT_TIMER_PID=""
 AUTO_COMPACT_POLL_TIMER_PID=""
 STALE_CHECK_PID=""
+STALL_WAKE_TIMER_PID=""
 seen_file=""
 cleanup_on_exit() {
     [ -n "${WATCH_TIMER_PID:-}" ] && kill "$WATCH_TIMER_PID" 2>/dev/null || true
     [ -n "${WORKER_COMPACT_TIMER_PID:-}" ] && kill "$WORKER_COMPACT_TIMER_PID" 2>/dev/null || true
     [ -n "${AUTO_COMPACT_POLL_TIMER_PID:-}" ] && kill "$AUTO_COMPACT_POLL_TIMER_PID" 2>/dev/null || true
     [ -n "${STALE_CHECK_PID:-}" ] && kill "$STALE_CHECK_PID" 2>/dev/null || true
+    [ -n "${STALL_WAKE_TIMER_PID:-}" ] && kill "$STALL_WAKE_TIMER_PID" 2>/dev/null || true
     # WATCHER_ECHO_PID is the `while read` reader — the last stage of the
     # `tail | while` pipeline, and the only PID $! gives us for it. `tail`
     # itself is a separate direct child of this script (pipeline stages
@@ -3374,6 +3488,19 @@ WATCHER_SELF_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH
 WATCHER_LAUNCH_MTIME="$(mtime_epoch "$WATCHER_SELF_PATH" 2>/dev/null || echo 0)"
 [ -n "$WATCHER_LAUNCH_MTIME" ] || WATCHER_LAUNCH_MTIME=0
 WATCHER_STARTED_AT="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+# issue #366 Part A: epoch twin of WATCHER_STARTED_AT above, so
+# stall_wake_pass has a real baseline for "quiet since when" on a freshly
+# started watcher — wake_clock_get fails open to 0 ("no wake ever"), which
+# would otherwise read as quiet since the Unix epoch and fire on the very
+# first tick regardless of STALL_WAKE_SECS.
+#
+# This ONLY covers that true-zero case. COORD_WAKE_LAST_FILE (issue #456) is
+# deliberately NOT reset here and survives a watcher restart, so a watcher
+# that restarts after a genuinely long quiet stretch can still fire on its
+# very first tick post-restart — same as the debounce clock it shares the
+# file with. That is intended, not a bug: "no wake of any kind for
+# STALL_WAKE_SECS" is meant to span restarts, not be reset by them.
+WATCHER_STARTED_AT_EPOCH="$(date +%s)"
 WATCHER_STATE_FILE="$PROJECT_DIR/.swarm/coordinator-watch.state"
 {
     printf 'pid=%s\n' "$$"
@@ -4822,6 +4949,21 @@ run_auto_compact_poll_loop() {
     while true; do
         sleep "$AUTO_COMPACT_TICK_SECS"
         auto_compact_poll_pass || true
+    done
+}
+
+# run_stall_wake_loop
+#
+# issue #366 Part A: own background process, own STALL_WAKE_SECS interval —
+# same blocking-duration reasoning as run_auto_compact_poll_loop's header
+# comment above (a single stall_wake_pass call can go all the way through
+# llm-start.sh's flock'd injection path, which run_watch_timer_loop's other
+# passes can't afford to wait behind). Only started when STALL_WAKE_SECS>0
+# — see the loop-startup section near the bottom of this script.
+run_stall_wake_loop() {
+    while true; do
+        sleep "$STALL_WAKE_SECS"
+        stall_wake_pass || true
     done
 }
 
@@ -7723,6 +7865,124 @@ Re-check your own picture of outstanding decisions/PRs/issues against this (gh p
     return 0
 }
 
+# stall_wake_pass
+#
+# (issue #366 Part A) Ticked from its own background loop, run_stall_wake_loop,
+# on STALL_WAKE_SECS — not from any worker event, since the whole point is to
+# resurface a swarm where no worker event is ever going to arrive. Mirrors
+# on_message's shape (inbox write -> debounce/hold gate -> pre-wake compact ->
+# llm-start -> ONCE) with no triggering path to name and no autoclose/sweep
+# (nothing finished; there's nothing to post or reap).
+#
+# "No wake of any kind delivered for STALL_WAKE_SECS" is read off
+# wake_clock_get — the same on-disk clock on_outcome/on_message already stamp
+# on every real wake (delivered OR hold-deferred; see their own wake_clock_set
+# call sites) via wake_debounced's DEBOUNCE_SECS window. Reusing it here means
+# a real outcome/message wake, at ANY point, pushes the next stall check out
+# by a full STALL_WAKE_SECS with no extra bookkeeping — exactly the "timer
+# reset by any real wake" the issue's constraints ask for. A stall wake that
+# itself gets delivered also stamps the clock (same call site, below), which
+# is what keeps this to "at most one stall wake per interval" rather than
+# firing again on every subsequent tick until something else resets it.
+stall_wake_pass() {
+    [ "$STALL_WAKE_SECS" -gt 0 ] || return 0
+    # Operator park switch (issue #366): a marker file, not just
+    # STALL_WAKE_SECS=0, so a deliberately idled swarm can go quiet without
+    # losing the configured interval.
+    [ -e "$SWARM_PARKED_FILE" ] && return 0
+
+    local now last_wake quiet_secs
+    now=$(date +%s)
+    last_wake="$(wake_clock_get)"
+    # wake_clock_get fails open to 0 ("no wake ever") — on a freshly started
+    # watcher that reads as quiet since the Unix epoch, which would fire on
+    # the very first tick regardless of STALL_WAKE_SECS. Anchor "never" to
+    # this watcher's own start time instead (see WATCHER_STARTED_AT_EPOCH's
+    # header comment).
+    [ "$last_wake" -gt 0 ] || last_wake="$WATCHER_STARTED_AT_EPOCH"
+    quiet_secs=$((now - last_wake))
+    [ "$quiet_secs" -ge "$STALL_WAKE_SECS" ] || return 0
+
+    log_event stall.check "quiet_secs=$quiet_secs threshold=${STALL_WAKE_SECS}s"
+
+    # issue #430: unconditional inbox write before any debounce/hold check —
+    # see on_outcome's identical step for the full rationale.
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "[$(date +%T)] [DRY] would write coord-inbox entry: trigger=stall quiet_secs=$quiet_secs"
+    else
+        if coord_inbox_write stall "$STALL_WAKE_PROMPT"; then
+            log_event coord.inbox.write "trigger=stall quiet_secs=$quiet_secs"
+        else
+            echo "[$(date +%T)] WARN: failed to write coord-inbox entry for stall wake" >&2
+        fi
+    fi
+
+    # issue #456 — hold, don't drop; see on_outcome's identical branch. Note
+    # this does NOT call wake_clock_set: a debounce skip must leave the clock
+    # exactly where the wake it's coalescing behind left it, or a run of
+    # skips would keep pushing the window forward and the debounce would
+    # never actually clear (same reasoning as on_outcome's own debounce
+    # branch, which returns before its wake_clock_set call too).
+    if wake_debounced; then
+        echo "[$(date +%T)] stall: within debounce window (${DEBOUNCE_SECS}s), holding doorbell for retry"
+        log_event coord.wake.defer "reason=debounce window=${DEBOUNCE_SECS}s trigger=stall"
+        coord_wake_hold_mark_pending debounce
+        return
+    fi
+
+    echo "[$(date +%T)] stall: quiet for ${quiet_secs}s (>= ${STALL_WAKE_SECS}s) — waking coordinator..."
+
+    # issue #430/#459: same doorbell hold gate as on_outcome/on_message — see
+    # coord_wake_hold_reason's header for the reason vocabulary. This is what
+    # makes a stall wake safe against a present operator or an unsubmitted
+    # composer draft (issue #366 Part B, already shipped as #431/#440/#460)
+    # without this function needing to know anything about either.
+    local hold_reason
+    hold_reason="$(coord_wake_hold_reason)"
+    if [ -n "$hold_reason" ]; then
+        echo "[$(date +%T)] coordinator not free to take a doorbell ($hold_reason) — deferring, will retry"
+        log_event coord.wake.defer "reason=$hold_reason trigger=stall"
+        coord_wake_hold_mark_pending "$hold_reason"
+    else
+        maybe_auto_compact wake
+
+        echo "[$(date +%T)] waking coordinator (stall)..."
+        local nudge
+        nudge="$(coord_inbox_nudge_text)"
+        log_event coord.wake "trigger=stall quiet_secs=$quiet_secs"
+
+        if [ "$DRY_RUN" = "1" ]; then
+            echo "[DRY] would: cd $PROJECT_DIR && NON_INTERACTIVE=1 $LLM_START \"$nudge\""
+        else
+            # Same flock'd single injection site every other wake path uses
+            # — see on_outcome's identical call site for the full rationale.
+            local wake_rc=0
+            ( flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 9 && cd "$PROJECT_DIR" && NON_INTERACTIVE=1 "$LLM_START" "$nudge" ) 9>"$COORD_WAKE_LOCK" || wake_rc=$?
+            if [ "$wake_rc" = "3" ]; then
+                # issue #422 — see on_outcome's identical branch.
+                echo "[$(date +%T)] coordinator composer holds an unsubmitted draft — deferring wake, will retry"
+                log_event coord.wake.deferred "reason=composer_dirty trigger=stall"
+                coord_wake_set_pending "$nudge"
+            elif [ "$wake_rc" != "0" ]; then
+                echo "[$(date +%T)] WARN: coordinator wake exited non-zero (continuing watch)"
+                log_event coord.wake.error "trigger=stall rc=$wake_rc"
+            else
+                coord_wake_clear_pending
+                coord_wake_hold_clear_pending
+            fi
+        fi
+    fi
+    wake_clock_set "$now"
+    # No ONCE=1 exit branch here, unlike on_outcome/on_message: this function
+    # runs inside run_stall_wake_loop's OWN backgrounded process (`&`), so an
+    # `exit` here would only kill that background timer — not the watcher —
+    # while still logging a misleading "whole daemon exited" event. ONCE=1's
+    # smoke-test semantics belong to the foreground dispatch loop that owns
+    # process lifetime; every other background-loop pass (auto_compact_poll_
+    # pass, coord_wake_retry_pass, coord_wake_hold_retry_pass, pr_poll_pass)
+    # follows the same rule and has no ONCE handling either.
+}
+
 # ---------------------------------------------------------------------------
 # Backend: inotify
 # ---------------------------------------------------------------------------
@@ -7869,6 +8129,13 @@ if [ "$AUTO_COMPACT" = "1" ] && [ "$AUTO_COMPACT_TICK_SECS" -gt 0 ]; then
     run_auto_compact_poll_loop &
     AUTO_COMPACT_POLL_TIMER_PID=$!
     log_event watch.timer.start "auto_compact_tick_secs=$AUTO_COMPACT_TICK_SECS auto_compact_cooldown_secs=$AUTO_COMPACT_COOLDOWN_SECS"
+fi
+# issue #366 Part A — opt-in only; a swarm that never sets STALL_WAKE_SECS
+# gets no new process and no behavior change at all.
+if [ "$STALL_WAKE_SECS" -gt 0 ]; then
+    run_stall_wake_loop &
+    STALL_WAKE_TIMER_PID=$!
+    log_event watch.timer.start "stall_wake_secs=$STALL_WAKE_SECS"
 fi
 # issue #296 — unconditional (subject only to its own WATCHER_STALE_CHECK
 # flag), unlike the three loops above which only start when their own
