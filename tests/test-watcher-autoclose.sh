@@ -1070,6 +1070,65 @@ green "watch.reconcile still logs the gap for the synthesized-id case"
 green "inbox/ untouched for the synthesized-id case too — log only, never a fabricated-id instruction"
 
 # ============================================================================
+heading "Test 19d: PR-open backstop does NOT treat a pre-existing open PR as done for a mid-flight follow-up brief (issue #475)"
+# ============================================================================
+# Reproduces the corpusminder-spring incident behind #475: a coordinator-
+# queued follow-up brief (e.g. "fix the merge conflict on this already-open
+# PR") is claimed into processing/ well AFTER that PR was opened, and is
+# still mid-flight — no status file for it yet. pr_poll_pass's synthesized-
+# task_id path used to treat "a PR exists at all" as a done signal here,
+# which would waste a check-on-done run against a tree the worker hasn't
+# finished touching, and permanently consume the synthesized check key
+# before the worker's real completion could ever use it.
+: > "$WAKE_LOG"
+rm -f "$PROJECT_DIR/.swarm/events.log"
+mkdir -p "$TEST_DIR/wt-issue-195/.swarm/tasks/done"
+mkdir -p "$TEST_DIR/wt-issue-195/.swarm/tasks/processing"
+# Deliberately NO .swarm/tasks/status/ file — the worker hasn't reached
+# ready-for-review for this follow-up brief yet.
+#
+# PR createdAt is set far in the past; the follow-up brief file's ctime
+# (its creation time here, "now") is necessarily after it — exactly the
+# "claimed after the PR already existed" shape #475 is about.
+echo '# fix merge conflict on PR 104' > "$TEST_DIR/wt-issue-195/.swarm/tasks/processing/20260926-175653-195.md"
+printf 'fix/issue-195\tOPEN\t104\t2020-01-01T00:00:00Z\n' > "$GH_PR_LIST_FILE"
+
+ONCE=0 WATCH_PR_POLL_SECS=2 WATCH_CHECK_ON_DONE=1 start_watcher 0 "$TEST_DIR/watch-19d.log"
+sleep 5
+stop_watcher
+
+[ ! -f "$TEST_DIR/wt-issue-195/.swarm/tasks/status/pr-issue-195.check.json" ] \
+    || red "no check.json should have been created for a follow-up brief claimed after its PR already existed. Watch log:
+$(cat "$TEST_DIR/watch-19d.log")"
+green "no check-claim/check.json for the mid-flight follow-up brief"
+
+grep -q 'watch\.reconcile .*issue=195' "$PROJECT_DIR/.swarm/events.log" 2>/dev/null \
+    && red "no watch.reconcile expected — the PR-open backstop should have been skipped entirely; got:
+$(cat "$PROJECT_DIR/.swarm/events.log")"
+green "no watch.reconcile logged — the backstop never ran"
+
+grep -q 'watch\.pr_poll .*reason=followup_brief_postdates_pr issue=195' "$PROJECT_DIR/.swarm/events.log" \
+    || red "expected a followup_brief_postdates_pr log line explaining the skip; got:
+$(cat "$PROJECT_DIR/.swarm/events.log" 2>/dev/null || echo '(missing)')"
+green "events.log records why the backstop was skipped"
+
+# Once the brief is archived (simulating task-done.sh moving it out of
+# processing/, worker finished) with still no status file, the guard's
+# "no processing/ brief at all" fail-closed path lets the legacy
+# synthesized-key backstop run normally again — no permanent suppression.
+rm -f "$TEST_DIR/wt-issue-195/.swarm/tasks/processing/20260926-175653-195.md"
+rm -f "$PROJECT_DIR/.swarm/events.log"
+
+ONCE=0 WATCH_PR_POLL_SECS=2 WATCH_CHECK_ON_DONE=1 start_watcher 0 "$TEST_DIR/watch-19d-b.log"
+sleep 5
+stop_watcher
+
+grep -q 'watch\.reconcile .*issue=195 task_id=pr-issue-195 reason=pr_open_no_outcome' "$PROJECT_DIR/.swarm/events.log" \
+    || red "expected the legacy synthesized-id backstop to resume once the follow-up brief was archived; got:
+$(cat "$PROJECT_DIR/.swarm/events.log" 2>/dev/null || echo '(missing)')"
+green "backstop resumes normally once the follow-up brief leaves processing/ — no permanent suppression"
+
+# ============================================================================
 heading "Test 20: a check-fail retry's corrected outcome does NOT fire a second wake (issue #468)"
 # ============================================================================
 # Reproduces the #455 post-merge finding: task-done.sh's provisional ok.json
