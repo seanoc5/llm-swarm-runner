@@ -277,6 +277,16 @@ fi
 # permissions.deny holds even under --dangerously-skip-permissions. Only
 # created when absent, so a project that already tracks its own
 # .claude/settings.json (or an operator's manual edit) is never clobbered.
+#
+# Deliberately NOT added to info/exclude above: that file lives in the
+# common .git dir shared by every worktree of this repo (self-review finding
+# on #476's PR — `git -C "$WT" rev-parse --git-path info/exclude` resolves
+# there even from a linked worktree), so an entry added here would hide a
+# future project-tracked .claude/settings.json from every worktree and the
+# main checkout, not just this one. .swarm/ earns that shared scope because
+# it's always scratch; a project settings file is plausible to want tracked
+# later, so this one is left to show up as an ordinary untracked file —
+# workers already review `git status` before staging (prompts/worker.md).
 if [ ! -e "$WT/.claude/settings.json" ]; then
     mkdir -p "$WT/.claude"
     cat > "$WT/.claude/settings.json" <<'SETTINGS'
@@ -286,9 +296,6 @@ if [ ! -e "$WT/.claude/settings.json" ]; then
   }
 }
 SETTINGS
-    if [ -n "$exclude_file" ] && [ -f "$exclude_file" ] && ! grep -qxF '.claude/settings.json' "$exclude_file"; then
-        printf '\n# llm-swarm-runner subagent gate, issue #476 (added by provision-worker.sh)\n.claude/settings.json\n' >> "$exclude_file"
-    fi
 fi
 echo "[2/4] queue dirs ready"
 
