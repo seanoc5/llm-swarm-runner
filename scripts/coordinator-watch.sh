@@ -4388,15 +4388,26 @@ pending_brief_marker_sweep_pass() {
 # assignment built the same way would abort the whole watcher under `set -e`
 # (see count_queued_files's header comment in kill-finished-workers.sh for
 # the same trap, guarded there with an explicit `[ -d ]` instead).
+#
+# Files younger than min_age_secs are excluded (self-review finding on
+# #448): provision-worker.sh writes the brief into inbox/ before it runs
+# lint-brief.sh/`docker ps` and finally opens the iss-N tmux window, so a
+# sweep tick landing in that gap would otherwise report a worker that's
+# only seconds away from existing. 120s is comfortably above that gap's
+# observed cost and far below the default 60s sweep interval's own next
+# retry, so a real strand is still caught within one or two ticks.
 stranded_brief_queue_lines() {
-    local wt_dir="$1" queue dir f now age_min
+    local wt_dir="$1" queue dir f now age_min age_secs
+    local min_age_secs=120
     now=$(date +%s)
     for queue in inbox processing; do
         dir="$wt_dir/.swarm/tasks/$queue"
         [ -d "$dir" ] || continue
         while IFS= read -r f; do
             [ -n "$f" ] || continue
-            age_min=$(( (now - $(mtime_epoch "$f")) / 60 ))
+            age_secs=$(( now - $(mtime_epoch "$f") ))
+            [ "$age_secs" -ge "$min_age_secs" ] || continue
+            age_min=$(( age_secs / 60 ))
             printf '%s\t%sm\t%s\n' "$queue" "$age_min" "$f"
         done < <(find "$dir" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | sort)
     done

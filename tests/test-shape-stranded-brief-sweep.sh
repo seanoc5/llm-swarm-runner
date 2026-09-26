@@ -96,6 +96,17 @@ done
 inbox_count()  { find "$COORD_INBOX_DIR" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' '; }
 last_inbox()   { find "$COORD_INBOX_DIR" -maxdepth 1 -type f 2>/dev/null | sort | tail -1; }
 
+# stranded_brief_queue_lines ignores anything younger than 120s (self-review
+# finding on #448: a brief written moments before provision-worker.sh opens
+# its tmux window must not read as a strand) — every fixture file below has
+# to be backdated past that floor, same GNU/BSD `touch -d`/`touch -t`
+# fallback test-coordinator-auto-compact.sh and test-watcher-autoclose.sh
+# already use.
+backdate() {
+    local epoch=$(( $(date +%s) - 200 ))
+    touch -d "@$epoch" "$1" 2>/dev/null || touch -t 197001010000 "$1"
+}
+
 git -C "$PROJECT_DIR" worktree add -q -b fix/issue-101 "$TEST_DIR/wt-issue-101" master
 declare -A STRANDED_BRIEF_LOGGED=()
 
@@ -112,6 +123,7 @@ heading "Test 2: claimed-but-orphaned brief in processing/, no live window -> fl
 # ============================================================================
 mkdir -p "$TEST_DIR/wt-issue-101/.swarm/tasks/processing"
 echo "claimed" > "$TEST_DIR/wt-issue-101/.swarm/tasks/processing/20260919-182935-101.md"
+backdate "$TEST_DIR/wt-issue-101/.swarm/tasks/processing/20260919-182935-101.md"
 
 stranded_brief_sweep_pass
 [ "$(inbox_count)" -eq 1 ] || red "expected exactly one coord-inbox entry, got $(inbox_count)"
@@ -168,6 +180,7 @@ green "archiving the brief (draining the queue) clears the dedup state, no re-po
 heading "Test 7: DRY_RUN=1 detects but writes nothing, and does not persist dedup"
 # ============================================================================
 echo "claimed again" > "$TEST_DIR/wt-issue-101/.swarm/tasks/processing/20260920-090000-101.md"
+backdate "$TEST_DIR/wt-issue-101/.swarm/tasks/processing/20260920-090000-101.md"
 DRY_RUN=1
 OUT="$(stranded_brief_sweep_pass)"
 DRY_RUN=0
@@ -191,6 +204,7 @@ rm -rf "$COORD_INBOX_DIR"
 declare -A STRANDED_BRIEF_LOGGED=()
 mkdir -p "$TEST_DIR/wt-issue-101/.swarm/tasks/inbox"
 echo "queued" > "$TEST_DIR/wt-issue-101/.swarm/tasks/inbox/20260921-100000-101.md"
+backdate "$TEST_DIR/wt-issue-101/.swarm/tasks/inbox/20260921-100000-101.md"
 stranded_brief_sweep_pass
 [ "$(inbox_count)" -eq 1 ] || red "expected an inbox/-only strand to be flagged too, got $(inbox_count)"
 grep -q 'inbox' "$(last_inbox)" || red "coord-inbox entry should name the inbox/ queue: $(cat "$(last_inbox)")"
@@ -204,6 +218,26 @@ stranded_brief_sweep_pass
 [ -z "${STRANDED_BRIEF_LOGGED[101]:-}" ] \
     || red "expected STRANDED_BRIEF_LOGGED[101] dropped once the worktree is gone entirely (a future wt-issue-101 should start fresh)"
 green "a fully-reaped worktree drops out of the dedup map, same as pr_poll_pass's ORPHAN_PR_LOGGED cleanup"
+
+# ============================================================================
+heading "Test 11: a brief younger than the grace floor is not yet flagged (self-review finding, #448)"
+# ============================================================================
+git -C "$PROJECT_DIR" worktree add -q -b fix/issue-102 "$TEST_DIR/wt-issue-102" master
+mkdir -p "$TEST_DIR/wt-issue-102/.swarm/tasks/inbox"
+echo "queued" > "$TEST_DIR/wt-issue-102/.swarm/tasks/inbox/20260926-brand-new-102.md"
+tmux() { echo ""; }
+before_count="$(inbox_count)"
+stranded_brief_sweep_pass
+[ "$(inbox_count)" -eq "$before_count" ] \
+    || red "a brief written moments ago (provision-worker.sh's own window-creation gap) must not be flagged yet"
+[ -z "${STRANDED_BRIEF_LOGGED[102]:-}" ] || red "STRANDED_BRIEF_LOGGED[102] must not be set for a too-young brief"
+green "a freshly-written brief inside provision-worker.sh's window-creation gap is not flagged (grace floor holds)"
+
+backdate "$TEST_DIR/wt-issue-102/.swarm/tasks/inbox/20260926-brand-new-102.md"
+stranded_brief_sweep_pass
+[ "$(inbox_count)" -eq $((before_count + 1)) ] || red "once past the grace floor, the same brief should be flagged"
+[ -n "${STRANDED_BRIEF_LOGGED[102]:-}" ] || red "expected STRANDED_BRIEF_LOGGED[102] set once past the grace floor"
+green "the same brief is flagged once it's old enough to be a real strand"
 
 # ============================================================================
 heading "All stranded-brief sweep tests passed"
