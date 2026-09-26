@@ -4389,6 +4389,16 @@ pending_brief_marker_sweep_pass() {
 # (see count_queued_files's header comment in kill-finished-workers.sh for
 # the same trap, guarded there with an explicit `[ -d ]` instead).
 #
+# mtime_epoch's output is captured into a variable (`|| true`, then skip on
+# empty) rather than inlined in the arithmetic (coordinator review, PR #480):
+# a file listed by `find` can vanish before the `stat` behind mtime_epoch
+# runs (e.g. the coordinator archiving a stranded brief by hand mid-tick),
+# and an empty result inlined as `$(( now - $(mtime_epoch "$f") ))` is a
+# bash arithmetic syntax error that aborts the whole script immediately —
+# it isn't a normal failing command, so `|| true` after it can't catch it,
+# which silently kills run_watch_timer_loop's background process and every
+# other periodic sweep along with it.
+#
 # Files younger than min_age_secs are excluded (self-review finding on
 # #448): provision-worker.sh writes the brief into inbox/ before it runs
 # lint-brief.sh/`docker ps` and finally opens the iss-N tmux window, so a
@@ -4397,7 +4407,7 @@ pending_brief_marker_sweep_pass() {
 # observed cost and far below the default 60s sweep interval's own next
 # retry, so a real strand is still caught within one or two ticks.
 stranded_brief_queue_lines() {
-    local wt_dir="$1" queue dir f now age_min age_secs
+    local wt_dir="$1" queue dir f now age_min age_secs m
     local min_age_secs=120
     now=$(date +%s)
     for queue in inbox processing; do
@@ -4405,7 +4415,9 @@ stranded_brief_queue_lines() {
         [ -d "$dir" ] || continue
         while IFS= read -r f; do
             [ -n "$f" ] || continue
-            age_secs=$(( now - $(mtime_epoch "$f") ))
+            m=$(mtime_epoch "$f") || true
+            [ -n "$m" ] || continue
+            age_secs=$(( now - m ))
             [ "$age_secs" -ge "$min_age_secs" ] || continue
             age_min=$(( age_secs / 60 ))
             printf '%s\t%sm\t%s\n' "$queue" "$age_min" "$f"

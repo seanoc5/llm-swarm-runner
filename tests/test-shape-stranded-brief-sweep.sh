@@ -240,6 +240,52 @@ stranded_brief_sweep_pass
 green "the same brief is flagged once it's old enough to be a real strand"
 
 # ============================================================================
+heading "Test 12: a file listed by find but deleted before stat leaves the rest of the scan (and the sweep) alive (PR #480 review)"
+# ============================================================================
+# Reproduces the coordinator's PR #480 finding: the coordinator can archive
+# a stranded brief by hand mid-tick, between find listing it and
+# stranded_brief_queue_lines's stat on it. Two files, sorted so the vanishing
+# one is scanned first and a REAL still-stranded one follows it -- this is
+# the only way to observe the pre-fix bug directly: a bare
+# `age_secs=$(( now - $(mtime_epoch "$f") ))` on the empty mtime_epoch result
+# is an arithmetic syntax error that aborts the `while read` scan outright
+# (confirmed experimentally: the loop does not even reach its next
+# iteration), so the real strand sorted after the vanished file would go
+# completely unreported -- not just "one line missing", a false "all clear"
+# for the whole queue. `|| true` on the bare form can't catch this because
+# the error isn't a normal nonzero exit status, it's a fatal parse error.
+rm -f "$TEST_DIR/wt-issue-102/.swarm/tasks/inbox"/*.md
+: > "$EVENTS_LOG"
+declare -A STRANDED_BRIEF_LOGGED=()
+mkdir -p "$TEST_DIR/wt-issue-102/.swarm/tasks/inbox"
+VANISHING="$TEST_DIR/wt-issue-102/.swarm/tasks/inbox/20260926-a-vanishing-102.md"
+STILL_STRANDED="$TEST_DIR/wt-issue-102/.swarm/tasks/inbox/20260926-b-still-stranded-102.md"
+echo "queued" > "$VANISHING"
+echo "queued" > "$STILL_STRANDED"
+backdate "$VANISHING"
+backdate "$STILL_STRANDED"
+
+# Shadow mtime_epoch (as extracted above) so stat'ing the vanishing file
+# fails exactly once, the moment it's looked up -- same shape as the real
+# race, without a timing-dependent sleep.
+mtime_epoch() {
+    if [ "$1" = "$VANISHING" ]; then
+        rm -f "$VANISHING"
+    fi
+    stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
+}
+
+lines="$(stranded_brief_queue_lines "$TEST_DIR/wt-issue-102")"
+echo "$lines" | grep -q "20260926-b-still-stranded-102.md" \
+    || red "the real strand sorted after a vanished file must still be reported, got: $lines"
+echo "$lines" | grep -q "20260926-a-vanishing-102.md" \
+    && red "the vanished file itself must not appear in the output: $lines"
+green "a file that vanishes mid-scan is skipped without losing the real strand that sorts after it"
+
+# Restore the real mtime_epoch (re-extracted) for any test added after this one.
+eval "$(extract_fn mtime_epoch "$WATCH")"
+
+# ============================================================================
 heading "All stranded-brief sweep tests passed"
 # ============================================================================
 green "stranded_brief_sweep_pass(): detects a queued/claimed brief with no live window, dedups per issue, and clears on re-provision or archive"
