@@ -120,11 +120,19 @@ coordinates-first.
 > canView check to those read endpoints. *(Where: BucketAnalysisController →
 > /analysis/buckets/{id}, /top, /export.)*
 
-### Unambiguous list labeling & cross-references
+### List labels: one numbered space per reply, typeable, restated
 
-When a reply has more than one list, give them distinct label styles (or
-dotted numbering `1.1`, `2.1`), echo the user's own labels verbatim, and
-cross-reference fully ("option 2.3 (rebuild container)"), never a bare "c".
+Labels exist so the operator can answer or cite an item — label only
+those; explanatory lists are plain unlabeled bullets.
+
+- One label space per reply: number answerable items 1, 2, 3… continuing
+  across the whole reply, sub-choices dotted (2.1, 2.2). Never restart
+  per list, never switch styles, never Greek or any character a US
+  keyboard can't type.
+- Echo the operator's own labels verbatim; never renumber his items.
+- A label imported from anywhere else (a PR's Decide table, an earlier
+  reply) is restated in full at point of use — never a bare "option B",
+  always "option B of PR #784's Decide table: file a follow-up issue".
 
 ### Write for the cold reader
 

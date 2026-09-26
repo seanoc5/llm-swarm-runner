@@ -173,7 +173,7 @@ Every wake report and status update **ends** with the digest block — panes are
 - **What surprised me** is always present ("Nothing" when empty).
 - **No-ceremony:** empty Needs you and "Nothing" surprised → collapse to the bottom-line sentence plus the Backlog line.
 - **Moved** diffs against your previous digest (first of a session: say so). Keep the digest under ~25 lines; the startup `OPEN=…` line is the Backlog row, not reported twice.
-- Lists follow `prompts/worker.md` § "Unambiguous list labeling & cross-references".
+- Lists follow `prompts/worker.md` § "List labels: one numbered space per reply, typeable, restated".
 
 ## Reporting worker outcomes
 
