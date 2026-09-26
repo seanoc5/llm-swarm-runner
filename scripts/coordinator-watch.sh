@@ -3493,6 +3493,13 @@ WATCHER_STARTED_AT="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 # started watcher — wake_clock_get fails open to 0 ("no wake ever"), which
 # would otherwise read as quiet since the Unix epoch and fire on the very
 # first tick regardless of STALL_WAKE_SECS.
+#
+# This ONLY covers that true-zero case. COORD_WAKE_LAST_FILE (issue #456) is
+# deliberately NOT reset here and survives a watcher restart, so a watcher
+# that restarts after a genuinely long quiet stretch can still fire on its
+# very first tick post-restart — same as the debounce clock it shares the
+# file with. That is intended, not a bug: "no wake of any kind for
+# STALL_WAKE_SECS" is meant to span restarts, not be reset by them.
 WATCHER_STARTED_AT_EPOCH="$(date +%s)"
 WATCHER_STATE_FILE="$PROJECT_DIR/.swarm/coordinator-watch.state"
 {
@@ -7966,13 +7973,14 @@ stall_wake_pass() {
         fi
     fi
     wake_clock_set "$now"
-
-    if [ "$ONCE" = "1" ]; then
-        echo "[$(date +%T)] ONCE=1 — exiting after first wake."
-        log_event watch.exit "reason=once"
-        [ "$WATCHER_QUIET" = "1" ] || sleep 1.5
-        exit 0
-    fi
+    # No ONCE=1 exit branch here, unlike on_outcome/on_message: this function
+    # runs inside run_stall_wake_loop's OWN backgrounded process (`&`), so an
+    # `exit` here would only kill that background timer — not the watcher —
+    # while still logging a misleading "whole daemon exited" event. ONCE=1's
+    # smoke-test semantics belong to the foreground dispatch loop that owns
+    # process lifetime; every other background-loop pass (auto_compact_poll_
+    # pass, coord_wake_retry_pass, coord_wake_hold_retry_pass, pr_poll_pass)
+    # follows the same rule and has no ONCE handling either.
 }
 
 # ---------------------------------------------------------------------------
