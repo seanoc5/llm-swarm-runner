@@ -267,6 +267,29 @@ exclude_file="$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || tr
 if [ -n "$exclude_file" ] && [ -f "$exclude_file" ] && ! grep -qxF '.swarm/' "$exclude_file"; then
     printf '\n# llm-swarm-runner worker scratch (added by provision-worker.sh)\n.swarm/\n' >> "$exclude_file"
 fi
+
+# Belt-and-braces subagent gate (issue #476): worker-listener.sh already
+# passes --disallowedTools Agent,Task on every claude dispatch, which is the
+# primary gate and covers the normal path. This worktree-local settings.json
+# denies the same tools at the project-settings layer, so a worker that
+# re-invokes `claude` by hand inside the container (bypassing the listener's
+# own flags) is still denied Agent/Task — confirmed empirically that
+# permissions.deny holds even under --dangerously-skip-permissions. Only
+# created when absent, so a project that already tracks its own
+# .claude/settings.json (or an operator's manual edit) is never clobbered.
+if [ ! -e "$WT/.claude/settings.json" ]; then
+    mkdir -p "$WT/.claude"
+    cat > "$WT/.claude/settings.json" <<'SETTINGS'
+{
+  "permissions": {
+    "deny": ["Agent", "Task"]
+  }
+}
+SETTINGS
+    if [ -n "$exclude_file" ] && [ -f "$exclude_file" ] && ! grep -qxF '.claude/settings.json' "$exclude_file"; then
+        printf '\n# llm-swarm-runner subagent gate, issue #476 (added by provision-worker.sh)\n.claude/settings.json\n' >> "$exclude_file"
+    fi
+fi
 echo "[2/4] queue dirs ready"
 
 # 3. Build task brief atomically (mktemp+mv inside same FS = atomic rename)

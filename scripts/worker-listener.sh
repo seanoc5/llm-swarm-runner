@@ -323,10 +323,20 @@ dispatch_agent() {
         # (interactive only) reopens /dev/tty for the live REPL, so an
         # attached human can still type once the piped prompt is consumed.
         # Confirmed against the installed CLI (2.1.259) before relying on it.
+        #
+        # --disallowedTools Agent,Task (issue #476): workers must not spawn
+        # subagents (prompts/worker.md § foreground-only / no-subagents) —
+        # out-of-scope work a subagent does bypasses the follow-up-suggestion
+        # gate entirely (see #476's incident). --disallowedTools removes the
+        # tool from the toolset outright, so --dangerously-skip-permissions
+        # below cannot resurrect it. "Agent" is the current subagent tool
+        # name; "Task" is kept for older CLI versions that used that name.
+        # Confirmed against the installed CLI (2.1.283): a denied session's
+        # tool listing omits Agent where an undenied control run includes it.
         if [ "$HEADLESS" = "1" ]; then
-            printf '%s' "$task_text" | claude "${MODEL_OPTS[@]}" "${WORKER_SYSTEM_PROMPT_OPTS[@]}" -p --dangerously-skip-permissions
+            printf '%s' "$task_text" | claude "${MODEL_OPTS[@]}" "${WORKER_SYSTEM_PROMPT_OPTS[@]}" --disallowedTools Agent,Task -p --dangerously-skip-permissions
         else
-            printf '%s' "$task_text" | claude "${MODEL_OPTS[@]}" "${WORKER_SYSTEM_PROMPT_OPTS[@]}" --dangerously-skip-permissions
+            printf '%s' "$task_text" | claude "${MODEL_OPTS[@]}" "${WORKER_SYSTEM_PROMPT_OPTS[@]}" --disallowedTools Agent,Task --dangerously-skip-permissions
         fi
     elif [[ "$AGENT" == "gemini" ]]; then
         if [ "$HEADLESS" = "1" ]; then
