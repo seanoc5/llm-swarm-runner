@@ -2850,7 +2850,7 @@ fi
 # coord_inbox_write). The pane doorbell itself stays the same short, generic
 # coord_inbox_nudge_text every wake path uses; only the inbox payload names
 # what kind of wake this was.
-STALL_WAKE_PROMPT="${STALL_WAKE_PROMPT:-Quiet-period check-in: no worker or wake activity for a while. Produce a short wake digest (swarm state: live workers, open PRs/issues, anything blocked) and suggest next steps — or say plainly that there is nothing to do right now.}"
+STALL_WAKE_PROMPT="${STALL_WAKE_PROMPT:-Quiet-period check-in: no coordinator wake has been delivered for at least ${STALL_WAKE_SECS}s. That only proves no doorbell landed in that window — it does NOT mean workers are idle; a swarm with live workers still on long tasks can look exactly like this. Verify actual worker/PR state before concluding the swarm is idle. Produce a short wake digest (swarm state: live workers, open PRs/issues, anything blocked) and suggest next steps — or say plainly that there is nothing to do right now.}"
 
 # SWARM_PARKED_FILE: the operator's park switch (issue #366's other
 # suppression knob besides STALL_WAKE_SECS=0) — touch this file to keep a
