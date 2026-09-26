@@ -48,9 +48,13 @@ CAP ENFORCEMENT (exit 3 on any)
     MAX_TMUX_WINDOWS    total session windows < cap       (default 10)
     HOST_MAX_WORKERS    running swarm-* containers across ALL swarms on this
                         host < cap                        (default 8)
-    All are checked just before the new tmux window would be created. The
-    host cap exists because per-swarm caps don't add up: 2026-09-02 saw 16
-    workers x 8 GB sandbox limit = all 128 GB of minti9's RAM.
+    All are checked BEFORE the task brief is written into inbox/ and before
+    the new tmux window would be created, so a refusal leaves no brief
+    behind (issue #464 — a refused-then-retried provision used to queue the
+    same brief twice). The worktree itself (step 1) is still created even
+    on refusal: it's harmless, and a retry reuses it instead of recreating
+    it. The host cap exists because per-swarm caps don't add up: 2026-09-02
+    saw 16 workers x 8 GB sandbox limit = all 128 GB of minti9's RAM.
     Re-running for an existing iss-N window does NOT count against caps —
     that path queues a follow-up task without adding capacity.
 
@@ -269,6 +273,66 @@ if [ -n "$exclude_file" ] && [ -f "$exclude_file" ] && ! grep -qxF '.swarm/' "$e
 fi
 echo "[2/4] queue dirs ready"
 
+# Cap enforcement — resolved BEFORE the brief is written (issue #464).
+#    Caps used to be checked only right before spawning the tmux window,
+#    by which point the brief already existed in inbox/; a cap.refused
+#    exit still left it there, and a later retry queued a duplicate
+#    (fand-etl, 2026-09-25: #995/#996/#997 each got a stray brief from a
+#    refused 01:13Z provision, then #995's 01:45Z retry ran the task
+#    twice). Deciding window-exists vs new-capacity here, and exiting
+#    before any brief is written, means a refusal leaves inbox/ untouched.
+#
+#    The worktree from step 1 is deliberately NOT rolled back on refusal:
+#    it's an empty, unqueued worktree — harmless, and a retry reuses it
+#    rather than recreating it. Leaving an orphaned wt-issue-N is the
+#    accepted tradeoff (see issue #464).
+if ! tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+    echo "ERROR: tmux session '$SESSION_NAME' does not exist." >&2
+    echo "  (Are you running this from inside the coordinator's session?)" >&2
+    exit 2
+fi
+
+# Skip cap enforcement if a window for this issue already exists — caps
+# don't apply because we're not adding capacity, just queueing a follow-up
+# task onto a worker that's already alive.
+WINDOW_EXISTS=0
+if tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx "iss-$ISSUE"; then
+    WINDOW_EXISTS=1
+fi
+
+if [ "$WINDOW_EXISTS" -eq 0 ]; then
+    # Cap enforcement: count alive workers (iss-*) and total windows BEFORE
+    # the spawn. Refuse with exit 3 if either cap would be exceeded. The
+    # coordinator catches non-zero exits and reports back to the user.
+    alive_workers=$(tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -c '^iss-' || true)
+    total_windows=$(tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | wc -l)
+    if [ "$alive_workers" -ge "$MAX_WORKERS" ]; then
+        echo "ERROR: MAX_WORKERS cap reached (alive=$alive_workers, max=$MAX_WORKERS)" >&2
+        echo "       Wait for a worker to finish, or raise MAX_WORKERS in <project>/.swarm/.env." >&2
+        log_event cap.refused "issue=$ISSUE reason=max_workers alive=$alive_workers max=$MAX_WORKERS"
+        exit 3
+    fi
+    if [ "$total_windows" -ge "$MAX_TMUX_WINDOWS" ]; then
+        echo "ERROR: MAX_TMUX_WINDOWS cap reached (total=$total_windows, max=$MAX_TMUX_WINDOWS)" >&2
+        echo "       Close finished iss-* windows: tmux kill-window -t '$SESSION_NAME:iss-NN'" >&2
+        echo "       Or raise MAX_TMUX_WINDOWS in <project>/.swarm/.env." >&2
+        log_event cap.refused "issue=$ISSUE reason=max_tmux_windows total=$total_windows max=$MAX_TMUX_WINDOWS"
+        exit 3
+    fi
+    # Host-wide cap: every swarm on this box provisions into the same RAM.
+    # Counts running worker containers regardless of session (names are
+    # swarm-<session>-iss-<issue>). Set HOST_MAX_WORKERS=0 to disable.
+    if [ "$HOST_MAX_WORKERS" != "0" ]; then
+        host_workers=$(docker ps --filter 'name=^swarm-' --format '{{.Names}}' 2>/dev/null | wc -l)
+        if [ "$host_workers" -ge "$HOST_MAX_WORKERS" ]; then
+            echo "ERROR: HOST_MAX_WORKERS cap reached (running swarm-* containers=$host_workers, max=$HOST_MAX_WORKERS, all swarms)" >&2
+            echo "       Reap finished workers in every swarm (kill-finished-workers.sh), or raise HOST_MAX_WORKERS." >&2
+            log_event cap.refused "issue=$ISSUE reason=host_max_workers running=$host_workers max=$HOST_MAX_WORKERS"
+            exit 3
+        fi
+    fi
+fi
+
 # 3. Build task brief atomically (mktemp+mv inside same FS = atomic rename)
 #
 # TASK_ID base is second-resolution; on the rare case of two re-dispatches
@@ -346,53 +410,15 @@ if [ "${BRIEF_LINT:-1}" = "1" ] && [ -x "$SCRIPT_DIR/lint-brief.sh" ]; then
     "$SCRIPT_DIR/lint-brief.sh" "$DEST" || true
 fi
 
-# 4. Spawn worker tmux window (background — does NOT steal focus from coordinator)
-# If the session doesn't exist, fail clearly — the coordinator should be
-# running inside the session, so it should always exist by the time we
-# reach this script.
-if ! tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
-    echo "ERROR: tmux session '$SESSION_NAME' does not exist." >&2
-    echo "  (Are you running this from inside the coordinator's session?)" >&2
-    exit 2
-fi
-
-# Skip if a window for this issue already exists — caps don't apply
-# because we're not adding capacity, just queueing a follow-up task.
-if tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx "iss-$ISSUE"; then
+# 4. Spawn worker tmux window (background — does NOT steal focus from
+#    coordinator). Session existence and caps were already checked above,
+#    before the brief was written; WINDOW_EXISTS/alive_workers/total_windows
+#    carry that decision forward so we don't re-check (and can't re-refuse
+#    after the brief already exists).
+if [ "$WINDOW_EXISTS" -eq 1 ]; then
     echo "[4/4] tmux window iss-$ISSUE already exists — listener will pick up the new task"
     log_event worker.requeue "issue=$ISSUE task_id=$TASK_ID"
 else
-    # Cap enforcement: count alive workers (iss-*) and total windows BEFORE
-    # the spawn. Refuse with exit 3 if either cap would be exceeded. The
-    # coordinator catches non-zero exits and reports back to the user.
-    alive_workers=$(tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -c '^iss-' || true)
-    total_windows=$(tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | wc -l)
-    if [ "$alive_workers" -ge "$MAX_WORKERS" ]; then
-        echo "ERROR: MAX_WORKERS cap reached (alive=$alive_workers, max=$MAX_WORKERS)" >&2
-        echo "       Wait for a worker to finish, or raise MAX_WORKERS in <project>/.swarm/.env." >&2
-        log_event cap.refused "issue=$ISSUE reason=max_workers alive=$alive_workers max=$MAX_WORKERS"
-        exit 3
-    fi
-    if [ "$total_windows" -ge "$MAX_TMUX_WINDOWS" ]; then
-        echo "ERROR: MAX_TMUX_WINDOWS cap reached (total=$total_windows, max=$MAX_TMUX_WINDOWS)" >&2
-        echo "       Close finished iss-* windows: tmux kill-window -t '$SESSION_NAME:iss-NN'" >&2
-        echo "       Or raise MAX_TMUX_WINDOWS in <project>/.swarm/.env." >&2
-        log_event cap.refused "issue=$ISSUE reason=max_tmux_windows total=$total_windows max=$MAX_TMUX_WINDOWS"
-        exit 3
-    fi
-    # Host-wide cap: every swarm on this box provisions into the same RAM.
-    # Counts running worker containers regardless of session (names are
-    # swarm-<session>-iss-<issue>). Set HOST_MAX_WORKERS=0 to disable.
-    if [ "$HOST_MAX_WORKERS" != "0" ]; then
-        host_workers=$(docker ps --filter 'name=^swarm-' --format '{{.Names}}' 2>/dev/null | wc -l)
-        if [ "$host_workers" -ge "$HOST_MAX_WORKERS" ]; then
-            echo "ERROR: HOST_MAX_WORKERS cap reached (running swarm-* containers=$host_workers, max=$HOST_MAX_WORKERS, all swarms)" >&2
-            echo "       Reap finished workers in every swarm (kill-finished-workers.sh), or raise HOST_MAX_WORKERS." >&2
-            log_event cap.refused "issue=$ISSUE reason=host_max_workers running=$host_workers max=$HOST_MAX_WORKERS"
-            exit 3
-        fi
-    fi
-
     # Container name lets the tmux Ctrl-Z binding `docker exec` into this
     # specific worker. Format must match the binding in ~/.tmux.conf:
     #   swarm-<session>-iss-<issue>
