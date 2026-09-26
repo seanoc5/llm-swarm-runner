@@ -97,8 +97,8 @@ for HEADLESS in 1 0; do
         || red "HEADLESS=$HEADLESS: worker.md path missing from argv"
     grep -qxF -- "--disallowedTools" "$CLAUDE_ARGS_LOG" \
         || red "HEADLESS=$HEADLESS: --disallowedTools missing from argv (issue #476 subagent gate)"
-    grep -qxF -- "Agent,Task" "$CLAUDE_ARGS_LOG" \
-        || red "HEADLESS=$HEADLESS: Agent,Task missing from --disallowedTools value (issue #476 subagent gate)"
+    grep -qxF -- "Agent,Task,Workflow" "$CLAUDE_ARGS_LOG" \
+        || red "HEADLESS=$HEADLESS: Agent,Task,Workflow missing from --disallowedTools value (issue #476 subagent gate)"
     grep -qF -- "$SENTINEL_WORKER_MD" "$CLAUDE_ARGS_LOG" \
         && red "HEADLESS=$HEADLESS: worker.md CONTENT leaked into argv"
     grep -qF -- "$SENTINEL_TASK" "$CLAUDE_ARGS_LOG" \
@@ -151,8 +151,8 @@ grep -qF -- "--append-system-prompt-file" "$TEST_DIR/wt/claude.args" \
     || red "end-to-end: --append-system-prompt-file missing from argv"
 grep -qxF -- "--disallowedTools" "$TEST_DIR/wt/claude.args" \
     || red "end-to-end: --disallowedTools missing from argv (issue #476 subagent gate)"
-grep -qxF -- "Agent,Task" "$TEST_DIR/wt/claude.args" \
-    || red "end-to-end: Agent,Task missing from --disallowedTools value (issue #476 subagent gate)"
+grep -qxF -- "Agent,Task,Workflow" "$TEST_DIR/wt/claude.args" \
+    || red "end-to-end: Agent,Task,Workflow missing from --disallowedTools value (issue #476 subagent gate)"
 grep -qF -- "$SENTINEL_WORKER_MD" "$TEST_DIR/wt/claude.args" \
     && red "end-to-end: worker.md CONTENT leaked into argv"
 grep -qF -- "$SENTINEL_TASK" "$TEST_DIR/wt/claude.args" \
