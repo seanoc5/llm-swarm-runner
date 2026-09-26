@@ -1093,8 +1093,8 @@ mkdir -p "$TEST_DIR/wt-issue-195/.swarm/tasks/processing"
 echo '# fix merge conflict on PR 104' > "$TEST_DIR/wt-issue-195/.swarm/tasks/processing/20260926-175653-195.md"
 printf 'fix/issue-195\tOPEN\t104\t2020-01-01T00:00:00Z\n' > "$GH_PR_LIST_FILE"
 
-ONCE=0 WATCH_PR_POLL_SECS=2 WATCH_CHECK_ON_DONE=1 start_watcher 0 "$TEST_DIR/watch-19d.log"
-sleep 5
+ONCE=0 WATCH_PR_POLL_SECS=1 WATCH_CHECK_ON_DONE=1 start_watcher 0 "$TEST_DIR/watch-19d.log"
+sleep 6
 stop_watcher
 
 [ ! -f "$TEST_DIR/wt-issue-195/.swarm/tasks/status/pr-issue-195.check.json" ] \
@@ -1107,10 +1107,14 @@ grep -q 'watch\.reconcile .*issue=195' "$PROJECT_DIR/.swarm/events.log" 2>/dev/n
 $(cat "$PROJECT_DIR/.swarm/events.log")"
 green "no watch.reconcile logged — the backstop never ran"
 
-grep -q 'watch\.pr_poll .*reason=followup_brief_postdates_pr issue=195' "$PROJECT_DIR/.swarm/events.log" \
-    || red "expected a followup_brief_postdates_pr log line explaining the skip; got:
+# Several WATCH_PR_POLL_SECS=1 ticks fired across the 6s window above — the
+# skip reason must be logged once, not once per tick (same dedup shape as
+# Test 17's orphan_no_window).
+SKIP_LINES=$(grep -c 'watch\.pr_poll .*reason=followup_brief_postdates_pr issue=195' "$PROJECT_DIR/.swarm/events.log" 2>/dev/null || true)
+[ "$SKIP_LINES" -eq 1 ] \
+    || red "expected exactly 1 followup_brief_postdates_pr log line across multiple poll ticks; got $SKIP_LINES. Events log:
 $(cat "$PROJECT_DIR/.swarm/events.log" 2>/dev/null || echo '(missing)')"
-green "events.log records why the backstop was skipped"
+green "followup_brief_postdates_pr logged exactly once despite multiple WATCH_PR_POLL_SECS ticks (no spam)"
 
 # Once the brief is archived (simulating task-done.sh moving it out of
 # processing/, worker finished) with still no status file, the guard's

@@ -3177,6 +3177,10 @@ declare -A ACTIVITY_ANNOUNCED_ISSUE=()
 # permanently suppressed.
 declare -A ORPHAN_PR_LOGGED=()
 
+# issue #475: same dedup shape as ORPHAN_PR_LOGGED above, for maybe_run_check's
+# followup_brief_postdates_pr skip — see that call site's own comment.
+declare -A FOLLOWUP_SKIP_LOGGED=()
+
 # issue #298: dedups bg_violation_sweep_pass's outbox drop + log line so a
 # worker window with a still-open background shell doesn't get a fresh
 # violation message every WATCH_BG_VIOLATION_SWEEP_SECS tick forever. Keyed
@@ -3773,6 +3777,7 @@ pr_poll_pass() {
             # any stale dedup entry so a future worktree reusing this issue
             # number starts fresh (see ORPHAN_PR_LOGGED comment above).
             unset "ORPHAN_PR_LOGGED[$issue]" 2>/dev/null || true
+            unset "FOLLOWUP_SKIP_LOGGED[$issue]" 2>/dev/null || true
             continue
         fi
 
@@ -4737,8 +4742,22 @@ maybe_run_check() {
             # per-issue key for it; the worker's own eventual
             # ready-for-review status file (or PR-merge) will drive the
             # real check-on-done run through the normal paths above.
-            log_event watch.pr_poll "reason=followup_brief_postdates_pr issue=$issue pr_created_at=$pr_created_at"
+            #
+            # Self-review finding: without FOLLOWUP_SKIP_LOGGED (same dedup
+            # shape as ORPHAN_PR_LOGGED above), this would log once per
+            # WATCH_PR_POLL_SECS tick for the brief's entire in-flight
+            # lifetime — hours, for a long follow-up task.
+            if [ -z "${FOLLOWUP_SKIP_LOGGED[$issue]:-}" ]; then
+                log_event watch.pr_poll "reason=followup_brief_postdates_pr issue=$issue pr_created_at=$pr_created_at"
+                FOLLOWUP_SKIP_LOGGED[$issue]=1
+            fi
             return 0
+        else
+            # The guard no longer applies (brief archived, or timestamps
+            # unresolvable) — clear any stale dedup entry so a LATER
+            # follow-up brief on this same issue logs fresh instead of
+            # staying silently suppressed forever.
+            unset "FOLLOWUP_SKIP_LOGGED[$issue]" 2>/dev/null || true
         fi
     fi
     [ -n "$task_id" ] || task_id="pr-issue-$issue"
