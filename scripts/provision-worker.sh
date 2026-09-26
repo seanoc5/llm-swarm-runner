@@ -270,26 +270,27 @@ fi
 
 # Belt-and-braces subagent gate (issue #476): worker-listener.sh already
 # passes --disallowedTools Agent,Task on every claude dispatch, which is the
-# primary gate and covers the normal path. This worktree-local settings.json
+# primary gate and covers the normal path. This worktree-local settings file
 # denies the same tools at the project-settings layer, so a worker that
 # re-invokes `claude` by hand inside the container (bypassing the listener's
 # own flags) is still denied Agent/Task — confirmed empirically that
 # permissions.deny holds even under --dangerously-skip-permissions. Only
-# created when absent, so a project that already tracks its own
-# .claude/settings.json (or an operator's manual edit) is never clobbered.
+# created when absent, so an existing local settings file is never
+# clobbered (and its rules are left as-is, not merged with these).
 #
-# Deliberately NOT added to info/exclude above: that file lives in the
-# common .git dir shared by every worktree of this repo (self-review finding
-# on #476's PR — `git -C "$WT" rev-parse --git-path info/exclude` resolves
-# there even from a linked worktree), so an entry added here would hide a
-# future project-tracked .claude/settings.json from every worktree and the
-# main checkout, not just this one. .swarm/ earns that shared scope because
-# it's always scratch; a project settings file is plausible to want tracked
-# later, so this one is left to show up as an ordinary untracked file —
-# workers already review `git status` before staging (prompts/worker.md).
-if [ ! -e "$WT/.claude/settings.json" ]; then
+# Uses .claude/settings.local.json, not .claude/settings.json: it's Claude
+# Code's own designated per-checkout/uncommitted settings file (conventional
+# .gitignore templates already exclude it), so it isn't the kind of file a
+# project would ever intend to track, unlike settings.json. Two things this
+# still doesn't guarantee: (1) a target project without that convention in
+# its own .gitignore could still have it swept into a PR by `git add -A`
+# (self-review finding on #476's PR); (2) info/exclude, used just above to
+# hide .swarm/, is shared across every worktree of a repo, so it's never
+# used here regardless — a shared hide-rule for a settings file is riskier
+# than the file being visible.
+if [ ! -e "$WT/.claude/settings.local.json" ]; then
     mkdir -p "$WT/.claude"
-    cat > "$WT/.claude/settings.json" <<'SETTINGS'
+    cat > "$WT/.claude/settings.local.json" <<'SETTINGS'
 {
   "permissions": {
     "deny": ["Agent", "Task"]
