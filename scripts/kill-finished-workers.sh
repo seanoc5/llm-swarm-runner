@@ -746,6 +746,31 @@ for w in "${KILL_LIST[@]}"; do
             exit 1
         fi
     else
+        # issue #448: a window-only reap (no --with-worktree) deliberately
+        # keeps the worktree around — so unlike kill-worktree.sh's own path
+        # above, nothing here salvages a brief still sitting in its queues.
+        # That worktree now has no live iss-N window left to drain it, which
+        # is exactly coordinator-watch.sh's stranded_brief_sweep_pass's
+        # detection condition; it'll pick this up within
+        # WATCH_STRANDED_BRIEF_SWEEP_SECS regardless of what happens here.
+        # This loud warning exists so the operator/coordinator sees the
+        # strand being CREATED, right here, rather than only learning about
+        # it from that sweep's coord-inbox entry one or more ticks later —
+        # real incident, fand-app 2026-09-20: a claimed brief in
+        # wt-issue-1112's processing/ went unnoticed for hours after exactly
+        # this reap shape. The reap itself is still allowed to proceed
+        # either way — this is visibility, not a new gate (see
+        # --refuse-nonempty-inbox, issue #317, for kill-worktree.sh's own
+        # gate on the with-worktree path, which this mode has no equivalent
+        # of by design).
+        wt_for_warn="$(swarm_worktree_dir "$PROJECT_DIR" "$issue")"
+        if [ -d "$wt_for_warn" ]; then
+            inbox_n=$(count_queued_files "$wt_for_warn/.swarm/tasks/inbox")
+            processing_n=$(count_queued_files "$wt_for_warn/.swarm/tasks/processing")
+            if [ "$((inbox_n + processing_n))" -gt 0 ]; then
+                echo "  WARN: window-only reap leaves a non-empty queue behind (inbox=$inbox_n processing=$processing_n) — worktree kept, but no window left to drain it; will surface via coordinator-watch.sh's stranded-brief sweep (issue #448)" >&2
+            fi
+        fi
         echo "→ $w: tmux kill-window"
         tmux kill-window -t "$SESSION_NAME:$w" 2>/dev/null || echo "  WARN: kill-window failed (continuing)"
     fi
