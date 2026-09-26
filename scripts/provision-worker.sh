@@ -267,37 +267,6 @@ exclude_file="$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || tr
 if [ -n "$exclude_file" ] && [ -f "$exclude_file" ] && ! grep -qxF '.swarm/' "$exclude_file"; then
     printf '\n# llm-swarm-runner worker scratch (added by provision-worker.sh)\n.swarm/\n' >> "$exclude_file"
 fi
-
-# Belt-and-braces subagent gate (issue #476): worker-listener.sh already
-# passes --disallowedTools Agent,Task on every claude dispatch, which is the
-# primary gate and covers the normal path. This worktree-local settings file
-# denies the same tools at the project-settings layer, so a worker that
-# re-invokes `claude` by hand inside the container (bypassing the listener's
-# own flags) is still denied Agent/Task — confirmed empirically that
-# permissions.deny holds even under --dangerously-skip-permissions. Only
-# created when absent, so an existing local settings file is never
-# clobbered (and its rules are left as-is, not merged with these).
-#
-# Uses .claude/settings.local.json, not .claude/settings.json: it's Claude
-# Code's own designated per-checkout/uncommitted settings file (conventional
-# .gitignore templates already exclude it), so it isn't the kind of file a
-# project would ever intend to track, unlike settings.json. Two things this
-# still doesn't guarantee: (1) a target project without that convention in
-# its own .gitignore could still have it swept into a PR by `git add -A`
-# (self-review finding on #476's PR); (2) info/exclude, used just above to
-# hide .swarm/, is shared across every worktree of a repo, so it's never
-# used here regardless — a shared hide-rule for a settings file is riskier
-# than the file being visible.
-if [ ! -e "$WT/.claude/settings.local.json" ]; then
-    mkdir -p "$WT/.claude"
-    cat > "$WT/.claude/settings.local.json" <<'SETTINGS'
-{
-  "permissions": {
-    "deny": ["Agent", "Task"]
-  }
-}
-SETTINGS
-fi
 echo "[2/4] queue dirs ready"
 
 # 3. Build task brief atomically (mktemp+mv inside same FS = atomic rename)
