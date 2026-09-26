@@ -107,11 +107,15 @@ not vibes.
 **Our implementation (original, bash/jq):** `append_eval_log` in
 `worker-listener.sh` writes one row per completed v2 task (ts, task_id,
 issue, agent, model, duration, exit code, check_cmd/check_exit, retried,
-outcome) to `.swarm/eval-log.jsonl` (or `$SWARM_EVAL_LOG`).
+outcome, task_state, verification) to `.swarm/eval-log.jsonl` (or `$SWARM_EVAL_LOG`).
 `scripts/swarm-scoreboard.sh` pools logs across worktrees and renders
-per-(agent, model) tasks / pass% / first-try% / retries / checked / avg
-duration. This makes the "claude workers default to Sonnet 5" decision
-empirically checkable.
+per-(agent, model) tasks / pass% / first-try% / retries / checked / unchecked /
+avg duration. Passes require `outcome == "ok"` and `check_exit == 0`, with no
+explicit blocked task state. Unchecked runs do not count as passes; both
+rates use all tasks as their denominator. A passed check is evidence, not
+proof of every requirement. Compare similar tasks before choosing model
+defaults from these figures. See [cold-reader evaluation](grokkability-evaluation.md)
+for the separate communication measures and remaining telemetry limitations.
 
 **Deliberate divergences:** we group by (agent, model) — we have no
 task_type taxonomy (our tasks are GitHub issues, not manifest kits). The

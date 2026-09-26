@@ -247,12 +247,14 @@ printf '%s' "$SB_JSON" | jq -e '
     length == 1
     and .[0].agent == "bash"
     and .[0].tasks == 4
-    and .[0].pass == 3
+    and .[0].pass == 2
     and .[0].retries == 1
     and .[0].checked == 3
-    and .[0].first_try_pass_rate == 0.75
+    and .[0].unchecked == 1
+    and .[0].pass_rate == 0.5
+    and .[0].first_try_pass_rate == 0.5
 ' >/dev/null || { printf '%s\n' "$SB_JSON"; red "scoreboard aggregation wrong"; }
-green "scoreboard --json: tasks=4 pass=3 retries=1 first_try=75%"
+green "scoreboard --json: tasks=4 verified passes=2 unchecked=1 retries=1 first_try=50%"
 
 "$SCOREBOARD" "$EVAL_LOG" | grep -q "bash" || red "scoreboard table missing agent row"
 green "scoreboard table renders"

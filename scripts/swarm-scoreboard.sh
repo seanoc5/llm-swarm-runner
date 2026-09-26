@@ -30,11 +30,12 @@
 #
 # Columns:
 #   tasks     rows for the group
-#   pass      outcome == "ok" (agent exit 0 AND executed check passed)
+#   pass      outcome == "ok" AND check_exit == 0 (not explicitly blocked)
 #   pass%     pass / tasks
 #   1st-try%  passed without the retry-once kicking in
 #   retries   rows where the retry fired
 #   checked   rows that had an executed check at all
+#   unchecked rows with no executed check (never counted as passes)
 #   avg-s     mean duration_seconds
 set -euo pipefail
 
@@ -80,18 +81,20 @@ if [ ${#LOGS[@]} -eq 0 ]; then
 fi
 
 AGG=$(cat "${LOGS[@]}" | jq -s '
+    def passed: .outcome == "ok" and .check_exit == 0 and .task_state != "blocked";
     map(select(type == "object"))
     | group_by([.agent, .model])
     | map({
         agent: .[0].agent,
         model: (.[0].model // "-"),
         tasks: length,
-        pass: (map(select(.outcome == "ok")) | length),
-        pass_rate: ((map(select(.outcome == "ok")) | length) / length),
+        pass: (map(select(passed)) | length),
+        pass_rate: ((map(select(passed)) | length) / length),
         first_try_pass_rate:
-            ((map(select(.outcome == "ok" and (.retried | not))) | length) / length),
+            ((map(select(passed and (.retried | not))) | length) / length),
         retries: (map(select(.retried)) | length),
         checked: (map(select(.check_exit != null)) | length),
+        unchecked: (map(select(.check_exit == null)) | length),
         avg_duration_s: ((map(.duration_seconds) | add / length) * 10 | round / 10)
       })
     | sort_by(-.first_try_pass_rate, -.tasks)')
@@ -104,11 +107,11 @@ fi
 echo "Eval logs: ${#LOGS[@]} file(s), $(cat "${LOGS[@]}" | wc -l) row(s)"
 echo ""
 {
-    echo "AGENT|MODEL|TASKS|PASS|PASS%|1ST-TRY%|RETRIES|CHECKED|AVG-S"
+    echo "AGENT|MODEL|TASKS|PASS|PASS%|1ST-TRY%|RETRIES|CHECKED|UNCHECKED|AVG-S"
     printf '%s\n' "$AGG" | jq -r '.[] |
         [.agent, .model, .tasks, .pass,
          ((.pass_rate * 100) | round | tostring) + "%",
          ((.first_try_pass_rate * 100) | round | tostring) + "%",
-         .retries, .checked, .avg_duration_s]
+         .retries, .checked, .unchecked, .avg_duration_s]
         | join("|")'
 } | column -t -s'|'

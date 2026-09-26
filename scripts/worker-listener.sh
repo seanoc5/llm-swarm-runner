@@ -48,9 +48,9 @@
 #
 # Executed acceptance checks (v2 tasks only):
 #   After the agent exits, the listener runs a per-issue acceptance check and
-#   stamps the result into the outcome JSON. A task is only `outcome: ok` when
-#   BOTH the agent exited 0 AND the check (if one resolved) exited 0 — an
-#   agent declaring "done" is not proof; an executed check is.
+#   stamps the result into the outcome JSON. `outcome: ok` requires exit 0,
+#   no failed check, and no explicit blocked status. It can still be unchecked:
+#   use `verification` (passed/failed/not-run), not `ok`, as check evidence.
 #   Concept adopted from Nate B. Jones's ringer (see docs/ringer-adoptions.md
 #   for attribution and pointers); implementation here is original.
 #   Check command resolution order:
@@ -407,6 +407,7 @@ append_eval_log() {
         --arg ts "$finished" --arg task_id "$TASK_ID" --arg issue "$issue" \
         --arg agent "$AGENT" --arg model "$MODEL" \
         --arg check_cmd "${CHECK_CMD:-}" --arg check_exit "${CHECK_EXIT:-}" \
+        --arg task_state "${TASK_STATE:-}" --arg verification "$VERIFICATION" \
         --argjson duration "$duration" --argjson exit_code "$rc" \
         --argjson retried "${RETRIED:-false}" --arg outcome "$outcome" \
         '{ts: $ts, task_id: $task_id,
@@ -416,7 +417,9 @@ append_eval_log() {
           duration_seconds: $duration, exit_code: $exit_code,
           check_cmd: (if $check_cmd == "" then null else $check_cmd end),
           check_exit: (if $check_exit == "" then null else ($check_exit | tonumber) end),
-          retried: $retried, outcome: $outcome}' >> "$log" 2>/dev/null \
+          retried: $retried, outcome: $outcome,
+          task_state: (if $task_state == "" then null else $task_state end),
+          verification: $verification}' >> "$log" 2>/dev/null \
         || echo "WARN: could not append eval row to $log" >&2
 }
 
@@ -505,6 +508,18 @@ write_outcome() {
     [ "$rc" -ne 0 ] && TASK_OUTCOME="err"
     [ -n "${CHECK_EXIT:-}" ] && [ "$CHECK_EXIT" -ne 0 ] && TASK_OUTCOME="err"
 
+    VERIFICATION="not-run"
+    if [ -n "${CHECK_EXIT:-}" ]; then
+        VERIFICATION="failed"
+        [ "$CHECK_EXIT" -eq 0 ] && VERIFICATION="passed"
+    fi
+    TASK_STATE=""
+    local reason="" task_state_json="null"
+    if command -v jq >/dev/null 2>&1 && [ -r "$STATUS/${TASK_ID}.json" ]; then
+        TASK_STATE=$(jq -r '.state | select(type == "string")' "$STATUS/${TASK_ID}.json" 2>/dev/null) || TASK_STATE=""
+        task_state_json=$(printf '%s' "$TASK_STATE" | jq -Rs 'if . == "" then null else . end')
+    fi
+
     # self-review finding: $rc (the dispatched CLI process's bare exit
     # code) and an executed check's exit code are both much weaker signals
     # than the worker's own explicit self-report via scripts/task-done.sh
@@ -540,12 +555,20 @@ write_outcome() {
         fi
     fi
 
+    # A successful process (or check) does not resolve a worker's blocker.
+    # Keep the existing ok/err protocol; preserve the distinct task state.
+    # Runs after the explicit-err reconciliation above so a worker's own
+    # task-done.sh declaration (and its reason) always takes precedence.
+    if [ "$TASK_STATE" = "blocked" ] && [ "$TASK_OUTCOME" != "err" ]; then
+        TASK_OUTCOME="err"
+        reason="worker-blocked: resolve the blocker in the worker status before continuing"
+    fi
+
     # Minimum-interaction floor (#287): an apparent "ok" backed by no
     # executed check is only trustworthy if the agent actually engaged with
     # the task. A passed check or a worker-written status file is
     # independent proof of real work and is never second-guessed below —
     # only reached when neither exists, on top of zero new commits.
-    local reason=""
     [ -n "$prior_err_reason" ] && reason="worker-reported: $prior_err_reason"
     if [ "$TASK_OUTCOME" = "ok" ] && [ -z "${CHECK_EXIT:-}" ]; then
         local default_ref ahead=0 has_status=0
@@ -601,7 +624,7 @@ write_outcome() {
     local model_json="null"
     [ -n "$MODEL" ] && model_json="\"$MODEL\""
 
-    # JSON-escape the reason field (set only when the noop tripwire fired)
+    # JSON-escape the reason field (blocked task or noop tripwire).
     local reason_json="null"
     if [ -n "$reason" ]; then
         if command -v jq >/dev/null 2>&1; then
@@ -631,6 +654,8 @@ write_outcome() {
   "duration_seconds": $duration,
   "exit_code": $rc,
   "outcome": "$outcome",
+  "task_state": $task_state_json,
+  "verification": "$VERIFICATION",
   "reason": $reason_json,
   "agent": "$AGENT",
   "model": $model_json,
@@ -686,18 +711,18 @@ clear_pr_pending_brief_marker() {
         >/dev/null 2>&1 || true
 }
 
-# Print a structured, actionable status block once per completed task —
-# replaces the old one-line "Task complete... Waiting for next brief"
-# message, which was indistinguishable from a hang at a glance (issue #42).
+# Print a compact result after the worker process exits. Process exit, task
+# state and executed-check evidence are distinct; none implies merge approval.
 #
-# The literal marker "[polling for next brief" on its own line at the end
+# The literal marker "[polling for next brief" on the final line
 # is load-bearing: it's what check-stuck-workers.sh and
 # kill-finished-workers.sh grep for to detect an idle/parked listener.
 # Keep that exact substring if you touch this function.
 print_completion_block() {
     local rc="$1" duration="$2" outcome="$3" is_legacy="$4" brief_ref="$5"
-    local bar="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     local issue_num="${WT_LABEL#wt-issue-}"
+    local subject="Worker $WT_LABEL"
+    [[ "$WT_LABEL" =~ ^wt-issue-[0-9]+$ ]] && subject="Issue #$issue_num"
 
     # Pull PR/blocked/done-no-pr status from the worker's own status file
     # (queue-v2 protocol: .swarm/tasks/status/<task_id>.json), when present.
@@ -705,53 +730,52 @@ print_completion_block() {
     if [ "$is_legacy" != "1" ] && command -v jq >/dev/null 2>&1; then
         local status_file="$STATUS/${TASK_ID}.json"
         if [ -r "$status_file" ]; then
-            pr=$(jq -r 'if (.pr // null) == null then "" else (.pr|tostring) end' "$status_file" 2>/dev/null)
-            pr_state=$(jq -r '.state // empty' "$status_file" 2>/dev/null)
-            pr_note=$(jq -r '.note // empty' "$status_file" 2>/dev/null)
+            pr=$(jq -r '.pr | select(type == "number" or type == "string") | tostring' "$status_file" 2>/dev/null) || pr=""
+            pr_state=$(jq -r '.state | select(type == "string")' "$status_file" 2>/dev/null) || pr_state=""
+            pr_note=$(jq -r '.note | select(type == "string") | gsub("[\\r\\n\\t]+"; " ")' "$status_file" 2>/dev/null) || pr_note=""
         fi
         local outcome_file="$DONE/${TASK_ID}.${outcome}.json"
         [ -r "$outcome_file" ] && outcome_reason=$(jq -r '.reason // empty' "$outcome_file" 2>/dev/null)
     fi
-    [ -n "$pr" ] && clear_pr_pending_brief_marker "$pr" "$INBOX" "$PROCESSING"
+    # Do not clear a queued-fix warning when that fix is still blocked/failed.
+    if [ -n "$pr" ] && [ "$outcome" = "ok" ] && [ "$pr_state" != "blocked" ]; then
+        clear_pr_pending_brief_marker "$pr" "$INBOX" "$PROCESSING"
+    fi
 
     echo ""
-    echo "$bar"
-    if [ "$outcome" = "ok" ]; then
-        printf '  TASK COMPLETE    exit=%s    duration=%ss\n' "$rc" "$duration"
-    else
-        printf '  TASK FAILED       exit=%s    duration=%ss\n' "$rc" "$duration"
-        [ -n "$outcome_reason" ] && echo "  Reason: $outcome_reason"
-    fi
-    if [ -n "$pr" ]; then
-        echo "  PR #$pr opened — gh pr view $pr"
-    elif [ "$pr_state" = "blocked" ]; then
-        echo "  Blocked${pr_note:+: $pr_note}"
-    elif [ "$pr_state" = "done-no-pr" ]; then
-        echo "  No PR — task delivered without one${pr_note:+: $pr_note}"
-    fi
-    echo "$bar"
-    echo ""
-    echo "What to do next:"
-    if [ -n "$pr" ]; then
-        echo "  • Accept & merge:   gh pr merge $pr --squash"
-        echo "  • Reject:           gh pr close $pr"
+    if [ "$pr_state" = "blocked" ]; then
+        printf '%s: blocked%s.\n' "$subject" "${pr_note:+ — $pr_note}"
+        echo "Next: resolve the blocker before continuing; this is not a completed result."
     elif [ "$outcome" != "ok" ]; then
-        echo "  • Investigate:      gh pr view, scrollback above, brief at $brief_ref"
-    fi
-    echo "  • Follow up here:   requeue.sh $issue_num \"<follow-up brief>\""
-    echo "  • Leave it          this listener will pick up the next brief on inbox/"
-    echo "                      (different issues need their own worktree via provision-worker.sh)"
-    echo "  • Close it:         Ctrl-D twice, Ctrl-C twice, or type close-worker at the shell prompt below"
-    echo "                      (plain 'exit' only respawns the shell; worktree stays for kill-worktree.sh)"
-    echo ""
-    if [ -n "$pr" ]; then
-        echo "(Watcher detects PR-state changes; this slot frees automatically — see #32)"
+        printf '%s: work did not finish successfully%s.\n' "$subject" "${outcome_reason:+ — $outcome_reason}"
+        echo "Next: inspect the failure evidence before retrying or considering a merge."
+    elif [ -n "$pr" ]; then
+        printf '%s: worker handed back PR #%s for review%s.\n' "$subject" "$pr" "${pr_note:+ — $pr_note}"
+        echo "Next: review the result and its verification limits before deciding whether to merge."
+    elif [ "$pr_state" = "done-no-pr" ]; then
+        printf '%s: worker reports delivery without a PR%s.\n' "$subject" "${pr_note:+ — $pr_note}"
+        echo "Next: no merge is needed; check the result against the task's acceptance criteria."
     else
-        echo "(No PR — the watcher will NOT autoclose this slot; use close-worker when done here)"
+        printf '%s: worker exited; task completion is not established by exit status alone.\n' "$subject"
+        echo "Next: confirm the delivered result against the brief before calling this done."
     fi
-    echo "$bar"
-    echo ""
-    echo "[$(date +%T)] [polling for next brief in $WT_LABEL/$INBOX/ ...]"
+    local verification="not run; result is not verified by the listener" evidence="$brief_ref"
+    if [ "$is_legacy" != "1" ]; then
+        evidence="$DONE/${TASK_ID}.${outcome}.json"
+        if [ -n "${CHECK_EXIT:-}" ]; then
+            verification="failed (exit $CHECK_EXIT)"
+            [ "$CHECK_EXIT" -eq 0 ] && verification="passed; this is not merge approval"
+        fi
+    fi
+    printf 'Acceptance check: %s. Evidence: %s\n' "$verification" "$evidence"
+    if [[ "$WT_LABEL" =~ ^wt-issue-[0-9]+$ ]]; then
+        printf 'Worker idle. Continue: requeue.sh %s "<brief>"; close: close-worker.\n' "$issue_num"
+    else
+        printf 'Worker idle. Continue via %s/; close: close-worker.\n' "$INBOX"
+    fi
+    # Neutral process marker: watcher compatibility without calling blocked
+    # or unchecked work "TASK COMPLETE". Preserve the parked-listener marker.
+    printf '[worker-run-ended exit=%s duration=%ss] [polling for next brief in %s/%s/ ...]\n' "$rc" "$duration" "$WT_LABEL" "$INBOX"
 }
 
 # ── Interactive idle shell (issue #43) ──────────────────────────────────────

@@ -5932,7 +5932,9 @@ worker_task_done() {
     # would also fire if a worker's own pane happened to display that phrase
     # via source/test-fixture content (e.g. this repo's own worker-listener.sh
     # or test-shape-stuck-workers.sh), falsely marking an in-progress worker done.
-    printf '%s\n' "$clean" | LC_ALL=C grep -qE '^[[:space:]]*TASK (COMPLETE|FAILED)[[:space:]]+exit='
+    # Accept the neutral listener marker as well as older completion banners.
+    # This means the process ended, not that the task passed acceptance.
+    printf '%s\n' "$clean" | LC_ALL=C grep -qE '^[[:space:]]*(TASK (COMPLETE|FAILED)[[:space:]]+exit=|\[worker-run-ended exit=[0-9]+ duration=[0-9]+s\])'
 }
 
 # ── Parked-brief delivery (issue #313) ──────────────────────────────────────
