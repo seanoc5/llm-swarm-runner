@@ -360,7 +360,7 @@ extract_fn() {
     local fn="$1"
     sed -n "/^${fn}() {/,/^}/p" "$WATCH"
 }
-for fn in log_event on_outcome outcome_path_issue coord_wake_set_pending coord_wake_clear_pending \
+for fn in log_event on_outcome outcome_path_issue outcome_path_task_id coord_wake_set_pending coord_wake_clear_pending \
           coord_inbox_write coord_inbox_count coord_inbox_nudge_text \
           coord_wake_hold_mark_pending coord_wake_hold_clear_pending coord_wake_hold_retry_pass \
           coord_wake_hold_reason coord_human_present worker_human_present swarm_busy \
@@ -378,6 +378,11 @@ maybe_auto_compact() { :; }
 # cleanup_eligible_workers is only reached when WATCHER_AUTOCLOSE=1 below;
 # stubbed for the same reason (out of scope for this test).
 cleanup_eligible_workers() { :; }
+# on_outcome's retry-correction dedup (issue #468) keys this associative
+# array; the watcher declares it at top level, which function extraction
+# never copies — without the declare, bash treats the non-numeric task_id
+# subscript arithmetically and the eval'd on_outcome dies under set -u.
+declare -A OUTCOME_TASK_ANNOUNCED=()
 
 LOCK_TEST_DIR="$TEST_DIR/lock-test"
 mkdir -p "$LOCK_TEST_DIR"
