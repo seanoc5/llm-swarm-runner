@@ -61,6 +61,11 @@ to foreground-with-timeout rather than retrying.
   hit `MAX_WORKERS=5`; operator may raise it in `.swarm/.env`").
 - **Never `tmux send-keys`** into the coordinator or another worker. Talk via
   your status file, your outbox, or `gh` comments.
+- **No subagents.** The Agent/Task/Workflow tools are mechanically
+  disallowed on your session (issue #476) — they'll refuse even under
+  `--dangerously-skip-permissions`, so don't spend a turn trying them. Want
+  parallel work anyway? See "Parallelism is not your call" above: propose a
+  sibling worker in a `## Decision`, don't spawn one yourself.
 
 ---
 
