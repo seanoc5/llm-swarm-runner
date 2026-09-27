@@ -3177,6 +3177,10 @@ declare -A ACTIVITY_ANNOUNCED_ISSUE=()
 # permanently suppressed.
 declare -A ORPHAN_PR_LOGGED=()
 
+# issue #475: same dedup shape as ORPHAN_PR_LOGGED above, for maybe_run_check's
+# followup_brief_postdates_pr skip — see that call site's own comment.
+declare -A FOLLOWUP_SKIP_LOGGED=()
+
 # issue #298: dedups bg_violation_sweep_pass's outbox drop + log line so a
 # worker window with a still-open background shell doesn't get a fresh
 # violation message every WATCH_BG_VIOLATION_SWEEP_SECS tick forever. Keyed
@@ -3666,6 +3670,53 @@ pr_predates_worktree() {
     [ "$pr_epoch" -lt "$wt_epoch" ]
 }
 
+# followup_brief_postdates_pr <pr-created_at-iso8601> <worktree-dir>
+#
+# issue #475: the mirror image of pr_predates_worktree above. That guard
+# asks "did this PR predate the worktree" (a recycled branch name); this
+# one asks "was the CURRENT processing/ brief claimed after this PR
+# already existed" — a coordinator-queued follow-up brief against an
+# already-open PR (e.g. "fix this merge conflict"), still mid-flight, whose
+# PR head hasn't moved yet. maybe_run_check's PR-open backstop only reaches
+# its synthesized-task_id path when the worktree has NO status file at all
+# (see its own header) — exactly the state a follow-up brief is in before
+# the worker reaches ready-for-review — so without this guard "any branch
+# with a PR at all counts as done" (pr_poll_pass's own header) fires a
+# check-on-done run against a tree the worker hasn't finished touching yet,
+# and permanently consumes the synthesized check key before the worker's
+# real completion could ever use it.
+#
+# Uses ctime (not mtime) of each processing/ brief, same rationale as
+# worker_current_task_terminal's issue #370 fallback (see ctime_epoch's own
+# header): claim_next_task()'s mv into processing/ always bumps ctime,
+# which is "when this brief was actually claimed" regardless of how long
+# it sat queued in inbox/ beforehand or whether its content was edited.
+#
+# Fails CLOSED (i.e. "does NOT postdate") whenever either timestamp can't
+# be resolved or processing/ holds no brief at all, so a parsing hiccup or
+# an already-archived brief falls back to the pre-#475 behavior (treat the
+# open PR as backstop-eligible) rather than silently suppressing a
+# legitimate check-on-done run forever.
+followup_brief_postdates_pr() {
+    local created_at="$1" wt_dir="$2"
+    [ -n "$created_at" ] || return 1
+    local pr_epoch
+    pr_epoch=$(date -d "$created_at" +%s 2>/dev/null) || return 1
+    [ -n "$pr_epoch" ] || return 1
+    local f claim_epoch
+    shopt -s nullglob
+    for f in "$wt_dir"/.swarm/tasks/processing/*.md; do
+        claim_epoch="$(ctime_epoch "$f")"
+        [ -n "$claim_epoch" ] || continue
+        if [ "$claim_epoch" -gt "$pr_epoch" ]; then
+            shopt -u nullglob
+            return 0
+        fi
+    done
+    shopt -u nullglob
+    return 1
+}
+
 # has_live_window <issue>
 #
 # issue #225: kill-finished-workers.sh (invoked by cleanup_eligible_workers)
@@ -3696,7 +3747,9 @@ has_live_window() {
 #
 # Also drives the Behavior B (check-on-done) PR-open backstop: any branch
 # with a PR at all (regardless of state) counts as "done" for a worker
-# that never wrote a status file.
+# that never wrote a status file — except (issue #475) a follow-up brief
+# claimed into processing/ AFTER that PR already existed, which
+# maybe_run_check excludes via followup_brief_postdates_pr.
 pr_poll_pass() {
     local prs
     prs="$(cd "$PROJECT_DIR" && gh pr list --state all --limit 500 \
@@ -3724,6 +3777,7 @@ pr_poll_pass() {
             # any stale dedup entry so a future worktree reusing this issue
             # number starts fresh (see ORPHAN_PR_LOGGED comment above).
             unset "ORPHAN_PR_LOGGED[$issue]" 2>/dev/null || true
+            unset "FOLLOWUP_SKIP_LOGGED[$issue]" 2>/dev/null || true
             continue
         fi
 
@@ -3755,7 +3809,7 @@ pr_poll_pass() {
         fi
 
         if [ "$WATCH_CHECK_ON_DONE" = "1" ]; then
-            maybe_run_check "$wt_dir" "$issue"
+            maybe_run_check "$wt_dir" "$issue" "" "$created_at"
         fi
     done <<< "$prs"
 
@@ -4601,7 +4655,7 @@ reconcile_missing_outcome() {
     log_event watch.reconcile "issue=$issue task_id=$task_id reason=$reason"
 }
 
-# maybe_run_check <worktree-dir> <issue> [task_id]
+# maybe_run_check <worktree-dir> <issue> [task_id] [pr_created_at]
 #
 # Resolve + claim + run the acceptance check for a worker that has
 # signaled done (either status_poll_pass or pr_poll_pass called us). Both
@@ -4620,6 +4674,17 @@ reconcile_missing_outcome() {
 # worktree has no status file at all — the literal "worker never wrote
 # the #129 convention" case the backstop exists for.
 #
+# pr_created_at: only ever passed by pr_poll_pass (already has it from its
+# one `gh pr list` call, so no extra round-trip). issue #475: right before
+# we'd synthesize that per-issue key, check whether the CURRENT processing/
+# brief was claimed after this PR already existed — a coordinator-queued
+# follow-up brief against an already-open PR (fix a merge conflict, etc.),
+# still mid-flight. Without this, "any branch with a PR at all counts as
+# done" (this function's whole reason for existing) fires a check-on-done
+# run against a tree the worker hasn't finished touching, and permanently
+# consumes the synthesized key before the worker's real completion could
+# ever use it. See followup_brief_postdates_pr's own header.
+#
 # issue #181: the claim dir is released (rmdir) as soon as its run reaches
 # a terminal outcome (pass/fail/skipped) — see execute_check below — so
 # kill-worktree.sh's reap-side guard only sees it as "in flight" for the
@@ -4629,7 +4694,7 @@ reconcile_missing_outcome() {
 # the fast-path re-entry check just above it both key off the *.check.json
 # terminal state instead, which IS permanent.
 maybe_run_check() {
-    local wt_dir="$1" issue="$2" task_id="${3:-}"
+    local wt_dir="$1" issue="$2" task_id="${3:-}" pr_created_at="${4:-}"
     local status_dir="$wt_dir/.swarm/tasks/status"
     mkdir -p "$status_dir" 2>/dev/null || return 0
 
@@ -4669,6 +4734,30 @@ maybe_run_check() {
             task_id="$unclaimed"
         elif [ "$any_status" = "1" ]; then
             return 0
+        elif [ -n "$pr_created_at" ] && followup_brief_postdates_pr "$pr_created_at" "$wt_dir"; then
+            # issue #475: no status file at all, but the brief now in
+            # processing/ was claimed after this PR already existed — a
+            # follow-up brief on an already-open PR, not a worker that
+            # skipped writing its status file. Don't synthesize a
+            # per-issue key for it; the worker's own eventual
+            # ready-for-review status file (or PR-merge) will drive the
+            # real check-on-done run through the normal paths above.
+            #
+            # Self-review finding: without FOLLOWUP_SKIP_LOGGED (same dedup
+            # shape as ORPHAN_PR_LOGGED above), this would log once per
+            # WATCH_PR_POLL_SECS tick for the brief's entire in-flight
+            # lifetime — hours, for a long follow-up task.
+            if [ -z "${FOLLOWUP_SKIP_LOGGED[$issue]:-}" ]; then
+                log_event watch.pr_poll "reason=followup_brief_postdates_pr issue=$issue pr_created_at=$pr_created_at"
+                FOLLOWUP_SKIP_LOGGED[$issue]=1
+            fi
+            return 0
+        else
+            # The guard no longer applies (brief archived, or timestamps
+            # unresolvable) — clear any stale dedup entry so a LATER
+            # follow-up brief on this same issue logs fresh instead of
+            # staying silently suppressed forever.
+            unset "FOLLOWUP_SKIP_LOGGED[$issue]" 2>/dev/null || true
         fi
     fi
     [ -n "$task_id" ] || task_id="pr-issue-$issue"
