@@ -186,38 +186,86 @@ reset_state
 set_pane_idle
 sleep 0.3
 
-# 6s heartbeat. An outcome lands almost immediately after boot, so a
-# non-reset implementation (or one that measured quiet time from watcher
-# start instead of from wake_clock_get) would still fire its first tick at
-# ~boot+6s; a correct reset pushes the earliest possible stall fire out to
-# ~outcome_wake+6s instead. We assert no SECOND wake shows up by boot+~7s
-# (comfortably past the first would-be tick, comfortably before the
-# reset-respecting one) and that one eventually does land later.
-start_watcher 6 "$TEST_DIR/watch-3.log"
+# issue #479: the previous version of this test sampled at a single instant
+# (~boot+6s) that also happens to be ~outcome_wake+6s, since the outcome was
+# written almost immediately after boot — an implementation that never
+# consults wake_clock_get (and just measures quiet time from
+# WATCHER_STARTED_AT_EPOCH) and the correct, reset-respecting one land their
+# first tick only ~1.5-2s apart there, so whether the regression was caught
+# came down to scheduling luck.
+#
+# Fixed by widening the gap between boot and the real wake — which widens
+# the gap between the two implementations' candidate fire times by the same
+# amount, since "buggy" fires at boot+STALL and "correct" fires at
+# wake+STALL — and by reading the actual boot/wake timestamps back out of
+# events.log instead of assuming sleep durations landed exactly on time.
+# The gap must still stay safely under STALL_WAKE_SECS, or the fallback
+# (no-real-wake-yet) stall wake fires before we ever write the outcome and
+# contaminates the count — checked explicitly below rather than assumed.
+STALL=10   # STALL_WAKE_SECS for this test
+GAP=7      # seconds after boot before the outcome is written; must be < STALL
+MARGIN=3   # safety margin (seconds) kept clear of each candidate fire time
+
+start_watcher "$STALL" "$TEST_DIR/watch-3.log"
+
+launch_ts="$(awk '$2=="watch.start"{print $1; exit}' "$EVENTS_LOG" 2>/dev/null)"
+[ -n "$launch_ts" ] || red "setup: no watch.start event found in events.log"
+launch_epoch=$(date -d "$launch_ts" +%s)
+
+sleep "$GAP"
 echo '{"task_id":"t950","outcome":"ok"}' > "$TEST_DIR/wt-issue-950/.swarm/tasks/done/t950-950.ok.json"
 
 poll_until 10 0.3 bash -c "[ \"\$(grep -c 'WAKE:' '$WAKE_LOG')\" = '1' ]" \
     || red "setup: the outcome's own wake never landed. watch log:
 $(cat "$TEST_DIR/watch-3.log")"
 
-# By now ~1.5-2s have elapsed since boot (start_watcher's own settle sleep)
-# plus this poll's own wait — comfortably short of the 6s heartbeat. Confirm
-# the count is still exactly 1 for a few more seconds spanning what would
-# have been an unreset first tick.
-sleep 4
-[ "$(wake_count)" = "1" ] || red "a stall wake fired before a full STALL_WAKE_SECS had passed since the outcome's own wake — the reset did not take effect. wake.log:
-$(cat "$WAKE_LOG")"
-green "no stall wake fires within STALL_WAKE_SECS of a real outcome wake (timer was reset)"
+# Confirm the wake we just saw really is the outcome's, not a fallback stall
+# wake that beat it into events.log (which would mean GAP left too little
+# buffer under STALL_WAKE_SECS on this box).
+wake_line="$(awk '$2=="coord.wake"{print; exit}' "$EVENTS_LOG" 2>/dev/null)"
+[ -n "$wake_line" ] || red "setup: no coord.wake event found for the outcome wake"
+case "$wake_line" in
+    *trigger=stall*)
+        red "setup: the fallback stall wake fired before the outcome's own wake reached events.log — GAP=${GAP}s left too little buffer under STALL_WAKE_SECS=${STALL}s on this box. line: $wake_line" ;;
+esac
+wake_ts="$(awk '{print $1}' <<< "$wake_line")"
+wake_epoch=$(date -d "$wake_ts" +%s)
 
-poll_until 20 0.5 bash -c "[ \"\$(grep -c 'WAKE:' '$WAKE_LOG')\" -ge '2' ]" \
-    || red "stall wake never fired even after a full quiet STALL_WAKE_SECS window post-outcome. wake.log:
+buggy_fire_epoch=$((launch_epoch + STALL))       # what an unreset impl would fire at
+correct_fire_epoch=$((wake_epoch + STALL))       # what the reset-respecting impl fires at
+sample_end=$((correct_fire_epoch - MARGIN))
+
+# Sanity-check our own setup: the two candidates must actually be separated
+# by more than 2*MARGIN, or the sampling window below collapses to nothing
+# and we'd be back to coin-flip determinism. This should always hold given
+# GAP > 2*MARGIN, but check the real numbers rather than trust the assumption.
+[ "$sample_end" -gt "$((buggy_fire_epoch + MARGIN))" ] \
+    || red "setup: not enough separation between the boot-fire candidate ($buggy_fire_epoch) and the wake-fire candidate ($correct_fire_epoch) to sample deterministically (launch_epoch=$launch_epoch wake_epoch=$wake_epoch) — widen GAP or MARGIN"
+
+# Poll continuously (not a single instant) from right after the outcome wake
+# until just short of when the reset-respecting implementation is due to
+# fire. This window straddles the unreset implementation's candidate fire
+# time with margin on both sides, so a premature wake is caught wherever in
+# the window it lands.
+while true; do
+    now=$(date +%s)
+    [ "$now" -ge "$sample_end" ] && break
+    [ "$(wake_count)" = "1" ] \
+        || red "a stall wake fired before the reset-respecting deadline (now=$now sample_end=$sample_end correct_fire_epoch=$correct_fire_epoch) — the reset did not take effect. wake.log:
+$(cat "$WAKE_LOG")"
+    sleep 0.3
+done
+green "no stall wake fires before ${STALL}s after the real outcome wake (timer was reset, not measured from boot)"
+
+poll_until 30 0.5 bash -c "[ \"\$(grep -c 'WAKE:' '$WAKE_LOG')\" -ge '2' ]" \
+    || red "stall wake never fired even after a full quiet ${STALL}s window post-outcome. wake.log:
 $(cat "$WAKE_LOG")
 events.log:
 $(cat "$EVENTS_LOG" 2>/dev/null || echo '(missing)')"
 stop_watcher
 grep -q 'coord.wake .*trigger=stall' "$EVENTS_LOG" \
     || red "expected a trigger=stall coord.wake once the reset quiet window elapsed"
-green "a stall wake fires once a full STALL_WAKE_SECS has passed since the last real wake"
+green "a stall wake fires once a full ${STALL}s has passed since the last real wake"
 
 # ============================================================================
 heading "Test 4: the park switch (.swarm/parked) suppresses stall wakes, even past the threshold"
