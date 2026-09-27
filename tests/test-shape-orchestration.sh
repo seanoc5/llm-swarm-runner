@@ -83,7 +83,19 @@ case "\${1:-}" in
 esac
 exit 0
 EOF
-chmod +x "$TEST_DIR/bin/gh" "$TEST_DIR/bin/tmux"
+cat > "$TEST_DIR/bin/docker" <<EOF
+#!/usr/bin/env bash
+# Stub: provision-worker.sh's HOST_MAX_WORKERS check calls
+#   docker ps --filter 'name=^swarm-' --format '{{.Names}}'
+# Container count is controlled via $TEST_DIR/docker-containers.txt (one
+# name per line; absent = 0, matching a host with no swarm containers).
+# Tests toggle its contents to simulate the host at/under cap (issue #464).
+if [ "\${1:-}" = "ps" ]; then
+    cat "$TEST_DIR/docker-containers.txt" 2>/dev/null
+fi
+exit 0
+EOF
+chmod +x "$TEST_DIR/bin/gh" "$TEST_DIR/bin/tmux" "$TEST_DIR/bin/docker"
 export PATH="$TEST_DIR/bin:$PATH"
 
 # ──────────────────────── Fixture: repo with worktrees ────────────────────────
@@ -192,6 +204,49 @@ grep -q "already exists with 1 commit(s) not on" "$TEST_DIR/prov-3c.log" \
 grep -qE 'new-window .* iss-102' "$TEST_DIR/tmux.log" \
     && red "tmux window should NOT have been spawned for the refused branch"
 green "stale branch with unique commits refuses with nonzero exit, no worktree, no tmux window"
+
+heading "Test 3d: provision-worker.sh refused by a cap leaves no brief; retry queues exactly one (#464)"
+cd "$PROJECT_DIR"
+# Simulate the host already at HOST_MAX_WORKERS=1 (one fake swarm-*
+# container running) so the new-capacity path in provision-worker.sh
+# refuses with exit 3 — same code path as the fand-etl 2026-09-25 incident
+# (#995/#996/#997 refused by host_max_workers each left a stray brief).
+echo "swarm-other-iss-1" > "$TEST_DIR/docker-containers.txt"
+set +e
+HOST_MAX_WORKERS=1 "$PROVISION" 103 > "$TEST_DIR/prov-3d-refused.log" 2>&1
+prov_exit=$?
+set -e
+[ "$prov_exit" -eq 3 ] \
+    || red "expected exit 3 on cap refusal, got $prov_exit: $(cat "$TEST_DIR/prov-3d-refused.log")"
+grep -q "HOST_MAX_WORKERS cap reached" "$TEST_DIR/prov-3d-refused.log" \
+    || red "expected HOST_MAX_WORKERS refusal message; got: $(cat "$TEST_DIR/prov-3d-refused.log")"
+WT103="$TEST_DIR/wt-issue-103"
+# Decision (issue #464): the worktree from step 1 is harmless and left in
+# place even on refusal — a retry reuses it instead of recreating it.
+[ -d "$WT103" ] || red "expected worktree to still be created despite the cap refusal (see #464 decision)"
+# The core fix: a cap refusal must leave NO brief behind.
+briefs_after_refusal=$(find "$WT103/.swarm/tasks/inbox" -maxdepth 1 -name '*.md' | wc -l)
+[ "$briefs_after_refusal" -eq 0 ] \
+    || red "cap refusal should leave zero briefs in inbox/, found $briefs_after_refusal"
+grep -qE 'new-window .* iss-103' "$TEST_DIR/tmux.log" \
+    && red "tmux window should NOT have been spawned for the cap-refused issue"
+
+# Free up capacity (host now has 0 running swarm-* containers) and retry —
+# this must queue exactly ONE brief, not a duplicate of a phantom first one.
+: > "$TEST_DIR/docker-containers.txt"
+HOST_MAX_WORKERS=1 "$PROVISION" 103 > "$TEST_DIR/prov-3d-retry.log" 2>&1 \
+    || red "retry after freeing capacity should succeed: $(cat "$TEST_DIR/prov-3d-retry.log")"
+briefs_after_retry=$(find "$WT103/.swarm/tasks/inbox" -maxdepth 1 -name '*.md' | wc -l)
+[ "$briefs_after_retry" -eq 1 ] \
+    || red "expected exactly 1 brief after refused-then-successful retry, got $briefs_after_retry"
+grep -qE 'new-window .* iss-103' "$TEST_DIR/tmux.log" \
+    || red "expected tmux new-window for iss-103 after capacity freed; got: $(cat "$TEST_DIR/tmux.log")"
+rm -f "$TEST_DIR/docker-containers.txt"
+green "cap refusal (exit 3) leaves no brief and no tmux window; worktree persists; retry queues exactly 1 brief"
+
+# Remove this test's worktree so it doesn't inflate Test 6's worktree count
+# below (which asserts an exact count of 4: main + wt-issue-99/100/101).
+git -C "$PROJECT_DIR" worktree remove --force "$WT103" 2>/dev/null || rm -rf "$WT103"
 
 # ────────────────────────── coordinator-watch.sh ──────────────────────────
 
