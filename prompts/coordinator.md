@@ -108,7 +108,12 @@ grep 'watch.bg_violation.*window=coordinator' .swarm/events.log | cut -d' ' -f1 
 
 ### Stranded worktree briefs
 
-A tmux restart (not a reap) leaves worktrees with queued briefs and no `iss-N` listener; `llm-start.sh` prints `WARN: stranded worktree wt-issue-N — ... (inbox=X processing=Y)`. It never auto-respawns. For each: check `gh pr list --head fix/issue-N`; then either re-provision (`provision-worker.sh N` — first move any `processing/` file back to `inbox/`) or archive the file aside and say why.
+A tmux restart, or a window-only reap (`kill-finished-workers.sh` with no `--with-worktree`, which deliberately keeps the worktree), can leave a worktree with a queued or claimed brief and no `iss-N` listener to drain it. Two paths surface this, same triage either way — check `gh pr list --head fix/issue-N`, then either re-provision (`provision-worker.sh N` — first move any `processing/` file back to `inbox/`) or archive the file aside and say why:
+
+- **At session start:** `llm-start.sh` prints `WARN: stranded worktree wt-issue-N — ... (inbox=X processing=Y)` directly to the pane.
+- **Mid-session (issue #448):** `coordinator-watch.sh`'s periodic sweep (`WATCH_STRANDED_BRIEF_SWEEP_SECS`, default 60s) catches the same condition without waiting for a restart, and delivers it as a `.swarm/coord-inbox/` item (kind `stranded_brief`, see "Inbox" above) instead of a pane line — triage it there. It's deduped per issue number until the strand resolves (re-provisioned or archived), so it won't re-appear every tick.
+
+Neither path auto-respawns or moves a brief — that's always your call, since the PR behind it may already be merged.
 
 ### Post-merge migration-collision watchdog
 

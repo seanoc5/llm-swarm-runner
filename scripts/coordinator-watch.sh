@@ -391,6 +391,47 @@
 #                           slower cadence than the local-only sweep above —
 #                           comparable to WATCH_ACTIVITY_POLL_SECS. Set to 0
 #                           to disable. See pending_brief_marker_sweep_pass.
+#   WATCH_STRANDED_BRIEF_SWEEP_SECS=60
+#                           (issue #448) Generalizes llm-start.sh's
+#                           warn_stranded_worktree_briefs (issue #376) from a
+#                           one-shot session-start check into a periodic,
+#                           mid-session sweep. That startup check only ever
+#                           runs once, when a tmux session is (re)created —
+#                           real incident, fand-app 2026-09-20: window
+#                           iss-1112 was reaped in parked/window-only mode
+#                           (kill-finished-workers.sh, no --with-worktree —
+#                           deliberately keeps the worktree, so nothing here
+#                           is a salvage concern) while a claimed brief from
+#                           the previous day still sat in the worktree's
+#                           .swarm/tasks/processing/. With no live iss-1112
+#                           window left to drain it and no session restart in
+#                           sight, the brief was invisible from the moment of
+#                           the reap until whenever the swarm next happened to
+#                           restart — it was only found by a manual
+#                           cross-swarm audit. On this timer, for every own
+#                           worktree (own_worktree_dirs_for_scan, the #357-safe
+#                           enumeration every other sweep here uses) with a
+#                           real (non-tmp) file in .swarm/tasks/inbox/ or
+#                           processing/ and no live iss-N window
+#                           (has_live_window), writes ONE coord-inbox entry
+#                           (issue #430 idiom: durable, no doorbell — a brief
+#                           that has already been sitting there survives one
+#                           more sweep interval fine) naming the worktree, the
+#                           queued file(s), and their age. STRANDED_BRIEF_LOGGED
+#                           dedups per issue so an already-reported strand
+#                           doesn't re-ring every tick (mirrors ORPHAN_PR_LOGGED's
+#                           pattern in pr_poll_pass); it's cleared the moment
+#                           either condition resolves — a live window reappears
+#                           (re-provisioned) or the queue empties (archived) —
+#                           so a future re-strand of the same issue number
+#                           reports again. Detection only: never respawns a
+#                           worker or moves a brief — the coordinator judges
+#                           relevance (the PR may already be merged) exactly as
+#                           it does for worktree_vanish_sweep_pass's findings.
+#                           Local-only (filesystem + `tmux list-windows`, no
+#                           network), so this runs on the same cheap cadence as
+#                           WATCH_WORKTREE_SWEEP_SECS. Set to 0 to disable. See
+#                           stranded_brief_sweep_pass.
 #   COORD_WAKE_RETRY_SECS=15
 #                           (issue #422, #366 part B) llm-start.sh's
 #                           reprompt_inject refuses to paste a wake over a
@@ -1773,6 +1814,7 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     ACTIVITY_POLL_OVERLAP_SECS 30  cursor overlap tolerating gh search-index lag; dedup maps prevent re-announcing
     WATCH_WORKTREE_SWEEP_SECS 60  periodic detection of a worktree removed outside every blessed reap path (0=off); see header comment (issue #439)
     WATCH_PENDING_BRIEF_SWEEP_SECS 300  periodic backstop posting SWARM_PENDING_BRIEF when a queued brief predates its PR (0=off); see header comment (issue #439)
+    WATCH_STRANDED_BRIEF_SWEEP_SECS 60  periodic detection of a queued/claimed brief with no live iss-N window to drain it (0=off); see header comment (issue #448)
     COORD_WAKE_LOCK_TIMEOUT_SECS 60  max wait to flock COORD_WAKE_LOCK before a wake gives up (see that lock's header comment)
     COORD_WAKE_RETRY_SECS 15      retry interval for a wake llm-start.sh deferred (composer held an unsubmitted human draft, issue #422); 0=off
     COORD_WAKE_DEFER_WARN_SECS 300  loud WARN threshold for a wake still deferred this long (issue #422); retries never stop on their own
@@ -2327,6 +2369,8 @@ ACTIVITY_WAKE_PROMPT="${ACTIVITY_WAKE_PROMPT:-}"
 # issue #439 — see header comment for both.
 WATCH_WORKTREE_SWEEP_SECS="${WATCH_WORKTREE_SWEEP_SECS:-60}"
 WATCH_PENDING_BRIEF_SWEEP_SECS="${WATCH_PENDING_BRIEF_SWEEP_SECS:-300}"
+# issue #448 — see header comment.
+WATCH_STRANDED_BRIEF_SWEEP_SECS="${WATCH_STRANDED_BRIEF_SWEEP_SECS:-60}"
 WATCH_CHECK_ON_DONE="${WATCH_CHECK_ON_DONE:-1}"
 CHECK_RUNNER="${CHECK_RUNNER:-}"
 SESSION_NAME="${SESSION_NAME:-llm-$(basename "$PROJECT_DIR")}"
@@ -2545,6 +2589,10 @@ if ! [[ "$WATCH_WORKTREE_SWEEP_SECS" =~ ^[0-9]+$ ]]; then
 fi
 if ! [[ "$WATCH_PENDING_BRIEF_SWEEP_SECS" =~ ^[0-9]+$ ]]; then
     echo "ERROR: WATCH_PENDING_BRIEF_SWEEP_SECS must be a non-negative integer (got: $WATCH_PENDING_BRIEF_SWEEP_SECS)" >&2
+    exit 1
+fi
+if ! [[ "$WATCH_STRANDED_BRIEF_SWEEP_SECS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: WATCH_STRANDED_BRIEF_SWEEP_SECS must be a non-negative integer (got: $WATCH_STRANDED_BRIEF_SWEEP_SECS)" >&2
     exit 1
 fi
 for _var in AUTO_COMPACT_THRESHOLD_TOKENS AUTO_COMPACT_PROBE_MAX_AGE_SECS \
@@ -3024,6 +3072,7 @@ bg-violation:  ${WATCH_BG_VIOLATION_SWEEP_SECS}s$([ "$WATCH_BG_VIOLATION_SWEEP_S
 activity-poll: ${WATCH_ACTIVITY_POLL_SECS}s$([ "$WATCH_ACTIVITY_POLL_SECS" = "0" ] && echo " (disabled)" || echo " (out-of-band PR/issue resolution backstop, issue #392)")
 worktree-sweep: ${WATCH_WORKTREE_SWEEP_SECS}s$([ "$WATCH_WORKTREE_SWEEP_SECS" = "0" ] && echo " (disabled)" || echo " (unblessed worktree-removal detection, issue #439)")
 pending-brief-sweep: ${WATCH_PENDING_BRIEF_SWEEP_SECS}s$([ "$WATCH_PENDING_BRIEF_SWEEP_SECS" = "0" ] && echo " (disabled)" || echo " (SWARM_PENDING_BRIEF marker-gap backstop, issue #439)")
+stranded-brief-sweep: ${WATCH_STRANDED_BRIEF_SWEEP_SECS}s$([ "$WATCH_STRANDED_BRIEF_SWEEP_SECS" = "0" ] && echo " (disabled)" || echo " (window-less queued/claimed brief detection, issue #448)")
 coord-wake-retry: ${COORD_WAKE_RETRY_SECS}s$([ "$COORD_WAKE_RETRY_SECS" = "0" ] && echo " (disabled)" || echo " (retry a dirty-composer-deferred wake, warn after ${COORD_WAKE_DEFER_WARN_SECS}s, issue #422)")
 coord-inbox:   $COORD_INBOX_DIR (issue #430; busy-pane doorbell defer: $([ "$COORD_WAKE_BUSY_RETRY_SECS" = "0" ] && echo "disabled — pastes immediately regardless of busy" || echo "retry ${COORD_WAKE_BUSY_RETRY_SECS}s, ceiling $([ "$COORD_WAKE_BUSY_CEILING_SECS" = "0" ] && echo "none" || echo "${COORD_WAKE_BUSY_CEILING_SECS}s")"))
 human-gate:    $([ "$COORD_HUMAN_IDLE_SECS" = "0" ] && [ "$WORKER_HUMAN_IDLE_SECS" = "0" ] && echo "disabled (issue #459)" || echo "coordinator ${COORD_HUMAN_IDLE_SECS}s / workers ${WORKER_HUMAN_IDLE_SECS}s, no ceiling (issue #459)"); swarm-busy hold: $([ "$WAKE_DEFER_ON_SWARM_BUSY" = "1" ] && echo "on" || echo "off")$([ "$HAVE_JQ" = "1" ] || echo " [no jq — human gate inert, doorbells always ring]")
@@ -3196,6 +3245,14 @@ declare -A BG_VIOLATION_LOGGED=()
 # happens WHILE the watcher is running and watching for it.
 declare -A KNOWN_WORKTREE_SEEN=()
 WT_INVENTORY_SEEDED=0
+
+# issue #448: stranded_brief_sweep_pass's dedup — keyed by issue number,
+# same idiom as ORPHAN_PR_LOGGED above. Set once a coord-inbox entry has
+# been written for that issue's stranded queue; cleared the moment either
+# condition resolves (a live iss-N window reappears — re-provisioned — or
+# the queue drains — archived), so a future re-strand of the same issue
+# number reports again instead of staying permanently suppressed.
+declare -A STRANDED_BRIEF_LOGGED=()
 
 # issue #468: a check-fail retry (or any later reconciliation in
 # worker-listener.sh's write_outcome()) can flip a task's outcome level
@@ -4371,6 +4428,142 @@ pending_brief_marker_sweep_pass() {
     done
 }
 
+# stranded_brief_queue_lines <worktree-dir>
+#
+# issue #448: one "queue<TAB>age_minutes<TAB>path" line per real (non-tmp)
+# file directly under <worktree>/.swarm/tasks/{inbox,processing}/, oldest
+# file per queue first — same non-tmp filter worker_pending_brief_path uses
+# for inbox/, extended to processing/ (a claimed-but-now-orphaned brief, the
+# fand-app iss-1112 shape this issue exists to catch, sits there instead).
+# Reads via process substitution (`< <(...)`), never a bare `x=$(...)`
+# assignment, so a missing queue directory's `find` failure can't trip this
+# script's `pipefail` — under pipefail a failing `find` outranks a
+# downstream `sort`'s success regardless of position, so an unguarded bare
+# assignment built the same way would abort the whole watcher under `set -e`
+# (see count_queued_files's header comment in kill-finished-workers.sh for
+# the same trap, guarded there with an explicit `[ -d ]` instead).
+#
+# mtime_epoch's output is captured into a variable (`|| true`, then skip on
+# empty) rather than inlined in the arithmetic (coordinator review, PR #480):
+# a file listed by `find` can vanish before the `stat` behind mtime_epoch
+# runs (e.g. the coordinator archiving a stranded brief by hand mid-tick),
+# and an empty result inlined as `$(( now - $(mtime_epoch "$f") ))` is a
+# bash arithmetic syntax error that aborts the whole script immediately —
+# it isn't a normal failing command, so `|| true` after it can't catch it,
+# which silently kills run_watch_timer_loop's background process and every
+# other periodic sweep along with it.
+#
+# Files younger than min_age_secs are excluded (self-review finding on
+# #448): provision-worker.sh writes the brief into inbox/ before it runs
+# lint-brief.sh/`docker ps` and finally opens the iss-N tmux window, so a
+# sweep tick landing in that gap would otherwise report a worker that's
+# only seconds away from existing. 120s is comfortably above that gap's
+# observed cost and far below the default 60s sweep interval's own next
+# retry, so a real strand is still caught within one or two ticks.
+stranded_brief_queue_lines() {
+    local wt_dir="$1" queue dir f now age_min age_secs m
+    local min_age_secs=120
+    now=$(date +%s)
+    for queue in inbox processing; do
+        dir="$wt_dir/.swarm/tasks/$queue"
+        [ -d "$dir" ] || continue
+        while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            m=$(mtime_epoch "$f") || true
+            [ -n "$m" ] || continue
+            age_secs=$(( now - m ))
+            [ "$age_secs" -ge "$min_age_secs" ] || continue
+            age_min=$(( age_secs / 60 ))
+            printf '%s\t%sm\t%s\n' "$queue" "$age_min" "$f"
+        done < <(find "$dir" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | sort)
+    done
+}
+
+# stranded_brief_body <issue> <worktree-dir> <lines>
+#
+# issue #448: composes the coord-inbox entry body — plain text, no `gh`
+# calls (unlike post_pending_brief_marker_sweep's PR comment above, this
+# never touches the network). Points at the same two resolutions
+# prompts/coordinator.md's "Stranded worktree briefs" section already
+# documents for llm-start.sh's one-shot startup version of this check
+# (issue #376): re-provision or archive.
+stranded_brief_body() {
+    local issue="$1" wt_dir="$2" lines="$3"
+    printf 'A queued or claimed brief in issue #%s'\''s worktree (%s) has no live iss-%s tmux window left to drain it. A session restart, or a parked/window-only reap (kill-finished-workers.sh with no --with-worktree, which deliberately keeps the worktree) can each leave this behind with no salvage and no other record (issue #448).\n\nQueued file(s) (queue, age, path):\n%s\n\nCheck `gh pr list --head fix/issue-%s`: if the PR already merged (or the work is otherwise moot), archive the file(s) above out of inbox/processing/ and say why. Otherwise re-provision with `provision-worker.sh %s` — move any processing/ entry back to inbox/ first so it is picked up as a fresh claim rather than silently skipped.\n' \
+        "$issue" "$wt_dir" "$issue" "$lines" "$issue" "$issue"
+}
+
+# stranded_brief_sweep_pass
+#
+# issue #448: generalizes llm-start.sh's warn_stranded_worktree_briefs
+# (issue #376) — a ONE-SHOT session-start check — into a periodic,
+# mid-session sweep. See WATCH_STRANDED_BRIEF_SWEEP_SECS's header comment
+# for the fand-app wt-issue-1112 incident this closes: a parked/window-only
+# reap deliberately kept the worktree (so no salvage fired) while a claimed
+# brief sat in processing/ with no window left to drain it, invisible from
+# the moment of the reap until the swarm's next restart.
+#
+# For every own worktree (own_worktree_dirs_for_scan, the #357-safe
+# enumeration every other sweep in this file uses): a live iss-N window
+# clears any prior dedup entry (re-provisioned) and moves on; an empty
+# queue does the same (archived) and moves on; a non-empty queue with no
+# live window writes ONE coord-inbox entry per issue (STRANDED_BRIEF_LOGGED
+# dedup, mirroring ORPHAN_PR_LOGGED's pattern in pr_poll_pass) and leaves it
+# logged until one of those two resolutions clears it. DRY_RUN never marks
+# the dedup map — mirrors pending_brief_marker_sweep_pass's DRY_RUN
+# handling above, so a dry run keeps reporting a still-stranded worktree
+# every tick instead of going silent after the first one.
+stranded_brief_sweep_pass() {
+    local wt issue lines
+    local -a dirs=()
+    while IFS= read -r wt; do
+        [ -n "$wt" ] && dirs+=("$wt")
+    done < <(own_worktree_dirs_for_scan "$PROJECT_DIR")
+
+    local -A current_issues=()
+    for wt in "${dirs[@]}"; do
+        [ -d "$wt" ] || continue
+        issue="$(basename "$wt" | sed -nE 's/^wt-issue-([0-9]+)$/\1/p')"
+        [ -n "$issue" ] || continue
+        current_issues["$issue"]=1
+
+        if has_live_window "$issue"; then
+            unset "STRANDED_BRIEF_LOGGED[$issue]" 2>/dev/null || true
+            continue
+        fi
+
+        lines="$(stranded_brief_queue_lines "$wt")"
+        if [ -z "$lines" ]; then
+            unset "STRANDED_BRIEF_LOGGED[$issue]" 2>/dev/null || true
+            continue
+        fi
+
+        [ -n "${STRANDED_BRIEF_LOGGED[$issue]:-}" ] && continue
+
+        if [ "$DRY_RUN" = "1" ]; then
+            echo "[DRY] would write coord-inbox stranded-brief entry for issue #$issue"
+            continue
+        fi
+
+        if coord_inbox_write stranded_brief "$(stranded_brief_body "$issue" "$wt" "$lines")"; then
+            log_event watch.stranded_brief_sweep "issue=$issue dir=$wt reason=detected"
+            log_event coord.inbox.write "trigger=stranded_brief issue=$issue"
+            STRANDED_BRIEF_LOGGED[$issue]=1
+        else
+            echo "[$(date +%T)] WARN: failed to write coord-inbox stranded-brief entry for issue #$issue" >&2
+        fi
+    done
+
+    # A worktree no longer in this tick's own-worktree inventory at all
+    # (fully reaped with --with-worktree, or never provisioned here) can
+    # never resolve via the live-window/empty-queue checks above — drop its
+    # dedup entry so a future worktree reusing the same issue number starts
+    # fresh, same reasoning as pr_poll_pass's ORPHAN_PR_LOGGED cleanup.
+    for issue in "${!STRANDED_BRIEF_LOGGED[@]}"; do
+        [ -n "${current_issues[$issue]:-}" ] || unset "STRANDED_BRIEF_LOGGED[$issue]"
+    done
+}
+
 # bg_violation_sweep_pass
 #
 # issue #298: fallback layer for the foreground-only rule — see
@@ -4954,7 +5147,7 @@ SCRIPT
 # run_auto_compact_poll_loop, started as its own background process right
 # after this function.
 run_watch_timer_loop() {
-    local last_pr_poll=0 last_orphan_sweep=0 last_bg_violation_sweep=0 last_activity_poll=0 last_coord_wake_retry=0 last_coord_wake_busy_retry=0 last_worktree_sweep=0 last_pending_brief_sweep=0 now
+    local last_pr_poll=0 last_orphan_sweep=0 last_bg_violation_sweep=0 last_activity_poll=0 last_coord_wake_retry=0 last_coord_wake_busy_retry=0 last_worktree_sweep=0 last_pending_brief_sweep=0 last_stranded_brief_sweep=0 now
     while true; do
         sleep 2
         [ "$WATCH_CHECK_ON_DONE" = "1" ] && { status_poll_pass || true; }
@@ -5015,6 +5208,13 @@ run_watch_timer_loop() {
             if [ $((now - last_pending_brief_sweep)) -ge "$WATCH_PENDING_BRIEF_SWEEP_SECS" ]; then
                 pending_brief_marker_sweep_pass || true
                 last_pending_brief_sweep=$now
+            fi
+        fi
+        if [ "$WATCH_STRANDED_BRIEF_SWEEP_SECS" -gt 0 ]; then
+            now=$(date +%s)
+            if [ $((now - last_stranded_brief_sweep)) -ge "$WATCH_STRANDED_BRIEF_SWEEP_SECS" ]; then
+                stranded_brief_sweep_pass || true
+                last_stranded_brief_sweep=$now
             fi
         fi
     done
@@ -8206,10 +8406,10 @@ run_poll() {
 # restarts. (COORD_WAKE_RETRY_SECS, issue #422's older dirty-draft retry,
 # has this identical gap and predates this fix — out of scope here, but
 # worth folding in alongside this one if it's ever revisited.)
-if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ] || [ "$WATCH_ORPHAN_SWEEP_SECS" -gt 0 ] || [ "$WATCH_BG_VIOLATION_SWEEP_SECS" -gt 0 ] || [ "$WATCH_ACTIVITY_POLL_SECS" -gt 0 ] || [ "$WATCH_WORKTREE_SWEEP_SECS" -gt 0 ] || [ "$WATCH_PENDING_BRIEF_SWEEP_SECS" -gt 0 ] || [ "$COORD_WAKE_HOLD_RETRY_SECS" -gt 0 ]; then
+if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ] || [ "$WATCH_ORPHAN_SWEEP_SECS" -gt 0 ] || [ "$WATCH_BG_VIOLATION_SWEEP_SECS" -gt 0 ] || [ "$WATCH_ACTIVITY_POLL_SECS" -gt 0 ] || [ "$WATCH_WORKTREE_SWEEP_SECS" -gt 0 ] || [ "$WATCH_PENDING_BRIEF_SWEEP_SECS" -gt 0 ] || [ "$WATCH_STRANDED_BRIEF_SWEEP_SECS" -gt 0 ] || [ "$COORD_WAKE_HOLD_RETRY_SECS" -gt 0 ]; then
     run_watch_timer_loop &
     WATCH_TIMER_PID=$!
-    log_event watch.timer.start "pr_poll_secs=$WATCH_PR_POLL_SECS check_on_done=$WATCH_CHECK_ON_DONE orphan_sweep_secs=$WATCH_ORPHAN_SWEEP_SECS bg_violation_sweep_secs=$WATCH_BG_VIOLATION_SWEEP_SECS activity_poll_secs=$WATCH_ACTIVITY_POLL_SECS worktree_sweep_secs=$WATCH_WORKTREE_SWEEP_SECS pending_brief_sweep_secs=$WATCH_PENDING_BRIEF_SWEEP_SECS"
+    log_event watch.timer.start "pr_poll_secs=$WATCH_PR_POLL_SECS check_on_done=$WATCH_CHECK_ON_DONE orphan_sweep_secs=$WATCH_ORPHAN_SWEEP_SECS bg_violation_sweep_secs=$WATCH_BG_VIOLATION_SWEEP_SECS activity_poll_secs=$WATCH_ACTIVITY_POLL_SECS worktree_sweep_secs=$WATCH_WORKTREE_SWEEP_SECS pending_brief_sweep_secs=$WATCH_PENDING_BRIEF_SWEEP_SECS stranded_brief_sweep_secs=$WATCH_STRANDED_BRIEF_SWEEP_SECS"
 fi
 if [ "$WORKER_AUTO_COMPACT" = "1" ] || [ "$WORKER_AUTO_DELIVER" = "1" ]; then
     run_worker_compact_loop &
