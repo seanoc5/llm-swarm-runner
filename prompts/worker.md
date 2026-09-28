@@ -271,6 +271,12 @@ nothing pending, no self-review `BLOCK`, not given up on an error).
   `## Findings`.
 - **Voice:** status at milestones (worktree ready, tests green, PR open), not
   per-step narration.
+- **Evidence outlives the worktree:** anything a PR or issue cites (an env
+  capture, a row-count table, corrected data, a log excerpt) must be
+  committed in the PR or copied to the project's `.swarm/` area
+  (`<project>/.swarm/evidence/iss-<N>/`). Your worktree's `.swarm/` and
+  `.local-data/` are ignored scratch and are destroyed without salvage
+  when the worktree is reaped after merge.
 
 ---
 
@@ -302,8 +308,9 @@ skeleton. When in doubt, rate higher.
 
 ### Merging your own PR
 
-Always `gh pr merge <N> --squash`, never `--delete-branch` (it fails from a
-worktree; the reaper handles the branch).
+Always `gh pr merge <N> --squash`, never `--delete-branch` (on current gh it
+removes the worktree holding the branch, i.e. yours, with no salvage; the
+reaper handles the branch).
 
 | Risk | Rule |
 |---|---|

@@ -278,6 +278,15 @@ echo "$OUT" | grep -qi "gate 0" || red "Gate 0 should still be reported as check
 echo "$OUT" | grep -qi "gate 2" || red "Gate 2 should still be reported as checked"
 grep -q "pr merge 501" "$GH_LOG" || red "gh pr merge 501 was not called"
 green "--auto-low merges once authorship is clean and CI is verified green"
+# issue #489: the merge no longer uses gh's --delete-branch (it removes the
+# live worker worktree); swarm-merge.sh deletes the REMOTE branch itself.
+# Prove that happened against the fixture remote, then re-seed the branch
+# for the later tests that reuse PR 501.
+if git -C "$CLONE" ls-remote --exit-code --heads origin fix/issue-501 >/dev/null 2>&1; then
+    red "origin/fix/issue-501 still exists — swarm-merge.sh did not delete the remote branch after merge (#489)"
+fi
+green "remote branch deleted explicitly after merge (no --delete-branch)"
+git -C "$CLONE" push -q origin fix/issue-501
 
 # ============================================================================
 heading "Test 10: swarm-merge.sh --auto-low distinguishes a Gate 0 error (exit 2) from a refusal (exit 1)"

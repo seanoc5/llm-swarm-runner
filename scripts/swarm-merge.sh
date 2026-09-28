@@ -104,9 +104,14 @@
 #      --override-migration-gate is given. MIGRATION_GATE=0 disables this
 #      gate entirely (default on) — see #294.
 #   3. cds to the MAIN worktree of the current repo (not the feature one).
-#   4. Runs `gh pr merge --squash --delete-branch`. The local-delete step may
-#      fail silently if the branch is checked out in a sibling worktree —
-#      that's fine; we sweep it later.
+#   4. Runs `gh pr merge --squash` — deliberately WITHOUT --delete-branch
+#      (issue #489): gh >= 2.100 implements that flag's local-delete step by
+#      first running `git worktree remove` on whichever linked worktree has
+#      the branch checked out, i.e. the live worker's worktree, bypassing
+#      kill-worktree.sh's salvage and event logging entirely (fand-etl
+#      2026-09-28 lost two incident-evidence files this way). The REMOTE
+#      branch is deleted explicitly right after the merge instead; the
+#      local branch is the reaper's job (step 7 / kill-worktree.sh).
 #   5. Waits up to 60s for the watcher to reap the worker's worktree + tmux window.
 #   6. If the iss-<N> tmux window is still alive after the grace period, kills it.
 #   7. Runs the SAFER local-branch sweep: deletes `fix/issue-N` only when GitHub
@@ -549,10 +554,20 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
           exit 1
         fi
       fi
-      echo "[4/7] merging PR #$PR_NUM (squash, delete-branch)…"
-      # gh pr merge's local-delete step may fail; tolerate it.
-      if ! gh pr merge "$PR_NUM" --squash --delete-branch; then
-        echo "       (local-delete step may have failed; that's expected if branch is still checked out in a worktree — sweep will clean it)"
+      echo "[4/7] merging PR #$PR_NUM (squash)…"
+      # issue #489: never --delete-branch here. On gh >= 2.100 its
+      # local-delete step removes the linked worktree that has the branch
+      # checked out — the live worker's worktree — with no salvage and no
+      # reap.worktree event. Delete the remote branch ourselves instead;
+      # the local branch is deleted by kill-worktree.sh / the step-7 sweep.
+      if ! gh pr merge "$PR_NUM" --squash; then
+        echo "ERROR: gh pr merge refused PR #$PR_NUM — nothing merged, skipping cleanup (issue #492)." >&2
+        exit 1
+      fi
+      if git push origin --delete "$PR_BRANCH" >/dev/null 2>&1; then
+        echo "       deleted remote branch origin/$PR_BRANCH"
+      else
+        echo "       (remote branch origin/$PR_BRANCH not deleted — already gone, or repo auto-deletes head branches)"
       fi
       ;;
     MERGED)
