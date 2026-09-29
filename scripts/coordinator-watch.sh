@@ -1911,9 +1911,13 @@ EVENTS LOG
                            the time the retry ran; already_submitted means the
                            coordinator transcript already has a typed turn,
                            newer than the pending file, that itself contains
-                           the nudge line — the operator finished the draft
-                           the paste landed in, or otherwise submitted it
-                           themselves, before the retry got to it); the FULL
+                           the nudge line AND is at least as new as every
+                           CURRENT coord-inbox file (self-review finding: a
+                           purely textual match would otherwise sweep in a
+                           payload that arrived after that turn) — the
+                           operator finished the draft the paste landed in,
+                           or otherwise submitted it themselves, before the
+                           retry got to it); the FULL
                            payload for this wake already landed in
                            coord-inbox/ beforehand — see coord.inbox.write
                            below (issue #430)
@@ -7558,6 +7562,15 @@ coord_wake_already_submitted() {
                 elif ($c | type) == "array" then ([$c[] | select(.type == "text") | .text] | join("\n"))
                 else "" end' 2>/dev/null)" || text=""
 
+            # `-ge`, not `-gt`: whole-second epochs mean a turn and an
+            # inbox write in the SAME second are indistinguishable here.
+            # Treating that tie as "covered" narrowly risks dropping a
+            # doorbell for an item that actually landed a moment later in
+            # that same second — but the item itself is never lost (it
+            # stays in coord-inbox/ regardless), only its nudge is delayed
+            # to the next real wake trigger. Self-review-noted tradeoff,
+            # not fixed: sub-second precision isn't available from either
+            # timestamp source this file uses.
             if printf '%s' "$text" | LC_ALL=C grep -qE "$nudge_re"; then
                 [ "$epoch" -ge "$newest_inbox" ] && return 0
             fi
