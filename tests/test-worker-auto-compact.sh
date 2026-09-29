@@ -59,6 +59,7 @@ extract_fn() {
 for fn in worker_pane_state worker_pane_busy worker_pane_ctx_used worker_pane_ctx_window \
           worker_compact_effective_threshold worker_has_open_pr \
           worker_task_done worker_compact_record_failure worker_compact_record_success \
+          is_own_worktree_dir own_wt_dir_for_issue \
           maybe_worker_compact compact_retract_queued compact_last_pane_line compact_composer_clear \
           compact_confirm_submitted compact_replay_detected log_event; do
     body="$(extract_fn "$fn")"
@@ -117,6 +118,14 @@ declare -A WORKER_COMPACT_LAST_FAIL=()
 declare -A WORKER_COMPACT_FAIL_COUNT=()
 declare -A WORKER_COMPACT_GAVE_UP=()
 
+# own_wt_dir_for_issue (issue #357/#388, pulled in by maybe_worker_compact)
+# resolves wt_dir via is_own_worktree_dir(), which needs $PROJECT_DIR set to
+# do its `git -C "$PROJECT_DIR" worktree list` check. This fixture has no
+# real git repo — is_own_worktree_dir's fail-open policy (a non-git
+# PROJECT_DIR treats every dir as ours) covers that, so any non-empty path
+# works here (same convention as test-worker-deliver-brief.sh's copy of
+# this var).
+PROJECT_DIR="$TEST_DIR/not-a-git-repo"
 WORKSPACE="$TEST_DIR/workspace"
 WT_DIR="$WORKSPACE/wt-issue-42"
 STATUS_DIR="$WT_DIR/.swarm/tasks/status"
@@ -735,6 +744,7 @@ heading "Test 14a: compact_retract_queued — COMPACT_RETRACT_BACKSPACES=3 (old 
 # the phase=start timeout fires, and the OLD default of 3 backspaces
 # reliably left "/compa" behind -- a partial clear that #265/#272's
 # marker-only success check couldn't detect. Must now log retract_failed.
+mkdir -p "$WORKSPACE/wt-issue-43"
 WIN2="iss-43"
 tmux new-window -t "$SESSION_NAME" -n "$WIN2" 2>/dev/null
 tmux send-keys -t "$SESSION_NAME:$WIN2" "exec -a claude bash $FAKE_COMPOSER" Enter
@@ -778,6 +788,7 @@ bspace_count="$(grep -c "send-keys -t $SESSION_NAME:$WIN2 BSpace" "$TMUX_CALL_LO
 check "retraction sent 3 Backspace keystrokes" "3" "$bspace_count"
 
 heading "Test 14b: compact_retract_queued — COMPACT_RETRACT_BACKSPACES=12 (shipped default) fully clears the composer (issue #290)"
+mkdir -p "$WORKSPACE/wt-issue-45"
 WIN2B="iss-45"
 tmux new-window -t "$SESSION_NAME" -n "$WIN2B" 2>/dev/null
 tmux send-keys -t "$SESSION_NAME:$WIN2B" "exec -a claude bash $FAKE_COMPOSER" Enter
@@ -813,6 +824,7 @@ heading "Test 15: compact_retract_queued — queued marker still visible -> work
 # exactly as first rendered. That models a retraction attempt that
 # genuinely did not clear the queue, so the outcome must be logged as
 # retract_failed, never a false-positive retracted.
+mkdir -p "$WORKSPACE/wt-issue-44"
 WIN3="iss-44"
 tmux new-window -t "$SESSION_NAME" -n "$WIN3" 2>/dev/null
 FAKE_STUCK="$TEST_DIR/fake-stuck-repl.sh"
@@ -938,6 +950,7 @@ done
 REPL
 chmod +x "$FAKE_REPL_EATFIRST"
 
+mkdir -p "$WORKSPACE/wt-issue-47"
 WIN5="iss-47"
 tmux new-window -t "$SESSION_NAME" -n "$WIN5" 2>/dev/null
 tmux send-keys -t "$SESSION_NAME:$WIN5" "exec -a claude bash $FAKE_REPL_EATFIRST" Enter
@@ -1021,6 +1034,7 @@ done
 REPL
 chmod +x "$FAKE_DELIVERED_AS_TEXT"
 
+mkdir -p "$WORKSPACE/wt-issue-48"
 WIN6="iss-48"
 tmux new-window -t "$SESSION_NAME" -n "$WIN6" 2>/dev/null
 tmux send-keys -t "$SESSION_NAME:$WIN6" "exec -a claude bash $FAKE_DELIVERED_AS_TEXT" Enter
@@ -1095,6 +1109,7 @@ done
 REPL
 chmod +x "$FAKE_REPL_REPLAY"
 
+mkdir -p "$WORKSPACE/wt-issue-49"
 WIN7="iss-49"
 tmux new-window -t "$SESSION_NAME" -n "$WIN7" 2>/dev/null
 tmux send-keys -t "$SESSION_NAME:$WIN7" "exec -a claude bash $FAKE_REPL_REPLAY" Enter
@@ -1169,6 +1184,7 @@ done
 REPL
 chmod +x "$FAKE_REPL_INSTANT_REJECT"
 
+mkdir -p "$WORKSPACE/wt-issue-50"
 WIN8="iss-50"
 tmux new-window -t "$SESSION_NAME" -n "$WIN8" 2>/dev/null
 tmux send-keys -t "$SESSION_NAME:$WIN8" "exec -a claude bash $FAKE_REPL_INSTANT_REJECT" Enter
