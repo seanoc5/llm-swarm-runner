@@ -62,6 +62,10 @@ export GH_LOG="$TEST_DIR/gh.log"
 # below overwrites it before invoking swarm-merge.sh.
 export POST_STATE_FILE="$TEST_DIR/post-state.json"
 
+# The normal stub: initial PR_JSON fetch reports a clean, mergeable OPEN PR;
+# `gh pr merge` always refuses (that's what Tests 1-2 exercise); the
+# post-merge re-query (issue #492) reads $POST_STATE_FILE, set per test.
+write_normal_gh_stub() {
 cat > "$TEST_DIR/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 echo "$*" >> "$GH_LOG"
@@ -82,6 +86,40 @@ esac
 exit 0
 EOF
 chmod +x "$TEST_DIR/bin/gh"
+}
+write_normal_gh_stub
+
+# ============================================================================
+heading "Test 0: mergeStateStatus already DIRTY on the initial fetch → refuse before ever calling gh pr merge"
+# ============================================================================
+cat > "$TEST_DIR/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >> "$GH_LOG"
+case "${1:-} ${2:-}" in
+    "api repos/{owner}/{repo}/issues/"*) echo "true"; exit 0 ;;
+    "pr merge") exit 1 ;;
+    "pr view")
+        case "$*" in
+            *comments*)             echo '{"comments":[]}'; exit 0 ;;
+            *state,mergeable*)      echo '{"state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"DIRTY","headRefName":"fix/issue-77","title":"fake"}'; exit 0 ;;
+        esac
+        exit 0 ;;
+esac
+exit 0
+EOF
+chmod +x "$TEST_DIR/bin/gh"
+
+set +e
+OUT=$(timeout 5 "$MERGE" 77 --no-kill 2>&1)
+RC=$?
+set -e
+
+[ "$RC" -ne 0 ] || red "expected non-zero exit when mergeStateStatus is already DIRTY, got 0:\n$OUT"
+grep -q "pr merge" "$GH_LOG" && red "gh pr merge must never be called once the pre-merge DIRTY gate refuses:\n$(cat "$GH_LOG")"
+echo "$OUT" | grep -qi "DIRTY" || red "expected the refusal to name mergeStateStatus=DIRTY, got:\n$OUT"
+green "mergeStateStatus=DIRTY on the initial fetch refuses before gh pr merge is ever called"
+: > "$GH_LOG"
+write_normal_gh_stub
 
 # ============================================================================
 heading "Test 1: gh pr merge fails, re-query shows still OPEN → refuse, no cleanup"

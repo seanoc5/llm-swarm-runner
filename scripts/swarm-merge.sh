@@ -393,9 +393,9 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
         exit 1
       fi
       # Pre-merge gate (#492): mergeStateStatus DIRTY means GitHub has
-      # already computed real conflicts against the base branch (this lags
-      # `mergeable` in a fast merge sequence, e.g. an earlier PR in the same
-      # batch just landed conflicting lines) — catch it here, cheaply, before
+      # recomputed real conflicts against the base branch — the exact case
+      # from the incident, where an earlier PR in the same merge batch had
+      # just landed conflicting lines. Catch it here, cheaply, before
       # spending time on gates or CI wait below.
       if [ "$PR_MERGE_STATE_STATUS" = "DIRTY" ]; then
         echo "ERROR: PR #$PR_NUM is not mergeable (mergeStateStatus=DIRTY)." >&2
