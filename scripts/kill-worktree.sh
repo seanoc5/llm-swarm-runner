@@ -58,6 +58,17 @@
 # protocol. A claim older than CHECK_CLAIM_STALE_SECS (default:
 # WORKER_CHECK_TIMEOUT + 300s slack) is treated as a crashed check and no
 # longer blocks removal.
+#
+# issue #495: the #317 salvage only ever covered the task-queue subdirs
+# (inbox/processing/outbox), so everything else a worker wrote under
+# `.swarm/` (logs, status, a misplaced evidence file) or `.local-data/`
+# (working output files) was still destroyed unrecoverably by the
+# `git worktree remove --force` below. Before that removal, both are
+# archived to `<project>/.swarm/reaped/iss-<N>-<UTC>.{swarm,local-data}/`
+# — `.local-data/` only under SWARM_REAP_LOCALDATA_MAX_MB (default 512MB),
+# since worker-generated datasets can be large; over the cap it is left in
+# place (still destroyed by the removal, same as before this issue) but
+# its size/path are logged and printed. See archive_worktree_scratch below.
 set -euo pipefail
 
 # Portable mtime (epoch seconds). GNU coreutils first, BSD fallback. Mirrors
@@ -234,6 +245,71 @@ salvage_queued_files() {
     done < <(find "$src" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null)
 }
 
+# issue #495: the #317 salvage above only ever covers the three task-queue
+# subdirs. Everything else a worker wrote under the worktree's `.swarm/`
+# (logs/, status/, an evidence file dropped there instead of
+# `<project>/.swarm/evidence/`) or under its `.local-data/` (working
+# output files) was still destroyed silently by `git worktree remove
+# --force` below. Two fand-etl incidents on 2026-09-28 lost exactly this:
+# corrected output data under `.local-data/` (iss-1103, reaped by the
+# watcher's sanctioned autoclose) and incident-evidence logs under
+# `.swarm/logs/` (iss-1010, reaped by #489's gh-side removal — same class
+# of loss, different remover, which is why this lives in kill-worktree.sh
+# itself rather than any one caller).
+#
+# Archives whatever is left of `<wt>/.swarm/` (always — small: tasks,
+# logs, status) and `<wt>/.local-data/` (only under
+# SWARM_REAP_LOCALDATA_MAX_MB, default 512 — worker-generated datasets can
+# be large) to `<project>/.swarm/reaped/iss-<N>-<UTC-timestamp>.{swarm,
+# local-data}/`, mv'd rather than copied so nothing is left for the
+# `git worktree remove --force` that follows to race against. Over the
+# cap, `.local-data/` is left in place — and is still destroyed by that
+# same removal, exactly as before this issue — but its size and path are
+# logged (reap.worktree.skipped_localdata) and printed, so the loss is at
+# least diagnosable afterward from events.log or the reaper's preserved
+# pane capture, and a human watching the pane live has a chance to copy it
+# out first.
+#
+# Sets ARCHIVE_SWARM / ARCHIVE_LOCALDATA / LOCALDATA_SKIPPED as call-site
+# globals (bash has no clean multi-value return) for the caller to
+# log/print — same "local since scripts here are self-contained" pattern
+# as mtime_epoch above; reap-orphan-worktrees.sh's reap_dangling and
+# swarm-merge.sh's fallback removal each carry their own copy of this
+# function rather than sourcing it, since neither can rely on this file
+# being on disk in every caller's context (dangling registration; a bare
+# checkout without this script's sibling files).
+archive_worktree_scratch() {
+    local project_dir="$1" issue="$2" wt="$3"
+    ARCHIVE_SWARM=""
+    ARCHIVE_LOCALDATA=""
+    LOCALDATA_SKIPPED=""
+    [ -d "$wt/.swarm" ] || [ -d "$wt/.local-data" ] || return 0
+
+    local ts base max_mb size_mb
+    ts="$(date -u +%Y%m%dT%H%M%SZ)"
+    base="$project_dir/.swarm/reaped/iss-$issue-$ts"
+    mkdir -p "$project_dir/.swarm/reaped" 2>/dev/null || true
+
+    if [ -d "$wt/.swarm" ]; then
+        if mv "$wt/.swarm" "$base.swarm" 2>/dev/null; then
+            ARCHIVE_SWARM="$base.swarm"
+        fi
+    fi
+
+    if [ -d "$wt/.local-data" ]; then
+        max_mb="${SWARM_REAP_LOCALDATA_MAX_MB:-512}"
+        size_mb="$(du -sm "$wt/.local-data" 2>/dev/null | cut -f1)"
+        size_mb="${size_mb:-0}"
+        if [ "$size_mb" -le "$max_mb" ] 2>/dev/null; then
+            if mv "$wt/.local-data" "$base.local-data" 2>/dev/null; then
+                ARCHIVE_LOCALDATA="$base.local-data"
+            fi
+        else
+            LOCALDATA_SKIPPED="size=${size_mb}MB path=$wt/.local-data"
+        fi
+    fi
+}
+
 ISSUE="${1:?usage: kill-worktree.sh <issue-number> [project-dir] [--no-compose-down] [--refuse-nonempty-inbox]}"
 PROJECT_DIR="${2:-$PWD}"
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
@@ -371,6 +447,21 @@ if [ -d "$WT" ]; then
     else
         "$SCRIPT_DIR/_compose-down-for-worktree.sh" "$WT" || echo "  WARN: compose-down helper exited non-zero (continuing)"
     fi
+
+    # issue #495: archive .swarm/ (and, size permitting, .local-data/)
+    # before the force-removal below discards them for good. See
+    # archive_worktree_scratch's own comment for the full rationale.
+    archive_worktree_scratch "$PROJECT_DIR" "$ISSUE" "$WT"
+    if [ -n "$ARCHIVE_SWARM" ] || [ -n "$ARCHIVE_LOCALDATA" ]; then
+        ARCHIVE_MSG="$ARCHIVE_SWARM"
+        [ -n "$ARCHIVE_LOCALDATA" ] && ARCHIVE_MSG="${ARCHIVE_MSG:+$ARCHIVE_MSG + }$ARCHIVE_LOCALDATA"
+        echo "  ⚠ ARCHIVED: $ARCHIVE_MSG"
+    fi
+    if [ -n "$LOCALDATA_SKIPPED" ]; then
+        echo "  ⚠ SKIPPED .local-data (over SWARM_REAP_LOCALDATA_MAX_MB cap): $LOCALDATA_SKIPPED — copy it out now if it matters, it will not survive the removal below"
+        log_event reap.worktree.skipped_localdata "issue=$ISSUE $LOCALDATA_SKIPPED"
+    fi
+
     # issue #446 self-review: logged AFTER a successful removal, not before.
     # An earlier issue #439 self-review moved this ahead of the removal to
     # close a sub-second race against coordinator-watch.sh's
@@ -393,10 +484,10 @@ if [ -d "$WT" ]; then
     # positive here beats a false negative that could hide a real
     # unblessed removal.
     if git worktree remove --force "$WT"; then
-        log_event reap.worktree "issue=$ISSUE branch=${ACTUAL_BRANCH:-$BRANCH} dir=$WT"
+        log_event reap.worktree "issue=$ISSUE branch=${ACTUAL_BRANCH:-$BRANCH} dir=$WT archive=${ARCHIVE_SWARM:-none}"
         echo "  ✓ removed worktree"
     else
-        log_event reap.worktree.error "issue=$ISSUE branch=${ACTUAL_BRANCH:-$BRANCH} dir=$WT reason=remove_failed"
+        log_event reap.worktree.error "issue=$ISSUE branch=${ACTUAL_BRANCH:-$BRANCH} dir=$WT reason=remove_failed archive=${ARCHIVE_SWARM:-none}"
         echo "  ✗ ERROR: git worktree remove failed for $WT — left in place, no reap.worktree event logged" >&2
         exit 1
     fi

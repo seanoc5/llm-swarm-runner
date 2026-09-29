@@ -296,6 +296,48 @@ log_event() {
     printf '%s  %-15s %s\n' "$ts" "$cat" "$*" >> "$EVENTS_LOG" 2>/dev/null || true
 }
 
+# issue #495: same rationale and contract as kill-worktree.sh's own copy of
+# this function (two fand-etl incidents, 2026-09-28, lost worker output
+# under .local-data/ and evidence logs under .swarm/logs/ to a bare
+# `git worktree remove --force` with no archive step). This fallback
+# removal below (used only when the watcher hasn't reaped within
+# GRACE_SECONDS) already duplicates its own `git worktree remove` +
+# log_event rather than calling kill-worktree.sh (see the issue #439
+# comment above) — so it carries its own copy here too, same
+# self-contained-scripts convention. Sets ARCHIVE_SWARM / ARCHIVE_LOCALDATA
+# / LOCALDATA_SKIPPED as call-site globals.
+archive_worktree_scratch() {
+    local project_dir="$1" issue="$2" wt="$3"
+    ARCHIVE_SWARM=""
+    ARCHIVE_LOCALDATA=""
+    LOCALDATA_SKIPPED=""
+    [ -d "$wt/.swarm" ] || [ -d "$wt/.local-data" ] || return 0
+
+    local ts base max_mb size_mb
+    ts="$(date -u +%Y%m%dT%H%M%SZ)"
+    base="$project_dir/.swarm/reaped/iss-$issue-$ts"
+    mkdir -p "$project_dir/.swarm/reaped" 2>/dev/null || true
+
+    if [ -d "$wt/.swarm" ]; then
+        if mv "$wt/.swarm" "$base.swarm" 2>/dev/null; then
+            ARCHIVE_SWARM="$base.swarm"
+        fi
+    fi
+
+    if [ -d "$wt/.local-data" ]; then
+        max_mb="${SWARM_REAP_LOCALDATA_MAX_MB:-512}"
+        size_mb="$(du -sm "$wt/.local-data" 2>/dev/null | cut -f1)"
+        size_mb="${size_mb:-0}"
+        if [ "$size_mb" -le "$max_mb" ] 2>/dev/null; then
+            if mv "$wt/.local-data" "$base.local-data" 2>/dev/null; then
+                ARCHIVE_LOCALDATA="$base.local-data"
+            fi
+        else
+            LOCALDATA_SKIPPED="size=${size_mb}MB path=$wt/.local-data"
+        fi
+    fi
+}
+
 # Resolve the given number as either an issue or a PR — GitHub shares one
 # numbering sequence, so #N is exactly one object and this is unambiguous.
 INPUT_NUM="$ISSUE"
@@ -624,6 +666,20 @@ if [ -n "$ISSUE" ]; then
     fi
     if [ -e "$WORKTREE_DIR/.git" ]; then
       echo "[6/7] watcher didn't reap; removing worktree $WORKTREE_DIR"
+
+      # issue #495: archive .swarm/.local-data before this fallback
+      # destroys them too — see archive_worktree_scratch above.
+      archive_worktree_scratch "$MAIN_WT" "$ISSUE" "$WORKTREE_DIR"
+      if [ -n "$ARCHIVE_SWARM" ] || [ -n "$ARCHIVE_LOCALDATA" ]; then
+        ARCHIVE_MSG="$ARCHIVE_SWARM"
+        [ -n "$ARCHIVE_LOCALDATA" ] && ARCHIVE_MSG="${ARCHIVE_MSG:+$ARCHIVE_MSG + }$ARCHIVE_LOCALDATA"
+        echo "       ARCHIVED: $ARCHIVE_MSG"
+      fi
+      if [ -n "$LOCALDATA_SKIPPED" ]; then
+        echo "       SKIPPED .local-data (over SWARM_REAP_LOCALDATA_MAX_MB cap): $LOCALDATA_SKIPPED"
+        log_event reap.worktree.skipped_localdata "issue=$ISSUE $LOCALDATA_SKIPPED"
+      fi
+
       # issue #446 self-review: logged AFTER a successful removal, not
       # before — see kill-worktree.sh's matching comment for why the
       # earlier before-removal ordering (issue #439 round 4) traded a rare
@@ -633,9 +689,9 @@ if [ -n "$ISSUE" ]; then
       # mistaken for an unblessed `git worktree remove` by the watcher's
       # vanish sweep — but only when the removal actually succeeded.
       if git worktree remove --force "$WORKTREE_DIR" 2>/dev/null; then
-        log_event reap.worktree "issue=$ISSUE branch=fix/issue-$ISSUE dir=$WORKTREE_DIR caller=swarm-merge.sh"
+        log_event reap.worktree "issue=$ISSUE branch=fix/issue-$ISSUE dir=$WORKTREE_DIR caller=swarm-merge.sh archive=${ARCHIVE_SWARM:-none}"
       else
-        log_event reap.worktree.error "issue=$ISSUE branch=fix/issue-$ISSUE dir=$WORKTREE_DIR caller=swarm-merge.sh reason=remove_failed"
+        log_event reap.worktree.error "issue=$ISSUE branch=fix/issue-$ISSUE dir=$WORKTREE_DIR caller=swarm-merge.sh reason=remove_failed archive=${ARCHIVE_SWARM:-none}"
       fi
     fi
   else

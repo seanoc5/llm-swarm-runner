@@ -226,6 +226,50 @@ mtime_epoch() {
     stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
 }
 
+# issue #495: archives a worktree's `.swarm/` (and, size permitting,
+# `.local-data/`) to `<project>/.swarm/reaped/iss-<N>-<UTC>.{swarm,
+# local-data}/` before it's destroyed — see kill-worktree.sh's own copy of
+# this function for the full rationale (two fand-etl incidents, 2026-09-28).
+# reap_dangling below is the one caller that can't route through
+# kill-worktree.sh at all (a dangling registration makes every git command
+# inside the worktree fail, including the one kill-worktree.sh's own
+# removal needs), so it carries its own copy rather than sourcing one —
+# same "self-contained scripts" convention as mtime_epoch above. `mv`/`du`
+# don't touch git, so both still work against a dangling worktree.
+# Sets ARCHIVE_SWARM / ARCHIVE_LOCALDATA / LOCALDATA_SKIPPED as call-site
+# globals, same contract as kill-worktree.sh's copy.
+archive_worktree_scratch() {
+    local project_dir="$1" issue="$2" wt="$3"
+    ARCHIVE_SWARM=""
+    ARCHIVE_LOCALDATA=""
+    LOCALDATA_SKIPPED=""
+    [ -d "$wt/.swarm" ] || [ -d "$wt/.local-data" ] || return 0
+
+    local ts base max_mb size_mb
+    ts="$(date -u +%Y%m%dT%H%M%SZ)"
+    base="$project_dir/.swarm/reaped/iss-$issue-$ts"
+    mkdir -p "$project_dir/.swarm/reaped" 2>/dev/null || true
+
+    if [ -d "$wt/.swarm" ]; then
+        if mv "$wt/.swarm" "$base.swarm" 2>/dev/null; then
+            ARCHIVE_SWARM="$base.swarm"
+        fi
+    fi
+
+    if [ -d "$wt/.local-data" ]; then
+        max_mb="${SWARM_REAP_LOCALDATA_MAX_MB:-512}"
+        size_mb="$(du -sm "$wt/.local-data" 2>/dev/null | cut -f1)"
+        size_mb="${size_mb:-0}"
+        if [ "$size_mb" -le "$max_mb" ] 2>/dev/null; then
+            if mv "$wt/.local-data" "$base.local-data" 2>/dev/null; then
+                ARCHIVE_LOCALDATA="$base.local-data"
+            fi
+        else
+            LOCALDATA_SKIPPED="size=${size_mb}MB path=$wt/.local-data"
+        fi
+    fi
+}
+
 # worktree_registration_ok <worktree-dir>
 #
 # issue #225: returns 0 if git considers this a valid, connected worktree —
@@ -308,16 +352,31 @@ reap_dangling() {
     if [ "$NO_COMPOSE_DOWN" != "1" ] && [ -x "$SCRIPT_DIR/_compose-down-for-worktree.sh" ]; then
         "$SCRIPT_DIR/_compose-down-for-worktree.sh" "$wt" || echo "  WARN: compose-down helper exited non-zero (continuing)"
     fi
+
+    # issue #495: this path can't call kill-worktree.sh (no working git
+    # inside a dangling registration), so it archives .swarm/.local-data
+    # itself — see archive_worktree_scratch above.
+    archive_worktree_scratch "$PROJECT_DIR" "$issue" "$wt"
+    if [ -n "$ARCHIVE_SWARM" ] || [ -n "$ARCHIVE_LOCALDATA" ]; then
+        ARCHIVE_MSG="$ARCHIVE_SWARM"
+        [ -n "$ARCHIVE_LOCALDATA" ] && ARCHIVE_MSG="${ARCHIVE_MSG:+$ARCHIVE_MSG + }$ARCHIVE_LOCALDATA"
+        echo "  ⚠ ARCHIVED: $ARCHIVE_MSG"
+    fi
+    if [ -n "$LOCALDATA_SKIPPED" ]; then
+        echo "  ⚠ SKIPPED .local-data (over SWARM_REAP_LOCALDATA_MAX_MB cap): $LOCALDATA_SKIPPED — copy it out now if it matters, it will not survive the removal below"
+        log_event reap.worktree.skipped_localdata "issue=$issue $LOCALDATA_SKIPPED"
+    fi
+
     # issue #446 self-review: logged AFTER a successful rm -rf, not before —
     # see kill-worktree.sh's matching comment. Logging first (the original
     # issue #439 rationale) would leave a blessed reap.worktree event on
     # record even when `rm -rf` fails (set -euo pipefail aborts right
     # after), masking a genuinely unblessed removal of the same directory.
     if rm -rf -- "$wt"; then
-        log_event reap.worktree "issue=$issue branch=fix/issue-$issue dir=$wt caller=reap-orphan-worktrees.sh(dangling)"
+        log_event reap.worktree "issue=$issue branch=fix/issue-$issue dir=$wt caller=reap-orphan-worktrees.sh(dangling) archive=${ARCHIVE_SWARM:-none}"
         echo "  ✓ removed worktree directory"
     else
-        log_event reap.worktree.error "issue=$issue branch=fix/issue-$issue dir=$wt caller=reap-orphan-worktrees.sh(dangling) reason=rm_failed"
+        log_event reap.worktree.error "issue=$issue branch=fix/issue-$issue dir=$wt caller=reap-orphan-worktrees.sh(dangling) reason=rm_failed archive=${ARCHIVE_SWARM:-none}"
         echo "  ✗ ERROR: rm -rf failed for $wt — no reap.worktree event logged" >&2
         exit 1
     fi
