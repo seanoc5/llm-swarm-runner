@@ -251,13 +251,12 @@ Always the `$LLM_SWARM_DIR`-prefixed path (your checkout may have no
 `scripts/` of its own). `$TASK_ID` matches your status file. `ok` covers
 any concluded outcome — PR, `blocked`, `done-no-pr`; use `err` only when
 nothing usable was delivered. This is the coordinator's one reliable
-"worker finished" signal for a session that never exits on its own —
-without it, detectors used to double-record completions (#451). If the
-project runs an executed check, `worker-listener.sh` reconciles this
-record against it afterward, so report what you believe now. Script
-missing (pre-#451 checkout) → skip; don't hand-write a `done/*.json`
-yourself. Refuses if it finds no brief for `$TASK_ID`; pass `--force` for
-a genuinely brief-less task (no-PR ruling/research, #466).
+"worker finished" signal for an interactive session that never exits on
+its own — without it, several detectors used to each guess and
+double-record completions (#451). If the project runs an executed check,
+`worker-listener.sh` reconciles this record against it afterward, so
+report what you believe now. Script missing (pre-#451 checkout) → skip;
+don't hand-write a `done/*.json` yourself.
 
 ---
 
