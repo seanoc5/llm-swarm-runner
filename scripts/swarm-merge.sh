@@ -311,6 +311,8 @@ archive_worktree_scratch() {
     ARCHIVE_SWARM=""
     ARCHIVE_LOCALDATA=""
     LOCALDATA_SKIPPED=""
+    ARCHIVE_MV_FAILED=""
+    ARCHIVE_EVENT_FIELD="none"
     [ -d "$wt/.swarm" ] || [ -d "$wt/.local-data" ] || return 0
 
     local ts base max_mb size_mb
@@ -321,6 +323,8 @@ archive_worktree_scratch() {
     if [ -d "$wt/.swarm" ]; then
         if mv "$wt/.swarm" "$base.swarm" 2>/dev/null; then
             ARCHIVE_SWARM="$base.swarm"
+        else
+            ARCHIVE_MV_FAILED="swarm"
         fi
     fi
 
@@ -331,9 +335,22 @@ archive_worktree_scratch() {
         if [ "$size_mb" -le "$max_mb" ] 2>/dev/null; then
             if mv "$wt/.local-data" "$base.local-data" 2>/dev/null; then
                 ARCHIVE_LOCALDATA="$base.local-data"
+            else
+                ARCHIVE_MV_FAILED="${ARCHIVE_MV_FAILED:+$ARCHIVE_MV_FAILED,}local-data"
             fi
         else
             LOCALDATA_SKIPPED="size=${size_mb}MB path=$wt/.local-data"
+        fi
+    fi
+
+    # self-review (PR #500): the events.log archive= field used to report
+    # ARCHIVE_SWARM alone, so a reap that archived ONLY .local-data/ (no
+    # .swarm/ dir at all — the iss-1103 shape) logged archive=none, exactly
+    # as if nothing had been preserved. Report both, comma-joined.
+    if [ -n "$ARCHIVE_SWARM" ] || [ -n "$ARCHIVE_LOCALDATA" ]; then
+        ARCHIVE_EVENT_FIELD="${ARCHIVE_SWARM:+swarm=$ARCHIVE_SWARM}"
+        if [ -n "$ARCHIVE_LOCALDATA" ]; then
+            ARCHIVE_EVENT_FIELD="${ARCHIVE_EVENT_FIELD:+$ARCHIVE_EVENT_FIELD,}local_data=$ARCHIVE_LOCALDATA"
         fi
     fi
 }
@@ -672,12 +689,18 @@ if [ -n "$ISSUE" ]; then
       archive_worktree_scratch "$MAIN_WT" "$ISSUE" "$WORKTREE_DIR"
       if [ -n "$ARCHIVE_SWARM" ] || [ -n "$ARCHIVE_LOCALDATA" ]; then
         ARCHIVE_MSG="$ARCHIVE_SWARM"
-        [ -n "$ARCHIVE_LOCALDATA" ] && ARCHIVE_MSG="${ARCHIVE_MSG:+$ARCHIVE_MSG + }$ARCHIVE_LOCALDATA"
+        if [ -n "$ARCHIVE_LOCALDATA" ]; then
+          ARCHIVE_MSG="${ARCHIVE_MSG:+$ARCHIVE_MSG + }$ARCHIVE_LOCALDATA"
+        fi
         echo "       ARCHIVED: $ARCHIVE_MSG"
       fi
       if [ -n "$LOCALDATA_SKIPPED" ]; then
         echo "       SKIPPED .local-data (over SWARM_REAP_LOCALDATA_MAX_MB cap): $LOCALDATA_SKIPPED"
         log_event reap.worktree.skipped_localdata "issue=$ISSUE $LOCALDATA_SKIPPED"
+      fi
+      if [ -n "$ARCHIVE_MV_FAILED" ]; then
+        echo "       WARN: failed to archive: $ARCHIVE_MV_FAILED (mv failed — check permissions/disk space)"
+        log_event reap.worktree.archive_failed "issue=$ISSUE which=$ARCHIVE_MV_FAILED"
       fi
 
       # issue #446 self-review: logged AFTER a successful removal, not
@@ -689,9 +712,9 @@ if [ -n "$ISSUE" ]; then
       # mistaken for an unblessed `git worktree remove` by the watcher's
       # vanish sweep — but only when the removal actually succeeded.
       if git worktree remove --force "$WORKTREE_DIR" 2>/dev/null; then
-        log_event reap.worktree "issue=$ISSUE branch=fix/issue-$ISSUE dir=$WORKTREE_DIR caller=swarm-merge.sh archive=${ARCHIVE_SWARM:-none}"
+        log_event reap.worktree "issue=$ISSUE branch=fix/issue-$ISSUE dir=$WORKTREE_DIR caller=swarm-merge.sh archive=$ARCHIVE_EVENT_FIELD"
       else
-        log_event reap.worktree.error "issue=$ISSUE branch=fix/issue-$ISSUE dir=$WORKTREE_DIR caller=swarm-merge.sh reason=remove_failed archive=${ARCHIVE_SWARM:-none}"
+        log_event reap.worktree.error "issue=$ISSUE branch=fix/issue-$ISSUE dir=$WORKTREE_DIR caller=swarm-merge.sh reason=remove_failed archive=$ARCHIVE_EVENT_FIELD"
       fi
     fi
   else

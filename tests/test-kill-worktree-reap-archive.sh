@@ -105,10 +105,10 @@ green "worktree still removed as normal despite the archive step"
 
 EVENTS_LOG1="$PROJ1/.swarm/events.log"
 [ -f "$EVENTS_LOG1" ] || red "no events.log written: $EVENTS_LOG1"
-grep -qE "reap\.worktree +issue=71 .*archive=$PROJ1/\.swarm/reaped/iss-71-[0-9TZ]+\.swarm( |\$)" "$EVENTS_LOG1" \
-    || red "reap.worktree event did not name the archive location. Log:
+grep -qE "reap\.worktree +issue=71 .*archive=swarm=$PROJ1/\.swarm/reaped/iss-71-[0-9TZ]+\.swarm,local_data=$PROJ1/\.swarm/reaped/iss-71-[0-9TZ]+\.local-data( |\$)" "$EVENTS_LOG1" \
+    || red "reap.worktree event did not name BOTH archive locations. Log:
 $(cat "$EVENTS_LOG1")"
-green "reap.worktree event names the archive location"
+green "reap.worktree event names both archive locations (swarm= and local_data=)"
 
 # ============================================================================
 heading "Test 2: .local-data/ over the size cap is skipped (logged + printed), not silently archived"
@@ -147,29 +147,106 @@ green "reap.worktree.skipped_localdata event logged with a size"
 green "worktree still removed as normal even though .local-data/ was skipped"
 
 # ============================================================================
-heading "Test 3: no .swarm/ or .local-data/ reaps exactly as before (no archive output, no reaped/ dir)"
+heading "Test 3: .local-data/ ALONE (no .swarm/ dir at all — the iss-1103 shape) is still named in the event"
 # ============================================================================
+# Self-review finding on this PR's own draft: the events.log archive= field
+# used to report ARCHIVE_SWARM alone, so a reap that only ever had
+# .local-data/ (no .swarm/ dir — exactly the iss-1103 incident this issue
+# is about) logged archive=none, indistinguishable from nothing having been
+# preserved at all.
 
 PROJ3="$TEST_DIR/proj3"
 new_project "$PROJ3"
-git -C "$PROJ3" worktree add -q -b fix/issue-73 "$TEST_DIR/wt-issue-73"
+git -C "$PROJ3" worktree add -q -b fix/issue-75 "$TEST_DIR/wt-issue-75"
+WT3="$TEST_DIR/wt-issue-75"
 
-RUN3="$TEST_DIR/run3.log"
+mkdir -p "$WT3/.local-data"
+echo "corrected numbers, no .swarm/ dir at all" > "$WT3/.local-data/corrected.csv"
+
+RUN_LDONLY="$TEST_DIR/run-ldonly.log"
 set +e
-(cd "$PROJ3" && "$KILL_WT" 73 "$PROJ3") > "$RUN3" 2>&1
-RC3=$?
+(cd "$PROJ3" && "$KILL_WT" 75 "$PROJ3") > "$RUN_LDONLY" 2>&1
+RC_LDONLY=$?
 set -e
-[ "$RC3" -eq 0 ] || red "expected exit 0, got $RC3. Output:
-$(cat "$RUN3")"
-grep -qi 'ARCHIVED\|SKIPPED .local-data' "$RUN3" \
+[ "$RC_LDONLY" -eq 0 ] || red "expected exit 0, got $RC_LDONLY. Output:
+$(cat "$RUN_LDONLY")"
+
+ARCHIVE_LDONLY_DIR="$(find "$PROJ3/.swarm/reaped" -maxdepth 1 -name 'iss-75-*.local-data' -type d 2>/dev/null | head -1)"
+[ -n "$ARCHIVE_LDONLY_DIR" ] \
+    || red ".local-data/-only worktree was not archived"
+[ -f "$ARCHIVE_LDONLY_DIR/corrected.csv" ] \
+    || red "corrected.csv did not survive the .local-data/-only archive"
+green ".local-data/-only worktree (no .swarm/ dir) is still archived"
+
+grep -qE "reap\.worktree +issue=75 .*archive=local_data=$PROJ3/\.swarm/reaped/iss-75-[0-9TZ]+\.local-data( |\$)" "$PROJ3/.swarm/events.log" \
+    || red "reap.worktree event for a .local-data/-only archive must NOT say archive=none. Log:
+$(cat "$PROJ3/.swarm/events.log")"
+green "reap.worktree event correctly names the .local-data/-only archive (not archive=none)"
+
+# ============================================================================
+heading "Test 4: a failed archive mv is surfaced (WARN line + archive_failed event), never silent"
+# ============================================================================
+# Self-review finding on this PR's own draft: if the mv itself fails (disk
+# full, permissions), the original code printed/logged nothing and the
+# removal proceeded — a second, quieter way to lose data unrecorded.
+# Reproduced here by making <project>/.swarm/reaped/ undeletable/unwritable
+# so the mv into it fails with EACCES (this suite runs as a non-root user).
+
+PROJ4B="$TEST_DIR/proj4b"
+new_project "$PROJ4B"
+git -C "$PROJ4B" worktree add -q -b fix/issue-76 "$TEST_DIR/wt-issue-76"
+WT4B="$TEST_DIR/wt-issue-76"
+
+mkdir -p "$WT4B/.swarm/logs" "$PROJ4B/.swarm/reaped"
+echo "would-be-archived" > "$WT4B/.swarm/logs/incident.log"
+chmod 555 "$PROJ4B/.swarm/reaped"
+
+RUN4B="$TEST_DIR/run4b.log"
+set +e
+(cd "$PROJ4B" && "$KILL_WT" 76 "$PROJ4B") > "$RUN4B" 2>&1
+RC4B=$?
+set -e
+chmod 755 "$PROJ4B/.swarm/reaped"
+[ "$RC4B" -eq 0 ] || red "expected exit 0 (archive failure must not abort the reap), got $RC4B. Output:
+$(cat "$RUN4B")"
+
+grep -q 'WARN: failed to archive' "$RUN4B" \
+    || red "expected a WARN line when the archive mv fails. Output:
+$(cat "$RUN4B")"
+green "kill-worktree.sh printed a WARN line when the .swarm/ archive mv failed"
+
+grep -qE 'reap\.worktree\.archive_failed +issue=76 which=swarm' "$PROJ4B/.swarm/events.log" \
+    || red "expected a reap.worktree.archive_failed event naming 'swarm'. Log:
+$(cat "$PROJ4B/.swarm/events.log")"
+green "reap.worktree.archive_failed event logged, naming what failed to archive"
+
+[ ! -d "$WT4B" ] || red "worktree dir still present after removal: $WT4B"
+green "worktree still removed as normal even though the archive mv failed"
+
+# ============================================================================
+heading "Test 5: no .swarm/ or .local-data/ reaps exactly as before (no archive output, no reaped/ dir)"
+# ============================================================================
+
+PROJ5="$TEST_DIR/proj5"
+new_project "$PROJ5"
+git -C "$PROJ5" worktree add -q -b fix/issue-73 "$TEST_DIR/wt-issue-73"
+
+RUN5="$TEST_DIR/run5.log"
+set +e
+(cd "$PROJ5" && "$KILL_WT" 73 "$PROJ5") > "$RUN5" 2>&1
+RC5=$?
+set -e
+[ "$RC5" -eq 0 ] || red "expected exit 0, got $RC5. Output:
+$(cat "$RUN5")"
+grep -qi 'ARCHIVED\|SKIPPED .local-data' "$RUN5" \
     && red "empty worktree reap must not mention archive/skip. Output:
-$(cat "$RUN3")"
-[ ! -d "$PROJ3/.swarm/reaped" ] \
+$(cat "$RUN5")"
+[ ! -d "$PROJ5/.swarm/reaped" ] \
     || red "empty worktree reap must not create a .swarm/reaped/ dir"
 green "reap with nothing to archive produced no archive output and no reaped/ dir"
 
 # ============================================================================
-heading "Test 4: reap-orphan-worktrees.sh's dangling-registration path also archives .swarm/"
+heading "Test 6: reap-orphan-worktrees.sh's dangling-registration path also archives .swarm/"
 # ============================================================================
 # Mirrors test-scripts.sh's test_dangling_registration_reap fixture (issue
 # #225): corrupt the worktree's git registration so no git command run
@@ -218,7 +295,7 @@ $(cat "$RUN4")"
     || red "incident.log did not survive the dangling-path .swarm/ archive: $ARCHIVE4_DIR"
 green "reap_dangling archived .swarm/logs/incident.log before the rm -rf"
 
-grep -qE "reap\.worktree +issue=74 .*archive=$PROJ4/\.swarm/reaped/iss-74-[0-9TZ]+\.swarm( |\$)" "$PROJ4/.swarm/events.log" \
+grep -qE "reap\.worktree +issue=74 .*archive=swarm=$PROJ4/\.swarm/reaped/iss-74-[0-9TZ]+\.swarm( |\$)" "$PROJ4/.swarm/events.log" \
     || red "reap.worktree event (dangling path) did not name the archive location. Log:
 $(cat "$PROJ4/.swarm/events.log")"
 green "reap.worktree event (dangling path) names the archive location"
