@@ -280,4 +280,60 @@ grep -q 'reason=human_present' "$EVENTS_LOG" \
 green "COORD_HUMAN_IDLE_SECS=0 is a clean rollback to pre-#459 behavior"
 stop_watcher
 
+# ============================================================================
+heading "Test 6 (issue #497): a turn that CONTAINS the nudge, plus the operator's own text, must count as human"
+# ============================================================================
+# The #497 incident's first hole: a prefix/substring match on the rendered
+# nudge read a turn like this one as "just the watcher's own paste" — the
+# operator had finished typing their own question on top of a pasted,
+# not-yet-submitted nudge and hit Enter once — and let a doorbell ring
+# straight into them. Fixture matches the issue's own acceptance criterion:
+# a nudge-shaped first line, a blank line, then real operator text.
+mkdir -p "$TEST_DIR/wt-issue-907/.swarm/tasks/done"
+reset_state
+write_typed_turn "$TRANSCRIPT_DIR/session-e.jsonl" "$(now_iso)" \
+    "$(printf 'Inbox: 3 item(s) in .swarm/coord-inbox/ — read and triage them (see prompts/coordinator.md "Inbox").\n\nhelp me fix the flaky watcher test')"
+
+COORD_HUMAN_IDLE_SECS=600 DEBOUNCE_SECS=0 start_watcher "$TEST_DIR/watch-6.log"
+echo '{"task_id":"t907","outcome":"ok"}' > "$TEST_DIR/wt-issue-907/.swarm/tasks/done/t907-907.ok.json"
+
+poll_until 20 0.5 bash -c "grep -q 'coord.wake.defer .*reason=human_present' '$EVENTS_LOG'" \
+    || red "a turn containing the nudge plus real operator text must count as human — this is the #497 re-ring hole. events:
+$(cat "$EVENTS_LOG" 2>/dev/null)
+watch log:
+$(cat "$TEST_DIR/watch-6.log")"
+green "nudge-plus-operator-text turn correctly counted as human (coord.wake.defer reason=human_present)"
+
+[ "$(wake_count)" = "0" ] || red "no paste should have reached the pane while a human was present; got: $(cat "$WAKE_LOG")"
+green "nothing was pasted into the operator's session"
+stop_watcher
+
+# ============================================================================
+heading "Test 7 (issue #497): a long (>2000 char) operator turn must count as human"
+# ============================================================================
+# The #497 incident's second hole: COORD_HUMAN_MAX_TYPED_CHARS (a length-
+# based "too long to be typed by hand" exclusion) tripped on a genuine long
+# operator turn, read it as machine, and the gate concluded nobody was
+# there. That exclusion is now dropped entirely (see human_typed_since's
+# header comment) — a 2001+ char operator turn must count as human.
+mkdir -p "$TEST_DIR/wt-issue-908/.swarm/tasks/done"
+reset_state
+LONG_TURN="file followups $(printf '12%.0s' $(seq 1 1000))"
+[ "${#LONG_TURN}" -gt 2000 ] || red "test fixture bug: LONG_TURN is only ${#LONG_TURN} chars, need >2000"
+write_typed_turn "$TRANSCRIPT_DIR/session-f.jsonl" "$(now_iso)" "$LONG_TURN"
+
+COORD_HUMAN_IDLE_SECS=600 DEBOUNCE_SECS=0 start_watcher "$TEST_DIR/watch-7.log"
+echo '{"task_id":"t908","outcome":"ok"}' > "$TEST_DIR/wt-issue-908/.swarm/tasks/done/t908-908.ok.json"
+
+poll_until 20 0.5 bash -c "grep -q 'coord.wake.defer .*reason=human_present' '$EVENTS_LOG'" \
+    || red "a ${#LONG_TURN}-char operator turn must count as human, not be dropped by a length cap. events:
+$(cat "$EVENTS_LOG" 2>/dev/null)
+watch log:
+$(cat "$TEST_DIR/watch-7.log")"
+green "a >2000-char operator turn correctly counted as human (coord.wake.defer reason=human_present)"
+
+[ "$(wake_count)" = "0" ] || red "no paste should have reached the pane while a human was present; got: $(cat "$WAKE_LOG")"
+green "nothing was pasted into the operator's session"
+stop_watcher
+
 printf '\n\033[1;32mAll wake-presence-gate tests passed.\033[0m\n'

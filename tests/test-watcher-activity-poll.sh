@@ -361,8 +361,9 @@ extract_fn() {
     sed -n "/^${fn}() {/,/^}/p" "$WATCH"
 }
 for fn in log_event on_outcome outcome_path_issue outcome_path_task_id coord_wake_set_pending coord_wake_clear_pending \
-          coord_inbox_write coord_inbox_count coord_inbox_nudge_text \
+          coord_inbox_write coord_inbox_count coord_inbox_nudge_text coord_inbox_nudge_pattern \
           coord_wake_hold_mark_pending coord_wake_hold_clear_pending coord_wake_hold_retry_pass \
+          coord_wake_retry_pass coord_wake_already_submitted \
           coord_wake_hold_reason coord_human_present worker_human_present swarm_busy \
           human_typed_since transcript_dir_for watcher_paste_epochs \
           wake_clock_get wake_clock_set wake_debounced \
@@ -411,8 +412,13 @@ COORD_WAKE_BUSY_CEILING_SECS=900
 # issue #459/#456: the rest of the hold vocabulary, all disabled here.
 COORD_HUMAN_IDLE_SECS=0
 WORKER_HUMAN_IDLE_SECS=0
+# issue #497: coord_wake_already_submitted (now consulted unconditionally by
+# both retry passes, ahead of every other gate) reads HAVE_JQ under this
+# script's `set -u` — the real script always initializes it at boot, which
+# this extracted-function harness never runs, so it must be set here too.
+HAVE_JQ=0
+command -v jq >/dev/null 2>&1 && HAVE_JQ=1
 COORD_HUMAN_PASTE_GRACE_SECS=15
-COORD_HUMAN_MAX_TYPED_CHARS=2000
 WATCHER_PASTE_SCAN_LINES=2000
 WAKE_DEFER_ON_SWARM_BUSY=0
 DEBOUNCE_SECS=0
@@ -446,7 +452,14 @@ chmod +x "$LLM_START"
 
 # Simulate "already held" for the retry side of the race. The marker's
 # CONTENT is the hold reason since issue #459 — "pane_busy" here, matching
-# what the pre-#459 empty marker always meant.
+# what the pre-#459 empty marker always meant. A real hold is only ever
+# raised after the triggering wake's own payload already landed in
+# coord-inbox/ (issue #430's write-before-hold ordering) — issue #497's
+# inbox_empty guard means an empty inbox here would make
+# coord_wake_hold_retry_pass skip the paste outright, so give it one file to
+# stay realistic to that ordering.
+mkdir -p "$COORD_INBOX_DIR"
+touch "$COORD_INBOX_DIR/probe.md"
 printf 'pane_busy\n' > "$COORD_WAKE_HOLD_PENDING_FILE"
 
 ( on_outcome "$LOCK_TEST_DIR/wt-issue-42/.swarm/tasks/done/t42-42.ok.json" ) &
@@ -475,6 +488,123 @@ if [ "${#TYPES[@]}" = "4" ] && [ "${TYPES[0]}" = "START" ] && [ "${TYPES[1]}" = 
 else
     red "on_outcome and coord_wake_hold_retry_pass's llm-start.sh calls OVERLAPPED — COORD_WAKE_LOCK did not serialize them. Timeline (sorted):
 $(cat "$CALL_TIMELINE.sorted")"
+fi
+
+# ============================================================================
+heading "Test 5b (issue #497): coord_wake_hold_retry_pass clears a pending hold without pasting once the inbox is empty"
+# ============================================================================
+# A held doorbell (pane_busy here, but the guard doesn't care which reason)
+# whose coord-inbox has been fully triaged by the time the retry tick runs —
+# every item it would have announced already handled some other way — has
+# nothing left to paste. Reuses Test 5's extracted functions/env verbatim;
+# resets only what this test itself needs to control.
+: > "$CALL_TIMELINE"
+: > "$EVENTS_LOG"
+rm -rf "$COORD_INBOX_DIR"; mkdir -p "$COORD_INBOX_DIR"   # empty inbox
+printf 'pane_busy\n' > "$COORD_WAKE_HOLD_PENDING_FILE"
+
+coord_wake_hold_retry_pass
+
+[ ! -e "$COORD_WAKE_HOLD_PENDING_FILE" ] \
+    || red "COORD_WAKE_HOLD_PENDING_FILE should have been cleared by the inbox_empty guard"
+grep -q '^START' "$CALL_TIMELINE" 2>/dev/null \
+    && red "llm-start.sh must not be invoked when the inbox is empty; call timeline:
+$(cat "$CALL_TIMELINE")"
+grep -q 'coord\.wake\.skip reason=inbox_empty' "$EVENTS_LOG" \
+    || red "expected coord.wake.skip reason=inbox_empty; events:
+$(cat "$EVENTS_LOG")"
+green "coord_wake_hold_retry_pass skips the paste and clears pending on an empty inbox (reason=inbox_empty)"
+
+# Same guard, same outcome, on the OTHER retry pass (coord_wake_set_pending's
+# dirty-composer path) — COORD_WAKE_PENDING_FILE, not the hold marker.
+: > "$CALL_TIMELINE"
+: > "$EVENTS_LOG"
+printf 'outcome-wake-prompt-probe\n' > "$COORD_WAKE_PENDING_FILE"
+
+coord_wake_retry_pass
+
+[ ! -e "$COORD_WAKE_PENDING_FILE" ] \
+    || red "COORD_WAKE_PENDING_FILE should have been cleared by the inbox_empty guard"
+grep -q '^START' "$CALL_TIMELINE" 2>/dev/null \
+    && red "llm-start.sh must not be invoked when the inbox is empty; call timeline:
+$(cat "$CALL_TIMELINE")"
+grep -q 'coord\.wake\.skip reason=inbox_empty' "$EVENTS_LOG" \
+    || red "expected coord.wake.skip reason=inbox_empty; events:
+$(cat "$EVENTS_LOG")"
+green "coord_wake_retry_pass skips the paste and clears pending on an empty inbox (reason=inbox_empty)"
+
+# ============================================================================
+heading "Test 5c (issue #497): both retry passes clear pending, without pasting, once the operator already submitted the nudge themselves"
+# ============================================================================
+command -v jq >/dev/null 2>&1 || { yellow "jq not found — skipping Test 5c (coord_wake_already_submitted is inert without it)"; SKIP_5C=1; }
+if [ "${SKIP_5C:-0}" != "1" ]; then
+    # coord_wake_already_submitted derives the coordinator's transcript dir
+    # from $HOME + $PROJECT_DIR via transcript_dir_for — point HOME at a
+    # fixture tree and write one there, same technique
+    # test-wake-presence-gate.sh uses for the daemon-level version of this.
+    FIXTURE_HOME="$LOCK_TEST_DIR/home"
+    FIXTURE_TRANSCRIPT_DIR="$FIXTURE_HOME/.claude/projects/$(printf '%s' "$PROJECT_DIR" | tr '/' '-')"
+    mkdir -p "$FIXTURE_TRANSCRIPT_DIR"
+    REAL_HOME="$HOME"
+    HAVE_JQ=1
+    HOME="$FIXTURE_HOME"
+
+    : > "$CALL_TIMELINE"
+    : > "$EVENTS_LOG"
+    rm -f "$FIXTURE_TRANSCRIPT_DIR"/*.jsonl
+    mkdir -p "$COORD_INBOX_DIR"
+    touch "$COORD_INBOX_DIR/probe.md"   # non-empty, so the inbox_empty guard above doesn't fire first
+    printf 'pane_busy\n' > "$COORD_WAKE_HOLD_PENDING_FILE"
+    PENDING_MTIME=$(mtime_epoch "$COORD_WAKE_HOLD_PENDING_FILE")
+
+    # A typed turn, timestamped AFTER the pending marker, that CONTAINS the
+    # rendered nudge line alongside the operator's own text — exactly the
+    # "finished the draft the paste landed in, then hit Enter" case.
+    SUBMIT_TS="$(date -u -d "@$((PENDING_MTIME + 5))" +%Y-%m-%dT%H:%M:%S.000Z)"
+    jq -cn --arg ts "$SUBMIT_TS" \
+        --arg text "$(printf 'Inbox: 3 item(s) probe\n\nand also please rebase PR 512')" \
+        '{type:"user", timestamp:$ts, promptSource:"typed", origin:{kind:"human"}, message:{role:"user", content:$text}}' \
+        >> "$FIXTURE_TRANSCRIPT_DIR/session.jsonl"
+    touch -d "@$((PENDING_MTIME + 10))" "$FIXTURE_TRANSCRIPT_DIR/session.jsonl"
+
+    coord_wake_hold_retry_pass
+
+    [ ! -e "$COORD_WAKE_HOLD_PENDING_FILE" ] \
+        || red "COORD_WAKE_HOLD_PENDING_FILE should have been cleared by the already_submitted guard"
+    grep -q '^START' "$CALL_TIMELINE" 2>/dev/null \
+        && red "llm-start.sh must not be invoked once the operator already submitted the nudge; call timeline:
+$(cat "$CALL_TIMELINE")"
+    grep -q 'coord\.wake\.skip reason=already_submitted' "$EVENTS_LOG" \
+        || red "expected coord.wake.skip reason=already_submitted; events:
+$(cat "$EVENTS_LOG")"
+    green "coord_wake_hold_retry_pass skips the paste and clears pending once the operator's own submitted turn already carries the nudge"
+
+    # Same fixture, same outcome, on the dirty-composer retry pass.
+    : > "$CALL_TIMELINE"
+    : > "$EVENTS_LOG"
+    printf 'outcome-wake-prompt-probe\n' > "$COORD_WAKE_PENDING_FILE"
+    PENDING_MTIME=$(mtime_epoch "$COORD_WAKE_PENDING_FILE")
+    SUBMIT_TS="$(date -u -d "@$((PENDING_MTIME + 5))" +%Y-%m-%dT%H:%M:%S.000Z)"
+    rm -f "$FIXTURE_TRANSCRIPT_DIR"/*.jsonl
+    jq -cn --arg ts "$SUBMIT_TS" \
+        --arg text "$(printf 'Inbox: 3 item(s) probe\n\nand also please rebase PR 512')" \
+        '{type:"user", timestamp:$ts, promptSource:"typed", origin:{kind:"human"}, message:{role:"user", content:$text}}' \
+        >> "$FIXTURE_TRANSCRIPT_DIR/session.jsonl"
+    touch -d "@$((PENDING_MTIME + 10))" "$FIXTURE_TRANSCRIPT_DIR/session.jsonl"
+
+    coord_wake_retry_pass
+
+    [ ! -e "$COORD_WAKE_PENDING_FILE" ] \
+        || red "COORD_WAKE_PENDING_FILE should have been cleared by the already_submitted guard"
+    grep -q '^START' "$CALL_TIMELINE" 2>/dev/null \
+        && red "llm-start.sh must not be invoked once the operator already submitted the nudge; call timeline:
+$(cat "$CALL_TIMELINE")"
+    grep -q 'coord\.wake\.skip reason=already_submitted' "$EVENTS_LOG" \
+        || red "expected coord.wake.skip reason=already_submitted; events:
+$(cat "$EVENTS_LOG")"
+    green "coord_wake_retry_pass skips the paste and clears pending once the operator's own submitted turn already carries the nudge"
+
+    HOME="$REAL_HOME"
 fi
 
 # ============================================================================
