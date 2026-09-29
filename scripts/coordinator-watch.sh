@@ -2829,11 +2829,21 @@ fi
 
 # COORD_HUMAN_PASTE_GRACE_SECS: how far either side of a paste the watcher
 # itself recorded in events.log a typed turn can land and still be treated
-# as that paste rather than as a human typing. 15s covers llm-start.sh's
-# paste→Enter→transcript-flush path with room to spare; too large starts
-# swallowing a human who typed immediately after reading a nudge, which is
-# the safe direction anyway (it reads as machine, so the doorbell rings).
-COORD_HUMAN_PASTE_GRACE_SECS="${COORD_HUMAN_PASTE_GRACE_SECS:-15}"
+# as that paste rather than as a human typing. Too large starts swallowing
+# a human who typed immediately after reading a nudge, which is the safe
+# direction anyway (it reads as machine, so the doorbell rings — see
+# COORD_HUMAN_MAX_TYPED_CHARS's DECISION comment below for why that
+# tradeoff is the accepted one throughout this gate).
+#
+# issue #497 self-review finding: this same window now also covers
+# worker.start-to-brief latency (watcher_paste_epochs), which is NOT the
+# near-instant llm-start.sh paste→Enter→transcript-flush path 15s was
+# originally sized for — it spans container/sandbox boot plus the
+# interactive claude launch before the brief is even typed in. Checked
+# against this project's own live events.log: recent worker spawns ran
+# 1-11s, but one ran 22s. 45s leaves real margin over that observed worst
+# case without a separate knob.
+COORD_HUMAN_PASTE_GRACE_SECS="${COORD_HUMAN_PASTE_GRACE_SECS:-45}"
 # issue #497 DECISION: COORD_HUMAN_MAX_TYPED_CHARS (the length-based "a typed
 # turn this long must be a machine paste" exclusion) is DROPPED, not raised.
 # It was the #497 incident's second hole: a genuinely present operator's

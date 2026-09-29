@@ -701,6 +701,41 @@ $LONG_BRIEF" \
 fi
 
 # ============================================================================
+heading "Test 5f (issue #497 self-review finding): a slow worker spawn (brief lands 22s after worker.start, this project's own observed worst case) is still excluded at the production default"
+# ============================================================================
+if [ "${SKIP_5E:-0}" != "1" ]; then
+    # This test alone runs at the real production default (45s), not this
+    # file's 15s override for every other test, to prove the wider window
+    # self-review's live-log finding motivated actually covers the worst
+    # case it found.
+    SAVED_GRACE="$COORD_HUMAN_PASTE_GRACE_SECS"
+    COORD_HUMAN_PASTE_GRACE_SECS=45
+
+    FIXTURE_TDIR5F="$LOCK_TEST_DIR/worker-transcript-5f"
+    mkdir -p "$FIXTURE_TDIR5F"
+    : > "$EVENTS_LOG"
+    log_event worker.start "issue=998 task_id=t998 window=iss-998 alive=1/5 total_windows=1/10"
+    WSTART_EPOCH=$(date +%s)
+    CUTOFF=$((WSTART_EPOCH - 5))
+
+    SLOW_BRIEF_EPOCH=$((WSTART_EPOCH + 22))
+    SLOW_BRIEF_TS="$(date -u -d "@$SLOW_BRIEF_EPOCH" +%Y-%m-%dT%H:%M:%S.000Z)"
+    jq -cn --arg ts "$SLOW_BRIEF_TS" --arg text "## Task
+
+$(head -c 4000 < /dev/zero | tr '\0' 'x')" \
+        '{type:"user", timestamp:$ts, promptSource:"typed", origin:{kind:"human"}, message:{role:"user", content:$text}}' \
+        > "$FIXTURE_TDIR5F/session.jsonl"
+
+    PASTES="$(watcher_paste_epochs)"
+    if human_typed_since "$FIXTURE_TDIR5F" "$CUTOFF" "$PASTES"; then
+        red "a 22s-delayed worker brief must still be excluded at the production 45s default (this repo's own observed worst case)"
+    fi
+    green "a 22s-delayed worker brief (this project's own observed worst case) is still excluded at the production 45s default"
+
+    COORD_HUMAN_PASTE_GRACE_SECS="$SAVED_GRACE"
+fi
+
+# ============================================================================
 heading "Test 6: a debounced activity finding is retried on a later tick, not lost (issue #392 self-review finding, now via the coordinator inbox)"
 # ============================================================================
 # activity_poll_pass only marks ACTIVITY_ANNOUNCED_PR/_ISSUE (and
