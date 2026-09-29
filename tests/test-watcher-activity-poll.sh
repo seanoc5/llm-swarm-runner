@@ -608,6 +608,53 @@ $(cat "$EVENTS_LOG")"
 fi
 
 # ============================================================================
+heading "Test 5d (issue #497 self-review finding): coord_wake_already_submitted does not fire when a NEWER inbox item arrived after the operator's confirming turn"
+# ============================================================================
+command -v jq >/dev/null 2>&1 || { yellow "jq not found — skipping Test 5d (coord_wake_already_submitted is inert without it)"; SKIP_5D=1; }
+if [ "${SKIP_5D:-0}" != "1" ]; then
+    FIXTURE_HOME="$LOCK_TEST_DIR/home5d"
+    FIXTURE_TRANSCRIPT_DIR="$FIXTURE_HOME/.claude/projects/$(printf '%s' "$PROJECT_DIR" | tr '/' '-')"
+    mkdir -p "$FIXTURE_TRANSCRIPT_DIR"
+    REAL_HOME="$HOME"
+    HAVE_JQ=1
+    HOME="$FIXTURE_HOME"
+
+    SINCE=$(date +%s)
+    TURN_EPOCH=$((SINCE + 5))
+    SUBMIT_TS="$(date -u -d "@$TURN_EPOCH" +%Y-%m-%dT%H:%M:%S.000Z)"
+    jq -cn --arg ts "$SUBMIT_TS" \
+        --arg text "$(printf 'Inbox: 1 item(s) probe\n\nthanks, already looked at that one')" \
+        '{type:"user", timestamp:$ts, promptSource:"typed", origin:{kind:"human"}, message:{role:"user", content:$text}}' \
+        > "$FIXTURE_TRANSCRIPT_DIR/session.jsonl"
+    touch -d "@$((TURN_EPOCH + 5))" "$FIXTURE_TRANSCRIPT_DIR/session.jsonl"
+
+    # A coord-inbox payload that arrived AFTER the operator's confirming
+    # turn: genuinely new work the operator has not acknowledged, even
+    # though an older turn already contains the (count-agnostic) nudge
+    # text. Must NOT be swept into already_submitted.
+    rm -rf "$COORD_INBOX_DIR"
+    mkdir -p "$COORD_INBOX_DIR"
+    touch -d "@$((TURN_EPOCH + 20))" "$COORD_INBOX_DIR/newer-than-turn.md"
+
+    if coord_wake_already_submitted "$SINCE"; then
+        red "coord_wake_already_submitted must not fire: a coord-inbox item arrived after the operator's confirming turn"
+    fi
+    green "coord_wake_already_submitted stays false open when a newer coord-inbox item postdates the confirming turn"
+
+    # Sanity check the other direction: once every current inbox file
+    # predates the confirming turn, the same fixture DOES count as
+    # already-submitted (the case Test 5c exercises end-to-end).
+    rm -rf "$COORD_INBOX_DIR"
+    mkdir -p "$COORD_INBOX_DIR"
+    touch -d "@$((TURN_EPOCH - 5))" "$COORD_INBOX_DIR/older-than-turn.md"
+    coord_wake_already_submitted "$SINCE" \
+        || red "coord_wake_already_submitted should fire once every current inbox item predates the confirming turn"
+    green "coord_wake_already_submitted still fires once the confirming turn covers every current inbox item"
+
+    HOME="$REAL_HOME"
+fi
+
+# ============================================================================
 heading "Test 6: a debounced activity finding is retried on a later tick, not lost (issue #392 self-review finding, now via the coordinator inbox)"
 # ============================================================================
 # activity_poll_pass only marks ACTIVITY_ANNOUNCED_PR/_ISSUE (and

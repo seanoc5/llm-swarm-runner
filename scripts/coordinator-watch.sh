@@ -7505,6 +7505,18 @@ coord_human_present() {
 # Fails OPEN (rc 1 — "not already submitted") on missing jq or an unreadable
 # transcript dir: uncertain here just means the normal retry/paste path
 # runs, same posture as human_typed_since throughout this file.
+#
+# (issue #497 self-review finding) A matching turn only counts if it is at
+# least as new as every CURRENT coord-inbox/*.md file. Without this, a
+# payload that lands AFTER the operator's confirming turn — genuinely new
+# work the operator has not seen yet — would still get swept into
+# "already_submitted" on the strength of an older turn that merely happens
+# to contain the (count-agnostic) nudge text, silently dropping that new
+# item's wake. Comparing against the newest surviving file, not "since",
+# also protects the case where the operator quotes or references an old
+# nudge line long after it was resolved: that turn is real and can be newer
+# than "since", but if newer inbox content has arrived since, it does not
+# yet cover it.
 coord_wake_already_submitted() {
     local since="$1"
     [ "$HAVE_JQ" = "1" ] || return 1
@@ -7514,6 +7526,14 @@ coord_wake_already_submitted() {
 
     local nudge_re
     nudge_re="$(coord_inbox_nudge_pattern)"
+
+    local newest_inbox=0 g gm
+    for g in "$COORD_INBOX_DIR"/*.md; do
+        [ -f "$g" ] || continue
+        gm=$(mtime_epoch "$g") || gm=0
+        [[ "$gm" =~ ^[0-9]+$ ]] || gm=0
+        [ "$gm" -gt "$newest_inbox" ] && newest_inbox=$gm
+    done
 
     local candidates=() f fmtime
     for f in "$dir"/*.jsonl; do
@@ -7538,7 +7558,9 @@ coord_wake_already_submitted() {
                 elif ($c | type) == "array" then ([$c[] | select(.type == "text") | .text] | join("\n"))
                 else "" end' 2>/dev/null)" || text=""
 
-            printf '%s' "$text" | LC_ALL=C grep -qE "$nudge_re" && return 0
+            if printf '%s' "$text" | LC_ALL=C grep -qE "$nudge_re"; then
+                [ "$epoch" -ge "$newest_inbox" ] && return 0
+            fi
         done < <(LC_ALL=C grep -E '"promptSource"[[:space:]]*:[[:space:]]*"typed"' "$f" 2>/dev/null)
     done
 
