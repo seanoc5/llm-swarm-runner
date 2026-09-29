@@ -19,7 +19,7 @@ grep -q 'git push origin --delete "\$PR_BRANCH"' "$SCRIPT" \
     || fail "swarm-merge.sh no longer deletes the remote branch after merge"
 ok "swarm-merge.sh deletes the remote branch explicitly after merge"
 
-grep -qE 'if ! gh pr merge "\$PR_NUM" --squash; then' "$SCRIPT" \
+grep -qE 'gh pr merge "\$PR_NUM" --squash \|\| MERGE_RC=\$\?' "$SCRIPT" \
     || fail "a refused gh pr merge must abort the script (issue #492)"
-ok "a refused merge aborts before cleanup"
+ok "gh pr merge's exit is captured rather than swallowed"
 echo "All #489 shape tests passed."

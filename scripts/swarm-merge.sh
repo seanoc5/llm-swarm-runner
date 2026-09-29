@@ -351,9 +351,10 @@ fi
 
 if [ "$HOUSEKEEP_ONLY" = 0 ]; then
   # Inspect PR state.
-  PR_JSON=$(gh pr view "$PR_NUM" --json state,mergeable,headRefName,title,closingIssuesReferences,body,isDraft,reviewDecision,baseRefName)
+  PR_JSON=$(gh pr view "$PR_NUM" --json state,mergeable,mergeStateStatus,headRefName,title,closingIssuesReferences,body,isDraft,reviewDecision,baseRefName)
   PR_STATE=$(echo "$PR_JSON" | jq -r .state)
   PR_MERGEABLE=$(echo "$PR_JSON" | jq -r .mergeable)
+  PR_MERGE_STATE_STATUS=$(echo "$PR_JSON" | jq -r '.mergeStateStatus // ""')
   PR_BRANCH=$(echo "$PR_JSON" | jq -r .headRefName)
   PR_TITLE=$(echo "$PR_JSON" | jq -r .title)
   PR_BODY=$(echo "$PR_JSON" | jq -r '.body // ""')
@@ -389,6 +390,16 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
       if [ "$PR_MERGEABLE" = "CONFLICTING" ]; then
         echo "ERROR: PR #$PR_NUM has merge conflicts. Resolve first." >&2
         echo "       See \$LLM_SWARM_DOCS/VCS/git-github.md for the playbook." >&2
+        exit 1
+      fi
+      # Pre-merge gate (#492): mergeStateStatus DIRTY means GitHub has
+      # already computed real conflicts against the base branch (this lags
+      # `mergeable` in a fast merge sequence, e.g. an earlier PR in the same
+      # batch just landed conflicting lines) — catch it here, cheaply, before
+      # spending time on gates or CI wait below.
+      if [ "$PR_MERGE_STATE_STATUS" = "DIRTY" ]; then
+        echo "ERROR: PR #$PR_NUM is not mergeable (mergeStateStatus=DIRTY)." >&2
+        echo "       Rebase onto the default branch and retry." >&2
         exit 1
       fi
       # --auto-low Gate 0 (#452): authorship, hard and non-overridable. Only
@@ -560,9 +571,25 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
       # checked out — the live worker's worktree — with no salvage and no
       # reap.worktree event. Delete the remote branch ourselves instead;
       # the local branch is deleted by kill-worktree.sh / the step-7 sweep.
-      if ! gh pr merge "$PR_NUM" --squash; then
-        echo "ERROR: gh pr merge refused PR #$PR_NUM — nothing merged, skipping cleanup (issue #492)." >&2
-        exit 1
+      MERGE_RC=0
+      gh pr merge "$PR_NUM" --squash || MERGE_RC=$?
+      if [ "$MERGE_RC" != 0 ]; then
+        # issue #492: a nonzero exit here used to be swallowed unconditionally
+        # (the old --delete-branch local-delete step could fail harmlessly
+        # even on a real merge). Re-query the PR's actual state instead of
+        # guessing from the exit code: only a confirmed MERGED state excuses
+        # the failure now that --delete-branch is gone (issue #489) and the
+        # local-delete case it was written for no longer exists on this path.
+        POST_JSON=$(gh pr view "$PR_NUM" --json state,mergeStateStatus 2>/dev/null || true)
+        POST_STATE=$(echo "$POST_JSON" | jq -r '.state // ""' 2>/dev/null || true)
+        if [ "$POST_STATE" != "MERGED" ]; then
+          POST_MSS=$(echo "$POST_JSON" | jq -r '.mergeStateStatus // ""' 2>/dev/null || true)
+          echo "ERROR: gh pr merge refused PR #$PR_NUM (exit $MERGE_RC) — nothing merged, skipping cleanup." >&2
+          echo "       PR not merged (state=${POST_STATE:-UNKNOWN}, mergeStateStatus=${POST_MSS:-UNKNOWN});" >&2
+          echo "       rebase onto the default branch and retry." >&2
+          exit 1
+        fi
+        echo "       $(c_amber "⚠ gh pr merge exited $MERGE_RC but PR #$PR_NUM is confirmed MERGED — proceeding")"
       fi
       if git push origin --delete "$PR_BRANCH" >/dev/null 2>&1; then
         echo "       deleted remote branch origin/$PR_BRANCH"
