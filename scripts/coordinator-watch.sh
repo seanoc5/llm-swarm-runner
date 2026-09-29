@@ -7307,6 +7307,17 @@ wake_debounced() {
 # way). There is no metadata field that distinguishes them, so the only
 # ground truth available is the watcher's own record of what it sent and when.
 #
+# (issue #497 self-review finding) worker.start MUST be in the pattern
+# below: provision-worker.sh logs it right as it spawns a fresh interactive
+# worker window and pastes that worker's initial task brief — a 3-7k
+# character typed turn, same shape as any other machine paste. Dropping
+# COORD_HUMAN_MAX_TYPED_CHARS (this same issue) removed the length cutoff
+# that used to hide this specific gap by accident: without worker.start
+# here, EVERY freshly spawned interactive worker's own brief would read as
+# "a human is present in that worker's pane" for WORKER_HUMAN_IDLE_SECS —
+# and coord_wake_hold_reason() consults worker_human_present() too, so that
+# would hold the COORDINATOR's own doorbell, not just that worker's.
+#
 # Bounded by `tail -n $WATCHER_PASTE_SCAN_LINES` rather than reading the whole
 # log: only pastes inside the largest idle window can possibly correlate, and
 # events.log grows without bound over a swarm's life. 2000 lines is generous
@@ -7319,7 +7330,7 @@ WATCHER_PASTE_SCAN_LINES="${WATCHER_PASTE_SCAN_LINES:-2000}"
 watcher_paste_epochs() {
     [ -r "$EVENTS_LOG" ] || return 0
     tail -n "$WATCHER_PASTE_SCAN_LINES" "$EVENTS_LOG" 2>/dev/null \
-        | LC_ALL=C grep -E '(coord\.wake|coord\.wake\.deferred_delivered|worker\.deliver\.(ok|attempt))[[:space:]]' \
+        | LC_ALL=C grep -E '(coord\.wake|coord\.wake\.deferred_delivered|worker\.deliver\.(ok|attempt)|worker\.start)[[:space:]]' \
         | awk '{print $1}' \
         | while read -r ts; do
               date -u -d "$ts" +%s 2>/dev/null || true

@@ -655,6 +655,52 @@ if [ "${SKIP_5D:-0}" != "1" ]; then
 fi
 
 # ============================================================================
+heading "Test 5e (issue #497 self-review finding): a worker's initial brief (worker.start) is excluded from human_typed_since via the paste-grace window"
+# ============================================================================
+command -v jq >/dev/null 2>&1 || { yellow "jq not found — skipping Test 5e (human_typed_since's jq path is inert without it)"; SKIP_5E=1; }
+if [ "${SKIP_5E:-0}" != "1" ]; then
+    FIXTURE_TDIR5E="$LOCK_TEST_DIR/worker-transcript-5e"
+    mkdir -p "$FIXTURE_TDIR5E"
+
+    # Before this issue's COORD_HUMAN_MAX_TYPED_CHARS removal, a long
+    # machine-pasted brief was (accidentally) excluded by its length alone.
+    # Dropping that cutoff means watcher_paste_epochs' worker.start entry is
+    # now the ONLY thing standing between a freshly spawned worker's own
+    # brief and a false "human present" read.
+    : > "$EVENTS_LOG"
+    log_event worker.start "issue=999 task_id=t999 window=iss-999 alive=1/5 total_windows=1/10"
+    WSTART_EPOCH=$(date +%s)
+    CUTOFF=$((WSTART_EPOCH - 5))
+
+    BRIEF_EPOCH=$((WSTART_EPOCH + 2))
+    BRIEF_TS="$(date -u -d "@$BRIEF_EPOCH" +%Y-%m-%dT%H:%M:%S.000Z)"
+    LONG_BRIEF="$(head -c 4000 < /dev/zero | tr '\0' 'x')"
+    jq -cn --arg ts "$BRIEF_TS" --arg text "## Task
+
+$LONG_BRIEF" \
+        '{type:"user", timestamp:$ts, promptSource:"typed", origin:{kind:"human"}, message:{role:"user", content:$text}}' \
+        > "$FIXTURE_TDIR5E/session.jsonl"
+
+    PASTES="$(watcher_paste_epochs)"
+    if human_typed_since "$FIXTURE_TDIR5E" "$CUTOFF" "$PASTES"; then
+        red "a freshly spawned worker's own initial brief must not read as a human turn — worker.start is missing from watcher_paste_epochs' pattern"
+    fi
+    green "a worker's initial brief lands inside the paste-grace window around its own worker.start event and is correctly excluded, not misread as human"
+
+    # Contrast: a genuine operator reply in that SAME worker pane, well
+    # outside the paste-grace window, must still count as human — this
+    # fix must not blanket-exclude everything near a worker.start event.
+    REPLY_EPOCH=$((WSTART_EPOCH + COORD_HUMAN_PASTE_GRACE_SECS + 30))
+    REPLY_TS="$(date -u -d "@$REPLY_EPOCH" +%Y-%m-%dT%H:%M:%S.000Z)"
+    jq -cn --arg ts "$REPLY_TS" --arg text "actually let's take a different approach here" \
+        '{type:"user", timestamp:$ts, promptSource:"typed", origin:{kind:"human"}, message:{role:"user", content:$text}}' \
+        >> "$FIXTURE_TDIR5E/session.jsonl"
+    human_typed_since "$FIXTURE_TDIR5E" "$CUTOFF" "$PASTES" \
+        || red "a genuine operator reply well outside the paste-grace window must still count as human"
+    green "a genuine operator reply in the same worker pane still counts as human once outside the paste-grace window"
+fi
+
+# ============================================================================
 heading "Test 6: a debounced activity finding is retried on a later tick, not lost (issue #392 self-review finding, now via the coordinator inbox)"
 # ============================================================================
 # activity_poll_pass only marks ACTIVITY_ANNOUNCED_PR/_ISSUE (and
