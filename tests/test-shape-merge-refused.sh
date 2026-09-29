@@ -11,13 +11,29 @@
 # The fix re-queries `gh pr view` after a failed `gh pr merge` and only
 # tolerates the failure when the PR is actually MERGED (the case
 # --delete-branch's now-removed local-delete step used to produce — see
-# issue #489). This test covers both branches of that check:
+# issue #489). PR #499's own review (caveat 1) found the re-query's error
+# message always said "nothing merged" / "rebase and retry" even when the
+# re-query itself failed (state unknown) or the refusal wasn't a conflict at
+# all (auth, network, branch protection) — a rebase hint is actively wrong
+# advice in those cases. This file now covers all of:
 #
-#   Test 1: gh pr merge fails, re-query shows state=OPEN (mergeStateStatus
-#           DIRTY)  → non-zero exit, no "Done." line, steps 5-7 (reap wait,
-#           tmux/worktree kill, branch sweep) never reached.
-#   Test 2: gh pr merge fails, re-query shows state=MERGED (the harmless
-#           local-delete-style case) → proceeds, exits 0, reaches "Done."
+#   Test 0: mergeStateStatus already DIRTY on the *initial* fetch → refuse
+#           before ever calling `gh pr merge`.
+#   Test 1: gh pr merge fails, re-query confirms state=OPEN with a REAL
+#           conflict (mergeable=CONFLICTING, mergeStateStatus=DIRTY) →
+#           refuse, rebase hint given, no cleanup.
+#   Test 2: gh pr merge fails, re-query confirms state=MERGED (the harmless
+#           local-delete-style case) → tolerate, proceed, exit 0.
+#   Test 3: gh pr merge fails, re-query confirms state=OPEN but nothing
+#           indicates a conflict (mergeable=MERGEABLE, mergeStateStatus=
+#           BLOCKED) → refuse, but must NOT suggest a rebase (the refusal
+#           is more likely auth/network/branch-protection) and must name
+#           the confirmed state.
+#   Test 4: the re-query itself fails (`gh pr view` exits non-zero) →
+#           fail closed, state reported as UNKNOWN (not OPEN), no rebase
+#           hint, no cleanup.
+#   Test 5: the re-query "succeeds" but returns empty output → same
+#           fail-closed/UNKNOWN handling as Test 4.
 #
 # Stubs `gh` and `tmux` via PATH override — no GitHub auth, no tmux server.
 set -euo pipefail
@@ -59,11 +75,15 @@ export GH_LOG="$TEST_DIR/gh.log"
 : > "$GH_LOG"
 
 # POST_STATE_FILE controls what the post-merge re-query reports; each test
-# below overwrites it before invoking swarm-merge.sh.
+# below overwrites it before invoking swarm-merge.sh. Distinguishing the
+# initial PR_JSON fetch from the post-merge re-query in the stub is done on
+# `headRefName`, which only the initial fetch requests — the re-query's
+# field list (state,mergeable,mergeStateStatus) is a substring-ambiguous
+# prefix match against the initial fetch's longer field list otherwise.
 export POST_STATE_FILE="$TEST_DIR/post-state.json"
 
 # The normal stub: initial PR_JSON fetch reports a clean, mergeable OPEN PR;
-# `gh pr merge` always refuses (that's what Tests 1-2 exercise); the
+# `gh pr merge` always refuses (that's what Tests 1-5 exercise); the
 # post-merge re-query (issue #492) reads $POST_STATE_FILE, set per test.
 write_normal_gh_stub() {
 cat > "$TEST_DIR/bin/gh" <<'EOF'
@@ -74,12 +94,10 @@ case "${1:-} ${2:-}" in
     "pr merge") exit 1 ;;   # always refuses — that's what this test exercises
     "pr view")
         case "$*" in
-            *comments*)             echo '{"comments":[]}'; exit 0 ;;
-            # swarm-merge.sh's post-merge re-query (issue #492): no
-            # "mergeable" in the field list, so this doesn't collide with
-            # the initial PR_JSON fetch below.
-            *state,mergeStateStatus*) cat "$POST_STATE_FILE"; exit 0 ;;
-            *state,mergeable*)      echo '{"state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefName":"fix/issue-77","title":"fake"}'; exit 0 ;;
+            *comments*)      echo '{"comments":[]}'; exit 0 ;;
+            *headRefName*)   echo '{"state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefName":"fix/issue-77","title":"fake"}'; exit 0 ;;
+            # swarm-merge.sh's post-merge re-query (issue #492).
+            *mergeStateStatus*) cat "$POST_STATE_FILE"; exit 0 ;;
         esac
         exit 0 ;;
 esac
@@ -100,8 +118,8 @@ case "${1:-} ${2:-}" in
     "pr merge") exit 1 ;;
     "pr view")
         case "$*" in
-            *comments*)             echo '{"comments":[]}'; exit 0 ;;
-            *state,mergeable*)      echo '{"state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"DIRTY","headRefName":"fix/issue-77","title":"fake"}'; exit 0 ;;
+            *comments*)      echo '{"comments":[]}'; exit 0 ;;
+            *headRefName*)   echo '{"state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"DIRTY","headRefName":"fix/issue-77","title":"fake"}'; exit 0 ;;
         esac
         exit 0 ;;
 esac
@@ -122,9 +140,9 @@ green "mergeStateStatus=DIRTY on the initial fetch refuses before gh pr merge is
 write_normal_gh_stub
 
 # ============================================================================
-heading "Test 1: gh pr merge fails, re-query shows still OPEN → refuse, no cleanup"
+heading "Test 1: gh pr merge fails, re-query confirms OPEN with a real conflict → refuse, rebase hint, no cleanup"
 # ============================================================================
-echo '{"state":"OPEN","mergeStateStatus":"DIRTY"}' > "$POST_STATE_FILE"
+echo '{"state":"OPEN","mergeable":"CONFLICTING","mergeStateStatus":"DIRTY"}' > "$POST_STATE_FILE"
 
 set +e
 OUT=$(timeout 5 "$MERGE" 77 --no-kill 2>&1)
@@ -134,14 +152,14 @@ set -e
 [ "$RC" -ne 0 ] || red "expected non-zero exit when the PR is still OPEN after a refused merge, got 0:\n$OUT"
 echo "$OUT" | grep -q "Done\." && red "must not print a 'Done.' line when the merge was refused:\n$OUT"
 echo "$OUT" | grep -qE '\[5/7\]|\[6/7\]|\[7/7\]' && red "must not reach steps 5-7 (reap wait / kill / sweep) after a refused merge:\n$OUT"
-echo "$OUT" | grep -q "state=OPEN" || red "expected the remedy hint to name the actual state, got:\n$OUT"
-echo "$OUT" | grep -qi "rebase" || red "expected a rebase-and-retry remedy hint, got:\n$OUT"
-green "refused merge (still OPEN) exits non-zero with no 'Done.' and no cleanup steps"
+echo "$OUT" | grep -q "state=OPEN" || red "expected the message to name the confirmed state, got:\n$OUT"
+echo "$OUT" | grep -qi "rebase" || red "expected a rebase-and-retry hint for a real conflict, got:\n$OUT"
+green "refused merge with a confirmed real conflict exits non-zero, suggests rebase, no cleanup"
 
 # ============================================================================
 heading "Test 2: gh pr merge fails, re-query shows MERGED → tolerate, proceed, exit 0"
 # ============================================================================
-echo '{"state":"MERGED","mergeStateStatus":"MERGED"}' > "$POST_STATE_FILE"
+echo '{"state":"MERGED","mergeable":"MERGED","mergeStateStatus":"MERGED"}' > "$POST_STATE_FILE"
 
 OUT=$(timeout 5 "$MERGE" 77 --no-kill 2>&1) || red "expected exit 0 once the re-query confirms MERGED:\n$OUT"
 echo "$OUT" | grep -q "Done\." || red "expected a 'Done.' completion line once MERGED is confirmed, got:\n$OUT"
@@ -149,8 +167,85 @@ grep -q "pr merge 77" "$GH_LOG" || red "gh pr merge 77 was not called"
 green "refused-but-actually-MERGED case tolerates the failure and completes"
 
 # ============================================================================
+heading "Test 3: gh pr merge fails, re-query confirms OPEN but nothing indicates a conflict → refuse, NO rebase hint"
+# ============================================================================
+# mergeable=MERGEABLE / mergeStateStatus=BLOCKED is the branch-protection-style
+# shape: GitHub says the PR could merge cleanly but something else (required
+# review, required status check, etc.) is blocking it. A rebase would not fix
+# that, so the message must not tell the operator to rebase.
+echo '{"state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"BLOCKED"}' > "$POST_STATE_FILE"
+
+set +e
+OUT=$(timeout 5 "$MERGE" 77 --no-kill 2>&1)
+RC=$?
+set -e
+
+[ "$RC" -ne 0 ] || red "expected non-zero exit for a non-conflict refusal, got 0:\n$OUT"
+echo "$OUT" | grep -q "Done\." && red "must not print a 'Done.' line:\n$OUT"
+echo "$OUT" | grep -q "state=OPEN" || red "expected the message to name the confirmed state, got:\n$OUT"
+echo "$OUT" | grep -qi "rebase onto the default branch and retry\." && red "must NOT suggest a rebase when nothing indicates a conflict:\n$OUT"
+echo "$OUT" | grep -qiE "auth|network|branch protection" || red "expected the message to name a non-conflict cause (auth/network/branch protection), got:\n$OUT"
+green "refused merge confirmed OPEN with no conflict evidence exits non-zero without a rebase hint"
+
+# ============================================================================
+heading "Test 4: the post-refusal re-query itself fails (gh pr view exits non-zero) → fail closed, state=UNKNOWN, no rebase hint"
+# ============================================================================
+cat > "$TEST_DIR/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >> "$GH_LOG"
+case "${1:-} ${2:-}" in
+    "api repos/{owner}/{repo}/issues/"*) echo "true"; exit 0 ;;
+    "pr merge") exit 1 ;;
+    "pr view")
+        case "$*" in
+            *comments*)      echo '{"comments":[]}'; exit 0 ;;
+            *headRefName*)   echo '{"state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefName":"fix/issue-77","title":"fake"}'; exit 0 ;;
+            # The post-merge re-query itself fails outright — simulates a
+            # transient gh error (rate limit, expired auth, network blip).
+            *mergeStateStatus*) exit 1 ;;
+        esac
+        exit 0 ;;
+esac
+exit 0
+EOF
+chmod +x "$TEST_DIR/bin/gh"
+
+set +e
+OUT=$(timeout 5 "$MERGE" 77 --no-kill 2>&1)
+RC=$?
+set -e
+
+[ "$RC" -ne 0 ] || red "expected non-zero exit when the re-query itself fails, got 0:\n$OUT"
+echo "$OUT" | grep -q "Done\." && red "must not print a 'Done.' line when the re-query failed:\n$OUT"
+echo "$OUT" | grep -qE '\[5/7\]|\[6/7\]|\[7/7\]' && red "must not reach steps 5-7 after a re-query failure:\n$OUT"
+echo "$OUT" | grep -q "confirmed state=" && red "must not claim a confirmed state when the re-query itself failed:\n$OUT"
+echo "$OUT" | grep -qi "UNKNOWN" || red "expected the message to say the state is UNKNOWN, got:\n$OUT"
+echo "$OUT" | grep -qi "rebase onto the default branch and retry\." && red "must NOT suggest a rebase when the state couldn't even be confirmed:\n$OUT"
+green "a failed re-query fails closed, reports state=UNKNOWN, and gives no rebase hint"
+write_normal_gh_stub
+
+# ============================================================================
+heading "Test 5: the post-refusal re-query succeeds but returns empty output → same fail-closed/UNKNOWN handling"
+# ============================================================================
+: > "$POST_STATE_FILE"   # empty file: gh exits 0 but prints nothing
+
+set +e
+OUT=$(timeout 5 "$MERGE" 77 --no-kill 2>&1)
+RC=$?
+set -e
+
+[ "$RC" -ne 0 ] || red "expected non-zero exit when the re-query returns empty output, got 0:\n$OUT"
+echo "$OUT" | grep -q "Done\." && red "must not print a 'Done.' line when the re-query returned nothing:\n$OUT"
+echo "$OUT" | grep -qE '\[5/7\]|\[6/7\]|\[7/7\]' && red "must not reach steps 5-7 after an empty re-query:\n$OUT"
+echo "$OUT" | grep -q "confirmed state=" && red "must not claim a confirmed state from empty re-query output:\n$OUT"
+echo "$OUT" | grep -qi "UNKNOWN" || red "expected the message to say the state is UNKNOWN, got:\n$OUT"
+echo "$OUT" | grep -qi "rebase onto the default branch and retry\." && red "must NOT suggest a rebase when the re-query returned nothing:\n$OUT"
+green "an empty re-query result fails closed, reports state=UNKNOWN, and gives no rebase hint"
+
+# ============================================================================
 heading "All #492 shape tests passed"
 # ============================================================================
 green "swarm-merge.sh only tolerates a refused gh pr merge when the PR is confirmed MERGED"
+green "and its refusal message matches what is actually known (open+conflict / open+no-conflict / unknown)"
 echo ""
 yellow "Run with KEEP=1 to leave $TEST_DIR for inspection."
