@@ -573,7 +573,7 @@
 #                           conversation. In practice nearly always false,
 #                           and costs one mtime check per worktree.
 #                           0 disables.
-#   COORD_HUMAN_PASTE_GRACE_SECS=15
+#   COORD_HUMAN_PASTE_GRACE_SECS=45
 #                           (issue #459) How far either side of a paste the
 #                           watcher recorded in its own events.log a typed
 #                           turn may land and still be attributed to that
@@ -1822,7 +1822,7 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     COORD_WAKE_BUSY_CEILING_SECS 900  deliver a busy-deferred wake anyway after this long (issue #430, 15min); 0=no ceiling; never applies to a human_present hold
     COORD_HUMAN_IDLE_SECS 600     hold every doorbell while the operator has typed into the COORDINATOR session this recently (issue #459); 0=off
     WORKER_HUMAN_IDLE_SECS 300    same, for any of this project's own WORKER sessions (issue #459); 0=off
-    COORD_HUMAN_PASTE_GRACE_SECS 15  how close to a watcher paste recorded in events.log a typed turn counts as that paste, not a human (issue #459)
+    COORD_HUMAN_PASTE_GRACE_SECS 45  how close to a watcher paste recorded in events.log a typed turn counts as that paste, not a human (issue #459)
     WAKE_DEFER_ON_SWARM_BUSY 0    also hold doorbells while any worker is mid-turn or has a queued unclaimed brief; OFF by default — see header comment for why worker busyness is the wrong lever (issue #459)
     COORD_INBOX_NUDGE_TEMPLATE (built-in) one-line doorbell text pasted once a wake is allowed to fire; %N = live coord-inbox/*.md count (issue #430)
     ACTIVITY_WAKE_PROMPT (built-in) what the coordinator writes to the inbox on an activity-poll finding (issue #430: inbox-only, no doorbell)
