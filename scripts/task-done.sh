@@ -191,6 +191,7 @@ fi
 
 OK_FILE="$DONE/${TASK_ID}.ok.json"
 ERR_FILE="$DONE/${TASK_ID}.err.json"
+DONE_BRIEF="$DONE/${TASK_ID}.md"
 
 # Duplicate suppression (issue #451 acceptance: "a reconciler — or a second
 # call — seeing an existing done record does nothing"). Whichever outcome
@@ -210,8 +211,18 @@ fi
 # ever claimed. --force is the escape hatch for a call that really is
 # legitimate despite having no brief on disk (a v1 legacy task, or a
 # no-PR ruling/research task, issue #466).
-if [ ! -f "$BRIEF" ] && [ "$FORCE" != 1 ]; then
-    echo "task-done.sh: no processing/${TASK_ID}.md in $PROCESSING — refusing to record an outcome for a task this queue has no record of claiming. If this is a legitimately brief-less task (no-PR ruling/research, or a v1 task), re-run with --force." >&2
+#
+# $DONE_BRIEF also counts as evidence of a legitimate claim (self-review
+# BLOCK finding on this PR): worker-listener.sh's check-retry path
+# (~line 1037) archives attempt 1's outcome JSON to *.attempt1.json
+# precisely so attempt 2's call to this script isn't a duplicate-suppressed
+# no-op — but attempt 1 already moved the brief itself to
+# done/<task-id>.md below, permanently, so by attempt 2 the brief is gone
+# from processing/ for a legitimate reason, not a confused caller. That
+# move never happens for the "t1"-style leak this check guards against, so
+# checking for it adds no new hole.
+if [ ! -f "$BRIEF" ] && [ ! -f "$DONE_BRIEF" ] && [ "$FORCE" != 1 ]; then
+    echo "task-done.sh: no processing/${TASK_ID}.md in $PROCESSING (and no done/${TASK_ID}.md from an earlier attempt) — refusing to record an outcome for a task this queue has no record of claiming. If this is a legitimately brief-less task (no-PR ruling/research, or a v1 task), re-run with --force." >&2
     exit 1
 fi
 
@@ -220,10 +231,11 @@ fi
 # salvages + posts SWARM_BRIEF_ORPHANED whenever processing/ is non-empty
 # at reap time — which used to be EVERY interactive worker, since nothing
 # ever emptied it before the agent process exited). By this point $BRIEF
-# either exists (the normal case) or --force was given (issue #484's gate
-# above already refused the alternative) — either way, tolerate it still
-# being gone (worker-listener.sh's own fallback path, or a legacy v1 task
-# with no processing/<id>.md at all) — the outcome record below is what
+# either exists (the normal case), or it doesn't for a reason the gate
+# above already accepted: $DONE_BRIEF exists instead (a retried task —
+# attempt 1 already moved it here), or --force was given (issue #484's
+# gate above already refused every other case) — either way, tolerate it
+# still being gone here too — the outcome record below is what
 # actually matters.
 if [ -f "$BRIEF" ]; then
     mv "$BRIEF" "$DONE/${TASK_ID}.md"

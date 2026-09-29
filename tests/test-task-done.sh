@@ -23,7 +23,9 @@
 #      (Test 7b) or a configured check PASSES (Test 7c).
 #   7. Foreign/no-brief refusal (issue #484): task-done.sh refuses to
 #      record an outcome for a task_id with no matching processing/
-#      entry unless --force is given (Test 4, Test 9).
+#      entry unless --force is given (Test 4, Test 9) — but NOT when
+#      done/<id>.md proves this queue already claimed it, e.g. a
+#      worker-listener.sh check-retry re-call (Test 10).
 set -euo pipefail
 
 # issue #484: this suite calls task-done.sh directly against its own
@@ -477,8 +479,37 @@ green "processing/ genuinely empty (nothing to recover from), no --force -> refu
 green "--force: processing/ genuinely empty -> proceeds under the given task_id, same as before this fix"
 
 # ============================================================================
+heading "Test 10 (check-retry, no --force): attempt 2's call is not refused just because attempt 1 already moved the brief (self-review BLOCK finding on this PR)"
+# ============================================================================
+# Mirrors worker-listener.sh's real check-retry path (~line 1037): attempt 1
+# calls task-done.sh (moving the brief to done/<id>.md, same as Test 1), the
+# check fails, and the listener archives attempt 1's outcome JSON to
+# *.attempt1.json specifically so a second call isn't duplicate-suppressed.
+# By attempt 2, processing/<id>.md is gone for a legitimate reason (already
+# claimed and moved by THIS queue), not a confused caller — issue #484's
+# refusal must not fire here without --force.
+rm -f .swarm/tasks/processing/*.md .swarm/tasks/done/*.json .swarm/tasks/done/*.md 2>/dev/null || true
+echo '## Task
+
+Do something retryable.' > .swarm/tasks/processing/t10.md
+
+"$TASK_DONE" t10 err "attempt 1 failed the check" >/dev/null
+[ -f .swarm/tasks/done/t10.md ] || red "t10: attempt 1 should have moved the brief into done/"
+mv .swarm/tasks/done/t10.err.json .swarm/tasks/done/t10.err.attempt1.json
+
+"$TASK_DONE" t10 ok >/dev/null \
+    || red "t10: attempt 2 was refused even though done/t10.md proves this queue already claimed it — no --force should be needed"
+[ -f .swarm/tasks/done/t10.ok.json ] \
+    || red "t10: attempt 2's outcome record was not written"
+jq -e '.outcome == "ok"' .swarm/tasks/done/t10.ok.json >/dev/null \
+    || { cat .swarm/tasks/done/t10.ok.json; red "t10: attempt 2's outcome should be the retry's ok, not attempt 1's archived err"; }
+[ -f .swarm/tasks/done/t10.err.attempt1.json ] \
+    || red "t10: attempt 1's archived record should be left alone, not touched by attempt 2"
+green "a retried check-fail call finds done/<id>.md and proceeds without --force, same as before this fix"
+
+# ============================================================================
 heading "All task-done.sh tests passed"
 # ============================================================================
-green "happy path, duplicate suppression, err+reason, missing-brief refusal + --force, usage errors, interactive-worker flow, check-correction, honest-err-no-check preservation, honest-err-passing-check preservation, SWARM_WORKTREE_DIR precedence, wrong-task_id self-correction"
+green "happy path, duplicate suppression, err+reason, missing-brief refusal + --force, usage errors, interactive-worker flow, check-correction, honest-err-no-check preservation, honest-err-passing-check preservation, SWARM_WORKTREE_DIR precedence, wrong-task_id self-correction, check-retry re-call after brief already moved"
 echo ""
 yellow "Run with KEEP=1 to leave $TEST_DIR for inspection."
