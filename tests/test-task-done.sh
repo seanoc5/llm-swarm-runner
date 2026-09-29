@@ -126,6 +126,19 @@ jq -e '.outcome == "err" and .exit_code == 1 and (.reason == "acceptance check n
     || { cat .swarm/tasks/done/t2.err.json; red "t2: err outcome/reason not recorded correctly"; }
 green "err outcome records exit_code=1 and the given reason"
 
+# A [reason] starting with "-" must not be mistaken for an unknown flag
+# (self-review finding on issue #484's own PR): flag parsing only looks at
+# LEADING arguments, so this must still succeed once TASK_ID/OUTCOME are
+# past.
+echo '## Task
+
+Do something else.' > .swarm/tasks/processing/t2b.md
+"$TASK_DONE" t2b err "- tests failing: 3 of 12" >/dev/null
+jq -e '.outcome == "err" and (.reason == "- tests failing: 3 of 12")' \
+    .swarm/tasks/done/t2b.err.json >/dev/null \
+    || { cat .swarm/tasks/done/t2b.err.json 2>/dev/null; red "t2b: a reason starting with '-' was mishandled as a flag"; }
+green "a [reason] starting with '-' is not mistaken for an unknown flag"
+
 # ============================================================================
 heading "Test 4 (missing brief refused without --force, tolerated with it)"
 # ============================================================================

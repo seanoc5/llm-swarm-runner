@@ -101,19 +101,23 @@ usage() {
     exit 2
 }
 
+# Flags only among the LEADING arguments — the first non-flag token ends
+# flag parsing, so a [reason] that happens to start with "-" (e.g. "- tests
+# failing: 3 of 12") is never mistaken for an unknown flag (self-review
+# finding on this PR).
 FORCE=0
-POSITIONAL=()
-for arg in "$@"; do
-    case "$arg" in
-        --force) FORCE=1 ;;
-        -*) echo "task-done.sh: unknown flag '$arg'" >&2; usage ;;
-        *) POSITIONAL+=("$arg") ;;
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --force) FORCE=1; shift ;;
+        --) shift; break ;;
+        -*) echo "task-done.sh: unknown flag '$1'" >&2; usage ;;
+        *) break ;;
     esac
 done
 
-TASK_ID="${POSITIONAL[0]:-}"
-OUTCOME="${POSITIONAL[1]:-}"
-REASON="${POSITIONAL[2]:-}"
+TASK_ID="${1:-}"
+OUTCOME="${2:-}"
+REASON="${3:-}"
 [ -n "$TASK_ID" ] || usage
 case "$OUTCOME" in
     ok|err) ;;
