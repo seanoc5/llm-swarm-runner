@@ -176,8 +176,9 @@ BRIEF="$PROCESSING/${TASK_ID}.md"
 # trustworthy than a self-report" principle worker_current_task_terminal's
 # own #370 fallback already applies. Ambiguous cases (processing/ empty,
 # or more than one file — shouldn't normally happen, since a worktree
-# only ever has one task claimed at a time) are left alone: proceed with
-# the given task_id as before, tolerating a missing brief (see below).
+# only ever has one task claimed at a time) are left alone: $BRIEF stays
+# unmatched, which now requires --force below (issue #484) rather than
+# being silently tolerated.
 if [ ! -f "$BRIEF" ]; then
     REAL_BRIEFS="$(find "$PROCESSING" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null || true)"
     if [ -n "$REAL_BRIEFS" ] && [ "$(printf '%s\n' "$REAL_BRIEFS" | wc -l)" -eq 1 ]; then
@@ -218,10 +219,12 @@ fi
 # processing/ dir (the false-alarm half of #450 finding 3: kill-worktree.sh
 # salvages + posts SWARM_BRIEF_ORPHANED whenever processing/ is non-empty
 # at reap time — which used to be EVERY interactive worker, since nothing
-# ever emptied it before the agent process exited). Tolerate the brief
-# still being gone (worker-listener.sh's own fallback path, or a legacy
-# v1 task with no processing/<id>.md at all) — the outcome record below is
-# what actually matters.
+# ever emptied it before the agent process exited). By this point $BRIEF
+# either exists (the normal case) or --force was given (issue #484's gate
+# above already refused the alternative) — either way, tolerate it still
+# being gone (worker-listener.sh's own fallback path, or a legacy v1 task
+# with no processing/<id>.md at all) — the outcome record below is what
+# actually matters.
 if [ -f "$BRIEF" ]; then
     mv "$BRIEF" "$DONE/${TASK_ID}.md"
 fi
