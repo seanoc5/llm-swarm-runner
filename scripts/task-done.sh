@@ -3,7 +3,7 @@
 # task-done.sh — the worker's own "this task is finished" declaration.
 #
 # Usage:
-#   task-done.sh <task-id> <ok|err> [reason]
+#   task-done.sh [--force] <task-id> <ok|err> [reason]
 #
 # issue #451 (α of #450): before this script existed, FIVE independent
 # places could each decide a task was "done" and write their own
@@ -81,16 +81,39 @@
 # needed, and activity_poll_pass's own live-worktree skip plus cursor
 # advance mean it is never retroactively announced either. Update
 # $LLM_SWARM_DIR to pick up this script.
+#
+# issue #484: a task_id with no trace at all in this queue's processing/
+# (not even via the wrong-task_id self-correction below) almost always
+# means the CALLER is confused about which queue it's even talking to —
+# the incident this guards against was an in-worker TEST SUITE run
+# inheriting the real worker session's $SWARM_WORKTREE_DIR and calling
+# this script with a test-fixture id ("t1"), which landed as a real,
+# permanent junk record in the LIVE queue because nothing here required
+# the id to mean anything to that queue. Refuse that case unless --force
+# is given. --force still exists for the genuinely brief-less case this
+# same check would otherwise block (a v1 legacy task, or a no-PR
+# ruling/research task per issue #466) — those are the caller's own queue,
+# just missing (or never having had) a processing/<id>.md.
 set -euo pipefail
 
 usage() {
-    echo "Usage: task-done.sh <task-id> <ok|err> [reason]" >&2
+    echo "Usage: task-done.sh [--force] <task-id> <ok|err> [reason]" >&2
     exit 2
 }
 
-TASK_ID="${1:-}"
-OUTCOME="${2:-}"
-REASON="${3:-}"
+FORCE=0
+POSITIONAL=()
+for arg in "$@"; do
+    case "$arg" in
+        --force) FORCE=1 ;;
+        -*) echo "task-done.sh: unknown flag '$arg'" >&2; usage ;;
+        *) POSITIONAL+=("$arg") ;;
+    esac
+done
+
+TASK_ID="${POSITIONAL[0]:-}"
+OUTCOME="${POSITIONAL[1]:-}"
+REASON="${POSITIONAL[2]:-}"
 [ -n "$TASK_ID" ] || usage
 case "$OUTCOME" in
     ok|err) ;;
@@ -171,6 +194,20 @@ ERR_FILE="$DONE/${TASK_ID}.err.json"
 if [ -e "$OK_FILE" ] || [ -e "$ERR_FILE" ]; then
     echo "task-done.sh: outcome already recorded for task_id=$TASK_ID — no-op" >&2
     exit 0
+fi
+
+# issue #484: nothing above (exact match, or the wrong-task_id
+# self-correction) found a brief for this task_id in THIS queue's
+# processing/, and no outcome was already recorded for it either. That
+# combination is what let a stray test-fixture id ("t1") land as a
+# permanent junk record in a real worker's live queue — refuse rather than
+# silently recording an outcome for a task this queue has no evidence it
+# ever claimed. --force is the escape hatch for a call that really is
+# legitimate despite having no brief on disk (a v1 legacy task, or a
+# no-PR ruling/research task, issue #466).
+if [ ! -f "$BRIEF" ] && [ "$FORCE" != 1 ]; then
+    echo "task-done.sh: no processing/${TASK_ID}.md in $PROCESSING — refusing to record an outcome for a task this queue has no record of claiming. If this is a legitimately brief-less task (no-PR ruling/research, or a v1 task), re-run with --force." >&2
+    exit 1
 fi
 
 # Move the claimed brief out of processing/ so a reap sees an empty

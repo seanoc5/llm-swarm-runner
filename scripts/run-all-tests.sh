@@ -58,6 +58,16 @@ done < <(find "$TESTS_DIR" -maxdepth 1 -name 'test-*.sh' -print0 | sort -z)
 
 [ "${#SUITES[@]}" -gt 0 ] || { echo "run-all-tests.sh: no tests/test-*.sh suites found" >&2; exit 2; }
 
+# issue #484: a worker running this from inside its own live session
+# inherits worker-listener.sh's exported $SWARM_WORKTREE_DIR (its real,
+# in-flight worktree). scripts/task-done.sh prefers that var unconditionally
+# over cwd, so any suite that calls task-done.sh directly (not through a
+# worker-listener.sh fixture, which always re-exports its own) would
+# resolve the REAL queue instead of its own fixture and write junk or
+# mis-claimed records into it. Unset it here, once, so every suite this
+# script runs is hermetic regardless of what called run-all-tests.sh.
+unset SWARM_WORKTREE_DIR
+
 if [ -n "$ONLY" ]; then
     FILTERED=()
     for f in "${SUITES[@]}"; do
