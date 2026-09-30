@@ -7347,6 +7347,35 @@ watcher_paste_epochs() {
           done
 }
 
+# coord_paste_epochs
+#
+# Same idea as watcher_paste_epochs, but scoped to only what the watcher
+# actually pastes into the COORDINATOR's own pane (coord.wake and its
+# deferred-delivery counterpart) — never a worker.start or worker.deliver.*
+# epoch, both of which are pastes into a WORKER's pane, not this one.
+#
+# (issue #497 self-review finding, round 7) coord_human_present() used to
+# call watcher_paste_epochs() directly, sharing the exact same list
+# worker_human_present() uses. human_typed_since's timestamp exclusion has
+# no text check of its own — it fires on proximity alone — so every entry
+# in that shared list could excuse a genuine operator turn in ANY
+# transcript it's checked against, coordinator included. worker.start is
+# the single most frequent event in the list (once per worker spawn) and a
+# worker spawn is typically the direct, near-immediate result of an
+# operator turn in the coordinator's own transcript — so left unscoped,
+# that fix for the worker-side gap (see watcher_paste_epochs above)
+# systematically excused the very operator turns that caused it, in the
+# one transcript that isn't a worker pane at all.
+coord_paste_epochs() {
+    [ -r "$EVENTS_LOG" ] || return 0
+    tail -n "$WATCHER_PASTE_SCAN_LINES" "$EVENTS_LOG" 2>/dev/null \
+        | LC_ALL=C grep -E '(coord\.wake|coord\.wake\.deferred_delivered)[[:space:]]' \
+        | awk '{print $1}' \
+        | while read -r ts; do
+              date -u -d "$ts" +%s 2>/dev/null || true
+          done
+}
+
 # human_typed_since <transcript-dir> <cutoff-epoch> <paste-epochs>
 #
 # True (rc 0) if that Claude Code session has a typed turn newer than
@@ -7496,7 +7525,7 @@ coord_human_present() {
     [ "$COORD_HUMAN_IDLE_SECS" -gt 0 ] || return 1
     local cutoff
     cutoff=$(( $(date +%s) - COORD_HUMAN_IDLE_SECS ))
-    human_typed_since "$(transcript_dir_for "$PROJECT_DIR")" "$cutoff" "$(watcher_paste_epochs)"
+    human_typed_since "$(transcript_dir_for "$PROJECT_DIR")" "$cutoff" "$(coord_paste_epochs)"
 }
 
 # coord_wake_already_submitted <since-epoch>

@@ -365,7 +365,7 @@ for fn in log_event on_outcome outcome_path_issue outcome_path_task_id coord_wak
           coord_wake_hold_mark_pending coord_wake_hold_clear_pending coord_wake_hold_retry_pass \
           coord_wake_retry_pass coord_wake_already_submitted \
           coord_wake_hold_reason coord_human_present worker_human_present swarm_busy \
-          human_typed_since transcript_dir_for watcher_paste_epochs \
+          human_typed_since transcript_dir_for watcher_paste_epochs coord_paste_epochs \
           wake_clock_get wake_clock_set wake_debounced \
           coordinator_pane_busy mtime_epoch; do
     body="$(extract_fn "$fn")"
@@ -733,6 +733,66 @@ $(head -c 4000 < /dev/zero | tr '\0' 'x')" \
     green "a 22s-delayed worker brief (this project's own observed worst case) is still excluded at the production 45s default"
 
     COORD_HUMAN_PASTE_GRACE_SECS="$SAVED_GRACE"
+fi
+
+# ============================================================================
+heading "Test 5g (issue #497 self-review finding, round 7): a worker spawn must not excuse a genuine operator turn in the COORDINATOR's own transcript"
+# ============================================================================
+# human_typed_since's paste-grace exclusion is pure timestamp proximity, no
+# text check — so before coord_human_present had its own coord_paste_epochs,
+# it shared worker_human_present's full list (including worker.start), and a
+# worker spawn is typically the direct, near-immediate result of an operator
+# turn in the coordinator's own transcript. Proves that fix: a real operator
+# reply landing seconds after a worker.start still reads as human when
+# checked via coord_human_present, even though the identical scenario
+# correctly excludes the WORKER's own brief via worker_human_present (5e).
+command -v jq >/dev/null 2>&1 || { yellow "jq not found — skipping Test 5g (needs jq fixtures)"; SKIP_5G=1; }
+if [ "${SKIP_5G:-0}" != "1" ]; then
+    FIXTURE_HOME5G="$LOCK_TEST_DIR/home5g"
+    FIXTURE_COORD_TDIR="$FIXTURE_HOME5G/.claude/projects/$(printf '%s' "$PROJECT_DIR" | tr '/' '-')"
+    mkdir -p "$FIXTURE_COORD_TDIR"
+    REAL_HOME="$HOME"
+    HAVE_JQ=1
+    HOME="$FIXTURE_HOME5G"
+
+    : > "$EVENTS_LOG"
+    log_event worker.start "issue=997 task_id=t997 window=iss-997 alive=1/5 total_windows=1/10"
+    WSTART_EPOCH=$(date +%s)
+
+    # A genuine, short operator reply in the COORDINATOR's own transcript,
+    # 5s after the worker.start this same operator turn presumably caused —
+    # well within COORD_HUMAN_PASTE_GRACE_SECS, and nothing like the nudge
+    # or wake-prompt text.
+    REPLY_EPOCH=$((WSTART_EPOCH + 5))
+    REPLY_TS="$(date -u -d "@$REPLY_EPOCH" +%Y-%m-%dT%H:%M:%S.000Z)"
+    jq -cn --arg ts "$REPLY_TS" --arg text "sounds good, go ahead and also check the flaky test while you're at it" \
+        '{type:"user", timestamp:$ts, promptSource:"typed", origin:{kind:"human"}, message:{role:"user", content:$text}}' \
+        > "$FIXTURE_COORD_TDIR/session.jsonl"
+
+    COORD_HUMAN_IDLE_SECS=600
+    coord_human_present \
+        || red "a genuine operator reply in the coordinator's own transcript, seconds after an unrelated worker.start, must still count as human present — coord_human_present wrongly excluded it"
+    green "a worker spawn no longer excuses a genuine operator turn in the coordinator's own transcript"
+
+    # Contrast: the SAME worker.start, checked the worker-side way, still
+    # correctly excludes that worker's own brief (regression guard for 5e —
+    # confirms the split didn't just move the bug, it scoped it correctly).
+    FIXTURE_WORKER_TDIR5G="$LOCK_TEST_DIR/worker-transcript-5g"
+    mkdir -p "$FIXTURE_WORKER_TDIR5G"
+    BRIEF_EPOCH=$((WSTART_EPOCH + 2))
+    BRIEF_TS="$(date -u -d "@$BRIEF_EPOCH" +%Y-%m-%dT%H:%M:%S.000Z)"
+    jq -cn --arg ts "$BRIEF_TS" --arg text "## Task
+
+$(head -c 4000 < /dev/zero | tr '\0' 'x')" \
+        '{type:"user", timestamp:$ts, promptSource:"typed", origin:{kind:"human"}, message:{role:"user", content:$text}}' \
+        > "$FIXTURE_WORKER_TDIR5G/session.jsonl"
+    PASTES="$(watcher_paste_epochs)"
+    if human_typed_since "$FIXTURE_WORKER_TDIR5G" "$((WSTART_EPOCH - 5))" "$PASTES"; then
+        red "the worker's own brief must still be excluded via the full watcher_paste_epochs list — the coord-side fix must not have broken the worker-side one"
+    fi
+    green "the worker-side exclusion (worker_human_present's own path) is untouched by the coordinator-side fix"
+
+    HOME="$REAL_HOME"
 fi
 
 # ============================================================================
