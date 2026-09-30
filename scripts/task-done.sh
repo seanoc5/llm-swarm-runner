@@ -3,7 +3,7 @@
 # task-done.sh — the worker's own "this task is finished" declaration.
 #
 # Usage:
-#   task-done.sh <task-id> <ok|err> [reason]
+#   task-done.sh [--force] <task-id> <ok|err> [reason]
 #
 # issue #451 (α of #450): before this script existed, FIVE independent
 # places could each decide a task was "done" and write their own
@@ -81,12 +81,39 @@
 # needed, and activity_poll_pass's own live-worktree skip plus cursor
 # advance mean it is never retroactively announced either. Update
 # $LLM_SWARM_DIR to pick up this script.
+#
+# issue #484: a task_id with no trace at all in this queue's processing/
+# (not even via the wrong-task_id self-correction below) almost always
+# means the CALLER is confused about which queue it's even talking to —
+# the incident this guards against was an in-worker TEST SUITE run
+# inheriting the real worker session's $SWARM_WORKTREE_DIR and calling
+# this script with a test-fixture id ("t1"), which landed as a real,
+# permanent junk record in the LIVE queue because nothing here required
+# the id to mean anything to that queue. Refuse that case unless --force
+# is given. --force still exists for the genuinely brief-less case this
+# same check would otherwise block (a v1 legacy task, or a no-PR
+# ruling/research task per issue #466) — those are the caller's own queue,
+# just missing (or never having had) a processing/<id>.md.
 set -euo pipefail
 
 usage() {
-    echo "Usage: task-done.sh <task-id> <ok|err> [reason]" >&2
+    echo "Usage: task-done.sh [--force] <task-id> <ok|err> [reason]" >&2
     exit 2
 }
+
+# Flags only among the LEADING arguments — the first non-flag token ends
+# flag parsing, so a [reason] that happens to start with "-" (e.g. "- tests
+# failing: 3 of 12") is never mistaken for an unknown flag (self-review
+# finding on this PR).
+FORCE=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --force) FORCE=1; shift ;;
+        --) shift; break ;;
+        -*) echo "task-done.sh: unknown flag '$1'" >&2; usage ;;
+        *) break ;;
+    esac
+done
 
 TASK_ID="${1:-}"
 OUTCOME="${2:-}"
@@ -149,8 +176,9 @@ BRIEF="$PROCESSING/${TASK_ID}.md"
 # trustworthy than a self-report" principle worker_current_task_terminal's
 # own #370 fallback already applies. Ambiguous cases (processing/ empty,
 # or more than one file — shouldn't normally happen, since a worktree
-# only ever has one task claimed at a time) are left alone: proceed with
-# the given task_id as before, tolerating a missing brief (see below).
+# only ever has one task claimed at a time) are left alone: $BRIEF stays
+# unmatched, which now requires --force below (issue #484) rather than
+# being silently tolerated.
 if [ ! -f "$BRIEF" ]; then
     REAL_BRIEFS="$(find "$PROCESSING" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null || true)"
     if [ -n "$REAL_BRIEFS" ] && [ "$(printf '%s\n' "$REAL_BRIEFS" | wc -l)" -eq 1 ]; then
@@ -163,6 +191,7 @@ fi
 
 OK_FILE="$DONE/${TASK_ID}.ok.json"
 ERR_FILE="$DONE/${TASK_ID}.err.json"
+DONE_BRIEF="$DONE/${TASK_ID}.md"
 
 # Duplicate suppression (issue #451 acceptance: "a reconciler — or a second
 # call — seeing an existing done record does nothing"). Whichever outcome
@@ -173,14 +202,41 @@ if [ -e "$OK_FILE" ] || [ -e "$ERR_FILE" ]; then
     exit 0
 fi
 
+# issue #484: nothing above (exact match, or the wrong-task_id
+# self-correction) found a brief for this task_id in THIS queue's
+# processing/, and no outcome was already recorded for it either. That
+# combination is what let a stray test-fixture id ("t1") land as a
+# permanent junk record in a real worker's live queue — refuse rather than
+# silently recording an outcome for a task this queue has no evidence it
+# ever claimed. --force is the escape hatch for a call that really is
+# legitimate despite having no brief on disk (a v1 legacy task, or a
+# no-PR ruling/research task, issue #466).
+#
+# $DONE_BRIEF also counts as evidence of a legitimate claim (self-review
+# BLOCK finding on this PR): worker-listener.sh's check-retry path
+# (~line 1037) archives attempt 1's outcome JSON to *.attempt1.json
+# precisely so attempt 2's call to this script isn't a duplicate-suppressed
+# no-op — but attempt 1 already moved the brief itself to
+# done/<task-id>.md below, permanently, so by attempt 2 the brief is gone
+# from processing/ for a legitimate reason, not a confused caller. That
+# move never happens for the "t1"-style leak this check guards against, so
+# checking for it adds no new hole.
+if [ ! -f "$BRIEF" ] && [ ! -f "$DONE_BRIEF" ] && [ "$FORCE" != 1 ]; then
+    echo "task-done.sh: no processing/${TASK_ID}.md in $PROCESSING (and no done/${TASK_ID}.md from an earlier attempt) — refusing to record an outcome for a task this queue has no record of claiming. If this is a legitimately brief-less task (no-PR ruling/research, or a v1 task), re-run with --force." >&2
+    exit 1
+fi
+
 # Move the claimed brief out of processing/ so a reap sees an empty
 # processing/ dir (the false-alarm half of #450 finding 3: kill-worktree.sh
 # salvages + posts SWARM_BRIEF_ORPHANED whenever processing/ is non-empty
 # at reap time — which used to be EVERY interactive worker, since nothing
-# ever emptied it before the agent process exited). Tolerate the brief
-# still being gone (worker-listener.sh's own fallback path, or a legacy
-# v1 task with no processing/<id>.md at all) — the outcome record below is
-# what actually matters.
+# ever emptied it before the agent process exited). By this point $BRIEF
+# either exists (the normal case), or it doesn't for a reason the gate
+# above already accepted: $DONE_BRIEF exists instead (a retried task —
+# attempt 1 already moved it here), or --force was given (issue #484's
+# gate above already refused every other case) — either way, tolerate it
+# still being gone here too — the outcome record below is what
+# actually matters.
 if [ -f "$BRIEF" ]; then
     mv "$BRIEF" "$DONE/${TASK_ID}.md"
 fi

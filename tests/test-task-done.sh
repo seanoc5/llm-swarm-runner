@@ -21,7 +21,21 @@
 #   6. Honest-err preservation (issue #468): an explicit worker err must
 #      never be silently upgraded to ok, whether no check is configured
 #      (Test 7b) or a configured check PASSES (Test 7c).
+#   7. Foreign/no-brief refusal (issue #484): task-done.sh refuses to
+#      record an outcome for a task_id with no matching processing/
+#      entry unless --force is given (Test 4, Test 9) — but NOT when
+#      done/<id>.md proves this queue already claimed it, e.g. a
+#      worker-listener.sh check-retry re-call (Test 10).
 set -euo pipefail
+
+# issue #484: this suite calls task-done.sh directly against its own
+# fixture repo below, relying on cwd-based `git rev-parse` resolution.
+# task-done.sh prefers $SWARM_WORKTREE_DIR unconditionally when set, so
+# running this suite from inside a live worker session (which has that
+# var exported for the whole session, pointing at the REAL worktree)
+# would silently redirect every call below into that real queue instead
+# of this fixture — the exact leak issue #484 reports. Don't inherit it.
+unset SWARM_WORKTREE_DIR
 
 green()  { printf '\033[32m✓ %s\033[0m\n' "$*"; }
 red()    { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
@@ -114,13 +128,30 @@ jq -e '.outcome == "err" and .exit_code == 1 and (.reason == "acceptance check n
     || { cat .swarm/tasks/done/t2.err.json; red "t2: err outcome/reason not recorded correctly"; }
 green "err outcome records exit_code=1 and the given reason"
 
+# A [reason] starting with "-" must not be mistaken for an unknown flag
+# (self-review finding on issue #484's own PR): flag parsing only looks at
+# LEADING arguments, so this must still succeed once TASK_ID/OUTCOME are
+# past.
+echo '## Task
+
+Do something else.' > .swarm/tasks/processing/t2b.md
+"$TASK_DONE" t2b err "- tests failing: 3 of 12" >/dev/null
+jq -e '.outcome == "err" and (.reason == "- tests failing: 3 of 12")' \
+    .swarm/tasks/done/t2b.err.json >/dev/null \
+    || { cat .swarm/tasks/done/t2b.err.json 2>/dev/null; red "t2b: a reason starting with '-' was mishandled as a flag"; }
+green "a [reason] starting with '-' is not mistaken for an unknown flag"
+
 # ============================================================================
-heading "Test 4 (missing brief tolerated): outcome still written if processing/ already empty"
+heading "Test 4 (missing brief refused without --force, tolerated with it)"
 # ============================================================================
-"$TASK_DONE" t3 ok >/dev/null
+"$TASK_DONE" t3 ok >/dev/null 2>&1 && red "t3: should have been refused — no processing/t3.md and no --force" || true
+[ ! -e .swarm/tasks/done/t3.ok.json ] || red "t3: a refused call should not have written anything"
+green "no processing/<id>.md and no --force: refused, nothing written (issue #484)"
+
+"$TASK_DONE" --force t3 ok >/dev/null
 jq -e '.task_id == "t3" and .outcome == "ok"' .swarm/tasks/done/t3.ok.json >/dev/null \
-    || red "t3: outcome not written despite no processing/t3.md ever existing"
-green "no processing/<id>.md to move (already gone, or never existed) does not block the outcome write"
+    || red "t3: --force outcome not written despite no processing/t3.md ever existing"
+green "--force: no processing/<id>.md to move (already gone, or never existed) does not block the outcome write"
 
 # ============================================================================
 heading "Test 5 (usage errors): bad args exit non-zero without touching the queue"
@@ -387,7 +418,7 @@ heading "Test 8 (SWARM_WORKTREE_DIR): the correct worktree is used even when cwd
 SCRATCH="$TEST_DIR/scratch-clone"
 git clone -q "$TEST_DIR/repo" "$SCRATCH"
 
-( cd "$SCRATCH" && SWARM_WORKTREE_DIR="$TEST_DIR/repo" "$TASK_DONE" t5 ok >/dev/null )
+( cd "$SCRATCH" && SWARM_WORKTREE_DIR="$TEST_DIR/repo" "$TASK_DONE" --force t5 ok >/dev/null )
 
 [ -f "$TEST_DIR/repo/.swarm/tasks/done/t5.ok.json" ] \
     || red "t5: outcome should have landed in the real worktree named by \$SWARM_WORKTREE_DIR"
@@ -396,7 +427,7 @@ git clone -q "$TEST_DIR/repo" "$SCRATCH"
 green "SWARM_WORKTREE_DIR set: record lands in the real worktree, not whatever repo cwd happens to point at"
 
 rm -f "$TEST_DIR/repo/.swarm/tasks/done/t5.ok.json"
-( cd "$SCRATCH" && "$TASK_DONE" t5 ok >/dev/null )
+( cd "$SCRATCH" && "$TASK_DONE" --force t5 ok >/dev/null )
 [ -f "$SCRATCH/.swarm/tasks/done/t5.ok.json" ] \
     || red "t5: without \$SWARM_WORKTREE_DIR, should fall back to git rev-parse (cwd's own repo)"
 green "SWARM_WORKTREE_DIR unset: falls back to git rev-parse --show-toplevel (cwd) unchanged, for callers not dispatched by worker-listener.sh"
@@ -432,17 +463,53 @@ jq -e '.task_id == "20260906-230823-517"' .swarm/tasks/done/20260906-230823-517.
 green "wrong task_id + exactly one real brief in processing/ -> self-corrects to the real one, exactly one record, no duplicate"
 
 # Ambiguous case (more than one file in processing/, or none at all)
-# must NOT guess — falls back to the original behavior (proceed under the
-# given task_id, tolerate a missing brief), same as Test 4.
+# must NOT guess — no self-correction is possible, and with no brief to
+# recover, issue #484's refusal now applies (same gate as Test 4): refused
+# without --force, proceeds under the given task_id with it.
 rm -f .swarm/tasks/processing/*.md .swarm/tasks/done/*.json .swarm/tasks/done/*.md 2>/dev/null || true
-"$TASK_DONE" totally-unrelated-id ok >/dev/null
+"$TASK_DONE" totally-unrelated-id ok >/dev/null 2>&1 \
+    && red "totally-unrelated-id: should have been refused — processing/ empty, nothing to self-correct to, no --force" || true
+[ ! -e .swarm/tasks/done/totally-unrelated-id.ok.json ] \
+    || red "totally-unrelated-id: a refused call should not have written anything"
+green "processing/ genuinely empty (nothing to recover from), no --force -> refused (issue #484)"
+
+"$TASK_DONE" --force totally-unrelated-id ok >/dev/null
 [ -f .swarm/tasks/done/totally-unrelated-id.ok.json ] \
-    || red "totally-unrelated-id: with processing/ genuinely empty, should proceed under the given task_id unchanged (no self-correction possible)"
-green "processing/ genuinely empty (nothing to recover from) -> proceeds under the given task_id, same as before this fix"
+    || red "totally-unrelated-id: --force should proceed under the given task_id unchanged (no self-correction possible)"
+green "--force: processing/ genuinely empty -> proceeds under the given task_id, same as before this fix"
+
+# ============================================================================
+heading "Test 10 (check-retry, no --force): attempt 2's call is not refused just because attempt 1 already moved the brief (self-review BLOCK finding on this PR)"
+# ============================================================================
+# Mirrors worker-listener.sh's real check-retry path (~line 1037): attempt 1
+# calls task-done.sh (moving the brief to done/<id>.md, same as Test 1), the
+# check fails, and the listener archives attempt 1's outcome JSON to
+# *.attempt1.json specifically so a second call isn't duplicate-suppressed.
+# By attempt 2, processing/<id>.md is gone for a legitimate reason (already
+# claimed and moved by THIS queue), not a confused caller — issue #484's
+# refusal must not fire here without --force.
+rm -f .swarm/tasks/processing/*.md .swarm/tasks/done/*.json .swarm/tasks/done/*.md 2>/dev/null || true
+echo '## Task
+
+Do something retryable.' > .swarm/tasks/processing/t10.md
+
+"$TASK_DONE" t10 err "attempt 1 failed the check" >/dev/null
+[ -f .swarm/tasks/done/t10.md ] || red "t10: attempt 1 should have moved the brief into done/"
+mv .swarm/tasks/done/t10.err.json .swarm/tasks/done/t10.err.attempt1.json
+
+"$TASK_DONE" t10 ok >/dev/null \
+    || red "t10: attempt 2 was refused even though done/t10.md proves this queue already claimed it — no --force should be needed"
+[ -f .swarm/tasks/done/t10.ok.json ] \
+    || red "t10: attempt 2's outcome record was not written"
+jq -e '.outcome == "ok"' .swarm/tasks/done/t10.ok.json >/dev/null \
+    || { cat .swarm/tasks/done/t10.ok.json; red "t10: attempt 2's outcome should be the retry's ok, not attempt 1's archived err"; }
+[ -f .swarm/tasks/done/t10.err.attempt1.json ] \
+    || red "t10: attempt 1's archived record should be left alone, not touched by attempt 2"
+green "a retried check-fail call finds done/<id>.md and proceeds without --force, same as before this fix"
 
 # ============================================================================
 heading "All task-done.sh tests passed"
 # ============================================================================
-green "happy path, duplicate suppression, err+reason, missing-brief tolerance, usage errors, interactive-worker flow, check-correction, honest-err-no-check preservation, honest-err-passing-check preservation, SWARM_WORKTREE_DIR precedence, wrong-task_id self-correction"
+green "happy path, duplicate suppression, err+reason, missing-brief refusal + --force, usage errors, interactive-worker flow, check-correction, honest-err-no-check preservation, honest-err-passing-check preservation, SWARM_WORKTREE_DIR precedence, wrong-task_id self-correction, check-retry re-call after brief already moved"
 echo ""
 yellow "Run with KEEP=1 to leave $TEST_DIR for inspection."
