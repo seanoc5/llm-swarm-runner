@@ -361,10 +361,11 @@ extract_fn() {
     sed -n "/^${fn}() {/,/^}/p" "$WATCH"
 }
 for fn in log_event on_outcome outcome_path_issue outcome_path_task_id coord_wake_set_pending coord_wake_clear_pending \
-          coord_inbox_write coord_inbox_count coord_inbox_nudge_text \
+          coord_inbox_write coord_inbox_count coord_inbox_nudge_text coord_inbox_nudge_pattern \
           coord_wake_hold_mark_pending coord_wake_hold_clear_pending coord_wake_hold_retry_pass \
+          coord_wake_retry_pass coord_wake_already_submitted \
           coord_wake_hold_reason coord_human_present worker_human_present swarm_busy \
-          human_typed_since transcript_dir_for watcher_paste_epochs \
+          human_typed_since transcript_dir_for watcher_paste_epochs coord_paste_epochs \
           wake_clock_get wake_clock_set wake_debounced \
           coordinator_pane_busy mtime_epoch; do
     body="$(extract_fn "$fn")"
@@ -411,8 +412,14 @@ COORD_WAKE_BUSY_CEILING_SECS=900
 # issue #459/#456: the rest of the hold vocabulary, all disabled here.
 COORD_HUMAN_IDLE_SECS=0
 WORKER_HUMAN_IDLE_SECS=0
+# issue #497: coord_wake_already_submitted (now consulted unconditionally by
+# both retry passes, ahead of every other gate) reads HAVE_JQ under this
+# script's `set -u` — the real script always initializes it at boot, which
+# this extracted-function harness never runs, so it must be set here too.
+HAVE_JQ=0
+command -v jq >/dev/null 2>&1 && HAVE_JQ=1
 COORD_HUMAN_PASTE_GRACE_SECS=15
-COORD_HUMAN_MAX_TYPED_CHARS=2000
+WORKER_HUMAN_PASTE_GRACE_SECS=15
 WATCHER_PASTE_SCAN_LINES=2000
 WAKE_DEFER_ON_SWARM_BUSY=0
 DEBOUNCE_SECS=0
@@ -446,7 +453,14 @@ chmod +x "$LLM_START"
 
 # Simulate "already held" for the retry side of the race. The marker's
 # CONTENT is the hold reason since issue #459 — "pane_busy" here, matching
-# what the pre-#459 empty marker always meant.
+# what the pre-#459 empty marker always meant. A real hold is only ever
+# raised after the triggering wake's own payload already landed in
+# coord-inbox/ (issue #430's write-before-hold ordering) — issue #497's
+# inbox_empty guard means an empty inbox here would make
+# coord_wake_hold_retry_pass skip the paste outright, so give it one file to
+# stay realistic to that ordering.
+mkdir -p "$COORD_INBOX_DIR"
+touch "$COORD_INBOX_DIR/probe.md"
 printf 'pane_busy\n' > "$COORD_WAKE_HOLD_PENDING_FILE"
 
 ( on_outcome "$LOCK_TEST_DIR/wt-issue-42/.swarm/tasks/done/t42-42.ok.json" ) &
@@ -475,6 +489,367 @@ if [ "${#TYPES[@]}" = "4" ] && [ "${TYPES[0]}" = "START" ] && [ "${TYPES[1]}" = 
 else
     red "on_outcome and coord_wake_hold_retry_pass's llm-start.sh calls OVERLAPPED — COORD_WAKE_LOCK did not serialize them. Timeline (sorted):
 $(cat "$CALL_TIMELINE.sorted")"
+fi
+
+# ============================================================================
+heading "Test 5b (issue #497): coord_wake_hold_retry_pass clears a pending hold without pasting once the inbox is empty"
+# ============================================================================
+# A held doorbell (pane_busy here, but the guard doesn't care which reason)
+# whose coord-inbox has been fully triaged by the time the retry tick runs —
+# every item it would have announced already handled some other way — has
+# nothing left to paste. Reuses Test 5's extracted functions/env verbatim;
+# resets only what this test itself needs to control.
+: > "$CALL_TIMELINE"
+: > "$EVENTS_LOG"
+rm -rf "$COORD_INBOX_DIR"; mkdir -p "$COORD_INBOX_DIR"   # empty inbox
+printf 'pane_busy\n' > "$COORD_WAKE_HOLD_PENDING_FILE"
+
+coord_wake_hold_retry_pass
+
+[ ! -e "$COORD_WAKE_HOLD_PENDING_FILE" ] \
+    || red "COORD_WAKE_HOLD_PENDING_FILE should have been cleared by the inbox_empty guard"
+grep -q '^START' "$CALL_TIMELINE" 2>/dev/null \
+    && red "llm-start.sh must not be invoked when the inbox is empty; call timeline:
+$(cat "$CALL_TIMELINE")"
+grep -q 'coord\.wake\.skip reason=inbox_empty' "$EVENTS_LOG" \
+    || red "expected coord.wake.skip reason=inbox_empty; events:
+$(cat "$EVENTS_LOG")"
+green "coord_wake_hold_retry_pass skips the paste and clears pending on an empty inbox (reason=inbox_empty)"
+
+# Same guard, same outcome, on the OTHER retry pass (coord_wake_set_pending's
+# dirty-composer path) — COORD_WAKE_PENDING_FILE, not the hold marker.
+: > "$CALL_TIMELINE"
+: > "$EVENTS_LOG"
+printf 'outcome-wake-prompt-probe\n' > "$COORD_WAKE_PENDING_FILE"
+
+coord_wake_retry_pass
+
+[ ! -e "$COORD_WAKE_PENDING_FILE" ] \
+    || red "COORD_WAKE_PENDING_FILE should have been cleared by the inbox_empty guard"
+grep -q '^START' "$CALL_TIMELINE" 2>/dev/null \
+    && red "llm-start.sh must not be invoked when the inbox is empty; call timeline:
+$(cat "$CALL_TIMELINE")"
+grep -q 'coord\.wake\.skip reason=inbox_empty' "$EVENTS_LOG" \
+    || red "expected coord.wake.skip reason=inbox_empty; events:
+$(cat "$EVENTS_LOG")"
+green "coord_wake_retry_pass skips the paste and clears pending on an empty inbox (reason=inbox_empty)"
+
+# ============================================================================
+heading "Test 5c (issue #497): both retry passes clear pending, without pasting, once the operator already submitted the nudge themselves"
+# ============================================================================
+command -v jq >/dev/null 2>&1 || { yellow "jq not found — skipping Test 5c (coord_wake_already_submitted is inert without it)"; SKIP_5C=1; }
+if [ "${SKIP_5C:-0}" != "1" ]; then
+    # coord_wake_already_submitted derives the coordinator's transcript dir
+    # from $HOME + $PROJECT_DIR via transcript_dir_for — point HOME at a
+    # fixture tree and write one there, same technique
+    # test-wake-presence-gate.sh uses for the daemon-level version of this.
+    FIXTURE_HOME="$LOCK_TEST_DIR/home"
+    FIXTURE_TRANSCRIPT_DIR="$FIXTURE_HOME/.claude/projects/$(printf '%s' "$PROJECT_DIR" | tr '/' '-')"
+    mkdir -p "$FIXTURE_TRANSCRIPT_DIR"
+    REAL_HOME="$HOME"
+    HAVE_JQ=1
+    HOME="$FIXTURE_HOME"
+
+    : > "$CALL_TIMELINE"
+    : > "$EVENTS_LOG"
+    rm -f "$FIXTURE_TRANSCRIPT_DIR"/*.jsonl
+    mkdir -p "$COORD_INBOX_DIR"
+    touch "$COORD_INBOX_DIR/probe.md"   # non-empty, so the inbox_empty guard above doesn't fire first
+    printf 'pane_busy\n' > "$COORD_WAKE_HOLD_PENDING_FILE"
+    PENDING_MTIME=$(mtime_epoch "$COORD_WAKE_HOLD_PENDING_FILE")
+
+    # A typed turn, timestamped AFTER the pending marker, that CONTAINS the
+    # rendered nudge line alongside the operator's own text — exactly the
+    # "finished the draft the paste landed in, then hit Enter" case.
+    SUBMIT_TS="$(date -u -d "@$((PENDING_MTIME + 5))" +%Y-%m-%dT%H:%M:%S.000Z)"
+    jq -cn --arg ts "$SUBMIT_TS" \
+        --arg text "$(printf 'Inbox: 3 item(s) probe\n\nand also please rebase PR 512')" \
+        '{type:"user", timestamp:$ts, promptSource:"typed", origin:{kind:"human"}, message:{role:"user", content:$text}}' \
+        >> "$FIXTURE_TRANSCRIPT_DIR/session.jsonl"
+    touch -d "@$((PENDING_MTIME + 10))" "$FIXTURE_TRANSCRIPT_DIR/session.jsonl"
+
+    coord_wake_hold_retry_pass
+
+    [ ! -e "$COORD_WAKE_HOLD_PENDING_FILE" ] \
+        || red "COORD_WAKE_HOLD_PENDING_FILE should have been cleared by the already_submitted guard"
+    grep -q '^START' "$CALL_TIMELINE" 2>/dev/null \
+        && red "llm-start.sh must not be invoked once the operator already submitted the nudge; call timeline:
+$(cat "$CALL_TIMELINE")"
+    grep -q 'coord\.wake\.skip reason=already_submitted' "$EVENTS_LOG" \
+        || red "expected coord.wake.skip reason=already_submitted; events:
+$(cat "$EVENTS_LOG")"
+    green "coord_wake_hold_retry_pass skips the paste and clears pending once the operator's own submitted turn already carries the nudge"
+
+    # Same fixture, same outcome, on the dirty-composer retry pass.
+    : > "$CALL_TIMELINE"
+    : > "$EVENTS_LOG"
+    printf 'outcome-wake-prompt-probe\n' > "$COORD_WAKE_PENDING_FILE"
+    PENDING_MTIME=$(mtime_epoch "$COORD_WAKE_PENDING_FILE")
+    SUBMIT_TS="$(date -u -d "@$((PENDING_MTIME + 5))" +%Y-%m-%dT%H:%M:%S.000Z)"
+    rm -f "$FIXTURE_TRANSCRIPT_DIR"/*.jsonl
+    jq -cn --arg ts "$SUBMIT_TS" \
+        --arg text "$(printf 'Inbox: 3 item(s) probe\n\nand also please rebase PR 512')" \
+        '{type:"user", timestamp:$ts, promptSource:"typed", origin:{kind:"human"}, message:{role:"user", content:$text}}' \
+        >> "$FIXTURE_TRANSCRIPT_DIR/session.jsonl"
+    touch -d "@$((PENDING_MTIME + 10))" "$FIXTURE_TRANSCRIPT_DIR/session.jsonl"
+
+    coord_wake_retry_pass
+
+    [ ! -e "$COORD_WAKE_PENDING_FILE" ] \
+        || red "COORD_WAKE_PENDING_FILE should have been cleared by the already_submitted guard"
+    grep -q '^START' "$CALL_TIMELINE" 2>/dev/null \
+        && red "llm-start.sh must not be invoked once the operator already submitted the nudge; call timeline:
+$(cat "$CALL_TIMELINE")"
+    grep -q 'coord\.wake\.skip reason=already_submitted' "$EVENTS_LOG" \
+        || red "expected coord.wake.skip reason=already_submitted; events:
+$(cat "$EVENTS_LOG")"
+    green "coord_wake_retry_pass skips the paste and clears pending once the operator's own submitted turn already carries the nudge"
+
+    HOME="$REAL_HOME"
+fi
+
+# ============================================================================
+heading "Test 5d (issue #497 self-review finding): coord_wake_already_submitted does not fire when a NEWER inbox item arrived after the operator's confirming turn"
+# ============================================================================
+command -v jq >/dev/null 2>&1 || { yellow "jq not found — skipping Test 5d (coord_wake_already_submitted is inert without it)"; SKIP_5D=1; }
+if [ "${SKIP_5D:-0}" != "1" ]; then
+    FIXTURE_HOME="$LOCK_TEST_DIR/home5d"
+    FIXTURE_TRANSCRIPT_DIR="$FIXTURE_HOME/.claude/projects/$(printf '%s' "$PROJECT_DIR" | tr '/' '-')"
+    mkdir -p "$FIXTURE_TRANSCRIPT_DIR"
+    REAL_HOME="$HOME"
+    HAVE_JQ=1
+    HOME="$FIXTURE_HOME"
+
+    SINCE=$(date +%s)
+    TURN_EPOCH=$((SINCE + 5))
+    SUBMIT_TS="$(date -u -d "@$TURN_EPOCH" +%Y-%m-%dT%H:%M:%S.000Z)"
+    jq -cn --arg ts "$SUBMIT_TS" \
+        --arg text "$(printf 'Inbox: 1 item(s) probe\n\nthanks, already looked at that one')" \
+        '{type:"user", timestamp:$ts, promptSource:"typed", origin:{kind:"human"}, message:{role:"user", content:$text}}' \
+        > "$FIXTURE_TRANSCRIPT_DIR/session.jsonl"
+    touch -d "@$((TURN_EPOCH + 5))" "$FIXTURE_TRANSCRIPT_DIR/session.jsonl"
+
+    # A coord-inbox payload that arrived AFTER the operator's confirming
+    # turn: genuinely new work the operator has not acknowledged, even
+    # though an older turn already contains the (count-agnostic) nudge
+    # text. Must NOT be swept into already_submitted.
+    rm -rf "$COORD_INBOX_DIR"
+    mkdir -p "$COORD_INBOX_DIR"
+    touch -d "@$((TURN_EPOCH + 20))" "$COORD_INBOX_DIR/newer-than-turn.md"
+
+    if coord_wake_already_submitted "$SINCE"; then
+        red "coord_wake_already_submitted must not fire: a coord-inbox item arrived after the operator's confirming turn"
+    fi
+    green "coord_wake_already_submitted stays false open when a newer coord-inbox item postdates the confirming turn"
+
+    # Sanity check the other direction: once every current inbox file
+    # predates the confirming turn, the same fixture DOES count as
+    # already-submitted (the case Test 5c exercises end-to-end).
+    rm -rf "$COORD_INBOX_DIR"
+    mkdir -p "$COORD_INBOX_DIR"
+    touch -d "@$((TURN_EPOCH - 5))" "$COORD_INBOX_DIR/older-than-turn.md"
+    coord_wake_already_submitted "$SINCE" \
+        || red "coord_wake_already_submitted should fire once every current inbox item predates the confirming turn"
+    green "coord_wake_already_submitted still fires once the confirming turn covers every current inbox item"
+
+    HOME="$REAL_HOME"
+fi
+
+# ============================================================================
+heading "Test 5e (issue #497 self-review finding): a worker's initial brief (worker.start) is excluded from human_typed_since via the paste-grace window"
+# ============================================================================
+command -v jq >/dev/null 2>&1 || { yellow "jq not found — skipping Test 5e (human_typed_since's jq path is inert without it)"; SKIP_5E=1; }
+if [ "${SKIP_5E:-0}" != "1" ]; then
+    FIXTURE_TDIR5E="$LOCK_TEST_DIR/worker-transcript-5e"
+    mkdir -p "$FIXTURE_TDIR5E"
+
+    # Before this issue's COORD_HUMAN_MAX_TYPED_CHARS removal, a long
+    # machine-pasted brief was (accidentally) excluded by its length alone.
+    # Dropping that cutoff means watcher_paste_epochs' worker.start entry is
+    # now the ONLY thing standing between a freshly spawned worker's own
+    # brief and a false "human present" read.
+    : > "$EVENTS_LOG"
+    log_event worker.start "issue=999 task_id=t999 window=iss-999 alive=1/5 total_windows=1/10"
+    WSTART_EPOCH=$(date +%s)
+    CUTOFF=$((WSTART_EPOCH - 5))
+
+    BRIEF_EPOCH=$((WSTART_EPOCH + 2))
+    BRIEF_TS="$(date -u -d "@$BRIEF_EPOCH" +%Y-%m-%dT%H:%M:%S.000Z)"
+    LONG_BRIEF="$(head -c 4000 < /dev/zero | tr '\0' 'x')"
+    jq -cn --arg ts "$BRIEF_TS" --arg text "## Task
+
+$LONG_BRIEF" \
+        '{type:"user", timestamp:$ts, promptSource:"typed", origin:{kind:"human"}, message:{role:"user", content:$text}}' \
+        > "$FIXTURE_TDIR5E/session.jsonl"
+
+    PASTES="$(watcher_paste_epochs)"
+    if human_typed_since "$FIXTURE_TDIR5E" "$CUTOFF" "$PASTES" "$WORKER_HUMAN_PASTE_GRACE_SECS"; then
+        red "a freshly spawned worker's own initial brief must not read as a human turn — worker.start is missing from watcher_paste_epochs' pattern"
+    fi
+    green "a worker's initial brief lands inside the paste-grace window around its own worker.start event and is correctly excluded, not misread as human"
+
+    # Contrast: a genuine operator reply in that SAME worker pane, well
+    # outside the paste-grace window, must still count as human — this
+    # fix must not blanket-exclude everything near a worker.start event.
+    REPLY_EPOCH=$((WSTART_EPOCH + WORKER_HUMAN_PASTE_GRACE_SECS + 30))
+    REPLY_TS="$(date -u -d "@$REPLY_EPOCH" +%Y-%m-%dT%H:%M:%S.000Z)"
+    jq -cn --arg ts "$REPLY_TS" --arg text "actually let's take a different approach here" \
+        '{type:"user", timestamp:$ts, promptSource:"typed", origin:{kind:"human"}, message:{role:"user", content:$text}}' \
+        >> "$FIXTURE_TDIR5E/session.jsonl"
+    human_typed_since "$FIXTURE_TDIR5E" "$CUTOFF" "$PASTES" "$WORKER_HUMAN_PASTE_GRACE_SECS" \
+        || red "a genuine operator reply well outside the paste-grace window must still count as human"
+    green "a genuine operator reply in the same worker pane still counts as human once outside the paste-grace window"
+fi
+
+# ============================================================================
+heading "Test 5f (issue #497 self-review finding): a slow worker spawn (brief lands 22s after worker.start, this project's own observed worst case) is still excluded at the production default"
+# ============================================================================
+if [ "${SKIP_5E:-0}" != "1" ]; then
+    # This test alone runs at the real production default (45s), not this
+    # file's 15s override for every other test, to prove the wider window
+    # self-review's live-log finding motivated actually covers the worst
+    # case it found.
+    SAVED_GRACE="$WORKER_HUMAN_PASTE_GRACE_SECS"
+    WORKER_HUMAN_PASTE_GRACE_SECS=45
+
+    FIXTURE_TDIR5F="$LOCK_TEST_DIR/worker-transcript-5f"
+    mkdir -p "$FIXTURE_TDIR5F"
+    : > "$EVENTS_LOG"
+    log_event worker.start "issue=998 task_id=t998 window=iss-998 alive=1/5 total_windows=1/10"
+    WSTART_EPOCH=$(date +%s)
+    CUTOFF=$((WSTART_EPOCH - 5))
+
+    SLOW_BRIEF_EPOCH=$((WSTART_EPOCH + 22))
+    SLOW_BRIEF_TS="$(date -u -d "@$SLOW_BRIEF_EPOCH" +%Y-%m-%dT%H:%M:%S.000Z)"
+    jq -cn --arg ts "$SLOW_BRIEF_TS" --arg text "## Task
+
+$(head -c 4000 < /dev/zero | tr '\0' 'x')" \
+        '{type:"user", timestamp:$ts, promptSource:"typed", origin:{kind:"human"}, message:{role:"user", content:$text}}' \
+        > "$FIXTURE_TDIR5F/session.jsonl"
+
+    PASTES="$(watcher_paste_epochs)"
+    if human_typed_since "$FIXTURE_TDIR5F" "$CUTOFF" "$PASTES" "$WORKER_HUMAN_PASTE_GRACE_SECS"; then
+        red "a 22s-delayed worker brief must still be excluded at the production 45s default (this repo's own observed worst case)"
+    fi
+    green "a 22s-delayed worker brief (this project's own observed worst case) is still excluded at the production 45s default"
+
+    WORKER_HUMAN_PASTE_GRACE_SECS="$SAVED_GRACE"
+fi
+
+# ============================================================================
+heading "Test 5g (issue #497 self-review finding, round 7): a worker spawn must not excuse a genuine operator turn in the COORDINATOR's own transcript"
+# ============================================================================
+# human_typed_since's paste-grace exclusion is pure timestamp proximity, no
+# text check — so before coord_human_present had its own coord_paste_epochs,
+# it shared worker_human_present's full list (including worker.start), and a
+# worker spawn is typically the direct, near-immediate result of an operator
+# turn in the coordinator's own transcript. Proves that fix: a real operator
+# reply landing seconds after a worker.start still reads as human when
+# checked via coord_human_present, even though the identical scenario
+# correctly excludes the WORKER's own brief via worker_human_present (5e).
+command -v jq >/dev/null 2>&1 || { yellow "jq not found — skipping Test 5g (needs jq fixtures)"; SKIP_5G=1; }
+if [ "${SKIP_5G:-0}" != "1" ]; then
+    FIXTURE_HOME5G="$LOCK_TEST_DIR/home5g"
+    FIXTURE_COORD_TDIR="$FIXTURE_HOME5G/.claude/projects/$(printf '%s' "$PROJECT_DIR" | tr '/' '-')"
+    mkdir -p "$FIXTURE_COORD_TDIR"
+    REAL_HOME="$HOME"
+    HAVE_JQ=1
+    HOME="$FIXTURE_HOME5G"
+
+    : > "$EVENTS_LOG"
+    log_event worker.start "issue=997 task_id=t997 window=iss-997 alive=1/5 total_windows=1/10"
+    WSTART_EPOCH=$(date +%s)
+
+    # A genuine, short operator reply in the COORDINATOR's own transcript,
+    # 5s after the worker.start this same operator turn presumably caused —
+    # well within COORD_HUMAN_PASTE_GRACE_SECS, and nothing like the nudge
+    # or wake-prompt text.
+    REPLY_EPOCH=$((WSTART_EPOCH + 5))
+    REPLY_TS="$(date -u -d "@$REPLY_EPOCH" +%Y-%m-%dT%H:%M:%S.000Z)"
+    jq -cn --arg ts "$REPLY_TS" --arg text "sounds good, go ahead and also check the flaky test while you're at it" \
+        '{type:"user", timestamp:$ts, promptSource:"typed", origin:{kind:"human"}, message:{role:"user", content:$text}}' \
+        > "$FIXTURE_COORD_TDIR/session.jsonl"
+
+    SAVED_COORD_HUMAN_IDLE_SECS="$COORD_HUMAN_IDLE_SECS"
+    COORD_HUMAN_IDLE_SECS=600
+    coord_human_present \
+        || red "a genuine operator reply in the coordinator's own transcript, seconds after an unrelated worker.start, must still count as human present — coord_human_present wrongly excluded it"
+    COORD_HUMAN_IDLE_SECS="$SAVED_COORD_HUMAN_IDLE_SECS"
+    green "a worker spawn no longer excuses a genuine operator turn in the coordinator's own transcript"
+
+    # Contrast: the SAME worker.start, checked the worker-side way, still
+    # correctly excludes that worker's own brief (regression guard for 5e —
+    # confirms the split didn't just move the bug, it scoped it correctly).
+    FIXTURE_WORKER_TDIR5G="$LOCK_TEST_DIR/worker-transcript-5g"
+    mkdir -p "$FIXTURE_WORKER_TDIR5G"
+    BRIEF_EPOCH=$((WSTART_EPOCH + 2))
+    BRIEF_TS="$(date -u -d "@$BRIEF_EPOCH" +%Y-%m-%dT%H:%M:%S.000Z)"
+    jq -cn --arg ts "$BRIEF_TS" --arg text "## Task
+
+$(head -c 4000 < /dev/zero | tr '\0' 'x')" \
+        '{type:"user", timestamp:$ts, promptSource:"typed", origin:{kind:"human"}, message:{role:"user", content:$text}}' \
+        > "$FIXTURE_WORKER_TDIR5G/session.jsonl"
+    PASTES="$(watcher_paste_epochs)"
+    if human_typed_since "$FIXTURE_WORKER_TDIR5G" "$((WSTART_EPOCH - 5))" "$PASTES" "$WORKER_HUMAN_PASTE_GRACE_SECS"; then
+        red "the worker's own brief must still be excluded via the full watcher_paste_epochs list — the coord-side fix must not have broken the worker-side one"
+    fi
+    green "the worker-side exclusion (worker_human_present's own path) is untouched by the coordinator-side fix"
+
+    HOME="$REAL_HOME"
+fi
+
+# ============================================================================
+heading "Test 5h (issue #497 self-review finding, round 10): the coordinator's own paste-grace window stays tight (15s), not the worker-spawn width (45s)"
+# ============================================================================
+# Before this fix, COORD_HUMAN_PASTE_GRACE_SECS and the worker-spawn-latency
+# window were the SAME constant — widening it to 45s for worker spawns (5f)
+# also widened the coordinator's own doorbell-paste correlation, even though
+# a coord.wake paste is near-instant and never needed widening. A genuine
+# operator reply 15-45s after their own just-delivered doorbell is a normal
+# human timescale, not an edge case, so this directly proves the split:
+# the SAME reply reads as human at the real 15s coordinator default, but
+# would have wrongly read as machine at the old shared 45s width.
+command -v jq >/dev/null 2>&1 || { yellow "jq not found — skipping Test 5h (needs jq fixtures)"; SKIP_5H=1; }
+if [ "${SKIP_5H:-0}" != "1" ]; then
+    FIXTURE_HOME5H="$LOCK_TEST_DIR/home5h"
+    FIXTURE_COORD_TDIR5H="$FIXTURE_HOME5H/.claude/projects/$(printf '%s' "$PROJECT_DIR" | tr '/' '-')"
+    mkdir -p "$FIXTURE_COORD_TDIR5H"
+    REAL_HOME="$HOME"
+    HAVE_JQ=1
+    HOME="$FIXTURE_HOME5H"
+
+    : > "$EVENTS_LOG"
+    log_event coord.wake "reason=probe"
+    WAKE_EPOCH=$(date +%s)
+
+    # A genuine operator reply 30s later: outside the real 15s coordinator
+    # window, but inside the old shared 45s one.
+    REPLY_EPOCH=$((WAKE_EPOCH + 30))
+    REPLY_TS="$(date -u -d "@$REPLY_EPOCH" +%Y-%m-%dT%H:%M:%S.000Z)"
+    jq -cn --arg ts "$REPLY_TS" --arg text "thanks, that makes sense — go ahead and merge it" \
+        '{type:"user", timestamp:$ts, promptSource:"typed", origin:{kind:"human"}, message:{role:"user", content:$text}}' \
+        > "$FIXTURE_COORD_TDIR5H/session.jsonl"
+
+    SAVED_COORD_HUMAN_IDLE_SECS="$COORD_HUMAN_IDLE_SECS"
+    COORD_HUMAN_IDLE_SECS=600
+
+    coord_human_present \
+        || red "a 30s-later genuine operator reply must count as human at the real 15s coordinator paste-grace default"
+    green "a 30s-later operator reply correctly counts as human at the real 15s coordinator default"
+
+    # Contrast: at the OLD shared 45s width, the exact same reply would have
+    # been wrongly excluded — proves this test actually discriminates
+    # between the fixed and unfixed behavior, not just trivially passing.
+    SAVED_COORD_GRACE="$COORD_HUMAN_PASTE_GRACE_SECS"
+    COORD_HUMAN_PASTE_GRACE_SECS=45
+    if coord_human_present; then
+        red "test fixture error: expected the old 45s-wide window to wrongly exclude this reply (if it didn't, this test proves nothing)"
+    fi
+    COORD_HUMAN_PASTE_GRACE_SECS="$SAVED_COORD_GRACE"
+    green "confirmed: the same reply would have been wrongly excluded at the old, unsplit 45s width — the split is what fixes it"
+
+    COORD_HUMAN_IDLE_SECS="$SAVED_COORD_HUMAN_IDLE_SECS"
+    HOME="$REAL_HOME"
 fi
 
 # ============================================================================

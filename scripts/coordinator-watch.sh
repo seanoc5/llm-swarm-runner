@@ -574,15 +574,26 @@
 #                           and costs one mtime check per worktree.
 #                           0 disables.
 #   COORD_HUMAN_PASTE_GRACE_SECS=15
-#                           (issue #459) How far either side of a paste the
-#                           watcher recorded in its own events.log a typed
-#                           turn may land and still be attributed to that
-#                           paste rather than to a human. See
-#                           human_typed_since for why this correlation is
-#                           needed alongside the text match, and why erring
-#                           large is the safe direction (a turn misread as
-#                           machine means the doorbell rings, never that the
-#                           swarm goes quiet).
+#                           (issue #459) How far either side of a paste into
+#                           the COORDINATOR's own pane the watcher recorded
+#                           in its own events.log a typed turn may land and
+#                           still be attributed to that paste rather than to
+#                           a human. See human_typed_since for why this
+#                           correlation is needed alongside the text match,
+#                           and why erring large is the safe direction (a
+#                           turn misread as machine means the doorbell
+#                           rings, never that the swarm goes quiet). Kept
+#                           tight because a coord.wake paste is near-instant
+#                           (issue #497 self-review, round 10) — see
+#                           WORKER_HUMAN_PASTE_GRACE_SECS below for the
+#                           much slower worker-spawn path this is
+#                           deliberately NOT shared with.
+#   WORKER_HUMAN_PASTE_GRACE_SECS=45
+#                           (issue #497) Same idea, for a paste into a
+#                           WORKER's own pane (its initial brief or a
+#                           mid-session redelivery) — wider because that
+#                           path spans container/sandbox boot plus agent
+#                           launch, not a same-tick paste+Enter.
 #   WAKE_DEFER_ON_SWARM_BUSY=0
 #                           (issue #459) Opt-in: also hold doorbells while
 #                           any own worker is mid-turn or has a brief queued
@@ -1822,7 +1833,8 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     COORD_WAKE_BUSY_CEILING_SECS 900  deliver a busy-deferred wake anyway after this long (issue #430, 15min); 0=no ceiling; never applies to a human_present hold
     COORD_HUMAN_IDLE_SECS 600     hold every doorbell while the operator has typed into the COORDINATOR session this recently (issue #459); 0=off
     WORKER_HUMAN_IDLE_SECS 300    same, for any of this project's own WORKER sessions (issue #459); 0=off
-    COORD_HUMAN_PASTE_GRACE_SECS 15  how close to a watcher paste recorded in events.log a typed turn counts as that paste, not a human (issue #459)
+    COORD_HUMAN_PASTE_GRACE_SECS 15  how close to a coord.wake paste (COORDINATOR's own pane) a typed turn counts as that paste, not a human (issue #459)
+    WORKER_HUMAN_PASTE_GRACE_SECS 45  same, for a paste into a WORKER's own pane (initial brief or redelivery) — wider: spans spawn latency, not a same-tick paste (issue #497)
     WAKE_DEFER_ON_SWARM_BUSY 0    also hold doorbells while any worker is mid-turn or has a queued unclaimed brief; OFF by default — see header comment for why worker busyness is the wrong lever (issue #459)
     COORD_INBOX_NUDGE_TEMPLATE (built-in) one-line doorbell text pasted once a wake is allowed to fire; %N = live coord-inbox/*.md count (issue #430)
     ACTIVITY_WAKE_PROMPT (built-in) what the coordinator writes to the inbox on an activity-poll finding (issue #430: inbox-only, no doorbell)
@@ -1902,9 +1914,25 @@ EVENTS LOG
                            (or coord.wake.skip reason=debounce|pane_busy — the
                            latter only on a coord_wake_retry_pass dirty-draft
                            retry finding the pane busy now, issue #430 self-
-                           review); the FULL payload for this wake already
-                           landed in coord-inbox/ beforehand — see
-                           coord.inbox.write below (issue #430)
+                           review — or reason=inbox_empty|already_submitted, a
+                           coord_wake_hold_retry_pass/coord_wake_retry_pass
+                           retry tick finding this pending wake has nothing
+                           left to accomplish, issue #497: inbox_empty means
+                           coord_inbox_count is now 0 — every payload this
+                           wake would have announced was already triaged by
+                           the time the retry ran; already_submitted means the
+                           coordinator transcript already has a typed turn,
+                           newer than the pending file, that itself contains
+                           the nudge line AND is at least as new as every
+                           CURRENT coord-inbox file (self-review finding: a
+                           purely textual match would otherwise sweep in a
+                           payload that arrived after that turn) — the
+                           operator finished the draft the paste landed in,
+                           or otherwise submitted it themselves, before the
+                           retry got to it); the FULL
+                           payload for this wake already landed in
+                           coord-inbox/ beforehand — see coord.inbox.write
+                           below (issue #430)
       coord.inbox.write    (issue #430) a wake payload (outcome/outbox/activity-poll)
                            was written to <project>/.swarm/coord-inbox/ as its own
                            .md file — unconditional, fires even when the doorbell
@@ -2789,6 +2817,17 @@ COORD_WAKE_LAST_FILE="$PROJECT_DIR/.swarm/coord-wake-last"
 # entries above for the full rationale, and coord_human_present /
 # swarm_human_present for the detection (which is not as simple as reading
 # the last user turn — the watcher's own pastes look identical).
+#
+# issue #497: the detector's "is this turn actually just the watcher's own
+# paste" check (human_typed_since's exclusion 1) is an EXACT match, modulo
+# surrounding whitespace, against the rendered nudge or the wake-prompt
+# head — never a prefix or substring match. A typed turn that CONTAINS the
+# nudge line alongside real operator text (the operator finished typing
+# their own message on top of, or right after, a pasted nudge and hit Enter
+# once) is a genuine human turn and must count as one. A prefix/substring
+# match here was the #497 incident's first hole: it read such a turn as
+# "just the watcher's own paste" and let a doorbell ring straight into a
+# present operator.
 COORD_HUMAN_IDLE_SECS="${COORD_HUMAN_IDLE_SECS:-600}"
 if ! [[ "$COORD_HUMAN_IDLE_SECS" =~ ^[0-9]+$ ]]; then
     echo "ERROR: COORD_HUMAN_IDLE_SECS must be a non-negative integer (got: $COORD_HUMAN_IDLE_SECS)" >&2
@@ -2800,21 +2839,58 @@ if ! [[ "$WORKER_HUMAN_IDLE_SECS" =~ ^[0-9]+$ ]]; then
     exit 1
 fi
 
-# COORD_HUMAN_PASTE_GRACE_SECS: how far either side of a paste the watcher
-# itself recorded in events.log a typed turn can land and still be treated
-# as that paste rather than as a human typing. 15s covers llm-start.sh's
-# paste→Enter→transcript-flush path with room to spare; too large starts
-# swallowing a human who typed immediately after reading a nudge, which is
-# the safe direction anyway (it reads as machine, so the doorbell rings).
+# COORD_HUMAN_PASTE_GRACE_SECS: how far either side of a paste into the
+# COORDINATOR's own pane (a coord.wake doorbell) a typed turn can land and
+# still be treated as that paste rather than as a human typing. Too large
+# starts swallowing a human who typed immediately after reading a nudge,
+# which is the safe direction anyway (it reads as machine, so the doorbell
+# rings — see COORD_HUMAN_MAX_TYPED_CHARS's DECISION comment below for why
+# that tradeoff is the accepted one throughout this gate). Sized for the
+# near-instant llm-start.sh paste→Enter→transcript-flush path — a coord.wake
+# paste and its own Enter happen in the same watcher tick, seconds apart at
+# most — NOT for a worker's spawn-to-brief latency, which is a different
+# path with a much longer, more variable delay (WORKER_HUMAN_PASTE_GRACE_SECS
+# below).
+#
+# issue #497 self-review finding (round 7): this used to be the SAME window
+# watcher_paste_epochs' worker.start correlation relied on too (both fed
+# through one shared constant), so widening it for worker-spawn latency
+# widened it here as well — and unlike the worker side, a genuine operator
+# reply landing 15-45s after their own just-delivered doorbell is a normal,
+# not rare, human timescale. Split into its own constant so this window
+# stays sized for what actually happens in this pane.
 COORD_HUMAN_PASTE_GRACE_SECS="${COORD_HUMAN_PASTE_GRACE_SECS:-15}"
-# COORD_HUMAN_MAX_TYPED_CHARS: a "typed" turn longer than this is treated as
-# a machine paste (see human_typed_since exclusion 3). Set very high rather
-# than tight: the cost of misreading a long operator paste as machine is one
-# doorbell ringing while they read, whereas misreading a delivered brief as
-# an operator holds doorbells for a whole idle window.
-COORD_HUMAN_MAX_TYPED_CHARS="${COORD_HUMAN_MAX_TYPED_CHARS:-2000}"
+# WORKER_HUMAN_PASTE_GRACE_SECS: same idea, but for a paste into a WORKER's
+# own pane — provision-worker.sh's initial brief (worker.start) or a
+# mid-session redelivery (worker.deliver.ok/attempt). Wider than the
+# coordinator's window on purpose (issue #497 self-review finding): this
+# path spans container/sandbox boot plus the interactive agent launch
+# before the brief is even typed in, not a same-tick paste+Enter. Checked
+# against this project's own live events.log: recent worker spawns ran
+# 1-11s, but one ran 22s. 45s leaves real margin over that observed worst
+# case.
+WORKER_HUMAN_PASTE_GRACE_SECS="${WORKER_HUMAN_PASTE_GRACE_SECS:-45}"
+# issue #497 DECISION: COORD_HUMAN_MAX_TYPED_CHARS (the length-based "a typed
+# turn this long must be a machine paste" exclusion) is DROPPED, not raised.
+# It was the #497 incident's second hole: a genuinely present operator's
+# typed turn tripped the (then 2000-char) cap, read as machine, and the gate
+# concluded nobody was there — ringing a doorbell straight into them. The
+# grace-window correlation immediately above is the correct signal for "this
+# typed turn was actually a machine paste": it checks the turn's TIMESTAMP
+# against this watcher's own paste/delivery events, which is ground truth.
+# A turn's LENGTH has no such correlation to typed-by-hand — operators paste
+# long specs, quote whole files, and file multi-item followups routinely —
+# so it was pure false-positive risk with no offsetting benefit once the
+# grace window already covers the one real case (a long PASTED brief/nudge)
+# it was trying to catch. Removing it only ever moves a turn from "machine"
+# to "human", i.e. toward holding the doorbell — this gate's safe direction
+# throughout (see human_typed_since's header comment).
 if ! [[ "$COORD_HUMAN_PASTE_GRACE_SECS" =~ ^[0-9]+$ ]]; then
     echo "ERROR: COORD_HUMAN_PASTE_GRACE_SECS must be a non-negative integer (got: $COORD_HUMAN_PASTE_GRACE_SECS)" >&2
+    exit 1
+fi
+if ! [[ "$WORKER_HUMAN_PASTE_GRACE_SECS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: WORKER_HUMAN_PASTE_GRACE_SECS must be a non-negative integer (got: $WORKER_HUMAN_PASTE_GRACE_SECS)" >&2
     exit 1
 fi
 
@@ -7202,6 +7278,20 @@ coord_inbox_nudge_text() {
     printf '%s\n' "${COORD_INBOX_NUDGE_TEMPLATE//%N/$n}"
 }
 
+# coord_inbox_nudge_pattern
+#
+# (issue #497) Echoes COORD_INBOX_NUDGE_TEMPLATE as an ERE with every literal
+# ERE metacharacter escaped and "%N" turned into a "[0-9]+" digit wildcard —
+# the one escaping rule shared by human_typed_since's EXACT match (which
+# anchors this pattern at both ends itself) and coord_wake_already_submitted's
+# SUBSTRING match (used bare, unanchored). Kept as its own function so the
+# escaping logic is written, and gets its ERE-vs-BRE wildcard syntax right,
+# in exactly one place.
+coord_inbox_nudge_pattern() {
+    printf '%s' "$COORD_INBOX_NUDGE_TEMPLATE" \
+        | sed 's/[][\.^$*+?(){}|\\]/\\&/g; s/%N/[0-9]+/'
+}
+
 # ── issue #456: the doorbell debounce clock, on disk ─────────────────────────
 #
 # wake_clock_get echoes the epoch seconds of the last doorbell actually
@@ -7257,6 +7347,17 @@ wake_debounced() {
 # way). There is no metadata field that distinguishes them, so the only
 # ground truth available is the watcher's own record of what it sent and when.
 #
+# (issue #497 self-review finding) worker.start MUST be in the pattern
+# below: provision-worker.sh logs it right as it spawns a fresh interactive
+# worker window and pastes that worker's initial task brief — a 3-7k
+# character typed turn, same shape as any other machine paste. Dropping
+# COORD_HUMAN_MAX_TYPED_CHARS (this same issue) removed the length cutoff
+# that used to hide this specific gap by accident: without worker.start
+# here, EVERY freshly spawned interactive worker's own brief would read as
+# "a human is present in that worker's pane" for WORKER_HUMAN_IDLE_SECS —
+# and coord_wake_hold_reason() consults worker_human_present() too, so that
+# would hold the COORDINATOR's own doorbell, not just that worker's.
+#
 # Bounded by `tail -n $WATCHER_PASTE_SCAN_LINES` rather than reading the whole
 # log: only pastes inside the largest idle window can possibly correlate, and
 # events.log grows without bound over a swarm's life. 2000 lines is generous
@@ -7269,44 +7370,88 @@ WATCHER_PASTE_SCAN_LINES="${WATCHER_PASTE_SCAN_LINES:-2000}"
 watcher_paste_epochs() {
     [ -r "$EVENTS_LOG" ] || return 0
     tail -n "$WATCHER_PASTE_SCAN_LINES" "$EVENTS_LOG" 2>/dev/null \
-        | LC_ALL=C grep -E '(coord\.wake|coord\.wake\.deferred_delivered|worker\.deliver\.(ok|attempt))[[:space:]]' \
+        | LC_ALL=C grep -E '(coord\.wake|coord\.wake\.deferred_delivered|worker\.deliver\.(ok|attempt)|worker\.start)[[:space:]]' \
         | awk '{print $1}' \
         | while read -r ts; do
               date -u -d "$ts" +%s 2>/dev/null || true
           done
 }
 
-# human_typed_since <transcript-dir> <cutoff-epoch> <paste-epochs>
+# coord_paste_epochs
+#
+# Same idea as watcher_paste_epochs, but scoped to only what the watcher
+# actually pastes into the COORDINATOR's own pane (coord.wake and its
+# deferred-delivery counterpart) — never a worker.start or worker.deliver.*
+# epoch, both of which are pastes into a WORKER's pane, not this one.
+#
+# (issue #497 self-review finding, round 7) coord_human_present() used to
+# call watcher_paste_epochs() directly, sharing the exact same list
+# worker_human_present() uses. human_typed_since's timestamp exclusion has
+# no text check of its own — it fires on proximity alone — so every entry
+# in that shared list could excuse a genuine operator turn in ANY
+# transcript it's checked against, coordinator included. worker.start is
+# the single most frequent event in the list (once per worker spawn) and a
+# worker spawn is typically the direct, near-immediate result of an
+# operator turn in the coordinator's own transcript — so left unscoped,
+# that fix for the worker-side gap (see watcher_paste_epochs above)
+# systematically excused the very operator turns that caused it, in the
+# one transcript that isn't a worker pane at all.
+coord_paste_epochs() {
+    [ -r "$EVENTS_LOG" ] || return 0
+    tail -n "$WATCHER_PASTE_SCAN_LINES" "$EVENTS_LOG" 2>/dev/null \
+        | LC_ALL=C grep -E '(coord\.wake|coord\.wake\.deferred_delivered)[[:space:]]' \
+        | awk '{print $1}' \
+        | while read -r ts; do
+              date -u -d "$ts" +%s 2>/dev/null || true
+          done
+}
+
+# human_typed_since <transcript-dir> <cutoff-epoch> <paste-epochs> <grace-secs>
 #
 # True (rc 0) if that Claude Code session has a typed turn newer than
 # <cutoff-epoch> that is NOT one of this watcher's own pastes. <paste-epochs>
-# is watcher_paste_epochs' output, passed in so a sweep over many worker
-# sessions computes it once.
+# is coord_paste_epochs' or watcher_paste_epochs' output (whichever matches
+# the pane actually being checked — see each call site), passed in so a
+# sweep over many worker sessions computes it once. <grace-secs> is the
+# caller's own COORD_HUMAN_PASTE_GRACE_SECS or WORKER_HUMAN_PASTE_GRACE_SECS
+# (issue #497 self-review finding, round 10: these two windows have
+# different, non-interchangeable causes — see their own declarations above
+# — so this function takes the value explicitly rather than reading either
+# global itself).
 #
 # Two independent exclusions, either of which marks a turn machine-origin:
 #
-#   1. Text match — the turn reads as the rendered inbox nudge (the template
-#      with its "%N" wildcarded) or opens with a known wake-prompt line.
-#   2. Event correlation — the turn's timestamp lands within
-#      COORD_HUMAN_PASTE_GRACE_SECS of a paste in <paste-epochs>.
-#   3. Length — the turn is longer than COORD_HUMAN_MAX_TYPED_CHARS. Worker
-#      brief deliveries are thousands of characters and match neither of the
-#      above (a brief is not the nudge, and its delivery event can scroll out
-#      of the tail); nobody types 2000 characters into a pane by hand.
+#   1. Exact text match — the turn, trimmed of surrounding whitespace, is
+#      EXACTLY the rendered inbox nudge (the template with its "%N"
+#      wildcarded) or EXACTLY the wake-prompt head line — nothing more,
+#      nothing less. (issue #497: this used to be a prefix/substring match,
+#      which misread a turn that contains the nudge alongside real operator
+#      text — e.g. the operator finishing their own message on top of a
+#      pasted, not-yet-submitted nudge and hitting Enter once — as this
+#      watcher's own paste, and let a doorbell ring straight into a present
+#      operator. An exact match only ever fires on a turn that carries
+#      NOTHING but what this watcher itself would have pasted.)
+#   2. Event correlation — the turn's timestamp lands within <grace-secs>
+#      of a paste in <paste-epochs>.
 #
-# All three, not any one: text match alone misses operator-customised
-# templates (COORD_INBOX_NUDGE_TEMPLATE / WAKE_PROMPT are env-overridable),
-# event correlation alone misses a paste whose event has scrolled out of the
-# log tail, and length alone would misread a long pasted spec as machine.
-# Each exclusion only ever moves a turn from "human" to "machine", i.e.
-# toward ringing the doorbell — the safe direction.
+# Both, not either: text match alone misses operator-customised templates
+# (COORD_INBOX_NUDGE_TEMPLATE / WAKE_PROMPT are env-overridable), and event
+# correlation alone misses a paste whose event has scrolled out of the log
+# tail. (issue #497: a third, length-based exclusion — "too long to have
+# been typed by hand" — was dropped rather than kept or raised; see
+# COORD_HUMAN_MAX_TYPED_CHARS's former declaration, near
+# COORD_HUMAN_PASTE_GRACE_SECS above, for why: it had no correlation to
+# actual typed-by-hand-ness and was the #497 incident's second hole, tripped
+# by a genuine long operator turn.) Each exclusion only ever moves a turn
+# from "human" to "machine", i.e. toward ringing the doorbell — the safe
+# direction.
 #
 # Fails OPEN throughout (rc 1 — "no human here") on a missing transcript dir,
 # absent jq, or an unreadable file. A muted swarm is a far worse failure than
 # a doorbell that rings while the operator is reading, so every uncertainty
 # resolves toward ringing.
 human_typed_since() {
-    local dir="$1" cutoff="$2" pastes="$3"
+    local dir="$1" cutoff="$2" pastes="$3" grace_secs="$4"
     [ "$HAVE_JQ" = "1" ] || return 1
     [ -d "$dir" ] || return 1
 
@@ -7331,20 +7476,25 @@ human_typed_since() {
     done
     [ "${#candidates[@]}" -gt 0 ] || return 1
 
-    # The nudge template with "%N" turned into a digit wildcard, anchored —
-    # so an operator quoting a nudge back mid-sentence doesn't match. The
-    # wildcard is ERE ("[0-9]+", not BRE's "[0-9]\+") because the matcher
-    # below is grep -E; getting that wrong makes the pattern match nothing,
-    # which reads every pasted doorbell as a human and mutes the swarm.
+    # The nudge template with "%N" turned into a digit wildcard, anchored at
+    # both ends — issue #497 made this a FULL-STRING match, not a prefix, so
+    # an operator turn that contains the nudge plus real text of their own no
+    # longer matches it. The wildcard is ERE ("[0-9]+", not BRE's "[0-9]\+")
+    # because it's matched with bash's own `=~` (ERE); getting that wrong
+    # makes the pattern match nothing, which reads every pasted doorbell as
+    # a human and mutes the swarm.
     local nudge_re
-    nudge_re="^$(printf '%s' "$COORD_INBOX_NUDGE_TEMPLATE" \
-        | sed 's/[][\.^$*+?(){}|\\]/\\&/g; s/%N/[0-9]+/')"
+    nudge_re="^$(coord_inbox_nudge_pattern)\$"
 
     # Walk each candidate's typed turns newest-first and stop at the first
     # one that survives both exclusions. tac + grep on the raw line keeps jq
     # off every line of what can be a very large transcript.
-    local line ts epoch text p wake_head
+    local line ts epoch text text_trimmed p wake_head
     wake_head="$(printf '%s' "$WAKE_PROMPT" | head -1)"
+    # Trim wake_head's own surrounding whitespace too, so it compares on the
+    # same "modulo surrounding whitespace" footing as the turn text below.
+    wake_head="${wake_head#"${wake_head%%[![:space:]]*}"}"
+    wake_head="${wake_head%"${wake_head##*[![:space:]]}"}"
     for f in "${candidates[@]}"; do
         while IFS= read -r line; do
             ts="$(printf '%s' "$line" | jq -r '.timestamp // empty' 2>/dev/null)" || continue
@@ -7361,21 +7511,24 @@ human_typed_since() {
                 elif ($c | type) == "array" then ([$c[] | select(.type == "text") | .text] | join("\n"))
                 else "" end' 2>/dev/null)" || text=""
 
-            # Exclusion 3 — too long to have been typed by a person. Cheapest
-            # of the three, so it runs first.
-            [ "${#text}" -gt "$COORD_HUMAN_MAX_TYPED_CHARS" ] && continue
-
-            # Exclusion 1 — this is the watcher's own doorbell or wake prompt.
-            printf '%s' "$text" | LC_ALL=C grep -qE "$nudge_re" && continue
-            [ -n "$wake_head" ] && \
-                printf '%s' "$text" | LC_ALL=C grep -qF -- "$wake_head" && continue
+            # Exclusion 1 — this turn IS, exactly (modulo surrounding
+            # whitespace), the watcher's own doorbell or wake-prompt head —
+            # not merely contains it. `[[ =~ ]]` matches the pattern against
+            # the WHOLE string (unlike grep, which matches per line), so a
+            # turn with the nudge on one line and the operator's own text on
+            # another correctly fails this match instead of firing on the
+            # nudge-shaped line alone.
+            text_trimmed="${text#"${text%%[![:space:]]*}"}"
+            text_trimmed="${text_trimmed%"${text_trimmed##*[![:space:]]}"}"
+            [[ "$text_trimmed" =~ $nudge_re ]] && continue
+            [ -n "$wake_head" ] && [ "$text_trimmed" = "$wake_head" ] && continue
 
             # Exclusion 2 — it coincides with a paste the watcher logged.
             local matched=0
             for p in $pastes; do
                 local delta=$((epoch - p))
                 [ "$delta" -lt 0 ] && delta=$((-delta))
-                if [ "$delta" -le "$COORD_HUMAN_PASTE_GRACE_SECS" ]; then matched=1; break; fi
+                if [ "$delta" -le "$grace_secs" ]; then matched=1; break; fi
             done
             [ "$matched" = "1" ] && continue
 
@@ -7408,7 +7561,133 @@ coord_human_present() {
     [ "$COORD_HUMAN_IDLE_SECS" -gt 0 ] || return 1
     local cutoff
     cutoff=$(( $(date +%s) - COORD_HUMAN_IDLE_SECS ))
-    human_typed_since "$(transcript_dir_for "$PROJECT_DIR")" "$cutoff" "$(watcher_paste_epochs)"
+    human_typed_since "$(transcript_dir_for "$PROJECT_DIR")" "$cutoff" "$(coord_paste_epochs)" "$COORD_HUMAN_PASTE_GRACE_SECS"
+}
+
+# coord_wake_already_submitted <since-epoch>
+#
+# (issue #497) True (rc 0) if the COORDINATOR transcript already has a
+# typed turn, timestamped strictly after <since-epoch>, whose text CONTAINS
+# the current nudge line. <since-epoch> is always a pending-wake marker's own
+# mtime (COORD_WAKE_HOLD_PENDING_FILE or COORD_WAKE_PENDING_FILE) — "has the
+# operator submitted the nudge themselves since this wake started waiting".
+#
+# This is the #497 incident's re-ring hole: a nudge pasted into the composer
+# as an unsubmitted draft (issue #422's dirty-composer case), then finished
+# and submitted by the operator as part of their own message, satisfies
+# EVERY existing gate — the pane goes idle (or busy-then-idle), the draft is
+# gone, nothing looks stuck — so the retry pass would go ahead and paste the
+# SAME nudge a second time, moments after the operator already acted on it
+# (the incident's "held two hours, re-rang as 2 items" case). Checking for
+# it here, once, right before a retry would otherwise paste or re-evaluate
+# its hold, is cheaper and more direct than teaching every hold reason about
+# it individually.
+#
+# Deliberately a SUBSTRING match (via coord_inbox_nudge_pattern, used bare —
+# contrast human_typed_since's own use of the same pattern, which anchors it
+# for an EXACT match instead): unlike that detector, which must never
+# misread a genuine operator turn as this watcher's own paste, this one only
+# ever needs to notice that the nudge content reached the coordinator by
+# SOME turn, however it arrived — anchoring it would miss the exact case
+# this function exists to catch (the nudge plus the operator's own text in
+# one submitted turn).
+#
+# Fails OPEN (rc 1 — "not already submitted") on missing jq or an unreadable
+# transcript dir: uncertain here just means the normal retry/paste path
+# runs, same posture as human_typed_since throughout this file.
+#
+# (issue #497 self-review finding) A matching turn only counts if it is at
+# least as new as every CURRENT coord-inbox/*.md file. Without this, a
+# payload that lands AFTER the operator's confirming turn — genuinely new
+# work the operator has not seen yet — would still get swept into
+# "already_submitted" on the strength of an older turn that merely happens
+# to contain the (count-agnostic) nudge text, silently dropping that new
+# item's wake. Comparing against the newest surviving file, not "since",
+# also protects the case where the operator quotes or references an old
+# nudge line long after it was resolved: that turn is real and can be newer
+# than "since", but if newer inbox content has arrived since, it does not
+# yet cover it.
+#
+# (issue #497 self-review finding, round 11) Each candidate file's typed
+# turns are walked newest-first (tac) and broken out of at the FIRST
+# nudge-matching line, same shape as human_typed_since's own cutoff break —
+# older turns in that same file can't beat this file's own newest match, so
+# there is no need to keep spawning jq against them. This only tracks each
+# file's own best (newest) matching epoch, never decides on one file alone:
+# human_typed_since's own comment warns a project dir can hold several
+# concurrent session files (a resumed session's fresh file, a subagent
+# run's own file) whose mtimes do not reliably order their CONTENTS against
+# each other, so a cross-file "first match wins" short-circuit would risk
+# missing a fresher match sitting in a file visited later. Aggregating the
+# max match epoch across every candidate file before the one freshness
+# check at the end keeps the semantics identical to the original full scan
+# while still cutting the per-tick cost from "every typed line since
+# <since>" to "typed lines back to the newest nudge mention, per file."
+coord_wake_already_submitted() {
+    local since="$1"
+    [ "$HAVE_JQ" = "1" ] || return 1
+    local dir
+    dir="$(transcript_dir_for "$PROJECT_DIR")"
+    [ -d "$dir" ] || return 1
+
+    local nudge_re
+    nudge_re="$(coord_inbox_nudge_pattern)"
+
+    local newest_inbox=0 g gm
+    for g in "$COORD_INBOX_DIR"/*.md; do
+        [ -f "$g" ] || continue
+        gm=$(mtime_epoch "$g") || gm=0
+        [[ "$gm" =~ ^[0-9]+$ ]] || gm=0
+        [ "$gm" -gt "$newest_inbox" ] && newest_inbox=$gm
+    done
+
+    local candidates=() f fmtime
+    for f in "$dir"/*.jsonl; do
+        [ -r "$f" ] || continue
+        fmtime=$(mtime_epoch "$f") || fmtime=0
+        [[ "$fmtime" =~ ^[0-9]+$ ]] || fmtime=0
+        [ "$fmtime" -ge "$since" ] && candidates+=("$f")
+    done
+    [ "${#candidates[@]}" -gt 0 ] || return 1
+
+    local line ts epoch text best_match=-1
+    for f in "${candidates[@]}"; do
+        while IFS= read -r line; do
+            ts="$(printf '%s' "$line" | jq -r '.timestamp // empty' 2>/dev/null)" || continue
+            [ -n "$ts" ] || continue
+            epoch=$(date -u -d "$ts" +%s 2>/dev/null) || continue
+            # Turns are appended in order, so once we are past "since" going
+            # backwards, every remaining turn in THIS file is older still —
+            # move on to the next candidate file.
+            [ "$epoch" -gt "$since" ] || break
+
+            text="$(printf '%s' "$line" | jq -r '
+                .message.content as $c |
+                if ($c | type) == "string" then $c
+                elif ($c | type) == "array" then ([$c[] | select(.type == "text") | .text] | join("\n"))
+                else "" end' 2>/dev/null)" || text=""
+
+            if printf '%s' "$text" | LC_ALL=C grep -qE "$nudge_re"; then
+                # This file's newest matching turn — older matches further
+                # back in this same file can never beat it, so stop here
+                # and move to the next candidate file.
+                [ "$epoch" -gt "$best_match" ] && best_match=$epoch
+                break
+            fi
+        done < <(LC_ALL=C grep -E '"promptSource"[[:space:]]*:[[:space:]]*"typed"' "$f" 2>/dev/null | tac)
+    done
+
+    # `-ge`, not `-gt`: whole-second epochs mean a turn and an inbox write
+    # in the SAME second are indistinguishable here. Treating that tie as
+    # "covered" narrowly risks dropping a doorbell for an item that
+    # actually landed a moment later in that same second — but the item
+    # itself is never lost (it stays in coord-inbox/ regardless), only its
+    # nudge is delayed to the next real wake trigger. Self-review-noted
+    # tradeoff, not fixed: sub-second precision isn't available from
+    # either timestamp source this file uses.
+    [ "$best_match" -ge 0 ] && [ "$best_match" -ge "$newest_inbox" ] && return 0
+
+    return 1
 }
 
 # worker_human_present
@@ -7430,7 +7709,7 @@ worker_human_present() {
     pastes="$(watcher_paste_epochs)"
     while read -r wt; do
         [ -n "$wt" ] || continue
-        human_typed_since "$(transcript_dir_for "$wt")" "$cutoff" "$pastes" && return 0
+        human_typed_since "$(transcript_dir_for "$wt")" "$cutoff" "$pastes" "$WORKER_HUMAN_PASTE_GRACE_SECS" && return 0
     done < <(own_worktree_dirs_for_scan "$PROJECT_DIR" 2>/dev/null || true)
     return 1
 }
@@ -7553,6 +7832,20 @@ coord_wake_hold_clear_pending() {
 # mechanism: once the busy phase is over, a human draft sitting in the
 # composer is exactly issue #422's case, with its own indefinite-retry-
 # without-forcing semantics.
+#
+# (issue #497) Before any of that, two guards that fire regardless of the
+# hold reason — either means THIS pending wake has nothing left to
+# accomplish, so it clears without ever touching llm-start.sh:
+#   inbox_empty        coord_inbox_count is now 0 — every payload this wake
+#                       would have announced was already triaged by the time
+#                       the retry ran.
+#   already_submitted  the coordinator transcript already has a typed turn,
+#                       newer than this marker, that itself contains the
+#                       nudge line (coord_wake_already_submitted) — the
+#                       operator finished the draft the paste landed in, or
+#                       otherwise submitted it themselves, before the retry
+#                       got to it (the "held two hours, re-rang as 2 items"
+#                       half of the #497 incident).
 coord_wake_hold_retry_pass() {
     [ -e "$COORD_WAKE_HOLD_PENDING_FILE" ] || return 0
 
@@ -7563,6 +7856,19 @@ coord_wake_hold_retry_pass() {
     # Pre-#459 writers left this file empty; empty always meant pane_busy.
     held_for="$(cat "$COORD_WAKE_HOLD_PENDING_FILE" 2>/dev/null | tr -d '[:space:]')" || held_for=""
     [ -n "$held_for" ] || held_for="pane_busy"
+
+    if [ "$(coord_inbox_count)" = "0" ]; then
+        echo "[$(date +%T)] held coordinator wake's inbox is now empty — clearing without pasting"
+        log_event coord.wake.skip "reason=inbox_empty trigger=hold_retry age=${age}s"
+        coord_wake_hold_clear_pending
+        return 0
+    fi
+    if coord_wake_already_submitted "$since"; then
+        echo "[$(date +%T)] operator already submitted the nudge themselves — clearing held wake without pasting"
+        log_event coord.wake.skip "reason=already_submitted trigger=hold_retry age=${age}s"
+        coord_wake_hold_clear_pending
+        return 0
+    fi
 
     # Re-evaluate LIVE — the reason recorded at mark time may have cleared,
     # or been replaced by a different one (the operator started typing while
@@ -7691,6 +7997,17 @@ coord_wake_clear_pending() {
 # exists to prevent. A busy pane on a retry tick just skips this tick
 # (coord.wake.skip reason=pane_busy) rather than delivering or escalating —
 # the pending file stays in place for the next tick either way.
+#
+# (issue #497) Before any of that, two guards that fire regardless of pane
+# state — either means THIS pending wake has nothing left to accomplish, so
+# it clears without ever touching llm-start.sh: coord_inbox_count is now 0
+# (reason=inbox_empty), or the coordinator transcript already has a typed
+# turn, newer than this pending file, that itself contains the nudge line
+# (reason=already_submitted, coord_wake_already_submitted) — the operator
+# finished the dirty draft this file was deferred over and submitted it
+# themselves before this retry got to it. See coord_wake_hold_retry_pass's
+# header comment for the same two guards on that pass, and
+# coord_wake_already_submitted's own header comment for the full incident.
 coord_wake_retry_pass() {
     [ -e "$COORD_WAKE_PENDING_FILE" ] || return 0
 
@@ -7707,6 +8024,19 @@ coord_wake_retry_pass() {
     since=$(mtime_epoch "$COORD_WAKE_PENDING_FILE") || since=$(date +%s)
     now=$(date +%s)
     age=$((now - since))
+
+    if [ "$(coord_inbox_count)" = "0" ]; then
+        echo "[$(date +%T)] deferred coordinator wake's inbox is now empty — clearing without pasting"
+        log_event coord.wake.skip "reason=inbox_empty trigger=retry age=${age}s"
+        coord_wake_clear_pending
+        return 0
+    fi
+    if coord_wake_already_submitted "$since"; then
+        echo "[$(date +%T)] operator already submitted the nudge themselves — clearing deferred wake without pasting"
+        log_event coord.wake.skip "reason=already_submitted trigger=retry age=${age}s"
+        coord_wake_clear_pending
+        return 0
+    fi
 
     if [ "$age" -ge "$COORD_WAKE_DEFER_WARN_SECS" ]; then
         local warned_at=0
