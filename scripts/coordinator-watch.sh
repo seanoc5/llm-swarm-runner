@@ -573,16 +573,27 @@
 #                           conversation. In practice nearly always false,
 #                           and costs one mtime check per worktree.
 #                           0 disables.
-#   COORD_HUMAN_PASTE_GRACE_SECS=45
-#                           (issue #459) How far either side of a paste the
-#                           watcher recorded in its own events.log a typed
-#                           turn may land and still be attributed to that
-#                           paste rather than to a human. See
-#                           human_typed_since for why this correlation is
-#                           needed alongside the text match, and why erring
-#                           large is the safe direction (a turn misread as
-#                           machine means the doorbell rings, never that the
-#                           swarm goes quiet).
+#   COORD_HUMAN_PASTE_GRACE_SECS=15
+#                           (issue #459) How far either side of a paste into
+#                           the COORDINATOR's own pane the watcher recorded
+#                           in its own events.log a typed turn may land and
+#                           still be attributed to that paste rather than to
+#                           a human. See human_typed_since for why this
+#                           correlation is needed alongside the text match,
+#                           and why erring large is the safe direction (a
+#                           turn misread as machine means the doorbell
+#                           rings, never that the swarm goes quiet). Kept
+#                           tight because a coord.wake paste is near-instant
+#                           (issue #497 self-review, round 10) — see
+#                           WORKER_HUMAN_PASTE_GRACE_SECS below for the
+#                           much slower worker-spawn path this is
+#                           deliberately NOT shared with.
+#   WORKER_HUMAN_PASTE_GRACE_SECS=45
+#                           (issue #497) Same idea, for a paste into a
+#                           WORKER's own pane (its initial brief or a
+#                           mid-session redelivery) — wider because that
+#                           path spans container/sandbox boot plus agent
+#                           launch, not a same-tick paste+Enter.
 #   WAKE_DEFER_ON_SWARM_BUSY=0
 #                           (issue #459) Opt-in: also hold doorbells while
 #                           any own worker is mid-turn or has a brief queued
@@ -1822,7 +1833,8 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     COORD_WAKE_BUSY_CEILING_SECS 900  deliver a busy-deferred wake anyway after this long (issue #430, 15min); 0=no ceiling; never applies to a human_present hold
     COORD_HUMAN_IDLE_SECS 600     hold every doorbell while the operator has typed into the COORDINATOR session this recently (issue #459); 0=off
     WORKER_HUMAN_IDLE_SECS 300    same, for any of this project's own WORKER sessions (issue #459); 0=off
-    COORD_HUMAN_PASTE_GRACE_SECS 45  how close to a watcher paste recorded in events.log a typed turn counts as that paste, not a human (issue #459)
+    COORD_HUMAN_PASTE_GRACE_SECS 15  how close to a coord.wake paste (COORDINATOR's own pane) a typed turn counts as that paste, not a human (issue #459)
+    WORKER_HUMAN_PASTE_GRACE_SECS 45  same, for a paste into a WORKER's own pane (initial brief or redelivery) — wider: spans spawn latency, not a same-tick paste (issue #497)
     WAKE_DEFER_ON_SWARM_BUSY 0    also hold doorbells while any worker is mid-turn or has a queued unclaimed brief; OFF by default — see header comment for why worker busyness is the wrong lever (issue #459)
     COORD_INBOX_NUDGE_TEMPLATE (built-in) one-line doorbell text pasted once a wake is allowed to fire; %N = live coord-inbox/*.md count (issue #430)
     ACTIVITY_WAKE_PROMPT (built-in) what the coordinator writes to the inbox on an activity-poll finding (issue #430: inbox-only, no doorbell)
@@ -2827,23 +2839,37 @@ if ! [[ "$WORKER_HUMAN_IDLE_SECS" =~ ^[0-9]+$ ]]; then
     exit 1
 fi
 
-# COORD_HUMAN_PASTE_GRACE_SECS: how far either side of a paste the watcher
-# itself recorded in events.log a typed turn can land and still be treated
-# as that paste rather than as a human typing. Too large starts swallowing
-# a human who typed immediately after reading a nudge, which is the safe
-# direction anyway (it reads as machine, so the doorbell rings — see
-# COORD_HUMAN_MAX_TYPED_CHARS's DECISION comment below for why that
-# tradeoff is the accepted one throughout this gate).
+# COORD_HUMAN_PASTE_GRACE_SECS: how far either side of a paste into the
+# COORDINATOR's own pane (a coord.wake doorbell) a typed turn can land and
+# still be treated as that paste rather than as a human typing. Too large
+# starts swallowing a human who typed immediately after reading a nudge,
+# which is the safe direction anyway (it reads as machine, so the doorbell
+# rings — see COORD_HUMAN_MAX_TYPED_CHARS's DECISION comment below for why
+# that tradeoff is the accepted one throughout this gate). Sized for the
+# near-instant llm-start.sh paste→Enter→transcript-flush path — a coord.wake
+# paste and its own Enter happen in the same watcher tick, seconds apart at
+# most — NOT for a worker's spawn-to-brief latency, which is a different
+# path with a much longer, more variable delay (WORKER_HUMAN_PASTE_GRACE_SECS
+# below).
 #
-# issue #497 self-review finding: this same window now also covers
-# worker.start-to-brief latency (watcher_paste_epochs), which is NOT the
-# near-instant llm-start.sh paste→Enter→transcript-flush path 15s was
-# originally sized for — it spans container/sandbox boot plus the
-# interactive claude launch before the brief is even typed in. Checked
+# issue #497 self-review finding (round 7): this used to be the SAME window
+# watcher_paste_epochs' worker.start correlation relied on too (both fed
+# through one shared constant), so widening it for worker-spawn latency
+# widened it here as well — and unlike the worker side, a genuine operator
+# reply landing 15-45s after their own just-delivered doorbell is a normal,
+# not rare, human timescale. Split into its own constant so this window
+# stays sized for what actually happens in this pane.
+COORD_HUMAN_PASTE_GRACE_SECS="${COORD_HUMAN_PASTE_GRACE_SECS:-15}"
+# WORKER_HUMAN_PASTE_GRACE_SECS: same idea, but for a paste into a WORKER's
+# own pane — provision-worker.sh's initial brief (worker.start) or a
+# mid-session redelivery (worker.deliver.ok/attempt). Wider than the
+# coordinator's window on purpose (issue #497 self-review finding): this
+# path spans container/sandbox boot plus the interactive agent launch
+# before the brief is even typed in, not a same-tick paste+Enter. Checked
 # against this project's own live events.log: recent worker spawns ran
 # 1-11s, but one ran 22s. 45s leaves real margin over that observed worst
-# case without a separate knob.
-COORD_HUMAN_PASTE_GRACE_SECS="${COORD_HUMAN_PASTE_GRACE_SECS:-45}"
+# case.
+WORKER_HUMAN_PASTE_GRACE_SECS="${WORKER_HUMAN_PASTE_GRACE_SECS:-45}"
 # issue #497 DECISION: COORD_HUMAN_MAX_TYPED_CHARS (the length-based "a typed
 # turn this long must be a machine paste" exclusion) is DROPPED, not raised.
 # It was the #497 incident's second hole: a genuinely present operator's
@@ -2861,6 +2887,10 @@ COORD_HUMAN_PASTE_GRACE_SECS="${COORD_HUMAN_PASTE_GRACE_SECS:-45}"
 # throughout (see human_typed_since's header comment).
 if ! [[ "$COORD_HUMAN_PASTE_GRACE_SECS" =~ ^[0-9]+$ ]]; then
     echo "ERROR: COORD_HUMAN_PASTE_GRACE_SECS must be a non-negative integer (got: $COORD_HUMAN_PASTE_GRACE_SECS)" >&2
+    exit 1
+fi
+if ! [[ "$WORKER_HUMAN_PASTE_GRACE_SECS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: WORKER_HUMAN_PASTE_GRACE_SECS must be a non-negative integer (got: $WORKER_HUMAN_PASTE_GRACE_SECS)" >&2
     exit 1
 fi
 
@@ -7376,12 +7406,18 @@ coord_paste_epochs() {
           done
 }
 
-# human_typed_since <transcript-dir> <cutoff-epoch> <paste-epochs>
+# human_typed_since <transcript-dir> <cutoff-epoch> <paste-epochs> <grace-secs>
 #
 # True (rc 0) if that Claude Code session has a typed turn newer than
 # <cutoff-epoch> that is NOT one of this watcher's own pastes. <paste-epochs>
-# is watcher_paste_epochs' output, passed in so a sweep over many worker
-# sessions computes it once.
+# is coord_paste_epochs' or watcher_paste_epochs' output (whichever matches
+# the pane actually being checked — see each call site), passed in so a
+# sweep over many worker sessions computes it once. <grace-secs> is the
+# caller's own COORD_HUMAN_PASTE_GRACE_SECS or WORKER_HUMAN_PASTE_GRACE_SECS
+# (issue #497 self-review finding, round 10: these two windows have
+# different, non-interchangeable causes — see their own declarations above
+# — so this function takes the value explicitly rather than reading either
+# global itself).
 #
 # Two independent exclusions, either of which marks a turn machine-origin:
 #
@@ -7395,8 +7431,8 @@ coord_paste_epochs() {
 #      watcher's own paste, and let a doorbell ring straight into a present
 #      operator. An exact match only ever fires on a turn that carries
 #      NOTHING but what this watcher itself would have pasted.)
-#   2. Event correlation — the turn's timestamp lands within
-#      COORD_HUMAN_PASTE_GRACE_SECS of a paste in <paste-epochs>.
+#   2. Event correlation — the turn's timestamp lands within <grace-secs>
+#      of a paste in <paste-epochs>.
 #
 # Both, not either: text match alone misses operator-customised templates
 # (COORD_INBOX_NUDGE_TEMPLATE / WAKE_PROMPT are env-overridable), and event
@@ -7415,7 +7451,7 @@ coord_paste_epochs() {
 # a doorbell that rings while the operator is reading, so every uncertainty
 # resolves toward ringing.
 human_typed_since() {
-    local dir="$1" cutoff="$2" pastes="$3"
+    local dir="$1" cutoff="$2" pastes="$3" grace_secs="$4"
     [ "$HAVE_JQ" = "1" ] || return 1
     [ -d "$dir" ] || return 1
 
@@ -7492,7 +7528,7 @@ human_typed_since() {
             for p in $pastes; do
                 local delta=$((epoch - p))
                 [ "$delta" -lt 0 ] && delta=$((-delta))
-                if [ "$delta" -le "$COORD_HUMAN_PASTE_GRACE_SECS" ]; then matched=1; break; fi
+                if [ "$delta" -le "$grace_secs" ]; then matched=1; break; fi
             done
             [ "$matched" = "1" ] && continue
 
@@ -7525,7 +7561,7 @@ coord_human_present() {
     [ "$COORD_HUMAN_IDLE_SECS" -gt 0 ] || return 1
     local cutoff
     cutoff=$(( $(date +%s) - COORD_HUMAN_IDLE_SECS ))
-    human_typed_since "$(transcript_dir_for "$PROJECT_DIR")" "$cutoff" "$(coord_paste_epochs)"
+    human_typed_since "$(transcript_dir_for "$PROJECT_DIR")" "$cutoff" "$(coord_paste_epochs)" "$COORD_HUMAN_PASTE_GRACE_SECS"
 }
 
 # coord_wake_already_submitted <since-epoch>
@@ -7649,7 +7685,7 @@ worker_human_present() {
     pastes="$(watcher_paste_epochs)"
     while read -r wt; do
         [ -n "$wt" ] || continue
-        human_typed_since "$(transcript_dir_for "$wt")" "$cutoff" "$pastes" && return 0
+        human_typed_since "$(transcript_dir_for "$wt")" "$cutoff" "$pastes" "$WORKER_HUMAN_PASTE_GRACE_SECS" && return 0
     done < <(own_worktree_dirs_for_scan "$PROJECT_DIR" 2>/dev/null || true)
     return 1
 }

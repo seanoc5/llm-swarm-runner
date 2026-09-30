@@ -419,6 +419,7 @@ WORKER_HUMAN_IDLE_SECS=0
 HAVE_JQ=0
 command -v jq >/dev/null 2>&1 && HAVE_JQ=1
 COORD_HUMAN_PASTE_GRACE_SECS=15
+WORKER_HUMAN_PASTE_GRACE_SECS=15
 WATCHER_PASTE_SCAN_LINES=2000
 WAKE_DEFER_ON_SWARM_BUSY=0
 DEBOUNCE_SECS=0
@@ -682,7 +683,7 @@ $LONG_BRIEF" \
         > "$FIXTURE_TDIR5E/session.jsonl"
 
     PASTES="$(watcher_paste_epochs)"
-    if human_typed_since "$FIXTURE_TDIR5E" "$CUTOFF" "$PASTES"; then
+    if human_typed_since "$FIXTURE_TDIR5E" "$CUTOFF" "$PASTES" "$WORKER_HUMAN_PASTE_GRACE_SECS"; then
         red "a freshly spawned worker's own initial brief must not read as a human turn — worker.start is missing from watcher_paste_epochs' pattern"
     fi
     green "a worker's initial brief lands inside the paste-grace window around its own worker.start event and is correctly excluded, not misread as human"
@@ -690,12 +691,12 @@ $LONG_BRIEF" \
     # Contrast: a genuine operator reply in that SAME worker pane, well
     # outside the paste-grace window, must still count as human — this
     # fix must not blanket-exclude everything near a worker.start event.
-    REPLY_EPOCH=$((WSTART_EPOCH + COORD_HUMAN_PASTE_GRACE_SECS + 30))
+    REPLY_EPOCH=$((WSTART_EPOCH + WORKER_HUMAN_PASTE_GRACE_SECS + 30))
     REPLY_TS="$(date -u -d "@$REPLY_EPOCH" +%Y-%m-%dT%H:%M:%S.000Z)"
     jq -cn --arg ts "$REPLY_TS" --arg text "actually let's take a different approach here" \
         '{type:"user", timestamp:$ts, promptSource:"typed", origin:{kind:"human"}, message:{role:"user", content:$text}}' \
         >> "$FIXTURE_TDIR5E/session.jsonl"
-    human_typed_since "$FIXTURE_TDIR5E" "$CUTOFF" "$PASTES" \
+    human_typed_since "$FIXTURE_TDIR5E" "$CUTOFF" "$PASTES" "$WORKER_HUMAN_PASTE_GRACE_SECS" \
         || red "a genuine operator reply well outside the paste-grace window must still count as human"
     green "a genuine operator reply in the same worker pane still counts as human once outside the paste-grace window"
 fi
@@ -708,8 +709,8 @@ if [ "${SKIP_5E:-0}" != "1" ]; then
     # file's 15s override for every other test, to prove the wider window
     # self-review's live-log finding motivated actually covers the worst
     # case it found.
-    SAVED_GRACE="$COORD_HUMAN_PASTE_GRACE_SECS"
-    COORD_HUMAN_PASTE_GRACE_SECS=45
+    SAVED_GRACE="$WORKER_HUMAN_PASTE_GRACE_SECS"
+    WORKER_HUMAN_PASTE_GRACE_SECS=45
 
     FIXTURE_TDIR5F="$LOCK_TEST_DIR/worker-transcript-5f"
     mkdir -p "$FIXTURE_TDIR5F"
@@ -727,12 +728,12 @@ $(head -c 4000 < /dev/zero | tr '\0' 'x')" \
         > "$FIXTURE_TDIR5F/session.jsonl"
 
     PASTES="$(watcher_paste_epochs)"
-    if human_typed_since "$FIXTURE_TDIR5F" "$CUTOFF" "$PASTES"; then
+    if human_typed_since "$FIXTURE_TDIR5F" "$CUTOFF" "$PASTES" "$WORKER_HUMAN_PASTE_GRACE_SECS"; then
         red "a 22s-delayed worker brief must still be excluded at the production 45s default (this repo's own observed worst case)"
     fi
     green "a 22s-delayed worker brief (this project's own observed worst case) is still excluded at the production 45s default"
 
-    COORD_HUMAN_PASTE_GRACE_SECS="$SAVED_GRACE"
+    WORKER_HUMAN_PASTE_GRACE_SECS="$SAVED_GRACE"
 fi
 
 # ============================================================================
@@ -789,11 +790,65 @@ $(head -c 4000 < /dev/zero | tr '\0' 'x')" \
         '{type:"user", timestamp:$ts, promptSource:"typed", origin:{kind:"human"}, message:{role:"user", content:$text}}' \
         > "$FIXTURE_WORKER_TDIR5G/session.jsonl"
     PASTES="$(watcher_paste_epochs)"
-    if human_typed_since "$FIXTURE_WORKER_TDIR5G" "$((WSTART_EPOCH - 5))" "$PASTES"; then
+    if human_typed_since "$FIXTURE_WORKER_TDIR5G" "$((WSTART_EPOCH - 5))" "$PASTES" "$WORKER_HUMAN_PASTE_GRACE_SECS"; then
         red "the worker's own brief must still be excluded via the full watcher_paste_epochs list — the coord-side fix must not have broken the worker-side one"
     fi
     green "the worker-side exclusion (worker_human_present's own path) is untouched by the coordinator-side fix"
 
+    HOME="$REAL_HOME"
+fi
+
+# ============================================================================
+heading "Test 5h (issue #497 self-review finding, round 10): the coordinator's own paste-grace window stays tight (15s), not the worker-spawn width (45s)"
+# ============================================================================
+# Before this fix, COORD_HUMAN_PASTE_GRACE_SECS and the worker-spawn-latency
+# window were the SAME constant — widening it to 45s for worker spawns (5f)
+# also widened the coordinator's own doorbell-paste correlation, even though
+# a coord.wake paste is near-instant and never needed widening. A genuine
+# operator reply 15-45s after their own just-delivered doorbell is a normal
+# human timescale, not an edge case, so this directly proves the split:
+# the SAME reply reads as human at the real 15s coordinator default, but
+# would have wrongly read as machine at the old shared 45s width.
+command -v jq >/dev/null 2>&1 || { yellow "jq not found — skipping Test 5h (needs jq fixtures)"; SKIP_5H=1; }
+if [ "${SKIP_5H:-0}" != "1" ]; then
+    FIXTURE_HOME5H="$LOCK_TEST_DIR/home5h"
+    FIXTURE_COORD_TDIR5H="$FIXTURE_HOME5H/.claude/projects/$(printf '%s' "$PROJECT_DIR" | tr '/' '-')"
+    mkdir -p "$FIXTURE_COORD_TDIR5H"
+    REAL_HOME="$HOME"
+    HAVE_JQ=1
+    HOME="$FIXTURE_HOME5H"
+
+    : > "$EVENTS_LOG"
+    log_event coord.wake "reason=probe"
+    WAKE_EPOCH=$(date +%s)
+
+    # A genuine operator reply 30s later: outside the real 15s coordinator
+    # window, but inside the old shared 45s one.
+    REPLY_EPOCH=$((WAKE_EPOCH + 30))
+    REPLY_TS="$(date -u -d "@$REPLY_EPOCH" +%Y-%m-%dT%H:%M:%S.000Z)"
+    jq -cn --arg ts "$REPLY_TS" --arg text "thanks, that makes sense — go ahead and merge it" \
+        '{type:"user", timestamp:$ts, promptSource:"typed", origin:{kind:"human"}, message:{role:"user", content:$text}}' \
+        > "$FIXTURE_COORD_TDIR5H/session.jsonl"
+
+    SAVED_COORD_HUMAN_IDLE_SECS="$COORD_HUMAN_IDLE_SECS"
+    COORD_HUMAN_IDLE_SECS=600
+
+    coord_human_present \
+        || red "a 30s-later genuine operator reply must count as human at the real 15s coordinator paste-grace default"
+    green "a 30s-later operator reply correctly counts as human at the real 15s coordinator default"
+
+    # Contrast: at the OLD shared 45s width, the exact same reply would have
+    # been wrongly excluded — proves this test actually discriminates
+    # between the fixed and unfixed behavior, not just trivially passing.
+    SAVED_COORD_GRACE="$COORD_HUMAN_PASTE_GRACE_SECS"
+    COORD_HUMAN_PASTE_GRACE_SECS=45
+    if coord_human_present; then
+        red "test fixture error: expected the old 45s-wide window to wrongly exclude this reply (if it didn't, this test proves nothing)"
+    fi
+    COORD_HUMAN_PASTE_GRACE_SECS="$SAVED_COORD_GRACE"
+    green "confirmed: the same reply would have been wrongly excluded at the old, unsplit 45s width — the split is what fixes it"
+
+    COORD_HUMAN_IDLE_SECS="$SAVED_COORD_HUMAN_IDLE_SECS"
     HOME="$REAL_HOME"
 fi
 
