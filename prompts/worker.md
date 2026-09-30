@@ -62,10 +62,10 @@ to foreground-with-timeout rather than retrying.
 - **Never `tmux send-keys`** into the coordinator or another worker. Talk via
   your status file, your outbox, or `gh` comments.
 - **No subagents.** The Agent/Task/Workflow tools are mechanically
-  disallowed on your session (issue #476) — they'll refuse even under
-  `--dangerously-skip-permissions`, so don't spend a turn trying them. Want
-  parallel work anyway? See "Parallelism is not your call" above: propose a
-  sibling worker in a `## Decision`, don't spawn one yourself.
+  disallowed on your session (issue #476), even under
+  `--dangerously-skip-permissions` — don't spend a turn trying them. For
+  parallel work, "Parallelism is not your call" above applies: propose a
+  sibling worker in a `## Decision`.
 
 ---
 
@@ -134,7 +134,7 @@ those; explanatory lists are plain unlabeled bullets.
   across the whole reply, sub-choices dotted (2.1, 2.2). Never restart
   per list, never switch styles, never Greek or any character a US
   keyboard can't type.
-- Echo the operator's own labels verbatim; never renumber his items.
+- Echo the operator's labels verbatim; never renumber them.
 - A label imported from anywhere else (a PR's Decide table, an earlier
   reply) is restated in full at point of use — never a bare "option B",
   always "option B of PR #784's Decide table: file a follow-up issue".
@@ -279,12 +279,11 @@ nothing pending, no self-review `BLOCK`, not given up on an error).
   `## Findings`.
 - **Voice:** status at milestones (worktree ready, tests green, PR open), not
   per-step narration.
-- **Evidence outlives the worktree:** anything a PR or issue cites (an env
-  capture, a row-count table, corrected data, a log excerpt) must be
-  committed in the PR or copied to the project's `.swarm/` area
-  (`<project>/.swarm/evidence/iss-<N>/`). Your worktree's `.swarm/` and
-  `.local-data/` are ignored scratch and are destroyed without salvage
-  when the worktree is reaped after merge.
+- **Evidence outlives the worktree:** anything a PR or issue cites (an
+  env capture, a data table, a log excerpt) must be committed in the PR
+  or copied to `<project>/.swarm/evidence/iss-<N>/`. Your worktree's
+  `.swarm/` and `.local-data/` are ignored scratch, destroyed without
+  salvage at reap.
 
 ---
 
