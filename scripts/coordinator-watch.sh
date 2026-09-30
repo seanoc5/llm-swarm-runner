@@ -7607,6 +7607,22 @@ coord_human_present() {
 # nudge line long after it was resolved: that turn is real and can be newer
 # than "since", but if newer inbox content has arrived since, it does not
 # yet cover it.
+#
+# (issue #497 self-review finding, round 11) Each candidate file's typed
+# turns are walked newest-first (tac) and broken out of at the FIRST
+# nudge-matching line, same shape as human_typed_since's own cutoff break —
+# older turns in that same file can't beat this file's own newest match, so
+# there is no need to keep spawning jq against them. This only tracks each
+# file's own best (newest) matching epoch, never decides on one file alone:
+# human_typed_since's own comment warns a project dir can hold several
+# concurrent session files (a resumed session's fresh file, a subagent
+# run's own file) whose mtimes do not reliably order their CONTENTS against
+# each other, so a cross-file "first match wins" short-circuit would risk
+# missing a fresher match sitting in a file visited later. Aggregating the
+# max match epoch across every candidate file before the one freshness
+# check at the end keeps the semantics identical to the original full scan
+# while still cutting the per-tick cost from "every typed line since
+# <since>" to "typed lines back to the newest nudge mention, per file."
 coord_wake_already_submitted() {
     local since="$1"
     [ "$HAVE_JQ" = "1" ] || return 1
@@ -7634,13 +7650,16 @@ coord_wake_already_submitted() {
     done
     [ "${#candidates[@]}" -gt 0 ] || return 1
 
-    local line ts epoch text
+    local line ts epoch text best_match=-1
     for f in "${candidates[@]}"; do
         while IFS= read -r line; do
             ts="$(printf '%s' "$line" | jq -r '.timestamp // empty' 2>/dev/null)" || continue
             [ -n "$ts" ] || continue
             epoch=$(date -u -d "$ts" +%s 2>/dev/null) || continue
-            [ "$epoch" -gt "$since" ] || continue
+            # Turns are appended in order, so once we are past "since" going
+            # backwards, every remaining turn in THIS file is older still —
+            # move on to the next candidate file.
+            [ "$epoch" -gt "$since" ] || break
 
             text="$(printf '%s' "$line" | jq -r '
                 .message.content as $c |
@@ -7648,20 +7667,25 @@ coord_wake_already_submitted() {
                 elif ($c | type) == "array" then ([$c[] | select(.type == "text") | .text] | join("\n"))
                 else "" end' 2>/dev/null)" || text=""
 
-            # `-ge`, not `-gt`: whole-second epochs mean a turn and an
-            # inbox write in the SAME second are indistinguishable here.
-            # Treating that tie as "covered" narrowly risks dropping a
-            # doorbell for an item that actually landed a moment later in
-            # that same second — but the item itself is never lost (it
-            # stays in coord-inbox/ regardless), only its nudge is delayed
-            # to the next real wake trigger. Self-review-noted tradeoff,
-            # not fixed: sub-second precision isn't available from either
-            # timestamp source this file uses.
             if printf '%s' "$text" | LC_ALL=C grep -qE "$nudge_re"; then
-                [ "$epoch" -ge "$newest_inbox" ] && return 0
+                # This file's newest matching turn — older matches further
+                # back in this same file can never beat it, so stop here
+                # and move to the next candidate file.
+                [ "$epoch" -gt "$best_match" ] && best_match=$epoch
+                break
             fi
-        done < <(LC_ALL=C grep -E '"promptSource"[[:space:]]*:[[:space:]]*"typed"' "$f" 2>/dev/null)
+        done < <(LC_ALL=C grep -E '"promptSource"[[:space:]]*:[[:space:]]*"typed"' "$f" 2>/dev/null | tac)
     done
+
+    # `-ge`, not `-gt`: whole-second epochs mean a turn and an inbox write
+    # in the SAME second are indistinguishable here. Treating that tie as
+    # "covered" narrowly risks dropping a doorbell for an item that
+    # actually landed a moment later in that same second — but the item
+    # itself is never lost (it stays in coord-inbox/ regardless), only its
+    # nudge is delayed to the next real wake trigger. Self-review-noted
+    # tradeoff, not fixed: sub-second precision isn't available from
+    # either timestamp source this file uses.
+    [ "$best_match" -ge 0 ] && [ "$best_match" -ge "$newest_inbox" ] && return 0
 
     return 1
 }
