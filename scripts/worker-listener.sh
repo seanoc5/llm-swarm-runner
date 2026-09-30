@@ -196,6 +196,7 @@ fi
 echo "--- Worker Listener Active ---"
 echo "Worktree: $WT_LABEL  (this listener serves ONLY $WT_LABEL's inbox)"
 echo "Agent:    $AGENT${MODEL:+ (model: $MODEL)}"
+echo "Prompt:   ${WORKER_PROMPT_FILE:-worker.md}"
 echo "Mode:     $([ "$HEADLESS" = "1" ] && echo headless || echo interactive)"
 echo "Queue:    $INBOX/  →  $PROCESSING/  →  $DONE/"
 echo "Legacy:   $LEGACY_TASK_FILE (v1, still supported)"
@@ -976,7 +977,15 @@ while true; do
         #   - codex: prepend worker.md to the task prompt (codex CLI does not
         #     expose an append-system-prompt flag)
         refresh_stale_runner_checkout
-        WORKER_MD="${LLM_SWARM_DIR:-}/prompts/worker.md"
+        # WORKER_PROMPT_FILE (issue #510): swap the system prompt per swarm,
+        # e.g. WORKER_PROMPT_FILE=worker-bare.md in <project>/.swarm/.env.
+        # Relative names resolve under $LLM_SWARM_DIR/prompts/ (mounted
+        # into the sandbox); absolute paths are used as-is. Unset = worker.md.
+        case "${WORKER_PROMPT_FILE:-}" in
+            "")  WORKER_MD="${LLM_SWARM_DIR:-}/prompts/worker.md" ;;
+            /*)  WORKER_MD="$WORKER_PROMPT_FILE" ;;
+            *)   WORKER_MD="${LLM_SWARM_DIR:-}/prompts/$WORKER_PROMPT_FILE" ;;
+        esac
         WORKER_SYSTEM_PROMPT_OPTS=()
         WORKER_SYSTEM_PROMPT_ENV=()
         CODEX_PREFIX=""
@@ -989,7 +998,7 @@ while true; do
         else
             case "$AGENT" in
                 claude|gemini|codex)
-                    echo "WARN: prompts/worker.md not found at $WORKER_MD — worker conventions will NOT be injected as system prompt." >&2
+                    echo "WARN: worker system prompt not found at $WORKER_MD (WORKER_PROMPT_FILE=${WORKER_PROMPT_FILE:-unset}) — worker conventions will NOT be injected as system prompt." >&2
                     echo "      Expected LLM_SWARM_DIR to be set and the file readable. Briefs will lack the universal conventions." >&2
                     ;;
             esac

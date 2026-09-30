@@ -16,6 +16,7 @@ red()   { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKER_MAX="${WORKER_MD_MAX_BYTES:-20000}"
 COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-25000}"
+BARE_MAX="${WORKER_BARE_MD_MAX_BYTES:-11000}"   # issue #510 trial prompt; ~7.5KB is script-parsed contract
 
 check() {
     local file="$1" max="$2" size
@@ -27,3 +28,4 @@ check() {
 
 check prompts/worker.md "$WORKER_MAX"
 check prompts/coordinator.md "$COORD_MAX"
+check prompts/worker-bare.md "$BARE_MAX"

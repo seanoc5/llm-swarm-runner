@@ -814,7 +814,7 @@ if ! $session_existed; then
     for _v in MAX_WORKERS MAX_TMUX_WINDOWS HOST_MAX_WORKERS TARGET_AVAILABLE OWNER_LABELS \
               INCLUDE_ASSIGNED_TO_OTHERS DEBOUNCE_SECS POLL_SECS \
               WORKER_CMD WORKER_MODEL WORKER_HEADLESS WORKER_SELF_REVIEW \
-              LLM_SWARM_DIR LLM_SWARM_DOCS; do
+              WORKER_PROMPT_FILE LLM_SWARM_DIR LLM_SWARM_DOCS; do
         _val="${!_v:-}"
         [ -n "$_val" ] && TMUX_ENV_OPTS+=(-e "$_v=$_val")
     done
