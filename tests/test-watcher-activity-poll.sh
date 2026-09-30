@@ -769,9 +769,11 @@ if [ "${SKIP_5G:-0}" != "1" ]; then
         '{type:"user", timestamp:$ts, promptSource:"typed", origin:{kind:"human"}, message:{role:"user", content:$text}}' \
         > "$FIXTURE_COORD_TDIR/session.jsonl"
 
+    SAVED_COORD_HUMAN_IDLE_SECS="$COORD_HUMAN_IDLE_SECS"
     COORD_HUMAN_IDLE_SECS=600
     coord_human_present \
         || red "a genuine operator reply in the coordinator's own transcript, seconds after an unrelated worker.start, must still count as human present — coord_human_present wrongly excluded it"
+    COORD_HUMAN_IDLE_SECS="$SAVED_COORD_HUMAN_IDLE_SECS"
     green "a worker spawn no longer excuses a genuine operator turn in the coordinator's own transcript"
 
     # Contrast: the SAME worker.start, checked the worker-side way, still
