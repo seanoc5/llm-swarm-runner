@@ -233,12 +233,18 @@ The coordinator and watcher honor a small set of tunables loaded from four sourc
 
 1. Shell env at invocation time (`MAX_WORKERS=8 ./llm-start.sh ...`)
 2. `<project>/.swarm/.env` — durable per-project overrides (gitignored)
-3. `<sandbox>/.env` — this machine's defaults (gitignored). Host facts that are true of the box, not the project: `HOST_MAX_WORKERS` sized to its RAM, data roots. Keep it short — mirroring `.env.example` here only creates drift.
+3. `<sandbox>/.env` — this machine's defaults (gitignored). Host facts that are true of the box, not the project: `HOST_MAX_WORKERS` sized to its RAM, data roots. Keep it short — mirroring `.env.example` here only creates drift. The `HOST_*` keys are host-only: tier 2 cannot set them (a project `.swarm/.env` that tries gets a warning and the key is skipped), because a per-project "host" cap is not a host cap.
 4. `<sandbox>/.env.example` — shipped defaults, safe-for-strangers
 
 | Var                          | Default | Purpose                                                                                                          |
 |------------------------------|---------|------------------------------------------------------------------------------------------------------------------|
 | `MAX_WORKERS`                | `5`     | Concurrent worker tmux windows. Increase consciously — each worker is a Claude Code session using real RAM/quota. |
+| `HOST_MAX_WORKERS`           | `8`     | Running worker containers plus spawns in flight, across every swarm on the box. Checked under one host-wide lock with the three below; refusal is exit 3 + `cap.refused`. |
+| `HOST_MAX_LOAD1`             | `auto`  | Refuse a spawn while the 1-minute load average is above this (`auto` = 1.5 x nproc; `0` off). Memory alone let 9 workers start in one minute and drive load to 95. |
+| `HOST_MIN_MEM_AVAIL_MB`      | `16384` | Refuse while `MemAvailable` is below this many MB (`0` off).                                                      |
+| `HOST_SPAWN_STAGGER_SECS`    | `60`    | Minimum seconds between any two spawns on the host, so new workers' compile and test-fork peaks don't line up (`0` off). |
+| `SANDBOX_CPUS`               | `6`     | `docker run --cpus` per worker; Java sizes `availableProcessors()` from it, so each repo's fork count shrinks on its own (`0` off). |
+| `SANDBOX_GRADLE_LIMITS`      | `1`     | Inject `org.gradle.workers.max` (`SANDBOX_GRADLE_WORKERS_MAX`, 4), a 3-min daemon idle timeout and a smaller Kotlin daemon heap (`SANDBOX_KOTLIN_DAEMON_XMX`, 1536m) into every worker's env; the repos' `gradle.properties` stay untouched. |
 | `MAX_TMUX_WINDOWS`           | `10`    | Hard cap on total session windows (`coordinator` + `util`, always present and hosting the watcher pane by default; + optional `status` + alive workers + leftover finished worker windows).             |
 | `TARGET_AVAILABLE`           | `10`    | Backlog target. Housekeeping creates new issues when AVAILABLE drops below this — NOT when raw open count is low. |
 | `OWNER_LABELS`               | empty   | Comma-separated labels treated as "human-owned" (e.g. `sean,radesh`). Skipped unless the label matches `@me`.     |

@@ -46,8 +46,16 @@ DESCRIPTION
 CAP ENFORCEMENT (exit 3 on any)
     MAX_WORKERS         alive iss-* windows < cap         (default 5)
     MAX_TMUX_WINDOWS    total session windows < cap       (default 10)
-    HOST_MAX_WORKERS    running swarm-* containers across ALL swarms on this
-                        host < cap                        (default 8)
+    HOST_MAX_WORKERS    running swarm-* containers + spawns in flight across
+                        ALL swarms on this host < cap     (default 8)
+    HOST_MAX_LOAD1      1-min load average <= cap         (default 1.5 x nproc)
+    HOST_MIN_MEM_AVAIL_MB  MemAvailable >= floor          (default 16384)
+    HOST_SPAWN_STAGGER_SECS  seconds since the last spawn on this host
+                        >= gap                            (default 60)
+    The four HOST_* checks run under one host-wide flock (HOST_STATE_DIR,
+    default $TMPDIR/llm-swarm-host-<uid>) so concurrent coordinators can't
+    each admit "one more". HOST_* keys are host facts: _load-env.sh ignores
+    them in <project>/.swarm/.env; set them in <sandbox>/.env.
     All are checked BEFORE the task brief is written into inbox/ and before
     the new tmux window would be created, so a refusal leaves no brief
     behind (issue #464 — a refused-then-retried provision used to queue the
@@ -72,6 +80,10 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env
     MAX_WORKERS         5         worker tmux window cap
     MAX_TMUX_WINDOWS    10        total session window cap
     HOST_MAX_WORKERS    8         host-wide running worker container cap
+    HOST_MAX_LOAD1      auto      host load1 ceiling (auto = 1.5 x nproc; 0 off)
+    HOST_MIN_MEM_AVAIL_MB 16384   host MemAvailable floor in MB (0 off)
+    HOST_SPAWN_STAGGER_SECS 60    min seconds between spawns host-wide (0 off)
+    HOST_STATE_DIR      (auto)    lock + pending-spawn markers, host-wide
     SANDBOX_SH          (auto)    path to sandbox.sh used by the listener
     LLM_SWARM_DIR     (auto)    sandbox install dir
 
@@ -79,7 +91,8 @@ EVENTS LOG
     Appends to <project>/.swarm/events.log:
       worker.start     new iss-N window created (alive=A/MAX, total=W/MAX)
       worker.requeue   existing iss-N window reused for follow-up task
-      cap.refused      MAX_WORKERS, MAX_TMUX_WINDOWS or HOST_MAX_WORKERS would be exceeded
+      cap.refused      MAX_WORKERS, MAX_TMUX_WINDOWS, HOST_MAX_WORKERS, host load,
+                       host memory or the spawn stagger refused the spawn (reason=)
 
 EXAMPLES
     provision-worker.sh 142                          # dispatch issue #142 from \$PWD
@@ -146,6 +159,110 @@ log_event() {
     local ts
     ts="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
     printf '%s  %-15s %s\n' "$ts" "$cat" "$*" >> "$EVENTS_LOG" 2>/dev/null || true
+}
+
+# --- Host-wide admission ------------------------------------------------------
+# Config (host tiers only; _load-env.sh ignores these in <project>/.swarm/.env):
+#   HOST_MAX_WORKERS         8        running + pending worker containers, all swarms
+#   HOST_MAX_LOAD1           auto     refuse when 1-min load > this (auto = 1.5 x nproc)
+#   HOST_MIN_MEM_AVAIL_MB    16384    refuse when MemAvailable is below this
+#   HOST_SPAWN_STAGGER_SECS  60       minimum seconds between spawns host-wide
+#   HOST_STATE_DIR           $TMPDIR/llm-swarm-host-<uid>   lock + pending markers
+# Test hooks: HOST_LOADAVG_FILE / HOST_MEMINFO_FILE replace /proc/{loadavg,meminfo}.
+HOST_MAX_LOAD1="${HOST_MAX_LOAD1:-auto}"
+HOST_MIN_MEM_AVAIL_MB="${HOST_MIN_MEM_AVAIL_MB:-16384}"
+HOST_SPAWN_STAGGER_SECS="${HOST_SPAWN_STAGGER_SECS:-60}"
+HOST_STATE_DIR="${HOST_STATE_DIR:-${TMPDIR:-/tmp}/llm-swarm-host-$(id -u)}"
+HOST_PENDING_TTL_SECS=120
+
+host_refuse() {
+    # $1 reason tag, $2 human line, $3 hint line, rest = event k=v pairs
+    local reason="$1" msg="$2" hint="$3"; shift 3
+    echo "ERROR: $msg" >&2
+    [ -n "$hint" ] && echo "       $hint" >&2
+    log_event cap.refused "issue=$ISSUE reason=$reason $*"
+    exit 3
+}
+
+host_admission_check() {
+    local container_name="swarm-${SESSION_NAME}-iss-${ISSUE}"
+    mkdir -p "$HOST_STATE_DIR"
+    exec 9>"$HOST_STATE_DIR/cap.lock"
+    flock -w 30 9 || echo "warn: host cap lock busy for 30 s; proceeding unlocked" >&2
+
+    # a) container count: running + pending spawns not yet visible to docker ps
+    if [ "$HOST_MAX_WORKERS" != "0" ]; then
+        local running pending=0 m name age now
+        running="$(docker ps --filter 'name=^swarm-' --format '{{.Names}}' 2>/dev/null || true)"
+        now=$(date +%s)
+        for m in "$HOST_STATE_DIR"/pending-*; do
+            [ -e "$m" ] || continue
+            name="${m##*/pending-}"
+            age=$(( now - $(stat -c %Y "$m" 2>/dev/null || echo "$now") ))
+            if grep -qx -- "$name" <<< "$running" || [ "$age" -gt "$HOST_PENDING_TTL_SECS" ]; then
+                rm -f -- "$m"
+            else
+                pending=$((pending + 1))
+            fi
+        done
+        local host_workers running_n=0
+        [ -n "$running" ] && running_n=$(wc -l <<< "$running")
+        host_workers=$(( running_n + pending ))
+        if [ "$host_workers" -ge "$HOST_MAX_WORKERS" ]; then
+            host_refuse host_max_workers \
+                "HOST_MAX_WORKERS cap reached (running swarm-* containers + pending spawns=$host_workers, max=$HOST_MAX_WORKERS, all swarms)" \
+                "Reap finished workers in every swarm (kill-finished-workers.sh), or raise HOST_MAX_WORKERS in <sandbox>/.env." \
+                "running=$host_workers pending=$pending max=$HOST_MAX_WORKERS"
+        fi
+    fi
+
+    # b) load average
+    if [ "$HOST_MAX_LOAD1" != "0" ]; then
+        local max_load load1 nproc_n
+        nproc_n=$(nproc 2>/dev/null || echo 4)
+        if [ "$HOST_MAX_LOAD1" = "auto" ]; then
+            max_load=$(( nproc_n * 3 / 2 ))
+        else
+            max_load="${HOST_MAX_LOAD1%%.*}"
+        fi
+        load1="$(cut -d' ' -f1 "${HOST_LOADAVG_FILE:-/proc/loadavg}" 2>/dev/null || echo 0)"
+        if [ "${load1%%.*}" -gt "$max_load" ]; then
+            host_refuse host_load \
+                "host load too high for a new worker (load1=$load1, max=$max_load, nproc=$nproc_n)" \
+                "Wait for the running workers' compile/test peaks to pass, or set HOST_MAX_LOAD1 in <sandbox>/.env (0 disables)." \
+                "load1=$load1 max=$max_load"
+        fi
+    fi
+
+    # c) available memory
+    if [ "$HOST_MIN_MEM_AVAIL_MB" != "0" ]; then
+        local avail_kb avail_mb
+        avail_kb="$(awk '/^MemAvailable:/ {print $2}' "${HOST_MEMINFO_FILE:-/proc/meminfo}" 2>/dev/null || echo 0)"
+        avail_mb=$(( ${avail_kb:-0} / 1024 ))
+        if [ "$avail_mb" -lt "$HOST_MIN_MEM_AVAIL_MB" ]; then
+            host_refuse host_mem \
+                "host memory too low for a new worker (MemAvailable=${avail_mb} MB, min=${HOST_MIN_MEM_AVAIL_MB} MB)" \
+                "Reap finished workers, or lower HOST_MIN_MEM_AVAIL_MB in <sandbox>/.env (0 disables)." \
+                "avail_mb=$avail_mb min_mb=$HOST_MIN_MEM_AVAIL_MB"
+        fi
+    fi
+
+    # d) spawn stagger
+    if [ "$HOST_SPAWN_STAGGER_SECS" != "0" ] && [ -e "$HOST_STATE_DIR/last-spawn" ]; then
+        local since
+        since=$(( $(date +%s) - $(stat -c %Y "$HOST_STATE_DIR/last-spawn") ))
+        if [ "$since" -lt "$HOST_SPAWN_STAGGER_SECS" ]; then
+            host_refuse spawn_stagger \
+                "a worker was spawned ${since}s ago on this host; minimum gap is ${HOST_SPAWN_STAGGER_SECS}s (HOST_SPAWN_STAGGER_SECS)" \
+                "Retry after $((HOST_SPAWN_STAGGER_SECS - since))s; the coordinator does this on its own." \
+                "since=$since min=$HOST_SPAWN_STAGGER_SECS"
+        fi
+    fi
+
+    # Admitted: record the in-flight spawn and the stagger clock, then
+    # release the lock (flock releases with fd 9 at exit anyway).
+    touch "$HOST_STATE_DIR/pending-$container_name" "$HOST_STATE_DIR/last-spawn"
+    exec 9>&-
 }
 
 echo "=== provision-worker.sh ==="
@@ -319,18 +436,27 @@ if [ "$WINDOW_EXISTS" -eq 0 ]; then
         log_event cap.refused "issue=$ISSUE reason=max_tmux_windows total=$total_windows max=$MAX_TMUX_WINDOWS"
         exit 3
     fi
-    # Host-wide cap: every swarm on this box provisions into the same RAM.
-    # Counts running worker containers regardless of session (names are
-    # swarm-<session>-iss-<issue>). Set HOST_MAX_WORKERS=0 to disable.
-    if [ "$HOST_MAX_WORKERS" != "0" ]; then
-        host_workers=$(docker ps --filter 'name=^swarm-' --format '{{.Names}}' 2>/dev/null | wc -l)
-        if [ "$host_workers" -ge "$HOST_MAX_WORKERS" ]; then
-            echo "ERROR: HOST_MAX_WORKERS cap reached (running swarm-* containers=$host_workers, max=$HOST_MAX_WORKERS, all swarms)" >&2
-            echo "       Reap finished workers in every swarm (kill-finished-workers.sh), or raise HOST_MAX_WORKERS." >&2
-            log_event cap.refused "issue=$ISSUE reason=host_max_workers running=$host_workers max=$HOST_MAX_WORKERS"
-            exit 3
-        fi
-    fi
+    # Host-wide admission (2026-09-29, after the load-95 review): every
+    # swarm on this box provisions into the same RAM and the same 32
+    # threads, so the decision is taken under one host-wide flock and
+    # covers four things, in order:
+    #   a) HOST_MAX_WORKERS  running swarm-* containers + spawns still in
+    #      flight (a "pending" marker per spawn, written under the lock,
+    #      dropped once the container shows up or after 120 s). Without the
+    #      markers three coordinators counting `docker ps` in the same
+    #      second all saw room for one more and 15 ran against a cap of 14.
+    #   b) HOST_MAX_LOAD1    1-minute load average ceiling ("auto" =
+    #      1.5 x nproc). Memory used to be the only governor and it cuts on
+    #      the wrong axis: 9 workers dispatched inside one minute all
+    #      compiled then forked test JVMs together (load 95 on 32 threads).
+    #   c) HOST_MIN_MEM_AVAIL_MB  MemAvailable floor, so a spawn can't push
+    #      the box into swap even when the container count is under cap.
+    #   d) HOST_SPAWN_STAGGER_SECS  minimum gap between any two spawns
+    #      host-wide, so the compile/fork peaks of new workers don't line up.
+    # Each refusal is exit 3 + cap.refused, the same path the coordinator
+    # already retries. 0 disables any one of them; HOST_STATE_DIR holds the
+    # lock and markers (host-wide, outside every repo).
+    host_admission_check
 fi
 
 # 3. Build task brief atomically (mktemp+mv inside same FS = atomic rename)
@@ -429,7 +555,7 @@ else
     # explicit hand-off the acceptance-check config documented in
     # .env.example never reaches sandbox.sh (and thus never the listener).
     tmux new-window -d -t "$SESSION_NAME" -n "iss-$ISSUE" \
-        "WORKER_CONTAINER_NAME=$(printf '%q' "$container_name") WORKER_CMD=$(printf '%q' "${WORKER_CMD:-claude}") WORKER_MODEL=$(printf '%q' "${WORKER_MODEL:-}") WORKER_HEADLESS=$(printf '%q' "${WORKER_HEADLESS:-0}") WORKER_SELF_REVIEW=$(printf '%q' "${WORKER_SELF_REVIEW:-1}") WORKER_CHECK=$(printf '%q' "${WORKER_CHECK:-}") WORKER_CHECK_CMD=$(printf '%q' "${WORKER_CHECK_CMD:-}") WORKER_CHECK_TIMEOUT=$(printf '%q' "${WORKER_CHECK_TIMEOUT:-}") WORKER_CHECK_RETRY=$(printf '%q' "${WORKER_CHECK_RETRY:-}") SWARM_EVAL_LOG=$(printf '%q' "${SWARM_EVAL_LOG:-}") EXTRA_MOUNTS=$(printf '%q' "${EXTRA_MOUNTS:-}") SANDBOX_DEP_CACHE=$(printf '%q' "${SANDBOX_DEP_CACHE:-}") SANDBOX_ALLOW_BACKGROUND_TASKS=$(printf '%q' "${SANDBOX_ALLOW_BACKGROUND_TASKS:-}") $(printf '%q' "$SANDBOX_SH") $(printf '%q' "$WT") listener"
+        "WORKER_CONTAINER_NAME=$(printf '%q' "$container_name") WORKER_CMD=$(printf '%q' "${WORKER_CMD:-claude}") WORKER_MODEL=$(printf '%q' "${WORKER_MODEL:-}") WORKER_HEADLESS=$(printf '%q' "${WORKER_HEADLESS:-0}") WORKER_SELF_REVIEW=$(printf '%q' "${WORKER_SELF_REVIEW:-1}") WORKER_CHECK=$(printf '%q' "${WORKER_CHECK:-}") WORKER_CHECK_CMD=$(printf '%q' "${WORKER_CHECK_CMD:-}") WORKER_CHECK_TIMEOUT=$(printf '%q' "${WORKER_CHECK_TIMEOUT:-}") WORKER_CHECK_RETRY=$(printf '%q' "${WORKER_CHECK_RETRY:-}") SWARM_EVAL_LOG=$(printf '%q' "${SWARM_EVAL_LOG:-}") EXTRA_MOUNTS=$(printf '%q' "${EXTRA_MOUNTS:-}") SANDBOX_DEP_CACHE=$(printf '%q' "${SANDBOX_DEP_CACHE:-}") SANDBOX_CPUS=$(printf '%q' "${SANDBOX_CPUS:-}") SANDBOX_GRADLE_LIMITS=$(printf '%q' "${SANDBOX_GRADLE_LIMITS:-}") SANDBOX_GRADLE_WORKERS_MAX=$(printf '%q' "${SANDBOX_GRADLE_WORKERS_MAX:-}") SANDBOX_KOTLIN_DAEMON_XMX=$(printf '%q' "${SANDBOX_KOTLIN_DAEMON_XMX:-}") SANDBOX_ALLOW_BACKGROUND_TASKS=$(printf '%q' "${SANDBOX_ALLOW_BACKGROUND_TASKS:-}") $(printf '%q' "$SANDBOX_SH") $(printf '%q' "$WT") listener"
     echo "[4/4] tmux window iss-$ISSUE spawned (listener)"
     log_event worker.start "issue=$ISSUE task_id=$TASK_ID window=iss-$ISSUE alive=$((alive_workers + 1))/$MAX_WORKERS total_windows=$((total_windows + 1))/$MAX_TMUX_WINDOWS"
 fi
