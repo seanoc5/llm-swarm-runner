@@ -505,5 +505,42 @@ grep -q 'iss-53.*lookup failed' "$RUN_LOG12" \
 $(cat "$RUN_LOG12")"
 green "iss-53 (PR lookup failed, issue CLOSED) preserved — PR_LOOKUP_FAILED guard held"
 
+# ============================================================================
+heading "Test 13: worktree_safe_to_reap on a real provision-worker.sh-shaped branch (issue #466 self-review)"
+# ============================================================================
+# Tests 7-12 all push with `-u origin <own-branch-name>`, which gives the
+# branch an upstream of its own name. A real worker branch never does that:
+# provision-worker.sh creates it as `git worktree add -b BRANCH
+# $DEFAULT_REMOTE_REF` (scripts/provision-worker.sh:351), which makes git set
+# its upstream to the DEFAULT branch's remote-tracking ref, not to a
+# same-named remote branch that may not even exist yet. For the common no-PR
+# case — no commits made at all, task delivered as an issue comment —
+# worktree_safe_to_reap must still read that as "0 ahead of upstream, safe",
+# even though upstream here is origin/<default>, not origin/fix/issue-54.
+
+git -C "$PROJECT_DIR" worktree add -q -b fix/issue-54 "$TEST_DIR/wt-issue-54" "origin/$DEFAULT_BRANCH"
+"$SHIM_DIR/tmux" new-window -t "$SESSION" -n iss-54
+sed -i "s/53) echo CLOSED; exit 0 ;;/53) echo CLOSED; exit 0 ;;\n        54) echo CLOSED; exit 0 ;;/" "$SHIM_DIR/gh"
+
+git -C "$TEST_DIR/wt-issue-54" rev-parse --symbolic-full-name '@{upstream}' | grep -qx "refs/remotes/origin/$DEFAULT_BRANCH" \
+    || red "fixture bug: fix/issue-54's upstream isn't origin/$DEFAULT_BRANCH as provision-worker.sh's shape requires"
+
+RUN_LOG13="$TEST_DIR/run13.log"
+set +e
+(cd "$PROJECT_DIR" && PATH="$SHIM_DIR:$PATH" "$KILL_FINISHED" --idle-min 0) > "$RUN_LOG13" 2>&1
+RC13=$?
+set -e
+[ "$RC13" -eq 0 ] || red "expected exit 0, got $RC13. Output:
+$(cat "$RUN_LOG13")"
+
+if "$SHIM_DIR/tmux" list-windows -t "$SESSION" -F '#W' | grep -qx 'iss-54'; then
+    red "iss-54 (no-commit no-PR task, provision-worker.sh-shaped upstream) survived default mode. Output:
+$(cat "$RUN_LOG13")"
+fi
+grep -q 'iss-54.*issue-closed.*kill' "$RUN_LOG13" \
+    || red "expected iss-54's kill line to cite issue-closed. Output:
+$(cat "$RUN_LOG13")"
+green "iss-54 (no commits, upstream = origin/$DEFAULT_BRANCH per provision-worker.sh's own shape) reaped by DEFAULT mode"
+
 echo
 green "ALL TESTS PASSED"
