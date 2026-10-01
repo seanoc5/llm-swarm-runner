@@ -112,6 +112,15 @@ count_queued_files() {
 # scripts convention; mirrors requeue.sh's brief_excerpt, including the
 # six-backtick fence and the defanging of any six-or-more run in the
 # content so a brief carrying its own code fences cannot break out.
+#
+# issue #449: provision-worker.sh prepends prompts/refs.md's Reference
+# Docs Index to every brief, so a literal head excerpt showed only that
+# preamble and nothing task-specific — misread three times on separate
+# civicstrata/fand-app PRs as salvage corruption before the coordinator's
+# investigation (issue #449 comments) traced it to this excerpt starting
+# at line 1 instead of the brief's own content. Excerpt from the brief's
+# `## Task` heading when present; fall back to the head for briefs that
+# don't have one (hand-authored requeues, legacy format).
 salvaged_excerpt() {
     local salvage_dir="$1"
     local max_lines="${SWARM_PR_BRIEF_LINES:-20}"
@@ -123,13 +132,17 @@ salvaged_excerpt() {
         [ -n "$file" ] && break
     done
     [ -n "$file" ] && [ -r "$file" ] || return 0
-    local total
+    local total start remaining
     total="$(wc -l < "$file" 2>/dev/null || echo 0)"
-    head -n "$max_lines" "$file" 2>/dev/null \
+    start="$(grep -n '^## Task$' "$file" 2>/dev/null | head -1 | cut -d: -f1)"
+    start="${start:-1}"
+    tail -n "+$start" "$file" 2>/dev/null \
+        | head -n "$max_lines" \
         | cut -c1-200 \
         | sed -e 's/`\{6,\}/[fence]/g'
-    if [ "$total" -gt "$max_lines" ]; then
-        printf '\n… truncated (%s more lines)\n' "$((total - max_lines))"
+    remaining=$((total - start + 1 - max_lines))
+    if [ "$remaining" -gt 0 ]; then
+        printf '\n… truncated (%s more lines)\n' "$remaining"
     fi
 }
 

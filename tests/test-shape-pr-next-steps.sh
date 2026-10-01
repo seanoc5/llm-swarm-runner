@@ -159,6 +159,20 @@ echo "visible" > "$TEST_DIR/ok-brief.md"
 [ -z "$(brief_excerpt "$TEST_DIR/nope.md")" ] || red "missing file must yield nothing, not an error"
 green "SWARM_PR_BRIEF_EXCERPT=0 suppresses; a missing brief degrades to silence"
 
+heading "Test 7b: excerpt starts at '## Task', not the refs.md preamble (issue #449)"
+{
+    seq 1 19 | sed 's/^/refs-index line /'  # mimics prompts/refs.md's length
+    echo
+    echo "## Task"
+    echo
+    echo "Fix issue #449. Details follow."
+} > "$TEST_DIR/provisioned-brief.md"
+out="$(SWARM_PR_BRIEF_LINES=5 brief_excerpt "$TEST_DIR/provisioned-brief.md")"
+printf '%s' "$out" | grep -q '^## Task$' || red "expected the excerpt to open on '## Task': $out"
+printf '%s' "$out" | grep -q 'refs-index line' \
+    && red "excerpt still shows the refs.md preamble instead of the task: $out"
+green "excerpt opens on '## Task' instead of the refs.md head"
+
 # ═════════════════════════════ salvaged_excerpt ═════════════════════════════
 
 heading "Test 8: salvage excerpt prefers inbox/ (never delivered) over processing/"
@@ -178,5 +192,21 @@ printf '%s' "$(salvaged_excerpt "$SALV")" | grep -q 'processing brief' \
 rm "$SALV/processing/b.md"
 [ -z "$(salvaged_excerpt "$SALV")" ] || red "an empty salvage dir must yield nothing"
 green "inbox → processing → outbox precedence; empty salvage degrades to silence"
+
+heading "Test 9: salvage excerpt starts at '## Task', not the refs.md preamble (issue #449)"
+SALV2="$TEST_DIR/salvaged/iss-449"
+mkdir -p "$SALV2/processing"
+{
+    seq 1 19 | sed 's/^/refs-index line /'
+    echo
+    echo "## Task"
+    echo
+    echo "Fix issue #449. Details follow."
+} > "$SALV2/processing/c.md"
+out="$(SWARM_PR_BRIEF_LINES=5 salvaged_excerpt "$SALV2")"
+printf '%s' "$out" | grep -q '^## Task$' || red "expected the excerpt to open on '## Task': $out"
+printf '%s' "$out" | grep -q 'refs-index line' \
+    && red "a salvaged brief still excerpts as the refs.md preamble — the #449 misread: $out"
+green "a claimed-but-unfinished brief excerpts its task, not the refs.md head"
 
 printf '\n\033[1;32mAll checks passed.\033[0m\n'
