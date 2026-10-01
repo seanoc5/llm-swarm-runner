@@ -100,6 +100,13 @@ STARTUP FAILURE (exit 4, issue #493)
     inbox/ (fand-etl 2026-09-27: undiscovered for ~7 hours).
     PROVISION_SPAWN_CHECK_SECS=0 disables this check (for test harnesses
     that stub tmux/docker without simulating a live pane or container).
+    Caveat: a cold host without the llm-swarm-runner image yet runs
+    `docker build` before `docker run` (sandbox.sh) — the default 5s isn't
+    enough to cover a build, so a first-ever (or post-Dockerfile-change)
+    spawn on such a host can false-positive exit 4 while the worker is
+    actually still coming up. Raise PROVISION_SPAWN_CHECK_SECS when
+    pre-warming a new host, or pre-build the image once with
+    `docker build -t llm-swarm-runner:latest .` before provisioning.
 
 CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env
          > <sandbox>/.env.example)

@@ -89,7 +89,7 @@ for fn in coord_inbox_write mtime_epoch; do
     [ "$(type -t "$fn")" = "function" ] || red "could not extract '$fn' from $WATCH — has it been renamed?"
 done
 
-for fn in is_own_worktree_dir own_worktree_dirs_for_scan has_live_window \
+for fn in is_own_worktree_dir own_worktree_dirs_for_scan has_live_window_draining_brief \
           stranded_brief_queue_lines stranded_brief_body stranded_brief_sweep_pass; do
     body="$(extract_fn "$fn" "$WATCH")"
     [ -n "$body" ] || red "could not extract '$fn' from $WATCH — has it been renamed?"
@@ -296,12 +296,18 @@ heading "Test 13: a listed-but-dead-paned window must NOT count as live (issue #
 # after a provisioning collision (e.g. sandbox.sh's `docker run` hitting a
 # stale same-name container, #493's "What happened" incident) — the window
 # NAME stays listed, pane_dead=1, nothing left to drain the queue. Before
-# #493's fix, has_live_window only checked window-name existence, so this
-# corpse read as "covers the queue" and the sweep never fired. The tmux
-# stub here distinguishes list-windows (names the window) from list-panes
-# (reports its pane_dead flag) — the earlier tests' single-answer `tmux()`
-# stubs can't express this distinction, which is exactly the gap the old
-# has_live_window had.
+# #493's fix, this sweep's "live window" check (has_live_window) only
+# looked at window-name existence, so this corpse read as "covers the
+# queue" and the sweep never fired; the fix added a second, pane-liveness-
+# aware check (has_live_window_draining_brief) used only here, not by
+# pr_poll_pass's reap decision — a dead-paned window is already reaped
+# correctly there regardless of pane state (kill-finished-workers.sh kills
+# by window name), so folding pane liveness into the shared helper would
+# have slowed that path down for no reason. The tmux stub here
+# distinguishes list-windows (names the window) from list-panes (reports
+# its pane_dead flag) — the earlier tests' single-answer `tmux()` stubs
+# can't express this distinction, which is exactly the gap the old check
+# had.
 # Test 12 leaves its own fixture file behind in wt-issue-102's inbox/ (it
 # exercises stranded_brief_queue_lines directly, never the full sweep, so
 # nothing ever drained it) — clear it so it can't also get flagged here and
