@@ -217,6 +217,10 @@ If the path inside the `gitdir:` line doesn't exist on the host (e.g., the main 
 
 Expected, not a bug: since [#504](https://github.com/seanoc5/llm-swarm-runner/issues/504), `sandbox.sh` re-mounts every *other* worktree's admin dir (`<main>/.git/worktrees/<other>/`) read-only on top of whichever read-write mount already covers it, because this container can only see its OWN worktree's working directory — every sibling's looks "gone" to git, which otherwise made `prune`/`remove` free to delete their live metadata. This applies the same way whether the container is pointed at a linked worktree or at the main checkout itself — either way, every *other* worktree it can't see gets locked down. `git worktree list --porcelain` still reports siblings as `prunable` (git still can't see them) — that's unchanged and harmless to ignore from inside a container. An attempt to actually prune/remove one now fails with a read-only-filesystem error instead of succeeding, which is the fix working as intended; run `git worktree prune`/`remove` from the host, outside any sandbox container, instead. The lockdown is applied at container-launch time — a worktree created after a sibling's (or the main checkout's) container started isn't covered by that container until it's relaunched.
 
+### `git gc` fails with "cannot lock ref 'worktrees/.../HEAD'" inside a worker
+
+Expected side effect of the same [#504](https://github.com/seanoc5/llm-swarm-runner/issues/504) lockdown above: `git gc` expires reflogs for *every* worktree, not just the current one, which needs to briefly lock each sibling's `HEAD` — and a worker container can't, since every sibling's admin dir is mounted read-only. Run `git gc` from the host instead. This doesn't reopen the original hole (no delete happens, the command just fails); it's a known, accepted tradeoff of blocking writes to sibling admin dirs at all, not something this fix special-cases around.
+
 ---
 
 ## Coordinator & Workers

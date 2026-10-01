@@ -155,15 +155,23 @@ fi
 # ── 3. Direct write/delete attempts against the sibling's admin dir fail ────
 echo ""
 echo "[ 3. Fix: direct writes to a sibling's admin dir are blocked, not just prune ]"
-write_out=$(run_in_wta "echo x >> '$GITCOMMON/worktrees/wt-b/HEAD' 2>&1; echo RC=\$?")
+write_out=$(run_in_wta "echo x >> '$GITCOMMON/worktrees/wt-b/HEAD' 2>&1; echo RC=\$?" || true)
 if echo "$write_out" | grep -qi "read-only file system" && ! echo "$write_out" | grep -q "RC=0"; then
     pass "direct write into sibling's admin file fails (read-only mount)"
 else
     fail "direct write into sibling's admin file fails (read-only mount)" "$write_out"
 fi
 
-rm_out=$(run_in_wta "rm -rf '$GITCOMMON/worktrees/wt-b' 2>&1; echo RC=\$?")
-if [ -d "$GITCOMMON/worktrees/wt-b" ]; then
+rm_out=$(run_in_wta "rm -rf '$GITCOMMON/worktrees/wt-b' 2>&1; echo RC=\$?" || true)
+# Require evidence the container actually ran rm and it failed (not just that
+# the dir survives, which would also be true — wrongly — if the container
+# never launched at all).
+if ! echo "$rm_out" | grep -q "RC="; then
+    fail "rm -rf on sibling's admin dir fails and leaves it intact" \
+        "container never reported a result — can't tell this blocked rm vs. never ran:" "$rm_out"
+elif echo "$rm_out" | grep -q "RC=0"; then
+    fail "rm -rf on sibling's admin dir fails and leaves it intact" "rm reported success: $rm_out"
+elif [ -d "$GITCOMMON/worktrees/wt-b" ]; then
     pass "rm -rf on sibling's admin dir fails and leaves it intact"
 else
     fail "rm -rf on sibling's admin dir fails and leaves it intact" "$rm_out"
@@ -219,6 +227,25 @@ else
     fail "both worktrees' admin dirs survive \`git worktree prune -v\` run against the main checkout" \
         "prune never even saw wt-a/wt-b as prunable — can't tell this blocked the delete vs. never ran:" \
         "prune output: $main_prune_out"
+fi
+
+# ── 7. Known, accepted tradeoff: `git gc` fails inside a locked-down worker ─
+# `git gc` expires reflogs for EVERY worktree, which needs to briefly lock
+# each sibling's HEAD — something the read-only overlay now refuses just
+# like it refuses prune/rm. This is intentional (allowing that one write
+# back would mean allowing writes to sibling admin dirs in general, which is
+# the whole thing being locked down) — asserted here so it's a documented,
+# tracked behavior rather than a silent, untested side effect.
+echo ""
+echo "[ 7. Known tradeoff: \`git gc\` can't lock a sibling's HEAD to expire its reflog ]"
+gc_out=$(run_in_wta "GIT_CONFIG_GLOBAL=/dev/null git gc 2>&1; echo RC=\$?" || true)
+if echo "$gc_out" | grep -qi "cannot lock ref" && ! echo "$gc_out" | grep -q "RC=0"; then
+    pass "git gc fails to lock a sibling's HEAD (expected — see docs/troubleshooting.md)"
+elif is_nested_gitconfig_quirk "$gc_out"; then
+    skip "git gc fails to lock a sibling's HEAD (expected — see docs/troubleshooting.md)" \
+        "nested-DooD \$HOME/.gitconfig quirk, unrelated to #504 (see is_nested_gitconfig_quirk)"
+else
+    fail "git gc fails to lock a sibling's HEAD (expected — see docs/troubleshooting.md)" "$gc_out"
 fi
 
 echo ""
