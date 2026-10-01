@@ -921,6 +921,62 @@ $(head -c 4000 < /dev/zero | tr '\0' 'x')" \
 fi
 
 # ============================================================================
+heading "Test 5j (issue #506 self-review finding): run_poll's claims scan is never baselined into seen_file, so a pre-existing marker (watcher restart) and a reused task_id (requeue) both still get forwarded"
+# ============================================================================
+# Self-review on this issue's own PR caught that routing claims/*.claim
+# through the SAME seen_file/comm diff used for done/outbox outcomes would
+# silently eat two cases: a marker already on disk when this watcher starts
+# (done/outbox outcomes correctly skip replaying what predates the watcher
+# — a claim marker, a one-shot buffer, must NOT be skipped the same way),
+# and a path whose task_id is reused by a later requeue after its first
+# marker was already forwarded+deleted (seen_file only drops a path once
+# some OTHER new path shows up in the same tick). The fix pulled claims
+# scanning out of scan_outcomes entirely into scan_claims/dispatch_claims,
+# which run_poll now calls unconditionally every tick with no seen-state at
+# all. This test drives those two functions directly — the same ones
+# run_poll's loop calls — rather than re-simulating the loop itself.
+for fn in scan_claims dispatch_claims; do
+    body="$(extract_fn "$fn")"
+    [ -n "$body" ] || red "could not extract function '$fn' from $WATCH — has it been renamed?"
+    eval "$body"
+done
+# scan_claims normally resolves worktrees via own_worktree_dirs_for_scan ->
+# swarm_own_worktree_dirs (issue #357's git-worktree-list-backed discovery,
+# its own separately-tested concern) — stubbed here to point straight at
+# this test's one fake worktree, so this test stays focused on scan_claims/
+# dispatch_claims' own baseline-free semantics instead of worktree discovery.
+own_worktree_dirs_for_scan() { echo "$SELFHEAL_WT"; }
+
+: > "$EVENTS_LOG"
+CLAIM_MARKER_5J="$SELFHEAL_WT/.swarm/tasks/claims/t506-startup.claim"
+printf '2026-10-01T00:00:00Z\n' > "$CLAIM_MARKER_5J"
+
+# Case 1: the marker already exists before dispatch_claims is ever called —
+# standing in for one a listener dropped moments before a coordinator
+# restart. No seen_file is built or consulted anywhere in this path.
+dispatch_claims
+
+[ -f "$CLAIM_MARKER_5J" ] && red "a claim marker that already existed before the first dispatch_claims call must still be forwarded and deleted (simulates a watcher restart)"
+grep -q 'task_id=t506-startup' "$EVENTS_LOG" \
+    || red "a pre-existing claim marker was not forwarded on the first dispatch_claims call: $(cat "$EVENTS_LOG")"
+green "a claim marker already on disk before the first scan (simulating a watcher restart) is still forwarded, not silently baselined away"
+
+# Case 2: the SAME path is recreated (a requeue reusing the same task_id)
+# after its first marker was already forwarded and deleted. A seen_file-
+# backed diff would treat this path as already handled; scan_claims/
+# dispatch_claims carry no such memory, so it must be forwarded again.
+: > "$EVENTS_LOG"
+printf '2026-10-01T00:05:00Z\n' > "$CLAIM_MARKER_5J"
+dispatch_claims
+
+[ -f "$CLAIM_MARKER_5J" ] && red "a reused claim marker path must also be forwarded and deleted on its second appearance"
+grep -q 'task_id=t506-startup' "$EVENTS_LOG" \
+    || red "a claim marker whose task_id was reused after its first delivery was silently dropped: $(cat "$EVENTS_LOG")"
+green "a claim marker path reused by a later requeue is forwarded again, not silently dropped as 'already seen'"
+
+unset -f own_worktree_dirs_for_scan
+
+# ============================================================================
 heading "Test 6: a debounced activity finding is retried on a later tick, not lost (issue #392 self-review finding, now via the coordinator inbox)"
 # ============================================================================
 # activity_poll_pass only marks ACTIVITY_ANNOUNCED_PR/_ISSUE (and

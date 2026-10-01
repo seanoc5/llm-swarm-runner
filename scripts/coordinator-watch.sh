@@ -8729,12 +8729,54 @@ run_inotify() {
                 ;;
             */wt-issue-*/.swarm/tasks/claims/*.claim)
                 # worker-listener.sh self-heal claim marker (issue #506) —
-                # same mktemp-then-mv convention, always scanned (see
-                # scan_outcomes' identical claims_dirs comment above).
+                # same mktemp-then-mv convention as outbox messages above.
+                # Unlike the poll backend's run_poll (see its scan_claims
+                # comment), inotify is inherently event-driven rather than
+                # a seen/unseen diff against a baseline, so this path
+                # doesn't share that function's startup/reuse race — it
+                # just can't see a marker dropped before inotifywait
+                # attached in the first place, same pre-existing gap as
+                # every other category above.
                 dispatch_selfheal_claim "$path"
                 ;;
         esac
     done
+}
+
+# scan_claims / dispatch_claims — worker-listener.sh self-heal claim
+# markers (issue #506), used by run_poll below. Deliberately kept OUT of
+# run_poll's scan_outcomes/seen_file: a claim marker is a one-shot handoff
+# buffer that on_selfheal_claim deletes once forwarded (see its header), so
+# every marker that exists on disk must be dispatched, full stop —
+# including one a listener dropped moments before this watcher (re)started
+# (self-review on this issue's own PR: baselining it into seen_file at
+# startup, the way done/outbox outcomes correctly ARE baselined so they're
+# never replayed, would silently swallow it instead), and including a path
+# whose task_id gets reused by a later requeue after its first marker was
+# already forwarded+deleted (seen_file only drops a path once some OTHER
+# new path arrives in the same tick — see run_poll's `echo "$current" >
+# seen_file` gate — so a quiet period followed by a reused name would
+# otherwise be misread as "already handled"). Scanning fresh every tick and
+# dispatching unconditionally sidesteps both: a marker disappears from the
+# next scan as soon as it's deleted, and a recreated one is always new
+# again. Top-level (not nested in run_poll, unlike its sibling
+# scan_outcomes) so tests can extract and drive them directly.
+scan_claims() {
+    local claims_dirs=() wt
+    while IFS= read -r wt; do
+        [ -n "$wt" ] || continue
+        [ -d "$wt/.swarm/tasks/claims" ] && claims_dirs+=("$wt/.swarm/tasks/claims")
+    done < <(own_worktree_dirs_for_scan "$PROJECT_DIR")
+    [ "${#claims_dirs[@]}" -gt 0 ] || return 0
+    find "${claims_dirs[@]}" -maxdepth 1 -name '*.claim' -print 2>/dev/null
+}
+
+dispatch_claims() {
+    local path
+    while IFS= read -r path; do
+        [ -z "$path" ] && continue
+        dispatch_selfheal_claim "$path"
+    done < <(scan_claims)
 }
 
 # ---------------------------------------------------------------------------
@@ -8761,12 +8803,11 @@ run_poll() {
     # exist yet — handle that gracefully so the find call gets an empty arg
     # list.
     scan_outcomes() {
-        local done_dirs=() outbox_dirs=() claims_dirs=() wt
+        local done_dirs=() outbox_dirs=() wt
         while IFS= read -r wt; do
             [ -n "$wt" ] || continue
             [ -d "$wt/.swarm/tasks/done" ] && done_dirs+=("$wt/.swarm/tasks/done")
             [ -d "$wt/.swarm/tasks/outbox" ] && outbox_dirs+=("$wt/.swarm/tasks/outbox")
-            [ -d "$wt/.swarm/tasks/claims" ] && claims_dirs+=("$wt/.swarm/tasks/claims")
         done < <(own_worktree_dirs_for_scan "$PROJECT_DIR")
         {
             if [ "${#done_dirs[@]}" -gt 0 ]; then
@@ -8778,17 +8819,14 @@ run_poll() {
             if [ "$WATCH_OUTBOX" = "1" ] && [ "${#outbox_dirs[@]}" -gt 0 ]; then
                 find "${outbox_dirs[@]}" -maxdepth 1 -name '*.md' -print 2>/dev/null
             fi
-            # worker-listener.sh self-heal claim markers (issue #506) —
-            # always scanned, same as done/*.json, since this is foundational
-            # human-presence instrumentation, not an opt-in notification
-            # feature like WATCH_OUTBOX.
-            if [ "${#claims_dirs[@]}" -gt 0 ]; then
-                find "${claims_dirs[@]}" -maxdepth 1 -name '*.claim' -print 2>/dev/null
-            fi
         } | sort -u
     }
 
     scan_outcomes > "$seen_file"
+    # Drain any marker already on disk before this watcher's first full
+    # tick — see scan_claims' header for why this one scan must NOT be
+    # skipped the way the done/outbox baseline above intentionally is.
+    dispatch_claims
 
     while true; do
         local current diff_new
@@ -8803,12 +8841,13 @@ run_poll() {
                 [ -z "$path" ] && continue
                 case "$path" in
                     */.swarm/tasks/outbox/*.md)  dispatch_message "$path" ;;
-                    */.swarm/tasks/claims/*.claim) dispatch_selfheal_claim "$path" ;;
                     *)                            dispatch_outcome "$path" ;;
                 esac
             done <<< "$diff_new"
             echo "$current" > "$seen_file"
         fi
+
+        dispatch_claims
 
         sleep "$POLL_SECS"
     done
