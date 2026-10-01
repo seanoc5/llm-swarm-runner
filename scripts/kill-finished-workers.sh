@@ -55,9 +55,12 @@
 #   worktree passes a clean-worktree guard: no uncommitted/untracked
 #   changes, and the branch pushed with nothing ahead of its upstream (no
 #   unpushed commits) — closing the issue is not itself proof the work
-#   reached anywhere outside the worktree. --idle-min applies to this path
-#   the same as every other reap reason. Dry-run cites the reason as
-#   `issue-closed`.
+#   reached anywhere outside the worktree. AND the window has sat idle at
+#   least REAP_ISSUE_CLOSED_MIN_IDLE_MIN minutes (default 10, env-
+#   overridable) — checked unconditionally for this path alone, since the
+#   real watcher invocation always passes --idle-min 0 (self-review
+#   finding: that flag is not a safety net here the way it is for
+#   parked/merged). Dry-run cites the reason as `issue-closed`.
 #
 # WINDOWLESS WORKTREES (issue #406)
 #   Everything above keys off live `iss-*` tmux windows, so a tmux session
@@ -104,7 +107,9 @@ DESCRIPTION
     issue #466: a window whose branch never had a PR at all is instead
     reap-eligible once its GitHub ISSUE is CLOSED and the worktree is clean
     and fully pushed (see NO-PR TASKS above) — in ALL THREE modes (default,
-    --merged-only, --pr-finalized), not just --pr-finalized.
+    --merged-only, --pr-finalized), not just --pr-finalized. This path also
+    enforces its own REAP_ISSUE_CLOSED_MIN_IDLE_MIN-minute idle floor
+    (default 10, env-overridable) independent of --idle-min.
 
 FLAGS
     -h, --help              Show this help and exit
@@ -202,6 +207,19 @@ PROJECT_DIR="$PWD"
 EVENTS_LOG="$PROJECT_DIR/.swarm/events.log"
 REAPED_DIR="$PROJECT_DIR/.swarm/reaped"
 REAP_CAPTURE_LINES="${REAP_CAPTURE_LINES:-500}"
+
+# issue #466 self-review: the watcher's real auto-reap pass always calls
+# this script with `--idle-min 0` (cleanup_eligible_workers,
+# coordinator-watch.sh), so the CLI --idle-min flag is never actually a
+# safety net for the issue-closed fallback in production — a still-running
+# worker session (no commits yet, clean tree) would have its window AND
+# worktree destroyed the instant anyone closes its issue (a duplicate-close,
+# a close by someone else's PR — not only the coordinator's planned one).
+# This floor applies ONLY to the issue-closed path, unconditionally,
+# regardless of what --idle-min was given, so it can't be silently
+# defeated the way the CLI flag is. Env-overridable (same pattern as
+# REAP_CAPTURE_LINES above) so tests can set it to 0.
+REAP_ISSUE_CLOSED_MIN_IDLE_MIN="${REAP_ISSUE_CLOSED_MIN_IDLE_MIN:-10}"
 log_event() {
     local cat="$1"; shift
     local ts
@@ -584,16 +602,21 @@ worktree_safe_to_reap() {
     return 0
 }
 
-# issue_closed_reap_eligible <issue> <wt>
+# issue_closed_reap_eligible <issue> <wt> <window>
 #
-# True only when the GitHub issue is CLOSED and the worktree passes
-# worktree_safe_to_reap above. Callers must have already confirmed PR_STATE
-# is empty (see the contract note above) — this function doesn't re-check
-# that itself so it stays a pure "is the no-PR fallback satisfied" test.
-# Sets ISSUE_SKIP_REASON on a 1-return for the caller's skip message.
+# True only when the GitHub issue is CLOSED, the worktree passes
+# worktree_safe_to_reap above, AND the window has sat idle at least
+# REAP_ISSUE_CLOSED_MIN_IDLE_MIN minutes — checked here, unconditionally,
+# because the caller's own --idle-min gate is not a reliable safety net for
+# this path (see REAP_ISSUE_CLOSED_MIN_IDLE_MIN's comment above: the real
+# watcher invocation always passes --idle-min 0). Callers must have already
+# confirmed PR_STATE is empty (see the contract note above) — this function
+# doesn't re-check that itself so it stays a pure "is the no-PR fallback
+# satisfied" test. Sets ISSUE_SKIP_REASON on a 1-return for the caller's
+# skip message.
 ISSUE_SKIP_REASON=""
 issue_closed_reap_eligible() {
-    local issue="$1" wt="$2"
+    local issue="$1" wt="$2" window="$3" idle
     ISSUE_SKIP_REASON=""
     if ! fetch_issue_state "$issue"; then
         ISSUE_SKIP_REASON="can't resolve issue #$issue state"
@@ -605,6 +628,11 @@ issue_closed_reap_eligible() {
     fi
     if ! worktree_safe_to_reap "$wt"; then
         ISSUE_SKIP_REASON="issue #$issue CLOSED but worktree unsafe: $WT_UNSAFE_REASON"
+        return 1
+    fi
+    idle=$(window_idle_min "$window")
+    if [ "$idle" -lt "$REAP_ISSUE_CLOSED_MIN_IDLE_MIN" ]; then
+        ISSUE_SKIP_REASON="issue #$issue CLOSED but only idle ${idle}m (< ${REAP_ISSUE_CLOSED_MIN_IDLE_MIN}m floor) — may still be actively running"
         return 1
     fi
     return 0
@@ -691,7 +719,7 @@ for w in "${WINDOWS[@]}"; do
         issue_closed=0
         if [ "$parked" = "0" ] && [ "$merged" = "0" ] && [ "$PR_CHECK" = "1" ] \
            && [ -z "$PR_STATE" ] && [ "$PR_LOOKUP_FAILED" != "1" ] \
-           && issue_closed_reap_eligible "$issue" "$wt"; then
+           && issue_closed_reap_eligible "$issue" "$wt" "$w"; then
             issue_closed=1
         fi
         if [ "$parked" = "0" ] && [ "$merged" = "0" ] && [ "$issue_closed" = "0" ]; then
@@ -744,7 +772,7 @@ for w in "${WINDOWS[@]}"; do
             # again here, not just in issue_closed_reap_eligible's caller
             # contract, so the "no PR" skip message below can't mislabel a
             # failed lookup as a confirmed absence either.
-            if [ -z "$PR_STATE" ] && [ "$PR_LOOKUP_FAILED" != "1" ] && issue_closed_reap_eligible "$issue" "$wt"; then
+            if [ -z "$PR_STATE" ] && [ "$PR_LOOKUP_FAILED" != "1" ] && issue_closed_reap_eligible "$issue" "$wt" "$w"; then
                 reasons+=("issue-closed")
             elif [ "$PR_LOOKUP_FAILED" = "1" ]; then
                 echo "  $w  [PR $branch: lookup failed (network/auth?) → skip (merged-only mode, not treated as no-PR)]"
@@ -763,7 +791,7 @@ for w in "${WINDOWS[@]}"; do
         if ! pr_is_finalized "$wt"; then
             # issue #466: same no-PR fallback + PR_LOOKUP_FAILED guard as
             # --merged-only above.
-            if [ -z "$PR_STATE" ] && [ "$PR_LOOKUP_FAILED" != "1" ] && issue_closed_reap_eligible "$issue" "$wt"; then
+            if [ -z "$PR_STATE" ] && [ "$PR_LOOKUP_FAILED" != "1" ] && issue_closed_reap_eligible "$issue" "$wt" "$w"; then
                 reasons+=("issue-closed")
             elif [ "$PR_LOOKUP_FAILED" = "1" ]; then
                 echo "  $w  [PR $branch: lookup failed (network/auth?) → skip (pr-finalized mode, not treated as no-PR)]"

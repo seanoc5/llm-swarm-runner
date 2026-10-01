@@ -27,6 +27,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KILL_FINISHED="$SCRIPT_DIR/../scripts/kill-finished-workers.sh"
 [ -x "$KILL_FINISHED" ] || red "kill-finished-workers.sh not executable: $KILL_FINISHED"
 
+# issue #466 self-review: the issue-closed reap path enforces its own
+# REAP_ISSUE_CLOSED_MIN_IDLE_MIN-minute idle floor regardless of --idle-min.
+# Every tmux window this suite creates is brand new (idle 0m), so default
+# to 0 here for the whole file; Test 14 overrides it per-invocation to
+# exercise the real (nonzero) default directly.
+export REAP_ISSUE_CLOSED_MIN_IDLE_MIN=0
+
 REAL_TMUX="$(command -v tmux)" || red "tmux not installed"
 command -v git >/dev/null || red "git not installed"
 
@@ -541,6 +548,40 @@ grep -q 'iss-54.*issue-closed.*kill' "$RUN_LOG13" \
     || red "expected iss-54's kill line to cite issue-closed. Output:
 $(cat "$RUN_LOG13")"
 green "iss-54 (no commits, upstream = origin/$DEFAULT_BRANCH per provision-worker.sh's own shape) reaped by DEFAULT mode"
+
+# ============================================================================
+heading "Test 14: the issue-closed idle floor holds even with --idle-min 0 (issue #466 self-review)"
+# ============================================================================
+# The watcher's real auto-reap pass always calls this script with
+# --idle-min 0 (coordinator-watch.sh's cleanup_eligible_workers), so that
+# CLI flag can never be trusted as the safety net for the issue-closed
+# fallback — it would let a still-running worker's window (and worktree) be
+# destroyed the instant its issue closes, for any reason, not just the
+# coordinator's planned close. REAP_ISSUE_CLOSED_MIN_IDLE_MIN enforces its
+# own floor regardless. This is the one test in the file that does NOT
+# override it to 0, to prove the real (nonzero) default actually holds.
+
+git -C "$PROJECT_DIR" worktree add -q -b fix/issue-55 "$TEST_DIR/wt-issue-55"
+git -C "$TEST_DIR/wt-issue-55" push -q -u origin fix/issue-55
+"$SHIM_DIR/tmux" new-window -t "$SESSION" -n iss-55
+sed -i "s/54) echo CLOSED; exit 0 ;;/54) echo CLOSED; exit 0 ;;\n        55) echo CLOSED; exit 0 ;;/" "$SHIM_DIR/gh"
+
+RUN_LOG14="$TEST_DIR/run14.log"
+set +e
+(cd "$PROJECT_DIR" && PATH="$SHIM_DIR:$PATH" env -u REAP_ISSUE_CLOSED_MIN_IDLE_MIN \
+    "$KILL_FINISHED" --idle-min 0) > "$RUN_LOG14" 2>&1
+RC14=$?
+set -e
+[ "$RC14" -eq 0 ] || red "expected exit 0, got $RC14. Output:
+$(cat "$RUN_LOG14")"
+
+"$SHIM_DIR/tmux" list-windows -t "$SESSION" -F '#W' | grep -qx 'iss-55' \
+    || red "iss-55 (no PR, issue CLOSED, clean+pushed, but freshly active — idle 0m) was reaped despite --idle-min 0 giving it no cover — the issue-closed floor must hold on its own. Output:
+$(cat "$RUN_LOG14")"
+grep -q 'iss-55.*floor.*actively running' "$RUN_LOG14" \
+    || red "expected iss-55's skip line to cite the issue-closed idle floor. Output:
+$(cat "$RUN_LOG14")"
+green "iss-55 (idle 0m, real default floor, --idle-min 0) preserved — issue-closed floor isn't defeated by the CLI flag"
 
 echo
 green "ALL TESTS PASSED"
