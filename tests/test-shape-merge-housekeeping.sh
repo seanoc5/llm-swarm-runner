@@ -17,6 +17,9 @@
 # --force-cleanup is given.
 #
 # Stubs `gh` and `tmux` via PATH override — no GitHub auth, no tmux server.
+#
+# issue #465: swarm-merge.sh's reap wait-loop (steps 5/6) collapsed into a
+# single immediate-reap step, so the sweep is now step [6/6], not [7/7].
 set -euo pipefail
 
 green()  { printf '\033[32m✓ %s\033[0m\n' "$*"; }
@@ -88,7 +91,7 @@ write_gh CLOSED ""
 OUT=$(timeout 15 "$MERGE" 269 2>&1) || red "housekeeping path exited non-zero:\n$OUT"
 echo "$OUT" | grep -q "no linked PR found for issue #269" || red "expected the no-PR reason to still be reported, got:\n$OUT"
 echo "$OUT" | grep -q "housekeeping only, nothing to merge" || red "expected housekeeping-only notice, got:\n$OUT"
-echo "$OUT" | grep -q "\[7/7\] running local-branch sweep" || red "expected step 7 to run — housekeeping means reaching the sweep:\n$OUT"
+echo "$OUT" | grep -q "\[6/6\] running local-branch sweep" || red "expected step 6 to run — housekeeping means reaching the sweep:\n$OUT"
 echo "$OUT" | grep -q "Housekeeping complete for issue #269" || red "expected honest final line, got:\n$OUT"
 echo "$OUT" | grep -q "merged for issue" && red "must NOT claim a merge that never happened:\n$OUT"
 green "closed issue with no PR now reaches the sweep and reports honestly"
@@ -101,7 +104,7 @@ RC=0
 OUT=$(timeout 15 "$MERGE" 269 2>&1) || RC=$?
 [ "$RC" -ne 0 ] || red "must NOT housekeep an OPEN issue — that is an in-flight worker:\n$OUT"
 echo "$OUT" | grep -q -- "--force-cleanup" || red "error should point at the escape hatch, got:\n$OUT"
-echo "$OUT" | grep -q "\[7/7\]" && red "must not reach the sweep for an OPEN issue:\n$OUT"
+echo "$OUT" | grep -q "\[6/6\]" && red "must not reach the sweep for an OPEN issue:\n$OUT"
 green "open issue still refuses, and names --force-cleanup"
 
 # ============================================================================

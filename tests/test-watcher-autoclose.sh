@@ -1226,6 +1226,52 @@ grep -q 'worker\.finish\.corrected .*issue=194 outcome=err task_id=t194' "$EVENT
 $(cat "$EVENTS_LOG" 2>/dev/null)"
 green "events.log shows one worker.finish + one worker.finish.corrected — the correction is logged, just never re-wakes"
 
+# ============================================================================
+heading "Test 21: pr-poll tolerates a worktree swarm-merge.sh already reaped — no re-reap, no orphan comment (issue #465)"
+# ============================================================================
+# issue #465 moved the reap off the watcher's own 60s backstop: swarm-merge.sh
+# now calls kill-worktree.sh immediately after `gh pr merge`, so by the time
+# this worktree's PR shows up as MERGED in a pr_poll_pass tick, WORKSPACE/
+# wt-issue-N is typically already gone. Unlike Test 17 (a window-less but
+# still-PRESENT worktree), this never creates wt-issue-465 at all — the
+# worktree directory simply doesn't exist, the same shape a swarm-merge.sh
+# reap leaves behind.
+#
+# pr_poll_pass's own guard (`[ ! -d "$wt_dir" ] || ! is_own_worktree_dir
+# "$wt_dir"` → continue) already short-circuits on the missing directory
+# before even calling is_own_worktree_dir, so no source change was needed
+# for this — only this regression test, which the issue explicitly asked
+# for. That continue is silent by design (no log line): pr_poll_pass's
+# `gh pr list --state all --limit 500` surfaces every historical merged PR
+# in the repo, the overwhelming majority of which have no local worktree at
+# all, so logging on every miss would spam events.log every tick for the
+# repo's entire PR history, not just the swarm-merge-reaped case. The
+# assertions below instead confirm the actually load-bearing acceptance
+# criterion: no second reap attempt (kill-finished-workers.sh never fires)
+# and no orphan-dedup/terminal-PR event is ever recorded — i.e. nothing a
+# human or an orphan-PR-comment path could act on.
+: > "$KILL_LOG"
+rm -f "$PROJECT_DIR/.swarm/events.log"
+printf 'fix/issue-465\tMERGED\t466\n' > "$GH_PR_LIST_FILE"
+# Deliberately NOT creating "$TEST_DIR/wt-issue-465" — simulates
+# swarm-merge.sh's immediate kill-worktree.sh reap having already removed it.
+
+ONCE=0 WATCH_PR_POLL_SECS=1 WATCH_ORPHAN_SWEEP_SECS=0 start_watcher 1 "$TEST_DIR/watch-21.log"
+sleep 6
+stop_watcher
+
+[ ! -s "$KILL_LOG" ] \
+    || red "kill-finished-workers.sh fired for a worktree that no longer exists — pr_poll_pass should never re-reap an already-gone worktree (issue #465). Kill log:
+$(cat "$KILL_LOG")"
+green "kill-finished-workers.sh was never invoked for the already-reaped worktree"
+
+EVENTS_LOG="$PROJECT_DIR/.swarm/events.log"
+if grep -q 'issue=465' "$EVENTS_LOG" 2>/dev/null; then
+    red "expected zero events.log entries for issue=465 (worktree never existed here) — a stray entry means pr_poll_pass tried to act on it instead of silently skipping. Events log:
+$(cat "$EVENTS_LOG")"
+fi
+green "no events.log entries at all for the already-reaped issue — pr_poll_pass's missing-worktree guard skips it silently, across multiple poll ticks"
+
 # ────────────────────────── Done ──────────────────────────
 
 heading "All watcher-autoclose tests passed"
@@ -1254,4 +1300,5 @@ echo "  #451: an existing (worker-written) outcome suppresses reconcile entirely
 echo "  #451: a PR-open backstop with no status file (synthesized task_id) still reconciles cleanly — log only"
 echo "  #451: on_outcome derives the issue number from the wt-issue-N path, not a fragile filename-trailing-digits parse"
 echo "  #468: a check-fail retry's corrected outcome (same task_id, different filename) logs worker.finish.corrected but never fires a second coord.wake"
+echo "  #465: pr-poll tolerates a worktree swarm-merge.sh already reaped — no re-reap, no stray events, across multiple poll ticks"
 yellow "Run with KEEP=1 to leave $TEST_DIR for inspection."
