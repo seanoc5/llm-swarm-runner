@@ -248,6 +248,27 @@ else
     fail "git gc fails to lock a sibling's HEAD (expected — see docs/troubleshooting.md)" "$gc_out"
 fi
 
+# ── 8. gc.auto is disabled inside a locked-down container ──────────────────
+# Without this, an ordinary commit/fetch/merge can trigger a BACKGROUNDED
+# `gc --auto` that hits the same sibling-HEAD-lock failure as test 7, but
+# detached — git captures that failure into `gc.log` in the shared common
+# dir (not per-worktree), which then makes every subsequent `gc --auto`
+# anywhere in the repo (other workers, the host) skip with a stale warning
+# until the file ages out. Disabling gc.auto via an env override (not a
+# repo-config change — host and other containers are unaffected) heads
+# this off before it can ever happen.
+echo ""
+echo "[ 8. Fix: gc.auto is forced off inside a locked-down container ]"
+gc_auto_out=$(run_in_wta "GIT_CONFIG_GLOBAL=/dev/null git config --get gc.auto; echo RC=\$?" || true)
+if echo "$gc_auto_out" | grep -qx "0" && echo "$gc_auto_out" | grep -q "RC=0"; then
+    pass "gc.auto reads 0 inside the container (background auto-gc can't fire)"
+elif is_nested_gitconfig_quirk "$gc_auto_out"; then
+    skip "gc.auto reads 0 inside the container (background auto-gc can't fire)" \
+        "nested-DooD \$HOME/.gitconfig quirk, unrelated to #504 (see is_nested_gitconfig_quirk)"
+else
+    fail "gc.auto reads 0 inside the container (background auto-gc can't fire)" "$gc_auto_out"
+fi
+
 echo ""
 echo "=== Results ==="
 TOTAL=$((PASS + FAIL + SKIP))

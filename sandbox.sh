@@ -101,6 +101,7 @@ unset _claude_cfg_key _claude_cfg_needs_seed
 
 # --- Mount strategy ---
 # Maps host configs into the container's standard home (/home/sandbox)
+GIT_WORKTREE_ENV_OPTS=()
 MOUNTS=(
     -v "$PROJECT_DIR:$PROJECT_DIR:rw"
     -v "$HOME/.claude:/home/sandbox/.claude:rw"
@@ -141,6 +142,21 @@ if command -v git &>/dev/null && git -C "$PROJECT_DIR" rev-parse --git-dir &>/de
         # Use realpath to handle any symlinks or relative paths for strict prefix comparison
         _proj_real="$(realpath "$PROJECT_DIR")"
         _git_real="$(realpath "$_git_common_dir")"
+
+        # `git gc` (including the background `gc --auto` an ordinary commit/
+        # fetch/merge can trigger) expires reflogs across every worktree,
+        # which needs a brief lock on each sibling's HEAD — exactly what the
+        # read-only lockdown below refuses. Left alone, a backgrounded
+        # autoDetach gc that hits this mid-run writes its failure to
+        # `gc.log` in the shared common dir (not per-worktree), which then
+        # makes every subsequent `gc --auto` anywhere in the repo — other
+        # workers, the host-side coordinator — skip with a stale warning
+        # until that file ages out or is removed. Disabling gc.auto inside
+        # this container (only here, via an env override — not touching the
+        # repo's actual on-disk config, which stays normal for the host and
+        # every other container) heads that off entirely rather than
+        # documenting it as a thing to clean up later.
+        GIT_WORKTREE_ENV_OPTS+=(-e "GIT_CONFIG_COUNT=1" -e "GIT_CONFIG_KEY_0=gc.auto" -e "GIT_CONFIG_VALUE_0=0")
         if [[ "$_git_real" != "$_proj_real"* ]]; then
             # Outside PROJECT_DIR (the worktree case) — mount it explicitly.
             # When it's INSIDE PROJECT_DIR instead (this container is pointed
@@ -652,6 +668,7 @@ exec docker run "${INTERACTIVE_FLAGS[@]}" --rm --init \
     "${DEP_CACHE_OPTS[@]}" \
     "${DEP_PROXY_OPTS[@]}" \
     "${SANDBOX_DOCS_ENV_OPTS[@]}" \
+    "${GIT_WORKTREE_ENV_OPTS[@]}" \
     "${MOUNTS[@]}" \
     -e "TERM=$TERM" \
     -e "COLORTERM=${COLORTERM:-}" \
