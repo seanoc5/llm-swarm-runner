@@ -403,7 +403,18 @@ fetch_pr_state() {
     if [ "$rc" -ne 0 ] || [ -z "$out" ]; then
         case "$err" in
             *"no pull requests found"*) : ;; # confirmed: branch has no PR
-            *) PR_LOOKUP_FAILED=1 ;;          # gh itself failed — state unknown
+            *)
+                # issue #466 self-review: this confirmed-no-PR match is only
+                # as durable as gh's exact English wording — a gh upgrade or
+                # a non-English locale could silently turn every genuine
+                # no-PR branch into a "lookup failed" one, quietly stranding
+                # windows again with nothing to point at. Logging it here,
+                # every time it happens, is the trip-wire: a sudden burst of
+                # pr.lookup_failed events across many branches at once is
+                # the wording-drift signature, not a one-off network blip.
+                PR_LOOKUP_FAILED=1
+                log_event pr.lookup_failed "branch=$branch err=${err:0:200}"
+                ;;
         esac
         return 1
     fi

@@ -512,6 +512,10 @@ grep -q 'iss-53.*lookup failed' "$RUN_LOG12" \
 $(cat "$RUN_LOG12")"
 green "iss-53 (PR lookup failed, issue CLOSED) preserved — PR_LOOKUP_FAILED guard held"
 
+grep -q 'pr\.lookup_failed .*branch=fix/issue-53' "$PROJECT_DIR/.swarm/events.log" \
+    || red "expected a pr.lookup_failed event for fix/issue-53 — this is the trip-wire for gh wording drift (self-review finding), it must not be silent"
+green "pr.lookup_failed logged to events.log — a wording-drift regression would now be visible, not silent"
+
 # ============================================================================
 heading "Test 13: worktree_safe_to_reap on a real provision-worker.sh-shaped branch (issue #466 self-review)"
 # ============================================================================
