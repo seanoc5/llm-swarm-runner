@@ -80,6 +80,10 @@ if [ "\$1" = "pr" ] && [ "\$2" = "view" ]; then
         fix/issue-45) printf 'CLOSED\t$FUTURE_ISO\t545\n'; exit 0 ;;
         fix/issue-52) printf 'CLOSED\t$FUTURE_ISO\t552\n'; exit 0 ;;
     esac
+    # real gh's exact message on a branch with no PR at all — fetch_pr_state
+    # (issue #466 self-review) keys off this text to tell "confirmed no PR"
+    # apart from a lookup failure, so the stub must say it verbatim.
+    echo "no pull requests found for branch \"\$3\"" >&2
     exit 1
 fi
 if [ "\$1" = "issue" ] && [ "\$2" = "view" ]; then
@@ -467,6 +471,39 @@ grep -q 'iss-52.*not MERGED.*skip.*merged-only' "$RUN_LOG11" \
     || red "expected iss-52's skip line to cite 'not MERGED' under --merged-only. Output:
 $(cat "$RUN_LOG11")"
 green "iss-52 (PR CLOSED-without-merge) still untouched under --merged-only — issue-closed fallback never applies to a branch that has a PR"
+
+# ============================================================================
+heading "Test 12: a failed PR lookup is never read as 'confirmed no PR' (issue #466 self-review)"
+# ============================================================================
+# fetch_pr_state's self-review fix: a transient `gh pr view` failure (network,
+# auth, rate-limit — anything other than gh's own "no pull requests found")
+# must set PR_LOOKUP_FAILED and must NOT unlock the issue-closed fallback,
+# even though PR_STATE is empty in both cases. Without the guard, a branch
+# with a real OPEN PR that gh simply failed to fetch this round could be
+# reaped the moment its issue closes. fix/issue-53's stub exits 1 with an
+# unrelated error message (not "no pull requests found") to simulate that.
+
+git -C "$PROJECT_DIR" worktree add -q -b fix/issue-53 "$TEST_DIR/wt-issue-53"
+git -C "$TEST_DIR/wt-issue-53" push -q -u origin fix/issue-53
+"$SHIM_DIR/tmux" new-window -t "$SESSION" -n iss-53
+sed -i "s/50) echo CLOSED; exit 0 ;;/50) echo CLOSED; exit 0 ;;\n        53) echo CLOSED; exit 0 ;;/" "$SHIM_DIR/gh"
+sed -i "s#552\\\\n'; exit 0 ;;#552\\\\n'; exit 0 ;;\n        fix/issue-53) echo \"error: GraphQL: something went wrong (rate limited)\" >\&2; exit 1 ;;#" "$SHIM_DIR/gh"
+
+RUN_LOG12="$TEST_DIR/run12.log"
+set +e
+(cd "$PROJECT_DIR" && PATH="$SHIM_DIR:$PATH" "$KILL_FINISHED" --idle-min 0) > "$RUN_LOG12" 2>&1
+RC12=$?
+set -e
+[ "$RC12" -eq 0 ] || red "expected exit 0, got $RC12. Output:
+$(cat "$RUN_LOG12")"
+
+"$SHIM_DIR/tmux" list-windows -t "$SESSION" -F '#W' | grep -qx 'iss-53' \
+    || red "iss-53 (PR lookup failed, issue CLOSED) was reaped — a failed lookup must never be treated as 'confirmed no PR'. Output:
+$(cat "$RUN_LOG12")"
+grep -q 'iss-53.*lookup failed' "$RUN_LOG12" \
+    || red "expected iss-53's skip line to cite the failed lookup, not the issue-closed fallback. Output:
+$(cat "$RUN_LOG12")"
+green "iss-53 (PR lookup failed, issue CLOSED) preserved — PR_LOOKUP_FAILED guard held"
 
 echo
 green "ALL TESTS PASSED"

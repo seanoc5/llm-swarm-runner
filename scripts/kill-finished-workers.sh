@@ -354,17 +354,35 @@ worktree_branch() {
 # --merged-only/--pr-finalized — up to twice per window for the same PR.
 # Callers gate the call itself (see the main loop) so plain default mode
 # with --no-pr-check still avoids the network entirely.
+#
+# PR_LOOKUP_FAILED (issue #466 self-review): set to 1 on a 1-return when the
+# `gh pr view` call itself failed for a reason OTHER than "no PR exists for
+# this branch" — network blip, auth, rate limit. Left 0 when gh affirmatively
+# reported no PR (its own "no pull requests found" message). This distinction
+# matters because issue_closed_reap_eligible's callers treat an empty
+# PR_STATE as "confirmed no PR, safe to fall back to the issue-closed
+# signal" — without it, a transient gh failure on a branch that actually HAS
+# an OPEN PR would look identical to "no PR found" and could get reaped.
 PR_STATE=""
 PR_CREATED_AT=""
 PR_NUMBER=""
+PR_LOOKUP_FAILED=0
 fetch_pr_state() {
-    local branch="$1" json
+    local branch="$1" out rc
     PR_STATE=""
     PR_CREATED_AT=""
     PR_NUMBER=""
-    json=$(gh pr view "$branch" --json state,createdAt,number -q '"\(.state)\t\(.createdAt)\t\(.number)"' 2>/dev/null || true)
-    [ -n "$json" ] || return 1
-    IFS=$'\t' read -r PR_STATE PR_CREATED_AT PR_NUMBER <<< "$json"
+    PR_LOOKUP_FAILED=0
+    out=$(gh pr view "$branch" --json state,createdAt,number -q '"\(.state)\t\(.createdAt)\t\(.number)"' 2>&1)
+    rc=$?
+    if [ "$rc" -ne 0 ] || [ -z "$out" ]; then
+        case "$out" in
+            *"no pull requests found"*) : ;; # confirmed: branch has no PR
+            *) PR_LOOKUP_FAILED=1 ;;          # gh itself failed — state unknown
+        esac
+        return 1
+    fi
+    IFS=$'\t' read -r PR_STATE PR_CREATED_AT PR_NUMBER <<< "$out"
     return 0
 }
 
@@ -607,6 +625,12 @@ for w in "${WINDOWS[@]}"; do
     wt=""
     parked=0
     merged=0
+    # issue #466 self-review: ISSUE_SKIP_REASON/PR_LOOKUP_FAILED are globals
+    # fetch_pr_state/issue_closed_reap_eligible only set on a call — reset
+    # them per window so a message or decision below can never read a value
+    # left over from a DIFFERENT window's gh calls this pass.
+    ISSUE_SKIP_REASON=""
+    PR_LOOKUP_FAILED=0
 
     # Resolve the worktree's actual branch + fetch PR state ONCE per
     # window (single `gh pr view` round-trip) whenever any mode needs PR
@@ -653,16 +677,22 @@ for w in "${WINDOWS[@]}"; do
         fi
         # issue #466: a no-PR task (PR_STATE empty — never had one) can
         # never satisfy "parked" or "PR-merged" above, so check the issue
-        # itself before giving up on this window.
+        # itself before giving up on this window. PR_LOOKUP_FAILED=0 guards
+        # against a transient `gh pr view` failure (network/auth) looking
+        # identical to "confirmed no PR" (self-review finding) — only a
+        # gh-affirmed absence unlocks this fallback.
         issue_closed=0
         if [ "$parked" = "0" ] && [ "$merged" = "0" ] && [ "$PR_CHECK" = "1" ] \
-           && [ -z "$PR_STATE" ] && issue_closed_reap_eligible "$issue" "$wt"; then
+           && [ -z "$PR_STATE" ] && [ "$PR_LOOKUP_FAILED" != "1" ] \
+           && issue_closed_reap_eligible "$issue" "$wt"; then
             issue_closed=1
         fi
         if [ "$parked" = "0" ] && [ "$merged" = "0" ] && [ "$issue_closed" = "0" ]; then
             if [ "$PR_CHECK" = "1" ] && [ "$PR_STATE" = "CLOSED" ]; then
                 echo "  $w  [active, PR #$PR_NUMBER CLOSED (not merged) → skip (parked-only mode; rerun with --pr-finalized to reap)]"
                 SKIPPED_FINALIZED=$((SKIPPED_FINALIZED + 1))
+            elif [ "$PR_CHECK" = "1" ] && [ "$PR_LOOKUP_FAILED" = "1" ]; then
+                echo "  $w  [active, PR lookup failed (network/auth?) → skip (not treated as no-PR)]"
             elif [ "$PR_CHECK" = "1" ] && [ -z "$PR_STATE" ] && [ -n "$ISSUE_SKIP_REASON" ]; then
                 echo "  $w  [active, no PR, $ISSUE_SKIP_REASON → skip]"
             else
@@ -699,8 +729,19 @@ for w in "${WINDOWS[@]}"; do
             # rather than stranding every no-PR task under this mode too.
             # A branch that HAS a PR (open, or closed-without-merge) is
             # still judged solely on that PR's state, same as always.
-            if [ -z "$PR_STATE" ] && issue_closed_reap_eligible "$issue" "$wt"; then
+            #
+            # PR_LOOKUP_FAILED guards the fallback itself (self-review
+            # finding): a transient `gh pr view` failure must never be read
+            # as "confirmed no PR" — that could reap a branch with a real
+            # OPEN PR gh simply couldn't fetch this round. It's checked
+            # again here, not just in issue_closed_reap_eligible's caller
+            # contract, so the "no PR" skip message below can't mislabel a
+            # failed lookup as a confirmed absence either.
+            if [ -z "$PR_STATE" ] && [ "$PR_LOOKUP_FAILED" != "1" ] && issue_closed_reap_eligible "$issue" "$wt"; then
                 reasons+=("issue-closed")
+            elif [ "$PR_LOOKUP_FAILED" = "1" ]; then
+                echo "  $w  [PR $branch: lookup failed (network/auth?) → skip (merged-only mode, not treated as no-PR)]"
+                continue
             elif [ -z "$PR_STATE" ]; then
                 echo "  $w  [no PR, ${ISSUE_SKIP_REASON:-unknown reason} → skip (merged-only mode)]"
                 continue
@@ -713,9 +754,13 @@ for w in "${WINDOWS[@]}"; do
         fi
     elif [ "$PR_FINALIZED" = "1" ]; then
         if ! pr_is_finalized "$wt"; then
-            # issue #466: same no-PR fallback as --merged-only above.
-            if [ -z "$PR_STATE" ] && issue_closed_reap_eligible "$issue" "$wt"; then
+            # issue #466: same no-PR fallback + PR_LOOKUP_FAILED guard as
+            # --merged-only above.
+            if [ -z "$PR_STATE" ] && [ "$PR_LOOKUP_FAILED" != "1" ] && issue_closed_reap_eligible "$issue" "$wt"; then
                 reasons+=("issue-closed")
+            elif [ "$PR_LOOKUP_FAILED" = "1" ]; then
+                echo "  $w  [PR $branch: lookup failed (network/auth?) → skip (pr-finalized mode, not treated as no-PR)]"
+                continue
             elif [ -z "$PR_STATE" ]; then
                 echo "  $w  [no PR, ${ISSUE_SKIP_REASON:-unknown reason} → skip (pr-finalized mode)]"
                 continue
