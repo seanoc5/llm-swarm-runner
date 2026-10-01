@@ -23,6 +23,14 @@ export SWARM_WORKTREE_GROUPING=flat
 # deterministically collides on BASE_ID and exercises the -2 suffix path.
 export PROVISION_NOW_EPOCH="$(date +%s)"
 
+# This suite's stubbed tmux/docker (below) never simulate a genuinely live
+# pane or a running container — they only log calls and replay canned
+# `docker ps` output. Issue #493's post-spawn health check would therefore
+# treat every successful provision call here as a failed spawn; it's
+# exercised for real against a real tmux server in
+# test-shape-provision-stale-container.sh instead.
+export PROVISION_SPAWN_CHECK_SECS=0
+
 green()  { printf '\033[32m✓ %s\033[0m\n' "$*"; }
 red()    { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 yellow() { printf '\033[33m%s\033[0m\n' "$*"; }

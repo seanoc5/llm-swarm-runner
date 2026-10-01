@@ -3859,8 +3859,21 @@ followup_brief_postdates_pr() {
 # orphan that needs reap-orphan-worktrees.sh instead (see orphan_sweep_pass).
 # Returns 1 (no window) if the session itself doesn't exist — that's still
 # correctly "kill-finished-workers.sh can't reach this."
+#
+# issue #493: a window whose pane has already died also returns 1. llm-
+# start.sh sets remain-on-exit=failed, so a crashed spawn (e.g. sandbox.sh's
+# `docker run` hitting a same-name container collision) leaves the window
+# LISTED — pane_dead=1, nothing left to drain any queued brief — which a
+# bare window-name check can't tell apart from a genuinely running worker.
+# That gap is exactly how a stranded brief went unflagged in the fand-etl
+# incident this issue describes: stranded_brief_sweep_pass's "live window"
+# check (below) treated the corpse as covering the queue and never fired.
 has_live_window() {
-    tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx "iss-$1"
+    local win="iss-$1"
+    tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx "$win" || return 1
+    local pane_dead
+    pane_dead="$(tmux list-panes -t "$SESSION_NAME:$win" -F '#{pane_dead}' 2>/dev/null | head -1)"
+    [ "$pane_dead" != "1" ]
 }
 
 # pr_poll_pass
