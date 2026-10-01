@@ -217,8 +217,10 @@ echo "queued" > "$TEST_DIR/brief-301.md"
 PROVISION_SPAWN_CHECK_SECS=0.1 post_spawn_health_check 301 iss-301 swarm-provstale-iss-301 "$TEST_DIR/brief-301.md"
 [ -z "$(cat "$EVENTS_LOG")" ] || red "expected no log_event call for a healthy spawn, got: $(cat "$EVENTS_LOG")"
 [ -f "$TEST_DIR/brief-301.md" ] || red "a healthy spawn must never remove the brief it was given"
+command tmux -L "$SOCKET" list-windows -t "$SESSION" -F '#W' | grep -qx iss-301 \
+    || red "a healthy spawn must never kill its own window"
 command tmux -L "$SOCKET" kill-window -t "$SESSION:iss-301" 2>/dev/null || true
-green "a live pane with a running container passes silently; its brief is untouched"
+green "a live pane with a running container passes silently; its brief and window are untouched"
 
 # ============================================================================
 heading "Test 7: post_spawn_health_check — pane DEAD (the collision shape) -> exit 4"
@@ -235,8 +237,9 @@ echo "$out" | grep -qi 'pane_dead=1' || red "expected the error to report pane_d
 grep -q 'worker.start.failed.*issue=302.*pane_dead=1.*brief_removed=1' "$EVENTS_LOG" \
     || red "expected a worker.start.failed log line with brief_removed=1, got: $(cat "$EVENTS_LOG")"
 [ -f "$TEST_DIR/brief-302.md" ] && red "a failed spawn must remove its unclaimed brief so a retry doesn't duplicate it"
-command tmux -L "$SOCKET" kill-window -t "$SESSION:iss-302" 2>/dev/null || true
-green "a dead pane right after spawn exits 4 (not 0), logs worker.start.failed, and removes the unclaimed brief — the exact gap the fand-etl incident fell through"
+! command tmux -L "$SOCKET" list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -qx iss-302 \
+    || red "a failed spawn must kill its window so a late-arriving pane doesn't park with an empty inbox"
+green "a dead pane right after spawn exits 4 (not 0), logs worker.start.failed, kills the window, and removes the unclaimed brief — the exact gap the fand-etl incident fell through"
 
 # ============================================================================
 heading "Test 8: post_spawn_health_check — pane alive but container never came up -> exit 4"
@@ -250,8 +253,9 @@ out="$(PROVISION_SPAWN_CHECK_SECS=0.1 post_spawn_health_check 303 iss-303 swarm-
 [ "$rc" -eq 4 ] || red "expected exit 4 when the container never came up, got rc=$rc, output: $out"
 echo "$out" | grep -qi 'container_running=0' || red "expected the error to report container_running=0: $out"
 [ -f "$TEST_DIR/brief-303.md" ] && red "a failed spawn (container never started) must also remove its unclaimed brief"
-command tmux -L "$SOCKET" kill-window -t "$SESSION:iss-303" 2>/dev/null || true
-green "a pane that's alive but whose container never started still exits 4 and removes its unclaimed brief"
+! command tmux -L "$SOCKET" list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -qx iss-303 \
+    || red "a failed spawn must kill its window even when the pane itself was still alive (container just never started)"
+green "a pane that's alive but whose container never started still exits 4, kills the window, and removes its unclaimed brief"
 
 # ============================================================================
 heading "All provision-worker.sh stale-container / post-spawn health tests passed"

@@ -95,11 +95,13 @@ STARTUP FAILURE (exit 4, issue #493)
     PROVISION_SPAWN_CHECK_SECS, default 5s): a dead pane or a container
     that never came up means the spawn failed (e.g. sandbox.sh's
     `docker run` exiting immediately) even though `tmux new-window` itself
-    reported success. Exits 4 with the pane's last lines printed, and
-    removes the brief step 3 already wrote to inbox/ — nothing claimed it,
-    and leaving it behind would duplicate onto a retry — instead of the
-    pre-#493 behavior of exiting 0 with it silently stranded there
-    (fand-etl 2026-09-27: undiscovered for ~7 hours).
+    reported success. Exits 4 with the pane's last lines printed, kills the
+    window, and removes the brief step 3 already wrote to inbox/ — nothing
+    claimed it, and leaving either behind would let a late-arriving pane
+    park with an empty inbox, or a retry queue a duplicate brief onto the
+    window — instead of the pre-#493 behavior of exiting 0 with the window
+    left running and the brief silently stranded there (fand-etl
+    2026-09-27: undiscovered for ~7 hours).
     PROVISION_SPAWN_CHECK_SECS=0 disables this check (for test harnesses
     that stub tmux/docker without simulating a live pane or container).
     Caveat: a cold host without the llm-swarm-runner image yet runs
@@ -395,14 +397,20 @@ check_stale_container() {
 # harness that stubs tmux/docker without actually simulating a live pane or
 # a running container, this check could never pass.
 #
-# On failure, removes brief_path (self-review finding): the brief was
-# already written to inbox/ in step 3, before this check ran. Leaving it
-# behind means any retry — whether it reclaims a now-dead window or queues
-# onto one that actually did come up late — adds a second copy next to the
-# first, and a listener has no way to know the first is moot. Nothing ever
-# claimed this brief (the spawn never came up), so there's no in-progress
-# work to lose; the pane's last lines printed just above are the forensic
-# record. Re-provisioning the issue writes a fresh brief from scratch.
+# On failure, also kills the window and removes brief_path (self-review
+# findings): the brief was already written to inbox/ in step 3, before
+# this check ran. Removing it without also killing the window would leave
+# a worker that comes up late (a container just slow to start, not truly
+# dead) alive with nothing in its inbox, parked forever; a retry would
+# then see that still-alive window and queue a follow-up onto it instead
+# of re-spawning cleanly, and if the slow start was actually hung, that
+# recreates the exact stranded-brief failure this issue closes. Killing
+# the window makes "exit 4" a clean, fully-failed state either way: no
+# window, no unclaimed brief, nothing for a retry to collide with. Nothing
+# ever claimed this brief (the spawn never came up), so there's no
+# in-progress work to lose; the pane's last lines printed just above are
+# the forensic record. Re-provisioning the issue spawns fresh from
+# scratch.
 post_spawn_health_check() {
     local issue="$1" window="$2" container="$3" brief_path="$4"
     local check_secs="${PROVISION_SPAWN_CHECK_SECS:-5}"
@@ -420,10 +428,13 @@ post_spawn_health_check() {
         echo "ERROR: worker window $window for issue #$issue did not come up (pane_dead=${pane_dead:-0} container_running=$running)." >&2
         echo "       Last lines of the pane:" >&2
         tmux capture-pane -t "$SESSION_NAME:$window" -p 2>/dev/null | tail -40 >&2 || true
-        if [ -n "$brief_path" ] && rm -f "$brief_path" 2>/dev/null; then
+        tmux kill-window -t "$SESSION_NAME:$window" 2>/dev/null || true
+        local brief_removed=0
+        if [ -n "$brief_path" ] && [ -e "$brief_path" ]; then
+            rm -f "$brief_path" 2>/dev/null && brief_removed=1
             echo "       Removed the unclaimed brief ($brief_path) so a retry doesn't queue a duplicate." >&2
         fi
-        log_event worker.start.failed "issue=$issue window=$window pane_dead=${pane_dead:-0} container_running=$running brief_removed=$([ -n "$brief_path" ] && [ ! -e "$brief_path" ] && echo 1 || echo 0)"
+        log_event worker.start.failed "issue=$issue window=$window pane_dead=${pane_dead:-0} container_running=$running brief_removed=$brief_removed"
         exit 4
     fi
 }
