@@ -321,14 +321,16 @@ fi
 
 # ── 10. A sibling created AFTER this container started is still locked
 #        down ────────────────────────────────────────────────────────────
-# The whole point of mounting the worktrees/ DIRECTORY read-only (instead
-# of one `-v` per sibling enumerated at launch) instead of the per-sibling
-# approach tests 1-9 exercise: a bind mount of a directory is a live view
-# of it, not a snapshot, so a sibling created on the host after this
-# container is already running should still appear through the same
-# mount, read-only. Mirrors wt-a's own mount set by hand (sandbox.sh
-# itself is a one-shot `exec`, so it can't be used to hold a container
-# open across a host-side `worktree add`).
+# The whole point of mounting the worktrees/ DIRECTORY read-only (rather
+# than one `-v` per sibling enumerated at launch): a bind mount of a
+# directory is a live view of it, not a snapshot, so a sibling created on
+# the host after this container is already running should still appear
+# through the same mount, read-only. Tests 1-9 exercise siblings that
+# already existed at launch; this test is the one that proves the
+# directory-mount design also covers a sibling that didn't exist yet.
+# Mirrors wt-a's own mount set by hand (sandbox.sh itself is a one-shot
+# `exec`, so it can't be used to hold a container open across a host-side
+# `worktree add`).
 echo ""
 echo "[ 10. Fix: a sibling created AFTER container launch is still locked down ]"
 HOLD2_NAME="wt504-lockdown-hold2-$$"
