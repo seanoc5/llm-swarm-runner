@@ -319,6 +319,43 @@ WT205="$TEST_DIR/wt-issue-205"
 rm -f "$TEST_DIR/tmux-windows.txt" "$TEST_DIR/tmux-pane-dead-iss-205.txt"
 git -C "$PROJECT_DIR" worktree remove --force "$WT205" 2>/dev/null || rm -rf "$WT205"
 
+heading "Test 3g: a dead-pane reclaim salvages stale inbox/processing briefs instead of letting the fresh listener re-run them (self-review, 12th pass)"
+cd "$PROJECT_DIR"
+# First, an ordinary spawn creates the worktree and queues its one brief —
+# nothing claims it (no real listener runs in this stub), the same shape as
+# a worker that crashed before ever picking up its first task.
+"$PROVISION" 206 > "$TEST_DIR/prov-3g-first.log" 2>&1 \
+    || red "initial spawn for issue 206 should succeed: $(cat "$TEST_DIR/prov-3g-first.log")"
+WT206="$TEST_DIR/wt-issue-206"
+# A second brief, abandoned mid-task, would sit in processing/ instead —
+# simulate that too (nothing in this stub ever claims a brief for real).
+mkdir -p "$WT206/.swarm/tasks/processing"
+echo "claimed but abandoned when the worker crashed" > "$WT206/.swarm/tasks/processing/stale-claimed.md"
+# Now the window dies and a follow-up is dispatched — the fand-etl
+# re-provision shape: the operator re-sends the same task.
+echo "iss-206" > "$TEST_DIR/tmux-windows.txt"
+echo "1" > "$TEST_DIR/tmux-pane-dead-iss-206.txt"
+: > "$TEST_DIR/tmux.log"
+"$PROVISION" 206 > "$TEST_DIR/prov-3g-reclaim.log" 2>&1 \
+    || red "reclaim+respawn for issue 206 should succeed: $(cat "$TEST_DIR/prov-3g-reclaim.log")"
+briefs206=$(find "$WT206/.swarm/tasks/inbox" -maxdepth 1 -name '*.md' | wc -l)
+[ "$briefs206" -eq 1 ] \
+    || red "expected exactly 1 brief in inbox/ after the reclaim (the fresh one, stale one salvaged out), got $briefs206: $(ls "$WT206/.swarm/tasks/inbox")"
+processing206=$(find "$WT206/.swarm/tasks/processing" -maxdepth 1 -name '*.md' 2>/dev/null | wc -l)
+[ "$processing206" -eq 0 ] \
+    || red "expected processing/ emptied by the salvage, got $processing206 file(s) left behind"
+SALVAGE206="$PROJECT_DIR/.swarm/salvaged/iss-206"
+salvaged206=$(find "$SALVAGE206/inbox" -maxdepth 1 -name '*.md' 2>/dev/null | wc -l)
+[ "$salvaged206" -ge 1 ] \
+    || red "expected the stale unclaimed brief salvaged to $SALVAGE206/inbox/, found: $(ls "$SALVAGE206/inbox" 2>&1)"
+[ -f "$SALVAGE206/processing/stale-claimed.md" ] \
+    || red "expected the stale claimed brief salvaged to $SALVAGE206/processing/stale-claimed.md"
+grep -q 'worker.dead_pane_reclaimed.*issue=206.*stale_briefs_salvaged=2' "$PROJECT_DIR/.swarm/events.log" \
+    || red "expected stale_briefs_salvaged=2 in the reclaim event, got: $(grep 'issue=206' "$PROJECT_DIR/.swarm/events.log")"
+green "a dead-pane reclaim salvages both the unclaimed inbox/ brief and the abandoned processing/ brief instead of letting a fresh listener silently re-run them"
+rm -f "$TEST_DIR/tmux-windows.txt" "$TEST_DIR/tmux-pane-dead-iss-206.txt"
+git -C "$PROJECT_DIR" worktree remove --force "$WT206" 2>/dev/null || rm -rf "$WT206"
+
 # ────────────────────────── coordinator-watch.sh ──────────────────────────
 
 heading "Test 4: coordinator-watch.sh detects new outcome JSON (DRY_RUN, ONCE)"

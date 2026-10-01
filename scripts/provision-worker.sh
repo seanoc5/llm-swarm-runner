@@ -693,7 +693,28 @@ if tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx "iss-$ISS
         echo "[*] window iss-$ISSUE exists but its pane is dead — reclaiming" >&2
         tmux capture-pane -t "$SESSION_NAME:iss-$ISSUE" -p 2>/dev/null | tail -20 >&2 || true
         tmux kill-window -t "$SESSION_NAME:iss-$ISSUE" 2>/dev/null || true
-        log_event worker.dead_pane_reclaimed "issue=$ISSUE window=iss-$ISSUE"
+        # self-review (12th pass): a dead pane can leave brief(s) behind in
+        # inbox/ (never claimed) or processing/ (claimed, abandoned
+        # mid-task) — the fresh listener this reclaim is about to spawn
+        # would inherit those ALONGSIDE the new brief written further
+        # below, re-running stale work. This is exactly the fand-etl
+        # re-provision shape: the operator re-sends the same task and it
+        # runs twice. Salvage them aside first (same destination
+        # convention as kill-worktree.sh's own queued-file salvage) rather
+        # than let a new listener silently pick them back up.
+        stale_briefs=0
+        for stale_subdir in inbox processing; do
+            for stale_file in "$WT/.swarm/tasks/$stale_subdir"/*.md; do
+                [ -e "$stale_file" ] || continue
+                stale_salvage_dir="$PROJECT_DIR/.swarm/salvaged/iss-$ISSUE/$stale_subdir"
+                mkdir -p "$stale_salvage_dir"
+                mv "$stale_file" "$stale_salvage_dir/" 2>/dev/null && stale_briefs=$((stale_briefs + 1))
+            done
+        done
+        if [ "$stale_briefs" -gt 0 ]; then
+            echo "       Salvaged $stale_briefs stale brief(s) to $PROJECT_DIR/.swarm/salvaged/iss-$ISSUE/ (preserved, not auto-rerun — review and re-file if still relevant)" >&2
+        fi
+        log_event worker.dead_pane_reclaimed "issue=$ISSUE window=iss-$ISSUE stale_briefs_salvaged=$stale_briefs"
         WINDOW_EXISTS=0
     fi
 fi
