@@ -122,11 +122,19 @@ MOUNTS=(
 )
 
 # ~/.gemini holds gemini-cli's settings.json (auth + MCP server config).
-# Mount it ro when present so gemini workers inherit the host's MCP servers
-# (e.g. open-brain) without re-configuring per-container. Skipped silently
-# if the dir doesn't exist on the host.
+# Workers inherit the host's config (e.g. the open-brain MCP server) without
+# re-configuring per-container. The dir itself must be writable: gemini-cli
+# writes state/history/tmp there at startup, and with the whole dir mounted
+# ro it hangs silently before its first API call (2026-10-01, 0.40.1 and
+# 0.62.0 alike). So: a per-container tmpfs, with the host's config files
+# bound ro on top. Each entry is skipped if absent on the host.
 if [ -d "$HOME/.gemini" ]; then
-    MOUNTS+=(-v "$HOME/.gemini:/home/sandbox/.gemini:ro")
+    MOUNTS+=(--mount "type=tmpfs,destination=/home/sandbox/.gemini,tmpfs-mode=1777")
+    for _g in settings.json GEMINI.md extensions skills; do
+        if [ -e "$HOME/.gemini/$_g" ]; then
+            MOUNTS+=(-v "$HOME/.gemini/$_g:/home/sandbox/.gemini/$_g:ro")
+        fi
+    done
 fi
 
 # --- Git Worktree Support ---

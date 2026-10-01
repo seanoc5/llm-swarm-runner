@@ -685,7 +685,7 @@ The `Dockerfile` pins all upstream-version-sensitive tools via `ARG`-driven vers
 |---|---|---|
 | `NODE_MAJOR` | `22` | Major only — NodeSource ships stable patches inside a major. |
 | `CLAUDE_CODE_VERSION` | `2.1.126` | Bump after testing — claude-code minor releases occasionally rename CLI flags. |
-| `GEMINI_CLI_VERSION` | `0.40.1` | Bump cautiously — gemini-cli's tool-call protocol has changed across versions. |
+| `GEMINI_CLI_VERSION` | `0.62.0` | Bump cautiously — gemini-cli's tool-call protocol has changed across versions. |
 | `OPENAI_CODEX_VERSION` | `0.128.0` | Less load-bearing — we don't currently script against it. |
 | `PROMPTFOO_VERSION` | `0.121.9` | Same. |
 | `DENO_VERSION` | `2.7.14` | Pinned via positional arg to `deno.land/install.sh`. |
