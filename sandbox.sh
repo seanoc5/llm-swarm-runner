@@ -101,6 +101,7 @@ unset _claude_cfg_key _claude_cfg_needs_seed
 
 # --- Mount strategy ---
 # Maps host configs into the container's standard home (/home/sandbox)
+GIT_WORKTREE_ENV_OPTS=()
 MOUNTS=(
     -v "$PROJECT_DIR:$PROJECT_DIR:rw"
     -v "$HOME/.claude:/home/sandbox/.claude:rw"
@@ -135,14 +136,140 @@ fi
 if command -v git &>/dev/null && git -C "$PROJECT_DIR" rev-parse --git-dir &>/dev/null; then
     # Try --path-format=absolute (git 2.31+) fallback to realpath
     _git_common_dir="$(git -C "$PROJECT_DIR" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || realpath "$(git -C "$PROJECT_DIR" rev-parse --git-common-dir)")"
-    
-    # Check if the common dir was resolved, exists, and is outside PROJECT_DIR
+
+    # Check if the common dir was resolved and exists
     if [ -n "$_git_common_dir" ] && [ -d "$_git_common_dir" ]; then
         # Use realpath to handle any symlinks or relative paths for strict prefix comparison
         _proj_real="$(realpath "$PROJECT_DIR")"
         _git_real="$(realpath "$_git_common_dir")"
+
         if [[ "$_git_real" != "$_proj_real"* ]]; then
+            # Outside PROJECT_DIR (the worktree case) — mount it explicitly.
+            # When it's INSIDE PROJECT_DIR instead (this container is pointed
+            # at the main checkout, not a linked worktree), PROJECT_DIR's own
+            # mount below already covers it, so no separate mount is needed
+            # here — but the sibling lockdown below still applies in both
+            # cases.
             MOUNTS+=("-v" "$_git_real:$_git_real:rw")
+        fi
+
+        # --- Sibling worktree admin-dir lockdown (#504) ---
+        # The common dir contains EVERY worktree's admin metadata
+        # (git_common_dir/worktrees/<name>/), not just this one's — that's
+        # how git's shared-object-database worktree design works. But only
+        # THIS container's own working directory is bind-mounted in
+        # (PROJECT_DIR, above); every sibling worktree's directory lives at a
+        # host path this container can't see. git can't tell "doesn't exist
+        # because I can't see it" apart from "doesn't exist because it was
+        # deleted", so it reports every sibling as prunable — and with the
+        # common dir writable (whether via the explicit mount above, or via
+        # PROJECT_DIR's own mount when this container IS the main checkout),
+        # `git worktree prune` (or `remove`) had full permission to act on
+        # that wrong belief, deleting other LIVE workers' indexes (seanoc5/
+        # llm-swarm-runner#504 incident: one worker's `worktree prune -v`
+        # destroyed four siblings' + the coordinator's admin dirs).
+        #
+        # Fix: mount the WHOLE `worktrees/` subtree read-only, then mount
+        # just THIS worktree's own admin subdir read-write, nested on top of
+        # that. A bind mount nested inside an already-mounted directory
+        # shadows that subtree regardless of nesting direction — verified
+        # directly in both directions (see PR body): a narrower rw mount
+        # nested inside a ro one restores write access only there, the same
+        # way the SANDBOX_DEP_CACHE gradle mount above nests a ro mount
+        # inside a rw one. `git worktree prune` still *reports* siblings as
+        # prunable — it still can't see their working directories — but can
+        # no longer delete their metadata: the delete fails and nothing is
+        # removed.
+        #
+        # Mounting the directory itself, not one `-v` per sibling found at
+        # launch, also means this isn't limited to worktrees that already
+        # existed when the container started: a bind mount of a directory
+        # is a live view of it, not a snapshot, so a sibling the host
+        # creates *after* this container is running still appears through
+        # this same mount (read-only, automatically) — verified directly: a
+        # worktree added on the host while a container was already running
+        # showed up inside it immediately, and a write into its admin dir
+        # still failed. The only thing still scoped to launch time is which
+        # one admin dir gets the rw override back — this container's own,
+        # necessarily the only one that can matter for it.
+        #
+        # Identifying "which admin dir is this worktree's own" by name would
+        # be wrong whenever git disambiguates a basename collision
+        # (worktrees/<name>, worktrees/<name>1, ...), so instead each admin
+        # dir's own `gitdir` file (its one authoritative pointer back to
+        # "<worktree>/.git") is read and compared against $_proj_real; the
+        # first (only) match gets the rw override. `gitdir` is normally an
+        # absolute path, but git 2.48+'s `worktree.useRelativePaths` can
+        # write a path relative to the admin dir itself (the same
+        # convention that directory's `commondir` file already uses) —
+        # resolved below before comparing. For a container pointed at the
+        # MAIN checkout rather than a linked worktree, no entry under
+        # worktrees/ matches (the main checkout's own admin state lives at
+        # the top level, not under worktrees/, and stays rw via the mount
+        # above) — every linked worktree stays read-only, which is correct:
+        # a main-checkout container has no linked worktree of its own to
+        # restore write access to.
+        if [ -d "$_git_real/worktrees" ]; then
+            # `git gc` (including the background `gc --auto` an ordinary
+            # commit/fetch/merge can trigger) expires reflogs across every
+            # worktree, which needs a brief lock on each sibling's HEAD —
+            # exactly what the read-only mount above refuses. Left alone, a
+            # backgrounded autoDetach gc that hits this mid-run writes its
+            # failure to `gc.log` in the shared common dir (not per-
+            # worktree), which then makes every subsequent `gc --auto`
+            # anywhere in the repo — other workers, the host-side
+            # coordinator — skip with a stale warning until that file ages
+            # out or is removed. Disabling gc.auto inside this container
+            # (only here, via an env override — not touching the repo's
+            # actual on-disk config, which stays normal for the host and
+            # every other container) heads that off entirely. Scoped to
+            # this branch (a `worktrees/` admin tree actually exists) so a
+            # plain, non-worktree project's container is unaffected — there
+            # is nothing to lock down for it, so no need to touch its gc
+            # behavior either.
+            #
+            # GIT_CONFIG_COUNT=1 here would silently CLOBBER any
+            # GIT_CONFIG_COUNT/KEY_n/VALUE_n a caller already has in its own
+            # environment (sandbox.sh inherits it, same as the WORKER_ENV_OPTS
+            # pass-throughs below): git only reads indices 0..count-1, so a
+            # caller's own entries at index 0+ would silently stop applying
+            # the moment this overwrote count down to 1. Append after the
+            # caller's own entries instead, forwarding each by reference
+            # (`-e NAME`, no value) exactly like the WORKER_ENV_OPTS pattern,
+            # so docker reads the value from this process's own environment.
+            _caller_git_config_count="${GIT_CONFIG_COUNT:-0}"
+            for ((_gcc_i = 0; _gcc_i < _caller_git_config_count; _gcc_i++)); do
+                GIT_WORKTREE_ENV_OPTS+=(-e "GIT_CONFIG_KEY_$_gcc_i" -e "GIT_CONFIG_VALUE_$_gcc_i")
+            done
+            GIT_WORKTREE_ENV_OPTS+=(
+                -e "GIT_CONFIG_COUNT=$((_caller_git_config_count + 1))"
+                -e "GIT_CONFIG_KEY_${_caller_git_config_count}=gc.auto"
+                -e "GIT_CONFIG_VALUE_${_caller_git_config_count}=0"
+            )
+            unset _caller_git_config_count _gcc_i
+            MOUNTS+=("-v" "$_git_real/worktrees:$_git_real/worktrees:ro")
+            for _wt_admin in "$_git_real"/worktrees/*/; do
+                [ -d "$_wt_admin" ] || continue
+                _wt_admin="${_wt_admin%/}"
+                _wt_gitdir_file="$_wt_admin/gitdir"
+                [ -f "$_wt_gitdir_file" ] || continue
+                _wt_path="$(cat "$_wt_gitdir_file")"
+                _wt_path="${_wt_path%/.git}"
+                case "$_wt_path" in
+                    /*) ;;
+                    *) _wt_path="$_wt_admin/$_wt_path" ;;
+                esac
+                if [ -d "$_wt_path" ]; then
+                    _wt_path_real="$(realpath "$_wt_path" 2>/dev/null || printf '%s' "$_wt_path")"
+                else
+                    _wt_path_real="$_wt_path"
+                fi
+                if [ "$_wt_path_real" = "$_proj_real" ]; then
+                    MOUNTS+=("-v" "$_wt_admin:$_wt_admin:rw")
+                    break
+                fi
+            done
+            unset _wt_admin _wt_gitdir_file _wt_path _wt_path_real
         fi
     fi
 fi
@@ -570,6 +697,7 @@ exec docker run "${INTERACTIVE_FLAGS[@]}" --rm --init \
     "${DEP_CACHE_OPTS[@]}" \
     "${DEP_PROXY_OPTS[@]}" \
     "${SANDBOX_DOCS_ENV_OPTS[@]}" \
+    "${GIT_WORKTREE_ENV_OPTS[@]}" \
     "${MOUNTS[@]}" \
     -e "TERM=$TERM" \
     -e "COLORTERM=${COLORTERM:-}" \

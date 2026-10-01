@@ -35,3 +35,7 @@ demo-*.png
 # Editor / OS junk
 .DS_Store
 Thumbs.db
+
+# tests/test-sandbox-worktree-lockdown.sh fixture (repo-root placement is
+# deliberate — see the test's own fixture-placement comment).
+/.tmp-test-sandbox-worktree-lockdown/
