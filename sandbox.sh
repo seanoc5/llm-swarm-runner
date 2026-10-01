@@ -95,6 +95,11 @@ unset _claude_cfg_key _claude_cfg_needs_seed
 MOUNTS=(
     -v "$PROJECT_DIR:$PROJECT_DIR:rw"
     -v "$HOME/.claude:/home/sandbox/.claude:rw"
+    # Shadow ~/.claude/chrome with a per-container tmpfs (#518): the
+    # container's claude regenerates chrome-native-host on startup with its
+    # own (container-only) binary path, which breaks the operator's Claude
+    # in Chrome bridge on the host. Workers never need the bridge.
+    --mount "type=tmpfs,destination=/home/sandbox/.claude/chrome,tmpfs-mode=1777"
     -v "$CLAUDE_CONFIG_COPY:/home/sandbox/.claude.json:rw"
     -v "$HOME/.codex:/home/sandbox/.codex:rw"
     -v "$HOME/.ssh:$HOME/.ssh:ro"

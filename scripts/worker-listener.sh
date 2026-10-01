@@ -339,9 +339,9 @@ dispatch_agent() {
         # installed CLI (2.1.283): a denied session's tool listing omits all
         # three where an undenied control run includes them.
         if [ "$HEADLESS" = "1" ]; then
-            printf '%s' "$task_text" | claude "${MODEL_OPTS[@]}" "${WORKER_SYSTEM_PROMPT_OPTS[@]}" --disallowedTools Agent,Task,Workflow -p --dangerously-skip-permissions
+            printf '%s' "$task_text" | claude "${MODEL_OPTS[@]}" "${WORKER_SYSTEM_PROMPT_OPTS[@]}" --disallowedTools Agent,Task,Workflow --no-chrome -p --dangerously-skip-permissions
         else
-            printf '%s' "$task_text" | claude "${MODEL_OPTS[@]}" "${WORKER_SYSTEM_PROMPT_OPTS[@]}" --disallowedTools Agent,Task,Workflow --dangerously-skip-permissions
+            printf '%s' "$task_text" | claude "${MODEL_OPTS[@]}" "${WORKER_SYSTEM_PROMPT_OPTS[@]}" --disallowedTools Agent,Task,Workflow --no-chrome --dangerously-skip-permissions
         fi
     elif [[ "$AGENT" == "gemini" ]]; then
         if [ "$HEADLESS" = "1" ]; then
