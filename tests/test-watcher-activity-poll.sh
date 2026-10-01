@@ -857,6 +857,130 @@ if [ "${SKIP_5H:-0}" != "1" ]; then
 fi
 
 # ============================================================================
+heading "Test 5i (issue #506): worker-listener.sh's self-heal claim marker is forwarded into events.log as worker.listener.selfheal, and excluded from human_typed_since like worker.start"
+# ============================================================================
+# worker-listener.sh runs fully inside its own worktree's sandboxed
+# container (sandbox.sh "$WT" listener, see #514) — it never mounts
+# $PROJECT_DIR, so it cannot call log_event itself. Its ordinary self-heal
+# claim of a queued v2 brief (an idle listener, or one draining several
+# briefs back-to-back) drops a marker in its own worktree instead
+# (worker-listener.sh's record_selfheal_claim()); dispatch_selfheal_claim/
+# on_selfheal_claim forward it. This exercises the REAL forwarding path,
+# not a hand-built log_event line, to prove the production mechanism — not
+# just the category string — produces a record watcher_paste_epochs() can
+# pick up.
+command -v jq >/dev/null 2>&1 || { yellow "jq not found — skipping Test 5i (human_typed_since's jq path is inert without it)"; SKIP_5I=1; }
+if [ "${SKIP_5I:-0}" != "1" ]; then
+    for fn in is_own_worktree_dir is_our_worktree dispatch_selfheal_claim on_selfheal_claim; do
+        body="$(extract_fn "$fn")"
+        [ -n "$body" ] || red "could not extract function '$fn' from $WATCH — has it been renamed?"
+        eval "$body"
+    done
+
+    SELFHEAL_WT="$LOCK_TEST_DIR/wt-issue-506"
+    mkdir -p "$SELFHEAL_WT/.swarm/tasks/claims"
+    CLAIM_MARKER="$SELFHEAL_WT/.swarm/tasks/claims/t506.claim"
+    printf '2026-10-01T00:00:00Z\n' > "$CLAIM_MARKER"
+
+    : > "$EVENTS_LOG"
+    dispatch_selfheal_claim "$CLAIM_MARKER"
+
+    [ -f "$CLAIM_MARKER" ] && red "on_selfheal_claim must delete its marker once forwarded — it's a one-shot handoff buffer, not a second copy of the event record"
+    grep -qE 'worker\.listener\.selfheal[[:space:]]' "$EVENTS_LOG" \
+        || red "dispatch_selfheal_claim did not forward a worker.listener.selfheal line into events.log:
+$(cat "$EVENTS_LOG")"
+    grep -q 'issue=506' "$EVENTS_LOG" || red "forwarded event is missing issue=506: $(cat "$EVENTS_LOG")"
+    grep -q 'task_id=t506' "$EVENTS_LOG" || red "forwarded event is missing task_id=t506: $(cat "$EVENTS_LOG")"
+    green "worker-listener.sh's self-heal claim marker is forwarded into events.log as worker.listener.selfheal (issue, task_id), and the marker is deleted once forwarded"
+
+    SELFHEAL_EPOCH=$(date +%s)
+    CUTOFF=$((SELFHEAL_EPOCH - 5))
+    FIXTURE_TDIR5I="$LOCK_TEST_DIR/worker-transcript-5i"
+    mkdir -p "$FIXTURE_TDIR5I"
+    BRIEF_EPOCH=$((SELFHEAL_EPOCH + 2))
+    BRIEF_TS="$(date -u -d "@$BRIEF_EPOCH" +%Y-%m-%dT%H:%M:%S.000Z)"
+    jq -cn --arg ts "$BRIEF_TS" --arg text "## Task
+
+$(head -c 4000 < /dev/zero | tr '\0' 'x')" \
+        '{type:"user", timestamp:$ts, promptSource:"typed", origin:{kind:"human"}, message:{role:"user", content:$text}}' \
+        > "$FIXTURE_TDIR5I/session.jsonl"
+
+    PASTES="$(watcher_paste_epochs)"
+    if human_typed_since "$FIXTURE_TDIR5I" "$CUTOFF" "$PASTES" "$WORKER_HUMAN_PASTE_GRACE_SECS"; then
+        red "a self-heal-delivered brief must not read as a human turn — worker.listener.selfheal is missing from watcher_paste_epochs' pattern"
+    fi
+    green "a self-heal-delivered brief lands inside the paste-grace window around its own worker.listener.selfheal event and is correctly excluded, not misread as human"
+
+    # Contrast: a genuine operator reply in that SAME worker pane, well
+    # outside the paste-grace window, must still count as human — same
+    # regression guard Test 5e applies to worker.start.
+    REPLY_EPOCH=$((SELFHEAL_EPOCH + WORKER_HUMAN_PASTE_GRACE_SECS + 30))
+    REPLY_TS="$(date -u -d "@$REPLY_EPOCH" +%Y-%m-%dT%H:%M:%S.000Z)"
+    jq -cn --arg ts "$REPLY_TS" --arg text "actually let's take a different approach here" \
+        '{type:"user", timestamp:$ts, promptSource:"typed", origin:{kind:"human"}, message:{role:"user", content:$text}}' \
+        >> "$FIXTURE_TDIR5I/session.jsonl"
+    human_typed_since "$FIXTURE_TDIR5I" "$CUTOFF" "$PASTES" "$WORKER_HUMAN_PASTE_GRACE_SECS" \
+        || red "a genuine operator reply well outside the paste-grace window must still count as human"
+    green "a genuine operator reply in the same worker pane still counts as human once outside the paste-grace window"
+fi
+
+# ============================================================================
+heading "Test 5j (issue #506 self-review finding): run_poll's claims scan is never baselined into seen_file, so a pre-existing marker (watcher restart) and a reused task_id (requeue) both still get forwarded"
+# ============================================================================
+# Self-review on this issue's own PR caught that routing claims/*.claim
+# through the SAME seen_file/comm diff used for done/outbox outcomes would
+# silently eat two cases: a marker already on disk when this watcher starts
+# (done/outbox outcomes correctly skip replaying what predates the watcher
+# — a claim marker, a one-shot buffer, must NOT be skipped the same way),
+# and a path whose task_id is reused by a later requeue after its first
+# marker was already forwarded+deleted (seen_file only drops a path once
+# some OTHER new path shows up in the same tick). The fix pulled claims
+# scanning out of scan_outcomes entirely into scan_claims/dispatch_claims,
+# which run_poll now calls unconditionally every tick with no seen-state at
+# all. This test drives those two functions directly — the same ones
+# run_poll's loop calls — rather than re-simulating the loop itself.
+for fn in scan_claims dispatch_claims; do
+    body="$(extract_fn "$fn")"
+    [ -n "$body" ] || red "could not extract function '$fn' from $WATCH — has it been renamed?"
+    eval "$body"
+done
+# scan_claims normally resolves worktrees via own_worktree_dirs_for_scan ->
+# swarm_own_worktree_dirs (issue #357's git-worktree-list-backed discovery,
+# its own separately-tested concern) — stubbed here to point straight at
+# this test's one fake worktree, so this test stays focused on scan_claims/
+# dispatch_claims' own baseline-free semantics instead of worktree discovery.
+own_worktree_dirs_for_scan() { echo "$SELFHEAL_WT"; }
+
+: > "$EVENTS_LOG"
+CLAIM_MARKER_5J="$SELFHEAL_WT/.swarm/tasks/claims/t506-startup.claim"
+printf '2026-10-01T00:00:00Z\n' > "$CLAIM_MARKER_5J"
+
+# Case 1: the marker already exists before dispatch_claims is ever called —
+# standing in for one a listener dropped moments before a coordinator
+# restart. No seen_file is built or consulted anywhere in this path.
+dispatch_claims
+
+[ -f "$CLAIM_MARKER_5J" ] && red "a claim marker that already existed before the first dispatch_claims call must still be forwarded and deleted (simulates a watcher restart)"
+grep -q 'task_id=t506-startup' "$EVENTS_LOG" \
+    || red "a pre-existing claim marker was not forwarded on the first dispatch_claims call: $(cat "$EVENTS_LOG")"
+green "a claim marker already on disk before the first scan (simulating a watcher restart) is still forwarded, not silently baselined away"
+
+# Case 2: the SAME path is recreated (a requeue reusing the same task_id)
+# after its first marker was already forwarded and deleted. A seen_file-
+# backed diff would treat this path as already handled; scan_claims/
+# dispatch_claims carry no such memory, so it must be forwarded again.
+: > "$EVENTS_LOG"
+printf '2026-10-01T00:05:00Z\n' > "$CLAIM_MARKER_5J"
+dispatch_claims
+
+[ -f "$CLAIM_MARKER_5J" ] && red "a reused claim marker path must also be forwarded and deleted on its second appearance"
+grep -q 'task_id=t506-startup' "$EVENTS_LOG" \
+    || red "a claim marker whose task_id was reused after its first delivery was silently dropped: $(cat "$EVENTS_LOG")"
+green "a claim marker path reused by a later requeue is forwarded again, not silently dropped as 'already seen'"
+
+unset -f own_worktree_dirs_for_scan
+
+# ============================================================================
 heading "Test 6: a debounced activity finding is retried on a later tick, not lost (issue #392 self-review finding, now via the coordinator inbox)"
 # ============================================================================
 # activity_poll_pass only marks ACTIVITY_ANNOUNCED_PR/_ISSUE (and
@@ -886,12 +1010,20 @@ declare -A ACTIVITY_ANNOUNCED_PR=()
 declare -A ACTIVITY_ANNOUNCED_ISSUE=()
 LAST_ACTIVITY_POLL_TS="1970-01-01T00:00:00Z"
 ACTIVITY_POLL_OVERLAP_SECS=30
-DEBOUNCE_SECS=2
+# A wider window than this test strictly needs (DEBOUNCE_SECS=2 plus a 1s
+# offset left only a ~1s cushion between capturing LAST_ACTIVITY_WAKE below
+# and activity_poll_pass's own `date +%s` read inside wake_debounced —
+# comfortable on an idle machine, but a loaded CI runner can burn that
+# whole second just scheduling the shell, flipping "still debounced" to
+# "not debounced" and failing this test's very first assertion. 5s/1s
+# leaves a ~4s cushion instead for the same reason, at the cost of 3 extra
+# seconds in the later `sleep` that lets the window clear.
+DEBOUNCE_SECS=5
 printf '4000\tDebounce probe\tfix/issue-4000\n' > "$PR_FIXTURE"
 : > "$ISSUE_FIXTURE"
 
-# Simulate "another wake fired 1s ago" — well inside the 2s debounce window
-# — so this call's on_activity is debounced (returns 1).
+# Simulate "another wake fired 1s ago" — well inside the debounce window —
+# so this call's on_activity is debounced (returns 1).
 LAST_ACTIVITY_WAKE=$(( $(date +%s) - 1 ))
 CURSOR_BEFORE="$LAST_ACTIVITY_POLL_TS"
 activity_poll_pass
@@ -914,7 +1046,7 @@ green "the cursor did NOT advance past the debounced, still-unannounced PR"
 # Let the debounce window clear, then retry with the SAME fixture — since
 # it was never marked as announced above AND the cursor never moved past
 # it, this call must still detect and record it.
-sleep 3
+sleep "$((DEBOUNCE_SECS + 1))"
 activity_poll_pass
 FILES="$(find "$COORD_INBOX_DIR" -maxdepth 1 -name '*.md' -type f 2>/dev/null)"
 [ -n "$FILES" ] \
