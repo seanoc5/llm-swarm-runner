@@ -587,6 +587,54 @@ if [ "$SANDBOX_MEM_LIMIT" != "0" ]; then
     MEM_OPTS=(--memory "$SANDBOX_MEM_LIMIT" --memory-swap "$SANDBOX_MEM_LIMIT")
 fi
 
+# CPU governor (2026-09-29). The memory cap above was the only limit, and it
+# cuts on the wrong axis: a worker's JVMs see all host cores, Gradle forks
+# `availableProcessors()/2` test JVMs (4 on a 32-thread box), and ten
+# workers doing that together put the host at load 95 while IO sat idle.
+# `--cpus` is a CFS quota, so Java 17+ derives availableProcessors() from it
+# and every repo's fork/worker arithmetic shrinks on its own. Default 6 is
+# clamped to the host's core count (docker refuses a quota above it); "0"
+# disables the cap (byte-identical docker run args to before the knob).
+CPU_OPTS=()
+SANDBOX_CPUS="${SANDBOX_CPUS:-6}"
+if [ "$SANDBOX_CPUS" != "0" ]; then
+    _host_cpus="$(nproc 2>/dev/null || echo 1)"
+    if [ "${SANDBOX_CPUS%%.*}" -gt "$_host_cpus" ] 2>/dev/null; then
+        SANDBOX_CPUS="$_host_cpus"
+    fi
+    CPU_OPTS=(--cpus "$SANDBOX_CPUS")
+    unset _host_cpus
+fi
+
+# Gradle worker limits (2026-09-29). Every swarm repo ships gradle.properties
+# sized for an idle developer box: no org.gradle.workers.max (defaults to
+# the core count), a 2 GB Gradle daemon, a Kotlin daemon that inherits the
+# same 2 GB, and a 15-minute daemon idle timeout. Inside an 8 GB cgroup
+# with test forks on top that is an OOM-kill waiting for its timing. The
+# limits ride in as environment because the image has no ~/.gradle to
+# mount a properties file into (a file mount would make docker create the
+# directory root-owned and the build could not write its caches):
+#   GRADLE_OPTS   -D system properties on the client JVM: org.gradle.*
+#                 ones are Gradle properties (workers.max, daemon idle
+#                 timeout) and org.gradle.project.<key> ones become project
+#                 properties, which is how the Kotlin plugin reads
+#                 kotlin.daemon.jvmargs. Appended to any GRADLE_OPTS the
+#                 caller already exports. Verified 2026-09-29 against
+#                 corpusminder with an init script (ORG_GRADLE_PROJECT_*
+#                 env did NOT reach findProperty for a dotted key; -D did).
+# SANDBOX_GRADLE_LIMITS=0 disables all of it; the other two knobs tune it.
+# The repos' own values are untouched, so nothing changes for a developer
+# running ./gradlew on the host.
+GRADLE_LIMIT_OPTS=()
+SANDBOX_GRADLE_LIMITS="${SANDBOX_GRADLE_LIMITS:-1}"
+if [ "$SANDBOX_GRADLE_LIMITS" = "1" ]; then
+    SANDBOX_GRADLE_WORKERS_MAX="${SANDBOX_GRADLE_WORKERS_MAX:-4}"
+    SANDBOX_KOTLIN_DAEMON_XMX="${SANDBOX_KOTLIN_DAEMON_XMX:-1536m}"
+    GRADLE_LIMIT_OPTS=(
+        -e "GRADLE_OPTS=${GRADLE_OPTS:+$GRADLE_OPTS }-Dorg.gradle.workers.max=$SANDBOX_GRADLE_WORKERS_MAX -Dorg.gradle.daemon.idletimeout=180000 -Dorg.gradle.project.kotlin.daemon.jvmargs=-Xmx$SANDBOX_KOTLIN_DAEMON_XMX"
+    )
+fi
+
 # Get the directory of this script so we can find worker-listener.sh
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 
@@ -685,6 +733,7 @@ echo "---------------------------"
 exec docker run "${INTERACTIVE_FLAGS[@]}" --rm --init \
     "${NAME_OPT[@]}" \
     "${MEM_OPTS[@]}" \
+    "${CPU_OPTS[@]}" \
     --network host \
     --user "$(id -u):$(id -g)" \
     --workdir "$PROJECT_DIR" \
@@ -696,6 +745,7 @@ exec docker run "${INTERACTIVE_FLAGS[@]}" --rm --init \
     "${GIT_IDENTITY_OPTS[@]}" \
     "${DEP_CACHE_OPTS[@]}" \
     "${DEP_PROXY_OPTS[@]}" \
+    "${GRADLE_LIMIT_OPTS[@]}" \
     "${SANDBOX_DOCS_ENV_OPTS[@]}" \
     "${GIT_WORKTREE_ENV_OPTS[@]}" \
     "${MOUNTS[@]}" \

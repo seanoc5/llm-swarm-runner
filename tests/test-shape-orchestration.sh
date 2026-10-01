@@ -38,6 +38,10 @@ for s in "$PROVISION" "$WATCH" "$LIST" "$SWEEP"; do
 done
 
 TEST_DIR=$(mktemp -d -t shape-orch-XXXXXX)
+# Host admission (provision-worker.sh, 2026-09-29) reads the real host's
+# load and memory and staggers spawns; under stubs that is noise, so pin
+# the state dir into the test tree and switch the three checks off.
+export HOST_STATE_DIR="$TEST_DIR/host-state" HOST_MAX_LOAD1=0 HOST_MIN_MEM_AVAIL_MB=0 HOST_SPAWN_STAGGER_SECS=0
 cleanup() {
     [ -n "${WATCH_PID:-}" ] && kill "$WATCH_PID" 2>/dev/null || true
     if [ "${KEEP:-0}" = "1" ]; then
@@ -233,7 +237,11 @@ grep -qE 'new-window .* iss-103' "$TEST_DIR/tmux.log" \
 
 # Free up capacity (host now has 0 running swarm-* containers) and retry —
 # this must queue exactly ONE brief, not a duplicate of a phantom first one.
+# Earlier admitted spawns in this file left pending-spawn markers that the
+# docker stub never resolves (no container ever appears); under a cap of 1
+# they count as in flight, so clear them: "capacity freed" means both.
 : > "$TEST_DIR/docker-containers.txt"
+rm -f "$HOST_STATE_DIR"/pending-*
 HOST_MAX_WORKERS=1 "$PROVISION" 103 > "$TEST_DIR/prov-3d-retry.log" 2>&1 \
     || red "retry after freeing capacity should succeed: $(cat "$TEST_DIR/prov-3d-retry.log")"
 briefs_after_retry=$(find "$WT103/.swarm/tasks/inbox" -maxdepth 1 -name '*.md' | wc -l)

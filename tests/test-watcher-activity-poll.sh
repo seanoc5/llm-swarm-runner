@@ -47,6 +47,10 @@ WATCH="$SCRIPT_DIR/../scripts/coordinator-watch.sh"
 [ -x "$WATCH" ] || red "coordinator-watch.sh not executable: $WATCH"
 
 TEST_DIR=$(mktemp -d -t watcher-activity-poll-XXXXXX)
+# Host admission (provision-worker.sh, 2026-09-29) reads the real host's
+# load and memory and staggers spawns; under stubs that is noise, so pin
+# the state dir into the test tree and switch the three checks off.
+export HOST_STATE_DIR="$TEST_DIR/host-state" HOST_MAX_LOAD1=0 HOST_MIN_MEM_AVAIL_MB=0 HOST_SPAWN_STAGGER_SECS=0
 cleanup() {
     [ -n "${WATCH_PID:-}" ] && kill "$WATCH_PID" 2>/dev/null || true
     [ -n "${WATCH_PID:-}" ] && wait "$WATCH_PID" 2>/dev/null || true

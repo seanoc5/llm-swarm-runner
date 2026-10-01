@@ -23,12 +23,25 @@
 #   - KEY=VALUE only (export prefix tolerated, stripped)
 #   - surrounding single or double quotes on VALUE stripped
 #   - inline comments NOT supported (kept literal — keep .env entries clean)
+#
+# Host-only keys: HOST_MAX_WORKERS, HOST_MAX_LOAD1, HOST_MIN_MEM_AVAIL_MB,
+# HOST_SPAWN_STAGGER_SECS and HOST_STATE_DIR describe the box, not the
+# project, so tier 2 (<project>/.swarm/.env) is NOT allowed to set them. A
+# project file that does gets a one-line warning and the key is skipped.
+# Reason (2026-09-29): fand-app's .swarm/.env said HOST_MAX_WORKERS=12 while
+# the host .env said 14, and llm-start.sh exports the loaded value into the
+# coordinator's tmux env, so each swarm ran with its own idea of the "host"
+# cap and 15 workers were counted against a 14 cap.
 
 # Don't enable -u / -e here; this is sourced into scripts that may not have
 # them. Use guards on each var read instead.
 
+# Keys that only the host tiers (3, 4) or the shell may set. See header.
+_LOAD_ENV_HOST_ONLY_KEYS=" HOST_MAX_WORKERS HOST_MAX_LOAD1 HOST_MIN_MEM_AVAIL_MB HOST_SPAWN_STAGGER_SECS HOST_STATE_DIR "
+
 _apply_env_file() {
     local f="$1"
+    local project_tier="${2:-0}"
     [ -f "$f" ] || return 0
     local line k v
     while IFS= read -r line || [ -n "$line" ]; do
@@ -42,6 +55,11 @@ _apply_env_file() {
             # strip optional surrounding quotes
             if [[ "$v" =~ ^\".*\"$ ]] || [[ "$v" =~ ^\'.*\'$ ]]; then
                 v="${v:1:${#v}-2}"
+            fi
+            # host-only keys are ignored in the project tier (see header)
+            if [ "$project_tier" = "1" ] && [[ "$_LOAD_ENV_HOST_ONLY_KEYS" == *" $k "* ]]; then
+                echo "warn: $f sets $k; host-only keys are ignored in <project>/.swarm/.env (set it in <sandbox>/.env)" >&2
+                continue
             fi
             # only export if unset (empty-but-set values from caller still win)
             [ -z "${!k+x}" ] && export "$k=$v"
@@ -82,7 +100,7 @@ _load_env_main() {
     # Caller may pre-set LLM_SWARM_DIR; otherwise infer from this script's path.
     sandbox="${LLM_SWARM_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 
-    _apply_env_file "$proj/.swarm/.env"        # project override
+    _apply_env_file "$proj/.swarm/.env" 1      # project override (host-only keys skipped)
     _apply_env_file "$sandbox/.env"            # this host's defaults (gitignored)
     _apply_env_file "$sandbox/.env.example"    # ship defaults
     _expand_extra_mounts                       # resolve ${FAND_DATA_ROOT} sentinel
