@@ -95,9 +95,11 @@ STARTUP FAILURE (exit 4, issue #493)
     PROVISION_SPAWN_CHECK_SECS, default 5s): a dead pane or a container
     that never came up means the spawn failed (e.g. sandbox.sh's
     `docker run` exiting immediately) even though `tmux new-window` itself
-    reported success. Exits 4 with the pane's last lines printed, instead
-    of the pre-#493 behavior of exiting 0 with a brief silently stranded in
-    inbox/ (fand-etl 2026-09-27: undiscovered for ~7 hours).
+    reported success. Exits 4 with the pane's last lines printed, and
+    removes the brief step 3 already wrote to inbox/ — nothing claimed it,
+    and leaving it behind would duplicate onto a retry — instead of the
+    pre-#493 behavior of exiting 0 with it silently stranded there
+    (fand-etl 2026-09-27: undiscovered for ~7 hours).
     PROVISION_SPAWN_CHECK_SECS=0 disables this check (for test harnesses
     that stub tmux/docker without simulating a live pane or container).
     Caveat: a cold host without the llm-swarm-runner image yet runs
@@ -139,7 +141,9 @@ EVENTS LOG
                                    Always preceded by a worker.start for the same
                                    issue/task_id — a consumer counting successful
                                    spawns must subtract these, not just count
-                                   worker.start lines.
+                                   worker.start lines. brief_removed=1 means the
+                                   unclaimed brief was deleted from inbox/ to
+                                   keep a retry from duplicating it.
 
 EXAMPLES
     provision-worker.sh 142                          # dispatch issue #142 from \$PWD
@@ -375,7 +379,7 @@ check_stale_container() {
     log_event provision.stale_container "issue=$issue container=$container state=cleared running_was=$running"
 }
 
-# post_spawn_health_check <issue> <window> <container>
+# post_spawn_health_check <issue> <window> <container> <brief_path>
 #
 # issue #493: verifies the just-spawned worker actually came up, instead of
 # trusting `tmux new-window`'s exit status — it only reports that tmux
@@ -390,8 +394,17 @@ check_stale_container() {
 # off" convention as coordinator-watch.sh's other interval knobs) — for a
 # harness that stubs tmux/docker without actually simulating a live pane or
 # a running container, this check could never pass.
+#
+# On failure, removes brief_path (self-review finding): the brief was
+# already written to inbox/ in step 3, before this check ran. Leaving it
+# behind means any retry — whether it reclaims a now-dead window or queues
+# onto one that actually did come up late — adds a second copy next to the
+# first, and a listener has no way to know the first is moot. Nothing ever
+# claimed this brief (the spawn never came up), so there's no in-progress
+# work to lose; the pane's last lines printed just above are the forensic
+# record. Re-provisioning the issue writes a fresh brief from scratch.
 post_spawn_health_check() {
-    local issue="$1" window="$2" container="$3"
+    local issue="$1" window="$2" container="$3" brief_path="$4"
     local check_secs="${PROVISION_SPAWN_CHECK_SECS:-5}"
     [ "$check_secs" = "0" ] && return 0
     sleep "$check_secs"
@@ -407,7 +420,10 @@ post_spawn_health_check() {
         echo "ERROR: worker window $window for issue #$issue did not come up (pane_dead=${pane_dead:-0} container_running=$running)." >&2
         echo "       Last lines of the pane:" >&2
         tmux capture-pane -t "$SESSION_NAME:$window" -p 2>/dev/null | tail -40 >&2 || true
-        log_event worker.start.failed "issue=$issue window=$window pane_dead=${pane_dead:-0} container_running=$running"
+        if [ -n "$brief_path" ] && rm -f "$brief_path" 2>/dev/null; then
+            echo "       Removed the unclaimed brief ($brief_path) so a retry doesn't queue a duplicate." >&2
+        fi
+        log_event worker.start.failed "issue=$issue window=$window pane_dead=${pane_dead:-0} container_running=$running brief_removed=$([ -n "$brief_path" ] && [ ! -e "$brief_path" ] && echo 1 || echo 0)"
         exit 4
     fi
 }
@@ -734,7 +750,7 @@ else
     # issue #493: don't report success on tmux's say-so alone — verify the
     # pane actually survived past its first line (see
     # post_spawn_health_check's header comment). Exits non-zero on failure.
-    post_spawn_health_check "$ISSUE" "iss-$ISSUE" "$container_name"
+    post_spawn_health_check "$ISSUE" "iss-$ISSUE" "$container_name" "$DEST"
 fi
 
 echo

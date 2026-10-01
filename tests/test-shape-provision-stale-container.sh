@@ -213,10 +213,12 @@ heading "Test 6: post_spawn_health_check — pane alive + container running -> s
 command tmux -L "$SOCKET" new-window -d -t "$SESSION" -n iss-301 "sleep 100"
 echo "swarm-provstale-iss-301 running" > "$DOCKER_STATE_FILE"
 : > "$EVENTS_LOG"
-PROVISION_SPAWN_CHECK_SECS=0.1 post_spawn_health_check 301 iss-301 swarm-provstale-iss-301
+echo "queued" > "$TEST_DIR/brief-301.md"
+PROVISION_SPAWN_CHECK_SECS=0.1 post_spawn_health_check 301 iss-301 swarm-provstale-iss-301 "$TEST_DIR/brief-301.md"
 [ -z "$(cat "$EVENTS_LOG")" ] || red "expected no log_event call for a healthy spawn, got: $(cat "$EVENTS_LOG")"
+[ -f "$TEST_DIR/brief-301.md" ] || red "a healthy spawn must never remove the brief it was given"
 command tmux -L "$SOCKET" kill-window -t "$SESSION:iss-301" 2>/dev/null || true
-green "a live pane with a running container passes silently"
+green "a live pane with a running container passes silently; its brief is untouched"
 
 # ============================================================================
 heading "Test 7: post_spawn_health_check — pane DEAD (the collision shape) -> exit 4"
@@ -225,14 +227,16 @@ command tmux -L "$SOCKET" new-window -d -t "$SESSION" -n iss-302 "exit 125"
 wait_pane_dead iss-302 1 || red "setup: expected window iss-302's pane to go dead"
 : > "$DOCKER_STATE_FILE"
 : > "$EVENTS_LOG"
+echo "queued" > "$TEST_DIR/brief-302.md"
 rc=0
-out="$(PROVISION_SPAWN_CHECK_SECS=0.1 post_spawn_health_check 302 iss-302 swarm-provstale-iss-302 2>&1)" || rc=$?
+out="$(PROVISION_SPAWN_CHECK_SECS=0.1 post_spawn_health_check 302 iss-302 swarm-provstale-iss-302 "$TEST_DIR/brief-302.md" 2>&1)" || rc=$?
 [ "$rc" -eq 4 ] || red "expected exit 4 for a dead pane right after spawn, got rc=$rc, output: $out"
 echo "$out" | grep -qi 'pane_dead=1' || red "expected the error to report pane_dead=1: $out"
-grep -q 'worker.start.failed.*issue=302.*pane_dead=1' "$EVENTS_LOG" \
-    || red "expected a worker.start.failed log line, got: $(cat "$EVENTS_LOG")"
+grep -q 'worker.start.failed.*issue=302.*pane_dead=1.*brief_removed=1' "$EVENTS_LOG" \
+    || red "expected a worker.start.failed log line with brief_removed=1, got: $(cat "$EVENTS_LOG")"
+[ -f "$TEST_DIR/brief-302.md" ] && red "a failed spawn must remove its unclaimed brief so a retry doesn't duplicate it"
 command tmux -L "$SOCKET" kill-window -t "$SESSION:iss-302" 2>/dev/null || true
-green "a dead pane right after spawn exits 4 (not 0) and logs worker.start.failed — the exact gap the fand-etl incident fell through"
+green "a dead pane right after spawn exits 4 (not 0), logs worker.start.failed, and removes the unclaimed brief — the exact gap the fand-etl incident fell through"
 
 # ============================================================================
 heading "Test 8: post_spawn_health_check — pane alive but container never came up -> exit 4"
@@ -240,12 +244,14 @@ heading "Test 8: post_spawn_health_check — pane alive but container never came
 command tmux -L "$SOCKET" new-window -d -t "$SESSION" -n iss-303 "sleep 100"
 : > "$DOCKER_STATE_FILE"
 : > "$EVENTS_LOG"
+echo "queued" > "$TEST_DIR/brief-303.md"
 rc=0
-out="$(PROVISION_SPAWN_CHECK_SECS=0.1 post_spawn_health_check 303 iss-303 swarm-provstale-iss-303 2>&1)" || rc=$?
+out="$(PROVISION_SPAWN_CHECK_SECS=0.1 post_spawn_health_check 303 iss-303 swarm-provstale-iss-303 "$TEST_DIR/brief-303.md" 2>&1)" || rc=$?
 [ "$rc" -eq 4 ] || red "expected exit 4 when the container never came up, got rc=$rc, output: $out"
 echo "$out" | grep -qi 'container_running=0' || red "expected the error to report container_running=0: $out"
+[ -f "$TEST_DIR/brief-303.md" ] && red "a failed spawn (container never started) must also remove its unclaimed brief"
 command tmux -L "$SOCKET" kill-window -t "$SESSION:iss-303" 2>/dev/null || true
-green "a pane that's alive but whose container never started still exits 4"
+green "a pane that's alive but whose container never started still exits 4 and removes its unclaimed brief"
 
 # ============================================================================
 heading "All provision-worker.sh stale-container / post-spawn health tests passed"
