@@ -227,7 +227,26 @@ if command -v git &>/dev/null && git -C "$PROJECT_DIR" rev-parse --git-dir &>/de
             # plain, non-worktree project's container is unaffected — there
             # is nothing to lock down for it, so no need to touch its gc
             # behavior either.
-            GIT_WORKTREE_ENV_OPTS+=(-e "GIT_CONFIG_COUNT=1" -e "GIT_CONFIG_KEY_0=gc.auto" -e "GIT_CONFIG_VALUE_0=0")
+            #
+            # GIT_CONFIG_COUNT=1 here would silently CLOBBER any
+            # GIT_CONFIG_COUNT/KEY_n/VALUE_n a caller already has in its own
+            # environment (sandbox.sh inherits it, same as the WORKER_ENV_OPTS
+            # pass-throughs below): git only reads indices 0..count-1, so a
+            # caller's own entries at index 0+ would silently stop applying
+            # the moment this overwrote count down to 1. Append after the
+            # caller's own entries instead, forwarding each by reference
+            # (`-e NAME`, no value) exactly like the WORKER_ENV_OPTS pattern,
+            # so docker reads the value from this process's own environment.
+            _caller_git_config_count="${GIT_CONFIG_COUNT:-0}"
+            for ((_gcc_i = 0; _gcc_i < _caller_git_config_count; _gcc_i++)); do
+                GIT_WORKTREE_ENV_OPTS+=(-e "GIT_CONFIG_KEY_$_gcc_i" -e "GIT_CONFIG_VALUE_$_gcc_i")
+            done
+            GIT_WORKTREE_ENV_OPTS+=(
+                -e "GIT_CONFIG_COUNT=$((_caller_git_config_count + 1))"
+                -e "GIT_CONFIG_KEY_${_caller_git_config_count}=gc.auto"
+                -e "GIT_CONFIG_VALUE_${_caller_git_config_count}=0"
+            )
+            unset _caller_git_config_count _gcc_i
             MOUNTS+=("-v" "$_git_real/worktrees:$_git_real/worktrees:ro")
             for _wt_admin in "$_git_real"/worktrees/*/; do
                 [ -d "$_wt_admin" ] || continue

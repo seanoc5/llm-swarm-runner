@@ -35,7 +35,7 @@ PASS=0
 FAIL=0
 SKIP=0
 
-pass() { PASS=$((PASS + 1)); green "  ✓ $1"; }
+pass() { PASS=$((PASS + 1)); green "  ✓ $1"; shift; [ $# -gt 0 ] && printf '    %s\n' "$@" || true; }
 fail() { FAIL=$((FAIL + 1)); red "  ✗ $1"; shift; [ $# -gt 0 ] && printf '    %s\n' "$@" || true; }
 skip() { SKIP=$((SKIP + 1)); yellow "  - $1 (skipped: $2)"; }
 
@@ -118,6 +118,42 @@ run_in_wta() {
     "$SANDBOX_SH" "$WTA" "$1" 2>&1
 }
 
+run_in_main() {
+    # Same one-shot-command caveat as run_in_wta, against the main checkout.
+    "$SANDBOX_SH" "$MAIN" "$1" 2>&1
+}
+
+# Distinguishes two different, equally-safe outcomes for a prune check that
+# saw no evidence a sibling was ever prunable: either (a) the check's own
+# fixture placement is responsible (see the fixture-placement comment above
+# $FIXTURE's definition) — this suite's fixture must live under $REPO_ROOT,
+# but sandbox.sh ALSO bind-mounts its OWN install directory ($REPO_ROOT)
+# read-only so helper scripts like worker-listener.sh stay reachable inside
+# the container, and that mount coincidentally exposes every sibling
+# worktree's directory here too, which would NOT happen for a real sibling
+# worktree in production (those live under a separate <project>-worktrees/
+# tree, never under sandbox.sh's own install directory) — or (b) something
+# is genuinely wrong and prune never ran at all. Checks whether the
+# sibling's own entry in `git worktree list --porcelain` is still marked
+# prunable (if so, this isn't case (a)) and, if it genuinely isn't, confirms
+# its WORKING TREE (not just its admin dir, which test 3 already covers)
+# still rejects a direct write the same read-only way — i.e. visible, but
+# still locked down, not a blind spot.
+sibling_visible_and_locked() {
+    local runner="$1" sibling_path="$2"
+    local list_out block write_out
+    list_out=$("$runner" "git worktree list --porcelain") || true
+    block=$(printf '%s\n' "$list_out" | awk -v p="worktree $sibling_path" '
+        $0 == p { flag=1; next }
+        flag && /^worktree / { exit }
+        flag { print }
+    ')
+    [ -n "$block" ] || return 1
+    echo "$block" | grep -q "^prunable" && return 1
+    write_out=$("$runner" "echo x >> '$sibling_path/f.txt' 2>&1; echo RC=\$?") || true
+    echo "$write_out" | grep -qi "read-only file system" && ! echo "$write_out" | grep -q "RC=0"
+}
+
 # ── 1. Reproduce the underlying visibility bug ──────────────────────────────
 # With ONLY wt-a's own directory + the common dir mounted (no wt-b directory),
 # git can't see wt-b and must mark it prunable. This is the belief that made
@@ -151,10 +187,15 @@ if ! echo "$prune_out" | grep -qi "wt-b"; then
     if is_nested_gitconfig_quirk "$prune_out"; then
         skip "wt-b's admin dir survives \`git worktree prune -v\` from inside the container" \
             "nested-DooD \$HOME/.gitconfig quirk, unrelated to #504 (see is_nested_gitconfig_quirk)"
+    elif sibling_visible_and_locked run_in_wta "$WTB"; then
+        pass "wt-b's admin dir survives \`git worktree prune -v\` from inside the container" \
+            "prune had nothing to report because wt-b is independently visible here (this fixture" \
+            "lives under \$REPO_ROOT, which sandbox.sh's own SCRIPT_DIR mount also exposes read-only" \
+            "— see sibling_visible_and_locked) — but wt-b's working tree still rejects a direct write"
     else
         fail "wt-b's admin dir survives \`git worktree prune -v\` from inside the container" \
-            "prune never even saw wt-b as prunable — can't tell this blocked the delete vs. never ran:" \
-            "prune output: $prune_out"
+            "prune never even saw wt-b as prunable, and it isn't independently visible+locked down" \
+            "either — can't tell this blocked the delete vs. never ran: prune output: $prune_out"
     fi
 elif [ -d "$GITCOMMON/worktrees/wt-b" ]; then
     pass "wt-b's admin dir survives \`git worktree prune -v\` from inside the container"
@@ -232,7 +273,7 @@ fi
 # now-redundant explicit common-dir mount.
 echo ""
 echo "[ 6. Fix: lockdown also applies when sandbox.sh is pointed at the main checkout ]"
-main_prune_out=$("$SANDBOX_SH" "$MAIN" "git worktree prune -v" 2>&1 || true)
+main_prune_out=$(run_in_main "git worktree prune -v")
 if echo "$main_prune_out" | grep -qi "wt-a\|wt-b"; then
     if [ -d "$GITCOMMON/worktrees/wt-a" ] && [ -d "$GITCOMMON/worktrees/wt-b" ]; then
         pass "both worktrees' admin dirs survive \`git worktree prune -v\` run against the main checkout"
@@ -243,10 +284,14 @@ if echo "$main_prune_out" | grep -qi "wt-a\|wt-b"; then
 elif is_nested_gitconfig_quirk "$main_prune_out"; then
     skip "both worktrees' admin dirs survive \`git worktree prune -v\` run against the main checkout" \
         "nested-DooD \$HOME/.gitconfig quirk, unrelated to #504 (see is_nested_gitconfig_quirk)"
+elif sibling_visible_and_locked run_in_main "$WTA" && sibling_visible_and_locked run_in_main "$WTB"; then
+    pass "both worktrees' admin dirs survive \`git worktree prune -v\` run against the main checkout" \
+        "prune had nothing to report because wt-a/wt-b are independently visible here (same" \
+        "fixture-placement side effect as test 2) — but both working trees still reject a direct write"
 else
     fail "both worktrees' admin dirs survive \`git worktree prune -v\` run against the main checkout" \
-        "prune never even saw wt-a/wt-b as prunable — can't tell this blocked the delete vs. never ran:" \
-        "prune output: $main_prune_out"
+        "prune never even saw wt-a/wt-b as prunable, and they aren't independently visible+locked" \
+        "down either — can't tell this blocked the delete vs. never ran: prune output: $main_prune_out"
 fi
 
 # ── 7. Known, accepted tradeoff: `git gc` fails inside a locked-down worker ─
