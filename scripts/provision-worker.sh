@@ -124,13 +124,22 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env
 
 EVENTS LOG
     Appends to <project>/.swarm/events.log:
-      worker.start                new iss-N window created (alive=A/MAX, total=W/MAX)
+      worker.start                new iss-N window created (alive=A/MAX, total=W/MAX).
+                                   Logged at spawn time, not confirmed-healthy time
+                                   (coordinator-watch.sh's activity-poll anchors a
+                                   paste-grace window to this timestamp, issue #497)
+                                   — a worker.start.failed a few seconds later for
+                                   the same issue means THIS spawn didn't survive.
       worker.requeue               existing iss-N window reused for follow-up task
       cap.refused                  MAX_WORKERS, MAX_TMUX_WINDOWS, HOST_MAX_WORKERS, host load,
                                     host memory or the spawn stagger refused the spawn (reason=)
       worker.dead_pane_reclaimed   iss-N window existed but its pane was dead; killed before re-provisioning (#493)
       provision.stale_container    pre-spawn stale-container check outcome: state=cleared/window_alive/removal_timeout (#493)
-      worker.start.failed          new window's pane died (or its container never came up) right after spawn (#493)
+      worker.start.failed          new window's pane died (or its container never came up) right after spawn (#493).
+                                   Always preceded by a worker.start for the same
+                                   issue/task_id — a consumer counting successful
+                                   spawns must subtract these, not just count
+                                   worker.start lines.
 
 EXAMPLES
     provision-worker.sh 142                          # dispatch issue #142 from \$PWD

@@ -75,12 +75,16 @@ exit 1
 EOF
 cat > "$TEST_DIR/bin/tmux" <<EOF
 #!/usr/bin/env bash
-# Stub: provision-worker.sh uses has-session + list-windows + new-window.
-# Pretend the session always exists, no windows yet, log new-window calls.
-# list-windows/capture-pane also serve bg_violation_sweep_pass's Test 15
-# fixtures below (\$TEST_DIR/tmux-windows.txt, tmux-pane-<win>.txt) — both
-# are absent for every earlier test, so those two cases fall back to their
-# original no-output behavior until Test 15 populates them.
+# Stub: provision-worker.sh uses has-session + list-windows + new-window
+# (+ list-panes/kill-window for the issue #493 dead-pane reclaim path).
+# Pretend the session always exists, no windows yet, log new-window/
+# kill-window calls. list-windows/capture-pane also serve
+# bg_violation_sweep_pass's Test 15 fixtures below (\$TEST_DIR/
+# tmux-windows.txt, tmux-pane-<win>.txt) — both are absent for every
+# earlier test, so those two cases fall back to their original no-output
+# behavior until Test 15 populates them. list-panes is controlled the same
+# way via \$TEST_DIR/tmux-pane-dead-<win>.txt (absent/"0" = alive, "1" =
+# dead), used only by the Test 3e/3f dead-pane-reclaim cases below.
 TMUX_LOG="$TEST_DIR/tmux.log"
 case "\${1:-}" in
     has-session)   exit 0 ;;
@@ -90,7 +94,14 @@ case "\${1:-}" in
         for a in "\$@"; do [ "\$prev" = "-t" ] && win="\${a##*:}"; prev="\$a"; done
         [ -f "$TEST_DIR/tmux-pane-\$win.txt" ] && cat "$TEST_DIR/tmux-pane-\$win.txt"
         exit 0 ;;
+    list-panes)
+        win=""; prev=""
+        for a in "\$@"; do [ "\$prev" = "-t" ] && win="\${a##*:}"; prev="\$a"; done
+        win="\${win##*:}"
+        [ -f "$TEST_DIR/tmux-pane-dead-\$win.txt" ] && cat "$TEST_DIR/tmux-pane-dead-\$win.txt"
+        exit 0 ;;
     new-window)    echo "\$*" >> "\$TMUX_LOG" ;;
+    kill-window)   echo "\$*" >> "\$TMUX_LOG" ;;
     *)             echo "stub-tmux: ignored: \$*" >> "\$TMUX_LOG" ;;
 esac
 exit 0
@@ -263,6 +274,50 @@ green "cap refusal (exit 3) leaves no brief and no tmux window; worktree persist
 # Remove this test's worktree so it doesn't inflate Test 6's worktree count
 # below (which asserts an exact count of 4: main + wt-issue-99/100/101).
 git -C "$PROJECT_DIR" worktree remove --force "$WT103" 2>/dev/null || rm -rf "$WT103"
+
+heading "Test 3e: provision-worker.sh reclaims a listed-but-dead-paned window instead of queuing a follow-up (issue #493)"
+cd "$PROJECT_DIR"
+# Simulate re-provisioning issue #204 while a crashed prior spawn's window
+# is still listed (remain-on-exit=failed) with a dead pane — the exact
+# fand-etl shape: nothing live would ever pick up the follow-up brief this
+# call is about to queue if it took the "already exists" path instead.
+echo "iss-204" > "$TEST_DIR/tmux-windows.txt"
+echo "1" > "$TEST_DIR/tmux-pane-dead-iss-204.txt"
+: > "$TEST_DIR/tmux.log"
+"$PROVISION" 204 > "$TEST_DIR/prov-3e.log" 2>&1 \
+    || red "provision-worker exit non-zero reclaiming a dead-paned window: $(cat "$TEST_DIR/prov-3e.log")"
+grep -q "window iss-204 exists but its pane is dead — reclaiming" "$TEST_DIR/prov-3e.log" \
+    || red "expected the reclaim message; got: $(cat "$TEST_DIR/prov-3e.log")"
+grep -qE 'kill-window .*iss-204' "$TEST_DIR/tmux.log" \
+    || red "expected the dead window to be killed; tmux.log: $(cat "$TEST_DIR/tmux.log")"
+grep -qE 'new-window .* iss-204' "$TEST_DIR/tmux.log" \
+    || red "expected a fresh tmux new-window for iss-204 after reclaim; tmux.log: $(cat "$TEST_DIR/tmux.log")"
+WT204="$TEST_DIR/wt-issue-204"
+briefs204=$(find "$WT204/.swarm/tasks/inbox" -maxdepth 1 -name '*.md' | wc -l)
+[ "$briefs204" -eq 1 ] || red "expected exactly 1 brief after the reclaim+respawn, got $briefs204"
+green "a listed-but-dead-paned window is killed and reclaimed; provisioning respawns fresh instead of stranding a follow-up brief"
+rm -f "$TEST_DIR/tmux-windows.txt" "$TEST_DIR/tmux-pane-dead-iss-204.txt"
+git -C "$PROJECT_DIR" worktree remove --force "$WT204" 2>/dev/null || rm -rf "$WT204"
+
+heading "Test 3f: provision-worker.sh leaves a genuinely alive window alone (control for Test 3e)"
+cd "$PROJECT_DIR"
+# Same shape as Test 3e, but the pane is alive — must take the existing
+# "listener will pick up the new task" path, not kill a live worker.
+echo "iss-205" > "$TEST_DIR/tmux-windows.txt"
+echo "0" > "$TEST_DIR/tmux-pane-dead-iss-205.txt"
+: > "$TEST_DIR/tmux.log"
+"$PROVISION" 205 > "$TEST_DIR/prov-3f.log" 2>&1 \
+    || red "provision-worker exit non-zero queuing a follow-up onto a live window: $(cat "$TEST_DIR/prov-3f.log")"
+grep -q "already exists — listener will pick up the new task" "$TEST_DIR/prov-3f.log" \
+    || red "expected the existing-window requeue message; got: $(cat "$TEST_DIR/prov-3f.log")"
+grep -qE 'kill-window .*iss-205' "$TEST_DIR/tmux.log" \
+    && red "a genuinely alive window must never be killed; tmux.log: $(cat "$TEST_DIR/tmux.log")"
+grep -qE 'new-window .* iss-205' "$TEST_DIR/tmux.log" \
+    && red "a genuinely alive window must not get a second tmux new-window; tmux.log: $(cat "$TEST_DIR/tmux.log")"
+green "a genuinely alive window is left running; the follow-up is queued for its own listener to pick up, not reclaimed"
+WT205="$TEST_DIR/wt-issue-205"
+rm -f "$TEST_DIR/tmux-windows.txt" "$TEST_DIR/tmux-pane-dead-iss-205.txt"
+git -C "$PROJECT_DIR" worktree remove --force "$WT205" 2>/dev/null || rm -rf "$WT205"
 
 # ────────────────────────── coordinator-watch.sh ──────────────────────────
 
