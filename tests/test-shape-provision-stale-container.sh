@@ -137,6 +137,14 @@ chmod +x "$TEST_DIR/bin/docker"
 export DOCKER_STATE_FILE
 export PATH="$TEST_DIR/bin:$PATH"
 
+# issue #493, self-review (7th pass): host_admission_check (provision-worker.sh)
+# writes $HOST_STATE_DIR/pending-<container> before a spawn attempt; a failed
+# attempt must remove it again (exit-2 and exit-4 paths) rather than leave it
+# to double-count toward HOST_MAX_WORKERS until HOST_PENDING_TTL_SECS expires.
+# A test-local dir keeps this isolated from any real host state.
+export HOST_STATE_DIR="$TEST_DIR/host-state"
+mkdir -p "$HOST_STATE_DIR"
+
 # Helper: wait for a just-spawned window's pane to reach pane_dead=<want> —
 # avoids a timing-dependent sleep for the genuinely-async tmux state change.
 wait_pane_dead() {
@@ -175,6 +183,7 @@ heading "Test 3: container running under a window whose pane is genuinely ALIVE 
 command tmux -L "$SOCKET" new-window -d -t "$SESSION" -n iss-203 "sleep 100"
 echo "swarm-provstale-iss-203 running" > "$DOCKER_STATE_FILE"
 : > "$EVENTS_LOG"
+: > "$HOST_STATE_DIR/pending-swarm-provstale-iss-203"
 rc=0
 out="$(check_stale_container 203 swarm-provstale-iss-203 2>&1)" || rc=$?
 [ "$rc" -eq 2 ] || red "expected exit 2 for a container whose window is genuinely alive, got rc=$rc, output: $out"
@@ -183,8 +192,10 @@ echo "$out" | grep -qi 'requeue.sh' || red "expected the refusal to point at req
     || red "a live worker's container must NOT be stopped: $(cat "$DOCKER_STATE_FILE")"
 grep -q 'provision.stale_container.*issue=203.*state=window_alive' "$EVENTS_LOG" \
     || red "expected a state=window_alive log line, got: $(cat "$EVENTS_LOG")"
+[ -e "$HOST_STATE_DIR/pending-swarm-provstale-iss-203" ] \
+    && red "exit 2 (window_alive) must remove this attempt's pending marker (self-review, 7th pass)"
 command tmux -L "$SOCKET" kill-window -t "$SESSION:iss-203" 2>/dev/null || true
-green "a container tracked by a genuinely live window is left alone; provisioning refuses instead of killing a live worker"
+green "a container tracked by a genuinely live window is left alone; provisioning refuses instead of killing a live worker, and clears its own pending marker"
 
 # ============================================================================
 heading "Test 4: container running under a window whose pane is DEAD -> cleared anyway (the fand-etl shape)"
@@ -206,12 +217,15 @@ heading "Test 5: removal races --rm's own auto-removal -> times out and exits 2 
 # ============================================================================
 echo "swarm-provstale-iss-205 stopped" > "$DOCKER_STATE_FILE"
 : > "$EVENTS_LOG"
+: > "$HOST_STATE_DIR/pending-swarm-provstale-iss-205"
 rc=0
 out="$(DOCKER_RM_NOOP=1 PROVISION_STALE_CONTAINER_WAIT_SECS=1 check_stale_container 205 swarm-provstale-iss-205 2>&1)" || rc=$?
 [ "$rc" -eq 2 ] || red "expected exit 2 on a removal timeout, got rc=$rc, output: $out"
 grep -q 'provision.stale_container.*issue=205.*state=removal_timeout' "$EVENTS_LOG" \
     || red "expected a state=removal_timeout log line, got: $(cat "$EVENTS_LOG")"
-green "a name that never actually clears (the --rm race) times out and exits 2 rather than spawning into it blind"
+[ -e "$HOST_STATE_DIR/pending-swarm-provstale-iss-205" ] \
+    && red "exit 2 (removal_timeout) must remove this attempt's pending marker (self-review, 7th pass)"
+green "a name that never actually clears (the --rm race) times out and exits 2 rather than spawning into it blind, and clears its own pending marker"
 
 # ============================================================================
 heading "Test 6: post_spawn_health_check — pane alive + container running -> succeeds silently"
@@ -236,6 +250,7 @@ wait_pane_dead iss-302 1 || red "setup: expected window iss-302's pane to go dea
 : > "$DOCKER_STATE_FILE"
 : > "$EVENTS_LOG"
 echo "queued" > "$TEST_DIR/brief-302.md"
+: > "$HOST_STATE_DIR/pending-swarm-provstale-iss-302"
 rc=0
 out="$(PROVISION_SPAWN_CHECK_SECS=0.1 post_spawn_health_check 302 iss-302 swarm-provstale-iss-302 "$TEST_DIR/brief-302.md" 2>&1)" || rc=$?
 [ "$rc" -eq 4 ] || red "expected exit 4 for a dead pane right after spawn, got rc=$rc, output: $out"
@@ -245,7 +260,9 @@ grep -q 'worker.start.failed.*issue=302.*pane_dead=1.*brief_removed=1' "$EVENTS_
 [ -f "$TEST_DIR/brief-302.md" ] && red "a failed spawn must remove its unclaimed brief so a retry doesn't duplicate it"
 ! command tmux -L "$SOCKET" list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -qx iss-302 \
     || red "a failed spawn must kill its window so a late-arriving pane doesn't park with an empty inbox"
-green "a dead pane right after spawn exits 4 (not 0), logs worker.start.failed, kills the window, and removes the unclaimed brief — the exact gap the fand-etl incident fell through"
+[ -e "$HOST_STATE_DIR/pending-swarm-provstale-iss-302" ] \
+    && red "exit 4 must remove this attempt's pending marker (self-review, 7th pass)"
+green "a dead pane right after spawn exits 4 (not 0), logs worker.start.failed, kills the window, removes the unclaimed brief, and clears its pending marker — the exact gap the fand-etl incident fell through"
 
 # ============================================================================
 heading "Test 8: post_spawn_health_check — pane alive but container never came up -> exit 4"

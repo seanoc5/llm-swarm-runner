@@ -359,6 +359,12 @@ check_stale_container() {
             echo "ERROR: container '$container' exists and its tmux window iss-$issue is alive." >&2
             echo "       The worker is running — route this brief through requeue.sh instead." >&2
             log_event provision.stale_container "issue=$issue container=$container state=window_alive"
+            # self-review (7th pass): host_admission_check already wrote a
+            # pending-$container marker for this attempt; left in place it
+            # would double-count a container docker ps can already see
+            # directly, inflating HOST_MAX_WORKERS until HOST_PENDING_TTL_SECS
+            # (120s) expires it on its own.
+            rm -f "$HOST_STATE_DIR/pending-$container"
             exit 2
         fi
     fi
@@ -382,6 +388,10 @@ check_stale_container() {
             echo "ERROR: container '$container' still present after stop+rm and a ${wait_secs}s wait." >&2
             echo "       Remove it manually:  docker rm -f '$container'" >&2
             log_event provision.stale_container "issue=$issue container=$container state=removal_timeout"
+            # self-review (7th pass): see the window_alive branch above —
+            # this attempt's pending marker would otherwise outlive the
+            # failed spawn by up to HOST_PENDING_TTL_SECS.
+            rm -f "$HOST_STATE_DIR/pending-$container"
             exit 2
         fi
         sleep 0.5
@@ -463,6 +473,15 @@ post_spawn_health_check() {
             echo "       Removed the unclaimed brief ($brief_path) so a retry doesn't queue a duplicate." >&2
         fi
         log_event worker.start.failed "issue=$issue window=$window pane_dead=${pane_dead:-0} container_running=$running brief_removed=$brief_removed"
+        # self-review (7th pass): host_admission_check's pending-$container
+        # marker is otherwise left behind by a failed spawn, double-counting
+        # toward HOST_MAX_WORKERS until HOST_PENDING_TTL_SECS (120s) expires
+        # it. Deliberately not touching last-spawn here: the stagger clock is
+        # about host load from the attempt itself (docker run + the pane's
+        # brief life), which still happened, so an immediate retry can still
+        # see an exit-3 spawn_stagger refusal — bounded by HOST_SPAWN_STAGGER_SECS
+        # and already retried by the coordinator, so left as-is (see Findings).
+        rm -f "$HOST_STATE_DIR/pending-$container"
         exit 4
     fi
 }
