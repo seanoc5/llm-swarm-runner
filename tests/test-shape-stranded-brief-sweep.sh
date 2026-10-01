@@ -352,6 +352,28 @@ stranded_brief_sweep_pass
 green "a genuinely alive pane still covers the queue — the fix only changes the dead-pane case, not the live one"
 
 # ============================================================================
+heading "Test 13c: a window whose pane vanished between list-windows and list-panes must NOT count as live (self-review, 13th pass)"
+# ============================================================================
+# A window that closes in the gap between the two tmux calls makes
+# list-panes return nothing at all, not pane_dead=0 — has_live_window_draining_brief
+# treated that empty read as "not 1, so alive", the opposite of the
+# empty-means-dead rule this same issue already applies in
+# provision-worker.sh (6th pass). An empty read here must flag the brief as
+# stranded, not shield it.
+tmux() {
+    case "$1" in
+        list-windows) echo "iss-103" ;;
+        list-panes)   echo "" ;;   # pane vanished between the two calls
+        *)            echo "" ;;
+    esac
+}
+rm -rf "$COORD_INBOX_DIR"
+declare -A STRANDED_BRIEF_LOGGED=()
+stranded_brief_sweep_pass
+[ "$(inbox_count)" -eq 1 ] || red "an empty list-panes read (vanished pane) must be treated as dead, not alive, got $(inbox_count)"
+green "an empty list-panes read is treated as dead, matching the empty-means-dead rule used elsewhere in this issue's fix"
+
+# ============================================================================
 heading "All stranded-brief sweep tests passed"
 # ============================================================================
 green "stranded_brief_sweep_pass(): detects a queued/claimed brief with no live window, dedups per issue, and clears on re-provision or archive"

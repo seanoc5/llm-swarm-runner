@@ -3888,7 +3888,11 @@ has_live_window_draining_brief() {
     tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx "$win" || return 1
     local pane_dead
     pane_dead="$(tmux list-panes -t "$SESSION_NAME:$win" -F '#{pane_dead}' 2>/dev/null | head -1)"
-    [ "$pane_dead" != "1" ]
+    # self-review (13th pass): a window that vanished between the
+    # list-windows check above and this list-panes call returns empty here,
+    # not "0" — treat that the same as dead (same empty-means-dead rule as
+    # provision-worker.sh's post-spawn check, 6th pass), not as alive.
+    [ -n "$pane_dead" ] && [ "$pane_dead" != "1" ]
 }
 
 # pr_poll_pass
