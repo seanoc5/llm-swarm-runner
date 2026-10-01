@@ -386,7 +386,7 @@ PR_CREATED_AT=""
 PR_NUMBER=""
 PR_LOOKUP_FAILED=0
 fetch_pr_state() {
-    local branch="$1" out err errfile rc
+    local branch="$1" out err err_flat errfile rc
     PR_STATE=""
     PR_CREATED_AT=""
     PR_NUMBER=""
@@ -413,7 +413,14 @@ fetch_pr_state() {
                 # pr.lookup_failed events across many branches at once is
                 # the wording-drift signature, not a one-off network blip.
                 PR_LOOKUP_FAILED=1
-                log_event pr.lookup_failed "branch=$branch err=${err:0:200}"
+                # gh's GraphQL/auth errors are often multi-line; events.log
+                # is one-line-per-event, so flatten before logging (self-
+                # review finding) — an embedded newline would otherwise
+                # split into untagged lines and miscount the very
+                # wording-drift trip-wire this event exists for. Truncated
+                # after flattening so one long error can't dominate the log.
+                err_flat="${err//$'\n'/ }"
+                log_event pr.lookup_failed "branch=$branch err=${err_flat:0:200}"
                 ;;
         esac
         return 1

@@ -494,7 +494,7 @@ git -C "$PROJECT_DIR" worktree add -q -b fix/issue-53 "$TEST_DIR/wt-issue-53"
 git -C "$TEST_DIR/wt-issue-53" push -q -u origin fix/issue-53
 "$SHIM_DIR/tmux" new-window -t "$SESSION" -n iss-53
 sed -i "s/50) echo CLOSED; exit 0 ;;/50) echo CLOSED; exit 0 ;;\n        53) echo CLOSED; exit 0 ;;/" "$SHIM_DIR/gh"
-sed -i "s#552\\\\n'; exit 0 ;;#552\\\\n'; exit 0 ;;\n        fix/issue-53) echo \"error: GraphQL: something went wrong (rate limited)\" >\&2; exit 1 ;;#" "$SHIM_DIR/gh"
+sed -i "s#552\\\\n'; exit 0 ;;#552\\\\n'; exit 0 ;;\n        fix/issue-53) printf 'error: GraphQL: something went wrong\\\\n(rate limited, try again later)\\\\n' >\&2; exit 1 ;;#" "$SHIM_DIR/gh"
 
 RUN_LOG12="$TEST_DIR/run12.log"
 set +e
@@ -515,6 +515,16 @@ green "iss-53 (PR lookup failed, issue CLOSED) preserved — PR_LOOKUP_FAILED gu
 grep -q 'pr\.lookup_failed .*branch=fix/issue-53' "$PROJECT_DIR/.swarm/events.log" \
     || red "expected a pr.lookup_failed event for fix/issue-53 — this is the trip-wire for gh wording drift (self-review finding), it must not be silent"
 green "pr.lookup_failed logged to events.log — a wording-drift regression would now be visible, not silent"
+
+# fix/issue-53's stub emits a 2-line stderr message — confirms the
+# flatten-before-logging fix (self-review finding) keeps events.log at
+# exactly one line per event instead of splitting into untagged lines
+# that would miscount this very trip-wire.
+[ "$(grep -c 'pr\.lookup_failed .*branch=fix/issue-53' "$PROJECT_DIR/.swarm/events.log")" -eq 1 ] \
+    || red "pr.lookup_failed for fix/issue-53 split across more than one events.log line — multi-line gh stderr wasn't flattened"
+grep -q 'rate limited' "$PROJECT_DIR/.swarm/events.log" \
+    || red "expected the flattened gh error text to still be present in the pr.lookup_failed event"
+green "multi-line gh stderr flattened to one events.log line"
 
 # ============================================================================
 heading "Test 13: worktree_safe_to_reap on a real provision-worker.sh-shaped branch (issue #466 self-review)"
