@@ -423,12 +423,16 @@ check_stale_container() {
 # then see that still-alive window and queue a follow-up onto it instead
 # of re-spawning cleanly, and if the slow start was actually hung, that
 # recreates the exact stranded-brief failure this issue closes. Killing
-# the window makes "exit 4" a clean, fully-failed state either way: no
-# window, no unclaimed brief, nothing for a retry to collide with. Nothing
-# ever claimed this brief (the spawn never came up), so there's no
-# in-progress work to lose; the pane's last lines printed just above are
-# the forensic record. Re-provisioning the issue spawns fresh from
-# scratch.
+# the window and removing the container (self-review, 9th pass — a
+# container that was merely slow, not dead, can still come up seconds
+# later with its window already gone, sitting there uncounted by any
+# worker but still visible to `docker ps` and so still counted against
+# HOST_MAX_WORKERS) makes "exit 4" a clean, fully-failed state: no window,
+# no container, no unclaimed brief, nothing for a retry to collide with or
+# be refused by. Nothing ever claimed this brief (the spawn never came
+# up), so there's no in-progress work to lose; the pane's last lines
+# printed just above are the forensic record. Re-provisioning the issue
+# spawns fresh from scratch.
 #
 # Skips entirely (self-review, 5th pass) when the worker image isn't built
 # yet: sandbox.sh builds it before its `docker run`, which routinely takes
@@ -467,6 +471,8 @@ post_spawn_health_check() {
         echo "       Last lines of the pane:" >&2
         tmux capture-pane -t "$SESSION_NAME:$window" -p 2>/dev/null | tail -40 >&2 || true
         tmux kill-window -t "$SESSION_NAME:$window" 2>/dev/null || true
+        docker stop "$container" >/dev/null 2>&1 || true
+        docker rm -f "$container" >/dev/null 2>&1 || true
         local brief_removed=0
         if [ -n "$brief_path" ] && [ -e "$brief_path" ]; then
             rm -f "$brief_path" 2>/dev/null && brief_removed=1

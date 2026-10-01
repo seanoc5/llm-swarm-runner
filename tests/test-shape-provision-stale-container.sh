@@ -340,6 +340,26 @@ grep -q 'worker.start.failed.*issue=305.*brief_removed=1' "$EVENTS_LOG" \
 green "a window that has vanished entirely (not just a dead pane) is treated as a failed spawn, not a shell-crashing set -e abort"
 
 # ============================================================================
+heading "Test 11: post_spawn_health_check — pane DEAD but container came up anyway -> container is also removed (self-review, 9th pass)"
+# ============================================================================
+# A container that was merely slow (not dead) can still start after its
+# pane already died; left running, it would sit uncounted by any worker but
+# still visible to `docker ps`, double-counting against HOST_MAX_WORKERS
+# and able to draw a spawn_stagger refusal on retry — the same shape as the
+# pending-marker leak fixed above, but for the container itself.
+command tmux -L "$SOCKET" new-window -d -t "$SESSION" -n iss-306 "exit 125"
+wait_pane_dead iss-306 1 || red "setup: expected window iss-306's pane to go dead"
+echo "swarm-provstale-iss-306 running" > "$DOCKER_STATE_FILE"
+: > "$EVENTS_LOG"
+echo "queued" > "$TEST_DIR/brief-306.md"
+rc=0
+out="$(PROVISION_SPAWN_CHECK_SECS=0.1 post_spawn_health_check 306 iss-306 swarm-provstale-iss-306 "$TEST_DIR/brief-306.md" 2>&1)" || rc=$?
+[ "$rc" -eq 4 ] || red "expected exit 4 for a dead pane with a container that did come up, got rc=$rc, output: $out"
+[ -z "$(awk -v n=swarm-provstale-iss-306 '$1==n' "$DOCKER_STATE_FILE")" ] \
+    || red "a failed spawn must remove the container too, not just the window, state: $(cat "$DOCKER_STATE_FILE")"
+green "a dead pane whose container still came up has that container removed too — no orphan left for a retry to collide with"
+
+# ============================================================================
 heading "All provision-worker.sh stale-container / post-spawn health tests passed"
 # ============================================================================
 green "check_stale_container(): clears a leftover same-name container before spawn, refuses only when it's genuinely still live"
