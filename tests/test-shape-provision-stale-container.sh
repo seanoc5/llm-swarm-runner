@@ -106,6 +106,13 @@ case "$1" in
             esac
             shift
         done
+        # DOCKER_PS_FLAKE_FILE: if present, a one-shot transient `docker ps`
+        # blip (prints nothing, as if the daemon briefly returned empty) —
+        # consumed (removed) on first use so only that one call is flaky.
+        if [ -n "${DOCKER_PS_FLAKE_FILE:-}" ] && [ -e "$DOCKER_PS_FLAKE_FILE" ]; then
+            rm -f "$DOCKER_PS_FLAKE_FILE"
+            exit 0
+        fi
         if [ "$all" = 1 ]; then
             awk -v n="$name" '$1==n {print $1}' "$STATE" 2>/dev/null
         else
@@ -358,6 +365,23 @@ out="$(PROVISION_SPAWN_CHECK_SECS=0.1 post_spawn_health_check 306 iss-306 swarm-
 [ -z "$(awk -v n=swarm-provstale-iss-306 '$1==n' "$DOCKER_STATE_FILE")" ] \
     || red "a failed spawn must remove the container too, not just the window, state: $(cat "$DOCKER_STATE_FILE")"
 green "a dead pane whose container still came up has that container removed too — no orphan left for a retry to collide with"
+
+# ============================================================================
+heading "Test 12: post_spawn_health_check — a one-shot docker ps blip does not kill a healthy spawn (self-review, 11th pass)"
+# ============================================================================
+command tmux -L "$SOCKET" new-window -d -t "$SESSION" -n iss-307 "sleep 100"
+echo "swarm-provstale-iss-307 running" > "$DOCKER_STATE_FILE"
+: > "$EVENTS_LOG"
+echo "queued" > "$TEST_DIR/brief-307.md"
+: > "$TEST_DIR/ps-flake-307"
+DOCKER_PS_FLAKE_FILE="$TEST_DIR/ps-flake-307" PROVISION_SPAWN_CHECK_SECS=0.1 \
+    post_spawn_health_check 307 iss-307 swarm-provstale-iss-307 "$TEST_DIR/brief-307.md"
+[ -z "$(cat "$EVENTS_LOG")" ] || red "a transient docker ps blip must not be treated as a failed spawn, got: $(cat "$EVENTS_LOG")"
+[ -f "$TEST_DIR/brief-307.md" ] || red "a one-shot docker ps blip must never remove a healthy spawn's brief"
+command tmux -L "$SOCKET" list-windows -t "$SESSION" -F '#W' | grep -qx iss-307 \
+    || red "a one-shot docker ps blip must never kill a healthy spawn's window"
+command tmux -L "$SOCKET" kill-window -t "$SESSION:iss-307" 2>/dev/null || true
+green "a single transient docker ps blip is retried once and does not false-positive a healthy spawn as failed"
 
 # ============================================================================
 heading "All provision-worker.sh stale-container / post-spawn health tests passed"

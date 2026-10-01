@@ -113,8 +113,10 @@ STARTUP FAILURE (exit 4, issue #493)
     actually still in progress — so a first-ever (or post-Dockerfile-
     change) spawn on such a host gets no post-spawn verification at all
     until the image exists. Pre-build it once with
-    `docker build -t llm-swarm-runner:latest .` before provisioning to get
-    the check back on a cold host.
+    `scripts/build-image.sh` before provisioning to get the check back on
+    a cold host — not a bare `docker build`, which skips the
+    dockerfile_sha label sandbox.sh checks and triggers its Dockerfile-
+    drift warning (#517) on every subsequent spawn.
 
 CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env
          > <sandbox>/.env.example)
@@ -474,10 +476,18 @@ post_spawn_health_check() {
     local pane_dead
     pane_dead="$(tmux list-panes -t "$SESSION_NAME:$window" -F '#{pane_dead}' 2>/dev/null | head -1)" || true
     [ -z "$pane_dead" ] && pane_dead=1
-    local running=0
-    if docker ps --filter "name=^${container}\$" --format '{{.Names}}' 2>/dev/null | grep -qx "$container"; then
-        running=1
-    fi
+    # self-review (11th pass): a single transient `docker ps` hiccup (empty
+    # output, daemon momentarily unresponsive) would otherwise read as
+    # "not running" and kill a perfectly healthy worker. One retry after a
+    # short pause distinguishes a real failed container from a blip.
+    local running=0 ps_try
+    for ps_try in 1 2; do
+        if docker ps --filter "name=^${container}\$" --format '{{.Names}}' 2>/dev/null | grep -qx "$container"; then
+            running=1
+            break
+        fi
+        [ "$ps_try" = "1" ] && sleep 1
+    done
 
     if [ "${pane_dead:-0}" = "1" ] || [ "$running" -eq 0 ]; then
         echo "ERROR: worker window $window for issue #$issue did not come up (pane_dead=${pane_dead:-0} container_running=$running)." >&2
