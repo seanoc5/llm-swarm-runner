@@ -113,7 +113,7 @@ Host-side tools you'll need before running the swarm:
 ```bash
 git clone git@github.com:seanoc5/llm-swarm-runner.git
 cd llm-swarm-runner
-docker build -t llm-swarm-runner:latest .
+scripts/build-image.sh   # docker build with a Dockerfile-hash label (see sandbox.sh drift warning)
 
 # One-time host-side setup (idempotent; re-run after gemini-cli upgrades).
 # At the end it prints the recommended LLM_SWARM_DIR + PATH exports for
