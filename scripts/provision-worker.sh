@@ -85,8 +85,10 @@ STALE WORKER STATE (issue #493)
     above) is stopped and removed before the new `docker run`, with a wait
     for `docker ps -a` to actually clear the name (avoids racing --rm's own
     async auto-removal). If that container's window is instead found
-    genuinely alive, provisioning refuses (exit 2) rather than stopping a
-    possibly-live worker's container — route the brief through requeue.sh.
+    genuinely alive, provisioning refuses (exit 5 — a dedicated code, since
+    plain exit 2 already means "refused, nothing running" elsewhere in this
+    script and this is the opposite) rather than stopping a possibly-live
+    worker's container — route the brief through requeue.sh instead.
     Exits 2 if the stale container doesn't clear within
     PROVISION_STALE_CONTAINER_WAIT_SECS (default 15s).
 
@@ -365,7 +367,18 @@ check_stale_container() {
             # directly, inflating HOST_MAX_WORKERS until HOST_PENDING_TTL_SECS
             # (120s) expires it on its own.
             rm -f "$HOST_STATE_DIR/pending-$container"
-            exit 2
+            # self-review (10th pass): exit 2 is already this script's
+            # generic "setup refused, nothing running, read stderr" code
+            # (bad flag, orphan worktree, stale branch with unique commits,
+            # missing tmux session) — all cases where there's no window to
+            # route a follow-up brief to. This is the only exit-2-shaped
+            # case that means the opposite (a worker IS running) and needs
+            # requeue.sh, not a retry; a coordinator rule keyed on exit 2
+            # would misroute the five other, far more common causes
+            # straight into requeue.sh with nothing there to drain the
+            # brief. A dedicated code keeps the two kinds of refusal
+            # distinguishable without parsing stderr.
+            exit 5
         fi
     fi
 

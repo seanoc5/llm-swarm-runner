@@ -178,7 +178,7 @@ grep -q 'provision.stale_container.*issue=202.*state=cleared' "$EVENTS_LOG" \
 green "a stale stopped container with no tracking window is cleared before spawn"
 
 # ============================================================================
-heading "Test 3: container running under a window whose pane is genuinely ALIVE -> refuse (exit 2), container untouched"
+heading "Test 3: container running under a window whose pane is genuinely ALIVE -> refuse (exit 5), container untouched"
 # ============================================================================
 command tmux -L "$SOCKET" new-window -d -t "$SESSION" -n iss-203 "sleep 100"
 echo "swarm-provstale-iss-203 running" > "$DOCKER_STATE_FILE"
@@ -186,14 +186,14 @@ echo "swarm-provstale-iss-203 running" > "$DOCKER_STATE_FILE"
 : > "$HOST_STATE_DIR/pending-swarm-provstale-iss-203"
 rc=0
 out="$(check_stale_container 203 swarm-provstale-iss-203 2>&1)" || rc=$?
-[ "$rc" -eq 2 ] || red "expected exit 2 for a container whose window is genuinely alive, got rc=$rc, output: $out"
+[ "$rc" -eq 5 ] || red "expected a dedicated exit 5 for a container whose window is genuinely alive (self-review, 10th pass — plain exit 2 already means a different, far more common 'nothing running' refusal elsewhere in this script), got rc=$rc, output: $out"
 echo "$out" | grep -qi 'requeue.sh' || red "expected the refusal to point at requeue.sh: $out"
 [ -n "$(awk -v n=swarm-provstale-iss-203 '$1==n && $2=="running"' "$DOCKER_STATE_FILE")" ] \
     || red "a live worker's container must NOT be stopped: $(cat "$DOCKER_STATE_FILE")"
 grep -q 'provision.stale_container.*issue=203.*state=window_alive' "$EVENTS_LOG" \
     || red "expected a state=window_alive log line, got: $(cat "$EVENTS_LOG")"
 [ -e "$HOST_STATE_DIR/pending-swarm-provstale-iss-203" ] \
-    && red "exit 2 (window_alive) must remove this attempt's pending marker (self-review, 7th pass)"
+    && red "exit 5 (window_alive) must remove this attempt's pending marker (self-review, 7th pass)"
 command tmux -L "$SOCKET" kill-window -t "$SESSION:iss-203" 2>/dev/null || true
 green "a container tracked by a genuinely live window is left alone; provisioning refuses instead of killing a live worker, and clears its own pending marker"
 
