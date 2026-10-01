@@ -27,6 +27,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KILL_FINISHED="$SCRIPT_DIR/../scripts/kill-finished-workers.sh"
 [ -x "$KILL_FINISHED" ] || red "kill-finished-workers.sh not executable: $KILL_FINISHED"
 
+# issue #466 self-review: the issue-closed reap path enforces its own
+# REAP_ISSUE_CLOSED_MIN_IDLE_MIN-minute idle floor regardless of --idle-min.
+# Every tmux window this suite creates is brand new (idle 0m), so default
+# to 0 here for the whole file; Test 14 overrides it per-invocation to
+# exercise the real (nonzero) default directly.
+export REAP_ISSUE_CLOSED_MIN_IDLE_MIN=0
+
 REAL_TMUX="$(command -v tmux)" || red "tmux not installed"
 command -v git >/dev/null || red "git not installed"
 
@@ -56,13 +63,18 @@ EOF
 chmod +x "$SHIM_DIR/tmux"
 
 # gh stub: `gh pr view <branch> --json state,createdAt,number -q '...'`
-# (fetch_pr_state's shape, issue #386) is the only query the script sends;
-# it always outputs a tab-separated "state<TAB>createdAt<TAB>number" triple
-# regardless of the exact --json/-q args, mirroring real gh -q's raw
+# (fetch_pr_state's shape, issue #386) is the only PR query the script
+# sends; it always outputs a tab-separated "state<TAB>createdAt<TAB>number"
+# triple regardless of the exact --json/-q args, mirroring real gh -q's raw
 # (unquoted) output. fix/issue-42/44/45 have PRs (createdAt set 1h in the
 # future so pr_predates_worktree never blocks them against these
 # just-created fixture worktrees); anything else has no PR (gh exits 1,
 # like the real CLI's "no pull requests found").
+#
+# `gh issue view <N> --json state -q .state` (fetch_issue_state's shape,
+# issue #466) outputs the raw state string, like real gh -q. Issue 47
+# (clean+pushed no-PR task) and 48 (dirty no-PR task) are CLOSED; issue 49
+# (still-open no-PR task) is OPEN; anything else has no issue at all.
 GH_LOG="$TEST_DIR/gh.log"
 FUTURE_ISO="$(date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%SZ)"
 cat > "$SHIM_DIR/gh" <<EOF
@@ -73,7 +85,21 @@ if [ "\$1" = "pr" ] && [ "\$2" = "view" ]; then
         fix/issue-42) printf 'MERGED\t$FUTURE_ISO\t542\n'; exit 0 ;;
         fix/issue-44) printf 'MERGED\t$FUTURE_ISO\t544\n'; exit 0 ;;
         fix/issue-45) printf 'CLOSED\t$FUTURE_ISO\t545\n'; exit 0 ;;
+        fix/issue-52) printf 'CLOSED\t$FUTURE_ISO\t552\n'; exit 0 ;;
     esac
+    # real gh's exact message on a branch with no PR at all — fetch_pr_state
+    # (issue #466 self-review) keys off this text to tell "confirmed no PR"
+    # apart from a lookup failure, so the stub must say it verbatim.
+    echo "no pull requests found for branch \"\$3\"" >&2
+    exit 1
+fi
+if [ "\$1" = "issue" ] && [ "\$2" = "view" ]; then
+    case "\$3" in
+        47) echo CLOSED; exit 0 ;;
+        48) echo CLOSED; exit 0 ;;
+        49) echo OPEN; exit 0 ;;
+    esac
+    exit 1
 fi
 exit 1
 EOF
@@ -89,6 +115,16 @@ git -C "$PROJECT_DIR" config user.name "Test"
 echo hello > "$PROJECT_DIR/README.md"
 git -C "$PROJECT_DIR" add README.md
 git -C "$PROJECT_DIR" commit -q -m init
+
+# A real "origin" (bare repo) so issue #466's clean-worktree guard has an
+# actual upstream to compare against — @{upstream} / `git rev-list
+# upstream..HEAD` need a real remote-tracking ref, not something the gh
+# stub can fake.
+ORIGIN_DIR="$TEST_DIR/origin.git"
+git init -q --bare "$ORIGIN_DIR"
+git -C "$PROJECT_DIR" remote add origin "$ORIGIN_DIR"
+DEFAULT_BRANCH="$(git -C "$PROJECT_DIR" symbolic-ref --short HEAD)"
+git -C "$PROJECT_DIR" push -q origin "$DEFAULT_BRANCH"
 
 # Flat grouping: worktrees are siblings of the project dir.
 export SWARM_WORKTREE_GROUPING=flat
@@ -286,6 +322,367 @@ green "wt-issue-46 (windowless, no PR) left completely untouched"
 [ -d "$TEST_DIR/wt-issue-43" ] \
     || red "wt-issue-43 (corrupt registration, still no resolvable branch) worktree was removed"
 green "wt-issue-43 (corrupt registration) left untouched"
+
+# ============================================================================
+heading "Test 7: no-PR task reaped once its GitHub issue closes (issue #466)"
+# ============================================================================
+# iss-47 never had a PR at all (gh stub has no fix/issue-47 case → 'no PR
+# found'). It's a live window that never parks (plain shell, no listener
+# marker) and never gets a merged PR — exactly the carve/ruling/research
+# shape #466 describes. Issue 47 is CLOSED and the worktree is clean and
+# fully pushed, so default mode must still reap it.
+
+git -C "$PROJECT_DIR" worktree add -q -b fix/issue-47 "$TEST_DIR/wt-issue-47"
+git -C "$TEST_DIR/wt-issue-47" push -q -u origin fix/issue-47
+"$SHIM_DIR/tmux" new-window -t "$SESSION" -n iss-47
+
+RUN_LOG7="$TEST_DIR/run7.log"
+set +e
+(cd "$PROJECT_DIR" && PATH="$SHIM_DIR:$PATH" "$KILL_FINISHED" --idle-min 0) > "$RUN_LOG7" 2>&1
+RC7=$?
+set -e
+[ "$RC7" -eq 0 ] || red "expected exit 0, got $RC7. Output:
+$(cat "$RUN_LOG7")"
+
+if "$SHIM_DIR/tmux" list-windows -t "$SESSION" -F '#W' | grep -qx 'iss-47'; then
+    red "iss-47 (no PR, issue CLOSED, clean+pushed) survived default mode. Output:
+$(cat "$RUN_LOG7")"
+fi
+green "iss-47 (no PR, issue CLOSED, clean+pushed) reaped by DEFAULT mode"
+
+grep -q 'iss-47.*issue-closed.*kill' "$RUN_LOG7" \
+    || red "expected iss-47's kill line to cite the issue-closed reason. Output:
+$(cat "$RUN_LOG7")"
+green "kill line cites issue-closed as the reason"
+
+# ============================================================================
+heading "Test 8: clean-worktree guard blocks reap — uncommitted changes (issue #466)"
+# ============================================================================
+# iss-48: same no-PR, issue-CLOSED shape as iss-47, but the worktree has an
+# untracked file. The clean-worktree guard must block the reap even though
+# every other condition is satisfied.
+
+git -C "$PROJECT_DIR" worktree add -q -b fix/issue-48 "$TEST_DIR/wt-issue-48"
+echo "still working" > "$TEST_DIR/wt-issue-48/scratch.txt"
+"$SHIM_DIR/tmux" new-window -t "$SESSION" -n iss-48
+
+RUN_LOG8="$TEST_DIR/run8.log"
+set +e
+(cd "$PROJECT_DIR" && PATH="$SHIM_DIR:$PATH" "$KILL_FINISHED" --idle-min 0) > "$RUN_LOG8" 2>&1
+RC8=$?
+set -e
+[ "$RC8" -eq 0 ] || red "expected exit 0, got $RC8. Output:
+$(cat "$RUN_LOG8")"
+
+"$SHIM_DIR/tmux" list-windows -t "$SESSION" -F '#W' | grep -qx 'iss-48' \
+    || red "iss-48 (issue CLOSED, but DIRTY worktree) was killed — clean-worktree guard must block this"
+grep -q 'iss-48.*uncommitted/untracked changes.*skip' "$RUN_LOG8" \
+    || red "expected iss-48's skip line to cite uncommitted/untracked changes. Output:
+$(cat "$RUN_LOG8")"
+green "iss-48 (issue CLOSED, dirty worktree) preserved — clean-worktree guard held"
+
+# ============================================================================
+heading "Test 9: clean-worktree guard blocks reap — unpushed commit (issue #466)"
+# ============================================================================
+# iss-51: tree is clean (the local commit IS committed), but it's ahead of
+# its own pushed upstream by one commit. Closing the issue is not proof
+# that commit reached anywhere outside this worktree.
+
+git -C "$PROJECT_DIR" worktree add -q -b fix/issue-51 "$TEST_DIR/wt-issue-51"
+git -C "$TEST_DIR/wt-issue-51" push -q -u origin fix/issue-51
+echo "local-only change" >> "$TEST_DIR/wt-issue-51/README.md"
+git -C "$TEST_DIR/wt-issue-51" commit -q -am "local-only commit"
+"$SHIM_DIR/tmux" new-window -t "$SESSION" -n iss-51
+# gh stub has no issue-51 case; extend it in place so this one scenario
+# doesn't need its own shim rebuild.
+sed -i "s/49) echo OPEN; exit 0 ;;/49) echo OPEN; exit 0 ;;\n        51) echo CLOSED; exit 0 ;;/" "$SHIM_DIR/gh"
+
+RUN_LOG9="$TEST_DIR/run9.log"
+set +e
+(cd "$PROJECT_DIR" && PATH="$SHIM_DIR:$PATH" "$KILL_FINISHED" --idle-min 0) > "$RUN_LOG9" 2>&1
+RC9=$?
+set -e
+[ "$RC9" -eq 0 ] || red "expected exit 0, got $RC9. Output:
+$(cat "$RUN_LOG9")"
+
+"$SHIM_DIR/tmux" list-windows -t "$SESSION" -F '#W' | grep -qx 'iss-51' \
+    || red "iss-51 (issue CLOSED, 1 unpushed commit) was killed — clean-worktree guard must block this"
+grep -q 'iss-51.*unpushed commit.*skip' "$RUN_LOG9" \
+    || red "expected iss-51's skip line to cite an unpushed commit. Output:
+$(cat "$RUN_LOG9")"
+green "iss-51 (issue CLOSED, 1 unpushed commit) preserved — clean-worktree guard held"
+
+# ============================================================================
+heading "Test 10: an OPEN issue leaves a no-PR task alone (issue #466)"
+# ============================================================================
+
+git -C "$PROJECT_DIR" worktree add -q -b fix/issue-49 "$TEST_DIR/wt-issue-49"
+git -C "$TEST_DIR/wt-issue-49" push -q -u origin fix/issue-49
+"$SHIM_DIR/tmux" new-window -t "$SESSION" -n iss-49
+
+RUN_LOG10="$TEST_DIR/run10.log"
+set +e
+(cd "$PROJECT_DIR" && PATH="$SHIM_DIR:$PATH" "$KILL_FINISHED" --idle-min 0) > "$RUN_LOG10" 2>&1
+RC10=$?
+set -e
+[ "$RC10" -eq 0 ] || red "expected exit 0, got $RC10. Output:
+$(cat "$RUN_LOG10")"
+
+"$SHIM_DIR/tmux" list-windows -t "$SESSION" -F '#W' | grep -qx 'iss-49' \
+    || red "iss-49 (no PR, issue still OPEN) was killed — must never reap while the issue is open"
+green "iss-49 (no PR, issue OPEN) preserved"
+
+# ============================================================================
+heading "Test 11: --merged-only mode also reaps a no-PR task via the issue-closed fallback (issue #466)"
+# ============================================================================
+# Before #466, --merged-only/--pr-finalized ONLY ever looked at PR state, so
+# a no-PR task was permanently unreachable under the pr-gated modes the
+# watcher actually runs (cleanup_eligible_workers always passes
+# --merged-only or --pr-finalized, never bare default mode). iss-50 proves
+# the fallback now fires there too — even under --merged-only, the
+# STRICTEST mode. iss-52 (a FRESH branch with its own CLOSED-without-merge
+# PR — iss-45 doesn't survive this far: Test 6's own --pr-finalized pass
+# already reaped it as PR-finalized, independent of #466) rides along in
+# the same run to prove a branch that DOES have a PR is still judged solely
+# on that PR's state, never the issue's: --merged-only's own "not MERGED"
+# rejection must still hold for it.
+
+git -C "$PROJECT_DIR" worktree add -q -b fix/issue-50 "$TEST_DIR/wt-issue-50"
+git -C "$TEST_DIR/wt-issue-50" push -q -u origin fix/issue-50
+"$SHIM_DIR/tmux" new-window -t "$SESSION" -n iss-50
+sed -i "s/49) echo OPEN; exit 0 ;;/49) echo OPEN; exit 0 ;;\n        50) echo CLOSED; exit 0 ;;/" "$SHIM_DIR/gh"
+
+git -C "$PROJECT_DIR" worktree add -q -b fix/issue-52 "$TEST_DIR/wt-issue-52"
+"$SHIM_DIR/tmux" new-window -t "$SESSION" -n iss-52
+
+RUN_LOG11="$TEST_DIR/run11.log"
+set +e
+(cd "$PROJECT_DIR" && PATH="$SHIM_DIR:$PATH" "$KILL_FINISHED" --merged-only --idle-min 0) > "$RUN_LOG11" 2>&1
+RC11=$?
+set -e
+[ "$RC11" -eq 0 ] || red "expected exit 0, got $RC11. Output:
+$(cat "$RUN_LOG11")"
+
+if "$SHIM_DIR/tmux" list-windows -t "$SESSION" -F '#W' | grep -qx 'iss-50'; then
+    red "iss-50 (no PR, issue CLOSED, clean+pushed) survived --merged-only mode. Output:
+$(cat "$RUN_LOG11")"
+fi
+grep -q 'iss-50.*issue-closed.*kill' "$RUN_LOG11" \
+    || red "expected iss-50's kill line to cite issue-closed under --merged-only. Output:
+$(cat "$RUN_LOG11")"
+green "iss-50 (no PR, issue CLOSED, clean+pushed) reaped by --merged-only mode"
+
+"$SHIM_DIR/tmux" list-windows -t "$SESSION" -F '#W' | grep -qx 'iss-52' \
+    || red "iss-52 (HAS a PR, CLOSED-without-merge) was reaped by the issue-closed fallback under --merged-only — a branch with a PR must be judged on the PR alone"
+grep -q 'iss-52.*not MERGED.*skip.*merged-only' "$RUN_LOG11" \
+    || red "expected iss-52's skip line to cite 'not MERGED' under --merged-only. Output:
+$(cat "$RUN_LOG11")"
+green "iss-52 (PR CLOSED-without-merge) still untouched under --merged-only — issue-closed fallback never applies to a branch that has a PR"
+
+# ============================================================================
+heading "Test 12: a failed PR lookup is never read as 'confirmed no PR' (issue #466 self-review)"
+# ============================================================================
+# fetch_pr_state's self-review fix: a transient `gh pr view` failure (network,
+# auth, rate-limit — anything other than gh's own "no pull requests found")
+# must set PR_LOOKUP_FAILED and must NOT unlock the issue-closed fallback,
+# even though PR_STATE is empty in both cases. Without the guard, a branch
+# with a real OPEN PR that gh simply failed to fetch this round could be
+# reaped the moment its issue closes. fix/issue-53's stub exits 1 with an
+# unrelated error message (not "no pull requests found") to simulate that.
+
+git -C "$PROJECT_DIR" worktree add -q -b fix/issue-53 "$TEST_DIR/wt-issue-53"
+git -C "$TEST_DIR/wt-issue-53" push -q -u origin fix/issue-53
+"$SHIM_DIR/tmux" new-window -t "$SESSION" -n iss-53
+sed -i "s/50) echo CLOSED; exit 0 ;;/50) echo CLOSED; exit 0 ;;\n        53) echo CLOSED; exit 0 ;;/" "$SHIM_DIR/gh"
+sed -i "s#552\\\\n'; exit 0 ;;#552\\\\n'; exit 0 ;;\n        fix/issue-53) printf 'error: GraphQL: something went wrong\\\\n(rate limited, try again later)\\\\n' >\&2; exit 1 ;;#" "$SHIM_DIR/gh"
+
+RUN_LOG12="$TEST_DIR/run12.log"
+set +e
+(cd "$PROJECT_DIR" && PATH="$SHIM_DIR:$PATH" "$KILL_FINISHED" --idle-min 0) > "$RUN_LOG12" 2>&1
+RC12=$?
+set -e
+[ "$RC12" -eq 0 ] || red "expected exit 0, got $RC12. Output:
+$(cat "$RUN_LOG12")"
+
+"$SHIM_DIR/tmux" list-windows -t "$SESSION" -F '#W' | grep -qx 'iss-53' \
+    || red "iss-53 (PR lookup failed, issue CLOSED) was reaped — a failed lookup must never be treated as 'confirmed no PR'. Output:
+$(cat "$RUN_LOG12")"
+grep -q 'iss-53.*lookup failed' "$RUN_LOG12" \
+    || red "expected iss-53's skip line to cite the failed lookup, not the issue-closed fallback. Output:
+$(cat "$RUN_LOG12")"
+green "iss-53 (PR lookup failed, issue CLOSED) preserved — PR_LOOKUP_FAILED guard held"
+
+grep -q 'pr\.lookup_failed .*branch=fix/issue-53' "$PROJECT_DIR/.swarm/events.log" \
+    || red "expected a pr.lookup_failed event for fix/issue-53 — this is the trip-wire for gh wording drift (self-review finding), it must not be silent"
+green "pr.lookup_failed logged to events.log — a wording-drift regression would now be visible, not silent"
+
+# fix/issue-53's stub emits a 2-line stderr message — confirms the
+# flatten-before-logging fix (self-review finding) keeps events.log at
+# exactly one line per event instead of splitting into untagged lines
+# that would miscount this very trip-wire.
+[ "$(grep -c 'pr\.lookup_failed .*branch=fix/issue-53' "$PROJECT_DIR/.swarm/events.log")" -eq 1 ] \
+    || red "pr.lookup_failed for fix/issue-53 split across more than one events.log line — multi-line gh stderr wasn't flattened"
+grep -q 'rate limited' "$PROJECT_DIR/.swarm/events.log" \
+    || red "expected the flattened gh error text to still be present in the pr.lookup_failed event"
+green "multi-line gh stderr flattened to one events.log line"
+
+# ============================================================================
+heading "Test 13: worktree_safe_to_reap on a real provision-worker.sh-shaped branch (issue #466 self-review)"
+# ============================================================================
+# Tests 7-12 all push with `-u origin <own-branch-name>`, which gives the
+# branch an upstream of its own name. A real worker branch never does that:
+# provision-worker.sh creates it as `git worktree add -b BRANCH
+# $DEFAULT_REMOTE_REF` (scripts/provision-worker.sh:351), which makes git set
+# its upstream to the DEFAULT branch's remote-tracking ref, not to a
+# same-named remote branch that may not even exist yet. For the common no-PR
+# case — no commits made at all, task delivered as an issue comment —
+# worktree_safe_to_reap must still read that as "0 ahead of upstream, safe",
+# even though upstream here is origin/<default>, not origin/fix/issue-54.
+
+git -C "$PROJECT_DIR" worktree add -q -b fix/issue-54 "$TEST_DIR/wt-issue-54" "origin/$DEFAULT_BRANCH"
+"$SHIM_DIR/tmux" new-window -t "$SESSION" -n iss-54
+sed -i "s/53) echo CLOSED; exit 0 ;;/53) echo CLOSED; exit 0 ;;\n        54) echo CLOSED; exit 0 ;;/" "$SHIM_DIR/gh"
+
+git -C "$TEST_DIR/wt-issue-54" rev-parse --symbolic-full-name '@{upstream}' | grep -qx "refs/remotes/origin/$DEFAULT_BRANCH" \
+    || red "fixture bug: fix/issue-54's upstream isn't origin/$DEFAULT_BRANCH as provision-worker.sh's shape requires"
+
+RUN_LOG13="$TEST_DIR/run13.log"
+set +e
+(cd "$PROJECT_DIR" && PATH="$SHIM_DIR:$PATH" "$KILL_FINISHED" --idle-min 0) > "$RUN_LOG13" 2>&1
+RC13=$?
+set -e
+[ "$RC13" -eq 0 ] || red "expected exit 0, got $RC13. Output:
+$(cat "$RUN_LOG13")"
+
+if "$SHIM_DIR/tmux" list-windows -t "$SESSION" -F '#W' | grep -qx 'iss-54'; then
+    red "iss-54 (no-commit no-PR task, provision-worker.sh-shaped upstream) survived default mode. Output:
+$(cat "$RUN_LOG13")"
+fi
+grep -q 'iss-54.*issue-closed.*kill' "$RUN_LOG13" \
+    || red "expected iss-54's kill line to cite issue-closed. Output:
+$(cat "$RUN_LOG13")"
+green "iss-54 (no commits, upstream = origin/$DEFAULT_BRANCH per provision-worker.sh's own shape) reaped by DEFAULT mode"
+
+# ============================================================================
+heading "Test 14: the issue-closed idle floor holds even with --idle-min 0 (issue #466 self-review)"
+# ============================================================================
+# The watcher's real auto-reap pass always calls this script with
+# --idle-min 0 (coordinator-watch.sh's cleanup_eligible_workers), so that
+# CLI flag can never be trusted as the safety net for the issue-closed
+# fallback — it would let a still-running worker's window (and worktree) be
+# destroyed the instant its issue closes, for any reason, not just the
+# coordinator's planned close. REAP_ISSUE_CLOSED_MIN_IDLE_MIN enforces its
+# own floor regardless. This is the one test in the file that does NOT
+# override it to 0, to prove the real (nonzero) default actually holds.
+
+git -C "$PROJECT_DIR" worktree add -q -b fix/issue-55 "$TEST_DIR/wt-issue-55"
+git -C "$TEST_DIR/wt-issue-55" push -q -u origin fix/issue-55
+"$SHIM_DIR/tmux" new-window -t "$SESSION" -n iss-55
+sed -i "s/54) echo CLOSED; exit 0 ;;/54) echo CLOSED; exit 0 ;;\n        55) echo CLOSED; exit 0 ;;/" "$SHIM_DIR/gh"
+
+RUN_LOG14="$TEST_DIR/run14.log"
+set +e
+(cd "$PROJECT_DIR" && PATH="$SHIM_DIR:$PATH" env -u REAP_ISSUE_CLOSED_MIN_IDLE_MIN \
+    "$KILL_FINISHED" --idle-min 0) > "$RUN_LOG14" 2>&1
+RC14=$?
+set -e
+[ "$RC14" -eq 0 ] || red "expected exit 0, got $RC14. Output:
+$(cat "$RUN_LOG14")"
+
+"$SHIM_DIR/tmux" list-windows -t "$SESSION" -F '#W' | grep -qx 'iss-55' \
+    || red "iss-55 (no PR, issue CLOSED, clean+pushed, but freshly active — idle 0m) was reaped despite --idle-min 0 giving it no cover — the issue-closed floor must hold on its own. Output:
+$(cat "$RUN_LOG14")"
+grep -q 'iss-55.*floor.*actively running' "$RUN_LOG14" \
+    || red "expected iss-55's skip line to cite the issue-closed idle floor. Output:
+$(cat "$RUN_LOG14")"
+green "iss-55 (idle 0m, real default floor, --idle-min 0) preserved — issue-closed floor isn't defeated by the CLI flag"
+
+# ============================================================================
+heading "Test 15: --pr-finalized also reaps via the issue-closed fallback (issue #466 self-review)"
+# ============================================================================
+# Tests 7, 12, 13 and 14 all exercise default mode; Test 11 covers
+# --merged-only. The fallback code in --pr-finalized is its own copy (not
+# shared), and --pr-finalized is one of the two modes the watcher's real
+# auto-reap pass actually uses — untested, a typo there would go unnoticed
+# in exactly the code path that matters most.
+
+git -C "$PROJECT_DIR" worktree add -q -b fix/issue-56 "$TEST_DIR/wt-issue-56"
+git -C "$TEST_DIR/wt-issue-56" push -q -u origin fix/issue-56
+"$SHIM_DIR/tmux" new-window -t "$SESSION" -n iss-56
+sed -i "s/55) echo CLOSED; exit 0 ;;/55) echo CLOSED; exit 0 ;;\n        56) echo CLOSED; exit 0 ;;/" "$SHIM_DIR/gh"
+
+RUN_LOG15="$TEST_DIR/run15.log"
+set +e
+(cd "$PROJECT_DIR" && PATH="$SHIM_DIR:$PATH" "$KILL_FINISHED" --pr-finalized --idle-min 0) > "$RUN_LOG15" 2>&1
+RC15=$?
+set -e
+[ "$RC15" -eq 0 ] || red "expected exit 0, got $RC15. Output:
+$(cat "$RUN_LOG15")"
+
+if "$SHIM_DIR/tmux" list-windows -t "$SESSION" -F '#W' | grep -qx 'iss-56'; then
+    red "iss-56 (no PR, issue CLOSED, clean+pushed) survived --pr-finalized mode. Output:
+$(cat "$RUN_LOG15")"
+fi
+grep -q 'iss-56.*issue-closed.*kill' "$RUN_LOG15" \
+    || red "expected iss-56's kill line to cite issue-closed under --pr-finalized. Output:
+$(cat "$RUN_LOG15")"
+green "iss-56 (no PR, issue CLOSED, clean+pushed) reaped by --pr-finalized mode"
+
+# ============================================================================
+heading "Test 16: --merged-only also honors the failed-lookup guard (issue #466 self-review)"
+# ============================================================================
+# Test 12 only exercises this under default mode. The guard is a separate
+# copy in the --merged-only branch too.
+
+git -C "$PROJECT_DIR" worktree add -q -b fix/issue-57 "$TEST_DIR/wt-issue-57"
+git -C "$TEST_DIR/wt-issue-57" push -q -u origin fix/issue-57
+"$SHIM_DIR/tmux" new-window -t "$SESSION" -n iss-57
+sed -i "s/56) echo CLOSED; exit 0 ;;/56) echo CLOSED; exit 0 ;;\n        57) echo CLOSED; exit 0 ;;/" "$SHIM_DIR/gh"
+sed -i "s#(rate limited, try again later)\\\\n' >\&2; exit 1 ;;#(rate limited, try again later)\\\\n' >\&2; exit 1 ;;\n        fix/issue-57) echo \"error: context deadline exceeded\" >\&2; exit 1 ;;#" "$SHIM_DIR/gh"
+
+RUN_LOG16="$TEST_DIR/run16.log"
+set +e
+(cd "$PROJECT_DIR" && PATH="$SHIM_DIR:$PATH" "$KILL_FINISHED" --merged-only --idle-min 0) > "$RUN_LOG16" 2>&1
+RC16=$?
+set -e
+[ "$RC16" -eq 0 ] || red "expected exit 0, got $RC16. Output:
+$(cat "$RUN_LOG16")"
+
+"$SHIM_DIR/tmux" list-windows -t "$SESSION" -F '#W' | grep -qx 'iss-57' \
+    || red "iss-57 (PR lookup failed, issue CLOSED) was reaped under --merged-only — the failed-lookup guard must hold in this mode too. Output:
+$(cat "$RUN_LOG16")"
+grep -q 'iss-57.*lookup failed' "$RUN_LOG16" \
+    || red "expected iss-57's skip line to cite the failed lookup under --merged-only. Output:
+$(cat "$RUN_LOG16")"
+green "iss-57 (PR lookup failed, issue CLOSED) preserved under --merged-only — guard holds outside default mode too"
+
+# ============================================================================
+heading "Test 17: --merged-only also honors the issue-closed idle floor (issue #466 self-review)"
+# ============================================================================
+# Test 14 only exercises the floor under default mode; --merged-only has
+# its own copy of the fallback call.
+
+git -C "$PROJECT_DIR" worktree add -q -b fix/issue-58 "$TEST_DIR/wt-issue-58"
+git -C "$TEST_DIR/wt-issue-58" push -q -u origin fix/issue-58
+"$SHIM_DIR/tmux" new-window -t "$SESSION" -n iss-58
+sed -i "s/57) echo CLOSED; exit 0 ;;/57) echo CLOSED; exit 0 ;;\n        58) echo CLOSED; exit 0 ;;/" "$SHIM_DIR/gh"
+
+RUN_LOG17="$TEST_DIR/run17.log"
+set +e
+(cd "$PROJECT_DIR" && PATH="$SHIM_DIR:$PATH" env -u REAP_ISSUE_CLOSED_MIN_IDLE_MIN \
+    "$KILL_FINISHED" --merged-only --idle-min 0) > "$RUN_LOG17" 2>&1
+RC17=$?
+set -e
+[ "$RC17" -eq 0 ] || red "expected exit 0, got $RC17. Output:
+$(cat "$RUN_LOG17")"
+
+"$SHIM_DIR/tmux" list-windows -t "$SESSION" -F '#W' | grep -qx 'iss-58' \
+    || red "iss-58 (idle 0m, real default floor) was reaped under --merged-only despite --idle-min 0 giving it no cover. Output:
+$(cat "$RUN_LOG17")"
+grep -q 'iss-58.*floor.*actively running' "$RUN_LOG17" \
+    || red "expected iss-58's skip line to cite the issue-closed idle floor under --merged-only. Output:
+$(cat "$RUN_LOG17")"
+green "iss-58 (idle 0m, real default floor) preserved under --merged-only — floor holds outside default mode too"
 
 echo
 green "ALL TESTS PASSED"

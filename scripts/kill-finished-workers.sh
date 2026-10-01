@@ -42,6 +42,26 @@
 #   that worktree entirely). --dry-run previews the would-be-salvaged
 #   counts per window without touching anything.
 #
+# NO-PR TASKS (issue #466)
+#   A task that never opens a PR (carving sub-issues, drafting rulings,
+#   research spikes delivered as outbox drafts or issue comments) can never
+#   satisfy "parked" (issue #386 — unreachable for the default interactive
+#   worker) or any PR-state check — there's no PR to look at. All three
+#   modes (default, --merged-only, --pr-finalized) treat the underlying
+#   GitHub ISSUE going CLOSED as the equivalent "safe to reap" signal for
+#   such a window, but ONLY when PR_STATE is confirmed empty (the branch
+#   never had a PR at all — one that has a PR, even CLOSED-without-merge,
+#   is still judged solely on that PR's state, same as always), AND the
+#   worktree passes a clean-worktree guard: no uncommitted/untracked
+#   changes, and the branch pushed with nothing ahead of its upstream (no
+#   unpushed commits) — closing the issue is not itself proof the work
+#   reached anywhere outside the worktree. AND the window has sat idle at
+#   least REAP_ISSUE_CLOSED_MIN_IDLE_MIN minutes (default 10, env-
+#   overridable) — checked unconditionally for this path alone, since the
+#   real watcher invocation always passes --idle-min 0 (self-review
+#   finding: that flag is not a safety net here the way it is for
+#   parked/merged). Dry-run cites the reason as `issue-closed`.
+#
 # WINDOWLESS WORKTREES (issue #406)
 #   Everything above keys off live `iss-*` tmux windows, so a tmux session
 #   restart (every window gone, worktrees untouched on disk) orphans any
@@ -83,6 +103,13 @@ DESCRIPTION
     by default — rerun with --pr-finalized to also reap those. --idle-min
     still defaults to 0, so a freshly-merged active window can be reaped
     immediately with no grace period; pass --idle-min N for one.
+
+    issue #466: a window whose branch never had a PR at all is instead
+    reap-eligible once its GitHub ISSUE is CLOSED and the worktree is clean
+    and fully pushed (see NO-PR TASKS above) — in ALL THREE modes (default,
+    --merged-only, --pr-finalized), not just --pr-finalized. This path also
+    enforces its own REAP_ISSUE_CLOSED_MIN_IDLE_MIN-minute idle floor
+    (default 10, env-overridable) independent of --idle-min.
 
 FLAGS
     -h, --help              Show this help and exit
@@ -180,6 +207,19 @@ PROJECT_DIR="$PWD"
 EVENTS_LOG="$PROJECT_DIR/.swarm/events.log"
 REAPED_DIR="$PROJECT_DIR/.swarm/reaped"
 REAP_CAPTURE_LINES="${REAP_CAPTURE_LINES:-500}"
+
+# issue #466 self-review: the watcher's real auto-reap pass always calls
+# this script with `--idle-min 0` (cleanup_eligible_workers,
+# coordinator-watch.sh), so the CLI --idle-min flag is never actually a
+# safety net for the issue-closed fallback in production — a still-running
+# worker session (no commits yet, clean tree) would have its window AND
+# worktree destroyed the instant anyone closes its issue (a duplicate-close,
+# a close by someone else's PR — not only the coordinator's planned one).
+# This floor applies ONLY to the issue-closed path, unconditionally,
+# regardless of what --idle-min was given, so it can't be silently
+# defeated the way the CLI flag is. Env-overridable (same pattern as
+# REAP_CAPTURE_LINES above) so tests can set it to 0.
+REAP_ISSUE_CLOSED_MIN_IDLE_MIN="${REAP_ISSUE_CLOSED_MIN_IDLE_MIN:-10}"
 log_event() {
     local cat="$1"; shift
     local ts
@@ -332,17 +372,60 @@ worktree_branch() {
 # --merged-only/--pr-finalized — up to twice per window for the same PR.
 # Callers gate the call itself (see the main loop) so plain default mode
 # with --no-pr-check still avoids the network entirely.
+#
+# PR_LOOKUP_FAILED (issue #466 self-review): set to 1 on a 1-return when the
+# `gh pr view` call itself failed for a reason OTHER than "no PR exists for
+# this branch" — network blip, auth, rate limit. Left 0 when gh affirmatively
+# reported no PR (its own "no pull requests found" message). This distinction
+# matters because issue_closed_reap_eligible's callers treat an empty
+# PR_STATE as "confirmed no PR, safe to fall back to the issue-closed
+# signal" — without it, a transient gh failure on a branch that actually HAS
+# an OPEN PR would look identical to "no PR found" and could get reaped.
 PR_STATE=""
 PR_CREATED_AT=""
 PR_NUMBER=""
+PR_LOOKUP_FAILED=0
 fetch_pr_state() {
-    local branch="$1" json
+    local branch="$1" out err err_flat errfile rc
     PR_STATE=""
     PR_CREATED_AT=""
     PR_NUMBER=""
-    json=$(gh pr view "$branch" --json state,createdAt,number -q '"\(.state)\t\(.createdAt)\t\(.number)"' 2>/dev/null || true)
-    [ -n "$json" ] || return 1
-    IFS=$'\t' read -r PR_STATE PR_CREATED_AT PR_NUMBER <<< "$json"
+    PR_LOOKUP_FAILED=0
+    # stderr goes to its own temp file, never merged into $out: a successful
+    # `gh pr view` that happens to print a warning on stderr (deprecation
+    # notice, auth refresh nudge) must not corrupt the tab-separated PR_STATE
+    # line on the success path (self-review finding).
+    errfile=$(mktemp)
+    out=$(gh pr view "$branch" --json state,createdAt,number -q '"\(.state)\t\(.createdAt)\t\(.number)"' 2>"$errfile")
+    rc=$?
+    err=$(cat "$errfile")
+    rm -f "$errfile"
+    if [ "$rc" -ne 0 ] || [ -z "$out" ]; then
+        case "$err" in
+            *"no pull requests found"*) : ;; # confirmed: branch has no PR
+            *)
+                # issue #466 self-review: this confirmed-no-PR match is only
+                # as durable as gh's exact English wording — a gh upgrade or
+                # a non-English locale could silently turn every genuine
+                # no-PR branch into a "lookup failed" one, quietly stranding
+                # windows again with nothing to point at. Logging it here,
+                # every time it happens, is the trip-wire: a sudden burst of
+                # pr.lookup_failed events across many branches at once is
+                # the wording-drift signature, not a one-off network blip.
+                PR_LOOKUP_FAILED=1
+                # gh's GraphQL/auth errors are often multi-line; events.log
+                # is one-line-per-event, so flatten before logging (self-
+                # review finding) — an embedded newline would otherwise
+                # split into untagged lines and miscount the very
+                # wording-drift trip-wire this event exists for. Truncated
+                # after flattening so one long error can't dominate the log.
+                err_flat="${err//$'\n'/ }"
+                log_event pr.lookup_failed "branch=$branch err=${err_flat:0:200}"
+                ;;
+        esac
+        return 1
+    fi
+    IFS=$'\t' read -r PR_STATE PR_CREATED_AT PR_NUMBER <<< "$out"
     return 0
 }
 
@@ -477,6 +560,102 @@ pr_is_finalized() {
     return 0
 }
 
+# issue #466: no-PR tasks (carving sub-issues, drafting rulings, research
+# spikes delivered as outbox drafts or issue comments) never open a PR at
+# all, so pr_is_merged/pr_is_finalized can never succeed for them and
+# "parked" is unreachable for the default interactive worker (issue #386)
+# — nothing above this point can ever mark one of these reap-eligible. The
+# GitHub issue going CLOSED is the equivalent signal for a no-PR task: the
+# deliverable was handled (per prompts/coordinator.md's close-on-handoff
+# convention) and the operator doesn't need the window kept around for
+# review the way an open-but-rejected PR does.
+#
+# Caller contract: only call this once PR_STATE is confirmed EMPTY (no PR
+# ever existed for the branch) — a branch that has a PR, even a stale
+# CLOSED-without-merge one, is judged on that PR's own state, never on the
+# issue's, so this never weakens the existing PR-based guarantees above.
+ISSUE_STATE=""
+fetch_issue_state() {
+    local issue="$1" state
+    ISSUE_STATE=""
+    state=$(gh issue view "$issue" --json state -q .state 2>/dev/null) || return 1
+    [ -n "$state" ] || return 1
+    ISSUE_STATE="$state"
+    return 0
+}
+
+# Clean-worktree guard (acceptance criterion, issue #466): closing the
+# issue is not itself proof the work reached anywhere outside this
+# worktree, so a no-PR reap additionally requires the tree to be clean
+# (nothing uncommitted/untracked) AND the branch pushed with nothing ahead
+# of its upstream (no unpushed commits) — reusing kill-worktree.sh's own
+# "uncommitted work LOST" worry, but checked here BEFORE the window (and
+# the worktree, under --with-worktree) is destroyed, not after.
+WT_UNSAFE_REASON=""
+worktree_safe_to_reap() {
+    local wt="$1" porcelain ahead
+    WT_UNSAFE_REASON=""
+    if [ ! -d "$wt" ] || ! git -C "$wt" rev-parse --git-dir >/dev/null 2>&1; then
+        WT_UNSAFE_REASON="no worktree / unresolvable git registration"
+        return 1
+    fi
+    porcelain="$(git -C "$wt" status --porcelain 2>/dev/null)"
+    if [ -n "$porcelain" ]; then
+        WT_UNSAFE_REASON="uncommitted/untracked changes"
+        return 1
+    fi
+    if ! git -C "$wt" rev-parse --verify --quiet '@{upstream}' >/dev/null 2>&1; then
+        WT_UNSAFE_REASON="branch has no upstream (never pushed)"
+        return 1
+    fi
+    ahead="$(git -C "$wt" rev-list --count '@{upstream}..HEAD' 2>/dev/null)"
+    if [ -z "$ahead" ]; then
+        WT_UNSAFE_REASON="can't resolve upstream comparison"
+        return 1
+    fi
+    if [ "$ahead" -gt 0 ]; then
+        WT_UNSAFE_REASON="$ahead unpushed commit(s)"
+        return 1
+    fi
+    return 0
+}
+
+# issue_closed_reap_eligible <issue> <wt> <window>
+#
+# True only when the GitHub issue is CLOSED, the worktree passes
+# worktree_safe_to_reap above, AND the window has sat idle at least
+# REAP_ISSUE_CLOSED_MIN_IDLE_MIN minutes — checked here, unconditionally,
+# because the caller's own --idle-min gate is not a reliable safety net for
+# this path (see REAP_ISSUE_CLOSED_MIN_IDLE_MIN's comment above: the real
+# watcher invocation always passes --idle-min 0). Callers must have already
+# confirmed PR_STATE is empty (see the contract note above) — this function
+# doesn't re-check that itself so it stays a pure "is the no-PR fallback
+# satisfied" test. Sets ISSUE_SKIP_REASON on a 1-return for the caller's
+# skip message.
+ISSUE_SKIP_REASON=""
+issue_closed_reap_eligible() {
+    local issue="$1" wt="$2" window="$3" idle
+    ISSUE_SKIP_REASON=""
+    if ! fetch_issue_state "$issue"; then
+        ISSUE_SKIP_REASON="can't resolve issue #$issue state"
+        return 1
+    fi
+    if [ "$ISSUE_STATE" != "CLOSED" ]; then
+        ISSUE_SKIP_REASON="issue #$issue is $ISSUE_STATE"
+        return 1
+    fi
+    if ! worktree_safe_to_reap "$wt"; then
+        ISSUE_SKIP_REASON="issue #$issue CLOSED but worktree unsafe: $WT_UNSAFE_REASON"
+        return 1
+    fi
+    idle=$(window_idle_min "$window")
+    if [ "$idle" -lt "$REAP_ISSUE_CLOSED_MIN_IDLE_MIN" ]; then
+        ISSUE_SKIP_REASON="issue #$issue CLOSED but only idle ${idle}m (< ${REAP_ISSUE_CLOSED_MIN_IDLE_MIN}m floor) — may still be actively running"
+        return 1
+    fi
+    return 0
+}
+
 # Decide which ones to kill ---------------------------------------------------
 KILL_LIST=()
 declare -A KILL_REASONS KILL_BRANCH
@@ -499,6 +678,12 @@ for w in "${WINDOWS[@]}"; do
     wt=""
     parked=0
     merged=0
+    # issue #466 self-review: ISSUE_SKIP_REASON/PR_LOOKUP_FAILED are globals
+    # fetch_pr_state/issue_closed_reap_eligible only set on a call — reset
+    # them per window so a message or decision below can never read a value
+    # left over from a DIFFERENT window's gh calls this pass.
+    ISSUE_SKIP_REASON=""
+    PR_LOOKUP_FAILED=0
 
     # Resolve the worktree's actual branch + fetch PR state ONCE per
     # window (single `gh pr view` round-trip) whenever any mode needs PR
@@ -543,10 +728,26 @@ for w in "${WINDOWS[@]}"; do
         if [ "$PR_CHECK" = "1" ] && pr_is_merged "$wt"; then
             merged=1
         fi
-        if [ "$parked" = "0" ] && [ "$merged" = "0" ]; then
+        # issue #466: a no-PR task (PR_STATE empty — never had one) can
+        # never satisfy "parked" or "PR-merged" above, so check the issue
+        # itself before giving up on this window. PR_LOOKUP_FAILED=0 guards
+        # against a transient `gh pr view` failure (network/auth) looking
+        # identical to "confirmed no PR" (self-review finding) — only a
+        # gh-affirmed absence unlocks this fallback.
+        issue_closed=0
+        if [ "$parked" = "0" ] && [ "$merged" = "0" ] && [ "$PR_CHECK" = "1" ] \
+           && [ -z "$PR_STATE" ] && [ "$PR_LOOKUP_FAILED" != "1" ] \
+           && issue_closed_reap_eligible "$issue" "$wt" "$w"; then
+            issue_closed=1
+        fi
+        if [ "$parked" = "0" ] && [ "$merged" = "0" ] && [ "$issue_closed" = "0" ]; then
             if [ "$PR_CHECK" = "1" ] && [ "$PR_STATE" = "CLOSED" ]; then
                 echo "  $w  [active, PR #$PR_NUMBER CLOSED (not merged) → skip (parked-only mode; rerun with --pr-finalized to reap)]"
                 SKIPPED_FINALIZED=$((SKIPPED_FINALIZED + 1))
+            elif [ "$PR_CHECK" = "1" ] && [ "$PR_LOOKUP_FAILED" = "1" ]; then
+                echo "  $w  [active, PR lookup failed (network/auth?) → skip (not treated as no-PR)]"
+            elif [ "$PR_CHECK" = "1" ] && [ -z "$PR_STATE" ] && [ -n "$ISSUE_SKIP_REASON" ]; then
+                echo "  $w  [active, no PR, $ISSUE_SKIP_REASON → skip]"
             else
                 echo "  $w  [active → skip]"
             fi
@@ -554,6 +755,7 @@ for w in "${WINDOWS[@]}"; do
         fi
         [ "$parked" = "1" ] && reasons+=("parked")
         [ "$merged" = "1" ] && reasons+=("PR-merged")
+        [ "$issue_closed" = "1" ] && reasons+=("issue-closed")
     fi
 
     # Idle-min check (applied in all modes when N>0)
@@ -574,16 +776,54 @@ for w in "${WINDOWS[@]}"; do
     # this worktree (issue #185).
     if [ "$MERGED_ONLY" = "1" ]; then
         if ! pr_is_merged "$wt"; then
-            echo "  $w  [PR $branch: ${PR_SKIP_REASON:-unknown reason} → skip (merged-only mode)]"
-            continue
+            # issue #466: a branch that never had a PR at all (PR_SKIP_REASON
+            # "no PR found") can never satisfy --merged-only's own promise —
+            # there's nothing to merge. Fall back to the issue-closed signal
+            # rather than stranding every no-PR task under this mode too.
+            # A branch that HAS a PR (open, or closed-without-merge) is
+            # still judged solely on that PR's state, same as always.
+            #
+            # PR_LOOKUP_FAILED guards the fallback itself (self-review
+            # finding): a transient `gh pr view` failure must never be read
+            # as "confirmed no PR" — that could reap a branch with a real
+            # OPEN PR gh simply couldn't fetch this round. It's checked
+            # again here, not just in issue_closed_reap_eligible's caller
+            # contract, so the "no PR" skip message below can't mislabel a
+            # failed lookup as a confirmed absence either.
+            if [ -z "$PR_STATE" ] && [ "$PR_LOOKUP_FAILED" != "1" ] && issue_closed_reap_eligible "$issue" "$wt" "$w"; then
+                reasons+=("issue-closed")
+            elif [ "$PR_LOOKUP_FAILED" = "1" ]; then
+                echo "  $w  [PR $branch: lookup failed (network/auth?) → skip (merged-only mode, not treated as no-PR)]"
+                continue
+            elif [ -z "$PR_STATE" ]; then
+                echo "  $w  [no PR, ${ISSUE_SKIP_REASON:-unknown reason} → skip (merged-only mode)]"
+                continue
+            else
+                echo "  $w  [PR $branch: ${PR_SKIP_REASON:-unknown reason} → skip (merged-only mode)]"
+                continue
+            fi
+        else
+            reasons+=("PR-merged")
         fi
-        reasons+=("PR-merged")
     elif [ "$PR_FINALIZED" = "1" ]; then
         if ! pr_is_finalized "$wt"; then
-            echo "  $w  [PR $branch: ${PR_SKIP_REASON:-unknown reason} → skip (pr-finalized mode)]"
-            continue
+            # issue #466: same no-PR fallback + PR_LOOKUP_FAILED guard as
+            # --merged-only above.
+            if [ -z "$PR_STATE" ] && [ "$PR_LOOKUP_FAILED" != "1" ] && issue_closed_reap_eligible "$issue" "$wt" "$w"; then
+                reasons+=("issue-closed")
+            elif [ "$PR_LOOKUP_FAILED" = "1" ]; then
+                echo "  $w  [PR $branch: lookup failed (network/auth?) → skip (pr-finalized mode, not treated as no-PR)]"
+                continue
+            elif [ -z "$PR_STATE" ]; then
+                echo "  $w  [no PR, ${ISSUE_SKIP_REASON:-unknown reason} → skip (pr-finalized mode)]"
+                continue
+            else
+                echo "  $w  [PR $branch: ${PR_SKIP_REASON:-unknown reason} → skip (pr-finalized mode)]"
+                continue
+            fi
+        else
+            reasons+=("PR-finalized")
         fi
-        reasons+=("PR-finalized")
     elif [ "$PR_CHECK" = "1" ]; then
         if pr_is_open; then
             echo "  $w  [PR $branch still OPEN → skip (use --no-pr-check to override)]"
