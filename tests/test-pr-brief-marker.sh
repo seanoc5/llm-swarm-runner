@@ -339,16 +339,27 @@ gh_last_comment | grep -q 'provision-worker.sh 90' \
 green "orphan comment carries the brief excerpt plus re-file / re-provision / drop commands"
 
 # ============================================================================
-heading "Test 8: requeue.sh posts nothing for a branch with no PR"
+heading "Test 8: requeue.sh posts no PR comment for a branch with no PR"
 # ============================================================================
 
+# issue #458: a PR-less branch no longer means "posts nothing" — requeue.sh
+# now falls back to a marker comment on the GitHub ISSUE instead (see
+# test-issue-brief-marker.sh for that path's full coverage). This gh stub
+# only implements `pr view`/`pr comment`, so the fallback's `gh issue
+# comment` call fails harmlessly (best-effort, `|| true`) and never reaches
+# COMMENTS_LOG — what this test still pins down is that no PR comment gets
+# posted for a branch with no PR, and that the attempt happened (not that
+# requeue.sh silently skipped it).
 git worktree add -q -b fix/issue-91 ../wt-issue-91 master
 mkdir -p "$TEST_DIR/wt-issue-91/.swarm/tasks/inbox"
 PRE="$(gh_comment_count)"
+: > "$GH_LOG"
 echo "brief for a PR-less branch" | PATH="$SHIM_DIR:$PATH" "$REQUEUE" 91 - \
     > "$TEST_DIR/requeue91.out" 2>&1 || red "requeue.sh exited non-zero: $(cat "$TEST_DIR/requeue91.out")"
-[ "$(gh_comment_count)" -eq "$PRE" ] || red "expected no new comment for a branch with no PR"
-green "requeue.sh stays silent when the target branch has no PR (never blocks the requeue itself)"
+[ "$(gh_comment_count)" -eq "$PRE" ] || red "expected no new PR comment for a branch with no PR"
+grep -q '^pr comment' "$GH_LOG" && red "did not expect a 'gh pr comment' call for a branch with no PR: $(cat "$GH_LOG")"
+grep -q 'issue comment 91' "$GH_LOG" || red "expected requeue.sh to attempt the issue #458 fallback (gh issue comment 91): $(cat "$GH_LOG")"
+green "requeue.sh posts no PR comment for a PR-less branch, and attempts the issue fallback instead"
 
 echo
 green "ALL TESTS PASSED"
