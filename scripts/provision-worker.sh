@@ -347,8 +347,14 @@ check_stale_container() {
     # (non-dead-pane) window still tracks it means a real worker may still
     # be running — never stop it out from under itself.
     if tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx "iss-$issue"; then
+        # `|| true` + empty-means-dead: same `set -e` abort risk as
+        # post_spawn_health_check's pane_dead query (self-review finding) —
+        # the window can vanish between the list-windows check above and
+        # here (e.g. its pane just exited 0, which remain-on-exit doesn't
+        # keep around), and a vanished window is not a "genuinely alive" one.
         local pd
-        pd="$(tmux list-panes -t "$SESSION_NAME:iss-$issue" -F '#{pane_dead}' 2>/dev/null | head -1)"
+        pd="$(tmux list-panes -t "$SESSION_NAME:iss-$issue" -F '#{pane_dead}' 2>/dev/null | head -1)" || true
+        [ -z "$pd" ] && pd=1
         if [ "$pd" != "1" ]; then
             echo "ERROR: container '$container' exists and its tmux window iss-$issue is alive." >&2
             echo "       The worker is running — route this brief through requeue.sh instead." >&2
@@ -431,8 +437,16 @@ post_spawn_health_check() {
     fi
     sleep "$check_secs"
 
+    # Under `set -euo pipefail`, `tmux list-panes` failing outright (the
+    # window itself is gone, not just its pane dead — e.g. the pane exited
+    # 0, which remain-on-exit does NOT keep around) would abort this whole
+    # script via the command substitution's own exit status, well before
+    # reaching the failure handling below. `|| true` avoids that; a window
+    # that can't be queried at all is treated the same as a dead pane, not
+    # defaulted to "alive" (self-review finding).
     local pane_dead
-    pane_dead="$(tmux list-panes -t "$SESSION_NAME:$window" -F '#{pane_dead}' 2>/dev/null | head -1)"
+    pane_dead="$(tmux list-panes -t "$SESSION_NAME:$window" -F '#{pane_dead}' 2>/dev/null | head -1)" || true
+    [ -z "$pane_dead" ] && pane_dead=1
     local running=0
     if docker ps --filter "name=^${container}\$" --format '{{.Names}}' 2>/dev/null | grep -qx "$container"; then
         running=1
@@ -618,7 +632,15 @@ if tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx "iss-$ISS
     # same failure mode this issue exists to close. Reclaim it instead so
     # the normal cap-checked spawn path below provisions a fresh, genuinely
     # live window.
-    pane_dead_flag="$(tmux list-panes -t "$SESSION_NAME:iss-$ISSUE" -F '#{pane_dead}' 2>/dev/null | head -1)"
+    #
+    # `|| true` + empty-means-dead: the window can vanish between the
+    # list-windows check above and here (its pane just exited 0, which
+    # remain-on-exit doesn't keep around) — under `set -euo pipefail` that
+    # would otherwise abort this whole script via the command substitution's
+    # own exit status (self-review finding on post_spawn_health_check,
+    # applied here too for the same race).
+    pane_dead_flag="$(tmux list-panes -t "$SESSION_NAME:iss-$ISSUE" -F '#{pane_dead}' 2>/dev/null | head -1)" || true
+    [ -z "$pane_dead_flag" ] && pane_dead_flag=1
     if [ "$pane_dead_flag" = "1" ]; then
         echo "[*] window iss-$ISSUE exists but its pane is dead — reclaiming" >&2
         tmux capture-pane -t "$SESSION_NAME:iss-$ISSUE" -p 2>/dev/null | tail -20 >&2 || true

@@ -280,6 +280,49 @@ command tmux -L "$SOCKET" kill-window -t "$SESSION:iss-304" 2>/dev/null || true
 green "a cold host without the worker image yet skips the health check rather than killing an in-progress build"
 
 # ============================================================================
+heading "Test 10: post_spawn_health_check — window has vanished entirely (not just dead-paned) -> exit 4, not a set -e abort (self-review, 6th pass)"
+# ============================================================================
+# No window named iss-305 was ever created: remain-on-exit only keeps a
+# window around for a pane that exits NON-zero, so a pane that exits 0
+# leaves tmux list-panes with nothing to query at all, not pane_dead=1.
+#
+# Deliberately NOT the `out="$(fn ...)" || rc=$?` idiom Tests 6-9 use: that
+# idiom itself happens to suppress the exact `set -e` abort bug under test
+# here (calling a function from inside a command substitution whose own
+# exit status will be checked disables errexit for everything inside it —
+# confirmed experimentally while writing this test). provision-worker.sh's
+# real call site is a bare, unconditional statement
+# (`post_spawn_health_check "$ISSUE" ...`, no `||`/capture around it), so
+# this test reproduces that exact shape instead: a genuinely separate bash
+# subprocess, invoked as a plain statement with its exit status read
+# afterward, not through `||` on the invocation itself.
+: > "$DOCKER_STATE_FILE"
+: > "$EVENTS_LOG"
+echo "queued" > "$TEST_DIR/brief-305.md"
+cat > "$TEST_DIR/run-305.sh" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+SESSION_NAME="$SESSION"
+log_event() {
+    local cat="\$1"; shift
+    printf '%s  %-15s %s\n' "\$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "\$cat" "\$*" >> "$EVENTS_LOG"
+}
+tmux() { command tmux -L "$SOCKET" "\$@"; }
+$(extract_fn post_spawn_health_check)
+PROVISION_SPAWN_CHECK_SECS=0.1 post_spawn_health_check 305 iss-305 swarm-provstale-iss-305 "$TEST_DIR/brief-305.md"
+EOF
+set +e
+bash "$TEST_DIR/run-305.sh" > "$TEST_DIR/out-305.log" 2>&1
+rc=$?
+set -e
+out="$(cat "$TEST_DIR/out-305.log")"
+[ "$rc" -eq 4 ] || red "a vanished window must still exit 4, not a set -e abort (rc=1) from tmux list-panes failing outright: rc=$rc, output: $out"
+grep -q 'worker.start.failed.*issue=305.*brief_removed=1' "$EVENTS_LOG" \
+    || red "expected worker.start.failed to still be logged for a vanished window, got: $(cat "$EVENTS_LOG")"
+[ -f "$TEST_DIR/brief-305.md" ] && red "a vanished window must also remove its unclaimed brief, not just a dead-paned one"
+green "a window that has vanished entirely (not just a dead pane) is treated as a failed spawn, not a shell-crashing set -e abort"
+
+# ============================================================================
 heading "All provision-worker.sh stale-container / post-spawn health tests passed"
 # ============================================================================
 green "check_stale_container(): clears a leftover same-name container before spawn, refuses only when it's genuinely still live"
