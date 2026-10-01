@@ -8707,6 +8707,13 @@ run_inotify() {
     # this process starts without re-globbing anyway.
     #
     # --exclude noisy dirs to keep watch count low.
+    #
+    # (issue #506 self-review) Drain any claim marker already on disk
+    # before inotifywait attaches — the same startup gap run_poll's
+    # dispatch_claims closes (see scan_claims' header): inotify only
+    # reports events from here forward, so a marker a listener wrote while
+    # this watcher was restarting would otherwise sit unforwarded forever.
+    dispatch_claims
     inotifywait -m -r \
         --exclude '/(\.git|node_modules|build|target|\.gradle|dist|out|\.next|\.venv|venv)(/|$)' \
         -e create -e moved_to \
