@@ -713,6 +713,15 @@ if tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx "iss-$ISS
         done
         if [ "$stale_briefs" -gt 0 ]; then
             echo "       Salvaged $stale_briefs stale brief(s) to $PROJECT_DIR/.swarm/salvaged/iss-$ISSUE/ (preserved, not auto-rerun — review and re-file if still relevant)" >&2
+            # self-review (14th pass): the cap/admission/stale-container
+            # checks below can still refuse this same re-provision (exit
+            # 2/3/5) -- the issue then has no window AND no queued brief,
+            # with the salvaged copy above as the only trace and none of
+            # those refusal paths otherwise mentioning it. An EXIT trap
+            # catches every such refusal (they each exit directly, from
+            # several call sites) without threading this through each one;
+            # it leaves the actual exit status untouched.
+            trap 'rc=$?; [ "$rc" -ne 0 ] && echo "       Note: issue #$ISSUE still has $stale_briefs brief(s) salvaged to $PROJECT_DIR/.swarm/salvaged/iss-$ISSUE/ from the reclaim above, now unqueued until this is retried." >&2; :' EXIT
         fi
         log_event worker.dead_pane_reclaimed "issue=$ISSUE window=iss-$ISSUE stale_briefs_salvaged=$stale_briefs"
         WINDOW_EXISTS=0

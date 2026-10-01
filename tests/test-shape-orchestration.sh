@@ -356,6 +356,38 @@ green "a dead-pane reclaim salvages both the unclaimed inbox/ brief and the aban
 rm -f "$TEST_DIR/tmux-windows.txt" "$TEST_DIR/tmux-pane-dead-iss-206.txt"
 git -C "$PROJECT_DIR" worktree remove --force "$WT206" 2>/dev/null || rm -rf "$WT206"
 
+# ============================================================================
+heading "Test 3h: a cap refusal right after a dead-pane reclaim still surfaces the salvaged briefs (self-review, 14th pass)"
+# ============================================================================
+# The reclaim-and-salvage above runs BEFORE the cap/admission checks below
+# it in provision-worker.sh. If one of those then refuses this same
+# re-provision attempt, the issue ends up with no window and no queued
+# brief -- the salvaged copy is the only trace, and the refusal's own
+# stderr said nothing about it until the 14th-pass EXIT trap fix.
+cd "$PROJECT_DIR"
+"$PROVISION" 207 > "$TEST_DIR/prov-3h-first.log" 2>&1 \
+    || red "initial spawn for issue 207 should succeed: $(cat "$TEST_DIR/prov-3h-first.log")"
+WT207="$TEST_DIR/wt-issue-207"
+echo "iss-207" > "$TEST_DIR/tmux-windows.txt"
+echo "1" > "$TEST_DIR/tmux-pane-dead-iss-207.txt"
+: > "$TEST_DIR/tmux.log"
+# Saturate the host-wide container cap so host_admission_check refuses
+# (exit 3) right after the reclaim's salvage runs — same mechanism as
+# Test 3d, just landing after a reclaim instead of a plain first spawn.
+echo "swarm-other-iss-1" > "$TEST_DIR/docker-containers.txt"
+set +e
+HOST_MAX_WORKERS=1 "$PROVISION" 207 > "$TEST_DIR/prov-3h-refused.log" 2>&1
+prov207_exit=$?
+set -e
+[ "$prov207_exit" -eq 3 ] \
+    || red "expected exit 3 (cap refusal) after the reclaim, got $prov207_exit: $(cat "$TEST_DIR/prov-3h-refused.log")"
+grep -q "Note: issue #207 still has 1 brief(s) salvaged to .*salvaged/iss-207/" "$TEST_DIR/prov-3h-refused.log" \
+    || red "expected the refusal to mention the salvaged brief; got: $(cat "$TEST_DIR/prov-3h-refused.log")"
+green "a cap refusal right after a dead-pane reclaim still tells the operator where the salvaged brief went"
+rm -f "$TEST_DIR/tmux-windows.txt" "$TEST_DIR/tmux-pane-dead-iss-207.txt" "$TEST_DIR/docker-containers.txt"
+rm -f "$HOST_STATE_DIR"/pending-*
+git -C "$PROJECT_DIR" worktree remove --force "$WT207" 2>/dev/null || rm -rf "$WT207"
+
 # ────────────────────────── coordinator-watch.sh ──────────────────────────
 
 heading "Test 4: coordinator-watch.sh detects new outcome JSON (DRY_RUN, ONCE)"
