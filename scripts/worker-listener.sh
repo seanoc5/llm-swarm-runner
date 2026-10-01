@@ -769,6 +769,30 @@ clear_pr_pending_brief_marker() {
         >/dev/null 2>&1 || true
 }
 
+# issue #458: requeue.sh falls back to a marker comment on the GitHub
+# ISSUE (not a PR) when it queues a brief against a branch with no OPEN PR
+# yet — see notify_issue_pending_brief in requeue.sh. Mirrors
+# clear_pr_pending_brief_marker's drained-queue gate exactly, just against
+# `gh issue` instead of `gh pr`: only clear once inbox/processing are both
+# empty, so a second brief queued behind the first doesn't get a false
+# "resolved" while it's still sitting unclaimed.
+clear_issue_pending_brief_marker() {
+    local issue_num="$1" inbox="$2" processing="$3"
+    command -v gh >/dev/null 2>&1 || return 0
+    if find "$inbox" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | grep -q . \
+        || find "$processing" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | grep -q .; then
+        return 0
+    fi
+    local last
+    last="$(gh issue view "$issue_num" --json comments \
+        -q '[.comments[] | select(.body | test("SWARM_PENDING_BRIEF:"))] | last | .body // empty' 2>/dev/null \
+        | grep -oE '^<!-- SWARM_PENDING_BRIEF: (queued|cleared) -->$' \
+        | sed -E 's/^<!-- SWARM_PENDING_BRIEF: (queued|cleared) -->$/\1/' || true)"
+    [ "$last" = "queued" ] || return 0
+    gh issue comment "$issue_num" --body $'<!-- SWARM_PENDING_BRIEF: cleared -->\n:white_check_mark: Swarm: the previously queued follow-up brief has been delivered.\n' \
+        >/dev/null 2>&1 || true
+}
+
 # Print a compact result after the worker process exits. Process exit, task
 # state and executed-check evidence are distinct; none implies merge approval.
 #
@@ -798,6 +822,12 @@ print_completion_block() {
     # Do not clear a queued-fix warning when that fix is still blocked/failed.
     if [ -n "$pr" ] && [ "$outcome" = "ok" ] && [ "$pr_state" != "blocked" ]; then
         clear_pr_pending_brief_marker "$pr" "$INBOX" "$PROCESSING"
+    fi
+    # issue #458: also clear the issue-level fallback marker (posted when a
+    # brief was queued before any PR existed) whenever the queue drains,
+    # whether or not this task ended up with a PR of its own yet.
+    if [ "$outcome" = "ok" ] && [ "$pr_state" != "blocked" ] && [[ "$WT_LABEL" =~ ^wt-issue-[0-9]+$ ]]; then
+        clear_issue_pending_brief_marker "$issue_num" "$INBOX" "$PROCESSING"
     fi
 
     echo ""

@@ -39,6 +39,17 @@
 # notify_pr_pending_brief below). worker-listener.sh posts the matching
 # `SWARM_PENDING_BRIEF: cleared` comment once the task that drains this
 # brief finishes with a PR resolved in its status file.
+#
+# issue #458: that marker has nowhere to land when the branch has no OPEN
+# PR yet — the civicstrata iss-487 incident, where a worker sat parked for
+# ~5 hours at an interactive in-pane question with no PR open, a requeued
+# brief produced zero externally-visible markers. When no OPEN PR exists,
+# notify_pending_brief (below) falls back to posting the same anchor
+# comment on the GitHub ISSUE (worktree name must match wt-issue-<N>)
+# instead, so a human answering the pane question — or later reviewing
+# whatever PR eventually opens, which links the issue — can see it.
+# worker-listener.sh clears whichever one (PR or issue) actually got the
+# marker once this worktree's queue drains.
 set -euo pipefail
 
 # Self-locate so the printed help text references the actual install path,
@@ -165,17 +176,13 @@ brief_excerpt() {
 # recently, no comment editing required. Silent no-op on any failure (no
 # gh, no remote, branch has no PR, PR not OPEN, or already flagged) — this
 # is a signal, never a gate.
+#
+# Takes pr_num from the caller (notify_pending_brief below), which already
+# did the branch→PR lookup to decide between this and the issue-fallback
+# path (issue #458) — doing that lookup twice would double the gh calls for
+# no benefit.
 notify_pr_pending_brief() {
-    local wt="$1" task_id="$2" state="$3" session="$4" win="$5" brief_file="$6"
-    command -v gh >/dev/null 2>&1 || return 0
-    local branch
-    branch="$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null)" || return 0
-    [ -n "$branch" ] || return 0
-    local json pr_num pr_state
-    json="$(gh pr view "$branch" --json number,state -q '"\(.number)\t\(.state)"' 2>/dev/null)" || return 0
-    [ -n "$json" ] || return 0
-    IFS=$'\t' read -r pr_num pr_state <<< "$json"
-    [ "$pr_state" = "OPEN" ] || return 0
+    local wt="$1" pr_num="$2" task_id="$3" state="$4" session="$5" win="$6" brief_file="$7"
 
     # Anchored to the HTML-comment marker line itself (start of line,
     # `-->` close required) — the comment's own body text explains the
@@ -235,6 +242,98 @@ notify_pr_pending_brief() {
     gh pr comment "$pr_num" --body "$comment" >/dev/null 2>&1 || true
 }
 
+# issue #458: fallback for when the target branch has no OPEN PR yet —
+# requeue.sh's #375 marker has nowhere to land, so a brief queued while a
+# worker is parked mid-task at an interactive question (no PR opened, maybe
+# for hours) produces zero externally-visible markers. Posts the same
+# anchor comment on the GitHub ISSUE instead: a human answering the
+# worker's pane question, or later reviewing whatever PR eventually opens
+# (it links the issue), can see a follow-up was queued. Same idempotency
+# and best-effort contract as notify_pr_pending_brief, just against
+# `gh issue` instead of `gh pr`.
+notify_issue_pending_brief() {
+    local wt="$1" issue_num="$2" task_id="$3" state="$4" session="$5" win="$6" brief_file="$7"
+
+    local last
+    last="$(gh issue view "$issue_num" --json comments \
+        -q '[.comments[] | select(.body | test("SWARM_PENDING_BRIEF:"))] | last | .body // empty' 2>/dev/null \
+        | grep -oE '^<!-- SWARM_PENDING_BRIEF: (queued|cleared) -->$' \
+        | sed -E 's/^<!-- SWARM_PENDING_BRIEF: (queued|cleared) -->$/\1/' || true)"
+    [ "$last" = "queued" ] && return 0
+
+    local ts
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+    local -a body=()
+    body+=('<!-- SWARM_PENDING_BRIEF: queued -->')
+    body+=("$(printf ':warning: **Swarm: a follow-up brief is queued for this issue'"'"'s worker** (task `%s`, queued %s UTC) — no open PR exists yet, so this notice is on the issue instead of a PR.' \
+        "$task_id" "$ts")")
+    body+=('')
+    body+=('If you answer an in-pane question from the worker, or a PR later opens and you review or merge it, read this first: that work may not yet reflect the queued brief below.')
+    body+=('')
+    body+=("$(printf '**Delivery outlook at queue time:** %s' \
+        "$(delivery_outlook "$state" "$session" "$win")")")
+
+    local excerpt
+    excerpt="$(brief_excerpt "$brief_file")"
+    if [ -n "$excerpt" ]; then
+        body+=('')
+        body+=('<details><summary><b>What was queued</b> (head of the brief — judge severity without leaving this page)</summary>')
+        body+=('')
+        body+=('``````text')
+        body+=("$excerpt")
+        body+=('``````')
+        body+=('</details>')
+    fi
+
+    body+=('')
+    body+=('**Next steps — pick one:**')
+    body+=('')
+    body+=('1. **Wait** — only if the outlook above says a listener is live. A `SWARM_PENDING_BRIEF: cleared` comment is posted here once the worker finishes a task with its inbox drained. Until then this warning stands.')
+    body+=("$(printf '2. **Check whether it is still pending** — on the swarm host:\n   ```bash\n   ls -1 %s/.swarm/tasks/{inbox,processing}\n   ```\n   A file in `inbox/` means not yet claimed; in `processing/` means the worker is on it; both empty means it was delivered and this note is stale.' \
+        "$wt")")
+    body+=("$(printf '3. **Cancel it** if the brief is obsolete:\n   ```bash\n   rm %s/.swarm/tasks/inbox/%s.md\n   ```\n   No effect once the worker has claimed it into `processing/`.' \
+        "$wt" "$task_id")")
+    body+=('')
+    body+=('<sub>scripts/requeue.sh — issue #458 (pre-PR marker gap).</sub>')
+
+    local comment
+    comment="$(printf '%s\n' "${body[@]}")"
+    gh issue comment "$issue_num" --body "$comment" >/dev/null 2>&1 || true
+}
+
+# notify_pending_brief <wt> <task_id> <state> <session> <win> <brief_file>
+#
+# Dispatcher: looks up whether the target branch has an OPEN PR and routes
+# to notify_pr_pending_brief (issue #375) when it does, or to the issue
+# #458 fallback (notify_issue_pending_brief) when it doesn't — no PR at
+# all, PR not yet opened, or PR closed/merged. Single lookup shared by both
+# paths. Silent no-op on any failure (no gh, no remote, detached HEAD) —
+# this is a signal, never a gate.
+notify_pending_brief() {
+    local wt="$1" task_id="$2" state="$3" session="$4" win="$5" brief_file="$6"
+    command -v gh >/dev/null 2>&1 || return 0
+    local branch
+    branch="$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null)" || return 0
+    [ -n "$branch" ] || return 0
+
+    local json pr_num pr_state
+    json="$(gh pr view "$branch" --json number,state -q '"\(.number)\t\(.state)"' 2>/dev/null)" || true
+    if [ -n "${json:-}" ]; then
+        IFS=$'\t' read -r pr_num pr_state <<< "$json"
+    fi
+
+    if [ -n "${pr_num:-}" ] && [ "$pr_state" = "OPEN" ]; then
+        notify_pr_pending_brief "$wt" "$pr_num" "$task_id" "$state" "$session" "$win" "$brief_file"
+        return
+    fi
+
+    local issue_num
+    issue_num="$(basename "$wt" | sed -nE 's/^wt-issue-([0-9]+)$/\1/p')"
+    [ -n "$issue_num" ] || return 0
+    notify_issue_pending_brief "$wt" "$issue_num" "$task_id" "$state" "$session" "$win" "$brief_file"
+}
+
 INBOX="$WT/.swarm/tasks/inbox"
 mkdir -p "$INBOX"
 
@@ -277,7 +376,7 @@ esac
 # same verdict instead of leaving it in a terminal nobody reads.
 LISTENER_STATE="$(listener_state "$SESSION_NAME" "$WIN")"
 
-notify_pr_pending_brief "$WT" "$TASK_ID" "$LISTENER_STATE" \
+notify_pending_brief "$WT" "$TASK_ID" "$LISTENER_STATE" \
     "$SESSION_NAME" "$WIN" "$INBOX/$TASK_ID.md"
 
 # Listener-state hint
