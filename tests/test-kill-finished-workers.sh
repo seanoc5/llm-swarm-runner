@@ -597,5 +597,92 @@ grep -q 'iss-55.*floor.*actively running' "$RUN_LOG14" \
 $(cat "$RUN_LOG14")"
 green "iss-55 (idle 0m, real default floor, --idle-min 0) preserved — issue-closed floor isn't defeated by the CLI flag"
 
+# ============================================================================
+heading "Test 15: --pr-finalized also reaps via the issue-closed fallback (issue #466 self-review)"
+# ============================================================================
+# Tests 7, 12, 13 and 14 all exercise default mode; Test 11 covers
+# --merged-only. The fallback code in --pr-finalized is its own copy (not
+# shared), and --pr-finalized is one of the two modes the watcher's real
+# auto-reap pass actually uses — untested, a typo there would go unnoticed
+# in exactly the code path that matters most.
+
+git -C "$PROJECT_DIR" worktree add -q -b fix/issue-56 "$TEST_DIR/wt-issue-56"
+git -C "$TEST_DIR/wt-issue-56" push -q -u origin fix/issue-56
+"$SHIM_DIR/tmux" new-window -t "$SESSION" -n iss-56
+sed -i "s/55) echo CLOSED; exit 0 ;;/55) echo CLOSED; exit 0 ;;\n        56) echo CLOSED; exit 0 ;;/" "$SHIM_DIR/gh"
+
+RUN_LOG15="$TEST_DIR/run15.log"
+set +e
+(cd "$PROJECT_DIR" && PATH="$SHIM_DIR:$PATH" "$KILL_FINISHED" --pr-finalized --idle-min 0) > "$RUN_LOG15" 2>&1
+RC15=$?
+set -e
+[ "$RC15" -eq 0 ] || red "expected exit 0, got $RC15. Output:
+$(cat "$RUN_LOG15")"
+
+if "$SHIM_DIR/tmux" list-windows -t "$SESSION" -F '#W' | grep -qx 'iss-56'; then
+    red "iss-56 (no PR, issue CLOSED, clean+pushed) survived --pr-finalized mode. Output:
+$(cat "$RUN_LOG15")"
+fi
+grep -q 'iss-56.*issue-closed.*kill' "$RUN_LOG15" \
+    || red "expected iss-56's kill line to cite issue-closed under --pr-finalized. Output:
+$(cat "$RUN_LOG15")"
+green "iss-56 (no PR, issue CLOSED, clean+pushed) reaped by --pr-finalized mode"
+
+# ============================================================================
+heading "Test 16: --merged-only also honors the failed-lookup guard (issue #466 self-review)"
+# ============================================================================
+# Test 12 only exercises this under default mode. The guard is a separate
+# copy in the --merged-only branch too.
+
+git -C "$PROJECT_DIR" worktree add -q -b fix/issue-57 "$TEST_DIR/wt-issue-57"
+git -C "$TEST_DIR/wt-issue-57" push -q -u origin fix/issue-57
+"$SHIM_DIR/tmux" new-window -t "$SESSION" -n iss-57
+sed -i "s/56) echo CLOSED; exit 0 ;;/56) echo CLOSED; exit 0 ;;\n        57) echo CLOSED; exit 0 ;;/" "$SHIM_DIR/gh"
+sed -i "s#(rate limited, try again later)\\\\n' >\&2; exit 1 ;;#(rate limited, try again later)\\\\n' >\&2; exit 1 ;;\n        fix/issue-57) echo \"error: context deadline exceeded\" >\&2; exit 1 ;;#" "$SHIM_DIR/gh"
+
+RUN_LOG16="$TEST_DIR/run16.log"
+set +e
+(cd "$PROJECT_DIR" && PATH="$SHIM_DIR:$PATH" "$KILL_FINISHED" --merged-only --idle-min 0) > "$RUN_LOG16" 2>&1
+RC16=$?
+set -e
+[ "$RC16" -eq 0 ] || red "expected exit 0, got $RC16. Output:
+$(cat "$RUN_LOG16")"
+
+"$SHIM_DIR/tmux" list-windows -t "$SESSION" -F '#W' | grep -qx 'iss-57' \
+    || red "iss-57 (PR lookup failed, issue CLOSED) was reaped under --merged-only — the failed-lookup guard must hold in this mode too. Output:
+$(cat "$RUN_LOG16")"
+grep -q 'iss-57.*lookup failed' "$RUN_LOG16" \
+    || red "expected iss-57's skip line to cite the failed lookup under --merged-only. Output:
+$(cat "$RUN_LOG16")"
+green "iss-57 (PR lookup failed, issue CLOSED) preserved under --merged-only — guard holds outside default mode too"
+
+# ============================================================================
+heading "Test 17: --merged-only also honors the issue-closed idle floor (issue #466 self-review)"
+# ============================================================================
+# Test 14 only exercises the floor under default mode; --merged-only has
+# its own copy of the fallback call.
+
+git -C "$PROJECT_DIR" worktree add -q -b fix/issue-58 "$TEST_DIR/wt-issue-58"
+git -C "$TEST_DIR/wt-issue-58" push -q -u origin fix/issue-58
+"$SHIM_DIR/tmux" new-window -t "$SESSION" -n iss-58
+sed -i "s/57) echo CLOSED; exit 0 ;;/57) echo CLOSED; exit 0 ;;\n        58) echo CLOSED; exit 0 ;;/" "$SHIM_DIR/gh"
+
+RUN_LOG17="$TEST_DIR/run17.log"
+set +e
+(cd "$PROJECT_DIR" && PATH="$SHIM_DIR:$PATH" env -u REAP_ISSUE_CLOSED_MIN_IDLE_MIN \
+    "$KILL_FINISHED" --merged-only --idle-min 0) > "$RUN_LOG17" 2>&1
+RC17=$?
+set -e
+[ "$RC17" -eq 0 ] || red "expected exit 0, got $RC17. Output:
+$(cat "$RUN_LOG17")"
+
+"$SHIM_DIR/tmux" list-windows -t "$SESSION" -F '#W' | grep -qx 'iss-58' \
+    || red "iss-58 (idle 0m, real default floor) was reaped under --merged-only despite --idle-min 0 giving it no cover. Output:
+$(cat "$RUN_LOG17")"
+grep -q 'iss-58.*floor.*actively running' "$RUN_LOG17" \
+    || red "expected iss-58's skip line to cite the issue-closed idle floor under --merged-only. Output:
+$(cat "$RUN_LOG17")"
+green "iss-58 (idle 0m, real default floor) preserved under --merged-only — floor holds outside default mode too"
+
 echo
 green "ALL TESTS PASSED"
