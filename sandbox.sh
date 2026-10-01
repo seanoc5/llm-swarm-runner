@@ -136,77 +136,95 @@ if command -v git &>/dev/null && git -C "$PROJECT_DIR" rev-parse --git-dir &>/de
     # Try --path-format=absolute (git 2.31+) fallback to realpath
     _git_common_dir="$(git -C "$PROJECT_DIR" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || realpath "$(git -C "$PROJECT_DIR" rev-parse --git-common-dir)")"
 
-    # Check if the common dir was resolved, exists, and is outside PROJECT_DIR
+    # Check if the common dir was resolved and exists
     if [ -n "$_git_common_dir" ] && [ -d "$_git_common_dir" ]; then
         # Use realpath to handle any symlinks or relative paths for strict prefix comparison
         _proj_real="$(realpath "$PROJECT_DIR")"
         _git_real="$(realpath "$_git_common_dir")"
         if [[ "$_git_real" != "$_proj_real"* ]]; then
+            # Outside PROJECT_DIR (the worktree case) — mount it explicitly.
+            # When it's INSIDE PROJECT_DIR instead (this container is pointed
+            # at the main checkout, not a linked worktree), PROJECT_DIR's own
+            # mount below already covers it, so no separate mount is needed
+            # here — but the sibling lockdown below still applies in both
+            # cases.
             MOUNTS+=("-v" "$_git_real:$_git_real:rw")
+        fi
 
-            # --- Sibling worktree admin-dir lockdown (#504) ---
-            # The common dir just mounted rw above contains EVERY worktree's
-            # admin metadata (git_common_dir/worktrees/<name>/), not just this
-            # one's — that's how git's shared-object-database worktree design
-            # works. But only THIS worktree's own working directory is bind-
-            # mounted into this container (PROJECT_DIR, above); every sibling
-            # worktree's directory lives at a host path this container can't
-            # see. git can't tell "doesn't exist because I can't see it" apart
-            # from "doesn't exist because it was deleted", so it reports every
-            # sibling as prunable — and with the common dir mounted rw, `git
-            # worktree prune` (or `remove`) had full permission to act on that
-            # wrong belief, deleting other LIVE workers' indexes (seanoc5/
-            # llm-swarm-runner#504 incident: one worker's `worktree prune -v`
-            # destroyed four siblings' + the coordinator's admin dirs).
-            #
-            # Fix: after the rw mount above, re-mount every OTHER worktree's
-            # admin subdir read-only on top of it. A bind mount nested inside
-            # an already-mounted directory shadows that subtree — verified
-            # directly (see PR body): writes/unlinks under the ro submount
-            # fail (EROFS / EBUSY on the dir itself) while the rest of the rw
-            # mount, including this worktree's OWN admin dir
-            # ($_git_real/worktrees/<this-one>, needed for every git
-            # operation's index write), is untouched. `git worktree prune`
-            # still *reports* siblings as prunable — it still can't see their
-            # directories — but can no longer delete their metadata: the
-            # delete fails and nothing is removed. This mirrors the SANDBOX_
-            # DEP_CACHE gradle mount's existing nested-ro-over-rw pattern
-            # above, just applied to a different subtree.
-            #
-            # Identifying "which admin dir is this worktree's own" by name
-            # would be wrong whenever git disambiguates a basename collision
-            # (worktrees/<name>, worktrees/<name>1, ...), so instead each
-            # admin dir's own `gitdir` file (its one authoritative pointer
-            # back to "<worktree>/.git") is read and compared against
-            # $_proj_real: only that one is skipped (left rw, as part of the
-            # broader mount, no override needed); every other admin dir
-            # present at container-start time gets the ro overlay.
-            #
-            # "At container-start time" matters: this only locks down
-            # worktrees that already existed when this container was
-            # launched, not ones a sibling creates afterward (docker doesn't
-            # support adding bind mounts to a running container). An existing
-            # worker's container does NOT pick this fix up retroactively —
-            # only a freshly provisioned/relaunched one does.
-            if [ -d "$_git_real/worktrees" ]; then
-                for _wt_admin in "$_git_real"/worktrees/*/; do
-                    [ -d "$_wt_admin" ] || continue
-                    _wt_admin="${_wt_admin%/}"
-                    _wt_gitdir_file="$_wt_admin/gitdir"
-                    [ -f "$_wt_gitdir_file" ] || continue
-                    _wt_path="$(cat "$_wt_gitdir_file")"
-                    _wt_path="${_wt_path%/.git}"
-                    if [ -d "$_wt_path" ]; then
-                        _wt_path_real="$(realpath "$_wt_path" 2>/dev/null || printf '%s' "$_wt_path")"
-                    else
-                        _wt_path_real="$_wt_path"
-                    fi
-                    if [ "$_wt_path_real" != "$_proj_real" ]; then
-                        MOUNTS+=("-v" "$_wt_admin:$_wt_admin:ro")
-                    fi
-                done
-                unset _wt_admin _wt_gitdir_file _wt_path _wt_path_real
-            fi
+        # --- Sibling worktree admin-dir lockdown (#504) ---
+        # The common dir contains EVERY worktree's admin metadata
+        # (git_common_dir/worktrees/<name>/), not just this one's — that's
+        # how git's shared-object-database worktree design works. But only
+        # THIS container's own working directory is bind-mounted in
+        # (PROJECT_DIR, above); every sibling worktree's directory lives at a
+        # host path this container can't see. git can't tell "doesn't exist
+        # because I can't see it" apart from "doesn't exist because it was
+        # deleted", so it reports every sibling as prunable — and with the
+        # common dir writable (whether via the explicit mount above, or via
+        # PROJECT_DIR's own mount when this container IS the main checkout),
+        # `git worktree prune` (or `remove`) had full permission to act on
+        # that wrong belief, deleting other LIVE workers' indexes (seanoc5/
+        # llm-swarm-runner#504 incident: one worker's `worktree prune -v`
+        # destroyed four siblings' + the coordinator's admin dirs).
+        #
+        # Fix: re-mount every OTHER worktree's admin subdir read-only on top
+        # of whichever rw mount already covers it. A bind mount nested
+        # inside an already-mounted directory shadows that subtree —
+        # verified directly (see PR body): writes/unlinks under the ro
+        # submount fail (EROFS / EBUSY on the dir itself) while the rest of
+        # the rw mount, including this worktree's OWN admin dir
+        # ($_git_real/worktrees/<this-one>, needed for every git operation's
+        # index write), is untouched. `git worktree prune` still *reports*
+        # siblings as prunable — it still can't see their directories — but
+        # can no longer delete their metadata: the delete fails and nothing
+        # is removed. This mirrors the SANDBOX_DEP_CACHE gradle mount's
+        # existing nested-ro-over-rw pattern above, just applied to a
+        # different subtree.
+        #
+        # Identifying "which admin dir is this worktree's own" by name would
+        # be wrong whenever git disambiguates a basename collision
+        # (worktrees/<name>, worktrees/<name>1, ...), so instead each admin
+        # dir's own `gitdir` file (its one authoritative pointer back to
+        # "<worktree>/.git") is read and compared against $_proj_real: only
+        # that one is skipped (left rw, no override needed); every other
+        # admin dir present at container-start time gets the ro overlay.
+        # `gitdir` is normally an absolute path, but git 2.48+'s
+        # `worktree.useRelativePaths` can write a path relative to the admin
+        # dir itself (the same convention that directory's `commondir` file
+        # already uses) — resolved below before comparing, so that mode
+        # doesn't get misread as "this isn't mine" and lock a worker out of
+        # its own admin dir.
+        #
+        # "At container-start time" matters: this only locks down worktrees
+        # that already existed when this container was launched, not ones a
+        # sibling creates afterward (docker doesn't support adding bind
+        # mounts to a running container). An existing worker's container
+        # does NOT pick this fix up retroactively — only a freshly
+        # provisioned/relaunched one does; nor does it cover a worktree
+        # created after a long-lived container (e.g. one left running for a
+        # while) started.
+        if [ -d "$_git_real/worktrees" ]; then
+            for _wt_admin in "$_git_real"/worktrees/*/; do
+                [ -d "$_wt_admin" ] || continue
+                _wt_admin="${_wt_admin%/}"
+                _wt_gitdir_file="$_wt_admin/gitdir"
+                [ -f "$_wt_gitdir_file" ] || continue
+                _wt_path="$(cat "$_wt_gitdir_file")"
+                _wt_path="${_wt_path%/.git}"
+                case "$_wt_path" in
+                    /*) ;;
+                    *) _wt_path="$_wt_admin/$_wt_path" ;;
+                esac
+                if [ -d "$_wt_path" ]; then
+                    _wt_path_real="$(realpath "$_wt_path" 2>/dev/null || printf '%s' "$_wt_path")"
+                else
+                    _wt_path_real="$_wt_path"
+                fi
+                if [ "$_wt_path_real" != "$_proj_real" ]; then
+                    MOUNTS+=("-v" "$_wt_admin:$_wt_admin:ro")
+                fi
+            done
+            unset _wt_admin _wt_gitdir_file _wt_path _wt_path_real
         fi
     fi
 fi

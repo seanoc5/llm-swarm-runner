@@ -132,7 +132,20 @@ fi
 echo ""
 echo "[ 2. Fix: git worktree prune -v inside the real sandbox.sh container removes nothing ]"
 prune_out=$(run_in_wta "git worktree prune -v" || true)
-if [ -d "$GITCOMMON/worktrees/wt-b" ]; then
+# Require evidence prune actually ran and saw wt-b as prunable — otherwise
+# this check would pass vacuously if sandbox.sh/git failed outright for an
+# unrelated reason (e.g. the nested-DooD gitconfig quirk) before prune ever
+# got a chance to attempt (and be blocked from) the delete.
+if ! echo "$prune_out" | grep -qi "wt-b"; then
+    if is_nested_gitconfig_quirk "$prune_out"; then
+        skip "wt-b's admin dir survives \`git worktree prune -v\` from inside the container" \
+            "nested-DooD \$HOME/.gitconfig quirk, unrelated to #504 (see is_nested_gitconfig_quirk)"
+    else
+        fail "wt-b's admin dir survives \`git worktree prune -v\` from inside the container" \
+            "prune never even saw wt-b as prunable — can't tell this blocked the delete vs. never ran:" \
+            "prune output: $prune_out"
+    fi
+elif [ -d "$GITCOMMON/worktrees/wt-b" ]; then
     pass "wt-b's admin dir survives \`git worktree prune -v\` from inside the container"
 else
     fail "wt-b's admin dir survives \`git worktree prune -v\` from inside the container" \
@@ -180,6 +193,32 @@ elif is_nested_gitconfig_quirk "$plain_out"; then
         "nested-DooD \$HOME/.gitconfig quirk, unrelated to #504 (see is_nested_gitconfig_quirk)"
 else
     fail "a plain, non-worktree project directory still launches and works" "$plain_out"
+fi
+
+# ── 6. Lockdown also applies when the container IS the main checkout ───────
+# The common-dir mount above is only added when it's OUTSIDE PROJECT_DIR
+# (the worktree case). When PROJECT_DIR is the main checkout itself, the
+# common dir lies INSIDE PROJECT_DIR and is already covered by PROJECT_DIR's
+# own mount — this check confirms the sibling lockdown still gets applied
+# (nested on top of that mount) rather than being skipped along with the
+# now-redundant explicit common-dir mount.
+echo ""
+echo "[ 6. Fix: lockdown also applies when sandbox.sh is pointed at the main checkout ]"
+main_prune_out=$("$SANDBOX_SH" "$MAIN" "git worktree prune -v" 2>&1 || true)
+if echo "$main_prune_out" | grep -qi "wt-a\|wt-b"; then
+    if [ -d "$GITCOMMON/worktrees/wt-a" ] && [ -d "$GITCOMMON/worktrees/wt-b" ]; then
+        pass "both worktrees' admin dirs survive \`git worktree prune -v\` run against the main checkout"
+    else
+        fail "both worktrees' admin dirs survive \`git worktree prune -v\` run against the main checkout" \
+            "prune output: $main_prune_out"
+    fi
+elif is_nested_gitconfig_quirk "$main_prune_out"; then
+    skip "both worktrees' admin dirs survive \`git worktree prune -v\` run against the main checkout" \
+        "nested-DooD \$HOME/.gitconfig quirk, unrelated to #504 (see is_nested_gitconfig_quirk)"
+else
+    fail "both worktrees' admin dirs survive \`git worktree prune -v\` run against the main checkout" \
+        "prune never even saw wt-a/wt-b as prunable — can't tell this blocked the delete vs. never ran:" \
+        "prune output: $main_prune_out"
 fi
 
 echo ""
