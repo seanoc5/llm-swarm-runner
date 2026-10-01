@@ -8737,13 +8737,17 @@ run_inotify() {
             */wt-issue-*/.swarm/tasks/claims/*.claim)
                 # worker-listener.sh self-heal claim marker (issue #506) —
                 # same mktemp-then-mv convention as outbox messages above.
-                # Unlike the poll backend's run_poll (see its scan_claims
-                # comment), inotify is inherently event-driven rather than
-                # a seen/unseen diff against a baseline, so this path
-                # doesn't share that function's startup/reuse race — it
-                # just can't see a marker dropped before inotifywait
-                # attached in the first place, same pre-existing gap as
-                # every other category above.
+                # The startup race this branch would otherwise have (a
+                # marker already on disk before inotify started watching,
+                # same shape as run_poll's own startup gap — see
+                # scan_claims' header) is covered by the dispatch_claims
+                # drain just above, before inotifywait starts. What's left
+                # is a much narrower window — a marker written in the gap
+                # between that drain and inotifywait actually attaching —
+                # inherent to any event-driven watch with no atomic
+                # "start watching AND list existing files" primitive, and
+                # not worth chasing further on a host that runs the poll
+                # backend in practice (inotify-tools isn't installed here).
                 dispatch_selfheal_claim "$path"
                 ;;
         esac
