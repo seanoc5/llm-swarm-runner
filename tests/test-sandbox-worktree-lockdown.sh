@@ -319,6 +319,41 @@ else
         "setup failed: couldn't start the long-lived holder container ($HOLD_NAME)"
 fi
 
+# ── 10. A sibling created AFTER this container started is still locked
+#        down ────────────────────────────────────────────────────────────
+# The whole point of mounting the worktrees/ DIRECTORY read-only (instead
+# of one `-v` per sibling enumerated at launch) instead of the per-sibling
+# approach tests 1-9 exercise: a bind mount of a directory is a live view
+# of it, not a snapshot, so a sibling created on the host after this
+# container is already running should still appear through the same
+# mount, read-only. Mirrors wt-a's own mount set by hand (sandbox.sh
+# itself is a one-shot `exec`, so it can't be used to hold a container
+# open across a host-side `worktree add`).
+echo ""
+echo "[ 10. Fix: a sibling created AFTER container launch is still locked down ]"
+HOLD2_NAME="wt504-lockdown-hold2-$$"
+docker run -d --rm --name "$HOLD2_NAME" \
+    --user "$(id -u):$(id -g)" \
+    -v "$WTA:$WTA:rw" \
+    -v "$GITCOMMON:$GITCOMMON:rw" \
+    -v "$GITCOMMON/worktrees:$GITCOMMON/worktrees:ro" \
+    -v "$GITCOMMON/worktrees/wt-a:$GITCOMMON/worktrees/wt-a:rw" \
+    "$IMAGE" sleep 60 >/dev/null 2>&1 || true
+if docker ps --format '{{.Names}}' | grep -qx "$HOLD2_NAME"; then
+    git -C "$MAIN" branch wtd
+    git -C "$MAIN" worktree add -q "$FIXTURE/wt-d" wtd
+    late_write_out=$(docker exec "$HOLD2_NAME" sh -c "echo x >> '$GITCOMMON/worktrees/wt-d/HEAD' 2>&1; echo RC=\$?" 2>&1)
+    if echo "$late_write_out" | grep -qi "read-only file system" && ! echo "$late_write_out" | grep -q "RC=0"; then
+        pass "a worktree created after container launch is visible and still read-only"
+    else
+        fail "a worktree created after container launch is visible and still read-only" "$late_write_out"
+    fi
+    docker rm -f "$HOLD2_NAME" >/dev/null 2>&1 || true
+else
+    fail "a worktree created after container launch is visible and still read-only" \
+        "setup failed: couldn't start the long-lived holder container ($HOLD2_NAME)"
+fi
+
 echo ""
 echo "=== Results ==="
 TOTAL=$((PASS + FAIL + SKIP))
