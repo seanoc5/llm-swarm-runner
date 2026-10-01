@@ -4,7 +4,7 @@
 # Usage:
 #   swarm-merge.sh <issue#|PR#>       # resolves PR from issue (or issue from
 #                                      # PR), merges, cleans
-#   swarm-merge.sh <issue#|PR#> --no-kill # skip the tmux-kill step
+#   swarm-merge.sh <issue#|PR#> --no-kill # skip the worktree/tmux reap step
 #   swarm-merge.sh <issue#|PR#> --override-review  # merge despite a BLOCK verdict
 #   swarm-merge.sh <issue#|PR#> --override-migration-gate  # merge despite a migration collision
 #   swarm-merge.sh <issue#> --force-cleanup  # housekeep even while the issue is OPEN
@@ -87,7 +87,7 @@
 #      merge, but the worker's mess is still on disk" — closed by another
 #      PR's work, PR closed unmerged and redone elsewhere, or closed by hand.
 #      When there is no PR to merge but the issue is CLOSED, steps 3-4 are
-#      skipped and steps 5-7 (reap wait, tmux/worktree kill, branch sweep)
+#      skipped and steps 5-6 (worktree/tmux reap, branch sweep)
 #      run as normal: they are keyed on the issue, not the PR, and are valid
 #      on their own. An OPEN issue still refuses, on the same reasoning
 #      run_sweep uses — an OPEN issue is an in-flight worker, and reaping it
@@ -112,18 +112,31 @@
 #      2026-09-28 lost two incident-evidence files this way). The REMOTE
 #      branch is deleted explicitly right after the merge instead; the
 #      local branch is the reaper's job (step 7 / kill-worktree.sh).
-#   5. Waits up to 60s for the watcher to reap the worker's worktree + tmux window.
-#   6. If the iss-<N> tmux window is still alive after the grace period, kills it.
-#   7. Runs the SAFER local-branch sweep: deletes `fix/issue-N` only when GitHub
+#   5. Reaps the worker immediately (issue #465): calls kill-worktree.sh <N>
+#      right here rather than waiting up to 60s for the watcher's own
+#      WATCH_PR_POLL_SECS backstop to notice — same script the watcher uses
+#      (kill-finished-workers.sh --with-worktree), so brief salvage
+#      (queued inbox/processing/outbox files), the .swarm/.local-data
+#      archive, and the reap.worktree event all still happen. --no-kill
+#      skips this step entirely, same semantics as before. A deferred
+#      (exit 75, in-flight check-claim) or refused (exit 76, non-empty
+#      inbox with SWARM_REAP_INBOX=refuse) result is reported and left for
+#      the watcher's own backstop to retry; a real failure (any other
+#      nonzero exit) is reported as a warning rather than failing the
+#      script — the merge itself already succeeded. The watcher's
+#      subsequent PR-poll tick finds the worktree already gone
+#      (pr_poll_pass's own is_own_worktree_dir check) and skips silently,
+#      never re-reaping or posting an orphan comment.
+#   6. Runs the SAFER local-branch sweep: deletes `fix/issue-N` only when GitHub
 #      issue N's state is CLOSED. (Never deletes branches for OPEN issues, so
-#      in-flight workers stay safe.)
-#   8. Reports final state.
+#      in-flight workers stay safe.) One `gh issue list` call covers every
+#      local fix/issue-* branch, not one `gh issue view` per branch.
+#   7. Reports final state.
 #
 # Exits 0 on success, non-zero on bailout.
 
 set -euo pipefail
 
-GRACE_SECONDS=60
 NO_KILL=0
 SWEEP_ONLY=0
 OVERRIDE_REVIEW=0
@@ -190,7 +203,7 @@ c_dim()   { printf '\033[2m%s\033[0m' "$1"; }
 
 # --- housekeeping-only decision (#368) ------------------------------------
 #
-# Called when there is nothing to merge. Steps 5-7 are keyed on the issue and
+# Called when there is nothing to merge. Steps 5-6 are keyed on the issue and
 # stand on their own, so the absence of a PR is not a reason to abandon the
 # worker's tmux window and worktree to a manual cleanup.
 #
@@ -217,21 +230,45 @@ housekeep_or_die() {
 
 # --- safer local-branch sweep ---------------------------------------------
 #
-# For each local `fix/issue-N` branch, look up issue N on GitHub.
+# For each local `fix/issue-N` branch, look up issue N's state on GitHub.
 # Delete the branch ONLY if the issue state is CLOSED.
 # This is safer than the "remote branch absent" heuristic because a
 # freshly-provisioned worker that hasn't pushed yet has an OPEN issue and
 # no remote branch — we never want to delete those.
+#
+# issue #465: used to make one `gh issue view <num>` round-trip per branch.
+# Instead, make exactly one `gh issue list --state all` call up front and
+# match branch numbers against it locally — a single GitHub call regardless
+# of how many fix/issue-* branches are lying around. SWARM_SWEEP_ISSUE_LIMIT
+# (default 1000) bounds that one call; an issue number missing from the
+# listing (beyond the limit, or genuinely gone) falls back to the same
+# UNKNOWN/skip behavior a failed `gh issue view` used to produce — never
+# delete unless CLOSED is confirmed.
 run_sweep() {
   echo "[sweep] scanning local fix/issue-* branches…"
   local deleted=0 kept_open=0 skipped=0
-  for b in $(git branch --format='%(refname:short)' | grep -E '^fix/issue-[0-9]+' || true); do
+  local branches
+  branches="$(git branch --format='%(refname:short)' | grep -E '^fix/issue-[0-9]+' || true)"
+  if [ -z "$branches" ]; then
+    echo "[sweep] deleted=0, kept_open=0, skipped=0"
+    return 0
+  fi
+
+  local issue_json
+  issue_json="$(gh issue list --state all --json number,state \
+                  --limit "${SWARM_SWEEP_ISSUE_LIMIT:-1000}" 2>/dev/null || echo '[]')"
+  [ -n "$issue_json" ] || issue_json='[]'
+
+  local b
+  while IFS= read -r b; do
+    [ -n "$b" ] || continue
     # Branch name may have a suffix (e.g. fix/issue-118-cluster-a); keep the full
     # name for deletion, but extract just the leading issue number for lookup.
-    local num
+    local num state
     num=$(echo "$b" | grep -oE '^fix/issue-[0-9]+' | sed 's|^fix/issue-||')
-    local state
-    state=$(gh issue view "$num" --json state -q .state 2>/dev/null || echo "UNKNOWN")
+    state=$(echo "$issue_json" | jq -r --arg n "$num" \
+              '([.[] | select(.number == ($n|tonumber)) | .state])[0] // "UNKNOWN"' 2>/dev/null)
+    [ -n "$state" ] || state="UNKNOWN"
     case "$state" in
       CLOSED)
         if git branch -D "$b" >/dev/null 2>&1; then
@@ -250,7 +287,7 @@ run_sweep() {
         skipped=$((skipped+1))
         ;;
     esac
-  done
+  done <<< "$branches"
   echo "[sweep] deleted=$deleted, kept_open=$kept_open, skipped=$skipped"
 }
 
@@ -276,17 +313,15 @@ git rev-parse --git-dir >/dev/null 2>&1 || { echo "ERROR: not in a git repo" >&2
 # cd to main worktree so gh pr merge's local-pull step has the right cwd.
 MAIN_WT=$(main_worktree)
 cd "$MAIN_WT"
-echo "[1/7] working in main worktree: $MAIN_WT"
+echo "[1/6] working in main worktree: $MAIN_WT"
 
 # shellcheck source=/dev/null
 . "$SCRIPT_DIR/_load-env.sh" "$MAIN_WT"
 
-# issue #439 self-review finding: the fallback worktree removal below (when
-# the watcher hasn't reaped within GRACE_SECONDS) used to call `git worktree
-# remove` directly, bypassing kill-worktree.sh entirely — which meant
-# coordinator-watch.sh's worktree_vanish_sweep_pass would flag every such
-# fallback removal as an unblessed disappearance. Same EVENTS_LOG/log_event
-# shape as kill-worktree.sh/kill-finished-workers.sh.
+# issue #465: swarm-merge.sh no longer removes the worktree itself (see
+# step 5 below, which now calls kill-worktree.sh directly) — but Gate 2's
+# no-checks-configured pass-with-warning below still logs a merge.gate
+# event, so EVENTS_LOG/log_event stay here for that one caller.
 EVENTS_LOG="$MAIN_WT/.swarm/events.log"
 mkdir -p "$(dirname "$EVENTS_LOG")" 2>/dev/null || true
 log_event() {
@@ -294,65 +329,6 @@ log_event() {
     local ts
     ts="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
     printf '%s  %-15s %s\n' "$ts" "$cat" "$*" >> "$EVENTS_LOG" 2>/dev/null || true
-}
-
-# issue #495: same rationale and contract as kill-worktree.sh's own copy of
-# this function (two fand-etl incidents, 2026-09-28, lost worker output
-# under .local-data/ and evidence logs under .swarm/logs/ to a bare
-# `git worktree remove --force` with no archive step). This fallback
-# removal below (used only when the watcher hasn't reaped within
-# GRACE_SECONDS) already duplicates its own `git worktree remove` +
-# log_event rather than calling kill-worktree.sh (see the issue #439
-# comment above) — so it carries its own copy here too, same
-# self-contained-scripts convention. Sets ARCHIVE_SWARM / ARCHIVE_LOCALDATA
-# / LOCALDATA_SKIPPED as call-site globals.
-archive_worktree_scratch() {
-    local project_dir="$1" issue="$2" wt="$3"
-    ARCHIVE_SWARM=""
-    ARCHIVE_LOCALDATA=""
-    LOCALDATA_SKIPPED=""
-    ARCHIVE_MV_FAILED=""
-    ARCHIVE_EVENT_FIELD="none"
-    [ -d "$wt/.swarm" ] || [ -d "$wt/.local-data" ] || return 0
-
-    local ts base max_mb size_mb
-    ts="$(date -u +%Y%m%dT%H%M%SZ)"
-    base="$project_dir/.swarm/reaped/iss-$issue-$ts"
-    mkdir -p "$project_dir/.swarm/reaped" 2>/dev/null || true
-
-    if [ -d "$wt/.swarm" ]; then
-        if mv "$wt/.swarm" "$base.swarm" 2>/dev/null; then
-            ARCHIVE_SWARM="$base.swarm"
-        else
-            ARCHIVE_MV_FAILED="swarm"
-        fi
-    fi
-
-    if [ -d "$wt/.local-data" ]; then
-        max_mb="${SWARM_REAP_LOCALDATA_MAX_MB:-512}"
-        size_mb="$(du -sm "$wt/.local-data" 2>/dev/null | cut -f1)"
-        size_mb="${size_mb:-0}"
-        if [ "$size_mb" -le "$max_mb" ] 2>/dev/null; then
-            if mv "$wt/.local-data" "$base.local-data" 2>/dev/null; then
-                ARCHIVE_LOCALDATA="$base.local-data"
-            else
-                ARCHIVE_MV_FAILED="${ARCHIVE_MV_FAILED:+$ARCHIVE_MV_FAILED,}local-data"
-            fi
-        else
-            LOCALDATA_SKIPPED="size=${size_mb}MB path=$wt/.local-data"
-        fi
-    fi
-
-    # self-review (PR #500): the events.log archive= field used to report
-    # ARCHIVE_SWARM alone, so a reap that archived ONLY .local-data/ (no
-    # .swarm/ dir at all — the iss-1103 shape) logged archive=none, exactly
-    # as if nothing had been preserved. Report both, comma-joined.
-    if [ -n "$ARCHIVE_SWARM" ] || [ -n "$ARCHIVE_LOCALDATA" ]; then
-        ARCHIVE_EVENT_FIELD="${ARCHIVE_SWARM:+swarm=$ARCHIVE_SWARM}"
-        if [ -n "$ARCHIVE_LOCALDATA" ]; then
-            ARCHIVE_EVENT_FIELD="${ARCHIVE_EVENT_FIELD:+$ARCHIVE_EVENT_FIELD,}local_data=$ARCHIVE_LOCALDATA"
-        fi
-    fi
 }
 
 # Resolve the given number as either an issue or a PR — GitHub shares one
@@ -365,7 +341,7 @@ IS_PR=$(gh api "repos/{owner}/{repo}/issues/$INPUT_NUM" --jq '.pull_request != n
 
 if [ "$IS_PR" = "true" ]; then
   PR_NUM="$INPUT_NUM"
-  echo "[2/7] #$INPUT_NUM is PR #$PR_NUM"
+  echo "[2/6] #$INPUT_NUM is PR #$PR_NUM"
 elif [ "$IS_PR" = "false" ]; then
   ISSUE="$INPUT_NUM"
   PR_NUM=$(gh issue view "$ISSUE" --json closedByPullRequestsReferences \
@@ -374,7 +350,7 @@ elif [ "$IS_PR" = "false" ]; then
     PR_NUM=""
     housekeep_or_die "no linked PR found for issue #$ISSUE"
   else
-    echo "[2/7] issue #$ISSUE → PR #$PR_NUM"
+    echo "[2/6] issue #$ISSUE → PR #$PR_NUM"
   fi
 else
   # The probe itself failed (rate limit, transient network, expired auth) —
@@ -388,11 +364,11 @@ else
   PR_NUM=$(gh issue view "$ISSUE" --json closedByPullRequestsReferences \
              -q '.closedByPullRequestsReferences[0].number' 2>/dev/null || echo "")
   if [ -n "$PR_NUM" ] && [ "$PR_NUM" != "null" ]; then
-    echo "[2/7] issue #$ISSUE → PR #$PR_NUM (resolved via fallback)"
+    echo "[2/6] issue #$ISSUE → PR #$PR_NUM (resolved via fallback)"
   elif gh pr view "$INPUT_NUM" --json number >/dev/null 2>&1; then
     ISSUE=""
     PR_NUM="$INPUT_NUM"
-    echo "[2/7] #$INPUT_NUM resolved directly as PR #$PR_NUM (resolved via fallback)"
+    echo "[2/6] #$INPUT_NUM resolved directly as PR #$PR_NUM (resolved via fallback)"
   elif [ -n "$(gh issue view "$INPUT_NUM" --json number -q .number 2>/dev/null)" ]; then
     # It is a real issue with no linked PR. Same housekeeping case as above,
     # reached through the degraded-classification path.
@@ -420,7 +396,7 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
   PR_IS_DRAFT=$(echo "$PR_JSON" | jq -r '.isDraft // false')
   PR_REVIEW_DECISION=$(echo "$PR_JSON" | jq -r '.reviewDecision // ""')
   PR_BASE=$(echo "$PR_JSON" | jq -r '.baseRefName // ""')
-  echo "[3/7] PR #$PR_NUM: state=$PR_STATE mergeable=$PR_MERGEABLE branch=$PR_BRANCH"
+  echo "[3/6] PR #$PR_NUM: state=$PR_STATE mergeable=$PR_MERGEABLE branch=$PR_BRANCH"
   echo "       title: $PR_TITLE"
 
   if [ -z "$ISSUE" ]; then
@@ -632,7 +608,7 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
           exit 1
         fi
       fi
-      echo "[4/7] merging PR #$PR_NUM (squash)…"
+      echo "[4/6] merging PR #$PR_NUM (squash)…"
       # issue #489: never --delete-branch here. On gh >= 2.100 its
       # local-delete step removes the linked worktree that has the branch
       # checked out — the live worker's worktree — with no salvage and no
@@ -700,11 +676,11 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
       fi
       ;;
     MERGED)
-      echo "[4/7] PR #$PR_NUM already MERGED — proceeding to cleanup"
+      echo "[4/6] PR #$PR_NUM already MERGED — proceeding to cleanup"
       ;;
     CLOSED)
       # Not "nothing to do": the PR is dead but the worker's tmux window and
-      # worktree are still on disk, and that is precisely what steps 5-7 clean.
+      # worktree are still on disk, and that is precisely what steps 5-6 clean.
       if [ -n "$ISSUE" ]; then
         housekeep_or_die "PR #$PR_NUM is CLOSED (not merged)"
       else
@@ -720,83 +696,45 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
   esac
 else
   # Housekeeping-only: no PR exists, so there is nothing to inspect or gate.
-  # Steps 5-7 below are keyed on $ISSUE and run exactly as they would after a
+  # Steps 5-6 below are keyed on $ISSUE and run exactly as they would after a
   # normal merge.
-  echo "[3/7] no PR to inspect for issue #$ISSUE"
-  echo "[4/7] nothing to merge — housekeeping only"
+  echo "[3/6] no PR to inspect for issue #$ISSUE"
+  echo "[4/6] nothing to merge — housekeeping only"
 fi
 
 if [ -n "$ISSUE" ]; then
-  # Wait for watcher to reap the worktree + tmux window.
-  TMUX_WIN="iss-$ISSUE"
-  WORKTREE_DIR="$(swarm_worktree_dir "$MAIN_WT" "$ISSUE")"
-  echo "[5/7] waiting up to ${GRACE_SECONDS}s for watcher reap of $TMUX_WIN + $(basename "$WORKTREE_DIR")…"
-  elapsed=0
-  while [ $elapsed -lt $GRACE_SECONDS ]; do
-    tmux_alive=0
-    wt_alive=0
-    tmux list-windows 2>/dev/null | grep -qE ": ${TMUX_WIN}[* -]?\b" && tmux_alive=1
-    [ -e "$WORKTREE_DIR/.git" ] && wt_alive=1
-    if [ $tmux_alive -eq 0 ] && [ $wt_alive -eq 0 ]; then
-      echo "       reaped after ${elapsed}s ✓"
-      break
-    fi
-    sleep 3
-    elapsed=$((elapsed+3))
-  done
-
-  # If still alive, manually kill (unless --no-kill).
-  if [ "$NO_KILL" = 0 ]; then
-    if tmux list-windows 2>/dev/null | grep -qE ": ${TMUX_WIN}[* -]?\b"; then
-      echo "[6/7] watcher didn't reap; killing tmux window $TMUX_WIN"
-      tmux kill-window -t "$TMUX_WIN" 2>/dev/null || true
-    fi
-    if [ -e "$WORKTREE_DIR/.git" ]; then
-      echo "[6/7] watcher didn't reap; removing worktree $WORKTREE_DIR"
-
-      # issue #495: archive .swarm/.local-data before this fallback
-      # destroys them too — see archive_worktree_scratch above.
-      archive_worktree_scratch "$MAIN_WT" "$ISSUE" "$WORKTREE_DIR"
-      if [ -n "$ARCHIVE_SWARM" ] || [ -n "$ARCHIVE_LOCALDATA" ]; then
-        ARCHIVE_MSG="$ARCHIVE_SWARM"
-        if [ -n "$ARCHIVE_LOCALDATA" ]; then
-          ARCHIVE_MSG="${ARCHIVE_MSG:+$ARCHIVE_MSG + }$ARCHIVE_LOCALDATA"
-        fi
-        echo "       ARCHIVED: $ARCHIVE_MSG"
-      fi
-      if [ -n "$LOCALDATA_SKIPPED" ]; then
-        echo "       SKIPPED .local-data (over SWARM_REAP_LOCALDATA_MAX_MB cap): $LOCALDATA_SKIPPED"
-        log_event reap.worktree.skipped_localdata "issue=$ISSUE $LOCALDATA_SKIPPED"
-      fi
-      if [ -n "$ARCHIVE_MV_FAILED" ]; then
-        echo "       WARN: failed to archive: $ARCHIVE_MV_FAILED (mv failed — check permissions/disk space)"
-        log_event reap.worktree.archive_failed "issue=$ISSUE which=$ARCHIVE_MV_FAILED"
-      fi
-
-      # issue #446 self-review: logged AFTER a successful removal, not
-      # before — see kill-worktree.sh's matching comment for why the
-      # earlier before-removal ordering (issue #439 round 4) traded a rare
-      # sweep false positive for a real false negative (a failed removal
-      # still getting a blessed event). The same reap.worktree event
-      # kill-worktree.sh logs on removal, so this fallback path isn't
-      # mistaken for an unblessed `git worktree remove` by the watcher's
-      # vanish sweep — but only when the removal actually succeeded.
-      if git worktree remove --force "$WORKTREE_DIR" 2>/dev/null; then
-        log_event reap.worktree "issue=$ISSUE branch=fix/issue-$ISSUE dir=$WORKTREE_DIR caller=swarm-merge.sh archive=$ARCHIVE_EVENT_FIELD"
-      else
-        log_event reap.worktree.error "issue=$ISSUE branch=fix/issue-$ISSUE dir=$WORKTREE_DIR caller=swarm-merge.sh reason=remove_failed archive=$ARCHIVE_EVENT_FIELD"
-      fi
-    fi
+  if [ "$NO_KILL" = 1 ]; then
+    echo "[5/6] --no-kill set; leaving tmux window / worktree alone"
   else
-    echo "[6/7] --no-kill set; leaving tmux window / worktree alone"
+    # issue #465: reap right now instead of waiting up to 60s for the
+    # watcher's own WATCH_PR_POLL_SECS backstop to notice this merge.
+    # kill-worktree.sh is the SAME reaper the watcher uses
+    # (kill-finished-workers.sh --with-worktree calls it per target), so
+    # brief salvage (queued inbox/processing/outbox files), the
+    # .swarm/.local-data archive, and the reap.worktree event logging all
+    # still happen exactly as they would for a watcher-driven reap.
+    echo "[5/6] reaping worktree + tmux window for issue #$ISSUE…"
+    KILL_RC=0
+    "$SCRIPT_DIR/kill-worktree.sh" "$ISSUE" "$MAIN_WT" || KILL_RC=$?
+    case "$KILL_RC" in
+      0) echo "       reaped ✓" ;;
+      75)
+        echo "       $(c_amber "⚠ kill-worktree.sh deferred (in-flight check-claim) — worktree left in place, watcher's own backstop will retry")"
+        ;;
+      76)
+        echo "       $(c_amber "⚠ kill-worktree.sh refused (non-empty inbox, SWARM_REAP_INBOX=refuse) — worktree left in place")"
+        ;;
+      *)
+        echo "       $(c_amber "⚠ kill-worktree.sh exited $KILL_RC — see its output above; worktree/window may still be present")"
+        ;;
+    esac
   fi
 else
-  echo "[5/7] no linked issue for PR #$PR_NUM — skipping tmux/worktree reap wait"
-  echo "[6/7] no linked issue for PR #$PR_NUM — skipping tmux/worktree kill"
+  echo "[5/6] no linked issue for PR #$PR_NUM — skipping tmux/worktree reap"
 fi
 
 # Run the safer local-branch sweep.
-echo "[7/7] running local-branch sweep…"
+echo "[6/6] running local-branch sweep…"
 run_sweep
 
 echo

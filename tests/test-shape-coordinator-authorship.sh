@@ -286,6 +286,12 @@ if git -C "$CLONE" ls-remote --exit-code --heads origin fix/issue-501 >/dev/null
     red "origin/fix/issue-501 still exists — swarm-merge.sh did not delete the remote branch after merge (#489)"
 fi
 green "remote branch deleted explicitly after merge (no --delete-branch)"
+# issue #465: swarm-merge.sh now reaps immediately via kill-worktree.sh,
+# which also deletes the LOCAL branch (not just the remote one) as part of
+# its ordinary cleanup — $CLONE is this fixture's "main worktree", so the
+# local fix/issue-501 branch is gone too by now. Recreate it before
+# re-pushing, for the later tests that reuse PR 501.
+git -C "$CLONE" checkout -q -b fix/issue-501 master
 git -C "$CLONE" push -q origin fix/issue-501
 
 # ============================================================================
