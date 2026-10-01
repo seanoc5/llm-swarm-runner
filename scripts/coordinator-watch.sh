@@ -8772,22 +8772,37 @@ run_inotify() {
 # next scan as soon as it's deleted, and a recreated one is always new
 # again. Top-level (not nested in run_poll, unlike its sibling
 # scan_outcomes) so tests can extract and drive them directly.
+#
+# scan_claims [wt_list] — wt_list is an optional newline-separated list of
+# own-worktree dirs (own_worktree_dirs_for_scan's own output). run_poll's
+# loop already computes this once per tick for scan_outcomes (its own
+# `git worktree list` call, issue #357); passing it through here avoids
+# running that same `git worktree list` a second time every POLL_SECS tick
+# (self-review on this issue's own PR) — callers with no ready-made list
+# (run_inotify's one-shot startup drain, this file's own tests) just omit
+# it and scan_claims resolves it itself, same as before.
 scan_claims() {
+    local wt_list="${1:-}"
     local claims_dirs=() wt
+    if [ -z "$wt_list" ]; then
+        wt_list="$(own_worktree_dirs_for_scan "$PROJECT_DIR")"
+    fi
     while IFS= read -r wt; do
         [ -n "$wt" ] || continue
         [ -d "$wt/.swarm/tasks/claims" ] && claims_dirs+=("$wt/.swarm/tasks/claims")
-    done < <(own_worktree_dirs_for_scan "$PROJECT_DIR")
+    done <<< "$wt_list"
     [ "${#claims_dirs[@]}" -gt 0 ] || return 0
     find "${claims_dirs[@]}" -maxdepth 1 -name '*.claim' -print 2>/dev/null
 }
 
+# dispatch_claims [wt_list] — see scan_claims above for wt_list.
 dispatch_claims() {
+    local wt_list="${1:-}"
     local path
     while IFS= read -r path; do
         [ -z "$path" ] && continue
         dispatch_selfheal_claim "$path"
-    done < <(scan_claims)
+    done < <(scan_claims "$wt_list")
 }
 
 # ---------------------------------------------------------------------------
@@ -8813,13 +8828,21 @@ run_poll() {
     # — see its header above). May expand to nothing if no worker worktrees
     # exist yet — handle that gracefully so the find call gets an empty arg
     # list.
+    # scan_outcomes [wt_list] — wt_list is an optional pre-fetched
+    # own_worktree_dirs_for_scan() listing (see scan_claims' header above
+    # for why: sharing it avoids calling `git worktree list` twice every
+    # tick). Omitted, it resolves the list itself, same as before.
     scan_outcomes() {
+        local wt_list="${1:-}"
         local done_dirs=() outbox_dirs=() wt
+        if [ -z "$wt_list" ]; then
+            wt_list="$(own_worktree_dirs_for_scan "$PROJECT_DIR")"
+        fi
         while IFS= read -r wt; do
             [ -n "$wt" ] || continue
             [ -d "$wt/.swarm/tasks/done" ] && done_dirs+=("$wt/.swarm/tasks/done")
             [ -d "$wt/.swarm/tasks/outbox" ] && outbox_dirs+=("$wt/.swarm/tasks/outbox")
-        done < <(own_worktree_dirs_for_scan "$PROJECT_DIR")
+        done <<< "$wt_list"
         {
             if [ "${#done_dirs[@]}" -gt 0 ]; then
                 find "${done_dirs[@]}" -maxdepth 1 \
@@ -8833,15 +8856,18 @@ run_poll() {
         } | sort -u
     }
 
-    scan_outcomes > "$seen_file"
+    local wt_list
+    wt_list="$(own_worktree_dirs_for_scan "$PROJECT_DIR")"
+    scan_outcomes "$wt_list" > "$seen_file"
     # Drain any marker already on disk before this watcher's first full
     # tick — see scan_claims' header for why this one scan must NOT be
     # skipped the way the done/outbox baseline above intentionally is.
-    dispatch_claims
+    dispatch_claims "$wt_list"
 
     while true; do
         local current diff_new
-        current=$(scan_outcomes)
+        wt_list="$(own_worktree_dirs_for_scan "$PROJECT_DIR")"
+        current=$(scan_outcomes "$wt_list")
 
         # New paths = in current, not in seen. Guard against the shutdown
         # race where the EXIT trap removes seen_file mid-iteration.
@@ -8858,7 +8884,7 @@ run_poll() {
             echo "$current" > "$seen_file"
         fi
 
-        dispatch_claims
+        dispatch_claims "$wt_list"
 
         sleep "$POLL_SECS"
     done
