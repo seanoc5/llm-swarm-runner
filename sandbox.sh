@@ -143,20 +143,6 @@ if command -v git &>/dev/null && git -C "$PROJECT_DIR" rev-parse --git-dir &>/de
         _proj_real="$(realpath "$PROJECT_DIR")"
         _git_real="$(realpath "$_git_common_dir")"
 
-        # `git gc` (including the background `gc --auto` an ordinary commit/
-        # fetch/merge can trigger) expires reflogs across every worktree,
-        # which needs a brief lock on each sibling's HEAD — exactly what the
-        # read-only lockdown below refuses. Left alone, a backgrounded
-        # autoDetach gc that hits this mid-run writes its failure to
-        # `gc.log` in the shared common dir (not per-worktree), which then
-        # makes every subsequent `gc --auto` anywhere in the repo — other
-        # workers, the host-side coordinator — skip with a stale warning
-        # until that file ages out or is removed. Disabling gc.auto inside
-        # this container (only here, via an env override — not touching the
-        # repo's actual on-disk config, which stays normal for the host and
-        # every other container) heads that off entirely rather than
-        # documenting it as a thing to clean up later.
-        GIT_WORKTREE_ENV_OPTS+=(-e "GIT_CONFIG_COUNT=1" -e "GIT_CONFIG_KEY_0=gc.auto" -e "GIT_CONFIG_VALUE_0=0")
         if [[ "$_git_real" != "$_proj_real"* ]]; then
             # Outside PROJECT_DIR (the worktree case) — mount it explicitly.
             # When it's INSIDE PROJECT_DIR instead (this container is pointed
@@ -220,6 +206,24 @@ if command -v git &>/dev/null && git -C "$PROJECT_DIR" rev-parse --git-dir &>/de
         # created after a long-lived container (e.g. one left running for a
         # while) started.
         if [ -d "$_git_real/worktrees" ]; then
+            # `git gc` (including the background `gc --auto` an ordinary
+            # commit/fetch/merge can trigger) expires reflogs across every
+            # worktree, which needs a brief lock on each sibling's HEAD —
+            # exactly what the read-only overlay below refuses. Left alone,
+            # a backgrounded autoDetach gc that hits this mid-run writes its
+            # failure to `gc.log` in the shared common dir (not per-
+            # worktree), which then makes every subsequent `gc --auto`
+            # anywhere in the repo — other workers, the host-side
+            # coordinator — skip with a stale warning until that file ages
+            # out or is removed. Disabling gc.auto inside this container
+            # (only here, via an env override — not touching the repo's
+            # actual on-disk config, which stays normal for the host and
+            # every other container) heads that off entirely. Scoped to
+            # this branch (a `worktrees/` admin tree actually exists) so a
+            # plain, non-worktree project's container is unaffected — there
+            # is nothing to lock down for it, so no need to touch its gc
+            # behavior either.
+            GIT_WORKTREE_ENV_OPTS+=(-e "GIT_CONFIG_COUNT=1" -e "GIT_CONFIG_KEY_0=gc.auto" -e "GIT_CONFIG_VALUE_0=0")
             for _wt_admin in "$_git_real"/worktrees/*/; do
                 [ -d "$_wt_admin" ] || continue
                 _wt_admin="${_wt_admin%/}"

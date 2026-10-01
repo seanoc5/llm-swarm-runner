@@ -96,6 +96,17 @@ git -C "$MAIN" worktree add -q "$WTA" wta
 git -C "$MAIN" worktree add -q "$WTB" wtb
 GITCOMMON="$MAIN/.git"
 
+# A genuinely standalone repo with NO linked worktrees at all — distinct
+# from $MAIN, which (being the main checkout of wt-a/wt-b) has its own
+# worktrees/ admin tree and so is itself a lockdown target (see test 6).
+PLAIN="$FIXTURE/plain"
+git init -q "$PLAIN"
+git -C "$PLAIN" config user.email test@example.com
+git -C "$PLAIN" config user.name Test
+echo hi > "$PLAIN/f.txt"
+git -C "$PLAIN" add f.txt
+git -C "$PLAIN" commit -qm init
+
 run_in_wta() {
     # Launch the real sandbox.sh against WTA with a one-shot command. Pass
     # the command as a SINGLE argument, not as separate "bash" "-c" words —
@@ -193,9 +204,18 @@ fi
 # ── 5. Plain non-worktree project still launches (no regression) ───────────
 echo ""
 echo "[ 5. Regression: a plain (non-worktree) project is unaffected ]"
-plain_out=$("$SANDBOX_SH" "$MAIN" "git status --porcelain=v1 >/dev/null && echo PLAIN_OK" 2>&1 || true)
+plain_out=$("$SANDBOX_SH" "$PLAIN" "GIT_CONFIG_GLOBAL=/dev/null git status --porcelain=v1 >/dev/null && echo PLAIN_OK && git config --get gc.auto; echo GC_AUTO_RC=\$?" 2>&1 || true)
 if echo "$plain_out" | grep -q "PLAIN_OK"; then
     pass "a plain, non-worktree project directory still launches and works"
+    # gc.auto is only ever forced off for a repo with a worktrees/ admin
+    # tree (see sandbox.sh) — a standalone repo has none, so this must
+    # read back the default (unset -> `git config --get` exits 1, no
+    # value printed), never the forced "0" a worktree-repo container gets.
+    if echo "$plain_out" | grep -q "GC_AUTO_RC=1" && ! echo "$plain_out" | grep -qx "0"; then
+        pass "gc.auto is left at its default for a standalone (non-worktree) project"
+    else
+        fail "gc.auto is left at its default for a standalone (non-worktree) project" "$plain_out"
+    fi
 elif is_nested_gitconfig_quirk "$plain_out"; then
     skip "a plain, non-worktree project directory still launches and works" \
         "nested-DooD \$HOME/.gitconfig quirk, unrelated to #504 (see is_nested_gitconfig_quirk)"
@@ -267,6 +287,36 @@ elif is_nested_gitconfig_quirk "$gc_auto_out"; then
         "nested-DooD \$HOME/.gitconfig quirk, unrelated to #504 (see is_nested_gitconfig_quirk)"
 else
     fail "gc.auto reads 0 inside the container (background auto-gc can't fire)" "$gc_auto_out"
+fi
+
+# ── 9. Host-side reap still works while a sibling container holds the
+#       lockdown mount ──────────────────────────────────────────────────────
+# A stated #504 constraint: the fix must not break the coordinator's
+# host-side reap path. The read-only overlay only exists inside a
+# container's own mount namespace — it's not a host-filesystem permission
+# change — so a legitimate `git worktree remove` run on the HOST must still
+# work even while some other (now-stale) container still has that sibling's
+# admin dir bind-mounted read-only. Verified with a real long-lived
+# container holding the mount open, not just inferred.
+echo ""
+echo "[ 9. Regression: host-side \`git worktree remove\` still works despite a sibling's ro mount ]"
+HOLD_NAME="wt504-lockdown-hold-$$"
+docker run -d --rm --name "$HOLD_NAME" \
+    --user "$(id -u):$(id -g)" \
+    -v "$GITCOMMON/worktrees/wt-b:$GITCOMMON/worktrees/wt-b:ro" \
+    "$IMAGE" sleep 60 >/dev/null 2>&1 || true
+if docker ps --format '{{.Names}}' | grep -qx "$HOLD_NAME"; then
+    host_rm_out=$(git -C "$MAIN" worktree remove --force wt-b 2>&1) && host_rm_rc=0 || host_rm_rc=$?
+    if [ "$host_rm_rc" -eq 0 ] && [ ! -d "$GITCOMMON/worktrees/wt-b" ]; then
+        pass "host-side \`git worktree remove\` succeeds even while a sibling container holds the ro mount"
+    else
+        fail "host-side \`git worktree remove\` succeeds even while a sibling container holds the ro mount" \
+            "rc=$host_rm_rc output: $host_rm_out"
+    fi
+    docker rm -f "$HOLD_NAME" >/dev/null 2>&1 || true
+else
+    fail "host-side \`git worktree remove\` succeeds even while a sibling container holds the ro mount" \
+        "setup failed: couldn't start the long-lived holder container ($HOLD_NAME)"
 fi
 
 echo ""
