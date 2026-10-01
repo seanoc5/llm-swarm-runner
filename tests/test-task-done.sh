@@ -65,13 +65,43 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# issue #508: wait_for's polling budget scales with host contention. Sibling
+# swarm worker containers on the same host can starve this suite's 0.5s
+# polling past the old fixed 10s window (20 iterations) with nothing wrong
+# in task-done.sh or worker-listener.sh themselves — a flaky false failure,
+# not a real regression. Recomputed on every call (cheap: one read, one
+# nproc, one awk) so it reacts to load that develops mid-suite, not just
+# load present at startup. WAIT_FOR_SCALE overrides auto-detection (e.g. to
+# force the contended path for manual testing); otherwise it's the 1-minute
+# load average divided by CPU count, floored at 1x (identical to the old
+# fixed budget on an idle host) and capped at 8x so a genuinely hung
+# condition still fails in bounded time rather than hanging the suite.
+wait_for_scale() {
+    if [ -n "${WAIT_FOR_SCALE:-}" ]; then
+        printf '%s' "$WAIT_FOR_SCALE"
+        return
+    fi
+    local load cpus
+    load=0
+    [ -r /proc/loadavg ] && load=$(cut -d' ' -f1 /proc/loadavg)
+    cpus=$(nproc 2>/dev/null) || cpus=1
+    awk -v l="$load" -v c="$cpus" 'BEGIN {
+        s = (c > 0) ? l / c : 1
+        if (s < 1) s = 1
+        if (s > 8) s = 8
+        printf "%d", (s == int(s)) ? s : int(s) + 1
+    }'
+}
+
 wait_for() {
-    local desc="$1" cmd="$2" max=20
+    local desc="$1" cmd="$2" base_max=20 scale max
+    scale=$(wait_for_scale)
+    max=$(( base_max * scale ))
     for ((i=0; i<max; i++)); do
         if eval "$cmd"; then return 0; fi
         sleep 0.5
     done
-    red "timeout waiting for: $desc"
+    red "timeout waiting for: $desc (waited $((max / 2))s at ${scale}x scale)"
 }
 
 # ── Fixture: a bare git repo + one worktree, so `git rev-parse
