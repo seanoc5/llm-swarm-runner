@@ -124,6 +124,12 @@ case "$1" in
         awk -v n="$name" '$1!=n' "$STATE" > "$STATE.tmp" 2>/dev/null
         mv "$STATE.tmp" "$STATE"
         ;;
+    image)
+        # `docker image inspect <name>` — DOCKER_IMAGE_MISSING=1 simulates a
+        # cold host that hasn't built the worker image yet.
+        [ "${DOCKER_IMAGE_MISSING:-0}" = "1" ] && exit 1
+        exit 0
+        ;;
     *) exit 0 ;;
 esac
 EOF
@@ -256,6 +262,22 @@ echo "$out" | grep -qi 'container_running=0' || red "expected the error to repor
 ! command tmux -L "$SOCKET" list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -qx iss-303 \
     || red "a failed spawn must kill its window even when the pane itself was still alive (container just never started)"
 green "a pane that's alive but whose container never started still exits 4, kills the window, and removes its unclaimed brief"
+
+# ============================================================================
+heading "Test 9: post_spawn_health_check — worker image not built yet -> skips the check entirely (self-review, 5th pass)"
+# ============================================================================
+command tmux -L "$SOCKET" new-window -d -t "$SESSION" -n iss-304 "sleep 100"
+: > "$DOCKER_STATE_FILE"
+: > "$EVENTS_LOG"
+echo "queued" > "$TEST_DIR/brief-304.md"
+out="$(DOCKER_IMAGE_MISSING=1 PROVISION_SPAWN_CHECK_SECS=0.1 post_spawn_health_check 304 iss-304 swarm-provstale-iss-304 "$TEST_DIR/brief-304.md" 2>&1)"
+[ -z "$(cat "$EVENTS_LOG")" ] || red "expected no log_event call when the check skips itself for a missing image, got: $(cat "$EVENTS_LOG")"
+echo "$out" | grep -qi 'not built yet' || red "expected a skip notice mentioning the missing image: $out"
+[ -f "$TEST_DIR/brief-304.md" ] || red "skipping the check for a missing image must never remove the brief"
+command tmux -L "$SOCKET" list-windows -t "$SESSION" -F '#W' | grep -qx iss-304 \
+    || red "skipping the check for a missing image must never kill the window — the container may still be building"
+command tmux -L "$SOCKET" kill-window -t "$SESSION:iss-304" 2>/dev/null || true
+green "a cold host without the worker image yet skips the health check rather than killing an in-progress build"
 
 # ============================================================================
 heading "All provision-worker.sh stale-container / post-spawn health tests passed"

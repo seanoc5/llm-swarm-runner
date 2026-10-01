@@ -105,12 +105,14 @@ STARTUP FAILURE (exit 4, issue #493)
     PROVISION_SPAWN_CHECK_SECS=0 disables this check (for test harnesses
     that stub tmux/docker without simulating a live pane or container).
     Caveat: a cold host without the llm-swarm-runner image yet runs
-    `docker build` before `docker run` (sandbox.sh) — the default 5s isn't
-    enough to cover a build, so a first-ever (or post-Dockerfile-change)
-    spawn on such a host can false-positive exit 4 while the worker is
-    actually still coming up. Raise PROVISION_SPAWN_CHECK_SECS when
-    pre-warming a new host, or pre-build the image once with
-    `docker build -t llm-swarm-runner:latest .` before provisioning.
+    `docker build` before `docker run` (sandbox.sh), which routinely takes
+    far longer than the default 5s. The check skips itself entirely in
+    that case (logging a notice) rather than risk killing a build that's
+    actually still in progress — so a first-ever (or post-Dockerfile-
+    change) spawn on such a host gets no post-spawn verification at all
+    until the image exists. Pre-build it once with
+    `docker build -t llm-swarm-runner:latest .` before provisioning to get
+    the check back on a cold host.
 
 CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env
          > <sandbox>/.env.example)
@@ -411,10 +413,22 @@ check_stale_container() {
 # in-progress work to lose; the pane's last lines printed just above are
 # the forensic record. Re-provisioning the issue spawns fresh from
 # scratch.
+#
+# Skips entirely (self-review, 5th pass) when the worker image isn't built
+# yet: sandbox.sh builds it before its `docker run`, which routinely takes
+# far longer than check_secs, and since the window-kill above, a false
+# alarm here would end that build partway instead of just logging a false
+# positive. A hung first-ever build then goes undetected by this check —
+# same as before this issue existed — rather than mistaken for the
+# fand-etl collision shape this check exists to catch.
 post_spawn_health_check() {
     local issue="$1" window="$2" container="$3" brief_path="$4"
     local check_secs="${PROVISION_SPAWN_CHECK_SECS:-5}"
     [ "$check_secs" = "0" ] && return 0
+    if ! docker image inspect llm-swarm-runner:latest >/dev/null 2>&1; then
+        echo "[*] worker image llm-swarm-runner:latest not built yet — skipping post-spawn health check for issue #$issue (sandbox.sh is likely still building it)" >&2
+        return 0
+    fi
     sleep "$check_secs"
 
     local pane_dead
