@@ -89,7 +89,7 @@ for fn in coord_inbox_write mtime_epoch; do
     [ "$(type -t "$fn")" = "function" ] || red "could not extract '$fn' from $WATCH — has it been renamed?"
 done
 
-for fn in is_own_worktree_dir own_worktree_dirs_for_scan has_live_window \
+for fn in is_own_worktree_dir own_worktree_dirs_for_scan has_live_window_draining_brief \
           stranded_brief_queue_lines stranded_brief_body stranded_brief_sweep_pass; do
     body="$(extract_fn "$fn" "$WATCH")"
     [ -n "$body" ] || red "could not extract '$fn' from $WATCH — has it been renamed?"
@@ -288,6 +288,90 @@ green "a file that vanishes mid-scan is skipped without losing the real strand t
 
 # Restore the real mtime_epoch (re-extracted) for any test added after this one.
 eval "$(extract_fn mtime_epoch "$WATCH")"
+
+# ============================================================================
+heading "Test 13: a listed-but-dead-paned window must NOT count as live (issue #493)"
+# ============================================================================
+# remain-on-exit=failed (llm-start.sh) keeps a crashed window's pane around
+# after a provisioning collision (e.g. sandbox.sh's `docker run` hitting a
+# stale same-name container, #493's "What happened" incident) — the window
+# NAME stays listed, pane_dead=1, nothing left to drain the queue. Before
+# #493's fix, this sweep's "live window" check (has_live_window) only
+# looked at window-name existence, so this corpse read as "covers the
+# queue" and the sweep never fired; the fix added a second, pane-liveness-
+# aware check (has_live_window_draining_brief) used only here, not by
+# pr_poll_pass's reap decision — a dead-paned window is already reaped
+# correctly there regardless of pane state (kill-finished-workers.sh kills
+# by window name), so folding pane liveness into the shared helper would
+# have slowed that path down for no reason. The tmux stub here
+# distinguishes list-windows (names the window) from list-panes (reports
+# its pane_dead flag) — the earlier tests' single-answer `tmux()` stubs
+# can't express this distinction, which is exactly the gap the old check
+# had.
+# Test 12 leaves its own fixture file behind in wt-issue-102's inbox/ (it
+# exercises stranded_brief_queue_lines directly, never the full sweep, so
+# nothing ever drained it) — clear it so it can't also get flagged here and
+# muddy this test's count.
+rm -f "$TEST_DIR/wt-issue-102/.swarm/tasks/inbox"/*.md 2>/dev/null || true
+
+git -C "$PROJECT_DIR" worktree add -q -b fix/issue-103 "$TEST_DIR/wt-issue-103" master
+mkdir -p "$TEST_DIR/wt-issue-103/.swarm/tasks/inbox"
+echo "queued" > "$TEST_DIR/wt-issue-103/.swarm/tasks/inbox/20260927-100000-103.md"
+backdate "$TEST_DIR/wt-issue-103/.swarm/tasks/inbox/20260927-100000-103.md"
+declare -A STRANDED_BRIEF_LOGGED=()
+rm -rf "$COORD_INBOX_DIR"
+: > "$EVENTS_LOG"
+
+tmux() {
+    case "$1" in
+        list-windows) echo "iss-103" ;;
+        list-panes)   echo "1" ;;   # pane_dead=1
+        *)            echo "" ;;
+    esac
+}
+stranded_brief_sweep_pass
+[ "$(inbox_count)" -eq 1 ] || red "a window that's listed but whose pane is dead must still be flagged as stranded, got $(inbox_count)"
+grep -q 'watch.stranded_brief_sweep.*issue=103.*reason=detected' "$EVENTS_LOG" \
+    || red "expected watch.stranded_brief_sweep for issue #103, events.log: $(cat "$EVENTS_LOG")"
+green "a dead-paned-but-still-listed window (remain-on-exit corpse) does not shield a stranded brief"
+
+# ============================================================================
+heading "Test 13b: the same window with a genuinely ALIVE pane does cover the queue (control)"
+# ============================================================================
+tmux() {
+    case "$1" in
+        list-windows) echo "iss-103" ;;
+        list-panes)   echo "0" ;;   # pane_dead=0 (alive)
+        *)            echo "" ;;
+    esac
+}
+rm -rf "$COORD_INBOX_DIR"
+declare -A STRANDED_BRIEF_LOGGED=()
+stranded_brief_sweep_pass
+[ "$(inbox_count)" -eq 0 ] || red "a genuinely alive window must still suppress the strand, got $(inbox_count)"
+green "a genuinely alive pane still covers the queue — the fix only changes the dead-pane case, not the live one"
+
+# ============================================================================
+heading "Test 13c: a window whose pane vanished between list-windows and list-panes must NOT count as live (self-review, 13th pass)"
+# ============================================================================
+# A window that closes in the gap between the two tmux calls makes
+# list-panes return nothing at all, not pane_dead=0 — has_live_window_draining_brief
+# treated that empty read as "not 1, so alive", the opposite of the
+# empty-means-dead rule this same issue already applies in
+# provision-worker.sh (6th pass). An empty read here must flag the brief as
+# stranded, not shield it.
+tmux() {
+    case "$1" in
+        list-windows) echo "iss-103" ;;
+        list-panes)   echo "" ;;   # pane vanished between the two calls
+        *)            echo "" ;;
+    esac
+}
+rm -rf "$COORD_INBOX_DIR"
+declare -A STRANDED_BRIEF_LOGGED=()
+stranded_brief_sweep_pass
+[ "$(inbox_count)" -eq 1 ] || red "an empty list-panes read (vanished pane) must be treated as dead, not alive, got $(inbox_count)"
+green "an empty list-panes read is treated as dead, matching the empty-means-dead rule used elsewhere in this issue's fix"
 
 # ============================================================================
 heading "All stranded-brief sweep tests passed"

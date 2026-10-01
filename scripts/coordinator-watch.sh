@@ -3930,8 +3930,40 @@ followup_brief_postdates_pr() {
 # orphan that needs reap-orphan-worktrees.sh instead (see orphan_sweep_pass).
 # Returns 1 (no window) if the session itself doesn't exist — that's still
 # correctly "kill-finished-workers.sh can't reach this."
+#
+# Deliberately a bare window-name check, not pane liveness: kill-finished-
+# workers.sh's own `tmux list-windows` reaps a dead-paned window just fine
+# (it kills by window name, pane state irrelevant), so a dead pane here
+# still belongs on pr_poll_pass's fast reap_hit path, not routed into the
+# slower hourly orphan_sweep_pass. See has_live_window_draining_brief below
+# for the issue #493 case that DOES need pane liveness.
 has_live_window() {
     tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx "iss-$1"
+}
+
+# has_live_window_draining_brief <issue>
+#
+# issue #493: for stranded_brief_sweep_pass only — is there a tmux window
+# for this issue AND is its pane actually alive enough to drain a queued
+# brief? llm-start.sh sets remain-on-exit=failed, so a crashed spawn (e.g.
+# sandbox.sh's `docker run` hitting a same-name container collision) leaves
+# the window LISTED — pane_dead=1, nothing left to drain the queue — which
+# has_live_window's bare window-name check can't tell apart from a
+# genuinely running worker. That gap is exactly how a stranded brief went
+# unflagged in the fand-etl incident this issue describes: the sweep's
+# "live window" check treated the corpse as covering the queue and never
+# fired. NOT used by pr_poll_pass's reap_hit decision (see has_live_window
+# above) — that path is already reaped correctly regardless of pane state.
+has_live_window_draining_brief() {
+    local win="iss-$1"
+    tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx "$win" || return 1
+    local pane_dead
+    pane_dead="$(tmux list-panes -t "$SESSION_NAME:$win" -F '#{pane_dead}' 2>/dev/null | head -1)"
+    # self-review (13th pass): a window that vanished between the
+    # list-windows check above and this list-panes call returns empty here,
+    # not "0" — treat that the same as dead (same empty-means-dead rule as
+    # provision-worker.sh's post-spawn check, 6th pass), not as alive.
+    [ -n "$pane_dead" ] && [ "$pane_dead" != "1" ]
 }
 
 # pr_poll_pass
@@ -4674,7 +4706,7 @@ stranded_brief_sweep_pass() {
         [ -n "$issue" ] || continue
         current_issues["$issue"]=1
 
-        if has_live_window "$issue"; then
+        if has_live_window_draining_brief "$issue"; then
             unset "STRANDED_BRIEF_LOGGED[$issue]" 2>/dev/null || true
             continue
         fi

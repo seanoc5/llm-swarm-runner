@@ -79,6 +79,11 @@ jobs:
         #     dead pane keeps reporting pane_start_command), so a stubbed
         #     tmux would only encode the belief that was wrong. Needs a real
         #     (private, -L) tmux server.
+        #   - test-shape-provision-stale-container.sh — same story again
+        #     (issue #493): exercises provision-worker.sh's pane_dead /
+        #     remain-on-exit handling against a real, throwaway (-L) tmux
+        #     server for the same reason as test-shape-watcher-respawn.sh
+        #     above; `docker` IS PATH-stubbed (no real container/daemon use).
         #   - test-e2e-swarm.sh            — spins up a real tmux session
         #     and drives an actual coordinator/worker LLM round-trip; "may
         #     consume agent quota" per its own --help text.

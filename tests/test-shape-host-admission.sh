@@ -69,7 +69,14 @@ run_prov() {  # $1 issue, rest = env assignments; prints exit code
     set -e
     echo "$rc"
 }
-off="HOST_MAX_LOAD1=0 HOST_MIN_MEM_AVAIL_MB=0 HOST_SPAWN_STAGGER_SECS=0"
+# issue #493: this stub's docker never reports the just-spawned issue's own
+# container as running (docker-containers.txt here tracks only the
+# HOST_MAX_WORKERS cap scenario, under different container names) — same
+# gap as test-shape-orchestration.sh's stub. PROVISION_SPAWN_CHECK_SECS=0
+# disables provision-worker.sh's unrelated post-spawn health check so it
+# doesn't misread every admitted spawn here as a failed one; spawn health
+# is covered for real by test-shape-provision-stale-container.sh instead.
+off="HOST_MAX_LOAD1=0 HOST_MIN_MEM_AVAIL_MB=0 HOST_SPAWN_STAGGER_SECS=0 PROVISION_SPAWN_CHECK_SECS=0"
 
 heading "1: admitted spawn leaves a pending marker; marker counts toward the cap"
 : > "$TEST_DIR/docker-containers.txt"
@@ -103,7 +110,7 @@ green "load1 99 > 48 refused (exit 3, reason=host_load)"
 rc=$(run_prov 13 HOST_MEMINFO_FILE="$TEST_DIR/meminfo" HOST_MAX_LOAD1=0 HOST_MIN_MEM_AVAIL_MB=16384 HOST_SPAWN_STAGGER_SECS=0)
 [ "$rc" -eq 3 ] && grep -q 'reason=host_mem avail_mb=4096 min_mb=16384' "$PROJECT_DIR/.swarm/events.log" || red "mem refusal: rc=$rc $(cat "$TEST_DIR/prov-13.log")"
 green "MemAvailable 4096 MB < 16384 refused (exit 3, reason=host_mem)"
-rc=$(run_prov 13 HOST_MAX_LOAD1=0 HOST_MIN_MEM_AVAIL_MB=0 HOST_SPAWN_STAGGER_SECS=600)
+rc=$(run_prov 13 HOST_MAX_LOAD1=0 HOST_MIN_MEM_AVAIL_MB=0 HOST_SPAWN_STAGGER_SECS=600 PROVISION_SPAWN_CHECK_SECS=0)
 [ "$rc" -eq 0 ] || red "first spawn with stagger should be admitted: $(cat "$TEST_DIR/prov-13.log")"
 rc=$(run_prov 14 HOST_MAX_LOAD1=0 HOST_MIN_MEM_AVAIL_MB=0 HOST_SPAWN_STAGGER_SECS=600)
 [ "$rc" -eq 3 ] && grep -q 'reason=spawn_stagger' "$PROJECT_DIR/.swarm/events.log" || red "stagger refusal: rc=$rc $(cat "$TEST_DIR/prov-14.log")"
