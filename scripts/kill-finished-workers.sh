@@ -368,15 +368,22 @@ PR_CREATED_AT=""
 PR_NUMBER=""
 PR_LOOKUP_FAILED=0
 fetch_pr_state() {
-    local branch="$1" out rc
+    local branch="$1" out err errfile rc
     PR_STATE=""
     PR_CREATED_AT=""
     PR_NUMBER=""
     PR_LOOKUP_FAILED=0
-    out=$(gh pr view "$branch" --json state,createdAt,number -q '"\(.state)\t\(.createdAt)\t\(.number)"' 2>&1)
+    # stderr goes to its own temp file, never merged into $out: a successful
+    # `gh pr view` that happens to print a warning on stderr (deprecation
+    # notice, auth refresh nudge) must not corrupt the tab-separated PR_STATE
+    # line on the success path (self-review finding).
+    errfile=$(mktemp)
+    out=$(gh pr view "$branch" --json state,createdAt,number -q '"\(.state)\t\(.createdAt)\t\(.number)"' 2>"$errfile")
     rc=$?
+    err=$(cat "$errfile")
+    rm -f "$errfile"
     if [ "$rc" -ne 0 ] || [ -z "$out" ]; then
-        case "$out" in
+        case "$err" in
             *"no pull requests found"*) : ;; # confirmed: branch has no PR
             *) PR_LOOKUP_FAILED=1 ;;          # gh itself failed — state unknown
         esac
