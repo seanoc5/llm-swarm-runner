@@ -213,6 +213,10 @@ ls /path/to/main/.git/worktrees/
 
 If the path inside the `gitdir:` line doesn't exist on the host (e.g., the main repo moved), recreate the worktree.
 
+### `git worktree prune`/`remove` reports siblings as prunable, or can't delete them
+
+Expected, not a bug: since [#504](https://github.com/seanoc5/llm-swarm-runner/issues/504), `sandbox.sh` re-mounts every *other* worktree's admin dir (`<main>/.git/worktrees/<other>/`) read-only on top of the common dir's rw mount, because this container can only see its OWN worktree's working directory — every sibling's looks "gone" to git, which otherwise made `prune`/`remove` free to delete their live metadata. `git worktree list --porcelain` still reports siblings as `prunable` (git still can't see them) — that's unchanged and harmless to ignore from inside a worker. An attempt to actually prune/remove one now fails with a read-only-filesystem error instead of succeeding, which is the fix working as intended; run `git worktree prune`/`remove` from the host or the main checkout instead. The lockdown is applied at container-launch time — a worktree created after a sibling's container started isn't covered by that container until it's relaunched.
+
 ---
 
 ## Coordinator & Workers

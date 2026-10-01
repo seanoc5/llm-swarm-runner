@@ -32,6 +32,8 @@ This document covers advanced workflows, custom mounts, and manual Git worktree 
 
 `sandbox.sh` automatically detects git worktrees. When the project directory is a worktree (its `.git` is a file pointing to the main repo), the script mounts the main repo's `.git/` directory into the container so all git operations work normally.
 
+That shared `.git/` dir holds every worktree's admin metadata, not just this one's, so `sandbox.sh` also re-mounts every *other* worktree's admin subdir (`.git/worktrees/<other>/`) read-only on top of the rw mount — this container can't see sibling worktrees' working directories, so without the lockdown `git worktree prune`/`remove` run from inside it would treat them as safe to delete ([#504](https://github.com/seanoc5/llm-swarm-runner/issues/504)). See [troubleshooting.md](./troubleshooting.md#git-worktree-pruneremove-reports-siblings-as-prunable-or-cant-delete-them) if you hit it. The lockdown is computed at container-launch time, so a worker provisioned before this change needs relaunching to pick it up — it isn't applied retroactively to a running container.
+
 ### Manual Multi-worktree tmux setup
 
 While `llm-start.sh` handles orchestration autonomously, you can manually use `sandbox-worktrees.sh` to list worktrees and optionally create tmux windows and/or launch sandboxes:

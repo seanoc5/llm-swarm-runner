@@ -52,12 +52,16 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Run CI-safe suites
-        # Everything under tests/test-*.sh EXCEPT the five below is
+        # Everything under tests/test-*.sh EXCEPT the six below is
         # deterministic and PATH-stubs gh/tmux/docker/claude — no live
         # daemon, network, GitHub auth, or LLM tokens required. Excluded
         # (need real infra this runner doesn't have / shouldn't use):
         #   - test-sandbox.sh              — needs the built
         #     llm-swarm-runner:latest Docker image (`docker run` against it).
+        #   - test-sandbox-worktree-lockdown.sh — same requirement (issue
+        #     #504): it exercises real kernel bind-mount enforcement (a
+        #     nested ro mount shadowing part of an rw one), which no
+        #     PATH-stubbed docker can substitute for.
         #   - test-coordinator-auto-compact.sh — exercises tmux-only
         #     functions (probe_ctx_used, maybe_auto_compact) against a real,
         #     throwaway tmux *session*, not a PATH-stubbable tmux binary.
@@ -90,6 +94,7 @@ jobs:
           set -euo pipefail
           EXCLUDE=(
             test-sandbox.sh
+            test-sandbox-worktree-lockdown.sh
             test-coordinator-auto-compact.sh
             test-llm-start-reprompt.sh
             test-shape-watcher-respawn.sh
