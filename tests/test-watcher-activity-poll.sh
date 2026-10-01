@@ -1006,12 +1006,20 @@ declare -A ACTIVITY_ANNOUNCED_PR=()
 declare -A ACTIVITY_ANNOUNCED_ISSUE=()
 LAST_ACTIVITY_POLL_TS="1970-01-01T00:00:00Z"
 ACTIVITY_POLL_OVERLAP_SECS=30
-DEBOUNCE_SECS=2
+# A wider window than this test strictly needs (DEBOUNCE_SECS=2 plus a 1s
+# offset left only a ~1s cushion between capturing LAST_ACTIVITY_WAKE below
+# and activity_poll_pass's own `date +%s` read inside wake_debounced —
+# comfortable on an idle machine, but a loaded CI runner can burn that
+# whole second just scheduling the shell, flipping "still debounced" to
+# "not debounced" and failing this test's very first assertion. 5s/1s
+# leaves a ~4s cushion instead for the same reason, at the cost of 3 extra
+# seconds in the later `sleep` that lets the window clear.
+DEBOUNCE_SECS=5
 printf '4000\tDebounce probe\tfix/issue-4000\n' > "$PR_FIXTURE"
 : > "$ISSUE_FIXTURE"
 
-# Simulate "another wake fired 1s ago" — well inside the 2s debounce window
-# — so this call's on_activity is debounced (returns 1).
+# Simulate "another wake fired 1s ago" — well inside the debounce window —
+# so this call's on_activity is debounced (returns 1).
 LAST_ACTIVITY_WAKE=$(( $(date +%s) - 1 ))
 CURSOR_BEFORE="$LAST_ACTIVITY_POLL_TS"
 activity_poll_pass
@@ -1034,7 +1042,7 @@ green "the cursor did NOT advance past the debounced, still-unannounced PR"
 # Let the debounce window clear, then retry with the SAME fixture — since
 # it was never marked as announced above AND the cursor never moved past
 # it, this call must still detect and record it.
-sleep 3
+sleep "$((DEBOUNCE_SECS + 1))"
 activity_poll_pass
 FILES="$(find "$COORD_INBOX_DIR" -maxdepth 1 -name '*.md' -type f 2>/dev/null)"
 [ -n "$FILES" ] \
