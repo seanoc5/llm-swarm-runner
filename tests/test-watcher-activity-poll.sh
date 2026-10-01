@@ -853,6 +853,74 @@ if [ "${SKIP_5H:-0}" != "1" ]; then
 fi
 
 # ============================================================================
+heading "Test 5i (issue #506): worker-listener.sh's self-heal claim marker is forwarded into events.log as worker.listener.selfheal, and excluded from human_typed_since like worker.start"
+# ============================================================================
+# worker-listener.sh runs fully inside its own worktree's sandboxed
+# container (sandbox.sh "$WT" listener, see #514) — it never mounts
+# $PROJECT_DIR, so it cannot call log_event itself. Its ordinary self-heal
+# claim of a queued v2 brief (an idle listener, or one draining several
+# briefs back-to-back) drops a marker in its own worktree instead
+# (worker-listener.sh's record_selfheal_claim()); dispatch_selfheal_claim/
+# on_selfheal_claim forward it. This exercises the REAL forwarding path,
+# not a hand-built log_event line, to prove the production mechanism — not
+# just the category string — produces a record watcher_paste_epochs() can
+# pick up.
+command -v jq >/dev/null 2>&1 || { yellow "jq not found — skipping Test 5i (human_typed_since's jq path is inert without it)"; SKIP_5I=1; }
+if [ "${SKIP_5I:-0}" != "1" ]; then
+    for fn in is_own_worktree_dir is_our_worktree dispatch_selfheal_claim on_selfheal_claim; do
+        body="$(extract_fn "$fn")"
+        [ -n "$body" ] || red "could not extract function '$fn' from $WATCH — has it been renamed?"
+        eval "$body"
+    done
+
+    SELFHEAL_WT="$LOCK_TEST_DIR/wt-issue-506"
+    mkdir -p "$SELFHEAL_WT/.swarm/tasks/claims"
+    CLAIM_MARKER="$SELFHEAL_WT/.swarm/tasks/claims/t506.claim"
+    printf '2026-10-01T00:00:00Z\n' > "$CLAIM_MARKER"
+
+    : > "$EVENTS_LOG"
+    dispatch_selfheal_claim "$CLAIM_MARKER"
+
+    [ -f "$CLAIM_MARKER" ] && red "on_selfheal_claim must delete its marker once forwarded — it's a one-shot handoff buffer, not a second copy of the event record"
+    grep -qE 'worker\.listener\.selfheal[[:space:]]' "$EVENTS_LOG" \
+        || red "dispatch_selfheal_claim did not forward a worker.listener.selfheal line into events.log:
+$(cat "$EVENTS_LOG")"
+    grep -q 'issue=506' "$EVENTS_LOG" || red "forwarded event is missing issue=506: $(cat "$EVENTS_LOG")"
+    grep -q 'task_id=t506' "$EVENTS_LOG" || red "forwarded event is missing task_id=t506: $(cat "$EVENTS_LOG")"
+    green "worker-listener.sh's self-heal claim marker is forwarded into events.log as worker.listener.selfheal (issue, task_id), and the marker is deleted once forwarded"
+
+    SELFHEAL_EPOCH=$(date +%s)
+    CUTOFF=$((SELFHEAL_EPOCH - 5))
+    FIXTURE_TDIR5I="$LOCK_TEST_DIR/worker-transcript-5i"
+    mkdir -p "$FIXTURE_TDIR5I"
+    BRIEF_EPOCH=$((SELFHEAL_EPOCH + 2))
+    BRIEF_TS="$(date -u -d "@$BRIEF_EPOCH" +%Y-%m-%dT%H:%M:%S.000Z)"
+    jq -cn --arg ts "$BRIEF_TS" --arg text "## Task
+
+$(head -c 4000 < /dev/zero | tr '\0' 'x')" \
+        '{type:"user", timestamp:$ts, promptSource:"typed", origin:{kind:"human"}, message:{role:"user", content:$text}}' \
+        > "$FIXTURE_TDIR5I/session.jsonl"
+
+    PASTES="$(watcher_paste_epochs)"
+    if human_typed_since "$FIXTURE_TDIR5I" "$CUTOFF" "$PASTES" "$WORKER_HUMAN_PASTE_GRACE_SECS"; then
+        red "a self-heal-delivered brief must not read as a human turn — worker.listener.selfheal is missing from watcher_paste_epochs' pattern"
+    fi
+    green "a self-heal-delivered brief lands inside the paste-grace window around its own worker.listener.selfheal event and is correctly excluded, not misread as human"
+
+    # Contrast: a genuine operator reply in that SAME worker pane, well
+    # outside the paste-grace window, must still count as human — same
+    # regression guard Test 5e applies to worker.start.
+    REPLY_EPOCH=$((SELFHEAL_EPOCH + WORKER_HUMAN_PASTE_GRACE_SECS + 30))
+    REPLY_TS="$(date -u -d "@$REPLY_EPOCH" +%Y-%m-%dT%H:%M:%S.000Z)"
+    jq -cn --arg ts "$REPLY_TS" --arg text "actually let's take a different approach here" \
+        '{type:"user", timestamp:$ts, promptSource:"typed", origin:{kind:"human"}, message:{role:"user", content:$text}}' \
+        >> "$FIXTURE_TDIR5I/session.jsonl"
+    human_typed_since "$FIXTURE_TDIR5I" "$CUTOFF" "$PASTES" "$WORKER_HUMAN_PASTE_GRACE_SECS" \
+        || red "a genuine operator reply well outside the paste-grace window must still count as human"
+    green "a genuine operator reply in the same worker pane still counts as human once outside the paste-grace window"
+fi
+
+# ============================================================================
 heading "Test 6: a debounced activity finding is retried on a later tick, not lost (issue #392 self-review finding, now via the coordinator inbox)"
 # ============================================================================
 # activity_poll_pass only marks ACTIVITY_ANNOUNCED_PR/_ISSUE (and

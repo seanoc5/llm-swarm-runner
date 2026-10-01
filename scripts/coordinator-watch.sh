@@ -2226,6 +2226,25 @@ EVENTS LOG
                            on the coordinator's next wake instead of aging silently behind
                            routine .skip lines; the streak resets (and can re-escalate) if a
                            DIFFERENT brief starts pending for this window
+      worker.listener.selfheal  (issue #506) worker-listener.sh's own ordinary self-heal
+                           path claimed a queued v2 brief on its own — an idle listener, or
+                           one draining several queued briefs back-to-back — and is about
+                           to start a fresh interactive session seeded with it (issue,
+                           task_id). Forwarded from a marker in the worktree's own
+                           .swarm/tasks/claims/ (worker-listener.sh cannot call log_event
+                           itself — it runs inside its own worktree's sandboxed container,
+                           which never mounts $PROJECT_DIR, see #514) by
+                           dispatch_selfheal_claim/on_selfheal_claim; the marker is deleted
+                           once forwarded. Distinct from worker.deliver.ok/.attempt, which
+                           cover maybe_worker_deliver_brief's own /quit injection into a
+                           STUCK, still-live session — this is the ordinary "nothing was
+                           stuck" path, with no record of its own before this issue.
+                           watcher_paste_epochs() includes it alongside worker.start so a
+                           machine-delivered brief here isn't misread as a human paste
+                           (human_typed_since).
+      worker.listener.selfheal.skip  self-heal claim marker detected for a foreign worktree
+                           (issue, reason=foreign_worktree, path) — same cross-talk guard
+                           as worker.finish.skip/worker.message.skip
 
 PANE ECHO (issue #38)
     By default, every line appended to events.log — by this process OR any
@@ -3065,6 +3084,8 @@ format_event_line() {
         worker.deliver.retract_skip)            glyph="·"; color=$'\033[2m'  ;;
         worker.deliver.giving_up)                  glyph="⚠"; color=$'\033[31m' ;;
         worker.deliver.composer_stalled)   glyph="⚠"; color=$'\033[31m' ;;
+        worker.listener.selfheal)        glyph="◐"; color=$'\033[36m' ;;
+        worker.listener.selfheal.skip)      glyph="·"; color=$'\033[2m'  ;;
         watch.autoclose)               glyph="♻"; color=$'\033[36m' ;;
         watch.orphan_sweep)             glyph="♻"; color=$'\033[36m' ;;
         reap.window)                    glyph="✂"; color=$'\033[36m' ;;
@@ -3386,10 +3407,11 @@ is_own_worktree_dir() {
 is_our_worktree() {
     local path="$1"
     local worktree_root
-    # Strip the "/.swarm/tasks/done/<file>.json" (outcome) or
-    # "/.swarm/tasks/outbox/<file>.md" (worker message, issue #129) suffix
-    # to get the worktree root.
-    worktree_root="$(echo "$path" | sed -E 's%/\.swarm/tasks/(done|outbox)/[^/]+$%%')"
+    # Strip the "/.swarm/tasks/done/<file>.json" (outcome), "/.swarm/tasks/
+    # outbox/<file>.md" (worker message, issue #129), or "/.swarm/tasks/
+    # claims/<file>.claim" (worker-listener.sh self-heal marker, issue #506)
+    # suffix to get the worktree root.
+    worktree_root="$(echo "$path" | sed -E 's%/\.swarm/tasks/(done|outbox|claims)/[^/]+$%%')"
     is_own_worktree_dir "$worktree_root"
 }
 
@@ -3521,6 +3543,55 @@ dispatch_message() {
         issue=$(msg_issue "$path")
         log_event worker.message.skip "issue=$issue reason=foreign_worktree path=$path"
     fi
+}
+
+# dispatch_selfheal_claim <claim-marker-path>
+#
+# (issue #506) Counterpart of dispatch_outcome/dispatch_message for
+# worker-listener.sh's own self-heal claims directory
+# (.swarm/tasks/claims/*.claim) — see on_selfheal_claim for what this
+# records and why. Same is_our_worktree scoping as the other two dispatch_*
+# wrappers, so a sibling project's worktree sharing the same WORKSPACE
+# parent under flat grouping can't forge an event into THIS project's
+# events.log. Used by both the inotify and poll backends.
+dispatch_selfheal_claim() {
+    local path="$1"
+    if is_our_worktree "$path"; then
+        on_selfheal_claim "$path"
+    else
+        log_event worker.listener.selfheal.skip "issue=$(outcome_path_issue "$path") reason=foreign_worktree path=$path"
+    fi
+}
+
+# on_selfheal_claim <claim-marker-path>
+#
+# (issue #506) worker-listener.sh's ordinary self-heal path — an idle
+# listener (or one draining several queued briefs back-to-back) claiming
+# the next brief on its own and starting a fresh interactive session seeded
+# with it, independent of this script's own maybe_worker_deliver_brief
+# auto_deliver (which already logs worker.deliver.ok/.attempt for the
+# different "stuck inside a live CLI session" case — see that function's
+# header and worker_deliver_detect_claim's header for why it deliberately
+# does not cover this one too) — had no events.log record of its own:
+# worker-listener.sh runs fully inside its own worktree's sandboxed
+# container, which never mounts $PROJECT_DIR (see #514), so it cannot call
+# log_event directly. It drops a cheap marker in its own worktree instead
+# (record_selfheal_claim() in worker-listener.sh); this forwards it.
+#
+# The marker's own claimed-at content isn't threaded through — log_event
+# always stamps "now" — but run_poll/run_inotify pick the marker up within
+# a few seconds of its creation, comfortably inside
+# WORKER_HUMAN_PASTE_GRACE_SECS, so the forwarded event still lands close
+# enough to the actual paste for watcher_paste_epochs' purpose. The marker
+# is deleted once logged: it's a one-shot handoff buffer, never a second
+# copy of the event record that could drift from events.log.
+on_selfheal_claim() {
+    local path="$1"
+    local issue task_id
+    issue=$(outcome_path_issue "$path")
+    task_id=$(basename "$path" .claim)
+    log_event worker.listener.selfheal "issue=$issue task_id=$task_id"
+    rm -f "$path" 2>/dev/null || true
 }
 
 # msg_issue <outbox-message-path> — issue number from the worktree dir name
@@ -7358,6 +7429,18 @@ wake_debounced() {
 # and coord_wake_hold_reason() consults worker_human_present() too, so that
 # would hold the COORDINATOR's own doorbell, not just that worker's.
 #
+# (issue #506) worker.listener.selfheal MUST also be in the pattern below,
+# for the identical reason but a different code path: worker.start only
+# covers a worktree's FIRST dispatch (provision-worker.sh spawning a brand
+# new window and pasting its initial brief). Every later brief a listener
+# claims on its own — an idle listener parked at a shell prompt, or one
+# draining several queued briefs back-to-back — relaunches the agent with
+# that brief piped in exactly the same way, but worker-listener.sh cannot
+# call log_event itself (its sandboxed container never mounts $PROJECT_DIR,
+# see #514), so this event is forwarded from a worktree-local marker
+# instead (dispatch_selfheal_claim/on_selfheal_claim) rather than logged
+# directly at paste time.
+#
 # Bounded by `tail -n $WATCHER_PASTE_SCAN_LINES` rather than reading the whole
 # log: only pastes inside the largest idle window can possibly correlate, and
 # events.log grows without bound over a swarm's life. 2000 lines is generous
@@ -7370,7 +7453,7 @@ WATCHER_PASTE_SCAN_LINES="${WATCHER_PASTE_SCAN_LINES:-2000}"
 watcher_paste_epochs() {
     [ -r "$EVENTS_LOG" ] || return 0
     tail -n "$WATCHER_PASTE_SCAN_LINES" "$EVENTS_LOG" 2>/dev/null \
-        | LC_ALL=C grep -E '(coord\.wake|coord\.wake\.deferred_delivered|worker\.deliver\.(ok|attempt)|worker\.start)[[:space:]]' \
+        | LC_ALL=C grep -E '(coord\.wake|coord\.wake\.deferred_delivered|worker\.deliver\.(ok|attempt)|worker\.start|worker\.listener\.selfheal)[[:space:]]' \
         | awk '{print $1}' \
         | while read -r ts; do
               date -u -d "$ts" +%s 2>/dev/null || true
@@ -8644,6 +8727,12 @@ run_inotify() {
                 # then mv — so half-written temp files never match *.md.
                 [ "$WATCH_OUTBOX" = "1" ] && dispatch_message "$path"
                 ;;
+            */wt-issue-*/.swarm/tasks/claims/*.claim)
+                # worker-listener.sh self-heal claim marker (issue #506) —
+                # same mktemp-then-mv convention, always scanned (see
+                # scan_outcomes' identical claims_dirs comment above).
+                dispatch_selfheal_claim "$path"
+                ;;
         esac
     done
 }
@@ -8672,11 +8761,12 @@ run_poll() {
     # exist yet — handle that gracefully so the find call gets an empty arg
     # list.
     scan_outcomes() {
-        local done_dirs=() outbox_dirs=() wt
+        local done_dirs=() outbox_dirs=() claims_dirs=() wt
         while IFS= read -r wt; do
             [ -n "$wt" ] || continue
             [ -d "$wt/.swarm/tasks/done" ] && done_dirs+=("$wt/.swarm/tasks/done")
             [ -d "$wt/.swarm/tasks/outbox" ] && outbox_dirs+=("$wt/.swarm/tasks/outbox")
+            [ -d "$wt/.swarm/tasks/claims" ] && claims_dirs+=("$wt/.swarm/tasks/claims")
         done < <(own_worktree_dirs_for_scan "$PROJECT_DIR")
         {
             if [ "${#done_dirs[@]}" -gt 0 ]; then
@@ -8687,6 +8777,13 @@ run_poll() {
             # outbox/processed/ subtree out of the scan.
             if [ "$WATCH_OUTBOX" = "1" ] && [ "${#outbox_dirs[@]}" -gt 0 ]; then
                 find "${outbox_dirs[@]}" -maxdepth 1 -name '*.md' -print 2>/dev/null
+            fi
+            # worker-listener.sh self-heal claim markers (issue #506) —
+            # always scanned, same as done/*.json, since this is foundational
+            # human-presence instrumentation, not an opt-in notification
+            # feature like WATCH_OUTBOX.
+            if [ "${#claims_dirs[@]}" -gt 0 ]; then
+                find "${claims_dirs[@]}" -maxdepth 1 -name '*.claim' -print 2>/dev/null
             fi
         } | sort -u
     }
@@ -8705,8 +8802,9 @@ run_poll() {
             while IFS= read -r path; do
                 [ -z "$path" ] && continue
                 case "$path" in
-                    */.swarm/tasks/outbox/*.md) dispatch_message "$path" ;;
-                    *)                          dispatch_outcome "$path" ;;
+                    */.swarm/tasks/outbox/*.md)  dispatch_message "$path" ;;
+                    */.swarm/tasks/claims/*.claim) dispatch_selfheal_claim "$path" ;;
+                    *)                            dispatch_outcome "$path" ;;
                 esac
             done <<< "$diff_new"
             echo "$current" > "$seen_file"

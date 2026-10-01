@@ -43,6 +43,12 @@
 #                                         coordinator (not this script —
 #                                         coordinator-watch.sh wakes on it,
 #                                         issue #129)
+#   <wt>/.swarm/tasks/claims/<id>.claim   this listener's own marker for a
+#                                         self-heal claim of a queued v2
+#                                         brief (issue #506) — forwarded
+#                                         into the coordinator's events.log
+#                                         as worker.listener.selfheal and
+#                                         deleted; see record_selfheal_claim()
 #
 # Coordinator polls done/*.json to know what happened (no need to scrape pane).
 #
@@ -138,7 +144,9 @@ INBOX="$QUEUE_ROOT/inbox"
 PROCESSING="$QUEUE_ROOT/processing"
 DONE="$QUEUE_ROOT/done"
 STATUS="$QUEUE_ROOT/status"
-mkdir -p "$INBOX" "$PROCESSING" "$DONE" "$STATUS"
+# issue #506: see record_selfheal_claim() below.
+CLAIMS="$QUEUE_ROOT/claims"
+mkdir -p "$INBOX" "$PROCESSING" "$DONE" "$STATUS" "$CLAIMS"
 
 # Sentinel used by run_idle_shell()'s background poller to signal the
 # interactive shell that a brief has arrived. Not inside INBOX itself so it
@@ -254,6 +262,41 @@ claim_next_task() {
     fi
 
     return 1
+}
+
+# issue #506: this listener's OWN main-loop claim of a queued v2 brief — an
+# idle listener (or one draining several back-to-back after a previous task
+# just finished) claiming the next brief with no human and no coordinator
+# auto_deliver ever touching it (see coordinator-watch.sh's
+# worker_deliver_detect_claim header comment for why that script
+# deliberately does NOT cover this "shell state" case) — had no record
+# anywhere coordinator-watch.sh's human-presence gate
+# (watcher_paste_epochs/human_typed_since) could see, so a freshly
+# relaunched interactive session's own piped-in brief could misread as a
+# human pasting it.
+#
+# This process cannot call coordinator-watch.sh's log_event itself: it runs
+# fully inside this worktree's own sandboxed container (sandbox.sh "$WT"
+# listener), which mounts only this worktree — never $PROJECT_DIR, where
+# events.log actually lives (see #514's sibling-worktree-admin-dir
+# lockdown, same reasoning). Drop a cheap one-line marker into this
+# worktree instead; coordinator-watch.sh's run_poll/run_inotify (which
+# already scan every own-worktree's done/ and outbox/ dirs this same way)
+# pick it up within a few seconds — comfortably inside
+# WORKER_HUMAN_PASTE_GRACE_SECS — and forward it into events.log as
+# worker.listener.selfheal (dispatch_selfheal_claim/on_selfheal_claim),
+# deleting the marker once forwarded. The marker is a one-shot handoff
+# buffer, never a second copy of the event record, so it can't drift from
+# events.log the way a standing duplicate log would.
+#
+# v2 tasks only (IS_LEGACY callers skip this) — the v1 single-file protocol
+# has no task_id to key the marker on and no structured-event contract.
+record_selfheal_claim() {
+    local task_id="$1"
+    local tmp
+    tmp=$(mktemp "$CLAIMS/.tmp.XXXXXX" 2>/dev/null) || return 0
+    date -u +'%Y-%m-%dT%H:%M:%SZ' > "$tmp" 2>/dev/null
+    mv "$tmp" "$CLAIMS/${task_id}.claim" 2>/dev/null || rm -f "$tmp" 2>/dev/null
 }
 
 # Guard against a stale $LLM_SWARM_DIR (issue #251). $LLM_SWARM_DIR is the
@@ -960,6 +1003,7 @@ while true; do
         echo "[$(date +%T)] Executing task..."
         STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
         STARTED_EPOCH=$(date +%s)
+        [ "$IS_LEGACY" = "1" ] || record_selfheal_claim "$TASK_ID"
 
         # Worker system prompt: prompts/worker.md (the universal worker
         # conventions — summary block, decision framing, NBA hint, PR risk
