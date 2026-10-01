@@ -22,9 +22,18 @@ IMAGE="llm-swarm-runner:latest"
 # Build if image doesn't exist
 if ! docker image inspect "$IMAGE" &>/dev/null; then
     echo "Building sandbox image..."
-    # Assumes Dockerfile is in the same directory as this script
-    docker build -t "$IMAGE" "$(dirname "$0")"
+    "$(dirname "$0")/scripts/build-image.sh"
 fi
+
+# Dockerfile drift (#517): warn when the image was built from a different
+# Dockerfile than the one checked in. build-image.sh stamps the label; an
+# image built by a bare `docker build` has no label and warns once per run.
+_df_want="$(git -C "$(dirname "$0")" hash-object Dockerfile 2>/dev/null || true)"
+_df_have="$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "dockerfile_sha"}}' 2>/dev/null || true)"
+if [ -n "$_df_want" ] && [ "$_df_want" != "$_df_have" ]; then
+    echo "WARN sandbox: $IMAGE was built from a different Dockerfile (image label: ${_df_have:-none}); workers run stale tooling until you run scripts/build-image.sh" >&2
+fi
+unset _df_want _df_have
 
 # Ensure host config dirs exist for persistence
 mkdir -p "$HOME/.claude" "$HOME/.codex" "$HOME/.npm-global"
