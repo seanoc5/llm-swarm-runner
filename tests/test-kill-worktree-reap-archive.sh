@@ -135,7 +135,7 @@ grep -q 'SKIPPED .local-data' "$RUN2" \
 $(cat "$RUN2")"
 green "kill-worktree.sh printed a SKIPPED .local-data line under SWARM_REAP_LOCALDATA_MAX_MB=0"
 
-[ ! -d "$(find "$PROJ2/.swarm/reaped" -maxdepth 1 -name 'iss-72-*.local-data' -type d 2>/dev/null | head -1)" 2>/dev/null ] \
+[ ! -d "$(find "$PROJ2/.swarm/reaped" -maxdepth 1 -name 'iss-72-*.local-data' -type d 2>/dev/null | head -1)" ] \
     || red ".local-data/ should NOT have been archived over the cap"
 
 grep -qE 'reap\.worktree\.skipped_localdata +issue=72 size=' "$PROJ2/.swarm/events.log" \

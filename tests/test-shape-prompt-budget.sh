@@ -8,14 +8,20 @@
 # makes regrowth a visible decision: raise the budget here in the same PR,
 # with a reason, or put the new text in a script, a docs/ page, or a
 # one-clause rule instead of an incident narrative.
+#
+# 2026-09-29: worker budget 20000 -> 22000. The five days after #463 added
+# 2.2KB (four rule-per-incident commits); bumped rather than trimmed so the
+# regrowth question gets one deliberate answer (issue #509) instead of a
+# 200-byte shave.
 set -euo pipefail
 
 green() { printf '\033[32m✓ %s\033[0m\n' "$*"; }
 red()   { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORKER_MAX="${WORKER_MD_MAX_BYTES:-20000}"
+WORKER_MAX="${WORKER_MD_MAX_BYTES:-22000}"
 COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-25000}"
+BARE_MAX="${WORKER_BARE_MD_MAX_BYTES:-11000}"   # issue #510 trial prompt; ~7.5KB is script-parsed contract
 
 check() {
     local file="$1" max="$2" size
@@ -27,3 +33,4 @@ check() {
 
 check prompts/worker.md "$WORKER_MAX"
 check prompts/coordinator.md "$COORD_MAX"
+check prompts/worker-bare.md "$BARE_MAX"

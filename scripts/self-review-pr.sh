@@ -75,7 +75,7 @@ MODEL_OPTS=()
 [ -n "$MODEL" ] && MODEL_OPTS=(--model "$MODEL")
 REVIEW="$(printf '%s\n\n--- PR ---\n%s\n\n--- DIFF ---\n%s\n' \
     "$(cat "$SKILL")" "$BODY" "$DIFF" \
-    | claude -p "${MODEL_OPTS[@]}" --dangerously-skip-permissions)" \
+    | claude -p "${MODEL_OPTS[@]}" --no-chrome --dangerously-skip-permissions)" \
     || { echo "ERROR: claude -p review invocation failed" >&2; exit 1; }
 
 # The review session sometimes wraps the verdict token in markdown
