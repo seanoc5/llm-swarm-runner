@@ -522,6 +522,36 @@ else
     skip "gh auth" "gh not authenticated on host"
 fi
 
+# SANDBOX_BUILD_TMPFS (2026-10-02): a Gradle project's build/ is a tmpfs
+# owned by the host user; non-Gradle dirs and "0" get no mount.
+if [ -S /var/run/docker.sock ]; then
+    _bt=$(mktemp -d)
+    touch "$_bt/build.gradle.kts"
+    output=$(env -u SANDBOX_BUILD_TMPFS "$REPO_ROOT/sandbox.sh" "$_bt" \
+        "findmnt -no FSTYPE,SIZE $_bt/build; touch $_bt/build/x && echo WRITABLE" 2>&1) || true
+    [[ "$output" == *"tmpfs    2G"* && "$output" == *"WRITABLE"* ]] \
+        && pass "SANDBOX_BUILD_TMPFS default -> 2g writable tmpfs over build/" "$output" \
+        || fail "SANDBOX_BUILD_TMPFS default -> 2g writable tmpfs over build/" "$output"
+    [[ ! -e "$_bt/build/x" && "$(stat -c %u "$_bt/build")" == "$(id -u)" ]] \
+        && pass "SANDBOX_BUILD_TMPFS -> nothing reaches disk, mountpoint owned by host user" \
+        || fail "SANDBOX_BUILD_TMPFS -> nothing reaches disk, mountpoint owned by host user" "$(ls -la "$_bt/build")"
+
+    output=$(SANDBOX_BUILD_TMPFS=0 "$REPO_ROOT/sandbox.sh" "$_bt" \
+        "findmnt -no FSTYPE $_bt/build || echo NOMOUNT" 2>&1) || true
+    [[ "$output" == *"NOMOUNT"* ]] \
+        && pass "SANDBOX_BUILD_TMPFS=0 -> no mount" "$output" \
+        || fail "SANDBOX_BUILD_TMPFS=0 -> no mount" "$output"
+
+    rm -rf "$_bt"; _bt=$(mktemp -d)
+    output=$(env -u SANDBOX_BUILD_TMPFS "$REPO_ROOT/sandbox.sh" "$_bt" "true" 2>&1) || true
+    [[ ! -e "$_bt/build" ]] \
+        && pass "SANDBOX_BUILD_TMPFS -> non-Gradle project gets no build/" "$output" \
+        || fail "SANDBOX_BUILD_TMPFS -> non-Gradle project gets no build/" "$output"
+    rm -rf "$_bt"
+else
+    skip "SANDBOX_BUILD_TMPFS checks (no docker socket)"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""
