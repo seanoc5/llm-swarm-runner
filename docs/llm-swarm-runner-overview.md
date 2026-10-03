@@ -157,8 +157,8 @@ WATCH=1  STATUS=1  MAX_WORKERS=5  INCLUDE_ASSIGNED_TO_OTHERS=1  DEBOUNCE_SECS=15
 
 | Variable                     | Default            | Flag                          | Notes                                                                                            |
 |------------------------------|--------------------|-------------------------------|--------------------------------------------------------------------------------------------------|
-| `COORDINATOR_CMD`            | `claude`           | —                             | `claude`, `gemini`, `codex`, or any custom CLI                                                    |
-| `COORDINATOR_MODEL`          | backend-dependent  | —                             | Passed to Claude, Gemini, or Codex when set. Codex otherwise uses the CLI-configured default.      |
+| `COORDINATOR_CMD`            | `claude`           | —                             | `claude`, `gemini`, `codex`, or `agy`; unknown values fail closed.                                 |
+| `COORDINATOR_MODEL`          | backend-dependent  | —                             | Passed to the selected CLI when set. Codex and AGY otherwise use their CLI-configured defaults.    |
 | `COORDINATOR_VERBOSE`        | `0`                | —                             | When `1` and using gemini: swaps `-p` for `-i` (`--prompt-interactive`) so tool calls are visible live in the pane. Agent stays alive — exit with `/quit`. claude is unaffected (its `-p` already streams). |
 | `COORDINATOR_HEADLESS`       | `0`                | —                             | When `1` and using claude: run one-shot (`-p`, exits after each prompt) like codex, instead of the default resident interactive REPL. |
 | `COORDINATOR_USE_API_KEY`    | `0`                | —                             | When `1` and using claude: keeps `ANTHROPIC_API_KEY` in the agent's env (bills the API account). Default strips it so Claude Max OAuth is used. |
@@ -538,7 +538,7 @@ The listener checks v2 inbox first, falls back to v1. Both can be in use simulta
 
 | Variable              | Default          | Notes                                                                                       |
 |-----------------------|------------------|---------------------------------------------------------------------------------------------|
-| `WORKER_CMD`          | `claude`         | Switches the worker's LLM CLI (`gemini` or `codex` are supported alternatives).             |
+| `WORKER_CMD`          | `claude`         | Switches the worker's LLM CLI (`gemini`, `codex`, or `agy` are supported alternatives).       |
 | `WORKER_MODEL`        | `claude-sonnet-5` (claude); CLI default (gemini/codex) | Passed as `--model` (claude) or `-m` (gemini/codex). E.g. `sonnet`, `gemini-2.5-flash`. |
 | `WORKER_HEADLESS`     | `0`              | When `1`, run agent with `-p` (print + exit). Required when no human is attached.           |
 | `WORKER_CHECK`        | `1`              | Executed acceptance checks. `0` disables (outcome JSON reverts to agent-exit-only).         |
