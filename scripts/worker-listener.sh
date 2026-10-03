@@ -130,6 +130,10 @@
 export SWARM_WORKTREE_DIR="$PWD"
 
 AGENT="${1:-claude}"
+case "$AGENT" in
+    claude|gemini|codex|agy) ;;
+    *) echo "ERROR: unsupported WORKER_CMD: $AGENT" >&2; exit 1 ;;
+esac
 MODEL="${WORKER_MODEL:-}"
 HEADLESS="${WORKER_HEADLESS:-0}"
 CHECK_ENABLED="${WORKER_CHECK:-1}"
@@ -198,6 +202,7 @@ if [ -n "$MODEL" ]; then
     case "$AGENT" in
         claude) MODEL_OPTS=(--model "$MODEL") ;;
         gemini|codex) MODEL_OPTS=(-m "$MODEL") ;;
+        agy) MODEL_OPTS=(--model "$MODEL") ;;
     esac
 fi
 
@@ -398,8 +403,15 @@ dispatch_agent() {
         else
             codex "${MODEL_OPTS[@]}" --dangerously-bypass-approvals-and-sandbox --no-alt-screen "$codex_task"
         fi
+    elif [[ "$AGENT" == "agy" ]]; then
+        if [ "$HEADLESS" = "1" ]; then
+            agy "${MODEL_OPTS[@]}" --dangerously-skip-permissions --print "$codex_task"
+        else
+            agy "${MODEL_OPTS[@]}" --dangerously-skip-permissions --prompt-interactive "$codex_task"
+        fi
     else
-        bash -c "$task_text"
+        echo "ERROR: unsupported worker backend: $AGENT" >&2
+        return 1
     fi && DISPATCH_RC=0 || DISPATCH_RC=$?
 }
 
@@ -1067,11 +1079,11 @@ while true; do
             case "$AGENT" in
                 claude) WORKER_SYSTEM_PROMPT_OPTS=(--append-system-prompt-file "$WORKER_MD") ;;
                 gemini) WORKER_SYSTEM_PROMPT_ENV=(env "GEMINI_SYSTEM_MD=$WORKER_MD") ;;
-                codex) CODEX_PREFIX="$(cat "$WORKER_MD")" ;;
+                codex|agy) CODEX_PREFIX="$(cat "$WORKER_MD")" ;;
             esac
         else
             case "$AGENT" in
-                claude|gemini|codex)
+                claude|gemini|codex|agy)
                     echo "WARN: worker system prompt not found at $WORKER_MD (WORKER_PROMPT_FILE=${WORKER_PROMPT_FILE:-unset}) — worker conventions will NOT be injected as system prompt." >&2
                     echo "      Expected LLM_SWARM_DIR to be set and the file readable. Briefs will lack the universal conventions." >&2
                     ;;

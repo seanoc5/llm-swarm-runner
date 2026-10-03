@@ -12,7 +12,7 @@
 # docs/ringer-adoptions.md #2).
 #
 # The review itself is the existing skill prompt
-# (prompts/skill-self-review.md) fed to a fresh `claude -p` session together
+# (prompts/skill-self-review.md) fed to a fresh Claude or Codex session together
 # with the PR title/body and full diff — zero shared context with whoever
 # wrote the code; that's the point.
 #
@@ -26,14 +26,16 @@
 #   --force   run even when WORKER_SELF_REVIEW=0, and re-post over an
 #             existing marker comment.
 #   --model   model for the review session (default: $SELF_REVIEW_MODEL,
-#             else the claude CLI's default).
+#             else $WORKER_MODEL for Codex, else the CLI's default).
+#   SELF_REVIEW_CMD selects claude or codex; defaults to WORKER_CMD when
+#             it is codex, otherwise claude for compatibility.
 #
 # Exit codes (gate-friendly — swarm-merge.sh consumes the marker comment):
 #   0  APPROVE
 #   3  APPROVE_WITH_CAVEATS
 #   2  BLOCK
 #   4  skipped (WORKER_SELF_REVIEW=0 and no --force)
-#   1  error (gh/claude failure, unparseable verdict, bad args)
+#   1  error (gh/agent failure, unparseable verdict, bad args)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -43,6 +45,13 @@ PR=""
 POST=0
 FORCE=0
 MODEL="${SELF_REVIEW_MODEL:-}"
+REVIEW_CMD="${SELF_REVIEW_CMD:-claude}"
+if [ -z "${SELF_REVIEW_CMD:-}" ] && [ "${WORKER_CMD:-}" = "codex" ]; then
+    REVIEW_CMD=codex
+fi
+if [ "$REVIEW_CMD" = "codex" ]; then
+    MODEL="${SELF_REVIEW_MODEL:-${WORKER_MODEL:-}}"
+fi
 while [ $# -gt 0 ]; do
     case "$1" in
         --post)  POST=1 ;;
@@ -58,7 +67,11 @@ done
 [ -n "$PR" ] || { echo "Usage: $0 <PR#> [--post] [--force] [--model <id>]" >&2; exit 1; }
 [ -r "$SKILL" ] || { echo "ERROR: skill prompt not readable: $SKILL" >&2; exit 1; }
 command -v gh >/dev/null 2>&1 || { echo "ERROR: gh required" >&2; exit 1; }
-command -v claude >/dev/null 2>&1 || { echo "ERROR: claude CLI required" >&2; exit 1; }
+case "$REVIEW_CMD" in
+    claude|codex) ;;
+    *) echo "ERROR: unsupported SELF_REVIEW_CMD: $REVIEW_CMD" >&2; exit 1 ;;
+esac
+command -v "$REVIEW_CMD" >/dev/null 2>&1 || { echo "ERROR: $REVIEW_CMD CLI required" >&2; exit 1; }
 
 if [ "${WORKER_SELF_REVIEW:-1}" = "0" ] && [ "$FORCE" = "0" ]; then
     echo "self-review: skipped — WORKER_SELF_REVIEW=0 (use --force to run anyway)"
@@ -73,10 +86,25 @@ BODY="$(gh pr view "$PR" --json title,body --jq '"\(.title)\n\n\(.body)"')" \
 # --- run the fresh-context review ------------------------------------------
 MODEL_OPTS=()
 [ -n "$MODEL" ] && MODEL_OPTS=(--model "$MODEL")
-REVIEW="$(printf '%s\n\n--- PR ---\n%s\n\n--- DIFF ---\n%s\n' \
-    "$(cat "$SKILL")" "$BODY" "$DIFF" \
-    | claude -p "${MODEL_OPTS[@]}" --no-chrome --dangerously-skip-permissions)" \
-    || { echo "ERROR: claude -p review invocation failed" >&2; exit 1; }
+review_payload() {
+    printf '%s\n\n--- PR ---\n%s\n\n--- DIFF ---\n%s\n' "$(cat "$SKILL")" "$BODY" "$DIFF"
+}
+if [ "$REVIEW_CMD" = "codex" ]; then
+    # Capture only the final answer: progress/tool output must not be parsed
+    # as a verdict. A review has no reason to write to the project checkout.
+    REVIEW_FILE="$(mktemp -t swarm-review-XXXXXX)"
+    trap 'rm -f "$REVIEW_FILE"' EXIT
+    if ! review_payload | codex exec "${MODEL_OPTS[@]}" --sandbox read-only \
+            -c 'approval_policy="never"' --output-last-message "$REVIEW_FILE" - >&2; then
+        echo "ERROR: codex exec review invocation failed" >&2
+        exit 1
+    fi
+    REVIEW="$(cat "$REVIEW_FILE")"
+else
+    REVIEW="$(review_payload \
+        | claude -p "${MODEL_OPTS[@]}" --no-chrome --dangerously-skip-permissions)" \
+        || { echo "ERROR: claude -p review invocation failed" >&2; exit 1; }
+fi
 
 # The review session sometimes wraps the verdict token in markdown
 # (backticks, bold, a code fence) despite the skill prompt's "no markdown"
@@ -108,8 +136,8 @@ if [ "$POST" = "1" ]; then
             --jq '.comments[].body' 2>/dev/null | grep -q 'SWARM_SELF_REVIEW:'; then
         echo "post: skipped — PR #$PR already has a SWARM_SELF_REVIEW comment (--force to re-post)"
     else
-        COMMENT="$(printf '<!-- SWARM_SELF_REVIEW: %s -->\n## Fresh-context self-review\n\n%s\n\n<sub>Adversarial review by a fresh claude session against prompts/skill-self-review.md — no shared context with the PR author. Machinery: scripts/self-review-pr.sh (docs/ringer-adoptions.md #2).</sub>\n' \
-            "$VERDICT" "$REVIEW")"
+        COMMENT="$(printf '<!-- SWARM_SELF_REVIEW: %s -->\n## Fresh-context self-review\n\n%s\n\n<sub>Adversarial review by a fresh %s session against prompts/skill-self-review.md — no shared context with the PR author. Machinery: scripts/self-review-pr.sh (docs/ringer-adoptions.md #2).</sub>\n' \
+            "$VERDICT" "$REVIEW" "$REVIEW_CMD")"
         gh pr comment "$PR" --body "$COMMENT" \
             || { echo "ERROR: gh pr comment failed" >&2; exit 1; }
         echo "post: verdict comment added to PR #$PR"

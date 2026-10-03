@@ -38,6 +38,7 @@ ENV LC_ALL=C.utf8
 ARG NODE_MAJOR=22
 ARG CLAUDE_CODE_VERSION=2.1.126
 ARG GEMINI_CLI_VERSION=0.62.0
+ARG AGY_SHA512=6d2e2eeda0cad6eac8e8b2df11257d684210f8d384a2ee011dc6ad0edacfa33e1ec9c554589f6ff6ef0697f4c3c777ba46b6e84639711f173377cc1554c67436
 ARG OPENAI_CODEX_VERSION=0.128.0
 ARG PROMPTFOO_VERSION=0.121.9
 ARG DENO_VERSION=2.7.14
@@ -98,6 +99,14 @@ RUN npm install -g \
     "@google/gemini-cli@${GEMINI_CLI_VERSION}" \
     "@openai/codex@${OPENAI_CODEX_VERSION}" \
     "promptfoo@${PROMPTFOO_VERSION}"
+
+# Native Antigravity CLI, pinned to the official release archive and checksum.
+RUN curl -fsSL "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.2.15-5434575321694208/linux-x64/cli_linux_x64.tar.gz" -o /tmp/agy.tar.gz \
+    && printf '%s  %s\n' "$AGY_SHA512" /tmp/agy.tar.gz | sha512sum -c - \
+    && tar -xzf /tmp/agy.tar.gz -C /usr/local/bin --transform='s|^antigravity$|agy|' antigravity \
+    && rm /tmp/agy.tar.gz \
+    && chmod 755 /usr/local/bin/agy \
+    && agy --version
 
 # Fix gemini-cli's missing vendored ripgrep — the npm package omits the
 # binary, so symlink the system rg (already installed earlier in this

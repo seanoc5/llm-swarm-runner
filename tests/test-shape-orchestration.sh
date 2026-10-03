@@ -139,6 +139,7 @@ green "fixture ready at $PROJECT_DIR"
 heading "Test 1: provision-worker.sh creates worktree + branch + brief"
 cd "$PROJECT_DIR"
 WORKER_CMD=codex WORKER_HEADLESS=1 WORKER_MODEL=test-codex WORKER_SELF_REVIEW=0 \
+SELF_REVIEW_CMD=codex SELF_REVIEW_MODEL=test-sol \
     "$PROVISION" 99 > "$TEST_DIR/prov-1.log" 2>&1 || red "provision-worker exit non-zero: $(cat $TEST_DIR/prov-1.log)"
 WT="$TEST_DIR/wt-issue-99"
 [ -d "$WT" ] || red "worktree not created at $WT"
@@ -154,6 +155,8 @@ grep -qE 'new-window .* iss-99' "$TEST_DIR/tmux.log" \
     || red "expected tmux new-window for iss-99; got: $(cat $TEST_DIR/tmux.log)"
 grep -q 'WORKER_CMD=codex .*WORKER_MODEL=test-codex .*WORKER_HEADLESS=1 .*WORKER_SELF_REVIEW=0' "$TEST_DIR/tmux.log" \
     || red "expected worker backend env in tmux spawn; got: $(cat "$TEST_DIR/tmux.log")"
+grep -q 'SELF_REVIEW_CMD=codex SELF_REVIEW_MODEL=test-sol' "$TEST_DIR/tmux.log" \
+    || red "expected review model in tmux spawn; got: $(cat "$TEST_DIR/tmux.log")"
 green "worktree, branch, queue (incl. status/), brief, tmux window, and worker backend env all created"
 
 heading "Test 2: provision-worker.sh embeds .swarm-policy.md when present"
