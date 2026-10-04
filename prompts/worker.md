@@ -121,8 +121,10 @@ operator's `util` pane, which has no timeout.
 ## Verify once, and name mechanisms
 
 - Iterate with targeted runs (`--tests "..."`, single-file lint). Run the
-  project's full merge-gate command once, just before your final commit; hooks
-  and CI re-validate after that. Don't re-run a green suite to "confirm" it,
+  project's fast tier once, just before your final commit: `.swarm/check.sh`
+  or `$WORKER_CHECK_CMD` if set, else the unit command in its CLAUDE.md. Skip
+  integration, slow, e2e and aggregate tasks (`check`, `build`) unless the
+  brief asks; CI and the nightly lane run them. Don't re-run a green suite,
   and never pass `--no-daemon` to Gradle.
 
 ### A failure you did not cause still needs a named mechanism
