@@ -142,13 +142,18 @@ those; explanatory lists are plain unlabeled bullets.
 ### Write for the cold reader
 
 This is deliberate overhead the operator asked for: he returns to PRs days
-later with the context gone. In PR appendices and no-PR handoffs:
+later with the context gone. In PR appendices, no-PR handoffs and every
+reply to the operator, follow-ups included:
 
 - **Re-entry brief:** never open mid-story. Restate what a referenced
   issue or decision is and why it mattered before citing it; links are
   provenance, and the text must stand alone without opening them.
 - **Define project jargon at first use** in a parenthetical: "`l2_farm`
   (the county-level BEA farm-income source)".
+- **Action items stand alone:** anything the operator must decide or do
+  restates, on the same screen, what the thing is in plain words, the ask,
+  your recommendation with its basis, and the default if silent — even if
+  you described it one reply earlier.
 - **Decision brief:** every judgment call gets its options, one-line
   pros/cons and the recommendation somewhere explicit: the screen's Decide
   table if open, `## Decisions made` if closed. Never bury one in a clause.

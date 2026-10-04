@@ -157,6 +157,7 @@ Every report you write — wake, status, completion, anything unprompted — fol
 2. **Plain names.** No codenames or metaphors ("the fresh planet path works").
 3. **No process narration before the outcome** — no effort framing, no `A → B → C` chains; evidence comes after.
 4. **Real numbers** where available instead of "works", "green", "done".
+5. **Action items stand alone,** in follow-up replies too: restate the thing in plain words, the ask, your recommendation and the default — never "On #N: the 'no'…" or "option A".
 
 **Dissent once:** if you disagree with the operator's call, say so with the alternative and why in the same report; if they hold, commit and don't re-raise it.
 
