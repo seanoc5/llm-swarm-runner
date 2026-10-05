@@ -117,6 +117,33 @@
 #                        spawned (there's no operator to hand it to, and
 #                        `bash -i` needs a real tty).
 
+# issue #529: without job control, a foreground command this script runs
+# (claude/gemini/codex, or their `bash -c`/pipeline stages) shares THIS
+# process's own process group — a plain fork/exec never calls setpgid.
+# An agent that resolves its own pgid and runs `kill -TERM -<pgid>` meaning
+# to stop only the command tree it started (observed: a Codex worker
+# killing a Gradle test run it had launched) therefore also kills this
+# listener and everything else sharing that group, with no outcome ever
+# written and the brief stranded in processing/ (the 2026-10-01
+# corpusminder incident this issue documents). `set -m` turns on job
+# control in this script too (it defaults off for non-interactive bash):
+# every foreground command dispatch_agent() below runs then gets ITS OWN
+# new process group (verified: the dispatched process's own pgid differs
+# from this script's), so a `kill -<pgid>` from inside it can only reach
+# its own descendants. When a controlling terminal is attached (the normal
+# interactive tmux-pane case) bash also gives that new group the terminal
+# in the usual job-control way and restores this script's own group
+# afterward, so interactive TTY behavior (claude reopening /dev/tty for its
+# REPL, Ctrl-C reaching the running agent) is unaffected — same session,
+# only the process group differs. No tty (headless dispatch, tests) still
+# gets the new pgid; it just skips the terminal handoff, same as any
+# foreground command run from a non-interactive shell with monitor mode on.
+# Not a `setsid`: that would start a new SESSION with no controlling
+# terminal at all, breaking /dev/tty reopen in interactive mode — and the
+# command still runs and is waited on in the foreground exactly as before,
+# so this isn't the background/detached pattern worker.md prohibits.
+set -m
+
 # issue #451 self-review finding: scripts/task-done.sh resolves its queue
 # root via `git rev-parse --show-toplevel`, which is cwd-dependent — a
 # worker that `cd`s into a scratch clone mid-task and calls task-done.sh
@@ -628,6 +655,22 @@ write_outcome() {
     # independent proof of real work and is never second-guessed below —
     # only reached when neither exists, on top of zero new commits.
     [ -n "$prior_err_reason" ] && reason="worker-reported: $prior_err_reason"
+
+    # issue #529 optional extra safety: $rc > 128 is bash's own-process-died-
+    # by-signal convention (128 + signal number) — the dispatched agent's
+    # own process group was killed (e.g. it ran `kill -<pgid>` meaning to
+    # stop a command it started, and with set -m above that pgid is now
+    # its own, not this listener's, so it dies instead of the listener).
+    # Name the signal here so a stranded-looking "err" is a diagnosable
+    # record rather than a bare exit code — never overrides a more specific
+    # reason (worker's own report or blocked state) already set above.
+    if [ -z "$reason" ] && [ "$TASK_OUTCOME" = "err" ] && [ "$rc" -gt 128 ]; then
+        local sig signame
+        sig=$((rc - 128))
+        signame="$(kill -l "$sig" 2>/dev/null)"
+        reason="agent-process-killed: signal $sig${signame:+ (SIG$signame)} — the agent likely killed its own process group"
+    fi
+
     if [ "$TASK_OUTCOME" = "ok" ] && [ -z "${CHECK_EXIT:-}" ]; then
         local default_ref ahead=0 has_status=0
         default_ref="$(worktree_default_ref)"
