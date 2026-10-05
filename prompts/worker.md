@@ -79,24 +79,25 @@ don't raise the timeout, split the job, or retry a third time without new
 information (e.g. you timed the first real sub-step and now know the true
 budget).
 
-Each time this happens, echo one line so the pane carries a visible,
-greppable record (the coordinator's watcher looks for this marker). Build
-it from two concatenated string literals as shown, not one — the Bash tool
-renders the command you ran into the pane verbatim, so a literal
-`WATCH_TIMEOUT_HIT` written directly in the command text would get counted
-as a sighting on every run, timed out or not; splitting it keeps the whole
-token out of the command source while still printing it whole in the
-output:
+Each time this happens, redirect the command's own output to a file, not
+the pane — a noisy command's output folds there ("… +N lines"), which can
+bury the marker in exactly the case this rule exists for — and echo one
+line so the pane carries a visible, greppable record (the watcher looks
+for this marker). Build it from two concatenated string literals as shown,
+not one — the Bash tool renders the command you ran into the pane
+verbatim, so a literal `WATCH_TIMEOUT_HIT` written directly in the command
+text would get counted as a sighting on every run, timed out or not;
+splitting it keeps the whole token out of the command source while still
+printing it whole in the output:
 
 ```bash
-timeout 595 ./restore.sh; ec=$?
+timeout 595 ./restore.sh >restore.log 2>&1; ec=$?
 [ "$ec" = 124 ] && echo "WATCH_TIMEOUT""_HIT cmd=\"restore.sh\" attempt=$n ran=595s"
 ```
 
-When the Bash tool's own timeout kills the command instead of a shell
-`timeout N cmd` wrapper, the echo above never runs — the process died
-mid-command. Issue the echo as its own follow-up command instead, same
-marker and format, so the sighting still lands in the pane.
+When the Bash tool's own timeout kills the command instead, the echo
+above never runs. Issue it as its own follow-up command, split the same
+way — it renders into the pane like any other command.
 
 On the second consecutive `WATCH_TIMEOUT_HIT` for the same command: write a
 `decision-needed` outbox message naming the command, how long each attempt
