@@ -1033,6 +1033,48 @@ outbox_file="$(ls "$TEST_DIR"/wt-issue-77/.swarm/tasks/outbox/*.md 2>/dev/null |
     || red "DRY_RUN=1 should not write a real outbox message; got: $(cat "$outbox_file")"
 green "DRY_RUN=1 logs the timeout-retry sighting but writes no real outbox message"
 
+heading "Test 16d: a rendered command SOURCE line (not real output) does not false-positive (#467, self-review finding)"
+# Claude Code renders the command text it ran into the pane verbatim — if
+# prompts/worker.md's example wrote the literal token in the command
+# source, every run of that snippet (timed out or not) would render
+# "WATCH_TIMEOUT_HIT" in the pane and get counted, even with no real
+# timeout and no real echoed output. The shipped worker.md snippet avoids
+# this by building the marker from two concatenated string literals
+# ("WATCH_TIMEOUT" "_HIT ...") so the whole token never appears contiguous
+# in the command source — only in the actual printed output. This fixture
+# reproduces the command SOURCE text three times with no echoed output line
+# at all (as if the command never actually timed out), and asserts the
+# sweep does not fire.
+rm -rf "$TEST_DIR/wt-issue-77/.swarm/tasks/outbox"
+echo "iss-77" > "$TEST_DIR/tmux-windows.txt"
+cat > "$TEST_DIR/tmux-pane-iss-77.txt" <<'PANE'
+timeout 595 ./restore.sh; ec=$?
+[ "$ec" = 124 ] && echo "WATCH_TIMEOUT""_HIT cmd=\"restore.sh\" attempt=$n ran=595s"
+timeout 595 ./restore.sh; ec=$?
+[ "$ec" = 124 ] && echo "WATCH_TIMEOUT""_HIT cmd=\"restore.sh\" attempt=$n ran=595s"
+timeout 595 ./restore.sh; ec=$?
+[ "$ec" = 124 ] && echo "WATCH_TIMEOUT""_HIT cmd=\"restore.sh\" attempt=$n ran=595s"
+PANE
+
+cd "$PROJECT_DIR"
+DRY_RUN=0 WATCH_TIMEOUT_RETRY_SWEEP_SECS=1 WATCH_BG_VIOLATION_SWEEP_SECS=0 WATCH_PR_POLL_SECS=0 \
+    WATCH_ORPHAN_SWEEP_SECS=0 WATCH_CHECK_ON_DONE=0 POLL_SECS=1 \
+    "$WATCH" "$PROJECT_DIR" > "$TEST_DIR/watch-timeoutretry-d.log" 2>&1 &
+WATCH_PID=$!
+
+sleep 5
+still_running=0
+kill -0 "$WATCH_PID" 2>/dev/null && still_running=1
+kill "$WATCH_PID" 2>/dev/null || true
+wait "$WATCH_PID" 2>/dev/null || true
+unset WATCH_PID
+
+[ "$still_running" = "1" ] || red "watch process exited unexpectedly; log: $(cat "$TEST_DIR/watch-timeoutretry-d.log")"
+outbox_file="$(ls "$TEST_DIR"/wt-issue-77/.swarm/tasks/outbox/*.md 2>/dev/null | head -1)" || true
+[ -z "$outbox_file" ] \
+    || red "a rendered command SOURCE line (no real timeout, no real output) wrongly fired an outbox message; got: $(cat "$outbox_file")"
+green "three renderings of the split-token command source (no real timeout output) do not false-positive"
+
 rm -f "$TEST_DIR/tmux-windows.txt" "$TEST_DIR/tmux-pane-iss-77.txt"
 
 # ────────────────────────── Done ──────────────────────────

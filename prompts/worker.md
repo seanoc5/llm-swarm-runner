@@ -80,11 +80,17 @@ information (e.g. you timed the first real sub-step and now know the true
 budget).
 
 Each time this happens, echo one line so the pane carries a visible,
-greppable record (the coordinator's watcher looks for this literal marker):
+greppable record (the coordinator's watcher looks for this marker). Build
+it from two concatenated string literals as shown, not one — the Bash tool
+renders the command you ran into the pane verbatim, so a literal
+`WATCH_TIMEOUT_HIT` written directly in the command text would get counted
+as a sighting on every run, timed out or not; splitting it keeps the whole
+token out of the command source while still printing it whole in the
+output:
 
 ```bash
 timeout 595 ./restore.sh; ec=$?
-[ "$ec" = 124 ] && echo "WATCH_TIMEOUT_HIT cmd=\"restore.sh\" attempt=$n ran=595s"
+[ "$ec" = 124 ] && echo "WATCH_TIMEOUT""_HIT cmd=\"restore.sh\" attempt=$n ran=595s"
 ```
 
 On the second consecutive `WATCH_TIMEOUT_HIT` for the same command: write a
