@@ -192,4 +192,14 @@ rc=0; run_pr_ready || rc=$?
 gh_ready_called || red "expected gh pr ready to run when the body only mentions the phrase in prose, not the actual banner"
 green "a prose mention of the phrase (not the actual banner) does not trigger a hold"
 
+# ============================================================================
+heading "Test 11: body QUOTES the exact banner markup mid-paragraph (not at line-start) — not held"
+# ============================================================================
+printf '<!-- BLIND_MERGE_RISK: low -->\nThis fixes pr-ready.sh so a `> \xe2\x9b\x94 **COORDINATOR HOLD**` banner is respected.\n' > "$BODY_FILE"
+make_fake_review 0
+rc=0; run_pr_ready || rc=$?
+[ "$rc" -eq 0 ] || red "expected exit 0 — quoting the banner markup mid-paragraph should not self-hold, got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called || red "expected gh pr ready to run when the banner markup only appears quoted inline, not as its own leading line"
+green "quoting the banner's exact markup inline (not as a leading blockquote line) does not trigger a hold"
+
 green "ALL TESTS PASSED"
