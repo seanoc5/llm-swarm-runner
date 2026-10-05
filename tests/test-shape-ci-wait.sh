@@ -201,7 +201,7 @@ check "logs that the fallback was used" 'grep -qi "falling back to polling gh ru
 heading "Test 10: fallback path, a run failed → exit 1"
 rc=0
 out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_PERM_ERROR=1 \
-    GH_RUNLIST_JSON='[{"status":"completed","conclusion":"success"},{"status":"completed","conclusion":"failure"}]' \
+    GH_RUNLIST_JSON='[{"status":"completed","conclusion":"success","workflowName":"Lint","createdAt":"2026-10-05T05:00:00Z"},{"status":"completed","conclusion":"failure","workflowName":"CI","createdAt":"2026-10-05T05:00:00Z"}]' \
     "$CI_WAIT" 42 5 2>&1)" || rc=$?
 check "exits 1 when the fallback sees a failing run" '[ "$rc" -eq 1 ]'
 
@@ -224,9 +224,25 @@ check "exits 1 (fail), not 2 (timeout), on a timed_out run conclusion" '[ "$rc" 
 heading "Test 10c: fallback path, one run skipped + one succeeded → exit 0 (skipped doesn't block green)"
 rc=0
 out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_PERM_ERROR=1 \
-    GH_RUNLIST_JSON='[{"status":"completed","conclusion":"success"},{"status":"completed","conclusion":"skipped"}]' \
+    GH_RUNLIST_JSON='[{"status":"completed","conclusion":"success","workflowName":"CI","createdAt":"2026-10-05T05:00:00Z"},{"status":"completed","conclusion":"skipped","workflowName":"Docs","createdAt":"2026-10-05T05:00:00Z"}]' \
     "$CI_WAIT" 42 5 2>&1)" || rc=$?
 check "exits 0 when the only non-success run is skipped" '[ "$rc" -eq 0 ]'
+
+# ── Test 10f: fallback dedupes by workflow — a superseded cancelled run must not fail a PR whose latest run is green ──
+#
+# Self-review finding, third round: `gh run list --commit` returns every
+# run for a commit, including ones a newer run superseded (a re-run, or a
+# concurrency group cancelling an older push-triggered run in favour of
+# the pull_request one) — unlike `gh pr checks`, which already shows only
+# the latest per check name. Without dedup, the leftover `cancelled` run
+# would falsely fail a PR whose current run is green.
+
+heading "Test 10f: fallback path, an older cancelled run of the same workflow is superseded by a newer green one → exit 0"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_PERM_ERROR=1 \
+    GH_RUNLIST_JSON='[{"status":"completed","conclusion":"cancelled","workflowName":"CI","createdAt":"2026-10-05T05:00:00Z"},{"status":"completed","conclusion":"success","workflowName":"CI","createdAt":"2026-10-05T05:05:00Z"}]' \
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
+check "exits 0 — the superseded cancelled run of the same workflow is ignored" '[ "$rc" -eq 0 ]'
 
 # ── Test 10d: fallback, gh's own stderr noise never corrupts the JSON parse ──
 #

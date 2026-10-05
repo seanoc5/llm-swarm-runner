@@ -125,7 +125,7 @@ while true; do
         # this script's exit code and get misread as "no CI configured"
         # (self-review finding on PR #540/#513).
         set +e
-        RUNS_JSON="$(gh run list --commit "$SHA" --json status,conclusion 2>"$RUNS_ERR_FILE")"
+        RUNS_JSON="$(gh run list --commit "$SHA" --json status,conclusion,workflowName,createdAt 2>"$RUNS_ERR_FILE")"
         RUNS_RC=$?
         set -e
         if [ "$RUNS_RC" -ne 0 ] || ! jq -e . >/dev/null 2>&1 <<<"$RUNS_JSON"; then
@@ -133,10 +133,22 @@ while true; do
             exit 4
         fi
 
+        # `gh run list --commit` returns every run for this commit, including
+        # ones a newer run superseded (a re-run, or a concurrency group
+        # cancelling an older push-triggered run in favour of the
+        # pull_request one) — unlike `gh pr checks`, which already shows
+        # only the latest per check. Keep only the newest run per workflow
+        # name before mapping conclusions, or a leftover `cancelled` run
+        # falsely fails a PR whose current run is green (self-review finding
+        # on PR #540/#513). Runs with no workflowName (rare: org/enterprise
+        # ruleset workflows, per `gh run list --help`) group together and
+        # only the single newest of them survives — an accepted gap, not
+        # a case any of this swarm's repos hits.
         RUN_STATE="$(jq -r '
-            (map(select(.status == "completed"))) as $done |
+            (group_by(.workflowName) | map(max_by(.createdAt))) as $latest |
+            ($latest | map(select(.status == "completed"))) as $done |
             if ($done | map(select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out" or .conclusion == "action_required" or .conclusion == "startup_failure" or .conclusion == "stale")) | length) > 0 then "fail"
-            elif (length > 0) and (($done | length) == length) and (($done | map(select(.conclusion == "success" or .conclusion == "skipped" or .conclusion == "neutral")) | length) == length) then "pass"
+            elif (($latest | length) > 0) and (($done | length) == ($latest | length)) and (($done | map(select(.conclusion == "success" or .conclusion == "skipped" or .conclusion == "neutral")) | length) == ($done | length)) then "pass"
             else "pending"
             end' <<<"$RUNS_JSON")"
 
