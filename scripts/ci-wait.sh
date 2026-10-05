@@ -20,9 +20,11 @@
 # real/pending/failed result, a permission error. When that text is seen
 # once, this script switches for the rest of the run to polling
 # `gh run list --commit <sha>` instead (needs only Actions: read, which
-# these tokens already have) and maps the runs itself: any failure/
-# cancelled run → fail; all completed+success → pass; otherwise → pending.
-# Exit codes and the deadline are unchanged. Behaviour with a
+# these tokens already have) and maps the runs itself: any completed run
+# concluding failure/cancelled/timed_out/action_required/startup_failure/
+# stale → fail; once every run has completed with success/skipped/neutral
+# → pass; otherwise (anything still queued/in_progress, or no runs yet) →
+# pending. Exit codes and the deadline are unchanged. Behaviour with a
 # normal OAuth login token (which can read Checks) is unaffected — the
 # fallback only engages on that exact permission-error text.
 #
@@ -121,8 +123,9 @@ while true; do
         [ "$RUNS_RC" -eq 0 ] || { echo "ci-wait: gh run list --commit $SHA failed: $RUNS_JSON" >&2; exit 4; }
 
         RUN_STATE="$(jq -r '
-            if (map(select(.conclusion == "failure" or .conclusion == "cancelled")) | length) > 0 then "fail"
-            elif (length > 0) and (map(select(.status == "completed" and .conclusion == "success")) | length) == length then "pass"
+            (map(select(.status == "completed"))) as $done |
+            if ($done | map(select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out" or .conclusion == "action_required" or .conclusion == "startup_failure" or .conclusion == "stale")) | length) > 0 then "fail"
+            elif (length > 0) and (($done | length) == length) and (($done | map(select(.conclusion == "success" or .conclusion == "skipped" or .conclusion == "neutral")) | length) == length) then "pass"
             else "pending"
             end' <<<"$RUNS_JSON")"
 

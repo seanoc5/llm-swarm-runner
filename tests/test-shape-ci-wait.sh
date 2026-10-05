@@ -202,6 +202,29 @@ out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_PERM_ERROR=1 \
     "$CI_WAIT" 42 5 2>&1)" || rc=$?
 check "exits 1 when the fallback sees a failing run" '[ "$rc" -eq 1 ]'
 
+# ── Test 10b: fallback, a run timed out (not "failure"/"cancelled") ⇒ still exit 1 ──
+#
+# Self-review finding on this PR: an earlier version only mapped
+# failure/cancelled to "fail", leaving timed_out/action_required/
+# startup_failure/stale stuck as "pending" until the deadline (exit 2
+# instead of 1). A red PR must fail fast, not time out.
+
+heading "Test 10b: fallback path, a run timed out → exit 1 (not a timeout-shaped exit 2)"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_PERM_ERROR=1 \
+    GH_RUNLIST_JSON='[{"status":"completed","conclusion":"timed_out"}]' \
+    CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 3 2>&1)" || rc=$?
+check "exits 1 (fail), not 2 (timeout), on a timed_out run conclusion" '[ "$rc" -eq 1 ]'
+
+# ── Test 10c: fallback, a skipped run alongside a successful one ⇒ still exit 0 ──
+
+heading "Test 10c: fallback path, one run skipped + one succeeded → exit 0 (skipped doesn't block green)"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_PERM_ERROR=1 \
+    GH_RUNLIST_JSON='[{"status":"completed","conclusion":"success"},{"status":"completed","conclusion":"skipped"}]' \
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
+check "exits 0 when the only non-success run is skipped" '[ "$rc" -eq 0 ]'
+
 # ─── Test 11: fallback path, pending then green — keeps polling run list, never re-tries gh pr checks ───
 
 heading "Test 11: fallback path, runs pending then green; gh pr checks is called exactly once"
