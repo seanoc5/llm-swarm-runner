@@ -14,6 +14,18 @@
 #   2. One bounded foreground poll of `gh pr checks`, fixed interval, hard
 #      deadline — never an unbounded loop.
 #
+# Fine-grained personal access tokens (see docs/gh-token-scoping.md): GitHub
+# offers no "Checks" permission for this token type, so `gh pr checks` fails
+# outright with "Resource not accessible by personal access token" — not a
+# real/pending/failed result, a permission error. When that text is seen
+# once, this script switches for the rest of the run to polling
+# `gh run list --commit <sha>` instead (needs only Actions: read, which
+# these tokens already have) and maps the runs itself: any failure/
+# cancelled run → fail; all completed+success → pass; otherwise → pending.
+# Exit codes and the deadline are unchanged. Behaviour with a
+# normal OAuth login token (which can read Checks) is unaffected — the
+# fallback only engages on that exact permission-error text.
+#
 # Usage:
 #   ci-wait.sh <PR#> [timeout-seconds]
 #
@@ -87,38 +99,70 @@ echo "ci-wait: PR #$PR mergeable ($MERGE_STATE), watching checks on ${SHA:0:12} 
 
 DEADLINE=$(( $(date -u +%s) + TIMEOUT ))
 WORKFLOW_COUNT=""   # lazily resolved at most once, only if "no checks" is ever seen
+FALLBACK=0          # set once "gh pr checks" proves unreadable by this token
 while true; do
-    set +e
-    CHECKS_OUT="$(gh pr checks "$PR" 2>&1)"
-    CHECKS_RC=$?
-    set -e
-    case "$CHECKS_RC" in
-        0) echo "ci-wait: PR #$PR checks green."; exit 0 ;;
-        1)
-            if grep -qi "no checks reported" <<<"$CHECKS_OUT"; then
-                if [ -z "$WORKFLOW_COUNT" ]; then
-                    WORKFLOW_COUNT="$(gh api repos/{owner}/{repo}/actions/workflows --jq '.total_count' 2>/dev/null || true)"
-                    # A failed lookup must still count as "resolved" (just
-                    # not "0") — otherwise a persistently-failing `gh api`
-                    # call gets re-run on every single poll instead of once.
-                    [ -n "$WORKFLOW_COUNT" ] || WORKFLOW_COUNT="unknown"
+    if [ "$FALLBACK" != "1" ]; then
+        set +e
+        CHECKS_OUT="$(gh pr checks "$PR" 2>&1)"
+        CHECKS_RC=$?
+        set -e
+
+        if grep -qi "resource not accessible by personal access token" <<<"$CHECKS_OUT"; then
+            FALLBACK=1
+            echo "ci-wait: gh pr checks is not readable by this token (fine-grained PATs have no Checks permission) — falling back to polling gh run list --commit ${SHA:0:12} for PR #$PR." >&2
+        fi
+    fi
+
+    if [ "$FALLBACK" = "1" ]; then
+        set +e
+        RUNS_JSON="$(gh run list --commit "$SHA" --json status,conclusion 2>&1)"
+        RUNS_RC=$?
+        set -e
+        [ "$RUNS_RC" -eq 0 ] || { echo "ci-wait: gh run list --commit $SHA failed: $RUNS_JSON" >&2; exit 4; }
+
+        RUN_STATE="$(jq -r '
+            if (map(select(.conclusion == "failure" or .conclusion == "cancelled")) | length) > 0 then "fail"
+            elif (length > 0) and (map(select(.status == "completed" and .conclusion == "success")) | length) == length then "pass"
+            else "pending"
+            end' <<<"$RUNS_JSON")"
+
+        case "$RUN_STATE" in
+            pass) echo "ci-wait: PR #$PR checks green (via Actions-runs fallback)."; exit 0 ;;
+            fail)
+                echo "ci-wait: PR #$PR has failing checks (via Actions-runs fallback):" >&2
+                echo "$RUNS_JSON" >&2
+                exit 1 ;;
+            pending) : ;; # fall through to deadline/sleep below
+        esac
+    else
+        case "$CHECKS_RC" in
+            0) echo "ci-wait: PR #$PR checks green."; exit 0 ;;
+            1)
+                if grep -qi "no checks reported" <<<"$CHECKS_OUT"; then
+                    if [ -z "$WORKFLOW_COUNT" ]; then
+                        WORKFLOW_COUNT="$(gh api repos/{owner}/{repo}/actions/workflows --jq '.total_count' 2>/dev/null || true)"
+                        # A failed lookup must still count as "resolved" (just
+                        # not "0") — otherwise a persistently-failing `gh api`
+                        # call gets re-run on every single poll instead of once.
+                        [ -n "$WORKFLOW_COUNT" ] || WORKFLOW_COUNT="unknown"
+                    fi
+                    if [ "$WORKFLOW_COUNT" = "0" ]; then
+                        echo "ci-wait: PR #$PR has no CI checks configured on this repo at all (0 workflows) — nothing ran, so nothing failed." >&2
+                        exit 5
+                    fi
+                    # Workflows exist (or the workflow-count lookup itself
+                    # failed, in which case failing closed means NOT assuming
+                    # absence) — this is the run-not-registered-yet race, not a
+                    # CI-less repo. Treat as pending, same as exit 8 below.
+                    echo "ci-wait: PR #$PR shows no checks yet, but the repo has CI configured — treating as pending, not absent." >&2
+                else
+                    echo "ci-wait: PR #$PR has failing checks:"; echo "$CHECKS_OUT" >&2; exit 1
                 fi
-                if [ "$WORKFLOW_COUNT" = "0" ]; then
-                    echo "ci-wait: PR #$PR has no CI checks configured on this repo at all (0 workflows) — nothing ran, so nothing failed." >&2
-                    exit 5
-                fi
-                # Workflows exist (or the workflow-count lookup itself
-                # failed, in which case failing closed means NOT assuming
-                # absence) — this is the run-not-registered-yet race, not a
-                # CI-less repo. Treat as pending, same as exit 8 below.
-                echo "ci-wait: PR #$PR shows no checks yet, but the repo has CI configured — treating as pending, not absent." >&2
-            else
-                echo "ci-wait: PR #$PR has failing checks:"; echo "$CHECKS_OUT" >&2; exit 1
-            fi
-            ;;
-        8) : ;; # pending — fall through to deadline/sleep below
-        *) echo "ci-wait: gh pr checks $PR exited $CHECKS_RC:"; echo "$CHECKS_OUT" >&2; exit 4 ;;
-    esac
+                ;;
+            8) : ;; # pending — fall through to deadline/sleep below
+            *) echo "ci-wait: gh pr checks $PR exited $CHECKS_RC:"; echo "$CHECKS_OUT" >&2; exit 4 ;;
+        esac
+    fi
 
     NOW=$(date -u +%s)
     [ "$NOW" -lt "$DEADLINE" ] || {

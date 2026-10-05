@@ -58,6 +58,10 @@ case "$1 $2" in
         if [ -f "${GH_CHECKS_CALL_COUNT_FILE:-/dev/null}" ]; then cn="$(cat "$GH_CHECKS_CALL_COUNT_FILE")"; fi
         cn=$((cn + 1))
         [ -n "${GH_CHECKS_CALL_COUNT_FILE:-}" ] && echo "$cn" > "$GH_CHECKS_CALL_COUNT_FILE"
+        if [ "${GH_CHECKS_PERM_ERROR:-0}" = "1" ]; then
+            echo "GraphQL: Resource not accessible by personal access token (node.statusCheckRollup.contexts.nodes)" >&2
+            exit 1
+        fi
         if [ "$cn" -le "${GH_CHECKS_NO_CHECKS_UNTIL:-0}" ] || [ "${GH_CHECKS_NO_CHECKS:-0}" = "1" ]; then
             echo "no checks reported on the 'main' branch" >&2
             exit 1
@@ -66,6 +70,20 @@ case "$1 $2" in
     "api repos/{owner}/{repo}/actions/workflows")
         echo "${GH_WORKFLOW_COUNT:-1}"
         exit 0 ;;
+    "run list")
+        rn=0
+        if [ -f "${GH_RUNLIST_CALL_COUNT_FILE:-/dev/null}" ]; then rn="$(cat "$GH_RUNLIST_CALL_COUNT_FILE")"; fi
+        rn=$((rn + 1))
+        [ -n "${GH_RUNLIST_CALL_COUNT_FILE:-}" ] && echo "$rn" > "$GH_RUNLIST_CALL_COUNT_FILE"
+        if [ -n "${GH_RUNLIST_JSON_SEQUENCE:-}" ]; then
+            idx="$rn"
+            lines="$(wc -l < "$GH_RUNLIST_JSON_SEQUENCE")"
+            [ "$idx" -le "$lines" ] || idx="$lines"
+            sed -n "${idx}p" "$GH_RUNLIST_JSON_SEQUENCE"
+        else
+            echo "${GH_RUNLIST_JSON:-[]}"
+        fi
+        exit "${GH_RUNLIST_RC:-0}" ;;
 esac
 exit 0
 EOF
@@ -158,6 +176,52 @@ out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_WORKFLOW_COUNT=1 \
 check "resolves to green once the real check run registers (not a false exit 5)" '[ "$rc" -eq 0 ]'
 check "message names the pending-not-absent distinction" 'grep -qi "treating as pending, not absent" <<<"$out"'
 check "gh pr checks was actually polled more than once (the race was real)" '[ "$(cat "$CHECKS_COUNT_FILE")" -ge 3 ]'
+
+# ── Test 9: fine-grained token can't read Checks → falls back to gh run list, green ──
+#
+# Issue #513: a fine-grained PAT has Actions:read but no Checks permission,
+# so `gh pr checks` fails outright with "Resource not accessible by
+# personal access token" instead of returning a real/pending/failed result.
+# ci-wait.sh must recognize that exact text and switch to polling
+# `gh run list --commit <sha>` for the rest of the run.
+
+heading "Test 9: gh pr checks unreadable by a fine-grained token → falls back to gh run list, run green → exit 0"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_PERM_ERROR=1 \
+    GH_RUNLIST_JSON='[{"status":"completed","conclusion":"success"}]' \
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
+check "exits 0 once the fallback sees a green run" '[ "$rc" -eq 0 ]'
+check "logs that the fallback was used" 'grep -qi "falling back to polling gh run list" <<<"$out"'
+
+# ─────────── Test 10: fallback sees a failing run ⇒ exit 1 ──────────────────
+
+heading "Test 10: fallback path, a run failed → exit 1"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_PERM_ERROR=1 \
+    GH_RUNLIST_JSON='[{"status":"completed","conclusion":"success"},{"status":"completed","conclusion":"failure"}]' \
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
+check "exits 1 when the fallback sees a failing run" '[ "$rc" -eq 1 ]'
+
+# ─── Test 11: fallback path, pending then green — keeps polling run list, never re-tries gh pr checks ───
+
+heading "Test 11: fallback path, runs pending then green; gh pr checks is called exactly once"
+rc=0
+CHECKS_COUNT_FILE_11="$TEST_DIR/checks-call-count-11"
+RUNLIST_COUNT_FILE_11="$TEST_DIR/runlist-call-count-11"
+RUNLIST_SEQ_11="$TEST_DIR/runlist-seq-11"
+rm -f "$CHECKS_COUNT_FILE_11" "$RUNLIST_COUNT_FILE_11"
+printf '%s\n' \
+    '[{"status":"in_progress","conclusion":null}]' \
+    '[{"status":"in_progress","conclusion":null}]' \
+    '[{"status":"completed","conclusion":"success"}]' \
+    > "$RUNLIST_SEQ_11"
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_PERM_ERROR=1 \
+    GH_CHECKS_CALL_COUNT_FILE="$CHECKS_COUNT_FILE_11" \
+    GH_RUNLIST_CALL_COUNT_FILE="$RUNLIST_COUNT_FILE_11" GH_RUNLIST_JSON_SEQUENCE="$RUNLIST_SEQ_11" \
+    CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 10 2>&1)" || rc=$?
+check "resolves to green once the run completes" '[ "$rc" -eq 0 ]'
+check "gh run list was polled more than once" '[ "$(cat "$RUNLIST_COUNT_FILE_11")" -ge 3 ]'
+check "gh pr checks was called exactly once (fallback engaged, no re-tries)" '[ "$(cat "$CHECKS_COUNT_FILE_11")" -eq 1 ]'
 
 heading "Results: $PASS checks passed"
 green "All checks passed."
