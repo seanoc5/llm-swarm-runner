@@ -46,11 +46,20 @@
 #   missing/unparseable BLIND_MERGE_RISK marker: treated as medium (fail
 #                      toward requiring review)
 #
+# issue #534: a PR the coordinator drafted as a hold (draft-as-hold,
+# `prompts/coordinator.md` § "Draft-as-hold") carries a
+# `> ⛔ **COORDINATOR HOLD**` banner in its body. Un-drafting that PR
+# defeats the hold even when self-review comes back clean, so a held PR
+# still gets its self-review posted (same rubric as above) but is never
+# un-drafted here — only the coordinator lifts the hold.
+#
 # Exit codes:
 #   0  readied (gh pr ready ran)
 #   2  refused — self-review returned BLOCK, or self-review-pr.sh exited 1
 #      (infra failure or an unparseable verdict, indistinguishable from the
 #      exit code alone — issue #446, treated as blocking either way)
+#   3  held — a COORDINATOR HOLD banner is on the PR body; self-review ran
+#      (and posted) as usual, but gh pr ready was deliberately skipped
 #   1  usage / gh error resolving the PR body
 set -euo pipefail
 
@@ -68,6 +77,15 @@ BODY="$(gh pr view "$PR" --json body --jq .body 2>/dev/null)" \
 
 RISK="$(grep -oE '<!-- BLIND_MERGE_RISK: (low|medium|high) -->' <<<"$BODY" \
     | head -1 | sed -E 's/.*: (low|medium|high) -->/\1/' || true)"
+
+HELD=0
+# Matches the literal draft-as-hold banner (prompts/coordinator.md): a
+# blockquote line starting with the banner, anchored to line-start so a
+# PR body that merely QUOTES or discusses the banner in running prose
+# (e.g. this PR's own appendix, or an inline code span) doesn't also
+# match and self-hold — only the real banner, which the coordinator
+# always prepends as its own leading "> " line, does.
+grep -qE '^> ⛔ \*\*COORDINATOR HOLD\*\*' <<<"$BODY" && HELD=1
 
 case "$RISK" in
     low)
@@ -144,6 +162,12 @@ case "$RISK" in
         fi
         ;;
 esac
+
+if [ "$HELD" = "1" ]; then
+    echo "pr-ready: PR #$PR carries a COORDINATOR HOLD banner — staying draft."
+    echo "          Self-review above is posted, but only the coordinator lifts the hold and readies this PR."
+    exit 3
+fi
 
 echo "pr-ready: gh pr ready $PR"
 gh pr ready "$PR"
