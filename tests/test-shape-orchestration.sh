@@ -1192,6 +1192,60 @@ green "a guard token more than 3 lines from 3 real markers does not suppress the
 
 rm -f "$TEST_DIR/tmux-windows.txt" "$TEST_DIR/tmux-pane-iss-77.txt"
 
+heading "Test 16g: an obedient worker's rendered decision-needed outbox heredoc does not false-positive (#467, round-10 self-review finding)"
+# Fourth self-review finding: test 16e's prose line sat right next to both
+# guard tokens, closer than the real outbox template ever would. The
+# template at prompts/worker.md's "Worker outbox" section is YAML
+# frontmatter (`---` / `kind: decision-needed` / `task_id:` / `ts:` /
+# `---`) THEN the body — so `kind: decision-needed` can land 4+ lines
+# above a body that narrates the stop, outside the guard's ±3-line window.
+# worker.md now tells the worker to describe the stop in words instead of
+# retyping the literal marker there, which is what this fixture's body
+# does (no literal WATCH_TIMEOUT_HIT in the heredoc at all) — proving an
+# obedient worker following that instruction stays clean even though
+# "decision-needed" sits well outside the guard window from the body text.
+rm -rf "$TEST_DIR/wt-issue-77/.swarm/tasks/outbox"
+echo "iss-77" > "$TEST_DIR/tmux-windows.txt"
+cat > "$TEST_DIR/tmux-pane-iss-77.txt" <<'PANE'
+timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
+exit=124
+WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=1 ran=595s
+timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
+exit=124
+WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=2 ran=595s
+cat > "$tmp" <<EOF
+---
+kind: decision-needed
+task_id: wt-issue-77
+ts: 2026-10-05T00:00:00Z
+---
+Hit the timeout twice in a row on restore.sh (two attempts, ~595s each).
+A full restore needs about 26 minutes per the dev-db size; handing this to
+the util pane, which has no timeout, is the usual fix. Parking as blocked.
+EOF
+PANE
+
+cd "$PROJECT_DIR"
+DRY_RUN=0 WATCH_TIMEOUT_RETRY_SWEEP_SECS=1 WATCH_BG_VIOLATION_SWEEP_SECS=0 WATCH_PR_POLL_SECS=0 \
+    WATCH_ORPHAN_SWEEP_SECS=0 WATCH_CHECK_ON_DONE=0 POLL_SECS=1 \
+    "$WATCH" "$PROJECT_DIR" > "$TEST_DIR/watch-timeoutretry-g.log" 2>&1 &
+WATCH_PID=$!
+
+sleep 5
+still_running=0
+kill -0 "$WATCH_PID" 2>/dev/null && still_running=1
+kill "$WATCH_PID" 2>/dev/null || true
+wait "$WATCH_PID" 2>/dev/null || true
+unset WATCH_PID
+
+[ "$still_running" = "1" ] || red "watch process exited unexpectedly; log: $(cat "$TEST_DIR/watch-timeoutretry-g.log")"
+outbox_file="$(ls "$TEST_DIR"/wt-issue-77/.swarm/tasks/outbox/*.md 2>/dev/null | head -1)" || true
+[ -z "$outbox_file" ] \
+    || red "a realistically-distant decision-needed heredoc wrongly tipped the sweep over; got: $(cat "$outbox_file")"
+green "2 real markers + a rendered decision-needed heredoc that never retypes the marker do not false-positive"
+
+rm -f "$TEST_DIR/tmux-windows.txt" "$TEST_DIR/tmux-pane-iss-77.txt"
+
 # ────────────────────────── Done ──────────────────────────
 
 heading "All shape-orchestration tests passed"

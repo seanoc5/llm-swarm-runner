@@ -109,7 +109,10 @@ On the second consecutive `WATCH_TIMEOUT_HIT` for the same command: write a
 ran, and what a full run actually needs (time its first real sub-step if
 you don't already know), then write status `blocked` and park — don't
 attempt a third run. The fix is usually to hand the command to the
-operator's `util` pane, which has no timeout.
+operator's `util` pane, which has no timeout. Describe the stop in words
+("hit the timeout twice on restore.sh"), not the literal `WATCH_TIMEOUT_HIT`
+token — the outbox frontmatter puts `kind: decision-needed` too many lines
+above the body for the watcher's narrow guard window to help here.
 
 ---
 
