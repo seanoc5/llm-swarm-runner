@@ -75,6 +75,9 @@ case "$1 $2" in
         if [ -f "${GH_RUNLIST_CALL_COUNT_FILE:-/dev/null}" ]; then rn="$(cat "$GH_RUNLIST_CALL_COUNT_FILE")"; fi
         rn=$((rn + 1))
         [ -n "${GH_RUNLIST_CALL_COUNT_FILE:-}" ] && echo "$rn" > "$GH_RUNLIST_CALL_COUNT_FILE"
+        if [ "${GH_RUNLIST_STDERR_NOISE:-0}" = "1" ]; then
+            echo "warning: some deprecation notice from gh itself" >&2
+        fi
         if [ -n "${GH_RUNLIST_JSON_SEQUENCE:-}" ]; then
             idx="$rn"
             lines="$(wc -l < "$GH_RUNLIST_JSON_SEQUENCE")"
@@ -224,6 +227,29 @@ out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_PERM_ERROR=1 \
     GH_RUNLIST_JSON='[{"status":"completed","conclusion":"success"},{"status":"completed","conclusion":"skipped"}]' \
     "$CI_WAIT" 42 5 2>&1)" || rc=$?
 check "exits 0 when the only non-success run is skipped" '[ "$rc" -eq 0 ]'
+
+# ── Test 10d: fallback, gh's own stderr noise never corrupts the JSON parse ──
+#
+# Self-review finding, second round: stdout and stderr must be kept apart
+# for `gh run list`, or a stray stderr line merged into stdout would fail
+# the jq parse and (under `set -e`) leak jq's own exit code 5 out as this
+# script's exit code — misread downstream as "no CI configured" instead of
+# a real gh/parse error (exit 4).
+
+heading "Test 10d: fallback path, gh emits noise on stderr → stdout JSON still parses clean, exit 0"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_PERM_ERROR=1 \
+    GH_RUNLIST_STDERR_NOISE=1 GH_RUNLIST_JSON='[{"status":"completed","conclusion":"success"}]' \
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
+check "exits 0 — stderr noise never reached the JSON parse" '[ "$rc" -eq 0 ]'
+
+# ── Test 10e: fallback, gh run list itself fails ⇒ exit 4, never 5 ───────────
+
+heading "Test 10e: fallback path, gh run list fails outright → exit 4 (gh error), not 5"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_PERM_ERROR=1 \
+    GH_RUNLIST_RC=1 "$CI_WAIT" 42 5 2>&1)" || rc=$?
+check "exits 4 on a gh run list failure, never misread as exit 5" '[ "$rc" -eq 4 ]'
 
 # ─── Test 11: fallback path, pending then green — keeps polling run list, never re-tries gh pr checks ───
 

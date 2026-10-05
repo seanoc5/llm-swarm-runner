@@ -102,6 +102,8 @@ echo "ci-wait: PR #$PR mergeable ($MERGE_STATE), watching checks on ${SHA:0:12} 
 DEADLINE=$(( $(date -u +%s) + TIMEOUT ))
 WORKFLOW_COUNT=""   # lazily resolved at most once, only if "no checks" is ever seen
 FALLBACK=0          # set once "gh pr checks" proves unreadable by this token
+RUNS_ERR_FILE="$(mktemp)"
+trap 'rm -f "$RUNS_ERR_FILE"' EXIT
 while true; do
     if [ "$FALLBACK" != "1" ]; then
         set +e
@@ -116,11 +118,20 @@ while true; do
     fi
 
     if [ "$FALLBACK" = "1" ]; then
+        # stdout/stderr are kept apart (never 2>&1 here): stdout must stay
+        # pure JSON for the jq parse below, or a stray warning line on
+        # stderr could get merged in and fail the parse — which, under
+        # `set -e`, would otherwise propagate jq's own exit code (5) as
+        # this script's exit code and get misread as "no CI configured"
+        # (self-review finding on PR #540/#513).
         set +e
-        RUNS_JSON="$(gh run list --commit "$SHA" --json status,conclusion 2>&1)"
+        RUNS_JSON="$(gh run list --commit "$SHA" --json status,conclusion 2>"$RUNS_ERR_FILE")"
         RUNS_RC=$?
         set -e
-        [ "$RUNS_RC" -eq 0 ] || { echo "ci-wait: gh run list --commit $SHA failed: $RUNS_JSON" >&2; exit 4; }
+        if [ "$RUNS_RC" -ne 0 ] || ! jq -e . >/dev/null 2>&1 <<<"$RUNS_JSON"; then
+            echo "ci-wait: gh run list --commit $SHA failed or returned unparseable output: $(cat "$RUNS_ERR_FILE")$RUNS_JSON" >&2
+            exit 4
+        fi
 
         RUN_STATE="$(jq -r '
             (map(select(.status == "completed"))) as $done |
