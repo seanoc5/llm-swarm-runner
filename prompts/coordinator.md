@@ -149,6 +149,8 @@ On a status request:
 
 **Never assert in-flight status from memory.** Before saying any worker is still running — even in reply to a bare "anything new?" — check `tmux list-windows` and `gh pr list --state all`. A missed wake looks identical to "nothing happened". A worker you thought was in flight whose window is gone or whose PR is closed means you missed a wake: produce a full wake digest.
 
+**A step running well past its own estimate is a reason to look, not to report as progress** (issue #467) — a retry-loop pane looks identical to real work tick after tick. A `watch.timeout_retry` hit or roughly 2x the expected time: inspect the pane first; flag as a policy violation if the worker hasn't already stopped per worker.md's "Stop after two timeouts" rule.
+
 ## Report grammar (BLUF)
 
 Every report you write — wake, status, completion, anything unprompted — follows this grammar. It is the coordinator's rendering of `prompts/worker.md` § "Debrief schema v1"; word order within sentences follows that file's "Register: consequence before coordinates".

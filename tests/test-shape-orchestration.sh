@@ -931,6 +931,110 @@ green "a worker's own violation line, rendered inside the coordinator window (as
 
 rm -f "$TEST_DIR/tmux-windows.txt" "$TEST_DIR/tmux-pane-iss-77.txt" "$TEST_DIR/tmux-pane-coordinator.txt"
 
+heading "Test 16a: timeout_retry_sweep_pass flags a worker stuck retrying a command past its own timeout (#467)"
+# Canned pane capture: 3 WATCH_TIMEOUT_HIT markers (the prompts/worker.md
+# "Stop after two timeouts on the same command" rule's echoed marker),
+# meeting the default WATCH_TIMEOUT_RETRY_MIN_COUNT=3 threshold.
+echo "iss-77" > "$TEST_DIR/tmux-windows.txt"
+cat > "$TEST_DIR/tmux-pane-iss-77.txt" <<'PANE'
+timeout 595 ./restore.sh; ec=$?
+WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=1 ran=595s
+timeout 595 ./restore.sh; ec=$?
+WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=2 ran=595s
+timeout 595 ./restore.sh; ec=$?
+WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=3 ran=595s
+PANE
+rm -rf "$TEST_DIR/wt-issue-77/.swarm/tasks/outbox"
+
+cd "$PROJECT_DIR"
+DRY_RUN=0 WATCH_TIMEOUT_RETRY_SWEEP_SECS=1 WATCH_BG_VIOLATION_SWEEP_SECS=0 WATCH_PR_POLL_SECS=0 \
+    WATCH_ORPHAN_SWEEP_SECS=0 WATCH_CHECK_ON_DONE=0 POLL_SECS=1 \
+    "$WATCH" "$PROJECT_DIR" > "$TEST_DIR/watch-timeoutretry-a.log" 2>&1 &
+WATCH_PID=$!
+
+outbox_file=""
+for ((i=0; i<20; i++)); do
+    outbox_file="$(ls "$TEST_DIR"/wt-issue-77/.swarm/tasks/outbox/*.md 2>/dev/null | head -1)" || true
+    [ -n "$outbox_file" ] && break
+    sleep 0.5
+done
+kill "$WATCH_PID" 2>/dev/null || true
+wait "$WATCH_PID" 2>/dev/null || true
+unset WATCH_PID
+
+[ -n "$outbox_file" ] || red "expected a timeout-retry outbox message; log: $(cat "$TEST_DIR/watch-timeoutretry-a.log")"
+grep -q 'kind: fyi' "$outbox_file" || red "expected kind: fyi in $outbox_file"
+grep -q 'iss-77' "$outbox_file" || red "expected issue reference in $outbox_file"
+green "3 WATCH_TIMEOUT_HIT markers -> outbox fyi message dropped for iss-77"
+
+heading "Test 16b: timeout_retry_sweep_pass does not fire below WATCH_TIMEOUT_RETRY_MIN_COUNT (#467)"
+# Same marker, but only 2 occurrences against the default min count of 3 —
+# a single retry (one timeout, one legitimate reattempt) should not page
+# anyone.
+rm -rf "$TEST_DIR/wt-issue-77/.swarm/tasks/outbox"
+echo "iss-77" > "$TEST_DIR/tmux-windows.txt"
+cat > "$TEST_DIR/tmux-pane-iss-77.txt" <<'PANE'
+timeout 595 ./restore.sh; ec=$?
+WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=1 ran=595s
+timeout 595 ./restore.sh; ec=$?
+WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=2 ran=595s
+PANE
+
+cd "$PROJECT_DIR"
+DRY_RUN=0 WATCH_TIMEOUT_RETRY_SWEEP_SECS=1 WATCH_BG_VIOLATION_SWEEP_SECS=0 WATCH_PR_POLL_SECS=0 \
+    WATCH_ORPHAN_SWEEP_SECS=0 WATCH_CHECK_ON_DONE=0 POLL_SECS=1 \
+    "$WATCH" "$PROJECT_DIR" > "$TEST_DIR/watch-timeoutretry-b.log" 2>&1 &
+WATCH_PID=$!
+
+sleep 5
+still_running=0
+kill -0 "$WATCH_PID" 2>/dev/null && still_running=1
+kill "$WATCH_PID" 2>/dev/null || true
+wait "$WATCH_PID" 2>/dev/null || true
+unset WATCH_PID
+
+[ "$still_running" = "1" ] || red "watch process exited unexpectedly; log: $(cat "$TEST_DIR/watch-timeoutretry-b.log")"
+outbox_file="$(ls "$TEST_DIR"/wt-issue-77/.swarm/tasks/outbox/*.md 2>/dev/null | head -1)" || true
+[ -z "$outbox_file" ] \
+    || red "2 markers (below MIN_COUNT=3) wrongly fired an outbox message; got: $(cat "$outbox_file")"
+green "2 WATCH_TIMEOUT_HIT markers (below the default min count of 3) do not fire"
+
+heading "Test 16c: timeout_retry_sweep_pass under DRY_RUN=1 logs but does not write a real outbox message (#467)"
+rm -rf "$TEST_DIR/wt-issue-77/.swarm/tasks/outbox"
+rm -f "$PROJECT_DIR/.swarm/events.log"
+echo "iss-77" > "$TEST_DIR/tmux-windows.txt"
+cat > "$TEST_DIR/tmux-pane-iss-77.txt" <<'PANE'
+WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=1 ran=595s
+WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=2 ran=595s
+WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=3 ran=595s
+PANE
+
+cd "$PROJECT_DIR"
+DRY_RUN=1 WATCH_TIMEOUT_RETRY_SWEEP_SECS=1 WATCH_BG_VIOLATION_SWEEP_SECS=0 WATCH_PR_POLL_SECS=0 \
+    WATCH_ORPHAN_SWEEP_SECS=0 WATCH_CHECK_ON_DONE=0 POLL_SECS=1 \
+    "$WATCH" "$PROJECT_DIR" > "$TEST_DIR/watch-timeoutretry-c.log" 2>&1 &
+WATCH_PID=$!
+
+logged=0
+for ((i=0; i<20; i++)); do
+    if grep -q 'watch.timeout_retry.*dry_run=1' "$PROJECT_DIR/.swarm/events.log" 2>/dev/null; then
+        logged=1
+        break
+    fi
+    sleep 0.5
+done
+kill "$WATCH_PID" 2>/dev/null || true
+wait "$WATCH_PID" 2>/dev/null || true
+unset WATCH_PID
+
+[ "$logged" = "1" ] || red "expected a dry_run=1 watch.timeout_retry event; log: $(cat "$PROJECT_DIR/.swarm/events.log" 2>/dev/null || echo none)"
+outbox_file="$(ls "$TEST_DIR"/wt-issue-77/.swarm/tasks/outbox/*.md 2>/dev/null | head -1)" || true
+[ -z "$outbox_file" ] \
+    || red "DRY_RUN=1 should not write a real outbox message; got: $(cat "$outbox_file")"
+green "DRY_RUN=1 logs the timeout-retry sighting but writes no real outbox message"
+
+rm -f "$TEST_DIR/tmux-windows.txt" "$TEST_DIR/tmux-pane-iss-77.txt"
+
 # ────────────────────────── Done ──────────────────────────
 
 heading "All shape-orchestration tests passed"

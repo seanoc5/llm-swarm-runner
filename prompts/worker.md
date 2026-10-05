@@ -67,6 +67,33 @@ to foreground-with-timeout rather than retrying.
   parallel work, "Parallelism is not your call" above applies: propose a
   sibling worker in a `## Decision`.
 
+### Stop after two timeouts on the same command (issue #467)
+
+A command that needs 26 minutes will keep hitting a 10-minute wall forever —
+raising the timeout once and retrying is fine, but retrying the *same*
+budget a third time, or quietly climbing the budget attempt after attempt,
+just burns hours while the pane looks like ordinary progress. If a command
+exits 124 (a shell `timeout N cmd` wrapper) or gets killed by the Bash
+tool's own configured timeout twice in a row for the same command, stop —
+don't raise the timeout, split the job, or retry a third time without new
+information (e.g. you timed the first real sub-step and now know the true
+budget).
+
+Each time this happens, echo one line so the pane carries a visible,
+greppable record (the coordinator's watcher looks for this literal marker):
+
+```bash
+timeout 595 ./restore.sh; ec=$?
+[ "$ec" = 124 ] && echo "WATCH_TIMEOUT_HIT cmd=\"restore.sh\" attempt=$n ran=595s"
+```
+
+On the second consecutive `WATCH_TIMEOUT_HIT` for the same command: write a
+`decision-needed` outbox message naming the command, how long each attempt
+ran, and what a full run actually needs (time its first real sub-step if
+you don't already know), then write status `blocked` and park — don't
+attempt a third run. The fix is usually to hand the command to the
+operator's `util` pane, which has no timeout.
+
 ---
 
 ## Verify once, and name mechanisms

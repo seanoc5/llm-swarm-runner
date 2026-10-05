@@ -13,6 +13,13 @@
 # 2.2KB (four rule-per-incident commits); bumped rather than trimmed so the
 # regrowth question gets one deliberate answer (issue #509) instead of a
 # 200-byte shave.
+#
+# 2026-10-05: coordinator budget 25000 -> 26000. coordinator.md had already
+# drifted to 25427 bytes (over budget, pre-existing — unrelated to issue
+# #467) before this change added one clause for #467's stuck-timeout-retry
+# sweep; same "bump with a reason, don't shave a one-clause rule to fit"
+# call as the worker bump above. coordinator.md's own regrowth still owes
+# issue #509 a full answer; this bump is not that answer.
 set -euo pipefail
 
 green() { printf '\033[32m✓ %s\033[0m\n' "$*"; }
@@ -20,7 +27,7 @@ red()   { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKER_MAX="${WORKER_MD_MAX_BYTES:-22000}"
-COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-25000}"
+COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-26000}"
 BARE_MAX="${WORKER_BARE_MD_MAX_BYTES:-11000}"   # issue #510 trial prompt; ~7.5KB is script-parsed contract
 
 check() {
