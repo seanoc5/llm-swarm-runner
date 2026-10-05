@@ -61,11 +61,9 @@ to foreground-with-timeout rather than retrying.
   hit `MAX_WORKERS=5`; operator may raise it in `.swarm/.env`").
 - **Never `tmux send-keys`** into the coordinator or another worker. Talk via
   your status file, your outbox, or `gh` comments.
-- **No subagents.** The Agent/Task/Workflow tools are mechanically
-  disallowed on your session (issue #476), even under
-  `--dangerously-skip-permissions` — don't spend a turn trying them. For
-  parallel work, "Parallelism is not your call" above applies: propose a
-  sibling worker in a `## Decision`.
+- **No subagents.** Agent/Task/Workflow are disallowed on your session
+  (issue #476), even under `--dangerously-skip-permissions`; don't try
+  them. For parallel work, see the bullet above.
 
 ### Stop after two timeouts on the same command (issue #467)
 
@@ -120,15 +118,13 @@ operator's `util` pane, which has no timeout.
 
 ## Verify once, and name mechanisms
 
-- Iterate with targeted runs (`--tests "..."`, single-file lint). Run the
-  project's whole fast tier once, just before your final commit:
-  `.swarm/check.sh` or `$WORKER_CHECK_CMD` if set, else the unit command in
-  its CLAUDE.md. If you touched database code (repositories, entities,
-  migrations, SQL), also run the database tests for that area, filtered to
-  the classes or files covering it (e.g. `integrationTest --tests "..."`).
-  Skip the rest of integration, slow, e2e and aggregate tasks (`check`,
-  `build`) unless the brief asks; CI and the nightly lane run them. Don't
-  re-run a green suite, and never pass `--no-daemon` to Gradle.
+- Iterate with targeted runs (`--tests "..."`, single-file lint). Before
+  the final commit, run the whole fast tier once (`.swarm/check.sh` or
+  `$WORKER_CHECK_CMD` if set, else CLAUDE.md's unit command), plus the
+  database tests covering any DB code you touched, filtered to that area.
+  Leave the rest of integration/slow/e2e and `check`/`build` to CI and the
+  nightly unless the brief asks. Don't re-run a green suite; never pass
+  `--no-daemon` to Gradle.
 
 ### A failure you did not cause still needs a named mechanism
 
@@ -304,10 +300,8 @@ $LLM_SWARM_DIR/scripts/task-done.sh "$TASK_ID" ok    # or: err "<short reason>"
 Always the `$LLM_SWARM_DIR`-prefixed path (your checkout may have no
 `scripts/` of its own). `$TASK_ID` matches your status file. `ok` covers
 any concluded outcome — PR, `blocked`, `done-no-pr`; use `err` only when
-nothing usable was delivered. This is the coordinator's one reliable
-"worker finished" signal for an interactive session that never exits on
-its own — without it, several detectors used to each guess and
-double-record completions (#451). If the project runs an executed check,
+nothing usable was delivered. It is the coordinator's one reliable
+"worker finished" signal (#451). If the project runs an executed check,
 `worker-listener.sh` reconciles this record against it afterward, so
 report what you believe now. Script missing (pre-#451 checkout) → skip;
 don't hand-write a `done/*.json` yourself.
