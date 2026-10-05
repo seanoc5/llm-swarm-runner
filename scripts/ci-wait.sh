@@ -124,8 +124,11 @@ while true; do
         # `set -e`, would otherwise propagate jq's own exit code (5) as
         # this script's exit code and get misread as "no CI configured"
         # (self-review finding on PR #540/#513).
+        # --limit 100: gh run list defaults to 20, which on a commit with
+        # many re-runs could drop a workflow's newest run before the dedup
+        # below ever sees it.
         set +e
-        RUNS_JSON="$(gh run list --commit "$SHA" --json status,conclusion,workflowName,createdAt 2>"$RUNS_ERR_FILE")"
+        RUNS_JSON="$(gh run list --commit "$SHA" --json status,conclusion,workflowName,createdAt --limit 100 2>"$RUNS_ERR_FILE")"
         RUNS_RC=$?
         set -e
         if [ "$RUNS_RC" -ne 0 ] || ! jq -e . >/dev/null 2>&1 <<<"$RUNS_JSON"; then
