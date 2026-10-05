@@ -75,9 +75,9 @@ budget a third time, or quietly climbing the budget attempt after attempt,
 just burns hours while the pane looks like ordinary progress. If a command
 exits 124 (a shell `timeout N cmd` wrapper) or gets killed by the Bash
 tool's own configured timeout twice in a row for the same command, stop —
-don't raise the timeout, split the job, or retry a third time without new
-information (e.g. you timed the first real sub-step and now know the true
-budget).
+don't, without new information (e.g. you timed the first real sub-step
+and now know the true budget), raise the timeout, split the job, or retry
+a third time.
 
 Each time this happens, redirect the command's own output to a file, not
 the pane — a noisy command's output folds there ("… +N lines"), which can
@@ -91,7 +91,7 @@ splitting it keeps the whole token out of the command source while still
 printing it whole in the output:
 
 ```bash
-timeout 595 ./restore.sh >restore.log 2>&1; ec=$?
+timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
 [ "$ec" = 124 ] && echo "WATCH_TIMEOUT""_HIT cmd=\"restore.sh\" attempt=$n ran=595s"
 ```
 

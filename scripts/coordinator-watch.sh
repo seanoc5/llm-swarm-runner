@@ -5037,6 +5037,18 @@ EOF
 # not the feature firing, and doesn't count. None of those tokens appear in
 # the worker rule's own echoed output or the command line before it, so a
 # real hit is never guarded away by this.
+#
+# Known gap (self-review finding, accepted as-is): the count is per PANE,
+# not per command, so 3 different one-off timeouts on 3 unrelated commands
+# (a test run, a build, a deploy) within the same 200-line window add up
+# to the same count as one command stuck retrying — the rule is
+# per-command, this sweep's counter isn't. Parsing each marker's cmd=
+# field to group by command would fix it precisely but makes the sweep
+# depend on a field worker.md shows as an example, not a mandated schema.
+# Cheaper and lower-risk: the outbox message below says the count may
+# span different commands and tells the reader to check the cmd= fields
+# themselves before concluding a violation — same "detection only, inspect
+# before acting" posture this sweep already has everywhere else.
 timeout_retry_sweep_pass() {
     tmux has-session -t "$SESSION_NAME" 2>/dev/null || return 0
 
@@ -5105,7 +5117,7 @@ kind: fyi
 task_id: watcher-timeout-retry
 ts: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 ---
-Automated timeout-retry check (issue #467, WATCH_TIMEOUT_RETRY_SWEEP_SECS) saw $count WATCH_TIMEOUT_HIT marker(s) in iss-$issue's recent pane output — this usually means a command is being retried after repeatedly hitting its own timeout rather than being fixed or escalated. Per prompts/worker.md's "Stop after two timeouts on the same command" rule, two consecutive 124 exits on the same command should already have stopped the worker and parked it with a decision-needed outbox message; if that hasn't happened, flag it in your next report as a worker-policy violation and inspect the pane before treating this step as ordinary progress — don't try to autoremediate, the pane may be mid-task.
+Automated timeout-retry check (issue #467, WATCH_TIMEOUT_RETRY_SWEEP_SECS) saw $count WATCH_TIMEOUT_HIT marker(s) in iss-$issue's recent pane output. This sweep counts markers across the whole pane, not per command, so $count could be one command stuck in a retry loop or several unrelated one-off timeouts (e.g. a test run, then a build, then a deploy, each timing out once) — check each marker's cmd= field before concluding anything. If they're the SAME command repeating: per prompts/worker.md's "Stop after two timeouts on the same command" rule, two consecutive 124 exits on it should already have stopped the worker and parked it with a decision-needed outbox message; flag a worker-policy violation only if that hasn't happened. Inspect the pane before treating this step as ordinary progress either way — don't try to autoremediate, the pane may be mid-task.
 EOF
         mv "$tmp" "$outbox/$(date -u +%Y%m%dT%H%M%SZ)-timeout-retry-iss-$issue.md" 2>/dev/null \
             || rm -f "$tmp" 2>/dev/null
