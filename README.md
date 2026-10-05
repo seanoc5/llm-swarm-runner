@@ -223,6 +223,7 @@ Full knob reference (including `WATCH_PR_POLL_SECS`, `WATCH_ORPHAN_SWEEP_SECS`, 
 Other automation paths if you want them:
 
 - **Time-based:** add a `cron` / `systemd --user` timer running `llm-start.sh "Check status; advance any stalled workers"` every 15min — usually unnecessary if the watcher is on.
+- **Nightly full tests:** `scripts/nightly-full-tests.sh` runs each project's slow lanes (integration, e2e, …) serially in a throwaway clone of origin's default branch, pauses new spawns host-wide while it runs, and files failures to a per-repo tracking issue. Lanes go in `nightly-repos.conf` (template: `examples/nightly-repos.conf.example`); timer units are in `examples/systemd/`.
 - **Conversational (the default for claude):** the coordinator's Window 1 is already a resident interactive REPL — just re-invoke `llm-start.sh "<follow-up prompt>"` and it pastes into the live session instead of spawning a new one. Set `COORDINATOR_HEADLESS=1` if you'd rather it exit after each prompt (capacity-conscious, one-shot).
 
 See [`docs/llm-swarm-runner-overview.md`](./docs/llm-swarm-runner-overview.md) for the full architecture.
