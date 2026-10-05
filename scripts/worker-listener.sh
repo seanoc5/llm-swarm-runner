@@ -157,8 +157,9 @@ set -m
 export SWARM_WORKTREE_DIR="$PWD"
 
 AGENT="${1:-claude}"
+# bash = test backend: runs each brief as a shell script (tests/test-shape-*).
 case "$AGENT" in
-    claude|gemini|codex|agy) ;;
+    claude|gemini|codex|agy|bash) ;;
     *) echo "ERROR: unsupported WORKER_CMD: $AGENT" >&2; exit 1 ;;
 esac
 MODEL="${WORKER_MODEL:-}"
@@ -436,6 +437,8 @@ dispatch_agent() {
         else
             agy "${MODEL_OPTS[@]}" --dangerously-skip-permissions --prompt-interactive "$codex_task"
         fi
+    elif [[ "$AGENT" == "bash" ]]; then
+        bash -c "$task_text"
     else
         echo "ERROR: unsupported worker backend: $AGENT" >&2
         return 1
