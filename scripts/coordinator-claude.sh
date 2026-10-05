@@ -11,7 +11,8 @@
 #   $2   path to initial user prompt file   (passed as trailing positional)
 #
 # Env:
-#   COORD_MODEL                Claude model id (default: claude-fable-5)
+#   COORD_MODEL                Claude model id or alias (default: opus, the
+#                              newest Opus; auto-upgrades, see llm-start.sh)
 #   COORDINATOR_HEADLESS=1     Use claude -p (exits after the prompt prints)
 #   COORDINATOR_USE_API_KEY=1  Keep ANTHROPIC_API_KEY in env (bills API, not Max OAuth)
 #   COORDINATOR_ALLOW_BACKGROUND_TASKS=1
@@ -33,7 +34,7 @@ set -euo pipefail
 
 SYSTEM_PROMPT_FILE="${1:?coordinator-claude.sh: missing system-prompt file (arg 1)}"
 INITIAL_PROMPT_FILE="${2:?coordinator-claude.sh: missing initial-prompt file (arg 2)}"
-MODEL="${COORD_MODEL:-claude-fable-5}"
+MODEL="${COORD_MODEL:-opus}"
 export STATUSLINE_PROBE="${STATUSLINE_PROBE:-${XDG_RUNTIME_DIR:-/tmp}/claude-statusline-$(basename "$PWD")-coordinator.json}"
 
 # Claude Max users authenticate via OAuth in ~/.claude/. If ANTHROPIC_API_KEY

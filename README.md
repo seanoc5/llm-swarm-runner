@@ -179,7 +179,8 @@ WORKER_CMD=codex WORKER_HEADLESS=1 ./llm-start.sh "..."
 # environment or <project>/.sandbox-env; the image sets its Gemini provider.
 COORDINATOR_CMD=agy COORDINATOR_HEADLESS=1 WORKER_CMD=agy WORKER_HEADLESS=1 ./llm-start.sh "..."
 
-# Override the coordinator model (defaults: claude -> claude-fable-5,
+# Override the coordinator model (defaults: claude -> opus, an alias that
+# tracks the newest Opus;
 # gemini -> gemini-2.5-flash; gemini-3-flash-preview is known-broken for
 # the coordinator's multi-step tool use, don't use it here)
 COORDINATOR_MODEL=claude-sonnet-5 ./llm-start.sh "..."
