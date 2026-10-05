@@ -16,8 +16,15 @@ example at the bottom is the 2026-09-23 corpusminder-spring switch (Fable 5 → 
 
 | Knob | Env var | Built-in default | Set in code at |
 |---|---|---|---|
-| Coordinator (the long-lived planner; one per swarm) | `COORDINATOR_MODEL` | `claude-fable-5` | `llm-start.sh` (`COORD_MODEL_DEFAULT`) and `scripts/coordinator-claude.sh` (`MODEL=`) |
+| Coordinator (the long-lived planner; one per swarm) | `COORDINATOR_MODEL` | `opus` (alias for the newest Opus; auto-upgrades, see note below) | `llm-start.sh` (`COORD_MODEL_DEFAULT`) and `scripts/coordinator-claude.sh` (`MODEL=`) |
 | Workers (N parallel sandboxed sessions) | `WORKER_MODEL` | `claude-sonnet-5` | `scripts/worker-listener.sh` (`MODEL=` fallback) |
+
+**Coordinator alias note (2026-10-05).** The claude coordinator defaults to the Claude
+CLI alias `opus`, which resolves to the newest Opus model (`claude-opus-5-5`, 1M context,
+when this was written) and moves to the next Opus automatically. `default` would also
+resolve to Opus 5.5 today, but it follows Anthropic's per-account recommendation and could
+switch model family, so it is not used. To freeze a model, set a full id such as
+`COORDINATOR_MODEL=claude-opus-5-5`. Before 2026-10-05 the default was `claude-fable-5`.
 
 They are separate on purpose: one coordinator at a top-tier model is cheap, `MAX_WORKERS`
 workers at a top-tier model is not. **Switching "the swarm's model" almost always means
