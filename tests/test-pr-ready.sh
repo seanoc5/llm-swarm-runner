@@ -160,4 +160,26 @@ rc=0; run_pr_ready || rc=$?
 grep -qi 'WARN' "$TEST_DIR/out.log" || red "expected a WARN about the missing risk marker: $(cat "$TEST_DIR/out.log")"
 green "a missing risk marker is treated as medium, not skipped"
 
+# ============================================================================
+heading "Test 8: COORDINATOR HOLD banner — self-review still posts, gh pr ready NEVER runs (issue #534)"
+# ============================================================================
+printf '> ⛔ **COORDINATOR HOLD** — fix queued; do not merge\n\n<!-- BLIND_MERGE_RISK: medium -->\nsome change\n' > "$BODY_FILE"
+make_fake_review 0
+rc=0; run_pr_ready || rc=$?
+[ "$rc" -eq 3 ] || red "expected exit 3 for a held PR, got $rc: $(cat "$TEST_DIR/out.log")"
+[ -s "$FAKE_REVIEW_LOG" ] || red "expected self-review to still run (and post) for a held PR"
+gh_ready_called && red "expected gh pr ready NOT to run for a held PR"
+grep -qi 'HOLD' "$TEST_DIR/out.log" || red "expected a HOLD message in output: $(cat "$TEST_DIR/out.log")"
+green "a COORDINATOR HOLD banner posts self-review but never un-drafts the PR"
+
+# ============================================================================
+heading "Test 9: COORDINATOR HOLD banner on a risk=low PR — still held, not readied"
+# ============================================================================
+printf '> ⛔ **COORDINATOR HOLD** — fix queued; do not merge\n\n<!-- BLIND_MERGE_RISK: low -->\nfixed a typo\n' > "$BODY_FILE"
+make_fake_review 0
+rc=0; run_pr_ready || rc=$?
+[ "$rc" -eq 3 ] || red "expected exit 3 for a held low-risk PR, got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called && red "expected gh pr ready NOT to run for a held low-risk PR"
+green "a COORDINATOR HOLD banner holds even a risk=low PR"
+
 green "ALL TESTS PASSED"

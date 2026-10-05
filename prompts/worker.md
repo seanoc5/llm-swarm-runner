@@ -296,7 +296,9 @@ nothing pending, no self-review `BLOCK`, not given up on an error).
 3. `lint-pr-screen.sh <N>` until it exits 0 (exit 3 names the failed rule).
 4. `pr-ready.sh <N>`, not bare `gh pr ready`. For 🟡/🔴 it runs and posts the
    self-review first, and refuses to ready on `BLOCK` or an unparseable
-   verdict (exit 2).
+   verdict (exit 2). If the PR body carries a coordinator `COORDINATOR
+   HOLD` banner (draft-as-hold), it still posts the self-review but leaves
+   the PR in draft (exit 3) — only the coordinator lifts the hold.
 
 A ready PR with a placeholder body reads as a policy violation.
 
