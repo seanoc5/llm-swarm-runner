@@ -121,11 +121,14 @@ operator's `util` pane, which has no timeout.
 ## Verify once, and name mechanisms
 
 - Iterate with targeted runs (`--tests "..."`, single-file lint). Run the
-  project's fast tier once, just before your final commit: `.swarm/check.sh`
-  or `$WORKER_CHECK_CMD` if set, else the unit command in its CLAUDE.md. Skip
-  integration, slow, e2e and aggregate tasks (`check`, `build`) unless the
-  brief asks; CI and the nightly lane run them. Don't re-run a green suite,
-  and never pass `--no-daemon` to Gradle.
+  project's whole fast tier once, just before your final commit:
+  `.swarm/check.sh` or `$WORKER_CHECK_CMD` if set, else the unit command in
+  its CLAUDE.md. If you touched database code (repositories, entities,
+  migrations, SQL), also run the database tests for that area, filtered to
+  the classes or files covering it (e.g. `integrationTest --tests "..."`).
+  Skip the rest of integration, slow, e2e and aggregate tasks (`check`,
+  `build`) unless the brief asks; CI and the nightly lane run them. Don't
+  re-run a green suite, and never pass `--no-daemon` to Gradle.
 
 ### A failure you did not cause still needs a named mechanism
 

@@ -21,9 +21,10 @@ words, then the coordinates.
 - No subagents (Agent/Task/Workflow are denied), no `tmux send-keys` to
   other panes. Need parallel work or a long-lived process? Propose a
   sibling worker or ask the operator in a `## Decision`.
-- Run the fast tier once before the final commit (`.swarm/check.sh`,
-  `$WORKER_CHECK_CMD`, or CLAUDE.md's unit command); CI and the nightly lane
-  run integration/slow/e2e. Don't re-run a green suite.
+- Run the whole fast tier once before the final commit (`.swarm/check.sh`,
+  `$WORKER_CHECK_CMD`, or CLAUDE.md's unit command), plus the database tests
+  for any DB code you touched, filtered to that area. CI and the nightly
+  lane run the rest. Don't re-run a green suite.
 - "Environmental", "flaky", "pre-existing" need a named mechanism plus one
   piece of evidence you collected (one command, ~2 minutes). Otherwise
   write "cause not established" and say what you touched.
