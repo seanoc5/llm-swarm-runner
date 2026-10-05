@@ -1192,18 +1192,18 @@ green "a guard token more than 3 lines from 3 real markers does not suppress the
 
 rm -f "$TEST_DIR/tmux-windows.txt" "$TEST_DIR/tmux-pane-iss-77.txt"
 
-heading "Test 16g: an obedient worker's rendered decision-needed outbox heredoc does not false-positive (#467, round-10 self-review finding)"
-# Fourth self-review finding: test 16e's prose line sat right next to both
-# guard tokens, closer than the real outbox template ever would. The
-# template at prompts/worker.md's "Worker outbox" section is YAML
-# frontmatter (`---` / `kind: decision-needed` / `task_id:` / `ts:` /
-# `---`) THEN the body — so `kind: decision-needed` can land 4+ lines
-# above a body that narrates the stop, outside the guard's ±3-line window.
-# worker.md now tells the worker to describe the stop in words instead of
-# retyping the literal marker there, which is what this fixture's body
-# does (no literal WATCH_TIMEOUT_HIT in the heredoc at all) — proving an
-# obedient worker following that instruction stays clean even though
-# "decision-needed" sits well outside the guard window from the body text.
+heading "Test 16g: a decision-needed body that retypes the marker DOES fire, unguarded by distance (#467, round-10 self-review finding)"
+# Fourth self-review finding (round 10): test 16e's prose line sat right
+# next to both guard tokens, closer than the real outbox template ever
+# would — self-review caught that in that fixture, "kind: decision-needed"
+# landed only 3 lines after the second real marker, inside the guard
+# window, which silently dropped that real marker from the count without
+# either test noticing. To show the actual risk (and that the guard really
+# doesn't reach this far), this fixture spaces 2 real markers AND a third,
+# retyped mention of the marker inside a rendered decision-needed heredoc
+# all more than 3 lines from every guard token (verified below) — proving
+# that if a worker ignored the new instruction and retyped the literal
+# marker in that message's body, the sweep would still correctly fire.
 rm -rf "$TEST_DIR/wt-issue-77/.swarm/tasks/outbox"
 echo "iss-77" > "$TEST_DIR/tmux-windows.txt"
 cat > "$TEST_DIR/tmux-pane-iss-77.txt" <<'PANE'
@@ -1213,6 +1213,76 @@ WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=1 ran=595s
 timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
 exit=124
 WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=2 ran=595s
+Two attempts in a row have now hit the wall.
+Writing the outbox message next.
+cat > "$tmp" <<EOF
+---
+kind: decision-needed
+task_id: wt-issue-77
+ts: 2026-10-05T00:00:00Z
+---
+This is the second WATCH_TIMEOUT_HIT on restore.sh in a row, so per the
+rule I am stopping instead of retrying a third time.
+EOF
+PANE
+# Sanity-check the fixture's own spacing before trusting the sweep's
+# verdict on it: every candidate line must be >3 lines from every guard
+# token, i.e. genuinely unguarded, or this test would prove nothing.
+awk '
+    /WATCH_TIMEOUT_HIT/ { markers[NR] = 1 }
+    /WATCH_TIMEOUT_RETRY_SWEEP_SECS|WATCH_TIMEOUT_RETRY_PATTERN|WATCH_TIMEOUT_RETRY_MIN_COUNT|decision-needed|worker\.md/ { guards[NR] = 1 }
+    END {
+        for (m in markers) for (g in guards) {
+            d = m - g; if (d < 0) d = -d
+            if (d <= 3) { print "fixture bug: marker line " m " is within " d " lines of guard line " g; bad = 1 }
+        }
+        exit bad
+    }
+' "$TEST_DIR/tmux-pane-iss-77.txt" \
+    || red "test 16g's own fixture doesn't actually test an unguarded case — fix the spacing"
+
+cd "$PROJECT_DIR"
+DRY_RUN=0 WATCH_TIMEOUT_RETRY_SWEEP_SECS=1 WATCH_BG_VIOLATION_SWEEP_SECS=0 WATCH_PR_POLL_SECS=0 \
+    WATCH_ORPHAN_SWEEP_SECS=0 WATCH_CHECK_ON_DONE=0 POLL_SECS=1 \
+    "$WATCH" "$PROJECT_DIR" > "$TEST_DIR/watch-timeoutretry-g.log" 2>&1 &
+WATCH_PID=$!
+
+outbox_file=""
+for _ in $(seq 1 10); do
+    outbox_file="$(ls "$TEST_DIR"/wt-issue-77/.swarm/tasks/outbox/*.md 2>/dev/null | head -1)" || true
+    [ -n "$outbox_file" ] && break
+    sleep 1
+done
+kill "$WATCH_PID" 2>/dev/null || true
+wait "$WATCH_PID" 2>/dev/null || true
+unset WATCH_PID
+
+[ -n "$outbox_file" ] \
+    || red "an unguarded, retyped third marker in a decision-needed body did not fire; log: $(cat "$TEST_DIR/watch-timeoutretry-g.log")"
+green "2 real markers + an unguarded retyped mention in a decision-needed body DOES fire (3 unguarded hits)"
+
+rm -f "$TEST_DIR/tmux-windows.txt" "$TEST_DIR/tmux-pane-iss-77.txt"
+
+heading "Test 16h: the same decision-needed body, worded per the fix, does not false-positive (#467, round-10 self-review finding)"
+# Same two real markers and the same spacing as 16g (so the 2 real hits are
+# genuinely unguarded, not accidentally swallowed by proximity to
+# "decision-needed" the way the original, now-replaced 16g fixture was) —
+# but the body now follows worker.md's round-10 instruction: it describes
+# the stop in words instead of retyping the literal marker. That leaves
+# only 2 real, unguarded hits, under WATCH_TIMEOUT_RETRY_MIN_COUNT=3, so
+# this proves the fix (not the guard) is what keeps an obedient worker
+# clean here — the guard never had to reach across the YAML frontmatter.
+rm -rf "$TEST_DIR/wt-issue-77/.swarm/tasks/outbox"
+echo "iss-77" > "$TEST_DIR/tmux-windows.txt"
+cat > "$TEST_DIR/tmux-pane-iss-77.txt" <<'PANE'
+timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
+exit=124
+WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=1 ran=595s
+timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
+exit=124
+WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=2 ran=595s
+Two attempts in a row have now hit the wall.
+Writing the outbox message next.
 cat > "$tmp" <<EOF
 ---
 kind: decision-needed
@@ -1228,7 +1298,7 @@ PANE
 cd "$PROJECT_DIR"
 DRY_RUN=0 WATCH_TIMEOUT_RETRY_SWEEP_SECS=1 WATCH_BG_VIOLATION_SWEEP_SECS=0 WATCH_PR_POLL_SECS=0 \
     WATCH_ORPHAN_SWEEP_SECS=0 WATCH_CHECK_ON_DONE=0 POLL_SECS=1 \
-    "$WATCH" "$PROJECT_DIR" > "$TEST_DIR/watch-timeoutretry-g.log" 2>&1 &
+    "$WATCH" "$PROJECT_DIR" > "$TEST_DIR/watch-timeoutretry-h.log" 2>&1 &
 WATCH_PID=$!
 
 sleep 5
@@ -1238,11 +1308,11 @@ kill "$WATCH_PID" 2>/dev/null || true
 wait "$WATCH_PID" 2>/dev/null || true
 unset WATCH_PID
 
-[ "$still_running" = "1" ] || red "watch process exited unexpectedly; log: $(cat "$TEST_DIR/watch-timeoutretry-g.log")"
+[ "$still_running" = "1" ] || red "watch process exited unexpectedly; log: $(cat "$TEST_DIR/watch-timeoutretry-h.log")"
 outbox_file="$(ls "$TEST_DIR"/wt-issue-77/.swarm/tasks/outbox/*.md 2>/dev/null | head -1)" || true
 [ -z "$outbox_file" ] \
-    || red "a realistically-distant decision-needed heredoc wrongly tipped the sweep over; got: $(cat "$outbox_file")"
-green "2 real markers + a rendered decision-needed heredoc that never retypes the marker do not false-positive"
+    || red "a realistically-spaced, non-retyping decision-needed body wrongly tipped the sweep over; got: $(cat "$outbox_file")"
+green "2 real, genuinely unguarded markers + a decision-needed body that never retypes the marker do not false-positive"
 
 rm -f "$TEST_DIR/tmux-windows.txt" "$TEST_DIR/tmux-pane-iss-77.txt"
 
