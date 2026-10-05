@@ -270,12 +270,23 @@
 #                           a fixed 200-line capture instead of a real
 #                           60-minute clock is a deliberate approximation
 #                           (capture-pane has no reliable per-line
-#                           timestamps to window on) that fires at least as
-#                           eagerly as "3 in 60 minutes", never more
-#                           loosely, since 200 lines of scrollback from
-#                           repeated multi-minute attempts is in practice a
-#                           tighter window than 60 minutes. Set to 0 to
-#                           disable. See timeout_retry_sweep_pass.
+#                           timestamps to window on) — NOT a guaranteed
+#                           tighter-or-equal match for "3 in 60 minutes" in
+#                           either direction (a self-review finding:
+#                           redirecting each attempt's own output to a
+#                           file, per worker.md's own rule, means each
+#                           attempt leaves only a handful of pane lines, so
+#                           200 lines can span many hours of quiet
+#                           scrollback — looser than 60 minutes, not
+#                           tighter). Combined with the per-pane-not-
+#                           per-command gap below, this sweep can fire on
+#                           markers from unrelated episodes hours apart.
+#                           Accepted: same "backstop for the common case,
+#                           not a hard guarantee" trade-off as the marker
+#                           format below, and still detection-only — a
+#                           false positive costs the coordinator one look
+#                           at a pane, not an action. Set to 0 to disable.
+#                           See timeout_retry_sweep_pass.
 #   WATCH_TIMEOUT_RETRY_PATTERN
 #                           (issue #467) Override the grep -E pattern
 #                           timeout_retry_sweep_pass matches against each
