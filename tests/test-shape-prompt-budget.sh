@@ -13,14 +13,32 @@
 # 2.2KB (four rule-per-incident commits); bumped rather than trimmed so the
 # regrowth question gets one deliberate answer (issue #509) instead of a
 # 200-byte shave.
+#
+# 2026-10-05: coordinator budget 25000 -> 26000. coordinator.md had already
+# drifted to 25427 bytes (over budget, pre-existing — unrelated to issue
+# #467) before this change added one clause for #467's stuck-timeout-retry
+# sweep; same "bump with a reason, don't shave a one-clause rule to fit"
+# call as the worker bump above. coordinator.md's own regrowth still owes
+# issue #509 a full answer; this bump is not that answer.
+#
+# 2026-10-05: worker budget 22000 -> 22300, then -> 22700. Repeated rounds
+# of automated self-review on #467's "Stop after two timeouts" rule each
+# caught a real correctness gap (a false-positive-prone example, pane
+# output folding able to hide the marker, an exit-code-masking bug in the
+# example itself, the rule's own decision-needed message being able to
+# retrigger the watcher it was written to satisfy) — fixes, not incident
+# narrative, but still didn't fit the headroom. (Exact round count lives
+# in PR #545's own "Decisions made" section, not here — duplicating it as
+# a number in two places is what caused that PR's own round-9 self-review
+# to catch this file and the PR body disagreeing.)
 set -euo pipefail
 
 green() { printf '\033[32m✓ %s\033[0m\n' "$*"; }
 red()   { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORKER_MAX="${WORKER_MD_MAX_BYTES:-22000}"
-COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-25000}"
+WORKER_MAX="${WORKER_MD_MAX_BYTES:-22700}"
+COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-26000}"
 BARE_MAX="${WORKER_BARE_MD_MAX_BYTES:-11000}"   # issue #510 trial prompt; ~7.5KB is script-parsed contract
 
 check() {

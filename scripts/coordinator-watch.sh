@@ -235,6 +235,77 @@
 #                           iss-* window's cleaned (ANSI-stripped) pane text.
 #                           Defaults to the two Claude Code UI markers named
 #                           above.
+#   WATCH_TIMEOUT_RETRY_SWEEP_SECS=60
+#                           (issue #467) Mechanical backstop for the
+#                           prompts/worker.md § "Stop after two timeouts on
+#                           the same command" rule — a command that can
+#                           never finish inside the timeout it's wrapped in
+#                           looks, on every single tick, like an active,
+#                           healthy worker ("Running…"); nothing distinguishes
+#                           a 9th doomed retry from a 1st legitimate one
+#                           until an operator notices the step has run for
+#                           hours (the fand-etl#1010 incident this issue
+#                           documents: 9 attempts, 2h40m, before anyone
+#                           asked). Runs from the same background timer loop
+#                           as bg_violation_sweep_pass above (cheap: local
+#                           capture-pane only) and counts
+#                           WATCH_TIMEOUT_RETRY_PATTERN hits in each iss-*
+#                           window's last 200 captured lines — the worker
+#                           rule above asks a worker to echo a
+#                           WATCH_TIMEOUT_HIT marker every time a command it
+#                           ran exits 124. A count at or above
+#                           WATCH_TIMEOUT_RETRY_MIN_COUNT fires a NEW sighting
+#                           (edge-triggered via the TIMEOUT_RETRY_LOGGED
+#                           dedup map, cleared once the count drops back
+#                           under the threshold — e.g. the markers scroll
+#                           out of the 200-line capture, or the worker
+#                           actually stops), delivered as a `kind: fyi`
+#                           outbox message (same WATCH_OUTBOX path
+#                           bg_violation_sweep_pass uses) plus a
+#                           watch.timeout_retry events.log line either way.
+#                           Detection only — never kills a window or touches
+#                           the worktree; prompts/coordinator.md names the
+#                           sighting as a reason to inspect the pane, not
+#                           something to report as progress. Counting within
+#                           a fixed 200-line capture instead of a real
+#                           60-minute clock is a deliberate approximation
+#                           (capture-pane has no reliable per-line
+#                           timestamps to window on) — NOT a guaranteed
+#                           tighter-or-equal match for "3 in 60 minutes" in
+#                           either direction (a self-review finding:
+#                           redirecting each attempt's own output to a
+#                           file, per worker.md's own rule, means each
+#                           attempt leaves only a handful of pane lines, so
+#                           200 lines can span many hours of quiet
+#                           scrollback — looser than 60 minutes, not
+#                           tighter). Combined with the per-pane-not-
+#                           per-command gap below, this sweep can fire on
+#                           markers from unrelated episodes hours apart.
+#                           Accepted: same "backstop for the common case,
+#                           not a hard guarantee" trade-off as the marker
+#                           format below, and still detection-only — a
+#                           false positive costs the coordinator one look
+#                           at a pane, not an action. Set to 0 to disable.
+#                           See timeout_retry_sweep_pass.
+#   WATCH_TIMEOUT_RETRY_PATTERN
+#                           (issue #467) Override the grep -E pattern
+#                           timeout_retry_sweep_pass matches against each
+#                           iss-* window's cleaned pane text. Defaults to the
+#                           WATCH_TIMEOUT_HIT marker named above. Not
+#                           line-anchored: Claude Code renders a Bash tool's
+#                           stdout indented under a `⎿` glyph, not at column
+#                           0, so an anchor would never match the real echo
+#                           either (a self-review finding — tried and
+#                           reverted). A worker's own prose naming the
+#                           marker (e.g. narrating a decision-needed message)
+#                           is instead excluded by a self-match guard in
+#                           timeout_retry_sweep_pass, the same mechanism
+#                           bg_violation_sweep_pass already uses.
+#   WATCH_TIMEOUT_RETRY_MIN_COUNT=3
+#                           (issue #467) Minimum WATCH_TIMEOUT_RETRY_PATTERN
+#                           hits within the capture window before
+#                           timeout_retry_sweep_pass fires (the issue's "3 or
+#                           more" threshold).
 #   WATCH_ACTIVITY_POLL_SECS=300
 #                           (issue #392) Every wake trigger above — the
 #                           outcome-driven backend, WATCH_PR_POLL_SECS,
@@ -1821,6 +1892,9 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     WATCH_ORPHAN_SWEEP_SECS 3600  periodic reap-orphan-worktrees.sh sweep for window-less worktrees (0=off); see header comment
     WATCH_BG_VIOLATION_SWEEP_SECS 60  periodic sweep for backgrounded-shell UI markers on iss-* panes + the coordinator pane (0=off); see header comment
     WATCH_BG_VIOLATION_PATTERN    (auto)  grep -E pattern for the sweep above
+    WATCH_TIMEOUT_RETRY_SWEEP_SECS 60  periodic sweep for a worker stuck retrying a command that always hits its timeout (0=off); see header comment (issue #467)
+    WATCH_TIMEOUT_RETRY_PATTERN    (auto)  grep -E pattern for the sweep above
+    WATCH_TIMEOUT_RETRY_MIN_COUNT  3      min hits within the capture window before it fires
     WATCH_ACTIVITY_POLL_SECS 300  periodic gh poll for PRs/issues resolved out-of-band, e.g. in the GitHub web UI (0=off); see header comment (issue #392)
     ACTIVITY_POLL_OVERLAP_SECS 30  cursor overlap tolerating gh search-index lag; dedup maps prevent re-announcing
     WATCH_WORKTREE_SWEEP_SECS 60  periodic detection of a worktree removed outside every blessed reap path (0=off); see header comment (issue #439)
@@ -2400,6 +2474,10 @@ REAP_ORPHAN="${REAP_ORPHAN:-$LLM_SWARM_DIR/scripts/reap-orphan-worktrees.sh}"
 # issue #298 — fallback detection for the foreground-only rule; see header comment.
 WATCH_BG_VIOLATION_SWEEP_SECS="${WATCH_BG_VIOLATION_SWEEP_SECS:-60}"
 WATCH_BG_VIOLATION_PATTERN="${WATCH_BG_VIOLATION_PATTERN:-Running in the background|[0-9]+ shells? still running}"
+# issue #467 — backstop for the "stop after two timeouts" rule; see header comment.
+WATCH_TIMEOUT_RETRY_SWEEP_SECS="${WATCH_TIMEOUT_RETRY_SWEEP_SECS:-60}"
+WATCH_TIMEOUT_RETRY_PATTERN="${WATCH_TIMEOUT_RETRY_PATTERN:-WATCH_TIMEOUT_HIT}"
+WATCH_TIMEOUT_RETRY_MIN_COUNT="${WATCH_TIMEOUT_RETRY_MIN_COUNT:-3}"
 # issue #392 — periodic backstop for operator actions taken entirely
 # outside this swarm (e.g. merging/closing a PR, or closing an issue,
 # straight in the GitHub web UI) that no other wake path can ever observe;
@@ -2620,6 +2698,14 @@ if ! [[ "$WATCH_ORPHAN_SWEEP_SECS" =~ ^[0-9]+$ ]]; then
 fi
 if ! [[ "$WATCH_BG_VIOLATION_SWEEP_SECS" =~ ^[0-9]+$ ]]; then
     echo "ERROR: WATCH_BG_VIOLATION_SWEEP_SECS must be a non-negative integer (got: $WATCH_BG_VIOLATION_SWEEP_SECS)" >&2
+    exit 1
+fi
+if ! [[ "$WATCH_TIMEOUT_RETRY_SWEEP_SECS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: WATCH_TIMEOUT_RETRY_SWEEP_SECS must be a non-negative integer (got: $WATCH_TIMEOUT_RETRY_SWEEP_SECS)" >&2
+    exit 1
+fi
+if ! [[ "$WATCH_TIMEOUT_RETRY_MIN_COUNT" =~ ^[0-9]+$ ]] || [ "$WATCH_TIMEOUT_RETRY_MIN_COUNT" -lt 1 ]; then
+    echo "ERROR: WATCH_TIMEOUT_RETRY_MIN_COUNT must be a positive integer (got: $WATCH_TIMEOUT_RETRY_MIN_COUNT)" >&2
     exit 1
 fi
 if ! [[ "$WATCH_ACTIVITY_POLL_SECS" =~ ^[0-9]+$ ]]; then
@@ -3166,6 +3252,7 @@ autoclose:     $WATCHER_AUTOCLOSE$([ "$WATCHER_AUTOCLOSE" = "1" ] && echo " (mod
 pr-poll:       ${WATCH_PR_POLL_SECS}s$([ "$WATCH_PR_POLL_SECS" = "0" ] && echo " (disabled)")
 orphan-sweep:  ${WATCH_ORPHAN_SWEEP_SECS}s$([ "$WATCH_ORPHAN_SWEEP_SECS" = "0" ] && echo " (disabled)" || echo " (script: $REAP_ORPHAN)")
 bg-violation:  ${WATCH_BG_VIOLATION_SWEEP_SECS}s$([ "$WATCH_BG_VIOLATION_SWEEP_SECS" = "0" ] && echo " (disabled)" || echo " (foreground-only fallback detection, issue #298)")
+timeout-retry: ${WATCH_TIMEOUT_RETRY_SWEEP_SECS}s$([ "$WATCH_TIMEOUT_RETRY_SWEEP_SECS" = "0" ] && echo " (disabled)" || echo " (min count: $WATCH_TIMEOUT_RETRY_MIN_COUNT, stuck-timeout-retry detection, issue #467)")
 activity-poll: ${WATCH_ACTIVITY_POLL_SECS}s$([ "$WATCH_ACTIVITY_POLL_SECS" = "0" ] && echo " (disabled)" || echo " (out-of-band PR/issue resolution backstop, issue #392)")
 worktree-sweep: ${WATCH_WORKTREE_SWEEP_SECS}s$([ "$WATCH_WORKTREE_SWEEP_SECS" = "0" ] && echo " (disabled)" || echo " (unblessed worktree-removal detection, issue #439)")
 pending-brief-sweep: ${WATCH_PENDING_BRIEF_SWEEP_SECS}s$([ "$WATCH_PENDING_BRIEF_SWEEP_SECS" = "0" ] && echo " (disabled)" || echo " (SWARM_PENDING_BRIEF marker-gap backstop, issue #439)")
@@ -3334,6 +3421,13 @@ declare -A FOLLOWUP_SKIP_LOGGED=()
 # WATCH_BG_VIOLATION_PATTERN on that window's pane, so a later, genuinely
 # new occurrence re-fires instead of staying permanently suppressed.
 declare -A BG_VIOLATION_LOGGED=()
+
+# issue #467: same dedup shape as BG_VIOLATION_LOGGED above, for
+# timeout_retry_sweep_pass. Keyed by window name; cleared once a sweep's
+# WATCH_TIMEOUT_RETRY_PATTERN count on that window's pane drops back under
+# WATCH_TIMEOUT_RETRY_MIN_COUNT, so a later, genuinely new retry-loop episode
+# re-fires instead of staying permanently suppressed.
+declare -A TIMEOUT_RETRY_LOGGED=()
 
 # issue #439: worktree_vanish_sweep_pass's own inventory — dir -> epoch it
 # was last confirmed present. Seeded whole on the first tick (WT_INVENTORY_
@@ -4921,6 +5015,126 @@ EOF
     done <<< "$windows"
 }
 
+# timeout_retry_sweep_pass
+#
+# issue #467: mechanical backstop for prompts/worker.md's "Stop after two
+# timeouts on the same command" rule — see WATCH_TIMEOUT_RETRY_SWEEP_SECS's
+# header comment for the full rationale (same shape as
+# bg_violation_sweep_pass's relationship to its own prompt rule).
+#
+# Scans every iss-* window's last -S -200 lines of rendered pane for
+# WATCH_TIMEOUT_RETRY_PATTERN — the WATCH_TIMEOUT_HIT marker a worker echoes
+# per the prompt rule above on every command that exits 124 — and counts
+# hits. A count at or above WATCH_TIMEOUT_RETRY_MIN_COUNT is a NEW sighting
+# (edge-triggered via the TIMEOUT_RETRY_LOGGED dedup map so a worker still
+# stuck in the loop doesn't get a fresh message every sweep tick forever).
+# Deliberately simpler than bg_violation_sweep_pass in one way: no
+# coordinator-window scan (the issue's own acceptance criteria scope this to
+# worker panes — a coordinator retrying a stuck command is the existing
+# bg-violation/self-check territory, not this one). But it needs the same
+# self-match guard bg_violation_sweep_pass has, for the same reason: a worker
+# that obeys the rule (two real timeouts, then it stops) can still narrate
+# the marker afterward — a decision-needed message's own wording, e.g.
+# "that's a second WATCH_TIMEOUT_HIT, filing a decision-needed message" —
+# and that line lands in the pane right next to the two legitimate echoed
+# markers. 2 real + 1 narrated = 3, tripping the sweep on a worker that did
+# everything right (self-review finding). Line-anchoring the pattern
+# (`^WATCH_TIMEOUT_HIT`) was tried and reverted: Claude Code renders a Bash
+# tool's stdout indented under a `⎿` glyph, never at column 0, so the real
+# echo would never match an anchored pattern either (a second self-review
+# finding). Guards instead on nearby context, same as bg_violation_sweep_pass:
+# a candidate within 3 lines of WATCH_TIMEOUT_RETRY_SWEEP_SECS/_PATTERN/
+# _MIN_COUNT, "decision-needed", or "worker.md" is prose about the feature,
+# not the feature firing, and doesn't count. None of those tokens appear in
+# the worker rule's own echoed output or the command line before it, so a
+# real hit is never guarded away by this.
+#
+# Known gap (self-review finding, accepted as-is): the count is per PANE,
+# not per command, so 3 different one-off timeouts on 3 unrelated commands
+# (a test run, a build, a deploy) within the same 200-line window add up
+# to the same count as one command stuck retrying — the rule is
+# per-command, this sweep's counter isn't. Parsing each marker's cmd=
+# field to group by command would fix it precisely but makes the sweep
+# depend on a field worker.md shows as an example, not a mandated schema.
+# Cheaper and lower-risk: the outbox message below says the count may
+# span different commands and tells the reader to check the cmd= fields
+# themselves before concluding a violation — same "detection only, inspect
+# before acting" posture this sweep already has everywhere else.
+timeout_retry_sweep_pass() {
+    tmux has-session -t "$SESSION_NAME" 2>/dev/null || return 0
+
+    local windows
+    windows="$(tmux list-windows -t "$SESSION_NAME" -F '#{window_name}' 2>/dev/null | grep '^iss-' || true)"
+    [ -n "$windows" ] || return 0
+
+    local win
+    while IFS= read -r win; do
+        [ -n "$win" ] || continue
+        local issue wt_dir content clean matched_lines ml cand_lineno count
+        issue="${win#iss-}"
+        [[ "$issue" =~ ^[0-9]+$ ]] || continue
+        wt_dir="$(own_wt_dir_for_issue "$issue")" || continue
+
+        content="$(tmux capture-pane -t "$SESSION_NAME:$win" -p -S -200 2>/dev/null)" || continue
+        clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
+        # `-n` (line-numbered) + `-o` (match-only), like
+        # bg_violation_sweep_pass, so each candidate's own line number is
+        # available to check its surrounding context below. `|| true`:
+        # under this file's `set -euo pipefail`, grep's no-match case
+        # exits 1, which pipefail would otherwise turn into an abort of
+        # the whole script on this line every ordinary tick.
+        matched_lines="$(printf '%s\n' "$clean" | LC_ALL=C grep -noE "$WATCH_TIMEOUT_RETRY_PATTERN" 2>/dev/null)" || true
+
+        count=0
+        if [ -n "$matched_lines" ]; then
+            while IFS= read -r ml; do
+                [ -n "$ml" ] || continue
+                cand_lineno="${ml%%:*}"
+                # Self-match guard (see header comment above): a candidate
+                # near one of these tokens is a worker's own prose about
+                # the feature, not the feature firing — don't count it.
+                printf '%s\n' "$clean" \
+                    | sed -n "$((cand_lineno > 3 ? cand_lineno - 3 : 1)),$((cand_lineno + 3))p" \
+                    | LC_ALL=C grep -qE 'WATCH_TIMEOUT_RETRY_SWEEP_SECS|WATCH_TIMEOUT_RETRY_PATTERN|WATCH_TIMEOUT_RETRY_MIN_COUNT|decision-needed|worker\.md' \
+                    && continue
+                count=$((count + 1))
+            done <<< "$matched_lines"
+        fi
+
+        if [ "$count" -lt "$WATCH_TIMEOUT_RETRY_MIN_COUNT" ]; then
+            unset "TIMEOUT_RETRY_LOGGED[$win]" 2>/dev/null || true
+            continue
+        fi
+        [ -n "${TIMEOUT_RETRY_LOGGED[$win]:-}" ] && continue
+        TIMEOUT_RETRY_LOGGED[$win]=1
+
+        # DRY_RUN=1 (log-only, same convention as every other side-effecting
+        # pass in this file): don't drop a real outbox message, just log
+        # that this pass would have.
+        if [ "$DRY_RUN" = "1" ]; then
+            log_event watch.timeout_retry "issue=$issue window=$win count=$count (WATCH_TIMEOUT_RETRY_PATTERN) dry_run=1"
+            continue
+        fi
+        log_event watch.timeout_retry "issue=$issue window=$win count=$count (WATCH_TIMEOUT_RETRY_PATTERN)"
+
+        [ "$WATCH_OUTBOX" = "1" ] || continue
+        local outbox tmp
+        outbox="$wt_dir/.swarm/tasks/outbox"
+        mkdir -p "$outbox" 2>/dev/null || continue
+        tmp="$(mktemp -p "$outbox" .tmp.XXXXXX 2>/dev/null)" || continue
+        cat > "$tmp" <<EOF
+---
+kind: fyi
+task_id: watcher-timeout-retry
+ts: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+---
+Automated timeout-retry check (issue #467, WATCH_TIMEOUT_RETRY_SWEEP_SECS) saw $count WATCH_TIMEOUT_HIT marker(s) in iss-$issue's recent pane output. This sweep counts markers across the whole pane, not per command, so $count could be one command stuck in a retry loop or several unrelated one-off timeouts (e.g. a test run, then a build, then a deploy, each timing out once) — check each marker's cmd= field before concluding anything. If they're the SAME command repeating: per prompts/worker.md's "Stop after two timeouts on the same command" rule, two consecutive 124 exits on it should already have stopped the worker and parked it with a decision-needed outbox message; flag a worker-policy violation only if that hasn't happened. Inspect the pane before treating this step as ordinary progress either way — don't try to autoremediate, the pane may be mid-task.
+EOF
+        mv "$tmp" "$outbox/$(date -u +%Y%m%dT%H%M%SZ)-timeout-retry-iss-$issue.md" 2>/dev/null \
+            || rm -f "$tmp" 2>/dev/null
+    done <<< "$windows"
+}
+
 # status_poll_pass
 #
 # Behavior B fast path (issue #119): scan every worktree's
@@ -5326,7 +5540,7 @@ SCRIPT
 # run_auto_compact_poll_loop, started as its own background process right
 # after this function.
 run_watch_timer_loop() {
-    local last_pr_poll=0 last_orphan_sweep=0 last_bg_violation_sweep=0 last_activity_poll=0 last_coord_wake_retry=0 last_coord_wake_busy_retry=0 last_worktree_sweep=0 last_pending_brief_sweep=0 last_stranded_brief_sweep=0 now
+    local last_pr_poll=0 last_orphan_sweep=0 last_bg_violation_sweep=0 last_timeout_retry_sweep=0 last_activity_poll=0 last_coord_wake_retry=0 last_coord_wake_busy_retry=0 last_worktree_sweep=0 last_pending_brief_sweep=0 last_stranded_brief_sweep=0 now
     while true; do
         sleep 2
         [ "$WATCH_CHECK_ON_DONE" = "1" ] && { status_poll_pass || true; }
@@ -5366,6 +5580,13 @@ run_watch_timer_loop() {
             if [ $((now - last_bg_violation_sweep)) -ge "$WATCH_BG_VIOLATION_SWEEP_SECS" ]; then
                 bg_violation_sweep_pass || true
                 last_bg_violation_sweep=$now
+            fi
+        fi
+        if [ "$WATCH_TIMEOUT_RETRY_SWEEP_SECS" -gt 0 ]; then
+            now=$(date +%s)
+            if [ $((now - last_timeout_retry_sweep)) -ge "$WATCH_TIMEOUT_RETRY_SWEEP_SECS" ]; then
+                timeout_retry_sweep_pass || true
+                last_timeout_retry_sweep=$now
             fi
         fi
         if [ "$WATCH_ACTIVITY_POLL_SECS" -gt 0 ]; then
@@ -8942,10 +9163,10 @@ run_poll() {
 # restarts. (COORD_WAKE_RETRY_SECS, issue #422's older dirty-draft retry,
 # has this identical gap and predates this fix — out of scope here, but
 # worth folding in alongside this one if it's ever revisited.)
-if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ] || [ "$WATCH_ORPHAN_SWEEP_SECS" -gt 0 ] || [ "$WATCH_BG_VIOLATION_SWEEP_SECS" -gt 0 ] || [ "$WATCH_ACTIVITY_POLL_SECS" -gt 0 ] || [ "$WATCH_WORKTREE_SWEEP_SECS" -gt 0 ] || [ "$WATCH_PENDING_BRIEF_SWEEP_SECS" -gt 0 ] || [ "$WATCH_STRANDED_BRIEF_SWEEP_SECS" -gt 0 ] || [ "$COORD_WAKE_HOLD_RETRY_SECS" -gt 0 ]; then
+if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ] || [ "$WATCH_ORPHAN_SWEEP_SECS" -gt 0 ] || [ "$WATCH_BG_VIOLATION_SWEEP_SECS" -gt 0 ] || [ "$WATCH_TIMEOUT_RETRY_SWEEP_SECS" -gt 0 ] || [ "$WATCH_ACTIVITY_POLL_SECS" -gt 0 ] || [ "$WATCH_WORKTREE_SWEEP_SECS" -gt 0 ] || [ "$WATCH_PENDING_BRIEF_SWEEP_SECS" -gt 0 ] || [ "$WATCH_STRANDED_BRIEF_SWEEP_SECS" -gt 0 ] || [ "$COORD_WAKE_HOLD_RETRY_SECS" -gt 0 ]; then
     run_watch_timer_loop &
     WATCH_TIMER_PID=$!
-    log_event watch.timer.start "pr_poll_secs=$WATCH_PR_POLL_SECS check_on_done=$WATCH_CHECK_ON_DONE orphan_sweep_secs=$WATCH_ORPHAN_SWEEP_SECS bg_violation_sweep_secs=$WATCH_BG_VIOLATION_SWEEP_SECS activity_poll_secs=$WATCH_ACTIVITY_POLL_SECS worktree_sweep_secs=$WATCH_WORKTREE_SWEEP_SECS pending_brief_sweep_secs=$WATCH_PENDING_BRIEF_SWEEP_SECS stranded_brief_sweep_secs=$WATCH_STRANDED_BRIEF_SWEEP_SECS"
+    log_event watch.timer.start "pr_poll_secs=$WATCH_PR_POLL_SECS check_on_done=$WATCH_CHECK_ON_DONE orphan_sweep_secs=$WATCH_ORPHAN_SWEEP_SECS bg_violation_sweep_secs=$WATCH_BG_VIOLATION_SWEEP_SECS timeout_retry_sweep_secs=$WATCH_TIMEOUT_RETRY_SWEEP_SECS activity_poll_secs=$WATCH_ACTIVITY_POLL_SECS worktree_sweep_secs=$WATCH_WORKTREE_SWEEP_SECS pending_brief_sweep_secs=$WATCH_PENDING_BRIEF_SWEEP_SECS stranded_brief_sweep_secs=$WATCH_STRANDED_BRIEF_SWEEP_SECS"
 fi
 if [ "$WORKER_AUTO_COMPACT" = "1" ] || [ "$WORKER_AUTO_DELIVER" = "1" ]; then
     run_worker_compact_loop &
