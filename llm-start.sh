@@ -299,7 +299,7 @@ case "$COORD_CMD" in
     *) echo "ERROR: unsupported COORDINATOR_CMD: $COORD_CMD" >&2; exit 1 ;;
 esac
 # Default model depends on which coordinator is running:
-#   claude → claude-fable-5 (Fable 5 — 1M context is the default on this
+#   claude → claude-opus-5-5 (opus 5.5 — 1M context is the default on this
 #     model, so no '[1m]' suffix is needed. Older '[1m]'-suffixed ids like
 #     'claude-opus-4-7[1m]' still work as overrides; single-quote them at
 #     the shell to suppress glob expansion of the brackets).
