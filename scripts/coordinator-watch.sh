@@ -279,17 +279,17 @@
 #   WATCH_TIMEOUT_RETRY_PATTERN
 #                           (issue #467) Override the grep -E pattern
 #                           timeout_retry_sweep_pass matches against each
-#                           iss-* window's cleaned pane text. Defaults to
-#                           `^WATCH_TIMEOUT_HIT` — anchored to the start of
-#                           the line on purpose (self-review finding): a
-#                           worker's own prose about this rule (e.g. "I got a
-#                           second WATCH_TIMEOUT_HIT, so I'm stopping") can
-#                           land in the pane too, but that marker is never
-#                           the first thing on its line there, only in the
-#                           echoed command output the worker rule actually
-#                           asks for. Un-anchoring would make an obedient
-#                           worker's own explanation of the rule count toward
-#                           tripping it.
+#                           iss-* window's cleaned pane text. Defaults to the
+#                           WATCH_TIMEOUT_HIT marker named above. Not
+#                           line-anchored: Claude Code renders a Bash tool's
+#                           stdout indented under a `⎿` glyph, not at column
+#                           0, so an anchor would never match the real echo
+#                           either (a self-review finding — tried and
+#                           reverted). A worker's own prose naming the
+#                           marker (e.g. narrating a decision-needed message)
+#                           is instead excluded by a self-match guard in
+#                           timeout_retry_sweep_pass, the same mechanism
+#                           bg_violation_sweep_pass already uses.
 #   WATCH_TIMEOUT_RETRY_MIN_COUNT=3
 #                           (issue #467) Minimum WATCH_TIMEOUT_RETRY_PATTERN
 #                           hits within the capture window before
@@ -2465,7 +2465,7 @@ WATCH_BG_VIOLATION_SWEEP_SECS="${WATCH_BG_VIOLATION_SWEEP_SECS:-60}"
 WATCH_BG_VIOLATION_PATTERN="${WATCH_BG_VIOLATION_PATTERN:-Running in the background|[0-9]+ shells? still running}"
 # issue #467 — backstop for the "stop after two timeouts" rule; see header comment.
 WATCH_TIMEOUT_RETRY_SWEEP_SECS="${WATCH_TIMEOUT_RETRY_SWEEP_SECS:-60}"
-WATCH_TIMEOUT_RETRY_PATTERN="${WATCH_TIMEOUT_RETRY_PATTERN:-^WATCH_TIMEOUT_HIT}"
+WATCH_TIMEOUT_RETRY_PATTERN="${WATCH_TIMEOUT_RETRY_PATTERN:-WATCH_TIMEOUT_HIT}"
 WATCH_TIMEOUT_RETRY_MIN_COUNT="${WATCH_TIMEOUT_RETRY_MIN_COUNT:-3}"
 # issue #392 — periodic backstop for operator actions taken entirely
 # outside this swarm (e.g. merging/closing a PR, or closing an issue,
@@ -5017,18 +5017,26 @@ EOF
 # hits. A count at or above WATCH_TIMEOUT_RETRY_MIN_COUNT is a NEW sighting
 # (edge-triggered via the TIMEOUT_RETRY_LOGGED dedup map so a worker still
 # stuck in the loop doesn't get a fresh message every sweep tick forever).
-# Deliberately simpler than bg_violation_sweep_pass: no coordinator-window
-# scan (the issue's own acceptance criteria scope this to worker panes — a
-# coordinator retrying a stuck command is the existing bg-violation/self-check
-# territory, not this one). It does need a self-match guard of sorts, though
-# unlike bg_violation_sweep_pass's: a worker that obeys the rule can still
-# narrate it ("that's a second WATCH_TIMEOUT_HIT, stopping per the rule") and
-# that line would land in the pane right alongside the two legitimate echoed
-# markers — 2 real + 1 narrated = 3, tripping the sweep on a worker that did
-# everything right (self-review finding on the first version of this PR).
-# WATCH_TIMEOUT_RETRY_PATTERN's default `^WATCH_TIMEOUT_HIT` anchor is that
-# guard: prose about the marker is never the first thing on its line,
-# only the worker's own `echo` output is.
+# Deliberately simpler than bg_violation_sweep_pass in one way: no
+# coordinator-window scan (the issue's own acceptance criteria scope this to
+# worker panes — a coordinator retrying a stuck command is the existing
+# bg-violation/self-check territory, not this one). But it needs the same
+# self-match guard bg_violation_sweep_pass has, for the same reason: a worker
+# that obeys the rule (two real timeouts, then it stops) can still narrate
+# the marker afterward — a decision-needed message's own wording, e.g.
+# "that's a second WATCH_TIMEOUT_HIT, filing a decision-needed message" —
+# and that line lands in the pane right next to the two legitimate echoed
+# markers. 2 real + 1 narrated = 3, tripping the sweep on a worker that did
+# everything right (self-review finding). Line-anchoring the pattern
+# (`^WATCH_TIMEOUT_HIT`) was tried and reverted: Claude Code renders a Bash
+# tool's stdout indented under a `⎿` glyph, never at column 0, so the real
+# echo would never match an anchored pattern either (a second self-review
+# finding). Guards instead on nearby context, same as bg_violation_sweep_pass:
+# a candidate within 3 lines of WATCH_TIMEOUT_RETRY_SWEEP_SECS/_PATTERN/
+# _MIN_COUNT, "decision-needed", or "worker.md" is prose about the feature,
+# not the feature firing, and doesn't count. None of those tokens appear in
+# the worker rule's own echoed output or the command line before it, so a
+# real hit is never guarded away by this.
 timeout_retry_sweep_pass() {
     tmux has-session -t "$SESSION_NAME" 2>/dev/null || return 0
 
@@ -5039,19 +5047,36 @@ timeout_retry_sweep_pass() {
     local win
     while IFS= read -r win; do
         [ -n "$win" ] || continue
-        local issue wt_dir content clean count
+        local issue wt_dir content clean matched_lines ml cand_lineno count
         issue="${win#iss-}"
         [[ "$issue" =~ ^[0-9]+$ ]] || continue
         wt_dir="$(own_wt_dir_for_issue "$issue")" || continue
 
         content="$(tmux capture-pane -t "$SESSION_NAME:$win" -p -S -200 2>/dev/null)" || continue
         clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
-        # `|| count=0`: under this file's `set -euo pipefail`, grep -c's
-        # no-match case still exits 0 (unlike grep -o's bare no-match,
-        # which exits 1 — see bg_violation_sweep_pass's comment on that),
-        # but capture-pane or sed failing upstream would otherwise abort
-        # the whole script on this line every tick.
-        count="$(printf '%s\n' "$clean" | LC_ALL=C grep -cE "$WATCH_TIMEOUT_RETRY_PATTERN" 2>/dev/null)" || count=0
+        # `-n` (line-numbered) + `-o` (match-only), like
+        # bg_violation_sweep_pass, so each candidate's own line number is
+        # available to check its surrounding context below. `|| true`:
+        # under this file's `set -euo pipefail`, grep's no-match case
+        # exits 1, which pipefail would otherwise turn into an abort of
+        # the whole script on this line every ordinary tick.
+        matched_lines="$(printf '%s\n' "$clean" | LC_ALL=C grep -noE "$WATCH_TIMEOUT_RETRY_PATTERN" 2>/dev/null)" || true
+
+        count=0
+        if [ -n "$matched_lines" ]; then
+            while IFS= read -r ml; do
+                [ -n "$ml" ] || continue
+                cand_lineno="${ml%%:*}"
+                # Self-match guard (see header comment above): a candidate
+                # near one of these tokens is a worker's own prose about
+                # the feature, not the feature firing — don't count it.
+                printf '%s\n' "$clean" \
+                    | sed -n "$((cand_lineno > 3 ? cand_lineno - 3 : 1)),$((cand_lineno + 3))p" \
+                    | LC_ALL=C grep -qE 'WATCH_TIMEOUT_RETRY_SWEEP_SECS|WATCH_TIMEOUT_RETRY_PATTERN|WATCH_TIMEOUT_RETRY_MIN_COUNT|decision-needed|worker\.md' \
+                    && continue
+                count=$((count + 1))
+            done <<< "$matched_lines"
+        fi
 
         if [ "$count" -lt "$WATCH_TIMEOUT_RETRY_MIN_COUNT" ]; then
             unset "TIMEOUT_RETRY_LOGGED[$win]" 2>/dev/null || true

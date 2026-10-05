@@ -1083,11 +1083,14 @@ heading "Test 16e: a worker's own prose about the marker does not false-positive
 # its own summary or decision-needed narration, e.g. "that's a second
 # WATCH_TIMEOUT_HIT, stopping per the rule" — 2 real + 1 narrated = 3,
 # tripping WATCH_TIMEOUT_RETRY_MIN_COUNT on a worker that did everything
-# right. Fixed by anchoring WATCH_TIMEOUT_RETRY_PATTERN to the start of the
-# line (^WATCH_TIMEOUT_HIT): the two real echoed markers start their line,
-# the narrated sentence never does. This fixture has exactly 2 real markers
-# plus one prose line mentioning the token mid-sentence, and asserts the
-# sweep does not fire.
+# right. Line-anchoring the pattern was tried and reverted (a THIRD
+# self-review finding): Claude Code indents real tool stdout under a `⎿`
+# glyph, never column 0, so an anchor would have missed real sightings too.
+# Fixed instead with a context self-match guard, same mechanism
+# bg_violation_sweep_pass already uses (see test 15b) — a candidate within 3
+# lines of "decision-needed" or "worker.md" is prose, not a real sighting.
+# This fixture has exactly 2 real markers plus one prose line mentioning the
+# token and both guard tokens, and asserts the sweep does not fire.
 rm -rf "$TEST_DIR/wt-issue-77/.swarm/tasks/outbox"
 echo "iss-77" > "$TEST_DIR/tmux-windows.txt"
 cat > "$TEST_DIR/tmux-pane-iss-77.txt" <<'PANE'
@@ -1116,7 +1119,52 @@ unset WATCH_PID
 outbox_file="$(ls "$TEST_DIR"/wt-issue-77/.swarm/tasks/outbox/*.md 2>/dev/null | head -1)" || true
 [ -z "$outbox_file" ] \
     || red "an obedient worker's own prose about the marker wrongly tipped the sweep over; got: $(cat "$outbox_file")"
-green "2 real markers + 1 mid-sentence prose mention (not line-initial) do not false-positive"
+green "2 real markers + 1 guarded prose mention of the token do not false-positive"
+
+rm -f "$TEST_DIR/tmux-windows.txt" "$TEST_DIR/tmux-pane-iss-77.txt"
+
+heading "Test 16f: the self-match guard does not mask a real, distant violation (#467)"
+# Mirrors test 15d for bg_violation_sweep_pass's own guard: a guard token
+# (here "worker.md", from an unrelated earlier line) more than 3 lines away
+# from a real marker must not suppress it. Scrollback has "worker.md" once
+# at the top, then 3 real markers all more than 3 lines below it — the
+# sweep should still fire.
+rm -rf "$TEST_DIR/wt-issue-77/.swarm/tasks/outbox"
+echo "iss-77" > "$TEST_DIR/tmux-windows.txt"
+cat > "$TEST_DIR/tmux-pane-iss-77.txt" <<'PANE'
+Reading prompts/worker.md to check the task conventions before starting.
+filler line 1
+filler line 2
+filler line 3
+timeout 595 ./restore.sh; ec=$?
+WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=1 ran=595s
+timeout 595 ./restore.sh; ec=$?
+WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=2 ran=595s
+timeout 595 ./restore.sh; ec=$?
+WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=3 ran=595s
+PANE
+
+cd "$PROJECT_DIR"
+DRY_RUN=0 WATCH_TIMEOUT_RETRY_SWEEP_SECS=1 WATCH_BG_VIOLATION_SWEEP_SECS=0 WATCH_PR_POLL_SECS=0 \
+    WATCH_ORPHAN_SWEEP_SECS=0 WATCH_CHECK_ON_DONE=0 POLL_SECS=1 \
+    "$WATCH" "$PROJECT_DIR" > "$TEST_DIR/watch-timeoutretry-f.log" 2>&1 &
+WATCH_PID=$!
+
+outbox_file=""
+for _ in $(seq 1 10); do
+    outbox_file="$(ls "$TEST_DIR"/wt-issue-77/.swarm/tasks/outbox/*.md 2>/dev/null | head -1)" || true
+    [ -n "$outbox_file" ] && break
+    sleep 1
+done
+kill "$WATCH_PID" 2>/dev/null || true
+wait "$WATCH_PID" 2>/dev/null || true
+unset WATCH_PID
+
+[ -n "$outbox_file" ] \
+    || red "a guard token 4+ lines from 3 real markers wrongly suppressed the sighting; log: $(cat "$TEST_DIR/watch-timeoutretry-f.log")"
+grep -q 'kind: fyi' "$outbox_file" || red "outbox file missing 'kind: fyi': $(cat "$outbox_file")"
+grep -q 'iss-77' "$outbox_file" || red "outbox file doesn't name iss-77: $(cat "$outbox_file")"
+green "a guard token more than 3 lines from 3 real markers does not suppress the sighting"
 
 rm -f "$TEST_DIR/tmux-windows.txt" "$TEST_DIR/tmux-pane-iss-77.txt"
 
