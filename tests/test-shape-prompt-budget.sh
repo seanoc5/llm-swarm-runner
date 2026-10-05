@@ -21,11 +21,14 @@
 # call as the worker bump above. coordinator.md's own regrowth still owes
 # issue #509 a full answer; this bump is not that answer.
 #
-# 2026-10-05: worker budget 22000 -> 22300. Six rounds of automated
+# 2026-10-05: worker budget 22000 -> 22300. Repeated rounds of automated
 # self-review on #467's "Stop after two timeouts" rule each caught a real
 # correctness gap (a false-positive-prone example, pane output folding
 # able to hide the marker, an exit-code-masking bug in the example itself)
-# — fixes, not incident narrative, but still didn't fit the headroom.
+# — fixes, not incident narrative, but still didn't fit the headroom. (Exact
+# round count lives in PR #545's own "Decisions made" section, not here —
+# duplicating it as a number in two places is what caused that PR's own
+# round-9 self-review to catch this file and the PR body disagreeing.)
 set -euo pipefail
 
 green() { printf '\033[32m✓ %s\033[0m\n' "$*"; }

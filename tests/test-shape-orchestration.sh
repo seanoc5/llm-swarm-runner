@@ -934,7 +934,11 @@ rm -f "$TEST_DIR/tmux-windows.txt" "$TEST_DIR/tmux-pane-iss-77.txt" "$TEST_DIR/t
 heading "Test 16a: timeout_retry_sweep_pass flags a worker stuck retrying a command past its own timeout (#467)"
 # Canned pane capture: 3 WATCH_TIMEOUT_HIT markers (the prompts/worker.md
 # "Stop after two timeouts on the same command" rule's echoed marker),
-# meeting the default WATCH_TIMEOUT_RETRY_MIN_COUNT=3 threshold.
+# meeting the default WATCH_TIMEOUT_RETRY_MIN_COUNT=3 threshold. The third
+# marker is prefixed the way Claude Code actually renders a Bash tool's
+# stdout in the pane (indented under a glyph, never at column 0) — the
+# pattern match is unanchored, so this proves real indentation doesn't
+# break it, not just the plain-text form the other markers use.
 echo "iss-77" > "$TEST_DIR/tmux-windows.txt"
 cat > "$TEST_DIR/tmux-pane-iss-77.txt" <<'PANE'
 timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
@@ -945,7 +949,7 @@ exit=124
 WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=2 ran=595s
 timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
 exit=124
-WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=3 ran=595s
+  ⎿ WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=3 ran=595s
 PANE
 rm -rf "$TEST_DIR/wt-issue-77/.swarm/tasks/outbox"
 
