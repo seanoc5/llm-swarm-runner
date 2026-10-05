@@ -279,8 +279,17 @@
 #   WATCH_TIMEOUT_RETRY_PATTERN
 #                           (issue #467) Override the grep -E pattern
 #                           timeout_retry_sweep_pass matches against each
-#                           iss-* window's cleaned pane text. Defaults to the
-#                           WATCH_TIMEOUT_HIT marker named above.
+#                           iss-* window's cleaned pane text. Defaults to
+#                           `^WATCH_TIMEOUT_HIT` — anchored to the start of
+#                           the line on purpose (self-review finding): a
+#                           worker's own prose about this rule (e.g. "I got a
+#                           second WATCH_TIMEOUT_HIT, so I'm stopping") can
+#                           land in the pane too, but that marker is never
+#                           the first thing on its line there, only in the
+#                           echoed command output the worker rule actually
+#                           asks for. Un-anchoring would make an obedient
+#                           worker's own explanation of the rule count toward
+#                           tripping it.
 #   WATCH_TIMEOUT_RETRY_MIN_COUNT=3
 #                           (issue #467) Minimum WATCH_TIMEOUT_RETRY_PATTERN
 #                           hits within the capture window before
@@ -2456,7 +2465,7 @@ WATCH_BG_VIOLATION_SWEEP_SECS="${WATCH_BG_VIOLATION_SWEEP_SECS:-60}"
 WATCH_BG_VIOLATION_PATTERN="${WATCH_BG_VIOLATION_PATTERN:-Running in the background|[0-9]+ shells? still running}"
 # issue #467 — backstop for the "stop after two timeouts" rule; see header comment.
 WATCH_TIMEOUT_RETRY_SWEEP_SECS="${WATCH_TIMEOUT_RETRY_SWEEP_SECS:-60}"
-WATCH_TIMEOUT_RETRY_PATTERN="${WATCH_TIMEOUT_RETRY_PATTERN:-WATCH_TIMEOUT_HIT}"
+WATCH_TIMEOUT_RETRY_PATTERN="${WATCH_TIMEOUT_RETRY_PATTERN:-^WATCH_TIMEOUT_HIT}"
 WATCH_TIMEOUT_RETRY_MIN_COUNT="${WATCH_TIMEOUT_RETRY_MIN_COUNT:-3}"
 # issue #392 — periodic backstop for operator actions taken entirely
 # outside this swarm (e.g. merging/closing a PR, or closing an issue,
@@ -5008,12 +5017,18 @@ EOF
 # hits. A count at or above WATCH_TIMEOUT_RETRY_MIN_COUNT is a NEW sighting
 # (edge-triggered via the TIMEOUT_RETRY_LOGGED dedup map so a worker still
 # stuck in the loop doesn't get a fresh message every sweep tick forever).
-# Deliberately simpler than bg_violation_sweep_pass: no self-match guard
-# (WATCH_TIMEOUT_HIT is a deliberately distinctive token, not UI chrome a
-# worker might incidentally render by reading prose about this feature) and
-# no coordinator-window scan (the issue's own acceptance criteria scope this
-# to worker panes — a coordinator retrying a stuck command is the existing
-# bg-violation/self-check territory, not this one).
+# Deliberately simpler than bg_violation_sweep_pass: no coordinator-window
+# scan (the issue's own acceptance criteria scope this to worker panes — a
+# coordinator retrying a stuck command is the existing bg-violation/self-check
+# territory, not this one). It does need a self-match guard of sorts, though
+# unlike bg_violation_sweep_pass's: a worker that obeys the rule can still
+# narrate it ("that's a second WATCH_TIMEOUT_HIT, stopping per the rule") and
+# that line would land in the pane right alongside the two legitimate echoed
+# markers — 2 real + 1 narrated = 3, tripping the sweep on a worker that did
+# everything right (self-review finding on the first version of this PR).
+# WATCH_TIMEOUT_RETRY_PATTERN's default `^WATCH_TIMEOUT_HIT` anchor is that
+# guard: prose about the marker is never the first thing on its line,
+# only the worker's own `echo` output is.
 timeout_retry_sweep_pass() {
     tmux has-session -t "$SESSION_NAME" 2>/dev/null || return 0
 

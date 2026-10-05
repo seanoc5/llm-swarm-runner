@@ -1077,6 +1077,49 @@ green "three renderings of the split-token command source (no real timeout outpu
 
 rm -f "$TEST_DIR/tmux-windows.txt" "$TEST_DIR/tmux-pane-iss-77.txt"
 
+heading "Test 16e: a worker's own prose about the marker does not false-positive an obedient worker (#467, self-review finding)"
+# Second self-review finding: a worker that obeys the rule (2 real timeouts,
+# then stops) can still get flagged if it later writes about the marker in
+# its own summary or decision-needed narration, e.g. "that's a second
+# WATCH_TIMEOUT_HIT, stopping per the rule" — 2 real + 1 narrated = 3,
+# tripping WATCH_TIMEOUT_RETRY_MIN_COUNT on a worker that did everything
+# right. Fixed by anchoring WATCH_TIMEOUT_RETRY_PATTERN to the start of the
+# line (^WATCH_TIMEOUT_HIT): the two real echoed markers start their line,
+# the narrated sentence never does. This fixture has exactly 2 real markers
+# plus one prose line mentioning the token mid-sentence, and asserts the
+# sweep does not fire.
+rm -rf "$TEST_DIR/wt-issue-77/.swarm/tasks/outbox"
+echo "iss-77" > "$TEST_DIR/tmux-windows.txt"
+cat > "$TEST_DIR/tmux-pane-iss-77.txt" <<'PANE'
+timeout 595 ./restore.sh; ec=$?
+WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=1 ran=595s
+timeout 595 ./restore.sh; ec=$?
+WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=2 ran=595s
+That's a second WATCH_TIMEOUT_HIT, so per worker.md I'm stopping and filing
+a decision-needed message instead of retrying a third time.
+PANE
+
+cd "$PROJECT_DIR"
+DRY_RUN=0 WATCH_TIMEOUT_RETRY_SWEEP_SECS=1 WATCH_BG_VIOLATION_SWEEP_SECS=0 WATCH_PR_POLL_SECS=0 \
+    WATCH_ORPHAN_SWEEP_SECS=0 WATCH_CHECK_ON_DONE=0 POLL_SECS=1 \
+    "$WATCH" "$PROJECT_DIR" > "$TEST_DIR/watch-timeoutretry-e.log" 2>&1 &
+WATCH_PID=$!
+
+sleep 5
+still_running=0
+kill -0 "$WATCH_PID" 2>/dev/null && still_running=1
+kill "$WATCH_PID" 2>/dev/null || true
+wait "$WATCH_PID" 2>/dev/null || true
+unset WATCH_PID
+
+[ "$still_running" = "1" ] || red "watch process exited unexpectedly; log: $(cat "$TEST_DIR/watch-timeoutretry-e.log")"
+outbox_file="$(ls "$TEST_DIR"/wt-issue-77/.swarm/tasks/outbox/*.md 2>/dev/null | head -1)" || true
+[ -z "$outbox_file" ] \
+    || red "an obedient worker's own prose about the marker wrongly tipped the sweep over; got: $(cat "$outbox_file")"
+green "2 real markers + 1 mid-sentence prose mention (not line-initial) do not false-positive"
+
+rm -f "$TEST_DIR/tmux-windows.txt" "$TEST_DIR/tmux-pane-iss-77.txt"
+
 # ────────────────────────── Done ──────────────────────────
 
 heading "All shape-orchestration tests passed"

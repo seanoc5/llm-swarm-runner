@@ -93,6 +93,11 @@ timeout 595 ./restore.sh; ec=$?
 [ "$ec" = 124 ] && echo "WATCH_TIMEOUT""_HIT cmd=\"restore.sh\" attempt=$n ran=595s"
 ```
 
+When the Bash tool's own timeout kills the command instead of a shell
+`timeout N cmd` wrapper, the echo above never runs — the process died
+mid-command. Issue the echo as its own follow-up command instead, same
+marker and format, so the sighting still lands in the pane.
+
 On the second consecutive `WATCH_TIMEOUT_HIT` for the same command: write a
 `decision-needed` outbox message naming the command, how long each attempt
 ran, and what a full run actually needs (time its first real sub-step if
