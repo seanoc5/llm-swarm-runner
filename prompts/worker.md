@@ -61,20 +61,70 @@ to foreground-with-timeout rather than retrying.
   hit `MAX_WORKERS=5`; operator may raise it in `.swarm/.env`").
 - **Never `tmux send-keys`** into the coordinator or another worker. Talk via
   your status file, your outbox, or `gh` comments.
-- **No subagents.** The Agent/Task/Workflow tools are mechanically
-  disallowed on your session (issue #476), even under
-  `--dangerously-skip-permissions` — don't spend a turn trying them. For
-  parallel work, "Parallelism is not your call" above applies: propose a
-  sibling worker in a `## Decision`.
+- **No subagents.** Agent/Task/Workflow are disallowed on your session
+  (issue #476), even under `--dangerously-skip-permissions`; don't try
+  them. For parallel work, see the bullet above.
+
+### Stop after two timeouts on the same command (issue #467)
+
+A command that needs 26 minutes will keep hitting a 10-minute wall forever —
+raising the timeout once and retrying is fine, but retrying the *same*
+budget a third time, or quietly climbing the budget attempt after attempt,
+just burns hours while the pane looks like ordinary progress. If a command
+exits 124 (a shell `timeout N cmd` wrapper) or gets killed by the Bash
+tool's own configured timeout twice in a row for the same command, stop —
+don't, without new information (e.g. you timed the first real sub-step
+and now know the true budget), raise the timeout, split the job, or retry
+a third time.
+
+Each time this happens, redirect the command's own output to a file, not
+the pane — a noisy command's output folds there ("… +N lines"), burying
+the marker — then always print the real exit code before checking it for
+124: ending on `[ "$ec" = 124 ] && echo …` alone makes a *successful* run
+report exit 1 to you, hiding what you need to see. Build the marker from
+two concatenated string literals as shown, not one — the Bash tool renders
+the command you ran into the pane verbatim, so a literal
+`WATCH_TIMEOUT_HIT` written directly in the command text would get
+counted as a sighting on every run, timed out or not; splitting it keeps
+the whole token out of the command source while still printing it whole
+in the output. Type the attempt number in literally — `$n` won't persist
+across Bash tool calls. Never type the bare token anywhere else either —
+not narrating what happened, not in the outbox message below — describe
+it in words instead ("hit the timeout twice on restore.sh"); the
+watcher's guard only reaches a few lines either side, so naming the
+marker in prose can retrip the sweep on a worker that already stopped
+correctly:
+
+```bash
+timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
+echo "exit=$ec"
+if [ "$ec" = 124 ]; then
+    echo "WATCH_TIMEOUT""_HIT cmd=\"restore.sh\" attempt=1 ran=595s"
+fi
+```
+
+When the Bash tool's own timeout kills the command instead, nothing above
+runs — issue the same marker as its own follow-up command, split the
+same way.
+
+On the second consecutive `WATCH_TIMEOUT_HIT` for the same command: write a
+`decision-needed` outbox message naming the command, how long each attempt
+ran, and what a full run actually needs (time its first real sub-step if
+you don't already know), then write status `blocked` and park — don't
+attempt a third run. The fix is usually to hand the command to the
+operator's `util` pane, which has no timeout.
 
 ---
 
 ## Verify once, and name mechanisms
 
-- Iterate with targeted runs (`--tests "..."`, single-file lint). Run the
-  project's full merge-gate command once, just before your final commit; hooks
-  and CI re-validate after that. Don't re-run a green suite to "confirm" it,
-  and never pass `--no-daemon` to Gradle.
+- Iterate with targeted runs (`--tests "..."`, single-file lint). Before
+  the final commit, run the whole fast tier once (`.swarm/check.sh` or
+  `$WORKER_CHECK_CMD` if set, else CLAUDE.md's unit command), plus the
+  database tests covering any DB code you touched, filtered to that area.
+  Leave the rest of integration/slow/e2e and `check`/`build` to CI and the
+  nightly unless the brief asks. Don't re-run a green suite; never pass
+  `--no-daemon` to Gradle.
 
 ### A failure you did not cause still needs a named mechanism
 
@@ -250,10 +300,8 @@ $LLM_SWARM_DIR/scripts/task-done.sh "$TASK_ID" ok    # or: err "<short reason>"
 Always the `$LLM_SWARM_DIR`-prefixed path (your checkout may have no
 `scripts/` of its own). `$TASK_ID` matches your status file. `ok` covers
 any concluded outcome — PR, `blocked`, `done-no-pr`; use `err` only when
-nothing usable was delivered. This is the coordinator's one reliable
-"worker finished" signal for an interactive session that never exits on
-its own — without it, several detectors used to each guess and
-double-record completions (#451). If the project runs an executed check,
+nothing usable was delivered. It is the coordinator's one reliable
+"worker finished" signal (#451). If the project runs an executed check,
 `worker-listener.sh` reconciles this record against it afterward, so
 report what you believe now. Script missing (pre-#451 checkout) → skip;
 don't hand-write a `done/*.json` yourself.
@@ -296,7 +344,9 @@ nothing pending, no self-review `BLOCK`, not given up on an error).
 3. `lint-pr-screen.sh <N>` until it exits 0 (exit 3 names the failed rule).
 4. `pr-ready.sh <N>`, not bare `gh pr ready`. For 🟡/🔴 it runs and posts the
    self-review first, and refuses to ready on `BLOCK` or an unparseable
-   verdict (exit 2).
+   verdict (exit 2). If the PR body carries a coordinator `COORDINATOR
+   HOLD` banner (draft-as-hold), it still posts the self-review but leaves
+   the PR in draft (exit 3) — only the coordinator lifts the hold.
 
 A ready PR with a placeholder body reads as a policy violation.
 

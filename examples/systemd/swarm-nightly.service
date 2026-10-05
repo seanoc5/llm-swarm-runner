@@ -1,0 +1,11 @@
+# ~/.config/systemd/user/swarm-nightly.service — edit the path, then:
+#   systemctl --user daemon-reload && systemctl --user enable --now swarm-nightly.timer
+[Unit]
+Description=llm-swarm-runner nightly full tests (all repos, serial)
+
+[Service]
+Type=oneshot
+ExecStart=%h/path/to/llm-swarm-runner/scripts/nightly-full-tests.sh
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=8h

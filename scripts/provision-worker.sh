@@ -227,6 +227,7 @@ log_event() {
 #   HOST_MIN_MEM_AVAIL_MB    16384    refuse when MemAvailable is below this
 #   HOST_SPAWN_STAGGER_SECS  60       minimum seconds between spawns host-wide
 #   HOST_STATE_DIR           $TMPDIR/llm-swarm-host-<uid>   lock + pending markers
+#                            + dispatch-paused (see nightly-full-tests.sh)
 # Test hooks: HOST_LOADAVG_FILE / HOST_MEMINFO_FILE replace /proc/{loadavg,meminfo}.
 HOST_MAX_LOAD1="${HOST_MAX_LOAD1:-auto}"
 HOST_MIN_MEM_AVAIL_MB="${HOST_MIN_MEM_AVAIL_MB:-16384}"
@@ -248,6 +249,23 @@ host_admission_check() {
     mkdir -p "$HOST_STATE_DIR"
     exec 9>"$HOST_STATE_DIR/cap.lock"
     flock -w 30 9 || echo "warn: host cap lock busy for 30 s; proceeding unlocked" >&2
+
+    # 0) dispatch pause: "<expiry-epoch> <reason...>" written by
+    # nightly-full-tests.sh. An expired file is ignored and removed, so a
+    # crashed nightly can't hold dispatch forever.
+    local pause_file="$HOST_STATE_DIR/dispatch-paused"
+    if [ -f "$pause_file" ]; then
+        local p_until p_reason p_left
+        read -r p_until p_reason < "$pause_file" || true
+        p_left=$(( ${p_until:-0} - $(date +%s) ))
+        if [ "$p_left" -gt 0 ]; then
+            host_refuse dispatch_paused \
+                "dispatch paused host-wide (${p_reason:-no reason given})" \
+                "Retry after ${p_left}s at the latest (the pause may lift sooner); the coordinator does this on its own." \
+                "left=${p_left}s"
+        fi
+        rm -f -- "$pause_file"
+    fi
 
     # a) container count: running + pending spawns not yet visible to docker ps
     if [ "$HOST_MAX_WORKERS" != "0" ]; then

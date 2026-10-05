@@ -95,6 +95,10 @@ else
     if [ -n "$PROBE_PR" ]; then
         probe "gh pr comment (marker comments)"     gh pr comment -R "$PROBE_REPO" "$PROBE_PR" --body "<!-- PROBE -->probe"
         probe "gh pr edit --body"                   gh pr edit -R "$PROBE_REPO" "$PROBE_PR" --body "edited by probe $STAMP"
+        probe "gh api statuses (commit-status write)" bash -c '
+            sha=$(gh pr view -R "$0" "$1" --json headRefOid -q .headRefOid) &&
+            gh api repos/"$0"/statuses/"$sha" -f state=success -f context=swarm/probe -f description="token probe $2"
+        ' "$PROBE_REPO" "$PROBE_PR" "$STAMP"
         probe "gh pr ready"                         bash -c 'gh pr ready -R "$0" "$1" 2>&1 | grep -qi "already\|is ready\|marked" || gh pr ready -R "$0" "$1"' "$PROBE_REPO" "$PROBE_PR"
         probe "gh pr close"                         gh pr close -R "$PROBE_REPO" "$PROBE_PR"
         probe "gh pr reopen"                        gh pr reopen -R "$PROBE_REPO" "$PROBE_PR"

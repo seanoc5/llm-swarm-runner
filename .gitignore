@@ -39,3 +39,7 @@ Thumbs.db
 # tests/test-sandbox-worktree-lockdown.sh fixture (repo-root placement is
 # deliberate — see the test's own fixture-placement comment).
 /.tmp-test-sandbox-worktree-lockdown/
+
+# Local nightly lane list (scripts/nightly-full-tests.sh); template in
+# examples/nightly-repos.conf.example.
+/nightly-repos.conf

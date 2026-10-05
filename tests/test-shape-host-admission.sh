@@ -116,6 +116,21 @@ rc=$(run_prov 14 HOST_MAX_LOAD1=0 HOST_MIN_MEM_AVAIL_MB=0 HOST_SPAWN_STAGGER_SEC
 [ "$rc" -eq 3 ] && grep -q 'reason=spawn_stagger' "$PROJECT_DIR/.swarm/events.log" || red "stagger refusal: rc=$rc $(cat "$TEST_DIR/prov-14.log")"
 green "second spawn inside the stagger window refused (exit 3, reason=spawn_stagger)"
 
+heading "3b: dispatch pause refuses until it expires, then is removed"
+rm -f "$HOST_STATE_DIR/last-spawn"
+echo "$(( $(date +%s) + 600 )) nightly full-test run" > "$HOST_STATE_DIR/dispatch-paused"
+# shellcheck disable=SC2086
+rc=$(run_prov 15 $off)
+[ "$rc" -eq 3 ] && grep -q 'reason=dispatch_paused left=' "$PROJECT_DIR/.swarm/events.log" \
+    && grep -q 'Retry after' "$TEST_DIR/prov-15.log" || red "pause refusal: rc=$rc $(cat "$TEST_DIR/prov-15.log")"
+green "live pause refused (exit 3, reason=dispatch_paused, names a retry wait)"
+echo "$(( $(date +%s) - 1 )) stale" > "$HOST_STATE_DIR/dispatch-paused"
+# shellcheck disable=SC2086
+rc=$(run_prov 15 $off)
+[ "$rc" -eq 0 ] || red "expired pause should admit, rc=$rc: $(cat "$TEST_DIR/prov-15.log")"
+[ ! -e "$HOST_STATE_DIR/dispatch-paused" ] || red "expired pause file should be removed"
+green "expired pause ignored and removed"
+
 heading "4: _load-env.sh ignores HOST_* keys in <project>/.swarm/.env"
 printf 'HOST_MAX_WORKERS=99\nMAX_WORKERS=7\n' > "$PROJECT_DIR/.swarm/.env"
 out=$(cd "$PROJECT_DIR" && bash -c ". '$LOAD_ENV' '$PROJECT_DIR'; echo \"\$HOST_MAX_WORKERS \$MAX_WORKERS\"" 2>"$TEST_DIR/loadenv.err")
