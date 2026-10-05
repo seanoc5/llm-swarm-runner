@@ -657,18 +657,22 @@ write_outcome() {
     [ -n "$prior_err_reason" ] && reason="worker-reported: $prior_err_reason"
 
     # issue #529 optional extra safety: $rc > 128 is bash's own-process-died-
-    # by-signal convention (128 + signal number) — the dispatched agent's
-    # own process group was killed (e.g. it ran `kill -<pgid>` meaning to
-    # stop a command it started, and with set -m above that pgid is now
-    # its own, not this listener's, so it dies instead of the listener).
-    # Name the signal here so a stranded-looking "err" is a diagnosable
-    # record rather than a bare exit code — never overrides a more specific
-    # reason (worker's own report or blocked state) already set above.
+    # by-signal convention (128 + signal number). Several distinct things
+    # can cause this — the dispatched agent killing its own process group
+    # (the incident this issue is about, now possible to survive at all
+    # thanks to set -m above), but also an OOM kill (137 = SIGKILL) or,
+    # now that the listener itself survives a dispatch's own group signal,
+    # an operator's Ctrl-C reaching the running agent (130 = SIGINT) — so
+    # this only names the signal itself, not a guessed cause (self-review
+    # finding on this PR: an earlier version guessed "agent killed its own
+    # process group" unconditionally, which is simply wrong for 137/130).
+    # Never overrides a more specific reason (worker's own report or
+    # blocked state) already set above.
     if [ -z "$reason" ] && [ "$TASK_OUTCOME" = "err" ] && [ "$rc" -gt 128 ]; then
         local sig signame
         sig=$((rc - 128))
         signame="$(kill -l "$sig" 2>/dev/null)"
-        reason="agent-process-killed: signal $sig${signame:+ (SIG$signame)} — the agent likely killed its own process group"
+        reason="agent-process-signaled: signal $sig${signame:+ (SIG$signame)} — dispatch did not exit normally"
     fi
 
     if [ "$TASK_OUTCOME" = "ok" ] && [ -z "${CHECK_EXIT:-}" ]; then

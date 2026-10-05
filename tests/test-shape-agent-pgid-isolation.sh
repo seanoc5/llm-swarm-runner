@@ -142,7 +142,7 @@ green "dispatched agent's own pgid ($STUB_PGID) differs from the listener's ($LI
 jq -e '
     .outcome == "err"
     and .exit_code == 143
-    and (.reason | test("agent-process-killed"))
+    and (.reason | test("agent-process-signaled"))
     and (.reason | test("signal 15"))
 ' .swarm/tasks/done/k1.err.json >/dev/null \
     || { cat .swarm/tasks/done/k1.err.json; red "k1: run was not recorded as a failed, signal-named outcome"; }
