@@ -299,17 +299,21 @@ case "$COORD_CMD" in
     *) echo "ERROR: unsupported COORDINATOR_CMD: $COORD_CMD" >&2; exit 1 ;;
 esac
 # Default model depends on which coordinator is running:
-#   claude → claude-opus-5-5 (opus 5.5 — 1M context is the default on this
-#     model, so no '[1m]' suffix is needed. Older '[1m]'-suffixed ids like
-#     'claude-opus-4-7[1m]' still work as overrides; single-quote them at
-#     the shell to suppress glob expansion of the brackets).
+#   claude → 'opus', the Claude CLI alias for the newest Opus model
+#     (claude-opus-5-5 with a 1M context as of 2026-10-05). The alias
+#     auto-upgrades when Anthropic ships the next Opus; pin a full id
+#     (e.g. COORDINATOR_MODEL=claude-opus-5-5) to freeze it. We use 'opus'
+#     rather than 'default' because 'default' follows Anthropic's
+#     per-account recommendation, which need not stay an Opus model.
+#     Older '[1m]'-suffixed ids like 'claude-opus-4-7[1m]' still work as
+#     overrides; single-quote them at the shell to suppress glob expansion.
 #   gemini → gemini-2.5-flash (stable). gemini-3-flash-preview returns
 #     INVALID_ARGUMENT on multi-step tool sequences (which is the
 #     coordinator's whole job), so it's not a viable default.
 #   codex → CLI-configured default. Set COORDINATOR_MODEL to pin one.
 # Override either via COORDINATOR_MODEL=<id>.
 case "$COORD_CMD" in
-    claude) COORD_MODEL_DEFAULT='claude-fable-5' ;;
+    claude) COORD_MODEL_DEFAULT='opus' ;;
     gemini) COORD_MODEL_DEFAULT='gemini-2.5-flash' ;;
     codex|agy) COORD_MODEL_DEFAULT='' ;;
 esac
