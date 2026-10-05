@@ -90,7 +90,12 @@ the command you ran into the pane verbatim, so a literal
 counted as a sighting on every run, timed out or not; splitting it keeps
 the whole token out of the command source while still printing it whole
 in the output. Type the attempt number in literally — `$n` won't persist
-across Bash tool calls:
+across Bash tool calls. Never type the bare token anywhere else either —
+not narrating what happened, not in the outbox message below — describe
+it in words instead ("hit the timeout twice on restore.sh"); the
+watcher's guard only reaches a few lines either side, so naming the
+marker in prose can retrip the sweep on a worker that already stopped
+correctly:
 
 ```bash
 timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
@@ -109,10 +114,7 @@ On the second consecutive `WATCH_TIMEOUT_HIT` for the same command: write a
 ran, and what a full run actually needs (time its first real sub-step if
 you don't already know), then write status `blocked` and park — don't
 attempt a third run. The fix is usually to hand the command to the
-operator's `util` pane, which has no timeout. Describe the stop in words
-("hit the timeout twice on restore.sh"), not the literal `WATCH_TIMEOUT_HIT`
-token — the outbox frontmatter puts `kind: decision-needed` too many lines
-above the body for the watcher's narrow guard window to help here.
+operator's `util` pane, which has no timeout.
 
 ---
 

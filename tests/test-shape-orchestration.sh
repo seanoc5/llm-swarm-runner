@@ -1316,6 +1316,52 @@ green "2 real, genuinely unguarded markers + a decision-needed body that never r
 
 rm -f "$TEST_DIR/tmux-windows.txt" "$TEST_DIR/tmux-pane-iss-77.txt"
 
+heading "Test 16i: plain pane narration with no nearby guard words, worded per the fix, does not false-positive (#467, round-12 self-review finding)"
+# Fifth self-review finding (round 12): round 10's fix only told the
+# worker not to retype the marker in the decision-needed outbox message —
+# but round 2's original finding was about ANY narration, including plain
+# pane prose with no "decision-needed" or "worker.md" nearby to guard it.
+# worker.md's instruction was widened to cover typing the bare token
+# anywhere outside the echo commands, not just the outbox message. This
+# fixture is round 2's exact original failure shape — a plain narration
+# line right after the second marker, with no guard word within 3 lines —
+# but worded per the widened fix (describes the stop, never retypes the
+# token), proving the fix itself is what keeps this clean, since there is
+# no guard token anywhere in this fixture for the self-match guard to use.
+rm -rf "$TEST_DIR/wt-issue-77/.swarm/tasks/outbox"
+echo "iss-77" > "$TEST_DIR/tmux-windows.txt"
+cat > "$TEST_DIR/tmux-pane-iss-77.txt" <<'PANE'
+timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
+exit=124
+WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=1 ran=595s
+timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
+exit=124
+WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=2 ran=595s
+That's two timeouts in a row on restore.sh, so I'm stopping here instead
+of retrying a third time, and filing a message about it next.
+PANE
+
+cd "$PROJECT_DIR"
+DRY_RUN=0 WATCH_TIMEOUT_RETRY_SWEEP_SECS=1 WATCH_BG_VIOLATION_SWEEP_SECS=0 WATCH_PR_POLL_SECS=0 \
+    WATCH_ORPHAN_SWEEP_SECS=0 WATCH_CHECK_ON_DONE=0 POLL_SECS=1 \
+    "$WATCH" "$PROJECT_DIR" > "$TEST_DIR/watch-timeoutretry-i.log" 2>&1 &
+WATCH_PID=$!
+
+sleep 5
+still_running=0
+kill -0 "$WATCH_PID" 2>/dev/null && still_running=1
+kill "$WATCH_PID" 2>/dev/null || true
+wait "$WATCH_PID" 2>/dev/null || true
+unset WATCH_PID
+
+[ "$still_running" = "1" ] || red "watch process exited unexpectedly; log: $(cat "$TEST_DIR/watch-timeoutretry-i.log")"
+outbox_file="$(ls "$TEST_DIR"/wt-issue-77/.swarm/tasks/outbox/*.md 2>/dev/null | head -1)" || true
+[ -z "$outbox_file" ] \
+    || red "plain narration with no guard word nearby, worded per the fix, wrongly tipped the sweep over; got: $(cat "$outbox_file")"
+green "2 real markers + unguarded plain narration that never retypes the token do not false-positive"
+
+rm -f "$TEST_DIR/tmux-windows.txt" "$TEST_DIR/tmux-pane-iss-77.txt"
+
 # ────────────────────────── Done ──────────────────────────
 
 heading "All shape-orchestration tests passed"
