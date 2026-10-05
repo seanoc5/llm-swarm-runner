@@ -32,7 +32,7 @@ run_coordinator() {
     for ((attempt=0; attempt<150; attempt++)); do
         state="$(tmux -L "$SOCKET" list-panes -t "$SESSION:coordinator" -F '#{pane_dead}' 2>/dev/null || true)"
         if [ "$state" = 1 ]; then
-            if tmux -L "$SOCKET" capture-pane -t "$SESSION:coordinator" -p | rg -q CODEX_RUN_COMPLETE; then
+            if tmux -L "$SOCKET" capture-pane -t "$SESSION:coordinator" -p | grep -q CODEX_RUN_COMPLETE; then
                 return 0
             fi
         fi
