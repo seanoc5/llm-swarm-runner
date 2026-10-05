@@ -79,7 +79,11 @@ RISK="$(grep -oE '<!-- BLIND_MERGE_RISK: (low|medium|high) -->' <<<"$BODY" \
     | head -1 | sed -E 's/.*: (low|medium|high) -->/\1/' || true)"
 
 HELD=0
-grep -q 'COORDINATOR HOLD' <<<"$BODY" && HELD=1
+# Matches the literal draft-as-hold banner (prompts/coordinator.md), not
+# just any mention of the phrase — this PR's own body talks ABOUT the
+# banner in prose, which a bare substring match on "COORDINATOR HOLD"
+# would also catch and self-hold on.
+grep -qE '⛔ \*\*COORDINATOR HOLD\*\*' <<<"$BODY" && HELD=1
 
 case "$RISK" in
     low)

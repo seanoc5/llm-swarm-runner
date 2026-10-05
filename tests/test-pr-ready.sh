@@ -182,4 +182,14 @@ rc=0; run_pr_ready || rc=$?
 gh_ready_called && red "expected gh pr ready NOT to run for a held low-risk PR"
 green "a COORDINATOR HOLD banner holds even a risk=low PR"
 
+# ============================================================================
+heading "Test 10: body merely MENTIONS the phrase (no banner) — not held, readies normally"
+# ============================================================================
+printf '<!-- BLIND_MERGE_RISK: low -->\nThis PR adds the COORDINATOR HOLD check to pr-ready.sh.\n' > "$BODY_FILE"
+make_fake_review 0
+rc=0; run_pr_ready || rc=$?
+[ "$rc" -eq 0 ] || red "expected exit 0 — a prose mention of the phrase should not self-hold, got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called || red "expected gh pr ready to run when the body only mentions the phrase in prose, not the actual banner"
+green "a prose mention of the phrase (not the actual banner) does not trigger a hold"
+
 green "ALL TESTS PASSED"
