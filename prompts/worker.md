@@ -80,24 +80,29 @@ and now know the true budget), raise the timeout, split the job, or retry
 a third time.
 
 Each time this happens, redirect the command's own output to a file, not
-the pane — a noisy command's output folds there ("… +N lines"), which can
-bury the marker in exactly the case this rule exists for — and echo one
-line so the pane carries a visible, greppable record (the watcher looks
-for this marker). Build it from two concatenated string literals as shown,
-not one — the Bash tool renders the command you ran into the pane
-verbatim, so a literal `WATCH_TIMEOUT_HIT` written directly in the command
-text would get counted as a sighting on every run, timed out or not;
-splitting it keeps the whole token out of the command source while still
-printing it whole in the output:
+the pane — a noisy command's output folds there ("… +N lines"), burying
+the marker — then always print the real exit code before checking it for
+124: ending on `[ "$ec" = 124 ] && echo …` alone makes a *successful* run
+report exit 1 to you, hiding what you need to see. Build the marker from
+two concatenated string literals as shown, not one — the Bash tool renders
+the command you ran into the pane verbatim, so a literal
+`WATCH_TIMEOUT_HIT` written directly in the command text would get
+counted as a sighting on every run, timed out or not; splitting it keeps
+the whole token out of the command source while still printing it whole
+in the output. Type the attempt number in literally — `$n` won't persist
+across Bash tool calls:
 
 ```bash
 timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
-[ "$ec" = 124 ] && echo "WATCH_TIMEOUT""_HIT cmd=\"restore.sh\" attempt=$n ran=595s"
+echo "exit=$ec"
+if [ "$ec" = 124 ]; then
+    echo "WATCH_TIMEOUT""_HIT cmd=\"restore.sh\" attempt=1 ran=595s"
+fi
 ```
 
-When the Bash tool's own timeout kills the command instead, the echo
-above never runs. Issue it as its own follow-up command, split the same
-way — it renders into the pane like any other command.
+When the Bash tool's own timeout kills the command instead, nothing above
+runs — issue the same marker as its own follow-up command, split the
+same way.
 
 On the second consecutive `WATCH_TIMEOUT_HIT` for the same command: write a
 `decision-needed` outbox message naming the command, how long each attempt

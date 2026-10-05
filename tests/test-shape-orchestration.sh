@@ -937,11 +937,14 @@ heading "Test 16a: timeout_retry_sweep_pass flags a worker stuck retrying a comm
 # meeting the default WATCH_TIMEOUT_RETRY_MIN_COUNT=3 threshold.
 echo "iss-77" > "$TEST_DIR/tmux-windows.txt"
 cat > "$TEST_DIR/tmux-pane-iss-77.txt" <<'PANE'
-timeout 595 ./restore.sh; ec=$?
+timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
+exit=124
 WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=1 ran=595s
-timeout 595 ./restore.sh; ec=$?
+timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
+exit=124
 WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=2 ran=595s
-timeout 595 ./restore.sh; ec=$?
+timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
+exit=124
 WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=3 ran=595s
 PANE
 rm -rf "$TEST_DIR/wt-issue-77/.swarm/tasks/outbox"
@@ -974,9 +977,11 @@ heading "Test 16b: timeout_retry_sweep_pass does not fire below WATCH_TIMEOUT_RE
 rm -rf "$TEST_DIR/wt-issue-77/.swarm/tasks/outbox"
 echo "iss-77" > "$TEST_DIR/tmux-windows.txt"
 cat > "$TEST_DIR/tmux-pane-iss-77.txt" <<'PANE'
-timeout 595 ./restore.sh; ec=$?
+timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
+exit=124
 WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=1 ran=595s
-timeout 595 ./restore.sh; ec=$?
+timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
+exit=124
 WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=2 ran=595s
 PANE
 
@@ -1042,18 +1047,28 @@ heading "Test 16d: a rendered command SOURCE line (not real output) does not fal
 # this by building the marker from two concatenated string literals
 # ("WATCH_TIMEOUT" "_HIT ...") so the whole token never appears contiguous
 # in the command source — only in the actual printed output. This fixture
-# reproduces the command SOURCE text three times with no echoed output line
-# at all (as if the command never actually timed out), and asserts the
-# sweep does not fire.
+# reproduces worker.md's exact current command source (redirect, exit-code
+# echo, if-block) three times with the `if` condition always false (as if
+# the command never actually timed out), and asserts the sweep does not
+# fire. Keep this in sync with worker.md's example if that changes again.
 rm -rf "$TEST_DIR/wt-issue-77/.swarm/tasks/outbox"
 echo "iss-77" > "$TEST_DIR/tmux-windows.txt"
 cat > "$TEST_DIR/tmux-pane-iss-77.txt" <<'PANE'
-timeout 595 ./restore.sh; ec=$?
-[ "$ec" = 124 ] && echo "WATCH_TIMEOUT""_HIT cmd=\"restore.sh\" attempt=$n ran=595s"
-timeout 595 ./restore.sh; ec=$?
-[ "$ec" = 124 ] && echo "WATCH_TIMEOUT""_HIT cmd=\"restore.sh\" attempt=$n ran=595s"
-timeout 595 ./restore.sh; ec=$?
-[ "$ec" = 124 ] && echo "WATCH_TIMEOUT""_HIT cmd=\"restore.sh\" attempt=$n ran=595s"
+timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
+echo "exit=$ec"
+if [ "$ec" = 124 ]; then
+    echo "WATCH_TIMEOUT""_HIT cmd=\"restore.sh\" attempt=1 ran=595s"
+fi
+timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
+echo "exit=$ec"
+if [ "$ec" = 124 ]; then
+    echo "WATCH_TIMEOUT""_HIT cmd=\"restore.sh\" attempt=2 ran=595s"
+fi
+timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
+echo "exit=$ec"
+if [ "$ec" = 124 ]; then
+    echo "WATCH_TIMEOUT""_HIT cmd=\"restore.sh\" attempt=3 ran=595s"
+fi
 PANE
 
 cd "$PROJECT_DIR"
@@ -1094,9 +1109,11 @@ heading "Test 16e: a worker's own prose about the marker does not false-positive
 rm -rf "$TEST_DIR/wt-issue-77/.swarm/tasks/outbox"
 echo "iss-77" > "$TEST_DIR/tmux-windows.txt"
 cat > "$TEST_DIR/tmux-pane-iss-77.txt" <<'PANE'
-timeout 595 ./restore.sh; ec=$?
+timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
+exit=124
 WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=1 ran=595s
-timeout 595 ./restore.sh; ec=$?
+timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
+exit=124
 WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=2 ran=595s
 That's a second WATCH_TIMEOUT_HIT, so per worker.md I'm stopping and filing
 a decision-needed message instead of retrying a third time.
@@ -1136,11 +1153,14 @@ Reading prompts/worker.md to check the task conventions before starting.
 filler line 1
 filler line 2
 filler line 3
-timeout 595 ./restore.sh; ec=$?
+timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
+exit=124
 WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=1 ran=595s
-timeout 595 ./restore.sh; ec=$?
+timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
+exit=124
 WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=2 ran=595s
-timeout 595 ./restore.sh; ec=$?
+timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
+exit=124
 WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=3 ran=595s
 PANE
 

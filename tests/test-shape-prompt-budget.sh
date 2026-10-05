@@ -21,18 +21,18 @@
 # call as the worker bump above. coordinator.md's own regrowth still owes
 # issue #509 a full answer; this bump is not that answer.
 #
-# 2026-10-05: worker budget 22000 -> 22200. Four rounds of automated
+# 2026-10-05: worker budget 22000 -> 22300. Six rounds of automated
 # self-review on #467's "Stop after two timeouts" rule each caught a real
 # correctness gap (a false-positive-prone example, pane output folding
-# able to hide the marker, an under-specified fallback case) — fixes, not
-# incident narrative, but still didn't fit the existing headroom.
+# able to hide the marker, an exit-code-masking bug in the example itself)
+# — fixes, not incident narrative, but still didn't fit the headroom.
 set -euo pipefail
 
 green() { printf '\033[32m✓ %s\033[0m\n' "$*"; }
 red()   { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORKER_MAX="${WORKER_MD_MAX_BYTES:-22200}"
+WORKER_MAX="${WORKER_MD_MAX_BYTES:-22300}"
 COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-26000}"
 BARE_MAX="${WORKER_BARE_MD_MAX_BYTES:-11000}"   # issue #510 trial prompt; ~7.5KB is script-parsed contract
 
