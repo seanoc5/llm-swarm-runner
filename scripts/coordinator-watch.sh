@@ -5696,11 +5696,28 @@ SCRIPT
         new_pane="$(tmux split-window -d -v -l 12 -t "$SESSION_NAME:iss-$issue" -c "$wt_dir" \
                         -P -F '#{pane_id}' bash "$runner_script" 2>/dev/null)" || spawn_rc=1
         [ "$spawn_rc" -eq 0 ] && [ -n "$new_pane" ] || spawn_rc=1
-    else
+
+        if [ "$spawn_rc" -ne 0 ]; then
+            # issue #555 self-review: iss-N can be too short for
+            # split-window -l 12 to fit (an attached client can shrink a
+            # window below that at any time) — tmux then refuses the
+            # split on every sweep, forever, with no fallback: the claim
+            # is released, check.json stays at "checking", and the next
+            # sweep just retries the same failing split. Patch the
+            # already-written runner script's baked-in MARK_KIND and fall
+            # through to the standalone chk-N window path below instead
+            # of giving up.
+            sed -i 's/^MARK_KIND=.*/MARK_KIND=window/' "$runner_script" 2>/dev/null || true
+            mark_kind=window
+            spawn_rc=0
+        fi
+    fi
+    if [ "$mark_kind" = window ]; then
         # Fallback: no iss-$issue window left to host a pane in (reaped
-        # out from under an in-flight check, or check-on-done fired from
-        # the PR-open backstop against a worktree whose window never
-        # existed in this tmux session at all). Mirrors provision-worker.sh's
+        # out from under an in-flight check, check-on-done fired from the
+        # PR-open backstop against a worktree whose window never existed
+        # in this tmux session at all, or the pane split above just
+        # failed and fell back here). Mirrors provision-worker.sh's
         # `iss-N` windows, `-d` so it doesn't steal focus; closes any
         # leftover chk-$issue window from a prior run first (replace, not
         # stack, same as the pane case above) — same reasoning as there:

@@ -595,5 +595,51 @@ green "the stale-labeled pane was replaced cleanly, not stacked alongside a seco
 
 stop_watcher
 
+# ============================================================================
+heading "Test 12: an iss-N window too short for the pane split falls back to the chk-N window instead of being permanently stuck (self-review round 7 finding)"
+# ============================================================================
+
+# Round 7's actual bug: split-window -l 12 needs enough rows for the new
+# pane plus at least one left for the worker's own pane; an attached
+# client that keeps iss-N shorter than that makes tmux refuse the split
+# with "no space for new pane" on EVERY sweep, forever — the claim gets
+# released, check.json is stuck at "checking", and nothing ever runs the
+# check. Force iss-907 down to 2 rows (manual per-window sizing, so this
+# doesn't shrink the session's other windows) and confirm the check still
+# completes, by falling back to the standalone chk-N window path.
+git -C "$PROJ" worktree add -q -b fix/issue-907 "$TEST_DIR/wt-issue-907"
+WT907="$TEST_DIR/wt-issue-907"
+mkdir -p "$WT907/.swarm/tasks/status"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$WT907/.swarm/check.sh"
+chmod +x "$WT907/.swarm/check.sh"
+printf 'fix/issue-907\tOPEN\t907\n' >> "$GH_PR_LIST_FILE"
+
+"$SHIM_TMUX" new-window -d -t "$SESSION" -n iss-907 -c "$WT907" \
+    bash -c 'while true; do echo WORKER_TICK; sleep 0.3; done'
+"$SHIM_TMUX" set-window-option -t "$SESSION:iss-907" window-size manual
+"$SHIM_TMUX" resize-window -t "$SESSION:iss-907" -y 2
+
+echo '{"task_id":"t907","state":"ready-for-review","pr":907,"ts":"2026-07-19T07:00:00Z"}' \
+    > "$WT907/.swarm/tasks/status/t907.json"
+
+start_watcher "$TEST_DIR/watch-8.log"
+
+wait_until 15 "t907's check to resolve despite iss-907 being too short to split" \
+    bash -c "grep -q '\"state\":\"pass\"\|\"state\":\"fail\"' '$WT907/.swarm/tasks/status/t907.check.json' 2>/dev/null"
+grep -q '"state":"pass"' "$WT907/.swarm/tasks/status/t907.check.json" \
+    || red "t907 should have passed via the fallback window; got: $(cat "$WT907/.swarm/tasks/status/t907.check.json" 2>/dev/null)"
+green "t907's check resolved via the chk-N window fallback despite the too-short iss-907 window"
+
+window_exists "chk-907:pass" \
+    || red "expected a resolved chk-907:pass fallback window, found: $("$SHIM_TMUX" list-windows -t "$SESSION" -F '#{window_name}')"
+green "chk-907 window carries the pass marker — the fallback path ran, not a silently stuck pane split"
+
+[ "$(pane_count iss-907)" -eq 1 ] \
+    || red "iss-907 should still have just its own worker pane (no stray half-split pane left behind), got $(pane_count iss-907)"
+green "iss-907 itself was never left with a stray pane from the failed split attempt"
+
+stop_watcher
+"$SHIM_TMUX" kill-window -t "$SESSION:chk-907" 2>/dev/null || true
+
 echo
 green "ALL TESTS PASSED"
