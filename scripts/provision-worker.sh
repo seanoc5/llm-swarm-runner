@@ -261,6 +261,19 @@ HOST_STATE_DIR="${HOST_STATE_DIR:-${TMPDIR:-/tmp}/llm-swarm-host-$(id -u)}"
 # setup that precedes the poll, so even the unraised 120s default can run
 # past a 120s TTL once that setup time is added in. Always max(120,
 # check_secs + 30s) rather than assuming the two stay equal.
+#
+# issue #546, self-review (round 7): PROVISION_SPAWN_CHECK_SECS is
+# per-project overridable (it's not in _load-env.sh's HOST_ONLY_KEYS list),
+# but $HOST_STATE_DIR and the pending-* markers under it are shared by
+# every project/swarm on this host. The value below is this invocation's
+# OWN TTL — it's written into the marker this invocation creates (see
+# host_admission_check) and used as the fallback when reading a marker
+# that has none — but it must never be used to judge another project's
+# marker: a project with a longer PROVISION_SPAWN_CHECK_SECS would have
+# its still-valid marker read, and deleted, by a sibling project's
+# shorter-ceilinged run. host_admission_check reads each marker's own
+# stored TTL instead, so this variable never gates a marker it didn't
+# write.
 HOST_PENDING_TTL_SECS="$(awk -v c="${PROVISION_SPAWN_CHECK_SECS:-120}" \
     'BEGIN{v=c+30; if (v<120) v=120; printf "%.0f", v}')"
 
@@ -298,14 +311,24 @@ host_admission_check() {
 
     # a) container count: running + pending spawns not yet visible to docker ps
     if [ "$HOST_MAX_WORKERS" != "0" ]; then
-        local running pending=0 m name age now
+        local running pending=0 m name age now marker_ttl
         running="$(docker ps --filter 'name=^swarm-' --format '{{.Names}}' 2>/dev/null || true)"
         now=$(date +%s)
         for m in "$HOST_STATE_DIR"/pending-*; do
             [ -e "$m" ] || continue
             name="${m##*/pending-}"
             age=$(( now - $(stat -c %Y "$m" 2>/dev/null || echo "$now") ))
-            if grep -qx -- "$name" <<< "$running" || [ "$age" -gt "$HOST_PENDING_TTL_SECS" ]; then
+            # issue #546, self-review (round 7): judge each marker against the
+            # TTL ITS OWN writer stored in it, not this invocation's
+            # HOST_PENDING_TTL_SECS — a sibling project can run with a
+            # different PROVISION_SPAWN_CHECK_SECS, and reading this
+            # process's own value here would let one project's admission
+            # check delete another project's still-valid marker mid-poll.
+            # Markers from before this fix (or corrupted) have no usable
+            # content, so fall back to this invocation's own TTL for those.
+            marker_ttl="$(cat -- "$m" 2>/dev/null)"
+            [[ "$marker_ttl" =~ ^[0-9]+$ ]] || marker_ttl="$HOST_PENDING_TTL_SECS"
+            if grep -qx -- "$name" <<< "$running" || [ "$age" -gt "$marker_ttl" ]; then
                 rm -f -- "$m"
             else
                 pending=$((pending + 1))
@@ -366,8 +389,14 @@ host_admission_check() {
     fi
 
     # Admitted: record the in-flight spawn and the stagger clock, then
-    # release the lock (flock releases with fd 9 at exit anyway).
-    touch "$HOST_STATE_DIR/pending-$container_name" "$HOST_STATE_DIR/last-spawn"
+    # release the lock (flock releases with fd 9 at exit anyway). The
+    # marker's content is this invocation's own HOST_PENDING_TTL_SECS
+    # (issue #546, self-review round 7) so any project's admission check
+    # that later reads this marker judges it by the TTL ITS OWN writer
+    # intended, not whatever PROVISION_SPAWN_CHECK_SECS that later reader
+    # happens to be running with.
+    echo "$HOST_PENDING_TTL_SECS" > "$HOST_STATE_DIR/pending-$container_name"
+    touch "$HOST_STATE_DIR/last-spawn"
     exec 9>&-
 }
 
@@ -580,8 +609,9 @@ post_spawn_health_check() {
         log_event worker.start.failed "issue=$issue window=$window pane_dead=1 container_running=0 brief_removed=$brief_removed"
         # self-review (7th pass): host_admission_check's pending-$container
         # marker is otherwise left behind by a failed spawn, double-counting
-        # toward HOST_MAX_WORKERS until HOST_PENDING_TTL_SECS (120s) expires
-        # it. Deliberately not touching last-spawn here: the stagger clock is
+        # toward HOST_MAX_WORKERS until the TTL stored in the marker itself
+        # (see host_admission_check) expires it. Deliberately not touching
+        # last-spawn here: the stagger clock is
         # about host load from the attempt itself (docker run + the pane's
         # brief life), which still happened, so an immediate retry can still
         # see an exit-3 spawn_stagger refusal — bounded by HOST_SPAWN_STAGGER_SECS
@@ -603,10 +633,12 @@ post_spawn_health_check() {
     # touching $HOST_STATE_DIR/pending-$container either (unlike the exit 4
     # and check_stale_container cleanup paths): the worker may still be
     # starting, so it should keep counting toward HOST_MAX_WORKERS — which
-    # is also why HOST_PENDING_TTL_SECS above tracks PROVISION_SPAWN_CHECK_SECS
-    # rather than staying a fixed 120s: the marker must outlive this whole
-    # check, or a spawn that's still legitimately in flight would stop
-    # counting partway through its own health poll (self-review finding).
+    # is also why the marker carries its own TTL (derived from THIS
+    # invocation's PROVISION_SPAWN_CHECK_SECS at admission time, stored in
+    # the marker's content, read back by host_admission_check) rather than
+    # a fixed 120s: the marker must outlive this whole check, or a spawn
+    # that's still legitimately in flight would stop counting partway
+    # through its own health poll (self-review finding).
     # Re-check manually
     # (`docker ps`, `tmux capture-pane`) or raise PROVISION_SPAWN_CHECK_SECS.
     echo "WARN: worker window $window for issue #$issue is still starting after ${check_secs}s (pane alive, container not observed yet) — leaving window and container running." >&2
