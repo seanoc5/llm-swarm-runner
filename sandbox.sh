@@ -459,6 +459,33 @@ if [ -n "${SANDBOX_DEP_PROXY_URL:-}" ]; then
     DEP_PROXY_OPTS=(-e "SANDBOX_DEP_PROXY_URL=$SANDBOX_DEP_PROXY_URL")
 fi
 
+# Build-output tmpfs (2026-10-02). Gradle's build/ is pure churn: class
+# files, test results, boot jars, all rebuilt on demand. Ten workers writing
+# it at once saturated the host's single NVMe (96% util, 4 s write waits,
+# io.pressure full ~75%), which slowed tests into timeouts and retries that
+# made more writes. A tmpfs over $PROJECT_DIR/build keeps that churn in RAM
+# without changing any path: Gradle, test reports and agents all still see
+# ./build. Worker build dirs measured 100-240 MB.
+#
+# tmpfs pages are charged to this container's memory cgroup, so the size
+# comes out of SANDBOX_MEM_LIMIT, not on top of it; 2g leaves 6g of the 8g
+# default for JVMs. Only used pages count, so an idle 2g mount costs
+# nothing. Contents vanish when the container exits; nothing on the host
+# reads a worker's build/ afterwards. A pre-existing on-disk build/ is
+# hidden while the container runs, not touched.
+#
+# The mountpoint is created as the host user first: otherwise dockerd makes
+# it root-owned inside the bind-mounted worktree, and host-side cleanup
+# (kill-worktree, a host ./gradlew) then fails on a root-owned build/.
+# Single-module Gradle projects only (all current swarm repos); a
+# subproject's build/ stays on disk. "0" disables.
+SANDBOX_BUILD_TMPFS="${SANDBOX_BUILD_TMPFS:-2g}"
+if [ "$SANDBOX_BUILD_TMPFS" != "0" ] \
+   && { [ -f "$PROJECT_DIR/build.gradle.kts" ] || [ -f "$PROJECT_DIR/build.gradle" ]; }; then
+    mkdir -p "$PROJECT_DIR/build"
+    MOUNTS+=(--mount "type=tmpfs,destination=$PROJECT_DIR/build,tmpfs-size=$SANDBOX_BUILD_TMPFS,tmpfs-mode=1777")
+fi
+
 # Project-specific environment variables
 ENV_FILE_OPT=()
 if [ -f "$PROJECT_DIR/.sandbox-env" ]; then
