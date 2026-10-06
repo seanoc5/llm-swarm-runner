@@ -7631,13 +7631,25 @@ worker_compact_pass() {
 # external drop (one extra, harmless debounce-covered wake re-check under
 # the default DEBOUNCE_SECS), not a correctness problem.
 coord_inbox_write() {
-    local kind="$1" content="$2" tmp final marker
+    local kind="$1" content="$2" tmp final marker stale_marker stale_note
     mkdir -p "$COORD_INBOX_DIR" "$COORD_INBOX_PROCESSED_DIR" "$COORD_INBOX_SELF_DIR" 2>/dev/null || true
     # A marker whose .md file on_inbox_drop never got to see (the watcher
     # exited right after this write, or wasn't running at all) would
-    # otherwise sit forever — sweep anything old enough that it can only be
-    # such an orphan, never a marker whose file is still in flight.
-    find "$COORD_INBOX_SELF_DIR" -maxdepth 1 -name '*.self' -mmin +60 -delete 2>/dev/null || true
+    # otherwise sit forever — sweep anything old enough to plausibly be
+    # such an orphan. Age alone isn't sufficient, though (self-review on
+    # this issue's own PR): a note can legitimately sit unarchived for
+    # over an hour — the #461 incident itself ran 2h23m — so deleting a
+    # marker just because it's old would let a later tick redecide a
+    # STILL-pending note's wake a second time, breaking the one-decision-
+    # per-file promise on_inbox_drop exists to keep. Only delete a marker
+    # whose note is actually gone (archived to processed/, or otherwise
+    # removed) — that pairing, not age by itself, is what makes it safe.
+    while IFS= read -r stale_marker; do
+        [ -n "$stale_marker" ] || continue
+        stale_note="$COORD_INBOX_DIR/$(basename "$stale_marker" .self)"
+        [ -e "$stale_note" ] && continue
+        rm -f "$stale_marker" 2>/dev/null || true
+    done < <(find "$COORD_INBOX_SELF_DIR" -maxdepth 1 -name '*.self' -mmin +60 -print 2>/dev/null)
     tmp="$(mktemp "$COORD_INBOX_DIR/.tmp.coord-inbox.XXXXXX" 2>/dev/null)" || return 1
     printf '%s\n' "$content" > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
     final="$COORD_INBOX_DIR/$(date -u +%Y%m%dT%H%M%SZ)-${kind}-$$-${RANDOM}.md"

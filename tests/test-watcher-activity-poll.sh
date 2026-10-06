@@ -1039,6 +1039,33 @@ green "a still-unarchived coord-inbox note is not redecided on later ticks — e
 unset -f scan_inbox_drops dispatch_inbox_drops on_inbox_drop
 
 # ============================================================================
+heading "Test 5l (issue #461 self-review finding, round 2): coord_inbox_write's stale-marker sweep only deletes a marker whose note is actually gone, never one that's just old"
+# ============================================================================
+# Self-review caught that age alone isn't a safe sweep condition: a note
+# can legitimately sit unarchived for over an hour (the #461 incident
+# itself ran 2h23m), so deleting its marker just because it's old would
+# let a later tick redecide that STILL-pending note's wake all over again
+# — exactly the bug this marker exists to prevent. coord_inbox_write (the
+# only place that runs the sweep) is already extracted from the big
+# function list above; reuses $RESTART_NOTE and its marker from Test 5k.
+RESTART_MARKER="$COORD_INBOX_SELF_DIR/$(basename "$RESTART_NOTE").self"
+[ -e "$RESTART_MARKER" ] || red "Test 5l needs Test 5k's marker still on disk to backdate"
+touch -d '90 minutes ago' "$RESTART_MARKER" 2>/dev/null || touch -t 202501010000 "$RESTART_MARKER"
+
+coord_inbox_write probe "sweep probe, note still pending" >/dev/null
+
+[ -e "$RESTART_MARKER" ] \
+    || red "the sweep deleted a >60min-old marker whose note is still on disk — a later tick would now redecide that still-pending note's wake"
+green "an old marker whose note is still pending survives the sweep"
+
+rm -f "$RESTART_NOTE"
+coord_inbox_write probe "sweep probe, note now gone" >/dev/null
+
+[ -e "$RESTART_MARKER" ] \
+    && red "the sweep left behind a marker whose note is actually gone — true orphans must still be pruned"
+green "a marker whose note is gone (processed/removed) is pruned by the sweep"
+
+# ============================================================================
 heading "Test 6: a debounced activity finding is retried on a later tick, not lost (issue #392 self-review finding, now via the coordinator inbox)"
 # ============================================================================
 # activity_poll_pass only marks ACTIVITY_ANNOUNCED_PR/_ISSUE (and
