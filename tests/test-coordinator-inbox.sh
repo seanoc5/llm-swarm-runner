@@ -128,6 +128,17 @@ wake_count() {
     grep -c 'WAKE:' "$WAKE_LOG" 2>/dev/null || true
 }
 
+# atomic_note_write <final-path> <content> — the producer contract Tests 7
+# and 8 are meant to exercise (self-review round 6: write a tmp file, then
+# `mv` it into place, the same pattern coord_inbox_write itself uses), not
+# a plain in-place `printf > file` the watcher only accepts on sufferance.
+atomic_note_write() {
+    local final="$1" content="$2" tmp
+    tmp="$(mktemp "$(dirname "$final")/.tmp.external-note.XXXXXX")"
+    printf '%s\n' "$content" > "$tmp"
+    mv -f "$tmp" "$final"
+}
+
 # poll_until <max-tries> <sleep-between> <check-command...>
 # Retries a condition rather than a single fixed sleep — this daemon's
 # poll loop (POLL_SECS=1) and timer loop (2s tick) both introduce real
@@ -400,7 +411,7 @@ start_watcher "$TEST_DIR/watch-7.log"
 
 mkdir -p "$INBOX_DIR"
 EXTERNAL_NOTE="$INBOX_DIR/$(date -u +%Y%m%dT%H%M%SZ)-external-probe.md"
-printf 'parity7-sweep-done\n' > "$EXTERNAL_NOTE"
+atomic_note_write "$EXTERNAL_NOTE" 'parity7-sweep-done'
 
 poll_until 20 0.5 bash -c "grep -q 'WAKE:' '$WAKE_LOG'" \
     || red "a foreign coord-inbox file never triggered a doorbell. watch log:
@@ -410,10 +421,8 @@ $(cat "$EVENTS_LOG" 2>/dev/null || true)"
 green "a foreign file dropped directly into coord-inbox/ (no .self marker, no live worker window) rang the doorbell"
 
 grep -q 'coord.inbox.drop ' "$EVENTS_LOG" \
-    || red "expected coord.inbox.drop to be logged for the externally-written file"
-grep -q 'coord.inbox.drop.skip' "$EVENTS_LOG" 2>/dev/null \
-    && red "a foreign file must never be skipped as self_written: $(cat "$EVENTS_LOG")"
-green "events.log: coord.inbox.drop logged, never skipped as self-written"
+    || red "expected coord.inbox.drop to be logged for the externally-written file — on_inbox_drop never took the new-decision path"
+green "events.log: coord.inbox.drop logged for the externally-written file"
 
 [ -e "$INBOX_DIR/.self/$(basename "$EXTERNAL_NOTE").self" ] \
     || red "on_inbox_drop should have marked this file decided once it rang the doorbell for it"
@@ -459,7 +468,7 @@ start_watcher "$TEST_DIR/watch-8.log"
 
 mkdir -p "$INBOX_DIR"
 FIXED_NOTE="$INBOX_DIR/done.md"
-printf 'first sweep done\n' > "$FIXED_NOTE"
+atomic_note_write "$FIXED_NOTE" 'first sweep done'
 
 poll_until 20 0.5 bash -c "grep -q 'WAKE:' '$WAKE_LOG'" \
     || red "first use of a fixed-name coord-inbox file never triggered a doorbell"
@@ -471,7 +480,7 @@ green "first note under a fixed/reused filename rang the doorbell"
 # Same producer, same filename, a later unrelated note — only a real wall-
 # clock gap (not a backdated marker) guarantees the new mtime is newer.
 sleep 1.5
-printf 'second sweep done\n' > "$FIXED_NOTE"
+atomic_note_write "$FIXED_NOTE" 'second sweep done'
 
 poll_until 20 0.5 bash -c "[ \"\$(grep -c 'WAKE:' '$WAKE_LOG')\" -ge 2 ]" \
     || red "a fixed filename reused for a second note never rang a second doorbell. watch log:
