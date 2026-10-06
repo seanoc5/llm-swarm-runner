@@ -46,6 +46,31 @@
 #   missing/unparseable BLIND_MERGE_RISK marker: treated as medium (fail
 #                      toward requiring review)
 #
+# issue #473: before calling self-review-pr.sh at all, counts the
+# `SWARM_SELF_REVIEW` marker comments already posted on the PR (one per
+# prior round — self-review-pr.sh --post --force always adds a fresh
+# comment, never edits one in place). Once that count reaches
+# WORKER_SELF_REVIEW_MAX_ROUNDS (default 3), this script stops calling
+# self-review-pr.sh — the fand-etl PR #1063 incident (2026-09-25/26) ran ~15
+# rounds over 2h15m for 23 mostly-cosmetic follow-up commits with no stop
+# condition. The worker is expected to fold any remaining findings into the
+# PR body's `## Follow-up suggestions` block instead of chasing them with
+# more commits (prompts/worker.md § "Self-review before merge"). 0 disables
+# self-review entirely, same effect as WORKER_SELF_REVIEW=0. Capping the
+# round does NOT skip the gate: it still checks the latest already-posted
+# verdict and refuses (exit 2, same as a fresh BLOCK) if that verdict is
+# BLOCK — a PR capped right after a BLOCK round must not ready unreviewed
+# (self-review finding on this script's first version of the cap).
+#
+# issue #473: also requires CI to be observed green (or absent) on the PR's
+# head commit immediately before `gh pr ready` runs — a single `gh pr
+# checks` snapshot, taken here rather than trusted from anything the worker
+# says earlier in its own transcript. The same fand-etl PR #1063 was marked
+# ready with `lint-and-test` failing (4 ruff errors) while the PR body
+# claimed "CI is green". Pending checks or failures refuse readying (exit
+# 4); no checks configured at all is a pass-with-warning, consistent with
+# ci-wait.sh's own exit 5 and swarm-merge.sh's Gate 2.
+#
 # issue #534: a PR the coordinator drafted as a hold (draft-as-hold,
 # `prompts/coordinator.md` § "Draft-as-hold") carries a
 # `> ⛔ **COORDINATOR HOLD**` banner in its body. Un-drafting that PR
@@ -60,6 +85,8 @@
 #      exit code alone — issue #446, treated as blocking either way)
 #   3  held — a COORDINATOR HOLD banner is on the PR body; self-review ran
 #      (and posted) as usual, but gh pr ready was deliberately skipped
+#   4  refused — CI checks on the head commit are not confirmed green
+#      (pending, failing, or an unexpected `gh pr checks` error)
 #   1  usage / gh error resolving the PR body
 set -euo pipefail
 
@@ -96,6 +123,7 @@ case "$RISK" in
             echo "pr-ready: WARN: no BLIND_MERGE_RISK marker found on PR #$PR's body — treating as medium (fail toward requiring review)" >&2
             RISK="medium"
         fi
+        MAX_ROUNDS="${WORKER_SELF_REVIEW_MAX_ROUNDS:-3}"
         if [ "${WORKER_SELF_REVIEW:-1}" = "0" ]; then
             # Checked HERE, before ever invoking self-review-pr.sh, rather
             # than relying on its own exit-4 "skipped" path: --force below
@@ -108,8 +136,41 @@ case "$RISK" in
             # keeps the kill switch intact while still letting --force do
             # its actual job once we've already decided to run.
             echo "pr-ready: self-review skipped (WORKER_SELF_REVIEW=0) — readying anyway. Flag this in your handoff."
+        elif [ "$MAX_ROUNDS" = "0" ]; then
+            echo "pr-ready: self-review disabled (WORKER_SELF_REVIEW_MAX_ROUNDS=0) — readying anyway. Flag this in your handoff."
         else
-            echo "pr-ready: risk=$RISK — running self-review ($SELF_REVIEW $PR --post --force)..."
+            # Round count is read from the PR itself (prior SWARM_SELF_REVIEW
+            # marker comments), not from this process's own memory — each
+            # pr-ready.sh invocation is a fresh call from a worker that may
+            # have retried across many separate commands in the same
+            # conversation. A lookup failure (gh hiccup, unparseable count)
+            # fails OPEN here (treated as round 0): the cap is a cost/time
+            # guard, not a correctness gate — that's CI-green and BLOCK
+            # below, which fail closed.
+            ROUNDS_DONE="$(gh pr view "$PR" --json comments \
+                --jq '[.comments[].body // "" | select(contains("SWARM_SELF_REVIEW:"))] | length' \
+                2>/dev/null || true)"
+            case "$ROUNDS_DONE" in
+                ''|*[!0-9]*) ROUNDS_DONE=0 ;;
+            esac
+            if [ "$ROUNDS_DONE" -ge "$MAX_ROUNDS" ]; then
+                echo "pr-ready: self-review round cap reached ($ROUNDS_DONE/$MAX_ROUNDS rounds already posted on PR #$PR, WORKER_SELF_REVIEW_MAX_ROUNDS=$MAX_ROUNDS) — not running another round."
+                echo "          Move any remaining findings into the PR body's ## Follow-up suggestions block instead of another commit."
+                # Skipping the round must not also skip the gate: check the
+                # LATEST posted verdict (same capture pattern as
+                # review-scoreboard.sh) so a PR capped right after a BLOCK
+                # round still refuses instead of readying unreviewed
+                # (self-review finding on this script's first version).
+                LATEST_VERDICT="$(gh pr view "$PR" --json comments \
+                    --jq '[.comments[].body // "" | select(contains("SWARM_SELF_REVIEW:")) | capture("SWARM_SELF_REVIEW: (?<v>APPROVE_WITH_CAVEATS|APPROVE|BLOCK)").v] | last // empty' \
+                    2>/dev/null || true)"
+                if [ "$LATEST_VERDICT" = "BLOCK" ]; then
+                    echo "pr-ready: REFUSED — PR #$PR's latest self-review verdict is BLOCK and the round cap means no further round will run to clear it." >&2
+                    echo "          Fix the finding, then either raise WORKER_SELF_REVIEW_MAX_ROUNDS for one more round, or get a human to ready it." >&2
+                    exit 2
+                fi
+            else
+            echo "pr-ready: risk=$RISK — running self-review (round $((ROUNDS_DONE + 1))/$MAX_ROUNDS: $SELF_REVIEW $PR --post --force)..."
             rc=0
             # --force is required, not optional (self-review's own
             # self-review finding on this script's first version):
@@ -159,6 +220,7 @@ case "$RISK" in
                     exit 2
                     ;;
             esac
+            fi
         fi
         ;;
 esac
@@ -168,6 +230,57 @@ if [ "$HELD" = "1" ]; then
     echo "          Self-review above is posted, but only the coordinator lifts the hold and readies this PR."
     exit 3
 fi
+
+# issue #473: a single `gh pr checks` snapshot, taken fresh right here, so
+# readying never relies on a CI status the worker merely remembers or
+# assumed from earlier in its own session (fand-etl PR #1063: readied with
+# `lint-and-test` failing while the PR body claimed CI was green).
+echo "pr-ready: confirming CI status for PR #$PR before readying..."
+set +e
+CHECKS_OUT="$(gh pr checks "$PR" 2>&1)"
+CHECKS_RC=$?
+set -e
+case "$CHECKS_RC" in
+    0)
+        echo "pr-ready: CI checks green on PR #$PR."
+        ;;
+    8)
+        echo "pr-ready: REFUSED — PR #$PR's CI checks are still pending (gh pr checks exit 8)." >&2
+        echo "          Run 'scripts/ci-wait.sh $PR' to wait for a real result, then re-run pr-ready.sh." >&2
+        exit 4
+        ;;
+    1)
+        if grep -qi "no checks reported" <<<"$CHECKS_OUT"; then
+            # issue #473 round-2 self-review: "no checks reported" also
+            # covers the ordinary post-push race where CI IS configured but
+            # this commit's run hasn't registered yet (ci-wait.sh's own
+            # issue #452 comment) — trusting the message alone would let a
+            # worker ready within seconds of pushing, before CI even
+            # started, reopening the #1063 failure the CI gate exists to
+            # close. Disambiguate the same way ci-wait.sh does: a workflow
+            # count of 0 means there is really nothing to wait for; any
+            # other count (including an unreadable one) means treat it as
+            # still pending.
+            WORKFLOW_COUNT="$(gh api 'repos/{owner}/{repo}/actions/workflows' --jq '.total_count' 2>/dev/null || true)"
+            if [ "$WORKFLOW_COUNT" = "0" ]; then
+                echo "pr-ready: WARN: PR #$PR has no CI checks configured on this repo at all (0 workflows) — proceeding." >&2
+            else
+                echo "pr-ready: REFUSED — PR #$PR reports 'no checks reported' but this repo has CI configured — this commit's run likely hasn't registered yet." >&2
+                echo "          Run 'scripts/ci-wait.sh $PR' to wait for a real result, then re-run pr-ready.sh." >&2
+                exit 4
+            fi
+        else
+            echo "pr-ready: REFUSED — PR #$PR has failing CI checks:" >&2
+            echo "$CHECKS_OUT" >&2
+            exit 4
+        fi
+        ;;
+    *)
+        echo "pr-ready: REFUSED — gh pr checks $PR exited $CHECKS_RC (unexpected):" >&2
+        echo "$CHECKS_OUT" >&2
+        exit 4
+        ;;
+esac
 
 echo "pr-ready: gh pr ready $PR"
 gh pr ready "$PR"

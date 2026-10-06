@@ -29,7 +29,13 @@
 # fallback only engages on that exact permission-error text.
 #
 # Usage:
-#   ci-wait.sh <PR#> [timeout-seconds]
+#   ci-wait.sh <PR#> [timeout-seconds] [--repo <owner/repo>]
+#
+#   --repo   target a PR in a different repo than the current directory's
+#            (passed straight through to every `gh` call below; issue #473
+#            "also noticed" — a worker's first call on fand-etl PR #1063
+#            used --repo and hit "line 67: repo: unbound variable" because
+#            the flag didn't exist yet).
 #
 # Env:
 #   CI_WAIT_TIMEOUT_SECONDS   default deadline if no arg given (default 900)
@@ -69,13 +75,46 @@
 
 set -euo pipefail
 
-PR="${1:-}"
-TIMEOUT="${2:-${CI_WAIT_TIMEOUT_SECONDS:-900}}"
+USAGE="Usage: $0 <PR#> [timeout-seconds] [--repo <owner/repo>]"
+
+PR=""
+TIMEOUT_ARG=""
+REPO=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --repo)
+            shift
+            REPO="${1:-}"
+            [ -n "$REPO" ] || { echo "$USAGE" >&2; exit 4; }
+            ;;
+        --repo=*) REPO="${1#--repo=}" ;;
+        -h|--help) echo "$USAGE"; exit 0 ;;
+        -*) echo "ci-wait: ERROR: unknown flag '$1'" >&2; echo "$USAGE" >&2; exit 4 ;;
+        *)
+            if [ -z "$PR" ]; then
+                PR="$1"
+            elif [ -z "$TIMEOUT_ARG" ]; then
+                TIMEOUT_ARG="$1"
+            else
+                echo "ci-wait: ERROR: too many arguments" >&2; echo "$USAGE" >&2; exit 4
+            fi
+            ;;
+    esac
+    shift
+done
+
+[ -n "$PR" ] || { echo "$USAGE" >&2; exit 4; }
+TIMEOUT="${TIMEOUT_ARG:-${CI_WAIT_TIMEOUT_SECONDS:-900}}"
 POLL="${CI_WAIT_POLL_SECONDS:-15}"
 
-[ -n "$PR" ] || { echo "Usage: $0 <PR#> [timeout-seconds]" >&2; exit 4; }
+REPO_ARGS=()
+API_REPO_PATH="repos/{owner}/{repo}"
+if [ -n "$REPO" ]; then
+    REPO_ARGS=(--repo "$REPO")
+    API_REPO_PATH="repos/$REPO"
+fi
 
-MERGE_JSON="$(gh pr view "$PR" --json mergeable,mergeStateStatus,headRefOid 2>&1)" \
+MERGE_JSON="$(gh pr view "$PR" "${REPO_ARGS[@]}" --json mergeable,mergeStateStatus,headRefOid 2>&1)" \
     || { echo "ci-wait: gh pr view $PR failed: $MERGE_JSON" >&2; exit 4; }
 
 MERGEABLE="$(jq -r '.mergeable' <<<"$MERGE_JSON")"
@@ -86,7 +125,7 @@ SHA="$(jq -r '.headRefOid' <<<"$MERGE_JSON")"
 # UNKNOWN for a few seconds. One short retry before trusting it.
 if [ "$MERGEABLE" = "UNKNOWN" ]; then
     sleep 3
-    MERGE_JSON="$(gh pr view "$PR" --json mergeable,mergeStateStatus,headRefOid 2>&1)" \
+    MERGE_JSON="$(gh pr view "$PR" "${REPO_ARGS[@]}" --json mergeable,mergeStateStatus,headRefOid 2>&1)" \
         || { echo "ci-wait: gh pr view $PR failed: $MERGE_JSON" >&2; exit 4; }
     MERGEABLE="$(jq -r '.mergeable' <<<"$MERGE_JSON")"
     MERGE_STATE="$(jq -r '.mergeStateStatus' <<<"$MERGE_JSON")"
@@ -107,7 +146,7 @@ trap 'rm -f "$RUNS_ERR_FILE"' EXIT
 while true; do
     if [ "$FALLBACK" != "1" ]; then
         set +e
-        CHECKS_OUT="$(gh pr checks "$PR" 2>&1)"
+        CHECKS_OUT="$(gh pr checks "$PR" "${REPO_ARGS[@]}" 2>&1)"
         CHECKS_RC=$?
         set -e
 
@@ -128,7 +167,7 @@ while true; do
         # many re-runs could drop a workflow's newest run before the dedup
         # below ever sees it.
         set +e
-        RUNS_JSON="$(gh run list --commit "$SHA" --json status,conclusion,workflowName,createdAt --limit 100 2>"$RUNS_ERR_FILE")"
+        RUNS_JSON="$(gh run list --commit "$SHA" "${REPO_ARGS[@]}" --json status,conclusion,workflowName,createdAt --limit 100 2>"$RUNS_ERR_FILE")"
         RUNS_RC=$?
         set -e
         if [ "$RUNS_RC" -ne 0 ] || ! jq -e . >/dev/null 2>&1 <<<"$RUNS_JSON"; then
@@ -169,7 +208,7 @@ while true; do
             1)
                 if grep -qi "no checks reported" <<<"$CHECKS_OUT"; then
                     if [ -z "$WORKFLOW_COUNT" ]; then
-                        WORKFLOW_COUNT="$(gh api repos/{owner}/{repo}/actions/workflows --jq '.total_count' 2>/dev/null || true)"
+                        WORKFLOW_COUNT="$(gh api "$API_REPO_PATH/actions/workflows" --jq '.total_count' 2>/dev/null || true)"
                         # A failed lookup must still count as "resolved" (just
                         # not "0") — otherwise a persistently-failing `gh api`
                         # call gets re-run on every single poll instead of once.

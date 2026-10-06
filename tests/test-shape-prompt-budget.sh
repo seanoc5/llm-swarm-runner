@@ -31,13 +31,18 @@
 # in PR #545's own "Decisions made" section, not here — duplicating it as
 # a number in two places is what caused that PR's own round-9 self-review
 # to catch this file and the PR body disagreeing.)
+#
+# 2026-10-06: worker budget 22700 -> 23700. Issue #473 added two one-clause
+# rules (self-review round cap, CI-green-before-ready) under "Self-review
+# before merge" plus a one-clause draft-first-checklist pointer to them;
+# trimmed first, still ~700 bytes over even after trimming twice.
 set -euo pipefail
 
 green() { printf '\033[32m✓ %s\033[0m\n' "$*"; }
 red()   { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORKER_MAX="${WORKER_MD_MAX_BYTES:-22700}"
+WORKER_MAX="${WORKER_MD_MAX_BYTES:-23700}"
 COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-26000}"
 BARE_MAX="${WORKER_BARE_MD_MAX_BYTES:-11000}"   # issue #510 trial prompt; ~7.5KB is script-parsed contract
 
