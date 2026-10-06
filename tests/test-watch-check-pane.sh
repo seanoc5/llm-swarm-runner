@@ -719,5 +719,87 @@ stop_watcher
 unset CHECK_CLAIM_STALE_SECS
 "$SHIM_TMUX" kill-window -t "$SESSION:chk-908" 2>/dev/null || true
 
+# ============================================================================
+heading "Test 14: a crashed check with a title clobbered past recognition still gets replaced, not stacked, and a live Ctrl-Z scratch pane in the same window is never touched (self-review round 10 finding)"
+# ============================================================================
+
+# Same reasoning as Test 8/13: t909b's cross-task defer (check_in_flight_for_issue)
+# needs t909's now-dead claim to age past this before it'll proceed, so
+# shrink it for the test — kept above check.sh's own sleep below so the
+# round-9 own-claim reclaim can't fire against a still-genuinely-running
+# check either (same invariant Test 8/13 rely on).
+export CHECK_CLAIM_STALE_SECS=8
+
+git -C "$PROJ" worktree add -q -b fix/issue-909 "$TEST_DIR/wt-issue-909"
+WT909="$TEST_DIR/wt-issue-909"
+mkdir -p "$WT909/.swarm/tasks/status"
+printf '#!/usr/bin/env bash\nsleep 5\nexit 0\n' > "$WT909/.swarm/check.sh"
+chmod +x "$WT909/.swarm/check.sh"
+printf 'fix/issue-909\tOPEN\t909\n' >> "$GH_PR_LIST_FILE"
+
+"$SHIM_TMUX" new-window -d -t "$SESSION" -n iss-909 -c "$WT909" \
+    bash -c 'while true; do echo WORKER_TICK; sleep 0.3; done'
+
+echo '{"task_id":"t909","state":"ready-for-review","pr":909,"ts":"2026-07-19T09:00:00Z"}' \
+    > "$WT909/.swarm/tasks/status/t909.json"
+
+start_watcher "$TEST_DIR/watch-10.log"
+
+wait_until 10 "t909's check pane to show the still-running 'chk' title" \
+    bash -c "$SHIM_TMUX list-panes -t '$SESSION:iss-909' -F '#{pane_title}' 2>/dev/null | grep -qx chk"
+
+# A live Ctrl-Z worker-shell scratch pane landing in the SAME window —
+# install-tmux-binding.sh's sibling-shell binding does exactly this for an
+# iss-N window. It must survive everything below untouched. Split
+# explicitly off the worker pane (.0) and capture the new pane's id
+# straight from split-window's own output, rather than re-deriving it by
+# index afterward — tmux can renumber the EXISTING check pane's index
+# when a new pane lands, and a guess here would risk retitling the wrong
+# one.
+SCRATCH_PANE_ID="$("$SHIM_TMUX" split-window -h -P -F '#{pane_id}' -t "$SESSION:iss-909.0" bash -c 'while true; do sleep 0.3; done')"
+[ -n "$SCRATCH_PANE_ID" ] || red "could not resolve the simulated Ctrl-Z scratch pane's id"
+"$SHIM_TMUX" select-pane -t "$SCRATCH_PANE_ID" -T coord-scratch
+
+# Simulate the check command's own escape sequence clobbering its title to
+# something unrecognizable, then crashing before its next periodic
+# reassertion tick (Test 10 proves the reassertion itself works — this is
+# the narrower case where the crash wins the race instead).
+CHECK_PANE_PID="$("$SHIM_TMUX" list-panes -t "$SESSION:iss-909" -F '#{pane_title} #{pane_pid}' | awk '$1=="chk"{print $2; exit}')"
+[ -n "$CHECK_PANE_PID" ] || red "could not resolve t909's check pane pid"
+CHECK_PANE_ID="$("$SHIM_TMUX" list-panes -t "$SESSION:iss-909" -F '#{pane_title} #{pane_id}' | awk '$1=="chk"{print $2; exit}')"
+"$SHIM_TMUX" select-pane -t "$CHECK_PANE_ID" -T 'garbage-from-check-cmd'
+kill -9 "$CHECK_PANE_PID" 2>/dev/null || true
+
+wait_until 10 "the clobbered check pane to be marked dead by tmux" \
+    bash -c "$SHIM_TMUX list-panes -t '$SESSION:iss-909' -F '#{pane_id} #{pane_dead}' 2>/dev/null | grep -qx '$CHECK_PANE_ID 1'"
+green "t909's check pane is dead with its title clobbered to something the old title-only match can't recognize"
+
+[ "$("$SHIM_TMUX" list-panes -t "$SESSION:iss-909" -F '#{pane_title}' | grep -cx coord-scratch)" -eq 1 ] \
+    || red "the scratch pane should still be alive and tagged before the next completion runs"
+
+echo '{"task_id":"t909b","state":"ready-for-review","pr":909,"ts":"2026-07-19T09:00:01Z"}' \
+    > "$WT909/.swarm/tasks/status/t909b.json"
+
+wait_until 30 "t909b's check to run and resolve despite the unrecognizably-titled dead pane" \
+    bash -c "grep -q '\"state\":\"pass\"\|\"state\":\"fail\"' '$WT909/.swarm/tasks/status/t909b.check.json' 2>/dev/null"
+grep -q '"state":"pass"' "$WT909/.swarm/tasks/status/t909b.check.json" \
+    || red "t909b should have run past the clobbered-title dead pane and passed; got: $(cat "$WT909/.swarm/tasks/status/t909b.check.json" 2>/dev/null)"
+green "t909b's check ran and resolved despite the dead pane's unrecognizable title — the dead-pane fallback caught it"
+
+"$SHIM_TMUX" list-panes -t "$SESSION:iss-909" -F '#{pane_id}' | grep -qx "$CHECK_PANE_ID" \
+    && red "the clobbered-title dead pane should have been replaced (killed), not left alongside the new check"
+green "the clobbered-title dead pane was replaced, not stacked"
+
+[ "$("$SHIM_TMUX" list-panes -t "$SESSION:iss-909" -F '#{pane_title}' | grep -cx coord-scratch)" -eq 1 ] \
+    || red "the live Ctrl-Z scratch pane should never be touched by the dead-pane fallback match"
+green "the live Ctrl-Z scratch pane survived untouched"
+
+[ "$(pane_count iss-909)" -eq 3 ] \
+    || red "expected exactly 3 panes in iss-909 (worker, scratch, new check) — got $(pane_count iss-909)"
+green "iss-909 ended with exactly worker + scratch + new-check panes — no pile-up, no collateral damage"
+
+stop_watcher
+unset CHECK_CLAIM_STALE_SECS
+
 echo
 green "ALL TESTS PASSED"

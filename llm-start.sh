@@ -767,7 +767,7 @@ if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
             # remain-on-exit=failed left a dead pane after a non-zero exit.
             # Kill it; the window auto-closes when its last pane is gone,
             # collapsing this into the window_exists=false case below.
-            tmux kill-pane -t "$SESSION_NAME:coordinator" 2>/dev/null || true
+            tmux kill-pane -t "$SESSION_NAME:coordinator.0" 2>/dev/null || true
             window_exists=false
             coordinator_idle=true
             echo "Detected dead coordinator pane (previous crash); cleared. Will relaunch."
@@ -989,7 +989,7 @@ if ! $session_existed || ! $window_exists || $coordinator_idle; then
         ENV_VARS+="STATUSLINE_PROBE=$(printf '%q' "${STATUSLINE_PROBE:-${XDG_RUNTIME_DIR:-/tmp}/claude-statusline-$(basename "$PWD")-coordinator.json}") "
 
         WRAPPER="$LLM_SWARM_DIR/scripts/coordinator-claude.sh"
-        tmux send-keys -t "$SESSION_NAME:coordinator" \
+        tmux send-keys -t "$SESSION_NAME:coordinator.0" \
             "${ENV_VARS}exec $(printf '%q' "$WRAPPER") $(printf '%q' "$RENDERED_PROMPT_FILE") $(printf '%q' "$TMP_PROMPT")" C-m
     elif [ "$COORD_CMD" = "codex" ]; then
         # Codex has no append-system-prompt flag, so the wrapper prepends the
@@ -999,13 +999,13 @@ if ! $session_existed || ! $window_exists || $coordinator_idle; then
         ENV_VARS=""
         [ -n "${COORD_MODEL:-}" ] && ENV_VARS+="COORD_MODEL=$(printf '%q' "$COORD_MODEL") "
         WRAPPER="$LLM_SWARM_DIR/scripts/coordinator-codex.sh"
-        tmux send-keys -t "$SESSION_NAME:coordinator" \
+        tmux send-keys -t "$SESSION_NAME:coordinator.0" \
             "${ENV_VARS}exec $(printf '%q' "$WRAPPER") $(printf '%q' "$RENDERED_PROMPT_FILE") $(printf '%q' "$TMP_PROMPT")" C-m
     elif [ "$COORD_CMD" = "agy" ]; then
         ENV_VARS="COORDINATOR_HEADLESS=$(printf '%q' "${COORDINATOR_HEADLESS:-0}") "
         [ -n "${COORD_MODEL:-}" ] && ENV_VARS+="COORD_MODEL=$(printf '%q' "$COORD_MODEL") "
         WRAPPER="$LLM_SWARM_DIR/scripts/coordinator-agy.sh"
-        tmux send-keys -t "$SESSION_NAME:coordinator" \
+        tmux send-keys -t "$SESSION_NAME:coordinator.0" \
             "${ENV_VARS}exec $(printf '%q' "$WRAPPER") $(printf '%q' "$RENDERED_PROMPT_FILE") $(printf '%q' "$TMP_PROMPT")" C-m
     else
         # Gemini CLI uses its own system-prompt file and interactive flag.
@@ -1031,7 +1031,7 @@ if ! $session_existed || ! $window_exists || $coordinator_idle; then
             ERR_TAIL=''
         fi
 
-        tmux send-keys -t "$SESSION_NAME:coordinator" "$BASE_CMD $PROMPT_FLAG \"\$(cat '$TMP_PROMPT')\"; rm '$TMP_PROMPT'$ERR_TAIL" C-m
+        tmux send-keys -t "$SESSION_NAME:coordinator.0" "$BASE_CMD $PROMPT_FLAG \"\$(cat '$TMP_PROMPT')\"; rm '$TMP_PROMPT'$ERR_TAIL" C-m
     fi
 elif { [ "$COORD_CMD" = "claude" ] || [ "$COORD_CMD" = "agy" ]; } && [ "${COORDINATOR_HEADLESS:-0}" != "1" ]; then
     # Live-REPL re-prompt path: claude is already running in the pane and
@@ -1057,7 +1057,7 @@ elif { [ "$COORD_CMD" = "claude" ] || [ "$COORD_CMD" = "agy" ]; } && [ "${COORDI
     TMP_PROMPT=$(mktemp)
     printf '%s\n' "$INITIAL_PROMPT" > "$TMP_PROMPT"
     REPROMPT_RC=0
-    reprompt_inject "$SESSION_NAME:coordinator" "$TMP_PROMPT" || REPROMPT_RC=$?
+    reprompt_inject "$SESSION_NAME:coordinator.0" "$TMP_PROMPT" || REPROMPT_RC=$?
     rm -f "$TMP_PROMPT"
     [ "$REPROMPT_RC" = "2" ] && REPROMPT_DEFERRED=1
 fi

@@ -5709,8 +5709,23 @@ SCRIPT
         # crashed-before-rename) — safe to replace regardless of what its
         # label currently says.
         local stale_pane
-        stale_pane="$(tmux list-panes -t "$SESSION_NAME:iss-$issue" -F '#{pane_id} #{pane_title}' 2>/dev/null \
-                        | awk '$2 ~ /^chk-(pass|fail)$/ || $2 == "chk" { print $1; exit }')"
+        stale_pane="$(tmux list-panes -t "$SESSION_NAME:iss-$issue" -F '#{pane_index} #{pane_id} #{pane_title}' 2>/dev/null \
+                        | awk '$1 != 0 && ($3 ~ /^chk-(pass|fail)$/ || $3 == "chk") { print $2; exit }')"
+        if [ -z "$stale_pane" ]; then
+            # self-review round 10: a check whose own escape sequence
+            # clobbers the pane title (the shape Test 10 covers) and then
+            # crashes before its next periodic reassertion tick leaves a
+            # DEAD pane with an unrecognizable title — the match above
+            # can't catch it, so it would silently stack a second pane
+            # beside it forever instead of replacing it. Fall back to
+            # "any dead, non-worker pane" only once the title match above
+            # finds nothing, so a live Ctrl-Z scratch pane
+            # (install-tmux-binding.sh's sibling-shell binding, which
+            # also lands in this same window) is never swept up by this —
+            # only ever a genuinely dead one.
+            stale_pane="$(tmux list-panes -t "$SESSION_NAME:iss-$issue" -F '#{pane_index} #{pane_id} #{pane_dead}' 2>/dev/null \
+                            | awk '$1 != 0 && $3 == 1 { print $2; exit }')"
+        fi
         [ -n "$stale_pane" ] && tmux kill-pane -t "$stale_pane" 2>/dev/null || true
 
         # Note: the "chk" title is set by the runner script itself, as its
