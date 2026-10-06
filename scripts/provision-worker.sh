@@ -515,12 +515,17 @@ post_spawn_health_check() {
 
     local poll_interval=1
     awk -v c="$check_secs" 'BEGIN{exit !(c<1)}' && poll_interval="$check_secs"
-    local attempts
-    attempts="$(awk -v c="$check_secs" -v p="$poll_interval" \
-        'BEGIN{n=c/p; i=int(n); if (n>i) i++; if (i<2) i=2; print i}')"
+    # Deadline in nanoseconds, not a fixed poll count (self-review finding):
+    # on the exact loaded host this issue is about, each `docker ps` /
+    # `tmux list-panes` call below can itself take real time, so counting
+    # polls instead of elapsed wall time could let this run well past
+    # check_secs — overrunning the "ceiling + buffer" timeout
+    # prompts/coordinator.md tells the coordinator to give this call.
+    local deadline_ns
+    deadline_ns=$(( $(date +%s%N) + $(awk -v s="$check_secs" 'BEGIN{printf "%.0f", s*1000000000}') ))
 
-    local pane_dead=1 running=0 attempt
-    for (( attempt=1; attempt<=attempts; attempt++ )); do
+    local pane_dead=1 running=0
+    while :; do
         # Under `set -euo pipefail`, `tmux list-panes` failing outright (the
         # window itself is gone, not just its pane dead — e.g. the pane
         # exited 0, which remain-on-exit does NOT keep around) would abort
@@ -541,7 +546,8 @@ post_spawn_health_check() {
         # unresponsive) just costs one extra poll here instead of needing
         # its own retry loop (self-review, 11th pass on the old code) — the
         # next iteration re-checks the same container.
-        [ "$attempt" -lt "$attempts" ] && sleep "$poll_interval"
+        [ "$(date +%s%N)" -ge "$deadline_ns" ] && break
+        sleep "$poll_interval"
     done
 
     [ "$running" -eq 1 ] && return 0
