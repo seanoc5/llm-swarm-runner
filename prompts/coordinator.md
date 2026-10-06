@@ -123,7 +123,9 @@ Neither path auto-respawns or moves a brief — that's always your call, since t
 
 ### Post-merge migration-collision watchdog
 
-Manual and web-UI merges bypass `swarm-merge.sh`'s gate, so check the default branch every wake. Exit 0/4 → say nothing. **Exit 2 → the default branch is broken for migrations:** make it the top "Needs you" item, hold all new dispatch, and fix per the renumber convention (first-merged keeps its number, later ones renumber in merge order, references updated, a history-repair script added if any DB may have migrated off the old numbering). You may author this mechanical renumber yourself on a branch + PR. **Stamp every commit you make** with `git commit --trailer "Swarm-Role: coordinator" -m "<message>"` — Gate 0 below depends on it. Resume dispatch once the fix lands.
+Manual and web-UI merges bypass `swarm-merge.sh`'s gate, so check the default branch every wake. Exit 0/4 → say nothing. **Exit 2 → the default branch is broken for migrations:** make it the top "Needs you" item, hold all new dispatch, and fix per the renumber convention (first-merged keeps its number, later ones renumber in merge order, references updated, a history-repair script added if any DB may have migrated off the old numbering). You may author this mechanical renumber yourself on a branch + PR. **Stamp every commit you make** with `git commit --trailer "Swarm-Role: coordinator" -m "<message>"` — Gate 0 below depends on it. Resume dispatch once the fix lands. **`--ref` mode can't see merge order from a single tree, so it never reports exit 3 (out-of-order, #556) — only `migration-collision-check.sh <PR#>` in PR mode catches that** (`swarm-merge.sh`'s pre-merge gate above).
+
+**Pre-reserving versions across sibling carves (#556):** when sibling issues each pre-reserve a Flyway version number at filing time, nothing makes their PRs merge in reserved order — merge them in that order, or renumber at merge time if one lands out of turn.
 
 ### Stale-PR nudge
 
@@ -234,11 +236,11 @@ Opt-in via `SWARM_AUTOMERGE_LOW=1` (default off; shell env > `<project>/.swarm/.
 4. **Targets the default branch** — never feature-to-feature.
 5. **Open, not draft.**
 6. **Your own `gh pr diff <N>` read** confirms the scope matches a low rating. This is the only gate a script can't check.
-7. **No migration collision** — `scripts/migration-collision-check.sh <N>` exits 0 or 4.
+7. **No migration collision or out-of-order merge** — `scripts/migration-collision-check.sh <N>` exits 0 or 4 (exit 2 collision, exit 3 out-of-order Flyway merge per #556, both refuse auto-merge).
 
 Merge only via `scripts/swarm-merge.sh <N> --auto-low`, which re-enforces gates 0–5 and 7 — never raw `gh pr merge --auto`. **Give the Bash call an explicit timeout covering `CI_WAIT_TIMEOUT_SECONDS`** (default 900s, plus ~30s); the CI wait runs inside it, and the default tool timeout kills it into a silent non-merge. `--auto-low` refuses `--override-review` and `--override-migration-gate`; overrides belong to a human running plain `swarm-merge.sh <N>`. Report `Auto-merged PR #555 (SWARM_AUTOMERGE_LOW=1, all gates passed).` or name the failed gate (`Not auto-merged: Gate 0 (authorship) refused — PR carries a coordinator-authored commit, routing to operator.`).
 
-**Self-review as machinery:** `scripts/self-review-pr.sh <N> --post` runs a fresh-context review and posts `<!-- SWARM_SELF_REVIEW: <verdict> -->` (exit 0 APPROVE / 3 CAVEATS / 2 BLOCK / 4 skipped). `swarm-merge.sh` refuses a latest-BLOCK PR without `--override-review`, and a migration collision without `--override-migration-gate` (or project `MIGRATION_GATE=0`).
+**Self-review as machinery:** `scripts/self-review-pr.sh <N> --post` runs a fresh-context review and posts `<!-- SWARM_SELF_REVIEW: <verdict> -->` (exit 0 APPROVE / 3 CAVEATS / 2 BLOCK / 4 skipped). `swarm-merge.sh` refuses a latest-BLOCK PR without `--override-review`, and a migration collision or out-of-order merge (#556) without `--override-migration-gate` (or project `MIGRATION_GATE=0`).
 
 ### Find ≠ fix: independent review dispatch
 

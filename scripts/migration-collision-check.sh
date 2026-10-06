@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
-# migration-collision-check.sh — detect duplicate Flyway version numbers and
-# Alembic multi-head DAGs in the union of a PR head and its base branch.
+# migration-collision-check.sh — detect duplicate Flyway version numbers,
+# out-of-order Flyway merges, and Alembic multi-head DAGs in the union of a
+# PR head and its base branch.
 #
 # Parallel workers each compute "next free migration number/revision" against
 # their own stale worktree base. A worker's own tests always pass — the
@@ -21,11 +22,15 @@
 #            way. Run this against the default branch on each coordinator
 #            wake to catch those within minutes. Needs only git (no gh);
 #            refs under origin/ are freshened with a best-effort fetch.
-#            Not combinable with a PR# or --post.
+#            Not combinable with a PR# or --post. NOTE: this mode scans a
+#            single tree, so it cannot see a base-vs-head split and never
+#            detects the out-of-order verdict (#556) — that needs the PR
+#            union and so is PR-mode only; --ref keeps catching duplicate
+#            versions and Alembic multi-heads only, unchanged.
 #   --post   also post the verdict as a PR comment with a
-#            <!-- SWARM_MIGRATION_GATE: <clean|collision> --> marker.
-#            Idempotent: skips posting when the latest marker comment
-#            already carries the same verdict (same pattern as
+#            <!-- SWARM_MIGRATION_GATE: <clean|collision|out-of-order> -->
+#            marker. Idempotent: skips posting when the latest marker
+#            comment already carries the same verdict (same pattern as
 #            scripts/stale-pr-nudges.sh's re-nudge suppression) — a
 #            collision → collision re-run stays silent, but a
 #            collision → clean transition (the fix landed) posts again.
@@ -38,27 +43,49 @@
 #            prefix from V106) but different filenames → collision. Catches
 #            PR-vs-base dupes and PR-internal dupes (the union already
 #            contains everything the PR head tree carries).
+#   Out-of-order (Flyway, PR mode only, #556): a PR-side (head-only) file
+#            whose integer version is lower than the max integer version
+#            already on the base tip — a reserved-order merge that landed
+#            out of sequence. No duplicate number, so it's invisible to the
+#            collision check above: e.g. V254 merges first, then V250 and
+#            V253 merge afterwards. Every DB that already ran V254 now fails
+#            Flyway validation on next start (`FlywayValidateException:
+#            Detected resolved migration not applied to database`) and needs
+#            a one-time `spring.flyway.out-of-order=true` recovery start.
+#            Skipped when the version is already part of a same-version
+#            collision above (that's reported as a collision, unchanged).
+#            Opt-out: a project that intentionally runs Flyway with
+#            `outOfOrder=true` can set MIGRATION_ALLOW_OUT_OF_ORDER=1 in
+#            <project>/.swarm/.env — the verdict then becomes a warning
+#            (printed, same detail) and exits 0 instead of refusing.
 #   Alembic  Revision files under a `versions/` directory in that same
 #            union. Static parse of `revision = ...` / `down_revision = ...`
 #            assignments — no project venv or DB required. The same
 #            revision id claimed by more than one file → collision (#350).
 #            A revision id never referenced as another file's down_revision
-#            is a head; more than one head → collision.
+#            is a head; more than one head → collision. Alembic's own DAG
+#            already orders revisions by down_revision chaining, so
+#            out-of-order merges are out of scope for Alembic (#556).
 #
-# Remediation (Flyway, PR mode): a collision verdict carries the exact fix —
-#            which file loses (the one only the PR head has; base-side files
-#            are already applied downstream and never move), the next free
-#            version (max across base ∪ head ∪ every other open PR's changed
-#            files, so a merge burst doesn't hand out the next PR's number),
-#            and the git mv / commit / push lines to paste on the PR branch.
-#            A PR-internal duplicate (no base-side claimant) is named as
-#            such with no mv line — which one loses is the worker's call.
-#            Deliberately NOT auto-applied: ~1 collision/week across swarms
-#            vs. a branch-mutating code path with its own refuse-list (#162).
+# Remediation (Flyway, PR mode): a collision or out-of-order verdict carries
+#            the exact fix — which file loses (the PR-side one; base-side
+#            files are already applied downstream and never move), the next
+#            free version (max across base ∪ head ∪ every other open PR's
+#            changed files, so a merge burst doesn't hand out the next PR's
+#            number), and the git mv / commit / push lines to paste on the
+#            PR branch. A PR-internal duplicate (no base-side claimant) is
+#            named as such with no mv line — which one loses is the worker's
+#            call. Deliberately NOT auto-applied: ~1 collision/week across
+#            swarms vs. a branch-mutating code path with its own refuse-list
+#            (#162).
 #
 # Exit codes:
-#   0  clean — no collision detected
+#   0  clean — no collision or out-of-order migration detected (or an
+#      out-of-order verdict downgraded to a warning by
+#      MIGRATION_ALLOW_OUT_OF_ORDER=1)
 #   2  collision — duplicate Flyway version(s) and/or Alembic multi-head
+#   3  out-of-order — a PR-side Flyway file numbered below the base tip's
+#      max version (#556); PR mode only, see --ref note above
 #   4  skipped — no migration files found in the union (nothing to check)
 #   1  error (gh/git failure, bad args)
 set -euo pipefail
@@ -95,6 +122,7 @@ PROJECT_DIR="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 # shellcheck source=/dev/null
 . "$SCRIPT_DIR/_load-env.sh" "$PROJECT_DIR"
 MIGRATION_GLOB="${MIGRATION_GLOB:-**/db/migration/**/V*__*.sql}"
+MIGRATION_ALLOW_OUT_OF_ORDER="${MIGRATION_ALLOW_OUT_OF_ORDER:-0}"
 
 # --- resolve refs to scan ----------------------------------------------------
 #
@@ -195,48 +223,46 @@ if [ -n "$FLYWAY_FILES" ]; then
 fi
 
 FLYWAY_COLLISIONS=()
+declare -A COLLIDED_VERSIONS=()   # full "ver" string (dots included) -> 1
 for ver in "${!VERSION_FILES[@]}"; do
     files="${VERSION_FILES[$ver]}"
     count="$(printf '%s' "$files" | grep -c .)"
     if [ "$count" -gt 1 ]; then
         names="$(printf '%s' "$files" | tr '\n' ' ' | sed 's/ $//')"
         FLYWAY_COLLISIONS+=("V$ver claimed by: $names")
+        COLLIDED_VERSIONS["$ver"]=1
     fi
 done
 
-# --- Flyway: concrete remediation recipe (PR mode only) ---------------------
+# --- Flyway: base/head split + shared next-free calculation (PR mode) ------
 #
-# The gate used to say "rename the losing file(s) to the next free version"
-# and leave the operator to work out which file loses and what "next free"
-# is. Both are mechanical, so compute them:
-#   loser     = the claimant that exists ONLY in the PR head. Base-side files
-#               are already applied to every DB tracking the base branch;
-#               renaming one of those forces a `flyway repair` everywhere.
-#   next free = max integer version across base ∪ head ∪ every OTHER open
-#               PR's changed files (gh pr list --json files, best-effort) + 1.
-#               Without the open-PR sweep the recipe hands out the number
-#               the next PR in a merge burst already claimed.
-# Multiple losers get consecutive numbers. A collision with no base-side
-# claimant is PR-internal (the worker shipped two files at one version) —
-# that's a worker bug, so the recipe just says so. --ref mode has no
-# base/head split and keeps the generic line.
-FLYWAY_RECIPE=()
-if [ -z "$REF" ] && [ "${#FLYWAY_COLLISIONS[@]}" -gt 0 ]; then
-    BASE_FLYWAY="$(list_tree_files "$BASE_LOCAL" | while IFS= read -r f; do
-            matches_glob "$f" "$MIGRATION_GLOB" && echo "$f"
-        done; true )"
-    in_base() { printf '%s\n' "$BASE_FLYWAY" | grep -qxF -- "$1"; }
-
+# Both the collision recipe and the out-of-order check below need the
+# base-only file list (to tell a base-side claimant from a PR-side one, and
+# to know the base tip's own max version) and the next-free-version
+# calculation (max integer version across base ∪ head ∪ every OTHER open
+# PR's changed files, so a merge burst doesn't hand out the next PR's
+# number). Computed once, lazily, only when there's something to report —
+# --ref mode has no base/head split and skips this entirely.
+BASE_FLYWAY=""
+BASE_TIP_MAX=0
+in_base() { printf '%s\n' "$BASE_FLYWAY" | grep -qxF -- "$1"; }
+NEXT_FREE_COMPUTED=0
+OTHER_PR_COUNT=0
+next_ver=0
+compute_next_free() {
+    [ "$NEXT_FREE_COMPUTED" = 1 ] && return 0
+    NEXT_FREE_COMPUTED=1
     # Migration files on every other open PR's head — same glob, same
     # version-prefix parse. gh failures (offline, stubbed, rate-limited)
     # degrade to "no other PRs considered", noted in the output.
+    local OTHER_PR_FILES
     OTHER_PR_FILES="$(gh pr list --state open --limit 100 --json number,files \
         --jq ".[] | select(.number != $PR) | .files[].path" 2>/dev/null || true )"
     OTHER_PR_COUNT="$(gh pr list --state open --limit 100 --json number \
         --jq "[.[] | select(.number != $PR)] | length" 2>/dev/null || echo 0)"
     [[ "$OTHER_PR_COUNT" =~ ^[0-9]+$ ]] || OTHER_PR_COUNT=0
 
-    max_ver=0
+    local max_ver=0 f b n
     while IFS= read -r f; do
         [ -n "$f" ] || continue
         matches_glob "$f" "$MIGRATION_GLOB" || continue
@@ -247,6 +273,38 @@ if [ -z "$REF" ] && [ "${#FLYWAY_COLLISIONS[@]}" -gt 0 ]; then
         fi
     done < <(printf '%s\n%s\n' "$FLYWAY_FILES" "$OTHER_PR_FILES")
     next_ver=$((max_ver + 1))
+}
+
+if [ -z "$REF" ] && [ -n "$FLYWAY_FILES" ]; then
+    BASE_FLYWAY="$(list_tree_files "$BASE_LOCAL" | while IFS= read -r f; do
+            matches_glob "$f" "$MIGRATION_GLOB" && echo "$f"
+        done; true )"
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        b="$(basename "$f")"
+        if [[ "$b" =~ ^V([0-9]+) ]]; then
+            n="${BASH_REMATCH[1]}"; n=$((10#$n))
+            [ "$n" -gt "$BASE_TIP_MAX" ] && BASE_TIP_MAX="$n"
+        fi
+    done <<< "$BASE_FLYWAY"
+fi
+
+# --- Flyway: concrete remediation recipe for a collision (PR mode only) ----
+#
+# The gate used to say "rename the losing file(s) to the next free version"
+# and leave the operator to work out which file loses and what "next free"
+# is. Both are mechanical, so compute them:
+#   loser     = the claimant that exists ONLY in the PR head. Base-side files
+#               are already applied to every DB tracking the base branch;
+#               renaming one of those forces a `flyway repair` everywhere.
+#   next free = see compute_next_free above.
+# Multiple losers get consecutive numbers. A collision with no base-side
+# claimant is PR-internal (the worker shipped two files at one version) —
+# that's a worker bug, so the recipe just says so. --ref mode has no
+# base/head split and keeps the generic line.
+FLYWAY_RECIPE=()
+if [ -z "$REF" ] && [ "${#FLYWAY_COLLISIONS[@]}" -gt 0 ]; then
+    compute_next_free
 
     FLYWAY_RECIPE+=("Remediation — rename the PR-side file(s) on branch $HEAD_REF; base-side ($BASE_REF) files are already applied downstream, never move those.")
     FLYWAY_RECIPE+=("  next free version: V$next_ver (max across $BASE_REF, $HEAD_REF, and $OTHER_PR_COUNT other open PR(s))")
@@ -280,6 +338,54 @@ if [ -z "$REF" ] && [ "${#FLYWAY_COLLISIONS[@]}" -gt 0 ]; then
         done
     done
     FLYWAY_RECIPE+=("  then re-run: scripts/migration-collision-check.sh $PR")
+fi
+
+# --- Flyway: out-of-order merge detection (PR mode only, #556) --------------
+#
+# A PR-side (head-only) file numbered below the base tip's own max version —
+# no duplicate number, so the collision check above never sees it, but a DB
+# that already ran the higher base-side migration fails Flyway validation
+# the next time it starts. A version already flagged as a same-version
+# collision above is skipped here (reported as a collision instead, so it
+# isn't double-counted).
+OUT_OF_ORDER=()
+OOO_RECIPE=()
+if [ -z "$REF" ] && [ "$BASE_TIP_MAX" -gt 0 ]; then
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        matches_glob "$f" "$MIGRATION_GLOB" || continue
+        in_base "$f" && continue                       # base-side: never the offender
+        b="$(basename "$f")"
+        [[ "$b" =~ ^V([0-9]+(\.[0-9]+)*)__ ]] || continue
+        fullver="${BASH_REMATCH[1]}"
+        [ -z "${COLLIDED_VERSIONS[$fullver]:-}" ] || continue   # reported as a collision instead
+        [[ "$b" =~ ^V([0-9]+) ]] || continue
+        n="${BASH_REMATCH[1]}"; n=$((10#$n))
+        [ "$n" -lt "$BASE_TIP_MAX" ] || continue
+        OUT_OF_ORDER+=("$f (V$n)")
+    done <<< "$FLYWAY_FILES"
+fi
+
+if [ "${#OUT_OF_ORDER[@]}" -gt 0 ]; then
+    compute_next_free
+    OOO_RECIPE+=("Remediation — renumber the PR-side file(s) on branch $HEAD_REF to the next free version; base-side ($BASE_REF, max V$BASE_TIP_MAX) files are already applied downstream and never move.")
+    OOO_RECIPE+=("  next free version: V$next_ver (max across $BASE_REF, $HEAD_REF, and $OTHER_PR_COUNT other open PR(s))")
+    for o in "${OUT_OF_ORDER[@]}"; do
+        f="${o% (V*}"
+        fb="$(basename "$f")"
+        if [[ "$fb" =~ ^V[0-9.]+__(.*)$ ]]; then rest="${BASH_REMATCH[1]}"; else rest="$fb"; fi
+        newf="$(dirname "$f")/V${next_ver}__${rest}"
+        case "$f" in
+            *.sql) ;;
+            *) OOO_RECIPE+=("    (Java/Kotlin-based migration — the class name must be renamed to match as well)") ;;
+        esac
+        OOO_RECIPE+=("  $o is below base tip max V$BASE_TIP_MAX ($BASE_REF):")
+        OOO_RECIPE+=("    git mv $f $newf")
+        OOO_RECIPE+=("    git commit -m \"fix(migration): renumber to V$next_ver, below base tip max V$BASE_TIP_MAX on $BASE_REF\"")
+        OOO_RECIPE+=("    git push origin $HEAD_REF")
+        next_ver=$((next_ver + 1))
+    done
+    OOO_RECIPE+=("  then re-run: scripts/migration-collision-check.sh $PR")
 fi
 
 # --- Alembic: multi-head DAG -------------------------------------------------
@@ -365,13 +471,33 @@ if [ "${#ALEMBIC_HEADS[@]}" -gt 1 ]; then
     BODY_LINES+=("Remediation: add an \`alembic merge\` revision joining the heads.")
 fi
 
+OUT_OF_ORDER_VERDICT=0
+if [ "${#OUT_OF_ORDER[@]}" -gt 0 ]; then
+    OUT_OF_ORDER_VERDICT=1
+    BODY_LINES+=("Out-of-order Flyway merge — PR-side file(s) below the base tip's max version (V$BASE_TIP_MAX on $BASE_REF):")
+    for o in "${OUT_OF_ORDER[@]}"; do BODY_LINES+=("- $o"); done
+    if [ "${#OOO_RECIPE[@]}" -gt 0 ]; then
+        for c in "${OOO_RECIPE[@]}"; do BODY_LINES+=("$c"); done
+    else
+        BODY_LINES+=("Remediation: renumber the offending file(s) to the next free version.")
+    fi
+fi
+
 if [ "$COLLISION" = "1" ]; then
     VERDICT="collision"
     EXIT=2
+elif [ "$OUT_OF_ORDER_VERDICT" = "1" ]; then
+    VERDICT="out-of-order"
+    if [ "$MIGRATION_ALLOW_OUT_OF_ORDER" = "1" ]; then
+        EXIT=0
+        BODY_LINES+=("MIGRATION_ALLOW_OUT_OF_ORDER=1: downgraded to a warning, exit 0.")
+    else
+        EXIT=3
+    fi
 else
     VERDICT="clean"
     EXIT=0
-    BODY_LINES+=("No duplicate Flyway versions or Alembic multi-heads in $SCOPE_DESC.")
+    BODY_LINES+=("No duplicate Flyway versions, out-of-order merges, or Alembic multi-heads in $SCOPE_DESC.")
 fi
 
 if [ -n "$REF" ]; then
@@ -388,11 +514,11 @@ echo "---"
 if [ "$POST" = "1" ]; then
     LAST_VERDICT="$(gh pr view "$PR" --json comments --jq \
         '[.comments[] | select(.body | test("SWARM_MIGRATION_GATE:"))] | last | .body // empty' 2>/dev/null \
-        | grep -oE 'SWARM_MIGRATION_GATE: (clean|collision)' | sed 's/^SWARM_MIGRATION_GATE: //' || true)"
+        | grep -oE 'SWARM_MIGRATION_GATE: (clean|collision|out-of-order)' | sed 's/^SWARM_MIGRATION_GATE: //' || true)"
     if [ "$LAST_VERDICT" = "$VERDICT" ]; then
         echo "post: skipped — PR #$PR already has a SWARM_MIGRATION_GATE: $VERDICT comment as the latest word"
     else
-        COMMENT="$(printf '<!-- SWARM_MIGRATION_GATE: %s -->\n## Migration collision check\n\n%s\n\n<sub>scripts/migration-collision-check.sh — static detection of duplicate Flyway versions / Alembic multi-heads in the union of base and head branches (#294).</sub>\n' \
+        COMMENT="$(printf '<!-- SWARM_MIGRATION_GATE: %s -->\n## Migration collision check\n\n%s\n\n<sub>scripts/migration-collision-check.sh — static detection of duplicate Flyway versions, out-of-order Flyway merges, and Alembic multi-heads in the union of base and head branches (#294, #556).</sub>\n' \
             "$VERDICT" "$(printf '%s\n' "${BODY_LINES[@]}")")"
         gh pr comment "$PR" --body "$COMMENT" \
             || { echo "ERROR: gh pr comment failed" >&2; exit 1; }
