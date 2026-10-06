@@ -429,6 +429,7 @@ WAKE_DEFER_ON_SWARM_BUSY=0
 DEBOUNCE_SECS=0
 COORD_INBOX_DIR="$LOCK_TEST_DIR/coord-inbox"
 COORD_INBOX_PROCESSED_DIR="$COORD_INBOX_DIR/processed"
+COORD_INBOX_SELF_DIR="$COORD_INBOX_DIR/.self"
 COORD_INBOX_NUDGE_TEMPLATE="Inbox: %N item(s) probe"
 # coordinator_pane_busy needs these two even though there's no real tmux
 # session behind SESSION_NAME here — its own `tmux capture-pane ... ||
@@ -981,6 +982,121 @@ green "a claim marker path reused by a later requeue is forwarded again, not sil
 unset -f own_worktree_dirs_for_scan
 
 # ============================================================================
+heading "Test 5k (issue #461 self-review finding): coord-inbox's own scan is never baselined into seen_file either — a note already on disk before the first scan (watcher restart) still rings, and a still-pending note isn't redecided on later ticks"
+# ============================================================================
+# Self-review on #461's own PR caught that the first version of this fix
+# folded coord-inbox scanning INTO scan_outcomes, whose result IS baselined
+# into seen_file before the loop starts (correctly so, for done/outbox
+# outcomes — an old one must never replay after a restart). That silently
+# swallowed a coord-inbox note that was already on disk the moment the
+# watcher started scanning — the same symptom #461 itself reports, just
+# shifted from "while idle" to "across any restart". The fix pulled it out
+# into scan_inbox_drops/dispatch_inbox_drops, run_poll's sibling to
+# scan_claims/dispatch_claims above, with the same no-baseline contract.
+# on_inbox_drop's own per-file .self marker — not seen_file — is what then
+# keeps a still-unarchived note from being redecided on every later tick.
+for fn in scan_inbox_drops dispatch_inbox_drops on_inbox_drop; do
+    body="$(extract_fn "$fn")"
+    [ -n "$body" ] || red "could not extract function '$fn' from $WATCH — has it been renamed?"
+    eval "$body"
+done
+
+: > "$EVENTS_LOG"
+: > "$CALL_TIMELINE"
+rm -rf "$COORD_INBOX_DIR"
+mkdir -p "$COORD_INBOX_DIR"
+rm -f "$COORD_WAKE_LAST_FILE" "$COORD_WAKE_HOLD_PENDING_FILE"
+
+# A note already on disk BEFORE dispatch_inbox_drops is ever called at
+# all — standing in for one dropped moments before this watcher restarted,
+# the same shape Test 5j above uses for a pre-existing claim marker.
+RESTART_NOTE="$COORD_INBOX_DIR/pre-restart-note.md"
+printf 'parity7-sweep-done\n' > "$RESTART_NOTE"
+
+dispatch_inbox_drops
+
+[ "$(grep -c '^START' "$CALL_TIMELINE")" = "1" ] \
+    || red "a coord-inbox note already on disk before the first scan (simulating a watcher restart) was not dispatched to llm-start.sh; call timeline:
+$(cat "$CALL_TIMELINE")
+events.log:
+$(cat "$EVENTS_LOG")"
+green "a coord-inbox note already on disk before the first scan (simulating a watcher restart) is still dispatched, not silently baselined away"
+
+[ -e "$COORD_INBOX_SELF_DIR/$(basename "$RESTART_NOTE").self" ] \
+    || red "on_inbox_drop should have marked the note decided after dispatching it"
+
+# The note is still sitting there, unarchived — re-scan it on a later tick
+# (dispatch_inbox_drops carries no seen-state, by design) and confirm it is
+# NOT redecided a second time.
+dispatch_inbox_drops
+dispatch_inbox_drops
+
+[ "$(grep -c '^START' "$CALL_TIMELINE")" = "1" ] \
+    || red "a still-pending coord-inbox note was redecided on a later tick instead of being recognized as already-decided; call timeline:
+$(cat "$CALL_TIMELINE")"
+green "a still-unarchived coord-inbox note is not redecided on later ticks — exactly one llm-start.sh call total"
+
+unset -f scan_inbox_drops dispatch_inbox_drops on_inbox_drop
+
+# ============================================================================
+heading "Test 5l (issue #461 self-review finding, round 2): coord_inbox_write's stale-marker sweep only deletes a marker whose note is actually gone, never one that's just old"
+# ============================================================================
+# Self-review caught that age alone isn't a safe sweep condition: a note
+# can legitimately sit unarchived for over an hour (the #461 incident
+# itself ran 2h23m), so deleting its marker just because it's old would
+# let a later tick redecide that STILL-pending note's wake all over again
+# — exactly the bug this marker exists to prevent. coord_inbox_write (the
+# only place that runs the sweep) is already extracted from the big
+# function list above; reuses $RESTART_NOTE and its marker from Test 5k.
+RESTART_MARKER="$COORD_INBOX_SELF_DIR/$(basename "$RESTART_NOTE").self"
+[ -e "$RESTART_MARKER" ] || red "Test 5l needs Test 5k's marker still on disk to backdate"
+touch -d '90 minutes ago' "$RESTART_MARKER" 2>/dev/null || touch -t 202501010000 "$RESTART_MARKER"
+
+coord_inbox_write probe "sweep probe, note still pending" >/dev/null
+
+[ -e "$RESTART_MARKER" ] \
+    || red "the sweep deleted a >60min-old marker whose note is still on disk — a later tick would now redecide that still-pending note's wake"
+green "an old marker whose note is still pending survives the sweep"
+
+rm -f "$RESTART_NOTE"
+coord_inbox_write probe "sweep probe, note now gone" >/dev/null
+
+[ -e "$RESTART_MARKER" ] \
+    && red "the sweep left behind a marker whose note is actually gone — true orphans must still be pruned"
+green "a marker whose note is gone (processed/removed) is pruned by the sweep"
+
+# ============================================================================
+heading "Test 5m (issue #461 self-review round 8): a note archived between the scan and on_inbox_drop's mtime check must not abort the whole watcher"
+# ============================================================================
+# This file runs under the SAME set -euo pipefail as coordinator-watch.sh
+# itself (line 36 above), so eval'ing the real on_inbox_drop here reproduces
+# the real failure mode exactly: a plain var="$(mtime_epoch "$path")"
+# assignment propagates mtime_epoch's exit status, and mtime_epoch fails
+# when stat can't find the file any more — routine, since the poll backend
+# re-stats every pending note every second and the coordinator can archive
+# one in between. Unguarded, that aborts this whole script right here,
+# before red/green ever get a chance to report it.
+for fn in on_inbox_drop; do
+    body="$(extract_fn "$fn")"
+    [ -n "$body" ] || red "could not extract function '$fn' from $WATCH — has it been renamed?"
+    eval "$body"
+done
+
+: > "$EVENTS_LOG"
+rm -rf "$COORD_INBOX_DIR"
+mkdir -p "$COORD_INBOX_DIR" "$COORD_INBOX_SELF_DIR"
+
+VANISHED_NOTE="$COORD_INBOX_DIR/archived-mid-scan.md"
+printf 'will be archived before on_inbox_drop re-checks it\n' > "$VANISHED_NOTE"
+touch "$COORD_INBOX_SELF_DIR/$(basename "$VANISHED_NOTE").self"
+rm -f "$VANISHED_NOTE"
+
+on_inbox_drop "$VANISHED_NOTE"
+green "on_inbox_drop returned (did not abort the script) for a note that vanished before its mtime check"
+
+unset -f on_inbox_drop
+
+# ============================================================================
 heading "Test 6: a debounced activity finding is retried on a later tick, not lost (issue #392 self-review finding, now via the coordinator inbox)"
 # ============================================================================
 # activity_poll_pass only marks ACTIVITY_ANNOUNCED_PR/_ISSUE (and
@@ -1003,6 +1119,7 @@ WORKSPACE="$TEST_DIR"
 EVENTS_LOG="$PROJECT_DIR/.swarm/events.log"
 COORD_INBOX_DIR="$PROJECT_DIR/.swarm/coord-inbox"
 COORD_INBOX_PROCESSED_DIR="$COORD_INBOX_DIR/processed"
+COORD_INBOX_SELF_DIR="$COORD_INBOX_DIR/.self"
 ACTIVITY_WAKE_PROMPT=""                    # so on_activity builds its default body (embeds $lines)
 : > "$EVENTS_LOG"
 rm -rf "$COORD_INBOX_DIR"

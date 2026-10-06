@@ -549,6 +549,39 @@
 #                           items to coord-inbox/processed/). Not itself
 #                           overridable — derived from PROJECT_DIR, same as
 #                           COORD_WAKE_PENDING_FILE.
+#                           (issue #461) Both backends also watch this
+#                           directory itself (inotify: a case arm on the
+#                           same recursive $WORKSPACE watch, plus a
+#                           startup drain before it attaches; poll: its
+#                           own scan_inbox_drops/dispatch_inbox_drops,
+#                           re-run every tick with no baseline — see that
+#                           function's header for why it is deliberately
+#                           NOT folded into scan_outcomes), dispatching
+#                           any *.md arrival through on_inbox_drop. Before
+#                           this fix, a file written here by something
+#                           OTHER than this watcher's own coord_inbox_write
+#                           calls — a util-pane driver script dropping a
+#                           done-note, the sanctioned no-polling way to
+#                           signal completion into the inbox — triggered no
+#                           dispatch path at all, so it could sit unnoticed
+#                           indefinitely if no unrelated outcome/outbox/
+#                           activity wake happened to also fire (observed:
+#                           2h23m, coordinator idle with zero workers).
+#                           on_inbox_drop runs the same debounce/hold-gate/
+#                           llm-start path as on_outcome/on_message/
+#                           on_activity the first time it sees a given
+#                           file; for a file one of THOSE just wrote (they
+#                           always land here too), or one it already
+#                           decided on an earlier pass while the note sat
+#                           still unprocessed, it instead no-ops via the
+#                           COORD_INBOX_SELF_DIR marker — see on_inbox_
+#                           drop's own header comment for why that
+#                           marker, not a timing assumption about the
+#                           shared debounce clock, is what keeps this from
+#                           racing the original caller's own retry/ceiling
+#                           handling for the same wake, and from
+#                           redeciding the same still-pending note on
+#                           every later tick.
 #   COORD_INBOX_NUDGE_TEMPLATE=(built-in)
 #                           (issue #430) The ONE-LINE doorbell text pasted
 #                           into the coordinator's composer once the wake is
@@ -2872,6 +2905,33 @@ fi
 # regenerable one-liner (coord_inbox_nudge_text), not the payload itself.
 COORD_INBOX_DIR="$PROJECT_DIR/.swarm/coord-inbox"
 COORD_INBOX_PROCESSED_DIR="$COORD_INBOX_DIR/processed"
+# COORD_INBOX_SELF_DIR (issue #461): a per-file ".self" marker meaning "a
+# wake decision has already been made for this exact filename" — one made
+# either by coord_inbox_write() right as it writes the file (on_outcome/
+# on_message/on_activity/the sweeps already run their own debounce/
+# hold-gate/wake decision immediately after writing), or by on_inbox_drop
+# itself the first time it sees a file nothing else decided for (a note
+# dropped directly into COORD_INBOX_DIR by something other than this
+# watcher — the actual gap this issue closes). Either way the marker stops
+# a later re-scan (run_poll's dispatch_inbox_drops re-lists every
+# unarchived note on every POLL_SECS tick — see scan_inbox_drops' header
+# for why it carries no baseline of its own) from redeciding the same
+# still-pending file over and over. ".self" (not ".md") so a marker can
+# never itself be mistaken for a new inbox item by any *.md scan. See
+# coord_inbox_write's and on_inbox_drop's own comments for why a registry,
+# not a timing assumption, is what makes the self-written case safe too:
+# the natural guess — rely on wake_debounced() seeing the clock the
+# original caller just set — only holds at the default DEBOUNCE_SECS=30;
+# at DEBOUNCE_SECS=0 (several of this file's own tests, deliberately, for
+# determinism) nothing stops on_inbox_drop from re-deciding the same wake
+# a second time through a different code path, racing coord_wake_hold_
+# retry_pass/coord_wake_retry_pass for who actually delivers it. The
+# marker's presence alone isn't quite enough, though (self-review round 4):
+# a producer that reuses a fixed filename for a second, later note would
+# otherwise be swallowed forever by the first note's leftover marker, so
+# on_inbox_drop also compares mtimes (mtime_epoch) and treats a note newer
+# than its own marker as a fresh arrival rather than an already-decided one.
+COORD_INBOX_SELF_DIR="$COORD_INBOX_DIR/.self"
 
 # COORD_INBOX_NUDGE_TEMPLATE: the fixed, short doorbell text — "%N" is
 # substituted with the live coord-inbox/*.md count at paste time (never
@@ -7672,13 +7732,48 @@ worker_compact_pass() {
 # paste" before this issue (see this file's header comment). Failure here
 # is logged but non-fatal — an inbox write that can't land shouldn't also
 # block the doorbell attempt that follows it.
+#
+# (issue #461) Also drops a same-named marker under COORD_INBOX_SELF_DIR —
+# see that var's header comment for why on_inbox_drop needs it. The marker
+# is touched BEFORE the mv, not after: on_inbox_drop runs in a separate
+# process (the inotify reader, or run_poll's own scan tick), and that
+# process can observe the final .md file (the inotify moved_to event, or
+# just finding it on the next poll) before this process gets to a
+# post-mv touch — there is no cross-process ordering guarantee the other
+# way. Touching first means the marker is always on disk no later than the
+# file a consumer could possibly see, at the cost of a marker very briefly
+# existing with no corresponding .md file yet (on_inbox_drop never looks
+# for a marker except in response to seeing the .md file itself, so that
+# window is never observed). Best-effort like the write itself: a lost
+# marker only means this file's own arrival gets treated as if it were an
+# external drop (one extra, harmless debounce-covered wake re-check under
+# the default DEBOUNCE_SECS), not a correctness problem.
 coord_inbox_write() {
-    local kind="$1" content="$2" tmp final
-    mkdir -p "$COORD_INBOX_DIR" "$COORD_INBOX_PROCESSED_DIR" 2>/dev/null || true
+    local kind="$1" content="$2" tmp final marker stale_marker stale_note
+    mkdir -p "$COORD_INBOX_DIR" "$COORD_INBOX_PROCESSED_DIR" "$COORD_INBOX_SELF_DIR" 2>/dev/null || true
+    # A marker whose .md file on_inbox_drop never got to see (the watcher
+    # exited right after this write, or wasn't running at all) would
+    # otherwise sit forever — sweep anything old enough to plausibly be
+    # such an orphan. Age alone isn't sufficient, though (self-review on
+    # this issue's own PR): a note can legitimately sit unarchived for
+    # over an hour — the #461 incident itself ran 2h23m — so deleting a
+    # marker just because it's old would let a later tick redecide a
+    # STILL-pending note's wake a second time, breaking the one-decision-
+    # per-file promise on_inbox_drop exists to keep. Only delete a marker
+    # whose note is actually gone (archived to processed/, or otherwise
+    # removed) — that pairing, not age by itself, is what makes it safe.
+    while IFS= read -r stale_marker; do
+        [ -n "$stale_marker" ] || continue
+        stale_note="$COORD_INBOX_DIR/$(basename "$stale_marker" .self)"
+        [ -e "$stale_note" ] && continue
+        rm -f "$stale_marker" 2>/dev/null || true
+    done < <(find "$COORD_INBOX_SELF_DIR" -maxdepth 1 -name '*.self' -mmin +60 -print 2>/dev/null)
     tmp="$(mktemp "$COORD_INBOX_DIR/.tmp.coord-inbox.XXXXXX" 2>/dev/null)" || return 1
     printf '%s\n' "$content" > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
     final="$COORD_INBOX_DIR/$(date -u +%Y%m%dT%H%M%SZ)-${kind}-$$-${RANDOM}.md"
-    mv -f "$tmp" "$final" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
+    marker="$COORD_INBOX_SELF_DIR/$(basename "$final").self"
+    touch "$marker" 2>/dev/null || true
+    mv -f "$tmp" "$final" 2>/dev/null || { rm -f "$tmp" "$marker" 2>/dev/null; return 1; }
 }
 
 # coord_inbox_count
@@ -8871,6 +8966,196 @@ on_message() {
     fi
 }
 
+# on_inbox_drop <coord-inbox-md-path>
+#
+# (issue #461) A *.md file landed in COORD_INBOX_DIR itself. Before this,
+# nothing watched that directory for arrivals — on_outcome/on_message/
+# on_activity/the stall/stranded-brief/worktree-vanished sweeps all write
+# there via coord_inbox_write, but each of THOSE already attempts its own
+# wake right after writing, so the gap was invisible as long as every
+# coord-inbox file came from one of them. The case this closes is a file
+# dropped there by something ELSE — a util-pane driver script signaling
+# job completion into the inbox is the documented #430 idiom for "tell the
+# coordinator something without polling" — which no dispatch path ever
+# observed: the reported incident left a done-note sitting unannounced for
+# 2h23m (coordinator idle, zero workers, so zero outcome/outbox events ever
+# gave it a chance to ride along on an unrelated wake).
+#
+# External producers should write the same way coord_inbox_write does —
+# a tmp file elsewhere plus an atomic `mv` into COORD_INBOX_DIR, never an
+# in-place truncate+write (`echo ... > done.md` over an existing file) —
+# for two reasons self-review found (round 6): (1) the inotify backend
+# only arms on create/moved_to, so an in-place rewrite of an existing
+# filename fires neither and is never seen at all; (2) on the poll
+# backend, a non-atomic write caught mid-write can get its marker touched
+# before the write finishes, making the finished file look "newer than
+# its own marker" to the round-4 freshness check and ring a second,
+# spurious doorbell for what was really one note. Both go away if the
+# file only ever appears via a single atomic rename.
+#
+# No coord_inbox_write call here — the file already exists; this is purely
+# the missing wake ATTEMPT, run through the same debounce/hold-gate/
+# llm-start path as on_outcome/on_message/on_activity. The COORD_INBOX_
+# SELF_DIR marker is what keeps this from re-litigating the SAME file's
+# wake more than once, for either of two reasons a re-scan can see the
+# same path again: (1) one of on_outcome/on_message/on_activity/the
+# periodic sweeps already wrote it and decided its own wake (coord_
+# inbox_write touches the marker before it even does the mv — see that
+# function's header), or (2) dispatch_inbox_drops itself already decided
+# this exact file on an earlier pass and the note is simply still sitting
+# there unprocessed (run_poll's POLL_SECS tick, by design, re-lists every
+# unarchived file on every pass — see scan_inbox_drops' header for why it
+# carries no baseline/seen-state of its own). Either way, finding the
+# marker here means a decision for this filename already happened — UNLESS
+# the note's own mtime is now newer than the marker's, which only happens
+# when something rewrote the file under that name after the marker was set
+# (a fixed-name producer reusing e.g. "done.md" for a second, later note);
+# that case is treated as a fresh arrival rather than skipped (self-review
+# round 4). Otherwise, this call creates the marker itself for case (2)
+# before doing anything else, so the NEXT re-scan (one second later, by
+# default) doesn't redecide it too. A first version of this fix instead
+# assumed wake_debounced() would
+# always see a clock the original caller just set and hold this as a
+# harmless no-op — true at the default DEBOUNCE_SECS=30, but this file's
+# own tests run several scenarios at DEBOUNCE_SECS=0, where nothing
+# stopped this function from re-deciding the SAME wake a second time
+# through a different path and racing coord_wake_hold_retry_pass/
+# coord_wake_retry_pass for who delivers it (caught by
+# test-coordinator-inbox.sh's busy-pane-defer case misfiring as a direct
+# delivery instead of the expected deferred one). The marker is never
+# removed here — on a lost race it would just mean this one file's
+# arrival got the "probably debounced" treatment again, mirroring the
+# cost of a lost marker described in coord_inbox_write's own header — and
+# coord_inbox_write's 60-minute sweep prunes stale markers whenever it
+# runs. That sweep only runs from inside coord_inbox_write itself, though
+# (self-review round 9) — in this issue's own idle/no-workers conditions,
+# nothing may call it again for a long time, so a marker for a file an
+# external producer writes just once can sit around well past 60 minutes.
+# Accepted: the marker is a few bytes, and the cost of one surviving is a
+# single harmless no-op re-scan, not unbounded growth of anything that
+# matters. The already-decided case returns with no
+# logging at all — see its own comment below (self-review round 5): a
+# still-pending note is re-seen on every POLL_SECS tick for as long as it
+# sits unarchived, so logging there would grow events.log unboundedly for
+# precisely the long-pending notes this issue exists to handle.
+on_inbox_drop() {
+    local path="$1"
+    local now self_marker marker_mtime note_mtime
+    now=$(date +%s)
+
+    self_marker="$COORD_INBOX_SELF_DIR/$(basename "$path").self"
+    if [ -e "$self_marker" ]; then
+        # Self-review (#461 round 4): a bare existence check means an
+        # external producer that reuses a fixed filename (the incident's own
+        # note was literally "parity7-sweep-done.md", not a unique name) gets
+        # permanently swallowed after its first use — coord_inbox_write's
+        # 60-minute sweep only prunes a marker once its note is gone, and in
+        # the incident's own idle/no-workers conditions coord_inbox_write may
+        # never run again to do that pruning. mtime_epoch comparison closes
+        # this without needing coord_inbox_write to run at all: the marker is
+        # always touched no later than the note's own content-write (see
+        # coord_inbox_write's header, and the mkdir+touch a few lines below
+        # for the external-first-sight case), so a note whose mtime is
+        # strictly newer than its marker's can only mean the file was
+        # rewritten after that decision — a genuinely new arrival under an
+        # old name, not the same one being re-seen. mtime_epoch's 1-second
+        # resolution (same as every other staleness check in this file)
+        # leaves a theoretical gap if the SAME filename gets rewritten twice
+        # inside one wall-clock second — accepted, not closed: the producers
+        # this closes for are periodic driver scripts, not a sub-second
+        # retry loop (self-review round 5).
+        # Self-review round 8: under this script's set -e, a plain
+        # var="$(cmd)" assignment propagates cmd's exit status — and
+        # mtime_epoch fails if the note gets archived between
+        # scan_inbox_drops listing it and this stat (routine: the poll
+        # backend re-stats every pending note every second). Unguarded,
+        # that would abort the whole watcher process. `|| true` keeps a
+        # failed stat as an empty value instead, and a vanished note is
+        # simply nothing left to decide.
+        # Explicit "return 0": a bare `return` here would propagate the
+        # just-failed `[ -e ]` test's own nonzero status, and both of this
+        # function's callers invoke it as a bare statement under set -e —
+        # the exact hazard this whole guard exists to avoid, just moved
+        # one line earlier.
+        [ -e "$path" ] || return 0
+        marker_mtime="$(mtime_epoch "$self_marker")" || true
+        note_mtime="$(mtime_epoch "$path")" || true
+        if [ -z "$marker_mtime" ] || [ -z "$note_mtime" ] || [ "$note_mtime" -le "$marker_mtime" ]; then
+            # Already decided and the note hasn't changed since — silent,
+            # on purpose (self-review round 5): scan_inbox_drops carries no
+            # baseline, so every unarchived note is re-listed on every
+            # POLL_SECS tick for as long as it sits waiting — logging here
+            # would grow events.log (and this process's own stdout log)
+            # without bound for exactly the long-pending notes this issue
+            # cares about: the incident's own note sat 2h23m, which at the
+            # default POLL_SECS would be ~7,000 lines; a day-old note would
+            # be ~43,000. Explicit "return 0" for the same reason as the
+            # [ -e "$path" ] guard above — this function is always called
+            # as a bare statement under set -e.
+            return 0
+        fi
+        echo "[$(date +%T)] inbox: $path — stale marker predates this note's content (filename reused since the last decision), treating as a new arrival"
+        log_event coord.inbox.drop.stale_marker "path=$path marker_mtime=$marker_mtime note_mtime=$note_mtime"
+    fi
+    log_event coord.inbox.drop "path=$path"
+    mkdir -p "$COORD_INBOX_SELF_DIR" 2>/dev/null || true
+    touch "$self_marker" 2>/dev/null || true
+
+    if wake_debounced; then
+        echo "[$(date +%T)] inbox: $path — within debounce window (${DEBOUNCE_SECS}s), holding doorbell for retry"
+        log_event coord.wake.defer "reason=debounce window=${DEBOUNCE_SECS}s trigger=inbox_drop"
+        coord_wake_hold_mark_pending debounce
+        return
+    fi
+
+    echo "[$(date +%T)] inbox: $path"
+
+    # issue #430/#459: same doorbell hold gate as on_outcome/on_message —
+    # see on_outcome's identical branch for the full rationale.
+    local hold_reason
+    hold_reason="$(coord_wake_hold_reason)"
+    if [ -n "$hold_reason" ]; then
+        echo "[$(date +%T)] coordinator not free to take a doorbell ($hold_reason) — deferring, will retry"
+        log_event coord.wake.defer "reason=$hold_reason trigger=inbox_drop"
+        coord_wake_hold_mark_pending "$hold_reason"
+    else
+        maybe_auto_compact wake
+
+        echo "[$(date +%T)] waking coordinator (inbox drop)..."
+        local nudge
+        nudge="$(coord_inbox_nudge_text)"
+        log_event coord.wake "trigger=inbox_drop:$(basename "$path")"
+
+        if [ "$DRY_RUN" = "1" ]; then
+            echo "[DRY] would: cd $PROJECT_DIR && NON_INTERACTIVE=1 $LLM_START \"$nudge\""
+        else
+            local wake_rc=0
+            ( flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 9 && cd "$PROJECT_DIR" && NON_INTERACTIVE=1 "$LLM_START" "$nudge" ) 9>"$COORD_WAKE_LOCK" || wake_rc=$?
+            if [ "$wake_rc" = "3" ]; then
+                echo "[$(date +%T)] coordinator composer holds an unsubmitted draft — deferring wake, will retry"
+                log_event coord.wake.deferred "reason=composer_dirty trigger=inbox_drop"
+                coord_wake_set_pending "$nudge"
+            elif [ "$wake_rc" != "0" ]; then
+                echo "[$(date +%T)] WARN: coordinator wake exited non-zero (continuing watch)"
+                log_event coord.wake.error "trigger=inbox_drop rc=$wake_rc"
+            else
+                coord_wake_clear_pending
+                coord_wake_hold_clear_pending
+            fi
+        fi
+    fi
+    wake_clock_set "$now"
+
+    if [ "$ONCE" = "1" ]; then
+        echo "[$(date +%T)] ONCE=1 — exiting after first wake."
+        log_event watch.exit "reason=once"
+        # Same pane-echo grace period as on_outcome's ONCE path — see the
+        # comment there for why 1.5s.
+        [ "$WATCHER_QUIET" = "1" ] || sleep 1.5
+        exit 0
+    fi
+}
+
 # on_activity <lines>
 #
 # (issue #392) activity_poll_pass found operator activity (PR merge / issue
@@ -9058,9 +9343,10 @@ stall_wake_pass() {
 # ---------------------------------------------------------------------------
 run_inotify() {
     # Watch the workspace (parent of project) recursively, filtering events
-    # to only outcomes inside wt-issue-*/.swarm/tasks/done/. The listener
-    # does `mv processing/X.md done/X.md` followed by writing done/X.json —
-    # both surface as create/moved_to events.
+    # to outcomes inside wt-issue-*/.swarm/tasks/done/, outbox messages,
+    # claim markers, and (issue #461) this project's own coord-inbox/. The
+    # listener does `mv processing/X.md done/X.md` followed by writing
+    # done/X.json — both surface as create/moved_to events.
     #
     # issue #357: this name-glob CAN match a sibling project's worktree
     # under flat grouping (inotifywait has no equivalent of `git worktree
@@ -9079,7 +9365,13 @@ run_inotify() {
     # dispatch_claims closes (see scan_claims' header): inotify only
     # reports events from here forward, so a marker a listener wrote while
     # this watcher was restarting would otherwise sit unforwarded forever.
+    # (issue #461 self-review) Same drain for coord-inbox: inotify never
+    # reports a file that already existed before it attached, so a note
+    # dropped moments before this watcher restarted would otherwise sit
+    # unreported for as long as nothing else happens to re-touch it —
+    # reproducing this issue's own incident across every restart.
     dispatch_claims
+    dispatch_inbox_drops
     inotifywait -m -r \
         --exclude '/(\.git|node_modules|build|target|\.gradle|dist|out|\.next|\.venv|venv)(/|$)' \
         -e create -e moved_to \
@@ -9115,6 +9407,30 @@ run_inotify() {
                 # not worth chasing further on a host that runs the poll
                 # backend in practice (inotify-tools isn't installed here).
                 dispatch_selfheal_claim "$path"
+                ;;
+            "$COORD_INBOX_PROCESSED_DIR"/*)
+                # Lifecycle archive (coordinator mv after handling, or this
+                # watcher's own coord_inbox_write targets COORD_INBOX_DIR
+                # directly and never this subdir) — not a new item.
+                ;;
+            "$COORD_INBOX_DIR"/*.md)
+                # issue #461: a file landed in the coordinator's own inbox —
+                # see on_inbox_drop's header for why this needs its own
+                # watch (not just the done/outbox/claims ones above), and
+                # coord_inbox_write's header for why its .self marker is
+                # always on disk by the time this inotify event (or the
+                # poll backend's own scan) can see the .md file, which is
+                # what makes firing on_inbox_drop for a file this watcher
+                # itself just wrote (via coord_inbox_write in
+                # on_outcome/on_message/on_activity/the periodic sweeps)
+                # harmless rather than a second, spurious wake. A note
+                # that was already on disk before this process started is
+                # instead handled by the dispatch_inbox_drops drain above,
+                # right before inotifywait attaches — this `create`/
+                # `moved_to` case only ever fires for one that arrives
+                # live, after that drain, same split as the claims arm
+                # just above.
+                on_inbox_drop "$path"
                 ;;
         esac
     done
@@ -9171,6 +9487,35 @@ dispatch_claims() {
     done < <(scan_claims "$wt_list")
 }
 
+# scan_inbox_drops / dispatch_inbox_drops — this project's own coord-inbox
+# (issue #461), used by run_poll and run_inotify's startup drain. Kept OUT
+# of run_poll's scan_outcomes/seen_file for the exact reason scan_claims is
+# (see its header above): seen_file's startup baseline is correct for
+# outcomes — an old, already-handled one must never replay after a restart
+# — but wrong here. A still-unprocessed coord-inbox note (one the
+# coordinator hasn't yet triaged into processed/) IS the pending signal
+# itself; baselining it into "already seen" at startup, the first version
+# of this fix did by folding it into scan_outcomes, would silently swallow
+# a note left over from before a restart — reproducing this issue's own
+# incident every time the watcher restarts while a note is still pending
+# (self-review on this issue's own PR). on_inbox_drop's own per-file marker
+# (COORD_INBOX_SELF_DIR), not seen_file, is what stops a still-pending note
+# from being redecided on every subsequent tick. Top-level (not nested in
+# run_poll) so tests can extract and drive them directly, same as
+# scan_claims/dispatch_claims.
+scan_inbox_drops() {
+    [ -d "$COORD_INBOX_DIR" ] || return 0
+    find "$COORD_INBOX_DIR" -maxdepth 1 -name '*.md' -print 2>/dev/null
+}
+
+dispatch_inbox_drops() {
+    local path
+    while IFS= read -r path; do
+        [ -z "$path" ] && continue
+        on_inbox_drop "$path"
+    done < <(scan_inbox_drops)
+}
+
 # ---------------------------------------------------------------------------
 # Backend: polling (find)
 # ---------------------------------------------------------------------------
@@ -9225,10 +9570,12 @@ run_poll() {
     local wt_list
     wt_list="$(own_worktree_dirs_for_scan "$PROJECT_DIR")"
     scan_outcomes "$wt_list" > "$seen_file"
-    # Drain any marker already on disk before this watcher's first full
-    # tick — see scan_claims' header for why this one scan must NOT be
-    # skipped the way the done/outbox baseline above intentionally is.
+    # Drain any marker/inbox-note already on disk before this watcher's
+    # first full tick — see scan_claims' and scan_inbox_drops' headers for
+    # why these two scans must NOT be skipped the way the done/outbox
+    # baseline above intentionally is.
     dispatch_claims "$wt_list"
+    dispatch_inbox_drops
 
     while true; do
         local current diff_new
@@ -9251,6 +9598,7 @@ run_poll() {
         fi
 
         dispatch_claims "$wt_list"
+        dispatch_inbox_drops
 
         sleep "$POLL_SECS"
     done
