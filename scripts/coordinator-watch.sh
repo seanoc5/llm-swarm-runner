@@ -8913,8 +8913,14 @@ on_message() {
 # removed here — on a lost race it would just mean this one file's
 # arrival got the "probably debounced" treatment again, mirroring the
 # cost of a lost marker described in coord_inbox_write's own header — and
-# coord_inbox_write's 60-minute sweep prunes stale markers either way, so
-# nothing accumulates unbounded. The already-decided case returns with no
+# coord_inbox_write's 60-minute sweep prunes stale markers whenever it
+# runs. That sweep only runs from inside coord_inbox_write itself, though
+# (self-review round 9) — in this issue's own idle/no-workers conditions,
+# nothing may call it again for a long time, so a marker for a file an
+# external producer writes just once can sit around well past 60 minutes.
+# Accepted: the marker is a few bytes, and the cost of one surviving is a
+# single harmless no-op re-scan, not unbounded growth of anything that
+# matters. The already-decided case returns with no
 # logging at all — see its own comment below (self-review round 5): a
 # still-pending note is re-seen on every POLL_SECS tick for as long as it
 # sits unarchived, so logging there would grow events.log unboundedly for
