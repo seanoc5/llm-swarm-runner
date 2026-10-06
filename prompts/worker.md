@@ -343,10 +343,13 @@ nothing pending, no self-review `BLOCK`, not given up on an error).
 2. Write the final body (risk marker + skeleton below).
 3. `lint-pr-screen.sh <N>` until it exits 0 (exit 3 names the failed rule).
 4. `pr-ready.sh <N>`, not bare `gh pr ready`. For 🟡/🔴 it runs and posts the
-   self-review first, and refuses to ready on `BLOCK` or an unparseable
-   verdict (exit 2). If the PR body carries a coordinator `COORDINATOR
-   HOLD` banner (draft-as-hold), it still posts the self-review but leaves
-   the PR in draft (exit 3) — only the coordinator lifts the hold.
+   self-review first (capped at `WORKER_SELF_REVIEW_MAX_ROUNDS` rounds — see
+   "Self-review before merge" below), and refuses to ready on `BLOCK` or an
+   unparseable verdict (exit 2). It also refuses if CI on the head commit
+   isn't confirmed green (exit 4). If the PR body carries a coordinator
+   `COORDINATOR HOLD` banner (draft-as-hold), it still posts the
+   self-review but leaves the PR in draft (exit 3) — only the coordinator
+   lifts the hold.
 
 A ready PR with a placeholder body reads as a policy violation.
 
@@ -388,6 +391,28 @@ review. The verdict's first line is `APPROVE`, `APPROVE_WITH_CAVEATS: <text>`
 ("self-review: skipped — WORKER_SELF_REVIEW=0"). Only if `pr-ready.sh` is
 unavailable, pipe `$LLM_SWARM_DIR/prompts/skill-self-review.md` + the PR
 title/body + `gh pr diff <N>` into `claude -p` and read the first line.
+
+**Round cap (issue #473):** self-review rounds on one PR are capped at
+`WORKER_SELF_REVIEW_MAX_ROUNDS` (read with the standard precedence: shell
+env > `<project>/.swarm/.env` > `.env.example`; default 3, 0 = disabled,
+same effect as `WORKER_SELF_REVIEW=0`). `pr-ready.sh` tracks rounds itself
+by counting the `SWARM_SELF_REVIEW` marker comments already posted on the
+PR — it refuses to run another round past the cap and says so. Once
+capped, fold any remaining findings into the PR body's `## Follow-up
+suggestions` block instead of chasing them with more commits: a
+fand-etl PR (#1063, 2026-09-25/26) ran ~15 rounds over 2h15m for 23
+mostly-wording follow-up commits with shrinking returns and no stop
+condition, and the actual failure (failing CI, see next paragraph) was
+never one of the findings a 16th round would have caught.
+
+**CI must be green before readying.** `pr-ready.sh` takes its own `gh pr
+checks` snapshot right before calling `gh pr ready` and refuses if it
+isn't green (pending or failing both refuse; no CI configured at all is a
+pass-with-warning). Never state a PR's CI status in its body or your
+handoff from memory or assumption — if you haven't just observed it via
+`gh pr checks` or `ci-wait.sh`, don't claim it. The incident this closes:
+fand-etl PR #1063 was marked ready with `lint-and-test` failing (4 ruff
+errors) while its body said "CI is green".
 
 ### PR body skeleton
 

@@ -17,6 +17,12 @@
 # pr-ready.sh's own DECISION LOGIC (risk gating, exit-code handling,
 # whether `gh pr ready` actually runs) rather than the review itself. gh
 # stubbed via a PATH shim, same technique as test-pr-brief-marker.sh.
+#
+# issue #473 (Tests 12-17): also covers the CI-green-before-ready gate (a
+# `gh pr checks` snapshot taken right before readying, controlled here via
+# GH_CHECKS_RC/GH_CHECKS_STDERR) and the self-review round cap
+# (WORKER_SELF_REVIEW_MAX_ROUNDS, controlled via GH_ROUNDS_DONE standing in
+# for the count of prior SWARM_SELF_REVIEW marker comments on the PR).
 set -euo pipefail
 
 green()   { printf '\033[32m✓ %s\033[0m\n' "$*"; }
@@ -48,8 +54,16 @@ cat > "$SHIM_DIR/gh" <<EOF
 #!/usr/bin/env bash
 echo "\$*" >> "$GH_LOG"
 if [ "\$1" = "pr" ] && [ "\$2" = "view" ]; then
-    cat "$BODY_FILE"
+    if printf '%s\n' "\$*" | grep -q -- '--json comments'; then
+        echo "\${GH_ROUNDS_DONE:-0}"
+    else
+        cat "$BODY_FILE"
+    fi
     exit 0
+fi
+if [ "\$1" = "pr" ] && [ "\$2" = "checks" ]; then
+    [ -n "\${GH_CHECKS_STDERR:-}" ] && echo "\$GH_CHECKS_STDERR" >&2
+    exit "\${GH_CHECKS_RC:-0}"
 fi
 if [ "\$1" = "pr" ] && [ "\$2" = "ready" ]; then
     exit 0
@@ -77,7 +91,11 @@ run_pr_ready() {
     : > "$GH_LOG"
     : > "$FAKE_REVIEW_LOG"
     rc=0
-    PATH="$SHIM_DIR:$PATH" SELF_REVIEW_SCRIPT="$FAKE_REVIEW" WORKER_SELF_REVIEW="${WORKER_SELF_REVIEW:-1}" "$PR_READY" 42 \
+    PATH="$SHIM_DIR:$PATH" SELF_REVIEW_SCRIPT="$FAKE_REVIEW" WORKER_SELF_REVIEW="${WORKER_SELF_REVIEW:-1}" \
+        WORKER_SELF_REVIEW_MAX_ROUNDS="${WORKER_SELF_REVIEW_MAX_ROUNDS:-3}" \
+        GH_ROUNDS_DONE="${GH_ROUNDS_DONE:-0}" \
+        GH_CHECKS_RC="${GH_CHECKS_RC:-0}" GH_CHECKS_STDERR="${GH_CHECKS_STDERR:-}" \
+        "$PR_READY" 42 \
         > "$TEST_DIR/out.log" 2>&1 || rc=$?
     return "$rc"
 }
@@ -201,5 +219,90 @@ rc=0; run_pr_ready || rc=$?
 [ "$rc" -eq 0 ] || red "expected exit 0 — quoting the banner markup mid-paragraph should not self-hold, got $rc: $(cat "$TEST_DIR/out.log")"
 gh_ready_called || red "expected gh pr ready to run when the banner markup only appears quoted inline, not as its own leading line"
 green "quoting the banner's exact markup inline (not as a leading blockquote line) does not trigger a hold"
+
+# ============================================================================
+heading "Test 12: CI checks pending (gh pr checks exit 8) — refuses, gh pr ready NEVER runs (issue #473)"
+# ============================================================================
+printf '<!-- BLIND_MERGE_RISK: low -->\nsome change\n' > "$BODY_FILE"
+make_fake_review 0
+GH_CHECKS_RC=8
+rc=0; run_pr_ready || rc=$?
+GH_CHECKS_RC=0
+[ "$rc" -eq 4 ] || red "expected exit 4 for pending CI, got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called && red "expected gh pr ready NOT to run while CI is still pending"
+grep -qi 'REFUSED' "$TEST_DIR/out.log" || red "expected a REFUSED message in output: $(cat "$TEST_DIR/out.log")"
+green "pending CI (gh pr checks exit 8) refuses to ready the PR"
+
+# ============================================================================
+heading "Test 13: CI checks failing (gh pr checks exit 1, real failure) — refuses, gh pr ready NEVER runs"
+# ============================================================================
+printf '<!-- BLIND_MERGE_RISK: low -->\nsome change\n' > "$BODY_FILE"
+make_fake_review 0
+GH_CHECKS_RC=1
+GH_CHECKS_STDERR="lint-and-test  fail  4m12s"
+rc=0; run_pr_ready || rc=$?
+GH_CHECKS_RC=0
+GH_CHECKS_STDERR=""
+[ "$rc" -eq 4 ] || red "expected exit 4 for failing CI, got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called && red "expected gh pr ready NOT to run with failing CI checks"
+grep -qi 'REFUSED' "$TEST_DIR/out.log" || red "expected a REFUSED message in output: $(cat "$TEST_DIR/out.log")"
+green "failing CI checks refuse to ready the PR (the fand-etl PR #1063 bug this issue closes)"
+
+# ============================================================================
+heading "Test 14: no CI checks configured at all ('no checks reported') — WARNs, still readies"
+# ============================================================================
+printf '<!-- BLIND_MERGE_RISK: low -->\nsome change\n' > "$BODY_FILE"
+make_fake_review 0
+GH_CHECKS_RC=1
+GH_CHECKS_STDERR="no checks reported on the 'main' branch"
+rc=0; run_pr_ready || rc=$?
+GH_CHECKS_RC=0
+GH_CHECKS_STDERR=""
+[ "$rc" -eq 0 ] || red "expected exit 0 when no CI is configured, got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called || red "expected gh pr ready to still run when no CI checks are configured"
+grep -qi 'WARN' "$TEST_DIR/out.log" || red "expected a WARN about the absent checks: $(cat "$TEST_DIR/out.log")"
+green "no CI configured at all is a pass-with-warning, not a refusal"
+
+# ============================================================================
+heading "Test 15: self-review round cap reached — skips another round, still readies on CI-green"
+# ============================================================================
+printf '<!-- BLIND_MERGE_RISK: medium -->\nsome change\n' > "$BODY_FILE"
+make_fake_review 0
+GH_ROUNDS_DONE=3
+WORKER_SELF_REVIEW_MAX_ROUNDS=3
+rc=0; run_pr_ready || rc=$?
+GH_ROUNDS_DONE=0
+WORKER_SELF_REVIEW_MAX_ROUNDS=3
+[ "$rc" -eq 0 ] || red "expected exit 0 once the cap is hit and CI is green, got $rc: $(cat "$TEST_DIR/out.log")"
+[ ! -s "$FAKE_REVIEW_LOG" ] || red "expected self-review-pr.sh NOT invoked once the round cap is reached, log: $(cat "$FAKE_REVIEW_LOG")"
+gh_ready_called || red "expected gh pr ready to still run once the round cap is reached"
+grep -qi 'round cap reached' "$TEST_DIR/out.log" || red "expected a round-cap message in output: $(cat "$TEST_DIR/out.log")"
+green "hitting the self-review round cap skips another round and folds findings into Follow-up suggestions instead"
+
+# ============================================================================
+heading "Test 16: WORKER_SELF_REVIEW_MAX_ROUNDS=0 — self-review disabled, readies anyway"
+# ============================================================================
+printf '<!-- BLIND_MERGE_RISK: medium -->\nsome change\n' > "$BODY_FILE"
+make_fake_review 0
+WORKER_SELF_REVIEW_MAX_ROUNDS=0
+rc=0; run_pr_ready || rc=$?
+WORKER_SELF_REVIEW_MAX_ROUNDS=3
+[ "$rc" -eq 0 ] || red "expected exit 0 when WORKER_SELF_REVIEW_MAX_ROUNDS=0, got $rc: $(cat "$TEST_DIR/out.log")"
+[ ! -s "$FAKE_REVIEW_LOG" ] || red "expected self-review-pr.sh NOT invoked when WORKER_SELF_REVIEW_MAX_ROUNDS=0, log: $(cat "$FAKE_REVIEW_LOG")"
+gh_ready_called || red "expected gh pr ready to still run when WORKER_SELF_REVIEW_MAX_ROUNDS=0"
+green "WORKER_SELF_REVIEW_MAX_ROUNDS=0 disables self-review entirely and still readies"
+
+# ============================================================================
+heading "Test 17: below the round cap — self-review still runs normally, round number logged"
+# ============================================================================
+printf '<!-- BLIND_MERGE_RISK: medium -->\nsome change\n' > "$BODY_FILE"
+make_fake_review 0
+GH_ROUNDS_DONE=1
+rc=0; run_pr_ready || rc=$?
+GH_ROUNDS_DONE=0
+[ "$rc" -eq 0 ] || red "expected exit 0 below the cap, got $rc: $(cat "$TEST_DIR/out.log")"
+grep -q '42 --post --force' "$FAKE_REVIEW_LOG" || red "expected self-review invoked below the cap, log: $(cat "$FAKE_REVIEW_LOG")"
+grep -q 'round 2/3' "$TEST_DIR/out.log" || red "expected the round number in output: $(cat "$TEST_DIR/out.log")"
+green "below the cap, self-review runs normally and logs its round number"
 
 green "ALL TESTS PASSED"

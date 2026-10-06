@@ -41,6 +41,7 @@ check() {
 mkdir -p "$TEST_DIR/bin"
 cat > "$TEST_DIR/bin/gh" <<'EOF'
 #!/usr/bin/env bash
+[ -n "${GH_ARGS_LOG:-}" ] && printf '%s\n' "$*" >> "$GH_ARGS_LOG"
 case "$1 $2" in
     "pr view")
         n=0
@@ -67,7 +68,7 @@ case "$1 $2" in
             exit 1
         fi
         exit "${GH_CHECKS_RC:-0}" ;;
-    "api repos/{owner}/{repo}/actions/workflows")
+    "api repos/{owner}/{repo}/actions/workflows"|"api repos/owner/repo/actions/workflows")
         echo "${GH_WORKFLOW_COUNT:-1}"
         exit 0 ;;
     "run list")
@@ -287,6 +288,35 @@ out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_PERM_ERROR=1 \
 check "resolves to green once the run completes" '[ "$rc" -eq 0 ]'
 check "gh run list was polled more than once" '[ "$(cat "$RUNLIST_COUNT_FILE_11")" -ge 3 ]'
 check "gh pr checks was called exactly once (fallback engaged, no re-tries)" '[ "$(cat "$CHECKS_COUNT_FILE_11")" -eq 1 ]'
+
+# ─── Test 12: --repo is accepted and forwarded to every gh call (issue #473 "also noticed") ───
+
+heading "Test 12: --repo <owner/repo> is accepted and forwarded to pr view/checks"
+rc=0
+ARGS_LOG_12="$TEST_DIR/args-log-12"
+: > "$ARGS_LOG_12"
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_RC=0 \
+    GH_ARGS_LOG="$ARGS_LOG_12" "$CI_WAIT" 42 5 --repo owner/repo 2>&1)" || rc=$?
+check "exits 0 with --repo after the positional args" '[ "$rc" -eq 0 ]'
+check "pr view was called with --repo owner/repo" 'grep -q "^pr view 42 --repo owner/repo" "$ARGS_LOG_12"'
+check "pr checks was called with --repo owner/repo" 'grep -q "^pr checks 42 --repo owner/repo" "$ARGS_LOG_12"'
+
+heading "Test 12b: --repo=<owner/repo> (= form) is also accepted"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_RC=0 \
+    "$CI_WAIT" --repo=owner/repo 42 5 2>&1)" || rc=$?
+check "exits 0 with --repo=owner/repo before the positional args" '[ "$rc" -eq 0 ]'
+
+heading "Test 12c: --repo changes the workflow-count lookup path (exit 5, zero workflows)"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_NO_CHECKS=1 \
+    GH_WORKFLOW_COUNT=0 "$CI_WAIT" 42 5 --repo owner/repo 2>&1)" || rc=$?
+check "exits 5 (no CI configured) with --repo set too" '[ "$rc" -eq 5 ]'
+
+heading "Test 12d: no PR# at all, only --repo → usage error, not a crash"
+rc=0
+out="$("$CI_WAIT" --repo owner/repo 2>&1)" || rc=$?
+check "exits 4 (usage) rather than crashing on an unbound variable" '[ "$rc" -eq 4 ]'
 
 heading "Results: $PASS checks passed"
 green "All checks passed."
