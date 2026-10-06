@@ -99,6 +99,28 @@ rc=$(run_prov 12 $off)
 [ ! -e "$HOST_STATE_DIR/pending-swarm-llm-proj-iss-11" ] || red "resolved marker should be removed"
 green "resolved marker removed, 1 running + 0 pending < 2 admits"
 
+heading "2b: a marker's own stored TTL outlives this reader's shorter default (issue #546, self-review round 7)"
+# Simulate a sibling project's marker written with a longer
+# PROVISION_SPAWN_CHECK_SECS (e.g. 270s -> stored TTL 300s), aged past
+# what THIS reader's own default TTL (120s, from PROVISION_SPAWN_CHECK_SECS=0
+# in `off`) would tolerate. The old code judged every marker by the
+# reader's own HOST_PENDING_TTL_SECS and would have dropped this one even
+# though its own writer intended it to live another 100s.
+: > "$TEST_DIR/docker-containers.txt"
+rm -f "$HOST_STATE_DIR"/pending-* "$HOST_STATE_DIR/last-spawn"
+echo 300 > "$HOST_STATE_DIR/pending-swarm-other-iss-99"
+touch -d "@$(( $(date +%s) - 200 ))" "$HOST_STATE_DIR/pending-swarm-other-iss-99"
+# shellcheck disable=SC2086
+rc=$(run_prov 14 $off)
+[ "$rc" -eq 0 ] || red "spawn should be admitted (foreign marker + this one = 2, under cap), rc=$rc: $(cat "$TEST_DIR/prov-14.log")"
+[ -e "$HOST_STATE_DIR/pending-swarm-other-iss-99" ] || red "foreign marker aged 200s with its own 300s TTL must survive this reader's 120s default"
+green "a 200s-old foreign marker storing its own 300s TTL survives a reader whose own default TTL is 120s"
+# shellcheck disable=SC2086
+rc=$(run_prov 15 $off)
+[ "$rc" -eq 3 ] || red "third spawn should be refused: foreign(1) + iss-14(1) pending >= cap 2, rc=$rc: $(cat "$TEST_DIR/prov-15.log")"
+grep -q 'reason=host_max_workers running=2 pending=2' "$PROJECT_DIR/.swarm/events.log" || red "expected pending=2 (foreign marker still counted) in cap.refused event"
+green "the still-live foreign marker keeps counting toward HOST_MAX_WORKERS, proving it wasn't dropped"
+
 heading "3: load, memory and stagger refusals"
 rm -f "$HOST_STATE_DIR"/pending-* "$HOST_STATE_DIR/last-spawn"
 : > "$TEST_DIR/docker-containers.txt"
