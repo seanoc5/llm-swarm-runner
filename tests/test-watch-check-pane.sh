@@ -801,5 +801,50 @@ green "iss-909 ended with exactly worker + scratch + new-check panes — no pile
 stop_watcher
 unset CHECK_CLAIM_STALE_SECS
 
+# ============================================================================
+heading "Test 15: a NEW check pane splits off the worker pane even when a Ctrl-Z scratch pane is the ACTIVE one (self-review round 11 finding)"
+# ============================================================================
+
+git -C "$PROJ" worktree add -q -b fix/issue-910 "$TEST_DIR/wt-issue-910"
+WT910="$TEST_DIR/wt-issue-910"
+mkdir -p "$WT910/.swarm/tasks/status"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$WT910/.swarm/check.sh"
+chmod +x "$WT910/.swarm/check.sh"
+printf 'fix/issue-910\tOPEN\t910\n' >> "$GH_PR_LIST_FILE"
+
+"$SHIM_TMUX" new-window -d -t "$SESSION" -n iss-910 -c "$WT910" \
+    bash -c 'while true; do echo WORKER_TICK; sleep 0.3; done'
+
+# Same technique as Test 14: split explicitly off the worker pane (.0) and
+# capture the new pane's own id, then make IT the active pane — the exact
+# state a human mid-Ctrl-Z-session would leave the window in right before
+# a completion lands.
+"$SHIM_TMUX" split-window -h -t "$SESSION:iss-910.0" bash -c 'while true; do sleep 0.3; done'
+"$SHIM_TMUX" select-pane -t "$SESSION:iss-910.1" -T coord-scratch
+
+WORKER_HEIGHT_BEFORE="$("$SHIM_TMUX" list-panes -t "$SESSION:iss-910" -F '#{pane_index} #{pane_height}' | awk '$1==0{print $2; exit}')"
+[ -n "$WORKER_HEIGHT_BEFORE" ] || red "could not resolve iss-910's worker pane height before the check spawns"
+
+echo '{"task_id":"t910","state":"ready-for-review","pr":910,"ts":"2026-07-19T10:00:00Z"}' \
+    > "$WT910/.swarm/tasks/status/t910.json"
+
+start_watcher "$TEST_DIR/watch-11.log"
+
+wait_until 20 "iss-910 to grow a third (check) pane while the scratch pane stayed active" \
+    bash -c "[ \"\$($SHIM_TMUX list-panes -t '$SESSION:iss-910' 2>/dev/null | wc -l)\" -eq 3 ]"
+
+WORKER_HEIGHT_AFTER="$("$SHIM_TMUX" list-panes -t "$SESSION:iss-910" -F '#{pane_index} #{pane_height}' | awk '$1==0{print $2; exit}')"
+SCRATCH_HEIGHT_AFTER="$("$SHIM_TMUX" list-panes -t "$SESSION:iss-910" -F '#{pane_title} #{pane_height}' | awk '$1=="coord-scratch"{print $2; exit}')"
+
+[ "$WORKER_HEIGHT_AFTER" -lt "$WORKER_HEIGHT_BEFORE" ] \
+    || red "the check split should have shrunk the WORKER pane (it targets .0 explicitly) — worker height before=$WORKER_HEIGHT_BEFORE after=$WORKER_HEIGHT_AFTER, scratch after=$SCRATCH_HEIGHT_AFTER (scratch being the one that shrank would mean the split landed on whichever pane was active instead)"
+green "the check pane split off the worker pane (its height shrank) even though the scratch pane was the active one"
+
+[ "$("$SHIM_TMUX" list-panes -t "$SESSION:iss-910" -F '#{pane_title}' | grep -cx coord-scratch)" -eq 1 ] \
+    || red "the scratch pane should still be present and untouched"
+green "the scratch pane was left alone — only the worker pane's geometry changed"
+
+stop_watcher
+
 echo
 green "ALL TESTS PASSED"

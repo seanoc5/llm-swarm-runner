@@ -5732,8 +5732,16 @@ SCRIPT
         # first action, not here — see the race-avoidance comment at the
         # top of the heredoc above. -P -F is kept only to detect spawn
         # failure (empty/missing pane id).
+        #
+        # issue #555 self-review round 11: -t names pane 0 explicitly —
+        # a bare window target here splits whichever pane is currently
+        # ACTIVE, which a live Ctrl-Z scratch pane (install-tmux-binding.sh,
+        # split -h so it never displaces the worker from index 0) can be.
+        # The check would still run correctly either way, but the split
+        # would land off the scratch pane instead of the worker, the
+        # exact bug class this PR exists to close everywhere else.
         local new_pane
-        new_pane="$(tmux split-window -d -v -l 12 -t "$SESSION_NAME:iss-$issue" -c "$wt_dir" \
+        new_pane="$(tmux split-window -d -v -l 12 -t "$SESSION_NAME:iss-$issue.0" -c "$wt_dir" \
                         -P -F '#{pane_id}' bash "$runner_script" 2>/dev/null)" || spawn_rc=1
         [ "$spawn_rc" -eq 0 ] && [ -n "$new_pane" ] || spawn_rc=1
 
