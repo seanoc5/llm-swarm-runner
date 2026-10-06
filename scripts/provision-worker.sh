@@ -255,6 +255,15 @@ HOST_MIN_MEM_AVAIL_MB="${HOST_MIN_MEM_AVAIL_MB:-16384}"
 HOST_SPAWN_STAGGER_SECS="${HOST_SPAWN_STAGGER_SECS:-60}"
 HOST_STATE_DIR="${HOST_STATE_DIR:-${TMPDIR:-/tmp}/llm-swarm-host-$(id -u)}"
 HOST_PENDING_TTL_SECS=120
+# issue #546, self-review: a pending marker must outlive the post-spawn
+# health poll it covers, or a spawn that's still legitimately in flight
+# stops counting toward HOST_MAX_WORKERS partway through its own check.
+# PROVISION_SPAWN_CHECK_SECS's docs (above) tell an operator on a
+# consistently loaded host to raise it past the 120s default, so the TTL
+# tracks that instead of assuming the two stay equal.
+if awk -v c="${PROVISION_SPAWN_CHECK_SECS:-120}" 'BEGIN{exit !(c>120)}' 2>/dev/null; then
+    HOST_PENDING_TTL_SECS="$(awk -v c="${PROVISION_SPAWN_CHECK_SECS:-120}" 'BEGIN{printf "%.0f", c+30}')"
+fi
 
 host_refuse() {
     # $1 reason tag, $2 human line, $3 hint line, rest = event k=v pairs
@@ -594,10 +603,12 @@ post_spawn_health_check() {
     # folding into exit 4's "fully cleaned up" contract. Deliberately not
     # touching $HOST_STATE_DIR/pending-$container either (unlike the exit 4
     # and check_stale_container cleanup paths): the worker may still be
-    # starting, so it should keep counting toward HOST_MAX_WORKERS; by the
-    # time check_secs has elapsed the marker is already at or past
-    # HOST_PENDING_TTL_SECS (120s) anyway, so the next host_admission_check
-    # run expires it on its own once it's stale. Re-check manually
+    # starting, so it should keep counting toward HOST_MAX_WORKERS — which
+    # is also why HOST_PENDING_TTL_SECS above tracks PROVISION_SPAWN_CHECK_SECS
+    # rather than staying a fixed 120s: the marker must outlive this whole
+    # check, or a spawn that's still legitimately in flight would stop
+    # counting partway through its own health poll (self-review finding).
+    # Re-check manually
     # (`docker ps`, `tmux capture-pane`) or raise PROVISION_SPAWN_CHECK_SECS.
     echo "WARN: worker window $window for issue #$issue is still starting after ${check_secs}s (pane alive, container not observed yet) — leaving window and container running." >&2
     echo "      Check again:  docker ps --filter name=^${container}\$   /   tmux capture-pane -t '$SESSION_NAME:$window' -p" >&2
