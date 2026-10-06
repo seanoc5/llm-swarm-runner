@@ -326,7 +326,7 @@ host_admission_check() {
             # check delete another project's still-valid marker mid-poll.
             # Markers from before this fix (or corrupted) have no usable
             # content, so fall back to this invocation's own TTL for those.
-            marker_ttl="$(cat -- "$m" 2>/dev/null)"
+            marker_ttl="$(cat -- "$m" 2>/dev/null)" || true
             [[ "$marker_ttl" =~ ^[0-9]+$ ]] || marker_ttl="$HOST_PENDING_TTL_SECS"
             if grep -qx -- "$name" <<< "$running" || [ "$age" -gt "$marker_ttl" ]; then
                 rm -f -- "$m"
