@@ -434,4 +434,31 @@ gh_ready_called && red "expected gh pr ready NOT to run when the head SHA can't 
 grep -qi "can't read CI status" "$TEST_DIR/out.log" || red "expected a 'can't read CI status' message: $(cat "$TEST_DIR/out.log")"
 green "a failed head-SHA lookup for the fallback also refuses with the distinct exit, not a crash"
 
+# ============================================================================
+heading "Test 24: token error, Actions-runs fallback given valid-JSON-but-non-array input — fails closed (exit 5), never reaches gh pr ready"
+# ============================================================================
+# Self-review finding on this PR: pr-ready's `case "$CI_FALLBACK_STATE"` had
+# no `*)` branch, so an unrecognized state would silently fall through to
+# `gh pr ready` instead of refusing. In practice ci_fallback_run_state's own
+# jq query only ever produces pass/fail/pending for valid ARRAY input (this
+# test's `{}` is valid JSON but not an array, so jq's group_by errors out
+# and the function returns non-zero — the same "fallback also failed" path
+# Test 22 covers, just via a different malformed-input shape). The `*)`
+# branch itself stays defensively unreachable through this black-box
+# harness; what's verified here is that malformed fallback output of any
+# kind still fails closed rather than readying.
+printf '<!-- BLIND_MERGE_RISK: low -->\nsome change\n' > "$BODY_FILE"
+make_fake_review 0
+GH_CHECKS_RC=1
+GH_CHECKS_STDERR="GraphQL: Resource not accessible by personal access token (node.statusCheckRollup.contexts.nodes)"
+GH_RUNLIST_JSON='{}'
+rc=0; run_pr_ready || rc=$?
+GH_CHECKS_RC=0
+GH_CHECKS_STDERR=""
+GH_RUNLIST_JSON="[]"
+[ "$rc" -eq 5 ] || red "expected exit 5 for malformed (non-array) fallback JSON, got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called && red "expected gh pr ready NOT to run on malformed fallback JSON (must fail closed)"
+grep -qi "can't read CI status" "$TEST_DIR/out.log" || red "expected a 'can't read CI status' message: $(cat "$TEST_DIR/out.log")"
+green "valid-JSON-but-non-array fallback output fails closed instead of readying"
+
 green "ALL TESTS PASSED"

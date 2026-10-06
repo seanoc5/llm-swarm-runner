@@ -298,6 +298,18 @@ case "$CHECKS_RC" in
                         echo "          Run 'scripts/ci-wait.sh $PR' to wait for a real result, then re-run pr-ready.sh." >&2
                         exit 4
                         ;;
+                    *)
+                        # Self-review finding: ci_fallback_run_state is called
+                        # as an `if` condition, so `set -e` is suspended for
+                        # everything it runs — an unrecognized CI_FALLBACK_STATE
+                        # (should be unreachable; ci_fallback_run_state's own
+                        # jq query only ever produces pass/fail/pending on its
+                        # success path) must still fail closed here instead of
+                        # silently falling through this case and reaching
+                        # `gh pr ready` with no CI verdict at all.
+                        echo "pr-ready: REFUSED — can't read CI status for PR #$PR: the Actions-runs fallback returned an unrecognized state ('$CI_FALLBACK_STATE')." >&2
+                        exit 5
+                        ;;
                 esac
             else
                 echo "pr-ready: REFUSED — can't read CI status for PR #$PR: this token can't read Checks, and the Actions-runs fallback also failed ($CI_FALLBACK_DETAIL)." >&2
