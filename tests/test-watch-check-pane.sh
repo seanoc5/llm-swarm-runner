@@ -375,6 +375,14 @@ heading "Test 8: a check pane killed outright (crash/Ctrl-C) leaves a DEAD pane 
 # killed runner script leaves behind.
 "$SHIM_TMUX" set-option -g remain-on-exit on
 
+# check_in_flight_for_issue (round 5) no longer trusts the pane label at
+# all — it keys off check-claim age instead (same mechanism
+# kill-worktree.sh's reap path already uses), so a crashed check's claim
+# only stops looking "in flight" once it's older than this. Shrink it for
+# this test so t903b doesn't have to wait out the real multi-minute
+# default to prove the eventual unblock.
+export CHECK_CLAIM_STALE_SECS=3
+
 git -C "$PROJ" worktree add -q -b fix/issue-903 "$TEST_DIR/wt-issue-903"
 WT903="$TEST_DIR/wt-issue-903"
 mkdir -p "$WT903/.swarm/tasks/status"
@@ -423,6 +431,7 @@ green "a dead check pane (still titled 'chk') did NOT permanently block later co
 green "the dead pane was replaced (not stacked) by t903b's check"
 
 stop_watcher
+unset CHECK_CLAIM_STALE_SECS
 
 # ============================================================================
 heading "Test 9: an INSTANT check (no sleep at all) still ends up titled chk-pass, never stuck at plain 'chk' (self-review race finding)"
@@ -518,6 +527,71 @@ grep -q '"state":"pass"' "$WT905/.swarm/tasks/status/t905.check.json" \
 [ "$(pane_count iss-905)" -eq 2 ] \
     || red "the title-clobber must not have caused a duplicate check pane — expected 2 panes in iss-905, got $(pane_count iss-905)"
 green "the check ran to completion as exactly one pane despite the mid-run title clobber"
+
+stop_watcher
+
+# ============================================================================
+heading "Test 11: a misleadingly stale 'chk' LABEL (claim already released) does not defer a later completion (self-review round 5 finding)"
+# ============================================================================
+
+# Round 5's actual bug: the label can lag behind (or race past) the real
+# resolution — e.g. a stray, already-orphaned retitle-watchdog iteration
+# landing right after the runner script's own final chk-pass/chk-fail
+# write. check_in_flight_for_issue must not be fooled by that: it keys
+# off the check-claim dir (released synchronously, well before any label
+# is touched), not the label text. Reproduce the exact shape directly —
+# run one check to a real, released resolution, then manually force the
+# pane's label back to plain "chk" (simulating that stray landing) before
+# the next completion ever looks at it.
+git -C "$PROJ" worktree add -q -b fix/issue-906 "$TEST_DIR/wt-issue-906"
+WT906="$TEST_DIR/wt-issue-906"
+mkdir -p "$WT906/.swarm/tasks/status"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$WT906/.swarm/check.sh"
+chmod +x "$WT906/.swarm/check.sh"
+printf 'fix/issue-906\tOPEN\t906\n' >> "$GH_PR_LIST_FILE"
+
+"$SHIM_TMUX" new-window -d -t "$SESSION" -n iss-906 -c "$WT906" \
+    bash -c 'while true; do echo WORKER_TICK; sleep 0.3; done'
+
+echo '{"task_id":"t906","state":"ready-for-review","pr":906,"ts":"2026-07-19T06:00:00Z"}' \
+    > "$WT906/.swarm/tasks/status/t906.json"
+
+start_watcher "$TEST_DIR/watch-7.log"
+
+wait_until 15 "t906's check to reach a real, released resolution (pass)" \
+    bash -c "grep -q '\"state\":\"pass\"' '$WT906/.swarm/tasks/status/t906.check.json' 2>/dev/null"
+[ ! -d "$WT906/.swarm/tasks/status/t906.check-claim" ] \
+    || red "t906's claim should already be released once its check.json shows pass"
+green "t906's check resolved for real — claim released, check.json says pass"
+
+# Force the label back to plain "chk", as if a stray reassertion had just
+# landed after the real resolution. Resolve the check pane by its current
+# (chk-pass) title rather than assuming a pane index — pane-base-index
+# varies by tmux config.
+CHK_PANE_906="$("$SHIM_TMUX" list-panes -t "$SESSION:iss-906" -F '#{pane_id} #{pane_title}' \
+    | awk '$2=="chk-pass"{print $1; exit}')"
+[ -n "$CHK_PANE_906" ] || red "could not find t906's resolved (chk-pass) check pane"
+"$SHIM_TMUX" select-pane -t "$CHK_PANE_906" -T chk
+
+EVENTS_LOG_906="$PROJ/.swarm/events.log"
+BEFORE_LINES_906="$(wc -l < "$EVENTS_LOG_906" 2>/dev/null || echo 0)"
+
+echo '{"task_id":"t906b","state":"ready-for-review","pr":906,"ts":"2026-07-19T06:00:01Z"}' \
+    > "$WT906/.swarm/tasks/status/t906b.json"
+
+wait_until 15 "t906b's check to resolve promptly despite the misleadingly stale 'chk' label" \
+    bash -c "grep -q '\"state\":\"pass\"\|\"state\":\"fail\"' '$WT906/.swarm/tasks/status/t906b.check.json' 2>/dev/null"
+grep -q '"state":"pass"' "$WT906/.swarm/tasks/status/t906b.check.json" \
+    || red "t906b should have passed promptly; got: $(cat "$WT906/.swarm/tasks/status/t906b.check.json" 2>/dev/null)"
+green "t906b resolved promptly — not fooled into waiting by the stale label"
+
+tail -n "+$((BEFORE_LINES_906 + 1))" "$EVENTS_LOG_906" 2>/dev/null | grep -q 'task_id=t906b result=skipped reason=prior_check_running' \
+    && red "t906b must NOT have been deferred — its claim-dir ground truth showed no real check in flight"
+green "t906b was never deferred — the stale label alone didn't trigger a prior_check_running skip"
+
+[ "$(pane_count iss-906)" -eq 2 ] \
+    || red "expected exactly 2 panes (worker + one check pane, replaced not stacked) in iss-906, got $(pane_count iss-906)"
+green "the stale-labeled pane was replaced cleanly, not stacked alongside a second one"
 
 stop_watcher
 

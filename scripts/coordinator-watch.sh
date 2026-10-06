@@ -5286,28 +5286,47 @@ reconcile_missing_outcome() {
 # completed task's claim is gone too) — the "unclaimed" scan below and
 # the fast-path re-entry check just above it both key off the *.check.json
 # terminal state instead, which IS permanent.
-# check_in_flight_for_issue <issue>
+# check_in_flight_for_issue <status-dir> [exclude-claim-basename]
 #
-# True iff a check-on-done run for this issue is genuinely still alive
-# right now — either a pane titled plain "chk" inside iss-$issue, or a
-# fallback chk-$issue window, in either case NOT yet dead (#{pane_dead}).
-# A pane/window renamed to chk-pass/chk-fail (resolved) or left as a dead
-# "chk"/"chk-$issue" placeholder (crashed/killed before it could rename
-# itself) both count as NOT in flight — safe for execute_check to replace.
-# Single source of truth for maybe_run_check's early defer and
-# execute_check's replace-vs-defer decision, so the two can't disagree.
+# True iff some OTHER task's check-on-done run against this worktree is
+# genuinely still alive right now (excluding, if given, the claim this
+# caller just won for itself — see call site). issue #555 self-review
+# round 5: an earlier version of this decided "still running" from the
+# check pane/window's tmux LABEL (plain "chk" vs chk-pass/chk-fail) — but
+# the label is set via a separate tmux client call the runner script
+# makes, which can itself still be in flight (or, per round 4's
+# title-reassertion watchdog, orphaned and about to fire again) at the
+# exact moment this is checked, racing the runner's own final chk-pass/
+# chk-fail write and potentially clobbering it back to plain "chk"
+# forever with nothing left alive to ever fix it — exactly the
+# permanent-false-"still running" bug round 5 found.
+#
+# The check-claim dir (see issue #181) is a strictly more reliable base
+# signal: a plain filesystem mkdir/rmdir with no tmux round-trip in the
+# way, released synchronously the instant a check reaches pass/fail/
+# skipped, strictly BEFORE the runner script ever touches the pane/
+# window label. But claim existence ALONE isn't enough either — a check
+# whose pane/tmux-process was killed outright (crash, Test 8's scenario)
+# never reaches that rmdir, so its claim dir would otherwise look
+# "in flight" forever and permanently wedge every later completion for
+# the issue. Same age-based staleness kill-worktree.sh's reap path
+# already uses for the identical "is this claim real or abandoned"
+# question (CHECK_CLAIM_STALE_SECS, default WORKER_CHECK_TIMEOUT+300s) —
+# reusing it here keeps one definition of "stale" instead of two, and a
+# claim younger than that is trusted as genuinely running without
+# needing tmux at all.
 check_in_flight_for_issue() {
-    local issue="$1"
-    command -v tmux >/dev/null 2>&1 || return 1
-    tmux has-session -t "$SESSION_NAME" 2>/dev/null || return 1
-    if tmux list-panes -t "$SESSION_NAME:iss-$issue" -F '#{pane_title} #{pane_dead}' 2>/dev/null \
-            | awk '$1=="chk" && $2!=1 { found=1 } END { exit !found }'; then
-        return 0
-    fi
-    if tmux list-panes -t "$SESSION_NAME" -a -F '#{window_name} #{pane_dead}' 2>/dev/null \
-            | awk -v w="chk-$issue" '$1==w && $2!=1 { found=1 } END { exit !found }'; then
-        return 0
-    fi
+    local status_dir="$1" exclude="${2:-}"
+    local stale_secs="${CHECK_CLAIM_STALE_SECS:-$(( ${WORKER_CHECK_TIMEOUT:-600} + 300 ))}"
+    local claim base age mtime
+    for claim in "$status_dir"/*.check-claim; do
+        [ -d "$claim" ] || continue
+        base="$(basename "$claim")"
+        [ -n "$exclude" ] && [ "$base" = "$exclude" ] && continue
+        mtime="$(mtime_epoch "$claim")" || continue
+        age=$(( $(date +%s) - mtime ))
+        [ "$age" -lt "$stale_secs" ] && return 0
+    done
     return 1
 }
 
@@ -5394,8 +5413,10 @@ maybe_run_check() {
     # genuinely running for this same issue, right after winning OUR OWN
     # claim (so this can only fire for a task that's never run before —
     # our own in-progress check would instead have failed the mkdir above
-    # and returned silently, long before reaching here). Checked BEFORE
-    # writing "checking"/logging result=running — otherwise every
+    # and returned silently, long before reaching here; passing our own
+    # claim's basename as the exclude arg means this can't immediately
+    # see-and-defer-against the very claim we just created). Checked
+    # BEFORE writing "checking"/logging result=running — otherwise every
     # POLL_SECS sweep for the whole duration of that other check would log
     # a fresh running+skipped pair, reading as if this task's check kept
     # starting and stopping. check_in_flight_for_issue is the single
@@ -5403,7 +5424,7 @@ maybe_run_check() {
     # replace-vs-defer decision use, so they can't disagree. Release the
     # claim we just took so the next sweep can retry once the conflict
     # clears.
-    if check_in_flight_for_issue "$issue"; then
+    if check_in_flight_for_issue "$status_dir" "$(basename "$claim_dir")"; then
         if [ -z "${PRIOR_CHECK_LOGGED[$issue]:-}" ]; then
             log_event watch.check_on_done "issue=$issue task_id=$task_id result=skipped reason=prior_check_running"
             PRIOR_CHECK_LOGGED[$issue]=1
@@ -5600,10 +5621,13 @@ echo "check: $CHECK_CMD"
 # window-name protection -n already gives the fallback-window case
 # (automatic-rename off), so there's no single option to just turn this
 # off. Reassert the title every few seconds for the check's duration so
-# any such clobber self-heals quickly rather than permanently misreading
-# as resolved/stale to check_in_flight_for_issue. Window case doesn't
-# need this: -n's implicit automatic-rename=off already makes the window
-# name immune to the same kind of escape sequence (verified).
+# any such clobber self-heals quickly — purely for a human glancing at
+# tmux: check_in_flight_for_issue (round 5) no longer trusts this label
+# for correctness at all, precisely because a label can lag/race like
+# this; it keys off the check-claim dir instead. Window case doesn't
+# need even the cosmetic fix: -n's implicit automatic-rename=off already
+# makes the window name immune to the same kind of escape sequence
+# (verified).
 # $$ inside this backgrounded subshell still names the TOP-LEVEL script's
 # pid (bash doesn't rebind $$ for subshells) — so if this script itself
 # is killed outright (crash, Test 8's scenario) rather than reaching the
@@ -5653,9 +5677,12 @@ SCRIPT
         #
         # maybe_run_check's check_in_flight_for_issue call already defers
         # (and returns) before ever reaching here if a prior check for
-        # this issue is genuinely still alive, so by this point any
-        # existing "chk"-titled pane is either resolved (chk-pass/fail) or
-        # dead (crashed before it could rename itself) — safe to replace.
+        # this issue is genuinely still alive — it checks claim-dir
+        # existence, not the pane label (issue #555 round 5: the label
+        # can lag or race), so by this point any existing "chk"-titled
+        # pane is a ground-truth-confirmed leftover (resolved or
+        # crashed-before-rename) — safe to replace regardless of what its
+        # label currently says.
         local stale_pane
         stale_pane="$(tmux list-panes -t "$SESSION_NAME:iss-$issue" -F '#{pane_id} #{pane_title}' 2>/dev/null \
                         | awk '$2 ~ /^chk-(pass|fail)$/ || $2 == "chk" { print $1; exit }')"
@@ -5678,8 +5705,9 @@ SCRIPT
         # leftover chk-$issue window from a prior run first (replace, not
         # stack, same as the pane case above) — same reasoning as there:
         # maybe_run_check's check_in_flight_for_issue already deferred
-        # before reaching here if that window were still genuinely alive,
-        # so any chk-$issue window found at this point is resolved or dead.
+        # before reaching here if that window were still genuinely alive
+        # (claim-dir ground truth, not the window name) — so any
+        # chk-$issue window found at this point is resolved or dead.
         swarm_close_chk_windows "$SESSION_NAME" "$issue"
         tmux new-window -d -t "$SESSION_NAME" -n "chk-$issue" -c "$wt_dir" bash "$runner_script" 2>/dev/null \
             || spawn_rc=1
