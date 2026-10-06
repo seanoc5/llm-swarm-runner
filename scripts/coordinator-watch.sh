@@ -8945,8 +8945,22 @@ on_inbox_drop() {
         # inside one wall-clock second — accepted, not closed: the producers
         # this closes for are periodic driver scripts, not a sub-second
         # retry loop (self-review round 5).
-        marker_mtime="$(mtime_epoch "$self_marker")"
-        note_mtime="$(mtime_epoch "$path")"
+        # Self-review round 8: under this script's set -e, a plain
+        # var="$(cmd)" assignment propagates cmd's exit status — and
+        # mtime_epoch fails if the note gets archived between
+        # scan_inbox_drops listing it and this stat (routine: the poll
+        # backend re-stats every pending note every second). Unguarded,
+        # that would abort the whole watcher process. `|| true` keeps a
+        # failed stat as an empty value instead, and a vanished note is
+        # simply nothing left to decide.
+        # Explicit "return 0": a bare `return` here would propagate the
+        # just-failed `[ -e ]` test's own nonzero status, and both of this
+        # function's callers invoke it as a bare statement under set -e —
+        # the exact hazard this whole guard exists to avoid, just moved
+        # one line earlier.
+        [ -e "$path" ] || return 0
+        marker_mtime="$(mtime_epoch "$self_marker")" || true
+        note_mtime="$(mtime_epoch "$path")" || true
         if [ -z "$marker_mtime" ] || [ -z "$note_mtime" ] || [ "$note_mtime" -le "$marker_mtime" ]; then
             # Already decided and the note hasn't changed since — silent,
             # on purpose (self-review round 5): scan_inbox_drops carries no
@@ -8956,8 +8970,10 @@ on_inbox_drop() {
             # without bound for exactly the long-pending notes this issue
             # cares about: the incident's own note sat 2h23m, which at the
             # default POLL_SECS would be ~7,000 lines; a day-old note would
-            # be ~43,000.
-            return
+            # be ~43,000. Explicit "return 0" for the same reason as the
+            # [ -e "$path" ] guard above — this function is always called
+            # as a bare statement under set -e.
+            return 0
         fi
         echo "[$(date +%T)] inbox: $path — stale marker predates this note's content (filename reused since the last decision), treating as a new arrival"
         log_event coord.inbox.drop.stale_marker "path=$path marker_mtime=$marker_mtime note_mtime=$note_mtime"

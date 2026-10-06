@@ -1066,6 +1066,37 @@ coord_inbox_write probe "sweep probe, note now gone" >/dev/null
 green "a marker whose note is gone (processed/removed) is pruned by the sweep"
 
 # ============================================================================
+heading "Test 5m (issue #461 self-review round 8): a note archived between the scan and on_inbox_drop's mtime check must not abort the whole watcher"
+# ============================================================================
+# This file runs under the SAME set -euo pipefail as coordinator-watch.sh
+# itself (line 36 above), so eval'ing the real on_inbox_drop here reproduces
+# the real failure mode exactly: a plain var="$(mtime_epoch "$path")"
+# assignment propagates mtime_epoch's exit status, and mtime_epoch fails
+# when stat can't find the file any more — routine, since the poll backend
+# re-stats every pending note every second and the coordinator can archive
+# one in between. Unguarded, that aborts this whole script right here,
+# before red/green ever get a chance to report it.
+for fn in on_inbox_drop; do
+    body="$(extract_fn "$fn")"
+    [ -n "$body" ] || red "could not extract function '$fn' from $WATCH — has it been renamed?"
+    eval "$body"
+done
+
+: > "$EVENTS_LOG"
+rm -rf "$COORD_INBOX_DIR"
+mkdir -p "$COORD_INBOX_DIR" "$COORD_INBOX_SELF_DIR"
+
+VANISHED_NOTE="$COORD_INBOX_DIR/archived-mid-scan.md"
+printf 'will be archived before on_inbox_drop re-checks it\n' > "$VANISHED_NOTE"
+touch "$COORD_INBOX_SELF_DIR/$(basename "$VANISHED_NOTE").self"
+rm -f "$VANISHED_NOTE"
+
+on_inbox_drop "$VANISHED_NOTE"
+green "on_inbox_drop returned (did not abort the script) for a note that vanished before its mtime check"
+
+unset -f on_inbox_drop
+
+# ============================================================================
 heading "Test 6: a debounced activity finding is retried on a later tick, not lost (issue #392 self-review finding, now via the coordinator inbox)"
 # ============================================================================
 # activity_poll_pass only marks ACTIVITY_ANNOUNCED_PR/_ISSUE (and
