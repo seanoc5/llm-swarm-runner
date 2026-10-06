@@ -93,5 +93,44 @@ done
 [ "$claimed" = 1 ] || { cat listener.log; fail "a fresh brief dropped after the reap was never claimed"; }
 green "a genuinely new brief dropped afterward is still claimed and completed normally"
 
+kill "$LISTENER_PID" 2>/dev/null || true
+wait "$LISTENER_PID" 2>/dev/null || true
+LISTENER_PID=""
+
+# ---------------------------------------------------------------------------
+# A persistently failing mv (e.g. a real disk/permission problem, not just
+# a one-off) must not flood stderr with the same WARNING every poll tick —
+# PR #569 self-review caught this: logging unconditionally on every retry
+# would make a genuinely stuck entry drown its own listener's log forever.
+# Exercised directly against the extracted function (same technique as
+# test-shape-worker-result.sh's worker_task_done check) so the destination
+# write can be forced to fail reliably: chmod the done/ dir read-only (no
+# write bit), so every mv into it fails the same way every time.
+# ---------------------------------------------------------------------------
+PROCESSING="$TEST_DIR/wt-issue-901/.swarm/tasks/processing"
+DONE="$TEST_DIR/wt-issue-901/.swarm/tasks/done"
+eval "$(sed -n '/^declare -A REAP_WARNED=()$/,/^}/p' "$RUNNER/scripts/worker-listener.sh")"
+
+FAIL_ID="20261006-000000-901"
+echo "stuck again" > "$PROCESSING/$FAIL_ID.md"
+printf '{"task_id":"%s","outcome":"ok"}' "$FAIL_ID" > "$DONE/$FAIL_ID.ok.json"
+chmod 500 "$DONE"  # writable dir bit off: mv into it fails, readably, every time
+# Calling through $(...) would fork a subshell and discard REAP_WARNED's
+# mutation on return, hiding the de-dup this is meant to test — so all 3
+# retries must run in THIS shell, with output only redirected to a file.
+RETRY_LOG="$TEST_DIR/retry.log"
+: > "$RETRY_LOG"
+reap_stale_processing_entries >> "$RETRY_LOG" 2>&1
+reap_stale_processing_entries >> "$RETRY_LOG" 2>&1
+reap_stale_processing_entries >> "$RETRY_LOG" 2>&1
+chmod 700 "$DONE"  # restore so cleanup's rm -rf can remove it
+
+[ "$(grep -c "moving it out of processing/ failed" "$RETRY_LOG")" = 1 ] \
+    || { cat "$RETRY_LOG"; fail "persistent mv failure logged more than once across 3 retries"; }
+green "a persistently failing move warns exactly once, not on every retry"
+
+[ -e "$PROCESSING/$FAIL_ID.md" ] || fail "entry vanished despite the move having failed"
+green "the entry stays in processing/ (never dropped) while the move keeps failing"
+
 echo
 green "All checks passed."

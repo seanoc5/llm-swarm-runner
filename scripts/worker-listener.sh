@@ -274,14 +274,26 @@ echo "------------------------------"
 # claim_next_task poll) rather than only right after write_outcome, so an
 # entry stranded by an OLDER, already-restarted listener process also
 # self-heals rather than needing a human to notice and move it by hand.
+#
+# The mv itself can keep failing (the same persistent done/ permission or
+# disk problem that stranded the entry in the first place) — REAP_WARNED
+# below keyed by task_id makes that failure path log once, with the actual
+# error, instead of flooding stderr with the same line every poll tick
+# forever.
+declare -A REAP_WARNED=()
 reap_stale_processing_entries() {
-    local f task_id
+    local f task_id mv_err
     for f in "$PROCESSING"/*.md; do
         [ -e "$f" ] || continue
         task_id="$(basename "$f" .md)"
         if [ -e "$DONE/${task_id}.ok.json" ] || [ -e "$DONE/${task_id}.err.json" ]; then
-            echo "[$(date +%T)] WARNING: processing/$(basename "$f") has an outcome already recorded in done/ (task_id=$task_id) but was never moved out of processing/ — moving it now." >&2
-            mv "$f" "$DONE/${task_id}.md" 2>/dev/null || true
+            if mv_err="$(mv "$f" "$DONE/${task_id}.md" 2>&1)"; then
+                echo "[$(date +%T)] WARNING: processing/$(basename "$f") had an outcome already recorded in done/ (task_id=$task_id) but was never moved out of processing/ — moved it to done/${task_id}.md." >&2
+                unset "REAP_WARNED[$task_id]"
+            elif [ -z "${REAP_WARNED[$task_id]:-}" ]; then
+                REAP_WARNED[$task_id]=1
+                echo "[$(date +%T)] WARNING: processing/$(basename "$f") has an outcome already recorded in done/ (task_id=$task_id) but moving it out of processing/ failed and will keep being retried silently: $mv_err" >&2
+            fi
         fi
     done
 }
