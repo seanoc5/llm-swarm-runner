@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 #
-# test-worker-close-defers-active-check.sh — issue #555 self-review round
-# 13: a check-on-done run (coordinator-watch.sh's execute_check, this PR's
-# pane) can still be genuinely running when the operator closes the worker.
-# The check pane shares its window with the worker pane (index 0); closing
-# pane 0 right then would let tmux renumber the still-RUNNING check pane
-# down into slot 0 the instant pane 0 exits, and every pane_dead(head -1)
-# reader in the codebase (provision-worker.sh's reclaim guard,
-# has_live_window_draining_brief, check-stuck-workers.sh) would read that
-# genuinely-running check command as a live worker until it finishes.
+# test-worker-close-defers-active-check.sh — a check-on-done run
+# (coordinator-watch.sh's execute_check, issue #561 — splits a pane into
+# the worker's iss-N window) can still be genuinely running when the
+# operator closes the worker. The check pane shares its window with the
+# worker pane (index 0); closing pane 0 right then would let tmux
+# renumber the still-RUNNING check pane down into slot 0 the instant pane
+# 0 exits, and every pane_dead(head -1) reader in the codebase
+# (provision-worker.sh's reclaim guard, has_live_window_draining_brief,
+# check-stuck-workers.sh) would read that genuinely-running check command
+# as a live worker until it finishes.
 #
-# Round 12's fix only covers a check that has already resolved (the pane
-# exits dead instead of staying an interactive shell — see
-# tests/test-watch-check-pane.sh's Test 16). This test covers the
+# worker-listener.sh's close_window_and_exit (see its own header comment)
+# only handles a check pane that has already exited. This test covers the
 # still-running case: worker-listener.sh's close-worker and double-exit
 # clean-exit paths now wait out any active, non-stale check-claim (same
 # claim-dir ground truth kill-worktree.sh's reap-defer path, issue #181,
@@ -76,7 +76,14 @@ mkfifo "$WT/stdin.fifo"
 # interactive mode; headless mode skips straight to a silent poll.
 (
     cd "$WT" && \
-    env HOME="$WT/home" "$LISTENER" bash \
+    # -u TMUX -u TMUX_PANE (self-review finding on PR #566): this test
+    # itself isn't given a real tmux pane, but close_window_and_exit()
+    # reads $TMUX_PANE from whatever environment the listener inherits —
+    # if this test is ever run from inside a real tmux pane (a worker's
+    # own session doing its own work, say), an ambient TMUX_PANE would
+    # leak in and Test 2's deferred close would kill THAT real window
+    # instead of being the no-op a plain unset TMUX_PANE makes it.
+    env -u TMUX -u TMUX_PANE HOME="$WT/home" "$LISTENER" bash \
         < stdin.fifo > listener.log 2>&1
 ) &
 LISTENER_PID=$!
