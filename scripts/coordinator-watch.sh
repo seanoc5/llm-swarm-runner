@@ -7603,19 +7603,34 @@ worker_compact_pass() {
 # block the doorbell attempt that follows it.
 #
 # (issue #461) Also drops a same-named marker under COORD_INBOX_SELF_DIR —
-# see that var's header comment for why on_inbox_drop needs it. Best-effort
-# like the write itself: a lost marker only means this file's own arrival
-# gets treated as if it were an external drop (one extra, harmless
-# debounce-covered wake re-check under the default DEBOUNCE_SECS), not a
-# correctness problem.
+# see that var's header comment for why on_inbox_drop needs it. The marker
+# is touched BEFORE the mv, not after: on_inbox_drop runs in a separate
+# process (the inotify reader, or run_poll's own scan tick), and that
+# process can observe the final .md file (the inotify moved_to event, or
+# just finding it on the next poll) before this process gets to a
+# post-mv touch — there is no cross-process ordering guarantee the other
+# way. Touching first means the marker is always on disk no later than the
+# file a consumer could possibly see, at the cost of a marker very briefly
+# existing with no corresponding .md file yet (on_inbox_drop never looks
+# for a marker except in response to seeing the .md file itself, so that
+# window is never observed). Best-effort like the write itself: a lost
+# marker only means this file's own arrival gets treated as if it were an
+# external drop (one extra, harmless debounce-covered wake re-check under
+# the default DEBOUNCE_SECS), not a correctness problem.
 coord_inbox_write() {
-    local kind="$1" content="$2" tmp final
+    local kind="$1" content="$2" tmp final marker
     mkdir -p "$COORD_INBOX_DIR" "$COORD_INBOX_PROCESSED_DIR" "$COORD_INBOX_SELF_DIR" 2>/dev/null || true
+    # A marker whose .md file on_inbox_drop never got to see (the watcher
+    # exited right after this write, or wasn't running at all) would
+    # otherwise sit forever — sweep anything old enough that it can only be
+    # such an orphan, never a marker whose file is still in flight.
+    find "$COORD_INBOX_SELF_DIR" -maxdepth 1 -name '*.self' -mmin +60 -delete 2>/dev/null || true
     tmp="$(mktemp "$COORD_INBOX_DIR/.tmp.coord-inbox.XXXXXX" 2>/dev/null)" || return 1
     printf '%s\n' "$content" > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
     final="$COORD_INBOX_DIR/$(date -u +%Y%m%dT%H%M%SZ)-${kind}-$$-${RANDOM}.md"
-    mv -f "$tmp" "$final" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
-    touch "$COORD_INBOX_SELF_DIR/$(basename "$final").self" 2>/dev/null || true
+    marker="$COORD_INBOX_SELF_DIR/$(basename "$final").self"
+    touch "$marker" 2>/dev/null || true
+    mv -f "$tmp" "$final" 2>/dev/null || { rm -f "$tmp" "$marker" 2>/dev/null; return 1; }
 }
 
 # coord_inbox_count
@@ -9164,10 +9179,14 @@ run_inotify() {
             "$COORD_INBOX_DIR"/*.md)
                 # issue #461: a file landed in the coordinator's own inbox —
                 # see on_inbox_drop's header for why this needs its own
-                # watch (not just the done/outbox/claims ones above) and
-                # why firing it for a file this watcher itself just wrote
-                # (via coord_inbox_write in on_outcome/on_message/
-                # on_activity/the periodic sweeps) is harmless.
+                # watch (not just the done/outbox/claims ones above), and
+                # coord_inbox_write's header for why its .self marker is
+                # always on disk by the time this inotify event (or the
+                # poll backend's own scan) can see the .md file, which is
+                # what makes firing on_inbox_drop for a file this watcher
+                # itself just wrote (via coord_inbox_write in
+                # on_outcome/on_message/on_activity/the periodic sweeps)
+                # harmless rather than a second, spurious wake.
                 on_inbox_drop "$path"
                 ;;
         esac
