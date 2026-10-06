@@ -2922,7 +2922,12 @@ COORD_INBOX_PROCESSED_DIR="$COORD_INBOX_DIR/processed"
 # at DEBOUNCE_SECS=0 (several of this file's own tests, deliberately, for
 # determinism) nothing stops on_inbox_drop from re-deciding the same wake
 # a second time through a different code path, racing coord_wake_hold_
-# retry_pass/coord_wake_retry_pass for who actually delivers it.
+# retry_pass/coord_wake_retry_pass for who actually delivers it. The
+# marker's presence alone isn't quite enough, though (self-review round 4):
+# a producer that reuses a fixed filename for a second, later note would
+# otherwise be swallowed forever by the first note's leftover marker, so
+# on_inbox_drop also compares mtimes (mtime_epoch) and treats a note newer
+# than its own marker as a fresh arrival rather than an already-decided one.
 COORD_INBOX_SELF_DIR="$COORD_INBOX_DIR/.self"
 
 # COORD_INBOX_NUDGE_TEMPLATE: the fixed, short doorbell text — "%N" is
@@ -8876,10 +8881,15 @@ on_message() {
 # there unprocessed (run_poll's POLL_SECS tick, by design, re-lists every
 # unarchived file on every pass — see scan_inbox_drops' header for why it
 # carries no baseline/seen-state of its own). Either way, finding the
-# marker here means a decision for this filename already happened; this
-# call creates the marker itself for case (2) before doing anything else,
-# so the NEXT re-scan (one second later, by default) doesn't redecide it
-# too. A first version of this fix instead assumed wake_debounced() would
+# marker here means a decision for this filename already happened — UNLESS
+# the note's own mtime is now newer than the marker's, which only happens
+# when something rewrote the file under that name after the marker was set
+# (a fixed-name producer reusing e.g. "done.md" for a second, later note);
+# that case is treated as a fresh arrival rather than skipped (self-review
+# round 4). Otherwise, this call creates the marker itself for case (2)
+# before doing anything else, so the NEXT re-scan (one second later, by
+# default) doesn't redecide it too. A first version of this fix instead
+# assumed wake_debounced() would
 # always see a clock the original caller just set and hold this as a
 # harmless no-op — true at the default DEBOUNCE_SECS=30, but this file's
 # own tests run several scenarios at DEBOUNCE_SECS=0, where nothing
@@ -8895,15 +8905,35 @@ on_message() {
 # nothing accumulates unbounded.
 on_inbox_drop() {
     local path="$1"
-    local now self_marker
+    local now self_marker marker_mtime note_mtime
     now=$(date +%s)
     log_event coord.inbox.drop "path=$path"
 
     self_marker="$COORD_INBOX_SELF_DIR/$(basename "$path").self"
     if [ -e "$self_marker" ]; then
-        echo "[$(date +%T)] inbox: $path — a wake decision for this file was already made (self-written, or an earlier pass already decided it)"
-        log_event coord.inbox.drop.skip "reason=already_decided path=$path"
-        return
+        # Self-review (#461 round 4): a bare existence check means an
+        # external producer that reuses a fixed filename (the incident's own
+        # note was literally "parity7-sweep-done.md", not a unique name) gets
+        # permanently swallowed after its first use — coord_inbox_write's
+        # 60-minute sweep only prunes a marker once its note is gone, and in
+        # the incident's own idle/no-workers conditions coord_inbox_write may
+        # never run again to do that pruning. mtime_epoch comparison closes
+        # this without needing coord_inbox_write to run at all: the marker is
+        # always touched no later than the note's own content-write (see
+        # coord_inbox_write's header, and the mkdir+touch a few lines below
+        # for the external-first-sight case), so a note whose mtime is
+        # strictly newer than its marker's can only mean the file was
+        # rewritten after that decision — a genuinely new arrival under an
+        # old name, not the same one being re-seen.
+        marker_mtime="$(mtime_epoch "$self_marker")"
+        note_mtime="$(mtime_epoch "$path")"
+        if [ -z "$marker_mtime" ] || [ -z "$note_mtime" ] || [ "$note_mtime" -le "$marker_mtime" ]; then
+            echo "[$(date +%T)] inbox: $path — a wake decision for this file was already made (self-written, or an earlier pass already decided it)"
+            log_event coord.inbox.drop.skip "reason=already_decided path=$path"
+            return
+        fi
+        echo "[$(date +%T)] inbox: $path — stale marker predates this note's content (filename reused since the last decision), treating as a new arrival"
+        log_event coord.inbox.drop.stale_marker "path=$path marker_mtime=$marker_mtime note_mtime=$note_mtime"
     fi
     mkdir -p "$COORD_INBOX_SELF_DIR" 2>/dev/null || true
     touch "$self_marker" 2>/dev/null || true

@@ -433,5 +433,48 @@ green "the still-pending foreign note was not redecided on later poll ticks — 
 
 stop_watcher
 
+# ============================================================================
+heading "Test 8 (issue #461 self-review round 4): a fixed filename reused for a second, later note still rings its own doorbell"
+# ============================================================================
+# Self-review found the gap: on_inbox_drop's marker check was a bare
+# existence test, so a producer that always writes the same filename (the
+# incident's own note, parity7-sweep-done.md, was itself a fixed name, not
+# a unique one) would have its SECOND note silently swallowed forever by
+# the marker left behind for the first. The fix compares mtimes: a note
+# newer than its own marker is treated as a fresh arrival, not a repeat.
+reset_state
+set_pane_idle
+sleep 0.3
+start_watcher "$TEST_DIR/watch-8.log"
+
+mkdir -p "$INBOX_DIR"
+FIXED_NOTE="$INBOX_DIR/done.md"
+printf 'first sweep done\n' > "$FIXED_NOTE"
+
+poll_until 20 0.5 bash -c "grep -q 'WAKE:' '$WAKE_LOG'" \
+    || red "first use of a fixed-name coord-inbox file never triggered a doorbell"
+green "first note under a fixed/reused filename rang the doorbell"
+
+[ "$(wake_count)" = "1" ] \
+    || red "expected exactly 1 WAKE after the first note, got $(wake_count)"
+
+# Same producer, same filename, a later unrelated note — only a real wall-
+# clock gap (not a backdated marker) guarantees the new mtime is newer.
+sleep 1.5
+printf 'second sweep done\n' > "$FIXED_NOTE"
+
+poll_until 20 0.5 bash -c "[ \"\$(grep -c 'WAKE:' '$WAKE_LOG')\" -ge 2 ]" \
+    || red "a fixed filename reused for a second note never rang a second doorbell. watch log:
+$(cat "$TEST_DIR/watch-8.log")
+events.log:
+$(cat "$EVENTS_LOG" 2>/dev/null || true)"
+green "a second note under the same reused filename rang its own doorbell (not swallowed by the first note's marker)"
+
+grep -q 'coord.inbox.drop.stale_marker' "$EVENTS_LOG" \
+    || red "expected coord.inbox.drop.stale_marker to be logged for the reused filename"
+green "events.log: coord.inbox.drop.stale_marker logged for the reused filename"
+
+stop_watcher
+
 echo ""
 green "All assertions passed (test-coordinator-inbox.sh)"
