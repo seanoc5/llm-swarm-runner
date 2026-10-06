@@ -254,16 +254,15 @@ HOST_MAX_LOAD1="${HOST_MAX_LOAD1:-auto}"
 HOST_MIN_MEM_AVAIL_MB="${HOST_MIN_MEM_AVAIL_MB:-16384}"
 HOST_SPAWN_STAGGER_SECS="${HOST_SPAWN_STAGGER_SECS:-60}"
 HOST_STATE_DIR="${HOST_STATE_DIR:-${TMPDIR:-/tmp}/llm-swarm-host-$(id -u)}"
-HOST_PENDING_TTL_SECS=120
 # issue #546, self-review: a pending marker must outlive the post-spawn
 # health poll it covers, or a spawn that's still legitimately in flight
-# stops counting toward HOST_MAX_WORKERS partway through its own check.
-# PROVISION_SPAWN_CHECK_SECS's docs (above) tell an operator on a
-# consistently loaded host to raise it past the 120s default, so the TTL
-# tracks that instead of assuming the two stay equal.
-if awk -v c="${PROVISION_SPAWN_CHECK_SECS:-120}" 'BEGIN{exit !(c>120)}' 2>/dev/null; then
-    HOST_PENDING_TTL_SECS="$(awk -v c="${PROVISION_SPAWN_CHECK_SECS:-120}" 'BEGIN{printf "%.0f", c+30}')"
-fi
+# stops counting toward HOST_MAX_WORKERS partway through its own check —
+# the marker is written at admission, BEFORE the worktree/brief/spawn
+# setup that precedes the poll, so even the unraised 120s default can run
+# past a 120s TTL once that setup time is added in. Always max(120,
+# check_secs + 30s) rather than assuming the two stay equal.
+HOST_PENDING_TTL_SECS="$(awk -v c="${PROVISION_SPAWN_CHECK_SECS:-120}" \
+    'BEGIN{v=c+30; if (v<120) v=120; printf "%.0f", v}')"
 
 host_refuse() {
     # $1 reason tag, $2 human line, $3 hint line, rest = event k=v pairs
