@@ -781,10 +781,10 @@ check "no false-positive retracted verdict" "absent" "$got"
 if printf '%s' "$pane_after_3" | grep -q '/compa'; then got=present; else got=missing; fi
 check "composer still shows the exact reported \"/compa\" ghost" "present" "$got"
 
-if grep -q "send-keys -t $SESSION_NAME:$WIN2 Escape" "$TMUX_CALL_LOG"; then got=sent; else got=missing; fi
+if grep -q "send-keys -t $SESSION_NAME:$WIN2.0 Escape" "$TMUX_CALL_LOG"; then got=sent; else got=missing; fi
 check "retraction sent an Escape keystroke to the target pane" "sent" "$got"
 
-bspace_count="$(grep -c "send-keys -t $SESSION_NAME:$WIN2 BSpace" "$TMUX_CALL_LOG" || true)"
+bspace_count="$(grep -c "send-keys -t $SESSION_NAME:$WIN2.0 BSpace" "$TMUX_CALL_LOG" || true)"
 check "retraction sent 3 Backspace keystrokes" "3" "$bspace_count"
 
 heading "Test 14b: compact_retract_queued — COMPACT_RETRACT_BACKSPACES=12 (shipped default) fully clears the composer (issue #290)"
@@ -863,7 +863,7 @@ check "queued marker still visible after Escape/Backspace -> worker.compact.retr
 if grep -q 'worker.compact.retracted issue=44' "$EVENTS_LOG"; then got=present; else got=absent; fi
 check "no false-positive retracted verdict" "absent" "$got"
 
-if grep -q "send-keys -t $SESSION_NAME:$WIN3 Escape" "$TMUX_CALL_LOG"; then got=sent; else got=missing; fi
+if grep -q "send-keys -t $SESSION_NAME:$WIN3.0 Escape" "$TMUX_CALL_LOG"; then got=sent; else got=missing; fi
 check "retraction still sent an Escape keystroke even though it didn't clear the queue" "sent" "$got"
 
 heading "Test 16: compact_retract_queued — never sends Escape into a pane that's genuinely busy (issue #290 reconciliation with #274)"
@@ -895,9 +895,9 @@ unset -f tmux
 check "retraction guard returns success (no-op is not a failure)" "0" "$rc"
 if grep -q 'worker.compact.retract_skip.*reason=busy' "$EVENTS_LOG"; then got=logged; else got=missing; fi
 check "worker.compact.retract_skip reason=busy logged" "logged" "$got"
-if grep -q "send-keys -t $SESSION_NAME:$WIN4 Escape" "$TMUX_CALL_LOG"; then got=present; else got=absent; fi
+if grep -q "send-keys -t $SESSION_NAME:$WIN4.0 Escape" "$TMUX_CALL_LOG"; then got=present; else got=absent; fi
 check "NO Escape sent into the genuinely-busy pane" "absent" "$got"
-if grep -q "send-keys -t $SESSION_NAME:$WIN4 BSpace" "$TMUX_CALL_LOG"; then got=present; else got=absent; fi
+if grep -q "send-keys -t $SESSION_NAME:$WIN4.0 BSpace" "$TMUX_CALL_LOG"; then got=present; else got=absent; fi
 check "NO Backspace sent into the genuinely-busy pane" "absent" "$got"
 
 heading "Test 17: maybe_worker_compact — Enter eaten by the autocomplete menu is retried once (issue #290)"
@@ -1066,10 +1066,10 @@ check "no misleading worker.compact.retracted verdict" "absent" "$got"
 if grep -q 'worker.compact.retract_failed issue=48' "$EVENTS_LOG"; then got=present; else got=absent; fi
 check "no worker.compact.retract_failed either — retraction was never attempted" "absent" "$got"
 
-if grep -q "send-keys -t $SESSION_NAME:$WIN6 Escape" "$TMUX_CALL_LOG"; then got=present; else got=absent; fi
+if grep -q "send-keys -t $SESSION_NAME:$WIN6.0 Escape" "$TMUX_CALL_LOG"; then got=present; else got=absent; fi
 check "NO Escape sent — nothing was left queued to retract" "absent" "$got"
 
-if grep -q "send-keys -t $SESSION_NAME:$WIN6 BSpace" "$TMUX_CALL_LOG"; then got=present; else got=absent; fi
+if grep -q "send-keys -t $SESSION_NAME:$WIN6.0 BSpace" "$TMUX_CALL_LOG"; then got=present; else got=absent; fi
 check "NO Backspace sent — nothing was left queued to retract" "absent" "$got"
 
 check "still counted as a backoff failure (no compaction actually ran)" "1" \

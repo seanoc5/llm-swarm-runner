@@ -597,7 +597,7 @@ post_spawn_health_check() {
     if [ "$pane_dead" = "1" ]; then
         echo "ERROR: worker window $window for issue #$issue did not come up (pane_dead=1 container_running=0)." >&2
         echo "       Last lines of the pane:" >&2
-        tmux capture-pane -t "$SESSION_NAME:$window" -p 2>/dev/null | tail -40 >&2 || true
+        tmux capture-pane -t "$SESSION_NAME:$window.0" -p 2>/dev/null | tail -40 >&2 || true
         tmux kill-window -t "$SESSION_NAME:$window" 2>/dev/null || true
         docker stop "$container" >/dev/null 2>&1 || true
         docker rm -f "$container" >/dev/null 2>&1 || true
@@ -823,7 +823,7 @@ if tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx "iss-$ISS
     [ -z "$pane_dead_flag" ] && pane_dead_flag=1
     if [ "$pane_dead_flag" = "1" ]; then
         echo "[*] window iss-$ISSUE exists but its pane is dead — reclaiming" >&2
-        tmux capture-pane -t "$SESSION_NAME:iss-$ISSUE" -p 2>/dev/null | tail -20 >&2 || true
+        tmux capture-pane -t "$SESSION_NAME:iss-$ISSUE.0" -p 2>/dev/null | tail -20 >&2 || true
         tmux kill-window -t "$SESSION_NAME:iss-$ISSUE" 2>/dev/null || true
         # self-review (12th pass): a dead pane can leave brief(s) behind in
         # inbox/ (never claimed) or processing/ (claimed, abandoned
@@ -1001,6 +1001,12 @@ else
     # sandbox.sh (and thus never the listener).
     tmux new-window -d -t "$SESSION_NAME" -n "iss-$ISSUE" \
         "WORKER_CONTAINER_NAME=$(printf '%q' "$container_name") WORKER_CMD=$(printf '%q' "${WORKER_CMD:-claude}") WORKER_MODEL=$(printf '%q' "${WORKER_MODEL:-}") WORKER_PROMPT_FILE=$(printf '%q' "${WORKER_PROMPT_FILE:-}") WORKER_HEADLESS=$(printf '%q' "${WORKER_HEADLESS:-0}") WORKER_SELF_REVIEW=$(printf '%q' "${WORKER_SELF_REVIEW:-1}") WORKER_SELF_REVIEW_MAX_ROUNDS=$(printf '%q' "${WORKER_SELF_REVIEW_MAX_ROUNDS:-3}") SELF_REVIEW_CMD=$(printf '%q' "${SELF_REVIEW_CMD:-}") SELF_REVIEW_MODEL=$(printf '%q' "${SELF_REVIEW_MODEL:-}") WORKER_CHECK=$(printf '%q' "${WORKER_CHECK:-}") WORKER_CHECK_CMD=$(printf '%q' "${WORKER_CHECK_CMD:-}") WORKER_CHECK_TIMEOUT=$(printf '%q' "${WORKER_CHECK_TIMEOUT:-}") WORKER_CHECK_RETRY=$(printf '%q' "${WORKER_CHECK_RETRY:-}") SWARM_EVAL_LOG=$(printf '%q' "${SWARM_EVAL_LOG:-}") EXTRA_MOUNTS=$(printf '%q' "${EXTRA_MOUNTS:-}") SANDBOX_DEP_CACHE=$(printf '%q' "${SANDBOX_DEP_CACHE:-}") SANDBOX_CPUS=$(printf '%q' "${SANDBOX_CPUS:-}") SANDBOX_GRADLE_LIMITS=$(printf '%q' "${SANDBOX_GRADLE_LIMITS:-}") SANDBOX_GRADLE_WORKERS_MAX=$(printf '%q' "${SANDBOX_GRADLE_WORKERS_MAX:-}") SANDBOX_KOTLIN_DAEMON_XMX=$(printf '%q' "${SANDBOX_KOTLIN_DAEMON_XMX:-}") SANDBOX_ALLOW_BACKGROUND_TASKS=$(printf '%q' "${SANDBOX_ALLOW_BACKGROUND_TASKS:-}") $(printf '%q' "$SANDBOX_SH") $(printf '%q' "$WT") listener"
+    # issue #555 self-review round 8: same pane-base-index belt-and-
+    # suspenders as llm-start.sh's coordinator window — a user conf
+    # sourced on this socket between window creations could otherwise
+    # drift this specific worker window's pane 0 away from index 0,
+    # breaking every `.0`-suffixed target above/below that assumes it.
+    tmux set-window-option -t "$SESSION_NAME:iss-$ISSUE" pane-base-index 0 2>/dev/null || true
     echo "[4/4] tmux window iss-$ISSUE spawned (listener)"
     log_event worker.start "issue=$ISSUE task_id=$TASK_ID window=iss-$ISSUE alive=$((alive_workers + 1))/$MAX_WORKERS total_windows=$((total_windows + 1))/$MAX_TMUX_WINDOWS"
 

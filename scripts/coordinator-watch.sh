@@ -4926,18 +4926,15 @@ stranded_brief_sweep_pass() {
 # run_watch_timer_loop like orphan_sweep_pass, not its own dedicated
 # background process.
 #
-# Known gap, shared with coordinator_pane_state/coordinator_pane_busy below
-# (pre-existing, not introduced here): `capture-pane -t "$SESSION_NAME:$win"`
-# with no pane index captures the window's ACTIVE pane. If the coordinator
-# window ever gets split with the new pane left active — demo-driver.sh's
-# Beat 6 (`tail -F .swarm/events.log`) does exactly this — this sweep (like
-# every other coordinator-pane probe in this file) is scanning that split
-# pane, not the actual claude coordinator pane, until focus returns. A real
-# coordinator violation during that window would go undetected until the
-# split pane loses focus, not just risk a false positive (the embedded
-# self-match-guard token above handles the false-positive side of that same
-# scenario). Fixing this for every coordinator-pane probe at once (pin
-# `coordinator.0`, or iterate `list-panes`) is out of scope for #385.
+# issue #550: every coordinator/worker-pane probe and injection in this
+# file now targets pane index 0 explicitly (`$win.0` / `coordinator.0`)
+# instead of a bare window — a bare window target captures/sends to
+# whichever pane is currently ACTIVE, which a split pane (demo-driver.sh's
+# Beat 6 `tail -F .swarm/events.log`, a Ctrl-Z scratch pane, or — the
+# motivating case — a check-on-done pane now living inside `iss-N`) can
+# steal. Pane 0 is the Claude pane for the life of the window; only
+# split-window-added panes (always index >= 1, never -b'd before it) share
+# the window with it.
 bg_violation_sweep_pass() {
     tmux has-session -t "$SESSION_NAME" 2>/dev/null || return 0
 
@@ -4963,7 +4960,7 @@ bg_violation_sweep_pass() {
             wt_dir="$(own_wt_dir_for_issue "$issue")" || continue
         fi
 
-        content="$(tmux capture-pane -t "$SESSION_NAME:$win" -p -S -200 2>/dev/null)" || continue
+        content="$(tmux capture-pane -t "$SESSION_NAME:$win.0" -p -S -200 2>/dev/null)" || continue
         clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
         # `-n` (line-numbered) + `-o` (match-only) gives "N:matched-text"
         # per hit, one per line — every candidate is needed (not just the
@@ -5138,7 +5135,7 @@ timeout_retry_sweep_pass() {
         [[ "$issue" =~ ^[0-9]+$ ]] || continue
         wt_dir="$(own_wt_dir_for_issue "$issue")" || continue
 
-        content="$(tmux capture-pane -t "$SESSION_NAME:$win" -p -S -200 2>/dev/null)" || continue
+        content="$(tmux capture-pane -t "$SESSION_NAME:$win.0" -p -S -200 2>/dev/null)" || continue
         clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
         # `-n` (line-numbered) + `-o` (match-only), like
         # bg_violation_sweep_pass, so each candidate's own line number is
@@ -5882,7 +5879,7 @@ coordinator_pane_state() {
 # bash's here-string handling under a UTF-8 locale.
 coordinator_pane_busy() {
     local content clean
-    content="$(tmux capture-pane -t "$SESSION_NAME:coordinator" -p 2>/dev/null)" || return 1
+    content="$(tmux capture-pane -t "$SESSION_NAME:coordinator.0" -p 2>/dev/null)" || return 1
     clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
     printf '%s\n' "$clean" | LC_ALL=C grep -qE "$AUTO_COMPACT_BUSY_PATTERN"
 }
@@ -6344,7 +6341,7 @@ maybe_auto_compact() {
         tmp_compact=$(mktemp) || { log_event coord.compact.skip "reason=mktemp_failed trigger=$trigger"; exit 0; }
         printf '/compact' > "$tmp_compact" 2>/dev/null || true
         tmux load-buffer -b llm-coord-autocompact "$tmp_compact" 2>/dev/null || true
-        tmux paste-buffer -b llm-coord-autocompact -t "$SESSION_NAME:coordinator" -d 2>/dev/null || true
+        tmux paste-buffer -b llm-coord-autocompact -t "$SESSION_NAME:coordinator.0" -d 2>/dev/null || true
         rm -f "$tmp_compact" 2>/dev/null || true
 
         # issue #290: pasting text that starts with "/" opens the CLI's
@@ -6362,11 +6359,11 @@ maybe_auto_compact() {
         # before falling through to the start-wait loop below (which still
         # owns the authoritative timeout either way).
         sleep "$COMPACT_SUBMIT_SETTLE_SECS"
-        tmux send-keys -t "$SESSION_NAME:coordinator" Enter 2>/dev/null || true
+        tmux send-keys -t "$SESSION_NAME:coordinator.0" Enter 2>/dev/null || true
         sleep "$COMPACT_SUBMIT_SETTLE_SECS"
-        if ! compact_confirm_submitted "$SESSION_NAME:coordinator" "$AUTO_COMPACT_BUSY_PATTERN" "/compact"; then
+        if ! compact_confirm_submitted "$SESSION_NAME:coordinator.0" "$AUTO_COMPACT_BUSY_PATTERN" "/compact"; then
             log_event coord.compact.resubmit "trigger=$trigger"
-            tmux send-keys -t "$SESSION_NAME:coordinator" Enter 2>/dev/null || true
+            tmux send-keys -t "$SESSION_NAME:coordinator.0" Enter 2>/dev/null || true
         fi
 
         # Wait for compaction to actually start (busy indicator appears) —
@@ -6387,10 +6384,10 @@ maybe_auto_compact() {
                 # /compact was delivered to the model as a plain chat message
                 # rather than executed as a slash command — see this file's
                 # COMPACT_REPLAY_PATTERN header comment for the full forensics.
-                if compact_composer_clear "$SESSION_NAME:coordinator"; then
+                if compact_composer_clear "$SESSION_NAME:coordinator.0"; then
                     log_event coord.compact.delivered_as_text "trigger=$trigger"
                 else
-                    compact_retract_queued "$SESSION_NAME:coordinator" coord.compact "trigger=$trigger" "$AUTO_COMPACT_BUSY_PATTERN" || true
+                    compact_retract_queued "$SESSION_NAME:coordinator.0" coord.compact "trigger=$trigger" "$AUTO_COMPACT_BUSY_PATTERN" || true
                 fi
                 exit 0
             fi
@@ -6444,7 +6441,7 @@ maybe_auto_compact() {
         while [ "$verify_waited" -lt "$AUTO_COMPACT_VERIFY_TIMEOUT_SECS" ]; do
             sleep "$AUTO_COMPACT_POLL_SECS"
             verify_waited=$((verify_waited + AUTO_COMPACT_POLL_SECS))
-            if compact_replay_detected "$SESSION_NAME:coordinator"; then
+            if compact_replay_detected "$SESSION_NAME:coordinator.0"; then
                 replayed=1
             fi
             probe_mtime_after=$(mtime_epoch "$AUTO_COMPACT_PROBE" 2>/dev/null) || probe_mtime_after=0
@@ -6582,7 +6579,7 @@ worker_pane_state() {
 # check-stuck-workers.sh's detect_state(), parameterized by window.
 worker_pane_busy() {
     local win="$1" content clean
-    content="$(tmux capture-pane -t "$SESSION_NAME:$win" -p 2>/dev/null)" || return 1
+    content="$(tmux capture-pane -t "$SESSION_NAME:$win.0" -p 2>/dev/null)" || return 1
     clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
     printf '%s\n' "$clean" | LC_ALL=C grep -qE "$WORKER_COMPACT_BUSY_PATTERN"
 }
@@ -6605,7 +6602,7 @@ worker_pane_busy() {
 # closed, same fail-open-to-skip contract as probe_ctx_used.
 worker_pane_ctx_used() {
     local win="$1" content clean line
-    content="$(tmux capture-pane -t "$SESSION_NAME:$win" -p 2>/dev/null)" || return 1
+    content="$(tmux capture-pane -t "$SESSION_NAME:$win.0" -p 2>/dev/null)" || return 1
     clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
     # tail -1: if the pattern somehow appears more than once in the visible
     # screen (shouldn't normally happen — the statusline is one line — but
@@ -6636,7 +6633,7 @@ worker_pane_ctx_used() {
 # worker_pane_busy()/worker_pane_ctx_used() already follow in this file.
 worker_pane_ctx_window() {
     local win="$1" content clean line
-    content="$(tmux capture-pane -t "$SESSION_NAME:$win" -p 2>/dev/null)" || return 1
+    content="$(tmux capture-pane -t "$SESSION_NAME:$win.0" -p 2>/dev/null)" || return 1
     clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
     line="$(printf '%s\n' "$clean" | LC_ALL=C grep -oE 'ctx: [0-9]+[kM]?/[0-9]+[kM]?[[:space:]]*\([0-9]+%\)' | tail -1)"
     [ -n "$line" ] || return 1
@@ -6786,7 +6783,7 @@ worker_task_done() {
     fi
 
     local content clean
-    content="$(tmux capture-pane -t "$SESSION_NAME:$win" -p 2>/dev/null)" || return 1
+    content="$(tmux capture-pane -t "$SESSION_NAME:$win.0" -p 2>/dev/null)" || return 1
     clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
     # Anchored on the literal completion-block line shape from
     # worker-listener.sh's print_completion_block() — "  TASK COMPLETE    exit=0    duration=42s"
@@ -7330,7 +7327,7 @@ maybe_worker_deliver_brief() {
     # observed dimmed suggestion on one parked pane) must never be pasted
     # over — pasting "/quit" into it would produce garbled, unpredictable
     # input rather than a clean exit command.
-    local target="$SESSION_NAME:$win"
+    local target="$SESSION_NAME:$win.0"
     if ! compact_composer_clear "$target"; then
         log_event worker.deliver.skip "issue=$issue reason=composer_not_clear"
         worker_deliver_record_composer_stall "$issue" "$brief_before"
@@ -7564,18 +7561,18 @@ maybe_worker_compact() {
     tmp_compact=$(mktemp) || { log_event worker.compact.skip "issue=$issue reason=mktemp_failed"; return 0; }
     printf '/compact' > "$tmp_compact" 2>/dev/null || true
     tmux load-buffer -b "llm-worker-autocompact-$issue" "$tmp_compact" 2>/dev/null || true
-    tmux paste-buffer -b "llm-worker-autocompact-$issue" -t "$SESSION_NAME:$win" -d 2>/dev/null || true
+    tmux paste-buffer -b "llm-worker-autocompact-$issue" -t "$SESSION_NAME:$win.0" -d 2>/dev/null || true
     rm -f "$tmp_compact" 2>/dev/null || true
 
     # issue #290: same autocomplete-menu race as maybe_auto_compact's
     # injection (see that function's comment) — settle, submit, verify,
     # retry once if the composer still holds the pasted text.
     sleep "$COMPACT_SUBMIT_SETTLE_SECS"
-    tmux send-keys -t "$SESSION_NAME:$win" Enter 2>/dev/null || true
+    tmux send-keys -t "$SESSION_NAME:$win.0" Enter 2>/dev/null || true
     sleep "$COMPACT_SUBMIT_SETTLE_SECS"
-    if ! compact_confirm_submitted "$SESSION_NAME:$win" "$WORKER_COMPACT_BUSY_PATTERN" "/compact"; then
+    if ! compact_confirm_submitted "$SESSION_NAME:$win.0" "$WORKER_COMPACT_BUSY_PATTERN" "/compact"; then
         log_event worker.compact.resubmit "issue=$issue"
-        tmux send-keys -t "$SESSION_NAME:$win" Enter 2>/dev/null || true
+        tmux send-keys -t "$SESSION_NAME:$win.0" Enter 2>/dev/null || true
     fi
 
     # Wait for compaction to actually start (busy indicator appears).
@@ -7590,10 +7587,10 @@ maybe_worker_compact() {
             # an already-empty composer here means nothing is left to
             # retract — most likely the injected /compact was delivered as a
             # plain chat message rather than executed as a slash command.
-            if compact_composer_clear "$SESSION_NAME:$win"; then
+            if compact_composer_clear "$SESSION_NAME:$win.0"; then
                 log_event worker.compact.delivered_as_text "issue=$issue"
             else
-                compact_retract_queued "$SESSION_NAME:$win" worker.compact "issue=$issue" "$WORKER_COMPACT_BUSY_PATTERN" || true
+                compact_retract_queued "$SESSION_NAME:$win.0" worker.compact "issue=$issue" "$WORKER_COMPACT_BUSY_PATTERN" || true
             fi
             worker_compact_record_failure "$issue"
             return 0
@@ -7643,7 +7640,7 @@ maybe_worker_compact() {
     while [ "$verify_waited" -lt "$WORKER_COMPACT_VERIFY_TIMEOUT_SECS" ]; do
         sleep "$WORKER_COMPACT_POLL_SECS"
         verify_waited=$((verify_waited + WORKER_COMPACT_POLL_SECS))
-        if compact_replay_detected "$SESSION_NAME:$win"; then
+        if compact_replay_detected "$SESSION_NAME:$win.0"; then
             replayed=1
         fi
         used_after="$(worker_pane_ctx_used "$win")" && break
@@ -7682,8 +7679,8 @@ maybe_worker_compact() {
     tmp_nudge=$(mktemp) || return 0
     printf '%s' "$WORKER_COMPACT_NUDGE_PROMPT" > "$tmp_nudge" 2>/dev/null || true
     tmux load-buffer -b "llm-worker-nudge-$issue" "$tmp_nudge" 2>/dev/null || true
-    tmux paste-buffer -b "llm-worker-nudge-$issue" -t "$SESSION_NAME:$win" -d 2>/dev/null || true
-    tmux send-keys -t "$SESSION_NAME:$win" Enter 2>/dev/null || true
+    tmux paste-buffer -b "llm-worker-nudge-$issue" -t "$SESSION_NAME:$win.0" -d 2>/dev/null || true
+    tmux send-keys -t "$SESSION_NAME:$win.0" Enter 2>/dev/null || true
     rm -f "$tmp_nudge" 2>/dev/null || true
 }
 

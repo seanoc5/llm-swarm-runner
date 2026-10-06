@@ -61,6 +61,11 @@ case "$1" in
         args="$*"
         win="${args##*:}"
         win="${win%% *}"
+        # issue #550: capture-worker.sh now targets the window's pane 0
+        # explicitly (session:window.0, not a bare session:window) — strip
+        # that pane-index suffix to resolve back to the plain fixture
+        # filename below.
+        win="${win%.0}"
         cat "$PANE_DIR/$win" 2>/dev/null
         exit 0 ;;
 esac

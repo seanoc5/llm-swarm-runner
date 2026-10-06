@@ -34,6 +34,8 @@ LLM_SWARM_DIR="${LLM_SWARM_DIR:-$SCRIPT_DIR}"
 
 SESSION_NAME="llm-$(basename "$PWD")"
 SYSTEM_PROMPT_FILE="$LLM_SWARM_DIR/prompts/coordinator.md"
+# Matches install-tmux-binding.sh's own default — same file, same override.
+TMUX_CONF="${TMUX_CONF:-$HOME/.tmux.conf}"
 
 # Per-repo tmux socket isolates swarm sessions from the user's default tmux
 # server. Different `-L name` = different tmux server = independent
@@ -765,7 +767,7 @@ if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
             # remain-on-exit=failed left a dead pane after a non-zero exit.
             # Kill it; the window auto-closes when its last pane is gone,
             # collapsing this into the window_exists=false case below.
-            tmux kill-pane -t "$SESSION_NAME:coordinator" 2>/dev/null || true
+            tmux kill-pane -t "$SESSION_NAME:coordinator.0" 2>/dev/null || true
             window_exists=false
             coordinator_idle=true
             echo "Detected dead coordinator pane (previous crash); cleared. Will relaunch."
@@ -831,7 +833,40 @@ if ! $session_existed; then
     if [ -n "$GEMINI_ENV_SOURCED" ]; then
         echo "Loaded GEMINI_API_KEY from $GEMINI_ENV_SOURCED"
     fi
-    tmux new-session -d -s "$SESSION_NAME" "${TMUX_ENV_OPTS[@]}" -n "coordinator"
+    # -f /dev/null (issue #550 self-review finding): this is the command
+    # that actually spawns the swarm socket's tmux server, so it's the one
+    # chance to keep the user's own ~/.tmux.conf from applying to it at
+    # all — in particular `pane-base-index`. Without this, a user config
+    # setting it to 1 would make the coordinator window's first (and only)
+    # pane come up as pane 1, not 0, silently breaking every `.0`-suffixed
+    # explicit pane target the watcher/worker scripts rely on (captures,
+    # send-keys and pastes would address a pane that doesn't exist and
+    # fail silently, since those calls swallow errors).
+    #
+    # Trade-off, not a free lunch: skipping the file at THIS exact moment
+    # means pane 0 of the very first (coordinator) pane is guaranteed to
+    # come up at index 0 regardless of the user's conf — but it would
+    # also drop everything else that conf sets (mouse mode, prefix key,
+    # status-bar styling, custom bindings, including the project's own
+    # Ctrl-Z binding — see the source-file call right below, which gets
+    # those back on this socket a moment later, after that one pane
+    # already exists). Harmless on an already-running server (a later
+    # `tmux` command on this socket ignores -f).
+    tmux -f /dev/null new-session -d -s "$SESSION_NAME" "${TMUX_ENV_OPTS[@]}" -n "coordinator"
+
+    # issue #555 self-review: -f /dev/null above means a BRAND-NEW swarm
+    # socket never sources ~/.tmux.conf at all — including the Ctrl-Z
+    # worker-escape-hatch / coordinator-scratch-pane binding
+    # install-tmux-binding.sh installs there. That script already
+    # reloads it on every ALREADY-RUNNING swarm-* socket after an
+    # install/update; a cold socket just never got that reload once, so
+    # giving it the same `source-file` treatment here — right after
+    # creation, before anything else runs on it — is the one-time
+    # equivalent for the socket's very first moment. The belt-and-
+    # suspenders `pane-base-index 0` a few lines below still runs
+    # unconditionally after this, so a user conf setting that option
+    # differently can't undo the issue #550 fix this socket exists for.
+    [ -f "$TMUX_CONF" ] && tmux source-file "$TMUX_CONF" 2>/dev/null || true
 
     # Pin resurrect state to this repo, disable continuum autosave/restore on
     # the swarm server. The swarm is recreated via llm-start.sh, so we don't
@@ -865,6 +900,25 @@ fi
 # before this feature existed.
 tmux set-option -g remain-on-exit "$REMAIN_ON_EXIT_VALUE"
 tmux set-option -g history-limit 50000
+
+# Belt-and-suspenders for the -f /dev/null fix above (issue #550): a user's
+# ~/.tmux.conf setting pane-base-index is skipped at session-creation time,
+# but a LATER conf reload on this same socket (e.g. the source-file call
+# above, or the user attaching and sourcing their own conf by hand) could
+# still set it globally afterward. Pin it back to 0 unconditionally, every
+# invocation, so the coordinator's `.0`-suffixed pane targets never go
+# stale regardless of what runs on this socket between invocations.
+tmux set-option -g pane-base-index 0
+# issue #555 self-review round 8: confirmed empirically that `set-option -g
+# pane-base-index` DOES retroactively renumber an already-existing window's
+# panes when queried (tmux recomputes pane-base-index per window at lookup
+# time, not just at window-creation time) — so the global pin above is
+# sufficient on its own. This window-level override is still set as a
+# second line of defense: it takes precedence over any later global drift
+# scoped to just this window, so even a conf reload that changes the global
+# setting again can't un-pin the coordinator window specifically.
+tmux set-window-option -t "$SESSION_NAME:coordinator" pane-base-index 0 2>/dev/null || true
+
 # Codex deliberately exits after each turn. Keep its completed report visible
 # until the next invocation replaces this dead pane via the detection above.
 if [ "$COORD_CMD" = "codex" ] || { [ "$COORD_CMD" = "agy" ] && [ "${COORDINATOR_HEADLESS:-0}" = "1" ]; }; then
@@ -937,7 +991,7 @@ if ! $session_existed || ! $window_exists || $coordinator_idle; then
         ENV_VARS+="STATUSLINE_PROBE=$(printf '%q' "${STATUSLINE_PROBE:-${XDG_RUNTIME_DIR:-/tmp}/claude-statusline-$(basename "$PWD")-coordinator.json}") "
 
         WRAPPER="$LLM_SWARM_DIR/scripts/coordinator-claude.sh"
-        tmux send-keys -t "$SESSION_NAME:coordinator" \
+        tmux send-keys -t "$SESSION_NAME:coordinator.0" \
             "${ENV_VARS}exec $(printf '%q' "$WRAPPER") $(printf '%q' "$RENDERED_PROMPT_FILE") $(printf '%q' "$TMP_PROMPT")" C-m
     elif [ "$COORD_CMD" = "codex" ]; then
         # Codex has no append-system-prompt flag, so the wrapper prepends the
@@ -947,13 +1001,13 @@ if ! $session_existed || ! $window_exists || $coordinator_idle; then
         ENV_VARS=""
         [ -n "${COORD_MODEL:-}" ] && ENV_VARS+="COORD_MODEL=$(printf '%q' "$COORD_MODEL") "
         WRAPPER="$LLM_SWARM_DIR/scripts/coordinator-codex.sh"
-        tmux send-keys -t "$SESSION_NAME:coordinator" \
+        tmux send-keys -t "$SESSION_NAME:coordinator.0" \
             "${ENV_VARS}exec $(printf '%q' "$WRAPPER") $(printf '%q' "$RENDERED_PROMPT_FILE") $(printf '%q' "$TMP_PROMPT")" C-m
     elif [ "$COORD_CMD" = "agy" ]; then
         ENV_VARS="COORDINATOR_HEADLESS=$(printf '%q' "${COORDINATOR_HEADLESS:-0}") "
         [ -n "${COORD_MODEL:-}" ] && ENV_VARS+="COORD_MODEL=$(printf '%q' "$COORD_MODEL") "
         WRAPPER="$LLM_SWARM_DIR/scripts/coordinator-agy.sh"
-        tmux send-keys -t "$SESSION_NAME:coordinator" \
+        tmux send-keys -t "$SESSION_NAME:coordinator.0" \
             "${ENV_VARS}exec $(printf '%q' "$WRAPPER") $(printf '%q' "$RENDERED_PROMPT_FILE") $(printf '%q' "$TMP_PROMPT")" C-m
     else
         # Gemini CLI uses its own system-prompt file and interactive flag.
@@ -979,7 +1033,7 @@ if ! $session_existed || ! $window_exists || $coordinator_idle; then
             ERR_TAIL=''
         fi
 
-        tmux send-keys -t "$SESSION_NAME:coordinator" "$BASE_CMD $PROMPT_FLAG \"\$(cat '$TMP_PROMPT')\"; rm '$TMP_PROMPT'$ERR_TAIL" C-m
+        tmux send-keys -t "$SESSION_NAME:coordinator.0" "$BASE_CMD $PROMPT_FLAG \"\$(cat '$TMP_PROMPT')\"; rm '$TMP_PROMPT'$ERR_TAIL" C-m
     fi
 elif { [ "$COORD_CMD" = "claude" ] || [ "$COORD_CMD" = "agy" ]; } && [ "${COORDINATOR_HEADLESS:-0}" != "1" ]; then
     # Live-REPL re-prompt path: claude is already running in the pane and
@@ -1005,7 +1059,7 @@ elif { [ "$COORD_CMD" = "claude" ] || [ "$COORD_CMD" = "agy" ]; } && [ "${COORDI
     TMP_PROMPT=$(mktemp)
     printf '%s\n' "$INITIAL_PROMPT" > "$TMP_PROMPT"
     REPROMPT_RC=0
-    reprompt_inject "$SESSION_NAME:coordinator" "$TMP_PROMPT" || REPROMPT_RC=$?
+    reprompt_inject "$SESSION_NAME:coordinator.0" "$TMP_PROMPT" || REPROMPT_RC=$?
     rm -f "$TMP_PROMPT"
     [ "$REPROMPT_RC" = "2" ] && REPROMPT_DEFERRED=1
 fi

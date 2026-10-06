@@ -963,6 +963,61 @@ poll_for_brief() {
     done
 }
 
+# check_claim_active — issue #555 self-review round 13: is a check-on-done
+# run (coordinator-watch.sh's execute_check, this PR's pane) genuinely
+# still running for this worktree right now? A check command's own
+# process lives in a PANE, not this listener — but it shares this
+# window, so if this listener's own pane (index 0) exits cleanly while
+# that check is still mid-run, tmux renumbers the still-alive check pane
+# down into slot 0 the instant pane 0 is destroyed, and every
+# pane_dead(head -1) reader in the codebase (provision-worker.sh's
+# reclaim guard, has_live_window_draining_brief, check-stuck-workers.sh)
+# reads that genuinely-running check command as a live worker until it
+# finishes. Same claim-dir ground truth kill-worktree.sh's reap-defer
+# path (issue #181) already uses for the identical "real or abandoned"
+# question — a stale claim (crashed check, nothing left to ever release
+# it) must not block a close forever.
+mtime_epoch() {
+    stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
+}
+
+check_claim_active() {
+    local stale_secs="${CHECK_CLAIM_STALE_SECS:-$((CHECK_TIMEOUT + 300))}"
+    local claim mtime age
+    for claim in "$STATUS"/*.check-claim; do
+        [ -d "$claim" ] || continue
+        mtime="$(mtime_epoch "$claim")" || continue
+        age=$(( $(date +%s) - mtime ))
+        [ "$age" -lt "$stale_secs" ] && return 0
+    done
+    return 1
+}
+
+# close_window_and_exit — issue #555 self-review round 14: a plain `exit 0`
+# here only destroys THIS pane. Before this PR, that was enough — the
+# worker's own pane was the only pane in its window, so destroying it
+# destroyed the window too. Now that a check-on-done run shares this same
+# window as a second pane (this PR's whole premise, execute_check() in
+# coordinator-watch.sh), a dead check pane (round 12's `exit 1`, left
+# around on purpose for post-mortem review) is still in the window and
+# survives this pane's exit — tmux just renumbers it down into slot 0, and
+# the window stays open holding only that dead pane. It then reads as a
+# DEAD-PANE to check-stuck-workers.sh and keeps counting toward
+# MAX_TMUX_WINDOWS until something else notices and reaps it, which
+# contradicts the "window will close" message both call sites below print.
+# Killing the whole window explicitly (not just this pane) makes that
+# promise true unconditionally, whatever else is left in it. No-op outside
+# tmux (unset $TMUX_PANE — e.g. this file's own FIFO-driven test, which
+# has no real tmux at all).
+close_window_and_exit() {
+    if [ -n "${TMUX_PANE:-}" ]; then
+        local win_id
+        win_id="$(tmux display-message -p -t "$TMUX_PANE" -F '#{window_id}' 2>/dev/null)"
+        [ -n "$win_id" ] && tmux kill-window -t "$win_id" 2>/dev/null
+    fi
+    exit 0
+}
+
 run_idle_shell() {
     rm -f "$IDLE_SENTINEL"
     poll_for_brief &
@@ -1038,15 +1093,28 @@ EOF
     wait "$poll_pid" 2>/dev/null
 
     # `close-worker` or the double-Ctrl-C trap ran in the idle shell: end
-    # the listener process itself, which closes the tmux window (same
-    # clean-exit contract as the reaped-worktree guard in the main loop).
+    # the listener process and explicitly close the whole tmux window
+    # (close_window_and_exit, round 14 — a bare `exit` here would only
+    # destroy this pane, not any check pane sharing the window with it).
+    # The reaped-worktree guard further down exits plainly instead,
+    # because kill-worktree.sh already closed the window itself from
+    # outside before deleting the worktree out from under this process.
     # The worktree is deliberately left in place — it may hold unpushed or
     # untracked material; clean it up host-side with kill-worktree.sh when
     # genuinely done with it.
     if [ -f "$CLOSE_SENTINEL" ]; then
+        # issue #555 self-review round 13: wait out a genuinely still-
+        # running check (see check_claim_active above) before actually
+        # exiting — this already-exited idle shell, not an interactive
+        # one, so this just pauses the listener process itself, with the
+        # pane showing the wait message.
+        while check_claim_active; do
+            echo "[$(date +%T)] close requested, but $WT_LABEL's check-on-done is still running — waiting for it to finish before closing."
+            sleep 5
+        done
         rm -f "$CLOSE_SENTINEL"
         echo "[$(date +%T)] close requested: listener exiting — window will close. Worktree $WT_LABEL/ is left intact (remove later with kill-worktree.sh)."
-        exit 0
+        close_window_and_exit
     fi
 
     # Double-Ctrl-D close: this was already a respawned shell (not the first
@@ -1058,8 +1126,12 @@ EOF
         local pending
         pending=$(find "$INBOX" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | head -1)
         if [ -z "$pending" ]; then
+            while check_claim_active; do
+                echo "[$(date +%T)] double exit requested, but $WT_LABEL's check-on-done is still running — waiting for it to finish before closing."
+                sleep 5
+            done
             echo "[$(date +%T)] double exit: listener exiting — window will close. Worktree $WT_LABEL/ is left intact (remove later with kill-worktree.sh)."
-            exit 0
+            close_window_and_exit
         fi
     fi
 }

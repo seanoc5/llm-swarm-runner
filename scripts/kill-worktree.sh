@@ -554,6 +554,11 @@ if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
     else
         echo "  - tmux window not present (skipped)"
     fi
+    # issue #550: a check-on-done run normally lives as a PANE inside
+    # iss-$ISSUE (killed above, pane and all) — this only catches the
+    # fallback `chk-$ISSUE` WINDOW execute_check falls back to when no
+    # iss-$ISSUE window existed to host the pane.
+    swarm_close_chk_windows "$SESSION_NAME" "$ISSUE"
 else
     echo "  - tmux session not running (skipped window cleanup)"
 fi
