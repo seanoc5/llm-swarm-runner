@@ -78,6 +78,19 @@
 # still gets its self-review posted (same rubric as above) but is never
 # un-drafted here — only the coordinator lifts the hold.
 #
+# issue #560: `gh pr checks` exit 1 for "Resource not accessible by
+# personal access token" (a fine-grained PAT has Actions:read but no Checks
+# permission) was previously indistinguishable from a genuine failing-CI
+# exit 1, so a green PR behind such a token got refused as "failing CI
+# checks" and stuck as a draft. That exact text is now recognized (shared
+# detector in `_ci-fallback.sh`, also used by ci-wait.sh) and routed to the
+# same `gh run list --commit` Actions-runs fallback ci-wait.sh already uses
+# (#513/#540) instead of being read as red. If that fallback ALSO can't
+# decide (`gh run list` itself fails), this refuses with a distinct exit
+# code (5) and message ("can't read CI status") rather than reusing exit 4's
+# "failing CI checks" wording — the two mean different things: one is a
+# confirmed red, the other is "no token can tell you right now".
+#
 # Exit codes:
 #   0  readied (gh pr ready ran)
 #   2  refused — self-review returned BLOCK, or self-review-pr.sh exited 1
@@ -86,12 +99,21 @@
 #   3  held — a COORDINATOR HOLD banner is on the PR body; self-review ran
 #      (and posted) as usual, but gh pr ready was deliberately skipped
 #   4  refused — CI checks on the head commit are not confirmed green
-#      (pending, failing, or an unexpected `gh pr checks` error)
+#      (pending, failing, or an unexpected `gh pr checks` error; also a
+#      confirmed red or still-pending result read via the Actions-runs
+#      fallback)
+#   5  refused — can't read CI status at all: the token lacks Checks
+#      permission AND the Actions-runs fallback itself couldn't be read
+#      either (`gh pr view` for the head SHA, or `gh run list`, failed).
+#      Distinct from exit 4 on purpose — this means "unknown", not
+#      "confirmed failing" (issue #560).
 #   1  usage / gh error resolving the PR body
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LLM_SWARM_DIR="${LLM_SWARM_DIR:-$(dirname "$SCRIPT_DIR")}"
+# shellcheck source=_ci-fallback.sh
+. "$SCRIPT_DIR/_ci-fallback.sh"
 # Overridable for testing (a stub in place of the real self-review-pr.sh,
 # which shells out to `claude -p` and can't be exercised in CI/tests).
 SELF_REVIEW="${SELF_REVIEW_SCRIPT:-$SCRIPT_DIR/self-review-pr.sh}"
@@ -250,7 +272,39 @@ case "$CHECKS_RC" in
         exit 4
         ;;
     1)
-        if grep -qi "no checks reported" <<<"$CHECKS_OUT"; then
+        if ci_fallback_is_token_error "$CHECKS_OUT"; then
+            # Fine-grained PAT: `gh pr checks` can't read Checks at all, so
+            # its exit 1 here is a permission error, not a CI result. Route
+            # to the same `gh run list --commit` fallback ci-wait.sh uses
+            # (#513/#540) instead of reading this as failing CI (#560).
+            echo "pr-ready: gh pr checks is not readable by this token (fine-grained PATs have no Checks permission) — falling back to the Actions-runs check for PR #$PR." >&2
+            SHA="$(gh pr view "$PR" --json headRefOid --jq .headRefOid 2>/dev/null)" || SHA=""
+            if [ -z "$SHA" ]; then
+                echo "pr-ready: REFUSED — can't read CI status for PR #$PR: gh pr view failed while resolving the head commit for the Actions-runs fallback." >&2
+                exit 5
+            fi
+            if ci_fallback_run_state "$SHA"; then
+                case "$CI_FALLBACK_STATE" in
+                    pass)
+                        echo "pr-ready: CI checks green on PR #$PR (via Actions-runs fallback)."
+                        ;;
+                    fail)
+                        echo "pr-ready: REFUSED — PR #$PR has failing CI checks (via Actions-runs fallback):" >&2
+                        echo "$CI_FALLBACK_DETAIL" >&2
+                        exit 4
+                        ;;
+                    pending)
+                        echo "pr-ready: REFUSED — PR #$PR's CI checks are still pending (via Actions-runs fallback)." >&2
+                        echo "          Run 'scripts/ci-wait.sh $PR' to wait for a real result, then re-run pr-ready.sh." >&2
+                        exit 4
+                        ;;
+                esac
+            else
+                echo "pr-ready: REFUSED — can't read CI status for PR #$PR: this token can't read Checks, and the Actions-runs fallback also failed ($CI_FALLBACK_DETAIL)." >&2
+                echo "          This means unknown, not failing — get a human (or a token with Checks or Actions read) to confirm CI before readying." >&2
+                exit 5
+            fi
+        elif grep -qi "no checks reported" <<<"$CHECKS_OUT"; then
             # issue #473 round-2 self-review: "no checks reported" also
             # covers the ordinary post-push race where CI IS configured but
             # this commit's run hasn't registered yet (ci-wait.sh's own
