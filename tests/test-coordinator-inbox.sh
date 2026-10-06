@@ -384,5 +384,42 @@ grep -q 'coord.inbox.write .*trigger=activity_poll' "$EVENTS_LOG_ACTIVITY" \
 grep -q 'coord.wake ' "$EVENTS_LOG_ACTIVITY" 2>/dev/null && red "did not expect any coord.wake event for an activity-poll finding: $(cat "$EVENTS_LOG_ACTIVITY")"
 green "events.log: coord.inbox.write trigger=activity_poll present, no coord.wake at all"
 
+# ============================================================================
+heading "Test 7 (issue #461): a file dropped into coord-inbox by something other than this watcher still rings the doorbell, idle pane, no worker windows"
+# ============================================================================
+# The gap #461 reports: coord_inbox_write()'s callers (on_outcome,
+# on_message, on_activity) always decide their own wake, so Tests 1-6 above
+# never exercised the path a file takes when NOTHING inside this script
+# wrote it — e.g. a util-pane driver script's own `echo ... > foo.md`. That
+# file has no .self marker, so on_inbox_drop must not mistake it for
+# already-decided and must ring the doorbell itself.
+reset_state
+set_pane_idle
+sleep 0.3
+start_watcher "$TEST_DIR/watch-7.log"
+
+mkdir -p "$INBOX_DIR"
+EXTERNAL_NOTE="$INBOX_DIR/$(date -u +%Y%m%dT%H%M%SZ)-external-probe.md"
+printf 'parity7-sweep-done\n' > "$EXTERNAL_NOTE"
+
+poll_until 20 0.5 bash -c "grep -q 'WAKE:' '$WAKE_LOG'" \
+    || red "a foreign coord-inbox file never triggered a doorbell. watch log:
+$(cat "$TEST_DIR/watch-7.log")
+events.log:
+$(cat "$EVENTS_LOG" 2>/dev/null || true)"
+green "a foreign file dropped directly into coord-inbox/ (no .self marker, no live worker window) rang the doorbell"
+
+grep -q 'coord.inbox.drop ' "$EVENTS_LOG" \
+    || red "expected coord.inbox.drop to be logged for the externally-written file"
+grep -q 'coord.inbox.drop.skip' "$EVENTS_LOG" 2>/dev/null \
+    && red "a foreign file must never be skipped as self_written: $(cat "$EVENTS_LOG")"
+green "events.log: coord.inbox.drop logged, never skipped as self-written"
+
+[ -e "$INBOX_DIR/.self/$(basename "$EXTERNAL_NOTE").self" ] 2>/dev/null \
+    && red "no .self marker should ever have existed for a file this watcher didn't write"
+green "no stray .self marker was created for a file this watcher didn't write"
+
+stop_watcher
+
 echo ""
 green "All assertions passed (test-coordinator-inbox.sh)"

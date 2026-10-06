@@ -90,6 +90,7 @@ declare -A WORKER_DELIVER_COMPOSER_STALL_ESCALATED=()
 # convention as test-watcher-activity-poll.sh's copy of these two vars.
 COORD_INBOX_DIR="$TEST_DIR/coord-inbox"
 COORD_INBOX_PROCESSED_DIR="$COORD_INBOX_DIR/processed"
+COORD_INBOX_SELF_DIR="$COORD_INBOX_DIR/.self"
 
 # own_wt_dir_for_issue (issue #357/#388) resolves wt_dir via
 # is_own_worktree_dir(), which needs $PROJECT_DIR set to do its `git -C

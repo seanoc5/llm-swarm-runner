@@ -549,6 +549,32 @@
 #                           items to coord-inbox/processed/). Not itself
 #                           overridable — derived from PROJECT_DIR, same as
 #                           COORD_WAKE_PENDING_FILE.
+#                           (issue #461) Both backends also watch this
+#                           directory itself (inotify: a case arm on the
+#                           same recursive $WORKSPACE watch; poll: folded
+#                           into scan_outcomes' per-tick find), dispatching
+#                           any *.md arrival through on_inbox_drop. Before
+#                           this fix, a file written here by something
+#                           OTHER than this watcher's own coord_inbox_write
+#                           calls — a util-pane driver script dropping a
+#                           done-note, the sanctioned no-polling way to
+#                           signal completion into the inbox — triggered no
+#                           dispatch path at all, so it could sit unnoticed
+#                           indefinitely if no unrelated outcome/outbox/
+#                           activity wake happened to also fire (observed:
+#                           2h23m, coordinator idle with zero workers).
+#                           on_inbox_drop runs the same debounce/hold-gate/
+#                           llm-start path as on_outcome/on_message/
+#                           on_activity for a GENUINELY external arrival;
+#                           for a file one of THOSE just wrote (they always
+#                           land here too) it instead no-ops via the
+#                           COORD_INBOX_SELF_DIR marker coord_inbox_write
+#                           also drops — see on_inbox_drop's own header
+#                           comment for why that marker, not a timing
+#                           assumption about the shared debounce clock, is
+#                           what keeps this from racing the original
+#                           caller's own retry/ceiling handling for the
+#                           same wake.
 #   COORD_INBOX_NUDGE_TEMPLATE=(built-in)
 #                           (issue #430) The ONE-LINE doorbell text pasted
 #                           into the coordinator's composer once the wake is
@@ -2869,6 +2895,22 @@ fi
 # regenerable one-liner (coord_inbox_nudge_text), not the payload itself.
 COORD_INBOX_DIR="$PROJECT_DIR/.swarm/coord-inbox"
 COORD_INBOX_PROCESSED_DIR="$COORD_INBOX_DIR/processed"
+# COORD_INBOX_SELF_DIR (issue #461): a per-file ".self" marker, one per
+# coord_inbox_write() call, used by on_inbox_drop to tell a file THIS
+# watcher just wrote (on_outcome/on_message/on_activity/the sweeps, which
+# already run their own debounce/hold-gate/wake decision right after
+# writing) apart from a file something else dropped directly into
+# COORD_INBOX_DIR — the actual gap this issue closes. ".self" (not ".md")
+# so a marker can never itself be mistaken for a new inbox item by any
+# *.md scan. See coord_inbox_write's and on_inbox_drop's own comments for
+# why a registry, not a timing assumption, is what makes this safe: the
+# natural guess — rely on wake_debounced() seeing the clock the original
+# caller just set — only holds at the default DEBOUNCE_SECS=30; at
+# DEBOUNCE_SECS=0 (several of this file's own tests, deliberately, for
+# determinism) nothing stops on_inbox_drop from re-deciding the same wake
+# a second time through a different code path, racing coord_wake_hold_
+# retry_pass/coord_wake_retry_pass for who actually delivers it.
+COORD_INBOX_SELF_DIR="$COORD_INBOX_DIR/.self"
 
 # COORD_INBOX_NUDGE_TEMPLATE: the fixed, short doorbell text — "%N" is
 # substituted with the live coord-inbox/*.md count at paste time (never
@@ -7559,13 +7601,21 @@ worker_compact_pass() {
 # paste" before this issue (see this file's header comment). Failure here
 # is logged but non-fatal — an inbox write that can't land shouldn't also
 # block the doorbell attempt that follows it.
+#
+# (issue #461) Also drops a same-named marker under COORD_INBOX_SELF_DIR —
+# see that var's header comment for why on_inbox_drop needs it. Best-effort
+# like the write itself: a lost marker only means this file's own arrival
+# gets treated as if it were an external drop (one extra, harmless
+# debounce-covered wake re-check under the default DEBOUNCE_SECS), not a
+# correctness problem.
 coord_inbox_write() {
     local kind="$1" content="$2" tmp final
-    mkdir -p "$COORD_INBOX_DIR" "$COORD_INBOX_PROCESSED_DIR" 2>/dev/null || true
+    mkdir -p "$COORD_INBOX_DIR" "$COORD_INBOX_PROCESSED_DIR" "$COORD_INBOX_SELF_DIR" 2>/dev/null || true
     tmp="$(mktemp "$COORD_INBOX_DIR/.tmp.coord-inbox.XXXXXX" 2>/dev/null)" || return 1
     printf '%s\n' "$content" > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
     final="$COORD_INBOX_DIR/$(date -u +%Y%m%dT%H%M%SZ)-${kind}-$$-${RANDOM}.md"
     mv -f "$tmp" "$final" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
+    touch "$COORD_INBOX_SELF_DIR/$(basename "$final").self" 2>/dev/null || true
 }
 
 # coord_inbox_count
@@ -8758,6 +8808,108 @@ on_message() {
     fi
 }
 
+# on_inbox_drop <coord-inbox-md-path>
+#
+# (issue #461) A *.md file landed in COORD_INBOX_DIR itself. Before this,
+# nothing watched that directory for arrivals — on_outcome/on_message/
+# on_activity/the stall/stranded-brief/worktree-vanished sweeps all write
+# there via coord_inbox_write, but each of THOSE already attempts its own
+# wake right after writing, so the gap was invisible as long as every
+# coord-inbox file came from one of them. The case this closes is a file
+# dropped there by something ELSE — a util-pane driver script signaling
+# job completion into the inbox is the documented #430 idiom for "tell the
+# coordinator something without polling" — which no dispatch path ever
+# observed: the reported incident left a done-note sitting unannounced for
+# 2h23m (coordinator idle, zero workers, so zero outcome/outbox events ever
+# gave it a chance to ride along on an unrelated wake).
+#
+# No coord_inbox_write call here — the file already exists; this is purely
+# the missing wake ATTEMPT, run through the same debounce/hold-gate/
+# llm-start path as on_outcome/on_message/on_activity. The COORD_INBOX_
+# SELF_DIR marker check below is what keeps this from re-litigating a wake
+# one of THOSE is already deciding for itself: a first version of this fix
+# instead assumed wake_debounced() would always see a clock the original
+# caller just set and hold this as a harmless no-op — true at the default
+# DEBOUNCE_SECS=30, but this file's own tests run several scenarios at
+# DEBOUNCE_SECS=0, where nothing stopped this function from re-deciding
+# the SAME wake a second time through a different path and racing
+# coord_wake_hold_retry_pass/coord_wake_retry_pass for who delivers it
+# (caught by test-coordinator-inbox.sh's busy-pane-defer case misfiring as
+# a direct delivery instead of the expected deferred one). The marker
+# check turns "probably debounced" into "definitely already somebody
+# else's wake to decide" — skip outright, let that caller's own retry
+# machinery resolve it (coord_inbox_nudge_text re-counts the inbox live at
+# delivery time, so this file's content isn't lost, only its OWN wake
+# decision is).
+on_inbox_drop() {
+    local path="$1"
+    local now self_marker
+    now=$(date +%s)
+    log_event coord.inbox.drop "path=$path"
+
+    self_marker="$COORD_INBOX_SELF_DIR/$(basename "$path").self"
+    if [ -e "$self_marker" ]; then
+        rm -f "$self_marker" 2>/dev/null || true
+        echo "[$(date +%T)] inbox: $path — written by this watcher's own coord_inbox_write; its caller already decided this wake"
+        log_event coord.inbox.drop.skip "reason=self_written path=$path"
+        return
+    fi
+
+    if wake_debounced; then
+        echo "[$(date +%T)] inbox: $path — within debounce window (${DEBOUNCE_SECS}s), holding doorbell for retry"
+        log_event coord.wake.defer "reason=debounce window=${DEBOUNCE_SECS}s trigger=inbox_drop"
+        coord_wake_hold_mark_pending debounce
+        return
+    fi
+
+    echo "[$(date +%T)] inbox: $path"
+
+    # issue #430/#459: same doorbell hold gate as on_outcome/on_message —
+    # see on_outcome's identical branch for the full rationale.
+    local hold_reason
+    hold_reason="$(coord_wake_hold_reason)"
+    if [ -n "$hold_reason" ]; then
+        echo "[$(date +%T)] coordinator not free to take a doorbell ($hold_reason) — deferring, will retry"
+        log_event coord.wake.defer "reason=$hold_reason trigger=inbox_drop"
+        coord_wake_hold_mark_pending "$hold_reason"
+    else
+        maybe_auto_compact wake
+
+        echo "[$(date +%T)] waking coordinator (inbox drop)..."
+        local nudge
+        nudge="$(coord_inbox_nudge_text)"
+        log_event coord.wake "trigger=inbox_drop:$(basename "$path")"
+
+        if [ "$DRY_RUN" = "1" ]; then
+            echo "[DRY] would: cd $PROJECT_DIR && NON_INTERACTIVE=1 $LLM_START \"$nudge\""
+        else
+            local wake_rc=0
+            ( flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 9 && cd "$PROJECT_DIR" && NON_INTERACTIVE=1 "$LLM_START" "$nudge" ) 9>"$COORD_WAKE_LOCK" || wake_rc=$?
+            if [ "$wake_rc" = "3" ]; then
+                echo "[$(date +%T)] coordinator composer holds an unsubmitted draft — deferring wake, will retry"
+                log_event coord.wake.deferred "reason=composer_dirty trigger=inbox_drop"
+                coord_wake_set_pending "$nudge"
+            elif [ "$wake_rc" != "0" ]; then
+                echo "[$(date +%T)] WARN: coordinator wake exited non-zero (continuing watch)"
+                log_event coord.wake.error "trigger=inbox_drop rc=$wake_rc"
+            else
+                coord_wake_clear_pending
+                coord_wake_hold_clear_pending
+            fi
+        fi
+    fi
+    wake_clock_set "$now"
+
+    if [ "$ONCE" = "1" ]; then
+        echo "[$(date +%T)] ONCE=1 — exiting after first wake."
+        log_event watch.exit "reason=once"
+        # Same pane-echo grace period as on_outcome's ONCE path — see the
+        # comment there for why 1.5s.
+        [ "$WATCHER_QUIET" = "1" ] || sleep 1.5
+        exit 0
+    fi
+}
+
 # on_activity <lines>
 #
 # (issue #392) activity_poll_pass found operator activity (PR merge / issue
@@ -8945,9 +9097,10 @@ stall_wake_pass() {
 # ---------------------------------------------------------------------------
 run_inotify() {
     # Watch the workspace (parent of project) recursively, filtering events
-    # to only outcomes inside wt-issue-*/.swarm/tasks/done/. The listener
-    # does `mv processing/X.md done/X.md` followed by writing done/X.json —
-    # both surface as create/moved_to events.
+    # to outcomes inside wt-issue-*/.swarm/tasks/done/, outbox messages,
+    # claim markers, and (issue #461) this project's own coord-inbox/. The
+    # listener does `mv processing/X.md done/X.md` followed by writing
+    # done/X.json — both surface as create/moved_to events.
     #
     # issue #357: this name-glob CAN match a sibling project's worktree
     # under flat grouping (inotifywait has no equivalent of `git worktree
@@ -9002,6 +9155,20 @@ run_inotify() {
                 # not worth chasing further on a host that runs the poll
                 # backend in practice (inotify-tools isn't installed here).
                 dispatch_selfheal_claim "$path"
+                ;;
+            "$COORD_INBOX_PROCESSED_DIR"/*)
+                # Lifecycle archive (coordinator mv after handling, or this
+                # watcher's own coord_inbox_write targets COORD_INBOX_DIR
+                # directly and never this subdir) — not a new item.
+                ;;
+            "$COORD_INBOX_DIR"/*.md)
+                # issue #461: a file landed in the coordinator's own inbox —
+                # see on_inbox_drop's header for why this needs its own
+                # watch (not just the done/outbox/claims ones above) and
+                # why firing it for a file this watcher itself just wrote
+                # (via coord_inbox_write in on_outcome/on_message/
+                # on_activity/the periodic sweeps) is harmless.
+                on_inbox_drop "$path"
                 ;;
         esac
     done
@@ -9106,6 +9273,27 @@ run_poll() {
             if [ "$WATCH_OUTBOX" = "1" ] && [ "${#outbox_dirs[@]}" -gt 0 ]; then
                 find "${outbox_dirs[@]}" -maxdepth 1 -name '*.md' -print 2>/dev/null
             fi
+            # issue #461: this project's own coord-inbox/ — a file landed
+            # there by something other than this watcher's own
+            # coord_inbox_write (a util-pane driver script's done-note, the
+            # #430 idiom for signaling completion without polling) never
+            # triggered any dispatch path before this; see on_inbox_drop's
+            # header. -maxdepth 1 keeps coord-inbox/processed/ out of the
+            # scan, same as outbox/processed/ above. `if`, not `&&`, the
+            # same guard style done_dirs/outbox_dirs use above — the
+            # script runs under `set -e`, and COORD_INBOX_DIR usually
+            # doesn't exist yet on a fresh project (mkdir -p happens
+            # lazily, in coord_inbox_write's first call): a bare `[ -d
+            # ... ] && find ...` with the dir absent evaluates to the
+            # test's own false/1, and as the LAST statement in this
+            # function that exit status becomes scan_outcomes' return
+            # value — which, unguarded by a conditional, kills the whole
+            # watcher via set -e on its very first poll tick (caught by
+            # this issue's own test suite: every outcome/outbox test
+            # failed as soon as this line was added bare).
+            if [ -d "$COORD_INBOX_DIR" ]; then
+                find "$COORD_INBOX_DIR" -maxdepth 1 -name '*.md' -print 2>/dev/null
+            fi
         } | sort -u
     }
 
@@ -9130,6 +9318,7 @@ run_poll() {
             while IFS= read -r path; do
                 [ -z "$path" ] && continue
                 case "$path" in
+                    "$COORD_INBOX_DIR"/*.md)     on_inbox_drop "$path" ;;
                     */.swarm/tasks/outbox/*.md)  dispatch_message "$path" ;;
                     *)                            dispatch_outcome "$path" ;;
                 esac

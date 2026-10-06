@@ -429,6 +429,7 @@ WAKE_DEFER_ON_SWARM_BUSY=0
 DEBOUNCE_SECS=0
 COORD_INBOX_DIR="$LOCK_TEST_DIR/coord-inbox"
 COORD_INBOX_PROCESSED_DIR="$COORD_INBOX_DIR/processed"
+COORD_INBOX_SELF_DIR="$COORD_INBOX_DIR/.self"
 COORD_INBOX_NUDGE_TEMPLATE="Inbox: %N item(s) probe"
 # coordinator_pane_busy needs these two even though there's no real tmux
 # session behind SESSION_NAME here — its own `tmux capture-pane ... ||
@@ -1003,6 +1004,7 @@ WORKSPACE="$TEST_DIR"
 EVENTS_LOG="$PROJECT_DIR/.swarm/events.log"
 COORD_INBOX_DIR="$PROJECT_DIR/.swarm/coord-inbox"
 COORD_INBOX_PROCESSED_DIR="$COORD_INBOX_DIR/processed"
+COORD_INBOX_SELF_DIR="$COORD_INBOX_DIR/.self"
 ACTIVITY_WAKE_PROMPT=""                    # so on_activity builds its default body (embeds $lines)
 : > "$EVENTS_LOG"
 rm -rf "$COORD_INBOX_DIR"
