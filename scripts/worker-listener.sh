@@ -963,13 +963,13 @@ poll_for_brief() {
     done
 }
 
-# check_claim_active — issue #555 self-review round 13: is a check-on-done
-# run (coordinator-watch.sh's execute_check, this PR's pane) genuinely
-# still running for this worktree right now? A check command's own
-# process lives in a PANE, not this listener — but it shares this
-# window, so if this listener's own pane (index 0) exits cleanly while
-# that check is still mid-run, tmux renumbers the still-alive check pane
-# down into slot 0 the instant pane 0 is destroyed, and every
+# check_claim_active — is a check-on-done run (coordinator-watch.sh's
+# execute_check) genuinely still running for this worktree right now? A
+# check command's own process lives in a PANE split into this same
+# window (issue #561), not this listener — so if this listener's own
+# pane (index 0) exits cleanly while that check is still mid-run, tmux
+# renumbers the still-alive check pane down into slot 0 the instant pane
+# 0 is destroyed, and every
 # pane_dead(head -1) reader in the codebase (provision-worker.sh's
 # reclaim guard, has_live_window_draining_brief, check-stuck-workers.sh)
 # reads that genuinely-running check command as a live worker until it
@@ -993,17 +993,17 @@ check_claim_active() {
     return 1
 }
 
-# close_window_and_exit — issue #555 self-review round 14: a plain `exit 0`
-# here only destroys THIS pane. Before this PR, that was enough — the
-# worker's own pane was the only pane in its window, so destroying it
-# destroyed the window too. Now that a check-on-done run shares this same
-# window as a second pane (this PR's whole premise, execute_check() in
-# coordinator-watch.sh), a dead check pane (round 12's `exit 1`, left
-# around on purpose for post-mortem review) is still in the window and
-# survives this pane's exit — tmux just renumbers it down into slot 0, and
-# the window stays open holding only that dead pane. It then reads as a
-# DEAD-PANE to check-stuck-workers.sh and keeps counting toward
-# MAX_TMUX_WINDOWS until something else notices and reaps it, which
+# close_window_and_exit — a plain `exit 0` here only destroys THIS pane.
+# When the worker's own pane was the only pane in its window, that was
+# enough — destroying it destroyed the window too. Now that a
+# check-on-done run can share this same window as a second pane (issue
+# #561, execute_check() in coordinator-watch.sh splits a pane into iss-N
+# rather than always opening a separate window), a check pane that has
+# already exited (passed and not yet reaped, or a crashed run) is still
+# in the window and survives this pane's exit — tmux just renumbers it
+# down into slot 0, and the window stays open holding only that dead
+# pane. It then reads as a DEAD-PANE to check-stuck-workers.sh and keeps
+# counting toward MAX_TMUX_WINDOWS until something else notices it, which
 # contradicts the "window will close" message both call sites below print.
 # Killing the whole window explicitly (not just this pane) makes that
 # promise true unconditionally, whatever else is left in it. No-op outside
