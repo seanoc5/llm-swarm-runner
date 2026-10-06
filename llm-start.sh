@@ -34,6 +34,8 @@ LLM_SWARM_DIR="${LLM_SWARM_DIR:-$SCRIPT_DIR}"
 
 SESSION_NAME="llm-$(basename "$PWD")"
 SYSTEM_PROMPT_FILE="$LLM_SWARM_DIR/prompts/coordinator.md"
+# Matches install-tmux-binding.sh's own default — same file, same override.
+TMUX_CONF="${TMUX_CONF:-$HOME/.tmux.conf}"
 
 # Per-repo tmux socket isolates swarm sessions from the user's default tmux
 # server. Different `-L name` = different tmux server = independent
@@ -840,17 +842,30 @@ if ! $session_existed; then
     # send-keys and pastes would address a pane that doesn't exist and
     # fail silently, since those calls swallow errors).
     #
-    # Trade-off, not a free lunch: this also drops whatever ELSE the user's
-    # conf sets for THIS socket only — mouse mode, prefix key, status-bar
-    # styling, custom bindings — since skipping the file is all-or-nothing.
-    # The project-specific options this socket actually needs are already
-    # set explicitly right below (@resurrect-dir/@continuum-*,
-    # remain-on-exit, history-limit) rather than sourced, so the swarm
-    # itself loses nothing — but a user who attaches and expects their own
-    # tmux muscle memory to work on this session specifically will find it
-    # doesn't. Harmless on an already-running server (a later `tmux`
-    # command on this socket ignores -f).
+    # Trade-off, not a free lunch: skipping the file at THIS exact moment
+    # means pane 0 of the very first (coordinator) pane is guaranteed to
+    # come up at index 0 regardless of the user's conf — but it would
+    # also drop everything else that conf sets (mouse mode, prefix key,
+    # status-bar styling, custom bindings, including the project's own
+    # Ctrl-Z binding — see the source-file call right below, which gets
+    # those back on this socket a moment later, after that one pane
+    # already exists). Harmless on an already-running server (a later
+    # `tmux` command on this socket ignores -f).
     tmux -f /dev/null new-session -d -s "$SESSION_NAME" "${TMUX_ENV_OPTS[@]}" -n "coordinator"
+
+    # issue #555 self-review: -f /dev/null above means a BRAND-NEW swarm
+    # socket never sources ~/.tmux.conf at all — including the Ctrl-Z
+    # worker-escape-hatch / coordinator-scratch-pane binding
+    # install-tmux-binding.sh installs there. That script already
+    # reloads it on every ALREADY-RUNNING swarm-* socket after an
+    # install/update; a cold socket just never got that reload once, so
+    # giving it the same `source-file` treatment here — right after
+    # creation, before anything else runs on it — is the one-time
+    # equivalent for the socket's very first moment. The belt-and-
+    # suspenders `pane-base-index 0` a few lines below still runs
+    # unconditionally after this, so a user conf setting that option
+    # differently can't undo the issue #550 fix this socket exists for.
+    [ -f "$TMUX_CONF" ] && tmux source-file "$TMUX_CONF" 2>/dev/null || true
 
     # Pin resurrect state to this repo, disable continuum autosave/restore on
     # the swarm server. The swarm is recreated via llm-start.sh, so we don't
