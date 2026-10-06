@@ -8868,6 +8868,18 @@ on_message() {
 # 2h23m (coordinator idle, zero workers, so zero outcome/outbox events ever
 # gave it a chance to ride along on an unrelated wake).
 #
+# External producers should write the same way coord_inbox_write does —
+# a tmp file elsewhere plus an atomic `mv` into COORD_INBOX_DIR, never an
+# in-place truncate+write (`echo ... > done.md` over an existing file) —
+# for two reasons self-review found (round 6): (1) the inotify backend
+# only arms on create/moved_to, so an in-place rewrite of an existing
+# filename fires neither and is never seen at all; (2) on the poll
+# backend, a non-atomic write caught mid-write can get its marker touched
+# before the write finishes, making the finished file look "newer than
+# its own marker" to the round-4 freshness check and ring a second,
+# spurious doorbell for what was really one note. Both go away if the
+# file only ever appears via a single atomic rename.
+#
 # No coord_inbox_write call here — the file already exists; this is purely
 # the missing wake ATTEMPT, run through the same debounce/hold-gate/
 # llm-start path as on_outcome/on_message/on_activity. The COORD_INBOX_
