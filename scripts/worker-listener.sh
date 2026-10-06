@@ -963,6 +963,36 @@ poll_for_brief() {
     done
 }
 
+# check_claim_active — issue #555 self-review round 13: is a check-on-done
+# run (coordinator-watch.sh's execute_check, this PR's pane) genuinely
+# still running for this worktree right now? A check command's own
+# process lives in a PANE, not this listener — but it shares this
+# window, so if this listener's own pane (index 0) exits cleanly while
+# that check is still mid-run, tmux renumbers the still-alive check pane
+# down into slot 0 the instant pane 0 is destroyed, and every
+# pane_dead(head -1) reader in the codebase (provision-worker.sh's
+# reclaim guard, has_live_window_draining_brief, check-stuck-workers.sh)
+# reads that genuinely-running check command as a live worker until it
+# finishes. Same claim-dir ground truth kill-worktree.sh's reap-defer
+# path (issue #181) already uses for the identical "real or abandoned"
+# question — a stale claim (crashed check, nothing left to ever release
+# it) must not block a close forever.
+mtime_epoch() {
+    stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
+}
+
+check_claim_active() {
+    local stale_secs="${CHECK_CLAIM_STALE_SECS:-$((CHECK_TIMEOUT + 300))}"
+    local claim mtime age
+    for claim in "$STATUS"/*.check-claim; do
+        [ -d "$claim" ] || continue
+        mtime="$(mtime_epoch "$claim")" || continue
+        age=$(( $(date +%s) - mtime ))
+        [ "$age" -lt "$stale_secs" ] && return 0
+    done
+    return 1
+}
+
 run_idle_shell() {
     rm -f "$IDLE_SENTINEL"
     poll_for_brief &
@@ -1044,6 +1074,15 @@ EOF
     # untracked material; clean it up host-side with kill-worktree.sh when
     # genuinely done with it.
     if [ -f "$CLOSE_SENTINEL" ]; then
+        # issue #555 self-review round 13: wait out a genuinely still-
+        # running check (see check_claim_active above) before actually
+        # exiting — this already-exited idle shell, not an interactive
+        # one, so this just pauses the listener process itself, with the
+        # pane showing the wait message.
+        while check_claim_active; do
+            echo "[$(date +%T)] close requested, but $WT_LABEL's check-on-done is still running — waiting for it to finish before closing."
+            sleep 5
+        done
         rm -f "$CLOSE_SENTINEL"
         echo "[$(date +%T)] close requested: listener exiting — window will close. Worktree $WT_LABEL/ is left intact (remove later with kill-worktree.sh)."
         exit 0
@@ -1058,6 +1097,10 @@ EOF
         local pending
         pending=$(find "$INBOX" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | head -1)
         if [ -z "$pending" ]; then
+            while check_claim_active; do
+                echo "[$(date +%T)] double exit requested, but $WT_LABEL's check-on-done is still running — waiting for it to finish before closing."
+                sleep 5
+            done
             echo "[$(date +%T)] double exit: listener exiting — window will close. Worktree $WT_LABEL/ is left intact (remove later with kill-worktree.sh)."
             exit 0
         fi

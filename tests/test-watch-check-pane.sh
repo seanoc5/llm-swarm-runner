@@ -863,15 +863,12 @@ stop_watcher
 heading "Test 16: a resolved check pane is left DEAD (not an interactive shell), so it reads as a corpse rather than a live worker once the worker's own pane exits cleanly and tmux renumbers the check pane down into slot 0 (self-review round 12 finding)"
 # ============================================================================
 
-# Production (llm-start.sh) sets remain-on-exit=failed globally: a CLEAN
-# (zero) exit destroys that pane outright (no dead-but-visible state at
-# all), while a non-zero exit leaves it around as [dead]. Test 8 switched
-# this session's global to "on" (which keeps a pane around on ANY exit,
-# zero or not) — that's the wrong semantics for THIS test, which depends
-# on a clean exit actually destroying pane 0, so override it back to
-# "failed" for this one window only (same per-window-override technique
-# llm-start.sh/provision-worker.sh themselves use for pane-base-index,
-# verified in test-llm-start-tmux-bootstrap.sh's Tests 4-5).
+# remain-on-exit=failed is already the session global (set at session
+# creation, above, matching production): a CLEAN (zero) exit destroys a
+# pane outright (no dead-but-visible state at all), while a non-zero
+# exit leaves it around as [dead] — exactly the two behaviors this test
+# needs from the worker pane and the check pane respectively, with no
+# further override needed here.
 git -C "$PROJ" worktree add -q -b fix/issue-911 "$TEST_DIR/wt-issue-911"
 WT911="$TEST_DIR/wt-issue-911"
 mkdir -p "$WT911/.swarm/tasks/status"
