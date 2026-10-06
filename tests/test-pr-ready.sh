@@ -18,11 +18,13 @@
 # whether `gh pr ready` actually runs) rather than the review itself. gh
 # stubbed via a PATH shim, same technique as test-pr-brief-marker.sh.
 #
-# issue #473 (Tests 12-17): also covers the CI-green-before-ready gate (a
+# issue #473 (Tests 12-19, numbered in file order): also covers the
+# CI-green-before-ready gate (a
 # `gh pr checks` snapshot taken right before readying, controlled here via
-# GH_CHECKS_RC/GH_CHECKS_STDERR) and the self-review round cap
-# (WORKER_SELF_REVIEW_MAX_ROUNDS, controlled via GH_ROUNDS_DONE standing in
-# for the count of prior SWARM_SELF_REVIEW marker comments on the PR).
+# GH_CHECKS_RC/GH_CHECKS_STDERR/GH_WORKFLOW_COUNT) and the self-review round
+# cap (WORKER_SELF_REVIEW_MAX_ROUNDS, controlled via GH_ROUNDS_DONE standing
+# in for the count of prior SWARM_SELF_REVIEW marker comments, and
+# GH_LATEST_VERDICT for the latest one's verdict).
 set -euo pipefail
 
 green()   { printf '\033[32m✓ %s\033[0m\n' "$*"; }
@@ -72,6 +74,10 @@ fi
 if [ "\$1" = "pr" ] && [ "\$2" = "ready" ]; then
     exit 0
 fi
+if [ "\$1" = "api" ]; then
+    echo "\${GH_WORKFLOW_COUNT:-0}"
+    exit 0
+fi
 exit 1
 EOF
 chmod +x "$SHIM_DIR/gh"
@@ -99,6 +105,7 @@ run_pr_ready() {
         WORKER_SELF_REVIEW_MAX_ROUNDS="${WORKER_SELF_REVIEW_MAX_ROUNDS:-3}" \
         GH_ROUNDS_DONE="${GH_ROUNDS_DONE:-0}" GH_LATEST_VERDICT="${GH_LATEST_VERDICT:-}" \
         GH_CHECKS_RC="${GH_CHECKS_RC:-0}" GH_CHECKS_STDERR="${GH_CHECKS_STDERR:-}" \
+        GH_WORKFLOW_COUNT="${GH_WORKFLOW_COUNT:-0}" \
         "$PR_READY" 42 \
         > "$TEST_DIR/out.log" 2>&1 || rc=$?
     return "$rc"
@@ -253,22 +260,39 @@ grep -qi 'REFUSED' "$TEST_DIR/out.log" || red "expected a REFUSED message in out
 green "failing CI checks refuse to ready the PR (the fand-etl PR #1063 bug this issue closes)"
 
 # ============================================================================
-heading "Test 14: no CI checks configured at all ('no checks reported') — WARNs, still readies"
+heading "Test 14: no CI checks configured at all (0 workflows) — WARNs, still readies"
 # ============================================================================
 printf '<!-- BLIND_MERGE_RISK: low -->\nsome change\n' > "$BODY_FILE"
 make_fake_review 0
 GH_CHECKS_RC=1
 GH_CHECKS_STDERR="no checks reported on the 'main' branch"
+GH_WORKFLOW_COUNT=0
 rc=0; run_pr_ready || rc=$?
 GH_CHECKS_RC=0
 GH_CHECKS_STDERR=""
 [ "$rc" -eq 0 ] || red "expected exit 0 when no CI is configured, got $rc: $(cat "$TEST_DIR/out.log")"
 gh_ready_called || red "expected gh pr ready to still run when no CI checks are configured"
 grep -qi 'WARN' "$TEST_DIR/out.log" || red "expected a WARN about the absent checks: $(cat "$TEST_DIR/out.log")"
-green "no CI configured at all is a pass-with-warning, not a refusal"
+green "no CI configured at all (0 workflows) is a pass-with-warning, not a refusal"
 
 # ============================================================================
-heading "Test 15: self-review round cap reached — skips another round, still readies on CI-green"
+heading "Test 15: 'no checks reported' but the repo HAS workflows (post-push race) — refuses"
+# ============================================================================
+printf '<!-- BLIND_MERGE_RISK: low -->\nsome change\n' > "$BODY_FILE"
+make_fake_review 0
+GH_CHECKS_RC=1
+GH_CHECKS_STDERR="no checks reported on the 'main' branch"
+GH_WORKFLOW_COUNT=2
+rc=0; run_pr_ready || rc=$?
+GH_CHECKS_RC=0
+GH_CHECKS_STDERR=""
+GH_WORKFLOW_COUNT=0
+[ "$rc" -eq 4 ] || red "expected exit 4 when checks report absent but workflows exist (round-2 self-review finding), got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called && red "expected gh pr ready NOT to run when this commit's CI run hasn't registered yet"
+green "'no checks reported' with workflows configured is treated as pending, not absent (closes the post-push race self-review found)"
+
+# ============================================================================
+heading "Test 16: self-review round cap reached — skips another round, still readies on CI-green"
 # ============================================================================
 printf '<!-- BLIND_MERGE_RISK: medium -->\nsome change\n' > "$BODY_FILE"
 make_fake_review 0
@@ -284,7 +308,7 @@ grep -qi 'round cap reached' "$TEST_DIR/out.log" || red "expected a round-cap me
 green "hitting the self-review round cap skips another round and folds findings into Follow-up suggestions instead"
 
 # ============================================================================
-heading "Test 16: WORKER_SELF_REVIEW_MAX_ROUNDS=0 — self-review disabled, readies anyway"
+heading "Test 17: WORKER_SELF_REVIEW_MAX_ROUNDS=0 — self-review disabled, readies anyway"
 # ============================================================================
 printf '<!-- BLIND_MERGE_RISK: medium -->\nsome change\n' > "$BODY_FILE"
 make_fake_review 0
@@ -297,7 +321,7 @@ gh_ready_called || red "expected gh pr ready to still run when WORKER_SELF_REVIE
 green "WORKER_SELF_REVIEW_MAX_ROUNDS=0 disables self-review entirely and still readies"
 
 # ============================================================================
-heading "Test 17: below the round cap — self-review still runs normally, round number logged"
+heading "Test 18: below the round cap — self-review still runs normally, round number logged"
 # ============================================================================
 printf '<!-- BLIND_MERGE_RISK: medium -->\nsome change\n' > "$BODY_FILE"
 make_fake_review 0
@@ -310,7 +334,7 @@ grep -q 'round 2/3' "$TEST_DIR/out.log" || red "expected the round number in out
 green "below the cap, self-review runs normally and logs its round number"
 
 # ============================================================================
-heading "Test 18: round cap reached with a BLOCK as the latest verdict — still refuses"
+heading "Test 19: round cap reached with a BLOCK as the latest verdict — still refuses"
 # ============================================================================
 printf '<!-- BLIND_MERGE_RISK: medium -->\nsome change\n' > "$BODY_FILE"
 make_fake_review 0
@@ -326,6 +350,5 @@ WORKER_SELF_REVIEW_MAX_ROUNDS=3
 gh_ready_called && red "expected gh pr ready NOT to run when capped with a BLOCK latest verdict"
 grep -qi 'BLOCK' "$TEST_DIR/out.log" || red "expected a BLOCK refusal message in output: $(cat "$TEST_DIR/out.log")"
 green "hitting the round cap with BLOCK as the latest verdict still refuses to ready (does not ready unreviewed)"
-green "below the cap, self-review runs normally and logs its round number"
 
 green "ALL TESTS PASSED"

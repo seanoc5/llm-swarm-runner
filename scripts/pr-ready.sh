@@ -251,7 +251,24 @@ case "$CHECKS_RC" in
         ;;
     1)
         if grep -qi "no checks reported" <<<"$CHECKS_OUT"; then
-            echo "pr-ready: WARN: no CI checks reported on PR #$PR — proceeding (nothing configured to wait for)." >&2
+            # issue #473 round-2 self-review: "no checks reported" also
+            # covers the ordinary post-push race where CI IS configured but
+            # this commit's run hasn't registered yet (ci-wait.sh's own
+            # issue #452 comment) — trusting the message alone would let a
+            # worker ready within seconds of pushing, before CI even
+            # started, reopening the #1063 failure the CI gate exists to
+            # close. Disambiguate the same way ci-wait.sh does: a workflow
+            # count of 0 means there is really nothing to wait for; any
+            # other count (including an unreadable one) means treat it as
+            # still pending.
+            WORKFLOW_COUNT="$(gh api 'repos/{owner}/{repo}/actions/workflows' --jq '.total_count' 2>/dev/null || true)"
+            if [ "$WORKFLOW_COUNT" = "0" ]; then
+                echo "pr-ready: WARN: PR #$PR has no CI checks configured on this repo at all (0 workflows) — proceeding." >&2
+            else
+                echo "pr-ready: REFUSED — PR #$PR reports 'no checks reported' but this repo has CI configured — this commit's run likely hasn't registered yet." >&2
+                echo "          Run 'scripts/ci-wait.sh $PR' to wait for a real result, then re-run pr-ready.sh." >&2
+                exit 4
+            fi
         else
             echo "pr-ready: REFUSED — PR #$PR has failing CI checks:" >&2
             echo "$CHECKS_OUT" >&2
