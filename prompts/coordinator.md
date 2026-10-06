@@ -71,6 +71,8 @@ First, `gh issue list --state closed --search "<2-3 distinctive words>"` to catc
 {{LLM_SWARM_DIR}}/scripts/provision-worker.sh 42
 ```
 
+**Give the call an explicit timeout covering `PROVISION_SPAWN_CHECK_SECS`** (default 120s) **plus ~60s** of admission/setup overhead ahead of it — the post-spawn health poll (see exit 4/6 above) can legitimately run the whole ceiling on a loaded host, and the default tool timeout killing the call into silence is exactly how a coordinator ends up re-provisioning an issue that was never actually confirmed dead (the double-provision exit 6 exists to prevent — a killed tool call looks the same as a crash, with no exit code to read).
+
 It creates the worktree and branch, embeds `.swarm-policy.md` and the issue body into the brief, and spawns the window. Re-running is safe and queues a follow-up.
 
 ## Talking to workers
