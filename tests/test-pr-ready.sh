@@ -55,7 +55,11 @@ cat > "$SHIM_DIR/gh" <<EOF
 echo "\$*" >> "$GH_LOG"
 if [ "\$1" = "pr" ] && [ "\$2" = "view" ]; then
     if printf '%s\n' "\$*" | grep -q -- '--json comments'; then
-        echo "\${GH_ROUNDS_DONE:-0}"
+        if printf '%s\n' "\$*" | grep -q -- 'capture('; then
+            echo "\${GH_LATEST_VERDICT:-}"
+        else
+            echo "\${GH_ROUNDS_DONE:-0}"
+        fi
     else
         cat "$BODY_FILE"
     fi
@@ -93,7 +97,7 @@ run_pr_ready() {
     rc=0
     PATH="$SHIM_DIR:$PATH" SELF_REVIEW_SCRIPT="$FAKE_REVIEW" WORKER_SELF_REVIEW="${WORKER_SELF_REVIEW:-1}" \
         WORKER_SELF_REVIEW_MAX_ROUNDS="${WORKER_SELF_REVIEW_MAX_ROUNDS:-3}" \
-        GH_ROUNDS_DONE="${GH_ROUNDS_DONE:-0}" \
+        GH_ROUNDS_DONE="${GH_ROUNDS_DONE:-0}" GH_LATEST_VERDICT="${GH_LATEST_VERDICT:-}" \
         GH_CHECKS_RC="${GH_CHECKS_RC:-0}" GH_CHECKS_STDERR="${GH_CHECKS_STDERR:-}" \
         "$PR_READY" 42 \
         > "$TEST_DIR/out.log" 2>&1 || rc=$?
@@ -303,6 +307,25 @@ GH_ROUNDS_DONE=0
 [ "$rc" -eq 0 ] || red "expected exit 0 below the cap, got $rc: $(cat "$TEST_DIR/out.log")"
 grep -q '42 --post --force' "$FAKE_REVIEW_LOG" || red "expected self-review invoked below the cap, log: $(cat "$FAKE_REVIEW_LOG")"
 grep -q 'round 2/3' "$TEST_DIR/out.log" || red "expected the round number in output: $(cat "$TEST_DIR/out.log")"
+green "below the cap, self-review runs normally and logs its round number"
+
+# ============================================================================
+heading "Test 18: round cap reached with a BLOCK as the latest verdict — still refuses"
+# ============================================================================
+printf '<!-- BLIND_MERGE_RISK: medium -->\nsome change\n' > "$BODY_FILE"
+make_fake_review 0
+GH_ROUNDS_DONE=3
+GH_LATEST_VERDICT=BLOCK
+WORKER_SELF_REVIEW_MAX_ROUNDS=3
+rc=0; run_pr_ready || rc=$?
+GH_ROUNDS_DONE=0
+GH_LATEST_VERDICT=
+WORKER_SELF_REVIEW_MAX_ROUNDS=3
+[ "$rc" -eq 2 ] || red "expected exit 2 when capped with a BLOCK as the latest verdict, got $rc: $(cat "$TEST_DIR/out.log")"
+[ ! -s "$FAKE_REVIEW_LOG" ] || red "expected self-review-pr.sh NOT invoked once the round cap is reached, log: $(cat "$FAKE_REVIEW_LOG")"
+gh_ready_called && red "expected gh pr ready NOT to run when capped with a BLOCK latest verdict"
+grep -qi 'BLOCK' "$TEST_DIR/out.log" || red "expected a BLOCK refusal message in output: $(cat "$TEST_DIR/out.log")"
+green "hitting the round cap with BLOCK as the latest verdict still refuses to ready (does not ready unreviewed)"
 green "below the cap, self-review runs normally and logs its round number"
 
 green "ALL TESTS PASSED"

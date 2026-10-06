@@ -51,13 +51,16 @@
 # prior round — self-review-pr.sh --post --force always adds a fresh
 # comment, never edits one in place). Once that count reaches
 # WORKER_SELF_REVIEW_MAX_ROUNDS (default 3), this script stops calling
-# self-review-pr.sh and readies on whatever verdict history already exists
-# — the fand-etl PR #1063 incident (2026-09-25/26) ran ~15 rounds over 2h15m
-# for 23 mostly-cosmetic follow-up commits with no stop condition. The
-# worker is expected to fold any remaining findings into the PR body's
-# `## Follow-up suggestions` block instead of chasing them with more
-# commits (prompts/worker.md § "Self-review before merge"). 0 disables
-# self-review entirely, same effect as WORKER_SELF_REVIEW=0.
+# self-review-pr.sh — the fand-etl PR #1063 incident (2026-09-25/26) ran ~15
+# rounds over 2h15m for 23 mostly-cosmetic follow-up commits with no stop
+# condition. The worker is expected to fold any remaining findings into the
+# PR body's `## Follow-up suggestions` block instead of chasing them with
+# more commits (prompts/worker.md § "Self-review before merge"). 0 disables
+# self-review entirely, same effect as WORKER_SELF_REVIEW=0. Capping the
+# round does NOT skip the gate: it still checks the latest already-posted
+# verdict and refuses (exit 2, same as a fresh BLOCK) if that verdict is
+# BLOCK — a PR capped right after a BLOCK round must not ready unreviewed
+# (self-review finding on this script's first version of the cap).
 #
 # issue #473: also requires CI to be observed green (or absent) on the PR's
 # head commit immediately before `gh pr ready` runs — a single `gh pr
@@ -153,6 +156,19 @@ case "$RISK" in
             if [ "$ROUNDS_DONE" -ge "$MAX_ROUNDS" ]; then
                 echo "pr-ready: self-review round cap reached ($ROUNDS_DONE/$MAX_ROUNDS rounds already posted on PR #$PR, WORKER_SELF_REVIEW_MAX_ROUNDS=$MAX_ROUNDS) — not running another round."
                 echo "          Move any remaining findings into the PR body's ## Follow-up suggestions block instead of another commit."
+                # Skipping the round must not also skip the gate: check the
+                # LATEST posted verdict (same capture pattern as
+                # review-scoreboard.sh) so a PR capped right after a BLOCK
+                # round still refuses instead of readying unreviewed
+                # (self-review finding on this script's first version).
+                LATEST_VERDICT="$(gh pr view "$PR" --json comments \
+                    --jq '[.comments[].body // "" | select(contains("SWARM_SELF_REVIEW:")) | capture("SWARM_SELF_REVIEW: (?<v>APPROVE_WITH_CAVEATS|APPROVE|BLOCK)").v] | last // empty' \
+                    2>/dev/null || true)"
+                if [ "$LATEST_VERDICT" = "BLOCK" ]; then
+                    echo "pr-ready: REFUSED — PR #$PR's latest self-review verdict is BLOCK and the round cap means no further round will run to clear it." >&2
+                    echo "          Fix the finding, then either raise WORKER_SELF_REVIEW_MAX_ROUNDS for one more round, or get a human to ready it." >&2
+                    exit 2
+                fi
             else
             echo "pr-ready: risk=$RISK — running self-review (round $((ROUNDS_DONE + 1))/$MAX_ROUNDS: $SELF_REVIEW $PR --post --force)..."
             rc=0
