@@ -424,5 +424,44 @@ green "the dead pane was replaced (not stacked) by t903b's check"
 
 stop_watcher
 
+# ============================================================================
+heading "Test 9: an INSTANT check (no sleep at all) still ends up titled chk-pass, never stuck at plain 'chk' (self-review race finding)"
+# ============================================================================
+
+# Self-review finding: the watcher used to label the pane "chk" via its
+# OWN tmux select-pane call issued right after split-window returned —
+# a check finishing in milliseconds could rename itself chk-pass/chk-fail
+# BEFORE that external call landed, which would then clobber the result
+# back to plain "chk" with nothing left alive to ever fix it. The fix
+# moved the initial "chk" label into the runner script itself, as its
+# first line, so the same single process sets both labels strictly in
+# order. An instant, zero-sleep check is the most direct way to exercise
+# that ordering.
+git -C "$PROJ" worktree add -q -b fix/issue-904 "$TEST_DIR/wt-issue-904"
+WT904="$TEST_DIR/wt-issue-904"
+mkdir -p "$WT904/.swarm/tasks/status"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$WT904/.swarm/check.sh"
+chmod +x "$WT904/.swarm/check.sh"
+printf 'fix/issue-904\tOPEN\t904\n' >> "$GH_PR_LIST_FILE"
+
+"$SHIM_TMUX" new-window -d -t "$SESSION" -n iss-904 -c "$WT904" \
+    bash -c 'while true; do echo WORKER_TICK; sleep 0.3; done'
+
+echo '{"task_id":"t904","state":"ready-for-review","pr":904,"ts":"2026-07-19T04:00:00Z"}' \
+    > "$WT904/.swarm/tasks/status/t904.json"
+
+start_watcher "$TEST_DIR/watch-5.log"
+
+wait_until 15 "t904.check.json to reach a terminal state" \
+    bash -c "grep -q '\"state\":\"pass\"\|\"state\":\"fail\"' '$WT904/.swarm/tasks/status/t904.check.json' 2>/dev/null"
+grep -q '"state":"pass"' "$WT904/.swarm/tasks/status/t904.check.json" \
+    || red "an instant check should still pass; got: $(cat "$WT904/.swarm/tasks/status/t904.check.json" 2>/dev/null)"
+
+wait_until 10 "t904's check pane to settle on chk-pass (not stuck at plain 'chk')" \
+    bash -c "$SHIM_TMUX list-panes -t '$SESSION:iss-904' -F '#{pane_title}' 2>/dev/null | grep -qx chk-pass"
+green "an instant check's pane correctly settled on chk-pass — no race against the initial 'chk' label"
+
+stop_watcher
+
 echo
 green "ALL TESTS PASSED"

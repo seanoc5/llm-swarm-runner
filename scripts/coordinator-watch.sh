@@ -5518,6 +5518,20 @@ execute_check() {
         # function if this drifts. Kept as inline shell (not a call back
         # into this script) because this runs as a separate tmux process.
         cat <<'SCRIPT'
+# issue #550 self-review: label the pane "chk" from inside the pane's own
+# process, as its very first action, rather than via a separate
+# tmux select-pane call issued by the watcher right after split-window
+# returns. tmux execs this script the instant the pane is created, so an
+# external follow-up call races a check that finishes in milliseconds —
+# it could rename the pane to chk-pass/chk-fail BEFORE the watcher's own
+# "set it to chk" call lands, which would then clobber that result back
+# to plain "chk" with nothing left alive to ever rename it again,
+# permanently reading as still-running. Doing it here instead removes
+# the race: the same single process sets the initial label, runs the
+# check, and sets the final one, strictly in that order.
+if [ "$MARK_KIND" = pane ]; then
+    tmux select-pane -t "$TMUX_PANE" -T chk 2>/dev/null || true
+fi
 echo "--- check-on-done: issue #$ISSUE (task $TASK_ID) ---"
 echo "check: $CHECK_CMD"
 timeout "$TIMEOUT_SECS" bash -c "$CHECK_CMD"
@@ -5583,14 +5597,14 @@ SCRIPT
                         | awk '$2 ~ /^chk-(pass|fail)$/ || $2 == "chk" { print $1; exit }')"
         [ -n "$stale_pane" ] && tmux kill-pane -t "$stale_pane" 2>/dev/null || true
 
+        # Note: the "chk" title is set by the runner script itself, as its
+        # first action, not here — see the race-avoidance comment at the
+        # top of the heredoc above. -P -F is kept only to detect spawn
+        # failure (empty/missing pane id).
         local new_pane
         new_pane="$(tmux split-window -d -v -l 12 -t "$SESSION_NAME:iss-$issue" -c "$wt_dir" \
                         -P -F '#{pane_id}' bash "$runner_script" 2>/dev/null)" || spawn_rc=1
-        if [ "$spawn_rc" -eq 0 ] && [ -n "$new_pane" ]; then
-            tmux select-pane -t "$new_pane" -T chk 2>/dev/null || true
-        else
-            spawn_rc=1
-        fi
+        [ "$spawn_rc" -eq 0 ] && [ -n "$new_pane" ] || spawn_rc=1
     else
         # Fallback: no iss-$issue window left to host a pane in (reaped
         # out from under an in-flight check, or check-on-done fired from

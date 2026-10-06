@@ -838,11 +838,17 @@ if ! $session_existed; then
     # pane come up as pane 1, not 0, silently breaking every `.0`-suffixed
     # explicit pane target the watcher/worker scripts rely on (captures,
     # send-keys and pastes would address a pane that doesn't exist and
-    # fail silently, since those calls swallow errors). The few options
-    # this socket actually wants from a config are already set explicitly
-    # right below (@resurrect-dir/@continuum-*, remain-on-exit,
-    # history-limit) rather than sourced, so skipping the file costs
-    # nothing. Harmless on an already-running server (a later `tmux`
+    # fail silently, since those calls swallow errors).
+    #
+    # Trade-off, not a free lunch: this also drops whatever ELSE the user's
+    # conf sets for THIS socket only — mouse mode, prefix key, status-bar
+    # styling, custom bindings — since skipping the file is all-or-nothing.
+    # The project-specific options this socket actually needs are already
+    # set explicitly right below (@resurrect-dir/@continuum-*,
+    # remain-on-exit, history-limit) rather than sourced, so the swarm
+    # itself loses nothing — but a user who attaches and expects their own
+    # tmux muscle memory to work on this session specifically will find it
+    # doesn't. Harmless on an already-running server (a later `tmux`
     # command on this socket ignores -f).
     tmux -f /dev/null new-session -d -s "$SESSION_NAME" "${TMUX_ENV_OPTS[@]}" -n "coordinator"
 
