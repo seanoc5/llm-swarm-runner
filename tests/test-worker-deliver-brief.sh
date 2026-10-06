@@ -50,7 +50,7 @@ for fn in worker_pane_state worker_pane_busy worker_pane_ctx_used worker_pending
           compact_confirm_submitted compact_retract_queued worker_deliver_record_failure \
           worker_deliver_record_success worker_deliver_detect_claim maybe_worker_deliver_brief log_event \
           is_own_worktree_dir own_wt_dir_for_issue worker_deliver_composer_stall_clear \
-          worker_deliver_record_composer_stall coord_inbox_write; do
+          worker_deliver_record_composer_stall worker_deliver_record_shell_stall coord_inbox_write; do
     body="$(extract_fn "$fn")"
     [ -n "$body" ] || red "could not extract function '$fn' from $WATCH — has it been renamed?"
     eval "$body"
@@ -69,6 +69,7 @@ WORKER_DELIVER_END_TIMEOUT_SECS=10
 WORKER_DELIVER_BACKOFF_SECS=600
 WORKER_DELIVER_MAX_FAILURES=3
 WORKER_DELIVER_COMPOSER_STALL_THRESHOLD=20
+WORKER_DELIVER_SHELL_STALL_THRESHOLD=20
 COMPACT_QUEUED_MARKER_PATTERN='Press up to edit queued messages'
 COMPACT_RETRACT_BACKSPACES=3
 COMPACT_SUBMIT_SETTLE_SECS=0
@@ -85,6 +86,9 @@ declare -A WORKER_DELIVER_PENDING_SEEN=()
 declare -A WORKER_DELIVER_COMPOSER_STALL_BRIEF=()
 declare -A WORKER_DELIVER_COMPOSER_STALL_COUNT=()
 declare -A WORKER_DELIVER_COMPOSER_STALL_ESCALATED=()
+declare -A WORKER_DELIVER_SHELL_STALL_BRIEF=()
+declare -A WORKER_DELIVER_SHELL_STALL_COUNT=()
+declare -A WORKER_DELIVER_SHELL_STALL_ESCALATED=()
 # coord_inbox_write (issue #430) is exercised by worker_deliver_record_
 # composer_stall's escalation path (Test 10 below) — same fixture
 # convention as test-watcher-activity-poll.sh's copy of these two vars.
@@ -922,10 +926,57 @@ body="$(extract_fn compact_composer_clear)"; eval "$body"   # restore the real f
 unset 'WORKER_DELIVER_COMPOSER_STALL_BRIEF[42]' 'WORKER_DELIVER_COMPOSER_STALL_COUNT[42]' 'WORKER_DELIVER_COMPOSER_STALL_ESCALATED[42]'
 WORKER_DELIVER_COMPOSER_STALL_THRESHOLD=20
 
-# Stop the relaunch loop — nothing later in the suite reuses $WIN, but leave
-# the pane tidy rather than respawning fake sessions for the rest of the run.
+# Stop the relaunch loop before Test 12 drops the pane back to a plain bash
+# shell — nothing else in the suite reuses $WIN after that.
 tmux send-keys -t "$SESSION_NAME:$WIN" C-c
 sleep 0.2
+
+heading "Test 12: shell-state stall escalation (issue #559) — a brief pending behind a fully parked idle-bash window escalates after N sweeps, never via a keystroke"
+unset 'WORKER_DELIVER_SHELL_STALL_BRIEF[42]' 'WORKER_DELIVER_SHELL_STALL_COUNT[42]' 'WORKER_DELIVER_SHELL_STALL_ESCALATED[42]'
+rm -rf "$COORD_INBOX_DIR"; mkdir -p "$COORD_INBOX_DIR"
+rm -f "$INBOX_DIR"/*.md "$PROCESSING_DIR"/*.md "$STATUS_DIR"/*.json
+: > "$EVENTS_LOG"
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.2
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear" Enter
+check_eventually "pane back at a plain bash prompt -> shell" "shell" "worker_pane_state '$WIN'"
+
+STALL_BRIEF="$INBOX_DIR/20261006-005420-42.md"
+echo "a follow-up brief queued behind a parked idle shell" > "$STALL_BRIEF"
+
+WORKER_DELIVER_SHELL_STALL_THRESHOLD=3
+for i in 1 2 3; do maybe_worker_deliver_brief "$WIN"; done
+check "no per-sweep worker.deliver.skip noise for routine 'shell' traffic (issue #43 self-heal is still assumed by default)" "0" "$(grep -c 'worker.deliver.skip' "$EVENTS_LOG")"
+check "nothing claimed, nothing retracted, no keystroke sent — the pane is untouched" "0" "$(grep -cE 'worker.deliver.(attempt|ok|timeout|retracted)' "$EVENTS_LOG")"
+check "escalation logged exactly once, with skips=3" "1" "$(grep -cF 'worker.deliver.shell_stall' "$EVENTS_LOG")"
+if grep -qF "issue=42 brief=$(basename "$STALL_BRIEF") skips=3" "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "escalation event names the stuck issue, brief, and skip count" "logged" "$got"
+check "escalation durably written to the coordinator inbox (issue #430)" "1" "$(find "$COORD_INBOX_DIR" -maxdepth 1 -name '*.md' -type f | wc -l | tr -d '[:space:]')"
+rc=0; worker_pending_brief "$WT_DIR" || rc=$?
+check "the brief is still sitting untouched in inbox/ (escalation only, never a blind keystroke)" "0" "$rc"
+
+# A 4th consecutive sweep against the SAME brief must not re-escalate.
+maybe_worker_deliver_brief "$WIN"
+check "4th consecutive sweep -> escalation still logged only once (not every sweep)" "1" "$(grep -cF 'worker.deliver.shell_stall' "$EVENTS_LOG")"
+
+# The brief being claimed (by a real self-heal, or a human) clears the
+# streak rather than leaving a stale ESCALATED flag behind for whatever
+# brief lands here next.
+rm -f "$INBOX_DIR"/*.md
+maybe_worker_deliver_brief "$WIN"
+check "brief claimed -> shell-stall bookkeeping clears itself" "" "${WORKER_DELIVER_SHELL_STALL_COUNT[42]:-}"
+
+# A DIFFERENT brief landing afterward starts its own fresh streak rather
+# than inheriting the already-escalated one.
+NEW_BRIEF="$INBOX_DIR/20261006-010000-42.md"
+echo "a second, unrelated follow-up brief" > "$NEW_BRIEF"
+maybe_worker_deliver_brief "$WIN"
+check "new brief starts its own streak at 1" "1" "${WORKER_DELIVER_SHELL_STALL_COUNT[42]}"
+check "no re-escalation on the first sweep against a new brief" "1" "$(grep -cF 'worker.deliver.shell_stall' "$EVENTS_LOG")"
+
+rm -f "$INBOX_DIR"/*.md "$NEW_BRIEF"
+unset 'WORKER_DELIVER_SHELL_STALL_BRIEF[42]' 'WORKER_DELIVER_SHELL_STALL_COUNT[42]' 'WORKER_DELIVER_SHELL_STALL_ESCALATED[42]'
+WORKER_DELIVER_SHELL_STALL_THRESHOLD=20
 
 echo
 green "All $PASS checks passed."

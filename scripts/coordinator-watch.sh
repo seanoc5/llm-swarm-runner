@@ -1628,6 +1628,20 @@
 #                           against one window (e.g. a non-claude agent, or
 #                           a composer that never clears) doesn't retry every
 #                           sweep forever.
+#   WORKER_DELIVER_SHELL_STALL_THRESHOLD=20
+#                           (issue #559) A window parked "shell" (worker-
+#                           listener.sh's own idle bash loop, issue #43) is
+#                           assumed to self-heal onto a pending brief on its
+#                           own — but only once something redraws that bash
+#                           prompt. A session parked there fully unattended
+#                           never gets a redraw, so the brief can sit
+#                           invisibly forever. This many consecutive sweeps
+#                           with the SAME brief still pending in that state
+#                           escalates once (worker.deliver.shell_stall +
+#                           coord_inbox_write) rather than ever injecting a
+#                           keystroke to force the redraw — there is no
+#                           reliable way to confirm an arbitrary shell's
+#                           input line is actually empty first.
 #   COMPACT_QUEUED_MARKER_PATTERN
 #   COMPACT_RETRACT_BACKSPACES=12
 #                           (issue #265) Shared by BOTH the coordinator and
@@ -2336,6 +2350,18 @@ EVENTS LOG
                            on the coordinator's next wake instead of aging silently behind
                            routine .skip lines; the streak resets (and can re-escalate) if a
                            DIFFERENT brief starts pending for this window
+      worker.deliver.shell_stall  (issue #559) same shape as worker.deliver.composer_stalled
+                           just above, for a window parked "shell" (worker-listener.sh's own
+                           idle bash loop, issue #43) instead of "cli": WORKER_DELIVER_SHELL_
+                           STALL_THRESHOLD sweeps have found the SAME brief still pending in
+                           inbox/ with the pane sitting idle (issue, brief=<inbox filename>,
+                           skips=N). "shell" is normally self-healing on its own the moment
+                           anything redraws that bash prompt, so maybe_worker_deliver_brief logs
+                           no per-sweep .skip for it at all (unlike composer_not_clear) and never
+                           injects a keystroke to force that redraw (no reliable way to confirm
+                           the shell's own input line is empty) — this WARNING plus its durable
+                           coord_inbox_write is the entire fix: a human who attaches and presses
+                           Enter (or runs anything) lets issue #43's self-heal finish the job.
       worker.listener.selfheal  (issue #506) worker-listener.sh's own ordinary self-heal
                            path claimed a queued v2 brief on its own — an idle listener, or
                            one draining several queued briefs back-to-back — and is about
@@ -2632,6 +2658,26 @@ WORKER_DELIVER_MAX_FAILURES="${WORKER_DELIVER_MAX_FAILURES:-3}"
 # closes: reason=composer_not_clear skips never touch WORKER_DELIVER_
 # BACKOFF_SECS/MAX_FAILURES above at all, so they need their own counter.
 WORKER_DELIVER_COMPOSER_STALL_THRESHOLD="${WORKER_DELIVER_COMPOSER_STALL_THRESHOLD:-20}"
+# issue #559 — a window whose pane reads "shell" (worker-listener.sh's own
+# idle bash loop, issue #43) is normally self-healing: poll_for_brief
+# touches a sentinel within ~2s of a brief landing, and the NEXT drawn
+# bash prompt's PROMPT_COMMAND claims it. But that redraw only happens on
+# an actual keypress/command in the pane — a session that parks there
+# fully unattended (no human, nothing else touching that pane) never gets
+# a redraw, so the self-heal never fires and maybe_worker_deliver_brief
+# previously skipped "shell" windows unconditionally (see its own header
+# comment) with no escalation at all: a SAMlytics brief sat in inbox/ for
+# ~12h with zero worker.deliver.* events. This script deliberately never
+# sends a keystroke into that shell (an idle bash prompt can hold a
+# human's unsubmitted, unverifiable command line — unlike the composer-
+# clear checks above, there is no reliable content-based way to confirm
+# the line is genuinely empty), so it only escalates, same shape as
+# WORKER_DELIVER_COMPOSER_STALL_THRESHOLD: this many consecutive sweeps
+# with the SAME brief still pending while "shell" before worker_deliver_
+# record_shell_stall logs one worker.deliver.shell_stall and writes a
+# coord-inbox stall item. At the shared WORKER_COMPACT_SCAN_SECS cadence
+# (default 30s) the default below bounds the stall to ~10 minutes.
+WORKER_DELIVER_SHELL_STALL_THRESHOLD="${WORKER_DELIVER_SHELL_STALL_THRESHOLD:-20}"
 # issue #265 — shared between the coordinator and per-window retraction
 # paths; see this file's COMPACT_QUEUED_MARKER_PATTERN header comment above.
 COMPACT_QUEUED_MARKER_PATTERN="${COMPACT_QUEUED_MARKER_PATTERN:-Press up to edit queued messages}"
@@ -3233,6 +3279,7 @@ format_event_line() {
         worker.deliver.retract_skip)            glyph="·"; color=$'\033[2m'  ;;
         worker.deliver.giving_up)                  glyph="⚠"; color=$'\033[31m' ;;
         worker.deliver.composer_stalled)   glyph="⚠"; color=$'\033[31m' ;;
+        worker.deliver.shell_stall)      glyph="⚠"; color=$'\033[31m' ;;
         worker.listener.selfheal)        glyph="◐"; color=$'\033[36m' ;;
         worker.listener.selfheal.skip)      glyph="·"; color=$'\033[2m'  ;;
         watch.autoclose)               glyph="♻"; color=$'\033[36m' ;;
@@ -7173,6 +7220,54 @@ worker_deliver_record_composer_stall() {
     fi
 }
 
+# WORKER_DELIVER_SHELL_STALL_BRIEF / _COUNT / _ESCALATED (issue #559)
+#
+# Same shape as WORKER_DELIVER_COMPOSER_STALL_BRIEF/_COUNT/_ESCALATED above,
+# for the OTHER parked state maybe_worker_deliver_brief sees: "shell"
+# (worker-listener.sh's own idle bash loop, issue #43), which it otherwise
+# ignores entirely on the assumption that issue #43's own self-heal will
+# claim any pending brief on its own. That assumption only holds while
+# something eventually redraws the pane's bash prompt (a keypress, a
+# command) — a fully unattended session parked at that prompt never gets
+# one, so the self-heal never fires and nothing else ever notices (the
+# 2026-10-06 SAMlytics incident this issue documents: ~12h, zero
+# worker.deliver.* events). In-memory only, reset on a watcher restart,
+# same contract as every other WORKER_DELIVER_* tracker.
+declare -A WORKER_DELIVER_SHELL_STALL_BRIEF=()
+declare -A WORKER_DELIVER_SHELL_STALL_COUNT=()
+declare -A WORKER_DELIVER_SHELL_STALL_ESCALATED=()
+
+# worker_deliver_record_shell_stall <issue> <brief>
+#
+# Called by maybe_worker_deliver_brief on every sweep that finds a window
+# parked "shell" with <brief> still sitting in inbox/. Same reset-on-new-
+# brief, escalate-once-at-threshold shape as worker_deliver_record_
+# composer_stall — see that function's header comment — but deliberately
+# never attempts anything more than logging+escalating: unlike a stuck
+# composer, there is no reliable way to confirm an idle bash prompt's
+# input line is genuinely empty (compact_composer_clear's chrome-stripping
+# only knows the claude TUI's own rendering, not an arbitrary shell's
+# PS1), so sending a keystroke here risks submitting a human's unsent,
+# unverifiable command line. Escalation (coord_inbox_write, issue #430) is
+# the whole fix: a human who attaches and presses Enter (or runs any
+# command) lets issue #43's own self-heal finish the job immediately.
+worker_deliver_record_shell_stall() {
+    local issue="$1" brief="$2" count
+    if [ "${WORKER_DELIVER_SHELL_STALL_BRIEF[$issue]:-}" != "$brief" ]; then
+        WORKER_DELIVER_SHELL_STALL_BRIEF[$issue]="$brief"
+        WORKER_DELIVER_SHELL_STALL_COUNT[$issue]=0
+        unset "WORKER_DELIVER_SHELL_STALL_ESCALATED[$issue]"
+    fi
+    count=$(( ${WORKER_DELIVER_SHELL_STALL_COUNT[$issue]:-0} + 1 ))
+    WORKER_DELIVER_SHELL_STALL_COUNT[$issue]=$count
+    if [ "$count" -ge "$WORKER_DELIVER_SHELL_STALL_THRESHOLD" ] && [ -z "${WORKER_DELIVER_SHELL_STALL_ESCALATED[$issue]:-}" ]; then
+        WORKER_DELIVER_SHELL_STALL_ESCALATED[$issue]=1
+        echo "[$(date +%T)] WARNING: worker iss-$issue has a brief queued ($brief) while its pane has sat at the listener's own idle bash prompt (state=shell) for $count sweeps with nothing claiming it — issue #43's self-heal only fires on the next prompt redraw, which needs a keypress; investigate with scripts/capture-worker.sh iss-$issue"
+        log_event worker.deliver.shell_stall "issue=$issue brief=$brief skips=$count"
+        coord_inbox_write deliver_stall "$(printf 'Worker iss-%s: a queued brief (%s) has sat for %s sweeps with the pane parked at its own idle bash prompt (state=shell).\n\nCheck: scripts/capture-worker.sh iss-%s\n\nThis state normally self-heals the moment anything redraws that bash prompt (issue #43), but nothing has — most likely no human or process has touched the pane since the brief landed. Attach and press Enter (or run any harmless command) to let the listener claim it.\n' "$issue" "$brief" "$count" "$issue")" || true
+    fi
+}
+
 # WORKER_DELIVER_PENDING_SEEN (issue #437)
 #
 # Cross-sweep bookkeeping keyed by issue: the pending brief's basename last
@@ -7284,9 +7379,28 @@ maybe_worker_deliver_brief() {
 
     local state
     state="$(worker_pane_state "$win")" || state="absent"
-    # "shell": the listener's own idle bash loop is in control and already
-    # self-heals onto a new brief (run_idle_shell/poll_for_brief, issue #43)
-    # — nothing to do. "absent": no such window.
+    # "shell": the listener's own idle bash loop is normally in control and
+    # self-heals onto a new brief on its own (run_idle_shell/poll_for_brief,
+    # issue #43) — but only once something redraws that bash prompt (a
+    # keypress, a command). A session parked there fully unattended never
+    # gets that redraw, so a brief can sit invisibly forever (issue #559).
+    # Never inject a keystroke here (no reliable way to confirm the shell's
+    # own input line is actually empty, unlike the claude-TUI composer
+    # checks below) — just track the stall and escalate once it crosses
+    # WORKER_DELIVER_SHELL_STALL_THRESHOLD sweeps. worker_deliver_detect_
+    # claim is deliberately still never called for "shell" (see its own
+    # header comment) — this is a parallel, independent tracker.
+    if [ "$state" = "shell" ]; then
+        local shell_brief
+        shell_brief="$(basename "$(worker_pending_brief_path "$wt_dir")" 2>/dev/null || true)"
+        if [ -n "$shell_brief" ]; then
+            worker_deliver_record_shell_stall "$issue" "$shell_brief"
+        else
+            unset "WORKER_DELIVER_SHELL_STALL_BRIEF[$issue]" "WORKER_DELIVER_SHELL_STALL_COUNT[$issue]" "WORKER_DELIVER_SHELL_STALL_ESCALATED[$issue]"
+        fi
+        return 0
+    fi
+    # "absent": no such window — nothing to do.
     [ "$state" = "cli" ] || return 0
 
     worker_deliver_detect_claim "$issue" "$wt_dir" "$state"

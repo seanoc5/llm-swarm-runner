@@ -257,6 +257,35 @@ echo "Legacy:   $LEGACY_TASK_FILE (v1, still supported)"
 NOTE
 echo "------------------------------"
 
+# reap_stale_processing_entries (issue #559)
+#
+# A processing/<id>.md whose outcome ALREADY exists in done/<id>.{ok,err}.json
+# means some earlier mv of the brief itself into done/ silently failed (both
+# task-done.sh's own move and this script's own fallback mv right before
+# write_outcome tolerate a missing source with `|| true`, so a genuinely
+# failed destination write — e.g. a transient done/ permission or disk
+# issue — leaves the stale .md behind with no error surfaced anywhere).
+# Nothing else ever revisits processing/ once its outcome is recorded, so
+# a stale entry here sits forever: worker_current_task_terminal() in
+# coordinator-watch.sh treats a non-empty processing/ as "task still in
+# flight" (by design — see its own header comment), permanently wedging
+# WORKER_AUTO_DELIVER/WORKER_AUTO_COMPACT for this window even though the
+# task genuinely finished. Checked once per main-loop iteration (every
+# claim_next_task poll) rather than only right after write_outcome, so an
+# entry stranded by an OLDER, already-restarted listener process also
+# self-heals rather than needing a human to notice and move it by hand.
+reap_stale_processing_entries() {
+    local f task_id
+    for f in "$PROCESSING"/*.md; do
+        [ -e "$f" ] || continue
+        task_id="$(basename "$f" .md)"
+        if [ -e "$DONE/${task_id}.ok.json" ] || [ -e "$DONE/${task_id}.err.json" ]; then
+            echo "[$(date +%T)] WARNING: processing/$(basename "$f") has an outcome already recorded in done/ (task_id=$task_id) but was never moved out of processing/ — moving it now." >&2
+            mv "$f" "$DONE/${task_id}.md" 2>/dev/null || true
+        fi
+    done
+}
+
 # Returns the path of the next task to process, or empty if none.
 # Sets globals: TASK_PATH (where the brief now lives, after claim),
 #               TASK_ID (identifier for this run),
@@ -1171,6 +1200,8 @@ while true; do
         echo "[$(date +%T)] Worktree $WT_LABEL appears reaped (inbox or cwd missing). Listener exiting cleanly."
         exit 0
     fi
+
+    reap_stale_processing_entries
 
     if claim_next_task; then
         echo "[$(date +%T)] Task received! id=$TASK_ID$([ "$IS_LEGACY" = "1" ] && echo " (v1 legacy)")"
