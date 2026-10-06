@@ -24,6 +24,18 @@
 # tmux call this test makes on its own behalf goes through `command tmux`
 # explicitly instead, so the two never fight over -L.
 #
+# Tests 4-5 (self-review round 8) cover the follow-on bug the round-6 fix
+# itself opened up: something else re-sourcing the operator's conf on an
+# ALREADY-LIVE swarm socket (install-tmux-binding.sh does exactly this,
+# intentionally, on every running swarm-* socket) can flip the global
+# pane-base-index back to whatever that conf says, for any window created
+# after that point — until llm-start.sh next happens to run and
+# re-assert it. llm-start.sh's coordinator window and provision-worker.sh's
+# iss-N windows now both set a WINDOW-level override at creation time
+# instead, which takes precedence over the global value for that window's
+# whole lifetime and so can't drift later no matter what re-sources the
+# conf next.
+#
 # Requires: tmux.
 set -euo pipefail
 
@@ -49,6 +61,12 @@ extract_line() {
 NEW_SESSION_LINE="$(extract_line 'tmux -f /dev/null new-session')"
 SOURCE_FILE_LINE="$(extract_line 'tmux source-file "$TMUX_CONF"')"
 PANE_BASE_LINE="$(extract_line 'tmux set-option -g pane-base-index 0')"
+COORD_WINDOW_OVERRIDE_LINE="$(extract_line 'tmux set-window-option -t "$SESSION_NAME:coordinator" pane-base-index 0')"
+
+PROVISION_WORKER="$SCRIPT_DIR/../scripts/provision-worker.sh"
+[ -x "$PROVISION_WORKER" ] || red "provision-worker.sh not executable: $PROVISION_WORKER"
+ISS_WINDOW_OVERRIDE_LINE="$(grep -F 'tmux set-window-option -t "$SESSION_NAME:iss-$ISSUE" pane-base-index 0' "$PROVISION_WORKER" \
+    || red "could not find expected line in provision-worker.sh (has it been rewritten?): the iss-\$ISSUE pane-base-index override")"
 
 PASS=0
 check() {
@@ -118,6 +136,37 @@ got="$(command tmux -L "$SOCK" show-options -g pane-base-index 2>/dev/null | awk
 # Before the belt-and-suspenders line runs, this is just tmux's own
 # compiled-in default (0) — nothing was sourced to set it either way.
 check "no stray pane-base-index leaks in from a nonexistent conf" "0" "${got:-0}"
+
+# ──────────────────── window-level override survives later drift ──────────
+heading "Test 4: the coordinator window's pane-base-index override survives a LATER global drift (self-review round 8 finding)"
+
+command tmux -L "$SOCK" kill-server 2>/dev/null || true
+TMUX_CONF="$TEST_DIR/does-not-exist.conf"
+eval "$NEW_SESSION_LINE"
+eval "$COORD_WINDOW_OVERRIDE_LINE"
+
+got="$(command tmux -L "$SOCK" list-panes -t "probe:coordinator" -F '#{pane_index}' 2>/dev/null)"
+check "coordinator pane starts at index 0" "0" "${got:-missing}"
+
+# Simulate something else (install-tmux-binding.sh) re-sourcing an
+# operator conf that sets pane-base-index 1 on this ALREADY-LIVE socket —
+# the exact round-8 scenario, with no llm-start.sh re-run in between.
+command tmux -L "$SOCK" set-option -g pane-base-index 1
+got="$(command tmux -L "$SOCK" list-panes -t "probe:coordinator" -F '#{pane_index}' 2>/dev/null)"
+check "coordinator's own window-level override is unaffected by the later global drift" "0" "${got:-missing}"
+
+heading "Test 5: provision-worker.sh's iss-N window gets the same per-window override"
+
+command tmux -L "$SOCK" new-window -d -t probe -n "iss-908" 'sleep 300'
+SESSION_NAME=probe ISSUE=908
+eval "$ISS_WINDOW_OVERRIDE_LINE"
+
+got="$(command tmux -L "$SOCK" list-panes -t "probe:iss-908" -F '#{pane_index}' 2>/dev/null)"
+check "iss-908 pane starts at index 0 despite the global drift set in Test 4" "0" "${got:-missing}"
+
+command tmux -L "$SOCK" set-option -g pane-base-index 1
+got="$(command tmux -L "$SOCK" list-panes -t "probe:iss-908" -F '#{pane_index}' 2>/dev/null)"
+check "iss-908's own window-level override is also unaffected by a later global drift" "0" "${got:-missing}"
 
 echo ""
 green "All llm-start.sh tmux-bootstrap tests passed ($PASS checks)"

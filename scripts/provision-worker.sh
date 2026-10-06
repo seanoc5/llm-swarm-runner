@@ -891,6 +891,17 @@ else
     # sandbox.sh (and thus never the listener).
     tmux new-window -d -t "$SESSION_NAME" -n "iss-$ISSUE" \
         "WORKER_CONTAINER_NAME=$(printf '%q' "$container_name") WORKER_CMD=$(printf '%q' "${WORKER_CMD:-claude}") WORKER_MODEL=$(printf '%q' "${WORKER_MODEL:-}") WORKER_PROMPT_FILE=$(printf '%q' "${WORKER_PROMPT_FILE:-}") WORKER_HEADLESS=$(printf '%q' "${WORKER_HEADLESS:-0}") WORKER_SELF_REVIEW=$(printf '%q' "${WORKER_SELF_REVIEW:-1}") SELF_REVIEW_CMD=$(printf '%q' "${SELF_REVIEW_CMD:-}") SELF_REVIEW_MODEL=$(printf '%q' "${SELF_REVIEW_MODEL:-}") WORKER_CHECK=$(printf '%q' "${WORKER_CHECK:-}") WORKER_CHECK_CMD=$(printf '%q' "${WORKER_CHECK_CMD:-}") WORKER_CHECK_TIMEOUT=$(printf '%q' "${WORKER_CHECK_TIMEOUT:-}") WORKER_CHECK_RETRY=$(printf '%q' "${WORKER_CHECK_RETRY:-}") SWARM_EVAL_LOG=$(printf '%q' "${SWARM_EVAL_LOG:-}") EXTRA_MOUNTS=$(printf '%q' "${EXTRA_MOUNTS:-}") SANDBOX_DEP_CACHE=$(printf '%q' "${SANDBOX_DEP_CACHE:-}") SANDBOX_CPUS=$(printf '%q' "${SANDBOX_CPUS:-}") SANDBOX_GRADLE_LIMITS=$(printf '%q' "${SANDBOX_GRADLE_LIMITS:-}") SANDBOX_GRADLE_WORKERS_MAX=$(printf '%q' "${SANDBOX_GRADLE_WORKERS_MAX:-}") SANDBOX_KOTLIN_DAEMON_XMX=$(printf '%q' "${SANDBOX_KOTLIN_DAEMON_XMX:-}") SANDBOX_ALLOW_BACKGROUND_TASKS=$(printf '%q' "${SANDBOX_ALLOW_BACKGROUND_TASKS:-}") $(printf '%q' "$SANDBOX_SH") $(printf '%q' "$WT") listener"
+    # issue #555 self-review round 8: a WINDOW-level override, set once
+    # here, takes precedence over the socket's global pane-base-index for
+    # this window's whole lifetime — immune to the global value drifting
+    # later (e.g. install-tmux-binding.sh re-sourcing an operator's
+    # ~/.tmux.conf that sets it to 1 on an already-running swarm socket).
+    # llm-start.sh's own global set-option does eventually self-heal that
+    # drift too (empirically confirmed retroactive), but only the next
+    # time it happens to run; this closes the gap for this window
+    # immediately, so every `.0`-targeted capture/send-keys/paste this PR
+    # relies on can't silently miss here even in between.
+    tmux set-window-option -t "$SESSION_NAME:iss-$ISSUE" pane-base-index 0 2>/dev/null || true
     echo "[4/4] tmux window iss-$ISSUE spawned (listener)"
     log_event worker.start "issue=$ISSUE task_id=$TASK_ID window=iss-$ISSUE alive=$((alive_workers + 1))/$MAX_WORKERS total_windows=$((total_windows + 1))/$MAX_TMUX_WINDOWS"
 

@@ -899,15 +899,24 @@ fi
 # before this feature existed.
 tmux set-option -g remain-on-exit "$REMAIN_ON_EXIT_VALUE"
 tmux set-option -g history-limit 50000
-# Belt-and-suspenders for the -f /dev/null fix above (issue #550): a
-# session created by a pre-upgrade llm-start.sh, before this socket
-# started skipping the user's conf, may already have a coordinator pane
-# numbered 1 that this can't retroactively renumber — but forcing the
-# option here still guarantees every window created from this point on
-# (iss-N workers, util, status, chk-N fallbacks, check-on-done panes)
-# gets a pane 0, which is what actually matters for the watcher's `.0`
-# targeting.
+# Belt-and-suspenders for the -f /dev/null fix above (issue #550).
+# Confirmed empirically this is retroactive — tmux recomputes pane_index
+# from the current pane-base-index whenever queried, so re-asserting the
+# global option here self-heals even an already-existing window's pane
+# numbering (a pre-upgrade session, or one drifted by something else
+# re-sourcing the operator's own conf — see install-tmux-binding.sh).
 tmux set-option -g pane-base-index 0
+# issue #555 self-review round 8: the self-heal above only runs when
+# llm-start.sh itself runs — a conf re-source landing in between (e.g. an
+# operator running install-tmux-binding.sh against an already-live swarm
+# socket) can still flip the global value back to something else for
+# whatever window-creating call happens to land in that gap. A
+# WINDOW-level override, once set, takes precedence over the global value
+# for that window's whole lifetime regardless of later drift, closing the
+# gap outright instead of just shortening it. provision-worker.sh sets
+# the same override on every iss-N window it creates, for the same
+# reason.
+tmux set-window-option -t "$SESSION_NAME:coordinator" pane-base-index 0 2>/dev/null || true
 # Codex deliberately exits after each turn. Keep its completed report visible
 # until the next invocation replaces this dead pane via the detection above.
 if [ "$COORD_CMD" = "codex" ] || { [ "$COORD_CMD" = "agy" ] && [ "${COORDINATOR_HEADLESS:-0}" = "1" ]; }; then
