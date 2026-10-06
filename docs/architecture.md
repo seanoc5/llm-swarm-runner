@@ -30,9 +30,9 @@ A running swarm session (`llm-<project-basename>`, on its own tmux socket) has t
 | `util` | Always, second window | Bare bash in the project dir for ad-hoc inspection — plus, as a **second pane** in this same window, the `coordinator-watch.sh` watcher (on by default; `WATCH=0` to skip it). The watcher is a pane, not a sibling window, so it never counts against `MAX_TMUX_WINDOWS` on its own. |
 | `status` (optional) | `STATUS=1` / `--status` | `gh-status-bar.sh`, updating the session's `status-right` with live open-issue/open-PR/closed-today counts. |
 | `iss-N` (0..MAX_WORKERS) | The coordinator, via `provision-worker.sh` | One window per active worker, each running `worker-listener.sh` against its own `wt-issue-N` git worktree. |
-| `chk-N` (transient) | The watcher, when `WATCH_CHECK_ON_DONE=1` (default) | Spawned the moment a worker signals done, to run the project's acceptance check visibly; closes once the check resolves. |
+| check pane (transient) | The watcher, when `WATCH_CHECK_ON_DONE=1` (default) | One pane per issue, split into the worker's `iss-N` window (a `chk-N` window only if `iss-N` is gone). Runs the acceptance check when the worker signals done; closes itself on pass, stays open on fail/timeout. A newer check for the same issue reuses the pane and kills the older run. Full output: `.swarm/checks/issue-N-<task_id>.log`. |
 
-`MAX_TMUX_WINDOWS` (default 10) caps `coordinator` + `util` + `status` + `iss-N` + any leftover finished-worker windows combined — the watcher's own pane inside `util` doesn't add to that count, but the `chk-N` windows it spawns do, transiently.
+`MAX_TMUX_WINDOWS` (default 10) caps `coordinator` + `util` + `status` + `iss-N` + any leftover finished-worker windows combined — the watcher's own pane inside `util` and the check panes inside `iss-N` don't add to that count; a fallback `chk-N` window does, transiently.
 
 ### The watcher's roles
 
@@ -41,7 +41,7 @@ A running swarm session (`llm-<project-basename>`, on its own tmux socket) has t
 - **Wakes the coordinator** when a worker finishes (new outcome JSON in `.swarm/tasks/done/`), debounced by `DEBOUNCE_SECS`.
 - **Auto-compacts** both the coordinator (`AUTO_COMPACT`) and idle over-threshold worker panes (`WORKER_AUTO_COMPACT`) by injecting a real `/compact`, keeping long-lived sessions out of the context "stupid zone".
 - **Auto-closes finalized workers** (`WATCHER_AUTOCLOSE`) — reaps the window, worktree, and branch for any worker whose PR reached the terminal state configured by `WATCHER_AUTOCLOSE_MODE` (`merged` by default; `finalized` also reaps CLOSED-without-merge), snapshotting the pane to `.swarm/reaped/` first.
-- **Runs check-on-done** (`WATCH_CHECK_ON_DONE`) — fires the project's acceptance check in a `chk-N` window as soon as a worker hands off, rather than waiting for the coordinator to notice.
+- **Runs check-on-done** (`WATCH_CHECK_ON_DONE`) — fires the project's acceptance check in a pane of the worker's `iss-N` window as soon as a worker hands off (one check per issue; duplicate done-signals for the same commit are skipped), rather than waiting for the coordinator to notice.
 
 See [`docs/llm-swarm-runner-overview.md`](./llm-swarm-runner-overview.md#coordinator-watchsh--event-driven-coordinator-wake-ups) for the full knob reference.
 
