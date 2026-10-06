@@ -8,10 +8,10 @@ set -euo pipefail
 PROJECT_DIR="$(realpath "${1:-$PWD}")"
 if [ $# -gt 0 ]; then shift; fi
 
-# Determine the agent (claude, gemini, codex, listener, or bash)
+# Determine the agent (claude, gemini, codex, agy, listener, or bash)
 AGENT="bash"
 if [[ $# -gt 0 ]]; then
-    if [[ "$1" == "claude" || "$1" == "gemini" || "$1" == "codex" || "$1" == "listener" ]]; then
+    if [[ "$1" == "claude" || "$1" == "gemini" || "$1" == "codex" || "$1" == "agy" || "$1" == "listener" ]]; then
         AGENT="$1"
         shift
     fi
@@ -502,7 +502,8 @@ fi
 # command line. `-e` here outranks any --env-file (.sandbox-env) value for
 # the same key — host config wins when both are set.
 WORKER_ENV_OPTS=()
-for _v in WORKER_HEADLESS WORKER_CMD WORKER_MODEL WORKER_PROMPT_FILE WORKER_SELF_REVIEW OPENAI_API_KEY \
+for _v in WORKER_HEADLESS WORKER_CMD WORKER_MODEL WORKER_PROMPT_FILE WORKER_SELF_REVIEW \
+          SELF_REVIEW_CMD SELF_REVIEW_MODEL OPENAI_API_KEY GEMINI_API_KEY \
           WORKER_CHECK WORKER_CHECK_CMD WORKER_CHECK_TIMEOUT WORKER_CHECK_RETRY SWARM_EVAL_LOG; do
     if [ -n "${!_v:-}" ]; then
         WORKER_ENV_OPTS+=(-e "$_v")
@@ -735,6 +736,12 @@ fi
 # first arg here; WORKER_MODEL is read by the listener directly from the
 # container's env (already passed-through above via WORKER_ENV_OPTS).
 WORKER_AGENT="${WORKER_CMD:-claude}"
+if [ "$AGENT" = "listener" ] && [ "$WORKER_AGENT" = "agy" ] \
+   && [ -z "${GEMINI_API_KEY:-}" ] \
+   && ! { [ -f "$PROJECT_DIR/.sandbox-env" ] && rg -q '^GEMINI_API_KEY=.+$' "$PROJECT_DIR/.sandbox-env"; }; then
+    echo "ERROR: agy workers require GEMINI_API_KEY in the environment or .sandbox-env" >&2
+    exit 1
+fi
 
 # Construct command as an array
 CMD_ARRAY=()
@@ -743,6 +750,7 @@ if [[ $# -eq 0 ]]; then
         claude)   CMD_ARRAY=("claude" "--dangerously-skip-permissions") ;;
         gemini)   CMD_ARRAY=("gemini" "--yolo") ;;
         codex)    CMD_ARRAY=("codex" "--dangerously-bypass-approvals-and-sandbox" "--no-alt-screen") ;;
+        agy)      CMD_ARRAY=("agy" "--dangerously-skip-permissions") ;;
         listener) CMD_ARRAY=("$SCRIPT_DIR/scripts/worker-listener.sh" "$WORKER_AGENT") ;;
         *)        CMD_ARRAY=("bash" "-i") ;;
     esac
@@ -751,6 +759,7 @@ else
         claude)   CMD_ARRAY=("claude" "$@" "--dangerously-skip-permissions") ;;
         gemini)   CMD_ARRAY=("gemini" "$@" "--yolo") ;;
         codex)    CMD_ARRAY=("codex" "$@" "--dangerously-bypass-approvals-and-sandbox" "--no-alt-screen") ;;
+        agy)      CMD_ARRAY=("agy" "$@" "--dangerously-skip-permissions") ;;
         listener) CMD_ARRAY=("$SCRIPT_DIR/scripts/worker-listener.sh" "$@" "--dangerously-skip-permissions") ;;
         *)        CMD_ARRAY=("bash" "-c" "$*") ;;
     esac

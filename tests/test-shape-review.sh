@@ -45,6 +45,9 @@ trap cleanup EXIT
 export GH_LOG="$TEST_DIR/gh.log"
 export GH_COMMENTS_FILE="$TEST_DIR/comments.txt"
 export CLAUDE_STUB_OUTPUT="$TEST_DIR/review-output.txt"
+export CODEX_ARGS_LOG="$TEST_DIR/codex.args"
+export CODEX_PAYLOAD_LOG="$TEST_DIR/codex.payload"
+unset SELF_REVIEW_CMD SELF_REVIEW_MODEL WORKER_CMD WORKER_MODEL
 : > "$GH_COMMENTS_FILE"
 
 mkdir -p "$TEST_DIR/bin"
@@ -81,7 +84,22 @@ cat > "$TEST_DIR/bin/tmux" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF
-chmod +x "$TEST_DIR/bin/gh" "$TEST_DIR/bin/claude" "$TEST_DIR/bin/tmux"
+cat > "$TEST_DIR/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "$CODEX_ARGS_LOG"
+cat > "$CODEX_PAYLOAD_LOG"
+while [ $# -gt 0 ]; do
+    if [ "$1" = "--output-last-message" ]; then
+        cp "$CLAUDE_STUB_OUTPUT" "$2"
+        break
+    fi
+    shift
+done
+# A progress line must never be mistaken for the final verdict.
+echo 'APPROVE'
+exit "${CODEX_STUB_EXIT:-0}"
+EOF
+chmod +x "$TEST_DIR/bin/gh" "$TEST_DIR/bin/claude" "$TEST_DIR/bin/codex" "$TEST_DIR/bin/tmux"
 export PATH="$TEST_DIR/bin:$PATH"
 
 # ============================================================================
@@ -151,6 +169,21 @@ heading "Test 5: WORKER_SELF_REVIEW=0 kill switch → exit 4"
 if WORKER_SELF_REVIEW=0 "$REVIEW" 42 >/dev/null; then RC=0; else RC=$?; fi
 [ "$RC" -eq 4 ] || red "expected exit 4 when kill switch set, got $RC"
 green "WORKER_SELF_REVIEW=0 → skipped (exit 4)"
+
+heading "Codex reviews use the selected model and final answer, and fail closed"
+printf 'BLOCK: broken invariant\n' > "$CLAUDE_STUB_OUTPUT"
+if WORKER_CMD=codex WORKER_MODEL=test-luna "$REVIEW" 42 >/dev/null; then RC=0; else RC=$?; fi
+[ "$RC" -eq 2 ] || red "Codex final BLOCK must win over progress APPROVE (rc=$RC)"
+grep -q -- '--model test-luna' "$CODEX_ARGS_LOG" || red "worker model not passed to Codex"
+grep -q -- '--sandbox read-only' "$CODEX_ARGS_LOG" || red "Codex review must use read-only sandbox"
+grep -q 'Fake PR body' "$CODEX_PAYLOAD_LOG" || red "Codex review missing PR body"
+grep -q 'diff --git' "$CODEX_PAYLOAD_LOG" || red "Codex review missing diff"
+if SELF_REVIEW_CMD=codex SELF_REVIEW_MODEL=test-sol "$REVIEW" 42 --model explicit-sol >/dev/null; then RC=0; else RC=$?; fi
+[ "$RC" -eq 2 ] || red "explicit Codex review failed (rc=$RC)"
+grep -q -- '--model explicit-sol' "$CODEX_ARGS_LOG" || red "--model must override SELF_REVIEW_MODEL"
+if WORKER_CMD=codex CODEX_STUB_EXIT=9 "$REVIEW" 42 >/dev/null 2>&1; then RC=0; else RC=$?; fi
+[ "$RC" -eq 1 ] || red "failed Codex invocation must fail closed (rc=$RC)"
+green "Codex model selection, stdin payload, final verdict, and failure handling"
 
 # ============================================================================
 heading "Test 6: swarm-merge BLOCK gate"

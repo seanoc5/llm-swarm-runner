@@ -1,0 +1,28 @@
+# nightly-repos.conf — lanes for scripts/nightly-full-tests.sh. Copy to the
+# runner root as nightly-repos.conf (gitignored) and edit paths.
+# One line per lane: <repo_dir> <lane> <command...>, run in a throwaway clone
+# of origin's default branch. Repos run in file order, lanes in line order.
+# Directives: @copy <files> (untracked files to bring along), @issue-title,
+# @needs-docker (skip instead of fail when Docker is down).
+# Only slow tiers belong here: workers run the fast tier, CI runs per-PR.
+
+/opt/work/springboot/corpusminder-spring @needs-docker
+/opt/work/springboot/corpusminder-spring @issue-title deep-CI failure tracking
+/opt/work/springboot/corpusminder-spring integration ./gradlew --no-daemon integrationTest
+/opt/work/springboot/corpusminder-spring slow        ./gradlew --no-daemon slowTest
+/opt/work/springboot/corpusminder-spring functional  ./gradlew --no-daemon functionalTest
+/opt/work/springboot/corpusminder-spring e2e         ./gradlew --no-daemon e2eTest
+
+/opt/work/springboot/civicstrata @needs-docker
+/opt/work/springboot/civicstrata full ./gradlew --no-daemon fullTest
+
+/opt/work/springboot/SAMlytics @needs-docker
+/opt/work/springboot/SAMlytics integration ./gradlew --no-daemon integrationTest
+
+/opt/work/oconeco/fand-app @needs-docker
+/opt/work/oconeco/fand-app slow ./gradlew --no-daemon test -PslowTests -x jacocoTestReport -x tailwindBuild
+
+# Host postgres, not Docker. The clone's dir name (nightly-fand-etl) gives it
+# its own TEST_DB. test_makefile_test_db_clean drops other checkouts' DBs.
+/opt/work/oconeco/fand-etl @copy .env
+/opt/work/oconeco/fand-etl full FAND_DATA_ROOT=/opt/data/onedrive/OconEco make test PYTEST_ARGS="--ignore=tests/test_makefile_test_db_clean.py"

@@ -13,7 +13,7 @@ When giving an autonomous AI tool access to your filesystem, security must be a 
 ## Known Risks and Caveats
 
 ### Backend Auto-Approval Flags
-Claude Code (`--dangerously-skip-permissions`), Gemini CLI (`--yolo`), and Codex CLI (`--dangerously-bypass-approvals-and-sandbox`) run in auto-approve mode inside the sandbox. This is the primary reason the sandbox exists. However, review what the agent is doing periodically. The sandbox does not prevent destructive file operations within mounted paths.
+Claude Code and Antigravity CLI (`--dangerously-skip-permissions`), Gemini CLI (`--yolo`), and Codex CLI (`--dangerously-bypass-approvals-and-sandbox`) run in auto-approve mode inside the sandbox. This is the primary reason the sandbox exists. However, review what the agent is doing periodically. The sandbox does not prevent destructive file operations within mounted paths.
 
 ### Network Host Mode (`--network host`)
 The container shares the host network stack. This is incredibly convenient for local development (e.g., the agent can connect to `localhost:5432` to query your local Postgres database), but it means the container is not network-isolated. 

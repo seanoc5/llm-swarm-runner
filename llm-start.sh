@@ -8,7 +8,7 @@
 # startup command.
 #
 # Optional flags (env vars):
-#   COORDINATOR_CMD={claude,gemini,codex}   Default: claude
+#   COORDINATOR_CMD={claude,gemini,codex,agy}   Default: claude
 #   COORDINATOR_MODEL=<id>            Per-coordinator default; see below
 #   COORDINATOR_VERBOSE=1             Stay interactive in coordinator pane
 #   WATCH=1                           Spawn coordinator-watch.sh as a pane in
@@ -90,7 +90,7 @@ ENV VARS  (precedence: flag > shell env > <project>/.swarm/.env > <sandbox>/.env
            > <sandbox>/.env.example)
 
   Coordinator
-    COORDINATOR_CMD              claude    claude | gemini | codex
+    COORDINATOR_CMD              claude    claude | gemini | codex | agy
     COORDINATOR_MODEL            (varies)  per-coordinator default
     COORDINATOR_VERBOSE          0         gemini -i instead of -p
     COORDINATOR_HEADLESS         0         1 = claude -p (exits after each prompt)
@@ -294,21 +294,28 @@ warn_stranded_worktree_briefs "$PWD" "$SESSION_NAME"
 
 # Allow overriding the coordinator command and model
 COORD_CMD="${COORDINATOR_CMD:-claude}"
+case "$COORD_CMD" in
+    claude|gemini|codex|agy) ;;
+    *) echo "ERROR: unsupported COORDINATOR_CMD: $COORD_CMD" >&2; exit 1 ;;
+esac
 # Default model depends on which coordinator is running:
-#   claude → claude-fable-5 (Fable 5 — 1M context is the default on this
-#     model, so no '[1m]' suffix is needed. Older '[1m]'-suffixed ids like
-#     'claude-opus-4-7[1m]' still work as overrides; single-quote them at
-#     the shell to suppress glob expansion of the brackets).
+#   claude → 'opus', the Claude CLI alias for the newest Opus model
+#     (claude-opus-5-5 with a 1M context as of 2026-10-05). The alias
+#     auto-upgrades when Anthropic ships the next Opus; pin a full id
+#     (e.g. COORDINATOR_MODEL=claude-opus-5-5) to freeze it. We use 'opus'
+#     rather than 'default' because 'default' follows Anthropic's
+#     per-account recommendation, which need not stay an Opus model.
+#     Older '[1m]'-suffixed ids like 'claude-opus-4-7[1m]' still work as
+#     overrides; single-quote them at the shell to suppress glob expansion.
 #   gemini → gemini-2.5-flash (stable). gemini-3-flash-preview returns
 #     INVALID_ARGUMENT on multi-step tool sequences (which is the
 #     coordinator's whole job), so it's not a viable default.
 #   codex → CLI-configured default. Set COORDINATOR_MODEL to pin one.
 # Override either via COORDINATOR_MODEL=<id>.
 case "$COORD_CMD" in
-    claude) COORD_MODEL_DEFAULT='claude-fable-5' ;;
+    claude) COORD_MODEL_DEFAULT='opus' ;;
     gemini) COORD_MODEL_DEFAULT='gemini-2.5-flash' ;;
-    codex)  COORD_MODEL_DEFAULT='' ;;
-    *)      COORD_MODEL_DEFAULT='' ;;
+    codex|agy) COORD_MODEL_DEFAULT='' ;;
 esac
 COORD_MODEL="${COORDINATOR_MODEL:-$COORD_MODEL_DEFAULT}"
 
@@ -322,7 +329,7 @@ COORD_MODEL="${COORDINATOR_MODEL:-$COORD_MODEL_DEFAULT}"
 # LLM_ENV_FILES (colon-separated, like $PATH) for additional locations
 # without losing the defaults.
 GEMINI_ENV_SOURCED=""
-if [ "$COORD_CMD" = "gemini" ] && [ -z "${GEMINI_API_KEY:-}" ]; then
+if { [ "$COORD_CMD" = "gemini" ] || [ "$COORD_CMD" = "agy" ]; } && [ -z "${GEMINI_API_KEY:-}" ]; then
     _env_candidates=(
         "$PWD/.env"
         "$HOME/.gemini/.env"
@@ -814,6 +821,7 @@ if ! $session_existed; then
     for _v in MAX_WORKERS MAX_TMUX_WINDOWS HOST_MAX_WORKERS TARGET_AVAILABLE OWNER_LABELS \
               INCLUDE_ASSIGNED_TO_OTHERS DEBOUNCE_SECS POLL_SECS \
               WORKER_CMD WORKER_MODEL WORKER_HEADLESS WORKER_SELF_REVIEW \
+              SELF_REVIEW_CMD SELF_REVIEW_MODEL \
               WORKER_PROMPT_FILE LLM_SWARM_DIR LLM_SWARM_DOCS; do
         _val="${!_v:-}"
         [ -n "$_val" ] && TMUX_ENV_OPTS+=(-e "$_v=$_val")
@@ -856,6 +864,11 @@ fi
 # before this feature existed.
 tmux set-option -g remain-on-exit "$REMAIN_ON_EXIT_VALUE"
 tmux set-option -g history-limit 50000
+# Codex deliberately exits after each turn. Keep its completed report visible
+# until the next invocation replaces this dead pane via the detection above.
+if [ "$COORD_CMD" = "codex" ] || { [ "$COORD_CMD" = "agy" ] && [ "${COORDINATOR_HEADLESS:-0}" = "1" ]; }; then
+    tmux set-option -w -t "$SESSION_NAME:coordinator" remain-on-exit on
+fi
 
 # Ensure the 'util' window exists immediately after coordinator (slot 2).
 # Bare bash in $PWD — no sandbox, no container — for ad-hoc inspection
@@ -935,13 +948,15 @@ if ! $session_existed || ! $window_exists || $coordinator_idle; then
         WRAPPER="$LLM_SWARM_DIR/scripts/coordinator-codex.sh"
         tmux send-keys -t "$SESSION_NAME:coordinator" \
             "${ENV_VARS}exec $(printf '%q' "$WRAPPER") $(printf '%q' "$RENDERED_PROMPT_FILE") $(printf '%q' "$TMP_PROMPT")" C-m
+    elif [ "$COORD_CMD" = "agy" ]; then
+        ENV_VARS="COORDINATOR_HEADLESS=$(printf '%q' "${COORDINATOR_HEADLESS:-0}") "
+        [ -n "${COORD_MODEL:-}" ] && ENV_VARS+="COORD_MODEL=$(printf '%q' "$COORD_MODEL") "
+        WRAPPER="$LLM_SWARM_DIR/scripts/coordinator-agy.sh"
+        tmux send-keys -t "$SESSION_NAME:coordinator" \
+            "${ENV_VARS}exec $(printf '%q' "$WRAPPER") $(printf '%q' "$RENDERED_PROMPT_FILE") $(printf '%q' "$TMP_PROMPT")" C-m
     else
-        # gemini (or any other backend): inline construction.
-        if [ "$COORD_CMD" = "gemini" ]; then
-            BASE_CMD="GEMINI_SYSTEM_MD='$RENDERED_PROMPT_FILE' gemini -m '$COORD_MODEL' --yolo --skip-trust"
-        else
-            BASE_CMD="$COORD_CMD"
-        fi
+        # Gemini CLI uses its own system-prompt file and interactive flag.
+        BASE_CMD="GEMINI_SYSTEM_MD='$RENDERED_PROMPT_FILE' gemini -m '$COORD_MODEL' --yolo --skip-trust"
 
         # COORDINATOR_VERBOSE=1 swaps gemini's -p for -i (--prompt-interactive)
         # so tool calls stream live in the pane. Trade-off: gemini stays alive
@@ -965,7 +980,7 @@ if ! $session_existed || ! $window_exists || $coordinator_idle; then
 
         tmux send-keys -t "$SESSION_NAME:coordinator" "$BASE_CMD $PROMPT_FLAG \"\$(cat '$TMP_PROMPT')\"; rm '$TMP_PROMPT'$ERR_TAIL" C-m
     fi
-elif [ "$COORD_CMD" = "claude" ] && [ "${COORDINATOR_HEADLESS:-0}" != "1" ]; then
+elif { [ "$COORD_CMD" = "claude" ] || [ "$COORD_CMD" = "agy" ]; } && [ "${COORDINATOR_HEADLESS:-0}" != "1" ]; then
     # Live-REPL re-prompt path: claude is already running in the pane and
     # we want to send a follow-up message into the existing conversation.
     # tmux load-buffer + paste-buffer handles multi-line content correctly

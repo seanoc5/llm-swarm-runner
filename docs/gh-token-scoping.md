@@ -27,7 +27,9 @@ Derived by grepping every `gh` call in `scripts/`, `sandbox.sh`, `llm-start.sh`,
 | Contents | **read + write** | `gh pr merge` (a merge is a write to the default branch), `gh pr diff` |
 | Pull requests | **read + write** | `gh pr create/view/list/comment/edit/close/reopen/ready/checks/merge` — 38 `pr view` sites alone |
 | Issues | **read + write** | `gh issue create/view/list/comment/edit/close`, `gh label create/list` |
+| Commit statuses | **write** | not yet used by any script — prerequisite for the `swarm/worker` status check (#532); probed by `gh-token-probe.sh` so a missing grant surfaces now instead of failing silently later |
 | Actions | read | `gh run list`, `gh run watch`, `gh workflow list` (CI gate + claude-code-action routing) |
+| Checks | **not offered to fine-grained tokens at all** | `gh pr checks` needs it and fails with "Resource not accessible by personal access token" when it's missing; `scripts/ci-wait.sh` (#513) falls back to polling `gh run list --commit` instead, which only needs the Actions: read above |
 | Workflows | **not needed** | the classic `workflow` scope only governs pushing `.github/workflows/*` over HTTPS; the swarm pushes over SSH |
 | Gist, Org, Projects, Discussions | none | never used |
 

@@ -227,6 +227,7 @@ log_event() {
 #   HOST_MIN_MEM_AVAIL_MB    16384    refuse when MemAvailable is below this
 #   HOST_SPAWN_STAGGER_SECS  60       minimum seconds between spawns host-wide
 #   HOST_STATE_DIR           $TMPDIR/llm-swarm-host-<uid>   lock + pending markers
+#                            + dispatch-paused (see nightly-full-tests.sh)
 # Test hooks: HOST_LOADAVG_FILE / HOST_MEMINFO_FILE replace /proc/{loadavg,meminfo}.
 HOST_MAX_LOAD1="${HOST_MAX_LOAD1:-auto}"
 HOST_MIN_MEM_AVAIL_MB="${HOST_MIN_MEM_AVAIL_MB:-16384}"
@@ -248,6 +249,23 @@ host_admission_check() {
     mkdir -p "$HOST_STATE_DIR"
     exec 9>"$HOST_STATE_DIR/cap.lock"
     flock -w 30 9 || echo "warn: host cap lock busy for 30 s; proceeding unlocked" >&2
+
+    # 0) dispatch pause: "<expiry-epoch> <reason...>" written by
+    # nightly-full-tests.sh. An expired file is ignored and removed, so a
+    # crashed nightly can't hold dispatch forever.
+    local pause_file="$HOST_STATE_DIR/dispatch-paused"
+    if [ -f "$pause_file" ]; then
+        local p_until p_reason p_left
+        read -r p_until p_reason < "$pause_file" || true
+        p_left=$(( ${p_until:-0} - $(date +%s) ))
+        if [ "$p_left" -gt 0 ]; then
+            host_refuse dispatch_paused \
+                "dispatch paused host-wide (${p_reason:-no reason given})" \
+                "Retry after ${p_left}s at the latest (the pause may lift sooner); the coordinator does this on its own." \
+                "left=${p_left}s"
+        fi
+        rm -f -- "$pause_file"
+    fi
 
     # a) container count: running + pending spawns not yet visible to docker ps
     if [ "$HOST_MAX_WORKERS" != "0" ]; then
@@ -868,7 +886,7 @@ else
     # acceptance-check config documented in .env.example never reaches
     # sandbox.sh (and thus never the listener).
     tmux new-window -d -t "$SESSION_NAME" -n "iss-$ISSUE" \
-        "WORKER_CONTAINER_NAME=$(printf '%q' "$container_name") WORKER_CMD=$(printf '%q' "${WORKER_CMD:-claude}") WORKER_MODEL=$(printf '%q' "${WORKER_MODEL:-}") WORKER_PROMPT_FILE=$(printf '%q' "${WORKER_PROMPT_FILE:-}") WORKER_HEADLESS=$(printf '%q' "${WORKER_HEADLESS:-0}") WORKER_SELF_REVIEW=$(printf '%q' "${WORKER_SELF_REVIEW:-1}") WORKER_CHECK=$(printf '%q' "${WORKER_CHECK:-}") WORKER_CHECK_CMD=$(printf '%q' "${WORKER_CHECK_CMD:-}") WORKER_CHECK_TIMEOUT=$(printf '%q' "${WORKER_CHECK_TIMEOUT:-}") WORKER_CHECK_RETRY=$(printf '%q' "${WORKER_CHECK_RETRY:-}") SWARM_EVAL_LOG=$(printf '%q' "${SWARM_EVAL_LOG:-}") EXTRA_MOUNTS=$(printf '%q' "${EXTRA_MOUNTS:-}") SANDBOX_DEP_CACHE=$(printf '%q' "${SANDBOX_DEP_CACHE:-}") SANDBOX_CPUS=$(printf '%q' "${SANDBOX_CPUS:-}") SANDBOX_GRADLE_LIMITS=$(printf '%q' "${SANDBOX_GRADLE_LIMITS:-}") SANDBOX_GRADLE_WORKERS_MAX=$(printf '%q' "${SANDBOX_GRADLE_WORKERS_MAX:-}") SANDBOX_KOTLIN_DAEMON_XMX=$(printf '%q' "${SANDBOX_KOTLIN_DAEMON_XMX:-}") SANDBOX_ALLOW_BACKGROUND_TASKS=$(printf '%q' "${SANDBOX_ALLOW_BACKGROUND_TASKS:-}") $(printf '%q' "$SANDBOX_SH") $(printf '%q' "$WT") listener"
+        "WORKER_CONTAINER_NAME=$(printf '%q' "$container_name") WORKER_CMD=$(printf '%q' "${WORKER_CMD:-claude}") WORKER_MODEL=$(printf '%q' "${WORKER_MODEL:-}") WORKER_PROMPT_FILE=$(printf '%q' "${WORKER_PROMPT_FILE:-}") WORKER_HEADLESS=$(printf '%q' "${WORKER_HEADLESS:-0}") WORKER_SELF_REVIEW=$(printf '%q' "${WORKER_SELF_REVIEW:-1}") SELF_REVIEW_CMD=$(printf '%q' "${SELF_REVIEW_CMD:-}") SELF_REVIEW_MODEL=$(printf '%q' "${SELF_REVIEW_MODEL:-}") WORKER_CHECK=$(printf '%q' "${WORKER_CHECK:-}") WORKER_CHECK_CMD=$(printf '%q' "${WORKER_CHECK_CMD:-}") WORKER_CHECK_TIMEOUT=$(printf '%q' "${WORKER_CHECK_TIMEOUT:-}") WORKER_CHECK_RETRY=$(printf '%q' "${WORKER_CHECK_RETRY:-}") SWARM_EVAL_LOG=$(printf '%q' "${SWARM_EVAL_LOG:-}") EXTRA_MOUNTS=$(printf '%q' "${EXTRA_MOUNTS:-}") SANDBOX_DEP_CACHE=$(printf '%q' "${SANDBOX_DEP_CACHE:-}") SANDBOX_CPUS=$(printf '%q' "${SANDBOX_CPUS:-}") SANDBOX_GRADLE_LIMITS=$(printf '%q' "${SANDBOX_GRADLE_LIMITS:-}") SANDBOX_GRADLE_WORKERS_MAX=$(printf '%q' "${SANDBOX_GRADLE_WORKERS_MAX:-}") SANDBOX_KOTLIN_DAEMON_XMX=$(printf '%q' "${SANDBOX_KOTLIN_DAEMON_XMX:-}") SANDBOX_ALLOW_BACKGROUND_TASKS=$(printf '%q' "${SANDBOX_ALLOW_BACKGROUND_TASKS:-}") $(printf '%q' "$SANDBOX_SH") $(printf '%q' "$WT") listener"
     echo "[4/4] tmux window iss-$ISSUE spawned (listener)"
     log_event worker.start "issue=$ISSUE task_id=$TASK_ID window=iss-$ISSUE alive=$((alive_workers + 1))/$MAX_WORKERS total_windows=$((total_windows + 1))/$MAX_TMUX_WINDOWS"
 

@@ -139,6 +139,7 @@ green "fixture ready at $PROJECT_DIR"
 heading "Test 1: provision-worker.sh creates worktree + branch + brief"
 cd "$PROJECT_DIR"
 WORKER_CMD=codex WORKER_HEADLESS=1 WORKER_MODEL=test-codex WORKER_SELF_REVIEW=0 \
+SELF_REVIEW_CMD=codex SELF_REVIEW_MODEL=test-sol \
     "$PROVISION" 99 > "$TEST_DIR/prov-1.log" 2>&1 || red "provision-worker exit non-zero: $(cat $TEST_DIR/prov-1.log)"
 WT="$TEST_DIR/wt-issue-99"
 [ -d "$WT" ] || red "worktree not created at $WT"
@@ -154,6 +155,8 @@ grep -qE 'new-window .* iss-99' "$TEST_DIR/tmux.log" \
     || red "expected tmux new-window for iss-99; got: $(cat $TEST_DIR/tmux.log)"
 grep -q 'WORKER_CMD=codex .*WORKER_MODEL=test-codex .*WORKER_HEADLESS=1 .*WORKER_SELF_REVIEW=0' "$TEST_DIR/tmux.log" \
     || red "expected worker backend env in tmux spawn; got: $(cat "$TEST_DIR/tmux.log")"
+grep -q 'SELF_REVIEW_CMD=codex SELF_REVIEW_MODEL=test-sol' "$TEST_DIR/tmux.log" \
+    || red "expected review model in tmux spawn; got: $(cat "$TEST_DIR/tmux.log")"
 green "worktree, branch, queue (incl. status/), brief, tmux window, and worker backend env all created"
 
 heading "Test 2: provision-worker.sh embeds .swarm-policy.md when present"
@@ -930,6 +933,437 @@ grep -q 'window=coordinator' "$PROJECT_DIR/.swarm/events.log" \
 green "a worker's own violation line, rendered inside the coordinator window (as demo-driver.sh's events.log tail would), is not reattributed as a coordinator sighting"
 
 rm -f "$TEST_DIR/tmux-windows.txt" "$TEST_DIR/tmux-pane-iss-77.txt" "$TEST_DIR/tmux-pane-coordinator.txt"
+
+heading "Test 16a: timeout_retry_sweep_pass flags a worker stuck retrying a command past its own timeout (#467)"
+# Canned pane capture: 3 WATCH_TIMEOUT_HIT markers (the prompts/worker.md
+# "Stop after two timeouts on the same command" rule's echoed marker),
+# meeting the default WATCH_TIMEOUT_RETRY_MIN_COUNT=3 threshold. The third
+# marker is prefixed the way Claude Code actually renders a Bash tool's
+# stdout in the pane (indented under a glyph, never at column 0) — the
+# pattern match is unanchored, so this proves real indentation doesn't
+# break it, not just the plain-text form the other markers use.
+echo "iss-77" > "$TEST_DIR/tmux-windows.txt"
+cat > "$TEST_DIR/tmux-pane-iss-77.txt" <<'PANE'
+timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
+exit=124
+WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=1 ran=595s
+timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
+exit=124
+WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=2 ran=595s
+timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
+exit=124
+  ⎿ WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=3 ran=595s
+PANE
+rm -rf "$TEST_DIR/wt-issue-77/.swarm/tasks/outbox"
+
+cd "$PROJECT_DIR"
+DRY_RUN=0 WATCH_TIMEOUT_RETRY_SWEEP_SECS=1 WATCH_BG_VIOLATION_SWEEP_SECS=0 WATCH_PR_POLL_SECS=0 \
+    WATCH_ORPHAN_SWEEP_SECS=0 WATCH_CHECK_ON_DONE=0 POLL_SECS=1 \
+    "$WATCH" "$PROJECT_DIR" > "$TEST_DIR/watch-timeoutretry-a.log" 2>&1 &
+WATCH_PID=$!
+
+outbox_file=""
+for ((i=0; i<20; i++)); do
+    outbox_file="$(ls "$TEST_DIR"/wt-issue-77/.swarm/tasks/outbox/*.md 2>/dev/null | head -1)" || true
+    [ -n "$outbox_file" ] && break
+    sleep 0.5
+done
+kill "$WATCH_PID" 2>/dev/null || true
+wait "$WATCH_PID" 2>/dev/null || true
+unset WATCH_PID
+
+[ -n "$outbox_file" ] || red "expected a timeout-retry outbox message; log: $(cat "$TEST_DIR/watch-timeoutretry-a.log")"
+grep -q 'kind: fyi' "$outbox_file" || red "expected kind: fyi in $outbox_file"
+grep -q 'iss-77' "$outbox_file" || red "expected issue reference in $outbox_file"
+green "3 WATCH_TIMEOUT_HIT markers -> outbox fyi message dropped for iss-77"
+
+heading "Test 16b: timeout_retry_sweep_pass does not fire below WATCH_TIMEOUT_RETRY_MIN_COUNT (#467)"
+# Same marker, but only 2 occurrences against the default min count of 3 —
+# a single retry (one timeout, one legitimate reattempt) should not page
+# anyone.
+rm -rf "$TEST_DIR/wt-issue-77/.swarm/tasks/outbox"
+echo "iss-77" > "$TEST_DIR/tmux-windows.txt"
+cat > "$TEST_DIR/tmux-pane-iss-77.txt" <<'PANE'
+timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
+exit=124
+WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=1 ran=595s
+timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
+exit=124
+WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=2 ran=595s
+PANE
+
+cd "$PROJECT_DIR"
+DRY_RUN=0 WATCH_TIMEOUT_RETRY_SWEEP_SECS=1 WATCH_BG_VIOLATION_SWEEP_SECS=0 WATCH_PR_POLL_SECS=0 \
+    WATCH_ORPHAN_SWEEP_SECS=0 WATCH_CHECK_ON_DONE=0 POLL_SECS=1 \
+    "$WATCH" "$PROJECT_DIR" > "$TEST_DIR/watch-timeoutretry-b.log" 2>&1 &
+WATCH_PID=$!
+
+sleep 5
+still_running=0
+kill -0 "$WATCH_PID" 2>/dev/null && still_running=1
+kill "$WATCH_PID" 2>/dev/null || true
+wait "$WATCH_PID" 2>/dev/null || true
+unset WATCH_PID
+
+[ "$still_running" = "1" ] || red "watch process exited unexpectedly; log: $(cat "$TEST_DIR/watch-timeoutretry-b.log")"
+outbox_file="$(ls "$TEST_DIR"/wt-issue-77/.swarm/tasks/outbox/*.md 2>/dev/null | head -1)" || true
+[ -z "$outbox_file" ] \
+    || red "2 markers (below MIN_COUNT=3) wrongly fired an outbox message; got: $(cat "$outbox_file")"
+green "2 WATCH_TIMEOUT_HIT markers (below the default min count of 3) do not fire"
+
+heading "Test 16c: timeout_retry_sweep_pass under DRY_RUN=1 logs but does not write a real outbox message (#467)"
+rm -rf "$TEST_DIR/wt-issue-77/.swarm/tasks/outbox"
+rm -f "$PROJECT_DIR/.swarm/events.log"
+echo "iss-77" > "$TEST_DIR/tmux-windows.txt"
+cat > "$TEST_DIR/tmux-pane-iss-77.txt" <<'PANE'
+WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=1 ran=595s
+WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=2 ran=595s
+WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=3 ran=595s
+PANE
+
+cd "$PROJECT_DIR"
+DRY_RUN=1 WATCH_TIMEOUT_RETRY_SWEEP_SECS=1 WATCH_BG_VIOLATION_SWEEP_SECS=0 WATCH_PR_POLL_SECS=0 \
+    WATCH_ORPHAN_SWEEP_SECS=0 WATCH_CHECK_ON_DONE=0 POLL_SECS=1 \
+    "$WATCH" "$PROJECT_DIR" > "$TEST_DIR/watch-timeoutretry-c.log" 2>&1 &
+WATCH_PID=$!
+
+logged=0
+for ((i=0; i<20; i++)); do
+    if grep -q 'watch.timeout_retry.*dry_run=1' "$PROJECT_DIR/.swarm/events.log" 2>/dev/null; then
+        logged=1
+        break
+    fi
+    sleep 0.5
+done
+kill "$WATCH_PID" 2>/dev/null || true
+wait "$WATCH_PID" 2>/dev/null || true
+unset WATCH_PID
+
+[ "$logged" = "1" ] || red "expected a dry_run=1 watch.timeout_retry event; log: $(cat "$PROJECT_DIR/.swarm/events.log" 2>/dev/null || echo none)"
+outbox_file="$(ls "$TEST_DIR"/wt-issue-77/.swarm/tasks/outbox/*.md 2>/dev/null | head -1)" || true
+[ -z "$outbox_file" ] \
+    || red "DRY_RUN=1 should not write a real outbox message; got: $(cat "$outbox_file")"
+green "DRY_RUN=1 logs the timeout-retry sighting but writes no real outbox message"
+
+heading "Test 16d: a rendered command SOURCE line (not real output) does not false-positive (#467, self-review finding)"
+# Claude Code renders the command text it ran into the pane verbatim — if
+# prompts/worker.md's example wrote the literal token in the command
+# source, every run of that snippet (timed out or not) would render
+# "WATCH_TIMEOUT_HIT" in the pane and get counted, even with no real
+# timeout and no real echoed output. The shipped worker.md snippet avoids
+# this by building the marker from two concatenated string literals
+# ("WATCH_TIMEOUT" "_HIT ...") so the whole token never appears contiguous
+# in the command source — only in the actual printed output. This fixture
+# reproduces worker.md's exact current command source (redirect, exit-code
+# echo, if-block) three times with the `if` condition always false (as if
+# the command never actually timed out), and asserts the sweep does not
+# fire. Keep this in sync with worker.md's example if that changes again.
+rm -rf "$TEST_DIR/wt-issue-77/.swarm/tasks/outbox"
+echo "iss-77" > "$TEST_DIR/tmux-windows.txt"
+cat > "$TEST_DIR/tmux-pane-iss-77.txt" <<'PANE'
+timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
+echo "exit=$ec"
+if [ "$ec" = 124 ]; then
+    echo "WATCH_TIMEOUT""_HIT cmd=\"restore.sh\" attempt=1 ran=595s"
+fi
+timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
+echo "exit=$ec"
+if [ "$ec" = 124 ]; then
+    echo "WATCH_TIMEOUT""_HIT cmd=\"restore.sh\" attempt=2 ran=595s"
+fi
+timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
+echo "exit=$ec"
+if [ "$ec" = 124 ]; then
+    echo "WATCH_TIMEOUT""_HIT cmd=\"restore.sh\" attempt=3 ran=595s"
+fi
+PANE
+
+cd "$PROJECT_DIR"
+DRY_RUN=0 WATCH_TIMEOUT_RETRY_SWEEP_SECS=1 WATCH_BG_VIOLATION_SWEEP_SECS=0 WATCH_PR_POLL_SECS=0 \
+    WATCH_ORPHAN_SWEEP_SECS=0 WATCH_CHECK_ON_DONE=0 POLL_SECS=1 \
+    "$WATCH" "$PROJECT_DIR" > "$TEST_DIR/watch-timeoutretry-d.log" 2>&1 &
+WATCH_PID=$!
+
+sleep 5
+still_running=0
+kill -0 "$WATCH_PID" 2>/dev/null && still_running=1
+kill "$WATCH_PID" 2>/dev/null || true
+wait "$WATCH_PID" 2>/dev/null || true
+unset WATCH_PID
+
+[ "$still_running" = "1" ] || red "watch process exited unexpectedly; log: $(cat "$TEST_DIR/watch-timeoutretry-d.log")"
+outbox_file="$(ls "$TEST_DIR"/wt-issue-77/.swarm/tasks/outbox/*.md 2>/dev/null | head -1)" || true
+[ -z "$outbox_file" ] \
+    || red "a rendered command SOURCE line (no real timeout, no real output) wrongly fired an outbox message; got: $(cat "$outbox_file")"
+green "three renderings of the split-token command source (no real timeout output) do not false-positive"
+
+rm -f "$TEST_DIR/tmux-windows.txt" "$TEST_DIR/tmux-pane-iss-77.txt"
+
+heading "Test 16e: a worker's own prose about the marker does not false-positive an obedient worker (#467, self-review finding)"
+# Second self-review finding: a worker that obeys the rule (2 real timeouts,
+# then stops) can still get flagged if it later writes about the marker in
+# its own summary or decision-needed narration, e.g. "that's a second
+# WATCH_TIMEOUT_HIT, stopping per the rule" — 2 real + 1 narrated = 3,
+# tripping WATCH_TIMEOUT_RETRY_MIN_COUNT on a worker that did everything
+# right. Line-anchoring the pattern was tried and reverted (a THIRD
+# self-review finding): Claude Code indents real tool stdout under a `⎿`
+# glyph, never column 0, so an anchor would have missed real sightings too.
+# Fixed instead with a context self-match guard, same mechanism
+# bg_violation_sweep_pass already uses (see test 15b) — a candidate within 3
+# lines of "decision-needed" or "worker.md" is prose, not a real sighting.
+# This fixture has exactly 2 real markers plus one prose line mentioning the
+# token and both guard tokens, and asserts the sweep does not fire.
+rm -rf "$TEST_DIR/wt-issue-77/.swarm/tasks/outbox"
+echo "iss-77" > "$TEST_DIR/tmux-windows.txt"
+cat > "$TEST_DIR/tmux-pane-iss-77.txt" <<'PANE'
+timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
+exit=124
+WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=1 ran=595s
+timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
+exit=124
+WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=2 ran=595s
+That's a second WATCH_TIMEOUT_HIT, so per worker.md I'm stopping and filing
+a decision-needed message instead of retrying a third time.
+PANE
+
+cd "$PROJECT_DIR"
+DRY_RUN=0 WATCH_TIMEOUT_RETRY_SWEEP_SECS=1 WATCH_BG_VIOLATION_SWEEP_SECS=0 WATCH_PR_POLL_SECS=0 \
+    WATCH_ORPHAN_SWEEP_SECS=0 WATCH_CHECK_ON_DONE=0 POLL_SECS=1 \
+    "$WATCH" "$PROJECT_DIR" > "$TEST_DIR/watch-timeoutretry-e.log" 2>&1 &
+WATCH_PID=$!
+
+sleep 5
+still_running=0
+kill -0 "$WATCH_PID" 2>/dev/null && still_running=1
+kill "$WATCH_PID" 2>/dev/null || true
+wait "$WATCH_PID" 2>/dev/null || true
+unset WATCH_PID
+
+[ "$still_running" = "1" ] || red "watch process exited unexpectedly; log: $(cat "$TEST_DIR/watch-timeoutretry-e.log")"
+outbox_file="$(ls "$TEST_DIR"/wt-issue-77/.swarm/tasks/outbox/*.md 2>/dev/null | head -1)" || true
+[ -z "$outbox_file" ] \
+    || red "an obedient worker's own prose about the marker wrongly tipped the sweep over; got: $(cat "$outbox_file")"
+green "2 real markers + 1 guarded prose mention of the token do not false-positive"
+
+rm -f "$TEST_DIR/tmux-windows.txt" "$TEST_DIR/tmux-pane-iss-77.txt"
+
+heading "Test 16f: the self-match guard does not mask a real, distant violation (#467)"
+# Mirrors test 15d for bg_violation_sweep_pass's own guard: a guard token
+# (here "worker.md", from an unrelated earlier line) more than 3 lines away
+# from a real marker must not suppress it. Scrollback has "worker.md" once
+# at the top, then 3 real markers all more than 3 lines below it — the
+# sweep should still fire.
+rm -rf "$TEST_DIR/wt-issue-77/.swarm/tasks/outbox"
+echo "iss-77" > "$TEST_DIR/tmux-windows.txt"
+cat > "$TEST_DIR/tmux-pane-iss-77.txt" <<'PANE'
+Reading prompts/worker.md to check the task conventions before starting.
+filler line 1
+filler line 2
+filler line 3
+timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
+exit=124
+WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=1 ran=595s
+timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
+exit=124
+WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=2 ran=595s
+timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
+exit=124
+WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=3 ran=595s
+PANE
+
+cd "$PROJECT_DIR"
+DRY_RUN=0 WATCH_TIMEOUT_RETRY_SWEEP_SECS=1 WATCH_BG_VIOLATION_SWEEP_SECS=0 WATCH_PR_POLL_SECS=0 \
+    WATCH_ORPHAN_SWEEP_SECS=0 WATCH_CHECK_ON_DONE=0 POLL_SECS=1 \
+    "$WATCH" "$PROJECT_DIR" > "$TEST_DIR/watch-timeoutretry-f.log" 2>&1 &
+WATCH_PID=$!
+
+outbox_file=""
+for _ in $(seq 1 10); do
+    outbox_file="$(ls "$TEST_DIR"/wt-issue-77/.swarm/tasks/outbox/*.md 2>/dev/null | head -1)" || true
+    [ -n "$outbox_file" ] && break
+    sleep 1
+done
+kill "$WATCH_PID" 2>/dev/null || true
+wait "$WATCH_PID" 2>/dev/null || true
+unset WATCH_PID
+
+[ -n "$outbox_file" ] \
+    || red "a guard token 4+ lines from 3 real markers wrongly suppressed the sighting; log: $(cat "$TEST_DIR/watch-timeoutretry-f.log")"
+grep -q 'kind: fyi' "$outbox_file" || red "outbox file missing 'kind: fyi': $(cat "$outbox_file")"
+grep -q 'iss-77' "$outbox_file" || red "outbox file doesn't name iss-77: $(cat "$outbox_file")"
+green "a guard token more than 3 lines from 3 real markers does not suppress the sighting"
+
+rm -f "$TEST_DIR/tmux-windows.txt" "$TEST_DIR/tmux-pane-iss-77.txt"
+
+heading "Test 16g: a decision-needed body that retypes the marker DOES fire, unguarded by distance (#467, round-10 self-review finding)"
+# Fourth self-review finding (round 10): test 16e's prose line sat right
+# next to both guard tokens, closer than the real outbox template ever
+# would — self-review caught that in that fixture, "kind: decision-needed"
+# landed only 3 lines after the second real marker, inside the guard
+# window, which silently dropped that real marker from the count without
+# either test noticing. To show the actual risk (and that the guard really
+# doesn't reach this far), this fixture spaces 2 real markers AND a third,
+# retyped mention of the marker inside a rendered decision-needed heredoc
+# all more than 3 lines from every guard token (verified below) — proving
+# that if a worker ignored the new instruction and retyped the literal
+# marker in that message's body, the sweep would still correctly fire.
+rm -rf "$TEST_DIR/wt-issue-77/.swarm/tasks/outbox"
+echo "iss-77" > "$TEST_DIR/tmux-windows.txt"
+cat > "$TEST_DIR/tmux-pane-iss-77.txt" <<'PANE'
+timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
+exit=124
+WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=1 ran=595s
+timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
+exit=124
+WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=2 ran=595s
+Two attempts in a row have now hit the wall.
+Writing the outbox message next.
+cat > "$tmp" <<EOF
+---
+kind: decision-needed
+task_id: wt-issue-77
+ts: 2026-10-05T00:00:00Z
+---
+This is the second WATCH_TIMEOUT_HIT on restore.sh in a row, so per the
+rule I am stopping instead of retrying a third time.
+EOF
+PANE
+# Sanity-check the fixture's own spacing before trusting the sweep's
+# verdict on it: every candidate line must be >3 lines from every guard
+# token, i.e. genuinely unguarded, or this test would prove nothing.
+awk '
+    /WATCH_TIMEOUT_HIT/ { markers[NR] = 1 }
+    /WATCH_TIMEOUT_RETRY_SWEEP_SECS|WATCH_TIMEOUT_RETRY_PATTERN|WATCH_TIMEOUT_RETRY_MIN_COUNT|decision-needed|worker\.md/ { guards[NR] = 1 }
+    END {
+        for (m in markers) for (g in guards) {
+            d = m - g; if (d < 0) d = -d
+            if (d <= 3) { print "fixture bug: marker line " m " is within " d " lines of guard line " g; bad = 1 }
+        }
+        exit bad
+    }
+' "$TEST_DIR/tmux-pane-iss-77.txt" \
+    || red "test 16g's own fixture doesn't actually test an unguarded case — fix the spacing"
+
+cd "$PROJECT_DIR"
+DRY_RUN=0 WATCH_TIMEOUT_RETRY_SWEEP_SECS=1 WATCH_BG_VIOLATION_SWEEP_SECS=0 WATCH_PR_POLL_SECS=0 \
+    WATCH_ORPHAN_SWEEP_SECS=0 WATCH_CHECK_ON_DONE=0 POLL_SECS=1 \
+    "$WATCH" "$PROJECT_DIR" > "$TEST_DIR/watch-timeoutretry-g.log" 2>&1 &
+WATCH_PID=$!
+
+outbox_file=""
+for _ in $(seq 1 10); do
+    outbox_file="$(ls "$TEST_DIR"/wt-issue-77/.swarm/tasks/outbox/*.md 2>/dev/null | head -1)" || true
+    [ -n "$outbox_file" ] && break
+    sleep 1
+done
+kill "$WATCH_PID" 2>/dev/null || true
+wait "$WATCH_PID" 2>/dev/null || true
+unset WATCH_PID
+
+[ -n "$outbox_file" ] \
+    || red "an unguarded, retyped third marker in a decision-needed body did not fire; log: $(cat "$TEST_DIR/watch-timeoutretry-g.log")"
+green "2 real markers + an unguarded retyped mention in a decision-needed body DOES fire (3 unguarded hits)"
+
+rm -f "$TEST_DIR/tmux-windows.txt" "$TEST_DIR/tmux-pane-iss-77.txt"
+
+heading "Test 16h: the same decision-needed body, worded per the fix, does not false-positive (#467, round-10 self-review finding)"
+# Same two real markers and the same spacing as 16g (so the 2 real hits are
+# genuinely unguarded, not accidentally swallowed by proximity to
+# "decision-needed" the way the original, now-replaced 16g fixture was) —
+# but the body now follows worker.md's round-10 instruction: it describes
+# the stop in words instead of retyping the literal marker. That leaves
+# only 2 real, unguarded hits, under WATCH_TIMEOUT_RETRY_MIN_COUNT=3, so
+# this proves the fix (not the guard) is what keeps an obedient worker
+# clean here — the guard never had to reach across the YAML frontmatter.
+rm -rf "$TEST_DIR/wt-issue-77/.swarm/tasks/outbox"
+echo "iss-77" > "$TEST_DIR/tmux-windows.txt"
+cat > "$TEST_DIR/tmux-pane-iss-77.txt" <<'PANE'
+timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
+exit=124
+WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=1 ran=595s
+timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
+exit=124
+WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=2 ran=595s
+Two attempts in a row have now hit the wall.
+Writing the outbox message next.
+cat > "$tmp" <<EOF
+---
+kind: decision-needed
+task_id: wt-issue-77
+ts: 2026-10-05T00:00:00Z
+---
+Hit the timeout twice in a row on restore.sh (two attempts, ~595s each).
+A full restore needs about 26 minutes per the dev-db size; handing this to
+the util pane, which has no timeout, is the usual fix. Parking as blocked.
+EOF
+PANE
+
+cd "$PROJECT_DIR"
+DRY_RUN=0 WATCH_TIMEOUT_RETRY_SWEEP_SECS=1 WATCH_BG_VIOLATION_SWEEP_SECS=0 WATCH_PR_POLL_SECS=0 \
+    WATCH_ORPHAN_SWEEP_SECS=0 WATCH_CHECK_ON_DONE=0 POLL_SECS=1 \
+    "$WATCH" "$PROJECT_DIR" > "$TEST_DIR/watch-timeoutretry-h.log" 2>&1 &
+WATCH_PID=$!
+
+sleep 5
+still_running=0
+kill -0 "$WATCH_PID" 2>/dev/null && still_running=1
+kill "$WATCH_PID" 2>/dev/null || true
+wait "$WATCH_PID" 2>/dev/null || true
+unset WATCH_PID
+
+[ "$still_running" = "1" ] || red "watch process exited unexpectedly; log: $(cat "$TEST_DIR/watch-timeoutretry-h.log")"
+outbox_file="$(ls "$TEST_DIR"/wt-issue-77/.swarm/tasks/outbox/*.md 2>/dev/null | head -1)" || true
+[ -z "$outbox_file" ] \
+    || red "a realistically-spaced, non-retyping decision-needed body wrongly tipped the sweep over; got: $(cat "$outbox_file")"
+green "2 real, genuinely unguarded markers + a decision-needed body that never retypes the marker do not false-positive"
+
+rm -f "$TEST_DIR/tmux-windows.txt" "$TEST_DIR/tmux-pane-iss-77.txt"
+
+heading "Test 16i: plain pane narration with no nearby guard words, worded per the fix, does not false-positive (#467, round-12 self-review finding)"
+# Fifth self-review finding (round 12): round 10's fix only told the
+# worker not to retype the marker in the decision-needed outbox message —
+# but round 2's original finding was about ANY narration, including plain
+# pane prose with no "decision-needed" or "worker.md" nearby to guard it.
+# worker.md's instruction was widened to cover typing the bare token
+# anywhere outside the echo commands, not just the outbox message. This
+# fixture is round 2's exact original failure shape — a plain narration
+# line right after the second marker, with no guard word within 3 lines —
+# but worded per the widened fix (describes the stop, never retypes the
+# token), proving the fix itself is what keeps this clean, since there is
+# no guard token anywhere in this fixture for the self-match guard to use.
+rm -rf "$TEST_DIR/wt-issue-77/.swarm/tasks/outbox"
+echo "iss-77" > "$TEST_DIR/tmux-windows.txt"
+cat > "$TEST_DIR/tmux-pane-iss-77.txt" <<'PANE'
+timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
+exit=124
+WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=1 ran=595s
+timeout 595 ./restore.sh >/tmp/restore.log 2>&1; ec=$?
+exit=124
+WATCH_TIMEOUT_HIT cmd="restore.sh" attempt=2 ran=595s
+That's two timeouts in a row on restore.sh, so I'm stopping here instead
+of retrying a third time, and filing a message about it next.
+PANE
+
+cd "$PROJECT_DIR"
+DRY_RUN=0 WATCH_TIMEOUT_RETRY_SWEEP_SECS=1 WATCH_BG_VIOLATION_SWEEP_SECS=0 WATCH_PR_POLL_SECS=0 \
+    WATCH_ORPHAN_SWEEP_SECS=0 WATCH_CHECK_ON_DONE=0 POLL_SECS=1 \
+    "$WATCH" "$PROJECT_DIR" > "$TEST_DIR/watch-timeoutretry-i.log" 2>&1 &
+WATCH_PID=$!
+
+sleep 5
+still_running=0
+kill -0 "$WATCH_PID" 2>/dev/null && still_running=1
+kill "$WATCH_PID" 2>/dev/null || true
+wait "$WATCH_PID" 2>/dev/null || true
+unset WATCH_PID
+
+[ "$still_running" = "1" ] || red "watch process exited unexpectedly; log: $(cat "$TEST_DIR/watch-timeoutretry-i.log")"
+outbox_file="$(ls "$TEST_DIR"/wt-issue-77/.swarm/tasks/outbox/*.md 2>/dev/null | head -1)" || true
+[ -z "$outbox_file" ] \
+    || red "plain narration with no guard word nearby, worded per the fix, wrongly tipped the sweep over; got: $(cat "$outbox_file")"
+green "2 real markers + unguarded plain narration that never retypes the token do not false-positive"
+
+rm -f "$TEST_DIR/tmux-windows.txt" "$TEST_DIR/tmux-pane-iss-77.txt"
 
 # ────────────────────────── Done ──────────────────────────
 

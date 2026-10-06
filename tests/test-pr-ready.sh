@@ -160,4 +160,46 @@ rc=0; run_pr_ready || rc=$?
 grep -qi 'WARN' "$TEST_DIR/out.log" || red "expected a WARN about the missing risk marker: $(cat "$TEST_DIR/out.log")"
 green "a missing risk marker is treated as medium, not skipped"
 
+# ============================================================================
+heading "Test 8: COORDINATOR HOLD banner — self-review still posts, gh pr ready NEVER runs (issue #534)"
+# ============================================================================
+printf '> ⛔ **COORDINATOR HOLD** — fix queued; do not merge\n\n<!-- BLIND_MERGE_RISK: medium -->\nsome change\n' > "$BODY_FILE"
+make_fake_review 0
+rc=0; run_pr_ready || rc=$?
+[ "$rc" -eq 3 ] || red "expected exit 3 for a held PR, got $rc: $(cat "$TEST_DIR/out.log")"
+[ -s "$FAKE_REVIEW_LOG" ] || red "expected self-review to still run (and post) for a held PR"
+gh_ready_called && red "expected gh pr ready NOT to run for a held PR"
+grep -qi 'HOLD' "$TEST_DIR/out.log" || red "expected a HOLD message in output: $(cat "$TEST_DIR/out.log")"
+green "a COORDINATOR HOLD banner posts self-review but never un-drafts the PR"
+
+# ============================================================================
+heading "Test 9: COORDINATOR HOLD banner on a risk=low PR — still held, not readied"
+# ============================================================================
+printf '> ⛔ **COORDINATOR HOLD** — fix queued; do not merge\n\n<!-- BLIND_MERGE_RISK: low -->\nfixed a typo\n' > "$BODY_FILE"
+make_fake_review 0
+rc=0; run_pr_ready || rc=$?
+[ "$rc" -eq 3 ] || red "expected exit 3 for a held low-risk PR, got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called && red "expected gh pr ready NOT to run for a held low-risk PR"
+green "a COORDINATOR HOLD banner holds even a risk=low PR"
+
+# ============================================================================
+heading "Test 10: body merely MENTIONS the phrase (no banner) — not held, readies normally"
+# ============================================================================
+printf '<!-- BLIND_MERGE_RISK: low -->\nThis PR adds the COORDINATOR HOLD check to pr-ready.sh.\n' > "$BODY_FILE"
+make_fake_review 0
+rc=0; run_pr_ready || rc=$?
+[ "$rc" -eq 0 ] || red "expected exit 0 — a prose mention of the phrase should not self-hold, got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called || red "expected gh pr ready to run when the body only mentions the phrase in prose, not the actual banner"
+green "a prose mention of the phrase (not the actual banner) does not trigger a hold"
+
+# ============================================================================
+heading "Test 11: body QUOTES the exact banner markup mid-paragraph (not at line-start) — not held"
+# ============================================================================
+printf '<!-- BLIND_MERGE_RISK: low -->\nThis fixes pr-ready.sh so a `> \xe2\x9b\x94 **COORDINATOR HOLD**` banner is respected.\n' > "$BODY_FILE"
+make_fake_review 0
+rc=0; run_pr_ready || rc=$?
+[ "$rc" -eq 0 ] || red "expected exit 0 — quoting the banner markup mid-paragraph should not self-hold, got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called || red "expected gh pr ready to run when the banner markup only appears quoted inline, not as its own leading line"
+green "quoting the banner's exact markup inline (not as a leading blockquote line) does not trigger a hold"
+
 green "ALL TESTS PASSED"

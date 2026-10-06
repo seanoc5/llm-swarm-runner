@@ -117,6 +117,33 @@
 #                        spawned (there's no operator to hand it to, and
 #                        `bash -i` needs a real tty).
 
+# issue #529: without job control, a foreground command this script runs
+# (claude/gemini/codex, or their `bash -c`/pipeline stages) shares THIS
+# process's own process group — a plain fork/exec never calls setpgid.
+# An agent that resolves its own pgid and runs `kill -TERM -<pgid>` meaning
+# to stop only the command tree it started (observed: a Codex worker
+# killing a Gradle test run it had launched) therefore also kills this
+# listener and everything else sharing that group, with no outcome ever
+# written and the brief stranded in processing/ (the 2026-10-01
+# corpusminder incident this issue documents). `set -m` turns on job
+# control in this script too (it defaults off for non-interactive bash):
+# every foreground command dispatch_agent() below runs then gets ITS OWN
+# new process group (verified: the dispatched process's own pgid differs
+# from this script's), so a `kill -<pgid>` from inside it can only reach
+# its own descendants. When a controlling terminal is attached (the normal
+# interactive tmux-pane case) bash also gives that new group the terminal
+# in the usual job-control way and restores this script's own group
+# afterward, so interactive TTY behavior (claude reopening /dev/tty for its
+# REPL, Ctrl-C reaching the running agent) is unaffected — same session,
+# only the process group differs. No tty (headless dispatch, tests) still
+# gets the new pgid; it just skips the terminal handoff, same as any
+# foreground command run from a non-interactive shell with monitor mode on.
+# Not a `setsid`: that would start a new SESSION with no controlling
+# terminal at all, breaking /dev/tty reopen in interactive mode — and the
+# command still runs and is waited on in the foreground exactly as before,
+# so this isn't the background/detached pattern worker.md prohibits.
+set -m
+
 # issue #451 self-review finding: scripts/task-done.sh resolves its queue
 # root via `git rev-parse --show-toplevel`, which is cwd-dependent — a
 # worker that `cd`s into a scratch clone mid-task and calls task-done.sh
@@ -130,6 +157,11 @@
 export SWARM_WORKTREE_DIR="$PWD"
 
 AGENT="${1:-claude}"
+# bash = test backend: runs each brief as a shell script (tests/test-shape-*).
+case "$AGENT" in
+    claude|gemini|codex|agy|bash) ;;
+    *) echo "ERROR: unsupported WORKER_CMD: $AGENT" >&2; exit 1 ;;
+esac
 MODEL="${WORKER_MODEL:-}"
 HEADLESS="${WORKER_HEADLESS:-0}"
 CHECK_ENABLED="${WORKER_CHECK:-1}"
@@ -198,6 +230,7 @@ if [ -n "$MODEL" ]; then
     case "$AGENT" in
         claude) MODEL_OPTS=(--model "$MODEL") ;;
         gemini|codex) MODEL_OPTS=(-m "$MODEL") ;;
+        agy) MODEL_OPTS=(--model "$MODEL") ;;
     esac
 fi
 
@@ -398,8 +431,17 @@ dispatch_agent() {
         else
             codex "${MODEL_OPTS[@]}" --dangerously-bypass-approvals-and-sandbox --no-alt-screen "$codex_task"
         fi
-    else
+    elif [[ "$AGENT" == "agy" ]]; then
+        if [ "$HEADLESS" = "1" ]; then
+            agy "${MODEL_OPTS[@]}" --dangerously-skip-permissions --print "$codex_task"
+        else
+            agy "${MODEL_OPTS[@]}" --dangerously-skip-permissions --prompt-interactive "$codex_task"
+        fi
+    elif [[ "$AGENT" == "bash" ]]; then
         bash -c "$task_text"
+    else
+        echo "ERROR: unsupported worker backend: $AGENT" >&2
+        return 1
     fi && DISPATCH_RC=0 || DISPATCH_RC=$?
 }
 
@@ -628,6 +670,26 @@ write_outcome() {
     # independent proof of real work and is never second-guessed below —
     # only reached when neither exists, on top of zero new commits.
     [ -n "$prior_err_reason" ] && reason="worker-reported: $prior_err_reason"
+
+    # issue #529 optional extra safety: $rc > 128 is bash's own-process-died-
+    # by-signal convention (128 + signal number). Several distinct things
+    # can cause this — the dispatched agent killing its own process group
+    # (the incident this issue is about, now possible to survive at all
+    # thanks to set -m above), but also an OOM kill (137 = SIGKILL) or,
+    # now that the listener itself survives a dispatch's own group signal,
+    # an operator's Ctrl-C reaching the running agent (130 = SIGINT) — so
+    # this only names the signal itself, not a guessed cause (self-review
+    # finding on this PR: an earlier version guessed "agent killed its own
+    # process group" unconditionally, which is simply wrong for 137/130).
+    # Never overrides a more specific reason (worker's own report or
+    # blocked state) already set above.
+    if [ -z "$reason" ] && [ "$TASK_OUTCOME" = "err" ] && [ "$rc" -gt 128 ]; then
+        local sig signame
+        sig=$((rc - 128))
+        signame="$(kill -l "$sig" 2>/dev/null)"
+        reason="agent-process-signaled: signal $sig${signame:+ (SIG$signame)} — dispatch did not exit normally"
+    fi
+
     if [ "$TASK_OUTCOME" = "ok" ] && [ -z "${CHECK_EXIT:-}" ]; then
         local default_ref ahead=0 has_status=0
         default_ref="$(worktree_default_ref)"
@@ -1067,11 +1129,11 @@ while true; do
             case "$AGENT" in
                 claude) WORKER_SYSTEM_PROMPT_OPTS=(--append-system-prompt-file "$WORKER_MD") ;;
                 gemini) WORKER_SYSTEM_PROMPT_ENV=(env "GEMINI_SYSTEM_MD=$WORKER_MD") ;;
-                codex) CODEX_PREFIX="$(cat "$WORKER_MD")" ;;
+                codex|agy) CODEX_PREFIX="$(cat "$WORKER_MD")" ;;
             esac
         else
             case "$AGENT" in
-                claude|gemini|codex)
+                claude|gemini|codex|agy)
                     echo "WARN: worker system prompt not found at $WORKER_MD (WORKER_PROMPT_FILE=${WORKER_PROMPT_FILE:-unset}) — worker conventions will NOT be injected as system prompt." >&2
                     echo "      Expected LLM_SWARM_DIR to be set and the file readable. Briefs will lack the universal conventions." >&2
                     ;;

@@ -4,13 +4,13 @@
 
 [![CI](https://github.com/seanoc5/llm-swarm-runner/actions/workflows/tests.yml/badge.svg)](https://github.com/seanoc5/llm-swarm-runner/actions/workflows/tests.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**TL;DR:** llm-swarm-runner points Claude Code, Gemini CLI, or Codex CLI at your GitHub issue backlog and lets a pool of sandboxed agents chew through it in parallel — each in its own git worktree, each in a Docker container, all visible live in tmux. You stay in the driver's seat; the swarm handles the parallelism, the isolation, and the bookkeeping.
+**TL;DR:** llm-swarm-runner points Claude Code, Gemini CLI, Codex CLI, or Antigravity CLI at your GitHub issue backlog and lets a pool of sandboxed agents chew through it in parallel — each in its own git worktree, each in a Docker container, all visible live in tmux. You stay in the driver's seat; the swarm handles the parallelism, the isolation, and the bookkeeping.
 
 A local-first **Claude Code swarm runner** for your own GitHub backlog.
 
 A coordinator agent — a persistent interactive Claude REPL by default, one-shot for Codex or headless Claude/Gemini runs — triages open issues, provisions isolated workers in **git worktrees**, and an event-driven watcher tops the swarm up as issues finish. Workers run in Docker sandboxes with `--network host`, so they can talk to your local Postgres, Spring Boot, etc. exactly as you do. Tmux gives you live observation of every worker.
 
-Also works as a single-agent sandbox if you don't want the swarm — `sandbox.sh <project> codex` gives you a safer shell around one agent. Supports **Claude Code**, **Gemini CLI**, **Codex CLI**, and **promptfoo**.
+Also works as a single-agent sandbox if you don't want the swarm — `sandbox.sh <project> codex` gives you a safer shell around one agent. Supports **Claude Code**, **Gemini CLI**, **Codex CLI**, **Antigravity CLI**, and **promptfoo**.
 
 ## Show me first
 
@@ -175,7 +175,12 @@ COORDINATOR_CMD=codex ./llm-start.sh "..."
 # Use Codex workers behind any coordinator
 WORKER_CMD=codex WORKER_HEADLESS=1 ./llm-start.sh "..."
 
-# Override the coordinator model (defaults: claude -> claude-fable-5,
+# Use Antigravity CLI for either role. Workers need GEMINI_API_KEY in the
+# environment or <project>/.sandbox-env; the image sets its Gemini provider.
+COORDINATOR_CMD=agy COORDINATOR_HEADLESS=1 WORKER_CMD=agy WORKER_HEADLESS=1 ./llm-start.sh "..."
+
+# Override the coordinator model (defaults: claude -> opus, an alias that
+# tracks the newest Opus;
 # gemini -> gemini-2.5-flash; gemini-3-flash-preview is known-broken for
 # the coordinator's multi-step tool use, don't use it here)
 COORDINATOR_MODEL=claude-sonnet-5 ./llm-start.sh "..."
@@ -223,6 +228,7 @@ Full knob reference (including `WATCH_PR_POLL_SECS`, `WATCH_ORPHAN_SWEEP_SECS`, 
 Other automation paths if you want them:
 
 - **Time-based:** add a `cron` / `systemd --user` timer running `llm-start.sh "Check status; advance any stalled workers"` every 15min — usually unnecessary if the watcher is on.
+- **Nightly full tests:** `scripts/nightly-full-tests.sh` runs each project's slow lanes (integration, e2e, …) serially in a throwaway clone of origin's default branch, pauses new spawns host-wide while it runs, and files failures to a per-repo tracking issue. Lanes go in `nightly-repos.conf` (template: `examples/nightly-repos.conf.example`); timer units are in `examples/systemd/`.
 - **Conversational (the default for claude):** the coordinator's Window 1 is already a resident interactive REPL — just re-invoke `llm-start.sh "<follow-up prompt>"` and it pastes into the live session instead of spawning a new one. Set `COORDINATOR_HEADLESS=1` if you'd rather it exit after each prompt (capacity-conscious, one-shot).
 
 See [`docs/llm-swarm-runner-overview.md`](./docs/llm-swarm-runner-overview.md) for the full architecture.
