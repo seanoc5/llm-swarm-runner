@@ -701,7 +701,8 @@
 #                           path no-ops), resolves the same acceptance check
 #                           worker-listener.sh would (brief marker ->
 #                           .swarm/check.sh -> WORKER_CHECK_CMD) and runs it
-#                           once in a visible tmux window `chk-N`, recording
+#                           once in a visible tmux pane (issue #561: split into
+#                           iss-N, chk-N window fallback, one per issue), recording
 #                           the result to `<id>.check.json` and events.log.
 #                           (issue #181) If the PR is already MERGED/CLOSED
 #                           by the time the claim is won, the check is
@@ -764,7 +765,9 @@
 #                           instead of spawning a real tmux window. Lets tests
 #                           exercise the claim/resolve/record logic without a
 #                           live tmux session.
-#   SESSION_NAME=<name>     tmux session check-on-done spawns chk-N windows
+#   CHECK_PASS_CLOSE_SECS=10 (issue #561) seconds a passing check pane stays
+#                           visible before closing itself.
+#   SESSION_NAME=<name>     tmux session check-on-done spawns check panes
 #                           in. Default: llm-$(basename PROJECT_DIR), matching
 #                           kill-finished-workers.sh / provision-worker.sh.
 #   WATCHER_QUIET=0         (issue #38) Set to 1 to suppress the human-
@@ -5421,6 +5424,45 @@ maybe_run_check() {
     execute_check "$wt_dir" "$issue" "$task_id" "$check_cmd" "$check_json" "$claim_dir"
 }
 
+# check_is_duplicate <wt_dir> <issue> <task_id> <check_json> <claim_dir> <head_file> <head_sha>
+#
+# issue #561: one completion reaches maybe_run_check under several task_ids
+# (pr-issue-N from the PR backstop, the worker's own status file, each rework
+# round's timestamped id), and each id wins its own claim. Keyed on the
+# worktree's HEAD instead: if the last check started for this issue was for
+# the same commit and is still running or already resolved pass/fail, this
+# one is a duplicate — record it as skipped and release the claim. A
+# superseded run records "skipped" too, so it never blocks a re-check.
+# Returns 0 if it was a duplicate (and fully handled), 1 otherwise.
+check_is_duplicate() {
+    local issue="$2" task_id="$3" check_json="$4" claim_dir="$5" head_file="$6" head_sha="$7"
+    [ -n "$head_sha" ] && [ -r "$head_file" ] || return 1
+    local prev_sha prev_task prev_json
+    read -r prev_sha prev_task prev_json < "$head_file" || return 1
+    [ "$prev_sha" = "$head_sha" ] && [ "$prev_task" != "$task_id" ] || return 1
+    case "$(check_json_state "$prev_json")" in
+        pass|fail) ;;
+        checking)
+            # Only a live run counts — a crashed one must not block forever.
+            [ -n "$CHECK_RUNNER" ] || [ -n "$(check_pane_for_issue "$issue")" ] || return 1 ;;
+        *) return 1 ;;
+    esac
+    printf '{"task_id":"%s","state":"skipped","check_exit":null,"ts":"%s"}\n' \
+        "$task_id" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$check_json" 2>/dev/null || true
+    log_event watch.check_on_done "issue=$issue task_id=$task_id result=skipped reason=duplicate_of_$prev_task"
+    rmdir "$claim_dir" 2>/dev/null || true
+    return 0
+}
+
+# check_pane_for_issue <issue>
+#
+# issue #561: echoes the pane id of this issue's check pane (tagged with the
+# @swarm_chk_issue pane option when created), or nothing.
+check_pane_for_issue() {
+    tmux list-panes -s -t "$SESSION_NAME" -F '#{pane_id} #{@swarm_chk_issue}' 2>/dev/null \
+        | awk -v i="$1" '$2 == i { print $1; exit }'
+}
+
 # record_check_result <task_id> <issue> <check_json> <exit-code>
 #
 # Single place that writes the watcher-owned <task_id>.check.json + the
@@ -5437,21 +5479,34 @@ record_check_result() {
 
 # execute_check <worktree-dir> <issue> <task_id> <check-cmd> <check-json> <claim-dir>
 #
-# Runs the resolved check exactly once (claim already taken by the caller)
-# and records the result. Two backends:
+# Runs the resolved check (claim already taken by the caller) and records
+# the result. Two backends:
 #   - CHECK_RUNNER set (tests): synchronous — run "$CHECK_RUNNER <worktree>
 #     <check_cmd>", record the result immediately via record_check_result.
 #     No tmux dependency.
-#   - default: spawn a visible tmux window `chk-N` (mirrors provision-worker.sh's
-#     `iss-N` windows) so the operator can watch/scroll back the run. check_cmd
-#     is free-form text (from a SWARM_CHECK marker, .swarm/check.sh, or
-#     WORKER_CHECK_CMD) — rather than interpolate it into a `tmux ... bash -c
-#     "..."` string (a stray single quote would break, or worse, the nested
-#     shell), we write a small standalone script and hand tmux its path. Each
-#     dynamic value is written as its own `NAME=%q` assignment (printf %q
-#     shell-quotes it correctly regardless of content); the rest of the
-#     script is a literal heredoc ('SCRIPT' — unexpanded by this shell) that
-#     just references those variables normally.
+#   - default: run in a visible tmux pane. check_cmd is free-form text (from
+#     a SWARM_CHECK marker, .swarm/check.sh, or WORKER_CHECK_CMD) — rather
+#     than interpolate it into a `tmux ... bash -c "..."` string (a stray
+#     single quote would break, or worse, the nested shell), we write a small
+#     standalone script and hand tmux its path. Each dynamic value is written
+#     as its own `NAME=%q` assignment (printf %q shell-quotes it correctly
+#     regardless of content); the rest of the script is a literal heredoc
+#     ('SCRIPT' — unexpanded by this shell) that just references those
+#     variables normally.
+#
+# issue #561: one check pane per issue, never a pile of chk-N windows.
+#   - Duplicate done-signals for the same HEAD are skipped (check_is_duplicate).
+#   - The pane is split into the worker's iss-N window (chk-N window only if
+#     that's gone), tagged @swarm_chk_issue, and reused: a newer check for
+#     the same issue respawns it, killing the older run (which records itself
+#     as skipped/superseded). Concurrent same-worktree Gradle runs used to
+#     corrupt each other's build/ and hang.
+#   - Pass closes the pane after a short pause; fail/timeout/Ctrl-C keeps it.
+#     Full output is tee'd to .swarm/checks/ in the main checkout, so it
+#     outlives both the pane and the worktree.
+#   - timeout -k: the Gradle client ignored SIGTERM and hung for 13h.
+#     Ctrl-C is forwarded to timeout's process group by hand, since timeout
+#     moves the check out of the tty's foreground group.
 #
 # issue #181: claim_dir is released (rmdir) as soon as this reaches a
 # terminal outcome — synchronously here for the CHECK_RUNNER/no-tmux/spawn-
@@ -5462,6 +5517,14 @@ record_check_result() {
 # right after the check finishes instead of waiting out the stale-claim TTL.
 execute_check() {
     local wt_dir="$1" issue="$2" task_id="$3" check_cmd="$4" check_json="$5" claim_dir="$6"
+    local checks_dir head_file head_sha
+    checks_dir="$(dirname "$EVENTS_LOG")/checks"
+    mkdir -p "$checks_dir" 2>/dev/null || true
+    head_file="$checks_dir/issue-${issue}.head"
+    head_sha="$(git -C "$wt_dir" rev-parse HEAD 2>/dev/null || true)"
+
+    check_is_duplicate "$wt_dir" "$issue" "$task_id" "$check_json" "$claim_dir" "$head_file" "$head_sha" && return 0
+    [ -n "$head_sha" ] && printf '%s %s %s\n' "$head_sha" "$task_id" "$check_json" > "$head_file" 2>/dev/null
 
     if [ -n "$CHECK_RUNNER" ]; then
         local rc=0
@@ -5479,9 +5542,9 @@ execute_check() {
         return 0
     fi
 
-    local win="chk-$issue"
     local timeout_secs="${WORKER_CHECK_TIMEOUT:-600}"
     local runner_script="$wt_dir/.swarm/tasks/status/${task_id}.check-run.sh"
+    local log_file="$checks_dir/issue-${issue}-${task_id}.log"
     {
         printf '#!/usr/bin/env bash\n'
         printf 'ISSUE=%q\n'        "$issue"
@@ -5491,27 +5554,77 @@ execute_check() {
         printf 'CLAIM_DIR=%q\n'    "$claim_dir"
         printf 'EVENTS_LOG=%q\n'   "$EVENTS_LOG"
         printf 'TIMEOUT_SECS=%q\n' "$timeout_secs"
+        printf 'LOG_FILE=%q\n'     "$log_file"
+        printf 'PASS_CLOSE_SECS=%q\n' "${CHECK_PASS_CLOSE_SECS:-10}"
         # Mirrors record_check_result's output shape exactly — see that
         # function if this drifts. Kept as inline shell (not a call back
         # into this script) because this runs as a separate tmux process.
         cat <<'SCRIPT'
-echo "--- check-on-done: issue #$ISSUE (task $TASK_ID) ---"
-echo "check: $CHECK_CMD"
-timeout "$TIMEOUT_SECS" bash -c "$CHECK_CMD"
-rc=$?
-state=pass; [ "$rc" -eq 0 ] || state=fail
-ts=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
-printf '{"task_id":"%s","state":"%s","check_exit":%d,"ts":"%s"}\n' "$TASK_ID" "$state" "$rc" "$ts" > "$CHECK_JSON"
-rmdir "$CLAIM_DIR" 2>/dev/null || true
-printf '%s  %-15s %s\n' "$ts" 'watch.check_on_done' "issue=$ISSUE task_id=$TASK_ID result=$state check_exit=$rc" >> "$EVENTS_LOG"
-echo "--- check $state (exit $rc) — this window stays open for review ---"
+record() {  # <state> <check_exit|null> [reason]
+    local ts; ts=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+    printf '{"task_id":"%s","state":"%s","check_exit":%s,"ts":"%s"}\n' "$TASK_ID" "$1" "$2" "$ts" > "$CHECK_JSON"
+    rmdir "$CLAIM_DIR" 2>/dev/null || true
+    printf '%s  %-15s %s\n' "$ts" 'watch.check_on_done' \
+        "issue=$ISSUE task_id=$TASK_ID result=$1 check_exit=$2${3:+ reason=$3} log=$LOG_FILE" >> "$EVENTS_LOG"
+}
+tpid=""
+superseded() {  # pane respawned for a newer check, or killed with its window
+    [ -n "$tpid" ] && kill -KILL -- "-$tpid" 2>/dev/null
+    record skipped null superseded
+    exit 0
+}
+trap superseded HUP TERM
+interrupted=0
+trap 'interrupted=1; [ -n "$tpid" ] && kill -INT -- "-$tpid" 2>/dev/null' INT
+
+{ echo "--- check-on-done: issue #$ISSUE (task $TASK_ID) ---"; echo "check: $CHECK_CMD"; } | tee "$LOG_FILE"
+timeout -k 30 "$TIMEOUT_SECS" bash -c "$CHECK_CMD" > >(tee -ia "$LOG_FILE") 2>&1 &
+tpid=$!
+rc=0; wait "$tpid" || rc=$?
+while kill -0 "$tpid" 2>/dev/null; do rc=0; wait "$tpid" || rc=$?; done
+tpid=""
+
+reason=""
+[ "$interrupted" = 1 ] && reason=interrupted
+case "$rc" in 124|137) [ -z "$reason" ] && reason=timeout_${TIMEOUT_SECS}s ;; esac
+if [ "$rc" -eq 0 ] && [ -z "$reason" ]; then
+    trap - HUP TERM
+    record pass 0
+    echo "--- check pass — this pane closes in ${PASS_CLOSE_SECS}s. Log: $LOG_FILE ---"
+    sleep "$PASS_CLOSE_SECS"
+    exit 0
+fi
+[ "$rc" -eq 0 ] && rc=130
+record fail "$rc" "$reason"
+echo "--- check FAILED (exit $rc${reason:+, $reason}) — pane kept for review; Ctrl-D closes it. Log: $LOG_FILE ---"
+trap - HUP TERM INT
 exec bash
 SCRIPT
     } > "$runner_script" 2>/dev/null
     chmod +x "$runner_script" 2>/dev/null
 
-    tmux new-window -d -t "$SESSION_NAME" -n "$win" -c "$wt_dir" bash "$runner_script" 2>/dev/null \
-        || { log_event watch.check_on_done.error "issue=$issue task_id=$task_id reason=tmux_new_window_failed"; rmdir "$claim_dir" 2>/dev/null || true; }
+    local pane how
+    pane="$(check_pane_for_issue "$issue")"
+    if [ -n "$pane" ]; then
+        how="reused"
+        tmux respawn-pane -k -t "$pane" -c "$wt_dir" bash "$runner_script" 2>/dev/null || pane=""
+    elif tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx "iss-$issue"; then
+        how="split"
+        pane="$(tmux split-window -d -v -l 35% -t "$SESSION_NAME:iss-$issue" -c "$wt_dir" \
+                    -P -F '#{pane_id}' bash "$runner_script" 2>/dev/null)" || pane=""
+    else
+        how="window"
+        pane="$(tmux new-window -d -t "$SESSION_NAME" -n "chk-$issue" -c "$wt_dir" \
+                    -P -F '#{pane_id}' bash "$runner_script" 2>/dev/null)" || pane=""
+    fi
+    if [ -z "$pane" ]; then
+        log_event watch.check_on_done.error "issue=$issue task_id=$task_id reason=tmux_${how}_failed"
+        rmdir "$claim_dir" 2>/dev/null || true
+        return 0
+    fi
+    tmux set-option -p -t "$pane" @swarm_chk_issue "$issue" 2>/dev/null || true
+    tmux select-pane -t "$pane" -T "chk #$issue" 2>/dev/null || true
+    log_event watch.check_on_done "issue=$issue task_id=$task_id result=started pane=$how log=$log_file"
 }
 
 # run_watch_timer_loop

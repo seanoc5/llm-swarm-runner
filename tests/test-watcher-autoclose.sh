@@ -521,6 +521,36 @@ $(cat "$CHECK_RUNNER_LOG")"
 green "status-file signal and PR-open backstop converge on one claim key — exactly one check run, no double-fire"
 
 # ============================================================================
+heading "Test 7b: two task_ids for the same worktree HEAD → ONE check run (issue #561)"
+# ============================================================================
+# One completion used to reach the watcher as pr-issue-N, issue-N and a
+# timestamped id, each winning its own claim and its own concurrent check.
+: > "$CHECK_RUNNER_LOG"
+rm -f "$PROJECT_DIR/.swarm/events.log"
+WT75="$TEST_DIR/wt-issue-75"
+mkdir -p "$WT75/.swarm/tasks/status" "$WT75/.swarm/tasks/done"
+git -C "$WT75" init -q
+git -C "$WT75" -c user.name=t -c user.email=t@t commit -q --allow-empty -m init
+echo 'echo ok' > "$WT75/.swarm/check.sh"
+echo '{"task_id":"issue-75","state":"ready-for-review","ts":"2026-10-06T00:00:00Z"}' \
+    > "$WT75/.swarm/tasks/status/issue-75.json"
+echo '{"task_id":"20261006-120000-75","state":"ready-for-review","ts":"2026-10-06T00:00:00Z"}' \
+    > "$WT75/.swarm/tasks/status/20261006-120000-75.json"
+
+ONCE=0 WATCH_CHECK_ON_DONE=1 CHECK_RUNNER="$FAKE_CHECK_RUNNER" \
+    start_watcher 0 "$TEST_DIR/watch-7b.log"
+sleep 4
+stop_watcher
+
+RUNS=$(grep -c "wt-issue-75" "$CHECK_RUNNER_LOG" || true)
+[ "$RUNS" -eq 1 ] \
+    || red "expected exactly 1 check run for issue #75 (two task_ids, same HEAD); got $RUNS. Log:
+$(cat "$CHECK_RUNNER_LOG")"
+grep -q 'issue=75 .*reason=duplicate_of_' "$PROJECT_DIR/.swarm/events.log" \
+    || red "expected a reason=duplicate_of_ skip for the second task_id in events.log"
+green "same-HEAD duplicate done-signals collapse to one check run"
+
+# ============================================================================
 heading "Test 8: pane echo (issue #38) — default (WATCHER_QUIET unset) echoes formatted event lines"
 # ============================================================================
 : > "$KILL_LOG"
