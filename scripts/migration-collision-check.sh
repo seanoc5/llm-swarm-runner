@@ -190,6 +190,35 @@ show_scan_file() {
 
 shopt -s extglob
 
+ver_key() {
+    # Comparable sort key for a dotted Flyway version string ("5", "5.2",
+    # "107.1"): each segment zero-padded to a fixed width and padded out to
+    # a fixed number of segments, so plain string comparison between two
+    # keys matches Flyway's component-wise numeric ordering (V5 < V5.1 <
+    # V5.2 < V6). Needed because out-of-order (#556) must compare the FULL
+    # version, not just the leading integer — V5.1 landing after the base
+    # already has V5.2 is out-of-order too, even though both share integer
+    # prefix 5 (a self-review finding on this PR).
+    local v="$1" seg out="" n=0 part
+    local -a parts
+    IFS='.' read -ra parts <<< "$v"
+    for part in "${parts[@]}"; do
+        printf -v seg '%018d' "$((10#$part))"
+        out+="$seg."
+        n=$((n + 1))
+    done
+    while [ "$n" -lt 8 ]; do
+        out+='000000000000000000.'
+        n=$((n + 1))
+    done
+    printf '%s' "$out"
+}
+
+ver_lt() {
+    # $1 < $2, comparing dotted versions via ver_key.
+    [[ "$(ver_key "$1")" < "$(ver_key "$2")" ]]
+}
+
 matches_glob() {
     # $1 = path, $2 = glob pattern. bash [[ ]] matching gives a bare '*' no
     # special slash-boundary treatment (it already crosses '/'), but a
@@ -244,7 +273,7 @@ done
 # number). Computed once, lazily, only when there's something to report —
 # --ref mode has no base/head split and skips this entirely.
 BASE_FLYWAY=""
-BASE_TIP_MAX=0
+BASE_TIP_MAX_VER=""     # full dotted version (e.g. "5.2"), not just the integer prefix
 in_base() { printf '%s\n' "$BASE_FLYWAY" | grep -qxF -- "$1"; }
 NEXT_FREE_COMPUTED=0
 OTHER_PR_COUNT=0
@@ -282,9 +311,11 @@ if [ -z "$REF" ] && [ -n "$FLYWAY_FILES" ]; then
     while IFS= read -r f; do
         [ -n "$f" ] || continue
         b="$(basename "$f")"
-        if [[ "$b" =~ ^V([0-9]+) ]]; then
-            n="${BASH_REMATCH[1]}"; n=$((10#$n))
-            [ "$n" -gt "$BASE_TIP_MAX" ] && BASE_TIP_MAX="$n"
+        if [[ "$b" =~ ^V([0-9]+(\.[0-9]+)*)__ ]]; then
+            bver="${BASH_REMATCH[1]}"
+            if [ -z "$BASE_TIP_MAX_VER" ] || ver_lt "$BASE_TIP_MAX_VER" "$bver"; then
+                BASE_TIP_MAX_VER="$bver"
+            fi
         fi
     done <<< "$BASE_FLYWAY"
 fi
@@ -350,7 +381,7 @@ fi
 # isn't double-counted).
 OUT_OF_ORDER=()
 OOO_RECIPE=()
-if [ -z "$REF" ] && [ "$BASE_TIP_MAX" -gt 0 ]; then
+if [ -z "$REF" ] && [ -n "$BASE_TIP_MAX_VER" ]; then
     while IFS= read -r f; do
         [ -n "$f" ] || continue
         matches_glob "$f" "$MIGRATION_GLOB" || continue
@@ -359,16 +390,14 @@ if [ -z "$REF" ] && [ "$BASE_TIP_MAX" -gt 0 ]; then
         [[ "$b" =~ ^V([0-9]+(\.[0-9]+)*)__ ]] || continue
         fullver="${BASH_REMATCH[1]}"
         [ -z "${COLLIDED_VERSIONS[$fullver]:-}" ] || continue   # reported as a collision instead
-        [[ "$b" =~ ^V([0-9]+) ]] || continue
-        n="${BASH_REMATCH[1]}"; n=$((10#$n))
-        [ "$n" -lt "$BASE_TIP_MAX" ] || continue
-        OUT_OF_ORDER+=("$f (V$n)")
+        ver_lt "$fullver" "$BASE_TIP_MAX_VER" || continue       # full dotted compare — not just the integer prefix
+        OUT_OF_ORDER+=("$f (V$fullver)")
     done <<< "$FLYWAY_FILES"
 fi
 
 if [ "${#OUT_OF_ORDER[@]}" -gt 0 ]; then
     compute_next_free
-    OOO_RECIPE+=("Remediation — renumber the PR-side file(s) on branch $HEAD_REF to the next free version; base-side ($BASE_REF, max V$BASE_TIP_MAX) files are already applied downstream and never move.")
+    OOO_RECIPE+=("Remediation — renumber the PR-side file(s) on branch $HEAD_REF to the next free version; base-side ($BASE_REF, max V$BASE_TIP_MAX_VER) files are already applied downstream and never move.")
     OOO_RECIPE+=("  next free version: V$next_ver (max across $BASE_REF, $HEAD_REF, and $OTHER_PR_COUNT other open PR(s))")
     for o in "${OUT_OF_ORDER[@]}"; do
         f="${o% (V*}"
@@ -379,9 +408,9 @@ if [ "${#OUT_OF_ORDER[@]}" -gt 0 ]; then
             *.sql) ;;
             *) OOO_RECIPE+=("    (Java/Kotlin-based migration — the class name must be renamed to match as well)") ;;
         esac
-        OOO_RECIPE+=("  $o is below base tip max V$BASE_TIP_MAX ($BASE_REF):")
+        OOO_RECIPE+=("  $o is below base tip max V$BASE_TIP_MAX_VER ($BASE_REF):")
         OOO_RECIPE+=("    git mv $f $newf")
-        OOO_RECIPE+=("    git commit -m \"fix(migration): renumber to V$next_ver, below base tip max V$BASE_TIP_MAX on $BASE_REF\"")
+        OOO_RECIPE+=("    git commit -m \"fix(migration): renumber to V$next_ver, below base tip max V$BASE_TIP_MAX_VER on $BASE_REF\"")
         OOO_RECIPE+=("    git push origin $HEAD_REF")
         next_ver=$((next_ver + 1))
     done
@@ -474,7 +503,7 @@ fi
 OUT_OF_ORDER_VERDICT=0
 if [ "${#OUT_OF_ORDER[@]}" -gt 0 ]; then
     OUT_OF_ORDER_VERDICT=1
-    BODY_LINES+=("Out-of-order Flyway merge — PR-side file(s) below the base tip's max version (V$BASE_TIP_MAX on $BASE_REF):")
+    BODY_LINES+=("Out-of-order Flyway merge — PR-side file(s) below the base tip's max version (V$BASE_TIP_MAX_VER on $BASE_REF):")
     for o in "${OUT_OF_ORDER[@]}"; do BODY_LINES+=("- $o"); done
     if [ "${#OOO_RECIPE[@]}" -gt 0 ]; then
         for c in "${OOO_RECIPE[@]}"; do BODY_LINES+=("$c"); done

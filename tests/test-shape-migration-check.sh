@@ -415,10 +415,47 @@ if OUT=$(MIGRATION_ALLOW_OUT_OF_ORDER=1 "$CHECK" 20 2>&1); then RC=0; else RC=$?
 echo "$OUT" | grep -q "verdict: out-of-order" || red "verdict should still read out-of-order"
 echo "$OUT" | grep -q "downgraded to a warning" || red "warning note missing"
 green "MIGRATION_ALLOW_OUT_OF_ORDER=1: out-of-order warns and exits 0"
+# ============================================================================
+heading "Test 10b: dotted-version out-of-order (#556 self-review) — V5.1 after base's V5.2 → exit 3"
+# ============================================================================
+# Self-review finding on this PR: comparing only the integer prefix would
+# treat V5.1 and V5.2 as equal (both "5"), missing a real out-of-order
+# merge. Base tip's max FULL version is 5.2; a PR adding 5.1 must still be
+# caught even though its integer prefix (5) is not below the base's own
+# integer prefix (5). Own dedicated fixture, not reusing $OOO_ORIGIN/$OOO_CLONE,
+# so Tests 11-12's master/ooo-branch state is untouched.
+DOT_ORIGIN="$TEST_DIR/dot-origin.git"
+DOT_CLONE="$TEST_DIR/dot-clone"
+git init -q --bare -b master "$DOT_ORIGIN"
+git init -q -b master "$DOT_CLONE"
+git -C "$DOT_CLONE" remote add origin "$DOT_ORIGIN"
+dot_commit() { git -C "$DOT_CLONE" -c user.email=t@t -c user.name=t commit -q -m "$1"; }
+
+mkdir -p "$DOT_CLONE/$MIG"
+echo "select 5;"  > "$DOT_CLONE/$MIG/V5__five.sql"
+echo "select 52;" > "$DOT_CLONE/$MIG/V5.2__five-two.sql"
+git -C "$DOT_CLONE" add -A; dot_commit "base: V5, V5.2"
+git -C "$DOT_CLONE" push -q origin master
+
+git -C "$DOT_CLONE" checkout -q -b dot-branch master
+echo "select 51;" > "$DOT_CLONE/$MIG/V5.1__five-one.sql"
+git -C "$DOT_CLONE" add -A; dot_commit "worker adds V5.1, unaware master already merged V5.2"
+git -C "$DOT_CLONE" push -q origin dot-branch
+set_pr 22 master dot-branch
+
+cd "$DOT_CLONE"
+if OUT=$("$CHECK" 22 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -eq 3 ] || red "expected exit 3 for dotted out-of-order (V5.1 after base V5.2), got $RC (output: $OUT)"
+echo "$OUT" | grep -q "verdict: out-of-order" || red "verdict line missing"
+echo "$OUT" | grep -qF "$MIG/V5.1__five-one.sql (V5.1)" || red "offending file not named with full dotted version"
+echo "$OUT" | grep -q "base tip's max version (V5.2" || red "base max full version (V5.2) not reported"
+green "dotted-version out-of-order caught: V5.1 after base's V5.2 — full-version compare, not just the integer prefix"
+
 # swarm-merge.sh's own migration-collision-check.sh call fetches base/head
 # from the CURRENT directory's "origin" remote — stay in $OOO_CLONE (whose
 # origin is $OOO_ORIGIN, holding master/ooo-branch) rather than $CLONE
 # (whose origin is the unrelated $ORIGIN fixture) for Tests 11-12.
+cd "$OOO_CLONE"
 
 # ============================================================================
 heading "Test 11: swarm-merge migration gate — out-of-order refuses plain and --auto-low"
