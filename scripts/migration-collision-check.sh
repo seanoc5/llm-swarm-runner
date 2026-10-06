@@ -44,10 +44,11 @@
 #            PR-vs-base dupes and PR-internal dupes (the union already
 #            contains everything the PR head tree carries).
 #   Out-of-order (Flyway, PR mode only, #556): a PR-side (head-only) file
-#            whose integer version is lower than the max integer version
-#            already on the base tip — a reserved-order merge that landed
-#            out of sequence. No duplicate number, so it's invisible to the
-#            collision check above: e.g. V254 merges first, then V250 and
+#            whose full version (dotted sub-versions compared in full, e.g.
+#            V5.1 vs V5.2 — not just the leading integer) is lower than the
+#            max full version already on the base tip — a reserved-order
+#            merge that landed out of sequence. No duplicate number, so it's
+#            invisible to the collision check above: e.g. V254 merges first, then V250 and
 #            V253 merge afterwards. Every DB that already ran V254 now fails
 #            Flyway validation on next start (`FlywayValidateException:
 #            Detected resolved migration not applied to database`) and needs
