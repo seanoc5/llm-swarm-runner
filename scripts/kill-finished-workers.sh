@@ -320,8 +320,12 @@ fi
 # Returns 0 if pane scrollback shows the listener parked at the
 # "[polling for next brief" marker (the last line of the post-task status
 # block; see worker-listener.sh's print_completion_block).
+#
+# issue #550: pane 0 explicitly — a check-on-done pane split into this
+# window (or any other split) can be the ACTIVE pane, and a bare window
+# target captures whichever pane is active, not the worker's Claude pane.
 is_parked() {
-    tmux capture-pane -t "$SESSION_NAME:$1" -p -S -5 2>/dev/null | grep -q '\[polling for next brief'
+    tmux capture-pane -t "$SESSION_NAME:$1.0" -p -S -5 2>/dev/null | grep -q '\[polling for next brief'
 }
 
 # Returns minutes since last pane activity. Uses tmux's window_activity
@@ -941,13 +945,15 @@ fi
 # high-risk PR" is only answerable from pane history once the window is
 # gone. capture=failed (window died between listing and capture) is still
 # logged so the reap itself stays on the record.
+#
+# issue #550: pane 0 explicitly, not the bare window — see is_parked above.
 capture_and_log_reap() {
     local w="$1" issue="$2"
     local ts file capture_ref
     ts="$(date -u +'%Y%m%dT%H%M%SZ')"
     file="$REAPED_DIR/$w-$ts.txt"
     mkdir -p "$REAPED_DIR" 2>/dev/null || true
-    if tmux capture-pane -p -t "$SESSION_NAME:$w" -S "-$REAP_CAPTURE_LINES" > "$file" 2>/dev/null; then
+    if tmux capture-pane -p -t "$SESSION_NAME:$w.0" -S "-$REAP_CAPTURE_LINES" > "$file" 2>/dev/null; then
         capture_ref="$file"
     else
         capture_ref="failed"
@@ -1013,6 +1019,11 @@ for w in "${KILL_LIST[@]}"; do
         fi
         echo "→ $w: tmux kill-window"
         tmux kill-window -t "$SESSION_NAME:$w" 2>/dev/null || echo "  WARN: kill-window failed (continuing)"
+        # issue #550: a check-on-done run normally lives as a PANE inside
+        # $w (killed above, pane and all) — this only catches the
+        # fallback `chk-$issue` WINDOW execute_check falls back to when
+        # no iss-$issue window existed to host the pane.
+        swarm_close_chk_windows "$SESSION_NAME" "$issue"
     fi
 done
 

@@ -66,6 +66,9 @@ case "$1" in
         args="$*"
         win="${args##*:}"
         win="${win%% *}"
+        # issue #550: check-stuck-workers.sh now targets pane 0 explicitly
+        # (session:window.0) — strip that suffix to resolve the fixture.
+        win="${win%.0}"
         cat "$PANE_DIR/$win" 2>/dev/null
         exit 0 ;;
 esac

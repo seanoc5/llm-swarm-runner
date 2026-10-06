@@ -963,6 +963,61 @@ poll_for_brief() {
     done
 }
 
+# check_claim_active — is a check-on-done run (coordinator-watch.sh's
+# execute_check) genuinely still running for this worktree right now? A
+# check command's own process lives in a PANE split into this same
+# window (issue #561), not this listener — so if this listener's own
+# pane (index 0) exits cleanly while that check is still mid-run, tmux
+# renumbers the still-alive check pane down into slot 0 the instant pane
+# 0 is destroyed, and every
+# pane_dead(head -1) reader in the codebase (provision-worker.sh's
+# reclaim guard, has_live_window_draining_brief, check-stuck-workers.sh)
+# reads that genuinely-running check command as a live worker until it
+# finishes. Same claim-dir ground truth kill-worktree.sh's reap-defer
+# path (issue #181) already uses for the identical "real or abandoned"
+# question — a stale claim (crashed check, nothing left to ever release
+# it) must not block a close forever.
+mtime_epoch() {
+    stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
+}
+
+check_claim_active() {
+    local stale_secs="${CHECK_CLAIM_STALE_SECS:-$((CHECK_TIMEOUT + 300))}"
+    local claim mtime age
+    for claim in "$STATUS"/*.check-claim; do
+        [ -d "$claim" ] || continue
+        mtime="$(mtime_epoch "$claim")" || continue
+        age=$(( $(date +%s) - mtime ))
+        [ "$age" -lt "$stale_secs" ] && return 0
+    done
+    return 1
+}
+
+# close_window_and_exit — a plain `exit 0` here only destroys THIS pane.
+# When the worker's own pane was the only pane in its window, that was
+# enough — destroying it destroyed the window too. Now that a
+# check-on-done run can share this same window as a second pane (issue
+# #561, execute_check() in coordinator-watch.sh splits a pane into iss-N
+# rather than always opening a separate window), a check pane that has
+# already exited (passed and not yet reaped, or a crashed run) is still
+# in the window and survives this pane's exit — tmux just renumbers it
+# down into slot 0, and the window stays open holding only that dead
+# pane. It then reads as a DEAD-PANE to check-stuck-workers.sh and keeps
+# counting toward MAX_TMUX_WINDOWS until something else notices it, which
+# contradicts the "window will close" message both call sites below print.
+# Killing the whole window explicitly (not just this pane) makes that
+# promise true unconditionally, whatever else is left in it. No-op outside
+# tmux (unset $TMUX_PANE — e.g. this file's own FIFO-driven test, which
+# has no real tmux at all).
+close_window_and_exit() {
+    if [ -n "${TMUX_PANE:-}" ]; then
+        local win_id
+        win_id="$(tmux display-message -p -t "$TMUX_PANE" -F '#{window_id}' 2>/dev/null)"
+        [ -n "$win_id" ] && tmux kill-window -t "$win_id" 2>/dev/null
+    fi
+    exit 0
+}
+
 run_idle_shell() {
     rm -f "$IDLE_SENTINEL"
     poll_for_brief &
@@ -1038,15 +1093,48 @@ EOF
     wait "$poll_pid" 2>/dev/null
 
     # `close-worker` or the double-Ctrl-C trap ran in the idle shell: end
-    # the listener process itself, which closes the tmux window (same
-    # clean-exit contract as the reaped-worktree guard in the main loop).
+    # the listener process and explicitly close the whole tmux window
+    # (close_window_and_exit, round 14 — a bare `exit` here would only
+    # destroy this pane, not any check pane sharing the window with it).
+    # The reaped-worktree guard further down exits plainly instead,
+    # because kill-worktree.sh already closed the window itself from
+    # outside before deleting the worktree out from under this process.
     # The worktree is deliberately left in place — it may hold unpushed or
     # untracked material; clean it up host-side with kill-worktree.sh when
     # genuinely done with it.
     if [ -f "$CLOSE_SENTINEL" ]; then
+        # issue #555 self-review round 13: wait out a genuinely still-
+        # running check (see check_claim_active above) before actually
+        # exiting — this already-exited idle shell, not an interactive
+        # one, so this just pauses the listener process itself, with the
+        # pane showing the wait message.
+        #
+        # self-review finding on PR #566: this script has no INT/TERM
+        # trap of its own at this point (the one set earlier only runs
+        # inside the inner `bash --rcfile ... -i` subshell, already
+        # exited by now) — an impatient Ctrl-C during this wait would hit
+        # bash's default disposition and kill the process outright,
+        # skipping close_window_and_exit below and leaving exactly the
+        # dead-pane-survives-and-gets-renumbered window this function
+        # exists to prevent. Since the only thing left to do past this
+        # point either way is close the window, trap INT/TERM to just do
+        # that immediately instead of waiting out the rest of the sleep.
+        #
+        # sleep backgrounded + waited on, not a plain foreground `sleep 5`:
+        # bash only runs a trap once the command it's synchronously waiting
+        # on completes, so a plain foreground sleep would swallow the
+        # signal for up to 5s instead of reacting to it right away. `wait`
+        # on an async child returns the moment the signal arrives, letting
+        # the trap run immediately instead.
+        trap close_window_and_exit INT TERM
+        while check_claim_active; do
+            echo "[$(date +%T)] close requested, but $WT_LABEL's check-on-done is still running — waiting for it to finish before closing."
+            sleep 5 & wait $!
+        done
+        trap - INT TERM
         rm -f "$CLOSE_SENTINEL"
         echo "[$(date +%T)] close requested: listener exiting — window will close. Worktree $WT_LABEL/ is left intact (remove later with kill-worktree.sh)."
-        exit 0
+        close_window_and_exit
     fi
 
     # Double-Ctrl-D close: this was already a respawned shell (not the first
@@ -1058,8 +1146,17 @@ EOF
         local pending
         pending=$(find "$INBOX" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | head -1)
         if [ -z "$pending" ]; then
+            # Same Ctrl-C-during-the-wait guard as the close-worker branch
+            # above — see that one's comment for why, including the
+            # backgrounded sleep.
+            trap close_window_and_exit INT TERM
+            while check_claim_active; do
+                echo "[$(date +%T)] double exit requested, but $WT_LABEL's check-on-done is still running — waiting for it to finish before closing."
+                sleep 5 & wait $!
+            done
+            trap - INT TERM
             echo "[$(date +%T)] double exit: listener exiting — window will close. Worktree $WT_LABEL/ is left intact (remove later with kill-worktree.sh)."
-            exit 0
+            close_window_and_exit
         fi
     fi
 }
