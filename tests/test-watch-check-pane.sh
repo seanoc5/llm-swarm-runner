@@ -157,6 +157,20 @@ printf 'fix/issue-900\tOPEN\t900\n' > "$GH_PR_LIST_FILE"
 # tmux session". Keep one never-closed window alive for the session's
 # lifetime, same as production.
 "$SHIM_TMUX" new-session -d -s "$SESSION" -n keepalive bash -c 'while true; do sleep 3600; done'
+
+# Production (llm-start.sh) sets this globally on the real swarm socket
+# before any worker window exists — self-review round 12's fix (the
+# resolved check pane exits non-zero instead of `exec bash`ing forever,
+# so it reads as DEAD rather than a live worker once renumbered into
+# slot 0) depends on it being set to at least "failed" from the start,
+# same as production, rather than tmux's bare-socket default of "off"
+# (which would destroy the pane outright the instant it exits, losing
+# the "stays open for review" guarantee entirely). Test 8 used to set
+# this itself, later in the file, purely for its own kill-9/dead-pane
+# scenario — moved up here so it's in effect from the very first test,
+# matching production's real setup.
+"$SHIM_TMUX" set-option -g remain-on-exit failed
+
 "$SHIM_TMUX" new-window -d -t "$SESSION" -n iss-900 -c "$WT900" \
     bash -c 'while true; do echo WORKER_TICK; sleep 0.3; done'
 
@@ -369,11 +383,10 @@ stop_watcher
 heading "Test 8: a check pane killed outright (crash/Ctrl-C) leaves a DEAD pane still titled 'chk' — later completions must not be stuck forever (self-review finding)"
 # ============================================================================
 
-# remain-on-exit is what production (llm-start.sh) sets on the swarm
-# socket; this test's raw tmux socket doesn't have it by default, so set
-# it explicitly to reproduce the real "dead pane, stale title" shape a
-# killed runner script leaves behind.
-"$SHIM_TMUX" set-option -g remain-on-exit on
+# remain-on-exit=failed is already set globally (session creation, above,
+# matching production) — a kill -9'd process doesn't exit 0, so "failed"
+# already reproduces the real "dead pane, stale title" shape a killed
+# runner script leaves behind; no extra override needed here.
 
 # check_in_flight_for_issue (round 5) no longer trusts the pane label at
 # all — it keys off check-claim age instead (same mechanism
@@ -843,6 +856,72 @@ green "the check pane split off the worker pane (its height shrank) even though 
 [ "$("$SHIM_TMUX" list-panes -t "$SESSION:iss-910" -F '#{pane_title}' | grep -cx coord-scratch)" -eq 1 ] \
     || red "the scratch pane should still be present and untouched"
 green "the scratch pane was left alone — only the worker pane's geometry changed"
+
+stop_watcher
+
+# ============================================================================
+heading "Test 16: a resolved check pane is left DEAD (not an interactive shell), so it reads as a corpse rather than a live worker once the worker's own pane exits cleanly and tmux renumbers the check pane down into slot 0 (self-review round 12 finding)"
+# ============================================================================
+
+# Production (llm-start.sh) sets remain-on-exit=failed globally: a CLEAN
+# (zero) exit destroys that pane outright (no dead-but-visible state at
+# all), while a non-zero exit leaves it around as [dead]. Test 8 switched
+# this session's global to "on" (which keeps a pane around on ANY exit,
+# zero or not) — that's the wrong semantics for THIS test, which depends
+# on a clean exit actually destroying pane 0, so override it back to
+# "failed" for this one window only (same per-window-override technique
+# llm-start.sh/provision-worker.sh themselves use for pane-base-index,
+# verified in test-llm-start-tmux-bootstrap.sh's Tests 4-5).
+git -C "$PROJ" worktree add -q -b fix/issue-911 "$TEST_DIR/wt-issue-911"
+WT911="$TEST_DIR/wt-issue-911"
+mkdir -p "$WT911/.swarm/tasks/status"
+printf '#!/usr/bin/env bash\nsleep 1\nexit 0\n' > "$WT911/.swarm/check.sh"
+chmod +x "$WT911/.swarm/check.sh"
+printf 'fix/issue-911\tOPEN\t911\n' >> "$GH_PR_LIST_FILE"
+
+# Worker pane ticks for ~12s (plenty of margin for the check above to
+# spawn and resolve first) then exits 0 on its own — the same "listener's
+# own process ends with exit 0" shape worker-listener.sh's close-worker/
+# double-exit/reaped-worktree paths all share, deterministic rather than
+# relying on an external kill/send-keys race.
+"$SHIM_TMUX" new-window -d -t "$SESSION" -n iss-911 -c "$WT911" \
+    bash -c 'for i in $(seq 1 40); do echo WORKER_TICK; sleep 0.3; done; exit 0'
+"$SHIM_TMUX" set-window-option -t "$SESSION:iss-911" remain-on-exit failed
+
+echo '{"task_id":"t911","state":"ready-for-review","pr":911,"ts":"2026-07-19T11:00:00Z"}' \
+    > "$WT911/.swarm/tasks/status/t911.json"
+
+start_watcher "$TEST_DIR/watch-12.log"
+
+wait_until 20 "t911's check pane to resolve to chk-pass" \
+    bash -c "$SHIM_TMUX list-panes -t '$SESSION:iss-911' -F '#{pane_title}' 2>/dev/null | grep -qx chk-pass"
+green "t911's check resolved and its pane is titled chk-pass"
+
+CHECK_PANE_DEAD="$("$SHIM_TMUX" list-panes -t "$SESSION:iss-911" -F '#{pane_title} #{pane_dead}' | awk '$1=="chk-pass"{print $2; exit}')"
+[ "$CHECK_PANE_DEAD" = "1" ] \
+    || red "a resolved check pane must exit non-zero so remain-on-exit=failed leaves it DEAD (not an interactive exec-bash shell staying genuinely alive) — got pane_dead=$CHECK_PANE_DEAD"
+green "the resolved check pane is DEAD, not an interactive shell (round 12's actual fix)"
+
+wait_until 15 "iss-911's worker pane to exit cleanly on its own and the window to collapse to a single pane" \
+    bash -c "[ \"\$($SHIM_TMUX list-panes -t '$SESSION:iss-911' 2>/dev/null | wc -l)\" -eq 1 ]"
+green "the worker's clean exit destroyed pane 0 (remain-on-exit=failed), leaving only the check pane — renumbered down into slot 0"
+
+SURVIVOR_INFO="$("$SHIM_TMUX" list-panes -t "$SESSION:iss-911" -F '#{pane_index} #{pane_title} #{pane_dead}')"
+[ "$(echo "$SURVIVOR_INFO" | awk '{print $1}')" = "0" ] \
+    || red "expected the surviving check pane to have been renumbered to index 0; got: $SURVIVOR_INFO"
+[ "$(echo "$SURVIVOR_INFO" | awk '{print $2}')" = "chk-pass" ] \
+    || red "the surviving pane at index 0 should still be the resolved check pane (title chk-pass); got: $SURVIVOR_INFO"
+green "the check pane was renumbered down into index 0, exactly the shape every pane_dead(head -1) reader in this codebase will see next"
+
+# This is the exact query provision-worker.sh's reclaim guard,
+# has_live_window_draining_brief and check-stuck-workers.sh all run
+# (list-panes, take the first line's pane_dead) — before round 12's fix
+# this would have read "0" (interactive exec-bash shell, alive), silently
+# passing the renumbered check-pane corpse off as a live worker.
+PANE_DEAD_VIA_HEAD1="$("$SHIM_TMUX" list-panes -t "$SESSION:iss-911" -F '#{pane_dead}' | head -1)"
+[ "$PANE_DEAD_VIA_HEAD1" = "1" ] \
+    || red "every pane_dead(head -1) reader in this codebase (provision-worker.sh's reclaim guard, has_live_window_draining_brief, check-stuck-workers.sh) would misread this window as a live worker — got pane_dead=$PANE_DEAD_VIA_HEAD1"
+green "the renumbered window correctly reads as dead/reclaimable to every existing pane_dead(head -1) check — no zombie worker slot"
 
 stop_watcher
 

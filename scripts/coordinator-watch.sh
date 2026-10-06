@@ -5682,12 +5682,33 @@ printf '%s  %-15s %s\n' "$ts" 'watch.check_on_done' "issue=$ISSUE task_id=$TASK_
 if [ "$MARK_KIND" = pane ]; then
     tmux select-pane -t "$TMUX_PANE" -T "chk-$state" 2>/dev/null || true
     echo "--- check $state (exit $rc) — this pane stays open for review ---"
+    # issue #555 self-review round 12: no `exec bash` here. This pane
+    # shares its WINDOW with the worker pane (index 0) — an interactive
+    # shell would keep this pane genuinely alive for as long as the
+    # window exists, including after the worker's own pane 0 later exits
+    # cleanly and tmux renumbers this pane down into slot 0 (remain-on-exit
+    # failed destroys a cleanly-exited pane outright, so the survivor
+    # shifts down). A live pane sitting at index 0 reads as "worker still
+    # here" to every pane_dead check in the codebase (all of them take
+    # `head -1` of `list-panes`, i.e. whatever is at index 0) —
+    # provision-worker.sh's reclaim guard, has_live_window_draining_brief,
+    # check-stuck-workers.sh — producing a zombie window that still counts
+    # toward MAX_WORKERS and would receive misdirected future
+    # .0-targeted sends/pastes meant for a real worker. Exiting non-zero
+    # instead leaves this pane DEAD but still fully inspectable
+    # (remain-on-exit=failed keeps a non-zero-exit pane around exactly
+    # the way a crashed worker's own dead pane 0 already does, and this
+    # codebase's whole reclaim story already treats that as "corpse, go
+    # ahead and reclaim" — so a renumbered dead check pane just falls
+    # into that same, already-correct handling, no new code needed
+    # anywhere else).
+    exit 1
 else
     win_id="$(tmux display-message -p -t "$TMUX_PANE" -F '#{window_id}' 2>/dev/null)"
     [ -n "$win_id" ] && tmux rename-window -t "$win_id" "chk-$ISSUE:$state" 2>/dev/null || true
     echo "--- check $state (exit $rc) — this window stays open for review ---"
+    exec bash
 fi
-exec bash
 SCRIPT
     } > "$runner_script" 2>/dev/null
     chmod +x "$runner_script" 2>/dev/null
