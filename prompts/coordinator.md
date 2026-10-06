@@ -48,7 +48,7 @@ Before reporting a cap, reap finished workers (recovery is `gh pr reopen N`):
 
 If still capped: stop provisioning, name the cap, and list remaining `iss-*` windows with PR state and a `tmux kill-window -t iss-N` command each — don't close them yourself, they may hold unpreserved work. A same-issue follow-up needs no slot: `requeue.sh N <brief>`. `provision-worker.sh` re-checks caps and exits 3 when exceeded — a hard stop, not something to retry or bypass.
 
-`provision-worker.sh` can also exit 2, 4 or 5 (issue #493). Exit 2: an unrelated setup refusal (stale branch with unique commits, orphan worktree, missing tmux session, bad flag) — nothing is running; read stderr for the specific cause, don't guess one fix for all of "exit 2". Exit 5: a worker genuinely IS running (a same-name container still tracked by a live window) — route via `requeue.sh N <brief>`, don't retry provision. Exit 4: the spawn failed (dead pane or container never came up) — nothing claimed, the brief already removed, so plain re-provisioning (`provision-worker.sh N`) should succeed once admitted. An immediate retry usually hits exit 3 first: the failed attempt still counted toward the host-wide spawn-stagger timer. Read its stderr — a spawn-stagger refusal names the exact wait ("Retry after Ns"); wait it out and retry once. Only a cap-exceeded exit 3 is the hard stop above.
+`provision-worker.sh` can also exit 2, 4, 5 or 6 (issue #493, #546). Exit 2: an unrelated setup refusal (stale branch, orphan worktree, missing tmux session, bad flag) — nothing running; read stderr, don't guess one fix for all of "exit 2". Exit 5: a worker genuinely IS running (same-name container still tracked by a live window) — route via `requeue.sh N <brief>`, don't retry. Exit 4: the spawn failed (dead pane or container never came up) — nothing claimed, brief already removed; plain re-provisioning (`provision-worker.sh N`) should succeed once admitted. Exit 6: the post-spawn poll's ceiling (`PROVISION_SPAWN_CHECK_SECS`, default 120s) ran out with the pane alive but no container seen yet — a loaded-host slow start, not a failure, so window/container/brief are left alone. Don't re-provision on exit 6 (double-provisions); re-check via `tmux capture-pane` / `docker ps`, then wait or raise the ceiling. An immediate retry after exit 4 usually hits exit 3 first (spawn-stagger); its stderr names the wait — wait it out and retry once. Only a cap-exceeded exit 3 is the hard stop above.
 
 ## Issue Routing: tmux Worker vs GH Action
 
@@ -70,6 +70,8 @@ First, `gh issue list --state closed --search "<2-3 distinctive words>"` to catc
 ```bash
 {{LLM_SWARM_DIR}}/scripts/provision-worker.sh 42
 ```
+
+**Give the call an explicit timeout**: `PROVISION_SPAWN_CHECK_SECS` (default 120s) plus ~60s setup overhead — the post-spawn poll can run the full ceiling on a loaded host, and the default tool timeout killing the call silently is how a coordinator ends up re-provisioning an issue that was never confirmed dead (what exit 6 exists to prevent).
 
 It creates the worktree and branch, embeds `.swarm-policy.md` and the issue body into the brief, and spawns the window. Re-running is safe and queues a follow-up.
 
