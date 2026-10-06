@@ -922,5 +922,51 @@ green "the renumbered window correctly reads as dead/reclaimable to every existi
 
 stop_watcher
 
+# ============================================================================
+heading "Test 17: close_window_and_exit kills the WHOLE window, not just the worker's own pane, when a dead check pane shares it (self-review round 14 finding)"
+# ============================================================================
+
+# Round 12 left a resolved check pane DEAD rather than an interactive shell
+# — correct for the pane_dead(head -1) readers (Test 16), but it means that
+# pane is still IN the window when the worker later closes. Before round
+# 14, worker-listener.sh's close-worker/double-exit paths did a bare `exit`
+# in the idle shell, which only destroys the worker's own pane (index 0);
+# tmux just renumbers the leftover dead check pane down into slot 0 and the
+# window stays open holding only a corpse, contradicting the "window will
+# close" message and leaving a DEAD-PANE window that keeps counting toward
+# MAX_TMUX_WINDOWS. close_window_and_exit (round 14) kills the window
+# itself instead. Extracting the real function's text (not a
+# reimplementation) so this test tracks worker-listener.sh's actual logic
+# rather than drifting from it.
+git -C "$PROJ" worktree add -q -b fix/issue-912 "$TEST_DIR/wt-issue-912" >/dev/null
+WT912="$TEST_DIR/wt-issue-912"
+
+FN_SNIPPET="$TEST_DIR/close_window_and_exit.sh"
+sed -n '/^close_window_and_exit() {/,/^}/p' "$SCRIPT_DIR/../scripts/worker-listener.sh" > "$FN_SNIPPET"
+grep -q '^close_window_and_exit() {' "$FN_SNIPPET" \
+    || red "failed to extract close_window_and_exit() from worker-listener.sh — did its signature change?"
+grep -q '^}' "$FN_SNIPPET" \
+    || red "extracted close_window_and_exit() snippet has no closing brace — sed range match failed: $(cat "$FN_SNIPPET")"
+
+"$SHIM_TMUX" new-window -d -t "$SESSION" -n iss-912 -c "$WT912" \
+    bash -c "source '$FN_SNIPPET'; sleep 2; close_window_and_exit"
+
+# A sibling dead check pane (round 12's resolved shape): split it off the
+# worker pane, title it like a resolved check, exit non-zero so the
+# session-global remain-on-exit=failed (set at session creation, above,
+# matching production) leaves it DEAD — the exact leftover pane round 14
+# is about, already dead and sitting in the window well before the worker
+# pane's close_window_and_exit call fires.
+"$SHIM_TMUX" split-window -d -t "$SESSION:iss-912.0" -c "$WT912" bash -c 'exit 1'
+"$SHIM_TMUX" select-pane -t "$SESSION:iss-912.1" -T chk-pass 2>/dev/null || true
+
+wait_until 10 "the sibling check pane to actually be dead before the worker pane closes" \
+    bash -c "[ \"\$($SHIM_TMUX list-panes -t '$SESSION:iss-912' -F '#{pane_index} #{pane_dead}' | awk '\$1==1{print \$2}')\" = 1 ]"
+green "the sibling check pane is dead, matching round 12's leftover shape, before close_window_and_exit runs"
+
+wait_until 10 "close_window_and_exit to run and the whole iss-912 window to disappear (not just shrink to one pane)" \
+    bash -c "! $SHIM_TMUX list-windows -t '$SESSION' -F '#{window_name}' 2>/dev/null | grep -qx iss-912"
+green "the whole window closed — close_window_and_exit took the dead check pane down with it, instead of leaving it behind renumbered into slot 0"
+
 echo
 green "ALL TESTS PASSED"

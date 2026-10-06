@@ -993,6 +993,31 @@ check_claim_active() {
     return 1
 }
 
+# close_window_and_exit — issue #555 self-review round 14: a plain `exit 0`
+# here only destroys THIS pane. Before this PR, that was enough — the
+# worker's own pane was the only pane in its window, so destroying it
+# destroyed the window too. Now that a check-on-done run shares this same
+# window as a second pane (this PR's whole premise, execute_check() in
+# coordinator-watch.sh), a dead check pane (round 12's `exit 1`, left
+# around on purpose for post-mortem review) is still in the window and
+# survives this pane's exit — tmux just renumbers it down into slot 0, and
+# the window stays open holding only that dead pane. It then reads as a
+# DEAD-PANE to check-stuck-workers.sh and keeps counting toward
+# MAX_TMUX_WINDOWS until something else notices and reaps it, which
+# contradicts the "window will close" message both call sites below print.
+# Killing the whole window explicitly (not just this pane) makes that
+# promise true unconditionally, whatever else is left in it. No-op outside
+# tmux (unset $TMUX_PANE — e.g. this file's own FIFO-driven test, which
+# has no real tmux at all).
+close_window_and_exit() {
+    if [ -n "${TMUX_PANE:-}" ]; then
+        local win_id
+        win_id="$(tmux display-message -p -t "$TMUX_PANE" -F '#{window_id}' 2>/dev/null)"
+        [ -n "$win_id" ] && tmux kill-window -t "$win_id" 2>/dev/null
+    fi
+    exit 0
+}
+
 run_idle_shell() {
     rm -f "$IDLE_SENTINEL"
     poll_for_brief &
@@ -1068,8 +1093,12 @@ EOF
     wait "$poll_pid" 2>/dev/null
 
     # `close-worker` or the double-Ctrl-C trap ran in the idle shell: end
-    # the listener process itself, which closes the tmux window (same
-    # clean-exit contract as the reaped-worktree guard in the main loop).
+    # the listener process and explicitly close the whole tmux window
+    # (close_window_and_exit, round 14 — a bare `exit` here would only
+    # destroy this pane, not any check pane sharing the window with it).
+    # The reaped-worktree guard further down exits plainly instead,
+    # because kill-worktree.sh already closed the window itself from
+    # outside before deleting the worktree out from under this process.
     # The worktree is deliberately left in place — it may hold unpushed or
     # untracked material; clean it up host-side with kill-worktree.sh when
     # genuinely done with it.
@@ -1085,7 +1114,7 @@ EOF
         done
         rm -f "$CLOSE_SENTINEL"
         echo "[$(date +%T)] close requested: listener exiting — window will close. Worktree $WT_LABEL/ is left intact (remove later with kill-worktree.sh)."
-        exit 0
+        close_window_and_exit
     fi
 
     # Double-Ctrl-D close: this was already a respawned shell (not the first
@@ -1102,7 +1131,7 @@ EOF
                 sleep 5
             done
             echo "[$(date +%T)] double exit: listener exiting — window will close. Worktree $WT_LABEL/ is left intact (remove later with kill-worktree.sh)."
-            exit 0
+            close_window_and_exit
         fi
     fi
 }
