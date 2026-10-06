@@ -2,8 +2,10 @@
 # swarm-merge.sh — merge a swarm PR and clean up the local mess.
 #
 # Usage:
-#   swarm-merge.sh <issue#|PR#>       # resolves PR from issue (or issue from
-#                                      # PR), merges, cleans
+#   swarm-merge.sh <PR#>              # preferred: merges that PR, walks back to
+#                                      # its issue for cleanup, cleans
+#   swarm-merge.sh <issue#>           # convenience: finds the issue's PR, then
+#                                      # the same as above
 #   swarm-merge.sh <issue#|PR#> --no-kill # skip the worktree/tmux reap step
 #   swarm-merge.sh <issue#|PR#> --override-review  # merge despite a BLOCK verdict
 #   swarm-merge.sh <issue#|PR#> --override-migration-gate  # merge despite a migration collision
@@ -75,10 +77,22 @@
 # human who has read the PR and disagrees with a gate, which is precisely
 # the judgment --auto-low is not allowed to make on its own.
 #
+# Pass the PR number. It is the unambiguous handle: an issue can have no
+# closing-keyword PR (a worker that split its work and wrote "steps 1-2 of
+# #N" instead of "Closes #N"), or several.
+#
+# Closing the issue is GitHub's job, not this script's: a squash merge to the
+# default branch closes every issue the PR body names with a closing keyword
+# (Closes/Fixes/Resolves #N). After merging, the script reports whether the
+# worker's issue is among them; when it isn't, the issue stays OPEN on
+# purpose (partial work) and the script says so with the `gh issue close`
+# command to run if the work is in fact complete. It never closes it itself.
+#
 # What it does:
 #   1. Resolves the given number as either an issue or a PR (GitHub shares
 #      one numbering sequence, so #N is exactly one object). Given an issue,
-#      resolves its linked PR (unchanged pre-#324 behavior). Given a PR,
+#      resolves its linked PR: the closing-keyword PR first, else the single
+#      open PR on the worker's `fix/issue-N` branch. Given a PR,
 #      walks back to its linked issue so the issue-keyed cleanup below
 #      (tmux window, worktree, branch sweep) still knows what to clean —
 #      if the PR has no linked issue, the merge proceeds but that cleanup
@@ -223,9 +237,60 @@ housekeep_or_die() {
     echo "       worker is still in flight; reaping its window and worktree now" >&2
     echo "       would destroy uncommitted work." >&2
     echo "       Re-run with --force-cleanup if you know the worker is dead." >&2
+    echo "       If the work has a PR, pass the PR number instead: $0 <PR#>" >&2
     exit 1
   fi
   HOUSEKEEP_ONLY=1
+}
+
+# --- issue -> PR resolution -------------------------------------------------
+#
+# Closing-keyword link first (the pre-#324 behavior). When there is none, fall
+# back to the single OPEN PR on the worker's own fix/issue-N branch: a worker
+# that split its work writes "steps 1-2 of #N" rather than "Closes #N", so
+# GitHub records no closing link and the issue path used to refuse a PR that
+# plainly exists (fand-etl #1133 / PR #1138, 2026-10-06). More than one open
+# PR on that branch is ambiguous, so it refuses and asks for the PR number.
+# Sets PR_NUM (empty when nothing is found) and PR_VIA (how it was found).
+resolve_pr_for_issue() {
+  local branch_prs count
+  PR_VIA=""
+  PR_NUM=$(gh issue view "$ISSUE" --json closedByPullRequestsReferences \
+             -q '.closedByPullRequestsReferences[0].number' 2>/dev/null || echo "")
+  [ "$PR_NUM" = "null" ] && PR_NUM=""
+  if [ -n "$PR_NUM" ]; then
+    PR_VIA="closing keyword"
+    return 0
+  fi
+  branch_prs=$(gh pr list --head "fix/issue-$ISSUE" --state open --json number \
+                 -q '.[].number' 2>/dev/null || echo "")
+  count=$(printf '%s\n' "$branch_prs" | grep -c '^[0-9][0-9]*$' || true)
+  if [ "$count" = 1 ]; then
+    PR_NUM="$branch_prs"
+    PR_VIA="open PR on branch fix/issue-$ISSUE"
+  elif [ "$count" -gt 1 ]; then
+    echo "ERROR: issue #$ISSUE has no closing-keyword PR and $count open PRs on" >&2
+    echo "       branch fix/issue-$ISSUE ($(echo "$branch_prs" | tr '\n' ' ')). Pass the PR number." >&2
+    exit 1
+  fi
+}
+
+# After a merge: say whether GitHub closes the worker's issue. GitHub closes
+# issues named by a closing keyword in the PR body; this script never closes
+# one itself, because a PR without the keyword is often deliberate partial
+# work.
+report_issue_closure() {
+  local closing others
+  closing=" $(echo "$PR_JSON" | jq -r '[(.closingIssuesReferences // [])[].number | tostring] | join(" ")' 2>/dev/null || true) "
+  if [[ "$closing" == *" $ISSUE "* ]]; then
+    echo "       issue #$ISSUE: GitHub closes it (PR #$PR_NUM names it with a closing keyword)"
+  else
+    echo "       $(c_amber "issue #$ISSUE stays OPEN: PR #$PR_NUM has no closing keyword for it (partial work, or the keyword was left out).")"
+    echo "       If the work is complete: gh issue close $ISSUE --comment \"Done in #$PR_NUM\""
+  fi
+  others=$(echo "$closing" | tr ' ' '\n' | grep -vx "$ISSUE" | grep . | sed 's/^/#/' | tr '\n' ' ' || true)
+  [ -n "$others" ] && echo "       GitHub also closes: $others"
+  return 0
 }
 
 # --- safer local-branch sweep ---------------------------------------------
@@ -302,8 +367,8 @@ fi
 # --- normal mode: require an issue number ---------------------------------
 
 if [ -z "$ISSUE" ]; then
-  echo "ERROR: issue# or PR# required (or use --sweep-only)" >&2
-  echo "Usage: $0 <issue#|PR#> [--no-kill]" >&2
+  echo "ERROR: PR# (or issue#) required (or use --sweep-only)" >&2
+  echo "Usage: $0 <PR#|issue#> [--no-kill]" >&2
   exit 2
 fi
 
@@ -344,13 +409,11 @@ if [ "$IS_PR" = "true" ]; then
   echo "[2/6] #$INPUT_NUM is PR #$PR_NUM"
 elif [ "$IS_PR" = "false" ]; then
   ISSUE="$INPUT_NUM"
-  PR_NUM=$(gh issue view "$ISSUE" --json closedByPullRequestsReferences \
-             -q '.closedByPullRequestsReferences[0].number' 2>/dev/null || echo "")
-  if [ -z "$PR_NUM" ] || [ "$PR_NUM" = "null" ]; then
-    PR_NUM=""
+  resolve_pr_for_issue
+  if [ -z "$PR_NUM" ]; then
     housekeep_or_die "no linked PR found for issue #$ISSUE"
   else
-    echo "[2/6] issue #$ISSUE → PR #$PR_NUM"
+    echo "[2/6] issue #$ISSUE → PR #$PR_NUM (via $PR_VIA)"
   fi
 else
   # The probe itself failed (rate limit, transient network, expired auth) —
@@ -361,10 +424,9 @@ else
   # so a flaky probe doesn't regress #324's own PR-number case either.
   echo "       $(c_amber "⚠ could not classify #$INPUT_NUM via gh api (transient failure?) — trying issue and PR lookups directly")"
   ISSUE="$INPUT_NUM"
-  PR_NUM=$(gh issue view "$ISSUE" --json closedByPullRequestsReferences \
-             -q '.closedByPullRequestsReferences[0].number' 2>/dev/null || echo "")
-  if [ -n "$PR_NUM" ] && [ "$PR_NUM" != "null" ]; then
-    echo "[2/6] issue #$ISSUE → PR #$PR_NUM (resolved via fallback)"
+  resolve_pr_for_issue
+  if [ -n "$PR_NUM" ]; then
+    echo "[2/6] issue #$ISSUE → PR #$PR_NUM (via $PR_VIA; resolved via fallback)"
   elif gh pr view "$INPUT_NUM" --json number >/dev/null 2>&1; then
     ISSUE=""
     PR_NUM="$INPUT_NUM"
@@ -746,6 +808,7 @@ if [ "$HOUSEKEEP_ONLY" = 1 ]; then
   fi
 elif [ -n "$ISSUE" ]; then
   echo "$(c_green "Done.") PR #$PR_NUM merged for issue #$ISSUE."
+  report_issue_closure
 else
   echo "$(c_green "Done.") PR #$PR_NUM merged (no linked issue)."
 fi
