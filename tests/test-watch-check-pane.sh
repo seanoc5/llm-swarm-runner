@@ -365,5 +365,64 @@ green "the deferred t902b check retried on a later sweep and resolved on its own
 
 stop_watcher
 
+# ============================================================================
+heading "Test 8: a check pane killed outright (crash/Ctrl-C) leaves a DEAD pane still titled 'chk' — later completions must not be stuck forever (self-review finding)"
+# ============================================================================
+
+# remain-on-exit is what production (llm-start.sh) sets on the swarm
+# socket; this test's raw tmux socket doesn't have it by default, so set
+# it explicitly to reproduce the real "dead pane, stale title" shape a
+# killed runner script leaves behind.
+"$SHIM_TMUX" set-option -g remain-on-exit on
+
+git -C "$PROJ" worktree add -q -b fix/issue-903 "$TEST_DIR/wt-issue-903"
+WT903="$TEST_DIR/wt-issue-903"
+mkdir -p "$WT903/.swarm/tasks/status"
+printf '#!/usr/bin/env bash\nsleep 5\nexit 0\n' > "$WT903/.swarm/check.sh"
+chmod +x "$WT903/.swarm/check.sh"
+printf 'fix/issue-903\tOPEN\t903\n' >> "$GH_PR_LIST_FILE"
+
+"$SHIM_TMUX" new-window -d -t "$SESSION" -n iss-903 -c "$WT903" \
+    bash -c 'while true; do echo WORKER_TICK; sleep 0.3; done'
+
+echo '{"task_id":"t903","state":"ready-for-review","pr":903,"ts":"2026-07-19T03:00:00Z"}' \
+    > "$WT903/.swarm/tasks/status/t903.json"
+
+start_watcher "$TEST_DIR/watch-4.log"
+
+wait_until 20 "iss-903 to grow a second (check) pane" \
+    bash -c "[ \"\$($SHIM_TMUX list-panes -t '$SESSION:iss-903' 2>/dev/null | wc -l)\" -eq 2 ]"
+wait_until 10 "t903's check pane to show the still-running 'chk' title" \
+    bash -c "$SHIM_TMUX list-panes -t '$SESSION:iss-903' -F '#{pane_title}' 2>/dev/null | grep -qx chk"
+
+CHECK_PANE_PID="$("$SHIM_TMUX" list-panes -t "$SESSION:iss-903" -F '#{pane_title} #{pane_pid}' | awk '$1=="chk"{print $2; exit}')"
+[ -n "$CHECK_PANE_PID" ] || red "could not resolve t903's check pane pid"
+# Kill the runner script's own process directly (not `tmux kill-pane`) to
+# simulate a crash/Ctrl-C from inside the pane — the script never reaches
+# its own rename-on-finish line, so the title is stuck at "chk" forever
+# while remain-on-exit keeps the pane around as [dead].
+kill -9 "$CHECK_PANE_PID" 2>/dev/null || true
+
+wait_until 10 "the killed check pane to be marked dead by tmux" \
+    bash -c "$SHIM_TMUX list-panes -t '$SESSION:iss-903' -F '#{pane_title} #{pane_dead}' 2>/dev/null | grep -qx 'chk 1'"
+green "t903's check pane is dead but still titled 'chk' (simulated crash)"
+
+# A different task_id, same issue — must NOT be deferred forever just
+# because a dead pane is still sitting there titled "chk".
+echo '{"task_id":"t903b","state":"ready-for-review","pr":903,"ts":"2026-07-19T03:00:01Z"}' \
+    > "$WT903/.swarm/tasks/status/t903b.json"
+
+wait_until 20 "t903b's check to run and resolve despite the dead 'chk' pane" \
+    bash -c "grep -q '\"state\":\"pass\"\|\"state\":\"fail\"' '$WT903/.swarm/tasks/status/t903b.check.json' 2>/dev/null"
+grep -q '"state":"pass"' "$WT903/.swarm/tasks/status/t903b.check.json" \
+    || red "t903b should have run past the dead pane and passed; got: $(cat "$WT903/.swarm/tasks/status/t903b.check.json" 2>/dev/null)"
+green "a dead check pane (still titled 'chk') did NOT permanently block later completions for the issue"
+
+[ "$(pane_count iss-903)" -eq 2 ] \
+    || red "the dead pane should have been replaced, not left alongside a new one — expected 2 panes in iss-903, got $(pane_count iss-903)"
+green "the dead pane was replaced (not stacked) by t903b's check"
+
+stop_watcher
+
 echo
 green "ALL TESTS PASSED"

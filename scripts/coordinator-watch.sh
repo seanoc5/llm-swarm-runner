@@ -5561,17 +5561,26 @@ SCRIPT
         # OUR claim (without writing a terminal check_json state, so the
         # next sweep retries cleanly) and let the running check finish on
         # its own first.
-        local existing_title
-        existing_title="$(tmux list-panes -t "$SESSION_NAME:iss-$issue" -F '#{pane_title}' 2>/dev/null \
-                        | grep '^chk' | head -1)"
-        if [ "$existing_title" = "chk" ]; then
+        # Self-review finding: a plain "chk" title alone isn't proof the
+        # check is still alive — remain-on-exit=failed (llm-start.sh)
+        # keeps a pane around as [dead] after the runner script is killed
+        # outright (Ctrl-C, crash, `tmux kill-pane`) before it ever
+        # reaches its own rename-on-finish line, which would otherwise
+        # read as "still running" forever and permanently skip every
+        # later completion for this issue. #{pane_dead} distinguishes a
+        # genuinely live run from an abandoned one.
+        local existing_pane existing_dead
+        existing_pane="$(tmux list-panes -t "$SESSION_NAME:iss-$issue" -F '#{pane_id} #{pane_title} #{pane_dead}' 2>/dev/null \
+                        | awk '$2 == "chk" { print; exit }')"
+        existing_dead="$(printf '%s' "$existing_pane" | awk '{print $3}')"
+        if [ -n "$existing_pane" ] && [ "$existing_dead" != "1" ]; then
             log_event watch.check_on_done "issue=$issue task_id=$task_id result=skipped reason=prior_check_running"
             rmdir "$claim_dir" 2>/dev/null || true
             return 0
         fi
         local stale_pane
         stale_pane="$(tmux list-panes -t "$SESSION_NAME:iss-$issue" -F '#{pane_id} #{pane_title}' 2>/dev/null \
-                        | awk '$2 ~ /^chk-(pass|fail)$/ { print $1; exit }')"
+                        | awk '$2 ~ /^chk-(pass|fail)$/ || $2 == "chk" { print $1; exit }')"
         [ -n "$stale_pane" ] && tmux kill-pane -t "$stale_pane" 2>/dev/null || true
 
         local new_pane
@@ -5594,7 +5603,12 @@ SCRIPT
         # "chk-$issue:<state>") means a different task_id's check is
         # still running in it, so defer instead of killing it out from
         # under itself.
-        if tmux list-windows -t "$SESSION_NAME" -F '#{window_name}' 2>/dev/null | grep -qx "chk-$issue"; then
+        # Same dead-pane carve-out as the pane path above: remain-on-exit
+        # keeps a killed runner script's window around (bare "chk-$issue"
+        # name, never renamed) — #{pane_dead} tells a genuinely still-
+        # running fallback check apart from an abandoned one.
+        if tmux list-panes -t "$SESSION_NAME" -a -F '#{window_name} #{pane_dead}' 2>/dev/null \
+                | awk -v w="chk-$issue" '$1 == w { print; exit }' | grep -q ' 0$'; then
             log_event watch.check_on_done "issue=$issue task_id=$task_id result=skipped reason=prior_check_running"
             rmdir "$claim_dir" 2>/dev/null || true
             return 0
