@@ -451,6 +451,46 @@ echo "$OUT" | grep -qF "$MIG/V5.1__five-one.sql (V5.1)" || red "offending file n
 echo "$OUT" | grep -q "base tip's max version (V5.2" || red "base max full version (V5.2) not reported"
 green "dotted-version out-of-order caught: V5.1 after base's V5.2 — full-version compare, not just the integer prefix"
 
+# ============================================================================
+heading "Test 10c: collision wins over out-of-order when a PR has both (#556 self-review)"
+# ============================================================================
+# review focus #1 asked for a test where ONE PR's head carries both a
+# same-version collision (V5, different filename from the base's V5) and
+# an unrelated out-of-order file (V3, no base claimant) at once. The
+# per-version exclusion (COLLIDED_VERSIONS) only keeps V5 out of the
+# out-of-order list — it does not change the overall verdict. The overall
+# verdict/exit code must still read "collision" (collision wins, exit 2,
+# never double-counted as 3), while V3 is still surfaced in the body so
+# the recipe isn't silently dropped.
+COL_ORIGIN="$TEST_DIR/col-origin.git"
+COL_CLONE="$TEST_DIR/col-clone"
+git init -q --bare -b master "$COL_ORIGIN"
+git init -q -b master "$COL_CLONE"
+git -C "$COL_CLONE" remote add origin "$COL_ORIGIN"
+col_commit() { git -C "$COL_CLONE" -c user.email=t@t -c user.name=t commit -q -m "$1"; }
+
+mkdir -p "$COL_CLONE/$MIG"
+echo "select 1;" > "$COL_CLONE/$MIG/V1__one.sql"
+echo "select 2;" > "$COL_CLONE/$MIG/V2__two.sql"
+echo "select 5;" > "$COL_CLONE/$MIG/V5__five.sql"
+git -C "$COL_CLONE" add -A; col_commit "base: V1, V2, V5"
+git -C "$COL_CLONE" push -q origin master
+
+git -C "$COL_CLONE" checkout -q -b mixed-branch master
+echo "select 5 dup;" > "$COL_CLONE/$MIG/V5__five-dup.sql"    # collision on V5
+echo "select 3;"     > "$COL_CLONE/$MIG/V3__three.sql"       # independently out-of-order
+git -C "$COL_CLONE" add -A; col_commit "worker ships a colliding V5 AND an unrelated out-of-order V3"
+git -C "$COL_CLONE" push -q origin mixed-branch
+set_pr 23 master mixed-branch
+
+cd "$COL_CLONE"
+if OUT=$("$CHECK" 23 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -eq 2 ] || red "expected exit 2 (collision wins) when a PR has both, got $RC (output: $OUT)"
+echo "$OUT" | grep -q "verdict: collision" || red "verdict should read collision, not out-of-order, when both are present"
+echo "$OUT" | grep -qF "V5 claimed by:" || red "the V5 collision itself must still be reported"
+echo "$OUT" | grep -qF "$MIG/V3__three.sql (V3)" || red "the unrelated V3 out-of-order file must still be surfaced, not swallowed by the collision verdict"
+green "collision wins over out-of-order in the overall verdict, while an unrelated out-of-order file is still surfaced"
+
 # swarm-merge.sh's own migration-collision-check.sh call fetches base/head
 # from the CURRENT directory's "origin" remote — stay in $OOO_CLONE (whose
 # origin is $OOO_ORIGIN, holding master/ooo-branch) rather than $CLONE
