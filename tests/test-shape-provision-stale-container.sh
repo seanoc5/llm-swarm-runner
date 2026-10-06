@@ -113,6 +113,25 @@ case "$1" in
             rm -f "$DOCKER_PS_FLAKE_FILE"
             exit 0
         fi
+        # DOCKER_RUNNING_AFTER_N_CALLS: the container only starts reporting
+        # "running" on its Nth (non -a) `docker ps` call for this name —
+        # models a container that comes up mid-poll rather than at t=0 or
+        # never (issue #546's actual shape: slow, not dead). Updates STATE
+        # too so later calls (including -a) stay consistent.
+        if [ "$all" = 0 ] && [ -n "${DOCKER_RUNNING_AFTER_N_CALLS:-}" ]; then
+            counter_file="${DOCKER_CALL_COUNTER_DIR:-.}/docker-ps-calls-${name}"
+            count=0
+            [ -f "$counter_file" ] && count="$(cat "$counter_file")"
+            count=$((count + 1))
+            echo "$count" > "$counter_file"
+            if [ "$count" -ge "$DOCKER_RUNNING_AFTER_N_CALLS" ]; then
+                awk -v n="$name" '$1!=n' "$STATE" > "$STATE.tmp" 2>/dev/null
+                mv "$STATE.tmp" "$STATE"
+                echo "$name running" >> "$STATE"
+                echo "$name"
+            fi
+            exit 0
+        fi
         if [ "$all" = 1 ]; then
             awk -v n="$name" '$1==n {print $1}' "$STATE" 2>/dev/null
         else
@@ -272,20 +291,28 @@ grep -q 'worker.start.failed.*issue=302.*pane_dead=1.*brief_removed=1' "$EVENTS_
 green "a dead pane right after spawn exits 4 (not 0), logs worker.start.failed, kills the window, removes the unclaimed brief, and clears its pending marker — the exact gap the fand-etl incident fell through"
 
 # ============================================================================
-heading "Test 8: post_spawn_health_check — pane alive but container never came up -> exit 4"
+heading "Test 8: post_spawn_health_check — ceiling reached, pane still alive, container never observed -> exit 6, nothing torn down (issue #546)"
 # ============================================================================
+# Before #546 this was a confirmed exit-4 failure (window killed, container
+# removed, brief deleted). #546 reclassifies it: a pane that's still alive
+# when the poll ceiling runs out is ambiguous (could be a slow start, not a
+# dead one), so the window/container/brief are left exactly as they are and
+# this gets its own exit code instead of exit 4's "fully cleaned up" contract.
 command tmux -L "$SOCKET" new-window -d -t "$SESSION" -n iss-303 "sleep 100"
 : > "$DOCKER_STATE_FILE"
 : > "$EVENTS_LOG"
 echo "queued" > "$TEST_DIR/brief-303.md"
 rc=0
 out="$(PROVISION_SPAWN_CHECK_SECS=0.1 post_spawn_health_check 303 iss-303 swarm-provstale-iss-303 "$TEST_DIR/brief-303.md" 2>&1)" || rc=$?
-[ "$rc" -eq 4 ] || red "expected exit 4 when the container never came up, got rc=$rc, output: $out"
-echo "$out" | grep -qi 'container_running=0' || red "expected the error to report container_running=0: $out"
-[ -f "$TEST_DIR/brief-303.md" ] && red "a failed spawn (container never started) must also remove its unclaimed brief"
-! command tmux -L "$SOCKET" list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -qx iss-303 \
-    || red "a failed spawn must kill its window even when the pane itself was still alive (container just never started)"
-green "a pane that's alive but whose container never started still exits 4, kills the window, and removes its unclaimed brief"
+[ "$rc" -eq 6 ] || red "expected the dedicated exit 6 (still starting, ambiguous) when the ceiling runs out with the pane alive, got rc=$rc, output: $out"
+echo "$out" | grep -qi 'still starting' || red "expected the message to say the worker is still starting, not that it died: $out"
+grep -q 'worker.start.indeterminate.*issue=303' "$EVENTS_LOG" \
+    || red "expected a worker.start.indeterminate log line, got: $(cat "$EVENTS_LOG")"
+[ -f "$TEST_DIR/brief-303.md" ] || red "exit 6 must never remove the brief — the worker may still be coming up"
+command tmux -L "$SOCKET" list-windows -t "$SESSION" -F '#W' | grep -qx iss-303 \
+    || red "exit 6 must never kill the window — the container may still be coming up"
+command tmux -L "$SOCKET" kill-window -t "$SESSION:iss-303" 2>/dev/null || true
+green "a pane that's still alive when the ceiling runs out gets exit 6 (ambiguous, not dead) and nothing is torn down"
 
 # ============================================================================
 heading "Test 9: post_spawn_health_check — worker image not built yet -> skips the check entirely (self-review, 5th pass)"
@@ -384,9 +411,35 @@ command tmux -L "$SOCKET" kill-window -t "$SESSION:iss-307" 2>/dev/null || true
 green "a single transient docker ps blip is retried once and does not false-positive a healthy spawn as failed"
 
 # ============================================================================
+heading "Test 13: post_spawn_health_check — container appears mid-poll, well past the old fixed-sleep window -> succeeds, window/brief untouched (issue #546)"
+# ============================================================================
+# Models the SAMlytics#397 shape (seanoc5/SAMlytics#397): on a loaded host
+# the container came up 31s after the spawn, while the old single
+# `sleep PROVISION_SPAWN_CHECK_SECS` + one check killed it mid-start every
+# time. A real ~20s-late container under a 120s ceiling is scaled down here
+# to 2 missed 1s polls before the 3rd succeeds, to keep the test fast — the
+# mechanism under test (poll-until-seen vs. sleep-then-check-once) is the
+# same either way.
+command tmux -L "$SOCKET" new-window -d -t "$SESSION" -n iss-308 "sleep 100"
+: > "$DOCKER_STATE_FILE"
+: > "$EVENTS_LOG"
+echo "queued" > "$TEST_DIR/brief-308.md"
+export DOCKER_CALL_COUNTER_DIR="$TEST_DIR"
+rm -f "$TEST_DIR/docker-ps-calls-swarm-provstale-iss-308"
+DOCKER_RUNNING_AFTER_N_CALLS=3 PROVISION_SPAWN_CHECK_SECS=5 \
+    post_spawn_health_check 308 iss-308 swarm-provstale-iss-308 "$TEST_DIR/brief-308.md"
+[ -z "$(cat "$EVENTS_LOG")" ] || red "a container seen running before the ceiling must not log any failure/indeterminate event, got: $(cat "$EVENTS_LOG")"
+[ -f "$TEST_DIR/brief-308.md" ] || red "a container that shows up before the ceiling must never have its brief removed"
+command tmux -L "$SOCKET" list-windows -t "$SESSION" -F '#W' | grep -qx iss-308 \
+    || red "a container that shows up before the ceiling must never have its window killed"
+command tmux -L "$SOCKET" kill-window -t "$SESSION:iss-308" 2>/dev/null || true
+unset DOCKER_RUNNING_AFTER_N_CALLS
+green "a slow-but-eventually-running container (mid-poll, not immediate) passes without the window being killed — the exact gap issue #546 closes"
+
+# ============================================================================
 heading "All provision-worker.sh stale-container / post-spawn health tests passed"
 # ============================================================================
 green "check_stale_container(): clears a leftover same-name container before spawn, refuses only when it's genuinely still live"
-green "post_spawn_health_check(): a dead pane or a never-started container makes provision-worker.sh exit 4, not 0 (issue #493)"
+green "post_spawn_health_check(): polls instead of sleep-then-check-once (issue #546) — a dead pane exits 4 (confirmed failure, fully cleaned up); a pane still alive when the ceiling runs out exits 6 (ambiguous, left untouched) instead of exiting 0 (issue #493)"
 echo ""
 yellow "Run with KEEP=1 to leave $TEST_DIR for inspection."
