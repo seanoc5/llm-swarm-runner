@@ -463,5 +463,63 @@ green "an instant check's pane correctly settled on chk-pass — no race against
 
 stop_watcher
 
+# ============================================================================
+heading "Test 10: a check command that clobbers the pane title via a terminal escape sequence gets it reasserted within a few seconds (self-review finding)"
+# ============================================================================
+
+# Self-review finding: a check command that itself prints a terminal-title
+# escape sequence (some test runners/TUIs do) overwrites the pane's "chk"
+# title out from under the watcher — confirmed empirically that this
+# tmux version has no pane-title equivalent of the window-name protection
+# -n already gives the fallback-window case (automatic-rename off). The
+# fix has the runner script reassert "chk" every few seconds for the
+# check's duration, so any such clobber self-heals instead of permanently
+# misreading as resolved/stale to check_in_flight_for_issue. Long sleep
+# (10s) + an early injection gives the reassertion loop (every 3s) ample
+# margin to catch and heal it well before the check itself finishes, so
+# this test can't race its own "chk" -> "chk-pass" transition.
+git -C "$PROJ" worktree add -q -b fix/issue-905 "$TEST_DIR/wt-issue-905"
+WT905="$TEST_DIR/wt-issue-905"
+mkdir -p "$WT905/.swarm/tasks/status"
+# The check command itself emits a title-setting escape sequence (OSC 2)
+# as part of its own output, exactly as a real test runner/TUI might —
+# this is real output on the pane's pty, not injected input, so tmux's
+# terminal emulation genuinely retitles the pane from it.
+cat > "$WT905/.swarm/check.sh" <<'CHECKSCRIPT'
+#!/usr/bin/env bash
+printf '\033]2;HACKED\033\\'
+sleep 10
+exit 0
+CHECKSCRIPT
+chmod +x "$WT905/.swarm/check.sh"
+printf 'fix/issue-905\tOPEN\t905\n' >> "$GH_PR_LIST_FILE"
+
+"$SHIM_TMUX" new-window -d -t "$SESSION" -n iss-905 -c "$WT905" \
+    bash -c 'while true; do echo WORKER_TICK; sleep 0.3; done'
+
+echo '{"task_id":"t905","state":"ready-for-review","pr":905,"ts":"2026-07-19T05:00:00Z"}' \
+    > "$WT905/.swarm/tasks/status/t905.json"
+
+start_watcher "$TEST_DIR/watch-6.log"
+
+wait_until 20 "t905's check pane to show the clobbered 'HACKED' title (confirms the check's own escape sequence really does overwrite 'chk')" \
+    bash -c "$SHIM_TMUX list-panes -t '$SESSION:iss-905' -F '#{pane_title}' 2>/dev/null | grep -qx HACKED"
+green "confirmed the check command's own escape sequence clobbers the pane title, as a real misbehaving check command would"
+
+wait_until 8 "the runner script's watchdog to reassert 'chk' within a few seconds" \
+    bash -c "$SHIM_TMUX list-panes -t '$SESSION:iss-905' -F '#{pane_title}' 2>/dev/null | grep -qx chk"
+green "the pane title self-healed back to 'chk' without any help from the watcher itself"
+
+wait_until 18 "t905's check to still resolve normally despite the mid-run title clobber" \
+    bash -c "grep -q '\"state\":\"pass\"\|\"state\":\"fail\"' '$WT905/.swarm/tasks/status/t905.check.json' 2>/dev/null"
+grep -q '"state":"pass"' "$WT905/.swarm/tasks/status/t905.check.json" \
+    || red "t905's check should still pass; got: $(cat "$WT905/.swarm/tasks/status/t905.check.json" 2>/dev/null)"
+
+[ "$(pane_count iss-905)" -eq 2 ] \
+    || red "the title-clobber must not have caused a duplicate check pane — expected 2 panes in iss-905, got $(pane_count iss-905)"
+green "the check ran to completion as exactly one pane despite the mid-run title clobber"
+
+stop_watcher
+
 echo
 green "ALL TESTS PASSED"

@@ -3437,6 +3437,16 @@ declare -A TIMEOUT_RETRY_LOGGED=()
 declare -A KNOWN_WORKTREE_SEEN=()
 WT_INVENTORY_SEEDED=0
 
+# issue #550 self-review: same dedup shape as ORPHAN_PR_LOGGED above, for
+# maybe_run_check's prior-check-still-running defer (see that call site's
+# comment) — without it, every POLL_SECS sweep while a different task_id's
+# check is in flight for the same issue would log a fresh result=running
+# followed immediately by result=skipped reason=prior_check_running,
+# making events.log read as if the check kept starting and stopping.
+# Keyed by issue number; cleared the moment that issue no longer has a
+# live check running, so a later, genuinely new busy episode logs again.
+declare -A PRIOR_CHECK_LOGGED=()
+
 # issue #448: stranded_brief_sweep_pass's dedup — keyed by issue number,
 # same idiom as ORPHAN_PR_LOGGED above. Set once a coord-inbox entry has
 # been written for that issue's stranded queue; cleared the moment either
@@ -5276,6 +5286,31 @@ reconcile_missing_outcome() {
 # completed task's claim is gone too) — the "unclaimed" scan below and
 # the fast-path re-entry check just above it both key off the *.check.json
 # terminal state instead, which IS permanent.
+# check_in_flight_for_issue <issue>
+#
+# True iff a check-on-done run for this issue is genuinely still alive
+# right now — either a pane titled plain "chk" inside iss-$issue, or a
+# fallback chk-$issue window, in either case NOT yet dead (#{pane_dead}).
+# A pane/window renamed to chk-pass/chk-fail (resolved) or left as a dead
+# "chk"/"chk-$issue" placeholder (crashed/killed before it could rename
+# itself) both count as NOT in flight — safe for execute_check to replace.
+# Single source of truth for maybe_run_check's early defer and
+# execute_check's replace-vs-defer decision, so the two can't disagree.
+check_in_flight_for_issue() {
+    local issue="$1"
+    command -v tmux >/dev/null 2>&1 || return 1
+    tmux has-session -t "$SESSION_NAME" 2>/dev/null || return 1
+    if tmux list-panes -t "$SESSION_NAME:iss-$issue" -F '#{pane_title} #{pane_dead}' 2>/dev/null \
+            | awk '$1=="chk" && $2!=1 { found=1 } END { exit !found }'; then
+        return 0
+    fi
+    if tmux list-panes -t "$SESSION_NAME" -a -F '#{window_name} #{pane_dead}' 2>/dev/null \
+            | awk -v w="chk-$issue" '$1==w && $2!=1 { found=1 } END { exit !found }'; then
+        return 0
+    fi
+    return 1
+}
+
 maybe_run_check() {
     local wt_dir="$1" issue="$2" task_id="${3:-}" pr_created_at="${4:-}"
     local status_dir="$wt_dir/.swarm/tasks/status"
@@ -5354,6 +5389,29 @@ maybe_run_check() {
 
     local claim_dir="$status_dir/${task_id}.check-claim"
     mkdir "$claim_dir" 2>/dev/null || return 0   # already claimed (in flight) — nothing to do
+
+    # issue #550 self-review: probe for a DIFFERENT task_id's check still
+    # genuinely running for this same issue, right after winning OUR OWN
+    # claim (so this can only fire for a task that's never run before —
+    # our own in-progress check would instead have failed the mkdir above
+    # and returned silently, long before reaching here). Checked BEFORE
+    # writing "checking"/logging result=running — otherwise every
+    # POLL_SECS sweep for the whole duration of that other check would log
+    # a fresh running+skipped pair, reading as if this task's check kept
+    # starting and stopping. check_in_flight_for_issue is the single
+    # source of truth both this early-return and execute_check's own
+    # replace-vs-defer decision use, so they can't disagree. Release the
+    # claim we just took so the next sweep can retry once the conflict
+    # clears.
+    if check_in_flight_for_issue "$issue"; then
+        if [ -z "${PRIOR_CHECK_LOGGED[$issue]:-}" ]; then
+            log_event watch.check_on_done "issue=$issue task_id=$task_id result=skipped reason=prior_check_running"
+            PRIOR_CHECK_LOGGED[$issue]=1
+        fi
+        rmdir "$claim_dir" 2>/dev/null || true
+        return 0
+    fi
+    unset "PRIOR_CHECK_LOGGED[$issue]" 2>/dev/null || true
 
     # issue #451 (was #314's synth_outcome call): winning the claim is the
     # one moment each done task passes through exactly once — reconcile
@@ -5534,8 +5592,39 @@ if [ "$MARK_KIND" = pane ]; then
 fi
 echo "--- check-on-done: issue #$ISSUE (task $TASK_ID) ---"
 echo "check: $CHECK_CMD"
+
+# issue #550 self-review: a check command that itself prints a
+# terminal-title escape sequence (some test runners/TUIs do) overwrites
+# this pane's "chk" title out from under us — confirmed empirically that
+# tmux (3.4, this project's target) has no pane-title equivalent of the
+# window-name protection -n already gives the fallback-window case
+# (automatic-rename off), so there's no single option to just turn this
+# off. Reassert the title every few seconds for the check's duration so
+# any such clobber self-heals quickly rather than permanently misreading
+# as resolved/stale to check_in_flight_for_issue. Window case doesn't
+# need this: -n's implicit automatic-rename=off already makes the window
+# name immune to the same kind of escape sequence (verified).
+# $$ inside this backgrounded subshell still names the TOP-LEVEL script's
+# pid (bash doesn't rebind $$ for subshells) — so if this script itself
+# is killed outright (crash, Test 8's scenario) rather than reaching the
+# explicit kill below, the loop notices its parent is gone within one
+# sleep and exits on its own instead of leaking forever.
+if [ "$MARK_KIND" = pane ]; then
+    ( while kill -0 "$$" 2>/dev/null; do
+          sleep 3
+          tmux select-pane -t "$TMUX_PANE" -T chk 2>/dev/null || true
+      done ) &
+    RETITLE_PID=$!
+fi
+
 timeout "$TIMEOUT_SECS" bash -c "$CHECK_CMD"
 rc=$?
+
+if [ -n "${RETITLE_PID:-}" ]; then
+    kill "$RETITLE_PID" 2>/dev/null || true
+    wait "$RETITLE_PID" 2>/dev/null || true
+fi
+
 state=pass; [ "$rc" -eq 0 ] || state=fail
 ts=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
 printf '{"task_id":"%s","state":"%s","check_exit":%d,"ts":"%s"}\n' "$TASK_ID" "$state" "$rc" "$ts" > "$CHECK_JSON"
@@ -5562,36 +5651,11 @@ SCRIPT
         # one pane per retry (the window-stacking shape issue #550's
         # evidence section documents).
         #
-        # Self-review finding: that's only safe once the prior check has
-        # actually finished. The runner script's title stays plain "chk"
-        # for its whole run and only becomes "chk-pass"/"chk-fail" at the
-        # very end (line ~5531 above), so a bare "chk" here means a
-        # DIFFERENT task_id's check for this same issue is still running
-        # (e.g. a fast-following requeued brief) — killing its pane would
-        # truncate it before it ever writes its own check.json or releases
-        # its claim-dir, leaving that task stuck at state=checking forever
-        # and blocking kill-worktree.sh's claim-based reap defer. Detect
-        # that case and defer this one instead of clobbering it: release
-        # OUR claim (without writing a terminal check_json state, so the
-        # next sweep retries cleanly) and let the running check finish on
-        # its own first.
-        # Self-review finding: a plain "chk" title alone isn't proof the
-        # check is still alive — remain-on-exit=failed (llm-start.sh)
-        # keeps a pane around as [dead] after the runner script is killed
-        # outright (Ctrl-C, crash, `tmux kill-pane`) before it ever
-        # reaches its own rename-on-finish line, which would otherwise
-        # read as "still running" forever and permanently skip every
-        # later completion for this issue. #{pane_dead} distinguishes a
-        # genuinely live run from an abandoned one.
-        local existing_pane existing_dead
-        existing_pane="$(tmux list-panes -t "$SESSION_NAME:iss-$issue" -F '#{pane_id} #{pane_title} #{pane_dead}' 2>/dev/null \
-                        | awk '$2 == "chk" { print; exit }')"
-        existing_dead="$(printf '%s' "$existing_pane" | awk '{print $3}')"
-        if [ -n "$existing_pane" ] && [ "$existing_dead" != "1" ]; then
-            log_event watch.check_on_done "issue=$issue task_id=$task_id result=skipped reason=prior_check_running"
-            rmdir "$claim_dir" 2>/dev/null || true
-            return 0
-        fi
+        # maybe_run_check's check_in_flight_for_issue call already defers
+        # (and returns) before ever reaching here if a prior check for
+        # this issue is genuinely still alive, so by this point any
+        # existing "chk"-titled pane is either resolved (chk-pass/fail) or
+        # dead (crashed before it could rename itself) — safe to replace.
         local stale_pane
         stale_pane="$(tmux list-panes -t "$SESSION_NAME:iss-$issue" -F '#{pane_id} #{pane_title}' 2>/dev/null \
                         | awk '$2 ~ /^chk-(pass|fail)$/ || $2 == "chk" { print $1; exit }')"
@@ -5612,21 +5676,10 @@ SCRIPT
         # existed in this tmux session at all). Mirrors provision-worker.sh's
         # `iss-N` windows, `-d` so it doesn't steal focus; closes any
         # leftover chk-$issue window from a prior run first (replace, not
-        # stack, same as the pane case above) — but same deferral as the
-        # pane case: a bare "chk-$issue" name (not yet renamed
-        # "chk-$issue:<state>") means a different task_id's check is
-        # still running in it, so defer instead of killing it out from
-        # under itself.
-        # Same dead-pane carve-out as the pane path above: remain-on-exit
-        # keeps a killed runner script's window around (bare "chk-$issue"
-        # name, never renamed) — #{pane_dead} tells a genuinely still-
-        # running fallback check apart from an abandoned one.
-        if tmux list-panes -t "$SESSION_NAME" -a -F '#{window_name} #{pane_dead}' 2>/dev/null \
-                | awk -v w="chk-$issue" '$1 == w { print; exit }' | grep -q ' 0$'; then
-            log_event watch.check_on_done "issue=$issue task_id=$task_id result=skipped reason=prior_check_running"
-            rmdir "$claim_dir" 2>/dev/null || true
-            return 0
-        fi
+        # stack, same as the pane case above) — same reasoning as there:
+        # maybe_run_check's check_in_flight_for_issue already deferred
+        # before reaching here if that window were still genuinely alive,
+        # so any chk-$issue window found at this point is resolved or dead.
         swarm_close_chk_windows "$SESSION_NAME" "$issue"
         tmux new-window -d -t "$SESSION_NAME" -n "chk-$issue" -c "$wt_dir" bash "$runner_script" 2>/dev/null \
             || spawn_rc=1
