@@ -5407,7 +5407,32 @@ maybe_run_check() {
     fi
 
     local claim_dir="$status_dir/${task_id}.check-claim"
-    mkdir "$claim_dir" 2>/dev/null || return 0   # already claimed (in flight) — nothing to do
+    if ! mkdir "$claim_dir" 2>/dev/null; then
+        # issue #555 self-review round 9: before this PR, a plain
+        # kill-window on just the iss-N window (kill-finished-workers.sh
+        # without -w; kill-worktree.sh's own claim-defer protocol doesn't
+        # apply here) left a check's dedicated chk-N window, and its
+        # claim, untouched. Now the check is a PANE inside that same
+        # iss-N window, so killing it kills the check mid-run too — its
+        # runner script never reaches its own final `rmdir "$claim_dir"`,
+        # orphaning this exact task_id's own claim forever. Without this,
+        # every later sweep would see the claim dir already exists, return
+        # 0 right here, and check.json would stay stuck at "checking"
+        # with no result ever logged — reusing check_in_flight_for_issue's
+        # cross-task staleness check wouldn't catch this because that only
+        # ever runs AFTER this task's own claim is won (and a task_id
+        # whose outcome already fired never gets a second completion to
+        # trigger it). Reclaim a stale OWN claim here the same way:
+        # same TTL, same mtime_epoch helper kill-worktree.sh's reap path
+        # already uses for the identical question.
+        local stale_secs="${CHECK_CLAIM_STALE_SECS:-$(( ${WORKER_CHECK_TIMEOUT:-600} + 300 ))}"
+        local claim_mtime claim_age
+        claim_mtime="$(mtime_epoch "$claim_dir" 2>/dev/null)" || return 0
+        claim_age=$(( $(date +%s) - claim_mtime ))
+        [ "$claim_age" -ge "$stale_secs" ] || return 0   # genuinely still in flight — nothing to do
+        rmdir "$claim_dir" 2>/dev/null || true
+        mkdir "$claim_dir" 2>/dev/null || return 0   # lost the reclaim race — bail, next sweep retries
+    fi
 
     # issue #550 self-review: probe for a DIFFERENT task_id's check still
     # genuinely running for this same issue, right after winning OUR OWN

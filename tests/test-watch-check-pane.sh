@@ -381,7 +381,20 @@ heading "Test 8: a check pane killed outright (crash/Ctrl-C) leaves a DEAD pane 
 # only stops looking "in flight" once it's older than this. Shrink it for
 # this test so t903b doesn't have to wait out the real multi-minute
 # default to prove the eventual unblock.
-export CHECK_CLAIM_STALE_SECS=3
+#
+# self-review round 9: must stay BIGGER than check.sh's own sleep (5s)
+# below. In production CHECK_CLAIM_STALE_SECS defaults to
+# WORKER_CHECK_TIMEOUT + 300, which structurally always exceeds a
+# genuinely-running check's max lifetime (the runner wraps the check
+# command in `timeout $WORKER_CHECK_TIMEOUT`), so maybe_run_check's own
+# round-9 own-claim reclaim can never fire against a check that's still
+# actually alive. Shrinking this below the check's real runtime (3 was
+# tried and broke: a still-alive, mid-sleep t903 kept getting reclaimed
+# and restarted every 3s, since the reclaim itself resets the claim's
+# mtime and the check never got the full 5s it needed to finish) breaks
+# that invariant and self-review round 9 caught it. Keep this above the
+# sleep below.
+export CHECK_CLAIM_STALE_SECS=8
 
 git -C "$PROJ" worktree add -q -b fix/issue-903 "$TEST_DIR/wt-issue-903"
 WT903="$TEST_DIR/wt-issue-903"
@@ -420,7 +433,7 @@ green "t903's check pane is dead but still titled 'chk' (simulated crash)"
 echo '{"task_id":"t903b","state":"ready-for-review","pr":903,"ts":"2026-07-19T03:00:01Z"}' \
     > "$WT903/.swarm/tasks/status/t903b.json"
 
-wait_until 20 "t903b's check to run and resolve despite the dead 'chk' pane" \
+wait_until 30 "t903b's check to run and resolve despite the dead 'chk' pane" \
     bash -c "grep -q '\"state\":\"pass\"\|\"state\":\"fail\"' '$WT903/.swarm/tasks/status/t903b.check.json' 2>/dev/null"
 grep -q '"state":"pass"' "$WT903/.swarm/tasks/status/t903b.check.json" \
     || red "t903b should have run past the dead pane and passed; got: $(cat "$WT903/.swarm/tasks/status/t903b.check.json" 2>/dev/null)"
@@ -640,6 +653,71 @@ green "iss-907 itself was never left with a stray pane from the failed split att
 
 stop_watcher
 "$SHIM_TMUX" kill-window -t "$SESSION:chk-907" 2>/dev/null || true
+
+# ============================================================================
+heading "Test 13: a worker-only reap that kills the whole iss-N window (no -w, no claim-defer) must not orphan its own check forever (self-review round 9 finding)"
+# ============================================================================
+
+# Round 9's actual bug: before this PR, a check ran in its own chk-N
+# window — a plain kill-finished-workers.sh reap of just iss-N (no -w;
+# only kill-worktree.sh's own protocol defers on an active claim) left
+# that chk-N window, and its claim, untouched. Now the check is a PANE
+# INSIDE iss-N, so killing that whole window kills the check mid-run too.
+# Its runner script never reaches its own final rmdir, orphaning t908's
+# own claim-dir forever — maybe_run_check's mkdir on an already-existing
+# claim just returned silently, with nothing left alive to ever retry it.
+# self-review round 9: must stay BIGGER than check.sh's own sleep (4s)
+# below, for the same reason Test 8 bumped its own value — the
+# own-claim reclaim must never fire while the check is still genuinely
+# alive, only once it's truly orphaned (which it is here, right after
+# the kill-window below).
+export CHECK_CLAIM_STALE_SECS=7
+
+git -C "$PROJ" worktree add -q -b fix/issue-908 "$TEST_DIR/wt-issue-908"
+WT908="$TEST_DIR/wt-issue-908"
+mkdir -p "$WT908/.swarm/tasks/status"
+printf '#!/usr/bin/env bash\nsleep 4\nexit 0\n' > "$WT908/.swarm/check.sh"
+chmod +x "$WT908/.swarm/check.sh"
+printf 'fix/issue-908\tOPEN\t908\n' >> "$GH_PR_LIST_FILE"
+
+"$SHIM_TMUX" new-window -d -t "$SESSION" -n iss-908 -c "$WT908" \
+    bash -c 'while true; do echo WORKER_TICK; sleep 0.3; done'
+
+echo '{"task_id":"t908","state":"ready-for-review","pr":908,"ts":"2026-07-19T08:00:00Z"}' \
+    > "$WT908/.swarm/tasks/status/t908.json"
+
+start_watcher "$TEST_DIR/watch-9.log"
+
+wait_until 10 "t908's check pane to show the still-running 'chk' title" \
+    bash -c "$SHIM_TMUX list-panes -t '$SESSION:iss-908' -F '#{pane_title}' 2>/dev/null | grep -qx chk"
+
+[ -d "$WT908/.swarm/tasks/status/t908.check-claim" ] \
+    || red "t908's claim-dir should exist while its check is still running"
+
+# Simulate kill-finished-workers.sh WITHOUT -w: kill the whole iss-N
+# window directly (worker pane and check pane together), bypassing
+# kill-worktree.sh's claim-defer protocol entirely.
+"$SHIM_TMUX" kill-window -t "$SESSION:iss-908" 2>/dev/null || true
+window_exists iss-908 && red "iss-908 should be fully gone after the simulated worker-only reap"
+green "iss-908 (worker + check pane together) was killed, simulating a plain worker-only reap"
+
+[ -d "$WT908/.swarm/tasks/status/t908.check-claim" ] \
+    || red "t908's claim-dir should still exist immediately after the kill — nothing ran its rmdir"
+green "t908's claim-dir is now orphaned, exactly as a kill-finished-workers.sh (no -w) reap would leave it"
+
+wait_until 25 "t908's check to recover via the stale-claim reclaim and resolve on its own" \
+    bash -c "grep -q '\"state\":\"pass\"\|\"state\":\"fail\"' '$WT908/.swarm/tasks/status/t908.check.json' 2>/dev/null"
+grep -q '"state":"pass"' "$WT908/.swarm/tasks/status/t908.check.json" \
+    || red "t908 should have recovered and passed; got: $(cat "$WT908/.swarm/tasks/status/t908.check.json" 2>/dev/null)"
+green "t908's own orphaned claim was reclaimed once stale, and its check ran to completion — never stuck forever"
+
+window_exists "chk-908:pass" \
+    || red "expected t908's reclaimed check to fall back to a standalone chk-908:pass window (iss-908 no longer exists), found: $("$SHIM_TMUX" list-windows -t "$SESSION" -F '#{window_name}')"
+green "t908's reclaimed check ran via the fallback chk-908 window, since iss-908 itself is gone"
+
+stop_watcher
+unset CHECK_CLAIM_STALE_SECS
+"$SHIM_TMUX" kill-window -t "$SESSION:chk-908" 2>/dev/null || true
 
 echo
 green "ALL TESTS PASSED"
