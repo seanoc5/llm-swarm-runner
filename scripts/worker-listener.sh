@@ -1108,10 +1108,30 @@ EOF
         # exiting — this already-exited idle shell, not an interactive
         # one, so this just pauses the listener process itself, with the
         # pane showing the wait message.
+        #
+        # self-review finding on PR #566: this script has no INT/TERM
+        # trap of its own at this point (the one set earlier only runs
+        # inside the inner `bash --rcfile ... -i` subshell, already
+        # exited by now) — an impatient Ctrl-C during this wait would hit
+        # bash's default disposition and kill the process outright,
+        # skipping close_window_and_exit below and leaving exactly the
+        # dead-pane-survives-and-gets-renumbered window this function
+        # exists to prevent. Since the only thing left to do past this
+        # point either way is close the window, trap INT/TERM to just do
+        # that immediately instead of waiting out the rest of the sleep.
+        #
+        # sleep backgrounded + waited on, not a plain foreground `sleep 5`:
+        # bash only runs a trap once the command it's synchronously waiting
+        # on completes, so a plain foreground sleep would swallow the
+        # signal for up to 5s instead of reacting to it right away. `wait`
+        # on an async child returns the moment the signal arrives, letting
+        # the trap run immediately instead.
+        trap close_window_and_exit INT TERM
         while check_claim_active; do
             echo "[$(date +%T)] close requested, but $WT_LABEL's check-on-done is still running — waiting for it to finish before closing."
-            sleep 5
+            sleep 5 & wait $!
         done
+        trap - INT TERM
         rm -f "$CLOSE_SENTINEL"
         echo "[$(date +%T)] close requested: listener exiting — window will close. Worktree $WT_LABEL/ is left intact (remove later with kill-worktree.sh)."
         close_window_and_exit
@@ -1126,10 +1146,15 @@ EOF
         local pending
         pending=$(find "$INBOX" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | head -1)
         if [ -z "$pending" ]; then
+            # Same Ctrl-C-during-the-wait guard as the close-worker branch
+            # above — see that one's comment for why, including the
+            # backgrounded sleep.
+            trap close_window_and_exit INT TERM
             while check_claim_active; do
                 echo "[$(date +%T)] double exit requested, but $WT_LABEL's check-on-done is still running — waiting for it to finish before closing."
-                sleep 5
+                sleep 5 & wait $!
             done
+            trap - INT TERM
             echo "[$(date +%T)] double exit: listener exiting — window will close. Worktree $WT_LABEL/ is left intact (remove later with kill-worktree.sh)."
             close_window_and_exit
         fi

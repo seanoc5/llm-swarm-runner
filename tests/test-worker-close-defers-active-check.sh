@@ -39,6 +39,7 @@ LISTENER_PID=""
 STDIN_FD=9
 cleanup() {
     exec 9>&- 2>/dev/null || true
+    exec 8>&- 2>/dev/null || true
     [ -n "$LISTENER_PID" ] && kill "$LISTENER_PID" 2>/dev/null || true
     [ -n "$LISTENER_PID" ] && wait "$LISTENER_PID" 2>/dev/null || true
     if [ "${KEEP:-0}" = "1" ]; then
@@ -131,6 +132,58 @@ grep -q 'close requested: listener exiting — window will close' "$WT/listener.
 $(cat "$WT/listener.log")"
 green "the log shows the real close-exit message, not a stuck or silent exit"
 
+# ============================================================================
+heading "Test 3: an impatient Ctrl-C during the deferred-close wait still closes cleanly (self-review finding on PR #566)"
+# ============================================================================
+# A second, independent listener instance (fresh worktree) — Test 1/2's
+# already exited. Proves the INT trap set around the check_claim_active
+# wait loop fires close_window_and_exit instead of letting bash's default
+# SIGINT disposition kill the process mid-wait, which would skip
+# close_window_and_exit and leave the stray check-claim/pane behind.
+
+WT2="$TEST_DIR/wt-b"
+mkdir -p "$WT2/.swarm/tasks/inbox" "$WT2/.swarm/tasks/processing" "$WT2/.swarm/tasks/done" "$WT2/.swarm/tasks/status"
+mkdir -p "$WT2/.swarm/tasks/status/t2.check-claim"
+mkdir -p "$WT2/home"
+mkfifo "$WT2/stdin.fifo"
+
+(
+    cd "$WT2" && \
+    # exec (not just a trailing command in the subshell): without it, $!
+    # below is this subshell wrapper's own pid, with the actual
+    # worker-listener.sh running as a SEPARATE CHILD process underneath
+    # it — sending SIGINT to the wrapper wouldn't reach the listener's
+    # own INT trap at all (found while writing this test). exec replaces
+    # the subshell's process image with the listener directly, so $! is
+    # the real target.
+    exec env -u TMUX -u TMUX_PANE HOME="$WT2/home" "$LISTENER" bash \
+        < stdin.fifo > listener.log 2>&1
+) &
+LISTENER_PID=$!
+exec 8>"$WT2/stdin.fifo"
+
+wait_for "second listener to go idle (no queued task)" \
+    "grep -q 'dropping to interactive shell' '$WT2/listener.log' 2>/dev/null"
+
+printf 'close-worker\n' >&8
+
+wait_for "the deferred-close wait message to appear" \
+    "grep -q 'still running — waiting for it to finish before closing' '$WT2/listener.log' 2>/dev/null"
+green "second listener: close-worker deferred on the active check-claim, same as Test 1"
+
+SIGINT_SENT_AT=$SECONDS
+kill -INT "$LISTENER_PID"
+
+wait_for "the listener to exit promptly after Ctrl-C, not wait out the sleep loop" \
+    "! kill -0 '$LISTENER_PID' 2>/dev/null"
+SIGINT_WAIT=$((SECONDS - SIGINT_SENT_AT))
+[ "$SIGINT_WAIT" -le 3 ] \
+    || red "listener took ${SIGINT_WAIT}s to exit after Ctrl-C — the INT trap should have closed it almost immediately, not waited out a 5s poll"
+green "Ctrl-C during the wait closed the listener promptly (${SIGINT_WAIT}s), not stuck waiting out the claim"
+
+exec 8>&-
+rm -f "$WT2/stdin.fifo"
 LISTENER_PID=""
+
 echo
 green "ALL TESTS PASSED"
