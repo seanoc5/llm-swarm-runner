@@ -431,6 +431,16 @@ WAKE_COUNT_AFTER_7="$(wake_count)"
 $(cat "$WAKE_LOG")"
 green "the still-pending foreign note was not redecided on later poll ticks — exactly one doorbell total"
 
+# Self-review round 5: those same later ticks must not grow events.log —
+# an already-decided, still-pending note used to log coord.inbox.drop +
+# coord.inbox.drop.skip on EVERY tick it was re-seen, unbounded for as
+# long as it sat waiting (the incident's own note sat 2h23m).
+DROP_LINES_AFTER_7="$(grep -c 'coord.inbox.drop ' "$EVENTS_LOG" 2>/dev/null || true)"
+[ "$DROP_LINES_AFTER_7" = "1" ] \
+    || red "coord.inbox.drop was logged more than once for a single still-pending note across repeated poll ticks: expected 1, got $DROP_LINES_AFTER_7. events.log:
+$(cat "$EVENTS_LOG" 2>/dev/null || true)"
+green "a still-pending note logged coord.inbox.drop exactly once despite several later poll ticks re-seeing it"
+
 stop_watcher
 
 # ============================================================================

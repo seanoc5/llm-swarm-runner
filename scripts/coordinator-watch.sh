@@ -8902,12 +8902,15 @@ on_message() {
 # arrival got the "probably debounced" treatment again, mirroring the
 # cost of a lost marker described in coord_inbox_write's own header — and
 # coord_inbox_write's 60-minute sweep prunes stale markers either way, so
-# nothing accumulates unbounded.
+# nothing accumulates unbounded. The already-decided case returns with no
+# logging at all — see its own comment below (self-review round 5): a
+# still-pending note is re-seen on every POLL_SECS tick for as long as it
+# sits unarchived, so logging there would grow events.log unboundedly for
+# precisely the long-pending notes this issue exists to handle.
 on_inbox_drop() {
     local path="$1"
     local now self_marker marker_mtime note_mtime
     now=$(date +%s)
-    log_event coord.inbox.drop "path=$path"
 
     self_marker="$COORD_INBOX_SELF_DIR/$(basename "$path").self"
     if [ -e "$self_marker" ]; then
@@ -8924,17 +8927,30 @@ on_inbox_drop() {
         # for the external-first-sight case), so a note whose mtime is
         # strictly newer than its marker's can only mean the file was
         # rewritten after that decision — a genuinely new arrival under an
-        # old name, not the same one being re-seen.
+        # old name, not the same one being re-seen. mtime_epoch's 1-second
+        # resolution (same as every other staleness check in this file)
+        # leaves a theoretical gap if the SAME filename gets rewritten twice
+        # inside one wall-clock second — accepted, not closed: the producers
+        # this closes for are periodic driver scripts, not a sub-second
+        # retry loop (self-review round 5).
         marker_mtime="$(mtime_epoch "$self_marker")"
         note_mtime="$(mtime_epoch "$path")"
         if [ -z "$marker_mtime" ] || [ -z "$note_mtime" ] || [ "$note_mtime" -le "$marker_mtime" ]; then
-            echo "[$(date +%T)] inbox: $path — a wake decision for this file was already made (self-written, or an earlier pass already decided it)"
-            log_event coord.inbox.drop.skip "reason=already_decided path=$path"
+            # Already decided and the note hasn't changed since — silent,
+            # on purpose (self-review round 5): scan_inbox_drops carries no
+            # baseline, so every unarchived note is re-listed on every
+            # POLL_SECS tick for as long as it sits waiting — logging here
+            # would grow events.log (and this process's own stdout log)
+            # without bound for exactly the long-pending notes this issue
+            # cares about: the incident's own note sat 2h23m, which at the
+            # default POLL_SECS would be ~7,000 lines; a day-old note would
+            # be ~43,000.
             return
         fi
         echo "[$(date +%T)] inbox: $path — stale marker predates this note's content (filename reused since the last decision), treating as a new arrival"
         log_event coord.inbox.drop.stale_marker "path=$path marker_mtime=$marker_mtime note_mtime=$note_mtime"
     fi
+    log_event coord.inbox.drop "path=$path"
     mkdir -p "$COORD_INBOX_SELF_DIR" 2>/dev/null || true
     touch "$self_marker" 2>/dev/null || true
 
