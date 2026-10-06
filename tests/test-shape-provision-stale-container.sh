@@ -433,7 +433,7 @@ DOCKER_RUNNING_AFTER_N_CALLS=3 PROVISION_SPAWN_CHECK_SECS=5 \
 command tmux -L "$SOCKET" list-windows -t "$SESSION" -F '#W' | grep -qx iss-308 \
     || red "a container that shows up before the ceiling must never have its window killed"
 command tmux -L "$SOCKET" kill-window -t "$SESSION:iss-308" 2>/dev/null || true
-unset DOCKER_RUNNING_AFTER_N_CALLS
+unset DOCKER_RUNNING_AFTER_N_CALLS DOCKER_CALL_COUNTER_DIR
 green "a slow-but-eventually-running container (mid-poll, not immediate) passes without the window being killed — the exact gap issue #546 closes"
 
 # ============================================================================

@@ -175,7 +175,7 @@ EVENTS LOG
                                    window/container/brief left untouched (exit 6).
 
 EXAMPLES
-    provision-worker.sh 142                          # dispatch issue #142 from \$PWD
+    provision-worker.sh 142                          # dispatch issue #142 from $PWD
     provision-worker.sh 142 /path/to/proj            # explicit project dir
 EOF
         exit 0
@@ -580,7 +580,13 @@ post_spawn_health_check() {
     # window/container/brief alone — a retry here would double-provision
     # the same issue, so this gets its own exit code (6; same "distinct
     # meanings get distinct codes" convention as exit 5 above) rather than
-    # folding into exit 4's "fully cleaned up" contract. Re-check manually
+    # folding into exit 4's "fully cleaned up" contract. Deliberately not
+    # touching $HOST_STATE_DIR/pending-$container either (unlike the exit 4
+    # and check_stale_container cleanup paths): the worker may still be
+    # starting, so it should keep counting toward HOST_MAX_WORKERS; by the
+    # time check_secs has elapsed the marker is already at or past
+    # HOST_PENDING_TTL_SECS (120s) anyway, so the next host_admission_check
+    # run expires it on its own once it's stale. Re-check manually
     # (`docker ps`, `tmux capture-pane`) or raise PROVISION_SPAWN_CHECK_SECS.
     echo "WARN: worker window $window for issue #$issue is still starting after ${check_secs}s (pane alive, container not observed yet) — leaving window and container running." >&2
     echo "      Check again:  docker ps --filter name=^${container}\$   /   tmux capture-pane -t '$SESSION_NAME:$window' -p" >&2
