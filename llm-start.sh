@@ -830,7 +830,21 @@ if ! $session_existed; then
     if [ -n "$GEMINI_ENV_SOURCED" ]; then
         echo "Loaded GEMINI_API_KEY from $GEMINI_ENV_SOURCED"
     fi
-    tmux new-session -d -s "$SESSION_NAME" "${TMUX_ENV_OPTS[@]}" -n "coordinator"
+    # -f /dev/null (issue #550 self-review finding): this is the command
+    # that actually spawns the swarm socket's tmux server, so it's the one
+    # chance to keep the user's own ~/.tmux.conf from applying to it at
+    # all — in particular `pane-base-index`. Without this, a user config
+    # setting it to 1 would make the coordinator window's first (and only)
+    # pane come up as pane 1, not 0, silently breaking every `.0`-suffixed
+    # explicit pane target the watcher/worker scripts rely on (captures,
+    # send-keys and pastes would address a pane that doesn't exist and
+    # fail silently, since those calls swallow errors). The few options
+    # this socket actually wants from a config are already set explicitly
+    # right below (@resurrect-dir/@continuum-*, remain-on-exit,
+    # history-limit) rather than sourced, so skipping the file costs
+    # nothing. Harmless on an already-running server (a later `tmux`
+    # command on this socket ignores -f).
+    tmux -f /dev/null new-session -d -s "$SESSION_NAME" "${TMUX_ENV_OPTS[@]}" -n "coordinator"
 
     # Pin resurrect state to this repo, disable continuum autosave/restore on
     # the swarm server. The swarm is recreated via llm-start.sh, so we don't
@@ -864,6 +878,15 @@ fi
 # before this feature existed.
 tmux set-option -g remain-on-exit "$REMAIN_ON_EXIT_VALUE"
 tmux set-option -g history-limit 50000
+# Belt-and-suspenders for the -f /dev/null fix above (issue #550): a
+# session created by a pre-upgrade llm-start.sh, before this socket
+# started skipping the user's conf, may already have a coordinator pane
+# numbered 1 that this can't retroactively renumber — but forcing the
+# option here still guarantees every window created from this point on
+# (iss-N workers, util, status, chk-N fallbacks, check-on-done panes)
+# gets a pane 0, which is what actually matters for the watcher's `.0`
+# targeting.
+tmux set-option -g pane-base-index 0
 # Codex deliberately exits after each turn. Keep its completed report visible
 # until the next invocation replaces this dead pane via the detection above.
 if [ "$COORD_CMD" = "codex" ] || { [ "$COORD_CMD" = "agy" ] && [ "${COORDINATOR_HEADLESS:-0}" = "1" ]; }; then

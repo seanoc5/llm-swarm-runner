@@ -5547,9 +5547,31 @@ SCRIPT
         # is split in — otherwise a crashed watcher + requeue can pile up
         # one pane per retry (the window-stacking shape issue #550's
         # evidence section documents).
+        #
+        # Self-review finding: that's only safe once the prior check has
+        # actually finished. The runner script's title stays plain "chk"
+        # for its whole run and only becomes "chk-pass"/"chk-fail" at the
+        # very end (line ~5531 above), so a bare "chk" here means a
+        # DIFFERENT task_id's check for this same issue is still running
+        # (e.g. a fast-following requeued brief) — killing its pane would
+        # truncate it before it ever writes its own check.json or releases
+        # its claim-dir, leaving that task stuck at state=checking forever
+        # and blocking kill-worktree.sh's claim-based reap defer. Detect
+        # that case and defer this one instead of clobbering it: release
+        # OUR claim (without writing a terminal check_json state, so the
+        # next sweep retries cleanly) and let the running check finish on
+        # its own first.
+        local existing_title
+        existing_title="$(tmux list-panes -t "$SESSION_NAME:iss-$issue" -F '#{pane_title}' 2>/dev/null \
+                        | grep '^chk' | head -1)"
+        if [ "$existing_title" = "chk" ]; then
+            log_event watch.check_on_done "issue=$issue task_id=$task_id result=skipped reason=prior_check_running"
+            rmdir "$claim_dir" 2>/dev/null || true
+            return 0
+        fi
         local stale_pane
         stale_pane="$(tmux list-panes -t "$SESSION_NAME:iss-$issue" -F '#{pane_id} #{pane_title}' 2>/dev/null \
-                        | awk '$2 ~ /^chk/ { print $1; exit }')"
+                        | awk '$2 ~ /^chk-(pass|fail)$/ { print $1; exit }')"
         [ -n "$stale_pane" ] && tmux kill-pane -t "$stale_pane" 2>/dev/null || true
 
         local new_pane
@@ -5567,7 +5589,16 @@ SCRIPT
         # existed in this tmux session at all). Mirrors provision-worker.sh's
         # `iss-N` windows, `-d` so it doesn't steal focus; closes any
         # leftover chk-$issue window from a prior run first (replace, not
-        # stack, same as the pane case above).
+        # stack, same as the pane case above) — but same deferral as the
+        # pane case: a bare "chk-$issue" name (not yet renamed
+        # "chk-$issue:<state>") means a different task_id's check is
+        # still running in it, so defer instead of killing it out from
+        # under itself.
+        if tmux list-windows -t "$SESSION_NAME" -F '#{window_name}' 2>/dev/null | grep -qx "chk-$issue"; then
+            log_event watch.check_on_done "issue=$issue task_id=$task_id result=skipped reason=prior_check_running"
+            rmdir "$claim_dir" 2>/dev/null || true
+            return 0
+        fi
         swarm_close_chk_windows "$SESSION_NAME" "$issue"
         tmux new-window -d -t "$SESSION_NAME" -n "chk-$issue" -c "$wt_dir" bash "$runner_script" 2>/dev/null \
             || spawn_rc=1

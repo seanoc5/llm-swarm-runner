@@ -310,5 +310,60 @@ $(cat "$TEST_DIR/reap-901.log")"
     || red "chk-901 fallback window should be closed by kill-worktree.sh's swarm_close_chk_windows call"
 green "reaping issue 901 also closed its leftover fallback chk-901 window"
 
+# ============================================================================
+heading "Test 7: a DIFFERENT task_id's completion for the same issue, while an earlier check is still running, is deferred rather than killing it (self-review finding)"
+# ============================================================================
+
+git -C "$PROJ" worktree add -q -b fix/issue-902 "$TEST_DIR/wt-issue-902"
+WT902="$TEST_DIR/wt-issue-902"
+mkdir -p "$WT902/.swarm/tasks/status"
+# Slow enough that t902b's status file can land, and a sweep can observe
+# t902's check pane still mid-run (title plain "chk", not yet resolved),
+# well before this finishes.
+printf '#!/usr/bin/env bash\nsleep 4\nexit 0\n' > "$WT902/.swarm/check.sh"
+chmod +x "$WT902/.swarm/check.sh"
+printf 'fix/issue-902\tOPEN\t902\n' >> "$GH_PR_LIST_FILE"
+
+"$SHIM_TMUX" new-window -d -t "$SESSION" -n iss-902 -c "$WT902" \
+    bash -c 'while true; do echo WORKER_TICK; sleep 0.3; done'
+
+echo '{"task_id":"t902","state":"ready-for-review","pr":902,"ts":"2026-07-19T02:00:00Z"}' \
+    > "$WT902/.swarm/tasks/status/t902.json"
+
+start_watcher "$TEST_DIR/watch-3.log"
+
+wait_until 20 "iss-902 to grow a second (check) pane" \
+    bash -c "[ \"\$($SHIM_TMUX list-panes -t '$SESSION:iss-902' 2>/dev/null | wc -l)\" -eq 2 ]"
+wait_until 10 "t902's check pane to show the still-running 'chk' title" \
+    bash -c "$SHIM_TMUX list-panes -t '$SESSION:iss-902' -F '#{pane_title}' 2>/dev/null | grep -qx chk"
+green "t902's check pane is up and still running (title is plain 'chk', not yet resolved)"
+
+# A different task_id, same issue, while t902's check is still mid-flight.
+echo '{"task_id":"t902b","state":"ready-for-review","pr":902,"ts":"2026-07-19T02:00:01Z"}' \
+    > "$WT902/.swarm/tasks/status/t902b.json"
+
+EVENTS_LOG_902="$PROJ/.swarm/events.log"
+wait_until 10 "t902b to be deferred instead of killing t902's running check" \
+    bash -c "grep -q 'task_id=t902b result=skipped reason=prior_check_running' '$EVENTS_LOG_902' 2>/dev/null"
+green "a second task_id's completion on the same issue was deferred, not run concurrently (reason=prior_check_running)"
+
+[ "$(pane_count iss-902)" -eq 2 ] \
+    || red "deferring t902b must not spawn a second check pane — expected 2 panes in iss-902, got $(pane_count iss-902)"
+green "no extra pane was spawned for the deferred completion"
+
+wait_until 15 "t902.check.json to reach a terminal state, undisturbed by the deferred t902b" \
+    bash -c "grep -q '\"state\":\"pass\"\|\"state\":\"fail\"' '$WT902/.swarm/tasks/status/t902.check.json' 2>/dev/null"
+grep -q '"state":"pass"' "$WT902/.swarm/tasks/status/t902.check.json" \
+    || red "t902's check should have run to completion undisturbed; got: $(cat "$WT902/.swarm/tasks/status/t902.check.json" 2>/dev/null)"
+green "t902's check ran to completion (pass) without being killed by the deferred t902b"
+
+wait_until 20 "t902b's own check to retry and resolve once t902's pane freed up" \
+    bash -c "grep -q '\"state\":\"pass\"\|\"state\":\"fail\"' '$WT902/.swarm/tasks/status/t902b.check.json' 2>/dev/null"
+grep -q '"state":"pass"' "$WT902/.swarm/tasks/status/t902b.check.json" \
+    || red "t902b's deferred check should eventually retry and pass; got: $(cat "$WT902/.swarm/tasks/status/t902b.check.json" 2>/dev/null)"
+green "the deferred t902b check retried on a later sweep and resolved on its own — never stuck"
+
+stop_watcher
+
 echo
 green "ALL TESTS PASSED"
