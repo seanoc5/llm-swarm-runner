@@ -415,9 +415,21 @@ grep -q 'coord.inbox.drop.skip' "$EVENTS_LOG" 2>/dev/null \
     && red "a foreign file must never be skipped as self_written: $(cat "$EVENTS_LOG")"
 green "events.log: coord.inbox.drop logged, never skipped as self-written"
 
-[ -e "$INBOX_DIR/.self/$(basename "$EXTERNAL_NOTE").self" ] 2>/dev/null \
-    && red "no .self marker should ever have existed for a file this watcher didn't write"
-green "no stray .self marker was created for a file this watcher didn't write"
+[ -e "$INBOX_DIR/.self/$(basename "$EXTERNAL_NOTE").self" ] \
+    || red "on_inbox_drop should have marked this file decided once it rang the doorbell for it"
+green "on_inbox_drop marked the foreign file as decided (so a later poll tick doesn't redecide it)"
+
+# The note is still sitting unarchived (nothing in this test triages it).
+# A still-pending file is re-listed by every POLL_SECS tick with no
+# baseline of its own (scan_inbox_drops carries none, by design) — the
+# .self marker just confirmed above is what must stop that from ringing a
+# second doorbell for a file whose wake was already decided.
+sleep 3
+WAKE_COUNT_AFTER_7="$(wake_count)"
+[ "$WAKE_COUNT_AFTER_7" = "1" ] \
+    || red "a still-pending foreign note got redecided on a later poll tick: expected exactly 1 WAKE total, got $WAKE_COUNT_AFTER_7. wake log:
+$(cat "$WAKE_LOG")"
+green "the still-pending foreign note was not redecided on later poll ticks — exactly one doorbell total"
 
 stop_watcher
 

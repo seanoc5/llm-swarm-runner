@@ -982,6 +982,63 @@ green "a claim marker path reused by a later requeue is forwarded again, not sil
 unset -f own_worktree_dirs_for_scan
 
 # ============================================================================
+heading "Test 5k (issue #461 self-review finding): coord-inbox's own scan is never baselined into seen_file either — a note already on disk before the first scan (watcher restart) still rings, and a still-pending note isn't redecided on later ticks"
+# ============================================================================
+# Self-review on #461's own PR caught that the first version of this fix
+# folded coord-inbox scanning INTO scan_outcomes, whose result IS baselined
+# into seen_file before the loop starts (correctly so, for done/outbox
+# outcomes — an old one must never replay after a restart). That silently
+# swallowed a coord-inbox note that was already on disk the moment the
+# watcher started scanning — the same symptom #461 itself reports, just
+# shifted from "while idle" to "across any restart". The fix pulled it out
+# into scan_inbox_drops/dispatch_inbox_drops, run_poll's sibling to
+# scan_claims/dispatch_claims above, with the same no-baseline contract.
+# on_inbox_drop's own per-file .self marker — not seen_file — is what then
+# keeps a still-unarchived note from being redecided on every later tick.
+for fn in scan_inbox_drops dispatch_inbox_drops on_inbox_drop; do
+    body="$(extract_fn "$fn")"
+    [ -n "$body" ] || red "could not extract function '$fn' from $WATCH — has it been renamed?"
+    eval "$body"
+done
+
+: > "$EVENTS_LOG"
+: > "$CALL_TIMELINE"
+rm -rf "$COORD_INBOX_DIR"
+mkdir -p "$COORD_INBOX_DIR"
+rm -f "$COORD_WAKE_LAST_FILE" "$COORD_WAKE_HOLD_PENDING_FILE"
+
+# A note already on disk BEFORE dispatch_inbox_drops is ever called at
+# all — standing in for one dropped moments before this watcher restarted,
+# the same shape Test 5j above uses for a pre-existing claim marker.
+RESTART_NOTE="$COORD_INBOX_DIR/pre-restart-note.md"
+printf 'parity7-sweep-done\n' > "$RESTART_NOTE"
+
+dispatch_inbox_drops
+
+[ "$(grep -c '^START' "$CALL_TIMELINE")" = "1" ] \
+    || red "a coord-inbox note already on disk before the first scan (simulating a watcher restart) was not dispatched to llm-start.sh; call timeline:
+$(cat "$CALL_TIMELINE")
+events.log:
+$(cat "$EVENTS_LOG")"
+green "a coord-inbox note already on disk before the first scan (simulating a watcher restart) is still dispatched, not silently baselined away"
+
+[ -e "$COORD_INBOX_SELF_DIR/$(basename "$RESTART_NOTE").self" ] \
+    || red "on_inbox_drop should have marked the note decided after dispatching it"
+
+# The note is still sitting there, unarchived — re-scan it on a later tick
+# (dispatch_inbox_drops carries no seen-state, by design) and confirm it is
+# NOT redecided a second time.
+dispatch_inbox_drops
+dispatch_inbox_drops
+
+[ "$(grep -c '^START' "$CALL_TIMELINE")" = "1" ] \
+    || red "a still-pending coord-inbox note was redecided on a later tick instead of being recognized as already-decided; call timeline:
+$(cat "$CALL_TIMELINE")"
+green "a still-unarchived coord-inbox note is not redecided on later ticks — exactly one llm-start.sh call total"
+
+unset -f scan_inbox_drops dispatch_inbox_drops on_inbox_drop
+
+# ============================================================================
 heading "Test 6: a debounced activity finding is retried on a later tick, not lost (issue #392 self-review finding, now via the coordinator inbox)"
 # ============================================================================
 # activity_poll_pass only marks ACTIVITY_ANNOUNCED_PR/_ISSUE (and
