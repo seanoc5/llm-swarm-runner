@@ -510,7 +510,9 @@ post_spawn_health_check() {
     if [ "${pane_dead:-0}" = "1" ] || [ "$running" -eq 0 ]; then
         echo "ERROR: worker window $window for issue #$issue did not come up (pane_dead=${pane_dead:-0} container_running=$running)." >&2
         echo "       Last lines of the pane:" >&2
-        tmux capture-pane -t "$SESSION_NAME:$window" -p 2>/dev/null | tail -40 >&2 || true
+        # issue #550: pane 0 explicitly, not the bare window — see
+        # coordinator-watch.sh's worker-pane-targeting comment.
+        tmux capture-pane -t "$SESSION_NAME:$window.0" -p 2>/dev/null | tail -40 >&2 || true
         tmux kill-window -t "$SESSION_NAME:$window" 2>/dev/null || true
         docker stop "$container" >/dev/null 2>&1 || true
         docker rm -f "$container" >/dev/null 2>&1 || true
@@ -709,7 +711,9 @@ if tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx "iss-$ISS
     [ -z "$pane_dead_flag" ] && pane_dead_flag=1
     if [ "$pane_dead_flag" = "1" ]; then
         echo "[*] window iss-$ISSUE exists but its pane is dead — reclaiming" >&2
-        tmux capture-pane -t "$SESSION_NAME:iss-$ISSUE" -p 2>/dev/null | tail -20 >&2 || true
+        # issue #550: pane 0 explicitly, not the bare window — see
+        # coordinator-watch.sh's worker-pane-targeting comment.
+        tmux capture-pane -t "$SESSION_NAME:iss-$ISSUE.0" -p 2>/dev/null | tail -20 >&2 || true
         tmux kill-window -t "$SESSION_NAME:iss-$ISSUE" 2>/dev/null || true
         # self-review (12th pass): a dead pane can leave brief(s) behind in
         # inbox/ (never claimed) or processing/ (claimed, abandoned

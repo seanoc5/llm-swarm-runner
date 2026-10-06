@@ -648,10 +648,10 @@ check "no false-positive retracted verdict" "absent" "$got"
 if printf '%s' "$pane_after_3" | grep -q '/compa'; then got=present; else got=missing; fi
 check "composer still shows the exact reported \"/compa\" ghost" "present" "$got"
 
-if grep -q "send-keys -t $RETRACT_SESSION:coordinator Escape" "$TMUX_CALL_LOG"; then got=sent; else got=missing; fi
+if grep -q "send-keys -t $RETRACT_SESSION:coordinator.0 Escape" "$TMUX_CALL_LOG"; then got=sent; else got=missing; fi
 check "retraction sent an Escape keystroke to the coordinator pane" "sent" "$got"
 
-bspace_count="$(grep -c "send-keys -t $RETRACT_SESSION:coordinator BSpace" "$TMUX_CALL_LOG" || true)"
+bspace_count="$(grep -c "send-keys -t $RETRACT_SESSION:coordinator.0 BSpace" "$TMUX_CALL_LOG" || true)"
 check "retraction sent 3 Backspace keystrokes" "3" "$bspace_count"
 
 heading "Test 12b: compact_retract_queued — COMPACT_RETRACT_BACKSPACES=12 (shipped default) fully clears the composer (issue #290)"
@@ -740,7 +740,7 @@ check "queued marker still visible after Escape/Backspace -> coord.compact.retra
 if grep -q 'coord.compact.retracted' "$EVENTS_LOG"; then got=present; else got=absent; fi
 check "no false-positive retracted verdict" "absent" "$got"
 
-if grep -q "send-keys -t $RETRACT_SESSION2:coordinator Escape" "$TMUX_CALL_LOG"; then got=sent; else got=missing; fi
+if grep -q "send-keys -t $RETRACT_SESSION2:coordinator.0 Escape" "$TMUX_CALL_LOG"; then got=sent; else got=missing; fi
 check "retraction still sent an Escape keystroke even though it didn't clear the queue" "sent" "$got"
 
 heading "Test 14: compact_retract_queued — never sends Escape into a pane that's genuinely busy (issue #290 reconciliation with #274)"
@@ -775,9 +775,9 @@ tmux kill-session -t "$RETRACT_SESSION3" 2>/dev/null || true
 check "retraction guard returns success (no-op is not a failure)" "0" "$rc"
 if grep -q 'coord.compact.retract_skip.*reason=busy' "$EVENTS_LOG"; then got=logged; else got=missing; fi
 check "coord.compact.retract_skip reason=busy logged" "logged" "$got"
-if grep -q "send-keys -t $RETRACT_SESSION3:coordinator Escape" "$TMUX_CALL_LOG"; then got=present; else got=absent; fi
+if grep -q "send-keys -t $RETRACT_SESSION3:coordinator.0 Escape" "$TMUX_CALL_LOG"; then got=present; else got=absent; fi
 check "NO Escape sent into the genuinely-busy pane" "absent" "$got"
-if grep -q "send-keys -t $RETRACT_SESSION3:coordinator BSpace" "$TMUX_CALL_LOG"; then got=present; else got=absent; fi
+if grep -q "send-keys -t $RETRACT_SESSION3:coordinator.0 BSpace" "$TMUX_CALL_LOG"; then got=present; else got=absent; fi
 check "NO Backspace sent into the genuinely-busy pane" "absent" "$got"
 
 heading "Test 15: maybe_auto_compact — Enter eaten by the autocomplete menu is retried once (issue #290)"
@@ -994,10 +994,10 @@ check "no misleading coord.compact.retracted verdict" "absent" "$got"
 if grep -q 'coord.compact.retract_failed' "$EVENTS_LOG"; then got=present; else got=absent; fi
 check "no coord.compact.retract_failed either — retraction was never attempted" "absent" "$got"
 
-if grep -q "send-keys -t $DAT_SESSION:coordinator Escape" "$TMUX_CALL_LOG"; then got=present; else got=absent; fi
+if grep -q "send-keys -t $DAT_SESSION:coordinator.0 Escape" "$TMUX_CALL_LOG"; then got=present; else got=absent; fi
 check "NO Escape sent — nothing was left queued to retract" "absent" "$got"
 
-if grep -q "send-keys -t $DAT_SESSION:coordinator BSpace" "$TMUX_CALL_LOG"; then got=present; else got=absent; fi
+if grep -q "send-keys -t $DAT_SESSION:coordinator.0 BSpace" "$TMUX_CALL_LOG"; then got=present; else got=absent; fi
 check "NO Backspace sent — nothing was left queued to retract" "absent" "$got"
 
 heading "Test 18: maybe_auto_compact — a post-compact replayed /compact ('Not enough messages to compact.') is tolerated, not logged as ineffective (issue #292)"

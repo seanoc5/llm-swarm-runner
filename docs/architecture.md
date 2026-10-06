@@ -30,9 +30,11 @@ A running swarm session (`llm-<project-basename>`, on its own tmux socket) has t
 | `util` | Always, second window | Bare bash in the project dir for ad-hoc inspection — plus, as a **second pane** in this same window, the `coordinator-watch.sh` watcher (on by default; `WATCH=0` to skip it). The watcher is a pane, not a sibling window, so it never counts against `MAX_TMUX_WINDOWS` on its own. |
 | `status` (optional) | `STATUS=1` / `--status` | `gh-status-bar.sh`, updating the session's `status-right` with live open-issue/open-PR/closed-today counts. |
 | `iss-N` (0..MAX_WORKERS) | The coordinator, via `provision-worker.sh` | One window per active worker, each running `worker-listener.sh` against its own `wt-issue-N` git worktree. |
-| `chk-N` (transient) | The watcher, when `WATCH_CHECK_ON_DONE=1` (default) | Spawned the moment a worker signals done, to run the project's acceptance check visibly; closes once the check resolves. |
+| `chk-N` (transient, fallback only) | The watcher, when `WATCH_CHECK_ON_DONE=1` (default) and `iss-N` is already gone | Spawned the moment a worker signals done, to run the project's acceptance check visibly, when there's no `iss-N` window left to host it as a pane (issue #550). Replaces any previous `chk-N` window for the same issue rather than stacking a second one, and renames itself to `chk-N:pass`/`chk-N:fail` once the check resolves. |
 
-`MAX_TMUX_WINDOWS` (default 10) caps `coordinator` + `util` + `status` + `iss-N` + any leftover finished-worker windows combined — the watcher's own pane inside `util` doesn't add to that count, but the `chk-N` windows it spawns do, transiently.
+Normally (issue #550) a check-on-done run is a **second pane inside `iss-N`** — `split-window -d` at the bottom, tagged with a `chk` pane title so tooling can find it — not a sibling window at all; the worker pane (index 0) stays active and every worker-pane probe/injection in `coordinator-watch.sh` targets it explicitly (`iss-N.0`), so selecting the check pane never redirects a capture or a send-keys meant for the worker. Reaping `iss-N` (kill-worktree.sh) takes that pane with it automatically. The standalone `chk-N` window above is only the fallback for the rare case where `iss-N` is already gone when the check fires.
+
+`MAX_TMUX_WINDOWS` (default 10) caps `coordinator` + `util` + `status` + `iss-N` + any leftover finished-worker windows combined — the watcher's own pane inside `util`, and a check-on-done pane inside `iss-N`, don't add to that count; a fallback `chk-N` window does, transiently.
 
 ### The watcher's roles
 

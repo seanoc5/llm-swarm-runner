@@ -256,7 +256,35 @@ swarm_own_worktree_dirs() {
     done
 }
 
+# swarm_close_chk_windows <session_name> <issue>
+#
+# issue #550: closes any top-level `chk-<issue>` check-on-done window(s) —
+# the fallback coordinator-watch.sh's execute_check uses only when no
+# `iss-<issue>` window exists to host the check as a pane instead. Matches
+# the window's bare name or a `chk-<issue>:<state>` idle-marker rename, and
+# kills by INDEX, not name — a crashed or duplicated check run can leave
+# two windows sharing the same name, and `tmux kill-window -t
+# session:name` silently no-ops against a duplicate (matches neither, or
+# the wrong one — see issue #550's evidence: chk-999 x2, chk-1000 x3).
+# Best-effort: no tmux, no session, or no match is a silent no-op. Shared
+# by kill-worktree.sh and kill-finished-workers.sh's window-only reap path
+# so both close a stale check window the same way.
+swarm_close_chk_windows() {
+    local session="$1" issue="$2"
+    command -v tmux >/dev/null 2>&1 || return 0
+    tmux has-session -t "$session" 2>/dev/null || return 0
+    local idx wname
+    while IFS=$'\t' read -r idx wname; do
+        [ -n "$idx" ] || continue
+        case "$wname" in
+            "chk-$issue"|"chk-$issue:"*)
+                tmux kill-window -t "${session}:${idx}" 2>/dev/null || true
+                ;;
+        esac
+    done < <(tmux list-windows -t "$session" -F '#{window_index}'$'\t''#{window_name}' 2>/dev/null)
+}
+
 # Cleanup internal-only helpers from caller scope so they don't leak.
-# `swarm_worktree_dir`, `swarm_worktree_parent` and `swarm_own_worktree_dirs`
-# are public — left in scope.
+# `swarm_worktree_dir`, `swarm_worktree_parent`, `swarm_own_worktree_dirs`
+# and `swarm_close_chk_windows` are public — left in scope.
 unset -f _apply_env_file _expand_extra_mounts _load_env_main
