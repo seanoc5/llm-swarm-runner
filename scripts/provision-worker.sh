@@ -524,8 +524,9 @@ post_spawn_health_check() {
     local deadline_ns
     deadline_ns=$(( $(date +%s%N) + $(awk -v s="$check_secs" 'BEGIN{printf "%.0f", s*1000000000}') ))
 
-    local pane_dead=1 running=0
+    local pane_dead=1 running=0 poll_num=0
     while :; do
+        poll_num=$((poll_num + 1))
         # Under `set -euo pipefail`, `tmux list-panes` failing outright (the
         # window itself is gone, not just its pane dead — e.g. the pane
         # exited 0, which remain-on-exit does NOT keep around) would abort
@@ -545,8 +546,12 @@ post_spawn_health_check() {
         # A one-shot `docker ps` blip (empty output, daemon momentarily
         # unresponsive) just costs one extra poll here instead of needing
         # its own retry loop (self-review, 11th pass on the old code) — the
-        # next iteration re-checks the same container.
-        [ "$(date +%s%N)" -ge "$deadline_ns" ] && break
+        # next iteration re-checks the same container. Always allow a 2nd
+        # poll regardless of the deadline (self-review finding): on a slow
+        # or loaded host the first poll's own tmux+docker round-trip can
+        # eat the entire budget of a short check_secs, and without this
+        # floor that blip would never get its retry at all.
+        [ "$poll_num" -ge 2 ] && [ "$(date +%s%N)" -ge "$deadline_ns" ] && break
         sleep "$poll_interval"
     done
 
