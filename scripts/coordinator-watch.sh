@@ -3445,10 +3445,11 @@ trap cleanup_on_exit EXIT
 # a single shared `exit 143` for both would make a Ctrl-C'd watcher
 # report the wrong signal to anything checking its exit status). This
 # also means cleanup_on_exit runs a second time via the EXIT trap this
-# exit itself triggers — already a tolerated pattern elsewhere in this
-# file (watcher_check_staleness calls it directly before its own exit,
-# same double-run), harmless since every kill in it is already a no-op
-# on an already-dead PID.
+# exit itself triggers — new to this script, but harmless, since every
+# kill in it is already a no-op on an already-dead PID. (Not the same as
+# watcher_check_staleness below, which calls cleanup_on_exit once and
+# then SIGKILLs — SIGKILL skips traps entirely, so that path never
+# re-enters cleanup_on_exit a second time.)
 trap 'cleanup_on_exit; exit 130' INT
 trap 'cleanup_on_exit; exit 143' TERM
 
