@@ -172,7 +172,7 @@ worktree; the reaper handles the branch).
 |---|---|
 | 🟢 low | You may propose merge in your handoff. Any short unhedged yes (`yes`, `y`, `go`, `ship`, 👍) approves; hedged replies and silence don't. |
 | 🟡 medium | Don't propose. Merge only on an explicit instruction naming the PR (`merge PR 555`); echo the rating back before merging. On `BLOCK`, offer: fix and re-push, `merge PR 555 --override-review`, or leave it. |
-| 🔴 high | Never merge yourself, even when told to. Hand back the exact `gh pr merge <N> --squash` command with the self-review output. |
+| 🔴 high | Only on the operator's `merge PR <N> red`. Echo PR number, title, rating, head SHA, then run `$LLM_SWARM_DIR/scripts/worker-merge.sh <N> --expect-head <sha>`. |
 
 ### PR body skeleton
 
