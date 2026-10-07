@@ -3391,6 +3391,7 @@ WORKER_COMPACT_TIMER_PID=""
 AUTO_COMPACT_POLL_TIMER_PID=""
 STALE_CHECK_PID=""
 STALL_WAKE_TIMER_PID=""
+POLL_SLEEP_PID=""
 seen_file=""
 cleanup_on_exit() {
     [ -n "${WATCH_TIMER_PID:-}" ] && kill "$WATCH_TIMER_PID" 2>/dev/null || true
@@ -3398,6 +3399,9 @@ cleanup_on_exit() {
     [ -n "${AUTO_COMPACT_POLL_TIMER_PID:-}" ] && kill "$AUTO_COMPACT_POLL_TIMER_PID" 2>/dev/null || true
     [ -n "${STALE_CHECK_PID:-}" ] && kill "$STALE_CHECK_PID" 2>/dev/null || true
     [ -n "${STALL_WAKE_TIMER_PID:-}" ] && kill "$STALL_WAKE_TIMER_PID" 2>/dev/null || true
+    # run_poll's own backgrounded sleep (issues #570/#571) — only set while
+    # a tick is actually asleep, so this is a no-op the rest of the time.
+    [ -n "${POLL_SLEEP_PID:-}" ] && kill "$POLL_SLEEP_PID" 2>/dev/null || true
     # WATCHER_ECHO_PID is the `while read` reader — the last stage of the
     # `tail | while` pipeline, and the only PID $! gives us for it. `tail`
     # itself is a separate direct child of this script (pipeline stages
@@ -9597,7 +9601,21 @@ run_poll() {
         dispatch_claims "$wt_list"
         dispatch_inbox_drops
 
-        sleep "$POLL_SECS"
+        # Backgrounded + `wait`, not a bare foreground `sleep` (issues
+        # #570/#571): bash defers a trapped TERM/INT until the current
+        # foreground command finishes, so a plain `sleep "$POLL_SECS"`
+        # here left a killed watcher alive for up to POLL_SECS seconds —
+        # long enough (POLL_SECS=10 in CI's .env.example) to make
+        # test-watcher-stale-check.sh's Test 7 see it as still FRESH.
+        # `wait` on a backgrounded child returns the instant the trap
+        # fires, so cleanup_on_exit's kills run immediately instead of
+        # waiting out the sleep. POLL_SLEEP_PID lets cleanup_on_exit reap
+        # this one too, so a signal that arrives mid-sleep doesn't orphan
+        # the backgrounded `sleep` process.
+        sleep "$POLL_SECS" &
+        POLL_SLEEP_PID=$!
+        wait "$POLL_SLEEP_PID" 2>/dev/null
+        POLL_SLEEP_PID=""
     done
 }
 
