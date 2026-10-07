@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# test-worker-merge.sh — regression test for scripts/worker-merge.sh (#564):
+# test-worker-merge.sh — regression test for scripts/worker-merge.sh (#564, all ratings):
 # the gated path a worker uses to merge its own 🔴 PR on the operator's
 # explicit `merge PR <N> red`. gh is a PATH shim driven by env vars;
 # ci-wait.sh and migration-collision-check.sh are replaced via the script's
@@ -78,7 +78,19 @@ run 2 "draft (coordinator hold) → refused"                          GH_DRAFT=t
 run 2 "conflicting → refused"                                       GH_MERGEABLE=CONFLICTING -- 7 --expect-head abcdef1
 run 2 "not the default branch → refused"                            GH_BASE=feature-x -- 7 --expect-head abcdef1
 run 2 "already merged → refused"                                    GH_STATE=MERGED -- 7 --expect-head abcdef1
-run 1 "override flags don't exist"                                  -- 7 --expect-head abcdef1 --override-review
+heading "🟢/🟡 through the same gates"
+run 0 "🟢 low, no self-review on record (pr-ready skips it) → merges" GH_RISK=low GH_VERDICT= -- 7 --expect-head abcdef1 --rating low
+run 0 "🟡 medium with APPROVE → merges"                              GH_RISK=medium -- 7 --expect-head abcdef1 --rating medium
+run 2 "🟢 low but latest self-review BLOCK → refused"               GH_RISK=low GH_VERDICT=BLOCK -- 7 --expect-head abcdef1 --rating low
+run 2 "🟡 medium with no self-review → refused"                      GH_RISK=medium GH_VERDICT= -- 7 --expect-head abcdef1 --rating medium
+run 2 "--rating low on a PR actually rated high → refused"          -- 7 --expect-head abcdef1 --rating low
+run 2 "--rating medium on a PR rated low → refused"                 GH_RISK=low -- 7 --expect-head abcdef1 --rating medium
+run 2 "🟢 low, CI failing → refused"                                 GH_RISK=low CI_RC=1 -- 7 --expect-head abcdef1 --rating low
+run 2 "🟢 low, migration collision → refused"                        GH_RISK=low MIG_RC=2 -- 7 --expect-head abcdef1 --rating low
+run 1 "unknown --rating value is a usage error"                     -- 7 --expect-head abcdef1 --rating urgent
+
+heading "usage"
+run 1 "override flags don't exist"                                -- 7 --expect-head abcdef1 --override-review
 run 1 "missing --expect-head is a usage error"                      -- 7
 run 1 "too-short SHA is a usage error"                              -- 7 --expect-head abc
 
