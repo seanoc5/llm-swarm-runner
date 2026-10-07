@@ -188,7 +188,7 @@ green "a check.json recorded against a different HEAD is ignored — the check r
 heading "Test 5: no check.json at all → behavior unchanged"
 # ============================================================================
 WT5="$TEST_DIR/wt-5"
-new_worktree "$WT5" >/dev/null
+HEAD5="$(new_worktree "$WT5")"
 start_listener "$WT5"
 drop_v2 "$WT5" c5 'echo agent-ran > t5.txt
 # <!-- SWARM_CHECK: echo ran >> ran5.txt -->'
@@ -199,6 +199,49 @@ jq -e '.outcome == "ok" and .check_exit == 0' "$WT5/.swarm/tasks/done/c5.ok.json
 grep -q "worker.check.reused" "$WT5/listener.log" \
     && red "c5: should not log a reuse when no check-on-done record exists at all"
 green "no check-on-done record at all: unchanged behavior — the listener runs its own check"
+# run_check_claimed() (self-review finding on this same issue's first draft):
+# even when the listener ends up running the check itself, it must leave
+# behind the same claim/record shape coordinator-watch.sh would, so a
+# watcher poll landing moments later backs off instead of starting its own
+# concurrent run — the half of the race try_reuse_check_on_done() alone
+# cannot close (the listener getting there before the watcher does).
+[ ! -d "$WT5/.swarm/tasks/status/c5.check-claim" ] \
+    || red "c5: the check-claim dir must be released (rmdir'd) once the listener's own run finishes, not left dangling"
+jq -e --arg h "$HEAD5" '.state == "pass" and .check_exit == 0 and .head_sha == $h' \
+    "$WT5/.swarm/tasks/status/c5.check.json" >/dev/null \
+    || { cat "$WT5/.swarm/tasks/status/c5.check.json" 2>/dev/null || echo "(missing)"; \
+         red "c5: the listener's own run must still record a watcher-shaped check.json (state/check_exit/head_sha) so a racing poll can see it was already done here"; }
+green "a self-run check still leaves a correctly shaped check.json behind, claim released — visible to a racing watcher poll"
+
+# ============================================================================
+heading "Test 6: watcher claimed first but hasn't written checking yet → listener waits, doesn't double-run"
+# ============================================================================
+# The other half of the self-review's finding: the narrow window right after
+# maybe_run_check()'s mkdir succeeds but before it writes the "checking"
+# check.json. A listener reaching try_reuse_check_on_done() in that exact
+# window must still wait for it, not read "no check.json" as "nothing to
+# reuse" and start a second, concurrent run of its own.
+WT6="$TEST_DIR/wt-6"
+HEAD6="$(new_worktree "$WT6")"
+mkdir -p "$WT6/.swarm/tasks/status/c6.check-claim"   # claimed — no check.json yet
+start_listener "$WT6"
+drop_v2 "$WT6" c6 'echo agent-ran > t6.txt
+# <!-- SWARM_CHECK: echo ran >> ran6.txt -->'
+sleep 2
+[ ! -f "$WT6/.swarm/tasks/done/c6.ok.json" ] && [ ! -f "$WT6/.swarm/tasks/done/c6.err.json" ] \
+    || red "c6: outcome was recorded before the watcher's claimed-but-not-yet-recorded check ever resolved — the listener raced ahead instead of waiting"
+[ ! -f "$WT6/ran6.txt" ] || red "c6: CHECK_CMD ran a second time while the watcher's claim was still active with no check.json yet"
+printf 'issue #579 check-on-done: resolved while the listener was waiting on the bare claim\n' \
+    > "$WT6/.swarm/tasks/done/c6.check.log"
+stub_check_json "$WT6" c6 pass 0 "$HEAD6"
+rmdir "$WT6/.swarm/tasks/status/c6.check-claim"
+wait_for "c6 outcome" "[ -f '$WT6/.swarm/tasks/done/c6.ok.json' ]"
+[ ! -f "$WT6/ran6.txt" ] || red "c6: CHECK_CMD ran a second time despite the claimed check resolving to pass"
+jq -e '.outcome == "ok" and .check_exit == 0' "$WT6/.swarm/tasks/done/c6.ok.json" >/dev/null \
+    || { cat "$WT6/.swarm/tasks/done/c6.ok.json"; red "c6: outcome JSON wrong"; }
+grep -q "worker.check.reused" "$WT6/listener.log" \
+    || red "c6: expected worker.check.reused in the listener's own log"
+green "a bare claim (watcher owns it, hasn't recorded checking yet) is waited out, then reused — no second CHECK_CMD run"
 
 echo
 green "ALL TESTS PASSED"

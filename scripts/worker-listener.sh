@@ -85,7 +85,14 @@
 #   reused; `skipped`, a HEAD mismatch (new commits landed since), or no
 #   file at all falls through to running the check exactly as before. A
 #   reused `fail` still drives retry-once like a fresh one. See
-#   try_reuse_check_on_done() below.
+#   try_reuse_check_on_done() below. When there is nothing to reuse, the
+#   check still doesn't run unconditionally: run_check_claimed() first
+#   mkdir's the same <task_id>.check-claim directory maybe_run_check() uses,
+#   so a watcher poll landing moments later sees the claim and backs off
+#   instead of starting its own concurrent run — closing the half of this
+#   race try_reuse_check_on_done() alone can't (the listener getting there
+#   first). Losing that claim (the watcher already got there first) falls
+#   back into try_reuse_check_on_done()'s own wait-and-reuse loop.
 #
 # Minimum-interaction floor (issue #287, claude agent only):
 #   An agent exit code of 0 is not proof the agent ever ran the task — an
@@ -555,22 +562,37 @@ json_num_field() {
 # On success (a terminal pass/fail recorded for the current HEAD), sets
 # CHECK_EXIT/CHECK_TAIL exactly as run_check() would and returns 0 — the
 # caller skips calling run_check() entirely. Returns 1 (nothing usable;
-# caller must run_check() as normal) when: no check.json for this task_id,
-# its state is "skipped", the HEAD it was run against no longer matches
-# (new commits landed since — the retry-once path always hits this), or an
-# in-flight "checking" run never reaches a terminal state within
-# WORKER_CHECK_TIMEOUT (gives up waiting rather than blocking forever).
+# caller must run_check() as normal) when: no check.json for this task_id
+# and no check-claim either, its state is "skipped", the HEAD it was run
+# against no longer matches (new commits landed since — the retry-once
+# path always hits this), or an in-flight check never reaches a terminal
+# state within WORKER_CHECK_TIMEOUT (gives up waiting rather than blocking
+# forever).
 try_reuse_check_on_done() {
     CHECK_EXIT=""
     CHECK_TAIL=""
     local check_json="$STATUS/${TASK_ID}.check.json"
-    [ -f "$check_json" ] || return 1
+    local claim_dir="$STATUS/${TASK_ID}.check-claim"
+    [ -f "$check_json" ] || [ -d "$claim_dir" ] || return 1
 
     local current_head waited=0 state head_sha
     current_head="$(git rev-parse HEAD 2>/dev/null || true)"
     [ -n "$current_head" ] || return 1
 
     while true; do
+        if [ ! -f "$check_json" ]; then
+            # issue #579 self-review finding: the watcher (or our own
+            # run_check_claimed(), losing a race to this same call) has
+            # mkdir'd the claim but not yet reached the line that writes
+            # "checking" — a narrow window right after the mkdir. Wait it
+            # out rather than concluding there is nothing to reuse and
+            # racing a second run ourselves; [ -d "$claim_dir" ] is why
+            # this function was entered at all when check_json is missing.
+            [ "$waited" -lt "$CHECK_TIMEOUT" ] || return 1
+            sleep 2
+            waited=$((waited + 2))
+            continue
+        fi
         state="$(json_str_field "$check_json" state)"
         head_sha="$(json_str_field "$check_json" head_sha)"
         # Re-checked every iteration, not just once up front: this is only
@@ -595,6 +617,38 @@ try_reuse_check_on_done() {
     [ -r "$check_log" ] && CHECK_TAIL=$(tail -n 20 "$check_log" 2>/dev/null)
     echo "[$(date +%T)] worker.check.reused task_id=$TASK_ID state=$state check_exit=$CHECK_EXIT head_sha=${current_head:0:12} — check-on-done already ran this commit; not re-running: $CHECK_CMD"
     return 0
+}
+
+# run_check_claimed (issue #579 self-review finding) — try_reuse_check_on_done()
+# alone only covers the watcher starting first: if THIS listener reaches its
+# check before coordinator-watch.sh's next poll does, nothing stopped that
+# poll from independently claiming and running the same $CHECK_CMD a moment
+# later, the exact duplicate-run race this issue exists to close. Wraps
+# run_check() in the same worktree-local <task_id>.check-claim mkdir lock
+# maybe_run_check() uses, so whichever side gets there first is visible to
+# the other: winning it means run_check() proceeds (recording "checking",
+# then the real pass/fail, under the same task_id.check.json path/schema the
+# watcher writes, so a racing poll backs off via its own check_json_state()
+# read); losing it means the watcher already owns this check, so this falls
+# into try_reuse_check_on_done()'s wait-and-reuse loop instead of running a
+# second time.
+run_check_claimed() {
+    [ -n "$CHECK_CMD" ] || { run_check; return; }
+    local claim_dir="$STATUS/${TASK_ID}.check-claim"
+    if ! mkdir "$claim_dir" 2>/dev/null; then
+        try_reuse_check_on_done || run_check
+        return
+    fi
+    local head_sha check_json="$STATUS/${TASK_ID}.check.json"
+    head_sha="$(git rev-parse HEAD 2>/dev/null || true)"
+    printf '{"task_id":"%s","state":"checking","check_exit":null,"head_sha":"%s","ts":"%s"}\n' \
+        "$TASK_ID" "$head_sha" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$check_json" 2>/dev/null || true
+    run_check
+    local state=pass
+    [ "$CHECK_EXIT" -eq 0 ] 2>/dev/null || state=fail
+    printf '{"task_id":"%s","state":"%s","check_exit":%s,"head_sha":"%s","ts":"%s"}\n' \
+        "$TASK_ID" "$state" "$CHECK_EXIT" "$head_sha" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$check_json" 2>/dev/null || true
+    rmdir "$claim_dir" 2>/dev/null || true
 }
 
 # Run $CHECK_CMD (if any). Sets CHECK_EXIT ("" = check not run) and
@@ -1393,7 +1447,7 @@ while true; do
             # $CHECK_CMD in this worktree — see try_reuse_check_on_done()'s
             # own header and the "Executed acceptance checks" section above.
             if [ -z "$CHECK_CMD" ] || ! try_reuse_check_on_done; then
-                run_check
+                run_check_claimed
             fi
             if [ -n "$CHECK_EXIT" ] && [ "$CHECK_EXIT" -ne 0 ] && [ "$CHECK_RETRY" = "1" ]; then
                 echo "[$(date +%T)] Check failed — retrying once with failure output injected."
@@ -1434,7 +1488,7 @@ $TASK"
                 RETRIED=true
                 dispatch_agent "$RETRY_TASK"
                 RC=$DISPATCH_RC
-                run_check
+                run_check_claimed
             fi
         fi
 
