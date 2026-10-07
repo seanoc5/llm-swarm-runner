@@ -536,5 +536,40 @@ check "once that real watcher process has exited -> exit 3, not a stale FRESH fr
 if echo "$OUT" | grep -q 'status: *NOT RUNNING'; then got=present; else got=missing; fi
 check "exited watcher -> reports NOT RUNNING" "present" "$got"
 
+heading "Test 7b: a killed watcher exits within ~2s of TERM even with a long poll interval (issues #570/#571)"
+# run_poll's main-loop sleep used to run in the foreground, so bash
+# deferred the trapped TERM until that sleep finished — a killed watcher
+# stayed alive for up to POLL_SECS seconds. POLL_SECS=30 here (an
+# extreme most real projects would never configure) makes that bug, if
+# it regresses, unmistakable: the old code would still be alive at the
+# 2s mark checked below, nowhere close to dying within it by chance.
+POLL30_PROJECT="$TEST_DIR/live-project-poll30"
+mkdir -p "$POLL30_PROJECT/.swarm"
+
+POLL_SECS=30 DRY_RUN=1 WATCHER_QUIET=1 LLM_START="$FAKE_LLM_START" WATCH_PR_POLL_SECS=0 \
+    WATCH_ORPHAN_SWEEP_SECS=0 WATCH_CHECK_ON_DONE=0 AUTO_COMPACT=0 WORKER_AUTO_COMPACT=0 \
+    WORKER_AUTO_DELIVER=0 WATCHER_STALE_CHECK=0 ONCE=0 "$WATCH" "$POLL30_PROJECT" >/dev/null 2>&1 &
+LIVE_WATCH_PID=$!
+
+POLL30_STATE_FILE="$POLL30_PROJECT/.swarm/coordinator-watch.state"
+for _i in $(seq 1 50); do
+    [ -r "$POLL30_STATE_FILE" ] && break
+    sleep 0.1
+done
+if [ -r "$POLL30_STATE_FILE" ]; then got=written; else got=missing; fi
+check "POLL_SECS=30 watcher startup still writes its state file" "written" "$got"
+
+kill "$LIVE_WATCH_PID" 2>/dev/null || true
+# Only ~2s of patience (20 x 0.1s), unlike Test 7's 5s — the whole point
+# of this test is that a fix regression (foreground sleep again) would
+# leave it alive well past this window, not just past Test 7's longer one.
+died_fast=0
+for _i in $(seq 1 20); do
+    kill -0 "$LIVE_WATCH_PID" 2>/dev/null || { died_fast=1; break; }
+    sleep 0.1
+done
+if [ "$died_fast" = 1 ]; then got=died; else got=alive; fi
+check "POLL_SECS=30 watcher is gone within ~2s of TERM, not still waiting out its poll interval" "died" "$got"
+
 echo ""
 green "All watcher-stale-check tests passed ($PASS checks)"

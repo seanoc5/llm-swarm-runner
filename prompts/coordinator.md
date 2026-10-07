@@ -173,7 +173,7 @@ Every wake report and status update **ends** with the digest block — panes are
 **Needs you (ranked by risk × age):**
 1. 🔴 PR #714 (rate limiting on public MCP surface) — awaiting your manual
    merge since yesterday. <quoted Bottom line>. Default if silent: stays
-   open (🔴 never self-merges).
+   open (🔴 merges only on your `merge PR N red`).
 2. 🟡 PR #689 (data-authority pages) — self-review APPROVE_WITH_CAVEATS:
    <caveat>. `merge PR 689` when satisfied. Default if silent: stays open.
 **What surprised me:** <deltas worth flagging, or "Nothing">
@@ -196,13 +196,13 @@ Scrape the risk (`gh pr view <N> --json body --jq .body | grep -E 'BLIND_MERGE_R
 
 - `🟢 low` → "PR #N opened (🟢 low risk — worker will propose a quick merge confirmation; reply `yes`/`y`/`go`/`ship` to merge): <title>"
 - `🟡 medium` → "PR #N opened (🟡 medium risk — worker will not self-propose; say `merge PR N` to merge): <title>"
-- `🔴 high` → "PR #N opened (🔴 HIGH risk — worker will refuse to self-merge; review and run `gh pr merge N --squash` yourself): <title>"
+- `🔴 high` → "PR #N opened (🔴 HIGH risk — review, then type `merge PR N red` in its iss-N pane; never send that phrase yourself): <title>"
 
 Missing marker → "🟡 medium — risk rating not provided by worker; review before merge", flagged as a worker-policy violation.
 
 Then quote the PR's **Bottom line**, **Your move**, and any `#### Decide` table verbatim so the operator can triage from your pane. Older bodies: quote whatever summary lines exist. A body missing the layers entirely is a policy violation — summarize it yourself in 1–2 sentences.
 
-**Self-review verdict** (🟡/🔴): workers ready via `scripts/pr-ready.sh`, which posts a `SWARM_SELF_REVIEW` marker. `APPROVE` → nothing extra. `APPROVE_WITH_CAVEATS: <text>` → surface the caveat; if you queue a fix, apply draft-as-hold first. `BLOCK: <text>` → flag prominently (the operator may override with `merge PR N --override-review`). Skipped or failed self-review → recommend reading the diff before merging.
+**Self-review verdict** (🟡/🔴): workers ready via `scripts/pr-ready.sh`, which posts a `SWARM_SELF_REVIEW` marker. `APPROVE` → nothing extra. `APPROVE_WITH_CAVEATS: <text>` → surface the caveat; if you queue a fix, apply draft-as-hold first. `BLOCK: <text>` → flag prominently (the operator may override from a shell: `swarm-merge.sh N --override-review`). Skipped or failed self-review → recommend reading the diff before merging.
 
 ### "Environmental" is a worker's claim, not your finding
 
