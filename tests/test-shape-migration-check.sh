@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 #
 # test-shape-migration-check.sh — Non-LLM shape tests for the migration
-# collision gate (#294):
+# collision gate (#294) and the out-of-order Flyway merge gate (#556):
 #
-#   - migration-collision-check.sh   Flyway dup-version detection, Alembic
-#                                     multi-head detection, exit codes,
-#                                     --post idempotency
-#   - swarm-merge.sh                 migration gate refusal, --override,
-#                                     MIGRATION_GATE=0 kill switch
+#   - migration-collision-check.sh   Flyway dup-version detection, Flyway
+#                                     out-of-order detection (+ its
+#                                     MIGRATION_ALLOW_OUT_OF_ORDER opt-out),
+#                                     Alembic multi-head detection, exit
+#                                     codes, --post idempotency
+#   - swarm-merge.sh                 migration gate refusal (collision and
+#                                     out-of-order), --override,
+#                                     MIGRATION_GATE=0 kill switch,
+#                                     --auto-low refusal on out-of-order
 #
 # Uses REAL git fixture repos (bare "origin" + a clone) so ref fetching and
 # tree listing exercise real git, not a stub — the collision only exists in
@@ -80,14 +84,20 @@ case "$1 $2" in
     "api repos/{owner}/{repo}/issues/"*) echo "false"; exit 0 ;;
     "pr view")
         if [[ "$*" == *state,mergeable* ]]; then
-            # swarm-merge.sh's main PR_JSON call. It also requests
-            # body/isDraft/reviewDecision/baseRefName (for --auto-low's
-            # gates 1/3/4/5, unused by this test file's plain-merge path);
-            # jq's `// default` fallbacks on the reading side handle their
-            # absence here without needing this stub to fake them.
+            # swarm-merge.sh's main PR_JSON call. body/isDraft/reviewDecision
+            # default to values that clear --auto-low's gates 1/3/4/5 (low
+            # marker, not a draft, no CHANGES_REQUESTED) so a test only
+            # needs to override one via GH_PR_BODY/GH_PR_REVIEW_DECISION/
+            # GH_PR_IS_DRAFT when it wants that specific gate to fire.
             base_head="$(jq -c --arg n "$pr_num" '.[$n]' "$GH_PR_TABLE")"
             head="$(jq -r '.headRefName' <<<"$base_head")"
-            echo "{\"state\":\"OPEN\",\"mergeable\":\"MERGEABLE\",\"headRefName\":\"$head\",\"title\":\"fake\"}"
+            base="$(jq -r '.baseRefName' <<<"$base_head")"
+            jq -n -c \
+                --arg head "$head" --arg base "$base" \
+                --arg body "${GH_PR_BODY:-<!-- BLIND_MERGE_RISK: low -->}" \
+                --arg review "${GH_PR_REVIEW_DECISION:-}" \
+                --argjson draft "${GH_PR_IS_DRAFT:-false}" \
+                '{state:"OPEN", mergeable:"MERGEABLE", headRefName:$head, baseRefName:$base, title:"fake", body:$body, isDraft:$draft, reviewDecision:$review}'
         elif [[ "$*" == *baseRefName* ]]; then
             jq -c --arg n "$pr_num" '.[$n]' "$GH_PR_TABLE"
         elif [[ "$*" == *comments* ]]; then
@@ -346,7 +356,186 @@ grep -q "pr merge 2" "$GH_LOG" || red "gh pr merge not called with MIGRATION_GAT
 green "MIGRATION_GATE=0 kill switch skips the gate"
 
 # ============================================================================
+heading "Test 8: out-of-order Flyway merge (#556) — PR adds V3 below base max V5 → exit 3"
+# ============================================================================
+# Dedicated fixture repo (clean V1/V2/V5 base) rather than reusing $CLONE,
+# which has accumulated unrelated collisions from earlier tests by now.
+OOO_ORIGIN="$TEST_DIR/ooo-origin.git"
+OOO_CLONE="$TEST_DIR/ooo-clone"
+git init -q --bare -b master "$OOO_ORIGIN"
+git init -q -b master "$OOO_CLONE"
+git -C "$OOO_CLONE" remote add origin "$OOO_ORIGIN"
+ooo_commit() { git -C "$OOO_CLONE" -c user.email=t@t -c user.name=t commit -q -m "$1"; }
+
+mkdir -p "$OOO_CLONE/$MIG"
+echo "select 1;" > "$OOO_CLONE/$MIG/V1__one.sql"
+echo "select 2;" > "$OOO_CLONE/$MIG/V2__two.sql"
+echo "select 5;" > "$OOO_CLONE/$MIG/V5__five.sql"
+git -C "$OOO_CLONE" add -A; ooo_commit "base: V1, V2, V5"
+git -C "$OOO_CLONE" push -q origin master
+
+git -C "$OOO_CLONE" checkout -q -b ooo-branch master
+echo "select 3;" > "$OOO_CLONE/$MIG/V3__three.sql"
+git -C "$OOO_CLONE" add -A; ooo_commit "worker adds V3, unaware master already merged V5"
+git -C "$OOO_CLONE" push -q origin ooo-branch
+set_pr 20 master ooo-branch
+
+cd "$OOO_CLONE"
+if OUT=$("$CHECK" 20 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -eq 3 ] || red "expected exit 3 for out-of-order, got $RC (output: $OUT)"
+echo "$OUT" | grep -q "verdict: out-of-order" || red "verdict line missing"
+echo "$OUT" | grep -qF "$MIG/V3__three.sql (V3)" || red "offending file not named"
+echo "$OUT" | grep -q "base tip's max version (V5" || red "base max (V5) not reported"
+echo "$OUT" | grep -q "next free version: V6" || red "expected next free V6 (max of V1,V2,V3,V5 + 1)"
+echo "$OUT" | grep -qF "git mv $MIG/V3__three.sql $MIG/V6__three.sql" || red "git mv line missing or wrong"
+echo "$OUT" | grep -qF "git commit -m \"fix(migration): renumber to V6, below base tip max V5 on master\"" \
+    || red "commit line missing"
+echo "$OUT" | grep -qF "git push origin ooo-branch" || red "push line must target the PR head branch"
+green "out-of-order Flyway merge → exit 3, names V3, base max V5, suggested V6, recipe verbatim"
+
+# ============================================================================
+heading "Test 9: PR adds V6 on a base with max V5 → clean"
+# ============================================================================
+git -C "$OOO_CLONE" checkout -q -b clean-higher master
+echo "select 6;" > "$OOO_CLONE/$MIG/V6__six.sql"
+git -C "$OOO_CLONE" add -A; ooo_commit "clean: V6 above base max V5"
+git -C "$OOO_CLONE" push -q origin clean-higher
+set_pr 21 master clean-higher
+
+if OUT=$("$CHECK" 21); then RC=0; else RC=$?; fi
+[ "$RC" -eq 0 ] || red "expected exit 0 for a PR above base max, got $RC"
+echo "$OUT" | grep -q "verdict: clean" || red "verdict line missing"
+green "PR adds V6 above base max V5 → clean"
+
+# ============================================================================
+heading "Test 10: MIGRATION_ALLOW_OUT_OF_ORDER=1 downgrades out-of-order to a warning, exit 0"
+# ============================================================================
+if OUT=$(MIGRATION_ALLOW_OUT_OF_ORDER=1 "$CHECK" 20 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -eq 0 ] || red "expected exit 0 under MIGRATION_ALLOW_OUT_OF_ORDER=1, got $RC"
+echo "$OUT" | grep -q "verdict: out-of-order" || red "verdict should still read out-of-order"
+echo "$OUT" | grep -q "downgraded to a warning" || red "warning note missing"
+green "MIGRATION_ALLOW_OUT_OF_ORDER=1: out-of-order warns and exits 0"
+# ============================================================================
+heading "Test 10b: dotted-version out-of-order (#556 self-review) — V5.1 after base's V5.2 → exit 3"
+# ============================================================================
+# Self-review finding on this PR: comparing only the integer prefix would
+# treat V5.1 and V5.2 as equal (both "5"), missing a real out-of-order
+# merge. Base tip's max FULL version is 5.2; a PR adding 5.1 must still be
+# caught even though its integer prefix (5) is not below the base's own
+# integer prefix (5). Own dedicated fixture, not reusing $OOO_ORIGIN/$OOO_CLONE,
+# so Tests 11-12's master/ooo-branch state is untouched.
+DOT_ORIGIN="$TEST_DIR/dot-origin.git"
+DOT_CLONE="$TEST_DIR/dot-clone"
+git init -q --bare -b master "$DOT_ORIGIN"
+git init -q -b master "$DOT_CLONE"
+git -C "$DOT_CLONE" remote add origin "$DOT_ORIGIN"
+dot_commit() { git -C "$DOT_CLONE" -c user.email=t@t -c user.name=t commit -q -m "$1"; }
+
+mkdir -p "$DOT_CLONE/$MIG"
+echo "select 5;"  > "$DOT_CLONE/$MIG/V5__five.sql"
+echo "select 52;" > "$DOT_CLONE/$MIG/V5.2__five-two.sql"
+git -C "$DOT_CLONE" add -A; dot_commit "base: V5, V5.2"
+git -C "$DOT_CLONE" push -q origin master
+
+git -C "$DOT_CLONE" checkout -q -b dot-branch master
+echo "select 51;" > "$DOT_CLONE/$MIG/V5.1__five-one.sql"
+git -C "$DOT_CLONE" add -A; dot_commit "worker adds V5.1, unaware master already merged V5.2"
+git -C "$DOT_CLONE" push -q origin dot-branch
+set_pr 22 master dot-branch
+
+cd "$DOT_CLONE"
+if OUT=$("$CHECK" 22 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -eq 3 ] || red "expected exit 3 for dotted out-of-order (V5.1 after base V5.2), got $RC (output: $OUT)"
+echo "$OUT" | grep -q "verdict: out-of-order" || red "verdict line missing"
+echo "$OUT" | grep -qF "$MIG/V5.1__five-one.sql (V5.1)" || red "offending file not named with full dotted version"
+echo "$OUT" | grep -q "base tip's max version (V5.2" || red "base max full version (V5.2) not reported"
+green "dotted-version out-of-order caught: V5.1 after base's V5.2 — full-version compare, not just the integer prefix"
+
+# ============================================================================
+heading "Test 10c: collision wins over out-of-order when a PR has both (#556 self-review)"
+# ============================================================================
+# review focus #1 asked for a test where ONE PR's head carries both a
+# same-version collision (V5, different filename from the base's V5) and
+# an unrelated out-of-order file (V3, no base claimant) at once. The
+# per-version exclusion (COLLIDED_VERSIONS) only keeps V5 out of the
+# out-of-order list — it does not change the overall verdict. The overall
+# verdict/exit code must still read "collision" (collision wins, exit 2,
+# never double-counted as 3), while V3 is still surfaced in the body so
+# the recipe isn't silently dropped.
+COL_ORIGIN="$TEST_DIR/col-origin.git"
+COL_CLONE="$TEST_DIR/col-clone"
+git init -q --bare -b master "$COL_ORIGIN"
+git init -q -b master "$COL_CLONE"
+git -C "$COL_CLONE" remote add origin "$COL_ORIGIN"
+col_commit() { git -C "$COL_CLONE" -c user.email=t@t -c user.name=t commit -q -m "$1"; }
+
+mkdir -p "$COL_CLONE/$MIG"
+echo "select 1;" > "$COL_CLONE/$MIG/V1__one.sql"
+echo "select 2;" > "$COL_CLONE/$MIG/V2__two.sql"
+echo "select 5;" > "$COL_CLONE/$MIG/V5__five.sql"
+git -C "$COL_CLONE" add -A; col_commit "base: V1, V2, V5"
+git -C "$COL_CLONE" push -q origin master
+
+git -C "$COL_CLONE" checkout -q -b mixed-branch master
+echo "select 5 dup;" > "$COL_CLONE/$MIG/V5__five-dup.sql"    # collision on V5
+echo "select 3;"     > "$COL_CLONE/$MIG/V3__three.sql"       # independently out-of-order
+git -C "$COL_CLONE" add -A; col_commit "worker ships a colliding V5 AND an unrelated out-of-order V3"
+git -C "$COL_CLONE" push -q origin mixed-branch
+set_pr 23 master mixed-branch
+
+cd "$COL_CLONE"
+if OUT=$("$CHECK" 23 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -eq 2 ] || red "expected exit 2 (collision wins) when a PR has both, got $RC (output: $OUT)"
+echo "$OUT" | grep -q "verdict: collision" || red "verdict should read collision, not out-of-order, when both are present"
+echo "$OUT" | grep -qF "V5 claimed by:" || red "the V5 collision itself must still be reported"
+echo "$OUT" | grep -qF "$MIG/V3__three.sql (V3)" || red "the unrelated V3 out-of-order file must still be surfaced, not swallowed by the collision verdict"
+green "collision wins over out-of-order in the overall verdict, while an unrelated out-of-order file is still surfaced"
+
+# swarm-merge.sh's own migration-collision-check.sh call fetches base/head
+# from the CURRENT directory's "origin" remote — stay in $OOO_CLONE (whose
+# origin is $OOO_ORIGIN, holding master/ooo-branch) rather than $CLONE
+# (whose origin is the unrelated $ORIGIN fixture) for Tests 11-12.
+cd "$OOO_CLONE"
+
+# ============================================================================
+heading "Test 11: swarm-merge migration gate — out-of-order refuses plain and --auto-low"
+# ============================================================================
+# Both refusal paths run BEFORE the override-proceeds test below, which
+# actually merges and deletes the real remote branch (swarm-merge.sh issue
+# #489: no --delete-branch on `gh pr merge`, but it does run a real `git
+# push origin --delete` right after) — once that lands, ooo-branch is gone
+# from $OOO_ORIGIN and a later fetch-based check would fail for the wrong
+# reason.
+: > "$GH_LOG"
+if OUT=$("$MERGE" 20 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -ne 0 ] || red "swarm-merge should refuse on an out-of-order Flyway merge"
+grep -q "pr merge" "$GH_LOG" && red "gh pr merge was called despite the out-of-order verdict"
+echo "$OUT" | grep -qi "out-of-order" || red "refusal message should name the out-of-order verdict"
+green "out-of-order merge refuses merge, gh pr merge never called"
+
+# Gates 0 (authorship), 1 (rating marker), 3 (review decision), 4 (base
+# branch), 5 (draft) all clear on the gh stub's defaults, so --auto-low
+# reaches the migration gate (which runs before the CI wait) and refuses
+# there, the same gate plain swarm-merge.sh refuses at above.
+: > "$GH_LOG"
+if OUT=$("$MERGE" 20 --auto-low 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -ne 0 ] || red "swarm-merge --auto-low should refuse the out-of-order PR #20"
+grep -q "pr merge" "$GH_LOG" && red "gh pr merge was called despite the out-of-order verdict"
+echo "$OUT" | grep -qi "out-of-order" || red "--auto-low refusal message should name the out-of-order verdict"
+green "--auto-low refuses on out-of-order Flyway merge, gh pr merge never called"
+
+# ============================================================================
+heading "Test 12: swarm-merge migration gate — --override-migration-gate proceeds despite out-of-order"
+# ============================================================================
+: > "$GH_LOG"
+if "$MERGE" 20 --override-migration-gate >/dev/null 2>&1; then RC=0; else RC=$?; fi
+[ "$RC" -eq 0 ] || red "override-migration-gate merge failed on out-of-order PR (rc=$RC)"
+grep -q "pr merge 20" "$GH_LOG" || red "gh pr merge not called under --override-migration-gate"
+green "--override-migration-gate proceeds to merge despite out-of-order"
+cd "$CLONE"
+
+# ============================================================================
 heading "All migration-collision-check shape tests passed"
-green "Flyway dup detection + remediation recipe (loser/next-free/open-PR sweep/internal dup), dotted-version distinctness, Alembic multi-head, exit 4 skip, --post idempotency, swarm-merge gate + override + kill switch"
+green "Flyway dup detection + remediation recipe (loser/next-free/open-PR sweep/internal dup), dotted-version distinctness, out-of-order merge detection + MIGRATION_ALLOW_OUT_OF_ORDER opt-out (#556), Alembic multi-head, exit 4 skip, --post idempotency, swarm-merge gate + override + kill switch + --auto-low refusal"
 echo ""
 yellow "Run with KEEP=1 to leave $TEST_DIR for inspection."
