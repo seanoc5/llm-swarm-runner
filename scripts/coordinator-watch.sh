@@ -3430,7 +3430,23 @@ cleanup_on_exit() {
     # forever, exactly the failure mode issue #296 exists to close.
     [ -n "${seen_file:-}" ] && rm -f -- "$seen_file" || true
 }
-trap cleanup_on_exit EXIT INT TERM
+trap cleanup_on_exit EXIT
+# INT/TERM get their own trap, calling exit explicitly, rather than
+# sharing the bare `cleanup_on_exit` binding above (self-review on
+# issues #570/#571): a trap that returns without exiting just resumes
+# wherever the signal interrupted it — fine for the sleep window (#570's
+# fix there relies on `wait`'s interrupted-by-signal return tripping this
+# script's own `set -e` instead), but a TERM/INT landing while a tick is
+# scanning (dispatch_claims/scan_outcomes, not sleeping) would otherwise
+# get silently absorbed: cleanup_on_exit still kills the other timer
+# PIDs, but the main loop just continues on to its next tick rather than
+# exiting. Explicit `exit 143` closes that gap unconditionally. This
+# also means cleanup_on_exit runs a second time via the EXIT trap this
+# exit itself triggers — already a tolerated pattern elsewhere in this
+# file (watcher_check_staleness calls it directly before its own exit,
+# same double-run), harmless since every kill in it is already a no-op
+# on an already-dead PID.
+trap 'cleanup_on_exit; exit 143' INT TERM
 
 # Shared state
 # issue #459: the outcome and outbox-message doorbell clocks were separate
