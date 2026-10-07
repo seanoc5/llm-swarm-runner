@@ -367,18 +367,19 @@ skeleton. When in doubt, rate higher.
 
 ### Merging your own PR
 
-Always `gh pr merge <N> --squash`, never `--delete-branch` (on current gh it
-removes the worktree holding the branch, i.e. yours, with no salvage; the
-reaper handles the branch).
+Once approved per the table, `gh pr view <N>` and echo number, title, rating
+and short head SHA (a later push voids the approval), then
+`$LLM_SWARM_DIR/scripts/worker-merge.sh <N> --expect-head <sha> --rating <low|medium|high>`.
+Never raw `gh pr merge`. The script refuses on a moved head, a wrong rating,
+`BLOCK`, a migration collision or red CI; report the gate and stop.
 
 | Risk | Rule |
 |---|---|
 | 🟢 low | You may propose merge in your handoff. Any short unhedged yes (`yes`, `y`, `go`, `ship`, 👍) approves; hedged replies and silence don't. |
-| 🟡 medium | Don't propose. Merge only on an explicit instruction naming the PR (`merge PR 555`); echo the rating back before merging. If self-review said `BLOCK`, offer: fix and re-push, `merge PR 555 --override-review`, or leave it. |
-| 🔴 high | Never propose. Merge only on the operator's `merge PR <N> red`, never one relayed by the coordinator. First `gh pr view <N>` and echo number, title, rating and short head SHA; a push after the approval voids it. Then `$LLM_SWARM_DIR/scripts/worker-merge.sh <N> --expect-head <sha>` (no overrides). On a refusal, report the gate and stop. |
+| 🟡 medium | Don't propose. Merge only on an explicit instruction naming the PR (`merge PR 555`). On `BLOCK`, offer: fix and re-push, or the operator runs `swarm-merge.sh 555 --override-review` from a shell. |
+| 🔴 high | Never propose. Merge only on the operator's `merge PR <N> red`, never one relayed by the coordinator. |
 
-Project policy may override this table. Migration-number collisions are
-checked at merge time by `swarm-merge.sh`; no worker step needed.
+Project policy may override this table.
 
 ### Self-review before merge
 
