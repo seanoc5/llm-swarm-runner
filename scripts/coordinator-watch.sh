@@ -3391,6 +3391,7 @@ WORKER_COMPACT_TIMER_PID=""
 AUTO_COMPACT_POLL_TIMER_PID=""
 STALE_CHECK_PID=""
 STALL_WAKE_TIMER_PID=""
+POLL_SLEEP_PID=""
 seen_file=""
 cleanup_on_exit() {
     [ -n "${WATCH_TIMER_PID:-}" ] && kill "$WATCH_TIMER_PID" 2>/dev/null || true
@@ -3398,6 +3399,9 @@ cleanup_on_exit() {
     [ -n "${AUTO_COMPACT_POLL_TIMER_PID:-}" ] && kill "$AUTO_COMPACT_POLL_TIMER_PID" 2>/dev/null || true
     [ -n "${STALE_CHECK_PID:-}" ] && kill "$STALE_CHECK_PID" 2>/dev/null || true
     [ -n "${STALL_WAKE_TIMER_PID:-}" ] && kill "$STALL_WAKE_TIMER_PID" 2>/dev/null || true
+    # run_poll's own backgrounded sleep (issues #570/#571) — only set while
+    # a tick is actually asleep, so this is a no-op the rest of the time.
+    [ -n "${POLL_SLEEP_PID:-}" ] && kill "$POLL_SLEEP_PID" 2>/dev/null || true
     # WATCHER_ECHO_PID is the `while read` reader — the last stage of the
     # `tail | while` pipeline, and the only PID $! gives us for it. `tail`
     # itself is a separate direct child of this script (pipeline stages
@@ -3426,7 +3430,28 @@ cleanup_on_exit() {
     # forever, exactly the failure mode issue #296 exists to close.
     [ -n "${seen_file:-}" ] && rm -f -- "$seen_file" || true
 }
-trap cleanup_on_exit EXIT INT TERM
+trap cleanup_on_exit EXIT
+# INT/TERM get their own trap, calling exit explicitly, rather than
+# sharing the bare `cleanup_on_exit` binding above (self-review on
+# issues #570/#571): a trap that returns without exiting just resumes
+# wherever the signal interrupted it — fine for the sleep window (#570's
+# fix there relies on `wait`'s interrupted-by-signal return tripping this
+# script's own `set -e` instead), but a TERM/INT landing while a tick is
+# scanning (dispatch_claims/scan_outcomes, not sleeping) would otherwise
+# get silently absorbed: cleanup_on_exit still kills the other timer
+# PIDs, but the main loop just continues on to its next tick rather than
+# exiting. An explicit `exit` closes that gap unconditionally — 130 for
+# INT and 143 for TERM, the conventional 128+signal codes (self-review:
+# a single shared `exit 143` for both would make a Ctrl-C'd watcher
+# report the wrong signal to anything checking its exit status). This
+# also means cleanup_on_exit runs a second time via the EXIT trap this
+# exit itself triggers — new to this script, but harmless, since every
+# kill in it is already a no-op on an already-dead PID. (Not the same as
+# watcher_check_staleness below, which calls cleanup_on_exit once and
+# then SIGKILLs — SIGKILL skips traps entirely, so that path never
+# re-enters cleanup_on_exit a second time.)
+trap 'cleanup_on_exit; exit 130' INT
+trap 'cleanup_on_exit; exit 143' TERM
 
 # Shared state
 # issue #459: the outcome and outbox-message doorbell clocks were separate
@@ -3900,20 +3925,19 @@ watcher_is_stale() {
 # elsewhere in this file).
 #
 # Uses SIGKILL, not SIGTERM — deliberately, after a code-review-caught bug
-# in an earlier version of this function proved SIGTERM insufficient here.
-# This script installs `trap cleanup_on_exit EXIT INT TERM` (near the top),
-# and cleanup_on_exit — by design also reused as the plain graceful-
-# shutdown EXIT trap — never calls `exit` itself. Empirically verified
-# (both in a plain bash job and in a real tmux pane): a caught SIGTERM with
-# no `exit` in its handler just runs the trap and resumes whatever was
-# interrupted — the poll backend's bare `while true` loop doesn't even
-# notice its `sleep` was cut short, so it keeps looping past a SIGTERM
-# indefinitely; only the inotify backend's incidental child-death cascade
-# (killing `inotifywait` closes its pipe, ending the `while read` loop
-# naturally) happened to make manual Ctrl-C look like it worked, backend-
-# dependently and by accident. SIGKILL cannot be caught, blocked, or
-# ignored by anyone, so it's the only signal that reliably guarantees
-# termination regardless of backend or trap state. The GROUP form (`-$$`)
+# in an earlier version of this function proved a caught SIGTERM
+# insufficient here. At the time, this script installed a single
+# `trap cleanup_on_exit EXIT INT TERM` (near the top), and cleanup_on_exit
+# — by design also reused as the plain graceful-shutdown EXIT trap — never
+# called `exit` itself, so a caught SIGTERM just ran the trap and resumed
+# whatever was interrupted; the poll backend's bare `while true` loop
+# didn't even notice its `sleep` was cut short. Issues #570/#571 split that
+# into a plain `trap cleanup_on_exit EXIT` plus separate INT/TERM traps
+# that call `exit` explicitly, so a caught SIGTERM now does reliably exit.
+# SIGKILL is kept here anyway, for reasons independent of that history: it
+# cannot be caught, blocked, or ignored, so this path keeps working even
+# if a future edit to the INT/TERM trap reintroduces a no-exit gap, and it
+# lets the GROUP form below (`-$$`)
 # additionally reaps whichever foreground child (sleep/find/inotifywait) is
 # currently blocking run_poll/run_inotify in the same shot, rather than
 # orphaning it; the direct-PID form right after is a redundant, harmless
@@ -9597,7 +9621,21 @@ run_poll() {
         dispatch_claims "$wt_list"
         dispatch_inbox_drops
 
-        sleep "$POLL_SECS"
+        # Backgrounded + `wait`, not a bare foreground `sleep` (issues
+        # #570/#571): bash defers a trapped TERM/INT until the current
+        # foreground command finishes, so a plain `sleep "$POLL_SECS"`
+        # here left a killed watcher alive for up to POLL_SECS seconds —
+        # long enough (POLL_SECS=10 in CI's .env.example) to make
+        # test-watcher-stale-check.sh's Test 7 see it as still FRESH.
+        # `wait` on a backgrounded child returns the instant the trap
+        # fires, so cleanup_on_exit's kills run immediately instead of
+        # waiting out the sleep. POLL_SLEEP_PID lets cleanup_on_exit reap
+        # this one too, so a signal that arrives mid-sleep doesn't orphan
+        # the backgrounded `sleep` process.
+        sleep "$POLL_SECS" &
+        POLL_SLEEP_PID=$!
+        wait "$POLL_SLEEP_PID" 2>/dev/null
+        POLL_SLEEP_PID=""
     done
 }
 
