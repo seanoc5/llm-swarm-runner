@@ -243,5 +243,47 @@ grep -q "worker.check.reused" "$WT6/listener.log" \
     || red "c6: expected worker.check.reused in the listener's own log"
 green "a bare claim (watcher owns it, hasn't recorded checking yet) is waited out, then reused — no second CHECK_CMD run"
 
+# ============================================================================
+heading "Test 7: watcher checking an OLDER commit (agent committed again since) → listener waits for it, THEN runs fresh — never concurrently"
+# ============================================================================
+# Second self-review finding on this PR: a head_sha mismatch alone must not
+# be read as "nothing to reuse, safe to run fresh right away" — the watcher
+# may be mid-run against an older commit (ready-for-review was written,
+# then the agent committed again), and starting a second check now would
+# run concurrently against the SAME worktree the watcher's run is still
+# using: corpusminder #1043's actual failure mode, just via a HEAD mismatch
+# instead of a plain duplicate. The wait must be keyed on the claim itself
+# clearing, not on whether its (possibly stale) check.json matches HEAD.
+WT7="$TEST_DIR/wt-7"
+HEAD7A="$(new_worktree "$WT7")"
+git -C "$WT7" -c user.name=t -c user.email=t@t commit -q --allow-empty -m "second commit, after ready-for-review was written"
+HEAD7B="$(git -C "$WT7" rev-parse HEAD)"
+[ "$HEAD7A" != "$HEAD7B" ] || red "c7b: test setup bug — second commit didn't move HEAD"
+mkdir -p "$WT7/.swarm/tasks/status/c7b.check-claim"
+stub_check_json "$WT7" c7b checking null "$HEAD7A"   # watcher: still checking the OLD commit
+start_listener "$WT7"
+drop_v2 "$WT7" c7b 'echo agent-ran > t7b.txt
+# <!-- SWARM_CHECK: echo ran >> ran7b.txt -->'
+sleep 2
+[ ! -f "$WT7/.swarm/tasks/done/c7b.ok.json" ] && [ ! -f "$WT7/.swarm/tasks/done/c7b.err.json" ] \
+    || red "c7b: outcome was recorded before the watcher's (stale-commit) check-claim ever cleared — the listener didn't wait for it"
+[ ! -f "$WT7/ran7b.txt" ] || red "c7b: CHECK_CMD ran while the watcher's claim on the OLD commit was still active — exactly the concurrent-run corpusminder #1043 describes"
+# The watcher's old-commit run now finishes — its result can't be reused
+# (wrong commit), but the claim clearing means it's finally SAFE to run our
+# own check fresh.
+printf 'watcher finished checking the old commit\n' > "$WT7/.swarm/tasks/done/c7b.check.log"
+stub_check_json "$WT7" c7b pass 0 "$HEAD7A"
+rmdir "$WT7/.swarm/tasks/status/c7b.check-claim"
+wait_for "c7b outcome" "[ -f '$WT7/.swarm/tasks/done/c7b.ok.json' ]"
+[ -f "$WT7/ran7b.txt" ] || red "c7b: the listener should have run its own fresh check once the stale claim cleared, but never did"
+jq -e '.outcome == "ok" and .check_exit == 0' "$WT7/.swarm/tasks/done/c7b.ok.json" >/dev/null \
+    || { cat "$WT7/.swarm/tasks/done/c7b.ok.json"; red "c7b: outcome JSON wrong"; }
+jq -e --arg h "$HEAD7B" '.head_sha == $h' "$WT7/.swarm/tasks/status/c7b.check.json" >/dev/null \
+    || { cat "$WT7/.swarm/tasks/status/c7b.check.json" 2>/dev/null; red "c7b: the listener's fresh run should have recorded the CURRENT head_sha, not the stale one it waited out"; }
+[ ! -d "$WT7/.swarm/tasks/status/c7b.check-claim" ] || red "c7b: claim dir left dangling after the listener's own run"
+grep -q "worker.check.reused" "$WT7/listener.log" \
+    && red "c7b: a stale-commit result must never be logged as reused — it was correctly discarded and re-run fresh"
+green "a watcher check in flight against an older commit is waited out (never run concurrently), then a fresh check runs safely once it clears"
+
 echo
 green "ALL TESTS PASSED"

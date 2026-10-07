@@ -565,9 +565,8 @@ json_num_field() {
 # caller must run_check() as normal) when: no check.json for this task_id
 # and no check-claim either, its state is "skipped", the HEAD it was run
 # against no longer matches (new commits landed since — the retry-once
-# path always hits this), or an in-flight check never reaches a terminal
-# state within WORKER_CHECK_TIMEOUT (gives up waiting rather than blocking
-# forever).
+# path always hits this), or the claim never clears within
+# WORKER_CHECK_TIMEOUT (gives up waiting rather than blocking forever).
 try_reuse_check_on_done() {
     CHECK_EXIT=""
     CHECK_TAIL=""
@@ -575,41 +574,37 @@ try_reuse_check_on_done() {
     local claim_dir="$STATUS/${TASK_ID}.check-claim"
     [ -f "$check_json" ] || [ -d "$claim_dir" ] || return 1
 
-    local current_head waited=0 state head_sha
+    local current_head waited=0
     current_head="$(git rev-parse HEAD 2>/dev/null || true)"
     [ -n "$current_head" ] || return 1
 
-    while true; do
-        if [ ! -f "$check_json" ]; then
-            # issue #579 self-review finding: the watcher (or our own
-            # run_check_claimed(), losing a race to this same call) has
-            # mkdir'd the claim but not yet reached the line that writes
-            # "checking" — a narrow window right after the mkdir. Wait it
-            # out rather than concluding there is nothing to reuse and
-            # racing a second run ourselves; [ -d "$claim_dir" ] is why
-            # this function was entered at all when check_json is missing.
-            [ "$waited" -lt "$CHECK_TIMEOUT" ] || return 1
-            sleep 2
-            waited=$((waited + 2))
-            continue
-        fi
-        state="$(json_str_field "$check_json" state)"
-        head_sha="$(json_str_field "$check_json" head_sha)"
-        # Re-checked every iteration, not just once up front: this is only
-        # ever reached between dispatch_agent() calls (the agent isn't
-        # running, so HEAD can't move out from under this wait), but
-        # costs nothing to re-verify and keeps this self-contained.
-        [ -n "$head_sha" ] && [ "$head_sha" = "$current_head" ] || return 1
-        case "$state" in
-            pass|fail) break ;;
-            checking)
-                [ "$waited" -lt "$CHECK_TIMEOUT" ] || return 1
-                sleep 2
-                waited=$((waited + 2))
-                ;;
-            *) return 1 ;;   # skipped, or an empty/unrecognized state
-        esac
+    # issue #579 self-review finding: wait out an ACTIVE claim purely on
+    # the claim dir's presence, not on whether its check.json (if any yet
+    # exists at all — the narrow window right after mkdir, before the
+    # "checking" write lands) matches our current HEAD. A mismatch here
+    # doesn't mean "nothing to reuse, safe to run fresh right now" — it can
+    # mean the watcher is mid-run against an OLDER commit (the agent
+    # committed again after going ready-for-review), and running our own
+    # check concurrently would hit the exact same build/ resources that run
+    # is using right now: corpusminder #1043's actual failure mode. Only
+    # once the claim clears do we know it's safe to either reuse (if its
+    # result does match current HEAD) or run fresh ourselves (nothing else
+    # is using the worktree any more).
+    while [ -d "$claim_dir" ]; do
+        [ "$waited" -lt "$CHECK_TIMEOUT" ] || return 1
+        sleep 2
+        waited=$((waited + 2))
     done
+
+    [ -f "$check_json" ] || return 1
+    local state head_sha
+    state="$(json_str_field "$check_json" state)"
+    head_sha="$(json_str_field "$check_json" head_sha)"
+    [ -n "$head_sha" ] && [ "$head_sha" = "$current_head" ] || return 1
+    case "$state" in
+        pass|fail) ;;
+        *) return 1 ;;   # skipped, a stale "checking" left by a crashed run, or unrecognized
+    esac
 
     CHECK_EXIT="$(json_num_field "$check_json" check_exit)"
     [ -n "$CHECK_EXIT" ] || return 1   # malformed record (pass/fail must carry an exit code) — don't trust it
