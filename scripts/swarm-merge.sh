@@ -275,12 +275,33 @@ resolve_pr_for_issue() {
   fi
 }
 
+# The repo's default branch from origin/HEAD, else origin/main or
+# origin/master; empty if none resolves.
+resolve_default_branch() {
+  local b
+  b="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+  b="${b#origin/}"
+  if [ -z "$b" ]; then
+    for candidate in main master; do
+      git show-ref --verify --quiet "refs/remotes/origin/$candidate" &&
+        b="$candidate" && break
+    done
+  fi
+  echo "$b"
+}
+
 # After a merge: say whether GitHub closes the worker's issue. GitHub closes
-# issues named by a closing keyword in the PR body; this script never closes
-# one itself, because a PR without the keyword is often deliberate partial
-# work.
+# issues named by a closing keyword in the PR body, and only when the PR
+# merges into the default branch; this script never closes one itself,
+# because a PR without the keyword is often deliberate partial work.
 report_issue_closure() {
-  local closing others
+  local closing others default_branch
+  default_branch="$(resolve_default_branch)"
+  if [ -n "$PR_BASE" ] && [ -n "$default_branch" ] && [ "$PR_BASE" != "$default_branch" ]; then
+    echo "       $(c_amber "issue #$ISSUE stays OPEN: PR #$PR_NUM merged into '$PR_BASE', not '$default_branch'; GitHub closes issues only on merges into the default branch.")"
+    echo "       Once the work reaches $default_branch: gh issue close $ISSUE --comment \"Done in #$PR_NUM\""
+    return 0
+  fi
   closing=" $(echo "$PR_JSON" | jq -r '[(.closingIssuesReferences // [])[].number | tostring] | join(" ")' 2>/dev/null || true) "
   if [[ "$closing" == *" $ISSUE "* ]]; then
     echo "       issue #$ISSUE: GitHub closes it (PR #$PR_NUM names it with a closing keyword)"
@@ -571,14 +592,7 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
         fi
 
         echo "       auto-low gate 4 (base branch): checking…"
-        DEFAULT_BRANCH="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"
-        DEFAULT_BRANCH="${DEFAULT_BRANCH#origin/}"
-        if [ -z "$DEFAULT_BRANCH" ]; then
-          for candidate in main master; do
-            git show-ref --verify --quiet "refs/remotes/origin/$candidate" &&
-              DEFAULT_BRANCH="$candidate" && break
-          done
-        fi
+        DEFAULT_BRANCH="$(resolve_default_branch)"
         if [ -z "$DEFAULT_BRANCH" ]; then
           echo "ERROR: PR #$PR_NUM refused by --auto-low Gate 4 (base branch)." >&2
           echo "       Could not resolve the repo's default branch to compare against —" >&2

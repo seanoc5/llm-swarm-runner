@@ -375,6 +375,33 @@ echo "$OUT" | grep -q "stays OPEN" && red "must not say stays OPEN when the PR c
 green "closing-keyword PR: report names the worker's issue and any other issue GitHub closes"
 
 # ============================================================================
+heading "Test 8: closing keyword, but PR merged into a non-default branch — report says stays OPEN"
+# ============================================================================
+# Self-review caveat on PR #558: GitHub only closes on a merge into the
+# default branch, so a feature-to-feature merge must not claim "GitHub closes it".
+git update-ref refs/remotes/origin/master HEAD
+cat > "$TEST_DIR/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+    "api repos/{owner}/{repo}/issues/800")
+        echo "true"; exit 0 ;;
+    "pr view")
+        case "$*" in
+            *state,mergeable*) echo '{"state":"MERGED","mergeable":"MERGEABLE","headRefName":"fix/issue-800","baseRefName":"feature/epic","title":"fake","closingIssuesReferences":[{"number":800}]}'; exit 0 ;;
+        esac
+        exit 0 ;;
+esac
+exit 0
+EOF
+chmod +x "$TEST_DIR/bin/gh"
+
+OUT=$(timeout 5 "$MERGE" 800 --no-kill 2>&1) || red "non-default-base report path failed:\n$OUT"
+echo "$OUT" | grep -q "issue #800 stays OPEN: PR #[0-9]* merged into 'feature/epic', not 'master'" || red "expected the non-default-base stays-OPEN line, got:\n$OUT"
+echo "$OUT" | grep -q "GitHub closes it" && red "must not claim GitHub closes the issue on a non-default-base merge:\n$OUT"
+git update-ref -d refs/remotes/origin/master
+green "non-default-base PR: report says the issue stays open until the work reaches the default branch"
+
+# ============================================================================
 heading "All swarm-merge PR-number resolution tests passed"
 # ============================================================================
 green "swarm-merge.sh accepts issue numbers and PR numbers per #324"
