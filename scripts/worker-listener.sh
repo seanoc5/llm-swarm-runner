@@ -257,6 +257,47 @@ echo "Legacy:   $LEGACY_TASK_FILE (v1, still supported)"
 NOTE
 echo "------------------------------"
 
+# reap_stale_processing_entries (issue #559)
+#
+# A processing/<id>.md whose outcome ALREADY exists in done/<id>.{ok,err}.json
+# means some earlier mv of the brief itself into done/ silently failed (both
+# task-done.sh's own move and this script's own fallback mv right before
+# write_outcome tolerate a missing source with `|| true`, so a genuinely
+# failed destination write — e.g. a transient done/ permission or disk
+# issue — leaves the stale .md behind with no error surfaced anywhere).
+# Nothing else ever revisits processing/ once its outcome is recorded, so
+# a stale entry here sits forever: worker_current_task_terminal() in
+# coordinator-watch.sh treats a non-empty processing/ as "task still in
+# flight" (by design — see its own header comment), permanently wedging
+# WORKER_AUTO_DELIVER/WORKER_AUTO_COMPACT for this window even though the
+# task genuinely finished. Checked once per main-loop iteration (every
+# claim_next_task poll) rather than only right after write_outcome, so an
+# entry stranded by an OLDER, already-restarted listener process also
+# self-heals rather than needing a human to notice and move it by hand.
+#
+# The mv itself can keep failing (the same persistent done/ permission or
+# disk problem that stranded the entry in the first place) — REAP_WARNED
+# below keyed by task_id makes that failure path log once, with the actual
+# error, instead of flooding stderr with the same line every poll tick
+# forever.
+declare -A REAP_WARNED=()
+reap_stale_processing_entries() {
+    local f task_id mv_err
+    for f in "$PROCESSING"/*.md; do
+        [ -e "$f" ] || continue
+        task_id="$(basename "$f" .md)"
+        if [ -e "$DONE/${task_id}.ok.json" ] || [ -e "$DONE/${task_id}.err.json" ]; then
+            if mv_err="$(mv "$f" "$DONE/${task_id}.md" 2>&1)"; then
+                echo "[$(date +%T)] WARNING: processing/$(basename "$f") had an outcome already recorded in done/ (task_id=$task_id) but was never moved out of processing/ — moved it to done/${task_id}.md." >&2
+                unset "REAP_WARNED[$task_id]"
+            elif [ -z "${REAP_WARNED[$task_id]:-}" ]; then
+                REAP_WARNED[$task_id]=1
+                echo "[$(date +%T)] WARNING: processing/$(basename "$f") has an outcome already recorded in done/ (task_id=$task_id) but moving it out of processing/ failed and will keep being retried silently: $mv_err" >&2
+            fi
+        fi
+    done
+}
+
 # Returns the path of the next task to process, or empty if none.
 # Sets globals: TASK_PATH (where the brief now lives, after claim),
 #               TASK_ID (identifier for this run),
@@ -1171,6 +1212,8 @@ while true; do
         echo "[$(date +%T)] Worktree $WT_LABEL appears reaped (inbox or cwd missing). Listener exiting cleanly."
         exit 0
     fi
+
+    reap_stale_processing_entries
 
     if claim_next_task; then
         echo "[$(date +%T)] Task received! id=$TASK_ID$([ "$IS_LEGACY" = "1" ] && echo " (v1 legacy)")"
