@@ -285,6 +285,123 @@ echo "$OUT" | grep -q "merged for issue #77" || red "expected final line to name
 green "probe failure on a genuine PR number is rescued by the symmetric gh pr view fallback"
 
 # ============================================================================
+heading "Test 6: issue number, no closing-keyword PR, one open PR on fix/issue-N — resolves via the branch"
+# ============================================================================
+# fand-etl #1133 / PR #1138 (2026-10-06): the worker split the issue and wrote
+# "steps 1-2 of #1133", not "Closes #1133", so the issue had no closing link
+# and `swarm-merge.sh 1133` refused although PR #1138 plainly existed. The
+# issue path now falls back to the single open PR on the worker's branch, and
+# the closing report says the issue stays OPEN (GitHub won't close it).
+cat > "$TEST_DIR/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+    "api repos/{owner}/{repo}/issues/1133")
+        echo "false"; exit 0 ;;
+    "issue view")
+        case "$*" in
+            *closedByPullRequestsReferences*) echo ""; exit 0 ;;
+        esac
+        echo "OPEN"; exit 0 ;;
+    "pr list")
+        case "$*" in
+            *"--head fix/issue-1133"*) echo "1138"; exit 0 ;;
+        esac
+        exit 0 ;;
+    "pr view")
+        case "$*" in
+            *state,mergeable*) echo '{"state":"MERGED","mergeable":"MERGEABLE","headRefName":"fix/issue-1133","title":"fake","closingIssuesReferences":[]}'; exit 0 ;;
+        esac
+        exit 0 ;;
+esac
+exit 0
+EOF
+chmod +x "$TEST_DIR/bin/gh"
+
+OUT=$(timeout 5 "$MERGE" 1133 --no-kill 2>&1) || red "issue-with-branch-PR path failed:\n$OUT"
+echo "$OUT" | grep -q "issue #1133 → PR #1138 (via open PR on branch fix/issue-1133)" || red "expected branch-fallback resolution line, got:\n$OUT"
+echo "$OUT" | grep -q "merged for issue #1133" || red "expected final line to name issue #1133, got:\n$OUT"
+echo "$OUT" | grep -q "issue #1133 stays OPEN" || red "expected the stays-OPEN closing report, got:\n$OUT"
+echo "$OUT" | grep -q "gh issue close 1133" || red "expected the close-by-hand command, got:\n$OUT"
+green "issue with no closing-keyword PR resolves via its fix/issue-N branch; report says the issue stays OPEN"
+
+# ============================================================================
+heading "Test 6b: issue number, no closing-keyword PR, TWO open PRs on fix/issue-N — refuses, asks for the PR#"
+# ============================================================================
+cat > "$TEST_DIR/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+    "api repos/{owner}/{repo}/issues/601")
+        echo "false"; exit 0 ;;
+    "issue view")
+        exit 0 ;;
+    "pr list")
+        printf '610\n611\n'; exit 0 ;;
+esac
+exit 0
+EOF
+chmod +x "$TEST_DIR/bin/gh"
+
+set +e
+OUT=$(timeout 5 "$MERGE" 601 --no-kill 2>&1)
+RC=$?
+set -e
+[ "$RC" -ne 0 ] || red "expected non-zero exit for an ambiguous branch, got 0:\n$OUT"
+echo "$OUT" | grep -q "2 open PRs on" || red "expected the ambiguity error, got:\n$OUT"
+echo "$OUT" | grep -q "Pass the PR number" || red "expected the pass-the-PR# hint, got:\n$OUT"
+green "two open PRs on the branch is ambiguous — refuses rather than guessing"
+
+# ============================================================================
+heading "Test 7: PR names the issue with a closing keyword (plus one more) — report says GitHub closes both"
+# ============================================================================
+cat > "$TEST_DIR/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+    "api repos/{owner}/{repo}/issues/702")
+        echo "true"; exit 0 ;;
+    "pr view")
+        case "$*" in
+            *state,mergeable*) echo '{"state":"MERGED","mergeable":"MERGEABLE","headRefName":"fix/issue-700","title":"fake","closingIssuesReferences":[{"number":700},{"number":701}]}'; exit 0 ;;
+        esac
+        exit 0 ;;
+esac
+exit 0
+EOF
+chmod +x "$TEST_DIR/bin/gh"
+
+OUT=$(timeout 5 "$MERGE" 702 --no-kill 2>&1) || red "closing-keyword report path failed:\n$OUT"
+echo "$OUT" | grep -q "issue #700: GitHub closes it" || red "expected the GitHub-closes line for #700, got:\n$OUT"
+echo "$OUT" | grep -q "GitHub also closes: #701" || red "expected the also-closes line for #701, got:\n$OUT"
+echo "$OUT" | grep -q "stays OPEN" && red "must not say stays OPEN when the PR closes the issue:\n$OUT"
+green "closing-keyword PR: report names the worker's issue and any other issue GitHub closes"
+
+# ============================================================================
+heading "Test 8: closing keyword, but PR merged into a non-default branch — report says stays OPEN"
+# ============================================================================
+# Self-review caveat on PR #558: GitHub only closes on a merge into the
+# default branch, so a feature-to-feature merge must not claim "GitHub closes it".
+git update-ref refs/remotes/origin/master HEAD
+cat > "$TEST_DIR/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+    "api repos/{owner}/{repo}/issues/800")
+        echo "true"; exit 0 ;;
+    "pr view")
+        case "$*" in
+            *state,mergeable*) echo '{"state":"MERGED","mergeable":"MERGEABLE","headRefName":"fix/issue-800","baseRefName":"feature/epic","title":"fake","closingIssuesReferences":[{"number":800}]}'; exit 0 ;;
+        esac
+        exit 0 ;;
+esac
+exit 0
+EOF
+chmod +x "$TEST_DIR/bin/gh"
+
+OUT=$(timeout 5 "$MERGE" 800 --no-kill 2>&1) || red "non-default-base report path failed:\n$OUT"
+echo "$OUT" | grep -q "issue #800 stays OPEN: PR #[0-9]* merged into 'feature/epic', not 'master'" || red "expected the non-default-base stays-OPEN line, got:\n$OUT"
+echo "$OUT" | grep -q "GitHub closes it" && red "must not claim GitHub closes the issue on a non-default-base merge:\n$OUT"
+git update-ref -d refs/remotes/origin/master
+green "non-default-base PR: report says the issue stays open until the work reaches the default branch"
+
+# ============================================================================
 heading "All swarm-merge PR-number resolution tests passed"
 # ============================================================================
 green "swarm-merge.sh accepts issue numbers and PR numbers per #324"
