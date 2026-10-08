@@ -268,6 +268,18 @@ out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_PERM_ERROR=1 \
     GH_RUNLIST_RC=1 "$CI_WAIT" 42 5 2>&1)" || rc=$?
 check "exits 4 on a gh run list failure, never misread as exit 5" '[ "$rc" -eq 4 ]'
 
+# ── Test 10g: fallback, gh run list returns valid JSON that isn't an array ⇒ exit 4, not a timeout ──
+# #568 self-review caveat: `{}` passed the parse check, failed jq's group_by,
+# and the function still returned 0 with an empty state, so ci-wait polled
+# until its deadline instead of reporting the error.
+
+heading "Test 10g: fallback path, gh run list returns non-array JSON → exit 4 (gh error), not a timeout"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_PERM_ERROR=1 \
+    GH_RUNLIST_JSON='{}' "$CI_WAIT" 42 5 2>&1)" || rc=$?
+check "exits 4 on non-array fallback JSON, never waits out the timeout (exit 2)" '[ "$rc" -eq 4 ]'
+check "names the malformed fallback output" 'grep -qi "isn.t a list of runs" <<<"$out"'
+
 # ─── Test 11: fallback path, pending then green — keeps polling run list, never re-tries gh pr checks ───
 
 heading "Test 11: fallback path, runs pending then green; gh pr checks is called exactly once"
