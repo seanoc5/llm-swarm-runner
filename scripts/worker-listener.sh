@@ -71,6 +71,29 @@
 #   with WORKER_CHECK_RETRY=0). The first attempt's check output is kept at
 #   done/<id>.check.attempt1.log and the outcome JSON records retried: true.
 #
+#   issue #579: before running $CHECK_CMD, the listener first looks for a
+#   check-on-done result (coordinator-watch.sh's execute_check, run from the
+#   watcher the moment this same task's status file went ready-for-review)
+#   already recorded for this exact task_id against this exact commit, at
+#   .swarm/tasks/status/<task_id>.check.json (worktree-local — both sides
+#   write/read it without crossing the worker's sandbox boundary; the
+#   watcher never gets a path into the main checkout's own .swarm/checks/
+#   mirrored back to the listener, so reuse is keyed off this worktree-local
+#   file, not that one). A `pass`/`fail` recorded against the current HEAD is
+#   reused outright (no second $CHECK_CMD run in this worktree); `checking`
+#   (still in flight) is waited out, bounded by WORKER_CHECK_TIMEOUT, then
+#   reused; `skipped`, a HEAD mismatch (new commits landed since), or no
+#   file at all falls through to running the check exactly as before. A
+#   reused `fail` still drives retry-once like a fresh one. See
+#   try_reuse_check_on_done() below. When there is nothing to reuse, the
+#   check still doesn't run unconditionally: run_check_claimed() first
+#   mkdir's the same <task_id>.check-claim directory maybe_run_check() uses,
+#   so a watcher poll landing moments later sees the claim and backs off
+#   instead of starting its own concurrent run — closing the half of this
+#   race try_reuse_check_on_done() alone can't (the listener getting there
+#   first). Losing that claim (the watcher already got there first) falls
+#   back into try_reuse_check_on_done()'s own wait-and-reuse loop.
+#
 # Minimum-interaction floor (issue #287, claude agent only):
 #   An agent exit code of 0 is not proof the agent ever ran the task — an
 #   interactive startup dialog (corrupt config, trust prompt, login screen;
@@ -509,6 +532,118 @@ resolve_check_cmd() {
     fi
     # 3. listener-wide env default
     CHECK_CMD="${WORKER_CHECK_CMD:-}"
+}
+
+# json_str_field <path> <field> — extracts a "field":"value" scalar string
+# from a single-line JSON file without requiring jq. Mirrors
+# coordinator-watch.sh's own check_json_state() (same sed trick, same
+# single-line-record assumption) so both sides agree on the format with no
+# shared library and no new hard dependency.
+json_str_field() {
+    sed -n "s/.*\"$2\":\"\([^\"]*\)\".*/\1/p" "$1" 2>/dev/null | head -1
+}
+
+# json_num_field <path> <field> — a bare number field; echoes "" for `null`
+# (or anything else unparseable), matching CHECK_EXIT's own "" = not run
+# convention used throughout this file.
+json_num_field() {
+    sed -n "s/.*\"$2\":\([0-9-][0-9]*\).*/\1/p" "$1" 2>/dev/null | head -1
+}
+
+# try_reuse_check_on_done (issue #579) — see the "Executed acceptance
+# checks" header above for the full rationale. Looks for
+# .swarm/tasks/status/<task_id>.check.json (coordinator-watch.sh's
+# check-on-done result for THIS task_id), and reuses it when it was run
+# against the exact commit this worktree is at right now instead of
+# starting a second, concurrent $CHECK_CMD in the same worktree (the
+# corpusminder #1043 incident this issue documents: a redundant run that
+# corrupts build/ and stalls delivery).
+#
+# On success (a terminal pass/fail recorded for the current HEAD), sets
+# CHECK_EXIT/CHECK_TAIL exactly as run_check() would and returns 0 — the
+# caller skips calling run_check() entirely. Returns 1 (nothing usable;
+# caller must run_check() as normal) when: no check.json for this task_id
+# and no check-claim either, its state is "skipped", the HEAD it was run
+# against no longer matches (new commits landed since — the retry-once
+# path always hits this), or the claim never clears within
+# WORKER_CHECK_TIMEOUT (gives up waiting rather than blocking forever).
+try_reuse_check_on_done() {
+    CHECK_EXIT=""
+    CHECK_TAIL=""
+    local check_json="$STATUS/${TASK_ID}.check.json"
+    local claim_dir="$STATUS/${TASK_ID}.check-claim"
+    [ -f "$check_json" ] || [ -d "$claim_dir" ] || return 1
+
+    local current_head waited=0
+    current_head="$(git rev-parse HEAD 2>/dev/null || true)"
+    [ -n "$current_head" ] || return 1
+
+    # issue #579 self-review finding: wait out an ACTIVE claim purely on
+    # the claim dir's presence, not on whether its check.json (if any yet
+    # exists at all — the narrow window right after mkdir, before the
+    # "checking" write lands) matches our current HEAD. A mismatch here
+    # doesn't mean "nothing to reuse, safe to run fresh right now" — it can
+    # mean the watcher is mid-run against an OLDER commit (the agent
+    # committed again after going ready-for-review), and running our own
+    # check concurrently would hit the exact same build/ resources that run
+    # is using right now: corpusminder #1043's actual failure mode. Only
+    # once the claim clears do we know it's safe to either reuse (if its
+    # result does match current HEAD) or run fresh ourselves (nothing else
+    # is using the worktree any more).
+    while [ -d "$claim_dir" ]; do
+        [ "$waited" -lt "$CHECK_TIMEOUT" ] || return 1
+        sleep 2
+        waited=$((waited + 2))
+    done
+
+    [ -f "$check_json" ] || return 1
+    local state head_sha
+    state="$(json_str_field "$check_json" state)"
+    head_sha="$(json_str_field "$check_json" head_sha)"
+    [ -n "$head_sha" ] && [ "$head_sha" = "$current_head" ] || return 1
+    case "$state" in
+        pass|fail) ;;
+        *) return 1 ;;   # skipped, a stale "checking" left by a crashed run, or unrecognized
+    esac
+
+    CHECK_EXIT="$(json_num_field "$check_json" check_exit)"
+    [ -n "$CHECK_EXIT" ] || return 1   # malformed record (pass/fail must carry an exit code) — don't trust it
+    local check_log="$DONE/${TASK_ID}.check.log"
+    [ -r "$check_log" ] && CHECK_TAIL=$(tail -n 20 "$check_log" 2>/dev/null)
+    echo "[$(date +%T)] worker.check.reused task_id=$TASK_ID state=$state check_exit=$CHECK_EXIT head_sha=${current_head:0:12} — check-on-done already ran this commit; not re-running: $CHECK_CMD"
+    return 0
+}
+
+# run_check_claimed (issue #579 self-review finding) — try_reuse_check_on_done()
+# alone only covers the watcher starting first: if THIS listener reaches its
+# check before coordinator-watch.sh's next poll does, nothing stopped that
+# poll from independently claiming and running the same $CHECK_CMD a moment
+# later, the exact duplicate-run race this issue exists to close. Wraps
+# run_check() in the same worktree-local <task_id>.check-claim mkdir lock
+# maybe_run_check() uses, so whichever side gets there first is visible to
+# the other: winning it means run_check() proceeds (recording "checking",
+# then the real pass/fail, under the same task_id.check.json path/schema the
+# watcher writes, so a racing poll backs off via its own check_json_state()
+# read); losing it means the watcher already owns this check, so this falls
+# into try_reuse_check_on_done()'s wait-and-reuse loop instead of running a
+# second time.
+run_check_claimed() {
+    [ -n "$CHECK_CMD" ] || { run_check; return; }
+    local claim_dir="$STATUS/${TASK_ID}.check-claim"
+    if ! mkdir "$claim_dir" 2>/dev/null; then
+        try_reuse_check_on_done || run_check
+        return
+    fi
+    local head_sha check_json="$STATUS/${TASK_ID}.check.json"
+    head_sha="$(git rev-parse HEAD 2>/dev/null || true)"
+    printf '{"task_id":"%s","state":"checking","check_exit":null,"head_sha":"%s","ts":"%s"}\n' \
+        "$TASK_ID" "$head_sha" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$check_json" 2>/dev/null || true
+    run_check
+    local state=pass
+    [ "$CHECK_EXIT" -eq 0 ] 2>/dev/null || state=fail
+    printf '{"task_id":"%s","state":"%s","check_exit":%s,"head_sha":"%s","ts":"%s"}\n' \
+        "$TASK_ID" "$state" "$CHECK_EXIT" "$head_sha" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$check_json" 2>/dev/null || true
+    rmdir "$claim_dir" 2>/dev/null || true
 }
 
 # Run $CHECK_CMD (if any). Sets CHECK_EXIT ("" = check not run) and
@@ -1302,7 +1437,13 @@ while true; do
         RETRIED=false
         if [ "$IS_LEGACY" != "1" ]; then
             resolve_check_cmd
-            run_check
+            # issue #579: reuse coordinator-watch.sh's check-on-done result
+            # for this task_id/commit instead of running a second, redundant
+            # $CHECK_CMD in this worktree — see try_reuse_check_on_done()'s
+            # own header and the "Executed acceptance checks" section above.
+            if [ -z "$CHECK_CMD" ] || ! try_reuse_check_on_done; then
+                run_check_claimed
+            fi
             if [ -n "$CHECK_EXIT" ] && [ "$CHECK_EXIT" -ne 0 ] && [ "$CHECK_RETRY" = "1" ]; then
                 echo "[$(date +%T)] Check failed — retrying once with failure output injected."
                 mv "$DONE/${TASK_ID}.check.log" "$DONE/${TASK_ID}.check.attempt1.log" 2>/dev/null || true
@@ -1342,7 +1483,7 @@ $TASK"
                 RETRIED=true
                 dispatch_agent "$RETRY_TASK"
                 RC=$DISPATCH_RC
-                run_check
+                run_check_claimed
             fi
         fi
 

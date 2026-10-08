@@ -5479,6 +5479,14 @@ maybe_run_check() {
     fi
     [ -n "$task_id" ] || task_id="pr-issue-$issue"
 
+    # issue #579: recorded alongside every check.json state below so
+    # worker-listener.sh's try_reuse_check_on_done() (worktree-local,
+    # doesn't cross the sandbox boundary into this main checkout) can tell
+    # "this result is for the exact commit I'm at right now" from "a new
+    # commit landed since" without needing anything outside the worktree.
+    local head_sha
+    head_sha="$(git -C "$wt_dir" rev-parse HEAD 2>/dev/null || true)"
+
     local check_json="$status_dir/${task_id}.check.json"
     if [ -f "$check_json" ]; then
         case "$(check_json_state "$check_json")" in
@@ -5505,15 +5513,15 @@ maybe_run_check() {
     local pr_state
     pr_state="$(pr_state_for_worktree "$wt_dir" "$issue")"
     if [ "$pr_state" = "MERGED" ] || [ "$pr_state" = "CLOSED" ]; then
-        printf '{"task_id":"%s","state":"skipped","check_exit":null,"ts":"%s"}\n' \
-            "$task_id" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$check_json" 2>/dev/null || true
+        printf '{"task_id":"%s","state":"skipped","check_exit":null,"head_sha":"%s","ts":"%s"}\n' \
+            "$task_id" "$head_sha" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$check_json" 2>/dev/null || true
         log_event watch.check_on_done "issue=$issue task_id=$task_id result=skipped reason=pr_terminal_$pr_state"
         rmdir "$claim_dir" 2>/dev/null || true
         return 0
     fi
 
-    printf '{"task_id":"%s","state":"checking","check_exit":null,"ts":"%s"}\n' \
-        "$task_id" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$check_json" 2>/dev/null || true
+    printf '{"task_id":"%s","state":"checking","check_exit":null,"head_sha":"%s","ts":"%s"}\n' \
+        "$task_id" "$head_sha" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$check_json" 2>/dev/null || true
 
     # Resolve the check command the same order worker-listener.sh does:
     #   1. brief marker in the task file (processing/ if still parked,
@@ -5532,8 +5540,8 @@ maybe_run_check() {
     [ -z "$check_cmd" ] && check_cmd="${WORKER_CHECK_CMD:-}"
 
     if [ -z "$check_cmd" ]; then
-        printf '{"task_id":"%s","state":"skipped","check_exit":null,"ts":"%s"}\n' \
-            "$task_id" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$check_json" 2>/dev/null || true
+        printf '{"task_id":"%s","state":"skipped","check_exit":null,"head_sha":"%s","ts":"%s"}\n' \
+            "$task_id" "$head_sha" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$check_json" 2>/dev/null || true
         log_event watch.check_on_done "issue=$issue task_id=$task_id result=skipped reason=no_check_resolved"
         rmdir "$claim_dir" 2>/dev/null || true
         return 0
@@ -5543,13 +5551,13 @@ maybe_run_check() {
 
     if [ "$DRY_RUN" = "1" ]; then
         echo "[$(date +%T)] [DRY] check-on-done issue #$issue (task $task_id): $check_cmd"
-        printf '{"task_id":"%s","state":"skipped","check_exit":null,"ts":"%s"}\n' \
-            "$task_id" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$check_json" 2>/dev/null || true
+        printf '{"task_id":"%s","state":"skipped","check_exit":null,"head_sha":"%s","ts":"%s"}\n' \
+            "$task_id" "$head_sha" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$check_json" 2>/dev/null || true
         rmdir "$claim_dir" 2>/dev/null || true
         return 0
     fi
 
-    execute_check "$wt_dir" "$issue" "$task_id" "$check_cmd" "$check_json" "$claim_dir"
+    execute_check "$wt_dir" "$issue" "$task_id" "$check_cmd" "$check_json" "$claim_dir" "$head_sha"
 }
 
 # check_is_duplicate <wt_dir> <issue> <task_id> <check_json> <claim_dir> <head_file> <head_sha>
@@ -5575,8 +5583,8 @@ check_is_duplicate() {
             [ -n "$CHECK_RUNNER" ] || [ -n "$(check_pane_for_issue "$issue")" ] || return 1 ;;
         *) return 1 ;;
     esac
-    printf '{"task_id":"%s","state":"skipped","check_exit":null,"ts":"%s"}\n' \
-        "$task_id" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$check_json" 2>/dev/null || true
+    printf '{"task_id":"%s","state":"skipped","check_exit":null,"head_sha":"%s","ts":"%s"}\n' \
+        "$task_id" "$head_sha" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$check_json" 2>/dev/null || true
     log_event watch.check_on_done "issue=$issue task_id=$task_id result=skipped reason=duplicate_of_$prev_task"
     rmdir "$claim_dir" 2>/dev/null || true
     return 0
@@ -5591,21 +5599,21 @@ check_pane_for_issue() {
         | awk -v i="$1" '$2 == i { print $1; exit }'
 }
 
-# record_check_result <task_id> <issue> <check_json> <exit-code>
+# record_check_result <task_id> <issue> <check_json> <exit-code> <head_sha>
 #
 # Single place that writes the watcher-owned <task_id>.check.json + the
 # events.log line, so both the synchronous CHECK_RUNNER (test) path and
 # the real tmux path record results identically.
 record_check_result() {
-    local task_id="$1" issue="$2" check_json="$3" rc="$4"
+    local task_id="$1" issue="$2" check_json="$3" rc="$4" head_sha="$5"
     local state="pass"
     [ "$rc" -eq 0 ] || state="fail"
-    printf '{"task_id":"%s","state":"%s","check_exit":%d,"ts":"%s"}\n' \
-        "$task_id" "$state" "$rc" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$check_json" 2>/dev/null || true
+    printf '{"task_id":"%s","state":"%s","check_exit":%d,"head_sha":"%s","ts":"%s"}\n' \
+        "$task_id" "$state" "$rc" "$head_sha" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$check_json" 2>/dev/null || true
     log_event watch.check_on_done "issue=$issue task_id=$task_id result=$state check_exit=$rc"
 }
 
-# execute_check <worktree-dir> <issue> <task_id> <check-cmd> <check-json> <claim-dir>
+# execute_check <worktree-dir> <issue> <task_id> <check-cmd> <check-json> <claim-dir> <head-sha>
 #
 # Runs the resolved check (claim already taken by the caller) and records
 # the result. Two backends:
@@ -5636,6 +5644,18 @@ record_check_result() {
 #     Ctrl-C is forwarded to timeout's process group by hand, since timeout
 #     moves the check out of the tty's foreground group.
 #
+# issue #579: the output is ALSO tee'd to a second copy at
+# <worktree>/.swarm/tasks/done/<task_id>.check.log — the exact path
+# worker-listener.sh's own run_check() would have written if it had run
+# this check itself. worker-listener.sh runs sandboxed with only its own
+# worktree mounted (never this main checkout, where the first copy above
+# lives — see that script's header on why it can't reach .swarm/checks/
+# here at all), so this second copy is what lets it reuse this result's
+# output (CHECK_TAIL on a reused pass/fail) without crossing that boundary.
+# The main-checkout copy stays the durable, post-reap artifact; this one is
+# disposable, worktree-local, and only ever read by this same worktree's
+# own listener.
+#
 # issue #181: claim_dir is released (rmdir) as soon as this reaches a
 # terminal outcome — synchronously here for the CHECK_RUNNER/no-tmux/spawn-
 # failure paths, or inside the runner_script itself for the real tmux path
@@ -5644,28 +5664,33 @@ record_check_result() {
 # in flight, defer" — releasing it promptly is what lets reap proceed
 # right after the check finishes instead of waiting out the stale-claim TTL.
 execute_check() {
-    local wt_dir="$1" issue="$2" task_id="$3" check_cmd="$4" check_json="$5" claim_dir="$6"
-    local checks_dir head_file head_sha
+    local wt_dir="$1" issue="$2" task_id="$3" check_cmd="$4" check_json="$5" claim_dir="$6" head_sha="$7"
+    local checks_dir head_file
     checks_dir="$(dirname "$EVENTS_LOG")/checks"
     mkdir -p "$checks_dir" 2>/dev/null || true
     head_file="$checks_dir/issue-${issue}.head"
-    head_sha="$(git -C "$wt_dir" rev-parse HEAD 2>/dev/null || true)"
 
     check_is_duplicate "$wt_dir" "$issue" "$task_id" "$check_json" "$claim_dir" "$head_file" "$head_sha" && return 0
     [ -n "$head_sha" ] && printf '%s %s %s\n' "$head_sha" "$task_id" "$check_json" > "$head_file" 2>/dev/null
 
+    # issue #579: worker-listener.sh's reuse read (same worktree, local
+    # path — see this function's own header) always lands at this exact
+    # path, whichever backend below actually produces it.
+    local wt_log_file="$wt_dir/.swarm/tasks/done/${task_id}.check.log"
+    mkdir -p "$(dirname "$wt_log_file")" 2>/dev/null || true
+
     if [ -n "$CHECK_RUNNER" ]; then
         local rc=0
-        "$CHECK_RUNNER" "$wt_dir" "$check_cmd" || rc=$?
-        record_check_result "$task_id" "$issue" "$check_json" "$rc"
+        "$CHECK_RUNNER" "$wt_dir" "$check_cmd" > "$wt_log_file" 2>&1 || rc=$?
+        record_check_result "$task_id" "$issue" "$check_json" "$rc" "$head_sha"
         rmdir "$claim_dir" 2>/dev/null || true
         return 0
     fi
 
     if ! command -v tmux >/dev/null 2>&1 || ! tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
         log_event watch.check_on_done "issue=$issue task_id=$task_id result=skipped reason=no_tmux_session"
-        printf '{"task_id":"%s","state":"skipped","check_exit":null,"ts":"%s"}\n' \
-            "$task_id" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$check_json" 2>/dev/null || true
+        printf '{"task_id":"%s","state":"skipped","check_exit":null,"head_sha":"%s","ts":"%s"}\n' \
+            "$task_id" "$head_sha" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$check_json" 2>/dev/null || true
         rmdir "$claim_dir" 2>/dev/null || true
         return 0
     fi
@@ -5683,6 +5708,8 @@ execute_check() {
         printf 'EVENTS_LOG=%q\n'   "$EVENTS_LOG"
         printf 'TIMEOUT_SECS=%q\n' "$timeout_secs"
         printf 'LOG_FILE=%q\n'     "$log_file"
+        printf 'WT_LOG_FILE=%q\n' "$wt_log_file"
+        printf 'HEAD_SHA=%q\n'    "$head_sha"
         printf 'PASS_CLOSE_SECS=%q\n' "${CHECK_PASS_CLOSE_SECS:-10}"
         # Mirrors record_check_result's output shape exactly — see that
         # function if this drifts. Kept as inline shell (not a call back
@@ -5690,7 +5717,7 @@ execute_check() {
         cat <<'SCRIPT'
 record() {  # <state> <check_exit|null> [reason]
     local ts; ts=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
-    printf '{"task_id":"%s","state":"%s","check_exit":%s,"ts":"%s"}\n' "$TASK_ID" "$1" "$2" "$ts" > "$CHECK_JSON"
+    printf '{"task_id":"%s","state":"%s","check_exit":%s,"head_sha":"%s","ts":"%s"}\n' "$TASK_ID" "$1" "$2" "$HEAD_SHA" "$ts" > "$CHECK_JSON"
     rmdir "$CLAIM_DIR" 2>/dev/null || true
     printf '%s  %-15s %s\n' "$ts" 'watch.check_on_done' \
         "issue=$ISSUE task_id=$TASK_ID result=$1 check_exit=$2${3:+ reason=$3} log=$LOG_FILE" >> "$EVENTS_LOG"
@@ -5705,8 +5732,8 @@ trap superseded HUP TERM
 interrupted=0
 trap 'interrupted=1; [ -n "$tpid" ] && kill -INT -- "-$tpid" 2>/dev/null' INT
 
-{ echo "--- check-on-done: issue #$ISSUE (task $TASK_ID) ---"; echo "check: $CHECK_CMD"; } | tee "$LOG_FILE"
-timeout -k 30 "$TIMEOUT_SECS" bash -c "$CHECK_CMD" > >(tee -ia "$LOG_FILE") 2>&1 &
+{ echo "--- check-on-done: issue #$ISSUE (task $TASK_ID) ---"; echo "check: $CHECK_CMD"; } | tee "$LOG_FILE" "$WT_LOG_FILE"
+timeout -k 30 "$TIMEOUT_SECS" bash -c "$CHECK_CMD" > >(tee -ia "$LOG_FILE" "$WT_LOG_FILE") 2>&1 &
 tpid=$!
 rc=0; wait "$tpid" || rc=$?
 while kill -0 "$tpid" 2>/dev/null; do rc=0; wait "$tpid" || rc=$?; done
