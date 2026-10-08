@@ -120,7 +120,7 @@ run_pr_ready() {
         GH_SHA="${GH_SHA:-deadbeef}" GH_SHA_LOOKUP_FAILS="${GH_SHA_LOOKUP_FAILS:-0}" \
         GH_RUNLIST_JSON="${GH_RUNLIST_JSON:-[]}" GH_RUNLIST_RC="${GH_RUNLIST_RC:-0}" \
         GH_RUNLIST_STDERR="${GH_RUNLIST_STDERR:-}" \
-        "$PR_READY" 42 \
+        "$PR_READY" ${PR_READY_FLAGS:-} 42 \
         > "$TEST_DIR/out.log" 2>&1 || rc=$?
     return "$rc"
 }
@@ -364,6 +364,55 @@ WORKER_SELF_REVIEW_MAX_ROUNDS=3
 gh_ready_called && red "expected gh pr ready NOT to run when capped with a BLOCK latest verdict"
 grep -qi 'BLOCK' "$TEST_DIR/out.log" || red "expected a BLOCK refusal message in output: $(cat "$TEST_DIR/out.log")"
 green "hitting the round cap with BLOCK as the latest verdict still refuses to ready (does not ready unreviewed)"
+
+# ============================================================================
+heading "Test 19b: --one-more-round past the cap — runs exactly one more round, then readies"
+# ============================================================================
+printf '<!-- BLIND_MERGE_RISK: medium -->\nsome change\n' > "$BODY_FILE"
+make_fake_review 0
+GH_ROUNDS_DONE=3
+GH_LATEST_VERDICT=BLOCK
+PR_READY_FLAGS=-y
+rc=0; run_pr_ready || rc=$?
+PR_READY_FLAGS=
+GH_ROUNDS_DONE=0
+GH_LATEST_VERDICT=
+[ "$rc" -eq 0 ] || red "expected exit 0 after a fresh APPROVE round via -y, got $rc: $(cat "$TEST_DIR/out.log")"
+grep -q '42 --post --force' "$FAKE_REVIEW_LOG" || red "expected self-review invoked with -y past the cap, log: $(cat "$FAKE_REVIEW_LOG")"
+grep -q 'round 4/4' "$TEST_DIR/out.log" || red "expected 'round 4/4' in output: $(cat "$TEST_DIR/out.log")"
+gh_ready_called || red "expected gh pr ready to run after the extra round approved"
+green "-y runs one round past the cap (4/4) and readies on APPROVE"
+
+# ============================================================================
+heading "Test 19c: --one-more-round with a BLOCK result still refuses"
+# ============================================================================
+printf '<!-- BLIND_MERGE_RISK: medium -->\nsome change\n' > "$BODY_FILE"
+make_fake_review 2
+GH_ROUNDS_DONE=3
+PR_READY_FLAGS=--one-more-round
+rc=0; run_pr_ready || rc=$?
+PR_READY_FLAGS=
+GH_ROUNDS_DONE=0
+[ "$rc" -eq 2 ] || red "expected exit 2 when the extra round returns BLOCK, got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called && red "expected gh pr ready NOT to run after a BLOCK on the extra round"
+green "--one-more-round does not bypass a BLOCK verdict"
+
+# ============================================================================
+heading "Test 19d: --one-more-round does not override WORKER_SELF_REVIEW_MAX_ROUNDS=0 or an unknown flag"
+# ============================================================================
+printf '<!-- BLIND_MERGE_RISK: medium -->\nsome change\n' > "$BODY_FILE"
+make_fake_review 0
+WORKER_SELF_REVIEW_MAX_ROUNDS=0
+PR_READY_FLAGS=-y
+rc=0; run_pr_ready || rc=$?
+WORKER_SELF_REVIEW_MAX_ROUNDS=3
+[ ! -s "$FAKE_REVIEW_LOG" ] || red "expected no self-review with MAX_ROUNDS=0 even with -y, log: $(cat "$FAKE_REVIEW_LOG")"
+PR_READY_FLAGS=--bogus
+rc=0; run_pr_ready || rc=$?
+PR_READY_FLAGS=
+[ "$rc" -eq 1 ] || red "expected exit 1 for an unknown flag, got $rc"
+gh_ready_called && red "expected gh pr ready NOT to run on an unknown flag"
+green "-y leaves a cap of 0 alone; unknown flags exit 1 before touching the PR"
 
 # ============================================================================
 heading "Test 20: gh pr checks unreadable by a fine-grained token, Actions-runs fallback green — readies (issue #560)"
