@@ -144,7 +144,7 @@ log "  $DEMO_COUNT open issues labeled '$DEMO_LABEL'."
 if [ "$DEMO_COUNT" -eq 0 ]; then
     err "FATAL: no open issues labeled '$DEMO_LABEL'."
     err "  Label some demo-friendly fodder first, e.g.:"
-    err "    gh issue list --label swarm-ready --state open"
+    err "    gh issue list --state open"
     err "    gh issue edit <N> --add-label $DEMO_LABEL"
     err "  Or create fresh: gh issue create --label $DEMO_LABEL --title '...' --body '...'"
     exit 1
@@ -204,7 +204,7 @@ recording, then removed (or replaced with the repo's original policy) on exit.
 - The coordinator MUST ONLY dispatch workers to issues that are currently
   labeled \`$DEMO_LABEL\` AND in state OPEN.
 - The coordinator MUST NOT dispatch to any other issue, regardless of its
-  other labels (e.g. \`swarm-ready\`, \`good first issue\`).
+  other labels (e.g. \`good first issue\`).
 - If the coordinator chooses to create new issues inline to top up the pool,
   it MUST label them with \`$DEMO_LABEL\` so they fall under this same scope.
 
@@ -307,7 +307,7 @@ DEFAULT_PROMPT="You are operating in DEMO MODE for a screen recording.
 
 The project's .swarm-policy.md restricts you to issues labeled \`$DEMO_LABEL\`.
 Honor it strictly — do NOT dispatch issues lacking that label, even if they
-otherwise look swarm-ready.
+otherwise look ready to work on.
 
 ISSUE-GENERATION POLICY (if AVAILABLE < 3 simple \`$DEMO_LABEL\` issues):
 - Create new issues inline via \`gh issue create --label $DEMO_LABEL\`.

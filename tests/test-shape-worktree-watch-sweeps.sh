@@ -72,6 +72,7 @@ WORKSPACE="$TEST_DIR"
 EVENTS_LOG="$PROJECT_DIR/.swarm/events.log"
 COORD_INBOX_DIR="$PROJECT_DIR/.swarm/coord-inbox"
 COORD_INBOX_PROCESSED_DIR="$COORD_INBOX_DIR/processed"
+COORD_INBOX_SELF_DIR="$COORD_INBOX_DIR/.self"
 DRY_RUN=0
 # worktree_vanish_sweep_pass's since-buffer (round 6 self-review) reads
 # this directly; the real script only ever calls the function with it set.

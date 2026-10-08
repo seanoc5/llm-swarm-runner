@@ -203,7 +203,11 @@ while IFS= read -r win; do
             container_alive=1
         fi
 
-        content="$(tmux -L "$SOCKET" capture-pane -t "$SESSION:$win" -p -S "-$CAPTURE_LINES" 2>/dev/null || true)"
+        # issue #550: pane 0 explicitly — a check-on-done pane split into
+        # this window (or any other split) can be the ACTIVE pane, and a
+        # bare window target captures whichever pane is active, not the
+        # worker's Claude pane.
+        content="$(tmux -L "$SOCKET" capture-pane -t "$SESSION:$win.0" -p -S "-$CAPTURE_LINES" 2>/dev/null || true)"
         clean="$(printf '%s' "$content" | strip_ansi)"
         state="$(detect_state "$clean")"
 

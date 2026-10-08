@@ -219,7 +219,7 @@ Beyond wake-on-finish, the watcher runs several other default-on behaviors — e
 | Feature | Env var (default) | What it does |
 |---|---|---|
 | Finalized-worker autoclose | `WATCHER_AUTOCLOSE=1` | Reaps (window + worktree + branch) workers whose PR is MERGED (or MERGED/CLOSED with `WATCHER_AUTOCLOSE_MODE=finalized`) before each wake, plus a 60s poll backstop and a 1hr orphan-worktree sweep. |
-| Check-on-done | `WATCH_CHECK_ON_DONE=1` | Runs the project's acceptance check in a visible `chk-N` window the moment a worker signals done, instead of waiting for the coordinator to notice. |
+| Check-on-done | `WATCH_CHECK_ON_DONE=1` | Runs the project's acceptance check in a pane of the worker's `iss-N` window the moment it signals done. One check per issue; the pane closes on pass and stays on fail. Logs in `.swarm/checks/`. |
 | Coordinator auto-compact | `AUTO_COMPACT=1` | Injects a real `/compact` into a long-lived coordinator pane before waking it, once it's over `AUTO_COMPACT_THRESHOLD_TOKENS`. |
 | Worker auto-compact | `WORKER_AUTO_COMPACT=1` | Same idea, generalized to every idle `iss-*` worker window over threshold. |
 

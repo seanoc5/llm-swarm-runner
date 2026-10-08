@@ -114,7 +114,9 @@
 #      is given. Verdict-gated merging is a ringer-concept adoption — see
 #      docs/ringer-adoptions.md #2.
 #      Also runs scripts/migration-collision-check.sh, refusing on a
-#      duplicate Flyway version / Alembic multi-head collision unless
+#      duplicate Flyway version / Alembic multi-head collision (exit 2) or
+#      an out-of-order Flyway merge (exit 3, #556: a PR-side migration
+#      numbered below the base branch's current max) unless
 #      --override-migration-gate is given. MIGRATION_GATE=0 disables this
 #      gate entirely (default on) — see #294.
 #   3. cds to the MAIN worktree of the current repo (not the feature one).
@@ -654,6 +656,23 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
               exit 1
             fi
             echo "       $(c_amber "⚠ overriding migration collision (--override-migration-gate)")"
+            ;;
+          3)
+            # Out-of-order Flyway merge (#556): a PR-side migration numbered
+            # below the base tip's own max — no duplicate number, so this is
+            # distinct from the collision case above, but equally refused by
+            # default (the same override flag, since a project that runs
+            # Flyway with outOfOrder=true may accept it deliberately; see
+            # MIGRATION_ALLOW_OUT_OF_ORDER in migration-collision-check.sh's
+            # header for an opt-out that avoids this gate firing at all).
+            if [ "$OVERRIDE_MIGRATION_GATE" = 0 ]; then
+              echo "ERROR: PR #$PR_NUM has an out-of-order Flyway merge (a PR-side" >&2
+              echo "       migration numbered below the base branch's current max)." >&2
+              echo "       Run scripts/migration-collision-check.sh $PR_NUM for details;" >&2
+              echo "       merge with --override-migration-gate if you disagree." >&2
+              exit 1
+            fi
+            echo "       $(c_amber "⚠ overriding out-of-order Flyway merge (--override-migration-gate)")"
             ;;
           *)
             echo "ERROR: migration-collision-check.sh failed (exit $MIGRATION_RC)" >&2

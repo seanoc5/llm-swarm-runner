@@ -62,6 +62,12 @@ if [ "\$1" = "pr" ] && [ "\$2" = "view" ]; then
         else
             echo "\${GH_ROUNDS_DONE:-0}"
         fi
+    elif printf '%s\n' "\$*" | grep -q -- '--json headRefOid'; then
+        if [ "\${GH_SHA_LOOKUP_FAILS:-0}" = "1" ]; then
+            echo "gh: pr view failed" >&2
+            exit 1
+        fi
+        echo "\${GH_SHA:-deadbeef}"
     else
         cat "$BODY_FILE"
     fi
@@ -73,6 +79,11 @@ if [ "\$1" = "pr" ] && [ "\$2" = "checks" ]; then
 fi
 if [ "\$1" = "pr" ] && [ "\$2" = "ready" ]; then
     exit 0
+fi
+if [ "\$1" = "run" ] && [ "\$2" = "list" ]; then
+    [ -n "\${GH_RUNLIST_STDERR:-}" ] && echo "\$GH_RUNLIST_STDERR" >&2
+    echo "\${GH_RUNLIST_JSON:-[]}"
+    exit "\${GH_RUNLIST_RC:-0}"
 fi
 if [ "\$1" = "api" ]; then
     echo "\${GH_WORKFLOW_COUNT:-0}"
@@ -106,6 +117,9 @@ run_pr_ready() {
         GH_ROUNDS_DONE="${GH_ROUNDS_DONE:-0}" GH_LATEST_VERDICT="${GH_LATEST_VERDICT:-}" \
         GH_CHECKS_RC="${GH_CHECKS_RC:-0}" GH_CHECKS_STDERR="${GH_CHECKS_STDERR:-}" \
         GH_WORKFLOW_COUNT="${GH_WORKFLOW_COUNT:-0}" \
+        GH_SHA="${GH_SHA:-deadbeef}" GH_SHA_LOOKUP_FAILS="${GH_SHA_LOOKUP_FAILS:-0}" \
+        GH_RUNLIST_JSON="${GH_RUNLIST_JSON:-[]}" GH_RUNLIST_RC="${GH_RUNLIST_RC:-0}" \
+        GH_RUNLIST_STDERR="${GH_RUNLIST_STDERR:-}" \
         "$PR_READY" 42 \
         > "$TEST_DIR/out.log" 2>&1 || rc=$?
     return "$rc"
@@ -350,5 +364,101 @@ WORKER_SELF_REVIEW_MAX_ROUNDS=3
 gh_ready_called && red "expected gh pr ready NOT to run when capped with a BLOCK latest verdict"
 grep -qi 'BLOCK' "$TEST_DIR/out.log" || red "expected a BLOCK refusal message in output: $(cat "$TEST_DIR/out.log")"
 green "hitting the round cap with BLOCK as the latest verdict still refuses to ready (does not ready unreviewed)"
+
+# ============================================================================
+heading "Test 20: gh pr checks unreadable by a fine-grained token, Actions-runs fallback green — readies (issue #560)"
+# ============================================================================
+printf '<!-- BLIND_MERGE_RISK: low -->\nsome change\n' > "$BODY_FILE"
+make_fake_review 0
+GH_CHECKS_RC=1
+GH_CHECKS_STDERR="GraphQL: Resource not accessible by personal access token (node.statusCheckRollup.contexts.nodes)"
+GH_RUNLIST_JSON='[{"status":"completed","conclusion":"success","workflowName":"CI","createdAt":"2026-10-06T05:00:00Z"}]'
+rc=0; run_pr_ready || rc=$?
+GH_CHECKS_RC=0
+GH_CHECKS_STDERR=""
+GH_RUNLIST_JSON="[]"
+[ "$rc" -eq 0 ] || red "expected exit 0 once the Actions-runs fallback sees a green run, got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called || red "expected gh pr ready to run once the fallback confirms green"
+grep -qi 'via Actions-runs fallback' "$TEST_DIR/out.log" || red "expected the output to name the fallback path: $(cat "$TEST_DIR/out.log")"
+green "a token-permission error on gh pr checks falls back to Actions runs and readies on green"
+
+# ============================================================================
+heading "Test 21: token error, Actions-runs fallback sees a failing run — refuses (exit 4), gh pr ready NEVER runs"
+# ============================================================================
+printf '<!-- BLIND_MERGE_RISK: low -->\nsome change\n' > "$BODY_FILE"
+make_fake_review 0
+GH_CHECKS_RC=1
+GH_CHECKS_STDERR="GraphQL: Resource not accessible by personal access token (node.statusCheckRollup.contexts.nodes)"
+GH_RUNLIST_JSON='[{"status":"completed","conclusion":"failure","workflowName":"CI","createdAt":"2026-10-06T05:00:00Z"}]'
+rc=0; run_pr_ready || rc=$?
+GH_CHECKS_RC=0
+GH_CHECKS_STDERR=""
+GH_RUNLIST_JSON="[]"
+[ "$rc" -eq 4 ] || red "expected exit 4 when the fallback sees a failing run, got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called && red "expected gh pr ready NOT to run when the fallback sees a failing run"
+grep -qi 'failing CI checks (via Actions-runs fallback)' "$TEST_DIR/out.log" || red "expected a fallback-specific failing-CI message: $(cat "$TEST_DIR/out.log")"
+green "token error + a failing run via the fallback refuses to ready, same exit as a confirmed red (4)"
+
+# ============================================================================
+heading "Test 22: token error, Actions-runs fallback itself can't decide — refuses with a DISTINCT exit (5), not 'failing CI checks'"
+# ============================================================================
+printf '<!-- BLIND_MERGE_RISK: low -->\nsome change\n' > "$BODY_FILE"
+make_fake_review 0
+GH_CHECKS_RC=1
+GH_CHECKS_STDERR="GraphQL: Resource not accessible by personal access token (node.statusCheckRollup.contexts.nodes)"
+GH_RUNLIST_RC=1
+rc=0; run_pr_ready || rc=$?
+GH_CHECKS_RC=0
+GH_CHECKS_STDERR=""
+GH_RUNLIST_RC=0
+[ "$rc" -eq 5 ] || red "expected a distinct exit 5 when the fallback can't decide either, got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called && red "expected gh pr ready NOT to run when CI status can't be determined at all"
+grep -qi "can't read CI status" "$TEST_DIR/out.log" || red "expected a 'can't read CI status' message, distinct from 'failing CI checks': $(cat "$TEST_DIR/out.log")"
+grep -qi 'failing CI checks' "$TEST_DIR/out.log" && red "must NOT reuse the 'failing CI checks' wording when the status is merely unknown: $(cat "$TEST_DIR/out.log")"
+green "an undecidable fallback (gh run list itself fails) refuses with a distinct 'can't read CI status' exit, never misread as failing CI"
+
+# ============================================================================
+heading "Test 23: token error, can't even resolve the head SHA — refuses with the distinct exit (5)"
+# ============================================================================
+printf '<!-- BLIND_MERGE_RISK: low -->\nsome change\n' > "$BODY_FILE"
+make_fake_review 0
+GH_CHECKS_RC=1
+GH_CHECKS_STDERR="GraphQL: Resource not accessible by personal access token (node.statusCheckRollup.contexts.nodes)"
+GH_SHA_LOOKUP_FAILS=1
+rc=0; run_pr_ready || rc=$?
+GH_CHECKS_RC=0
+GH_CHECKS_STDERR=""
+GH_SHA_LOOKUP_FAILS=0
+[ "$rc" -eq 5 ] || red "expected exit 5 when the head SHA itself can't be resolved, got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called && red "expected gh pr ready NOT to run when the head SHA can't be resolved"
+grep -qi "can't read CI status" "$TEST_DIR/out.log" || red "expected a 'can't read CI status' message: $(cat "$TEST_DIR/out.log")"
+green "a failed head-SHA lookup for the fallback also refuses with the distinct exit, not a crash"
+
+# ============================================================================
+heading "Test 24: token error, Actions-runs fallback given valid-JSON-but-non-array input — fails closed (exit 5), never reaches gh pr ready"
+# ============================================================================
+# Self-review finding on this PR: pr-ready's `case "$CI_FALLBACK_STATE"` had
+# no `*)` branch, so an unrecognized state would silently fall through to
+# `gh pr ready` instead of refusing. In practice ci_fallback_run_state's own
+# jq query only ever produces pass/fail/pending for valid ARRAY input (this
+# test's `{}` is valid JSON but not an array, so jq's group_by errors out
+# and the function returns non-zero — the same "fallback also failed" path
+# Test 22 covers, just via a different malformed-input shape). The `*)`
+# branch itself stays defensively unreachable through this black-box
+# harness; what's verified here is that malformed fallback output of any
+# kind still fails closed rather than readying.
+printf '<!-- BLIND_MERGE_RISK: low -->\nsome change\n' > "$BODY_FILE"
+make_fake_review 0
+GH_CHECKS_RC=1
+GH_CHECKS_STDERR="GraphQL: Resource not accessible by personal access token (node.statusCheckRollup.contexts.nodes)"
+GH_RUNLIST_JSON='{}'
+rc=0; run_pr_ready || rc=$?
+GH_CHECKS_RC=0
+GH_CHECKS_STDERR=""
+GH_RUNLIST_JSON="[]"
+[ "$rc" -eq 5 ] || red "expected exit 5 for malformed (non-array) fallback JSON, got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called && red "expected gh pr ready NOT to run on malformed fallback JSON (must fail closed)"
+grep -qi "can't read CI status" "$TEST_DIR/out.log" || red "expected a 'can't read CI status' message: $(cat "$TEST_DIR/out.log")"
+green "valid-JSON-but-non-array fallback output fails closed instead of readying"
 
 green "ALL TESTS PASSED"

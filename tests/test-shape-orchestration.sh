@@ -92,6 +92,9 @@ case "\${1:-}" in
     capture-pane)
         win=""; prev=""
         for a in "\$@"; do [ "\$prev" = "-t" ] && win="\${a##*:}"; prev="\$a"; done
+        # issue #550: callers now target pane 0 explicitly (window.0) —
+        # strip that suffix to resolve back to the plain fixture name.
+        win="\${win%.0}"
         [ -f "$TEST_DIR/tmux-pane-\$win.txt" ] && cat "$TEST_DIR/tmux-pane-\$win.txt"
         exit 0 ;;
     list-panes)

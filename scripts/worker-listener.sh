@@ -71,6 +71,29 @@
 #   with WORKER_CHECK_RETRY=0). The first attempt's check output is kept at
 #   done/<id>.check.attempt1.log and the outcome JSON records retried: true.
 #
+#   issue #579: before running $CHECK_CMD, the listener first looks for a
+#   check-on-done result (coordinator-watch.sh's execute_check, run from the
+#   watcher the moment this same task's status file went ready-for-review)
+#   already recorded for this exact task_id against this exact commit, at
+#   .swarm/tasks/status/<task_id>.check.json (worktree-local — both sides
+#   write/read it without crossing the worker's sandbox boundary; the
+#   watcher never gets a path into the main checkout's own .swarm/checks/
+#   mirrored back to the listener, so reuse is keyed off this worktree-local
+#   file, not that one). A `pass`/`fail` recorded against the current HEAD is
+#   reused outright (no second $CHECK_CMD run in this worktree); `checking`
+#   (still in flight) is waited out, bounded by WORKER_CHECK_TIMEOUT, then
+#   reused; `skipped`, a HEAD mismatch (new commits landed since), or no
+#   file at all falls through to running the check exactly as before. A
+#   reused `fail` still drives retry-once like a fresh one. See
+#   try_reuse_check_on_done() below. When there is nothing to reuse, the
+#   check still doesn't run unconditionally: run_check_claimed() first
+#   mkdir's the same <task_id>.check-claim directory maybe_run_check() uses,
+#   so a watcher poll landing moments later sees the claim and backs off
+#   instead of starting its own concurrent run — closing the half of this
+#   race try_reuse_check_on_done() alone can't (the listener getting there
+#   first). Losing that claim (the watcher already got there first) falls
+#   back into try_reuse_check_on_done()'s own wait-and-reuse loop.
+#
 # Minimum-interaction floor (issue #287, claude agent only):
 #   An agent exit code of 0 is not proof the agent ever ran the task — an
 #   interactive startup dialog (corrupt config, trust prompt, login screen;
@@ -256,6 +279,47 @@ echo "Legacy:   $LEGACY_TASK_FILE (v1, still supported)"
 
 NOTE
 echo "------------------------------"
+
+# reap_stale_processing_entries (issue #559)
+#
+# A processing/<id>.md whose outcome ALREADY exists in done/<id>.{ok,err}.json
+# means some earlier mv of the brief itself into done/ silently failed (both
+# task-done.sh's own move and this script's own fallback mv right before
+# write_outcome tolerate a missing source with `|| true`, so a genuinely
+# failed destination write — e.g. a transient done/ permission or disk
+# issue — leaves the stale .md behind with no error surfaced anywhere).
+# Nothing else ever revisits processing/ once its outcome is recorded, so
+# a stale entry here sits forever: worker_current_task_terminal() in
+# coordinator-watch.sh treats a non-empty processing/ as "task still in
+# flight" (by design — see its own header comment), permanently wedging
+# WORKER_AUTO_DELIVER/WORKER_AUTO_COMPACT for this window even though the
+# task genuinely finished. Checked once per main-loop iteration (every
+# claim_next_task poll) rather than only right after write_outcome, so an
+# entry stranded by an OLDER, already-restarted listener process also
+# self-heals rather than needing a human to notice and move it by hand.
+#
+# The mv itself can keep failing (the same persistent done/ permission or
+# disk problem that stranded the entry in the first place) — REAP_WARNED
+# below keyed by task_id makes that failure path log once, with the actual
+# error, instead of flooding stderr with the same line every poll tick
+# forever.
+declare -A REAP_WARNED=()
+reap_stale_processing_entries() {
+    local f task_id mv_err
+    for f in "$PROCESSING"/*.md; do
+        [ -e "$f" ] || continue
+        task_id="$(basename "$f" .md)"
+        if [ -e "$DONE/${task_id}.ok.json" ] || [ -e "$DONE/${task_id}.err.json" ]; then
+            if mv_err="$(mv "$f" "$DONE/${task_id}.md" 2>&1)"; then
+                echo "[$(date +%T)] WARNING: processing/$(basename "$f") had an outcome already recorded in done/ (task_id=$task_id) but was never moved out of processing/ — moved it to done/${task_id}.md." >&2
+                unset "REAP_WARNED[$task_id]"
+            elif [ -z "${REAP_WARNED[$task_id]:-}" ]; then
+                REAP_WARNED[$task_id]=1
+                echo "[$(date +%T)] WARNING: processing/$(basename "$f") has an outcome already recorded in done/ (task_id=$task_id) but moving it out of processing/ failed and will keep being retried silently: $mv_err" >&2
+            fi
+        fi
+    done
+}
 
 # Returns the path of the next task to process, or empty if none.
 # Sets globals: TASK_PATH (where the brief now lives, after claim),
@@ -468,6 +532,118 @@ resolve_check_cmd() {
     fi
     # 3. listener-wide env default
     CHECK_CMD="${WORKER_CHECK_CMD:-}"
+}
+
+# json_str_field <path> <field> — extracts a "field":"value" scalar string
+# from a single-line JSON file without requiring jq. Mirrors
+# coordinator-watch.sh's own check_json_state() (same sed trick, same
+# single-line-record assumption) so both sides agree on the format with no
+# shared library and no new hard dependency.
+json_str_field() {
+    sed -n "s/.*\"$2\":\"\([^\"]*\)\".*/\1/p" "$1" 2>/dev/null | head -1
+}
+
+# json_num_field <path> <field> — a bare number field; echoes "" for `null`
+# (or anything else unparseable), matching CHECK_EXIT's own "" = not run
+# convention used throughout this file.
+json_num_field() {
+    sed -n "s/.*\"$2\":\([0-9-][0-9]*\).*/\1/p" "$1" 2>/dev/null | head -1
+}
+
+# try_reuse_check_on_done (issue #579) — see the "Executed acceptance
+# checks" header above for the full rationale. Looks for
+# .swarm/tasks/status/<task_id>.check.json (coordinator-watch.sh's
+# check-on-done result for THIS task_id), and reuses it when it was run
+# against the exact commit this worktree is at right now instead of
+# starting a second, concurrent $CHECK_CMD in the same worktree (the
+# corpusminder #1043 incident this issue documents: a redundant run that
+# corrupts build/ and stalls delivery).
+#
+# On success (a terminal pass/fail recorded for the current HEAD), sets
+# CHECK_EXIT/CHECK_TAIL exactly as run_check() would and returns 0 — the
+# caller skips calling run_check() entirely. Returns 1 (nothing usable;
+# caller must run_check() as normal) when: no check.json for this task_id
+# and no check-claim either, its state is "skipped", the HEAD it was run
+# against no longer matches (new commits landed since — the retry-once
+# path always hits this), or the claim never clears within
+# WORKER_CHECK_TIMEOUT (gives up waiting rather than blocking forever).
+try_reuse_check_on_done() {
+    CHECK_EXIT=""
+    CHECK_TAIL=""
+    local check_json="$STATUS/${TASK_ID}.check.json"
+    local claim_dir="$STATUS/${TASK_ID}.check-claim"
+    [ -f "$check_json" ] || [ -d "$claim_dir" ] || return 1
+
+    local current_head waited=0
+    current_head="$(git rev-parse HEAD 2>/dev/null || true)"
+    [ -n "$current_head" ] || return 1
+
+    # issue #579 self-review finding: wait out an ACTIVE claim purely on
+    # the claim dir's presence, not on whether its check.json (if any yet
+    # exists at all — the narrow window right after mkdir, before the
+    # "checking" write lands) matches our current HEAD. A mismatch here
+    # doesn't mean "nothing to reuse, safe to run fresh right now" — it can
+    # mean the watcher is mid-run against an OLDER commit (the agent
+    # committed again after going ready-for-review), and running our own
+    # check concurrently would hit the exact same build/ resources that run
+    # is using right now: corpusminder #1043's actual failure mode. Only
+    # once the claim clears do we know it's safe to either reuse (if its
+    # result does match current HEAD) or run fresh ourselves (nothing else
+    # is using the worktree any more).
+    while [ -d "$claim_dir" ]; do
+        [ "$waited" -lt "$CHECK_TIMEOUT" ] || return 1
+        sleep 2
+        waited=$((waited + 2))
+    done
+
+    [ -f "$check_json" ] || return 1
+    local state head_sha
+    state="$(json_str_field "$check_json" state)"
+    head_sha="$(json_str_field "$check_json" head_sha)"
+    [ -n "$head_sha" ] && [ "$head_sha" = "$current_head" ] || return 1
+    case "$state" in
+        pass|fail) ;;
+        *) return 1 ;;   # skipped, a stale "checking" left by a crashed run, or unrecognized
+    esac
+
+    CHECK_EXIT="$(json_num_field "$check_json" check_exit)"
+    [ -n "$CHECK_EXIT" ] || return 1   # malformed record (pass/fail must carry an exit code) — don't trust it
+    local check_log="$DONE/${TASK_ID}.check.log"
+    [ -r "$check_log" ] && CHECK_TAIL=$(tail -n 20 "$check_log" 2>/dev/null)
+    echo "[$(date +%T)] worker.check.reused task_id=$TASK_ID state=$state check_exit=$CHECK_EXIT head_sha=${current_head:0:12} — check-on-done already ran this commit; not re-running: $CHECK_CMD"
+    return 0
+}
+
+# run_check_claimed (issue #579 self-review finding) — try_reuse_check_on_done()
+# alone only covers the watcher starting first: if THIS listener reaches its
+# check before coordinator-watch.sh's next poll does, nothing stopped that
+# poll from independently claiming and running the same $CHECK_CMD a moment
+# later, the exact duplicate-run race this issue exists to close. Wraps
+# run_check() in the same worktree-local <task_id>.check-claim mkdir lock
+# maybe_run_check() uses, so whichever side gets there first is visible to
+# the other: winning it means run_check() proceeds (recording "checking",
+# then the real pass/fail, under the same task_id.check.json path/schema the
+# watcher writes, so a racing poll backs off via its own check_json_state()
+# read); losing it means the watcher already owns this check, so this falls
+# into try_reuse_check_on_done()'s wait-and-reuse loop instead of running a
+# second time.
+run_check_claimed() {
+    [ -n "$CHECK_CMD" ] || { run_check; return; }
+    local claim_dir="$STATUS/${TASK_ID}.check-claim"
+    if ! mkdir "$claim_dir" 2>/dev/null; then
+        try_reuse_check_on_done || run_check
+        return
+    fi
+    local head_sha check_json="$STATUS/${TASK_ID}.check.json"
+    head_sha="$(git rev-parse HEAD 2>/dev/null || true)"
+    printf '{"task_id":"%s","state":"checking","check_exit":null,"head_sha":"%s","ts":"%s"}\n' \
+        "$TASK_ID" "$head_sha" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$check_json" 2>/dev/null || true
+    run_check
+    local state=pass
+    [ "$CHECK_EXIT" -eq 0 ] 2>/dev/null || state=fail
+    printf '{"task_id":"%s","state":"%s","check_exit":%s,"head_sha":"%s","ts":"%s"}\n' \
+        "$TASK_ID" "$state" "$CHECK_EXIT" "$head_sha" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$check_json" 2>/dev/null || true
+    rmdir "$claim_dir" 2>/dev/null || true
 }
 
 # Run $CHECK_CMD (if any). Sets CHECK_EXIT ("" = check not run) and
@@ -963,6 +1139,61 @@ poll_for_brief() {
     done
 }
 
+# check_claim_active — is a check-on-done run (coordinator-watch.sh's
+# execute_check) genuinely still running for this worktree right now? A
+# check command's own process lives in a PANE split into this same
+# window (issue #561), not this listener — so if this listener's own
+# pane (index 0) exits cleanly while that check is still mid-run, tmux
+# renumbers the still-alive check pane down into slot 0 the instant pane
+# 0 is destroyed, and every
+# pane_dead(head -1) reader in the codebase (provision-worker.sh's
+# reclaim guard, has_live_window_draining_brief, check-stuck-workers.sh)
+# reads that genuinely-running check command as a live worker until it
+# finishes. Same claim-dir ground truth kill-worktree.sh's reap-defer
+# path (issue #181) already uses for the identical "real or abandoned"
+# question — a stale claim (crashed check, nothing left to ever release
+# it) must not block a close forever.
+mtime_epoch() {
+    stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
+}
+
+check_claim_active() {
+    local stale_secs="${CHECK_CLAIM_STALE_SECS:-$((CHECK_TIMEOUT + 300))}"
+    local claim mtime age
+    for claim in "$STATUS"/*.check-claim; do
+        [ -d "$claim" ] || continue
+        mtime="$(mtime_epoch "$claim")" || continue
+        age=$(( $(date +%s) - mtime ))
+        [ "$age" -lt "$stale_secs" ] && return 0
+    done
+    return 1
+}
+
+# close_window_and_exit — a plain `exit 0` here only destroys THIS pane.
+# When the worker's own pane was the only pane in its window, that was
+# enough — destroying it destroyed the window too. Now that a
+# check-on-done run can share this same window as a second pane (issue
+# #561, execute_check() in coordinator-watch.sh splits a pane into iss-N
+# rather than always opening a separate window), a check pane that has
+# already exited (passed and not yet reaped, or a crashed run) is still
+# in the window and survives this pane's exit — tmux just renumbers it
+# down into slot 0, and the window stays open holding only that dead
+# pane. It then reads as a DEAD-PANE to check-stuck-workers.sh and keeps
+# counting toward MAX_TMUX_WINDOWS until something else notices it, which
+# contradicts the "window will close" message both call sites below print.
+# Killing the whole window explicitly (not just this pane) makes that
+# promise true unconditionally, whatever else is left in it. No-op outside
+# tmux (unset $TMUX_PANE — e.g. this file's own FIFO-driven test, which
+# has no real tmux at all).
+close_window_and_exit() {
+    if [ -n "${TMUX_PANE:-}" ]; then
+        local win_id
+        win_id="$(tmux display-message -p -t "$TMUX_PANE" -F '#{window_id}' 2>/dev/null)"
+        [ -n "$win_id" ] && tmux kill-window -t "$win_id" 2>/dev/null
+    fi
+    exit 0
+}
+
 run_idle_shell() {
     rm -f "$IDLE_SENTINEL"
     poll_for_brief &
@@ -1038,15 +1269,48 @@ EOF
     wait "$poll_pid" 2>/dev/null
 
     # `close-worker` or the double-Ctrl-C trap ran in the idle shell: end
-    # the listener process itself, which closes the tmux window (same
-    # clean-exit contract as the reaped-worktree guard in the main loop).
+    # the listener process and explicitly close the whole tmux window
+    # (close_window_and_exit, round 14 — a bare `exit` here would only
+    # destroy this pane, not any check pane sharing the window with it).
+    # The reaped-worktree guard further down exits plainly instead,
+    # because kill-worktree.sh already closed the window itself from
+    # outside before deleting the worktree out from under this process.
     # The worktree is deliberately left in place — it may hold unpushed or
     # untracked material; clean it up host-side with kill-worktree.sh when
     # genuinely done with it.
     if [ -f "$CLOSE_SENTINEL" ]; then
+        # issue #555 self-review round 13: wait out a genuinely still-
+        # running check (see check_claim_active above) before actually
+        # exiting — this already-exited idle shell, not an interactive
+        # one, so this just pauses the listener process itself, with the
+        # pane showing the wait message.
+        #
+        # self-review finding on PR #566: this script has no INT/TERM
+        # trap of its own at this point (the one set earlier only runs
+        # inside the inner `bash --rcfile ... -i` subshell, already
+        # exited by now) — an impatient Ctrl-C during this wait would hit
+        # bash's default disposition and kill the process outright,
+        # skipping close_window_and_exit below and leaving exactly the
+        # dead-pane-survives-and-gets-renumbered window this function
+        # exists to prevent. Since the only thing left to do past this
+        # point either way is close the window, trap INT/TERM to just do
+        # that immediately instead of waiting out the rest of the sleep.
+        #
+        # sleep backgrounded + waited on, not a plain foreground `sleep 5`:
+        # bash only runs a trap once the command it's synchronously waiting
+        # on completes, so a plain foreground sleep would swallow the
+        # signal for up to 5s instead of reacting to it right away. `wait`
+        # on an async child returns the moment the signal arrives, letting
+        # the trap run immediately instead.
+        trap close_window_and_exit INT TERM
+        while check_claim_active; do
+            echo "[$(date +%T)] close requested, but $WT_LABEL's check-on-done is still running — waiting for it to finish before closing."
+            sleep 5 & wait $!
+        done
+        trap - INT TERM
         rm -f "$CLOSE_SENTINEL"
         echo "[$(date +%T)] close requested: listener exiting — window will close. Worktree $WT_LABEL/ is left intact (remove later with kill-worktree.sh)."
-        exit 0
+        close_window_and_exit
     fi
 
     # Double-Ctrl-D close: this was already a respawned shell (not the first
@@ -1058,8 +1322,17 @@ EOF
         local pending
         pending=$(find "$INBOX" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | head -1)
         if [ -z "$pending" ]; then
+            # Same Ctrl-C-during-the-wait guard as the close-worker branch
+            # above — see that one's comment for why, including the
+            # backgrounded sleep.
+            trap close_window_and_exit INT TERM
+            while check_claim_active; do
+                echo "[$(date +%T)] double exit requested, but $WT_LABEL's check-on-done is still running — waiting for it to finish before closing."
+                sleep 5 & wait $!
+            done
+            trap - INT TERM
             echo "[$(date +%T)] double exit: listener exiting — window will close. Worktree $WT_LABEL/ is left intact (remove later with kill-worktree.sh)."
-            exit 0
+            close_window_and_exit
         fi
     fi
 }
@@ -1074,6 +1347,8 @@ while true; do
         echo "[$(date +%T)] Worktree $WT_LABEL appears reaped (inbox or cwd missing). Listener exiting cleanly."
         exit 0
     fi
+
+    reap_stale_processing_entries
 
     if claim_next_task; then
         echo "[$(date +%T)] Task received! id=$TASK_ID$([ "$IS_LEGACY" = "1" ] && echo " (v1 legacy)")"
@@ -1162,7 +1437,13 @@ while true; do
         RETRIED=false
         if [ "$IS_LEGACY" != "1" ]; then
             resolve_check_cmd
-            run_check
+            # issue #579: reuse coordinator-watch.sh's check-on-done result
+            # for this task_id/commit instead of running a second, redundant
+            # $CHECK_CMD in this worktree — see try_reuse_check_on_done()'s
+            # own header and the "Executed acceptance checks" section above.
+            if [ -z "$CHECK_CMD" ] || ! try_reuse_check_on_done; then
+                run_check_claimed
+            fi
             if [ -n "$CHECK_EXIT" ] && [ "$CHECK_EXIT" -ne 0 ] && [ "$CHECK_RETRY" = "1" ]; then
                 echo "[$(date +%T)] Check failed — retrying once with failure output injected."
                 mv "$DONE/${TASK_ID}.check.log" "$DONE/${TASK_ID}.check.attempt1.log" 2>/dev/null || true
@@ -1202,7 +1483,7 @@ $TASK"
                 RETRIED=true
                 dispatch_agent "$RETRY_TASK"
                 RC=$DISPATCH_RC
-                run_check
+                run_check_claimed
             fi
         fi
 

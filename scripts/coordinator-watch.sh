@@ -549,6 +549,39 @@
 #                           items to coord-inbox/processed/). Not itself
 #                           overridable — derived from PROJECT_DIR, same as
 #                           COORD_WAKE_PENDING_FILE.
+#                           (issue #461) Both backends also watch this
+#                           directory itself (inotify: a case arm on the
+#                           same recursive $WORKSPACE watch, plus a
+#                           startup drain before it attaches; poll: its
+#                           own scan_inbox_drops/dispatch_inbox_drops,
+#                           re-run every tick with no baseline — see that
+#                           function's header for why it is deliberately
+#                           NOT folded into scan_outcomes), dispatching
+#                           any *.md arrival through on_inbox_drop. Before
+#                           this fix, a file written here by something
+#                           OTHER than this watcher's own coord_inbox_write
+#                           calls — a util-pane driver script dropping a
+#                           done-note, the sanctioned no-polling way to
+#                           signal completion into the inbox — triggered no
+#                           dispatch path at all, so it could sit unnoticed
+#                           indefinitely if no unrelated outcome/outbox/
+#                           activity wake happened to also fire (observed:
+#                           2h23m, coordinator idle with zero workers).
+#                           on_inbox_drop runs the same debounce/hold-gate/
+#                           llm-start path as on_outcome/on_message/
+#                           on_activity the first time it sees a given
+#                           file; for a file one of THOSE just wrote (they
+#                           always land here too), or one it already
+#                           decided on an earlier pass while the note sat
+#                           still unprocessed, it instead no-ops via the
+#                           COORD_INBOX_SELF_DIR marker — see on_inbox_
+#                           drop's own header comment for why that
+#                           marker, not a timing assumption about the
+#                           shared debounce clock, is what keeps this from
+#                           racing the original caller's own retry/ceiling
+#                           handling for the same wake, and from
+#                           redeciding the same still-pending note on
+#                           every later tick.
 #   COORD_INBOX_NUDGE_TEMPLATE=(built-in)
 #                           (issue #430) The ONE-LINE doorbell text pasted
 #                           into the coordinator's composer once the wake is
@@ -701,7 +734,8 @@
 #                           path no-ops), resolves the same acceptance check
 #                           worker-listener.sh would (brief marker ->
 #                           .swarm/check.sh -> WORKER_CHECK_CMD) and runs it
-#                           once in a visible tmux window `chk-N`, recording
+#                           once in a visible tmux pane (issue #561: split into
+#                           iss-N, chk-N window fallback, one per issue), recording
 #                           the result to `<id>.check.json` and events.log.
 #                           (issue #181) If the PR is already MERGED/CLOSED
 #                           by the time the claim is won, the check is
@@ -764,7 +798,9 @@
 #                           instead of spawning a real tmux window. Lets tests
 #                           exercise the claim/resolve/record logic without a
 #                           live tmux session.
-#   SESSION_NAME=<name>     tmux session check-on-done spawns chk-N windows
+#   CHECK_PASS_CLOSE_SECS=10 (issue #561) seconds a passing check pane stays
+#                           visible before closing itself.
+#   SESSION_NAME=<name>     tmux session check-on-done spawns check panes
 #                           in. Default: llm-$(basename PROJECT_DIR), matching
 #                           kill-finished-workers.sh / provision-worker.sh.
 #   WATCHER_QUIET=0         (issue #38) Set to 1 to suppress the human-
@@ -1592,6 +1628,20 @@
 #                           against one window (e.g. a non-claude agent, or
 #                           a composer that never clears) doesn't retry every
 #                           sweep forever.
+#   WORKER_DELIVER_SHELL_STALL_THRESHOLD=20
+#                           (issue #559) A window parked "shell" (worker-
+#                           listener.sh's own idle bash loop, issue #43) is
+#                           assumed to self-heal onto a pending brief on its
+#                           own — but only once something redraws that bash
+#                           prompt. A session parked there fully unattended
+#                           never gets a redraw, so the brief can sit
+#                           invisibly forever. This many consecutive sweeps
+#                           with the SAME brief still pending in that state
+#                           escalates once (worker.deliver.shell_stall +
+#                           coord_inbox_write) rather than ever injecting a
+#                           keystroke to force the redraw — there is no
+#                           reliable way to confirm an arbitrary shell's
+#                           input line is actually empty first.
 #   COMPACT_QUEUED_MARKER_PATTERN
 #   COMPACT_RETRACT_BACKSPACES=12
 #                           (issue #265) Shared by BOTH the coordinator and
@@ -2300,6 +2350,18 @@ EVENTS LOG
                            on the coordinator's next wake instead of aging silently behind
                            routine .skip lines; the streak resets (and can re-escalate) if a
                            DIFFERENT brief starts pending for this window
+      worker.deliver.shell_stall  (issue #559) same shape as worker.deliver.composer_stalled
+                           just above, for a window parked "shell" (worker-listener.sh's own
+                           idle bash loop, issue #43) instead of "cli": WORKER_DELIVER_SHELL_
+                           STALL_THRESHOLD sweeps have found the SAME brief still pending in
+                           inbox/ with the pane sitting idle (issue, brief=<inbox filename>,
+                           skips=N). "shell" is normally self-healing on its own the moment
+                           anything redraws that bash prompt, so maybe_worker_deliver_brief logs
+                           no per-sweep .skip for it at all (unlike composer_not_clear) and never
+                           injects a keystroke to force that redraw (no reliable way to confirm
+                           the shell's own input line is empty) — this WARNING plus its durable
+                           coord_inbox_write is the entire fix: a human who attaches and presses
+                           Enter (or runs anything) lets issue #43's self-heal finish the job.
       worker.listener.selfheal  (issue #506) worker-listener.sh's own ordinary self-heal
                            path claimed a queued v2 brief on its own — an idle listener, or
                            one draining several queued briefs back-to-back — and is about
@@ -2596,6 +2658,26 @@ WORKER_DELIVER_MAX_FAILURES="${WORKER_DELIVER_MAX_FAILURES:-3}"
 # closes: reason=composer_not_clear skips never touch WORKER_DELIVER_
 # BACKOFF_SECS/MAX_FAILURES above at all, so they need their own counter.
 WORKER_DELIVER_COMPOSER_STALL_THRESHOLD="${WORKER_DELIVER_COMPOSER_STALL_THRESHOLD:-20}"
+# issue #559 — a window whose pane reads "shell" (worker-listener.sh's own
+# idle bash loop, issue #43) is normally self-healing: poll_for_brief
+# touches a sentinel within ~2s of a brief landing, and the NEXT drawn
+# bash prompt's PROMPT_COMMAND claims it. But that redraw only happens on
+# an actual keypress/command in the pane — a session that parks there
+# fully unattended (no human, nothing else touching that pane) never gets
+# a redraw, so the self-heal never fires and maybe_worker_deliver_brief
+# previously skipped "shell" windows unconditionally (see its own header
+# comment) with no escalation at all: a SAMlytics brief sat in inbox/ for
+# ~12h with zero worker.deliver.* events. This script deliberately never
+# sends a keystroke into that shell (an idle bash prompt can hold a
+# human's unsubmitted, unverifiable command line — unlike the composer-
+# clear checks above, there is no reliable content-based way to confirm
+# the line is genuinely empty), so it only escalates, same shape as
+# WORKER_DELIVER_COMPOSER_STALL_THRESHOLD: this many consecutive sweeps
+# with the SAME brief still pending while "shell" before worker_deliver_
+# record_shell_stall logs one worker.deliver.shell_stall and writes a
+# coord-inbox stall item. At the shared WORKER_COMPACT_SCAN_SECS cadence
+# (default 30s) the default below bounds the stall to ~10 minutes.
+WORKER_DELIVER_SHELL_STALL_THRESHOLD="${WORKER_DELIVER_SHELL_STALL_THRESHOLD:-20}"
 # issue #265 — shared between the coordinator and per-window retraction
 # paths; see this file's COMPACT_QUEUED_MARKER_PATTERN header comment above.
 COMPACT_QUEUED_MARKER_PATTERN="${COMPACT_QUEUED_MARKER_PATTERN:-Press up to edit queued messages}"
@@ -2869,6 +2951,33 @@ fi
 # regenerable one-liner (coord_inbox_nudge_text), not the payload itself.
 COORD_INBOX_DIR="$PROJECT_DIR/.swarm/coord-inbox"
 COORD_INBOX_PROCESSED_DIR="$COORD_INBOX_DIR/processed"
+# COORD_INBOX_SELF_DIR (issue #461): a per-file ".self" marker meaning "a
+# wake decision has already been made for this exact filename" — one made
+# either by coord_inbox_write() right as it writes the file (on_outcome/
+# on_message/on_activity/the sweeps already run their own debounce/
+# hold-gate/wake decision immediately after writing), or by on_inbox_drop
+# itself the first time it sees a file nothing else decided for (a note
+# dropped directly into COORD_INBOX_DIR by something other than this
+# watcher — the actual gap this issue closes). Either way the marker stops
+# a later re-scan (run_poll's dispatch_inbox_drops re-lists every
+# unarchived note on every POLL_SECS tick — see scan_inbox_drops' header
+# for why it carries no baseline of its own) from redeciding the same
+# still-pending file over and over. ".self" (not ".md") so a marker can
+# never itself be mistaken for a new inbox item by any *.md scan. See
+# coord_inbox_write's and on_inbox_drop's own comments for why a registry,
+# not a timing assumption, is what makes the self-written case safe too:
+# the natural guess — rely on wake_debounced() seeing the clock the
+# original caller just set — only holds at the default DEBOUNCE_SECS=30;
+# at DEBOUNCE_SECS=0 (several of this file's own tests, deliberately, for
+# determinism) nothing stops on_inbox_drop from re-deciding the same wake
+# a second time through a different code path, racing coord_wake_hold_
+# retry_pass/coord_wake_retry_pass for who actually delivers it. The
+# marker's presence alone isn't quite enough, though (self-review round 4):
+# a producer that reuses a fixed filename for a second, later note would
+# otherwise be swallowed forever by the first note's leftover marker, so
+# on_inbox_drop also compares mtimes (mtime_epoch) and treats a note newer
+# than its own marker as a fresh arrival rather than an already-decided one.
+COORD_INBOX_SELF_DIR="$COORD_INBOX_DIR/.self"
 
 # COORD_INBOX_NUDGE_TEMPLATE: the fixed, short doorbell text — "%N" is
 # substituted with the live coord-inbox/*.md count at paste time (never
@@ -3170,6 +3279,7 @@ format_event_line() {
         worker.deliver.retract_skip)            glyph="·"; color=$'\033[2m'  ;;
         worker.deliver.giving_up)                  glyph="⚠"; color=$'\033[31m' ;;
         worker.deliver.composer_stalled)   glyph="⚠"; color=$'\033[31m' ;;
+        worker.deliver.shell_stall)      glyph="⚠"; color=$'\033[31m' ;;
         worker.listener.selfheal)        glyph="◐"; color=$'\033[36m' ;;
         worker.listener.selfheal.skip)      glyph="·"; color=$'\033[2m'  ;;
         watch.autoclose)               glyph="♻"; color=$'\033[36m' ;;
@@ -3328,6 +3438,7 @@ WORKER_COMPACT_TIMER_PID=""
 AUTO_COMPACT_POLL_TIMER_PID=""
 STALE_CHECK_PID=""
 STALL_WAKE_TIMER_PID=""
+POLL_SLEEP_PID=""
 seen_file=""
 cleanup_on_exit() {
     [ -n "${WATCH_TIMER_PID:-}" ] && kill "$WATCH_TIMER_PID" 2>/dev/null || true
@@ -3335,6 +3446,9 @@ cleanup_on_exit() {
     [ -n "${AUTO_COMPACT_POLL_TIMER_PID:-}" ] && kill "$AUTO_COMPACT_POLL_TIMER_PID" 2>/dev/null || true
     [ -n "${STALE_CHECK_PID:-}" ] && kill "$STALE_CHECK_PID" 2>/dev/null || true
     [ -n "${STALL_WAKE_TIMER_PID:-}" ] && kill "$STALL_WAKE_TIMER_PID" 2>/dev/null || true
+    # run_poll's own backgrounded sleep (issues #570/#571) — only set while
+    # a tick is actually asleep, so this is a no-op the rest of the time.
+    [ -n "${POLL_SLEEP_PID:-}" ] && kill "$POLL_SLEEP_PID" 2>/dev/null || true
     # WATCHER_ECHO_PID is the `while read` reader — the last stage of the
     # `tail | while` pipeline, and the only PID $! gives us for it. `tail`
     # itself is a separate direct child of this script (pipeline stages
@@ -3363,7 +3477,28 @@ cleanup_on_exit() {
     # forever, exactly the failure mode issue #296 exists to close.
     [ -n "${seen_file:-}" ] && rm -f -- "$seen_file" || true
 }
-trap cleanup_on_exit EXIT INT TERM
+trap cleanup_on_exit EXIT
+# INT/TERM get their own trap, calling exit explicitly, rather than
+# sharing the bare `cleanup_on_exit` binding above (self-review on
+# issues #570/#571): a trap that returns without exiting just resumes
+# wherever the signal interrupted it — fine for the sleep window (#570's
+# fix there relies on `wait`'s interrupted-by-signal return tripping this
+# script's own `set -e` instead), but a TERM/INT landing while a tick is
+# scanning (dispatch_claims/scan_outcomes, not sleeping) would otherwise
+# get silently absorbed: cleanup_on_exit still kills the other timer
+# PIDs, but the main loop just continues on to its next tick rather than
+# exiting. An explicit `exit` closes that gap unconditionally — 130 for
+# INT and 143 for TERM, the conventional 128+signal codes (self-review:
+# a single shared `exit 143` for both would make a Ctrl-C'd watcher
+# report the wrong signal to anything checking its exit status). This
+# also means cleanup_on_exit runs a second time via the EXIT trap this
+# exit itself triggers — new to this script, but harmless, since every
+# kill in it is already a no-op on an already-dead PID. (Not the same as
+# watcher_check_staleness below, which calls cleanup_on_exit once and
+# then SIGKILLs — SIGKILL skips traps entirely, so that path never
+# re-enters cleanup_on_exit a second time.)
+trap 'cleanup_on_exit; exit 130' INT
+trap 'cleanup_on_exit; exit 143' TERM
 
 # Shared state
 # issue #459: the outcome and outbox-message doorbell clocks were separate
@@ -3837,20 +3972,19 @@ watcher_is_stale() {
 # elsewhere in this file).
 #
 # Uses SIGKILL, not SIGTERM — deliberately, after a code-review-caught bug
-# in an earlier version of this function proved SIGTERM insufficient here.
-# This script installs `trap cleanup_on_exit EXIT INT TERM` (near the top),
-# and cleanup_on_exit — by design also reused as the plain graceful-
-# shutdown EXIT trap — never calls `exit` itself. Empirically verified
-# (both in a plain bash job and in a real tmux pane): a caught SIGTERM with
-# no `exit` in its handler just runs the trap and resumes whatever was
-# interrupted — the poll backend's bare `while true` loop doesn't even
-# notice its `sleep` was cut short, so it keeps looping past a SIGTERM
-# indefinitely; only the inotify backend's incidental child-death cascade
-# (killing `inotifywait` closes its pipe, ending the `while read` loop
-# naturally) happened to make manual Ctrl-C look like it worked, backend-
-# dependently and by accident. SIGKILL cannot be caught, blocked, or
-# ignored by anyone, so it's the only signal that reliably guarantees
-# termination regardless of backend or trap state. The GROUP form (`-$$`)
+# in an earlier version of this function proved a caught SIGTERM
+# insufficient here. At the time, this script installed a single
+# `trap cleanup_on_exit EXIT INT TERM` (near the top), and cleanup_on_exit
+# — by design also reused as the plain graceful-shutdown EXIT trap — never
+# called `exit` itself, so a caught SIGTERM just ran the trap and resumed
+# whatever was interrupted; the poll backend's bare `while true` loop
+# didn't even notice its `sleep` was cut short. Issues #570/#571 split that
+# into a plain `trap cleanup_on_exit EXIT` plus separate INT/TERM traps
+# that call `exit` explicitly, so a caught SIGTERM now does reliably exit.
+# SIGKILL is kept here anyway, for reasons independent of that history: it
+# cannot be caught, blocked, or ignored, so this path keeps working even
+# if a future edit to the INT/TERM trap reintroduces a no-exit gap, and it
+# lets the GROUP form below (`-$$`)
 # additionally reaps whichever foreground child (sleep/find/inotifywait) is
 # currently blocking run_poll/run_inotify in the same shot, rather than
 # orphaning it; the direct-PID form right after is a redundant, harmless
@@ -4863,18 +4997,15 @@ stranded_brief_sweep_pass() {
 # run_watch_timer_loop like orphan_sweep_pass, not its own dedicated
 # background process.
 #
-# Known gap, shared with coordinator_pane_state/coordinator_pane_busy below
-# (pre-existing, not introduced here): `capture-pane -t "$SESSION_NAME:$win"`
-# with no pane index captures the window's ACTIVE pane. If the coordinator
-# window ever gets split with the new pane left active — demo-driver.sh's
-# Beat 6 (`tail -F .swarm/events.log`) does exactly this — this sweep (like
-# every other coordinator-pane probe in this file) is scanning that split
-# pane, not the actual claude coordinator pane, until focus returns. A real
-# coordinator violation during that window would go undetected until the
-# split pane loses focus, not just risk a false positive (the embedded
-# self-match-guard token above handles the false-positive side of that same
-# scenario). Fixing this for every coordinator-pane probe at once (pin
-# `coordinator.0`, or iterate `list-panes`) is out of scope for #385.
+# issue #550: every coordinator/worker-pane probe and injection in this
+# file now targets pane index 0 explicitly (`$win.0` / `coordinator.0`)
+# instead of a bare window — a bare window target captures/sends to
+# whichever pane is currently ACTIVE, which a split pane (demo-driver.sh's
+# Beat 6 `tail -F .swarm/events.log`, a Ctrl-Z scratch pane, or — the
+# motivating case — a check-on-done pane now living inside `iss-N`) can
+# steal. Pane 0 is the Claude pane for the life of the window; only
+# split-window-added panes (always index >= 1, never -b'd before it) share
+# the window with it.
 bg_violation_sweep_pass() {
     tmux has-session -t "$SESSION_NAME" 2>/dev/null || return 0
 
@@ -4900,7 +5031,7 @@ bg_violation_sweep_pass() {
             wt_dir="$(own_wt_dir_for_issue "$issue")" || continue
         fi
 
-        content="$(tmux capture-pane -t "$SESSION_NAME:$win" -p -S -200 2>/dev/null)" || continue
+        content="$(tmux capture-pane -t "$SESSION_NAME:$win.0" -p -S -200 2>/dev/null)" || continue
         clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
         # `-n` (line-numbered) + `-o` (match-only) gives "N:matched-text"
         # per hit, one per line — every candidate is needed (not just the
@@ -5075,7 +5206,7 @@ timeout_retry_sweep_pass() {
         [[ "$issue" =~ ^[0-9]+$ ]] || continue
         wt_dir="$(own_wt_dir_for_issue "$issue")" || continue
 
-        content="$(tmux capture-pane -t "$SESSION_NAME:$win" -p -S -200 2>/dev/null)" || continue
+        content="$(tmux capture-pane -t "$SESSION_NAME:$win.0" -p -S -200 2>/dev/null)" || continue
         clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
         # `-n` (line-numbered) + `-o` (match-only), like
         # bg_violation_sweep_pass, so each candidate's own line number is
@@ -5348,6 +5479,14 @@ maybe_run_check() {
     fi
     [ -n "$task_id" ] || task_id="pr-issue-$issue"
 
+    # issue #579: recorded alongside every check.json state below so
+    # worker-listener.sh's try_reuse_check_on_done() (worktree-local,
+    # doesn't cross the sandbox boundary into this main checkout) can tell
+    # "this result is for the exact commit I'm at right now" from "a new
+    # commit landed since" without needing anything outside the worktree.
+    local head_sha
+    head_sha="$(git -C "$wt_dir" rev-parse HEAD 2>/dev/null || true)"
+
     local check_json="$status_dir/${task_id}.check.json"
     if [ -f "$check_json" ]; then
         case "$(check_json_state "$check_json")" in
@@ -5374,15 +5513,15 @@ maybe_run_check() {
     local pr_state
     pr_state="$(pr_state_for_worktree "$wt_dir" "$issue")"
     if [ "$pr_state" = "MERGED" ] || [ "$pr_state" = "CLOSED" ]; then
-        printf '{"task_id":"%s","state":"skipped","check_exit":null,"ts":"%s"}\n' \
-            "$task_id" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$check_json" 2>/dev/null || true
+        printf '{"task_id":"%s","state":"skipped","check_exit":null,"head_sha":"%s","ts":"%s"}\n' \
+            "$task_id" "$head_sha" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$check_json" 2>/dev/null || true
         log_event watch.check_on_done "issue=$issue task_id=$task_id result=skipped reason=pr_terminal_$pr_state"
         rmdir "$claim_dir" 2>/dev/null || true
         return 0
     fi
 
-    printf '{"task_id":"%s","state":"checking","check_exit":null,"ts":"%s"}\n' \
-        "$task_id" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$check_json" 2>/dev/null || true
+    printf '{"task_id":"%s","state":"checking","check_exit":null,"head_sha":"%s","ts":"%s"}\n' \
+        "$task_id" "$head_sha" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$check_json" 2>/dev/null || true
 
     # Resolve the check command the same order worker-listener.sh does:
     #   1. brief marker in the task file (processing/ if still parked,
@@ -5401,8 +5540,8 @@ maybe_run_check() {
     [ -z "$check_cmd" ] && check_cmd="${WORKER_CHECK_CMD:-}"
 
     if [ -z "$check_cmd" ]; then
-        printf '{"task_id":"%s","state":"skipped","check_exit":null,"ts":"%s"}\n' \
-            "$task_id" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$check_json" 2>/dev/null || true
+        printf '{"task_id":"%s","state":"skipped","check_exit":null,"head_sha":"%s","ts":"%s"}\n' \
+            "$task_id" "$head_sha" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$check_json" 2>/dev/null || true
         log_event watch.check_on_done "issue=$issue task_id=$task_id result=skipped reason=no_check_resolved"
         rmdir "$claim_dir" 2>/dev/null || true
         return 0
@@ -5412,46 +5551,110 @@ maybe_run_check() {
 
     if [ "$DRY_RUN" = "1" ]; then
         echo "[$(date +%T)] [DRY] check-on-done issue #$issue (task $task_id): $check_cmd"
-        printf '{"task_id":"%s","state":"skipped","check_exit":null,"ts":"%s"}\n' \
-            "$task_id" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$check_json" 2>/dev/null || true
+        printf '{"task_id":"%s","state":"skipped","check_exit":null,"head_sha":"%s","ts":"%s"}\n' \
+            "$task_id" "$head_sha" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$check_json" 2>/dev/null || true
         rmdir "$claim_dir" 2>/dev/null || true
         return 0
     fi
 
-    execute_check "$wt_dir" "$issue" "$task_id" "$check_cmd" "$check_json" "$claim_dir"
+    execute_check "$wt_dir" "$issue" "$task_id" "$check_cmd" "$check_json" "$claim_dir" "$head_sha"
 }
 
-# record_check_result <task_id> <issue> <check_json> <exit-code>
+# check_is_duplicate <wt_dir> <issue> <task_id> <check_json> <claim_dir> <head_file> <head_sha>
+#
+# issue #561: one completion reaches maybe_run_check under several task_ids
+# (pr-issue-N from the PR backstop, the worker's own status file, each rework
+# round's timestamped id), and each id wins its own claim. Keyed on the
+# worktree's HEAD instead: if the last check started for this issue was for
+# the same commit and is still running or already resolved pass/fail, this
+# one is a duplicate — record it as skipped and release the claim. A
+# superseded run records "skipped" too, so it never blocks a re-check.
+# Returns 0 if it was a duplicate (and fully handled), 1 otherwise.
+check_is_duplicate() {
+    local issue="$2" task_id="$3" check_json="$4" claim_dir="$5" head_file="$6" head_sha="$7"
+    [ -n "$head_sha" ] && [ -r "$head_file" ] || return 1
+    local prev_sha prev_task prev_json
+    read -r prev_sha prev_task prev_json < "$head_file" || return 1
+    [ "$prev_sha" = "$head_sha" ] && [ "$prev_task" != "$task_id" ] || return 1
+    case "$(check_json_state "$prev_json")" in
+        pass|fail) ;;
+        checking)
+            # Only a live run counts — a crashed one must not block forever.
+            [ -n "$CHECK_RUNNER" ] || [ -n "$(check_pane_for_issue "$issue")" ] || return 1 ;;
+        *) return 1 ;;
+    esac
+    printf '{"task_id":"%s","state":"skipped","check_exit":null,"head_sha":"%s","ts":"%s"}\n' \
+        "$task_id" "$head_sha" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$check_json" 2>/dev/null || true
+    log_event watch.check_on_done "issue=$issue task_id=$task_id result=skipped reason=duplicate_of_$prev_task"
+    rmdir "$claim_dir" 2>/dev/null || true
+    return 0
+}
+
+# check_pane_for_issue <issue>
+#
+# issue #561: echoes the pane id of this issue's check pane (tagged with the
+# @swarm_chk_issue pane option when created), or nothing.
+check_pane_for_issue() {
+    tmux list-panes -s -t "$SESSION_NAME" -F '#{pane_id} #{@swarm_chk_issue}' 2>/dev/null \
+        | awk -v i="$1" '$2 == i { print $1; exit }'
+}
+
+# record_check_result <task_id> <issue> <check_json> <exit-code> <head_sha>
 #
 # Single place that writes the watcher-owned <task_id>.check.json + the
 # events.log line, so both the synchronous CHECK_RUNNER (test) path and
 # the real tmux path record results identically.
 record_check_result() {
-    local task_id="$1" issue="$2" check_json="$3" rc="$4"
+    local task_id="$1" issue="$2" check_json="$3" rc="$4" head_sha="$5"
     local state="pass"
     [ "$rc" -eq 0 ] || state="fail"
-    printf '{"task_id":"%s","state":"%s","check_exit":%d,"ts":"%s"}\n' \
-        "$task_id" "$state" "$rc" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$check_json" 2>/dev/null || true
+    printf '{"task_id":"%s","state":"%s","check_exit":%d,"head_sha":"%s","ts":"%s"}\n' \
+        "$task_id" "$state" "$rc" "$head_sha" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$check_json" 2>/dev/null || true
     log_event watch.check_on_done "issue=$issue task_id=$task_id result=$state check_exit=$rc"
 }
 
-# execute_check <worktree-dir> <issue> <task_id> <check-cmd> <check-json> <claim-dir>
+# execute_check <worktree-dir> <issue> <task_id> <check-cmd> <check-json> <claim-dir> <head-sha>
 #
-# Runs the resolved check exactly once (claim already taken by the caller)
-# and records the result. Two backends:
+# Runs the resolved check (claim already taken by the caller) and records
+# the result. Two backends:
 #   - CHECK_RUNNER set (tests): synchronous — run "$CHECK_RUNNER <worktree>
 #     <check_cmd>", record the result immediately via record_check_result.
 #     No tmux dependency.
-#   - default: spawn a visible tmux window `chk-N` (mirrors provision-worker.sh's
-#     `iss-N` windows) so the operator can watch/scroll back the run. check_cmd
-#     is free-form text (from a SWARM_CHECK marker, .swarm/check.sh, or
-#     WORKER_CHECK_CMD) — rather than interpolate it into a `tmux ... bash -c
-#     "..."` string (a stray single quote would break, or worse, the nested
-#     shell), we write a small standalone script and hand tmux its path. Each
-#     dynamic value is written as its own `NAME=%q` assignment (printf %q
-#     shell-quotes it correctly regardless of content); the rest of the
-#     script is a literal heredoc ('SCRIPT' — unexpanded by this shell) that
-#     just references those variables normally.
+#   - default: run in a visible tmux pane. check_cmd is free-form text (from
+#     a SWARM_CHECK marker, .swarm/check.sh, or WORKER_CHECK_CMD) — rather
+#     than interpolate it into a `tmux ... bash -c "..."` string (a stray
+#     single quote would break, or worse, the nested shell), we write a small
+#     standalone script and hand tmux its path. Each dynamic value is written
+#     as its own `NAME=%q` assignment (printf %q shell-quotes it correctly
+#     regardless of content); the rest of the script is a literal heredoc
+#     ('SCRIPT' — unexpanded by this shell) that just references those
+#     variables normally.
+#
+# issue #561: one check pane per issue, never a pile of chk-N windows.
+#   - Duplicate done-signals for the same HEAD are skipped (check_is_duplicate).
+#   - The pane is split into the worker's iss-N window (chk-N window only if
+#     that's gone), tagged @swarm_chk_issue, and reused: a newer check for
+#     the same issue respawns it, killing the older run (which records itself
+#     as skipped/superseded). Concurrent same-worktree Gradle runs used to
+#     corrupt each other's build/ and hang.
+#   - Pass closes the pane after a short pause; fail/timeout/Ctrl-C keeps it.
+#     Full output is tee'd to .swarm/checks/ in the main checkout, so it
+#     outlives both the pane and the worktree.
+#   - timeout -k: the Gradle client ignored SIGTERM and hung for 13h.
+#     Ctrl-C is forwarded to timeout's process group by hand, since timeout
+#     moves the check out of the tty's foreground group.
+#
+# issue #579: the output is ALSO tee'd to a second copy at
+# <worktree>/.swarm/tasks/done/<task_id>.check.log — the exact path
+# worker-listener.sh's own run_check() would have written if it had run
+# this check itself. worker-listener.sh runs sandboxed with only its own
+# worktree mounted (never this main checkout, where the first copy above
+# lives — see that script's header on why it can't reach .swarm/checks/
+# here at all), so this second copy is what lets it reuse this result's
+# output (CHECK_TAIL on a reused pass/fail) without crossing that boundary.
+# The main-checkout copy stays the durable, post-reap artifact; this one is
+# disposable, worktree-local, and only ever read by this same worktree's
+# own listener.
 #
 # issue #181: claim_dir is released (rmdir) as soon as this reaches a
 # terminal outcome — synchronously here for the CHECK_RUNNER/no-tmux/spawn-
@@ -5461,27 +5664,40 @@ record_check_result() {
 # in flight, defer" — releasing it promptly is what lets reap proceed
 # right after the check finishes instead of waiting out the stale-claim TTL.
 execute_check() {
-    local wt_dir="$1" issue="$2" task_id="$3" check_cmd="$4" check_json="$5" claim_dir="$6"
+    local wt_dir="$1" issue="$2" task_id="$3" check_cmd="$4" check_json="$5" claim_dir="$6" head_sha="$7"
+    local checks_dir head_file
+    checks_dir="$(dirname "$EVENTS_LOG")/checks"
+    mkdir -p "$checks_dir" 2>/dev/null || true
+    head_file="$checks_dir/issue-${issue}.head"
+
+    check_is_duplicate "$wt_dir" "$issue" "$task_id" "$check_json" "$claim_dir" "$head_file" "$head_sha" && return 0
+    [ -n "$head_sha" ] && printf '%s %s %s\n' "$head_sha" "$task_id" "$check_json" > "$head_file" 2>/dev/null
+
+    # issue #579: worker-listener.sh's reuse read (same worktree, local
+    # path — see this function's own header) always lands at this exact
+    # path, whichever backend below actually produces it.
+    local wt_log_file="$wt_dir/.swarm/tasks/done/${task_id}.check.log"
+    mkdir -p "$(dirname "$wt_log_file")" 2>/dev/null || true
 
     if [ -n "$CHECK_RUNNER" ]; then
         local rc=0
-        "$CHECK_RUNNER" "$wt_dir" "$check_cmd" || rc=$?
-        record_check_result "$task_id" "$issue" "$check_json" "$rc"
+        "$CHECK_RUNNER" "$wt_dir" "$check_cmd" > "$wt_log_file" 2>&1 || rc=$?
+        record_check_result "$task_id" "$issue" "$check_json" "$rc" "$head_sha"
         rmdir "$claim_dir" 2>/dev/null || true
         return 0
     fi
 
     if ! command -v tmux >/dev/null 2>&1 || ! tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
         log_event watch.check_on_done "issue=$issue task_id=$task_id result=skipped reason=no_tmux_session"
-        printf '{"task_id":"%s","state":"skipped","check_exit":null,"ts":"%s"}\n' \
-            "$task_id" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$check_json" 2>/dev/null || true
+        printf '{"task_id":"%s","state":"skipped","check_exit":null,"head_sha":"%s","ts":"%s"}\n' \
+            "$task_id" "$head_sha" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$check_json" 2>/dev/null || true
         rmdir "$claim_dir" 2>/dev/null || true
         return 0
     fi
 
-    local win="chk-$issue"
     local timeout_secs="${WORKER_CHECK_TIMEOUT:-600}"
     local runner_script="$wt_dir/.swarm/tasks/status/${task_id}.check-run.sh"
+    local log_file="$checks_dir/issue-${issue}-${task_id}.log"
     {
         printf '#!/usr/bin/env bash\n'
         printf 'ISSUE=%q\n'        "$issue"
@@ -5491,27 +5707,79 @@ execute_check() {
         printf 'CLAIM_DIR=%q\n'    "$claim_dir"
         printf 'EVENTS_LOG=%q\n'   "$EVENTS_LOG"
         printf 'TIMEOUT_SECS=%q\n' "$timeout_secs"
+        printf 'LOG_FILE=%q\n'     "$log_file"
+        printf 'WT_LOG_FILE=%q\n' "$wt_log_file"
+        printf 'HEAD_SHA=%q\n'    "$head_sha"
+        printf 'PASS_CLOSE_SECS=%q\n' "${CHECK_PASS_CLOSE_SECS:-10}"
         # Mirrors record_check_result's output shape exactly — see that
         # function if this drifts. Kept as inline shell (not a call back
         # into this script) because this runs as a separate tmux process.
         cat <<'SCRIPT'
-echo "--- check-on-done: issue #$ISSUE (task $TASK_ID) ---"
-echo "check: $CHECK_CMD"
-timeout "$TIMEOUT_SECS" bash -c "$CHECK_CMD"
-rc=$?
-state=pass; [ "$rc" -eq 0 ] || state=fail
-ts=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
-printf '{"task_id":"%s","state":"%s","check_exit":%d,"ts":"%s"}\n' "$TASK_ID" "$state" "$rc" "$ts" > "$CHECK_JSON"
-rmdir "$CLAIM_DIR" 2>/dev/null || true
-printf '%s  %-15s %s\n' "$ts" 'watch.check_on_done' "issue=$ISSUE task_id=$TASK_ID result=$state check_exit=$rc" >> "$EVENTS_LOG"
-echo "--- check $state (exit $rc) — this window stays open for review ---"
+record() {  # <state> <check_exit|null> [reason]
+    local ts; ts=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+    printf '{"task_id":"%s","state":"%s","check_exit":%s,"head_sha":"%s","ts":"%s"}\n' "$TASK_ID" "$1" "$2" "$HEAD_SHA" "$ts" > "$CHECK_JSON"
+    rmdir "$CLAIM_DIR" 2>/dev/null || true
+    printf '%s  %-15s %s\n' "$ts" 'watch.check_on_done' \
+        "issue=$ISSUE task_id=$TASK_ID result=$1 check_exit=$2${3:+ reason=$3} log=$LOG_FILE" >> "$EVENTS_LOG"
+}
+tpid=""
+superseded() {  # pane respawned for a newer check, or killed with its window
+    [ -n "$tpid" ] && kill -KILL -- "-$tpid" 2>/dev/null
+    record skipped null superseded
+    exit 0
+}
+trap superseded HUP TERM
+interrupted=0
+trap 'interrupted=1; [ -n "$tpid" ] && kill -INT -- "-$tpid" 2>/dev/null' INT
+
+{ echo "--- check-on-done: issue #$ISSUE (task $TASK_ID) ---"; echo "check: $CHECK_CMD"; } | tee "$LOG_FILE" "$WT_LOG_FILE"
+timeout -k 30 "$TIMEOUT_SECS" bash -c "$CHECK_CMD" > >(tee -ia "$LOG_FILE" "$WT_LOG_FILE") 2>&1 &
+tpid=$!
+rc=0; wait "$tpid" || rc=$?
+while kill -0 "$tpid" 2>/dev/null; do rc=0; wait "$tpid" || rc=$?; done
+tpid=""
+
+reason=""
+[ "$interrupted" = 1 ] && reason=interrupted
+case "$rc" in 124|137) [ -z "$reason" ] && reason=timeout_${TIMEOUT_SECS}s ;; esac
+if [ "$rc" -eq 0 ] && [ -z "$reason" ]; then
+    trap - HUP TERM
+    record pass 0
+    echo "--- check pass — this pane closes in ${PASS_CLOSE_SECS}s. Log: $LOG_FILE ---"
+    sleep "$PASS_CLOSE_SECS"
+    exit 0
+fi
+[ "$rc" -eq 0 ] && rc=130
+record fail "$rc" "$reason"
+echo "--- check FAILED (exit $rc${reason:+, $reason}) — pane kept for review; Ctrl-D closes it. Log: $LOG_FILE ---"
+trap - HUP TERM INT
 exec bash
 SCRIPT
     } > "$runner_script" 2>/dev/null
     chmod +x "$runner_script" 2>/dev/null
 
-    tmux new-window -d -t "$SESSION_NAME" -n "$win" -c "$wt_dir" bash "$runner_script" 2>/dev/null \
-        || { log_event watch.check_on_done.error "issue=$issue task_id=$task_id reason=tmux_new_window_failed"; rmdir "$claim_dir" 2>/dev/null || true; }
+    local pane how
+    pane="$(check_pane_for_issue "$issue")"
+    if [ -n "$pane" ]; then
+        how="reused"
+        tmux respawn-pane -k -t "$pane" -c "$wt_dir" bash "$runner_script" 2>/dev/null || pane=""
+    elif tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx "iss-$issue"; then
+        how="split"
+        pane="$(tmux split-window -d -v -l 35% -t "$SESSION_NAME:iss-$issue" -c "$wt_dir" \
+                    -P -F '#{pane_id}' bash "$runner_script" 2>/dev/null)" || pane=""
+    else
+        how="window"
+        pane="$(tmux new-window -d -t "$SESSION_NAME" -n "chk-$issue" -c "$wt_dir" \
+                    -P -F '#{pane_id}' bash "$runner_script" 2>/dev/null)" || pane=""
+    fi
+    if [ -z "$pane" ]; then
+        log_event watch.check_on_done.error "issue=$issue task_id=$task_id reason=tmux_${how}_failed"
+        rmdir "$claim_dir" 2>/dev/null || true
+        return 0
+    fi
+    tmux set-option -p -t "$pane" @swarm_chk_issue "$issue" 2>/dev/null || true
+    tmux select-pane -t "$pane" -T "chk #$issue" 2>/dev/null || true
+    log_event watch.check_on_done "issue=$issue task_id=$task_id result=started pane=$how log=$log_file"
 }
 
 # run_watch_timer_loop
@@ -5709,7 +5977,7 @@ coordinator_pane_state() {
 # bash's here-string handling under a UTF-8 locale.
 coordinator_pane_busy() {
     local content clean
-    content="$(tmux capture-pane -t "$SESSION_NAME:coordinator" -p 2>/dev/null)" || return 1
+    content="$(tmux capture-pane -t "$SESSION_NAME:coordinator.0" -p 2>/dev/null)" || return 1
     clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
     printf '%s\n' "$clean" | LC_ALL=C grep -qE "$AUTO_COMPACT_BUSY_PATTERN"
 }
@@ -6171,7 +6439,7 @@ maybe_auto_compact() {
         tmp_compact=$(mktemp) || { log_event coord.compact.skip "reason=mktemp_failed trigger=$trigger"; exit 0; }
         printf '/compact' > "$tmp_compact" 2>/dev/null || true
         tmux load-buffer -b llm-coord-autocompact "$tmp_compact" 2>/dev/null || true
-        tmux paste-buffer -b llm-coord-autocompact -t "$SESSION_NAME:coordinator" -d 2>/dev/null || true
+        tmux paste-buffer -b llm-coord-autocompact -t "$SESSION_NAME:coordinator.0" -d 2>/dev/null || true
         rm -f "$tmp_compact" 2>/dev/null || true
 
         # issue #290: pasting text that starts with "/" opens the CLI's
@@ -6189,11 +6457,11 @@ maybe_auto_compact() {
         # before falling through to the start-wait loop below (which still
         # owns the authoritative timeout either way).
         sleep "$COMPACT_SUBMIT_SETTLE_SECS"
-        tmux send-keys -t "$SESSION_NAME:coordinator" Enter 2>/dev/null || true
+        tmux send-keys -t "$SESSION_NAME:coordinator.0" Enter 2>/dev/null || true
         sleep "$COMPACT_SUBMIT_SETTLE_SECS"
-        if ! compact_confirm_submitted "$SESSION_NAME:coordinator" "$AUTO_COMPACT_BUSY_PATTERN" "/compact"; then
+        if ! compact_confirm_submitted "$SESSION_NAME:coordinator.0" "$AUTO_COMPACT_BUSY_PATTERN" "/compact"; then
             log_event coord.compact.resubmit "trigger=$trigger"
-            tmux send-keys -t "$SESSION_NAME:coordinator" Enter 2>/dev/null || true
+            tmux send-keys -t "$SESSION_NAME:coordinator.0" Enter 2>/dev/null || true
         fi
 
         # Wait for compaction to actually start (busy indicator appears) —
@@ -6214,10 +6482,10 @@ maybe_auto_compact() {
                 # /compact was delivered to the model as a plain chat message
                 # rather than executed as a slash command — see this file's
                 # COMPACT_REPLAY_PATTERN header comment for the full forensics.
-                if compact_composer_clear "$SESSION_NAME:coordinator"; then
+                if compact_composer_clear "$SESSION_NAME:coordinator.0"; then
                     log_event coord.compact.delivered_as_text "trigger=$trigger"
                 else
-                    compact_retract_queued "$SESSION_NAME:coordinator" coord.compact "trigger=$trigger" "$AUTO_COMPACT_BUSY_PATTERN" || true
+                    compact_retract_queued "$SESSION_NAME:coordinator.0" coord.compact "trigger=$trigger" "$AUTO_COMPACT_BUSY_PATTERN" || true
                 fi
                 exit 0
             fi
@@ -6271,7 +6539,7 @@ maybe_auto_compact() {
         while [ "$verify_waited" -lt "$AUTO_COMPACT_VERIFY_TIMEOUT_SECS" ]; do
             sleep "$AUTO_COMPACT_POLL_SECS"
             verify_waited=$((verify_waited + AUTO_COMPACT_POLL_SECS))
-            if compact_replay_detected "$SESSION_NAME:coordinator"; then
+            if compact_replay_detected "$SESSION_NAME:coordinator.0"; then
                 replayed=1
             fi
             probe_mtime_after=$(mtime_epoch "$AUTO_COMPACT_PROBE" 2>/dev/null) || probe_mtime_after=0
@@ -6409,7 +6677,7 @@ worker_pane_state() {
 # check-stuck-workers.sh's detect_state(), parameterized by window.
 worker_pane_busy() {
     local win="$1" content clean
-    content="$(tmux capture-pane -t "$SESSION_NAME:$win" -p 2>/dev/null)" || return 1
+    content="$(tmux capture-pane -t "$SESSION_NAME:$win.0" -p 2>/dev/null)" || return 1
     clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
     printf '%s\n' "$clean" | LC_ALL=C grep -qE "$WORKER_COMPACT_BUSY_PATTERN"
 }
@@ -6432,7 +6700,7 @@ worker_pane_busy() {
 # closed, same fail-open-to-skip contract as probe_ctx_used.
 worker_pane_ctx_used() {
     local win="$1" content clean line
-    content="$(tmux capture-pane -t "$SESSION_NAME:$win" -p 2>/dev/null)" || return 1
+    content="$(tmux capture-pane -t "$SESSION_NAME:$win.0" -p 2>/dev/null)" || return 1
     clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
     # tail -1: if the pattern somehow appears more than once in the visible
     # screen (shouldn't normally happen — the statusline is one line — but
@@ -6463,7 +6731,7 @@ worker_pane_ctx_used() {
 # worker_pane_busy()/worker_pane_ctx_used() already follow in this file.
 worker_pane_ctx_window() {
     local win="$1" content clean line
-    content="$(tmux capture-pane -t "$SESSION_NAME:$win" -p 2>/dev/null)" || return 1
+    content="$(tmux capture-pane -t "$SESSION_NAME:$win.0" -p 2>/dev/null)" || return 1
     clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
     line="$(printf '%s\n' "$clean" | LC_ALL=C grep -oE 'ctx: [0-9]+[kM]?/[0-9]+[kM]?[[:space:]]*\([0-9]+%\)' | tail -1)"
     [ -n "$line" ] || return 1
@@ -6613,7 +6881,7 @@ worker_task_done() {
     fi
 
     local content clean
-    content="$(tmux capture-pane -t "$SESSION_NAME:$win" -p 2>/dev/null)" || return 1
+    content="$(tmux capture-pane -t "$SESSION_NAME:$win.0" -p 2>/dev/null)" || return 1
     clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
     # Anchored on the literal completion-block line shape from
     # worker-listener.sh's print_completion_block() — "  TASK COMPLETE    exit=0    duration=42s"
@@ -6979,6 +7247,54 @@ worker_deliver_record_composer_stall() {
     fi
 }
 
+# WORKER_DELIVER_SHELL_STALL_BRIEF / _COUNT / _ESCALATED (issue #559)
+#
+# Same shape as WORKER_DELIVER_COMPOSER_STALL_BRIEF/_COUNT/_ESCALATED above,
+# for the OTHER parked state maybe_worker_deliver_brief sees: "shell"
+# (worker-listener.sh's own idle bash loop, issue #43), which it otherwise
+# ignores entirely on the assumption that issue #43's own self-heal will
+# claim any pending brief on its own. That assumption only holds while
+# something eventually redraws the pane's bash prompt (a keypress, a
+# command) — a fully unattended session parked at that prompt never gets
+# one, so the self-heal never fires and nothing else ever notices (the
+# 2026-10-06 SAMlytics incident this issue documents: ~12h, zero
+# worker.deliver.* events). In-memory only, reset on a watcher restart,
+# same contract as every other WORKER_DELIVER_* tracker.
+declare -A WORKER_DELIVER_SHELL_STALL_BRIEF=()
+declare -A WORKER_DELIVER_SHELL_STALL_COUNT=()
+declare -A WORKER_DELIVER_SHELL_STALL_ESCALATED=()
+
+# worker_deliver_record_shell_stall <issue> <brief>
+#
+# Called by maybe_worker_deliver_brief on every sweep that finds a window
+# parked "shell" with <brief> still sitting in inbox/. Same reset-on-new-
+# brief, escalate-once-at-threshold shape as worker_deliver_record_
+# composer_stall — see that function's header comment — but deliberately
+# never attempts anything more than logging+escalating: unlike a stuck
+# composer, there is no reliable way to confirm an idle bash prompt's
+# input line is genuinely empty (compact_composer_clear's chrome-stripping
+# only knows the claude TUI's own rendering, not an arbitrary shell's
+# PS1), so sending a keystroke here risks submitting a human's unsent,
+# unverifiable command line. Escalation (coord_inbox_write, issue #430) is
+# the whole fix: a human who attaches and presses Enter (or runs any
+# command) lets issue #43's own self-heal finish the job immediately.
+worker_deliver_record_shell_stall() {
+    local issue="$1" brief="$2" count
+    if [ "${WORKER_DELIVER_SHELL_STALL_BRIEF[$issue]:-}" != "$brief" ]; then
+        WORKER_DELIVER_SHELL_STALL_BRIEF[$issue]="$brief"
+        WORKER_DELIVER_SHELL_STALL_COUNT[$issue]=0
+        unset "WORKER_DELIVER_SHELL_STALL_ESCALATED[$issue]"
+    fi
+    count=$(( ${WORKER_DELIVER_SHELL_STALL_COUNT[$issue]:-0} + 1 ))
+    WORKER_DELIVER_SHELL_STALL_COUNT[$issue]=$count
+    if [ "$count" -ge "$WORKER_DELIVER_SHELL_STALL_THRESHOLD" ] && [ -z "${WORKER_DELIVER_SHELL_STALL_ESCALATED[$issue]:-}" ]; then
+        WORKER_DELIVER_SHELL_STALL_ESCALATED[$issue]=1
+        echo "[$(date +%T)] WARNING: worker iss-$issue has a brief queued ($brief) while its pane has sat at the listener's own idle bash prompt (state=shell) for $count sweeps with nothing claiming it — issue #43's self-heal only fires on the next prompt redraw, which needs a keypress; investigate with scripts/capture-worker.sh iss-$issue"
+        log_event worker.deliver.shell_stall "issue=$issue brief=$brief skips=$count"
+        coord_inbox_write deliver_stall "$(printf 'Worker iss-%s: a queued brief (%s) has sat for %s sweeps with the pane parked at its own idle bash prompt (state=shell).\n\nCheck: scripts/capture-worker.sh iss-%s\n\nThis state normally self-heals the moment anything redraws that bash prompt (issue #43), but nothing has — most likely no human or process has touched the pane since the brief landed. Attach and press Enter (or run any harmless command) to let the listener claim it.\n' "$issue" "$brief" "$count" "$issue")" || true
+    fi
+}
+
 # WORKER_DELIVER_PENDING_SEEN (issue #437)
 #
 # Cross-sweep bookkeeping keyed by issue: the pending brief's basename last
@@ -7090,9 +7406,28 @@ maybe_worker_deliver_brief() {
 
     local state
     state="$(worker_pane_state "$win")" || state="absent"
-    # "shell": the listener's own idle bash loop is in control and already
-    # self-heals onto a new brief (run_idle_shell/poll_for_brief, issue #43)
-    # — nothing to do. "absent": no such window.
+    # "shell": the listener's own idle bash loop is normally in control and
+    # self-heals onto a new brief on its own (run_idle_shell/poll_for_brief,
+    # issue #43) — but only once something redraws that bash prompt (a
+    # keypress, a command). A session parked there fully unattended never
+    # gets that redraw, so a brief can sit invisibly forever (issue #559).
+    # Never inject a keystroke here (no reliable way to confirm the shell's
+    # own input line is actually empty, unlike the claude-TUI composer
+    # checks below) — just track the stall and escalate once it crosses
+    # WORKER_DELIVER_SHELL_STALL_THRESHOLD sweeps. worker_deliver_detect_
+    # claim is deliberately still never called for "shell" (see its own
+    # header comment) — this is a parallel, independent tracker.
+    if [ "$state" = "shell" ]; then
+        local shell_brief
+        shell_brief="$(basename "$(worker_pending_brief_path "$wt_dir")" 2>/dev/null || true)"
+        if [ -n "$shell_brief" ]; then
+            worker_deliver_record_shell_stall "$issue" "$shell_brief"
+        else
+            unset "WORKER_DELIVER_SHELL_STALL_BRIEF[$issue]" "WORKER_DELIVER_SHELL_STALL_COUNT[$issue]" "WORKER_DELIVER_SHELL_STALL_ESCALATED[$issue]"
+        fi
+        return 0
+    fi
+    # "absent": no such window — nothing to do.
     [ "$state" = "cli" ] || return 0
 
     worker_deliver_detect_claim "$issue" "$wt_dir" "$state"
@@ -7157,7 +7492,7 @@ maybe_worker_deliver_brief() {
     # observed dimmed suggestion on one parked pane) must never be pasted
     # over — pasting "/quit" into it would produce garbled, unpredictable
     # input rather than a clean exit command.
-    local target="$SESSION_NAME:$win"
+    local target="$SESSION_NAME:$win.0"
     if ! compact_composer_clear "$target"; then
         log_event worker.deliver.skip "issue=$issue reason=composer_not_clear"
         worker_deliver_record_composer_stall "$issue" "$brief_before"
@@ -7391,18 +7726,18 @@ maybe_worker_compact() {
     tmp_compact=$(mktemp) || { log_event worker.compact.skip "issue=$issue reason=mktemp_failed"; return 0; }
     printf '/compact' > "$tmp_compact" 2>/dev/null || true
     tmux load-buffer -b "llm-worker-autocompact-$issue" "$tmp_compact" 2>/dev/null || true
-    tmux paste-buffer -b "llm-worker-autocompact-$issue" -t "$SESSION_NAME:$win" -d 2>/dev/null || true
+    tmux paste-buffer -b "llm-worker-autocompact-$issue" -t "$SESSION_NAME:$win.0" -d 2>/dev/null || true
     rm -f "$tmp_compact" 2>/dev/null || true
 
     # issue #290: same autocomplete-menu race as maybe_auto_compact's
     # injection (see that function's comment) — settle, submit, verify,
     # retry once if the composer still holds the pasted text.
     sleep "$COMPACT_SUBMIT_SETTLE_SECS"
-    tmux send-keys -t "$SESSION_NAME:$win" Enter 2>/dev/null || true
+    tmux send-keys -t "$SESSION_NAME:$win.0" Enter 2>/dev/null || true
     sleep "$COMPACT_SUBMIT_SETTLE_SECS"
-    if ! compact_confirm_submitted "$SESSION_NAME:$win" "$WORKER_COMPACT_BUSY_PATTERN" "/compact"; then
+    if ! compact_confirm_submitted "$SESSION_NAME:$win.0" "$WORKER_COMPACT_BUSY_PATTERN" "/compact"; then
         log_event worker.compact.resubmit "issue=$issue"
-        tmux send-keys -t "$SESSION_NAME:$win" Enter 2>/dev/null || true
+        tmux send-keys -t "$SESSION_NAME:$win.0" Enter 2>/dev/null || true
     fi
 
     # Wait for compaction to actually start (busy indicator appears).
@@ -7417,10 +7752,10 @@ maybe_worker_compact() {
             # an already-empty composer here means nothing is left to
             # retract — most likely the injected /compact was delivered as a
             # plain chat message rather than executed as a slash command.
-            if compact_composer_clear "$SESSION_NAME:$win"; then
+            if compact_composer_clear "$SESSION_NAME:$win.0"; then
                 log_event worker.compact.delivered_as_text "issue=$issue"
             else
-                compact_retract_queued "$SESSION_NAME:$win" worker.compact "issue=$issue" "$WORKER_COMPACT_BUSY_PATTERN" || true
+                compact_retract_queued "$SESSION_NAME:$win.0" worker.compact "issue=$issue" "$WORKER_COMPACT_BUSY_PATTERN" || true
             fi
             worker_compact_record_failure "$issue"
             return 0
@@ -7470,7 +7805,7 @@ maybe_worker_compact() {
     while [ "$verify_waited" -lt "$WORKER_COMPACT_VERIFY_TIMEOUT_SECS" ]; do
         sleep "$WORKER_COMPACT_POLL_SECS"
         verify_waited=$((verify_waited + WORKER_COMPACT_POLL_SECS))
-        if compact_replay_detected "$SESSION_NAME:$win"; then
+        if compact_replay_detected "$SESSION_NAME:$win.0"; then
             replayed=1
         fi
         used_after="$(worker_pane_ctx_used "$win")" && break
@@ -7509,8 +7844,8 @@ maybe_worker_compact() {
     tmp_nudge=$(mktemp) || return 0
     printf '%s' "$WORKER_COMPACT_NUDGE_PROMPT" > "$tmp_nudge" 2>/dev/null || true
     tmux load-buffer -b "llm-worker-nudge-$issue" "$tmp_nudge" 2>/dev/null || true
-    tmux paste-buffer -b "llm-worker-nudge-$issue" -t "$SESSION_NAME:$win" -d 2>/dev/null || true
-    tmux send-keys -t "$SESSION_NAME:$win" Enter 2>/dev/null || true
+    tmux paste-buffer -b "llm-worker-nudge-$issue" -t "$SESSION_NAME:$win.0" -d 2>/dev/null || true
+    tmux send-keys -t "$SESSION_NAME:$win.0" Enter 2>/dev/null || true
     rm -f "$tmp_nudge" 2>/dev/null || true
 }
 
@@ -7559,13 +7894,48 @@ worker_compact_pass() {
 # paste" before this issue (see this file's header comment). Failure here
 # is logged but non-fatal — an inbox write that can't land shouldn't also
 # block the doorbell attempt that follows it.
+#
+# (issue #461) Also drops a same-named marker under COORD_INBOX_SELF_DIR —
+# see that var's header comment for why on_inbox_drop needs it. The marker
+# is touched BEFORE the mv, not after: on_inbox_drop runs in a separate
+# process (the inotify reader, or run_poll's own scan tick), and that
+# process can observe the final .md file (the inotify moved_to event, or
+# just finding it on the next poll) before this process gets to a
+# post-mv touch — there is no cross-process ordering guarantee the other
+# way. Touching first means the marker is always on disk no later than the
+# file a consumer could possibly see, at the cost of a marker very briefly
+# existing with no corresponding .md file yet (on_inbox_drop never looks
+# for a marker except in response to seeing the .md file itself, so that
+# window is never observed). Best-effort like the write itself: a lost
+# marker only means this file's own arrival gets treated as if it were an
+# external drop (one extra, harmless debounce-covered wake re-check under
+# the default DEBOUNCE_SECS), not a correctness problem.
 coord_inbox_write() {
-    local kind="$1" content="$2" tmp final
-    mkdir -p "$COORD_INBOX_DIR" "$COORD_INBOX_PROCESSED_DIR" 2>/dev/null || true
+    local kind="$1" content="$2" tmp final marker stale_marker stale_note
+    mkdir -p "$COORD_INBOX_DIR" "$COORD_INBOX_PROCESSED_DIR" "$COORD_INBOX_SELF_DIR" 2>/dev/null || true
+    # A marker whose .md file on_inbox_drop never got to see (the watcher
+    # exited right after this write, or wasn't running at all) would
+    # otherwise sit forever — sweep anything old enough to plausibly be
+    # such an orphan. Age alone isn't sufficient, though (self-review on
+    # this issue's own PR): a note can legitimately sit unarchived for
+    # over an hour — the #461 incident itself ran 2h23m — so deleting a
+    # marker just because it's old would let a later tick redecide a
+    # STILL-pending note's wake a second time, breaking the one-decision-
+    # per-file promise on_inbox_drop exists to keep. Only delete a marker
+    # whose note is actually gone (archived to processed/, or otherwise
+    # removed) — that pairing, not age by itself, is what makes it safe.
+    while IFS= read -r stale_marker; do
+        [ -n "$stale_marker" ] || continue
+        stale_note="$COORD_INBOX_DIR/$(basename "$stale_marker" .self)"
+        [ -e "$stale_note" ] && continue
+        rm -f "$stale_marker" 2>/dev/null || true
+    done < <(find "$COORD_INBOX_SELF_DIR" -maxdepth 1 -name '*.self' -mmin +60 -print 2>/dev/null)
     tmp="$(mktemp "$COORD_INBOX_DIR/.tmp.coord-inbox.XXXXXX" 2>/dev/null)" || return 1
     printf '%s\n' "$content" > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
     final="$COORD_INBOX_DIR/$(date -u +%Y%m%dT%H%M%SZ)-${kind}-$$-${RANDOM}.md"
-    mv -f "$tmp" "$final" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
+    marker="$COORD_INBOX_SELF_DIR/$(basename "$final").self"
+    touch "$marker" 2>/dev/null || true
+    mv -f "$tmp" "$final" 2>/dev/null || { rm -f "$tmp" "$marker" 2>/dev/null; return 1; }
 }
 
 # coord_inbox_count
@@ -8758,6 +9128,196 @@ on_message() {
     fi
 }
 
+# on_inbox_drop <coord-inbox-md-path>
+#
+# (issue #461) A *.md file landed in COORD_INBOX_DIR itself. Before this,
+# nothing watched that directory for arrivals — on_outcome/on_message/
+# on_activity/the stall/stranded-brief/worktree-vanished sweeps all write
+# there via coord_inbox_write, but each of THOSE already attempts its own
+# wake right after writing, so the gap was invisible as long as every
+# coord-inbox file came from one of them. The case this closes is a file
+# dropped there by something ELSE — a util-pane driver script signaling
+# job completion into the inbox is the documented #430 idiom for "tell the
+# coordinator something without polling" — which no dispatch path ever
+# observed: the reported incident left a done-note sitting unannounced for
+# 2h23m (coordinator idle, zero workers, so zero outcome/outbox events ever
+# gave it a chance to ride along on an unrelated wake).
+#
+# External producers should write the same way coord_inbox_write does —
+# a tmp file elsewhere plus an atomic `mv` into COORD_INBOX_DIR, never an
+# in-place truncate+write (`echo ... > done.md` over an existing file) —
+# for two reasons self-review found (round 6): (1) the inotify backend
+# only arms on create/moved_to, so an in-place rewrite of an existing
+# filename fires neither and is never seen at all; (2) on the poll
+# backend, a non-atomic write caught mid-write can get its marker touched
+# before the write finishes, making the finished file look "newer than
+# its own marker" to the round-4 freshness check and ring a second,
+# spurious doorbell for what was really one note. Both go away if the
+# file only ever appears via a single atomic rename.
+#
+# No coord_inbox_write call here — the file already exists; this is purely
+# the missing wake ATTEMPT, run through the same debounce/hold-gate/
+# llm-start path as on_outcome/on_message/on_activity. The COORD_INBOX_
+# SELF_DIR marker is what keeps this from re-litigating the SAME file's
+# wake more than once, for either of two reasons a re-scan can see the
+# same path again: (1) one of on_outcome/on_message/on_activity/the
+# periodic sweeps already wrote it and decided its own wake (coord_
+# inbox_write touches the marker before it even does the mv — see that
+# function's header), or (2) dispatch_inbox_drops itself already decided
+# this exact file on an earlier pass and the note is simply still sitting
+# there unprocessed (run_poll's POLL_SECS tick, by design, re-lists every
+# unarchived file on every pass — see scan_inbox_drops' header for why it
+# carries no baseline/seen-state of its own). Either way, finding the
+# marker here means a decision for this filename already happened — UNLESS
+# the note's own mtime is now newer than the marker's, which only happens
+# when something rewrote the file under that name after the marker was set
+# (a fixed-name producer reusing e.g. "done.md" for a second, later note);
+# that case is treated as a fresh arrival rather than skipped (self-review
+# round 4). Otherwise, this call creates the marker itself for case (2)
+# before doing anything else, so the NEXT re-scan (one second later, by
+# default) doesn't redecide it too. A first version of this fix instead
+# assumed wake_debounced() would
+# always see a clock the original caller just set and hold this as a
+# harmless no-op — true at the default DEBOUNCE_SECS=30, but this file's
+# own tests run several scenarios at DEBOUNCE_SECS=0, where nothing
+# stopped this function from re-deciding the SAME wake a second time
+# through a different path and racing coord_wake_hold_retry_pass/
+# coord_wake_retry_pass for who delivers it (caught by
+# test-coordinator-inbox.sh's busy-pane-defer case misfiring as a direct
+# delivery instead of the expected deferred one). The marker is never
+# removed here — on a lost race it would just mean this one file's
+# arrival got the "probably debounced" treatment again, mirroring the
+# cost of a lost marker described in coord_inbox_write's own header — and
+# coord_inbox_write's 60-minute sweep prunes stale markers whenever it
+# runs. That sweep only runs from inside coord_inbox_write itself, though
+# (self-review round 9) — in this issue's own idle/no-workers conditions,
+# nothing may call it again for a long time, so a marker for a file an
+# external producer writes just once can sit around well past 60 minutes.
+# Accepted: the marker is a few bytes, and the cost of one surviving is a
+# single harmless no-op re-scan, not unbounded growth of anything that
+# matters. The already-decided case returns with no
+# logging at all — see its own comment below (self-review round 5): a
+# still-pending note is re-seen on every POLL_SECS tick for as long as it
+# sits unarchived, so logging there would grow events.log unboundedly for
+# precisely the long-pending notes this issue exists to handle.
+on_inbox_drop() {
+    local path="$1"
+    local now self_marker marker_mtime note_mtime
+    now=$(date +%s)
+
+    self_marker="$COORD_INBOX_SELF_DIR/$(basename "$path").self"
+    if [ -e "$self_marker" ]; then
+        # Self-review (#461 round 4): a bare existence check means an
+        # external producer that reuses a fixed filename (the incident's own
+        # note was literally "parity7-sweep-done.md", not a unique name) gets
+        # permanently swallowed after its first use — coord_inbox_write's
+        # 60-minute sweep only prunes a marker once its note is gone, and in
+        # the incident's own idle/no-workers conditions coord_inbox_write may
+        # never run again to do that pruning. mtime_epoch comparison closes
+        # this without needing coord_inbox_write to run at all: the marker is
+        # always touched no later than the note's own content-write (see
+        # coord_inbox_write's header, and the mkdir+touch a few lines below
+        # for the external-first-sight case), so a note whose mtime is
+        # strictly newer than its marker's can only mean the file was
+        # rewritten after that decision — a genuinely new arrival under an
+        # old name, not the same one being re-seen. mtime_epoch's 1-second
+        # resolution (same as every other staleness check in this file)
+        # leaves a theoretical gap if the SAME filename gets rewritten twice
+        # inside one wall-clock second — accepted, not closed: the producers
+        # this closes for are periodic driver scripts, not a sub-second
+        # retry loop (self-review round 5).
+        # Self-review round 8: under this script's set -e, a plain
+        # var="$(cmd)" assignment propagates cmd's exit status — and
+        # mtime_epoch fails if the note gets archived between
+        # scan_inbox_drops listing it and this stat (routine: the poll
+        # backend re-stats every pending note every second). Unguarded,
+        # that would abort the whole watcher process. `|| true` keeps a
+        # failed stat as an empty value instead, and a vanished note is
+        # simply nothing left to decide.
+        # Explicit "return 0": a bare `return` here would propagate the
+        # just-failed `[ -e ]` test's own nonzero status, and both of this
+        # function's callers invoke it as a bare statement under set -e —
+        # the exact hazard this whole guard exists to avoid, just moved
+        # one line earlier.
+        [ -e "$path" ] || return 0
+        marker_mtime="$(mtime_epoch "$self_marker")" || true
+        note_mtime="$(mtime_epoch "$path")" || true
+        if [ -z "$marker_mtime" ] || [ -z "$note_mtime" ] || [ "$note_mtime" -le "$marker_mtime" ]; then
+            # Already decided and the note hasn't changed since — silent,
+            # on purpose (self-review round 5): scan_inbox_drops carries no
+            # baseline, so every unarchived note is re-listed on every
+            # POLL_SECS tick for as long as it sits waiting — logging here
+            # would grow events.log (and this process's own stdout log)
+            # without bound for exactly the long-pending notes this issue
+            # cares about: the incident's own note sat 2h23m, which at the
+            # default POLL_SECS would be ~7,000 lines; a day-old note would
+            # be ~43,000. Explicit "return 0" for the same reason as the
+            # [ -e "$path" ] guard above — this function is always called
+            # as a bare statement under set -e.
+            return 0
+        fi
+        echo "[$(date +%T)] inbox: $path — stale marker predates this note's content (filename reused since the last decision), treating as a new arrival"
+        log_event coord.inbox.drop.stale_marker "path=$path marker_mtime=$marker_mtime note_mtime=$note_mtime"
+    fi
+    log_event coord.inbox.drop "path=$path"
+    mkdir -p "$COORD_INBOX_SELF_DIR" 2>/dev/null || true
+    touch "$self_marker" 2>/dev/null || true
+
+    if wake_debounced; then
+        echo "[$(date +%T)] inbox: $path — within debounce window (${DEBOUNCE_SECS}s), holding doorbell for retry"
+        log_event coord.wake.defer "reason=debounce window=${DEBOUNCE_SECS}s trigger=inbox_drop"
+        coord_wake_hold_mark_pending debounce
+        return
+    fi
+
+    echo "[$(date +%T)] inbox: $path"
+
+    # issue #430/#459: same doorbell hold gate as on_outcome/on_message —
+    # see on_outcome's identical branch for the full rationale.
+    local hold_reason
+    hold_reason="$(coord_wake_hold_reason)"
+    if [ -n "$hold_reason" ]; then
+        echo "[$(date +%T)] coordinator not free to take a doorbell ($hold_reason) — deferring, will retry"
+        log_event coord.wake.defer "reason=$hold_reason trigger=inbox_drop"
+        coord_wake_hold_mark_pending "$hold_reason"
+    else
+        maybe_auto_compact wake
+
+        echo "[$(date +%T)] waking coordinator (inbox drop)..."
+        local nudge
+        nudge="$(coord_inbox_nudge_text)"
+        log_event coord.wake "trigger=inbox_drop:$(basename "$path")"
+
+        if [ "$DRY_RUN" = "1" ]; then
+            echo "[DRY] would: cd $PROJECT_DIR && NON_INTERACTIVE=1 $LLM_START \"$nudge\""
+        else
+            local wake_rc=0
+            ( flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 9 && cd "$PROJECT_DIR" && NON_INTERACTIVE=1 "$LLM_START" "$nudge" ) 9>"$COORD_WAKE_LOCK" || wake_rc=$?
+            if [ "$wake_rc" = "3" ]; then
+                echo "[$(date +%T)] coordinator composer holds an unsubmitted draft — deferring wake, will retry"
+                log_event coord.wake.deferred "reason=composer_dirty trigger=inbox_drop"
+                coord_wake_set_pending "$nudge"
+            elif [ "$wake_rc" != "0" ]; then
+                echo "[$(date +%T)] WARN: coordinator wake exited non-zero (continuing watch)"
+                log_event coord.wake.error "trigger=inbox_drop rc=$wake_rc"
+            else
+                coord_wake_clear_pending
+                coord_wake_hold_clear_pending
+            fi
+        fi
+    fi
+    wake_clock_set "$now"
+
+    if [ "$ONCE" = "1" ]; then
+        echo "[$(date +%T)] ONCE=1 — exiting after first wake."
+        log_event watch.exit "reason=once"
+        # Same pane-echo grace period as on_outcome's ONCE path — see the
+        # comment there for why 1.5s.
+        [ "$WATCHER_QUIET" = "1" ] || sleep 1.5
+        exit 0
+    fi
+}
+
 # on_activity <lines>
 #
 # (issue #392) activity_poll_pass found operator activity (PR merge / issue
@@ -8945,9 +9505,10 @@ stall_wake_pass() {
 # ---------------------------------------------------------------------------
 run_inotify() {
     # Watch the workspace (parent of project) recursively, filtering events
-    # to only outcomes inside wt-issue-*/.swarm/tasks/done/. The listener
-    # does `mv processing/X.md done/X.md` followed by writing done/X.json —
-    # both surface as create/moved_to events.
+    # to outcomes inside wt-issue-*/.swarm/tasks/done/, outbox messages,
+    # claim markers, and (issue #461) this project's own coord-inbox/. The
+    # listener does `mv processing/X.md done/X.md` followed by writing
+    # done/X.json — both surface as create/moved_to events.
     #
     # issue #357: this name-glob CAN match a sibling project's worktree
     # under flat grouping (inotifywait has no equivalent of `git worktree
@@ -8966,7 +9527,13 @@ run_inotify() {
     # dispatch_claims closes (see scan_claims' header): inotify only
     # reports events from here forward, so a marker a listener wrote while
     # this watcher was restarting would otherwise sit unforwarded forever.
+    # (issue #461 self-review) Same drain for coord-inbox: inotify never
+    # reports a file that already existed before it attached, so a note
+    # dropped moments before this watcher restarted would otherwise sit
+    # unreported for as long as nothing else happens to re-touch it —
+    # reproducing this issue's own incident across every restart.
     dispatch_claims
+    dispatch_inbox_drops
     inotifywait -m -r \
         --exclude '/(\.git|node_modules|build|target|\.gradle|dist|out|\.next|\.venv|venv)(/|$)' \
         -e create -e moved_to \
@@ -9002,6 +9569,30 @@ run_inotify() {
                 # not worth chasing further on a host that runs the poll
                 # backend in practice (inotify-tools isn't installed here).
                 dispatch_selfheal_claim "$path"
+                ;;
+            "$COORD_INBOX_PROCESSED_DIR"/*)
+                # Lifecycle archive (coordinator mv after handling, or this
+                # watcher's own coord_inbox_write targets COORD_INBOX_DIR
+                # directly and never this subdir) — not a new item.
+                ;;
+            "$COORD_INBOX_DIR"/*.md)
+                # issue #461: a file landed in the coordinator's own inbox —
+                # see on_inbox_drop's header for why this needs its own
+                # watch (not just the done/outbox/claims ones above), and
+                # coord_inbox_write's header for why its .self marker is
+                # always on disk by the time this inotify event (or the
+                # poll backend's own scan) can see the .md file, which is
+                # what makes firing on_inbox_drop for a file this watcher
+                # itself just wrote (via coord_inbox_write in
+                # on_outcome/on_message/on_activity/the periodic sweeps)
+                # harmless rather than a second, spurious wake. A note
+                # that was already on disk before this process started is
+                # instead handled by the dispatch_inbox_drops drain above,
+                # right before inotifywait attaches — this `create`/
+                # `moved_to` case only ever fires for one that arrives
+                # live, after that drain, same split as the claims arm
+                # just above.
+                on_inbox_drop "$path"
                 ;;
         esac
     done
@@ -9058,6 +9649,35 @@ dispatch_claims() {
     done < <(scan_claims "$wt_list")
 }
 
+# scan_inbox_drops / dispatch_inbox_drops — this project's own coord-inbox
+# (issue #461), used by run_poll and run_inotify's startup drain. Kept OUT
+# of run_poll's scan_outcomes/seen_file for the exact reason scan_claims is
+# (see its header above): seen_file's startup baseline is correct for
+# outcomes — an old, already-handled one must never replay after a restart
+# — but wrong here. A still-unprocessed coord-inbox note (one the
+# coordinator hasn't yet triaged into processed/) IS the pending signal
+# itself; baselining it into "already seen" at startup, the first version
+# of this fix did by folding it into scan_outcomes, would silently swallow
+# a note left over from before a restart — reproducing this issue's own
+# incident every time the watcher restarts while a note is still pending
+# (self-review on this issue's own PR). on_inbox_drop's own per-file marker
+# (COORD_INBOX_SELF_DIR), not seen_file, is what stops a still-pending note
+# from being redecided on every subsequent tick. Top-level (not nested in
+# run_poll) so tests can extract and drive them directly, same as
+# scan_claims/dispatch_claims.
+scan_inbox_drops() {
+    [ -d "$COORD_INBOX_DIR" ] || return 0
+    find "$COORD_INBOX_DIR" -maxdepth 1 -name '*.md' -print 2>/dev/null
+}
+
+dispatch_inbox_drops() {
+    local path
+    while IFS= read -r path; do
+        [ -z "$path" ] && continue
+        on_inbox_drop "$path"
+    done < <(scan_inbox_drops)
+}
+
 # ---------------------------------------------------------------------------
 # Backend: polling (find)
 # ---------------------------------------------------------------------------
@@ -9112,10 +9732,12 @@ run_poll() {
     local wt_list
     wt_list="$(own_worktree_dirs_for_scan "$PROJECT_DIR")"
     scan_outcomes "$wt_list" > "$seen_file"
-    # Drain any marker already on disk before this watcher's first full
-    # tick — see scan_claims' header for why this one scan must NOT be
-    # skipped the way the done/outbox baseline above intentionally is.
+    # Drain any marker/inbox-note already on disk before this watcher's
+    # first full tick — see scan_claims' and scan_inbox_drops' headers for
+    # why these two scans must NOT be skipped the way the done/outbox
+    # baseline above intentionally is.
     dispatch_claims "$wt_list"
+    dispatch_inbox_drops
 
     while true; do
         local current diff_new
@@ -9138,8 +9760,23 @@ run_poll() {
         fi
 
         dispatch_claims "$wt_list"
+        dispatch_inbox_drops
 
-        sleep "$POLL_SECS"
+        # Backgrounded + `wait`, not a bare foreground `sleep` (issues
+        # #570/#571): bash defers a trapped TERM/INT until the current
+        # foreground command finishes, so a plain `sleep "$POLL_SECS"`
+        # here left a killed watcher alive for up to POLL_SECS seconds —
+        # long enough (POLL_SECS=10 in CI's .env.example) to make
+        # test-watcher-stale-check.sh's Test 7 see it as still FRESH.
+        # `wait` on a backgrounded child returns the instant the trap
+        # fires, so cleanup_on_exit's kills run immediately instead of
+        # waiting out the sleep. POLL_SLEEP_PID lets cleanup_on_exit reap
+        # this one too, so a signal that arrives mid-sleep doesn't orphan
+        # the backgrounded `sleep` process.
+        sleep "$POLL_SECS" &
+        POLL_SLEEP_PID=$!
+        wait "$POLL_SLEEP_PID" 2>/dev/null
+        POLL_SLEEP_PID=""
     done
 }
 

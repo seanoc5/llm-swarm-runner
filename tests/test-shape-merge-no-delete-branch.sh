@@ -22,4 +22,10 @@ ok "swarm-merge.sh deletes the remote branch explicitly after merge"
 grep -qE 'gh pr merge "\$PR_NUM" --squash \|\| MERGE_RC=\$\?' "$SCRIPT" \
     || fail "a refused gh pr merge must abort the script (issue #492)"
 ok "gh pr merge's exit is captured rather than swallowed"
+# Every worker merge now goes through worker-merge.sh, and the worker prompts
+# no longer warn about the flag, so the script carries the rule.
+if grep -vE '^\s*#' "$HERE/../scripts/worker-merge.sh" | grep -q -- '--delete-branch'; then
+    fail "worker-merge.sh passes --delete-branch (issue #489: removes the worker's own worktree)"
+fi
+ok "worker-merge.sh never passes --delete-branch"
 echo "All #489 shape tests passed."

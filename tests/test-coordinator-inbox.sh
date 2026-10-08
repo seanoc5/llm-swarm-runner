@@ -128,6 +128,17 @@ wake_count() {
     grep -c 'WAKE:' "$WAKE_LOG" 2>/dev/null || true
 }
 
+# atomic_note_write <final-path> <content> — the producer contract Tests 7
+# and 8 are meant to exercise (self-review round 6: write a tmp file, then
+# `mv` it into place, the same pattern coord_inbox_write itself uses), not
+# a plain in-place `printf > file` the watcher only accepts on sufferance.
+atomic_note_write() {
+    local final="$1" content="$2" tmp
+    tmp="$(mktemp "$(dirname "$final")/.tmp.external-note.XXXXXX")"
+    printf '%s\n' "$content" > "$tmp"
+    mv -f "$tmp" "$final"
+}
+
 # poll_until <max-tries> <sleep-between> <check-command...>
 # Retries a condition rather than a single fixed sleep — this daemon's
 # poll loop (POLL_SECS=1) and timer loop (2s tick) both introduce real
@@ -383,6 +394,106 @@ grep -q 'coord.inbox.write .*trigger=activity_poll' "$EVENTS_LOG_ACTIVITY" \
     || red "expected coord.inbox.write trigger=activity_poll in events.log"
 grep -q 'coord.wake ' "$EVENTS_LOG_ACTIVITY" 2>/dev/null && red "did not expect any coord.wake event for an activity-poll finding: $(cat "$EVENTS_LOG_ACTIVITY")"
 green "events.log: coord.inbox.write trigger=activity_poll present, no coord.wake at all"
+
+# ============================================================================
+heading "Test 7 (issue #461): a file dropped into coord-inbox by something other than this watcher still rings the doorbell, idle pane, no worker windows"
+# ============================================================================
+# The gap #461 reports: coord_inbox_write()'s callers (on_outcome,
+# on_message, on_activity) always decide their own wake, so Tests 1-6 above
+# never exercised the path a file takes when NOTHING inside this script
+# wrote it — e.g. a util-pane driver script's own `echo ... > foo.md`. That
+# file has no .self marker, so on_inbox_drop must not mistake it for
+# already-decided and must ring the doorbell itself.
+reset_state
+set_pane_idle
+sleep 0.3
+start_watcher "$TEST_DIR/watch-7.log"
+
+mkdir -p "$INBOX_DIR"
+EXTERNAL_NOTE="$INBOX_DIR/$(date -u +%Y%m%dT%H%M%SZ)-external-probe.md"
+atomic_note_write "$EXTERNAL_NOTE" 'parity7-sweep-done'
+
+poll_until 20 0.5 bash -c "grep -q 'WAKE:' '$WAKE_LOG'" \
+    || red "a foreign coord-inbox file never triggered a doorbell. watch log:
+$(cat "$TEST_DIR/watch-7.log")
+events.log:
+$(cat "$EVENTS_LOG" 2>/dev/null || true)"
+green "a foreign file dropped directly into coord-inbox/ (no .self marker, no live worker window) rang the doorbell"
+
+grep -q 'coord.inbox.drop ' "$EVENTS_LOG" \
+    || red "expected coord.inbox.drop to be logged for the externally-written file — on_inbox_drop never took the new-decision path"
+green "events.log: coord.inbox.drop logged for the externally-written file"
+
+[ -e "$INBOX_DIR/.self/$(basename "$EXTERNAL_NOTE").self" ] \
+    || red "on_inbox_drop should have marked this file decided once it rang the doorbell for it"
+green "on_inbox_drop marked the foreign file as decided (so a later poll tick doesn't redecide it)"
+
+# The note is still sitting unarchived (nothing in this test triages it).
+# A still-pending file is re-listed by every POLL_SECS tick with no
+# baseline of its own (scan_inbox_drops carries none, by design) — the
+# .self marker just confirmed above is what must stop that from ringing a
+# second doorbell for a file whose wake was already decided.
+sleep 3
+WAKE_COUNT_AFTER_7="$(wake_count)"
+[ "$WAKE_COUNT_AFTER_7" = "1" ] \
+    || red "a still-pending foreign note got redecided on a later poll tick: expected exactly 1 WAKE total, got $WAKE_COUNT_AFTER_7. wake log:
+$(cat "$WAKE_LOG")"
+green "the still-pending foreign note was not redecided on later poll ticks — exactly one doorbell total"
+
+# Self-review round 5: those same later ticks must not grow events.log —
+# an already-decided, still-pending note used to log coord.inbox.drop +
+# coord.inbox.drop.skip on EVERY tick it was re-seen, unbounded for as
+# long as it sat waiting (the incident's own note sat 2h23m).
+DROP_LINES_AFTER_7="$(grep -c 'coord.inbox.drop ' "$EVENTS_LOG" 2>/dev/null || true)"
+[ "$DROP_LINES_AFTER_7" = "1" ] \
+    || red "coord.inbox.drop was logged more than once for a single still-pending note across repeated poll ticks: expected 1, got $DROP_LINES_AFTER_7. events.log:
+$(cat "$EVENTS_LOG" 2>/dev/null || true)"
+green "a still-pending note logged coord.inbox.drop exactly once despite several later poll ticks re-seeing it"
+
+stop_watcher
+
+# ============================================================================
+heading "Test 8 (issue #461 self-review round 4): a fixed filename reused for a second, later note still rings its own doorbell"
+# ============================================================================
+# Self-review found the gap: on_inbox_drop's marker check was a bare
+# existence test, so a producer that always writes the same filename (the
+# incident's own note, parity7-sweep-done.md, was itself a fixed name, not
+# a unique one) would have its SECOND note silently swallowed forever by
+# the marker left behind for the first. The fix compares mtimes: a note
+# newer than its own marker is treated as a fresh arrival, not a repeat.
+reset_state
+set_pane_idle
+sleep 0.3
+start_watcher "$TEST_DIR/watch-8.log"
+
+mkdir -p "$INBOX_DIR"
+FIXED_NOTE="$INBOX_DIR/done.md"
+atomic_note_write "$FIXED_NOTE" 'first sweep done'
+
+poll_until 20 0.5 bash -c "grep -q 'WAKE:' '$WAKE_LOG'" \
+    || red "first use of a fixed-name coord-inbox file never triggered a doorbell"
+green "first note under a fixed/reused filename rang the doorbell"
+
+[ "$(wake_count)" = "1" ] \
+    || red "expected exactly 1 WAKE after the first note, got $(wake_count)"
+
+# Same producer, same filename, a later unrelated note — only a real wall-
+# clock gap (not a backdated marker) guarantees the new mtime is newer.
+sleep 1.5
+atomic_note_write "$FIXED_NOTE" 'second sweep done'
+
+poll_until 20 0.5 bash -c "[ \"\$(grep -c 'WAKE:' '$WAKE_LOG')\" -ge 2 ]" \
+    || red "a fixed filename reused for a second note never rang a second doorbell. watch log:
+$(cat "$TEST_DIR/watch-8.log")
+events.log:
+$(cat "$EVENTS_LOG" 2>/dev/null || true)"
+green "a second note under the same reused filename rang its own doorbell (not swallowed by the first note's marker)"
+
+grep -q 'coord.inbox.drop.stale_marker' "$EVENTS_LOG" \
+    || red "expected coord.inbox.drop.stale_marker to be logged for the reused filename"
+green "events.log: coord.inbox.drop.stale_marker logged for the reused filename"
+
+stop_watcher
 
 echo ""
 green "All assertions passed (test-coordinator-inbox.sh)"

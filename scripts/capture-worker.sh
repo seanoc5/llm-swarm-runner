@@ -219,4 +219,7 @@ echo "# suggestions in particular can render as plain text below the last respon
 echo "# never attribute untagged text to the operator without --verify. See"
 echo "# docs/tmux-as-channel.md §1c."
 echo "# ---------------------------------------------------------------------------"
-tmux -L "$SOCKET" capture-pane -t "$SESSION:$WINDOW" -p -S "-$LINES" | strip_ansi | tag_chrome
+# issue #550: pane 0 explicitly, not the bare window — a check-on-done
+# pane (or any other split added to the window) can be the ACTIVE pane,
+# and a bare window target captures/sends to whichever pane is active.
+tmux -L "$SOCKET" capture-pane -t "$SESSION:$WINDOW.0" -p -S "-$LINES" | strip_ansi | tag_chrome
