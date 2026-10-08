@@ -446,7 +446,9 @@ heading "Test 24: token error, Actions-runs fallback given valid-JSON-but-non-ar
 # Test 22 covers, just via a different malformed-input shape). The `*)`
 # branch itself stays defensively unreachable through this black-box
 # harness; what's verified here is that malformed fallback output of any
-# kind still fails closed rather than readying.
+# kind still fails closed rather than readying. (Before the jq guard in
+# _ci-fallback.sh, `{}` actually returned 0 with an empty state and was
+# caught by the `*)` branch instead — #568 self-review caveat.)
 printf '<!-- BLIND_MERGE_RISK: low -->\nsome change\n' > "$BODY_FILE"
 make_fake_review 0
 GH_CHECKS_RC=1

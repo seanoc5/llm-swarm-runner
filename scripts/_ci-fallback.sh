@@ -77,6 +77,13 @@ ci_fallback_run_state() {
         if ($done | map(select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out" or .conclusion == "action_required" or .conclusion == "startup_failure" or .conclusion == "stale")) | length) > 0 then "fail"
         elif (($latest | length) > 0) and (($done | length) == ($latest | length)) and (($done | map(select(.conclusion == "success" or .conclusion == "skipped" or .conclusion == "neutral")) | length) == ($done | length)) then "pass"
         else "pending"
-        end' <<<"$runs_json")"
+        end' <<<"$runs_json" 2>/dev/null)" || {
+        # Valid JSON that isn't an array (e.g. `{}`) passes the parse check
+        # above but fails group_by here; without this, the function returned
+        # 0 with an empty state and ci-wait.sh polled until its timeout.
+        CI_FALLBACK_STATE="error"
+        CI_FALLBACK_DETAIL="gh run list --commit $sha returned JSON that isn't a list of runs: $runs_json"
+        return 1
+    }
     return 0
 }
