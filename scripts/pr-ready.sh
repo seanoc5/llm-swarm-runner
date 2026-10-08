@@ -14,7 +14,15 @@
 # that visible on the PR itself).
 #
 # Usage:
-#   pr-ready.sh <PR#>
+#   pr-ready.sh [-y|--one-more-round] <PR#>
+#
+#   -y, --one-more-round  run exactly one self-review round past the cap
+#                         (sets the cap to rounds-already-posted + 1). A
+#                         human convenience in place of raising
+#                         WORKER_SELF_REVIEW_MAX_ROUNDS by hand; it does not
+#                         override WORKER_SELF_REVIEW=0 or a cap of 0, and
+#                         every other gate (BLOCK, CI-green, hold) still
+#                         applies.
 #
 # Reads the PR body's `<!-- BLIND_MERGE_RISK: low|medium|high -->` marker
 # (prompts/worker.md § "PR risk assessment") to decide whether self-review
@@ -118,7 +126,17 @@ LLM_SWARM_DIR="${LLM_SWARM_DIR:-$(dirname "$SCRIPT_DIR")}"
 # which shells out to `claude -p` and can't be exercised in CI/tests).
 SELF_REVIEW="${SELF_REVIEW_SCRIPT:-$SCRIPT_DIR/self-review-pr.sh}"
 
-PR="${1:?usage: pr-ready.sh <PR#>}"
+USAGE="usage: pr-ready.sh [-y|--one-more-round] <PR#>"
+ONE_MORE_ROUND=0
+while [[ "${1:-}" == -* ]]; do
+    case "$1" in
+        -y|--one-more-round) ONE_MORE_ROUND=1; shift ;;
+        -h|--help) echo "$USAGE"; exit 0 ;;
+        --) shift; break ;;
+        *) echo "ERROR: unknown flag '$1' ($USAGE)" >&2; exit 1 ;;
+    esac
+done
+PR="${1:?$USAGE}"
 command -v gh >/dev/null 2>&1 || { echo "ERROR: gh required" >&2; exit 1; }
 
 BODY="$(gh pr view "$PR" --json body --jq .body 2>/dev/null)" \
@@ -175,6 +193,10 @@ case "$RISK" in
             case "$ROUNDS_DONE" in
                 ''|*[!0-9]*) ROUNDS_DONE=0 ;;
             esac
+            if [ "$ONE_MORE_ROUND" = "1" ] && [ "$ROUNDS_DONE" -ge "$MAX_ROUNDS" ]; then
+                echo "pr-ready: --one-more-round: allowing round $((ROUNDS_DONE + 1)) past the cap of $MAX_ROUNDS"
+                MAX_ROUNDS=$((ROUNDS_DONE + 1))
+            fi
             if [ "$ROUNDS_DONE" -ge "$MAX_ROUNDS" ]; then
                 echo "pr-ready: self-review round cap reached ($ROUNDS_DONE/$MAX_ROUNDS rounds already posted on PR #$PR, WORKER_SELF_REVIEW_MAX_ROUNDS=$MAX_ROUNDS) — not running another round."
                 echo "          Move any remaining findings into the PR body's ## Follow-up suggestions block instead of another commit."
@@ -188,7 +210,7 @@ case "$RISK" in
                     2>/dev/null || true)"
                 if [ "$LATEST_VERDICT" = "BLOCK" ]; then
                     echo "pr-ready: REFUSED — PR #$PR's latest self-review verdict is BLOCK and the round cap means no further round will run to clear it." >&2
-                    echo "          Fix the finding, then either raise WORKER_SELF_REVIEW_MAX_ROUNDS for one more round, or get a human to ready it." >&2
+                    echo "          Fix the finding, then either re-run with --one-more-round (pr-ready.sh -y $PR), or get a human to ready it." >&2
                     exit 2
                 fi
             else
