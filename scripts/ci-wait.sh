@@ -75,6 +75,10 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_ci-fallback.sh
+. "$SCRIPT_DIR/_ci-fallback.sh"
+
 USAGE="Usage: $0 <PR#> [timeout-seconds] [--repo <owner/repo>]"
 
 PR=""
@@ -141,8 +145,6 @@ echo "ci-wait: PR #$PR mergeable ($MERGE_STATE), watching checks on ${SHA:0:12} 
 DEADLINE=$(( $(date -u +%s) + TIMEOUT ))
 WORKFLOW_COUNT=""   # lazily resolved at most once, only if "no checks" is ever seen
 FALLBACK=0          # set once "gh pr checks" proves unreadable by this token
-RUNS_ERR_FILE="$(mktemp)"
-trap 'rm -f "$RUNS_ERR_FILE"' EXIT
 while true; do
     if [ "$FALLBACK" != "1" ]; then
         set +e
@@ -150,55 +152,28 @@ while true; do
         CHECKS_RC=$?
         set -e
 
-        if grep -qi "resource not accessible by personal access token" <<<"$CHECKS_OUT"; then
+        if ci_fallback_is_token_error "$CHECKS_OUT"; then
             FALLBACK=1
             echo "ci-wait: gh pr checks is not readable by this token (fine-grained PATs have no Checks permission) — falling back to polling gh run list --commit ${SHA:0:12} for PR #$PR." >&2
         fi
     fi
 
     if [ "$FALLBACK" = "1" ]; then
-        # stdout/stderr are kept apart (never 2>&1 here): stdout must stay
-        # pure JSON for the jq parse below, or a stray warning line on
-        # stderr could get merged in and fail the parse — which, under
-        # `set -e`, would otherwise propagate jq's own exit code (5) as
-        # this script's exit code and get misread as "no CI configured"
-        # (self-review finding on PR #540/#513).
         # --limit 100: gh run list defaults to 20, which on a commit with
-        # many re-runs could drop a workflow's newest run before the dedup
-        # below ever sees it.
-        set +e
-        RUNS_JSON="$(gh run list --commit "$SHA" "${REPO_ARGS[@]}" --json status,conclusion,workflowName,createdAt --limit 100 2>"$RUNS_ERR_FILE")"
-        RUNS_RC=$?
-        set -e
-        if [ "$RUNS_RC" -ne 0 ] || ! jq -e . >/dev/null 2>&1 <<<"$RUNS_JSON"; then
-            echo "ci-wait: gh run list --commit $SHA failed or returned unparseable output: $(cat "$RUNS_ERR_FILE")$RUNS_JSON" >&2
+        # many re-runs could drop a workflow's newest run before
+        # ci_fallback_run_state's own dedup ever sees it. The dedup-by-
+        # workflow, stdout/stderr-separation and conclusion-mapping logic
+        # all live in _ci-fallback.sh now (shared with pr-ready.sh, #560),
+        # not duplicated here.
+        if ! ci_fallback_run_state "$SHA" "${REPO_ARGS[@]}"; then
+            echo "ci-wait: $CI_FALLBACK_DETAIL" >&2
             exit 4
         fi
-
-        # `gh run list --commit` returns every run for this commit, including
-        # ones a newer run superseded (a re-run, or a concurrency group
-        # cancelling an older push-triggered run in favour of the
-        # pull_request one) — unlike `gh pr checks`, which already shows
-        # only the latest per check. Keep only the newest run per workflow
-        # name before mapping conclusions, or a leftover `cancelled` run
-        # falsely fails a PR whose current run is green (self-review finding
-        # on PR #540/#513). Runs with no workflowName (rare: org/enterprise
-        # ruleset workflows, per `gh run list --help`) group together and
-        # only the single newest of them survives — an accepted gap, not
-        # a case any of this swarm's repos hits.
-        RUN_STATE="$(jq -r '
-            (group_by(.workflowName) | map(max_by(.createdAt))) as $latest |
-            ($latest | map(select(.status == "completed"))) as $done |
-            if ($done | map(select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out" or .conclusion == "action_required" or .conclusion == "startup_failure" or .conclusion == "stale")) | length) > 0 then "fail"
-            elif (($latest | length) > 0) and (($done | length) == ($latest | length)) and (($done | map(select(.conclusion == "success" or .conclusion == "skipped" or .conclusion == "neutral")) | length) == ($done | length)) then "pass"
-            else "pending"
-            end' <<<"$RUNS_JSON")"
-
-        case "$RUN_STATE" in
+        case "$CI_FALLBACK_STATE" in
             pass) echo "ci-wait: PR #$PR checks green (via Actions-runs fallback)."; exit 0 ;;
             fail)
                 echo "ci-wait: PR #$PR has failing checks (via Actions-runs fallback):" >&2
-                echo "$RUNS_JSON" >&2
+                echo "$CI_FALLBACK_DETAIL" >&2
                 exit 1 ;;
             pending) : ;; # fall through to deadline/sleep below
         esac
