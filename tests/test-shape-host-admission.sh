@@ -31,6 +31,7 @@ git -C "$PROJECT_DIR" fetch -q origin
 cat > "$TEST_DIR/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 if [ "${1:-}" = "issue" ] && [ "${2:-}" = "view" ]; then
+    [ "${3:-}" = "404" ] && { echo "stub-gh: issue not found" >&2; exit 1; }
     echo "FAKE-GH issue #${3:-?}: synthetic body for shape test"; exit 0
 fi
 echo "stub-gh: unhandled args: $*" >&2; exit 1
@@ -88,7 +89,7 @@ echo "swarm-other-iss-1" > "$TEST_DIR/docker-containers.txt"   # 1 running + 1 p
 # shellcheck disable=SC2086
 rc=$(run_prov 12 $off)
 [ "$rc" -eq 3 ] || red "second spawn should be refused by running+pending, rc=$rc: $(cat "$TEST_DIR/prov-12.log")"
-grep -q 'reason=host_max_workers running=2 pending=1' "$PROJECT_DIR/.swarm/events.log" || red "expected pending=1 in cap.refused event"
+grep -q 'reason=host_max_workers total=2 running=1 pending=1' "$PROJECT_DIR/.swarm/events.log" || red "expected pending=1 in cap.refused event"
 green "pending marker counted (running=1 + pending=1 >= 2)"
 
 heading "2: marker is dropped once the container is visible"
@@ -118,7 +119,7 @@ green "a 200s-old foreign marker storing its own 300s TTL survives a reader whos
 # shellcheck disable=SC2086
 rc=$(run_prov 15 $off)
 [ "$rc" -eq 3 ] || red "third spawn should be refused: foreign(1) + iss-14(1) pending >= cap 2, rc=$rc: $(cat "$TEST_DIR/prov-15.log")"
-grep -q 'reason=host_max_workers running=2 pending=2' "$PROJECT_DIR/.swarm/events.log" || red "expected pending=2 (foreign marker still counted) in cap.refused event"
+grep -q 'reason=host_max_workers total=2 running=0 pending=2' "$PROJECT_DIR/.swarm/events.log" || red "expected pending=2 (foreign marker still counted) in cap.refused event"
 green "the still-live foreign marker keeps counting toward HOST_MAX_WORKERS, proving it wasn't dropped"
 
 heading "3: load, memory and stagger refusals"
@@ -129,6 +130,10 @@ printf 'MemTotal: 131072000 kB\nMemAvailable: 4194304 kB\n' > "$TEST_DIR/meminfo
 rc=$(run_prov 13 HOST_LOADAVG_FILE="$TEST_DIR/loadavg" HOST_MAX_LOAD1=48 HOST_MIN_MEM_AVAIL_MB=0 HOST_SPAWN_STAGGER_SECS=0)
 [ "$rc" -eq 3 ] && grep -q 'reason=host_load load1=99.00 max=48' "$PROJECT_DIR/.swarm/events.log" || red "load refusal: rc=$rc $(cat "$TEST_DIR/prov-13.log")"
 green "load1 99 > 48 refused (exit 3, reason=host_load)"
+printf '12.90 5.00 1.00 1/1 1\n' > "$TEST_DIR/loadavg"
+rc=$(run_prov 13 HOST_LOADAVG_FILE="$TEST_DIR/loadavg" HOST_MAX_LOAD1=12 HOST_MIN_MEM_AVAIL_MB=0 HOST_SPAWN_STAGGER_SECS=0)
+[ "$rc" -eq 3 ] && grep -q 'reason=host_load load1=12.90 max=12' "$PROJECT_DIR/.swarm/events.log" || red "fractional load refusal: rc=$rc $(cat "$TEST_DIR/prov-13.log")"
+green "load1 12.90 > 12 refused (decimals compared, not truncated)"
 rc=$(run_prov 13 HOST_MEMINFO_FILE="$TEST_DIR/meminfo" HOST_MAX_LOAD1=0 HOST_MIN_MEM_AVAIL_MB=16384 HOST_SPAWN_STAGGER_SECS=0)
 [ "$rc" -eq 3 ] && grep -q 'reason=host_mem avail_mb=4096 min_mb=16384' "$PROJECT_DIR/.swarm/events.log" || red "mem refusal: rc=$rc $(cat "$TEST_DIR/prov-13.log")"
 green "MemAvailable 4096 MB < 16384 refused (exit 3, reason=host_mem)"
@@ -152,6 +157,23 @@ rc=$(run_prov 15 $off)
 [ "$rc" -eq 0 ] || red "expired pause should admit, rc=$rc: $(cat "$TEST_DIR/prov-15.log")"
 [ ! -e "$HOST_STATE_DIR/dispatch-paused" ] || red "expired pause file should be removed"
 green "expired pause ignored and removed"
+rm -f "$HOST_STATE_DIR"/pending-*
+echo "garbage nightly" > "$HOST_STATE_DIR/dispatch-paused"
+rm -f "$HOST_STATE_DIR/last-spawn"
+# shellcheck disable=SC2086
+rc=$(run_prov 16 $off)
+[ "$rc" -eq 0 ] || red "malformed pause file should admit, not crash, rc=$rc: $(cat "$TEST_DIR/prov-16.log")"
+[ ! -e "$HOST_STATE_DIR/dispatch-paused" ] || red "malformed pause file should be removed"
+green "malformed pause file ignored and removed"
+
+heading "3c: a failed issue fetch refuses before admission (no pending marker, no brief)"
+rm -f "$HOST_STATE_DIR"/pending-* "$HOST_STATE_DIR/last-spawn"
+# shellcheck disable=SC2086
+rc=$(run_prov 404 $off)
+[ "$rc" -eq 2 ] || red "failed gh issue view should exit 2, rc=$rc: $(cat "$TEST_DIR/prov-404.log")"
+[ ! -e "$HOST_STATE_DIR/pending-swarm-llm-proj-iss-404" ] || red "no pending marker should be written when the issue fetch fails"
+[ -z "$(find "$TEST_DIR" -path '*wt-issue-404/.swarm/tasks/inbox/*' -type f)" ] || red "no brief (or .tmp file) should be left in inbox/"
+green "gh issue view failure: exit 2, no pending marker, empty inbox"
 
 heading "4: _load-env.sh ignores HOST_* keys in <project>/.swarm/.env"
 printf 'HOST_MAX_WORKERS=99\nMAX_WORKERS=7\n' > "$PROJECT_DIR/.swarm/.env"
