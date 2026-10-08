@@ -2,181 +2,81 @@
 #
 # provision-worker.sh — coordinator helper to provision a worker for an issue.
 #
-# Usage:   provision-worker.sh <issue-number> [project-dir]
-# Example: provision-worker.sh 142
-#          provision-worker.sh 142 /opt/work/oconeco/fand-api
-#
-# Wraps the multi-step "create worktree, init queue, build brief with
-# .swarm-policy.md guardrails embedded, atomic write, spawn worker tmux
-# window" workflow into a single command call. The coordinator (gemini or
-# claude) invokes this once per dispatch — no $(...) substitution at the
-# coordinator's tool layer, so gemini's run_shell_command guardrails are
-# satisfied.
-#
-# Re-running for the same issue is idempotent: a pre-existing worktree
-# is reused (no re-create), and the new task is queued via a fresh task
-# id so the listener processes it as a follow-up.
+# One call does: create worktree, init queue, check caps, write the brief
+# atomically, spawn the worker tmux window, verify it came up. The
+# coordinator calls it as a single command (no $(...) at its tool layer,
+# which gemini's run_shell_command guardrails require). See --help for the
+# contract (exit codes, config, events).
 set -euo pipefail
 
-# --- Help / usage ---
 case "${1:-}" in
     -h|--help)
         cat <<'EOF'
 provision-worker.sh — Provision a worker for one GitHub issue
 
 USAGE
-    provision-worker.sh <issue-number> [project-dir]
+    provision-worker.sh <issue-number> [project-dir]     (project-dir default: $PWD)
 
-ARGUMENTS
-    issue-number    GitHub issue number to dispatch (required)
-    project-dir     Path to project root (default: $PWD)
+WHAT IT DOES
+    1. Worktree <worktree-parent>/wt-issue-N on branch fix/issue-N, based on
+       origin's default branch (reused if present). <worktree-parent> is the
+       project's parent dir, or <project-parent>/<project>-worktrees when
+       SWARM_WORKTREE_GROUPING=project.
+    2. Queue dirs under <wt>/.swarm/tasks/.
+    3. Caps and host admission (below), then the brief: prompts/refs.md +
+       .swarm-policy.md + `gh issue view N`, atomically written to inbox/.
+    4. tmux window 'iss-N' running the sandbox listener, then a health poll.
+    If a live iss-N window already exists, steps 3-4 only queue a follow-up
+    brief onto it (no caps, no spawn).
 
-DESCRIPTION
-    One-call helper for the coordinator. Creates worktree at
-    <worktree-parent>/wt-issue-N on branch fix/issue-N (idempotent), initializes
-    -- where <worktree-parent> is either <project-parent> (the default 'flat'
-    -- layout) or <project-parent>/<project>-worktrees (when
-    -- SWARM_WORKTREE_GROUPING=project; recommended for multi-swarm hosts).
-    the v2 queue, embeds the worker communication conventions (via
-    system prompt at launch time) plus
-    any project .swarm-policy.md guardrails into the brief, atomic-writes
-    the task into inbox/, and spawns a worker tmux window 'iss-N' running
-    the sandbox listener.
+EXIT CODES
+    0  provisioned (or follow-up queued)
+    2  setup refused, nothing running: bad flag, issue fetch failed, no
+       origin default branch, orphan worktree, stale branch with unique
+       commits, missing tmux session, stale container that won't clear
+    3  cap refused (cap.refused event) — the coordinator retries these
+    4  spawn confirmed dead: window, container and brief all removed, so a
+       retry starts clean
+    5  a same-name container exists AND its iss-N window is alive — a worker
+       is running; use requeue.sh, not a retry
+    6  still starting after PROVISION_SPAWN_CHECK_SECS (pane alive, container
+       not seen yet) — nothing cleaned up; re-running would double-provision.
+       Check `docker ps` / `tmux capture-pane`.
+    Caps and admission run before the brief is written, so 2/3/5 leave no
+    brief behind (#464). The worktree is kept on refusal; a retry reuses it.
 
-CAP ENFORCEMENT (exit 3 on any)
-    MAX_WORKERS         alive iss-* windows < cap         (default 5)
-    MAX_TMUX_WINDOWS    total session windows < cap       (default 10)
-    HOST_MAX_WORKERS    running swarm-* containers + spawns in flight across
-                        ALL swarms on this host < cap     (default 8)
-    HOST_MAX_LOAD1      1-min load average <= cap         (default 1.5 x nproc)
-    HOST_MIN_MEM_AVAIL_MB  MemAvailable >= floor          (default 16384)
-    HOST_SPAWN_STAGGER_SECS  seconds since the last spawn on this host
-                        >= gap                            (default 60)
-    The four HOST_* checks run under one host-wide flock (HOST_STATE_DIR,
-    default $TMPDIR/llm-swarm-host-<uid>) so concurrent coordinators can't
-    each admit "one more". HOST_* keys are host facts: _load-env.sh ignores
-    them in <project>/.swarm/.env; set them in <sandbox>/.env.
-    All are checked BEFORE the task brief is written into inbox/ and before
-    the new tmux window would be created, so a refusal leaves no brief
-    behind (issue #464 — a refused-then-retried provision used to queue the
-    same brief twice). The worktree itself (step 1) is still created even
-    on refusal: it's harmless, and a retry reuses it instead of recreating
-    it. The host cap exists because per-swarm caps don't add up: 2026-09-02
-    saw 16 workers x 8 GB sandbox limit = all 128 GB of minti9's RAM.
-    Re-running for an existing iss-N window does NOT count against caps —
-    that path queues a follow-up task without adding capacity.
+CAPS (exit 3)
+    MAX_WORKERS              5     alive iss-* windows in this session
+    MAX_TMUX_WINDOWS         10    total windows in this session
+    Host-wide, under one flock in HOST_STATE_DIR (set these in <sandbox>/.env;
+    _load-env.sh ignores them in <project>/.swarm/.env):
+    HOST_MAX_WORKERS         8     running swarm-* containers + spawns in flight
+    HOST_MAX_LOAD1           auto  1-min load ceiling (auto = 1.5 x nproc; 0 off)
+    HOST_MIN_MEM_AVAIL_MB    16384 MemAvailable floor (0 off)
+    HOST_SPAWN_STAGGER_SECS  60    min gap between spawns host-wide (0 off)
+    HOST_STATE_DIR           $TMPDIR/llm-swarm-host-<uid>  lock, pending
+                                   markers, dispatch-paused (nightly-full-tests.sh)
 
-STALE BRANCH (exit 2)
-    If fix/issue-N already exists as a branch but no worktree at
-    <worktree-parent>/wt-issue-N is attached to it (deleted manually, left
-    behind by branch sweep, or orphaned by a worktree-grouping change), the
-    script decides instead of letting 'git worktree add -b' fail blind:
-      - no commits beyond the default branch  -> reused automatically
-      - unique commits present                -> refuses, exits 2 with a
-                                                   remedy hint (never exit 0)
+OTHER CONFIG  (shell env > <project>/.swarm/.env > <sandbox>/.env > .env.example)
+    PROVISION_SPAWN_CHECK_SECS           120  health-poll ceiling (0 disables;
+                                              also skipped while the image is
+                                              unbuilt — pre-build with
+                                              scripts/build-image.sh)
+    PROVISION_STALE_CONTAINER_WAIT_SECS  15   wait for a stale container's name to clear
+    SANDBOX_SH, LLM_SWARM_DIR            auto
+    BRIEF_LINT                           1    run lint-brief.sh (warn-only)
 
-STALE WORKER STATE (issue #493)
-    A dead-paned iss-N window (remain-on-exit=failed keeps a crashed
-    window's corpse around for forensic scrollback) is reclaimed
-    automatically: killed, logged (worker.dead_pane_reclaimed), then
-    re-provisioned as a fresh spawn.
-    A leftover container under this issue's exact name (outlived its
-    window — a parked/window-only reap, a session restart, or the reclaim
-    above) is stopped and removed before the new `docker run`, with a wait
-    for `docker ps -a` to actually clear the name (avoids racing --rm's own
-    async auto-removal). If that container's window is instead found
-    genuinely alive, provisioning refuses (exit 5 — a dedicated code, since
-    plain exit 2 already means "refused, nothing running" elsewhere in this
-    script and this is the opposite) rather than stopping a possibly-live
-    worker's container — route the brief through requeue.sh instead.
-    Exits 2 if the stale container doesn't clear within
-    PROVISION_STALE_CONTAINER_WAIT_SECS (default 15s).
-
-STARTUP FAILURE (exit 4, issue #493; polling since issue #546)
-    After spawning, the new pane is polled (up to PROVISION_SPAWN_CHECK_SECS,
-    default 120s) instead of checked once after a fixed sleep: it succeeds
-    the instant the container is seen running, so a healthy-but-slow start
-    (a loaded host can take 30s+ just to reach `docker create` -> `start`)
-    is never mistaken for a dead one. A dead pane fails immediately without
-    waiting out the rest of the budget. Exits 4 only on that confirmed
-    failure (e.g. sandbox.sh's `docker run` exiting immediately on a
-    name-collision) even though `tmux new-window` itself reported success
-    — prints the pane's last lines, kills the window, and removes the
-    brief step 3 already wrote to inbox/ — nothing claimed it, and leaving
-    either behind would let a late-arriving pane park with an empty inbox,
-    or a retry queue a duplicate brief onto the window — instead of the
-    pre-#493 behavior of exiting 0 with the window left running and the
-    brief silently stranded there (fand-etl 2026-09-27: undiscovered for
-    ~7 hours).
-    PROVISION_SPAWN_CHECK_SECS=0 disables this check (for test harnesses
-    that stub tmux/docker without simulating a live pane or container).
-    Caveat: a cold host without the llm-swarm-runner image yet runs
-    `docker build` before `docker run` (sandbox.sh), which routinely takes
-    far longer than even the new 120s default. The check skips itself
-    entirely in that case (logging a notice) rather than risk killing a
-    build that's actually still in progress — so a first-ever (or
-    post-Dockerfile-change) spawn on such a host gets no post-spawn
-    verification at all until the image exists. Pre-build it once with
-    `scripts/build-image.sh` before provisioning to get the check back on
-    a cold host — not a bare `docker build`, which skips the
-    dockerfile_sha label sandbox.sh checks and triggers its Dockerfile-
-    drift warning (#517) on every subsequent spawn.
-
-STARTUP STILL IN PROGRESS (exit 6, issue #546)
-    If the pane is still alive when PROVISION_SPAWN_CHECK_SECS runs out but
-    the container was never observed running, that's genuinely ambiguous
-    (slow start vs. actually stuck) rather than the confirmed failure
-    above — the window, container and brief are all left exactly as they
-    are rather than tearing down a worker that may only need more time.
-    Exit 6 tells the caller nothing was cleaned up, so re-running
-    provision-worker.sh would double-provision the same issue; check
-    `docker ps` / `tmux capture-pane` instead, or raise
-    PROVISION_SPAWN_CHECK_SECS and retry once the cause is clear.
-
-CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env
-         > <sandbox>/.env.example)
-    MAX_WORKERS         5         worker tmux window cap
-    MAX_TMUX_WINDOWS    10        total session window cap
-    HOST_MAX_WORKERS    8         host-wide running worker container cap
-    HOST_MAX_LOAD1      auto      host load1 ceiling (auto = 1.5 x nproc; 0 off)
-    HOST_MIN_MEM_AVAIL_MB 16384   host MemAvailable floor in MB (0 off)
-    HOST_SPAWN_STAGGER_SECS 60    min seconds between spawns host-wide (0 off)
-    HOST_STATE_DIR      (auto)    lock + pending-spawn markers, host-wide
-    SANDBOX_SH          (auto)    path to sandbox.sh used by the listener
-    LLM_SWARM_DIR     (auto)    sandbox install dir
-    PROVISION_SPAWN_CHECK_SECS            120 ceiling for the post-spawn health poll (0 disables it; issue #546)
-    PROVISION_STALE_CONTAINER_WAIT_SECS   15  max wait for a stale container's name to clear
-
-EVENTS LOG
-    Appends to <project>/.swarm/events.log:
-      worker.start                new iss-N window created (alive=A/MAX, total=W/MAX).
-                                   Logged at spawn time, not confirmed-healthy time
-                                   (coordinator-watch.sh's activity-poll anchors a
-                                   paste-grace window to this timestamp, issue #497)
-                                   — a worker.start.failed a few seconds later for
-                                   the same issue means THIS spawn didn't survive.
-      worker.requeue               existing iss-N window reused for follow-up task
-      cap.refused                  MAX_WORKERS, MAX_TMUX_WINDOWS, HOST_MAX_WORKERS, host load,
-                                    host memory or the spawn stagger refused the spawn (reason=)
-      worker.dead_pane_reclaimed   iss-N window existed but its pane was dead; killed before re-provisioning (#493)
-      provision.stale_container    pre-spawn stale-container check outcome: state=cleared/window_alive/removal_timeout (#493)
-      worker.start.failed          new window's pane died right after spawn (#493) —
-                                   a confirmed failure: window killed, container
-                                   removed, brief deleted. Always preceded by a
-                                   worker.start for the same issue/task_id — a
-                                   consumer counting successful spawns must
-                                   subtract these, not just count worker.start
-                                   lines. brief_removed=1 means the unclaimed
-                                   brief was deleted from inbox/ to keep a retry
-                                   from duplicating it.
-      worker.start.indeterminate   PROVISION_SPAWN_CHECK_SECS ran out with the pane
-                                   still alive but the container never observed
-                                   running (#546) — ambiguous, not confirmed dead;
-                                   window/container/brief left untouched (exit 6).
-
-EXAMPLES
-    provision-worker.sh 142                          # dispatch issue #142 from $PWD
-    provision-worker.sh 142 /path/to/proj            # explicit project dir
+EVENTS  (<project>/.swarm/events.log)
+    worker.start                 window spawned (logged before the health poll)
+    worker.start.failed          spawn confirmed dead (exit 4); follows a worker.start
+    worker.start.indeterminate   health poll ran out, pane alive (exit 6)
+    worker.requeue               follow-up queued onto a live window
+    worker.dead_pane_reclaimed   dead-pane iss-N window killed, its stale briefs
+                                 salvaged to .swarm/salvaged/iss-N/
+    provision.stale_container    state=cleared|window_alive|removal_timeout
+    provision.stale_branch       fix/issue-N has unique commits, no worktree
+    cap.refused                  reason=max_workers|max_tmux_windows|dispatch_paused|
+                                 host_max_workers|host_load|host_mem|spawn_stagger
 EOF
         exit 0
         ;;
@@ -190,95 +90,83 @@ while [[ "${1:-}" == -* ]]; do
 done
 
 ISSUE="${1:?usage: provision-worker.sh <issue-number> [project-dir]   (try --help)}"
-PROJECT_DIR="${2:-$PWD}"
-PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
+PROJECT_DIR="$(cd "${2:-$PWD}" && pwd)"
 BRANCH="fix/issue-$ISSUE"
 SESSION_NAME="llm-$(basename "$PROJECT_DIR")"
-# Self-locate so SANDBOX_SH default follows the script. Override with
-# SANDBOX_SH=<path> when running a non-standard install.
+WINDOW="iss-$ISSUE"
+# Must match the Ctrl-Z `docker exec` binding in ~/.tmux.conf.
+CONTAINER="swarm-${SESSION_NAME}-iss-${ISSUE}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LLM_SWARM_DIR="${LLM_SWARM_DIR:-$(dirname "$SCRIPT_DIR")}"
 SANDBOX_SH="${SANDBOX_SH:-$LLM_SWARM_DIR/sandbox.sh}"
 
-# Apply <project>/.swarm/.env then sandbox .env.example before reading caps,
-# so caller env > project file > sandbox defaults. Normally the tmux session
-# already has these exported (set by llm-start.sh), but the explicit load
-# lets the script run correctly when invoked standalone. This also defines
-# swarm_worktree_dir() so we can compute WT honoring SWARM_WORKTREE_GROUPING.
+# Loads <project>/.swarm/.env and sandbox defaults (the tmux session usually
+# has them already; this covers standalone runs) and defines
+# swarm_worktree_dir, so WT is computed after it.
 # shellcheck source=_load-env.sh
 . "$SCRIPT_DIR/_load-env.sh" "$PROJECT_DIR"
-
-# Derive worktree path AFTER env load so SWARM_WORKTREE_GROUPING is honored.
 WT="$(swarm_worktree_dir "$PROJECT_DIR" "$ISSUE")"
-# Ensure parent dir exists in 'project' grouping mode (the flat layout's
-# parent already exists; project-grouping creates <project>-worktrees/).
 mkdir -p "$(dirname "$WT")"
 
 MAX_WORKERS="${MAX_WORKERS:-5}"
 MAX_TMUX_WINDOWS="${MAX_TMUX_WINDOWS:-10}"
 HOST_MAX_WORKERS="${HOST_MAX_WORKERS:-8}"
-
-# Worker conventions (`prompts/worker.md`) are delivered as a system prompt
-# by the listener at claude/gemini launch time — see scripts/worker-listener.sh.
-# Briefs no longer carry them verbatim; this script only assembles the
-# per-task payload (refs index + project policy + task content).
-
-# Reference-docs index. Cat'd into every brief so workers know what
-# authoritative docs are available under $LLM_SWARM_DOCS/ inside their
-# container. The docs themselves are reachable via the sandbox-dir bind
-# mount in sandbox.sh. Kept in the brief (not the system prompt) because
-# refs.md is contextual ("consult when triggered") rather than a behavior
-# rule — and projects may append refs via .swarm-policy.md.
-WORKER_REFS_MD="$LLM_SWARM_DIR/prompts/refs.md"
-
-# Append-only structured event log. Same format as coordinator-watch.sh.
-EVENTS_LOG="$PROJECT_DIR/.swarm/events.log"
-mkdir -p "$(dirname "$EVENTS_LOG")" 2>/dev/null || true
-log_event() {
-    local cat="$1"; shift
-    local ts
-    ts="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-    printf '%s  %-15s %s\n' "$ts" "$cat" "$*" >> "$EVENTS_LOG" 2>/dev/null || true
-}
-
-# --- Host-wide admission ------------------------------------------------------
-# Config (host tiers only; _load-env.sh ignores these in <project>/.swarm/.env):
-#   HOST_MAX_WORKERS         8        running + pending worker containers, all swarms
-#   HOST_MAX_LOAD1           auto     refuse when 1-min load > this (auto = 1.5 x nproc)
-#   HOST_MIN_MEM_AVAIL_MB    16384    refuse when MemAvailable is below this
-#   HOST_SPAWN_STAGGER_SECS  60       minimum seconds between spawns host-wide
-#   HOST_STATE_DIR           $TMPDIR/llm-swarm-host-<uid>   lock + pending markers
-#                            + dispatch-paused (see nightly-full-tests.sh)
-# Test hooks: HOST_LOADAVG_FILE / HOST_MEMINFO_FILE replace /proc/{loadavg,meminfo}.
 HOST_MAX_LOAD1="${HOST_MAX_LOAD1:-auto}"
 HOST_MIN_MEM_AVAIL_MB="${HOST_MIN_MEM_AVAIL_MB:-16384}"
 HOST_SPAWN_STAGGER_SECS="${HOST_SPAWN_STAGGER_SECS:-60}"
 HOST_STATE_DIR="${HOST_STATE_DIR:-${TMPDIR:-/tmp}/llm-swarm-host-$(id -u)}"
-# issue #546, self-review: a pending marker must outlive the post-spawn
-# health poll it covers, or a spawn that's still legitimately in flight
-# stops counting toward HOST_MAX_WORKERS partway through its own check —
-# the marker is written at admission, BEFORE the worktree/brief/spawn
-# setup that precedes the poll, so even the unraised 120s default can run
-# past a 120s TTL once that setup time is added in. Always max(120,
-# check_secs + 30s) rather than assuming the two stay equal.
-#
-# issue #546, self-review (round 7): PROVISION_SPAWN_CHECK_SECS is
-# per-project overridable (it's not in _load-env.sh's HOST_ONLY_KEYS list),
-# but $HOST_STATE_DIR and the pending-* markers under it are shared by
-# every project/swarm on this host. The value below is this invocation's
-# OWN TTL — it's written into the marker this invocation creates (see
-# host_admission_check) and used as the fallback when reading a marker
-# that has none — but it must never be used to judge another project's
-# marker: a project with a longer PROVISION_SPAWN_CHECK_SECS would have
-# its still-valid marker read, and deleted, by a sibling project's
-# shorter-ceilinged run. host_admission_check reads each marker's own
-# stored TTL instead, so this variable never gates a marker it didn't
-# write.
-HOST_PENDING_TTL_SECS="$(awk -v c="${PROVISION_SPAWN_CHECK_SECS:-120}" \
-    'BEGIN{v=c+30; if (v<120) v=120; printf "%.0f", v}')"
+SPAWN_CHECK_SECS="${PROVISION_SPAWN_CHECK_SECS:-120}"
+# A pending marker must outlive this run's health poll plus the setup before
+# it (#546). Each marker stores its writer's TTL, because projects can set
+# different PROVISION_SPAWN_CHECK_SECS and share HOST_STATE_DIR.
+HOST_PENDING_TTL_SECS="$(awk -v c="$SPAWN_CHECK_SECS" 'BEGIN{v=c+30; if (v<120) v=120; printf "%.0f", v}')"
 
-host_refuse() {
-    # $1 reason tag, $2 human line, $3 hint line, rest = event k=v pairs
+# Worker conventions (prompts/worker.md) reach the agent as a system prompt
+# via worker-listener.sh; the brief carries only per-task content.
+WORKER_REFS_MD="$LLM_SWARM_DIR/prompts/refs.md"
+
+EVENTS_LOG="$PROJECT_DIR/.swarm/events.log"
+mkdir -p "$(dirname "$EVENTS_LOG")" 2>/dev/null || true
+log_event() {
+    local cat="$1"; shift
+    printf '%s  %-15s %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$cat" "$*" >> "$EVENTS_LOG" 2>/dev/null || true
+}
+
+# --- helpers ------------------------------------------------------------------
+
+# pane_is_dead <window>: true if the pane is dead OR the window can't be
+# queried (a pane that exited 0 isn't kept by remain-on-exit, so the window
+# can vanish between list-windows and here; `|| true` keeps set -e out of it).
+pane_is_dead() {
+    local pd
+    pd="$(tmux list-panes -t "$SESSION_NAME:$1" -F '#{pane_dead}' 2>/dev/null | head -1)" || true
+    [ "${pd:-1}" = "1" ]
+}
+
+window_listed() {
+    tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx "$1"
+}
+
+# container_listed [-a] <name>: exact-name match (-a includes stopped ones).
+container_listed() {
+    local all=()
+    [ "$1" = "-a" ] && { all=(-a); shift; }
+    docker ps "${all[@]}" --filter "name=^$1\$" --format '{{.Names}}' 2>/dev/null | grep -qx "$1"
+}
+
+remove_container() {
+    docker stop "$1" >/dev/null 2>&1 || true
+    docker rm -f "$1" >/dev/null 2>&1 || true
+}
+
+# drop_pending_marker <container>: every refusal after admission drops the
+# marker, or it double-counts toward HOST_MAX_WORKERS until its TTL expires.
+drop_pending_marker() {
+    rm -f -- "$HOST_STATE_DIR/pending-$1"
+}
+
+# refuse_cap <reason> <message> <hint> [k=v ...]  -> exit 3
+refuse_cap() {
     local reason="$1" msg="$2" hint="$3"; shift 3
     echo "ERROR: $msg" >&2
     [ -n "$hint" ] && echo "       $hint" >&2
@@ -286,46 +174,62 @@ host_refuse() {
     exit 3
 }
 
+# --- session caps -------------------------------------------------------------
+
+session_cap_check() {
+    alive_workers=$(tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -c '^iss-' || true)
+    total_windows=$(tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | wc -l)
+    [ "$alive_workers" -ge "$MAX_WORKERS" ] && refuse_cap max_workers \
+        "MAX_WORKERS cap reached (alive=$alive_workers, max=$MAX_WORKERS)" \
+        "Wait for a worker to finish, or raise MAX_WORKERS in <project>/.swarm/.env." \
+        "alive=$alive_workers max=$MAX_WORKERS"
+    [ "$total_windows" -ge "$MAX_TMUX_WINDOWS" ] && refuse_cap max_tmux_windows \
+        "MAX_TMUX_WINDOWS cap reached (total=$total_windows, max=$MAX_TMUX_WINDOWS)" \
+        "Close finished windows (tmux kill-window -t '$SESSION_NAME:iss-NN') or raise MAX_TMUX_WINDOWS in <project>/.swarm/.env." \
+        "total=$total_windows max=$MAX_TMUX_WINDOWS"
+    return 0
+}
+
+# --- host-wide admission ------------------------------------------------------
+# Every swarm on the host shares its RAM and cores, so admission is decided
+# under one host-wide flock (2026-09-29, after load 95 on 32 threads and
+# 16 x 8 GB workers filling 128 GB). Test hooks: HOST_LOADAVG_FILE and
+# HOST_MEMINFO_FILE replace /proc/{loadavg,meminfo}.
+
 host_admission_check() {
-    local container_name="swarm-${SESSION_NAME}-iss-${ISSUE}"
     mkdir -p "$HOST_STATE_DIR"
     exec 9>"$HOST_STATE_DIR/cap.lock"
     flock -w 30 9 || echo "warn: host cap lock busy for 30 s; proceeding unlocked" >&2
 
-    # 0) dispatch pause: "<expiry-epoch> <reason...>" written by
-    # nightly-full-tests.sh. An expired file is ignored and removed, so a
-    # crashed nightly can't hold dispatch forever.
+    # Dispatch pause: "<expiry-epoch> <reason...>" from nightly-full-tests.sh.
+    # Expired or malformed files are removed, so a crashed nightly can't
+    # hold dispatch forever.
     local pause_file="$HOST_STATE_DIR/dispatch-paused"
     if [ -f "$pause_file" ]; then
-        local p_until p_reason p_left
+        local p_until="" p_reason="" p_left=0
         read -r p_until p_reason < "$pause_file" || true
-        p_left=$(( ${p_until:-0} - $(date +%s) ))
-        if [ "$p_left" -gt 0 ]; then
-            host_refuse dispatch_paused \
-                "dispatch paused host-wide (${p_reason:-no reason given})" \
-                "Retry after ${p_left}s at the latest (the pause may lift sooner); the coordinator does this on its own." \
-                "left=${p_left}s"
-        fi
+        [[ "$p_until" =~ ^[0-9]+$ ]] && p_left=$(( p_until - $(date +%s) ))
+        [ "$p_left" -gt 0 ] && refuse_cap dispatch_paused \
+            "dispatch paused host-wide (${p_reason:-no reason given})" \
+            "Retry after ${p_left}s at the latest (the pause may lift sooner); the coordinator does this on its own." \
+            "left=${p_left}s"
         rm -f -- "$pause_file"
     fi
 
-    # a) container count: running + pending spawns not yet visible to docker ps
+    # Container count = running + spawns admitted but not yet in docker ps.
+    # Without pending markers, three coordinators in the same second all saw
+    # room for one more.
     if [ "$HOST_MAX_WORKERS" != "0" ]; then
-        local running pending=0 m name age now marker_ttl
+        local running running_n=0 pending=0 m name age marker_ttl now
         running="$(docker ps --filter 'name=^swarm-' --format '{{.Names}}' 2>/dev/null || true)"
+        [ -n "$running" ] && running_n=$(wc -l <<< "$running")
         now=$(date +%s)
         for m in "$HOST_STATE_DIR"/pending-*; do
             [ -e "$m" ] || continue
             name="${m##*/pending-}"
             age=$(( now - $(stat -c %Y "$m" 2>/dev/null || echo "$now") ))
-            # issue #546, self-review (round 7): judge each marker against the
-            # TTL ITS OWN writer stored in it, not this invocation's
-            # HOST_PENDING_TTL_SECS — a sibling project can run with a
-            # different PROVISION_SPAWN_CHECK_SECS, and reading this
-            # process's own value here would let one project's admission
-            # check delete another project's still-valid marker mid-poll.
-            # Markers from before this fix (or corrupted) have no usable
-            # content, so fall back to this invocation's own TTL for those.
+            # Judge each marker by its own stored TTL (pre-#546 markers have
+            # none; fall back to ours).
             marker_ttl="$(cat -- "$m" 2>/dev/null)" || true
             [[ "$marker_ttl" =~ ^[0-9]+$ ]] || marker_ttl="$HOST_PENDING_TTL_SECS"
             if grep -qx -- "$name" <<< "$running" || [ "$age" -gt "$marker_ttl" ]; then
@@ -334,155 +238,92 @@ host_admission_check() {
                 pending=$((pending + 1))
             fi
         done
-        local host_workers running_n=0
-        [ -n "$running" ] && running_n=$(wc -l <<< "$running")
-        host_workers=$(( running_n + pending ))
-        if [ "$host_workers" -ge "$HOST_MAX_WORKERS" ]; then
-            host_refuse host_max_workers \
-                "HOST_MAX_WORKERS cap reached (running swarm-* containers + pending spawns=$host_workers, max=$HOST_MAX_WORKERS, all swarms)" \
-                "Reap finished workers in every swarm (kill-finished-workers.sh), or raise HOST_MAX_WORKERS in <sandbox>/.env." \
-                "running=$host_workers pending=$pending max=$HOST_MAX_WORKERS"
-        fi
+        local total=$(( running_n + pending ))
+        [ "$total" -ge "$HOST_MAX_WORKERS" ] && refuse_cap host_max_workers \
+            "HOST_MAX_WORKERS cap reached (running swarm-* containers + pending spawns=$total, max=$HOST_MAX_WORKERS, all swarms)" \
+            "Reap finished workers in every swarm (kill-finished-workers.sh), or raise HOST_MAX_WORKERS in <sandbox>/.env." \
+            "total=$total running=$running_n pending=$pending max=$HOST_MAX_WORKERS"
     fi
 
-    # b) load average
+    # Load ceiling: memory alone cut on the wrong axis — 9 workers spawned
+    # in one minute compiled and forked test JVMs together.
     if [ "$HOST_MAX_LOAD1" != "0" ]; then
         local max_load load1 nproc_n
         nproc_n=$(nproc 2>/dev/null || echo 4)
         if [ "$HOST_MAX_LOAD1" = "auto" ]; then
             max_load=$(( nproc_n * 3 / 2 ))
         else
-            max_load="${HOST_MAX_LOAD1%%.*}"
+            max_load="$HOST_MAX_LOAD1"
         fi
         load1="$(cut -d' ' -f1 "${HOST_LOADAVG_FILE:-/proc/loadavg}" 2>/dev/null || echo 0)"
-        if [ "${load1%%.*}" -gt "$max_load" ]; then
-            host_refuse host_load \
-                "host load too high for a new worker (load1=$load1, max=$max_load, nproc=$nproc_n)" \
-                "Wait for the running workers' compile/test peaks to pass, or set HOST_MAX_LOAD1 in <sandbox>/.env (0 disables)." \
-                "load1=$load1 max=$max_load"
-        fi
+        awk -v l="${load1:-0}" -v m="$max_load" 'BEGIN{exit !(l+0 > m+0)}' && refuse_cap host_load \
+            "host load too high for a new worker (load1=$load1, max=$max_load, nproc=$nproc_n)" \
+            "Wait for the running workers' compile/test peaks to pass, or set HOST_MAX_LOAD1 in <sandbox>/.env (0 disables)." \
+            "load1=$load1 max=$max_load"
     fi
 
-    # c) available memory
     if [ "$HOST_MIN_MEM_AVAIL_MB" != "0" ]; then
         local avail_kb avail_mb
         avail_kb="$(awk '/^MemAvailable:/ {print $2}' "${HOST_MEMINFO_FILE:-/proc/meminfo}" 2>/dev/null || echo 0)"
         avail_mb=$(( ${avail_kb:-0} / 1024 ))
-        if [ "$avail_mb" -lt "$HOST_MIN_MEM_AVAIL_MB" ]; then
-            host_refuse host_mem \
-                "host memory too low for a new worker (MemAvailable=${avail_mb} MB, min=${HOST_MIN_MEM_AVAIL_MB} MB)" \
-                "Reap finished workers, or lower HOST_MIN_MEM_AVAIL_MB in <sandbox>/.env (0 disables)." \
-                "avail_mb=$avail_mb min_mb=$HOST_MIN_MEM_AVAIL_MB"
-        fi
+        [ "$avail_mb" -lt "$HOST_MIN_MEM_AVAIL_MB" ] && refuse_cap host_mem \
+            "host memory too low for a new worker (MemAvailable=${avail_mb} MB, min=${HOST_MIN_MEM_AVAIL_MB} MB)" \
+            "Reap finished workers, or lower HOST_MIN_MEM_AVAIL_MB in <sandbox>/.env (0 disables)." \
+            "avail_mb=$avail_mb min_mb=$HOST_MIN_MEM_AVAIL_MB"
     fi
 
-    # d) spawn stagger
+    # Stagger so new workers' compile/fork peaks don't line up.
     if [ "$HOST_SPAWN_STAGGER_SECS" != "0" ] && [ -e "$HOST_STATE_DIR/last-spawn" ]; then
-        local since
-        since=$(( $(date +%s) - $(stat -c %Y "$HOST_STATE_DIR/last-spawn") ))
-        if [ "$since" -lt "$HOST_SPAWN_STAGGER_SECS" ]; then
-            host_refuse spawn_stagger \
-                "a worker was spawned ${since}s ago on this host; minimum gap is ${HOST_SPAWN_STAGGER_SECS}s (HOST_SPAWN_STAGGER_SECS)" \
-                "Retry after $((HOST_SPAWN_STAGGER_SECS - since))s; the coordinator does this on its own." \
-                "since=$since min=$HOST_SPAWN_STAGGER_SECS"
-        fi
+        local since=$(( $(date +%s) - $(stat -c %Y "$HOST_STATE_DIR/last-spawn") ))
+        [ "$since" -lt "$HOST_SPAWN_STAGGER_SECS" ] && refuse_cap spawn_stagger \
+            "a worker was spawned ${since}s ago on this host; minimum gap is ${HOST_SPAWN_STAGGER_SECS}s (HOST_SPAWN_STAGGER_SECS)" \
+            "Retry after $((HOST_SPAWN_STAGGER_SECS - since))s; the coordinator does this on its own." \
+            "since=$since min=$HOST_SPAWN_STAGGER_SECS"
     fi
 
-    # Admitted: record the in-flight spawn and the stagger clock, then
-    # release the lock (flock releases with fd 9 at exit anyway). The
-    # marker's content is this invocation's own HOST_PENDING_TTL_SECS
-    # (issue #546, self-review round 7) so any project's admission check
-    # that later reads this marker judges it by the TTL ITS OWN writer
-    # intended, not whatever PROVISION_SPAWN_CHECK_SECS that later reader
-    # happens to be running with.
-    echo "$HOST_PENDING_TTL_SECS" > "$HOST_STATE_DIR/pending-$container_name"
+    # Admitted. last-spawn is deliberately not rolled back on a later
+    # failure: the attempt itself still loaded the host.
+    echo "$HOST_PENDING_TTL_SECS" > "$HOST_STATE_DIR/pending-$CONTAINER"
     touch "$HOST_STATE_DIR/last-spawn"
     exec 9>&-
 }
 
-# check_stale_container <issue> <container>
-#
-# issue #493: a container can outlive the tmux window that spawned it — a
-# parked/window-only reap (kill-finished-workers.sh with no
-# --with-worktree), a session restart, or this script's own dead-pane
-# reclaim just above can each leave a container running (or mid --rm
-# teardown) under the exact name the next `docker run` for this issue will
-# ask for. `docker run --name` refuses to start over either state, and the
-# fand-etl incident (seanoc5/fand-etl#1092, 2026-09-27) shows what that
-# failure costs with no further checks: sandbox.sh's `exec docker run`
-# exited 125 ("name ... already in use"), the new tmux pane died
-# immediately, and — because nothing checked — provision-worker.sh still
-# exited 0. The brief sat in inbox/ for ~7 hours before anyone noticed.
-#
-# Only ever called with WINDOW_EXISTS=0 (about to spawn): if a live tmux
-# window for this issue existed, the caller's queue-follow-up path takes
-# over before this runs. The re-check below is defense in depth, not the
-# primary gate.
-check_stale_container() {
-    local issue="$1" container="$2"
-    docker ps -a --filter "name=^${container}\$" --format '{{.Names}}' 2>/dev/null \
-        | grep -qx "$container" || return 0
+# --- stale container (#493) ---------------------------------------------------
+# A container can outlive its window (window-only reap, session restart, the
+# dead-pane reclaim below), and `docker run --name` then fails. fand-etl
+# 2026-09-27: the pane died on exit 125, this script still exited 0, and the
+# brief sat unclaimed for ~7 hours.
 
-    # A container surviving under this exact name while a genuinely live
-    # (non-dead-pane) window still tracks it means a real worker may still
-    # be running — never stop it out from under itself.
-    if tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx "iss-$issue"; then
-        # `|| true` + empty-means-dead: same `set -e` abort risk as
-        # post_spawn_health_check's pane_dead query (self-review finding) —
-        # the window can vanish between the list-windows check above and
-        # here (e.g. its pane just exited 0, which remain-on-exit doesn't
-        # keep around), and a vanished window is not a "genuinely alive" one.
-        local pd
-        pd="$(tmux list-panes -t "$SESSION_NAME:iss-$issue" -F '#{pane_dead}' 2>/dev/null | head -1)" || true
-        [ -z "$pd" ] && pd=1
-        if [ "$pd" != "1" ]; then
-            echo "ERROR: container '$container' exists and its tmux window iss-$issue is alive." >&2
-            echo "       The worker is running — route this brief through requeue.sh instead." >&2
-            log_event provision.stale_container "issue=$issue container=$container state=window_alive"
-            # self-review (7th pass): host_admission_check already wrote a
-            # pending-$container marker for this attempt; left in place it
-            # would double-count a container docker ps can already see
-            # directly, inflating HOST_MAX_WORKERS until HOST_PENDING_TTL_SECS
-            # (120s) expires it on its own.
-            rm -f "$HOST_STATE_DIR/pending-$container"
-            # self-review (10th pass): exit 2 is already this script's
-            # generic "setup refused, nothing running, read stderr" code
-            # (bad flag, orphan worktree, stale branch with unique commits,
-            # missing tmux session) — all cases where there's no window to
-            # route a follow-up brief to. This is the only exit-2-shaped
-            # case that means the opposite (a worker IS running) and needs
-            # requeue.sh, not a retry; a coordinator rule keyed on exit 2
-            # would misroute the five other, far more common causes
-            # straight into requeue.sh with nothing there to drain the
-            # brief. A dedicated code keeps the two kinds of refusal
-            # distinguishable without parsing stderr.
-            exit 5
-        fi
+# check_stale_container <issue> <container>
+check_stale_container() {
+    local issue="$1" container="$2" window="iss-$1"
+    container_listed -a "$container" || return 0
+
+    # Defense in depth: the caller only gets here with no live window, but
+    # never stop a container whose window is genuinely alive.
+    if window_listed "$window" && ! pane_is_dead "$window"; then
+        echo "ERROR: container '$container' exists and its tmux window $window is alive." >&2
+        echo "       The worker is running — route this brief through requeue.sh instead." >&2
+        log_event provision.stale_container "issue=$issue container=$container state=window_alive"
+        drop_pending_marker "$container"
+        exit 5
     fi
 
     local running=0
-    if docker ps --filter "name=^${container}\$" --format '{{.Names}}' 2>/dev/null | grep -qx "$container"; then
-        running=1
-    fi
+    container_listed "$container" && running=1
     echo "[*] stale container '$container' found (running=$running, no live tracking window) — clearing before spawn" >&2
-    docker stop "$container" >/dev/null 2>&1 || true
-    docker rm -f "$container" >/dev/null 2>&1 || true
+    remove_container "$container"
 
-    # `docker rm -f` returning isn't proof the name is free yet — the
-    # fand-etl incident's first recovery retry raced --rm's own async
-    # auto-removal and hit the same "already in use" failure. Poll until
-    # `docker ps -a` genuinely stops listing it.
+    # `docker rm -f` returning doesn't mean the name is free: --rm's async
+    # auto-removal can still hold it. Poll until docker ps -a drops it.
     local wait_secs="${PROVISION_STALE_CONTAINER_WAIT_SECS:-15}"
     local deadline=$(( $(date +%s) + wait_secs ))
-    while docker ps -a --filter "name=^${container}\$" --format '{{.Names}}' 2>/dev/null | grep -qx "$container"; do
+    while container_listed -a "$container"; do
         if [ "$(date +%s)" -ge "$deadline" ]; then
             echo "ERROR: container '$container' still present after stop+rm and a ${wait_secs}s wait." >&2
             echo "       Remove it manually:  docker rm -f '$container'" >&2
             log_event provision.stale_container "issue=$issue container=$container state=removal_timeout"
-            # self-review (7th pass): see the window_alive branch above —
-            # this attempt's pending marker would otherwise outlive the
-            # failed spawn by up to HOST_PENDING_TTL_SECS.
-            rm -f "$HOST_STATE_DIR/pending-$container"
+            drop_pending_marker "$container"
             exit 2
         fi
         sleep 0.5
@@ -490,61 +331,20 @@ check_stale_container() {
     log_event provision.stale_container "issue=$issue container=$container state=cleared running_was=$running"
 }
 
+# --- post-spawn health poll (#493, #546) --------------------------------------
+# `tmux new-window` succeeding only means tmux accepted the request. Poll
+# until the container is running (success), the pane dies (exit 4, full
+# cleanup), or the deadline passes with the pane alive (exit 6, no cleanup).
+# A one-shot check after a fixed sleep killed healthy spawns on a loaded host
+# (SAMlytics#397: `docker create` at +31s).
+
 # post_spawn_health_check <issue> <window> <container> <brief_path>
-#
-# issue #493: verifies the just-spawned worker actually came up, instead of
-# trusting `tmux new-window`'s exit status — it only reports that tmux
-# accepted the request to create a window, not that the shell command
-# inside it survived past its first line. That gap is exactly how the
-# fand-etl incident went unreported: the new pane died on a name-collision
-# `docker run` failure while provision-worker.sh still exited 0.
-#
-# issue #546: this used to sleep a single fixed PROVISION_SPAWN_CHECK_SECS
-# (default 5) then check once — on a loaded host that's nowhere near long
-# enough for `docker create` to reach `start`, and the one-shot check can't
-# tell "dead" from "just not up yet", so it killed a healthy spawn (the
-# SAMlytics#397 shape, 2026-10-04: load1 24 on 32 cores, `docker create` at
-# +31s, killed mid-start three times in a row; PROVISION_SPAWN_CHECK_SECS=120
-# then succeeded). Now it polls: succeeds the instant the container is seen
-# running; a dead pane still fails immediately without waiting out the rest
-# of the budget; a container that's simply slow keeps getting checked up to
-# the new default ceiling of 120s. poll_interval scales down for a sub-1s
-# check_secs so a short override (including the test harness's fractional
-# values) still gets more than one poll instead of a single immediate one.
-#
-# PROVISION_SPAWN_CHECK_SECS=0 disables the check entirely (same "0 means
-# off" convention as coordinator-watch.sh's other interval knobs) — for a
-# harness that stubs tmux/docker without actually simulating a live pane or
-# a running container, this check could never pass.
-#
-# On a CONFIRMED failure (dead pane — see exit 6 below for the other case),
-# also kills the window and removes brief_path (self-review findings from
-# #493): the brief was already written to inbox/ in step 3, before this
-# check ran. Removing it without also killing the window would leave a
-# worker that comes up late alive with nothing in its inbox, parked
-# forever; a retry would then see that still-alive window and queue a
-# follow-up onto it instead of re-spawning cleanly. Killing the window and
-# removing the container (self-review, 9th pass — a container that was
-# merely slow, not dead, can still come up seconds later with its window
-# already gone, sitting there uncounted by any worker but still visible to
-# `docker ps` and so still counted against HOST_MAX_WORKERS) makes "exit 4"
-# a clean, fully-failed state: no window, no container, no unclaimed
-# brief, nothing for a retry to collide with or be refused by. Nothing
-# ever claimed this brief (the spawn never came up), so there's no
-# in-progress work to lose; the pane's last lines printed just above are
-# the forensic record. Re-provisioning the issue spawns fresh from scratch.
-#
-# Skips entirely (self-review, 5th pass) when the worker image isn't built
-# yet: sandbox.sh builds it before its `docker run`, which routinely takes
-# far longer than check_secs, and since the window-kill above, a false
-# alarm here would end that build partway instead of just logging a false
-# positive. A hung first-ever build then goes undetected by this check —
-# same as before this issue existed — rather than mistaken for the
-# fand-etl collision shape this check exists to catch.
 post_spawn_health_check() {
     local issue="$1" window="$2" container="$3" brief_path="$4"
     local check_secs="${PROVISION_SPAWN_CHECK_SECS:-120}"
     [ "$check_secs" = "0" ] && return 0
+    # sandbox.sh builds a missing image before `docker run`, which can take
+    # far longer than the poll; killing the window would abort the build.
     if ! docker image inspect llm-swarm-runner:latest >/dev/null 2>&1; then
         echo "[*] worker image llm-swarm-runner:latest not built yet — skipping post-spawn health check for issue #$issue (sandbox.sh is likely still building it)" >&2
         return 0
@@ -552,117 +352,62 @@ post_spawn_health_check() {
 
     local poll_interval=1
     awk -v c="$check_secs" 'BEGIN{exit !(c<1)}' && poll_interval="$check_secs"
-    # Deadline in nanoseconds, not a fixed poll count (self-review finding):
-    # on the exact loaded host this issue is about, each `docker ps` /
-    # `tmux list-panes` call below can itself take real time, so counting
-    # polls instead of elapsed wall time could let this run well past
-    # check_secs — overrunning the "ceiling + buffer" timeout
-    # prompts/coordinator.md tells the coordinator to give this call.
+    # Wall-clock deadline, not a poll count: each tmux/docker call can be
+    # slow on exactly the loaded host this guards.
     local deadline_ns
     deadline_ns=$(( $(date +%s%N) + $(awk -v s="$check_secs" 'BEGIN{printf "%.0f", s*1000000000}') ))
 
-    local pane_dead=1 running=0 poll_num=0
+    local dead=0 poll_num=0
     while :; do
         poll_num=$((poll_num + 1))
-        # Under `set -euo pipefail`, `tmux list-panes` failing outright (the
-        # window itself is gone, not just its pane dead — e.g. the pane
-        # exited 0, which remain-on-exit does NOT keep around) would abort
-        # this whole script via the command substitution's own exit status.
-        # `|| true` avoids that; a window that can't be queried at all is
-        # treated the same as a dead pane, not defaulted to "alive"
-        # (self-review finding, carried over from the fixed-sleep version).
-        pane_dead="$(tmux list-panes -t "$SESSION_NAME:$window" -F '#{pane_dead}' 2>/dev/null | head -1)" || true
-        [ -z "$pane_dead" ] && pane_dead=1
-        [ "$pane_dead" = "1" ] && break
-
-        if docker ps --filter "name=^${container}\$" --format '{{.Names}}' 2>/dev/null | grep -qx "$container"; then
-            running=1
-            break
-        fi
-
-        # A one-shot `docker ps` blip (empty output, daemon momentarily
-        # unresponsive) just costs one extra poll here instead of needing
-        # its own retry loop (self-review, 11th pass on the old code) — the
-        # next iteration re-checks the same container. Always allow a 2nd
-        # poll regardless of the deadline (self-review finding): on a slow
-        # or loaded host the first poll's own tmux+docker round-trip can
-        # eat the entire budget of a short check_secs, and without this
-        # floor that blip would never get its retry at all.
+        if pane_is_dead "$window"; then dead=1; break; fi
+        container_listed "$container" && return 0
+        # Always allow a second poll, so a docker blip on a short budget
+        # still gets its retry.
         [ "$poll_num" -ge 2 ] && [ "$(date +%s%N)" -ge "$deadline_ns" ] && break
         sleep "$poll_interval"
     done
 
-    [ "$running" -eq 1 ] && return 0
-
-    if [ "$pane_dead" = "1" ]; then
+    if [ "$dead" -eq 1 ]; then
         echo "ERROR: worker window $window for issue #$issue did not come up (pane_dead=1 container_running=0)." >&2
         echo "       Last lines of the pane:" >&2
         tmux capture-pane -t "$SESSION_NAME:$window.0" -p 2>/dev/null | tail -40 >&2 || true
+        # Remove window, container and brief together so a late-starting
+        # worker can't park with an empty inbox and a retry starts clean.
         tmux kill-window -t "$SESSION_NAME:$window" 2>/dev/null || true
-        docker stop "$container" >/dev/null 2>&1 || true
-        docker rm -f "$container" >/dev/null 2>&1 || true
+        remove_container "$container"
         local brief_removed=0
         if [ -n "$brief_path" ] && [ -e "$brief_path" ]; then
             rm -f "$brief_path" 2>/dev/null && brief_removed=1
             echo "       Removed the unclaimed brief ($brief_path) so a retry doesn't queue a duplicate." >&2
         fi
         log_event worker.start.failed "issue=$issue window=$window pane_dead=1 container_running=0 brief_removed=$brief_removed"
-        # self-review (7th pass): host_admission_check's pending-$container
-        # marker is otherwise left behind by a failed spawn, double-counting
-        # toward HOST_MAX_WORKERS until the TTL stored in the marker itself
-        # (see host_admission_check) expires it. Deliberately not touching
-        # last-spawn here: the stagger clock is
-        # about host load from the attempt itself (docker run + the pane's
-        # brief life), which still happened, so an immediate retry can still
-        # see an exit-3 spawn_stagger refusal — bounded by HOST_SPAWN_STAGGER_SECS
-        # and already retried by the coordinator, so left as-is (see Findings).
-        rm -f "$HOST_STATE_DIR/pending-$container"
+        drop_pending_marker "$container"
         exit 4
     fi
 
-    # issue #546: the pane is still alive and check_secs ran out without
-    # ever seeing the container — genuinely ambiguous, not the confirmed
-    # "pane died" failure above. Treating it the same way (kill the window,
-    # stop the container, drop the brief) is exactly the bug this issue
-    # closes: a container that's merely slow can still come up seconds
-    # later. Say so instead of implying the spawn died, and leave the
-    # window/container/brief alone — a retry here would double-provision
-    # the same issue, so this gets its own exit code (6; same "distinct
-    # meanings get distinct codes" convention as exit 5 above) rather than
-    # folding into exit 4's "fully cleaned up" contract. Deliberately not
-    # touching $HOST_STATE_DIR/pending-$container either (unlike the exit 4
-    # and check_stale_container cleanup paths): the worker may still be
-    # starting, so it should keep counting toward HOST_MAX_WORKERS — which
-    # is also why the marker carries its own TTL (derived from THIS
-    # invocation's PROVISION_SPAWN_CHECK_SECS at admission time, stored in
-    # the marker's content, read back by host_admission_check) rather than
-    # a fixed 120s: the marker must outlive this whole check, or a spawn
-    # that's still legitimately in flight would stop counting partway
-    # through its own health poll (self-review finding).
-    # Re-check manually
-    # (`docker ps`, `tmux capture-pane`) or raise PROVISION_SPAWN_CHECK_SECS.
+    # Pane alive, container never seen: may just be slow. Leave everything
+    # (including the pending marker, so it keeps counting) and say so.
     echo "WARN: worker window $window for issue #$issue is still starting after ${check_secs}s (pane alive, container not observed yet) — leaving window and container running." >&2
     echo "      Check again:  docker ps --filter name=^${container}\$   /   tmux capture-pane -t '$SESSION_NAME:$window' -p" >&2
     log_event worker.start.indeterminate "issue=$issue window=$window check_secs=$check_secs"
     exit 6
 }
 
+# --- main ---------------------------------------------------------------------
+
 echo "=== provision-worker.sh ==="
 echo "issue:      #$ISSUE"
 echo "project:    $PROJECT_DIR"
 echo "worktree:   $WT"
 echo "branch:     $BRANCH"
-echo "tmux:       $SESSION_NAME / iss-$ISSUE"
+echo "tmux:       $SESSION_NAME / $WINDOW"
 echo
 
 cd "$PROJECT_DIR"
 
-# 1. Worktree (idempotent). Pre-flight: refresh remote refs and branch the
-#    worker explicitly from origin/<default>, not from the coordinator's
-#    local HEAD. The coordinator's checkout can be stale, mid-rebase, or on
-#    an unrelated feature branch — branching off the remote ref gives every
-#    new worker a fresh, predictable base without touching the coordinator's
-#    working tree.
+# 1. Worktree, branched from origin's default branch (not the coordinator's
+#    local HEAD, which may be stale or on another branch).
 git fetch --quiet origin || echo "WARN: git fetch failed — using cached remote refs" >&2
 DEFAULT_REMOTE_REF="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"
 if [ -z "$DEFAULT_REMOTE_REF" ]; then
@@ -679,16 +424,11 @@ if [ -z "$DEFAULT_REMOTE_REF" ]; then
 fi
 
 if [ -d "$WT" ]; then
-    # Guard: wt-issue-N paths are namespaced only by issue number, so an
-    # orphan from a deleted sibling repo (or a worktree from a different
-    # project sharing this parent dir) can collide. Refuse to reuse unless
-    # the existing worktree's common gitdir matches $PROJECT_DIR's.
-    # See todo/TODO.md for the proposed path-namespacing fix.
-    expected_common="$(cd "$PROJECT_DIR" && realpath "$(git rev-parse --git-common-dir)")"
+    # wt-issue-N is namespaced only by issue number, so refuse to reuse a
+    # worktree that belongs to another repo sharing this parent dir.
+    expected_common="$(realpath "$(git rev-parse --git-common-dir)")"
     existing_common="$(git -C "$WT" rev-parse --git-common-dir 2>/dev/null || true)"
-    if [ -n "$existing_common" ]; then
-        existing_common="$(cd "$WT" && realpath "$existing_common" 2>/dev/null || true)"
-    fi
+    [ -n "$existing_common" ] && existing_common="$(cd "$WT" && realpath "$existing_common" 2>/dev/null || true)"
     if [ -z "$existing_common" ] || [ "$existing_common" != "$expected_common" ]; then
         echo "ERROR: $WT exists but does not belong to $PROJECT_DIR" >&2
         echo "       existing gitdir: ${existing_common:-<broken or missing>}" >&2
@@ -700,22 +440,11 @@ if [ -d "$WT" ]; then
     fi
     echo "[1/4] worktree already exists — reusing existing $BRANCH (base unchanged)"
 elif git show-ref --verify --quiet "refs/heads/$BRANCH"; then
-    # Stale branch: $BRANCH already exists but no worktree at $WT is attached
-    # to it (deleted manually, orphaned by a worktree-grouping change, or
-    # left behind by branch sweep — see #174). `git worktree add -b` refuses
-    # to recreate an existing branch, and under `set -e` that failure used
-    # to propagate as a plain nonzero exit with no diagnosis, or — worse, in
-    # some invocation contexts — got swallowed, spawning no window and no
-    # brief while still reporting success. Decide explicitly instead of
-    # letting `-b` fail blind.
+    # Branch exists without a worktree (manual delete, branch sweep #174,
+    # grouping change). `worktree add -b` would fail blind, so decide here.
     unique_commits="$(git rev-list --count "$DEFAULT_REMOTE_REF..$BRANCH" 2>/dev/null || echo "")"
     if [ "$unique_commits" = "0" ]; then
-        # No commits beyond the default branch means $BRANCH is an ancestor
-        # of (or equal to) $DEFAULT_REMOTE_REF, so fast-forwarding it there
-        # is lossless. Do that before attaching a worktree so a long-stale
-        # branch (0-ahead but many commits *behind*) doesn't hand the worker
-        # an outdated base — without this it would silently reuse the old
-        # tip instead of matching the fresh-branch path's base.
+        # Nothing unique, so fast-forwarding to the fresh base is lossless.
         git branch -f "$BRANCH" "$DEFAULT_REMOTE_REF"
         git worktree add "$WT" "$BRANCH"
         echo "[1/4] worktree created (reused stale branch $BRANCH — no unique commits vs $DEFAULT_REMOTE_REF, fast-forwarded)"
@@ -734,291 +463,167 @@ else
     echo "[1/4] worktree created (base: $DEFAULT_REMOTE_REF @ $(git rev-parse --short "$DEFAULT_REMOTE_REF"))"
 fi
 
-# Symlink the project's .env into the worktree so workers find credentials
-# (DB hosts/ports/passwords, API keys) at the path the project's own code
-# expects. .env is gitignored so worktrees don't get it from the checkout.
-# Skip if the target already exists (worker may have written scratch creds).
-if [ -f "$PROJECT_DIR/.env" ] && [ ! -e "$WT/.env" ]; then
-    ln -s "$PROJECT_DIR/.env" "$WT/.env"
-    echo "       linked .env -> $PROJECT_DIR/.env"
-fi
+# Gitignored files the worker needs: .env (project credentials) and
+# .sandbox-env (sandbox.sh's --env-file). Never overwrite a worker's own copy.
+for f in .env .sandbox-env; do
+    if [ -f "$PROJECT_DIR/$f" ] && [ ! -e "$WT/$f" ]; then
+        ln -s "$PROJECT_DIR/$f" "$WT/$f"
+        echo "       linked $f -> $PROJECT_DIR/$f"
+    fi
+done
 
-# Same for .sandbox-env: sandbox.sh passes $PROJECT_DIR/.sandbox-env (the
-# WORKTREE, from the worker's perspective) to `docker run --env-file`, but
-# the file is gitignored so fresh worktrees never contain it. Linking the
-# canonical project's copy lets per-project worker-container env (e.g.
-# PRECOMMIT_FAST_TESTS=0, GRADLE_RO_DEP_CACHE) reach every worker.
-if [ -f "$PROJECT_DIR/.sandbox-env" ] && [ ! -e "$WT/.sandbox-env" ]; then
-    ln -s "$PROJECT_DIR/.sandbox-env" "$WT/.sandbox-env"
-    echo "       linked .sandbox-env -> $PROJECT_DIR/.sandbox-env"
-fi
+# 2. Queue dirs (the listener creates them too). status/ and outbox/ are the
+#    worker->watcher/coordinator channels (prompts/worker.md).
+mkdir -p "$WT"/.swarm/tasks/{inbox,processing,done,status,outbox}
 
-# 2. Queue dirs (idempotent — listener also creates them on startup).
-#    status/ holds worker-written state files (ready-for-review / blocked /
-#    done-no-pr) so the watcher can react while the worker is still parked
-#    and attachable — see "Worker status file" in prompts/worker.md.
-#    outbox/ holds worker-written message files (fyi / decision-needed /
-#    brief-draft) that wake the coordinator mid-task — the worker→coordinator
-#    channel from issue #129; see "Worker outbox" in prompts/worker.md.
-mkdir -p "$WT/.swarm/tasks/inbox" "$WT/.swarm/tasks/processing" "$WT/.swarm/tasks/done" "$WT/.swarm/tasks/status" "$WT/.swarm/tasks/outbox"
-
-# Hide worker scratch (.swarm/) from the project's git view so `gh pr create`
-# and `git status` don't flag it as an uncommitted/untracked change. Uses the
-# per-clone info/exclude (not the tracked .gitignore), so the project repo's
-# committed files are untouched. Idempotent — only appends once.
+# Hide .swarm/ from the worktree's git view via info/exclude (not the
+# tracked .gitignore).
 exclude_file="$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)"
 if [ -n "$exclude_file" ] && [ -f "$exclude_file" ] && ! grep -qxF '.swarm/' "$exclude_file"; then
     printf '\n# llm-swarm-runner worker scratch (added by provision-worker.sh)\n.swarm/\n' >> "$exclude_file"
 fi
 echo "[2/4] queue dirs ready"
 
-# Cap enforcement — resolved BEFORE the brief is written (issue #464).
-#    Caps used to be checked only right before spawning the tmux window,
-#    by which point the brief already existed in inbox/; a cap.refused
-#    exit still left it there, and a later retry queued a duplicate
-#    (fand-etl, 2026-09-25: #995/#996/#997 each got a stray brief from a
-#    refused 01:13Z provision, then #995's 01:45Z retry ran the task
-#    twice). Deciding window-exists vs new-capacity here, and exiting
-#    before any brief is written, means a refusal leaves inbox/ untouched.
-#
-#    The worktree from step 1 is deliberately NOT rolled back on refusal:
-#    it's an empty, unqueued worktree — harmless, and a retry reuses it
-#    rather than recreating it. Leaving an orphaned wt-issue-N is the
-#    accepted tradeoff (see issue #464).
 if ! tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
     echo "ERROR: tmux session '$SESSION_NAME' does not exist." >&2
     echo "  (Are you running this from inside the coordinator's session?)" >&2
     exit 2
 fi
 
-# Container name lets the tmux Ctrl-Z binding `docker exec` into this
-# specific worker, and is the key check_stale_container/post_spawn_health_
-# check use below. Format must match the binding in ~/.tmux.conf:
-#   swarm-<session>-iss-<issue>
-container_name="swarm-${SESSION_NAME}-iss-${ISSUE}"
+# Fetch the issue before any cap is claimed, so a bad issue number or a gh
+# outage refuses cleanly instead of failing mid-brief with a pending marker
+# already written.
+if ! ISSUE_TEXT="$(gh issue view "$ISSUE")"; then
+    echo "ERROR: gh issue view $ISSUE failed — nothing queued." >&2
+    exit 2
+fi
 
-# Skip cap enforcement if a window for this issue already exists — caps
-# don't apply because we're not adding capacity, just queueing a follow-up
-# task onto a worker that's already alive.
+# A live iss-N window means "queue a follow-up": no caps, no spawn.
+# remain-on-exit=failed (llm-start.sh) keeps a crashed window listed, so a
+# dead pane is reclaimed and treated as no window (#493).
 WINDOW_EXISTS=0
-if tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx "iss-$ISSUE"; then
+if window_listed "$WINDOW"; then
     WINDOW_EXISTS=1
-    # issue #493: remain-on-exit=failed (llm-start.sh) keeps a window listed
-    # after its pane exits non-zero, so "window exists" alone can't tell a
-    # genuinely live worker from a corpse left by a crashed/collided spawn.
-    # A dead-paned window has nothing listening for the brief we're about
-    # to queue — treating it as "listener will pick up the new task" (the
-    # live-window path below) would silently strand that brief forever, the
-    # same failure mode this issue exists to close. Reclaim it instead so
-    # the normal cap-checked spawn path below provisions a fresh, genuinely
-    # live window.
-    #
-    # `|| true` + empty-means-dead: the window can vanish between the
-    # list-windows check above and here (its pane just exited 0, which
-    # remain-on-exit doesn't keep around) — under `set -euo pipefail` that
-    # would otherwise abort this whole script via the command substitution's
-    # own exit status (self-review finding on post_spawn_health_check,
-    # applied here too for the same race).
-    pane_dead_flag="$(tmux list-panes -t "$SESSION_NAME:iss-$ISSUE" -F '#{pane_dead}' 2>/dev/null | head -1)" || true
-    [ -z "$pane_dead_flag" ] && pane_dead_flag=1
-    if [ "$pane_dead_flag" = "1" ]; then
-        echo "[*] window iss-$ISSUE exists but its pane is dead — reclaiming" >&2
-        tmux capture-pane -t "$SESSION_NAME:iss-$ISSUE.0" -p 2>/dev/null | tail -20 >&2 || true
-        tmux kill-window -t "$SESSION_NAME:iss-$ISSUE" 2>/dev/null || true
-        # self-review (12th pass): a dead pane can leave brief(s) behind in
-        # inbox/ (never claimed) or processing/ (claimed, abandoned
-        # mid-task) — the fresh listener this reclaim is about to spawn
-        # would inherit those ALONGSIDE the new brief written further
-        # below, re-running stale work. This is exactly the fand-etl
-        # re-provision shape: the operator re-sends the same task and it
-        # runs twice. Salvage them aside first (same destination
-        # convention as kill-worktree.sh's own queued-file salvage) rather
-        # than let a new listener silently pick them back up.
+    if pane_is_dead "$WINDOW"; then
+        echo "[*] window $WINDOW exists but its pane is dead — reclaiming" >&2
+        tmux capture-pane -t "$SESSION_NAME:$WINDOW.0" -p 2>/dev/null | tail -20 >&2 || true
+        tmux kill-window -t "$SESSION_NAME:$WINDOW" 2>/dev/null || true
+        # Move its unclaimed/abandoned briefs aside so the fresh listener
+        # doesn't re-run stale work next to the new brief.
         stale_briefs=0
-        for stale_subdir in inbox processing; do
-            for stale_file in "$WT/.swarm/tasks/$stale_subdir"/*.md; do
-                [ -e "$stale_file" ] || continue
-                stale_salvage_dir="$PROJECT_DIR/.swarm/salvaged/iss-$ISSUE/$stale_subdir"
-                mkdir -p "$stale_salvage_dir"
-                mv "$stale_file" "$stale_salvage_dir/" 2>/dev/null && stale_briefs=$((stale_briefs + 1))
+        salvage_root="$PROJECT_DIR/.swarm/salvaged/$WINDOW"
+        for sub in inbox processing; do
+            for f in "$WT/.swarm/tasks/$sub"/*.md; do
+                [ -e "$f" ] || continue
+                mkdir -p "$salvage_root/$sub"
+                mv "$f" "$salvage_root/$sub/" 2>/dev/null && stale_briefs=$((stale_briefs + 1))
             done
         done
         if [ "$stale_briefs" -gt 0 ]; then
-            echo "       Salvaged $stale_briefs stale brief(s) to $PROJECT_DIR/.swarm/salvaged/iss-$ISSUE/ (preserved, not auto-rerun — review and re-file if still relevant)" >&2
-            # self-review (14th pass): the cap/admission/stale-container
-            # checks below can still refuse this same re-provision (exit
-            # 2/3/5) -- the issue then has no window AND no queued brief,
-            # with the salvaged copy above as the only trace and none of
-            # those refusal paths otherwise mentioning it. An EXIT trap
-            # catches every such refusal (they each exit directly, from
-            # several call sites) without threading this through each one;
-            # it leaves the actual exit status untouched.
-            trap 'rc=$?; [ "$rc" -ne 0 ] && echo "       Note: issue #$ISSUE still has $stale_briefs brief(s) salvaged to $PROJECT_DIR/.swarm/salvaged/iss-$ISSUE/ from the reclaim above, now unqueued until this is retried." >&2; :' EXIT
+            echo "       Salvaged $stale_briefs stale brief(s) to $salvage_root/ (preserved, not auto-rerun — review and re-file if still relevant)" >&2
+            # If a check below refuses, the issue is left with no window and
+            # no queued brief; say where the briefs went.
+            trap 'rc=$?; [ "$rc" -ne 0 ] && echo "       Note: issue #$ISSUE still has $stale_briefs brief(s) salvaged to $salvage_root/ from the reclaim above, now unqueued until this is retried." >&2; :' EXIT
         fi
-        log_event worker.dead_pane_reclaimed "issue=$ISSUE window=iss-$ISSUE stale_briefs_salvaged=$stale_briefs"
+        log_event worker.dead_pane_reclaimed "issue=$ISSUE window=$WINDOW stale_briefs_salvaged=$stale_briefs"
         WINDOW_EXISTS=0
     fi
 fi
 
+# Caps run before the brief is written, so a refusal leaves inbox/ untouched
+# (#464: a refused-then-retried provision used to run the task twice).
 if [ "$WINDOW_EXISTS" -eq 0 ]; then
-    # Cap enforcement: count alive workers (iss-*) and total windows BEFORE
-    # the spawn. Refuse with exit 3 if either cap would be exceeded. The
-    # coordinator catches non-zero exits and reports back to the user.
-    alive_workers=$(tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -c '^iss-' || true)
-    total_windows=$(tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | wc -l)
-    if [ "$alive_workers" -ge "$MAX_WORKERS" ]; then
-        echo "ERROR: MAX_WORKERS cap reached (alive=$alive_workers, max=$MAX_WORKERS)" >&2
-        echo "       Wait for a worker to finish, or raise MAX_WORKERS in <project>/.swarm/.env." >&2
-        log_event cap.refused "issue=$ISSUE reason=max_workers alive=$alive_workers max=$MAX_WORKERS"
-        exit 3
-    fi
-    if [ "$total_windows" -ge "$MAX_TMUX_WINDOWS" ]; then
-        echo "ERROR: MAX_TMUX_WINDOWS cap reached (total=$total_windows, max=$MAX_TMUX_WINDOWS)" >&2
-        echo "       Close finished iss-* windows: tmux kill-window -t '$SESSION_NAME:iss-NN'" >&2
-        echo "       Or raise MAX_TMUX_WINDOWS in <project>/.swarm/.env." >&2
-        log_event cap.refused "issue=$ISSUE reason=max_tmux_windows total=$total_windows max=$MAX_TMUX_WINDOWS"
-        exit 3
-    fi
-    # Host-wide admission (2026-09-29, after the load-95 review): every
-    # swarm on this box provisions into the same RAM and the same 32
-    # threads, so the decision is taken under one host-wide flock and
-    # covers four things, in order:
-    #   a) HOST_MAX_WORKERS  running swarm-* containers + spawns still in
-    #      flight (a "pending" marker per spawn, written under the lock,
-    #      dropped once the container shows up or after 120 s). Without the
-    #      markers three coordinators counting `docker ps` in the same
-    #      second all saw room for one more and 15 ran against a cap of 14.
-    #   b) HOST_MAX_LOAD1    1-minute load average ceiling ("auto" =
-    #      1.5 x nproc). Memory used to be the only governor and it cuts on
-    #      the wrong axis: 9 workers dispatched inside one minute all
-    #      compiled then forked test JVMs together (load 95 on 32 threads).
-    #   c) HOST_MIN_MEM_AVAIL_MB  MemAvailable floor, so a spawn can't push
-    #      the box into swap even when the container count is under cap.
-    #   d) HOST_SPAWN_STAGGER_SECS  minimum gap between any two spawns
-    #      host-wide, so the compile/fork peaks of new workers don't line up.
-    # Each refusal is exit 3 + cap.refused, the same path the coordinator
-    # already retries. 0 disables any one of them; HOST_STATE_DIR holds the
-    # lock and markers (host-wide, outside every repo).
+    session_cap_check
     host_admission_check
-
-    # issue #493: clear any leftover same-name container before the brief
-    # is written — see check_stale_container's header comment.
-    check_stale_container "$ISSUE" "$container_name"
+    check_stale_container "$ISSUE" "$CONTAINER"
 fi
 
-# 3. Build task brief atomically (mktemp+mv inside same FS = atomic rename)
-#
-# TASK_ID base is second-resolution; on the rare case of two re-dispatches
-# in the same wall-clock second for the same issue, append a counter
-# (-2, -3, ...) so we don't silently clobber the previous brief. The common
-# case (no collision) keeps the clean YYYYMMDD-HHMMSS-N naming.
-#
-# PROVISION_NOW_EPOCH lets callers (tests) freeze/inject "now" so the
-# collision-suffix path doesn't depend on two real invocations landing in
-# the same wall-clock second — see #192. Unset in normal operation.
+# 3. Brief, written atomically (mktemp + rename in the same dir). TASK_ID
+#    gets a -2, -3... suffix on a same-second collision. PROVISION_NOW_EPOCH
+#    freezes "now" for tests (#192).
 if [ -n "${PROVISION_NOW_EPOCH:-}" ]; then
     NOW_FMT="$(date -d "@$PROVISION_NOW_EPOCH" +%Y%m%d-%H%M%S 2>/dev/null \
         || date -r "$PROVISION_NOW_EPOCH" +%Y%m%d-%H%M%S)"
 else
     NOW_FMT="$(date +%Y%m%d-%H%M%S)"
 fi
+INBOX="$WT/.swarm/tasks/inbox"
 BASE_ID="$NOW_FMT-$ISSUE"
 TASK_ID="$BASE_ID"
-DEST="$WT/.swarm/tasks/inbox/$TASK_ID.md"
 N=2
-while [ -e "$DEST" ]; do
+while [ -e "$INBOX/$TASK_ID.md" ]; do
     TASK_ID="$BASE_ID-$N"
-    DEST="$WT/.swarm/tasks/inbox/$TASK_ID.md"
     N=$((N + 1))
 done
 
-TMP="$(mktemp -p "$WT/.swarm/tasks/inbox" .tmp.XXXXXX.md)"
+TMP="$(mktemp -p "$INBOX" .tmp.XXXXXX.md)"
 {
-    # Worker baseline conventions (prompts/worker.md) are NOT cat'd here —
-    # they reach the agent via system prompt at launch time (see
-    # scripts/worker-listener.sh). Brief contents below are per-task.
-    #
-    # 1. Reference-docs index: tells the worker what authoritative docs live
-    #    under $LLM_SWARM_DOCS/ (mounted ro into the container) and when to
-    #    consult them. Index is small; the doc bodies stay on disk until needed.
+    # refs.md is a "consult when relevant" index, so it rides the brief
+    # rather than the system prompt.
     if [ -f "$WORKER_REFS_MD" ]; then
         cat "$WORKER_REFS_MD"
-        echo
-        echo "---"
-        echo
+        printf '\n---\n\n'
     fi
-    # 2. Project-specific guardrails (per-project policy may extend or
-    #    override the worker baseline delivered via system prompt).
     if [ -f .swarm-policy.md ]; then
-        echo "## Project Guardrails (MUST OBEY)"
-        echo
+        printf '## Project Guardrails (MUST OBEY)\n\n'
         cat .swarm-policy.md
-        echo
-        echo "---"
-        echo
+        printf '\n---\n\n'
     fi
-    # 3. The actual task.
-    echo "## Task"
-    echo
-    echo "Fix issue #$ISSUE. Details follow."
-    echo
-    gh issue view "$ISSUE"
+    printf '## Task\n\nFix issue #%s. Details follow.\n\n' "$ISSUE"
+    printf '%s\n' "$ISSUE_TEXT"
 } > "$TMP"
-# `mv -n` won't clobber even if a colliding file appeared between our
-# existence check and now; on the (vanishingly rare) race, fall back to
-# bumping the counter and retrying once.
-if ! mv -n "$TMP" "$DEST" 2>/dev/null || [ -f "$TMP" ]; then
+# `mv -n` never clobbers; if a same-name brief appeared since the check, take
+# the next suffix.
+if ! mv -n "$TMP" "$INBOX/$TASK_ID.md" 2>/dev/null || [ -f "$TMP" ]; then
     TASK_ID="$BASE_ID-$N"
-    DEST="$WT/.swarm/tasks/inbox/$TASK_ID.md"
-    mv "$TMP" "$DEST"
+    mv "$TMP" "$INBOX/$TASK_ID.md"
 fi
+DEST="$INBOX/$TASK_ID.md"
 echo "[3/4] brief queued: $DEST"
 
-# Brief lint (ringer manifest-lint concept — docs/ringer-adoptions.md #6).
-# Warn-only: dispatch proceeds, but unverifiable briefs (no acceptance
-# criteria / can't-fail check / no named files / underspecified) are
-# surfaced so the coordinator can improve the issue before the worker
-# burns tokens on it. BRIEF_LINT=0 disables.
+# Warn-only lint for unverifiable briefs (docs/ringer-adoptions.md #6).
 if [ "${BRIEF_LINT:-1}" = "1" ] && [ -x "$SCRIPT_DIR/lint-brief.sh" ]; then
     "$SCRIPT_DIR/lint-brief.sh" "$DEST" || true
 fi
 
-# 4. Spawn worker tmux window (background — does NOT steal focus from
-#    coordinator). Session existence and caps were already checked above,
-#    before the brief was written; WINDOW_EXISTS/alive_workers/total_windows
-#    carry that decision forward so we don't re-check (and can't re-refuse
-#    after the brief already exists).
+# 4. Spawn (detached, so the coordinator keeps focus).
 if [ "$WINDOW_EXISTS" -eq 1 ]; then
-    echo "[4/4] tmux window iss-$ISSUE already exists — listener will pick up the new task"
+    echo "[4/4] tmux window $WINDOW already exists — listener will pick up the new task"
     log_event worker.requeue "issue=$ISSUE task_id=$TASK_ID"
 else
-    # container_name was computed above (needed earlier for
-    # check_stale_container's pre-flight). WORKER_CHECK*/SWARM_EVAL_LOG must
-    # ride this line too: _load-env.sh applies <project>/.swarm/.env only in
-    # THIS host process, and the tmux window's shell inherits the tmux
-    # server env instead — without the explicit hand-off the
-    # acceptance-check config documented in .env.example never reaches
-    # sandbox.sh (and thus never the listener).
-    tmux new-window -d -t "$SESSION_NAME" -n "iss-$ISSUE" \
-        "WORKER_CONTAINER_NAME=$(printf '%q' "$container_name") WORKER_CMD=$(printf '%q' "${WORKER_CMD:-claude}") WORKER_MODEL=$(printf '%q' "${WORKER_MODEL:-}") WORKER_PROMPT_FILE=$(printf '%q' "${WORKER_PROMPT_FILE:-}") WORKER_HEADLESS=$(printf '%q' "${WORKER_HEADLESS:-0}") WORKER_SELF_REVIEW=$(printf '%q' "${WORKER_SELF_REVIEW:-1}") WORKER_SELF_REVIEW_MAX_ROUNDS=$(printf '%q' "${WORKER_SELF_REVIEW_MAX_ROUNDS:-3}") SELF_REVIEW_CMD=$(printf '%q' "${SELF_REVIEW_CMD:-}") SELF_REVIEW_MODEL=$(printf '%q' "${SELF_REVIEW_MODEL:-}") WORKER_CHECK=$(printf '%q' "${WORKER_CHECK:-}") WORKER_CHECK_CMD=$(printf '%q' "${WORKER_CHECK_CMD:-}") WORKER_CHECK_TIMEOUT=$(printf '%q' "${WORKER_CHECK_TIMEOUT:-}") WORKER_CHECK_RETRY=$(printf '%q' "${WORKER_CHECK_RETRY:-}") SWARM_EVAL_LOG=$(printf '%q' "${SWARM_EVAL_LOG:-}") EXTRA_MOUNTS=$(printf '%q' "${EXTRA_MOUNTS:-}") SANDBOX_DEP_CACHE=$(printf '%q' "${SANDBOX_DEP_CACHE:-}") SANDBOX_CPUS=$(printf '%q' "${SANDBOX_CPUS:-}") SANDBOX_GRADLE_LIMITS=$(printf '%q' "${SANDBOX_GRADLE_LIMITS:-}") SANDBOX_GRADLE_WORKERS_MAX=$(printf '%q' "${SANDBOX_GRADLE_WORKERS_MAX:-}") SANDBOX_KOTLIN_DAEMON_XMX=$(printf '%q' "${SANDBOX_KOTLIN_DAEMON_XMX:-}") SANDBOX_ALLOW_BACKGROUND_TASKS=$(printf '%q' "${SANDBOX_ALLOW_BACKGROUND_TASKS:-}") $(printf '%q' "$SANDBOX_SH") $(printf '%q' "$WT") listener"
-    # issue #555 self-review round 8: same pane-base-index belt-and-
-    # suspenders as llm-start.sh's coordinator window — a user conf
-    # sourced on this socket between window creations could otherwise
-    # drift this specific worker window's pane 0 away from index 0,
-    # breaking every `.0`-suffixed target above/below that assumes it.
+    # The window's shell inherits the tmux server env, not this process's,
+    # so everything _load-env.sh applied from <project>/.swarm/.env must be
+    # handed over explicitly. NAME or NAME=default.
+    PASS_VARS=(
+        WORKER_CMD=claude WORKER_MODEL WORKER_PROMPT_FILE WORKER_HEADLESS=0
+        WORKER_SELF_REVIEW=1 WORKER_SELF_REVIEW_MAX_ROUNDS=3
+        SELF_REVIEW_CMD SELF_REVIEW_MODEL
+        WORKER_CHECK WORKER_CHECK_CMD WORKER_CHECK_TIMEOUT WORKER_CHECK_RETRY
+        SWARM_EVAL_LOG EXTRA_MOUNTS
+        SANDBOX_DEP_CACHE SANDBOX_CPUS SANDBOX_GRADLE_LIMITS SANDBOX_GRADLE_WORKERS_MAX
+        SANDBOX_KOTLIN_DAEMON_XMX SANDBOX_ALLOW_BACKGROUND_TASKS
+    )
+    window_cmd="WORKER_CONTAINER_NAME=$(printf '%q' "$CONTAINER")"
+    for spec in "${PASS_VARS[@]}"; do
+        name="${spec%%=*}"
+        default=""; [[ "$spec" == *=* ]] && default="${spec#*=}"
+        window_cmd+=" $name=$(printf '%q' "${!name:-$default}")"
+    done
+    window_cmd+=" $(printf '%q' "$SANDBOX_SH") $(printf '%q' "$WT") listener"
+    tmux new-window -d -t "$SESSION_NAME" -n "$WINDOW" "$window_cmd"
+    # Pin pane 0 (#555): a user conf sourced between window creations could
+    # shift it, breaking every `.0` target.
     tmux set-window-option -t "$SESSION_NAME:iss-$ISSUE" pane-base-index 0 2>/dev/null || true
-    echo "[4/4] tmux window iss-$ISSUE spawned (listener)"
-    log_event worker.start "issue=$ISSUE task_id=$TASK_ID window=iss-$ISSUE alive=$((alive_workers + 1))/$MAX_WORKERS total_windows=$((total_windows + 1))/$MAX_TMUX_WINDOWS"
-
-    # issue #493: don't report success on tmux's say-so alone — verify the
-    # pane actually survived past its first line (see
-    # post_spawn_health_check's header comment). Exits non-zero on failure.
-    post_spawn_health_check "$ISSUE" "iss-$ISSUE" "$container_name" "$DEST"
+    echo "[4/4] tmux window $WINDOW spawned (listener)"
+    # Logged at spawn time; coordinator-watch.sh anchors its paste-grace
+    # window to it (#497). A worker.start.failed may follow.
+    log_event worker.start "issue=$ISSUE task_id=$TASK_ID window=$WINDOW alive=$((alive_workers + 1))/$MAX_WORKERS total_windows=$((total_windows + 1))/$MAX_TMUX_WINDOWS"
+    post_spawn_health_check "$ISSUE" "$WINDOW" "$CONTAINER" "$DEST"
 fi
 
 echo
 echo "Provisioned worker for issue #$ISSUE."
 echo "  task_id: $TASK_ID"
-echo "  worker: tmux window '$SESSION_NAME:iss-$ISSUE'"
+echo "  worker: tmux window '$SESSION_NAME:$WINDOW'"
 echo "  monitor: ls $WT/.swarm/tasks/done/"
 echo "  events:  tail -F $EVENTS_LOG"

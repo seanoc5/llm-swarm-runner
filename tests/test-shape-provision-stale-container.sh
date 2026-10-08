@@ -58,7 +58,8 @@ trap cleanup EXIT
 extract_fn() {
     sed -n "/^${1}() {/,/^}/p" "$PROVISION"
 }
-for fn in check_stale_container post_spawn_health_check; do
+for fn in pane_is_dead window_listed container_listed remove_container drop_pending_marker \
+          check_stale_container post_spawn_health_check; do
     body="$(extract_fn "$fn")"
     [ -n "$body" ] || red "could not extract '$fn' from $PROVISION — has it been renamed?"
     eval "$body"
@@ -359,7 +360,7 @@ log_event() {
     printf '%s  %-15s %s\n' "\$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "\$cat" "\$*" >> "$EVENTS_LOG"
 }
 tmux() { command tmux -L "$SOCKET" "\$@"; }
-$(extract_fn post_spawn_health_check)
+$(for fn in pane_is_dead container_listed remove_container drop_pending_marker post_spawn_health_check; do extract_fn "$fn"; done)
 PROVISION_SPAWN_CHECK_SECS=0.1 post_spawn_health_check 305 iss-305 swarm-provstale-iss-305 "$TEST_DIR/brief-305.md"
 EOF
 set +e
