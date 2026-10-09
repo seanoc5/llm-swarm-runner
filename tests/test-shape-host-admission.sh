@@ -58,6 +58,7 @@ mkdir -p "$LLM_SWARM_DIR"
 printf 'HOST_MAX_WORKERS=2\n' > "$LLM_SWARM_DIR/.env.example"
 cp "$SCRIPT_DIR/../sandbox.sh" "$LLM_SWARM_DIR/sandbox.sh"
 mkdir -p "$LLM_SWARM_DIR/scripts" && cp "$SCRIPT_DIR"/../scripts/_load-env.sh "$LLM_SWARM_DIR/scripts/"
+cp "$SCRIPT_DIR"/../scripts/_window-flags.sh "$LLM_SWARM_DIR/scripts/"
 cp "$SCRIPT_DIR"/../scripts/provision-worker.sh "$LLM_SWARM_DIR/scripts/"
 cp "$SCRIPT_DIR"/../scripts/lint-brief.sh "$LLM_SWARM_DIR/scripts/" 2>/dev/null || true
 PROVISION="$LLM_SWARM_DIR/scripts/provision-worker.sh"

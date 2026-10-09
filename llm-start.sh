@@ -937,6 +937,36 @@ tmux set-option -g pane-base-index 0
 # setting again can't un-pin the coordinator window specifically.
 tmux set-window-option -t "$SESSION_NAME:coordinator" pane-base-index 0 2>/dev/null || true
 
+# issue #594: render each window's @swarm_flag (📬/🟡/✋/🔔 — see
+# scripts/_window-flags.sh) in the status bar next to its tab, so an
+# operator scanning the bar — never opening every pane — can tell who needs
+# them. Scoped to just THIS session (`-t "$SESSION_NAME"`): never touches
+# the user's own ~/.tmux.conf, the server-wide default, or any other
+# session sharing this socket. Starts from whatever format is already in
+# effect for this session (an explicit per-session override if one exists,
+# else the global/compiled default, which `show-options -g` always
+# resolves to something) so existing operator styling is preserved, and
+# only appends the flag placeholder. Idempotent: skipped once the
+# placeholder is already present, so a repeat llm-start.sh invocation
+# against a live session doesn't keep appending. Kill switch:
+# WATCH_WINDOW_FLAGS=0 suppresses the flags themselves (see
+# _window-flags.sh); this format string is harmless left in place either
+# way since an unset @swarm_flag renders as nothing.
+if [ "${WATCH_WINDOW_FLAGS:-1}" = "1" ]; then
+    for _fmt_opt in window-status-format window-status-current-format; do
+        _cur_fmt="$(tmux show-options -t "$SESSION_NAME" -v "$_fmt_opt" 2>/dev/null)"
+        [ -n "$_cur_fmt" ] || _cur_fmt="$(tmux show-options -g -v "$_fmt_opt" 2>/dev/null)"
+        case "$_cur_fmt" in
+            *'@swarm_flag'*) ;; # already wired up
+            *)
+                tmux set-option -t "$SESSION_NAME" "$_fmt_opt" \
+                    "${_cur_fmt}#{?@swarm_flag, #{@swarm_flag},}" 2>/dev/null || true
+                ;;
+        esac
+    done
+    unset _fmt_opt _cur_fmt
+fi
+
 # Codex deliberately exits after each turn. Keep its completed report visible
 # until the next invocation replaces this dead pane via the detection above.
 if [ "$COORD_CMD" = "codex" ] || { [ "$COORD_CMD" = "agy" ] && [ "${COORDINATOR_HEADLESS:-0}" = "1" ]; }; then

@@ -57,6 +57,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LLM_SWARM_DIR="${LLM_SWARM_DIR:-$(dirname "$SCRIPT_DIR")}"
 
+# issue #594: set_window_flag/clear_window_flag — see scripts/_window-flags.sh.
+# shellcheck source=_window-flags.sh
+. "$SCRIPT_DIR/_window-flags.sh"
+
 TARGET="${1:?usage: requeue.sh <wt-path|issue-N> <brief-file|->}"
 SOURCE="${2:?usage: requeue.sh <wt-path|issue-N> <brief-file|->}"
 
@@ -369,6 +373,13 @@ WIN=""
 case "$WT_BASENAME" in
     wt-issue-[0-9]*) WIN="iss-${WT_BASENAME#wt-issue-}" ;;
 esac
+
+# issue #594: a brief just got requeued into this window — any 📬 (finished,
+# no PR) or 🟡 (PR ready) flag left over from the PREVIOUS task is stale.
+if [ -n "$WIN" ] && [ -n "$SESSION_NAME" ]; then
+    clear_window_flag "$WIN" "📬" "new_brief_requeued task_id=$TASK_ID"
+    clear_window_flag "$WIN" "🟡" "new_brief_requeued task_id=$TASK_ID"
+fi
 
 # Probed once, rendered twice: as prose in the PR comment (issue #397) and
 # as the terminal hint below. The session/window resolution above used to
