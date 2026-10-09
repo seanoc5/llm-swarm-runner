@@ -369,7 +369,12 @@ rm -rf "$FLAG_DIR"/*
 rm -f "$PROJECT_DIR/.swarm/events.log"
 mkdir -p "$FLAG_DIR"
 printf '🟡' > "$FLAG_DIR/${SESSION_NAME}_iss-52"
-printf 'fix/issue-52\tMERGED\t103\t2026-01-01T00:00:00Z\tfalse\n' > "$GH_PR_LIST_FILE"
+# issue #185 pr_predates_worktree guard (added for the B6b hazard below)
+# compares this PR's createdAt against the worktree dir's own mtime, which
+# is "now" since it was just mkdir'd above — createdAt must be NOW-or-later
+# for this to read as "belongs to this worktree" and actually clear.
+NOW_ISO="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+printf 'fix/issue-52\tMERGED\t103\t%s\tfalse\n' "$NOW_ISO" > "$GH_PR_LIST_FILE"
 
 ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 0 "$TEST_DIR/watch-b6.log"
 sleep 4
@@ -378,6 +383,33 @@ stop_watcher
 [ -z "$(flag_of "$SESSION_NAME:iss-52")" ] \
     || red "expected 🟡 to be cleared on MERGED; got: $(flag_of "$SESSION_NAME:iss-52")"
 green "pr_poll_pass clears 🟡 on MERGED"
+
+# ---------------------------------------------------------------------------
+heading "Test B6b: pr_poll_pass's 🟡 survives an OLD terminal PR on a reused branch name (issue #594 self-review, round 2 / issue #185 hazard)"
+# ---------------------------------------------------------------------------
+mkdir -p "$TEST_DIR/wt-issue-54/.swarm/tasks/done"
+rm -rf "$FLAG_DIR"/*
+rm -f "$PROJECT_DIR/.swarm/events.log"
+# gh pr list --state all returns every PR that ever existed for a branch
+# name — a reused branch name has a NEW open PR for the live worktree AND
+# an old terminal PR from that branch name's previous life. Without the
+# pr_predates_worktree guard, whichever row pr_poll_pass's while-loop
+# reaches second would win regardless of state, so this fixture puts the
+# OPEN row first and the stale CLOSED row second to catch exactly that
+# ordering. The CLOSED row's createdAt (2020) predates the worktree dir's
+# mtime (just mkdir'd, i.e. "now"), so it must be skipped, not clear the 🟡
+# the OPEN row just set.
+printf 'fix/issue-54\tOPEN\t201\t2026-01-01T00:00:00Z\tfalse\nfix/issue-54\tCLOSED\t150\t2020-01-01T00:00:00Z\tfalse\n' \
+    > "$GH_PR_LIST_FILE"
+
+ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 0 "$TEST_DIR/watch-b6b.log"
+sleep 4
+stop_watcher
+
+[ "$(flag_of "$SESSION_NAME:iss-54")" = "🟡" ] \
+    || red "an old terminal PR from a reused branch name clobbered the 🟡 a new OPEN PR just set; got: $(flag_of "$SESSION_NAME:iss-54"). Watch log:
+$(cat "$TEST_DIR/watch-b6b.log")"
+green "🟡 survives an old terminal PR on a reused branch name (issue #185 hazard)"
 
 # ---------------------------------------------------------------------------
 heading "Test B7: pr_poll_pass's 🟡 never clobbers a higher-rank ✋"

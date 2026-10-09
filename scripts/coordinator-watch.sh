@@ -4273,6 +4273,15 @@ pr_poll_pass() {
         # window had. Never touches ✋ or 📬 (different flag,
         # clear_window_flag only acts when the CURRENT value is exactly
         # the one passed in — see _window-flags.sh).
+        #
+        # issue #594 self-review, round 2: `--state all` returns every PR
+        # that ever existed for a branch name (same issue #185 recycled-
+        # branch hazard the MERGED/CLOSED reap guard below already handles).
+        # Without the pr_predates_worktree guard here too, a reused branch
+        # name's OLD terminal PR would clear the 🟡 a NEW open PR on the
+        # live worktree just set in this same pass — the flag would never
+        # actually show. Only clear for a terminal PR that belongs to
+        # THIS worktree's own lifetime.
         case "$state" in
             OPEN)
                 if [ "$is_draft" = "false" ]; then
@@ -4282,7 +4291,9 @@ pr_poll_pass() {
                 fi
                 ;;
             MERGED|CLOSED)
-                clear_window_flag "iss-$issue" "🟡" "pr_${state,,} pr=$pr_number"
+                if ! pr_predates_worktree "$created_at" "$wt_dir"; then
+                    clear_window_flag "iss-$issue" "🟡" "pr_${state,,} pr=$pr_number"
+                fi
                 ;;
         esac
 
