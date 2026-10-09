@@ -940,26 +940,30 @@ tmux set-window-option -t "$SESSION_NAME:coordinator" pane-base-index 0 2>/dev/n
 # issue #594: render each window's @swarm_flag (📬/🟡/✋/🔔 — see
 # scripts/_window-flags.sh) in the status bar next to its tab, so an
 # operator scanning the bar — never opening every pane — can tell who needs
-# them. Scoped to just THIS session (`-t "$SESSION_NAME"`): never touches
-# the user's own ~/.tmux.conf, the server-wide default, or any other
-# session sharing this socket. Starts from whatever format is already in
-# effect for this session (an explicit per-session override if one exists,
-# else the global/compiled default, which `show-options -g` always
-# resolves to something) so existing operator styling is preserved, and
-# only appends the flag placeholder. Idempotent: skipped once the
-# placeholder is already present, so a repeat llm-start.sh invocation
-# against a live session doesn't keep appending. Kill switch:
-# WATCH_WINDOW_FLAGS=0 suppresses the flags themselves (see
-# _window-flags.sh); this format string is harmless left in place either
-# way since an unset @swarm_flag renders as nothing.
+# them. window-status-format/window-status-current-format are WINDOW
+# options in tmux, not session options: `set-option -t <session>` (no -g,
+# no -w) only rewrites the format for that session's current window, so a
+# window created later (every iss-N worker) would silently keep the
+# default and never show a flag. Setting them with `-g` (global WINDOW
+# option) is still scoped to just this swarm, because llm-start.sh always
+# runs each swarm on its own dedicated tmux server/socket (see
+# docs/tmux-cheatsheet.md) — `-g` here can never reach another project's
+# swarm or the operator's own default tmux server. Starts from whatever
+# global window format this server already has (the operator's
+# ~/.tmux.conf, read once when this server started, or tmux's compiled
+# default) so existing styling is preserved, and only appends the flag
+# placeholder. Idempotent: skipped once the placeholder is already
+# present, so a repeat llm-start.sh invocation against a live session
+# doesn't keep appending. Kill switch: WATCH_WINDOW_FLAGS=0 suppresses the
+# flags themselves (see _window-flags.sh); this format string is harmless
+# left in place either way since an unset @swarm_flag renders as nothing.
 if [ "${WATCH_WINDOW_FLAGS:-1}" = "1" ]; then
     for _fmt_opt in window-status-format window-status-current-format; do
-        _cur_fmt="$(tmux show-options -t "$SESSION_NAME" -v "$_fmt_opt" 2>/dev/null)"
-        [ -n "$_cur_fmt" ] || _cur_fmt="$(tmux show-options -g -v "$_fmt_opt" 2>/dev/null)"
+        _cur_fmt="$(tmux show-window-options -g -v "$_fmt_opt" 2>/dev/null)"
         case "$_cur_fmt" in
             *'@swarm_flag'*) ;; # already wired up
             *)
-                tmux set-option -t "$SESSION_NAME" "$_fmt_opt" \
+                tmux set-window-option -g "$_fmt_opt" \
                     "${_cur_fmt}#{?@swarm_flag, #{@swarm_flag},}" 2>/dev/null || true
                 ;;
         esac
