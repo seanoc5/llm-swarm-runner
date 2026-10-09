@@ -27,12 +27,21 @@ command -v tmux >/dev/null 2>&1 || red "tmux not found — required by this feat
 
 TEST_DIR=$(mktemp -d -t llm-start-reprompt-XXXXXX)
 SESSION_NAME="test-reprompt-$$"
+# Test 5 (issue #593) runs the real llm-start.sh end-to-end on its own
+# per-project swarm socket (a separate tmux SERVER, not just a session on
+# this file's ambient one) — these stay empty until that test sets them,
+# so cleanup here is a no-op for every earlier test.
+E2E_SOCKET=""
+E2E_DIR=""
 cleanup() {
     tmux kill-session -t "$SESSION_NAME" 2>/dev/null || true
+    [ -n "$E2E_SOCKET" ] && { command tmux -L "$E2E_SOCKET" kill-server 2>/dev/null || true; }
     if [ "${KEEP:-0}" = "1" ]; then
         yellow "KEEP=1: leaving $TEST_DIR for inspection"
+        [ -n "$E2E_DIR" ] && yellow "KEEP=1: leaving $E2E_DIR for inspection"
     else
         rm -rf "$TEST_DIR"
+        [ -n "$E2E_DIR" ] && rm -rf "$E2E_DIR"
     fi
 }
 trap cleanup EXIT
@@ -543,6 +552,120 @@ check "llm-start.sh defines its own COORD_BUSY_PATTERN" "present" "$got"
 
 grep -q '^REPROMPT_CHROME_PATTERN=' "$LLM_START" && got=present || got=missing
 check "llm-start.sh defines REPROMPT_CHROME_PATTERN for the pre-paste dirty check (issue #422)" "present" "$got"
+
+heading "Test 5: llm-start.sh end-to-end — bare re-run against a live coordinator attaches only (issue #593)"
+# Unlike the earlier tests (which extract reprompt_inject etc. and drive
+# them directly against a bare tmux session), this test runs the real,
+# unmodified llm-start.sh three times in a row against its own per-project
+# swarm socket — the exact sequence from the issue: a fresh launch, then a
+# BARE re-run (no prompt) against the now-live coordinator, then a re-run
+# WITH an explicit prompt. A stub `claude` on PATH stands in for the real
+# CLI (same idle/composer shape as Test 1's FAKE_REPL, via exec -a claude
+# so pane_current_command reads "claude") and logs the trailing positional
+# it's invoked with — the message, if any, each launch actually sent.
+ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+E2E_DIR=$(mktemp -d -t llm-start-e2e-XXXXXX)
+E2E_PROJECT="$E2E_DIR/proj-$$"
+mkdir -p "$E2E_PROJECT" "$E2E_DIR/bin"
+git -C "$E2E_PROJECT" init -q >/dev/null
+
+CLAUDE_ARGV_LOG="$E2E_DIR/claude-argv.log"
+: > "$CLAUDE_ARGV_LOG"
+FAKE_CLAUDE="$E2E_DIR/bin/claude"
+cat > "$FAKE_CLAUDE" <<STUB
+#!/usr/bin/env bash
+# Re-exec with argv[0] forced to "claude" (same technique Test 1's
+# FAKE_REPL uses via "exec -a claude bash ..."): a shebang invocation's
+# own argv[0] is the interpreter ("bash"), which llm-start.sh's
+# coordinator_idle detection (tmux pane_current_command) would read as an
+# idle shell, not a live coordinator — defeating this whole test.
+if [ "\${_REEXECED:-0}" != "1" ]; then
+    export _REEXECED=1
+    exec -a claude bash "\$0" "\$@"
+fi
+printf '%s\n' "\${@: -1}" >> "$CLAUDE_ARGV_LOG"
+render_idle() {
+    echo "idle-prompt >"
+    printf '\xe2\x9d\xaf \n'
+}
+render_idle
+# Unlike Test 1's FAKE_REPL (which cycles busy -> idle to exercise
+# reprompt_inject's own retry/confirm machinery), this stub stays busy
+# forever after one submit and never clears: Test 5 drives the REAL
+# llm-start.sh end-to-end, so reprompt_inject runs with its real (not
+# the test-file's shortened) COMPACT_SUBMIT_SETTLE_SECS default —
+# clearing back to idle after a short sleep raced llm-start.sh's own
+# settle delay and made this test's later pane check flake.
+while IFS= read -r line; do
+    [ -z "\$line" ] && continue
+    echo "GOT: \$line"
+    echo "✻ Considering… (esc to interrupt)"
+done
+STUB
+chmod +x "$FAKE_CLAUDE"
+
+E2E_SOCKET="swarm-$(basename "$E2E_PROJECT")"
+E2E_SESSION="llm-$(basename "$E2E_PROJECT")"
+# llm-start.sh's own EVENTS_LOG (distinct from this test file's extracted
+# copy, which lives at $EVENTS_LOG / $TEST_DIR above).
+E2E_EVENTS_LOG="$E2E_PROJECT/.swarm/events.log"
+
+run_llm_start() {
+    (cd "$E2E_PROJECT" && PATH="$E2E_DIR/bin:$PATH" \
+        LLM_SWARM_DIR="$ROOT" NON_INTERACTIVE=1 WATCH=0 STATUS=0 \
+        "$LLM_START" "$@")
+}
+
+# llm-start.sh runs its own session on E2E_SOCKET, a dedicated tmux SERVER
+# (not just a session on this file's ambient one) — these two local
+# helpers mirror pane_contains/check_eventually above but address that
+# socket explicitly, since the bare `tmux` those use would otherwise hit
+# the wrong server entirely.
+e2e_pane_contains() {
+    local needle="$1" content
+    content="$(command tmux -L "$E2E_SOCKET" capture-pane -t "$E2E_SESSION:coordinator" -p 2>/dev/null)" || { echo no; return; }
+    if printf '%s\n' "$content" | grep -qF "$needle"; then echo yes; else echo no; fi
+}
+e2e_check_eventually() {
+    local desc="$1" expect="$2" needle="$3" max="${4:-100}"
+    local got=""
+    for ((i = 0; i < max; i++)); do
+        got="$(e2e_pane_contains "$needle")"
+        if [ "$expect" = "$got" ]; then
+            green "$desc"
+            PASS=$((PASS + 1))
+            return 0
+        fi
+        sleep 0.1
+    done
+    red "$desc (expected [$expect] got [$got] after $((max))x0.1s polling)"
+}
+
+OUT1="$(run_llm_start)"
+e2e_check_eventually "fresh launch: fake claude foreground" "yes" "idle-prompt >"
+check "fresh launch (no prompt): sends the default startup-checklist prompt" \
+    "Execute the Initial Startup Checklist." "$(cat "$CLAUDE_ARGV_LOG")"
+
+: > "$CLAUDE_ARGV_LOG"
+OUT2="$(run_llm_start)"
+if printf '%s' "$OUT2" | grep -qF 'Attached without sending a prompt'; then got=present; else got=absent; fi
+check "bare re-run against a live coordinator: prints the attach-only message" "present" "$got"
+check "bare re-run: claude is NOT re-invoked (argv log stays empty)" "" "$(cat "$CLAUDE_ARGV_LOG")"
+check "bare re-run: nothing pasted into the live pane" "no" "$(e2e_pane_contains 'GOT:')"
+if grep -q 'coord.wake.skip' "$E2E_EVENTS_LOG" 2>/dev/null && grep -q 'reason=bare_rerun_no_prompt' "$E2E_EVENTS_LOG" 2>/dev/null; then
+    got=logged
+else
+    got=missing
+fi
+check "bare re-run: coord.wake.skip reason=bare_rerun_no_prompt logged" "logged" "$got"
+
+OUT3="$(run_llm_start "a follow-up for the live coordinator")"
+e2e_check_eventually "explicit re-run: prompt text reaches the live pane" "yes" \
+    "GOT: a follow-up for the live coordinator"
+if printf '%s' "$OUT3" | grep -qF 'Sending prompt into the running session'; then got=present; else got=absent; fi
+check "explicit re-run against a live coordinator: still reprompts (unchanged, issue #295)" "present" "$got"
+
+command tmux -L "$E2E_SOCKET" kill-server 2>/dev/null || true
 
 echo ""
 green "All llm-start.sh reprompt tests passed ($PASS checks)"
