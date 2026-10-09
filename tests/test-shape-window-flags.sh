@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # test-shape-window-flags.sh — shape tests for issue #594's per-window tmux
-# status flags (📬/🟡/✋ on worker windows, 🔔 on the coordinator window).
+# status flags (📬/👀/✋ on worker windows, 🔔 on the coordinator window).
 #
 # Covers:
 #   - scripts/_window-flags.sh's own rank/ownership contract (set never
@@ -10,7 +10,8 @@
 #   - on_outcome's 📬 set/clear from an outcome JSON's task_state (through
 #     the real coordinator-watch.sh, background, same convention as
 #     test-watcher-autoclose.sh).
-#   - pr_poll_pass's 🟡 set/clear from gh pr list's state/isDraft.
+#   - pr_poll_pass's 👀 set/clear from gh pr list's state/isDraft, gated on
+#     the worker pane being idle, with the PR body's risk-glyph suffix.
 #   - window_flags_sweep_pass's ✋ set/clear from an outbox decision-needed
 #     message appearing/disappearing.
 #   - coord_approval_flag_pass's 🔔 set/clear from the coordinator's own
@@ -60,8 +61,9 @@ mkdir -p "$TEST_DIR/bin"
 # coordinator-watch.sh's non-flag code paths (has_live_window,
 # coord_human_present-adjacent checks) make along the way.
 FLAG_DIR="$TEST_DIR/flag-store"
-export FLAG_DIR
-mkdir -p "$FLAG_DIR"
+PANE_DIR="$TEST_DIR/pane-store"
+export FLAG_DIR PANE_DIR
+mkdir -p "$FLAG_DIR" "$PANE_DIR"
 TMUX_WINDOWS_FILE="$TEST_DIR/tmux-windows.txt"
 : > "$TMUX_WINDOWS_FILE"
 FAKE_TMUX="$TEST_DIR/bin/tmux"
@@ -104,6 +106,21 @@ case "${1:-}" in
         fi
         exit 0
         ;;
+    capture-pane)
+        # PANE_DIR/<session:window> (sanitized) holds the rendered pane
+        # text; absent = empty pane = idle for worker_pane_busy.
+        shift
+        target=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                -t) target="${2%.0}"; shift 2 ;;
+                *) shift ;;
+            esac
+        done
+        pf="$PANE_DIR/$(printf '%s' "$target" | tr ':/' '__')"
+        [ -f "$pf" ] && cat "$pf"
+        exit 0
+        ;;
     list-windows) cat "$TMUX_WINDOWS_FILE" ;;
     has-session)  exit 1 ;;
     *)            exit 0 ;;
@@ -133,30 +150,30 @@ green "set_window_flag sets an empty slot"
 grep -q 'watch.flag window=iss-1 flag=📬' "$EVENTS_SEEN" || red "expected a watch.flag log_event call"
 green "set_window_flag calls the caller's log_event when present"
 
-# 🟡 (rank 2) must overwrite 📬 (rank 1) — higher priority wins.
-set_window_flag "iss-1" "🟡" "test_a2"
-[ "$(flag_of "$SESSION_NAME:iss-1")" = "🟡" ] || red "expected 🟡 to overwrite 📬 (higher rank)"
+# 👀 (rank 2) must overwrite 📬 (rank 1) — higher priority wins.
+set_window_flag "iss-1" "👀" "test_a2"
+[ "$(flag_of "$SESSION_NAME:iss-1")" = "👀" ] || red "expected 👀 to overwrite 📬 (higher rank)"
 green "set_window_flag lets a higher-rank flag overwrite a lower one"
 
-# 📬 (rank 1) must NOT overwrite 🟡 (rank 2) — lower priority loses.
+# 📬 (rank 1) must NOT overwrite 👀 (rank 2) — lower priority loses.
 set_window_flag "iss-1" "📬" "test_a3"
-[ "$(flag_of "$SESSION_NAME:iss-1")" = "🟡" ] || red "lower-rank 📬 incorrectly overwrote 🟡"
+[ "$(flag_of "$SESSION_NAME:iss-1")" = "👀" ] || red "lower-rank 📬 incorrectly overwrote 👀"
 green "set_window_flag refuses to let a lower-rank flag overwrite a higher one"
 
 # clear_window_flag for a flag that is NOT the current owner is a no-op.
 clear_window_flag "iss-1" "📬" "test_a4"
-[ "$(flag_of "$SESSION_NAME:iss-1")" = "🟡" ] || red "clear_window_flag cleared a flag it didn't own"
+[ "$(flag_of "$SESSION_NAME:iss-1")" = "👀" ] || red "clear_window_flag cleared a flag it didn't own"
 green "clear_window_flag is a no-op when it doesn't currently own the slot"
 
 # clear_window_flag for the actual current flag clears it.
-clear_window_flag "iss-1" "🟡" "test_a5"
+clear_window_flag "iss-1" "👀" "test_a5"
 [ -z "$(flag_of "$SESSION_NAME:iss-1")" ] || red "clear_window_flag did not clear the flag it owns"
 green "clear_window_flag clears the flag it currently owns"
 
-# ✋ (rank 3, highest) set, then a 🟡 set attempt must not downgrade it.
+# ✋ (rank 3, highest) set, then a 👀 set attempt must not downgrade it.
 set_window_flag "iss-2" "✋" "test_a6"
-set_window_flag "iss-2" "🟡" "test_a7"
-[ "$(flag_of "$SESSION_NAME:iss-2")" = "✋" ] || red "🟡 incorrectly downgraded ✋ (highest rank)"
+set_window_flag "iss-2" "👀" "test_a7"
+[ "$(flag_of "$SESSION_NAME:iss-2")" = "✋" ] || red "👀 incorrectly downgraded ✋ (highest rank)"
 green "✋ (highest rank) survives a later lower-rank set attempt"
 
 # Re-setting the SAME flag that's already current is a cheap no-op (no
@@ -174,6 +191,20 @@ WATCH_WINDOW_FLAGS=0 set_window_flag "iss-3" "📬" "test_a10"
 WATCH_WINDOW_FLAGS=0 clear_window_flag "iss-3" "✋" "test_a11"
 [ "$(flag_of "$SESSION_NAME:iss-3")" = "✋" ] || red "WATCH_WINDOW_FLAGS=0 should have no-op'd the clear"
 green "WATCH_WINDOW_FLAGS=0 kill switch disables both set and clear"
+
+# Risk-suffixed 👀 variants: same rank as bare 👀 (so a changed rating
+# overwrites), still outranked by ✋, and owned by a bare "👀" clear.
+set_window_flag "iss-4" "👀🟢" "test_a12"
+set_window_flag "iss-4" "👀🔴" "test_a13"
+[ "$(flag_of "$SESSION_NAME:iss-4")" = "👀🔴" ] || red "a re-rated 👀🔴 should overwrite 👀🟢 (equal rank)"
+set_window_flag "iss-4" "📬" "test_a14"
+[ "$(flag_of "$SESSION_NAME:iss-4")" = "👀🔴" ] || red "lower-rank 📬 incorrectly overwrote 👀🔴"
+clear_window_flag "iss-4" "👀" "test_a15"
+[ -z "$(flag_of "$SESSION_NAME:iss-4")" ] || red "a bare 👀 clear should own the suffixed 👀🔴"
+set_window_flag "iss-5" "✋" "test_a16"
+set_window_flag "iss-5" "👀🟢" "test_a17"
+[ "$(flag_of "$SESSION_NAME:iss-5")" = "✋" ] || red "👀🟢 incorrectly downgraded ✋"
+green "risk-suffixed 👀 ranks and clears as one family with bare 👀"
 
 unset SESSION_NAME
 rm -rf "$FLAG_DIR"/*
@@ -217,14 +248,20 @@ EOF
 chmod +x "$FAKE_LLM_START"
 
 # gh stub: pr list reads a 5-column TSV fixture (branch/state/number/
-# createdAt/isDraft, matching pr_poll_pass's --jq projection exactly).
+# createdAt/isDraft, matching pr_poll_pass's --jq projection exactly), or —
+# for pr_risk_glyph's open-PR body lookup — a 2-column number/risk fixture.
 GH_PR_LIST_FILE="$TEST_DIR/gh-pr-list.tsv"
+GH_PR_RISK_FILE="$TEST_DIR/gh-pr-risk.tsv"
 : > "$GH_PR_LIST_FILE"
+: > "$GH_PR_RISK_FILE"
 FAKE_GH="$TEST_DIR/bin/gh"
 cat > "$FAKE_GH" <<EOF
 #!/usr/bin/env bash
 if [ "\$1" = "pr" ] && [ "\$2" = "list" ]; then
-    cat "$GH_PR_LIST_FILE"
+    case " \$* " in
+        *" number,body "*) cat "$GH_PR_RISK_FILE" ;;
+        *)                 cat "$GH_PR_LIST_FILE" ;;
+    esac
     exit 0
 fi
 exit 0
@@ -325,7 +362,7 @@ wait_for_watcher_exit
 green "a later outcome correction clears a stale 📬"
 
 # ---------------------------------------------------------------------------
-heading "Test B4: pr_poll_pass sets 🟡 for an OPEN, non-draft PR"
+heading "Test B4: pr_poll_pass sets 👀 for an OPEN, non-draft PR"
 # ---------------------------------------------------------------------------
 mkdir -p "$TEST_DIR/wt-issue-50/.swarm/tasks/done"
 rm -rf "$FLAG_DIR"/*
@@ -336,20 +373,95 @@ ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 0 "$TEST_DIR/watch-b4.log"
 sleep 4
 stop_watcher
 
-[ "$(flag_of "$SESSION_NAME:iss-50")" = "🟡" ] \
-    || red "expected 🟡 on iss-50 for an OPEN non-draft PR. Watch log:
+[ "$(flag_of "$SESSION_NAME:iss-50")" = "👀" ] \
+    || red "expected 👀 on iss-50 for an OPEN non-draft PR. Watch log:
 $(cat "$TEST_DIR/watch-b4.log")"
-green "pr_poll_pass set 🟡 for an OPEN, non-draft PR"
+green "pr_poll_pass set 👀 for an OPEN, non-draft PR"
 
 # ---------------------------------------------------------------------------
-heading "Test B5: pr_poll_pass withholds 🟡 for a draft PR, and clears one already set"
+heading "Test B4b: pr_poll_pass suffixes 👀 with the PR body's risk rating"
+# ---------------------------------------------------------------------------
+mkdir -p "$TEST_DIR/wt-issue-55/.swarm/tasks/done"
+rm -rf "$FLAG_DIR"/*
+rm -f "$PROJECT_DIR/.swarm/events.log"
+printf 'fix/issue-55\tOPEN\t105\t2026-01-01T00:00:00Z\tfalse\n' > "$GH_PR_LIST_FILE"
+printf '105\t🟢\n' > "$GH_PR_RISK_FILE"
+
+ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 0 "$TEST_DIR/watch-b4b.log"
+sleep 4
+stop_watcher
+
+[ "$(flag_of "$SESSION_NAME:iss-55")" = "👀🟢" ] \
+    || red "expected 👀🟢 on iss-55 for a 🟢-rated ready PR; got: $(flag_of "$SESSION_NAME:iss-55"). Watch log:
+$(cat "$TEST_DIR/watch-b4b.log")"
+green "pr_poll_pass suffixes 👀 with the risk rating (👀🟢)"
+
+rm -rf "$FLAG_DIR"/*
+WATCH_WINDOW_FLAG_RISK=0 ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 0 "$TEST_DIR/watch-b4b2.log"
+sleep 4
+stop_watcher
+[ "$(flag_of "$SESSION_NAME:iss-55")" = "👀" ] \
+    || red "WATCH_WINDOW_FLAG_RISK=0 should show a bare 👀; got: $(flag_of "$SESSION_NAME:iss-55")"
+green "WATCH_WINDOW_FLAG_RISK=0 drops the risk suffix"
+: > "$GH_PR_RISK_FILE"
+
+# ---------------------------------------------------------------------------
+heading "Test B4c: pr_poll_pass withholds 👀 while the worker pane is busy, and clears one already set"
+# ---------------------------------------------------------------------------
+# The iss-1140 case: pr-ready.sh readied the PR on a first caveated
+# self-review round, and the worker kept working.
+mkdir -p "$TEST_DIR/wt-issue-56/.swarm/tasks/done"
+rm -rf "$FLAG_DIR"/*
+rm -f "$PROJECT_DIR/.swarm/events.log"
+printf '👀🟡' > "$FLAG_DIR/${SESSION_NAME}_iss-56"
+printf '✶ Blanching… (2h 7m 37s · ↓ 48.1k tokens)\n  esc to interrupt\n' > "$PANE_DIR/${SESSION_NAME}_iss-56"
+printf 'fix/issue-56\tOPEN\t106\t2026-01-01T00:00:00Z\tfalse\n' > "$GH_PR_LIST_FILE"
+
+ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 0 "$TEST_DIR/watch-b4c.log"
+sleep 4
+stop_watcher
+
+[ -z "$(flag_of "$SESSION_NAME:iss-56")" ] \
+    || red "expected no flag on a busy worker's window; got: $(flag_of "$SESSION_NAME:iss-56"). Watch log:
+$(cat "$TEST_DIR/watch-b4c.log")"
+green "pr_poll_pass clears/withholds 👀 while the worker is mid-turn"
+
+rm -f "$PANE_DIR/${SESSION_NAME}_iss-56"
+ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 0 "$TEST_DIR/watch-b4c2.log"
+sleep 4
+stop_watcher
+[ "$(flag_of "$SESSION_NAME:iss-56")" = "👀" ] \
+    || red "expected 👀 once the worker pane went idle; got: $(flag_of "$SESSION_NAME:iss-56")"
+green "pr_poll_pass sets 👀 once the worker goes idle"
+
+# ---------------------------------------------------------------------------
+heading "Test B4d: pr_poll_pass migrates a legacy bare 🟡 flag"
+# ---------------------------------------------------------------------------
+mkdir -p "$TEST_DIR/wt-issue-57/.swarm/tasks/done"
+rm -rf "$FLAG_DIR"/*
+rm -f "$PROJECT_DIR/.swarm/events.log"
+printf '🟡' > "$FLAG_DIR/${SESSION_NAME}_iss-57"
+printf 'busy · ↓ 3.2k tokens\n' > "$PANE_DIR/${SESSION_NAME}_iss-57"
+printf 'fix/issue-57\tOPEN\t107\t2026-01-01T00:00:00Z\tfalse\n' > "$GH_PR_LIST_FILE"
+
+ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 0 "$TEST_DIR/watch-b4d.log"
+sleep 4
+stop_watcher
+rm -f "$PANE_DIR/${SESSION_NAME}_iss-57"
+
+[ -z "$(flag_of "$SESSION_NAME:iss-57")" ] \
+    || red "a legacy 🟡 on a busy worker should be cleared; got: $(flag_of "$SESSION_NAME:iss-57")"
+green "pr_poll_pass clears a legacy 🟡 left by the pre-👀 watcher"
+
+# ---------------------------------------------------------------------------
+heading "Test B5: pr_poll_pass withholds 👀 for a draft PR, and clears one already set"
 # ---------------------------------------------------------------------------
 mkdir -p "$TEST_DIR/wt-issue-51/.swarm/tasks/done"
 rm -rf "$FLAG_DIR"/*
 rm -f "$PROJECT_DIR/.swarm/events.log"
-# Pre-seed 🟡 directly, as if a prior ready PR had set it.
+# Pre-seed 👀 directly, as if a prior ready PR had set it.
 mkdir -p "$FLAG_DIR"
-printf '🟡' > "$FLAG_DIR/${SESSION_NAME}_iss-51"
+printf '👀' > "$FLAG_DIR/${SESSION_NAME}_iss-51"
 printf 'fix/issue-51\tOPEN\t102\t2026-01-01T00:00:00Z\ttrue\n' > "$GH_PR_LIST_FILE"
 
 ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 0 "$TEST_DIR/watch-b5.log"
@@ -357,18 +469,18 @@ sleep 4
 stop_watcher
 
 [ -z "$(flag_of "$SESSION_NAME:iss-51")" ] \
-    || red "expected 🟡 to be cleared once the PR went back to draft; got: $(flag_of "$SESSION_NAME:iss-51"). Watch log:
+    || red "expected 👀 to be cleared once the PR went back to draft; got: $(flag_of "$SESSION_NAME:iss-51"). Watch log:
 $(cat "$TEST_DIR/watch-b5.log")"
-green "pr_poll_pass clears 🟡 when the PR is a draft"
+green "pr_poll_pass clears 👀 when the PR is a draft"
 
 # ---------------------------------------------------------------------------
-heading "Test B6: pr_poll_pass clears 🟡 on MERGED/CLOSED"
+heading "Test B6: pr_poll_pass clears 👀 on MERGED/CLOSED"
 # ---------------------------------------------------------------------------
 mkdir -p "$TEST_DIR/wt-issue-52/.swarm/tasks/done"
 rm -rf "$FLAG_DIR"/*
 rm -f "$PROJECT_DIR/.swarm/events.log"
 mkdir -p "$FLAG_DIR"
-printf '🟡' > "$FLAG_DIR/${SESSION_NAME}_iss-52"
+printf '👀' > "$FLAG_DIR/${SESSION_NAME}_iss-52"
 # issue #185 pr_predates_worktree guard (added for the B6b hazard below)
 # compares this PR's createdAt against the worktree dir's own mtime, which
 # is "now" since it was just mkdir'd above — createdAt must be NOW-or-later
@@ -381,11 +493,11 @@ sleep 4
 stop_watcher
 
 [ -z "$(flag_of "$SESSION_NAME:iss-52")" ] \
-    || red "expected 🟡 to be cleared on MERGED; got: $(flag_of "$SESSION_NAME:iss-52")"
-green "pr_poll_pass clears 🟡 on MERGED"
+    || red "expected 👀 to be cleared on MERGED; got: $(flag_of "$SESSION_NAME:iss-52")"
+green "pr_poll_pass clears 👀 on MERGED"
 
 # ---------------------------------------------------------------------------
-heading "Test B6b: pr_poll_pass's 🟡 survives an OLD terminal PR on a reused branch name (issue #594 self-review, round 2 / issue #185 hazard)"
+heading "Test B6b: pr_poll_pass's 👀 survives an OLD terminal PR on a reused branch name (issue #594 self-review, round 2 / issue #185 hazard)"
 # ---------------------------------------------------------------------------
 mkdir -p "$TEST_DIR/wt-issue-54/.swarm/tasks/done"
 rm -rf "$FLAG_DIR"/*
@@ -397,7 +509,7 @@ rm -f "$PROJECT_DIR/.swarm/events.log"
 # reaches second would win regardless of state, so this fixture puts the
 # OPEN row first and the stale CLOSED row second to catch exactly that
 # ordering. The CLOSED row's createdAt (2020) predates the worktree dir's
-# mtime (just mkdir'd, i.e. "now"), so it must be skipped, not clear the 🟡
+# mtime (just mkdir'd, i.e. "now"), so it must be skipped, not clear the 👀
 # the OPEN row just set.
 printf 'fix/issue-54\tOPEN\t201\t2026-01-01T00:00:00Z\tfalse\nfix/issue-54\tCLOSED\t150\t2020-01-01T00:00:00Z\tfalse\n' \
     > "$GH_PR_LIST_FILE"
@@ -406,13 +518,13 @@ ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 0 "$TEST_DIR/watch-b6b.log"
 sleep 4
 stop_watcher
 
-[ "$(flag_of "$SESSION_NAME:iss-54")" = "🟡" ] \
-    || red "an old terminal PR from a reused branch name clobbered the 🟡 a new OPEN PR just set; got: $(flag_of "$SESSION_NAME:iss-54"). Watch log:
+[ "$(flag_of "$SESSION_NAME:iss-54")" = "👀" ] \
+    || red "an old terminal PR from a reused branch name clobbered the 👀 a new OPEN PR just set; got: $(flag_of "$SESSION_NAME:iss-54"). Watch log:
 $(cat "$TEST_DIR/watch-b6b.log")"
-green "🟡 survives an old terminal PR on a reused branch name (issue #185 hazard)"
+green "👀 survives an old terminal PR on a reused branch name (issue #185 hazard)"
 
 # ---------------------------------------------------------------------------
-heading "Test B7: pr_poll_pass's 🟡 never clobbers a higher-rank ✋"
+heading "Test B7: pr_poll_pass's 👀 never clobbers a higher-rank ✋"
 # ---------------------------------------------------------------------------
 mkdir -p "$TEST_DIR/wt-issue-53/.swarm/tasks/done"
 rm -rf "$FLAG_DIR"/*
@@ -426,8 +538,8 @@ sleep 4
 stop_watcher
 
 [ "$(flag_of "$SESSION_NAME:iss-53")" = "✋" ] \
-    || red "a ready PR's 🟡 incorrectly clobbered the higher-rank ✋; got: $(flag_of "$SESSION_NAME:iss-53")"
-green "🟡 never overwrites a higher-rank ✋ already on the window"
+    || red "a ready PR's 👀 incorrectly clobbered the higher-rank ✋; got: $(flag_of "$SESSION_NAME:iss-53")"
+green "👀 never overwrites a higher-rank ✋ already on the window"
 
 # ---------------------------------------------------------------------------
 heading "Test B8: window_flags_sweep_pass sets ✋ for an unprocessed decision-needed message"

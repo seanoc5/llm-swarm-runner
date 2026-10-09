@@ -7,7 +7,13 @@
 # renders it next to the window name so an operator scanning the tab bar —
 # never opening every pane — can tell who needs them:
 #   📬  worker finished, no PR open (worker status: done-no-pr)
-#   🟡  worker's PR is open and ready for review (not a draft)
+#   👀  worker's PR is open and ready for review (not a draft) AND the
+#       worker's pane is idle — never shown while the worker is still mid-
+#       turn (e.g. iterating on its own self-review caveats after
+#       pr-ready.sh already readied the PR). Optionally suffixed with the
+#       PR body's risk rating (👀🟢 / 👀🟡 / 👀🔴, WATCH_WINDOW_FLAG_RISK).
+#       Was a bare 🟡 originally; a non-color glyph now so colored dots
+#       only ever mean merge risk.
 #   ✋  worker posted a decision-needed outbox message, still unprocessed
 #   🔔  the coordinator's last turn ended asking for an approval
 #
@@ -30,14 +36,17 @@
 # silently replacing a more urgent one still pending; clear_window_flag
 # only clears when the CURRENT value is exactly the flag the caller is
 # clearing, never erasing a different, more urgent flag that has since
-# taken the slot. Priority, highest first: ✋ > 🟡 > 📬. 🔔 only ever
+# taken the slot. A flag passed to either function matches any current
+# value that STARTS with it, so "👀" owns every risk-suffixed "👀🟢"-style
+# variant (first glyphs are all distinct, so no other flag can collide).
+# Priority, highest first: ✋ > 👀 > 📬. 🔔 only ever
 # targets the "coordinator" window, which no worker flag ever contends
 # for, so it is not ranked against the other three.
 
 _window_flag_rank() {
     case "$1" in
         "✋") printf '3\n' ;;
-        "🟡") printf '2\n' ;;
+        "👀"*) printf '2\n' ;;
         "📬") printf '1\n' ;;
         "") printf '0\n' ;;
         *) printf '1\n' ;;
@@ -71,13 +80,14 @@ set_window_flag() {
 # clear_window_flag <window> <flag> <reason>
 #
 # <flag> is the flag the caller believes it owns right now — clearing is a
-# no-op unless the window's CURRENT flag is exactly this one (see header).
+# no-op unless the window's CURRENT flag is this one, or a suffixed variant
+# of it (see header).
 clear_window_flag() {
     local win="$1" flag="$2" reason="$3"
     [ "${WATCH_WINDOW_FLAGS:-1}" = "1" ] || return 0
     local cur
     cur="$(_window_flag_current "$win")" || true
-    [ "$cur" = "$flag" ] || return 0
+    [ -n "$cur" ] && [[ "$cur" == "$flag"* ]] || return 0
     tmux set-window-option -t "$SESSION_NAME:$win" -u @swarm_flag 2>/dev/null || return 0
     if command -v log_event >/dev/null 2>&1; then
         log_event watch.flag "window=$win flag=none reason=$reason"
