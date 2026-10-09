@@ -877,6 +877,13 @@ if [ "${SKIP_5I:-0}" != "1" ]; then
         [ -n "$body" ] || red "could not extract function '$fn' from $WATCH — has it been renamed?"
         eval "$body"
     done
+    # issue #594: on_selfheal_claim calls set_window_flag/clear_window_flag,
+    # which live in the sourced sibling scripts/_window-flags.sh rather than
+    # in coordinator-watch.sh itself — extract_fn only pulls functions out
+    # of $WATCH, so source the library directly the same way coordinator-
+    # watch.sh's own top-of-file `.` does for the real run.
+    # shellcheck source=../scripts/_window-flags.sh
+    . "$SCRIPT_DIR/../scripts/_window-flags.sh"
 
     SELFHEAL_WT="$LOCK_TEST_DIR/wt-issue-506"
     mkdir -p "$SELFHEAL_WT/.swarm/tasks/claims"

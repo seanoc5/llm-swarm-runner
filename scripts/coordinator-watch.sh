@@ -2561,6 +2561,19 @@ WATCH_STRANDED_BRIEF_SWEEP_SECS="${WATCH_STRANDED_BRIEF_SWEEP_SECS:-60}"
 WATCH_CHECK_ON_DONE="${WATCH_CHECK_ON_DONE:-1}"
 CHECK_RUNNER="${CHECK_RUNNER:-}"
 SESSION_NAME="${SESSION_NAME:-llm-$(basename "$PROJECT_DIR")}"
+# issue #594 — per-window tmux status flags (📬/🟡/✋ on worker windows,
+# 🔔 on the coordinator window); see scripts/_window-flags.sh for the
+# flags themselves and window_flags_sweep_pass/coord_approval_flag_pass
+# below for the ✋/🔔 derivation. WATCH_WINDOW_FLAGS=0 is the kill switch
+# _window-flags.sh's own set/clear functions check; the sweep interval is
+# this file's own concern, kept separate so a project could disable the
+# sweep (e.g. to cut its small per-tick cost) while still letting the
+# other direct set/clear call sites (on_outcome, pr_poll_pass,
+# provision-worker.sh, requeue.sh) manage their own flags.
+WATCH_WINDOW_FLAGS="${WATCH_WINDOW_FLAGS:-1}"
+WATCH_WINDOW_FLAGS_SWEEP_SECS="${WATCH_WINDOW_FLAGS_SWEEP_SECS:-10}"
+# shellcheck source=_window-flags.sh
+. "$SCRIPT_DIR/_window-flags.sh"
 WATCHER_QUIET="${WATCHER_QUIET:-0}"
 # issue #296 — see this file's WATCHER_STALE_CHECK header comment.
 WATCHER_STALE_CHECK="${WATCHER_STALE_CHECK:-1}"
@@ -3820,6 +3833,13 @@ on_selfheal_claim() {
     issue=$(outcome_path_issue "$path")
     task_id=$(basename "$path" .claim)
     log_event worker.listener.selfheal "issue=$issue task_id=$task_id"
+    # issue #594: the listener just claimed a NEW brief on its own — the
+    # window is busy again, not "done" or "awaiting merge" any more. See
+    # provision-worker.sh's and requeue.sh's identical clear calls for the
+    # other two ways a worker picks up a new brief (an operator/coordinator
+    # dispatch, rather than this self-heal path).
+    clear_window_flag "iss-$issue" "📬" "new_brief_claimed task_id=$task_id"
+    clear_window_flag "iss-$issue" "🟡" "new_brief_claimed task_id=$task_id"
     rm -f "$path" 2>/dev/null || true
 }
 
@@ -4217,15 +4237,15 @@ has_live_window_draining_brief() {
 pr_poll_pass() {
     local prs
     prs="$(cd "$PROJECT_DIR" && gh pr list --state all --limit 500 \
-            --json headRefName,state,number,createdAt \
-            --jq '.[] | "\(.headRefName)\t\(.state)\t\(.number)\t\(.createdAt)"' 2>/dev/null)" || {
+            --json headRefName,state,number,createdAt,isDraft \
+            --jq '.[] | "\(.headRefName)\t\(.state)\t\(.number)\t\(.createdAt)\t\(.isDraft)"' 2>/dev/null)" || {
         log_event pr_poll.error "reason=gh_pr_list_failed"
         return 0
     }
     [ -n "$prs" ] || return 0
 
-    local reap_hit=0 branch state pr_number created_at issue wt_dir
-    while IFS=$'\t' read -r branch state pr_number created_at; do
+    local reap_hit=0 branch state pr_number created_at is_draft issue wt_dir
+    while IFS=$'\t' read -r branch state pr_number created_at is_draft; do
         [ -z "$branch" ] && continue
         case "$branch" in
             fix/issue-*) : ;;
@@ -4244,6 +4264,38 @@ pr_poll_pass() {
             unset "FOLLOWUP_SKIP_LOGGED[$issue]" 2>/dev/null || true
             continue
         fi
+
+        # issue #594: 🟡 means "a PR is open and ready for someone to
+        # merge" — OPEN and not a draft. A draft PR (still being written
+        # per worker.md's "draft first, ready only once the body is
+        # final") isn't ready for merge attention yet, so it gets no flag
+        # rather than a misleading 🟡; MERGED/CLOSED clears whatever this
+        # window had. Never touches ✋ or 📬 (different flag,
+        # clear_window_flag only acts when the CURRENT value is exactly
+        # the one passed in — see _window-flags.sh).
+        #
+        # issue #594 self-review, round 2: `--state all` returns every PR
+        # that ever existed for a branch name (same issue #185 recycled-
+        # branch hazard the MERGED/CLOSED reap guard below already handles).
+        # Without the pr_predates_worktree guard here too, a reused branch
+        # name's OLD terminal PR would clear the 🟡 a NEW open PR on the
+        # live worktree just set in this same pass — the flag would never
+        # actually show. Only clear for a terminal PR that belongs to
+        # THIS worktree's own lifetime.
+        case "$state" in
+            OPEN)
+                if [ "$is_draft" = "false" ]; then
+                    set_window_flag "iss-$issue" "🟡" "pr_ready pr=$pr_number"
+                else
+                    clear_window_flag "iss-$issue" "🟡" "pr_draft pr=$pr_number"
+                fi
+                ;;
+            MERGED|CLOSED)
+                if ! pr_predates_worktree "$created_at" "$wt_dir"; then
+                    clear_window_flag "iss-$issue" "🟡" "pr_${state,,} pr=$pr_number"
+                fi
+                ;;
+        esac
 
         # issue #237: in the default merged mode, a CLOSED-without-merge PR
         # is not reap-eligible at all — skip it here so it never triggers
@@ -5782,6 +5834,117 @@ SCRIPT
     log_event watch.check_on_done "issue=$issue task_id=$task_id result=started pane=$how log=$log_file"
 }
 
+# window_flags_sweep_pass (issue #594)
+#
+# Derives ✋ for every own worktree from its outbox — never event-driven,
+# always recomputed fresh each tick, so it self-heals regardless of how
+# the message arrived (a fresh on_message dispatch, a message dropped
+# before this watcher process even started, or one left over from a
+# crashed/restarted watcher) and clears itself the moment the file is
+# archived to outbox/processed/ (per worker.md's "Never leave a handled
+# message in outbox/ — unarchived means unread" — the glob below only
+# ever matches the TOP of that directory, never processed/).
+#
+# A worktree can have more than one unprocessed message; this only needs
+# to know whether at least one is kind: decision-needed, so it stops at
+# the first match. `head -20` is enough to cover the outbox skeleton's
+# whole `---`-delimited frontmatter block (kind/task_id/ts) without
+# reading a potentially long message body.
+window_flags_sweep_pass() {
+    [ "$WATCH_WINDOW_FLAGS" = "1" ] || return 0
+
+    local wt_dir issue f has_decision
+    while IFS= read -r wt_dir; do
+        [ -n "$wt_dir" ] || continue
+        case "$(basename "$wt_dir")" in
+            wt-issue-*) issue="$(basename "$wt_dir")"; issue="${issue#wt-issue-}" ;;
+            *) continue ;;
+        esac
+        [[ "$issue" =~ ^[0-9]+$ ]] || continue
+
+        has_decision=0
+        shopt -s nullglob
+        for f in "$wt_dir/.swarm/tasks/outbox"/*.md; do
+            [ -f "$f" ] || continue
+            if head -20 "$f" 2>/dev/null | grep -qE '^kind:[[:space:]]*decision-needed[[:space:]]*$'; then
+                has_decision=1
+                break
+            fi
+        done
+        shopt -u nullglob
+
+        if [ "$has_decision" = "1" ]; then
+            set_window_flag "iss-$issue" "✋" "outbox_decision_needed"
+        else
+            clear_window_flag "iss-$issue" "✋" "outbox_drained_or_processed"
+        fi
+    done < <(own_worktree_dirs_for_scan "$PROJECT_DIR")
+}
+
+# coord_approval_flag_pass (issue #594)
+#
+# 🔔 on the "coordinator" window: set when the COORDINATOR's own last
+# transcript turn was an assistant message containing the literal text
+# "Pending your approval:" (the exact phrase this project's own CLAUDE.md
+# tells the coordinator to end a status/design reply with when it's
+# waiting on an operator decision — see that file's "Reader" section),
+# AND no human-typed turn has landed since. Cleared the moment a
+# human-typed turn lands after that assistant message — reusing
+# human_typed_since (this file's own #497 machinery) so an automated
+# wake's own injected nudge, which also becomes a "user"-role transcript
+# line, is correctly NOT mistaken for the operator's reply; only a turn
+# human_typed_since itself would recognize as typed counts.
+#
+# Recomputed fresh every tick (same self-healing shape as
+# window_flags_sweep_pass above): no watcher-restart-proof state to
+# maintain, no missed transition to worry about — the newest assistant
+# turn's text and timestamp are read straight off disk every time.
+#
+# Fails quiet (no flag change) on missing jq or an unreadable/absent
+# transcript dir, same posture as every other transcript reader in this
+# file.
+coord_approval_flag_pass() {
+    [ "$WATCH_WINDOW_FLAGS" = "1" ] || return 0
+    [ "$HAVE_JQ" = "1" ] || return 0
+
+    local dir
+    dir="$(transcript_dir_for "$PROJECT_DIR")"
+    [ -d "$dir" ] || return 0
+
+    # Last assistant-role line of each candidate file (transcripts are
+    # append-only, so a file's OWN last assistant line is always its
+    # newest) — `tail -n 200` bounds the read cost regardless of how large
+    # a long-running session's transcript has grown, since the turn we
+    # want is always near the end of the file.
+    local f line best_epoch=0 best_text="" ts epoch text
+    for f in "$dir"/*.jsonl; do
+        [ -r "$f" ] || continue
+        line="$(tail -n 200 "$f" 2>/dev/null | LC_ALL=C grep -E '"role"[[:space:]]*:[[:space:]]*"assistant"' | tail -n 1)"
+        [ -n "$line" ] || continue
+        ts="$(printf '%s' "$line" | jq -r '.timestamp // empty' 2>/dev/null)" || continue
+        [ -n "$ts" ] || continue
+        epoch=$(date -u -d "$ts" +%s 2>/dev/null) || continue
+        [ "$epoch" -gt "$best_epoch" ] || continue
+        text="$(printf '%s' "$line" | jq -r '
+            .message.content as $c |
+            if ($c | type) == "string" then $c
+            elif ($c | type) == "array" then ([$c[] | select(.type == "text") | .text] | join("\n"))
+            else "" end' 2>/dev/null)" || text=""
+        best_epoch="$epoch"
+        best_text="$text"
+    done
+
+    if [ "$best_epoch" -gt 0 ] && printf '%s' "$best_text" | grep -qF "Pending your approval:"; then
+        if human_typed_since "$dir" "$((best_epoch + 1))" "$(coord_paste_epochs)" "$COORD_HUMAN_PASTE_GRACE_SECS"; then
+            clear_window_flag coordinator "🔔" "approval_answered"
+        else
+            set_window_flag coordinator "🔔" "pending_approval"
+        fi
+    else
+        clear_window_flag coordinator "🔔" "no_pending_approval"
+    fi
+}
+
 # run_watch_timer_loop
 #
 # Single background process driving Behavior A (WATCH_PR_POLL_SECS) and
@@ -5808,10 +5971,18 @@ SCRIPT
 # run_auto_compact_poll_loop, started as its own background process right
 # after this function.
 run_watch_timer_loop() {
-    local last_pr_poll=0 last_orphan_sweep=0 last_bg_violation_sweep=0 last_timeout_retry_sweep=0 last_activity_poll=0 last_coord_wake_retry=0 last_coord_wake_busy_retry=0 last_worktree_sweep=0 last_pending_brief_sweep=0 last_stranded_brief_sweep=0 now
+    local last_pr_poll=0 last_orphan_sweep=0 last_bg_violation_sweep=0 last_timeout_retry_sweep=0 last_activity_poll=0 last_coord_wake_retry=0 last_coord_wake_busy_retry=0 last_worktree_sweep=0 last_pending_brief_sweep=0 last_stranded_brief_sweep=0 last_window_flags_sweep=0 now
     while true; do
         sleep 2
         [ "$WATCH_CHECK_ON_DONE" = "1" ] && { status_poll_pass || true; }
+        if [ "$WATCH_WINDOW_FLAGS" = "1" ] && [ "$WATCH_WINDOW_FLAGS_SWEEP_SECS" -gt 0 ]; then
+            now=$(date +%s)
+            if [ $((now - last_window_flags_sweep)) -ge "$WATCH_WINDOW_FLAGS_SWEEP_SECS" ]; then
+                window_flags_sweep_pass || true
+                coord_approval_flag_pass || true
+                last_window_flags_sweep=$now
+            fi
+        fi
         if [ "$COORD_WAKE_RETRY_SECS" -gt 0 ]; then
             now=$(date +%s)
             if [ $((now - last_coord_wake_retry)) -ge "$COORD_WAKE_RETRY_SECS" ]; then
@@ -8844,6 +9015,26 @@ on_outcome() {
         log_event worker.finish "issue=$issue outcome=$outcome path=$path"
     fi
 
+    # issue #594: 📬 reflects the outcome JSON's OWN task_state field
+    # (copied straight from the worker's status file by write_outcome) —
+    # "done-no-pr" is the one state that means "nothing more for this
+    # worker to do, and nothing to merge" (ready-for-review has a PR for
+    # pr_poll_pass's own sweep to flag 🟡 on; blocked gets ✋ instead, from
+    # whatever decision-needed outbox message a blocked worker is expected
+    # to have posted — see worker.md's status contract). Runs for a
+    # correction too (a check-fail retry can flip the recorded state), so
+    # the flag always reflects the LATEST outcome for this task_id, not
+    # just its first announcement.
+    if [ "$HAVE_JQ" = "1" ] && [ -r "$path" ]; then
+        local outcome_task_state
+        outcome_task_state="$(jq -r '.task_state // empty' "$path" 2>/dev/null)" || outcome_task_state=""
+        if [ "$outcome_task_state" = "done-no-pr" ]; then
+            set_window_flag "iss-$issue" "📬" "worker_finish_no_pr task_id=$task_id"
+        else
+            clear_window_flag "iss-$issue" "📬" "worker_finish_state=${outcome_task_state:-unknown} task_id=$task_id"
+        fi
+    fi
+
     # Audit posting fires for EVERY outcome (not gated by wake-debounce).
     # The sweep is idempotent via .posted markers, so repeated calls are
     # cheap, and we don't want auditing to be coalesced — every finished
@@ -9800,10 +9991,10 @@ run_poll() {
 # restarts. (COORD_WAKE_RETRY_SECS, issue #422's older dirty-draft retry,
 # has this identical gap and predates this fix — out of scope here, but
 # worth folding in alongside this one if it's ever revisited.)
-if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ] || [ "$WATCH_ORPHAN_SWEEP_SECS" -gt 0 ] || [ "$WATCH_BG_VIOLATION_SWEEP_SECS" -gt 0 ] || [ "$WATCH_TIMEOUT_RETRY_SWEEP_SECS" -gt 0 ] || [ "$WATCH_ACTIVITY_POLL_SECS" -gt 0 ] || [ "$WATCH_WORKTREE_SWEEP_SECS" -gt 0 ] || [ "$WATCH_PENDING_BRIEF_SWEEP_SECS" -gt 0 ] || [ "$WATCH_STRANDED_BRIEF_SWEEP_SECS" -gt 0 ] || [ "$COORD_WAKE_HOLD_RETRY_SECS" -gt 0 ]; then
+if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ] || [ "$WATCH_ORPHAN_SWEEP_SECS" -gt 0 ] || [ "$WATCH_BG_VIOLATION_SWEEP_SECS" -gt 0 ] || [ "$WATCH_TIMEOUT_RETRY_SWEEP_SECS" -gt 0 ] || [ "$WATCH_ACTIVITY_POLL_SECS" -gt 0 ] || [ "$WATCH_WORKTREE_SWEEP_SECS" -gt 0 ] || [ "$WATCH_PENDING_BRIEF_SWEEP_SECS" -gt 0 ] || [ "$WATCH_STRANDED_BRIEF_SWEEP_SECS" -gt 0 ] || [ "$COORD_WAKE_HOLD_RETRY_SECS" -gt 0 ] || { [ "$WATCH_WINDOW_FLAGS" = "1" ] && [ "$WATCH_WINDOW_FLAGS_SWEEP_SECS" -gt 0 ]; }; then
     run_watch_timer_loop &
     WATCH_TIMER_PID=$!
-    log_event watch.timer.start "pr_poll_secs=$WATCH_PR_POLL_SECS check_on_done=$WATCH_CHECK_ON_DONE orphan_sweep_secs=$WATCH_ORPHAN_SWEEP_SECS bg_violation_sweep_secs=$WATCH_BG_VIOLATION_SWEEP_SECS timeout_retry_sweep_secs=$WATCH_TIMEOUT_RETRY_SWEEP_SECS activity_poll_secs=$WATCH_ACTIVITY_POLL_SECS worktree_sweep_secs=$WATCH_WORKTREE_SWEEP_SECS pending_brief_sweep_secs=$WATCH_PENDING_BRIEF_SWEEP_SECS stranded_brief_sweep_secs=$WATCH_STRANDED_BRIEF_SWEEP_SECS"
+    log_event watch.timer.start "pr_poll_secs=$WATCH_PR_POLL_SECS check_on_done=$WATCH_CHECK_ON_DONE orphan_sweep_secs=$WATCH_ORPHAN_SWEEP_SECS bg_violation_sweep_secs=$WATCH_BG_VIOLATION_SWEEP_SECS timeout_retry_sweep_secs=$WATCH_TIMEOUT_RETRY_SWEEP_SECS activity_poll_secs=$WATCH_ACTIVITY_POLL_SECS worktree_sweep_secs=$WATCH_WORKTREE_SWEEP_SECS pending_brief_sweep_secs=$WATCH_PENDING_BRIEF_SWEEP_SECS stranded_brief_sweep_secs=$WATCH_STRANDED_BRIEF_SWEEP_SECS window_flags_sweep_secs=$([ "$WATCH_WINDOW_FLAGS" = "1" ] && echo "$WATCH_WINDOW_FLAGS_SWEEP_SECS" || echo 0)"
 fi
 if [ "$WORKER_AUTO_COMPACT" = "1" ] || [ "$WORKER_AUTO_DELIVER" = "1" ]; then
     run_worker_compact_loop &
