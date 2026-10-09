@@ -69,6 +69,9 @@ USAGE
 ARGUMENTS
     PROMPT          Initial prompt for the coordinator
                     (default: "Execute the Initial Startup Checklist.")
+                    Only sent on a fresh/idle/dead coordinator. A bare
+                    re-run (no PROMPT) against an already-live coordinator
+                    just attaches — pass PROMPT explicitly to reprompt it.
 
 FLAGS
     -h, --help                       Show this help and exit
@@ -183,6 +186,14 @@ if [ "$YOLO" = "1" ]; then
     : "${DEBOUNCE_SECS:=15}";             export DEBOUNCE_SECS
 fi
 
+#
+# issue #593: PROMPT_EXPLICIT distinguishes "operator passed a prompt" from
+# "no positional arg, default filled in" — the live-REPL reprompt path below
+# needs this so a bare re-run against an already-live coordinator doesn't
+# silently resend the startup-checklist default (which looked, from the
+# pane, like the coordinator had woken up on its own).
+PROMPT_EXPLICIT=0
+[ -n "${1:-}" ] && PROMPT_EXPLICIT=1
 INITIAL_PROMPT="${1:-Execute the Initial Startup Checklist.}"
 
 # Load <project>/.swarm/.env, <sandbox>/.env, then <sandbox>/.env.example.
@@ -886,7 +897,14 @@ elif [ "$COORD_CMD" = "claude" ] && [ "${COORDINATOR_HEADLESS:-0}" != "1" ]; the
     # REPL and paste the new prompt into it as a follow-up message instead
     # of relaunching claude. This is what kills the "coordinator amnesia"
     # symptom — prior turns stay in-context across `llm "..."` invocations.
-    echo "Session $SESSION_NAME exists; coordinator REPL is live (pane: '$PANE_CMD'). Sending prompt into the running session."
+    #
+    # issue #593: a bare re-run (no prompt argument, PROMPT_EXPLICIT=0) must
+    # not look like the coordinator reprompting itself — attach only.
+    if [ "$PROMPT_EXPLICIT" = "1" ]; then
+        echo "Session $SESSION_NAME exists; coordinator REPL is live (pane: '$PANE_CMD'). Sending prompt into the running session."
+    else
+        echo "Session $SESSION_NAME exists; coordinator already running (pane: '$PANE_CMD'). Attached without sending a prompt (pass a prompt to send one)."
+    fi
 else
     echo "Session $SESSION_NAME exists; coordinator is busy (running '$PANE_CMD'). Not interrupting — attaching."
 fi
@@ -1056,12 +1074,23 @@ elif { [ "$COORD_CMD" = "claude" ] || [ "$COORD_CMD" = "agy" ]; } && [ "${COORDI
     # coordinator-watch.sh's wake dispatchers can tell "retry this prompt
     # later" apart from every other outcome — see that reprompt_inject's
     # own header comment for the full return-code contract.
-    TMP_PROMPT=$(mktemp)
-    printf '%s\n' "$INITIAL_PROMPT" > "$TMP_PROMPT"
-    REPROMPT_RC=0
-    reprompt_inject "$SESSION_NAME:coordinator.0" "$TMP_PROMPT" || REPROMPT_RC=$?
-    rm -f "$TMP_PROMPT"
-    [ "$REPROMPT_RC" = "2" ] && REPROMPT_DEFERRED=1
+    #
+    # issue #593: PROMPT_EXPLICIT=0 means no positional prompt was passed —
+    # INITIAL_PROMPT only holds the startup-checklist default here, and
+    # every real wake path (coordinator-watch.sh's dispatchers, a manual
+    # `llm-start.sh "<prompt>"` re-run) always passes one explicitly, so
+    # this branch is reached only by a bare `llm-start.sh` re-run. Skip the
+    # inject entirely rather than resend the default into a live session.
+    if [ "$PROMPT_EXPLICIT" = "1" ]; then
+        TMP_PROMPT=$(mktemp)
+        printf '%s\n' "$INITIAL_PROMPT" > "$TMP_PROMPT"
+        REPROMPT_RC=0
+        reprompt_inject "$SESSION_NAME:coordinator.0" "$TMP_PROMPT" || REPROMPT_RC=$?
+        rm -f "$TMP_PROMPT"
+        [ "$REPROMPT_RC" = "2" ] && REPROMPT_DEFERRED=1
+    else
+        log_event coord.wake.skip "reason=bare_rerun_no_prompt"
+    fi
 fi
 
 # Optionally spawn coordinator-watch.sh as a second pane inside the util
