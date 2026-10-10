@@ -114,6 +114,14 @@ plus a new `**What surprised me:**` line, per Debrief schema v1
 (`prompts/worker.md` § "Debrief schema v1"). Same fold, same fields'
 purpose, manager-audience wording.
 
+### 2026-10-07 — finish the reporting feedback loop and prompt-simplification trial
+
+Proposal and draft examples: [Reports for a returning decision-maker](manager-communication-plan.md).
+Actual exchanges and draft rewrites: [Historical reports: before and after](manager-communication-history.md).
+Resume #488 with example calibration and a coordinator-reply pilot (#533),
+then evaluate prompt simplification under #509/#510. These are proposed next
+steps; reader approval and a completed comparison are still outstanding.
+
 ---
 
 ## Done
