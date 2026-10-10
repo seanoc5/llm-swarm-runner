@@ -183,6 +183,7 @@ Every wake report and status update **ends** with the digest block — panes are
 ```
 
 - **Needs you:** each item names the PR in plain words, quotes its Bottom line, gives the exact command, and states the default if the operator stays silent.
+- **Caveat before command:** one entry per PR, ordered recommendation → caveat → command for the recommended path → alternative command (e.g. "I recommend holding for tests: <caveat>. `B1 yes` holds it; `merge PR N` takes it as-is"). Never print a merge (or close/delete) command ahead of a caveat, or while a separate item proposes holding the same PR — an operator acting on the first command they read merges past the hold.
 - **What surprised me** is always present ("Nothing" when empty).
 - **No-ceremony:** empty Needs you and "Nothing" surprised → collapse to the bottom-line sentence plus the Backlog line.
 - **Moved** diffs against your previous digest (first of a session: say so). Keep the digest under ~25 lines; the startup `OPEN=…` line is the Backlog row, not reported twice.
