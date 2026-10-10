@@ -48,7 +48,7 @@ Before reporting a cap, reap finished workers (recovery is `gh pr reopen N`):
 
 If still capped: stop provisioning, name the cap, and list remaining `iss-*` windows with PR state and a `tmux kill-window -t iss-N` command each — don't close them yourself, they may hold unpreserved work. A same-issue follow-up needs no slot: `requeue.sh N <brief>`. `provision-worker.sh` re-checks caps and exits 3 when exceeded — a hard stop, not something to retry or bypass.
 
-`provision-worker.sh` can also exit 2, 4, 5 or 6 (issue #493, #546). Exit 2: an unrelated setup refusal (stale branch, orphan worktree, no tmux session, bad flag, issue fetch failed) — nothing running; read stderr, don't guess one fix for all of "exit 2". Exit 5: a worker IS running (same-name container still tracked by a live window) — route via `requeue.sh N <brief>`, don't retry. Exit 4: the spawn failed (dead pane or container never came up) — nothing claimed, brief removed; plain re-provisioning (`provision-worker.sh N`) should succeed once admitted. Exit 6: the post-spawn poll's ceiling (`PROVISION_SPAWN_CHECK_SECS`, default 120s) ran out with the pane alive but no container seen yet — a loaded-host slow start, not a failure, so window/container/brief are left alone. Don't re-provision on exit 6 (double-provisions); re-check via `tmux capture-pane` / `docker ps`, then wait or raise the ceiling. An immediate retry after exit 4 usually hits exit 3 first (spawn-stagger); its stderr names the wait — wait it out and retry once. Only a cap-exceeded exit 3 is the hard stop above.
+Other `provision-worker.sh` exits (issue #493, #546): stderr names the next step — read it, don't guess. Never retry exit 5 (a worker is already running: use `requeue.sh`) or exit 6 (slow start, pane alive: re-check, don't re-provision). Exit 4 (spawn died, fully cleaned up) may be re-provisioned once; a spawn-stagger exit 3 right after names its wait.
 
 ## Issue Routing: tmux Worker vs GH Action
 
@@ -71,7 +71,7 @@ First, `gh issue list --state closed --search "<2-3 distinctive words>"` to catc
 {{LLM_SWARM_DIR}}/scripts/provision-worker.sh 42
 ```
 
-**Give the call an explicit timeout**: `PROVISION_SPAWN_CHECK_SECS` (default 120s) plus ~60s setup overhead — the post-spawn poll can run the full ceiling on a loaded host, and the default tool timeout killing the call silently is how a coordinator ends up re-provisioning an issue that was never confirmed dead (what exit 6 exists to prevent).
+**Give the call an explicit timeout**: `PROVISION_SPAWN_CHECK_SECS` (default 120s) plus ~60s setup overhead; the default tool timeout kills it silently and invites a double-provision.
 
 It creates the worktree and branch, embeds `.swarm-policy.md` and the issue body into the brief, and spawns the window. Re-running is safe and queues a follow-up.
 
@@ -108,7 +108,7 @@ grep 'watch.bg_violation.*window=coordinator' .swarm/events.log | cut -d' ' -f1 
 
 **Worker outbox** (oldest first, by `kind:`): `fyi` → fold into your picture/digest; `decision-needed` → decide if within your authority, else put it on "Needs you" (the worker may be parked `blocked`; unblock with `requeue.sh`); `brief-draft` → review scope, guardrails and duplicates, then dispatch or decline with a reason. Archive to `<its-outbox>/processed/`. Reply only via a queued brief or the operator, never `send-keys`.
 
-**No-PR tasks (issue #466):** a task that never opens a PR — carving sub-issues into the outbox, drafting rulings or research posted as issue comments — never produces a PR for the usual reap signals to key off, so its window holds a slot until something closes the issue explicitly. Once you've confirmed the deliverable is actually handled (every carved draft above dispatched or declined, every drafted comment posted), `gh issue close N --comment "<why>"` yourself — don't leave it for the operator. That's the signal `kill-finished-workers.sh` needs to reap the window later (CLOSED issue + the branch never had a PR at all, open or otherwise + idle past its own floor + a clean, fully-pushed worktree); skipping this step strands the window like the fand-etl incident #466 describes.
+**No-PR tasks (issue #466):** a task that never opens a PR (carving sub-issues, posting rulings or research as comments) holds its window until the issue closes. Once its deliverable is handled, `gh issue close N --comment "<why>"` yourself — that's what lets `kill-finished-workers.sh` reap it.
 
 **Salvaged briefs:** the auto-reap can race a worker's queue, so `kill-worktree.sh` moves leftover files to `.swarm/salvaged/iss-<N>/` and posts `SWARM_BRIEF_ORPHANED` on the PR (`requeue.sh` posts `SWARM_PENDING_BRIEF: queued`, the listener posts `cleared`). For each file, re-dispatch via `provision-worker.sh`/`requeue.sh` if still relevant, else note why it was dropped; then move it to a sibling `handled/` dir.
 
@@ -117,7 +117,7 @@ grep 'watch.bg_violation.*window=coordinator' .swarm/events.log | cut -d' ' -f1 
 A tmux restart, or a window-only reap (`kill-finished-workers.sh` without `--with-worktree`, which deliberately keeps the worktree), can leave a worktree with a queued or claimed brief and no `iss-N` listener to drain it. Same triage either way — check `gh pr list --head fix/issue-N`, then re-provision (`provision-worker.sh N` — first move any `processing/` file back to `inbox/`) or archive the file and say why:
 
 - **At session start:** `llm-start.sh` prints `WARN: stranded worktree wt-issue-N — ... (inbox=X processing=Y)`.
-- **Mid-session (issue #448):** `coordinator-watch.sh`'s periodic sweep (`WATCH_STRANDED_BRIEF_SWEEP_SECS`, default 60s) catches it without waiting for a restart, delivered as a `.swarm/coord-inbox/` item (kind `stranded_brief`, see "Inbox" above) instead of a pane line — triage it there. Deduped per issue until the strand resolves (re-provisioned or archived).
+- **Mid-session (issue #448):** `coordinator-watch.sh`'s periodic sweep (`WATCH_STRANDED_BRIEF_SWEEP_SECS`, default 60s) delivers it as a `stranded_brief` inbox item, deduped per issue until resolved.
 
 Neither path auto-respawns or moves a brief — that's always your call, since the PR behind it may be merged.
 
@@ -190,7 +190,7 @@ Every wake report and status update **ends** with the digest block — panes are
 
 ## Reporting worker outcomes
 
-**Draft first:** `gh pr view <N> --json isDraft,body`. A draft with a placeholder body is a worker mid-self-review, not a violation — report "PR #N opened as a draft (worker still finalizing)" and re-check later. Everything below applies once `isDraft` is false.
+**Draft first:** `gh pr view <N> --json isDraft,body`. A draft with a placeholder body is a worker mid-self-review, not a violation — report "PR #N opened as a draft (worker still finalizing)" and re-check later. A `⏳ Still a draft` banner means `pr-ready.sh` refused: report its reason (CI ones the watcher retries; review/red-CI ones need the author). Everything below applies once `isDraft` is false.
 
 Scrape the risk (`gh pr view <N> --json body --jq .body | grep -E 'BLIND_MERGE_RISK|Blind-merge risk'`) and render:
 

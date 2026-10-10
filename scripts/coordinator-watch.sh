@@ -1940,6 +1940,7 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     WATCHER_AUTOCLOSE_MODE merged which terminal PR states are reap-eligible: merged (MERGED only, default) | finalized (MERGED or CLOSED)
     WATCH_PR_POLL_SECS  60        periodic gh-poll backstop reap (0=off); see header comment
     WATCH_ORPHAN_SWEEP_SECS 3600  periodic reap-orphan-worktrees.sh sweep for window-less worktrees (0=off); see header comment
+    WATCH_READY_SWEEP_SECS 300   periodic ready-sweep.sh: re-run pr-ready.sh on drafts refused only for CI pending/unreadable (0=off; issue #602)
     WATCH_BG_VIOLATION_SWEEP_SECS 60  periodic sweep for backgrounded-shell UI markers on iss-* panes + the coordinator pane (0=off); see header comment
     WATCH_BG_VIOLATION_PATTERN    (auto)  grep -E pattern for the sweep above
     WATCH_TIMEOUT_RETRY_SWEEP_SECS 60  periodic sweep for a worker stuck retrying a command that always hits its timeout (0=off); see header comment (issue #467)
@@ -2533,6 +2534,9 @@ KILL_FINISHED="${KILL_FINISHED:-$LLM_SWARM_DIR/scripts/kill-finished-workers.sh}
 WATCH_PR_POLL_SECS="${WATCH_PR_POLL_SECS:-60}"
 WATCH_ORPHAN_SWEEP_SECS="${WATCH_ORPHAN_SWEEP_SECS:-3600}"
 REAP_ORPHAN="${REAP_ORPHAN:-$LLM_SWARM_DIR/scripts/reap-orphan-worktrees.sh}"
+# issue #602: retry drafts that pr-ready.sh refused only for CI pending/unreadable.
+WATCH_READY_SWEEP_SECS="${WATCH_READY_SWEEP_SECS:-300}"
+READY_SWEEP="${READY_SWEEP:-$LLM_SWARM_DIR/scripts/ready-sweep.sh}"
 # issue #298 — fallback detection for the foreground-only rule; see header comment.
 WATCH_BG_VIOLATION_SWEEP_SECS="${WATCH_BG_VIOLATION_SWEEP_SECS:-60}"
 WATCH_BG_VIOLATION_PATTERN="${WATCH_BG_VIOLATION_PATTERN:-Running in the background|[0-9]+ shells? still running}"
@@ -2792,6 +2796,10 @@ if ! [[ "$WATCH_PR_POLL_SECS" =~ ^[0-9]+$ ]]; then
 fi
 if ! [[ "$WATCH_ORPHAN_SWEEP_SECS" =~ ^[0-9]+$ ]]; then
     echo "ERROR: WATCH_ORPHAN_SWEEP_SECS must be a non-negative integer (got: $WATCH_ORPHAN_SWEEP_SECS)" >&2
+    exit 1
+fi
+if ! [[ "$WATCH_READY_SWEEP_SECS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: WATCH_READY_SWEEP_SECS must be a non-negative integer (got: $WATCH_READY_SWEEP_SECS)" >&2
     exit 1
 fi
 if ! [[ "$WATCH_BG_VIOLATION_SWEEP_SECS" =~ ^[0-9]+$ ]]; then
@@ -3356,6 +3364,11 @@ if [ "$WATCH_ORPHAN_SWEEP_SECS" -gt 0 ] && [ ! -x "$REAP_ORPHAN" ]; then
     echo "      Disabling orphan sweep; set WATCH_ORPHAN_SWEEP_SECS=0 to silence this." >&2
     WATCH_ORPHAN_SWEEP_SECS=0
 fi
+if [ "$WATCH_READY_SWEEP_SECS" -gt 0 ] && [ ! -x "$READY_SWEEP" ]; then
+    echo "WARN: WATCH_READY_SWEEP_SECS>0 but ready-sweep.sh not executable: $READY_SWEEP" >&2
+    echo "      Disabling ready sweep; set WATCH_READY_SWEEP_SECS=0 to silence this." >&2
+    WATCH_READY_SWEEP_SECS=0
+fi
 
 # Pick a backend
 BACKEND="poll"
@@ -3377,6 +3390,7 @@ post-outcomes: $POST_OUTCOMES$([ "$POST_OUTCOMES" = "1" ] && echo " (sweep: $SWE
 autoclose:     $WATCHER_AUTOCLOSE$([ "$WATCHER_AUTOCLOSE" = "1" ] && echo " (mode: $WATCHER_AUTOCLOSE_MODE [$AUTOCLOSE_PR_FLAG], script: $KILL_FINISHED)")
 pr-poll:       ${WATCH_PR_POLL_SECS}s$([ "$WATCH_PR_POLL_SECS" = "0" ] && echo " (disabled)")
 orphan-sweep:  ${WATCH_ORPHAN_SWEEP_SECS}s$([ "$WATCH_ORPHAN_SWEEP_SECS" = "0" ] && echo " (disabled)" || echo " (script: $REAP_ORPHAN)")
+ready-sweep:   ${WATCH_READY_SWEEP_SECS}s$([ "$WATCH_READY_SWEEP_SECS" = "0" ] && echo " (disabled)" || echo " (CI-pending draft retry, issue #602)")
 bg-violation:  ${WATCH_BG_VIOLATION_SWEEP_SECS}s$([ "$WATCH_BG_VIOLATION_SWEEP_SECS" = "0" ] && echo " (disabled)" || echo " (foreground-only fallback detection, issue #298)")
 timeout-retry: ${WATCH_TIMEOUT_RETRY_SWEEP_SECS}s$([ "$WATCH_TIMEOUT_RETRY_SWEEP_SECS" = "0" ] && echo " (disabled)" || echo " (min count: $WATCH_TIMEOUT_RETRY_MIN_COUNT, stuck-timeout-retry detection, issue #467)")
 activity-poll: ${WATCH_ACTIVITY_POLL_SECS}s$([ "$WATCH_ACTIVITY_POLL_SECS" = "0" ] && echo " (disabled)" || echo " (out-of-band PR/issue resolution backstop, issue #392)")
@@ -4416,6 +4430,27 @@ orphan_sweep_pass() {
     if [ "$reaped" != "0" ] || [ "$DRY_RUN" = "1" ]; then
         log_event watch.orphan_sweep "mode=pr-finalized dry_run=$DRY_RUN reaped=$reaped"
     fi
+}
+
+# ready_sweep_pass
+#
+# issue #602: a worker runs pr-ready.sh seconds after pushing, gets refused
+# because CI is still running, and exits. Nothing re-ran it, so drafts sat
+# for hours with green CI (fand-app #1533/#1534). ready-sweep.sh retries
+# drafts whose SWARM_DRAFT_REASON banner says ci-pending/ci-unknown. It keys
+# off the PR list, not worktrees, because the worktree is often reaped first.
+ready_sweep_pass() {
+    local dry_arg="" out line
+    [ "$DRY_RUN" = "1" ] && dry_arg="--dry-run"
+    out="$(cd "$PROJECT_DIR" && "$READY_SWEEP" $dry_arg 2>&1)" || {
+        log_event watch.ready_sweep "reason=sweep_failed"
+        return 0
+    }
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        echo "[$(date +%T)] ready-sweep: $line"
+        log_event watch.ready_sweep "result=\"$line\""
+    done <<<"$out"
 }
 
 # swarm_already_reaped <issue> <since-iso8601>
@@ -6017,7 +6052,7 @@ coord_approval_flag_pass() {
 # run_auto_compact_poll_loop, started as its own background process right
 # after this function.
 run_watch_timer_loop() {
-    local last_pr_poll=0 last_orphan_sweep=0 last_bg_violation_sweep=0 last_timeout_retry_sweep=0 last_activity_poll=0 last_coord_wake_retry=0 last_coord_wake_busy_retry=0 last_worktree_sweep=0 last_pending_brief_sweep=0 last_stranded_brief_sweep=0 last_window_flags_sweep=0 now
+    local last_pr_poll=0 last_orphan_sweep=0 last_ready_sweep=0 last_bg_violation_sweep=0 last_timeout_retry_sweep=0 last_activity_poll=0 last_coord_wake_retry=0 last_coord_wake_busy_retry=0 last_worktree_sweep=0 last_pending_brief_sweep=0 last_stranded_brief_sweep=0 last_window_flags_sweep=0 now
     while true; do
         sleep 2
         [ "$WATCH_CHECK_ON_DONE" = "1" ] && { status_poll_pass || true; }
@@ -6058,6 +6093,13 @@ run_watch_timer_loop() {
             if [ $((now - last_orphan_sweep)) -ge "$WATCH_ORPHAN_SWEEP_SECS" ]; then
                 orphan_sweep_pass || true
                 last_orphan_sweep=$now
+            fi
+        fi
+        if [ "$WATCH_READY_SWEEP_SECS" -gt 0 ]; then
+            now=$(date +%s)
+            if [ $((now - last_ready_sweep)) -ge "$WATCH_READY_SWEEP_SECS" ]; then
+                ready_sweep_pass || true
+                last_ready_sweep=$now
             fi
         fi
         if [ "$WATCH_BG_VIOLATION_SWEEP_SECS" -gt 0 ]; then
@@ -10037,10 +10079,10 @@ run_poll() {
 # restarts. (COORD_WAKE_RETRY_SECS, issue #422's older dirty-draft retry,
 # has this identical gap and predates this fix — out of scope here, but
 # worth folding in alongside this one if it's ever revisited.)
-if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ] || [ "$WATCH_ORPHAN_SWEEP_SECS" -gt 0 ] || [ "$WATCH_BG_VIOLATION_SWEEP_SECS" -gt 0 ] || [ "$WATCH_TIMEOUT_RETRY_SWEEP_SECS" -gt 0 ] || [ "$WATCH_ACTIVITY_POLL_SECS" -gt 0 ] || [ "$WATCH_WORKTREE_SWEEP_SECS" -gt 0 ] || [ "$WATCH_PENDING_BRIEF_SWEEP_SECS" -gt 0 ] || [ "$WATCH_STRANDED_BRIEF_SWEEP_SECS" -gt 0 ] || [ "$COORD_WAKE_HOLD_RETRY_SECS" -gt 0 ] || { [ "$WATCH_WINDOW_FLAGS" = "1" ] && [ "$WATCH_WINDOW_FLAGS_SWEEP_SECS" -gt 0 ]; }; then
+if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ] || [ "$WATCH_ORPHAN_SWEEP_SECS" -gt 0 ] || [ "$WATCH_READY_SWEEP_SECS" -gt 0 ] || [ "$WATCH_BG_VIOLATION_SWEEP_SECS" -gt 0 ] || [ "$WATCH_TIMEOUT_RETRY_SWEEP_SECS" -gt 0 ] || [ "$WATCH_ACTIVITY_POLL_SECS" -gt 0 ] || [ "$WATCH_WORKTREE_SWEEP_SECS" -gt 0 ] || [ "$WATCH_PENDING_BRIEF_SWEEP_SECS" -gt 0 ] || [ "$WATCH_STRANDED_BRIEF_SWEEP_SECS" -gt 0 ] || [ "$COORD_WAKE_HOLD_RETRY_SECS" -gt 0 ] || { [ "$WATCH_WINDOW_FLAGS" = "1" ] && [ "$WATCH_WINDOW_FLAGS_SWEEP_SECS" -gt 0 ]; }; then
     run_watch_timer_loop &
     WATCH_TIMER_PID=$!
-    log_event watch.timer.start "pr_poll_secs=$WATCH_PR_POLL_SECS check_on_done=$WATCH_CHECK_ON_DONE orphan_sweep_secs=$WATCH_ORPHAN_SWEEP_SECS bg_violation_sweep_secs=$WATCH_BG_VIOLATION_SWEEP_SECS timeout_retry_sweep_secs=$WATCH_TIMEOUT_RETRY_SWEEP_SECS activity_poll_secs=$WATCH_ACTIVITY_POLL_SECS worktree_sweep_secs=$WATCH_WORKTREE_SWEEP_SECS pending_brief_sweep_secs=$WATCH_PENDING_BRIEF_SWEEP_SECS stranded_brief_sweep_secs=$WATCH_STRANDED_BRIEF_SWEEP_SECS window_flags_sweep_secs=$([ "$WATCH_WINDOW_FLAGS" = "1" ] && echo "$WATCH_WINDOW_FLAGS_SWEEP_SECS" || echo 0)"
+    log_event watch.timer.start "pr_poll_secs=$WATCH_PR_POLL_SECS check_on_done=$WATCH_CHECK_ON_DONE orphan_sweep_secs=$WATCH_ORPHAN_SWEEP_SECS ready_sweep_secs=$WATCH_READY_SWEEP_SECS bg_violation_sweep_secs=$WATCH_BG_VIOLATION_SWEEP_SECS timeout_retry_sweep_secs=$WATCH_TIMEOUT_RETRY_SWEEP_SECS activity_poll_secs=$WATCH_ACTIVITY_POLL_SECS worktree_sweep_secs=$WATCH_WORKTREE_SWEEP_SECS pending_brief_sweep_secs=$WATCH_PENDING_BRIEF_SWEEP_SECS stranded_brief_sweep_secs=$WATCH_STRANDED_BRIEF_SWEEP_SECS window_flags_sweep_secs=$([ "$WATCH_WINDOW_FLAGS" = "1" ] && echo "$WATCH_WINDOW_FLAGS_SWEEP_SECS" || echo 0)"
 fi
 if [ "$WORKER_AUTO_COMPACT" = "1" ] || [ "$WORKER_AUTO_DELIVER" = "1" ]; then
     run_worker_compact_loop &
