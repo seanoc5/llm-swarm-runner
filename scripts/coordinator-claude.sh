@@ -76,8 +76,11 @@ fi
 INITIAL_PROMPT="$(cat "$INITIAL_PROMPT_FILE")"
 rm -f "$INITIAL_PROMPT_FILE"
 
+# The path goes on argv, never the content (as for workers, #415): the
+# ~26 KB rendered prompt with its 267 newlines in argv broke btop's process
+# view and matched any `pgrep -f` on its keywords.
 ARGS=(--model "$MODEL"
-      --append-system-prompt "$(cat "$SYSTEM_PROMPT_FILE")"
+      --append-system-prompt-file "$SYSTEM_PROMPT_FILE"
       --dangerously-skip-permissions)
 [ "${COORDINATOR_HEADLESS:-0}" = "1" ] && ARGS+=(-p)
 # Trailing positional: initial user message in REPL mode, print-prompt in -p mode.
