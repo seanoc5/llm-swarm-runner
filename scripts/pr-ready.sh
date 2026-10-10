@@ -116,6 +116,20 @@
 #      Distinct from exit 4 on purpose — this means "unknown", not
 #      "confirmed failing" (issue #560).
 #   1  usage / gh error resolving the PR body
+#
+# issue #602: every refusal (exits 2, 4 and 5) also writes a marked
+# "⏳ Still a draft" banner at the top of the PR body: the reason, the
+# head SHA and the time. Before that, the reason lived only in the
+# worker's transcript, and the worker usually exited right after. A
+# success strips the banner before `gh pr ready`. Exit 3 writes nothing,
+# because the COORDINATOR HOLD banner already explains it. Reasons:
+#   review-block  self-review BLOCK or failure; needs a fix
+#   ci-pending    CI still running; ready-sweep.sh retries it
+#   ci-unknown    CI status unreadable; ready-sweep.sh retries it
+#   ci-failing    red CI; needs a fix push
+# A ci-* banner whose sha= matches the current head means self-review
+# already passed on that commit (review runs before the CI gate), so a
+# re-run skips straight to the CI gate rather than spending another round.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -154,6 +168,56 @@ HELD=0
 # always prepends as its own leading "> " line, does.
 grep -qE '^> ⛔ \*\*COORDINATOR HOLD\*\*' <<<"$BODY" && HELD=1
 
+# issue #602: the draft-reason banner (see header).
+DRAFT_REASON_OPEN_RE='^<!-- SWARM_DRAFT_REASON: [a-z-]+ sha=[0-9a-f]* -->$'
+DRAFT_REASON_CLOSE='<!-- /SWARM_DRAFT_REASON -->'
+OLD_REASON_LINE="$(grep -m1 -E "$DRAFT_REASON_OPEN_RE" <<<"$BODY" || true)"
+OLD_REASON="$(sed -E 's/^<!-- SWARM_DRAFT_REASON: ([a-z-]+) .*/\1/' <<<"$OLD_REASON_LINE")"
+OLD_REASON_SHA="$(sed -E 's/.* sha=([0-9a-f]*) -->$/\1/' <<<"$OLD_REASON_LINE")"
+
+HEAD_SHA=""
+head_sha() {
+    [ -n "$HEAD_SHA" ] || HEAD_SHA="$(gh pr view "$PR" --json headRefOid --jq .headRefOid 2>/dev/null || true)"
+    printf '%s' "$HEAD_SHA"
+}
+
+body_without_reason() {
+    sed -E "/$DRAFT_REASON_OPEN_RE/,\#^$DRAFT_REASON_CLOSE\$#d" <<<"$BODY"
+}
+
+# Best-effort: a failed body edit warns but never changes the exit code.
+write_body() {
+    gh pr edit "$PR" --body-file - <<<"$1" >/dev/null 2>&1 \
+        || echo "pr-ready: WARN: couldn't update PR #$PR's body (draft-reason banner)" >&2
+}
+
+refuse() {
+    local reason="$1" code="$2" sha ts text
+    sha="$(head_sha)"
+    # Same reason on the same commit: leave the body alone, so the
+    # ready-sweep.sh retries don't rewrite it every pass.
+    if [ "$reason" != "$OLD_REASON" ] || [ "$sha" != "$OLD_REASON_SHA" ]; then
+        ts="$(date -u '+%Y-%m-%d %H:%MZ')"
+        case "$reason" in
+            review-block) text="self-review returned BLOCK (or failed) at $ts. Fix the finding, then re-run \`pr-ready.sh $PR\`." ;;
+            ci-pending)   text="CI was still running at $ts. The coordinator watcher retries this automatically; by hand: \`pr-ready.sh $PR\`." ;;
+            ci-unknown)   text="CI status couldn't be read at $ts. The coordinator watcher retries this automatically; by hand: \`pr-ready.sh $PR\`." ;;
+            ci-failing)   text="CI failed on ${sha:0:7} at $ts. Push a fix, then re-run \`pr-ready.sh $PR\`." ;;
+        esac
+        write_body "$(printf '<!-- SWARM_DRAFT_REASON: %s sha=%s -->\n> ⏳ **Still a draft:** %s\n%s\n%s' \
+            "$reason" "$sha" "$text" "$DRAFT_REASON_CLOSE" "$(body_without_reason)")"
+    fi
+    exit "$code"
+}
+
+SKIP_REVIEW=0
+if [[ "$OLD_REASON" == ci-* ]] && [ -n "$OLD_REASON_SHA" ] && [ "$OLD_REASON_SHA" = "$(head_sha)" ]; then
+    SKIP_REVIEW=1
+fi
+
+if [ "$SKIP_REVIEW" = "1" ]; then
+    echo "pr-ready: self-review already passed on ${OLD_REASON_SHA:0:7} (last refusal was $OLD_REASON on this same commit) — going straight to the CI gate"
+else
 case "$RISK" in
     low)
         echo "pr-ready: risk=low — self-review not required (worker.md rubric); readying"
@@ -211,7 +275,7 @@ case "$RISK" in
                 if [ "$LATEST_VERDICT" = "BLOCK" ]; then
                     echo "pr-ready: REFUSED — PR #$PR's latest self-review verdict is BLOCK and the round cap means no further round will run to clear it." >&2
                     echo "          Fix the finding, then either re-run with --one-more-round (pr-ready.sh -y $PR), or get a human to ready it." >&2
-                    exit 2
+                    refuse review-block 2
                 fi
             else
             echo "pr-ready: risk=$RISK — running self-review (round $((ROUNDS_DONE + 1))/$MAX_ROUNDS: $SELF_REVIEW $PR --post --force)..."
@@ -243,7 +307,7 @@ case "$RISK" in
                     # run gh directly.
                     echo "pr-ready: REFUSED — self-review returned BLOCK on PR #$PR." >&2
                     echo "          Fix the finding and re-push, then re-run pr-ready.sh." >&2
-                    exit 2
+                    refuse review-block 2
                     ;;
                 *)
                     # self-review-pr.sh's own exit 4 (skipped,
@@ -261,13 +325,14 @@ case "$RISK" in
                     # for the ambiguous cases.
                     echo "pr-ready: REFUSED — self-review-pr.sh exited $rc for PR #$PR (infra failure or an unparseable verdict — can't tell which from the exit code, so treating it as blocking)." >&2
                     echo "          Inspect the review output above, then fix the finding or re-run once the infra issue has cleared." >&2
-                    exit 2
+                    refuse review-block 2
                     ;;
             esac
             fi
         fi
         ;;
 esac
+fi
 
 if [ "$HELD" = "1" ]; then
     echo "pr-ready: PR #$PR carries a COORDINATOR HOLD banner — staying draft."
@@ -291,7 +356,7 @@ case "$CHECKS_RC" in
     8)
         echo "pr-ready: REFUSED — PR #$PR's CI checks are still pending (gh pr checks exit 8)." >&2
         echo "          Run 'scripts/ci-wait.sh $PR' to wait for a real result, then re-run pr-ready.sh." >&2
-        exit 4
+        refuse ci-pending 4
         ;;
     1)
         if ci_fallback_is_token_error "$CHECKS_OUT"; then
@@ -303,7 +368,7 @@ case "$CHECKS_RC" in
             SHA="$(gh pr view "$PR" --json headRefOid --jq .headRefOid 2>/dev/null)" || SHA=""
             if [ -z "$SHA" ]; then
                 echo "pr-ready: REFUSED — can't read CI status for PR #$PR: gh pr view failed while resolving the head commit for the Actions-runs fallback." >&2
-                exit 5
+                refuse ci-unknown 5
             fi
             if ci_fallback_run_state "$SHA"; then
                 case "$CI_FALLBACK_STATE" in
@@ -313,12 +378,12 @@ case "$CHECKS_RC" in
                     fail)
                         echo "pr-ready: REFUSED — PR #$PR has failing CI checks (via Actions-runs fallback):" >&2
                         echo "$CI_FALLBACK_DETAIL" >&2
-                        exit 4
+                        refuse ci-failing 4
                         ;;
                     pending)
                         echo "pr-ready: REFUSED — PR #$PR's CI checks are still pending (via Actions-runs fallback)." >&2
                         echo "          Run 'scripts/ci-wait.sh $PR' to wait for a real result, then re-run pr-ready.sh." >&2
-                        exit 4
+                        refuse ci-pending 4
                         ;;
                     *)
                         # Self-review finding: ci_fallback_run_state is called
@@ -330,13 +395,13 @@ case "$CHECKS_RC" in
                         # silently falling through this case and reaching
                         # `gh pr ready` with no CI verdict at all.
                         echo "pr-ready: REFUSED — can't read CI status for PR #$PR: the Actions-runs fallback returned an unrecognized state ('$CI_FALLBACK_STATE')." >&2
-                        exit 5
+                        refuse ci-unknown 5
                         ;;
                 esac
             else
                 echo "pr-ready: REFUSED — can't read CI status for PR #$PR: this token can't read Checks, and the Actions-runs fallback also failed ($CI_FALLBACK_DETAIL)." >&2
                 echo "          This means unknown, not failing — get a human (or a token with Checks or Actions read) to confirm CI before readying." >&2
-                exit 5
+                refuse ci-unknown 5
             fi
         elif grep -qi "no checks reported" <<<"$CHECKS_OUT"; then
             # issue #473 round-2 self-review: "no checks reported" also
@@ -355,20 +420,25 @@ case "$CHECKS_RC" in
             else
                 echo "pr-ready: REFUSED — PR #$PR reports 'no checks reported' but this repo has CI configured — this commit's run likely hasn't registered yet." >&2
                 echo "          Run 'scripts/ci-wait.sh $PR' to wait for a real result, then re-run pr-ready.sh." >&2
-                exit 4
+                refuse ci-pending 4
             fi
         else
             echo "pr-ready: REFUSED — PR #$PR has failing CI checks:" >&2
             echo "$CHECKS_OUT" >&2
-            exit 4
+            refuse ci-failing 4
         fi
         ;;
     *)
         echo "pr-ready: REFUSED — gh pr checks $PR exited $CHECKS_RC (unexpected):" >&2
         echo "$CHECKS_OUT" >&2
-        exit 4
+        refuse ci-unknown 4
         ;;
 esac
+
+if [ -n "$OLD_REASON_LINE" ]; then
+    echo "pr-ready: removing the draft-reason banner from PR #$PR"
+    write_body "$(body_without_reason)"
+fi
 
 echo "pr-ready: gh pr ready $PR"
 gh pr ready "$PR"

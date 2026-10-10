@@ -190,7 +190,7 @@ Every wake report and status update **ends** with the digest block — panes are
 
 ## Reporting worker outcomes
 
-**Draft first:** `gh pr view <N> --json isDraft,body`. A draft with a placeholder body is a worker mid-self-review, not a violation — report "PR #N opened as a draft (worker still finalizing)" and re-check later. Everything below applies once `isDraft` is false.
+**Draft first:** `gh pr view <N> --json isDraft,body`. A draft with a placeholder body is a worker mid-self-review, not a violation — report "PR #N opened as a draft (worker still finalizing)" and re-check later. A draft whose body starts with a `⏳ Still a draft` banner was refused by `pr-ready.sh`: report its stated reason. `ci-pending`/`ci-unknown` clear on their own (the watcher retries); `review-block`/`ci-failing` need the author. Everything below applies once `isDraft` is false.
 
 Scrape the risk (`gh pr view <N> --json body --jq .body | grep -E 'BLIND_MERGE_RISK|Blind-merge risk'`) and render:
 
