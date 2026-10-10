@@ -133,6 +133,7 @@ start_watcher() {
         WATCHER_AUTOCLOSE=0 \
         WATCH_PR_POLL_SECS=0 \
         WATCH_ORPHAN_SWEEP_SECS=0 \
+        WATCH_READY_SWEEP_SECS=0 \
         WATCH_BG_VIOLATION_SWEEP_SECS=0 \
         WATCH_CHECK_ON_DONE=0 \
         WATCH_ACTIVITY_POLL_SECS="$poll_secs" \
