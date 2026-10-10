@@ -45,7 +45,7 @@ Conventions used below:
 | Find window by name (substring search)                        | `<prefix> f` then type `iss-215`                                                               |
 | Show window number of currently-focused window                 | `<prefix> q`                                                                                   |
 
-**Status-bar flags (issue #594):** each `iss-N` tab and `coordinator` can carry a small glyph next to its name so you can tell who needs you without opening every pane — 📬 worker finished with no PR open, 🟡 a PR is open and ready for review, ✋ the worker posted a decision it needs you to make, 🔔 (coordinator only) the coordinator's last reply is waiting on your approval. `coordinator-watch.sh` sets/clears these as it detects each transition; `WATCH_WINDOW_FLAGS=0` turns the feature off.
+**Status-bar flags (issue #594):** each `iss-N` tab and `coordinator` can carry a small glyph next to its name so you can tell who needs you without opening every pane — 📬 worker finished with no PR open, 👀 a PR is open and ready for review and the worker is idle (suffixed with the PR's risk rating, e.g. 👀🟢, unless `WATCH_WINDOW_FLAG_RISK=0`), ✋ the worker posted a decision it needs you to make, 🔔 (coordinator only) the coordinator's last reply is waiting on your approval. `coordinator-watch.sh` sets/clears these as it detects each transition; `WATCH_WINDOW_FLAGS=0` turns the feature off.
 
 ## 4. Inspecting a worker without disturbing it (capture-pane)
 

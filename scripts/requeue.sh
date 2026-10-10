@@ -375,10 +375,10 @@ case "$WT_BASENAME" in
 esac
 
 # issue #594: a brief just got requeued into this window — any 📬 (finished,
-# no PR) or 🟡 (PR ready) flag left over from the PREVIOUS task is stale.
+# no PR) or 👀 (PR ready) flag left over from the PREVIOUS task is stale.
 if [ -n "$WIN" ] && [ -n "$SESSION_NAME" ]; then
     clear_window_flag "$WIN" "📬" "new_brief_requeued task_id=$TASK_ID"
-    clear_window_flag "$WIN" "🟡" "new_brief_requeued task_id=$TASK_ID"
+    clear_window_flag "$WIN" "👀" "new_brief_requeued task_id=$TASK_ID"
 fi
 
 # Probed once, rendered twice: as prose in the PR comment (issue #397) and

@@ -2561,7 +2561,7 @@ WATCH_STRANDED_BRIEF_SWEEP_SECS="${WATCH_STRANDED_BRIEF_SWEEP_SECS:-60}"
 WATCH_CHECK_ON_DONE="${WATCH_CHECK_ON_DONE:-1}"
 CHECK_RUNNER="${CHECK_RUNNER:-}"
 SESSION_NAME="${SESSION_NAME:-llm-$(basename "$PROJECT_DIR")}"
-# issue #594 — per-window tmux status flags (📬/🟡/✋ on worker windows,
+# issue #594 — per-window tmux status flags (📬/👀/✋ on worker windows,
 # 🔔 on the coordinator window); see scripts/_window-flags.sh for the
 # flags themselves and window_flags_sweep_pass/coord_approval_flag_pass
 # below for the ✋/🔔 derivation. WATCH_WINDOW_FLAGS=0 is the kill switch
@@ -2571,6 +2571,9 @@ SESSION_NAME="${SESSION_NAME:-llm-$(basename "$PROJECT_DIR")}"
 # other direct set/clear call sites (on_outcome, pr_poll_pass,
 # provision-worker.sh, requeue.sh) manage their own flags.
 WATCH_WINDOW_FLAGS="${WATCH_WINDOW_FLAGS:-1}"
+# Suffix the ready-and-idle 👀 flag with the PR's risk rating (👀🟢); 0 shows
+# a bare 👀. See pr_risk_glyph.
+WATCH_WINDOW_FLAG_RISK="${WATCH_WINDOW_FLAG_RISK:-1}"
 WATCH_WINDOW_FLAGS_SWEEP_SECS="${WATCH_WINDOW_FLAGS_SWEEP_SECS:-10}"
 # shellcheck source=_window-flags.sh
 . "$SCRIPT_DIR/_window-flags.sh"
@@ -3839,7 +3842,7 @@ on_selfheal_claim() {
     # other two ways a worker picks up a new brief (an operator/coordinator
     # dispatch, rather than this self-heal path).
     clear_window_flag "iss-$issue" "📬" "new_brief_claimed task_id=$task_id"
-    clear_window_flag "iss-$issue" "🟡" "new_brief_claimed task_id=$task_id"
+    clear_window_flag "iss-$issue" "👀" "new_brief_claimed task_id=$task_id"
     rm -f "$path" 2>/dev/null || true
 }
 
@@ -4234,7 +4237,34 @@ has_live_window_draining_brief() {
 # that never wrote a status file — except (issue #475) a follow-up brief
 # claimed into processing/ AFTER that PR already existed, which
 # maybe_run_check excludes via followup_brief_postdates_pr.
+#
+# pr_risk_glyph <pr_number>
+#
+# Echoes the PR body's risk rating (first 🟢/🟡/🔴 in the body — the same
+# rule review-scoreboard.sh and swarm-merge.sh use), or nothing when the
+# body has none or WATCH_WINDOW_FLAG_RISK=0. Used to suffix pr_poll_pass's
+# 👀 flag. One lazy `gh pr list --state open` per pass, only on a pass that
+# actually has a ready+idle PR to flag — the main --state all call above
+# deliberately skips bodies (500 of them every 60s).
+declare -gA PR_RISK_CACHE=()
+PR_RISK_LOADED=0
+pr_risk_glyph() {
+    [ "$WATCH_WINDOW_FLAG_RISK" = "1" ] || return 0
+    if [ "$PR_RISK_LOADED" = "0" ]; then
+        PR_RISK_LOADED=1
+        PR_RISK_CACHE=()
+        local n r
+        while IFS=$'\t' read -r n r; do
+            [ -n "$n" ] && PR_RISK_CACHE[$n]="$r"
+        done < <(cd "$PROJECT_DIR" && gh pr list --state open --limit 200 \
+                --json number,body \
+                --jq '.[] | "\(.number)\t\(((.body // "") | capture("(?<r>🟢|🟡|🔴)").r?) // "")"' 2>/dev/null)
+    fi
+    printf '%s' "${PR_RISK_CACHE[$1]:-}"
+}
+
 pr_poll_pass() {
+    PR_RISK_LOADED=0
     local prs
     prs="$(cd "$PROJECT_DIR" && gh pr list --state all --limit 500 \
             --json headRefName,state,number,createdAt,isDraft \
@@ -4265,11 +4295,11 @@ pr_poll_pass() {
             continue
         fi
 
-        # issue #594: 🟡 means "a PR is open and ready for someone to
+        # issue #594: 👀 means "a PR is open and ready for someone to
         # merge" — OPEN and not a draft. A draft PR (still being written
         # per worker.md's "draft first, ready only once the body is
         # final") isn't ready for merge attention yet, so it gets no flag
-        # rather than a misleading 🟡; MERGED/CLOSED clears whatever this
+        # rather than a misleading 👀; MERGED/CLOSED clears whatever this
         # window had. Never touches ✋ or 📬 (different flag,
         # clear_window_flag only acts when the CURRENT value is exactly
         # the one passed in — see _window-flags.sh).
@@ -4282,17 +4312,33 @@ pr_poll_pass() {
         # live worktree just set in this same pass — the flag would never
         # actually show. Only clear for a terminal PR that belongs to
         # THIS worktree's own lifetime.
+        #
+        # Ready AND idle: pr-ready.sh readies a PR on the first
+        # APPROVE_WITH_CAVEATS round, and the worker routinely keeps
+        # iterating on those caveats for another hour — a ready flag on a
+        # visibly busy pane reads as "stalled/waiting on you" when it
+        # isn't. So 👀 only shows while worker_pane_busy is false; this
+        # pass reruns every WATCH_PR_POLL_SECS, so the flag appears within
+        # one poll of the worker going idle.
+        #
+        # The bare 🟡 clears below migrate windows flagged by the pre-👀
+        # glyph (a watcher restart against a live session) — duct tape,
+        # safe to drop once no swarm predates the change.
         case "$state" in
             OPEN)
-                if [ "$is_draft" = "false" ]; then
-                    set_window_flag "iss-$issue" "🟡" "pr_ready pr=$pr_number"
+                clear_window_flag "iss-$issue" "🟡" "legacy_glyph pr=$pr_number"
+                if [ "$is_draft" = "false" ] && ! worker_pane_busy "iss-$issue"; then
+                    set_window_flag "iss-$issue" "👀$(pr_risk_glyph "$pr_number")" "pr_ready_idle pr=$pr_number"
+                elif [ "$is_draft" = "false" ]; then
+                    clear_window_flag "iss-$issue" "👀" "pr_ready_busy pr=$pr_number"
                 else
-                    clear_window_flag "iss-$issue" "🟡" "pr_draft pr=$pr_number"
+                    clear_window_flag "iss-$issue" "👀" "pr_draft pr=$pr_number"
                 fi
                 ;;
             MERGED|CLOSED)
                 if ! pr_predates_worktree "$created_at" "$wt_dir"; then
-                    clear_window_flag "iss-$issue" "🟡" "pr_${state,,} pr=$pr_number"
+                    clear_window_flag "iss-$issue" "🟡" "legacy_glyph pr=$pr_number"
+                    clear_window_flag "iss-$issue" "👀" "pr_${state,,} pr=$pr_number"
                 fi
                 ;;
         esac
@@ -9019,7 +9065,7 @@ on_outcome() {
     # (copied straight from the worker's status file by write_outcome) —
     # "done-no-pr" is the one state that means "nothing more for this
     # worker to do, and nothing to merge" (ready-for-review has a PR for
-    # pr_poll_pass's own sweep to flag 🟡 on; blocked gets ✋ instead, from
+    # pr_poll_pass's own sweep to flag 👀 on; blocked gets ✋ instead, from
     # whatever decision-needed outbox message a blocked worker is expected
     # to have posted — see worker.md's status contract). Runs for a
     # correction too (a check-fail retry can flip the recorded state), so

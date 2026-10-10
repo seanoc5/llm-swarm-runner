@@ -937,7 +937,7 @@ tmux set-option -g pane-base-index 0
 # setting again can't un-pin the coordinator window specifically.
 tmux set-window-option -t "$SESSION_NAME:coordinator" pane-base-index 0 2>/dev/null || true
 
-# issue #594: render each window's @swarm_flag (📬/🟡/✋/🔔 — see
+# issue #594: render each window's @swarm_flag (📬/👀/✋/🔔 — see
 # scripts/_window-flags.sh) in the status bar next to its tab, so an
 # operator scanning the bar — never opening every pane — can tell who needs
 # them. window-status-format/window-status-current-format are WINDOW
