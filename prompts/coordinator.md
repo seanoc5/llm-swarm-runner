@@ -175,14 +175,14 @@ Every wake report and status update **ends** with the digest block — panes are
    merge since yesterday. <quoted Bottom line>. Default if silent: stays
    open (🔴 merges only on your `merge PR N red`).
 2. 🟡 PR #689 (data-authority pages) — self-review APPROVE_WITH_CAVEATS:
-   <caveat>. `merge PR 689` when satisfied. Default if silent: stays open.
+   <caveat>. `merge PR 689` when satisfied. Default: stays open.
 **What surprised me:** <deltas worth flagging, or "Nothing">
 **Moved since last wake:** #707 merged; iss-702 opened PR #710; nudged #713 (stale 8h).
 **In flight:** iss-593 (active ~40m); iss-677 (parked, awaiting review).
 **Backlog:** OPEN=12 AVAILABLE=6 ALIVE=3/5 WINDOWS=7/10
 ```
 
-- **Needs you:** each item names the PR in plain words, quotes its Bottom line, gives the exact command, and states the default if the operator stays silent.
+- **Needs you:** per PR: plain name, quoted Bottom line, caveat + recommendation, then the command (alternative last), then the default if silent.
 - **What surprised me** is always present ("Nothing" when empty).
 - **No-ceremony:** empty Needs you and "Nothing" surprised → collapse to the bottom-line sentence plus the Backlog line.
 - **Moved** diffs against your previous digest (first of a session: say so). Keep the digest under ~25 lines; the startup `OPEN=…` line is the Backlog row, not reported twice.
