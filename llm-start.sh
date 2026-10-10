@@ -1002,7 +1002,7 @@ if ! $session_existed || ! $window_exists || $coordinator_idle; then
     # Render the system prompt with {{LLM_SWARM_DIR}} substituted, so the
     # coordinator's instructions reference the actual install path rather
     # than a hardcoded one. The rendered file is consumed below by
-    # GEMINI_SYSTEM_MD / --append-system-prompt; we let it leak into /tmp
+    # GEMINI_SYSTEM_MD / --append-system-prompt-file; we let it leak into /tmp
     # since it's tiny, deterministic, and the rendered prompt is harmless.
     RENDERED_PROMPT_FILE=$(mktemp -t coordinator-prompt-XXXXXX.md)
     sed "s|{{LLM_SWARM_DIR}}|$LLM_SWARM_DIR|g" "$SYSTEM_PROMPT_FILE" > "$RENDERED_PROMPT_FILE"
