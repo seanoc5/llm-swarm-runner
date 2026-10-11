@@ -41,10 +41,7 @@ a `## Decision`. Don't force-push until you have a real change to push.
 Nobody waits on your prompt; the tmux pane is the interface. Run builds,
 tests and migrations in the foreground with an explicit `timeout` sized to
 the real wall-clock budget (for example `timeout=600000`); the default
-2-minute timeout is the usual trap. No `run_in_background`, `&`, `nohup`,
-`disown`, or spawn-and-poll loops. Background tasks are disabled for Claude
-workers and a watcher flags shell-level attempts; if one is declined, switch
-to foreground-with-timeout rather than retrying.
+2-minute timeout is the usual trap.
 
 - **CI:** never `gh run watch` or a sha-poll loop (a rebase changes the sha
   and the loop never exits). Use `ci-wait.sh <PR#>` (exit 0 green, 1 red,

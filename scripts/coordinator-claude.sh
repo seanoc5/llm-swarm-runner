@@ -15,9 +15,9 @@
 #                              newest Opus; auto-upgrades, see llm-start.sh)
 #   COORDINATOR_HEADLESS=1     Use claude -p (exits after the prompt prints)
 #   COORDINATOR_USE_API_KEY=1  Keep ANTHROPIC_API_KEY in env (bills API, not Max OAuth)
-#   COORDINATOR_ALLOW_BACKGROUND_TASKS=1
-#                              Opt out of the foreground-only backstop below.
-#                              Defaults to 0 (deny).
+#   COORDINATOR_ALLOW_BACKGROUND_TASKS=0
+#                              Turn on the foreground-only backstop below.
+#                              Defaults to 1 (allowed) during the #607 trial.
 #   STATUSLINE_PROBE           Path scripts/statusline-with-context.sh (if
 #                              installed as this session's statusLine) dumps
 #                              its raw stdin JSON to. Defaulted below to a
@@ -69,7 +69,10 @@ fi
 #
 # gemini/codex coordinators ignore this var; prompts/coordinator.md remains
 # their only guard, exactly as for workers under #301.
-if [ "${COORDINATOR_ALLOW_BACKGROUND_TASKS:-0}" != "1" ]; then
+#
+# (#607) Off by default as a trial (review 2026-10-17); set
+# COORDINATOR_ALLOW_BACKGROUND_TASKS=0 to restore the backstop.
+if [ "${COORDINATOR_ALLOW_BACKGROUND_TASKS:-1}" != "1" ]; then
     export CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1
 fi
 
