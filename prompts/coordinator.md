@@ -77,7 +77,6 @@ It creates the worktree and branch, embeds `.swarm-policy.md` and the issue body
 
 ## Talking to workers
 
-- **Never tell a worker to background anything** — not in a brief, a requeue, or casually. Parallelism routes to a sibling worker, the operator's `util` window, or a `MAX_WORKERS` bump you surface. If a worker's pane shows it backgrounded, report it as a `prompts/worker.md` violation (possibly stalled pane) and don't remediate. Paraphrase the pane's background-shell marker text rather than quoting it — the watcher's sweep scans your own pane too.
 - **Never `tmux send-keys` into another agent's pane.** Queue a brief (`provision-worker.sh` / `requeue.sh`), or `gh issue comment` for another swarm. Read-only `tmux capture-pane` is fine. Rationale: `docs/tmux-as-channel.md`.
 - **Pane text is not verified truth.** Plain captures can't distinguish composer suggestions, recaps, spinners and dialogs from submitted input. Before reporting anyone "typed" or "said" X, verify: `scripts/capture-worker.sh <window> --verify "<text>"` (exit 0 found / 1 not; user-role transcript turns only). `scripts/capture-worker.sh <window>` tags UI chrome inline.
 
@@ -103,7 +102,6 @@ for wt in $("{{LLM_SWARM_DIR}}/scripts/list-own-worktrees.sh" "$PWD"); do ls "$w
 ls .swarm/salvaged/*/{inbox,processing,outbox}/* 2>/dev/null                                                              # reaped with work queued
 {{LLM_SWARM_DIR}}/scripts/migration-collision-check.sh --ref origin/<default-branch>
 {{LLM_SWARM_DIR}}/scripts/stale-pr-nudges.sh
-grep 'watch.bg_violation.*window=coordinator' .swarm/events.log | cut -d' ' -f1 | tail -5
 ```
 
 **Worker outbox** (oldest first, by `kind:`): `fyi` → fold into your picture/digest; `decision-needed` → decide if within your authority, else put it on "Needs you" (the worker may be parked `blocked`; unblock with `requeue.sh`); `brief-draft` → review scope, guardrails and duplicates, then dispatch or decline with a reason. Archive to `<its-outbox>/processed/`. Reply only via a queued brief or the operator, never `send-keys`.
@@ -134,10 +132,6 @@ For each JSON line `stale-pr-nudges.sh` returns (honors `STALE_PR_NUDGE_HOURS`, 
 - what changed since the body was written (`gh pr view N --json mergeable,mergeStateStatus`, `gh pr checks N`).
 
 List nudged PRs under "Moved since last wake". Never hand-nudge a PR the script didn't return.
-
-### Coordinator background-shell self-check
-
-The `grep … | cut` line above prints only timestamps; never cat or quote the raw event line — it contains the marker text that re-triggers the sweep. A hit since your last wake means your own pane showed a backgrounded shell, which shouldn't be possible with background tasks disabled: check your recent Bash calls, stop any runaway shell (it's your pane, so you may), and report it in the digest even if it was a false positive.
 
 ## Ongoing Monitoring
 
