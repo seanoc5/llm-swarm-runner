@@ -1940,7 +1940,7 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     WATCHER_AUTOCLOSE_MODE merged which terminal PR states are reap-eligible: merged (MERGED only, default) | finalized (MERGED or CLOSED)
     WATCH_PR_POLL_SECS  60        periodic gh-poll backstop reap (0=off); see header comment
     WATCH_ORPHAN_SWEEP_SECS 3600  periodic reap-orphan-worktrees.sh sweep for window-less worktrees (0=off); see header comment
-    WATCH_BG_VIOLATION_SWEEP_SECS 60  periodic sweep for backgrounded-shell UI markers on iss-* panes + the coordinator pane (0=off); see header comment
+    WATCH_BG_VIOLATION_SWEEP_SECS 0   periodic sweep for backgrounded-shell UI markers on iss-* panes + the coordinator pane (0=off); see header comment
     WATCH_BG_VIOLATION_PATTERN    (auto)  grep -E pattern for the sweep above
     WATCH_TIMEOUT_RETRY_SWEEP_SECS 60  periodic sweep for a worker stuck retrying a command that always hits its timeout (0=off); see header comment (issue #467)
     WATCH_TIMEOUT_RETRY_PATTERN    (auto)  grep -E pattern for the sweep above
@@ -2534,7 +2534,7 @@ WATCH_PR_POLL_SECS="${WATCH_PR_POLL_SECS:-60}"
 WATCH_ORPHAN_SWEEP_SECS="${WATCH_ORPHAN_SWEEP_SECS:-3600}"
 REAP_ORPHAN="${REAP_ORPHAN:-$LLM_SWARM_DIR/scripts/reap-orphan-worktrees.sh}"
 # issue #298 — fallback detection for the foreground-only rule; see header comment.
-WATCH_BG_VIOLATION_SWEEP_SECS="${WATCH_BG_VIOLATION_SWEEP_SECS:-60}"
+WATCH_BG_VIOLATION_SWEEP_SECS="${WATCH_BG_VIOLATION_SWEEP_SECS:-0}"  # #607: off during the background-task trial
 WATCH_BG_VIOLATION_PATTERN="${WATCH_BG_VIOLATION_PATTERN:-Running in the background|[0-9]+ shells? still running}"
 # issue #467 — backstop for the "stop after two timeouts" rule; see header comment.
 WATCH_TIMEOUT_RETRY_SWEEP_SECS="${WATCH_TIMEOUT_RETRY_SWEEP_SECS:-60}"
