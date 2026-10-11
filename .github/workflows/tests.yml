@@ -46,8 +46,15 @@ jobs:
           exit "$fail"
 
   shape-tests:
-    name: CI-safe suites (run-all-tests.sh)
+    name: CI-safe suites (shard ${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
+    # The suites took ~13 min run serially in one job. Each shard runs every
+    # 4th non-excluded suite on its own runner, so suites never share a
+    # machine (temp dirs, tmux sockets) and wall-clock is ~1/4.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@v4
 
@@ -117,7 +124,10 @@ jobs:
             SUITES+=("$f")
           done < <(find tests -maxdepth 1 -name 'test-*.sh' -print0 | sort -z)
 
+          SHARD=${{ matrix.shard }}
+          SHARDS=4
           fail=0
+          i=0
           for f in "${SUITES[@]}"; do
             base="$(basename "$f")"
             skip=0
@@ -128,6 +138,10 @@ jobs:
               echo "=== skip (needs live infra): $base ==="
               continue
             fi
+            # Count only runnable suites so shards stay even.
+            mine=$(( i % SHARDS == SHARD ))
+            i=$((i + 1))
+            [ "$mine" = "1" ] || continue
             echo "=== run-all-tests.sh --only '$base' ==="
             scripts/run-all-tests.sh --only "$base" || fail=1
           done
