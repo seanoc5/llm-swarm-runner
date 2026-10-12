@@ -165,6 +165,19 @@ case "$1 $2" in
     "api repos/{owner}/{repo}/actions/workflows")
         echo "${GH_WORKFLOW_COUNT:-1}"
         exit 0 ;;
+    "run list")
+        # issue #596: ci-wait.sh's Gate 2 now cross-checks every green `gh pr
+        # checks` reading against `gh run list --commit` before trusting it
+        # (ci_fallback_run_state) — default to a single completed/success run
+        # so the existing GH_CHECKS_RC=0 fixtures here still resolve to a
+        # pass instead of pending forever. (Built via a plain variable, not
+        # a `${VAR:-default}` default containing a brace: bash's parameter
+        # expansion treats the first unescaped `}` in the default as the
+        # expansion's own terminator, truncating embedded JSON.)
+        runlist_json="${GH_RUNLIST_JSON:-}"
+        [ -n "$runlist_json" ] || runlist_json='[{"status":"completed","conclusion":"success"}]'
+        echo "$runlist_json"
+        exit "${GH_RUNLIST_RC:-0}" ;;
     "pr merge") exit 0 ;;
     "pr list")
         cat "$GH_PR_LIST"; exit 0 ;;
@@ -272,10 +285,7 @@ green "--auto-low never merges on a pending/timed-out CI wait"
 heading "Test 9: swarm-merge.sh --auto-low proceeds once authorship is clean and CI is green"
 # ============================================================================
 : > "$GH_LOG"
-# CI_WAIT_SETTLE_SECONDS=0: issue #596's settle window (ci-wait.sh) is
-# exercised on its own in test-shape-ci-wait.sh; disabled here so this
-# gate-ordering test stays instant.
-if OUT=$(GH_CHECKS_RC=0 CI_WAIT_SETTLE_SECONDS=0 "$MERGE" 501 --auto-low 2>&1); then RC=0; else RC=$?; fi
+if OUT=$(GH_CHECKS_RC=0 "$MERGE" 501 --auto-low 2>&1); then RC=0; else RC=$?; fi
 [ "$RC" -eq 0 ] || red "swarm-merge --auto-low should succeed once both gates pass (rc=$RC, output: $OUT)"
 echo "$OUT" | grep -qi "gate 0" || red "Gate 0 should still be reported as checked"
 echo "$OUT" | grep -qi "gate 2" || red "Gate 2 should still be reported as checked"

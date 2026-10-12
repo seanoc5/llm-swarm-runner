@@ -67,12 +67,6 @@ case "$1 $2" in
             echo "no checks reported on the 'main' branch" >&2
             exit 1
         fi
-        if [ -n "${GH_CHECKS_RC_SEQUENCE:-}" ]; then
-            idx="$cn"
-            lines="$(wc -l < "$GH_CHECKS_RC_SEQUENCE")"
-            [ "$idx" -le "$lines" ] || idx="$lines"
-            exit "$(sed -n "${idx}p" "$GH_CHECKS_RC_SEQUENCE")"
-        fi
         exit "${GH_CHECKS_RC:-0}" ;;
     "api repos/{owner}/{repo}/actions/workflows"|"api repos/owner/repo/actions/workflows")
         echo "${GH_WORKFLOW_COUNT:-1}"
@@ -111,13 +105,18 @@ check "message names the rebase-first remedy" 'grep -qi "rebase" <<<"$out"'
 
 # ─────────────────────────── Test 2: mergeable + checks green ⇒ exit 0 ──────
 
-heading "Test 2: mergeable PR, checks green → exit 0"
+heading "Test 2: mergeable PR, checks green and the run-level cross-check agrees → exit 0"
 rc=0
-# CI_WAIT_SETTLE_SECONDS=0 here and below: issue #596's settle window is
-# exercised on its own in Tests 13-15; everywhere else disabling it keeps
-# these tests instant and focused on what they're actually checking.
+# GH_RUNLIST_JSON here and below (wherever GH_CHECKS_RC=0 is expected to
+# resolve to a pass): issue #596's run-level cross-check (ci_fallback_run_state,
+# exercised on its own with a late-finishing run in Test 13) now runs on
+# every green `gh pr checks` reading too, so these tests must give it a
+# matching completed/success run or the cross-check reads the stub's
+# default empty run list as "pending" and the test times out instead of
+# passing.
 out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_RC=0 \
-    CI_WAIT_SETTLE_SECONDS=0 "$CI_WAIT" 42 5 2>&1)" || rc=$?
+    GH_RUNLIST_JSON='[{"status":"completed","conclusion":"success"}]' \
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
 check "exits 0 on green checks" '[ "$rc" -eq 0 ]'
 
 # ─────────────────────────── Test 3: mergeable + checks failing ⇒ exit 1 ────
@@ -148,7 +147,8 @@ COUNT_FILE="$TEST_DIR/gh-call-count"
 rm -f "$COUNT_FILE"
 out="$(GH_CALL_COUNT_FILE="$COUNT_FILE" GH_VIEW_UNKNOWN_FIRST=1 \
     GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_RC=0 \
-    CI_WAIT_SETTLE_SECONDS=0 "$CI_WAIT" 42 5 2>&1)" || rc=$?
+    GH_RUNLIST_JSON='[{"status":"completed","conclusion":"success"}]' \
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
 check "resolves to success once mergeability settles" '[ "$rc" -eq 0 ]'
 check "pr view was called at least twice (initial + retry)" '[ "$(cat "$COUNT_FILE")" -ge 2 ]'
 
@@ -185,7 +185,8 @@ CHECKS_COUNT_FILE="$TEST_DIR/checks-call-count"
 rm -f "$CHECKS_COUNT_FILE"
 out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_WORKFLOW_COUNT=1 \
     GH_CHECKS_CALL_COUNT_FILE="$CHECKS_COUNT_FILE" GH_CHECKS_NO_CHECKS_UNTIL=2 \
-    CI_WAIT_SETTLE_SECONDS=0 CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 10 2>&1)" || rc=$?
+    GH_RUNLIST_JSON='[{"status":"completed","conclusion":"success"}]' \
+    CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 10 2>&1)" || rc=$?
 check "resolves to green once the real check run registers (not a false exit 5)" '[ "$rc" -eq 0 ]'
 check "message names the pending-not-absent distinction" 'grep -qi "treating as pending, not absent" <<<"$out"'
 check "gh pr checks was actually polled more than once (the race was real)" '[ "$(cat "$CHECKS_COUNT_FILE")" -ge 3 ]'
@@ -202,7 +203,7 @@ heading "Test 9: gh pr checks unreadable by a fine-grained token → falls back 
 rc=0
 out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_PERM_ERROR=1 \
     GH_RUNLIST_JSON='[{"status":"completed","conclusion":"success"}]' \
-    CI_WAIT_SETTLE_SECONDS=0 "$CI_WAIT" 42 5 2>&1)" || rc=$?
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
 check "exits 0 once the fallback sees a green run" '[ "$rc" -eq 0 ]'
 check "logs that the fallback was used" 'grep -qi "falling back to polling gh run list" <<<"$out"'
 
@@ -235,7 +236,7 @@ heading "Test 10c: fallback path, one run skipped + one succeeded → exit 0 (sk
 rc=0
 out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_PERM_ERROR=1 \
     GH_RUNLIST_JSON='[{"status":"completed","conclusion":"success","workflowName":"CI","createdAt":"2026-10-05T05:00:00Z"},{"status":"completed","conclusion":"skipped","workflowName":"Docs","createdAt":"2026-10-05T05:00:00Z"}]' \
-    CI_WAIT_SETTLE_SECONDS=0 "$CI_WAIT" 42 5 2>&1)" || rc=$?
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
 check "exits 0 when the only non-success run is skipped" '[ "$rc" -eq 0 ]'
 
 # ── Test 10f: fallback dedupes by workflow — a superseded cancelled run must not fail a PR whose latest run is green ──
@@ -251,7 +252,7 @@ heading "Test 10f: fallback path, an older cancelled run of the same workflow is
 rc=0
 out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_PERM_ERROR=1 \
     GH_RUNLIST_JSON='[{"status":"completed","conclusion":"cancelled","workflowName":"CI","createdAt":"2026-10-05T05:00:00Z"},{"status":"completed","conclusion":"success","workflowName":"CI","createdAt":"2026-10-05T05:05:00Z"}]' \
-    CI_WAIT_SETTLE_SECONDS=0 "$CI_WAIT" 42 5 2>&1)" || rc=$?
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
 check "exits 0 — the superseded cancelled run of the same workflow is ignored" '[ "$rc" -eq 0 ]'
 
 # ── Test 10d: fallback, gh's own stderr noise never corrupts the JSON parse ──
@@ -266,7 +267,7 @@ heading "Test 10d: fallback path, gh emits noise on stderr → stdout JSON still
 rc=0
 out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_PERM_ERROR=1 \
     GH_RUNLIST_STDERR_NOISE=1 GH_RUNLIST_JSON='[{"status":"completed","conclusion":"success"}]' \
-    CI_WAIT_SETTLE_SECONDS=0 "$CI_WAIT" 42 5 2>&1)" || rc=$?
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
 check "exits 0 — stderr noise never reached the JSON parse" '[ "$rc" -eq 0 ]'
 
 # ── Test 10e: fallback, gh run list itself fails ⇒ exit 4, never 5 ───────────
@@ -305,7 +306,7 @@ printf '%s\n' \
 out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_PERM_ERROR=1 \
     GH_CHECKS_CALL_COUNT_FILE="$CHECKS_COUNT_FILE_11" \
     GH_RUNLIST_CALL_COUNT_FILE="$RUNLIST_COUNT_FILE_11" GH_RUNLIST_JSON_SEQUENCE="$RUNLIST_SEQ_11" \
-    CI_WAIT_SETTLE_SECONDS=0 CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 10 2>&1)" || rc=$?
+    CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 10 2>&1)" || rc=$?
 check "resolves to green once the run completes" '[ "$rc" -eq 0 ]'
 check "gh run list was polled more than once" '[ "$(cat "$RUNLIST_COUNT_FILE_11")" -ge 3 ]'
 check "gh pr checks was called exactly once (fallback engaged, no re-tries)" '[ "$(cat "$CHECKS_COUNT_FILE_11")" -eq 1 ]'
@@ -317,7 +318,8 @@ rc=0
 ARGS_LOG_12="$TEST_DIR/args-log-12"
 : > "$ARGS_LOG_12"
 out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_RC=0 \
-    CI_WAIT_SETTLE_SECONDS=0 GH_ARGS_LOG="$ARGS_LOG_12" "$CI_WAIT" 42 5 --repo owner/repo 2>&1)" || rc=$?
+    GH_RUNLIST_JSON='[{"status":"completed","conclusion":"success"}]' \
+    GH_ARGS_LOG="$ARGS_LOG_12" "$CI_WAIT" 42 5 --repo owner/repo 2>&1)" || rc=$?
 check "exits 0 with --repo after the positional args" '[ "$rc" -eq 0 ]'
 check "pr view was called with --repo owner/repo" 'grep -q "^pr view 42 --repo owner/repo" "$ARGS_LOG_12"'
 check "pr checks was called with --repo owner/repo" 'grep -q "^pr checks 42 --repo owner/repo" "$ARGS_LOG_12"'
@@ -325,7 +327,8 @@ check "pr checks was called with --repo owner/repo" 'grep -q "^pr checks 42 --re
 heading "Test 12b: --repo=<owner/repo> (= form) is also accepted"
 rc=0
 out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_RC=0 \
-    CI_WAIT_SETTLE_SECONDS=0 "$CI_WAIT" --repo=owner/repo 42 5 2>&1)" || rc=$?
+    GH_RUNLIST_JSON='[{"status":"completed","conclusion":"success"}]' \
+    "$CI_WAIT" --repo=owner/repo 42 5 2>&1)" || rc=$?
 check "exits 0 with --repo=owner/repo before the positional args" '[ "$rc" -eq 0 ]'
 
 heading "Test 12c: --repo changes the workflow-count lookup path (exit 5, zero workflows)"
@@ -339,60 +342,50 @@ rc=0
 out="$("$CI_WAIT" --repo owner/repo 2>&1)" || rc=$?
 check "exits 4 (usage) rather than crashing on an unbound variable" '[ "$rc" -eq 4 ]'
 
-# ── Test 13: settle window — green from the first poll still has to hold for CI_WAIT_SETTLE_SECONDS ──
+# ── Test 13: the corpusminder-spring #1126 shape — gh pr checks reads green while the run itself is still in progress ──
 #
-# Issue #596: a single green reading is no longer trusted on sight. This
-# is the settle mechanism in isolation, with no late check in the picture
-# at all — just proving it actually delays.
+# Issue #596's real incident, reproduced from PR #1126/run 37944084110's
+# actual timestamps: `gh pr checks` sees only the Fast job (green) and
+# reports exit 0 the whole time, because the `needs:`-gated Integration
+# job's check-run hadn't even been created yet (self-hosted runner
+# contention, corpusminder-spring's ci.yml). The run-level cross-check
+# (`gh run list --commit`, status "in_progress" — exactly what run
+# 37944084110 showed at the real 14:32:02 merge time) must NOT let that
+# green `gh pr checks` reading through until the run itself is done.
 
-heading "Test 13: non-fallback path, green from the first poll — still waits out the settle window before exiting 0"
+heading "Test 13: non-fallback path, gh pr checks reads green while the run-level cross-check is still in_progress → waited for, not an instant pass"
 rc=0
-start="$(date -u +%s)"
-out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_RC=0 \
-    CI_WAIT_SETTLE_SECONDS=2 CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 10 2>&1)" || rc=$?
-elapsed=$(( $(date -u +%s) - start ))
-check "exits 0 once settled" '[ "$rc" -eq 0 ]'
-check "actually waited out the settle window, not an instant pass" '[ "$elapsed" -ge 2 ]'
-check "message names the settling wait" 'grep -qi "settling" <<<"$out"'
-
-# ── Test 14: a check that registers late (gh pr checks path) interrupts the settle window and is waited for ──
-#
-# The corpusminder-spring #1126 shape: `gh pr checks` reads all-green
-# (Fast + Detect) for two polls, then a late-registering, needs:-gated
-# Integration check shows up mid-settle (bucket flips to pending, exit 8)
-# before finally resolving green. Must NOT exit 0 on the early green
-# reading, and must still resolve to 0 once the real check concludes.
-
-heading "Test 14: non-fallback path, a late-registering check interrupts the settle window and is waited for"
-rc=0
-RC_SEQ_14="$TEST_DIR/checks-rc-seq-14"
-printf '%s\n' 0 0 8 8 0 > "$RC_SEQ_14"
-out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_RC_SEQUENCE="$RC_SEQ_14" \
-    CI_WAIT_SETTLE_SECONDS=2 CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 15 2>&1)" || rc=$?
-check "resolves to green only once the late check actually finishes" '[ "$rc" -eq 0 ]'
-check "message showed it was settling before the late check interrupted it" 'grep -qi "settling" <<<"$out"'
-
-# ── Test 15: a workflow that registers late (fallback path) interrupts the settle window and is waited for ──
-#
-# Same shape as Test 14, through the gh-run-list fallback: "Fast" alone
-# reads as a complete, green picture for two polls, then "Integration"
-# appears in_progress (pending — not a false pass), then both complete
-# green.
-
-heading "Test 15: fallback path, a second workflow registers late — waited for before exit 0"
-rc=0
-RUNLIST_SEQ_15="$TEST_DIR/runlist-seq-15"
+RUNLIST_SEQ_13="$TEST_DIR/runlist-seq-13"
+RUNLIST_COUNT_FILE_13="$TEST_DIR/runlist-call-count-13"
+rm -f "$RUNLIST_COUNT_FILE_13"
 printf '%s\n' \
-    '[{"status":"completed","conclusion":"success","workflowName":"Fast","createdAt":"2026-10-09T14:20:00Z"}]' \
-    '[{"status":"completed","conclusion":"success","workflowName":"Fast","createdAt":"2026-10-09T14:20:00Z"}]' \
-    '[{"status":"completed","conclusion":"success","workflowName":"Fast","createdAt":"2026-10-09T14:20:00Z"},{"status":"in_progress","conclusion":null,"workflowName":"Integration","createdAt":"2026-10-09T14:25:00Z"}]' \
-    '[{"status":"completed","conclusion":"success","workflowName":"Fast","createdAt":"2026-10-09T14:20:00Z"},{"status":"completed","conclusion":"success","workflowName":"Integration","createdAt":"2026-10-09T14:25:00Z"}]' \
-    > "$RUNLIST_SEQ_15"
-out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_PERM_ERROR=1 \
-    GH_RUNLIST_JSON_SEQUENCE="$RUNLIST_SEQ_15" \
-    CI_WAIT_SETTLE_SECONDS=2 CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 15 2>&1)" || rc=$?
-check "resolves to green only once the late-registering workflow actually completes" '[ "$rc" -eq 0 ]'
-check "logs the settling message before the late workflow appeared" 'grep -qi "settling" <<<"$out"'
+    '[{"status":"in_progress","conclusion":null,"workflowName":"CI","createdAt":"2026-10-09T14:25:00Z"}]' \
+    '[{"status":"in_progress","conclusion":null,"workflowName":"CI","createdAt":"2026-10-09T14:25:00Z"}]' \
+    '[{"status":"completed","conclusion":"success","workflowName":"CI","createdAt":"2026-10-09T14:25:00Z"}]' \
+    > "$RUNLIST_SEQ_13"
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_RC=0 \
+    GH_RUNLIST_CALL_COUNT_FILE="$RUNLIST_COUNT_FILE_13" GH_RUNLIST_JSON_SEQUENCE="$RUNLIST_SEQ_13" \
+    CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 10 2>&1)" || rc=$?
+check "resolves to green only once the run-level cross-check also says done" '[ "$rc" -eq 0 ]'
+check "message named the run still in progress before it resolved" 'grep -qi "still in progress" <<<"$out"'
+
+# ── Test 14: the cross-check contradicts a green gh pr checks reading with a real failure → exit 1, not a timeout ──
+
+heading "Test 14: non-fallback path, gh pr checks reads green but the run-level cross-check shows a completed failure → exit 1"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_RC=0 \
+    GH_RUNLIST_JSON='[{"status":"completed","conclusion":"failure","workflowName":"CI","createdAt":"2026-10-09T14:25:00Z"}]' \
+    CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 10 2>&1)" || rc=$?
+check "exits 1 (fail), not 2 (timeout), when the cross-check contradicts a green reading" '[ "$rc" -eq 1 ]'
+
+# ── Test 15: the cross-check call itself can't be read → never trusts a bare green reading, refuses rather than merging on it ──
+
+heading "Test 15: non-fallback path, the run-level cross-check call itself fails → times out (refuses), never a false pass"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_RC=0 GH_RUNLIST_RC=1 \
+    CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 2 2>&1)" || rc=$?
+check "exits 2 (timeout/refuse), never a false pass, when the cross-check itself can't be read" '[ "$rc" -eq 2 ]'
+check "message says it isn't trusting a bare green reading" 'grep -qi "not trusting a bare green reading" <<<"$out"'
 
 heading "Results: $PASS checks passed"
 green "All checks passed."
