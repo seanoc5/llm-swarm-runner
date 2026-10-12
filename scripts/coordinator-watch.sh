@@ -5087,7 +5087,7 @@ stranded_brief_queue_lines() {
 # (issue #376): re-provision or archive.
 stranded_brief_body() {
     local issue="$1" wt_dir="$2" lines="$3"
-    printf 'A queued or claimed brief in issue #%s'\''s worktree (%s) has no live iss-%s tmux window left to drain it. A session restart, or a parked/window-only reap (kill-finished-workers.sh with no --with-worktree, which deliberately keeps the worktree) can each leave this behind with no salvage and no other record (issue #448).\n\nQueued file(s) (queue, age, path):\n%s\n\nCheck `gh pr list --head fix/issue-%s`: if the PR already merged (or the work is otherwise moot), archive the file(s) above out of inbox/processing/ and say why. Otherwise re-provision with `provision-worker.sh %s` — move any processing/ entry back to inbox/ first so it is picked up as a fresh claim rather than silently skipped.\n' \
+    printf 'A queued or claimed brief in issue #%s'\''s worktree (%s) has no live iss-%s tmux window left to drain it. A session restart, or a parked/window-only reap (kill-finished-workers.sh with no --with-worktree, which deliberately keeps the worktree) can each leave this behind with no salvage and no other record (issue #448).\n\nQueued file(s) (queue, age, path):\n%s\n\nCheck `gh pr list --head fix/issue-%s`: if the PR already merged (or the work is otherwise moot), archive the file(s) above out of inbox/processing/ and say why. Otherwise re-provision with `provision-worker.sh --wake %s` — move any processing/ entry back to inbox/ first so it is picked up as a fresh claim rather than silently skipped (--wake resumes that exact brief instead of salvaging it aside for a fresh issue fetch, issue #578).\n' \
         "$issue" "$wt_dir" "$issue" "$lines" "$issue" "$issue"
 }
 
