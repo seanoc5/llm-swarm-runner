@@ -272,8 +272,15 @@ case "$RISK" in
             # this file's header comment above. A marker with no actor=
             # attribute at all (posted before --actor existed) still counts,
             # same as an actor=worker one.
+            # capture() ties the actor to the marker tag itself (the text
+            # immediately after "SWARM_SELF_REVIEW: <VERDICT>"), not a bare
+            # contains() anywhere in the comment body — a worker's own
+            # review prose that happens to quote/discuss "actor=coordinator"
+            # (as this very PR's does) must not get misread as a
+            # coordinator round and silently excluded from its own count
+            # (self-review finding, issue #601).
             ROUNDS_DONE="$(gh pr view "$PR" --json comments \
-                --jq '[.comments[].body // "" | select(contains("SWARM_SELF_REVIEW:")) | select((contains("actor=coordinator") or contains("actor=operator")) | not)] | length' \
+                --jq '[.comments[].body // "" | select(contains("SWARM_SELF_REVIEW:")) | (capture("SWARM_SELF_REVIEW: [A-Za-z_]+(?: actor=(?<actor>[A-Za-z0-9_-]+))?").actor // "worker") | select(. != "coordinator" and . != "operator")] | length' \
                 2>/dev/null || true)"
             case "$ROUNDS_DONE" in
                 ''|*[!0-9]*) ROUNDS_DONE=0 ;;

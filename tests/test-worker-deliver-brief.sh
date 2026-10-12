@@ -332,6 +332,34 @@ printf '{"task_id":"t451","outcome":"ok","finished":"2026-01-01T00:00:00Z","sour
 rc=0; worker_current_task_terminal "$WT_DIR" || rc=$?
 check "processing/ empty, archived brief, done/t451.ok.json exists (task-done.sh's own record) -> rc0" "0" "$rc"
 
+# issue #601's actual root cause, isolated: task-done.sh --force's BRIEF-LESS
+# completion (a no-PR ruling/research task, or a v1 legacy task — see
+# task-done.sh's own --force comment) has no matching processing/<id>.md to
+# move, so done/*.md NEVER gets written at all — only the .ok.json/.err.json
+# outcome record. Before this fix, the processing/-empty fallback scanned
+# ONLY done/*.md to recover a task_id, so this exact shape (no .md anywhere
+# in done/) found nothing and fell through to rc1 forever — the iss-1175
+# stall. Must still resolve via the matching status file alone.
+rm -f "$DONE_DIR"/*.md "$STATUS_DIR"/*.json 2>/dev/null || true
+printf '{"task_id":"t451","state":"blocked","pr":null,"ts":"2026-01-01T00:00:00Z","note":""}' \
+    > "$STATUS_DIR/t451.json"
+rc=0; worker_current_task_terminal "$WT_DIR" || rc=$?
+check "brief-less completion (no done/*.md at all, only .ok.json), status=blocked -> rc1 (not actually done)" "1" "$rc"
+
+printf '{"task_id":"t451","state":"ready-for-review","pr":null,"ts":"2026-01-01T00:00:00Z","note":""}' \
+    > "$STATUS_DIR/t451.json"
+rc=0; worker_current_task_terminal "$WT_DIR" || rc=$?
+check "brief-less completion (no done/*.md at all, only .ok.json), status=ready-for-review -> rc0 (issue #601 fix)" "0" "$rc"
+
+# Same shape again for a failed brief-less run (.err.json instead of .ok.json).
+rm -f "$DONE_DIR"/*.ok.json "$STATUS_DIR"/*.json 2>/dev/null || true
+printf '{"task_id":"t452","outcome":"err","finished":"2026-01-01T00:00:00Z","source":"task-done.sh"}' \
+    > "$DONE_DIR/t452.err.json"
+printf '{"task_id":"t452","state":"done-no-pr","pr":null,"ts":"2026-01-01T00:00:00Z","note":""}' \
+    > "$STATUS_DIR/t452.json"
+rc=0; worker_current_task_terminal "$WT_DIR" || rc=$?
+check "brief-less completion, no done/*.md at all, only .err.json, status=done-no-pr -> rc0 (issue #601 fix, .err.json shape)" "0" "$rc"
+
 rm -f "$PROCESSING_DIR"/*.md "$STATUS_DIR"/*.json "$DONE_DIR"/*.md "$DONE_DIR"/*.json 2>/dev/null || true
 
 heading "Test 3: maybe_worker_deliver_brief — gating (DRY_RUN)"

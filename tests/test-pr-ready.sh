@@ -71,7 +71,10 @@ if [ "\$1" = "pr" ] && [ "\$2" = "view" ]; then
                 prev="\$arg"
             done
             printf '%s' "\$GH_COMMENTS_JSON" | jq -r "\$JQ_EXPR"
-        elif printf '%s\n' "\$*" | grep -q -- 'capture('; then
+        elif printf '%s\n' "\$*" | grep -q -- 'last // empty'; then
+            # LATEST_VERDICT's query ends '| last // empty'; ROUNDS_DONE's
+            # now also contains 'capture(' (issue #601's actor extraction),
+            # so that substring alone no longer tells the two apart.
             echo "\${GH_LATEST_VERDICT:-}"
         else
             echo "\${GH_ROUNDS_DONE:-0}"
@@ -486,6 +489,32 @@ WORKER_SELF_REVIEW_MAX_ROUNDS=3
 gh_ready_called && red "expected gh pr ready NOT to run when a coordinator-found BLOCK is the latest verdict"
 grep -qi 'BLOCK' "$TEST_DIR/out.log" || red "expected a BLOCK refusal message in output: $(cat "$TEST_DIR/out.log")"
 green "a coordinator BLOCK still refuses readying although it never counted toward the worker's own 3/3 round cap"
+
+# ============================================================================
+heading "Test 19g: a worker round whose review PROSE mentions 'actor=coordinator' still counts as the worker's own (self-review finding, issue #601)"
+# ============================================================================
+# The actor must come from the marker tag itself (capture() anchored right
+# after "SWARM_SELF_REVIEW: <VERDICT>"), not a bare contains() anywhere in
+# the comment body — a worker's own review discussing this very PR's
+# actor-exclusion fix, which quotes "actor=coordinator" in its prose, must
+# not get misread as a coordinator round and silently dropped from the
+# worker's own count (which would let one extra round through uncounted).
+printf '<!-- BLIND_MERGE_RISK: medium -->\nsome change\n' > "$BODY_FILE"
+make_fake_review 0
+GH_COMMENTS_JSON='{"comments":[
+  {"body":"<!-- SWARM_SELF_REVIEW: APPROVE actor=worker -->\nreview text"},
+  {"body":"<!-- SWARM_SELF_REVIEW: BLOCK actor=worker -->\nreview mentions actor=coordinator and actor=operator in its prose while describing the fix, but is itself a worker round"},
+  {"body":"<!-- SWARM_SELF_REVIEW: APPROVE actor=worker -->\nreview text"}
+]}'
+WORKER_SELF_REVIEW_MAX_ROUNDS=3
+rc=0; run_pr_ready || rc=$?
+GH_COMMENTS_JSON=
+WORKER_SELF_REVIEW_MAX_ROUNDS=3
+[ "$rc" -eq 0 ] || red "expected exit 0 (capped on APPROVE, no BLOCK) got $rc: $(cat "$TEST_DIR/out.log")"
+[ ! -s "$FAKE_REVIEW_LOG" ] || red "expected self-review-pr.sh NOT invoked, log: $(cat "$FAKE_REVIEW_LOG")"
+grep -q '3/3 rounds' "$TEST_DIR/out.log" || red "expected all 3 worker rounds to count despite one's prose mentioning other actors: $(cat "$TEST_DIR/out.log")"
+gh_ready_called || red "expected gh pr ready to run once capped with APPROVE as the latest verdict"
+green "a worker round's prose mentioning 'actor=coordinator'/'actor=operator' still counts as the worker's own — the actor comes from the marker tag, not a body-wide substring match"
 
 # ============================================================================
 heading "Test 20: gh pr checks unreadable by a fine-grained token, Actions-runs fallback green — readies (issue #560)"
