@@ -119,6 +119,10 @@ A tmux restart, or a window-only reap (`kill-finished-workers.sh` without `--wit
 
 Neither path auto-respawns or moves a brief — that's always your call, since the PR behind it may be merged.
 
+### Sidelined workers (issue #622)
+
+With `WATCH_SIDELINE_SECS` set, the watcher stops a worker that has been idle that long (window and container gone, worktree/branch/PR kept, marker `<wt>/.swarm/sidelined`) so its slot can take new work. Sidelined issues are **in progress**: don't re-dispatch them or count them as AVAILABLE. To send one work, `requeue.sh N <brief>` — the watcher wakes it through `provision-worker.sh --wake` once caps allow. A worker sidelined mid-task (`stalled` or `waiting`) arrives as a `sidelined_worker` inbox item: answer it with a brief, or archive its `.swarm/tasks/sidelined/` files and say why. List them with `ls <wt>/.swarm/sidelined` over `list-own-worktrees.sh`.
+
 ### Post-merge migration-collision watchdog
 
 Manual and web-UI merges bypass `swarm-merge.sh`'s gate, so check the default branch every wake. Exit 0/4 → say nothing (`--ref` misses exit 3 — merge/renumber reserved siblings). **Exit 2 → the default branch is broken for migrations:** make it the top "Needs you" item, hold all new dispatch, and fix per the renumber convention (first-merged keeps its number, later ones renumber in merge order, references updated, a history-repair script added if any DB may have migrated off the old numbering). You may author this mechanical renumber yourself on a branch + PR. **Stamp every commit you make** with `git commit --trailer "Swarm-Role: coordinator" -m "<message>"` — Gate 0 below depends on it. Resume dispatch once the fix lands.

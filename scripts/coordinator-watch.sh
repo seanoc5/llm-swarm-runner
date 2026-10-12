@@ -502,7 +502,33 @@
 #                           Local-only (filesystem + `tmux list-windows`, no
 #                           network), so this runs on the same cheap cadence as
 #                           WATCH_WORKTREE_SWEEP_SECS. Set to 0 to disable. See
-#                           stranded_brief_sweep_pass.
+#                           stranded_brief_sweep_pass. Worktrees carrying a
+#                           .swarm/sidelined marker (issue #622) are skipped:
+#                           sideline_wake_pass owns their queued briefs.
+#   WATCH_SIDELINE_SECS=0   (issue #622) Sideline a worker whose iss-N window
+#                           has printed nothing for this many seconds (tmux
+#                           window_activity), whose pane is not mid-turn
+#                           (worker_pane_busy) and whose inbox is empty:
+#                           sideline-worker.sh stops the window and container
+#                           (freeing its MAX_WORKERS and HOST_MAX_WORKERS
+#                           slot) and keeps worktree, branch and PR. Reason
+#                           is finished (nothing claimed), stalled (a brief
+#                           still in processing/) or waiting (also an
+#                           unprocessed decision-needed outbox message); the
+#                           last two write a coord-inbox note, since only a
+#                           new brief brings that worker back. 0 = off
+#                           (default); e.g. 3600 in <project>/.swarm/.env.
+#   WATCH_SIDELINE_SWEEP_SECS=60
+#                           (issue #622) Cadence of sideline_idle_pass and
+#                           sideline_wake_pass. The wake pass runs even with
+#                           WATCH_SIDELINE_SECS=0, so a by-hand
+#                           sideline-worker.sh is woken too: a sidelined
+#                           worktree with a brief in inbox/ (requeue.sh) is
+#                           re-spawned via `provision-worker.sh --wake`,
+#                           which runs the usual caps and host admission —
+#                           a cap refusal just retries next tick. Other
+#                           failures write one coord-inbox note per issue.
+#                           0 disables both passes.
 #   COORD_WAKE_RETRY_SECS=15
 #                           (issue #422, #366 part B) llm-start.sh's
 #                           reprompt_inject refuses to paste a wake over a
@@ -2562,6 +2588,11 @@ WATCH_WORKTREE_SWEEP_SECS="${WATCH_WORKTREE_SWEEP_SECS:-60}"
 WATCH_PENDING_BRIEF_SWEEP_SECS="${WATCH_PENDING_BRIEF_SWEEP_SECS:-300}"
 # issue #448 — see header comment.
 WATCH_STRANDED_BRIEF_SWEEP_SECS="${WATCH_STRANDED_BRIEF_SWEEP_SECS:-60}"
+# issue #622 — sidelining idle workers; see header comment.
+WATCH_SIDELINE_SECS="${WATCH_SIDELINE_SECS:-0}"
+WATCH_SIDELINE_SWEEP_SECS="${WATCH_SIDELINE_SWEEP_SECS:-60}"
+SIDELINE_WORKER="${SIDELINE_WORKER:-$LLM_SWARM_DIR/scripts/sideline-worker.sh}"
+PROVISION_WORKER="${PROVISION_WORKER:-$LLM_SWARM_DIR/scripts/provision-worker.sh}"
 WATCH_CHECK_ON_DONE="${WATCH_CHECK_ON_DONE:-1}"
 CHECK_RUNNER="${CHECK_RUNNER:-}"
 SESSION_NAME="${SESSION_NAME:-llm-$(basename "$PROJECT_DIR")}"
@@ -3397,6 +3428,7 @@ activity-poll: ${WATCH_ACTIVITY_POLL_SECS}s$([ "$WATCH_ACTIVITY_POLL_SECS" = "0"
 worktree-sweep: ${WATCH_WORKTREE_SWEEP_SECS}s$([ "$WATCH_WORKTREE_SWEEP_SECS" = "0" ] && echo " (disabled)" || echo " (unblessed worktree-removal detection, issue #439)")
 pending-brief-sweep: ${WATCH_PENDING_BRIEF_SWEEP_SECS}s$([ "$WATCH_PENDING_BRIEF_SWEEP_SECS" = "0" ] && echo " (disabled)" || echo " (SWARM_PENDING_BRIEF marker-gap backstop, issue #439)")
 stranded-brief-sweep: ${WATCH_STRANDED_BRIEF_SWEEP_SECS}s$([ "$WATCH_STRANDED_BRIEF_SWEEP_SECS" = "0" ] && echo " (disabled)" || echo " (window-less queued/claimed brief detection, issue #448)")
+sideline:      $([ "$WATCH_SIDELINE_SWEEP_SECS" = "0" ] && echo "disabled" || echo "idle ${WATCH_SIDELINE_SECS}s$([ "$WATCH_SIDELINE_SECS" = "0" ] && echo " (off; wake-only)"), sweep ${WATCH_SIDELINE_SWEEP_SECS}s (free idle workers' slots, wake on new brief, issue #622)")
 coord-wake-retry: ${COORD_WAKE_RETRY_SECS}s$([ "$COORD_WAKE_RETRY_SECS" = "0" ] && echo " (disabled)" || echo " (retry a dirty-composer-deferred wake, warn after ${COORD_WAKE_DEFER_WARN_SECS}s, issue #422)")
 coord-inbox:   $COORD_INBOX_DIR (issue #430; busy-pane doorbell defer: $([ "$COORD_WAKE_BUSY_RETRY_SECS" = "0" ] && echo "disabled — pastes immediately regardless of busy" || echo "retry ${COORD_WAKE_BUSY_RETRY_SECS}s, ceiling $([ "$COORD_WAKE_BUSY_CEILING_SECS" = "0" ] && echo "none" || echo "${COORD_WAKE_BUSY_CEILING_SECS}s")"))
 human-gate:    $([ "$COORD_HUMAN_IDLE_SECS" = "0" ] && [ "$WORKER_HUMAN_IDLE_SECS" = "0" ] && echo "disabled (issue #459)" || echo "coordinator ${COORD_HUMAN_IDLE_SECS}s / workers ${WORKER_HUMAN_IDLE_SECS}s, no ceiling (issue #459)"); swarm-busy hold: $([ "$WAKE_DEFER_ON_SWARM_BUSY" = "1" ] && echo "on" || echo "off")$([ "$HAVE_JQ" = "1" ] || echo " [no jq — human gate inert, doorbells always ring]")
@@ -5072,6 +5104,13 @@ stranded_brief_sweep_pass() {
             continue
         fi
 
+        # issue #622: a sidelined worktree's queued brief is
+        # sideline_wake_pass's to act on, not a strand to report.
+        if [ -e "$wt/.swarm/sidelined" ] && [ "$WATCH_SIDELINE_SWEEP_SECS" -gt 0 ]; then
+            unset "STRANDED_BRIEF_LOGGED[$issue]" 2>/dev/null || true
+            continue
+        fi
+
         lines="$(stranded_brief_queue_lines "$wt")"
         if [ -z "$lines" ]; then
             unset "STRANDED_BRIEF_LOGGED[$issue]" 2>/dev/null || true
@@ -5101,6 +5140,137 @@ stranded_brief_sweep_pass() {
     # fresh, same reasoning as pr_poll_pass's ORPHAN_PR_LOGGED cleanup.
     for issue in "${!STRANDED_BRIEF_LOGGED[@]}"; do
         [ -n "${current_issues[$issue]:-}" ] || unset "STRANDED_BRIEF_LOGGED[$issue]"
+    done
+}
+
+# ── Sidelining idle workers (issue #622) ────────────────────────────────────
+# See WATCH_SIDELINE_SECS / WATCH_SIDELINE_SWEEP_SECS in the header. A
+# sidelined worker gives back its slot (window + container) and keeps its
+# worktree, branch and PR; the next brief queued into its inbox wakes it.
+
+# worker_inbox_brief <worktree-dir>: oldest real (non-tmp) inbox brief.
+worker_inbox_brief() {
+    find "$1/.swarm/tasks/inbox" -maxdepth 1 -type f -name '*.md' -not -name '.tmp.*' 2>/dev/null | sort | head -1
+}
+
+# sideline_reason <worktree-dir>: finished | stalled | waiting
+sideline_reason() {
+    local wt_dir="$1" f
+    compgen -G "$wt_dir/.swarm/tasks/processing/*.md" >/dev/null || { echo finished; return; }
+    for f in "$wt_dir/.swarm/tasks/outbox"/*.md; do
+        [ -f "$f" ] || continue
+        if head -20 "$f" 2>/dev/null | grep -qE '^kind:[[:space:]]*decision-needed[[:space:]]*$'; then
+            echo waiting; return
+        fi
+    done
+    echo stalled
+}
+
+sidelined_worker_body() {
+    local issue="$1" reason="$2" wt_dir="$3" idle_min="$4" what
+    case "$reason" in
+        waiting) what="it was waiting on a decision (unprocessed decision-needed message in its outbox/)" ;;
+        *)       what="it stopped mid-task with no output (its claimed brief is now in .swarm/tasks/sidelined/)" ;;
+    esac
+    printf 'Worker for issue #%s was sidelined after %s idle minutes: %s. Its window and container are stopped to free the slot; worktree, branch and PR are kept (%s).\n\nNothing brings it back except a new brief. To resume, answer or redirect it with `requeue.sh %s <brief-file>` from the project dir; the watcher wakes it when a slot is free (provision-worker.sh --wake). If the work is moot, archive the files under %s/.swarm/tasks/sidelined/ and say why.\n' \
+        "$issue" "$idle_min" "$what" "$wt_dir" "$issue" "$wt_dir"
+}
+
+# sideline_idle_pass
+#
+# For every own worktree with a live iss-N window: sideline it once the
+# window has printed nothing for WATCH_SIDELINE_SECS, the pane is not
+# mid-turn, and nothing is queued. tmux's window_activity is the same idle
+# clock kill-finished-workers.sh's window_idle_min uses — an idle claude
+# REPL and the listener's poll loop both print nothing.
+sideline_idle_pass() {
+    [ "${WATCH_SIDELINE_SECS:-0}" -gt 0 ] 2>/dev/null || return 0
+    local wt_dir issue win activity now idle reason rc
+    now=$(date +%s)
+    while IFS= read -r wt_dir; do
+        [ -n "$wt_dir" ] || continue
+        case "$(basename "$wt_dir")" in
+            wt-issue-*) issue="$(basename "$wt_dir")"; issue="${issue#wt-issue-}" ;;
+            *) continue ;;
+        esac
+        [[ "$issue" =~ ^[0-9]+$ ]] || continue
+        win="iss-$issue"
+        has_live_window_draining_brief "$issue" || continue
+        [ -z "$(worker_inbox_brief "$wt_dir")" ] || continue
+        activity="$(tmux display-message -p -t "$SESSION_NAME:$win" '#{window_activity}' 2>/dev/null)" || continue
+        [[ "$activity" =~ ^[0-9]+$ ]] || continue
+        idle=$(( now - activity ))
+        [ "$idle" -ge "$WATCH_SIDELINE_SECS" ] || continue
+        worker_pane_busy "$win" && continue
+
+        reason="$(sideline_reason "$wt_dir")"
+        if [ "$DRY_RUN" = "1" ]; then
+            echo "[DRY] would sideline issue #$issue (reason=$reason idle=${idle}s)"
+            continue
+        fi
+        rc=0
+        "$SIDELINE_WORKER" "$issue" "$PROJECT_DIR" --reason "$reason" >/dev/null 2>&1 || rc=$?
+        if [ "$rc" -ne 0 ]; then
+            log_event watch.sideline.error "issue=$issue reason=$reason rc=$rc"
+            continue
+        fi
+        log_event watch.sideline "issue=$issue reason=$reason idle_secs=$idle"
+        echo "[$(date +%T)] sidelined issue #$issue ($reason, idle $((idle / 60))m) — slot freed"
+        if [ "$reason" != "finished" ]; then
+            coord_inbox_write sidelined_worker "$(sidelined_worker_body "$issue" "$reason" "$wt_dir" "$((idle / 60))")" \
+                && log_event coord.inbox.write "trigger=sidelined_worker issue=$issue"
+        fi
+    done < <(own_worktree_dirs_for_scan "$PROJECT_DIR")
+}
+
+# sideline_wake_pass
+#
+# A sidelined worktree (marker present) with a brief in inbox/ and no live
+# window gets `provision-worker.sh --wake`. Exit 3 (a cap or host-admission
+# refusal) retries next tick — provision-worker.sh logs cap.refused itself.
+# Any other failure writes one coord-inbox note per issue (deduped until
+# the wake succeeds or the marker goes away).
+declare -A SIDELINE_WAKE_FAIL_LOGGED=()
+sideline_wake_pass() {
+    local wt_dir issue out rc
+    local -A seen=()
+    while IFS= read -r wt_dir; do
+        [ -n "$wt_dir" ] || continue
+        [ -e "$wt_dir/.swarm/sidelined" ] || continue
+        case "$(basename "$wt_dir")" in
+            wt-issue-*) issue="$(basename "$wt_dir")"; issue="${issue#wt-issue-}" ;;
+            *) continue ;;
+        esac
+        [[ "$issue" =~ ^[0-9]+$ ]] || continue
+        seen[$issue]=1
+        [ -n "$(worker_inbox_brief "$wt_dir")" ] || continue
+        has_live_window_draining_brief "$issue" && continue
+
+        if [ "$DRY_RUN" = "1" ]; then
+            echo "[DRY] would wake sidelined issue #$issue"
+            continue
+        fi
+        rc=0
+        out="$("$PROVISION_WORKER" --wake "$issue" "$PROJECT_DIR" 2>&1)" || rc=$?
+        case "$rc" in
+            0)
+                unset "SIDELINE_WAKE_FAIL_LOGGED[$issue]" 2>/dev/null || true
+                log_event watch.wake "issue=$issue result=ok"
+                echo "[$(date +%T)] woke sidelined issue #$issue"
+                ;;
+            3) ;;
+            *)
+                [ -n "${SIDELINE_WAKE_FAIL_LOGGED[$issue]:-}" ] && continue
+                SIDELINE_WAKE_FAIL_LOGGED[$issue]=1
+                log_event watch.wake.error "issue=$issue rc=$rc"
+                coord_inbox_write sidelined_wake_failed "$(printf 'Waking sidelined issue #%s failed (provision-worker.sh --wake exit %s). Its queued brief is still in %s/.swarm/tasks/inbox/. Last output:\n\n```\n%s\n```\n\nRetry by hand: `provision-worker.sh --wake %s`.\n' \
+                    "$issue" "$rc" "$wt_dir" "$(printf '%s\n' "$out" | tail -15)" "$issue")" \
+                    && log_event coord.inbox.write "trigger=sidelined_wake_failed issue=$issue"
+                ;;
+        esac
+    done < <(own_worktree_dirs_for_scan "$PROJECT_DIR")
+    for issue in "${!SIDELINE_WAKE_FAIL_LOGGED[@]}"; do
+        [ -n "${seen[$issue]:-}" ] || unset "SIDELINE_WAKE_FAIL_LOGGED[$issue]"
     done
 }
 
@@ -6052,7 +6222,7 @@ coord_approval_flag_pass() {
 # run_auto_compact_poll_loop, started as its own background process right
 # after this function.
 run_watch_timer_loop() {
-    local last_pr_poll=0 last_orphan_sweep=0 last_ready_sweep=0 last_bg_violation_sweep=0 last_timeout_retry_sweep=0 last_activity_poll=0 last_coord_wake_retry=0 last_coord_wake_busy_retry=0 last_worktree_sweep=0 last_pending_brief_sweep=0 last_stranded_brief_sweep=0 last_window_flags_sweep=0 now
+    local last_pr_poll=0 last_orphan_sweep=0 last_ready_sweep=0 last_bg_violation_sweep=0 last_timeout_retry_sweep=0 last_activity_poll=0 last_coord_wake_retry=0 last_coord_wake_busy_retry=0 last_worktree_sweep=0 last_pending_brief_sweep=0 last_stranded_brief_sweep=0 last_window_flags_sweep=0 last_sideline_sweep=0 now
     while true; do
         sleep 2
         [ "$WATCH_CHECK_ON_DONE" = "1" ] && { status_poll_pass || true; }
@@ -6142,6 +6312,14 @@ run_watch_timer_loop() {
             if [ $((now - last_stranded_brief_sweep)) -ge "$WATCH_STRANDED_BRIEF_SWEEP_SECS" ]; then
                 stranded_brief_sweep_pass || true
                 last_stranded_brief_sweep=$now
+            fi
+        fi
+        if [ "$WATCH_SIDELINE_SWEEP_SECS" -gt 0 ]; then
+            now=$(date +%s)
+            if [ $((now - last_sideline_sweep)) -ge "$WATCH_SIDELINE_SWEEP_SECS" ]; then
+                sideline_wake_pass || true
+                sideline_idle_pass || true
+                last_sideline_sweep=$now
             fi
         fi
     done
@@ -10079,10 +10257,10 @@ run_poll() {
 # restarts. (COORD_WAKE_RETRY_SECS, issue #422's older dirty-draft retry,
 # has this identical gap and predates this fix — out of scope here, but
 # worth folding in alongside this one if it's ever revisited.)
-if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ] || [ "$WATCH_ORPHAN_SWEEP_SECS" -gt 0 ] || [ "$WATCH_READY_SWEEP_SECS" -gt 0 ] || [ "$WATCH_BG_VIOLATION_SWEEP_SECS" -gt 0 ] || [ "$WATCH_TIMEOUT_RETRY_SWEEP_SECS" -gt 0 ] || [ "$WATCH_ACTIVITY_POLL_SECS" -gt 0 ] || [ "$WATCH_WORKTREE_SWEEP_SECS" -gt 0 ] || [ "$WATCH_PENDING_BRIEF_SWEEP_SECS" -gt 0 ] || [ "$WATCH_STRANDED_BRIEF_SWEEP_SECS" -gt 0 ] || [ "$COORD_WAKE_HOLD_RETRY_SECS" -gt 0 ] || { [ "$WATCH_WINDOW_FLAGS" = "1" ] && [ "$WATCH_WINDOW_FLAGS_SWEEP_SECS" -gt 0 ]; }; then
+if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ] || [ "$WATCH_ORPHAN_SWEEP_SECS" -gt 0 ] || [ "$WATCH_READY_SWEEP_SECS" -gt 0 ] || [ "$WATCH_BG_VIOLATION_SWEEP_SECS" -gt 0 ] || [ "$WATCH_TIMEOUT_RETRY_SWEEP_SECS" -gt 0 ] || [ "$WATCH_ACTIVITY_POLL_SECS" -gt 0 ] || [ "$WATCH_WORKTREE_SWEEP_SECS" -gt 0 ] || [ "$WATCH_PENDING_BRIEF_SWEEP_SECS" -gt 0 ] || [ "$WATCH_STRANDED_BRIEF_SWEEP_SECS" -gt 0 ] || [ "$COORD_WAKE_HOLD_RETRY_SECS" -gt 0 ] || [ "$WATCH_SIDELINE_SWEEP_SECS" -gt 0 ] || { [ "$WATCH_WINDOW_FLAGS" = "1" ] && [ "$WATCH_WINDOW_FLAGS_SWEEP_SECS" -gt 0 ]; }; then
     run_watch_timer_loop &
     WATCH_TIMER_PID=$!
-    log_event watch.timer.start "pr_poll_secs=$WATCH_PR_POLL_SECS check_on_done=$WATCH_CHECK_ON_DONE orphan_sweep_secs=$WATCH_ORPHAN_SWEEP_SECS ready_sweep_secs=$WATCH_READY_SWEEP_SECS bg_violation_sweep_secs=$WATCH_BG_VIOLATION_SWEEP_SECS timeout_retry_sweep_secs=$WATCH_TIMEOUT_RETRY_SWEEP_SECS activity_poll_secs=$WATCH_ACTIVITY_POLL_SECS worktree_sweep_secs=$WATCH_WORKTREE_SWEEP_SECS pending_brief_sweep_secs=$WATCH_PENDING_BRIEF_SWEEP_SECS stranded_brief_sweep_secs=$WATCH_STRANDED_BRIEF_SWEEP_SECS window_flags_sweep_secs=$([ "$WATCH_WINDOW_FLAGS" = "1" ] && echo "$WATCH_WINDOW_FLAGS_SWEEP_SECS" || echo 0)"
+    log_event watch.timer.start "pr_poll_secs=$WATCH_PR_POLL_SECS check_on_done=$WATCH_CHECK_ON_DONE orphan_sweep_secs=$WATCH_ORPHAN_SWEEP_SECS ready_sweep_secs=$WATCH_READY_SWEEP_SECS bg_violation_sweep_secs=$WATCH_BG_VIOLATION_SWEEP_SECS timeout_retry_sweep_secs=$WATCH_TIMEOUT_RETRY_SWEEP_SECS activity_poll_secs=$WATCH_ACTIVITY_POLL_SECS worktree_sweep_secs=$WATCH_WORKTREE_SWEEP_SECS pending_brief_sweep_secs=$WATCH_PENDING_BRIEF_SWEEP_SECS stranded_brief_sweep_secs=$WATCH_STRANDED_BRIEF_SWEEP_SECS window_flags_sweep_secs=$([ "$WATCH_WINDOW_FLAGS" = "1" ] && echo "$WATCH_WINDOW_FLAGS_SWEEP_SECS" || echo 0) sideline_secs=$WATCH_SIDELINE_SECS sideline_sweep_secs=$WATCH_SIDELINE_SWEEP_SECS"
 fi
 if [ "$WORKER_AUTO_COMPACT" = "1" ] || [ "$WORKER_AUTO_DELIVER" = "1" ]; then
     run_worker_compact_loop &

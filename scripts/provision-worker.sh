@@ -16,6 +16,7 @@ provision-worker.sh — Provision a worker for one GitHub issue
 
 USAGE
     provision-worker.sh <issue-number> [project-dir]     (project-dir default: $PWD)
+    provision-worker.sh --wake <issue-number> [project-dir]
 
 WHAT IT DOES
     1. Worktree <worktree-parent>/wt-issue-N on branch fix/issue-N, based on
@@ -28,6 +29,12 @@ WHAT IT DOES
     4. tmux window 'iss-N' running the sandbox listener, then a health poll.
     If a live iss-N window already exists, steps 3-4 only queue a follow-up
     brief onto it (no caps, no spawn).
+
+    --wake (issue #622): re-spawn a sidelined worker (sideline-worker.sh) on
+    its existing worktree for the brief already in its inbox. Skips the
+    issue fetch and writes no brief; caps and host admission still run. The
+    worktree's .swarm/sidelined marker is removed once the worker is up. A
+    failed spawn keeps the brief, since this run did not write it.
 
 EXIT CODES
     0  provisioned (or follow-up queued)
@@ -82,8 +89,10 @@ EOF
         ;;
 esac
 
+WAKE=0
 while [[ "${1:-}" == -* ]]; do
     case "$1" in
+        --wake) WAKE=1; shift ;;
         --) shift; break ;;
         *) echo "ERROR: unknown flag '$1' (try --help)" >&2; exit 2 ;;
     esac
@@ -427,6 +436,11 @@ if [ -z "$DEFAULT_REMOTE_REF" ]; then
     exit 2
 fi
 
+if [ "$WAKE" = "1" ] && [ ! -d "$WT/.swarm/tasks/inbox" ]; then
+    echo "ERROR: --wake needs an existing worker queue at $WT/.swarm/tasks/inbox" >&2
+    exit 2
+fi
+
 if [ -d "$WT" ]; then
     # wt-issue-N is namespaced only by issue number, so refuse to reuse a
     # worktree that belongs to another repo sharing this parent dir.
@@ -497,7 +511,14 @@ fi
 # Fetch the issue before any cap is claimed, so a bad issue number or a gh
 # outage refuses cleanly instead of failing mid-brief with a pending marker
 # already written.
-if ! ISSUE_TEXT="$(gh issue view "$ISSUE")"; then
+# --wake brings its own brief (already in inbox/), so there is nothing to fetch.
+if [ "$WAKE" = "1" ]; then
+    WAKE_BRIEF="$(find "$WT/.swarm/tasks/inbox" -maxdepth 1 -type f -name "*.md" -not -name ".tmp.*" 2>/dev/null | sort | head -1)"
+    if [ -z "$WAKE_BRIEF" ]; then
+        echo "ERROR: --wake: no brief in $WT/.swarm/tasks/inbox/ — nothing to wake for." >&2
+        exit 2
+    fi
+elif ! ISSUE_TEXT="$(gh issue view "$ISSUE")"; then
     echo "ERROR: gh issue view $ISSUE failed — nothing queued." >&2
     exit 2
 fi
@@ -516,7 +537,9 @@ if window_listed "$WINDOW"; then
         # doesn't re-run stale work next to the new brief.
         stale_briefs=0
         salvage_root="$PROJECT_DIR/.swarm/salvaged/$WINDOW"
-        for sub in inbox processing; do
+        reclaim_subs=(inbox processing)
+        [ "$WAKE" = "1" ] && reclaim_subs=(processing)  # the inbox brief is what we wake for
+        for sub in "${reclaim_subs[@]}"; do
             for f in "$WT/.swarm/tasks/$sub"/*.md; do
                 [ -e "$f" ] || continue
                 mkdir -p "$salvage_root/$sub"
@@ -544,7 +567,12 @@ fi
 
 # 3. Brief, written atomically (mktemp + rename in the same dir). TASK_ID
 #    gets a -2, -3... suffix on a same-second collision. PROVISION_NOW_EPOCH
-#    freezes "now" for tests (#192).
+#    freezes "now" for tests (#192). --wake skips this: its brief is queued.
+if [ "$WAKE" = "1" ]; then
+    DEST="$WAKE_BRIEF"
+    TASK_ID="$(basename "$DEST" .md)"
+    echo "[3/4] waking for queued brief: $DEST"
+else
 if [ -n "${PROVISION_NOW_EPOCH:-}" ]; then
     NOW_FMT="$(date -d "@$PROVISION_NOW_EPOCH" +%Y%m%d-%H%M%S 2>/dev/null \
         || date -r "$PROVISION_NOW_EPOCH" +%Y%m%d-%H%M%S)"
@@ -589,6 +617,7 @@ echo "[3/4] brief queued: $DEST"
 if [ "${BRIEF_LINT:-1}" = "1" ] && [ -x "$SCRIPT_DIR/lint-brief.sh" ]; then
     "$SCRIPT_DIR/lint-brief.sh" "$DEST" || true
 fi
+fi
 
 # 4. Spawn (detached, so the coordinator keeps focus).
 if [ "$WINDOW_EXISTS" -eq 1 ]; then
@@ -599,6 +628,10 @@ if [ "$WINDOW_EXISTS" -eq 1 ]; then
     # task is stale now. See scripts/_window-flags.sh.
     clear_window_flag "iss-$ISSUE" "📬" "new_brief_claimed task_id=$TASK_ID"
     clear_window_flag "iss-$ISSUE" "👀" "new_brief_claimed task_id=$TASK_ID"
+    if [ "$WAKE" = "1" ]; then
+        rm -f "$WT/.swarm/sidelined"
+        log_event worker.wake "issue=$ISSUE task_id=$TASK_ID window=$WINDOW already_live=1"
+    fi
 else
     # The window's shell inherits the tmux server env, not this process's,
     # so everything _load-env.sh applied from <project>/.swarm/.env must be
@@ -626,8 +659,18 @@ else
     echo "[4/4] tmux window $WINDOW spawned (listener)"
     # Logged at spawn time; coordinator-watch.sh anchors its paste-grace
     # window to it (#497). A worker.start.failed may follow.
-    log_event worker.start "issue=$ISSUE task_id=$TASK_ID window=$WINDOW alive=$((alive_workers + 1))/$MAX_WORKERS total_windows=$((total_windows + 1))/$MAX_TMUX_WINDOWS"
-    post_spawn_health_check "$ISSUE" "$WINDOW" "$CONTAINER" "$DEST"
+    log_event worker.start "issue=$ISSUE task_id=$TASK_ID window=$WINDOW alive=$((alive_workers + 1))/$MAX_WORKERS total_windows=$((total_windows + 1))/$MAX_TMUX_WINDOWS$([ "$WAKE" = "1" ] && echo " wake=1")"
+    if [ "$WAKE" = "1" ]; then
+        # No brief path: a failed wake must leave the queued brief in place
+        # for the next wake attempt (this run did not write it).
+        post_spawn_health_check "$ISSUE" "$WINDOW" "$CONTAINER" ""
+        log_event worker.wake "issue=$ISSUE task_id=$TASK_ID window=$WINDOW"
+    else
+        post_spawn_health_check "$ISSUE" "$WINDOW" "$CONTAINER" "$DEST"
+    fi
+    # A live worker is not sidelined, however it got here (a plain
+    # re-provision of a sidelined issue included).
+    rm -f "$WT/.swarm/sidelined"
 fi
 
 echo
