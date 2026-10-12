@@ -408,6 +408,45 @@ rm -f "$TEST_DIR/tmux-windows.txt" "$TEST_DIR/tmux-pane-dead-iss-207.txt" "$TEST
 rm -f "$HOST_STATE_DIR"/pending-*
 git -C "$PROJECT_DIR" worktree remove --force "$WT207" 2>/dev/null || rm -rf "$WT207"
 
+# ============================================================================
+heading "Test 3i: a window removed OUTRIGHT (never listed, not merely dead-paned) salvages stale briefs too (issue #578 self-review: round-4 coverage gap)"
+# ============================================================================
+# Tests 3e-3h all cover a window that was LISTED but pane-dead (issue #493's
+# original reclaim). Issue #578 added a second, separate salvage call site
+# for a window that was never listed at all -- a manual `tmux kill-window`
+# or a window that simply never got spawned -- which the pane-dead branch
+# structurally can't reach (it's nested inside `if window_listed; then`).
+# This stub never auto-marks a window alive (by design, see this file's own
+# header note), so simply not touching tmux-windows.txt for issue 208
+# reproduces "never listed" without any extra setup.
+cd "$PROJECT_DIR"
+"$PROVISION" 208 > "$TEST_DIR/prov-3i-first.log" 2>&1 \
+    || red "initial spawn for issue 208 should succeed: $(cat "$TEST_DIR/prov-3i-first.log")"
+WT208="$TEST_DIR/wt-issue-208"
+mkdir -p "$WT208/.swarm/tasks/processing"
+echo "claimed but abandoned when the window was killed outright" > "$WT208/.swarm/tasks/processing/stale-claimed.md"
+: > "$TEST_DIR/tmux.log"
+"$PROVISION" 208 > "$TEST_DIR/prov-3i-reprovision.log" 2>&1 \
+    || red "re-provision of issue 208 with no listed window should succeed: $(cat "$TEST_DIR/prov-3i-reprovision.log")"
+briefs208=$(find "$WT208/.swarm/tasks/inbox" -maxdepth 1 -name '*.md' | wc -l)
+[ "$briefs208" -eq 1 ] \
+    || red "expected exactly 1 brief in inbox/ after the no-window salvage (the fresh one, stale ones salvaged out), got $briefs208: $(ls "$WT208/.swarm/tasks/inbox")"
+processing208=$(find "$WT208/.swarm/tasks/processing" -maxdepth 1 -name '*.md' 2>/dev/null | wc -l)
+[ "$processing208" -eq 0 ] \
+    || red "expected processing/ emptied by the salvage, got $processing208 file(s) left behind"
+SALVAGE208="$PROJECT_DIR/.swarm/salvaged/iss-208"
+salvaged208=$(find "$SALVAGE208/inbox" -maxdepth 1 -name '*.md' 2>/dev/null | wc -l)
+[ "$salvaged208" -ge 1 ] \
+    || red "expected the stale unclaimed brief salvaged to $SALVAGE208/inbox/, found: $(ls "$SALVAGE208/inbox" 2>&1)"
+[ -f "$SALVAGE208/processing/stale-claimed.md" ] \
+    || red "expected the stale claimed brief salvaged to $SALVAGE208/processing/stale-claimed.md"
+grep -q 'worker.dead_pane_reclaimed.*issue=208.*stale_briefs_salvaged=2.*reclaim=no_window' "$PROJECT_DIR/.swarm/events.log" \
+    || red "expected stale_briefs_salvaged=2 reclaim=no_window in the event, got: $(grep 'issue=208' "$PROJECT_DIR/.swarm/events.log")"
+grep -qE 'kill-window .*iss-208' "$TEST_DIR/tmux.log" \
+    && red "a window that was never listed must never be killed; tmux.log: $(cat "$TEST_DIR/tmux.log")"
+green "a window removed outright (never listed) salvages both the unclaimed inbox/ brief and the abandoned processing/ brief before writing a fresh one"
+git -C "$PROJECT_DIR" worktree remove --force "$WT208" 2>/dev/null || rm -rf "$WT208"
+
 # ────────────────────────── coordinator-watch.sh ──────────────────────────
 
 heading "Test 4: coordinator-watch.sh detects new outcome JSON (DRY_RUN, ONCE)"
