@@ -165,6 +165,19 @@ case "$1 $2" in
     "api repos/{owner}/{repo}/actions/workflows")
         echo "${GH_WORKFLOW_COUNT:-1}"
         exit 0 ;;
+    "run list")
+        # issue #596: ci-wait.sh's Gate 2 now cross-checks every green `gh pr
+        # checks` reading against `gh run list --commit` before trusting it
+        # (ci_fallback_run_state) — default to a single completed/success run
+        # so the existing GH_CHECKS_RC=0 fixtures here still resolve to a
+        # pass instead of pending forever. (Built via a plain variable, not
+        # a `${VAR:-default}` default containing a brace: bash's parameter
+        # expansion treats the first unescaped `}` in the default as the
+        # expansion's own terminator, truncating embedded JSON.)
+        runlist_json="${GH_RUNLIST_JSON:-}"
+        [ -n "$runlist_json" ] || runlist_json='[{"status":"completed","conclusion":"success"}]'
+        echo "$runlist_json"
+        exit "${GH_RUNLIST_RC:-0}" ;;
     "pr merge") exit 0 ;;
     "pr list")
         cat "$GH_PR_LIST"; exit 0 ;;

@@ -37,6 +37,41 @@
 #            used --repo and hit "line 67: repo: unbound variable" because
 #            the flag didn't exist yet).
 #
+# issue #596: a job whose `if:`/`needs:` makes it conditional on an earlier
+# job in the SAME workflow run (e.g. a "detect changes" job gating a
+# downstream "Integration" job) can take real wall-clock MINUTES — not
+# seconds — to even become eligible to run, if the runner it needs is busy
+# (corpusminder-spring's self-hosted runner serves five repos). A poll that
+# lands anywhere in that window sees only the already-finished, already-
+# green jobs — "all CURRENTLY KNOWN checks are green" is indistinguishable
+# from "every check that will ever exist for this commit is green" from a
+# single `gh pr checks` snapshot. corpusminder-spring PR #1126 (run
+# 37944084110) is exactly this race: Fast finished 14:27:50, `--auto-low`
+# merged at 14:32:02 with only Fast's check visible, Detect didn't even
+# START until 14:39:16, and Integration (which `needs: [detect]`) ran
+# 14:43:14-14:53:54 and failed. A time-based "wait N seconds and then trust
+# it" guard was considered and rejected: the real gap here was over 11
+# minutes, so any fixed settle short enough to not slow down every ordinary
+# merge would have been too short to have caught this actual incident.
+#
+# What actually distinguishes "really done" from "looks done so far" is the
+# workflow RUN's own top-level status, which GitHub does not flip to
+# "completed" until every job in that run's DAG — however many there turn
+# out to be, however late a conditional one registers — has reached a
+# terminal state. That signal is already computed by
+# ci_fallback_run_state() (the same helper this script already uses when
+# `gh pr checks` is unreadable at all) from `gh run list --commit`, which
+# needs only Actions:read — permission this script already requires for
+# its fallback path, so cross-checking with it costs nothing new. So a
+# `gh pr checks` exit 0 is now a candidate, not a verdict: it's confirmed
+# against ci_fallback_run_state before ci-wait.sh will actually exit 0, and
+# an unconfirmed (still-running, or uncheckable) run is treated as pending,
+# same as any other in-progress check — it keeps polling, and times out
+# (refuses) rather than merging on it. At 14:32:02 in the real incident,
+# `gh run list` for this commit shows exactly this: one run, status
+# "in_progress" (it stayed that way until 14:53:55) — the cross-check
+# would have kept Gate 2 waiting right through it.
+#
 # Env:
 #   CI_WAIT_TIMEOUT_SECONDS   default deadline if no arg given (default 900)
 #   CI_WAIT_POLL_SECONDS      poll interval (default 15)
@@ -146,6 +181,9 @@ DEADLINE=$(( $(date -u +%s) + TIMEOUT ))
 WORKFLOW_COUNT=""   # lazily resolved at most once, only if "no checks" is ever seen
 FALLBACK=0          # set once "gh pr checks" proves unreadable by this token
 while true; do
+    PASS_NOW=0
+    PASS_MSG=""
+
     if [ "$FALLBACK" != "1" ]; then
         set +e
         CHECKS_OUT="$(gh pr checks "$PR" "${REPO_ARGS[@]}" 2>&1)"
@@ -170,7 +208,7 @@ while true; do
             exit 4
         fi
         case "$CI_FALLBACK_STATE" in
-            pass) echo "ci-wait: PR #$PR checks green (via Actions-runs fallback)."; exit 0 ;;
+            pass) PASS_NOW=1; PASS_MSG="PR #$PR checks green (via Actions-runs fallback)." ;;
             fail)
                 echo "ci-wait: PR #$PR has failing checks (via Actions-runs fallback):" >&2
                 echo "$CI_FALLBACK_DETAIL" >&2
@@ -179,7 +217,30 @@ while true; do
         esac
     else
         case "$CHECKS_RC" in
-            0) echo "ci-wait: PR #$PR checks green."; exit 0 ;;
+            0)
+                # issue #596: don't trust "every check gh pr checks currently
+                # knows about is green" as "this commit's CI is really done" —
+                # cross-check against the run-level signal (ci_fallback_run_state,
+                # the same helper used on the fallback path below), which GitHub
+                # only reports non-pending once every job in the run's DAG has
+                # reached a terminal state, however late a conditional one
+                # registers.
+                if ci_fallback_run_state "$SHA" "${REPO_ARGS[@]}"; then
+                    case "$CI_FALLBACK_STATE" in
+                        pass) PASS_NOW=1; PASS_MSG="PR #$PR checks green." ;;
+                        pending)
+                            echo "ci-wait: gh pr checks shows every currently-known check on PR #$PR green, but the workflow run itself is still in progress (a later job — e.g. one gated on an earlier job's output — hasn't registered its check yet). Treating as pending." >&2
+                            ;;
+                        fail)
+                            echo "ci-wait: PR #$PR's workflow run concluded with a failure gh pr checks' per-check view hadn't caught up to (via Actions-runs cross-check):" >&2
+                            echo "$CI_FALLBACK_DETAIL" >&2
+                            exit 1
+                            ;;
+                    esac
+                else
+                    echo "ci-wait: gh pr checks shows PR #$PR green, but the run-level cross-check failed ($CI_FALLBACK_DETAIL) — not trusting a bare green reading without it. Treating as pending." >&2
+                fi
+                ;;
             1)
                 if grep -qi "no checks reported" <<<"$CHECKS_OUT"; then
                     if [ -z "$WORKFLOW_COUNT" ]; then
@@ -205,6 +266,11 @@ while true; do
             8) : ;; # pending — fall through to deadline/sleep below
             *) echo "ci-wait: gh pr checks $PR exited $CHECKS_RC:"; echo "$CHECKS_OUT" >&2; exit 4 ;;
         esac
+    fi
+
+    if [ "$PASS_NOW" = "1" ]; then
+        echo "ci-wait: $PASS_MSG"
+        exit 0
     fi
 
     NOW=$(date -u +%s)
