@@ -599,6 +599,8 @@ if [ "$WINDOW_EXISTS" -eq 1 ]; then
     # task is stale now. See scripts/_window-flags.sh.
     clear_window_flag "iss-$ISSUE" "📬" "new_brief_claimed task_id=$TASK_ID"
     clear_window_flag "iss-$ISSUE" "👀" "new_brief_claimed task_id=$TASK_ID"
+    clear_window_flag "iss-$ISSUE" "✅" "new_brief_claimed task_id=$TASK_ID"
+    clear_window_flag "iss-$ISSUE" "❌" "new_brief_claimed task_id=$TASK_ID"
 else
     # The window's shell inherits the tmux server env, not this process's,
     # so everything _load-env.sh applied from <project>/.swarm/.env must be
