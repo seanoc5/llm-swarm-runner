@@ -272,7 +272,10 @@ green "--auto-low never merges on a pending/timed-out CI wait"
 heading "Test 9: swarm-merge.sh --auto-low proceeds once authorship is clean and CI is green"
 # ============================================================================
 : > "$GH_LOG"
-if OUT=$(GH_CHECKS_RC=0 "$MERGE" 501 --auto-low 2>&1); then RC=0; else RC=$?; fi
+# CI_WAIT_SETTLE_SECONDS=0: issue #596's settle window (ci-wait.sh) is
+# exercised on its own in test-shape-ci-wait.sh; disabled here so this
+# gate-ordering test stays instant.
+if OUT=$(GH_CHECKS_RC=0 CI_WAIT_SETTLE_SECONDS=0 "$MERGE" 501 --auto-low 2>&1); then RC=0; else RC=$?; fi
 [ "$RC" -eq 0 ] || red "swarm-merge --auto-low should succeed once both gates pass (rc=$RC, output: $OUT)"
 echo "$OUT" | grep -qi "gate 0" || red "Gate 0 should still be reported as checked"
 echo "$OUT" | grep -qi "gate 2" || red "Gate 2 should still be reported as checked"

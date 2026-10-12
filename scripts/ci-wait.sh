@@ -37,9 +37,37 @@
 #            used --repo and hit "line 67: repo: unbound variable" because
 #            the flag didn't exist yet).
 #
+# issue #596: a job whose `if:`/`needs:` makes it conditional on an earlier
+# job in the SAME workflow run (e.g. a "detect changes" job gating a
+# downstream "Integration" job) can take real wall-clock seconds to
+# register as a check at all after its dependency finishes. A poll that
+# lands in that exact window sees only the already-finished, already-green
+# jobs — "all CURRENTLY KNOWN checks are green" is indistinguishable from
+# "every check that will ever exist for this commit is green" from a single
+# snapshot. corpusminder-spring PR #1126 (run 37944084110: Fast + Detect
+# finished, then `--auto-low` merged while the `needs: [detect]`-gated
+# Integration (Testcontainers) job — already running since 14:25 — was
+# still in_progress at the 14:32 merge) is exactly this race, not a
+# genuine "no CI configured" case (ci_fallback / "no checks reported"
+# above already handle that one).
+#
+# So a "pass" reading (gh pr checks exit 0, or the Actions-runs fallback's
+# "pass") is no longer trusted on sight. It starts a settle timer instead;
+# only once that reading has held — unbroken, same bounded poll — for
+# CI_WAIT_SETTLE_SECONDS does ci-wait.sh actually exit 0. Any poll in
+# between that is NOT a pass (a late check shows up and isn't done yet —
+# bucket flips to pending, same as any other in-progress check) resets the
+# timer, same as if settling had never started: the settle window only ever
+# delays a pass, it never turns a real pending/fail into anything else.
+#
 # Env:
 #   CI_WAIT_TIMEOUT_SECONDS   default deadline if no arg given (default 900)
 #   CI_WAIT_POLL_SECONDS      poll interval (default 15)
+#   CI_WAIT_SETTLE_SECONDS    how long an all-green reading must hold,
+#                             unbroken, before it's trusted (default 30 —
+#                             roughly two default polls). 0 restores the
+#                             old "trust the first green reading" behaviour
+#                             (what the shape tests use, for speed).
 #
 # Exit codes:
 #   0  all required checks passing
@@ -110,6 +138,7 @@ done
 [ -n "$PR" ] || { echo "$USAGE" >&2; exit 4; }
 TIMEOUT="${TIMEOUT_ARG:-${CI_WAIT_TIMEOUT_SECONDS:-900}}"
 POLL="${CI_WAIT_POLL_SECONDS:-15}"
+SETTLE="${CI_WAIT_SETTLE_SECONDS:-30}"
 
 REPO_ARGS=()
 API_REPO_PATH="repos/{owner}/{repo}"
@@ -140,12 +169,17 @@ if [ "$MERGEABLE" = "CONFLICTING" ] || [ "$MERGE_STATE" = "DIRTY" ]; then
     exit 3
 fi
 
-echo "ci-wait: PR #$PR mergeable ($MERGE_STATE), watching checks on ${SHA:0:12} (deadline ${TIMEOUT}s, poll ${POLL}s)"
+echo "ci-wait: PR #$PR mergeable ($MERGE_STATE), watching checks on ${SHA:0:12} (deadline ${TIMEOUT}s, poll ${POLL}s, settle ${SETTLE}s)"
 
 DEADLINE=$(( $(date -u +%s) + TIMEOUT ))
 WORKFLOW_COUNT=""   # lazily resolved at most once, only if "no checks" is ever seen
 FALLBACK=0          # set once "gh pr checks" proves unreadable by this token
+PASS_FIRST_SEEN=0   # epoch when the current unbroken "all known checks are
+                     # green" streak began; 0 means no streak in progress.
 while true; do
+    PASS_NOW=0   # this poll's own reading, before the settle gate below
+    PASS_MSG=""
+
     if [ "$FALLBACK" != "1" ]; then
         set +e
         CHECKS_OUT="$(gh pr checks "$PR" "${REPO_ARGS[@]}" 2>&1)"
@@ -170,7 +204,7 @@ while true; do
             exit 4
         fi
         case "$CI_FALLBACK_STATE" in
-            pass) echo "ci-wait: PR #$PR checks green (via Actions-runs fallback)."; exit 0 ;;
+            pass) PASS_NOW=1; PASS_MSG="PR #$PR checks green (via Actions-runs fallback)." ;;
             fail)
                 echo "ci-wait: PR #$PR has failing checks (via Actions-runs fallback):" >&2
                 echo "$CI_FALLBACK_DETAIL" >&2
@@ -179,7 +213,7 @@ while true; do
         esac
     else
         case "$CHECKS_RC" in
-            0) echo "ci-wait: PR #$PR checks green."; exit 0 ;;
+            0) PASS_NOW=1; PASS_MSG="PR #$PR checks green." ;;
             1)
                 if grep -qi "no checks reported" <<<"$CHECKS_OUT"; then
                     if [ -z "$WORKFLOW_COUNT" ]; then
@@ -205,6 +239,22 @@ while true; do
             8) : ;; # pending — fall through to deadline/sleep below
             *) echo "ci-wait: gh pr checks $PR exited $CHECKS_RC:"; echo "$CHECKS_OUT" >&2; exit 4 ;;
         esac
+    fi
+
+    if [ "$PASS_NOW" = "1" ]; then
+        NOW=$(date -u +%s)
+        [ "$PASS_FIRST_SEEN" != "0" ] || PASS_FIRST_SEEN=$NOW
+        ELAPSED=$(( NOW - PASS_FIRST_SEEN ))
+        if [ "$ELAPSED" -ge "$SETTLE" ]; then
+            echo "ci-wait: $PASS_MSG"
+            exit 0
+        fi
+        echo "ci-wait: all currently known checks on PR #$PR are green, but settling (green for ${ELAPSED}s of ${SETTLE}s needed) before trusting it — a check gated on an earlier job in the same run can still be about to register." >&2
+    else
+        # Any non-pass reading (pending, including a check that only just
+        # registered) breaks the streak — the next green reading starts a
+        # fresh settle window, same as if this were the first one.
+        PASS_FIRST_SEEN=0
     fi
 
     NOW=$(date -u +%s)
