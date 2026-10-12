@@ -394,7 +394,11 @@ precedence; default 3, 0 = disabled). `pr-ready.sh` counts prior
 `SWARM_SELF_REVIEW` marker comments and refuses another round past the
 cap. Past the cap, fold remaining findings into `## Follow-up
 suggestions` instead of more commits (issue #473: a fand-etl PR ran ~15
-rounds over 2h15m for 23 mostly-wording commits, shrinking returns).
+rounds over 2h15m for 23 mostly-wording commits, shrinking returns). The
+count only includes your own rounds — a coordinator- or operator-run
+independent review (`self-review-pr.sh --actor coordinator|operator`,
+issue #601) posts its own marker but never eats into your budget; its
+verdict still gates readying like any other BLOCK, though.
 
 **CI-green gate:** `pr-ready.sh` snapshots `gh pr checks` right before
 readying and refuses unless green (no CI configured passes with a

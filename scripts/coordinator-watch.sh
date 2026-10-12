@@ -2032,6 +2032,8 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     WORKER_DELIVER_BACKOFF_SECS             600     cooldown for a window after a failed delivery attempt
     WORKER_DELIVER_MAX_FAILURES             3       consecutive failures before giving up on a window entirely
     WORKER_DELIVER_COMPOSER_STALL_THRESHOLD 20      (issue #436) composer_not_clear skips racked up against the same pending brief (not reset by an interleaved skip for a different reason) before a loud, once-only escalation; see header comment
+    WORKER_DELIVER_SHELL_STALL_THRESHOLD    20      (issue #559) same shape as composer_not_clear's threshold above, for a window parked "shell" instead of "cli"; see header comment
+    WORKER_DELIVER_TERMINAL_STALL_THRESHOLD 20      (issue #601) same shape again, for reason=task_not_terminal — a worker_current_task_terminal() refusal that never self-heals or escalates on its own otherwise; see header comment
     COMPACT_QUEUED_MARKER_PATTERN     (auto)  queued-input marker checked when retracting a stuck phase=start injection; see header comment
     COMPACT_RETRACT_BACKSPACES        12      Backspace keystrokes sent alongside the retraction Escape (coord + worker, shared; issue #265/#290)
     COMPACT_SUBMIT_SETTLE_SECS        1       settle delay around the injection-submit Enter (coord + worker, shared; issue #290); see header comment
@@ -2389,6 +2391,18 @@ EVENTS LOG
                            the shell's own input line is empty) — this WARNING plus its durable
                            coord_inbox_write is the entire fix: a human who attaches and presses
                            Enter (or runs anything) lets issue #43's self-heal finish the job.
+      worker.deliver.terminal_stalled  (issue #601) same shape as worker.deliver.composer_stalled
+                           above, for reason=task_not_terminal: WORKER_DELIVER_TERMINAL_STALL_
+                           THRESHOLD sweeps have found the SAME brief still pending while
+                           worker_current_task_terminal() keeps refusing (issue, brief=<inbox
+                           filename>, skips=N). Unlike composer_not_clear, this reason can mean
+                           either a genuinely `blocked` worker awaiting a human answer, or
+                           worker_current_task_terminal() failing to recognize a completion it
+                           should (the #370/#601 status-file-mismatch/brief-less-task fallbacks)
+                           — this WARNING plus its durable coord_inbox_write surfaces either case
+                           instead of letting the skip lines age silently (the corpusminder-spring
+                           iss-1175 incident this closes: ~5.5h, task_not_terminal every sweep,
+                           nothing escalating).
       worker.listener.selfheal  (issue #506) worker-listener.sh's own ordinary self-heal
                            path claimed a queued v2 brief on its own — an idle listener, or
                            one draining several queued briefs back-to-back — and is about
@@ -2729,6 +2743,16 @@ WORKER_DELIVER_COMPOSER_STALL_THRESHOLD="${WORKER_DELIVER_COMPOSER_STALL_THRESHO
 # coord-inbox stall item. At the shared WORKER_COMPACT_SCAN_SECS cadence
 # (default 30s) the default below bounds the stall to ~10 minutes.
 WORKER_DELIVER_SHELL_STALL_THRESHOLD="${WORKER_DELIVER_SHELL_STALL_THRESHOLD:-20}"
+# issue #601 — reason=task_not_terminal is the one worker.deliver.skip
+# reason that, like composer_not_clear and shell above, never touches
+# WORKER_DELIVER_BACKOFF_SECS/MAX_FAILURES (no /quit is ever attempted) and
+# so never escalates on its own: the corpusminder-spring iss-1175 stall ran
+# every WORKER_COMPACT_SCAN_SECS sweep for ~5.5h with nothing surfacing it.
+# Same shape as the two STALL_THRESHOLDs above: this many consecutive
+# sweeps with the SAME brief still pending and worker_current_task_terminal()
+# still refusing before worker_deliver_record_terminal_stall logs one
+# worker.deliver.terminal_stalled and writes a coord-inbox stall item.
+WORKER_DELIVER_TERMINAL_STALL_THRESHOLD="${WORKER_DELIVER_TERMINAL_STALL_THRESHOLD:-20}"
 # issue #265 — shared between the coordinator and per-window retraction
 # paths; see this file's COMPACT_QUEUED_MARKER_PATTERN header comment above.
 COMPACT_QUEUED_MARKER_PATTERN="${COMPACT_QUEUED_MARKER_PATTERN:-Press up to edit queued messages}"
@@ -7494,9 +7518,27 @@ worker_current_task_terminal() {
         # existence is checked instead, which needs no such fallback since
         # (unlike a still-in-progress processing/ entry) task-done.sh only
         # ever writes one once the worker has actually declared done.
+        #
+        # issue #601: task-done.sh's own --force path (a brief-less
+        # declaration — a no-PR ruling/research task, issue #466, or a v1
+        # legacy task) writes done/<task_id>.{ok,err}.json WITHOUT ever
+        # moving a done/<task_id>.md into place (there was nothing in
+        # processing/ to mv — see task-done.sh's own "Move the claimed
+        # brief" comment). Scanning *.md only meant a window whose most
+        # recently archived task was brief-less had NOTHING for this loop
+        # to find: proc_file stayed empty, and this branch fell straight
+        # through to "return 1" FOREVER — task_not_terminal never
+        # self-healing, exactly the corpusminder-spring iss-1175 stall
+        # (#601) where worker_task_done() had already called the same
+        # window done via its own first loop below, which checks done/
+        # *.ok.json/*.err.json EXISTENCE directly with no task_id
+        # correlation at all. Scanning the ok/err records alongside *.md
+        # for the newest ctime closes that gap: task-done.sh always writes
+        # one of the two regardless of whether a brief existed to move, so
+        # the task_id it ran under is always discoverable here too.
         local done_dir="$wt_dir/.swarm/tasks/done" f fctime best_ctime=-1
         shopt -s nullglob
-        for f in "$done_dir"/*.md; do
+        for f in "$done_dir"/*.md "$done_dir"/*.ok.json "$done_dir"/*.err.json; do
             fctime="$(ctime_epoch "$f")"
             [ -n "$fctime" ] || continue
             if [ "$fctime" -gt "$best_ctime" ]; then
@@ -7506,7 +7548,11 @@ worker_current_task_terminal() {
         done
         shopt -u nullglob
         [ -n "$proc_file" ] || return 1
-        task_id="$(basename "$proc_file" .md)"
+        case "$proc_file" in
+            *.ok.json)  task_id="$(basename "$proc_file" .ok.json)" ;;
+            *.err.json) task_id="$(basename "$proc_file" .err.json)" ;;
+            *)          task_id="$(basename "$proc_file" .md)" ;;
+        esac
         status_file="$wt_dir/.swarm/tasks/status/${task_id}.json"
         if [ -r "$status_file" ]; then
             state="$(jq -r '.state // empty' "$status_file" 2>/dev/null)" || return 1
@@ -7609,6 +7655,7 @@ worker_deliver_record_success() {
     local issue="$1"
     unset "WORKER_DELIVER_LAST_FAIL[$issue]" "WORKER_DELIVER_FAIL_COUNT[$issue]" "WORKER_DELIVER_GAVE_UP[$issue]" "WORKER_DELIVER_TIMED_OUT_BRIEF[$issue]"
     worker_deliver_composer_stall_clear "$issue"
+    worker_deliver_terminal_stall_clear "$issue"
 }
 
 # WORKER_DELIVER_COMPOSER_STALL_BRIEF / _COUNT / _ESCALATED (issue #436)
@@ -7732,6 +7779,60 @@ worker_deliver_record_shell_stall() {
     fi
 }
 
+# WORKER_DELIVER_TERMINAL_STALL_BRIEF / _COUNT / _ESCALATED (issue #601)
+#
+# Same shape as WORKER_DELIVER_COMPOSER_STALL_BRIEF/_COUNT/_ESCALATED above,
+# for reason=task_not_terminal: worker_current_task_terminal()'s own header
+# comment documents this as a fail-CLOSED gate that can legitimately stay
+# unresolved for a long time (a worker genuinely parked `blocked`, waiting
+# on a human answer) — unlike composer_not_clear/shell, a skip for this
+# reason never even calls worker_deliver_record_failure, so nothing else in
+# this file escalates it. The corpusminder-spring iss-1175 incident (#601)
+# ran task_not_terminal skips every WORKER_COMPACT_SCAN_SECS for ~5.5h with
+# no coord-inbox signal at all — this closes that the same way #436/#559
+# already closed their own reasons. In-memory only, reset on a watcher
+# restart, same contract as every other WORKER_DELIVER_* tracker.
+declare -A WORKER_DELIVER_TERMINAL_STALL_BRIEF=()
+declare -A WORKER_DELIVER_TERMINAL_STALL_COUNT=()
+declare -A WORKER_DELIVER_TERMINAL_STALL_ESCALATED=()
+
+# worker_deliver_terminal_stall_clear <issue>
+#
+# Same positive success-side cleanup as worker_deliver_composer_stall_clear
+# above, for the task_not_terminal tracker.
+worker_deliver_terminal_stall_clear() {
+    local issue="$1"
+    unset "WORKER_DELIVER_TERMINAL_STALL_BRIEF[$issue]" "WORKER_DELIVER_TERMINAL_STALL_COUNT[$issue]" "WORKER_DELIVER_TERMINAL_STALL_ESCALATED[$issue]"
+}
+
+# worker_deliver_record_terminal_stall <issue> <brief>
+#
+# Called on every worker.deliver.skip reason=task_not_terminal, right
+# alongside that log_event call. Same reset-on-new-brief, escalate-once-at-
+# threshold shape as worker_deliver_record_composer_stall — see that
+# function's header comment. Deliberately does NOT set WORKER_DELIVER_
+# GAVE_UP or otherwise stop retrying: a genuinely `blocked` worker can still
+# self-heal the moment a human answers it (or, per #601, a fixed
+# worker_current_task_terminal() can start recognizing a completion it
+# previously missed), so there's nothing to give up on, only something to
+# escalate.
+worker_deliver_record_terminal_stall() {
+    local issue="$1" brief="$2" count
+    if [ "${WORKER_DELIVER_TERMINAL_STALL_BRIEF[$issue]:-}" != "$brief" ]; then
+        WORKER_DELIVER_TERMINAL_STALL_BRIEF[$issue]="$brief"
+        WORKER_DELIVER_TERMINAL_STALL_COUNT[$issue]=0
+        unset "WORKER_DELIVER_TERMINAL_STALL_ESCALATED[$issue]"
+    fi
+    count=$(( ${WORKER_DELIVER_TERMINAL_STALL_COUNT[$issue]:-0} + 1 ))
+    WORKER_DELIVER_TERMINAL_STALL_COUNT[$issue]=$count
+    if [ "$count" -ge "$WORKER_DELIVER_TERMINAL_STALL_THRESHOLD" ] && [ -z "${WORKER_DELIVER_TERMINAL_STALL_ESCALATED[$issue]:-}" ]; then
+        WORKER_DELIVER_TERMINAL_STALL_ESCALATED[$issue]=1
+        echo "[$(date +%T)] WARNING: worker iss-$issue has skipped brief delivery $count times (reason=task_not_terminal) for the same queued brief ($brief) — its current/most-recently-archived task has never confirmed a ready-for-review/done-no-pr status, which may mean it's genuinely blocked awaiting a human answer, or a status-file mismatch (worker_current_task_terminal's #370/#601 fallbacks); investigate with scripts/capture-worker.sh iss-$issue"
+        log_event worker.deliver.terminal_stalled "issue=$issue brief=$brief skips=$count"
+        coord_inbox_write deliver_stall "$(printf 'Worker iss-%s: brief delivery has skipped %s times (reason=task_not_terminal) for the queued brief %s.\n\nCheck: scripts/capture-worker.sh iss-%s\n\nThis usually means the windows current (or most recently archived) task never wrote a ready-for-review/done-no-pr status — either it is genuinely `blocked` awaiting your answer (attach and answer it directly, then requeue.sh the queued brief), or its status file is under a different name than worker_current_task_terminal() expects (see that functions #370/#601 header comments).\n' "$issue" "$count" "$brief" "$issue")" || true
+    fi
+}
+
 # WORKER_DELIVER_PENDING_SEEN (issue #437)
 #
 # Cross-sweep bookkeeping keyed by issue: the pending brief's basename last
@@ -7821,8 +7922,11 @@ worker_deliver_detect_claim() {
         # $prior is moot now that it's actually been claimed — clear it here
         # too (not just on worker_deliver_record_success's auto_deliver
         # path) so a listener_claim_after_quit resolution also drops a
-        # stale WORKER_DELIVER_COMPOSER_STALL_ESCALATED flag.
+        # stale WORKER_DELIVER_COMPOSER_STALL_ESCALATED flag. issue #601:
+        # same reasoning for the terminal-stall tracker — a human manually
+        # /quit-ing past a task_not_terminal stall still resolves it.
         worker_deliver_composer_stall_clear "$issue"
+        worker_deliver_terminal_stall_clear "$issue"
     fi
     WORKER_DELIVER_PENDING_SEEN[$issue]="$current"
 }
@@ -7882,8 +7986,10 @@ maybe_worker_deliver_brief() {
     # deliver an answer as a continuing turn instead of ending the session.
     if ! worker_current_task_terminal "$wt_dir"; then
         log_event worker.deliver.skip "issue=$issue reason=task_not_terminal"
+        worker_deliver_record_terminal_stall "$issue" "$brief_before"
         return 0
     fi
+    worker_deliver_terminal_stall_clear "$issue"
 
     if [ "${WORKER_DELIVER_GAVE_UP[$issue]:-0}" = "1" ]; then
         return 0   # already logged the one worker.deliver.giving_up warning

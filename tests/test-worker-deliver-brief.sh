@@ -50,7 +50,8 @@ for fn in worker_pane_state worker_pane_busy worker_pane_ctx_used worker_pending
           compact_confirm_submitted compact_retract_queued worker_deliver_record_failure \
           worker_deliver_record_success worker_deliver_detect_claim maybe_worker_deliver_brief log_event \
           is_own_worktree_dir own_wt_dir_for_issue worker_deliver_composer_stall_clear \
-          worker_deliver_record_composer_stall worker_deliver_record_shell_stall coord_inbox_write; do
+          worker_deliver_record_composer_stall worker_deliver_record_shell_stall coord_inbox_write \
+          worker_deliver_terminal_stall_clear worker_deliver_record_terminal_stall; do
     body="$(extract_fn "$fn")"
     [ -n "$body" ] || red "could not extract function '$fn' from $WATCH — has it been renamed?"
     eval "$body"
@@ -70,6 +71,7 @@ WORKER_DELIVER_BACKOFF_SECS=600
 WORKER_DELIVER_MAX_FAILURES=3
 WORKER_DELIVER_COMPOSER_STALL_THRESHOLD=20
 WORKER_DELIVER_SHELL_STALL_THRESHOLD=20
+WORKER_DELIVER_TERMINAL_STALL_THRESHOLD=20
 COMPACT_QUEUED_MARKER_PATTERN='Press up to edit queued messages'
 COMPACT_RETRACT_BACKSPACES=3
 COMPACT_SUBMIT_SETTLE_SECS=0
@@ -89,6 +91,9 @@ declare -A WORKER_DELIVER_COMPOSER_STALL_ESCALATED=()
 declare -A WORKER_DELIVER_SHELL_STALL_BRIEF=()
 declare -A WORKER_DELIVER_SHELL_STALL_COUNT=()
 declare -A WORKER_DELIVER_SHELL_STALL_ESCALATED=()
+declare -A WORKER_DELIVER_TERMINAL_STALL_BRIEF=()
+declare -A WORKER_DELIVER_TERMINAL_STALL_COUNT=()
+declare -A WORKER_DELIVER_TERMINAL_STALL_ESCALATED=()
 # coord_inbox_write (issue #430) is exercised by worker_deliver_record_
 # composer_stall's escalation path (Test 10 below) — same fixture
 # convention as test-watcher-activity-poll.sh's copy of these two vars.
@@ -977,6 +982,52 @@ check "no re-escalation on the first sweep against a new brief" "1" "$(grep -cF 
 rm -f "$INBOX_DIR"/*.md "$NEW_BRIEF"
 unset 'WORKER_DELIVER_SHELL_STALL_BRIEF[42]' 'WORKER_DELIVER_SHELL_STALL_COUNT[42]' 'WORKER_DELIVER_SHELL_STALL_ESCALATED[42]'
 WORKER_DELIVER_SHELL_STALL_THRESHOLD=20
+
+heading "Test 13: task_not_terminal stall escalation (issue #601) — a brief stuck behind a current task that never confirms terminal escalates after N sweeps"
+unset 'WORKER_DELIVER_TERMINAL_STALL_BRIEF[42]' 'WORKER_DELIVER_TERMINAL_STALL_COUNT[42]' 'WORKER_DELIVER_TERMINAL_STALL_ESCALATED[42]'
+rm -rf "$COORD_INBOX_DIR"; mkdir -p "$COORD_INBOX_DIR"
+rm -f "$INBOX_DIR"/*.md "$PROCESSING_DIR"/*.md "$STATUS_DIR"/*.json
+
+# Same idle, empty-composer pane as Test 3's final case — the ONLY reason
+# delivery should be skipped here is the current task never confirming
+# terminal (the iss-1175 stall: worker_task_done() thought it was done,
+# worker_current_task_terminal() never agreed, and nothing else escalated).
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.2
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'sonnet · wt-issue-42 · ctx: 20k/1M (2%)'; printf '❯ \n'; sleep 300" Enter
+check_eventually "idle, empty-composer pane -> cli" "cli" "worker_pane_state '$WIN'"
+
+STALL_BRIEF="$INBOX_DIR/20261012-000000-42.md"
+echo "a follow-up brief queued behind a current task stuck non-terminal" > "$STALL_BRIEF"
+set_current_task "t1" "blocked"
+
+WORKER_DELIVER_TERMINAL_STALL_THRESHOLD=3
+: > "$EVENTS_LOG"
+for i in 1 2 3; do maybe_worker_deliver_brief "$WIN"; done
+check "3 consecutive task_not_terminal skips logged" "3" "$(grep -cF 'worker.deliver.skip issue=42 reason=task_not_terminal' "$EVENTS_LOG")"
+check "escalation logged exactly once, with skips=3" "1" "$(grep -cF 'worker.deliver.terminal_stalled' "$EVENTS_LOG")"
+if grep -qF "issue=42 brief=$(basename "$STALL_BRIEF") skips=3" "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "escalation event names the stuck issue, brief, and skip count" "logged" "$got"
+check "escalation durably written to the coordinator inbox (issue #430)" "1" "$(find "$COORD_INBOX_DIR" -maxdepth 1 -name '*.md' -type f | wc -l | tr -d '[:space:]')"
+rc=0; worker_pending_brief "$WT_DIR" || rc=$?
+check "the brief is still sitting untouched in inbox/ (escalation only, never a blind keystroke)" "0" "$rc"
+
+# A 4th consecutive sweep against the SAME brief must not re-escalate.
+maybe_worker_deliver_brief "$WIN"
+check "4th consecutive sweep -> escalation still logged only once (not every sweep)" "1" "$(grep -cF 'worker.deliver.terminal_stalled' "$EVENTS_LOG")"
+
+# The current task finally confirming terminal (status flips to
+# ready-for-review) clears the streak and lets delivery proceed, rather than
+# leaving a stale ESCALATED flag behind for whatever brief lands here next.
+set_current_task "t1" "ready-for-review"
+maybe_worker_deliver_brief "$WIN"
+check "task confirms terminal -> terminal-stall bookkeeping clears itself" "" "${WORKER_DELIVER_TERMINAL_STALL_COUNT[42]:-}"
+if grep -q 'worker.deliver.attempt' "$EVENTS_LOG"; then got=attempted; else got=notattempted; fi
+check "once terminal, delivery is attempted on the very next sweep (issue #601: no self-heal gap once confirmed)" "attempted" "$got"
+
+rm -f "$INBOX_DIR"/*.md "$STALL_BRIEF"
+unset 'WORKER_DELIVER_TERMINAL_STALL_BRIEF[42]' 'WORKER_DELIVER_TERMINAL_STALL_COUNT[42]' 'WORKER_DELIVER_TERMINAL_STALL_ESCALATED[42]'
+WORKER_DELIVER_TERMINAL_STALL_THRESHOLD=20
 
 echo
 green "All $PASS checks passed."

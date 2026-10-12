@@ -58,7 +58,20 @@ cat > "$SHIM_DIR/gh" <<EOF
 echo "\$*" >> "$GH_LOG"
 if [ "\$1" = "pr" ] && [ "\$2" = "view" ]; then
     if printf '%s\n' "\$*" | grep -q -- '--json comments'; then
-        if printf '%s\n' "\$*" | grep -q -- 'capture('; then
+        if [ -n "\${GH_COMMENTS_JSON:-}" ]; then
+            # issue #601: run pr-ready.sh's REAL --jq expression (the arg
+            # right after --jq) against a real comments fixture, instead of
+            # the canned GH_ROUNDS_DONE/GH_LATEST_VERDICT stand-ins below —
+            # proves the actual actor-exclusion filter, not just pr-ready.sh's
+            # downstream decision logic given an already-computed count.
+            JQ_EXPR=""
+            prev=""
+            for arg in "\$@"; do
+                [ "\$prev" = "--jq" ] && JQ_EXPR="\$arg"
+                prev="\$arg"
+            done
+            printf '%s' "\$GH_COMMENTS_JSON" | jq -r "\$JQ_EXPR"
+        elif printf '%s\n' "\$*" | grep -q -- 'capture('; then
             echo "\${GH_LATEST_VERDICT:-}"
         else
             echo "\${GH_ROUNDS_DONE:-0}"
@@ -121,6 +134,7 @@ run_pr_ready() {
     PATH="$SHIM_DIR:$PATH" SELF_REVIEW_SCRIPT="$FAKE_REVIEW" WORKER_SELF_REVIEW="${WORKER_SELF_REVIEW:-1}" \
         WORKER_SELF_REVIEW_MAX_ROUNDS="${WORKER_SELF_REVIEW_MAX_ROUNDS:-3}" \
         GH_ROUNDS_DONE="${GH_ROUNDS_DONE:-0}" GH_LATEST_VERDICT="${GH_LATEST_VERDICT:-}" \
+        GH_COMMENTS_JSON="${GH_COMMENTS_JSON:-}" \
         GH_CHECKS_RC="${GH_CHECKS_RC:-0}" GH_CHECKS_STDERR="${GH_CHECKS_STDERR:-}" \
         GH_WORKFLOW_COUNT="${GH_WORKFLOW_COUNT:-0}" \
         GH_SHA="${GH_SHA:-deadbeef}" GH_SHA_LOOKUP_FAILS="${GH_SHA_LOOKUP_FAILS:-0}" \
@@ -419,6 +433,59 @@ PR_READY_FLAGS=
 [ "$rc" -eq 1 ] || red "expected exit 1 for an unknown flag, got $rc"
 gh_ready_called && red "expected gh pr ready NOT to run on an unknown flag"
 green "-y leaves a cap of 0 alone; unknown flags exit 1 before touching the PR"
+
+# ============================================================================
+heading "Test 19e: coordinator-tagged rounds do not inflate the worker's round count (issue #601)"
+# ============================================================================
+# Real comments fixture (GH_COMMENTS_JSON), not the canned GH_ROUNDS_DONE
+# stand-in: exercises pr-ready.sh's ACTUAL jq filter end to end. 3 worker
+# rounds + 1 coordinator round, cap=3: ROUNDS_DONE must come out to 3 (the
+# coordinator comment excluded), reaching the cap on the worker's own rounds
+# alone — not 4, which would also reach it and mask the bug.
+printf '<!-- BLIND_MERGE_RISK: medium -->\nsome change\n' > "$BODY_FILE"
+make_fake_review 0
+GH_COMMENTS_JSON='{"comments":[
+  {"body":"<!-- SWARM_SELF_REVIEW: APPROVE actor=worker -->\nreview text"},
+  {"body":"<!-- SWARM_SELF_REVIEW: BLOCK actor=worker -->\nreview text"},
+  {"body":"<!-- SWARM_SELF_REVIEW: APPROVE actor=worker -->\nreview text"},
+  {"body":"<!-- SWARM_SELF_REVIEW: APPROVE actor=coordinator -->\nreview text"}
+]}'
+WORKER_SELF_REVIEW_MAX_ROUNDS=3
+rc=0; run_pr_ready || rc=$?
+GH_COMMENTS_JSON=
+WORKER_SELF_REVIEW_MAX_ROUNDS=3
+[ "$rc" -eq 0 ] || red "expected exit 0 (capped on APPROVE, no BLOCK anywhere) got $rc: $(cat "$TEST_DIR/out.log")"
+[ ! -s "$FAKE_REVIEW_LOG" ] || red "expected self-review-pr.sh NOT invoked once the WORKER's 3 rounds reach the cap, log: $(cat "$FAKE_REVIEW_LOG")"
+grep -q '3/3 rounds' "$TEST_DIR/out.log" || red "expected '3/3 rounds' (coordinator comment excluded from the count) in output: $(cat "$TEST_DIR/out.log")"
+gh_ready_called || red "expected gh pr ready to run once capped with APPROVE as the latest verdict"
+green "3 worker rounds + 1 coordinator round hits the cap at 3/3, not 4/3 — coordinator comment excluded from the count"
+
+# ============================================================================
+heading "Test 19f: a coordinator-tagged BLOCK still refuses readying even though it is excluded from the worker's round count (issue #601)"
+# ============================================================================
+# Same 3 worker rounds (hits the cap on its own), but the actual latest
+# comment overall is a coordinator BLOCK. ROUNDS_DONE excludes it (still
+# 3/3, same as 19e) yet the LATEST_VERDICT check — deliberately NOT
+# actor-scoped — must still see it and refuse. Proves the two queries are
+# independently correct: one actor-filtered (the cost/time budget), one not
+# (the correctness/safety gate).
+printf '<!-- BLIND_MERGE_RISK: medium -->\nsome change\n' > "$BODY_FILE"
+make_fake_review 0
+GH_COMMENTS_JSON='{"comments":[
+  {"body":"<!-- SWARM_SELF_REVIEW: APPROVE actor=worker -->\nreview text"},
+  {"body":"<!-- SWARM_SELF_REVIEW: BLOCK actor=worker -->\nreview text"},
+  {"body":"<!-- SWARM_SELF_REVIEW: APPROVE actor=worker -->\nreview text"},
+  {"body":"<!-- SWARM_SELF_REVIEW: BLOCK actor=coordinator -->\nreview text"}
+]}'
+WORKER_SELF_REVIEW_MAX_ROUNDS=3
+rc=0; run_pr_ready || rc=$?
+GH_COMMENTS_JSON=
+WORKER_SELF_REVIEW_MAX_ROUNDS=3
+[ "$rc" -eq 2 ] || red "expected exit 2 (coordinator BLOCK still refuses) got $rc: $(cat "$TEST_DIR/out.log")"
+[ ! -s "$FAKE_REVIEW_LOG" ] || red "expected self-review-pr.sh NOT invoked, log: $(cat "$FAKE_REVIEW_LOG")"
+gh_ready_called && red "expected gh pr ready NOT to run when a coordinator-found BLOCK is the latest verdict"
+grep -qi 'BLOCK' "$TEST_DIR/out.log" || red "expected a BLOCK refusal message in output: $(cat "$TEST_DIR/out.log")"
+green "a coordinator BLOCK still refuses readying although it never counted toward the worker's own 3/3 round cap"
 
 # ============================================================================
 heading "Test 20: gh pr checks unreadable by a fine-grained token, Actions-runs fallback green — readies (issue #560)"
