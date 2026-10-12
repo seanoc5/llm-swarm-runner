@@ -619,8 +619,15 @@ fi
 # function's own comment) with this second call's own count (0), corrupting
 # the one EXIT-trap message that still needs the first call's real count.
 # --wake is exempt: its whole point is to resume the one brief already in
-# inbox/, so salvaging it would defeat the call.
-if [ "$WINDOW_WAS_LISTED" -eq 0 ] && [ "$WAKE" = "0" ]; then
+# inbox/, so salvaging it would defeat the call. A sidelined worktree (#622
+# marker file, window+container deliberately stopped to free its slot,
+# queue kept) is exempt too, --wake or not: self-review finding — a plain
+# (non-wake) re-provision of a sidelined issue is itself a supported path
+# (see this file's own "A live worker is not sidelined, however it got
+# here" comment below), and a human's requeue.sh answer sitting in inbox/
+# while sidelined is exactly the queued, not-yet-claimed brief this whole
+# feature exists to protect, not abandoned work from a dead session.
+if [ "$WINDOW_WAS_LISTED" -eq 0 ] && [ "$WAKE" = "0" ] && [ ! -e "$WT/.swarm/sidelined" ]; then
     salvage_stale_queue no_window inbox processing
 fi
 
