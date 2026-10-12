@@ -50,6 +50,7 @@ SHIM_DIR="$TEST_DIR/shims"
 mkdir -p "$SHIM_DIR"
 GH_LOG="$TEST_DIR/gh.log"
 BODY_FILE="$TEST_DIR/pr-body.txt"
+EDITED_BODY="$TEST_DIR/edited-body.txt"
 : > "$GH_LOG"
 
 cat > "$SHIM_DIR/gh" <<EOF
@@ -78,6 +79,10 @@ if [ "\$1" = "pr" ] && [ "\$2" = "checks" ]; then
     exit "\${GH_CHECKS_RC:-0}"
 fi
 if [ "\$1" = "pr" ] && [ "\$2" = "ready" ]; then
+    exit 0
+fi
+if [ "\$1" = "pr" ] && [ "\$2" = "edit" ]; then
+    cat > "$EDITED_BODY"
     exit 0
 fi
 if [ "\$1" = "run" ] && [ "\$2" = "list" ]; then
@@ -110,6 +115,7 @@ gh_ready_called() { grep -q 'pr ready' "$GH_LOG"; }
 
 run_pr_ready() {
     : > "$GH_LOG"
+    rm -f "$EDITED_BODY"
     : > "$FAKE_REVIEW_LOG"
     rc=0
     PATH="$SHIM_DIR:$PATH" SELF_REVIEW_SCRIPT="$FAKE_REVIEW" WORKER_SELF_REVIEW="${WORKER_SELF_REVIEW:-1}" \
@@ -511,5 +517,68 @@ GH_RUNLIST_JSON="[]"
 gh_ready_called && red "expected gh pr ready NOT to run on malformed fallback JSON (must fail closed)"
 grep -qi "can't read CI status" "$TEST_DIR/out.log" || red "expected a 'can't read CI status' message: $(cat "$TEST_DIR/out.log")"
 green "valid-JSON-but-non-array fallback output fails closed instead of readying"
+
+# ============================================================================
+# issue #602 (Tests 25-30): the SWARM_DRAFT_REASON banner.
+# ============================================================================
+banner() {  # banner <reason> <sha> — a body carrying an existing banner
+    printf '<!-- SWARM_DRAFT_REASON: %s sha=%s -->\n> ⏳ **Still a draft:** old text\n<!-- /SWARM_DRAFT_REASON -->\n<!-- BLIND_MERGE_RISK: medium -->\nsome change\n' "$1" "$2"
+}
+
+heading "Test 25: CI pending — refusal writes a ci-pending banner with the head SHA, body kept"
+printf '<!-- BLIND_MERGE_RISK: low -->\nsome change\n' > "$BODY_FILE"
+GH_CHECKS_RC=8
+rc=0; run_pr_ready || rc=$?
+GH_CHECKS_RC=0
+[ "$rc" -eq 4 ] || red "expected exit 4, got $rc: $(cat "$TEST_DIR/out.log")"
+[ -f "$EDITED_BODY" ] || red "expected the PR body to be edited with a banner"
+head -1 "$EDITED_BODY" | grep -qx '<!-- SWARM_DRAFT_REASON: ci-pending sha=deadbeef -->' || red "expected ci-pending banner first: $(cat "$EDITED_BODY")"
+grep -q 'Still a draft:.*CI was still running' "$EDITED_BODY" || red "expected plain-language reason: $(cat "$EDITED_BODY")"
+grep -q '^<!-- BLIND_MERGE_RISK: low -->$' "$EDITED_BODY" || red "expected original body kept: $(cat "$EDITED_BODY")"
+green "CI-pending refusal records why on the PR itself"
+
+heading "Test 26: self-review BLOCK — refusal writes a review-block banner"
+printf '<!-- BLIND_MERGE_RISK: medium -->\nsome change\n' > "$BODY_FILE"
+make_fake_review 2
+rc=0; run_pr_ready || rc=$?
+[ "$rc" -eq 2 ] || red "expected exit 2, got $rc"
+head -1 "$EDITED_BODY" | grep -qx '<!-- SWARM_DRAFT_REASON: review-block sha=deadbeef -->' || red "expected review-block banner: $(cat "$EDITED_BODY" 2>/dev/null)"
+green "BLOCK refusal records review-block"
+
+heading "Test 27: ci-pending banner on the current head + green CI — skips self-review, strips banner, readies"
+banner ci-pending deadbeef > "$BODY_FILE"
+make_fake_review 2  # would BLOCK if it ran
+rc=0; run_pr_ready || rc=$?
+[ "$rc" -eq 0 ] || red "expected exit 0, got $rc: $(cat "$TEST_DIR/out.log")"
+[ ! -s "$FAKE_REVIEW_LOG" ] || red "expected self-review skipped for an already-reviewed head"
+gh_ready_called || red "expected gh pr ready to run"
+grep -q 'SWARM_DRAFT_REASON\|Still a draft' "$EDITED_BODY" && red "expected banner stripped: $(cat "$EDITED_BODY")"
+grep -q '^<!-- BLIND_MERGE_RISK: medium -->$' "$EDITED_BODY" || red "expected rest of body kept: $(cat "$EDITED_BODY")"
+green "retry on the same commit spends no review round and cleans up the banner"
+
+heading "Test 28: ci-pending banner on an OLD sha — self-review runs again"
+banner ci-pending 0ddc0de > "$BODY_FILE"
+make_fake_review 0
+rc=0; run_pr_ready || rc=$?
+[ "$rc" -eq 0 ] || red "expected exit 0, got $rc: $(cat "$TEST_DIR/out.log")"
+grep -q '42 --post --force' "$FAKE_REVIEW_LOG" || red "expected self-review to run for a new head commit"
+green "a new push re-earns its review"
+
+heading "Test 29: review-block banner on the current head — self-review still runs"
+banner review-block deadbeef > "$BODY_FILE"
+make_fake_review 0
+rc=0; run_pr_ready || rc=$?
+[ "$rc" -eq 0 ] || red "expected exit 0, got $rc"
+grep -q '42 --post --force' "$FAKE_REVIEW_LOG" || red "expected self-review to run after a review-block"
+green "only ci-* banners skip review"
+
+heading "Test 30: same reason on the same sha — body left alone (no churn on sweep retries)"
+banner ci-pending deadbeef > "$BODY_FILE"
+GH_CHECKS_RC=8
+rc=0; run_pr_ready || rc=$?
+GH_CHECKS_RC=0
+[ "$rc" -eq 4 ] || red "expected exit 4, got $rc"
+[ ! -f "$EDITED_BODY" ] || red "expected no body edit for an unchanged reason: $(cat "$EDITED_BODY")"
+green "repeat refusal doesn't rewrite the body"
 
 green "ALL TESTS PASSED"
