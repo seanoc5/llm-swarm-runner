@@ -1110,38 +1110,56 @@ print_completion_block() {
     printf '[worker-run-ended exit=%s duration=%ss] [polling for next brief in %s/%s/ ...]\n' "$rc" "$duration" "$WT_LABEL" "$INBOX"
 }
 
-# ── Interactive idle shell (issue #43) ──────────────────────────────────────
+# ── Interactive idle shell (issue #43, #589) ────────────────────────────────
 # Between agent invocations, hand the pane to the operator as a normal bash
 # shell instead of blocking the pane on a silent `sleep 2` poll. Two pieces:
 #
 #   poll_for_brief  — background subshell; sleeps 2s at a time watching
 #                      inbox/ (same emptiness check claim_next_task uses) and
-#                      touches IDLE_SENTINEL the moment a brief shows up,
-#                      then exits. It never claims the task itself — that
-#                      stays claim_next_task's job once control returns here.
-#
-#   run_idle_shell  — starts poll_for_brief, then execs an interactive
-#                      `bash -i` whose PROMPT_COMMAND checks IDLE_SENTINEL
-#                      right before each new prompt is drawn. PROMPT_COMMAND
-#                      only runs between commands, so this can never fire
-#                      mid-keystroke or kill a command the operator has
-#                      running — the trade-off is that a genuinely idle,
-#                      untouched prompt won't pick up a brief until the
-#                      operator hits Enter again. Given the alternative is
-#                      forcibly killing whatever's running in the shell,
-#                      that trade-off is the right default (see issue #43's
-#                      "race handling" discussion for the other options
-#                      considered).
+#                      touches IDLE_SENTINEL the moment a brief shows up.
+#                      PROMPT_COMMAND (below) only runs when bash redraws a
+#                      prompt, i.e. after the operator hits Enter — nothing
+#                      redraws an UNTOUCHED prompt on its own, so issue #589
+#                      found a requeued brief could sit unclaimed forever in
+#                      that state. Once a brief is pending, this function
+#                      additionally watches whether the shell is genuinely
+#                      idle (no child process running under it — the same
+#                      "mid-command" guarantee issue #43 established, just
+#                      checked externally via pgrep -P instead of waiting for
+#                      a redraw) and, once it is, sends it SIGHUP to end it
+#                      itself. SIGHUP, not SIGTERM: an interactive bash with
+#                      no job control (true for this `bash -i`, piped from a
+#                      FIFO or a pty with no real job-control session)
+#                      ignores SIGTERM by design, but still reacts to SIGHUP
+#                      the way a dropped terminal connection would. It never
+#                      claims the task itself — that stays claim_next_task's
+#                      job once control returns to the main loop below.
+#                      Known trade-off: a line the operator has typed but not
+#                      yet submitted is invisible from outside the process
+#                      (no pty to inspect without a real tmux pane), so it
+#                      can be lost if a brief lands mid-keystroke — accepted
+#                      as the rare, non-destructive edge case; a foreground
+#                      command actually running is never interrupted.
 poll_for_brief() {
+    local shell_pid="$1"
     while true; do
         sleep 2
         [ -d "$INBOX" ] && [ -d "$PWD" ] || return 0
+        kill -0 "$shell_pid" 2>/dev/null || return 0
         local next
         next=$(find "$INBOX" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | head -1)
         if [ -n "$next" ]; then
             touch "$IDLE_SENTINEL" 2>/dev/null
+            break
+        fi
+    done
+
+    while kill -0 "$shell_pid" 2>/dev/null; do
+        if [ -z "$(pgrep -P "$shell_pid" 2>/dev/null)" ]; then
+            kill -HUP "$shell_pid" 2>/dev/null
             return 0
         fi
+        sleep 2
     done
 }
 
@@ -1202,8 +1220,6 @@ close_window_and_exit() {
 
 run_idle_shell() {
     rm -f "$IDLE_SENTINEL"
-    poll_for_brief &
-    local poll_pid=$!
 
     local rcfile
     rcfile=$(mktemp)
@@ -1267,7 +1283,20 @@ EOF
     echo ""
     echo "[$(date +%T)] Queue empty — dropping to interactive shell in $WT_LABEL/. Polling continues in the background."
     echo "               (a plain 'exit' respawns this shell — close the worker with Ctrl-D twice, Ctrl-C twice, or 'close-worker')"
-    bash --rcfile "$rcfile" -i
+    # Backgrounded (not run synchronously in the foreground) so poll_for_brief
+    # can target its PID directly (issue #589) — see that function's header
+    # comment. This script has no job control of its own (no `set -m`;
+    # job_control is off for a non-interactive script), so bash never
+    # re-pgroups a backgrounded child: it keeps the exact same stdin/stdout/
+    # stderr and process group it would have had running in the foreground,
+    # so this changes nothing about how the operator's terminal interacts
+    # with it. `wait` right below blocks until it exits either way, same as
+    # the previous synchronous call did.
+    bash --rcfile "$rcfile" -i &
+    local shell_pid=$!
+    poll_for_brief "$shell_pid" &
+    local poll_pid=$!
+    wait "$shell_pid" 2>/dev/null
     local lifetime=$((SECONDS - spawned))
 
     rm -f "$rcfile"

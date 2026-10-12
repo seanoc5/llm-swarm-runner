@@ -408,8 +408,9 @@ case "$LISTENER_STATE" in
     live-idle)
         LISTENERS=$(tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -c '^iss-' || true)
         echo "  (tmux session '$SESSION_NAME' has $LISTENERS listener window(s); pickup expected within ~2s"
-        echo "   once that pane is idle — headless workers or an idle interactive shell pick up immediately;"
-        echo "   an interactive shell mid-command finishes that command first, see issue #43)"
+        echo "   once that pane is idle — headless workers or an idle interactive shell pick up immediately,"
+        echo "   even an untouched one (issue #589); an interactive shell mid-command finishes that"
+        echo "   command first, see issue #43)"
         ;;
     live-busy:*)
         echo "  NOTE: window '$WIN' is running a live agent process (${LISTENER_STATE#live-busy:}) — if it's an interactive"
