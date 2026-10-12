@@ -208,6 +208,11 @@ mkdir -p "$INBOX" "$PROCESSING" "$DONE" "$STATUS" "$CLAIMS"
 # can never be mistaken for a queued task.
 IDLE_SENTINEL="$QUEUE_ROOT/.brief-pending"
 
+# Written by the idle shell's rcfile ($$ of the `bash -i` itself) so
+# poll_for_brief can find its PID without ever backgrounding it — see the
+# PID-sourcing comment on run_idle_shell's `bash --rcfile` call.
+IDLE_SHELL_PIDFILE="$QUEUE_ROOT/.idle-shell-pid"
+
 # Sentinel touched by the idle shell's `close-worker` command to tell the
 # listener the operator wants this listener ended and the window closed.
 # Needed because a plain `exit` from the idle shell deliberately respawns it
@@ -1128,12 +1133,15 @@ print_completion_block() {
 #                      checked externally via pgrep -P instead of waiting for
 #                      a redraw) and, once it is, sends it SIGHUP to end it
 #                      itself. SIGHUP, not SIGTERM: an interactive bash with
-#                      no job control (true for this `bash -i`, piped from a
-#                      FIFO or a pty with no real job-control session)
-#                      ignores SIGTERM by design, but still reacts to SIGHUP
-#                      the way a dropped terminal connection would. It never
-#                      claims the task itself — that stays claim_next_task's
-#                      job once control returns to the main loop below.
+#                      no job control ignores SIGTERM by design, but still
+#                      reacts to SIGHUP the way a dropped terminal connection
+#                      would — and this script runs with `set -m` (issue
+#                      #529's pgid isolation, above), so "no job control" is
+#                      NOT a safe assumption to fall back on here either; see
+#                      the PID-sourcing note on run_idle_shell's `bash
+#                      --rcfile` call for why that matters. It never claims
+#                      the task itself — that stays claim_next_task's job
+#                      once control returns to the main loop below.
 #                      Known trade-off: a line the operator has typed but not
 #                      yet submitted is invisible from outside the process
 #                      (no pty to inspect without a real tmux pane), so it
@@ -1141,17 +1149,31 @@ print_completion_block() {
 #                      as the rare, non-destructive edge case; a foreground
 #                      command actually running is never interrupted.
 poll_for_brief() {
-    local shell_pid="$1"
     while true; do
         sleep 2
         [ -d "$INBOX" ] && [ -d "$PWD" ] || return 0
-        kill -0 "$shell_pid" 2>/dev/null || return 0
         local next
         next=$(find "$INBOX" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | head -1)
         if [ -n "$next" ]; then
             touch "$IDLE_SENTINEL" 2>/dev/null
             break
         fi
+    done
+
+    # The shell's PID isn't known yet here — see run_idle_shell's PID-sourcing
+    # comment for why it can't just be `$!` from a backgrounded launch. Wait
+    # for it to write its own pidfile instead (self-review finding on this
+    # PR's first draft: PROMPT_COMMAND may already have raced this and
+    # ended the shell on its own by the time the pidfile ever appears, in
+    # which case the pidfile check below just never succeeds and this exits
+    # on the next `[ -d "$PWD" ]`-style liveness check once run_idle_shell
+    # kills this whole function off).
+    local shell_pid=""
+    while [ -z "$shell_pid" ]; do
+        [ -d "$PWD" ] || return 0
+        shell_pid=$(cat "$IDLE_SHELL_PIDFILE" 2>/dev/null)
+        [ -n "$shell_pid" ] && break
+        sleep 0.2
     done
 
     while kill -0 "$shell_pid" 2>/dev/null; do
@@ -1219,7 +1241,10 @@ close_window_and_exit() {
 }
 
 run_idle_shell() {
-    rm -f "$IDLE_SENTINEL"
+    rm -f "$IDLE_SENTINEL" "$IDLE_SHELL_PIDFILE"
+
+    poll_for_brief &
+    local poll_pid=$!
 
     local rcfile
     rcfile=$(mktemp)
@@ -1228,6 +1253,11 @@ run_idle_shell() {
     # still runs — our check runs LAST so its INT-trap re-assert wins (see
     # __swarm_check_brief's comment).
     cat > "$rcfile" <<EOF
+# poll_for_brief (background, started by run_idle_shell below) reads this
+# to get the shell's PID without ever backgrounding the shell itself — see
+# the PID-sourcing comment on the \`bash --rcfile\` call for why.
+echo \$\$ > "$IDLE_SHELL_PIDFILE"
+
 [ -r ~/.bashrc ] && source ~/.bashrc
 
 __swarm_check_brief() {
@@ -1283,23 +1313,23 @@ EOF
     echo ""
     echo "[$(date +%T)] Queue empty — dropping to interactive shell in $WT_LABEL/. Polling continues in the background."
     echo "               (a plain 'exit' respawns this shell — close the worker with Ctrl-D twice, Ctrl-C twice, or 'close-worker')"
-    # Backgrounded (not run synchronously in the foreground) so poll_for_brief
-    # can target its PID directly (issue #589) — see that function's header
-    # comment. This script has no job control of its own (no `set -m`;
-    # job_control is off for a non-interactive script), so bash never
-    # re-pgroups a backgrounded child: it keeps the exact same stdin/stdout/
-    # stderr and process group it would have had running in the foreground,
-    # so this changes nothing about how the operator's terminal interacts
-    # with it. `wait` right below blocks until it exits either way, same as
-    # the previous synchronous call did.
-    bash --rcfile "$rcfile" -i &
-    local shell_pid=$!
-    poll_for_brief "$shell_pid" &
-    local poll_pid=$!
-    wait "$shell_pid" 2>/dev/null
+    # Run in the FOREGROUND, not backgrounded: this script runs with `set -m`
+    # (issue #529's pgid isolation, near the top of the file), and under
+    # active job control, backgrounding a command puts it in a NEW process
+    # group without handing it the controlling terminal — an interactive
+    # shell that doesn't own the terminal immediately stops itself
+    # (SIGTTIN-style) the moment it tries to read a keystroke, which would
+    # freeze this pane for the operator and leave it unresponsive even to
+    # poll_for_brief's own SIGHUP (a stopped process doesn't act on signals
+    # until resumed). That's why poll_for_brief can't just take `$!` as a
+    # parameter here (issue #589 self-review, first draft of this PR) — it
+    # instead reads the shell's own PID back from IDLE_SHELL_PIDFILE, which
+    # the rcfile writes as its first line, letting this run normally in the
+    # foreground the whole time.
+    bash --rcfile "$rcfile" -i
     local lifetime=$((SECONDS - spawned))
 
-    rm -f "$rcfile"
+    rm -f "$rcfile" "$IDLE_SHELL_PIDFILE"
     kill "$poll_pid" 2>/dev/null
     wait "$poll_pid" 2>/dev/null
 
