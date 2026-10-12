@@ -17,16 +17,29 @@
 # wrote the code; that's the point.
 #
 # Usage:
-#   self-review-pr.sh <PR#> [--post] [--force] [--model <id>]
+#   self-review-pr.sh <PR#> [--post] [--force] [--model <id>] [--actor <name>]
 #
 #   --post    also post the verdict as a PR comment with a
-#             <!-- SWARM_SELF_REVIEW: <VERDICT> --> marker. Idempotent:
-#             skips posting if a marker comment already exists (--force
-#             re-posts).
+#             <!-- SWARM_SELF_REVIEW: <VERDICT> actor=<name> --> marker.
+#             Idempotent: skips posting if a marker comment already exists
+#             (--force re-posts).
 #   --force   run even when WORKER_SELF_REVIEW=0, and re-post over an
 #             existing marker comment.
 #   --model   model for the review session (default: $SELF_REVIEW_MODEL,
 #             else $WORKER_MODEL for Codex, else the CLI's default).
+#   --actor   who is running this round — "worker" (default), "coordinator",
+#             or "operator". Recorded in the posted marker's actor=<name>
+#             attribute (issue #601): scripts/pr-ready.sh's round cap
+#             (WORKER_SELF_REVIEW_MAX_ROUNDS) counts only actor=worker
+#             rounds against the worker, so an independent "Find ≠ fix"
+#             review the coordinator or operator runs on top of the
+#             worker's own rounds never eats into the worker's budget. The
+#             BLOCK/latest-verdict gate itself still looks at EVERY actor's
+#             marker — a coordinator- or operator-found BLOCK blocks
+#             readying same as a worker-found one; only the round COUNT is
+#             actor-scoped. Pass --actor coordinator from
+#             prompts/coordinator.md's "Find ≠ fix" dispatch, and --actor
+#             operator for a manual re-review from a shell.
 #   SELF_REVIEW_CMD selects claude or codex; defaults to WORKER_CMD when
 #             it is codex, otherwise claude for compatibility.
 #
@@ -44,6 +57,7 @@ SKILL="${LLM_SWARM_DIR:-$SCRIPT_DIR/..}/prompts/skill-self-review.md"
 PR=""
 POST=0
 FORCE=0
+ACTOR="worker"
 MODEL="${SELF_REVIEW_MODEL:-}"
 REVIEW_CMD="${SELF_REVIEW_CMD:-claude}"
 if [ -z "${SELF_REVIEW_CMD:-}" ] && [ "${WORKER_CMD:-}" = "codex" ]; then
@@ -57,14 +71,19 @@ while [ $# -gt 0 ]; do
         --post)  POST=1 ;;
         --force) FORCE=1 ;;
         --model) shift; MODEL="${1:-}" ;;
-        -h|--help) sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --actor) shift; ACTOR="${1:-}" ;;
+        -h|--help) sed -n '2,51p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         -*) echo "ERROR: unknown flag '$1'" >&2; exit 1 ;;
         *)  [ -z "$PR" ] || { echo "ERROR: multiple PR numbers" >&2; exit 1; }
             PR="$1" ;;
     esac
     shift
 done
-[ -n "$PR" ] || { echo "Usage: $0 <PR#> [--post] [--force] [--model <id>]" >&2; exit 1; }
+[ -n "$PR" ] || { echo "Usage: $0 <PR#> [--post] [--force] [--model <id>] [--actor <name>]" >&2; exit 1; }
+case "$ACTOR" in
+    worker|coordinator|operator) ;;
+    *) echo "ERROR: --actor must be worker, coordinator, or operator (got '$ACTOR')" >&2; exit 1 ;;
+esac
 [ -r "$SKILL" ] || { echo "ERROR: skill prompt not readable: $SKILL" >&2; exit 1; }
 command -v gh >/dev/null 2>&1 || { echo "ERROR: gh required" >&2; exit 1; }
 case "$REVIEW_CMD" in
@@ -136,8 +155,16 @@ if [ "$POST" = "1" ]; then
             --jq '.comments[].body' 2>/dev/null | grep -q 'SWARM_SELF_REVIEW:'; then
         echo "post: skipped — PR #$PR already has a SWARM_SELF_REVIEW comment (--force to re-post)"
     else
-        COMMENT="$(printf '<!-- SWARM_SELF_REVIEW: %s -->\n## Fresh-context self-review\n\n%s\n\n<sub>Adversarial review by a fresh %s session against prompts/skill-self-review.md — no shared context with the PR author. Machinery: scripts/self-review-pr.sh (docs/ringer-adoptions.md #2).</sub>\n' \
-            "$VERDICT" "$REVIEW" "$REVIEW_CMD")"
+        # actor=<ACTOR> (issue #601): scripts/pr-ready.sh's round cap reads
+        # this attribute to exclude coordinator-/operator-run rounds from
+        # the WORKER's own budget — see this script's --actor header
+        # comment. Always present (not just when non-default) so a
+        # consumer never has to treat a missing attribute as implicitly
+        # "worker"; the one exception is every marker posted before this
+        # change, which pr-ready.sh's own query still treats as a worker
+        # round for the same reason.
+        COMMENT="$(printf '<!-- SWARM_SELF_REVIEW: %s actor=%s -->\n## Fresh-context self-review\n\n%s\n\n<sub>Adversarial review by a fresh %s session against prompts/skill-self-review.md — no shared context with the PR author. Machinery: scripts/self-review-pr.sh (docs/ringer-adoptions.md #2).</sub>\n' \
+            "$VERDICT" "$ACTOR" "$REVIEW" "$REVIEW_CMD")"
         gh pr comment "$PR" --body "$COMMENT" \
             || { echo "ERROR: gh pr comment failed" >&2; exit 1; }
         echo "post: verdict comment added to PR #$PR"

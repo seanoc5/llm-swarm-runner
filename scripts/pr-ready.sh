@@ -70,6 +70,20 @@
 # BLOCK — a PR capped right after a BLOCK round must not ready unreviewed
 # (self-review finding on this script's first version of the cap).
 #
+# issue #601: the round COUNT only counts actor=worker marker comments (and
+# any marker posted before self-review-pr.sh's --actor existed, which carries
+# no actor= attribute at all — treated as a worker round for backward
+# compatibility). The coordinator's own independent "Find ≠ fix" review
+# (`self-review-pr.sh <N> --post --force --actor coordinator`,
+# `prompts/coordinator.md` § "Find ≠ fix") posts its own marker on the SAME
+# PR this script is about to ready, and prior to this fix that comment
+# counted against THIS script's own cap even though the worker never ran
+# it — PR #1176 hit "8/3 rounds" after exactly one round of its own work.
+# The BLOCK/latest-verdict gate below is deliberately NOT actor-scoped the
+# same way: it still reads every actor's latest marker, so a coordinator- or
+# operator-found BLOCK still refuses readying. Only the per-worker budget is
+# actor-scoped.
+#
 # issue #473: also requires CI to be observed green (or absent) on the PR's
 # head commit immediately before `gh pr ready` runs — a single `gh pr
 # checks` snapshot, taken here rather than trusted from anything the worker
@@ -251,8 +265,22 @@ case "$RISK" in
             # fails OPEN here (treated as round 0): the cap is a cost/time
             # guard, not a correctness gate — that's CI-green and BLOCK
             # below, which fail closed.
+            # issue #601: excludes actor=coordinator/actor=operator marker
+            # comments (self-review-pr.sh's --actor, posted by the
+            # coordinator's own independent "Find ≠ fix" review or a manual
+            # operator re-review) from the WORKER's own round budget — see
+            # this file's header comment above. A marker with no actor=
+            # attribute at all (posted before --actor existed) still counts,
+            # same as an actor=worker one.
+            # capture() ties the actor to the marker tag itself (the text
+            # immediately after "SWARM_SELF_REVIEW: <VERDICT>"), not a bare
+            # contains() anywhere in the comment body — a worker's own
+            # review prose that happens to quote/discuss "actor=coordinator"
+            # (as this very PR's does) must not get misread as a
+            # coordinator round and silently excluded from its own count
+            # (self-review finding, issue #601).
             ROUNDS_DONE="$(gh pr view "$PR" --json comments \
-                --jq '[.comments[].body // "" | select(contains("SWARM_SELF_REVIEW:"))] | length' \
+                --jq '[.comments[].body // "" | select(contains("SWARM_SELF_REVIEW:")) | (capture("SWARM_SELF_REVIEW: [A-Za-z_]+(?: actor=(?<actor>[A-Za-z0-9_-]+))?").actor // "worker") | select(. != "coordinator" and . != "operator")] | length' \
                 2>/dev/null || true)"
             case "$ROUNDS_DONE" in
                 ''|*[!0-9]*) ROUNDS_DONE=0 ;;
@@ -269,6 +297,10 @@ case "$RISK" in
                 # review-scoreboard.sh) so a PR capped right after a BLOCK
                 # round still refuses instead of readying unreviewed
                 # (self-review finding on this script's first version).
+                # Deliberately NOT actor-scoped like ROUNDS_DONE above
+                # (issue #601): a coordinator- or operator-found BLOCK is a
+                # real finding and must still refuse readying even though it
+                # doesn't count against the worker's own round budget.
                 LATEST_VERDICT="$(gh pr view "$PR" --json comments \
                     --jq '[.comments[].body // "" | select(contains("SWARM_SELF_REVIEW:")) | capture("SWARM_SELF_REVIEW: (?<v>APPROVE_WITH_CAVEATS|APPROVE|BLOCK)").v] | last // empty' \
                     2>/dev/null || true)"
@@ -278,7 +310,7 @@ case "$RISK" in
                     refuse review-block 2
                 fi
             else
-            echo "pr-ready: risk=$RISK — running self-review (round $((ROUNDS_DONE + 1))/$MAX_ROUNDS: $SELF_REVIEW $PR --post --force)..."
+            echo "pr-ready: risk=$RISK — running self-review (round $((ROUNDS_DONE + 1))/$MAX_ROUNDS: $SELF_REVIEW $PR --post --force --actor worker)..."
             rc=0
             # --force is required, not optional (self-review's own
             # self-review finding on this script's first version):
@@ -289,8 +321,11 @@ case "$RISK" in
             # pr-ready.sh) would get a fresh APPROVE here but post
             # nothing — the PR would ready with a stale BLOCK marker as
             # its latest verdict, which is exactly the gate this script
-            # exists to keep accurate.
-            "$SELF_REVIEW" "$PR" --post --force || rc=$?
+            # exists to keep accurate. --actor worker is self-review-pr.sh's
+            # own default (issue #601) — passed explicitly here so this,
+            # the one call site that actually represents the worker's own
+            # round, never silently drifts if that default ever changes.
+            "$SELF_REVIEW" "$PR" --post --force --actor worker || rc=$?
             case "$rc" in
                 0|3)
                     : # APPROVE / APPROVE_WITH_CAVEATS — proceed
