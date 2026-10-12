@@ -455,6 +455,12 @@ refresh_stale_runner_checkout() {
 # Callable more than once per task (used by the check-failure retry).
 dispatch_agent() {
     local task_text="$1"
+    # issue #610: prompts/worker.md tells the agent to call task-done.sh
+    # "$TASK_ID" and name its status file after it, but TASK_ID was only a
+    # listener-shell variable. Agents guessed it from processing/, and a
+    # follow-up session (requeued brief) refused to guess, so its
+    # completion was never recorded and coordinator holds never lifted.
+    export TASK_ID
     local codex_task="$task_text"
     [ -n "$CODEX_PREFIX" ] && codex_task="$CODEX_PREFIX"$'\n\n---\n\n'"$task_text"
 

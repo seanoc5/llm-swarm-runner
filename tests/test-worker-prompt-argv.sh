@@ -59,6 +59,7 @@ cat > "$TEST_DIR/bin/claude" <<'STUB'
 for a in "$@"; do printf '%s\n' "$a" >> "$CLAUDE_ARGS_LOG"; done
 : > "$CLAUDE_STDIN_LOG"
 if [ ! -t 0 ]; then cat > "$CLAUDE_STDIN_LOG"; fi
+printf '%s' "${TASK_ID-<unset>}" > "${CLAUDE_STDIN_LOG%.stdin}.task_id"
 slug="$(printf '%s' "$PWD" | sed 's/[^A-Za-z0-9]/-/g')"
 dir="$HOME/.claude/projects/$slug"
 mkdir -p "$dir"
@@ -160,5 +161,11 @@ grep -qF -- "$SENTINEL_TASK" "$TEST_DIR/wt/claude.args" \
 grep -qF -- "$SENTINEL_TASK" "$TEST_DIR/wt/claude.stdin" \
     || red "end-to-end: task brief missing from stdin"
 green "end-to-end headless run: brief claimed, dispatched with no prompt text on argv, outcome written"
+
+# issue #610: the agent must see the claimed brief's id as $TASK_ID, since
+# prompts/worker.md has it call task-done.sh "$TASK_ID".
+[ "$(cat "$TEST_DIR/wt/claude.task_id")" = "t1" ] \
+    || red "end-to-end: agent saw TASK_ID=$(cat "$TEST_DIR/wt/claude.task_id"), expected t1 (issue #610)"
+green "end-to-end: agent process inherits TASK_ID of the claimed brief"
 
 heading "All worker-prompt-argv checks passed"
