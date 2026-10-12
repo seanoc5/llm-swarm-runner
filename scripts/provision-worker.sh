@@ -552,10 +552,18 @@ done
 mkdir -p "$WT"/.swarm/tasks/{inbox,processing,done,status,outbox}
 
 # Hide .swarm/ from the worktree's git view via info/exclude (not the
-# tracked .gitignore).
+# tracked .gitignore). info/exclude can be missing entirely — e.g. after
+# the #615 shared-.git-wipe incident, or any time the admin dir predates
+# this worktree — in which case the old `[ -f "$exclude_file" ]` guard
+# silently skipped creating it, and .swarm/ showed as untracked in every
+# subsequent provision. Create the file (and its info/ dir) when absent.
 exclude_file="$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)"
-if [ -n "$exclude_file" ] && [ -f "$exclude_file" ] && ! grep -qxF '.swarm/' "$exclude_file"; then
-    printf '\n# llm-swarm-runner worker scratch (added by provision-worker.sh)\n.swarm/\n' >> "$exclude_file"
+if [ -n "$exclude_file" ]; then
+    mkdir -p "$(dirname "$exclude_file")"
+    [ -f "$exclude_file" ] || : > "$exclude_file"
+    if ! grep -qxF '.swarm/' "$exclude_file"; then
+        printf '\n# llm-swarm-runner worker scratch (added by provision-worker.sh)\n.swarm/\n' >> "$exclude_file"
+    fi
 fi
 echo "[2/4] queue dirs ready"
 

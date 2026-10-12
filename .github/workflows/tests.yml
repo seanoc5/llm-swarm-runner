@@ -69,6 +69,10 @@ jobs:
         #     #504): it exercises real kernel bind-mount enforcement (a
         #     nested ro mount shadowing part of an rw one), which no
         #     PATH-stubbed docker can substitute for.
+        #   - test-sandbox-git-dir-lockdown.sh — same requirement again
+        #     (issue #615): same real-bind-mount-enforcement reasoning as
+        #     test-sandbox-worktree-lockdown.sh above, just over
+        #     hooks/info/config/refs/logs instead of worktrees/.
         #   - test-coordinator-auto-compact.sh — exercises tmux-only
         #     functions (probe_ctx_used, maybe_auto_compact) against a real,
         #     throwaway tmux *session*, not a PATH-stubbable tmux binary.
@@ -107,6 +111,7 @@ jobs:
           EXCLUDE=(
             test-sandbox.sh
             test-sandbox-worktree-lockdown.sh
+            test-sandbox-git-dir-lockdown.sh
             test-coordinator-auto-compact.sh
             test-llm-start-reprompt.sh
             test-shape-watcher-respawn.sh

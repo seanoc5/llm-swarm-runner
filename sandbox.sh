@@ -278,6 +278,91 @@ if command -v git &>/dev/null && git -C "$PROJECT_DIR" rev-parse --git-dir &>/de
                 fi
             done
             unset _wt_admin _wt_gitdir_file _wt_path _wt_path_real
+
+            # --- Shared .git lockdown: hooks/info/config/refs/logs (#615) ---
+            # The sibling lockdown above only narrows `worktrees/` — every
+            # OTHER top-level entry in the common dir (`hooks/`, `info/`,
+            # `config`, `refs/`, `logs/`, `packed-refs`) was still part of
+            # the broad rw mount above (`-v "$_git_real:$_git_real:rw"`, or
+            # PROJECT_DIR's own rw mount when this container IS the main
+            # checkout). #615: a worker's own `build.gradle.kts` created
+            # symlinks named exactly `objects`, `refs`, `logs`, `hooks`,
+            # `info`, `worktrees` and `config` pointing INTO the shared
+            # common dir, and a recursive delete through them (Kotlin's
+            # `deleteRecursively()`, which follows symlinks to directories)
+            # emptied whatever they pointed at — permitted only because
+            # those targets were writable. Lost for good: `refs/stash`,
+            # `refs/notes/*`, every reflog, and any custom hooks (loose
+            # objects were recoverable by re-fetching from origin by SHA,
+            # since they're content-addressed and the remote already has a
+            # copy — not true of the rest).
+            #
+            # Fix, same nested-bind-mount technique as the worktrees/
+            # lockdown above (verified there to work in both directions —
+            # a narrower mount, ro or rw, overrides whatever it's nested
+            # inside): mount `hooks/`, `info/`, `config` and `packed-refs`
+            # read-only outright — a worker never legitimately writes any
+            # of them — then mount `refs/` and `logs/` read-only too, with
+            # narrow rw carve-outs restoring exactly what a normal worker
+            # flow (commit, push, the `git fetch origin <default>` refresh
+            # step every brief starts with) needs:
+            #   - refs/heads/<this worktree's own branch>'s containing
+            #     directory (and the mirror path under logs/) — git updates
+            #     a loose ref via a `<ref>.lock` file in the SAME directory
+            #     then renames over it, so the carve-out has to be a
+            #     directory, not just the leaf ref file, or the rename has
+            #     nowhere to stage. For a slash-named branch (this project's
+            #     convention, e.g. `fix/issue-615`) that only reopens the
+            #     one prefix family (`refs/heads/fix/*`), not every branch
+            #     — a known, accepted narrowing, not full per-worker
+            #     isolation (that needs option (b) in #615: a separate git
+            #     dir per worker). A flat branch name (e.g. `master`, the
+            #     main-checkout case) has no narrower directory than
+            #     refs/heads itself, so it reopens the whole thing — no
+            #     worse than before this fix.
+            #   - refs/remotes/ and logs/refs/remotes/ wholesale: remote-
+            #     tracking refs are shared bookkeeping, not a per-worker
+            #     secret, and every worker's own startup fetch needs to
+            #     update them.
+            # `refs/stash`, `refs/notes/*`, `refs/tags` and every OTHER
+            # branch's ref/reflog stay read-only — exactly the things #615
+            # actually lost.
+            #
+            # Skips entirely (falls back to the pre-#615 fully-open mount)
+            # when the current branch can't be resolved as a loose ref
+            # under refs/heads (detached HEAD, or a ref that's only in
+            # packed-refs) — narrowing refs/ without a working carve-out
+            # would break every commit, which is worse than the hole this
+            # closes.
+            for _ro_leaf in hooks info config packed-refs; do
+                if [ -e "$_git_real/$_ro_leaf" ]; then
+                    MOUNTS+=("-v" "$_git_real/$_ro_leaf:$_git_real/$_ro_leaf:ro")
+                fi
+            done
+            unset _ro_leaf
+
+            _own_branch="$(git -C "$PROJECT_DIR" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+            if [ -n "$_own_branch" ] && [ -f "$_git_real/refs/heads/$_own_branch" ]; then
+                _own_heads_dir="$(dirname "$_git_real/refs/heads/$_own_branch")"
+                MOUNTS+=(
+                    "-v" "$_git_real/refs:$_git_real/refs:ro"
+                    "-v" "$_own_heads_dir:$_own_heads_dir:rw"
+                )
+                if [ -d "$_git_real/refs/remotes" ]; then
+                    MOUNTS+=("-v" "$_git_real/refs/remotes:$_git_real/refs/remotes:rw")
+                fi
+                if [ -d "$_git_real/logs" ]; then
+                    _own_logs_heads_dir="$(dirname "$_git_real/logs/refs/heads/$_own_branch")"
+                    MOUNTS+=("-v" "$_git_real/logs:$_git_real/logs:ro")
+                    mkdir -p "$_own_logs_heads_dir"
+                    MOUNTS+=("-v" "$_own_logs_heads_dir:$_own_logs_heads_dir:rw")
+                    if [ -d "$_git_real/logs/refs/remotes" ]; then
+                        MOUNTS+=("-v" "$_git_real/logs/refs/remotes:$_git_real/logs/refs/remotes:rw")
+                    fi
+                    unset _own_logs_heads_dir
+                fi
+            fi
+            unset _own_branch _own_heads_dir
         fi
     fi
 fi
