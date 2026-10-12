@@ -2316,7 +2316,9 @@ EVENTS LOG
       worker.deliver.skip   parked-brief delivery skipped this cycle (issue, reason=task_not_terminal|
                            pane_busy|no_ctx_parsed|composer_not_clear|backoff|mktemp_failed —
                            task_not_terminal means the CURRENT processing/ task's status isn't
-                           ready-for-review/done-no-pr yet (e.g. "blocked", or no status file at all);
+                           ready-for-review/done-no-pr/blocked yet (issue #578 made "blocked"
+                           terminal too — it just means no status file at all, or a genuinely
+                           non-terminal value);
                            no_ctx_parsed means no interactive statusline is rendered on screen — most
                            likely a WORKER_HEADLESS=1 worker's `claude -p` run, which never shows busy
                            chrome for worker_pane_busy() to key off — see worker_current_task_terminal()'s
@@ -2395,14 +2397,14 @@ EVENTS LOG
                            above, for reason=task_not_terminal: WORKER_DELIVER_TERMINAL_STALL_
                            THRESHOLD sweeps have found the SAME brief still pending while
                            worker_current_task_terminal() keeps refusing (issue, brief=<inbox
-                           filename>, skips=N). Unlike composer_not_clear, this reason can mean
-                           either a genuinely `blocked` worker awaiting a human answer, or
-                           worker_current_task_terminal() failing to recognize a completion it
-                           should (the #370/#601 status-file-mismatch/brief-less-task fallbacks)
-                           — this WARNING plus its durable coord_inbox_write surfaces either case
-                           instead of letting the skip lines age silently (the corpusminder-spring
-                           iss-1175 incident this closes: ~5.5h, task_not_terminal every sweep,
-                           nothing escalating).
+                           filename>, skips=N). Since issue #578 made `blocked` terminal too,
+                           this reason now means either the task is still genuinely in flight,
+                           or worker_current_task_terminal() is failing to recognize a
+                           completion it should (the #370/#601 status-file-mismatch/brief-less-
+                           task fallbacks) — this WARNING plus its durable coord_inbox_write
+                           surfaces either case instead of letting the skip lines age silently
+                           (the corpusminder-spring iss-1175 incident this closes: ~5.5h,
+                           task_not_terminal every sweep, nothing escalating).
       worker.listener.selfheal  (issue #506) worker-listener.sh's own ordinary self-heal
                            path claimed a queued v2 brief on its own — an idle listener, or
                            one draining several queued briefs back-to-back — and is about
@@ -7396,28 +7398,43 @@ worker_pending_brief() {
 # there while the agent process is still alive (see this function's own
 # "if [ -z "$proc_file" ]" branch below for why processing/-empty can no
 # longer mean "nothing in flight" the way it always used to) — has a
-# status file reporting a genuinely terminal state: "ready-for-review" or
-# "done-no-pr".
+# status file reporting a genuinely terminal state: "ready-for-review",
+# "done-no-pr", or (issue #578) "blocked".
 #
-# Self-review finding on this feature's first version: gating delivery on
-# pane idleness alone is not enough. A worker parked `blocked` (asked a
-# decision-needed question, awaiting the coordinator's answer — exactly the
-# state prompts/coordinator.md's "unblock it with a requeue.sh follow-up
-# brief" line describes) renders as idle, cli, composer-empty — indistinguishable
-# from a worker that's actually finished. Injecting /quit there would end the
-# session before its current task ever truly concluded; worker-listener.sh's
-# write_outcome() can't tell a natural post-completion /quit from one forced
-# mid-decision — exit code 0 maps straight to "ok", and the #287 minimum-
-# interaction floor doesn't catch it either (a blocked worker already has a
-# status file, so that check's own no-status-file precondition never fires).
-# The result: a real fand-etl-shaped decision-needed task gets recorded as a
-# false, silent success. So this is a positive (fail-CLOSED) gate — the
-# opposite of every other check in this feature, which fail open — because
-# the cost of a missed automatic delivery (falls back to the documented
-# manual /quit) is far lower than the cost of corrupting a task's outcome
-# record. A processing/ entry with no status file yet, or one whose state is
-# "blocked" (or anything else), is treated as NOT confirmed finished and
-# blocks delivery — see worker.deliver.skip reason=task_not_terminal.
+# Self-review finding on this feature's first version (2026-09-03, #339):
+# gating delivery on pane idleness alone is not enough. A worker parked
+# `blocked` (asked a decision-needed question, awaiting the coordinator's
+# answer — exactly the state prompts/coordinator.md's "unblock it with a
+# requeue.sh follow-up brief" line describes) renders as idle, cli,
+# composer-empty — indistinguishable from a worker that's actually
+# finished. At the time, injecting /quit there could end the session before
+# its current task ever truly concluded AND get recorded as a false, silent
+# success: worker-listener.sh's write_outcome() read $rc/check-exit alone,
+# so exit code 0 mapped straight to "ok", and the #287 minimum-interaction
+# floor didn't catch it either (a blocked worker already has a status file,
+# so that check's own no-status-file precondition never fired). So this was
+# built as a positive (fail-CLOSED) gate — the opposite of every other check
+# in this feature, which fail open — treating a `blocked` (or any other
+# non-terminal) status file as NOT confirmed finished and blocking delivery
+# (worker.deliver.skip reason=task_not_terminal), on the theory that a
+# missed automatic delivery (falling back to the documented manual /quit)
+# was cheaper than a corrupted outcome record.
+#
+# issue #578: that gate then NEVER self-heals for a worker that stays
+# `blocked` (see the #370 comment below — task_not_terminal has no retry
+# path of its own) — and separately, by Sept 26 (wip #481), write_outcome()
+# gained its own explicit check (`[ "$TASK_STATE" = "blocked" ] &&
+# TASK_OUTCOME="err"`, reason "worker-blocked: resolve the blocker in the
+# worker status before continuing") that already closes the false-success
+# gap this gate exists to prevent — independently of how the session ends.
+# So ending a `blocked` session no longer risks a corrupted record: the
+# outcome is correctly recorded as `err`/worker-blocked either way, and a
+# requeue.sh follow-up (prompts/coordinator.md's own documented unblock
+# path) can safely end it and let the listener claim that follow-up as a
+# fresh task. "blocked" is therefore treated as terminal-for-delivery too,
+# alongside ready-for-review/done-no-pr; a processing/ entry with no status
+# file yet, or one whose state is anything else, is still treated as NOT
+# confirmed finished and still blocks delivery.
 #
 # Deliberately NOT worker_task_done(): that function's (a)/(b) signals are
 # themselves gated on `.swarm/tasks/processing/` being EMPTY (a staleness
@@ -7557,8 +7574,8 @@ worker_current_task_terminal() {
         if [ -r "$status_file" ]; then
             state="$(jq -r '.state // empty' "$status_file" 2>/dev/null)" || return 1
             case "$state" in
-                ready-for-review|done-no-pr) return 0 ;;
-                *)                           return 1 ;;
+                ready-for-review|done-no-pr|blocked) return 0 ;;
+                *)                                   return 1 ;;
             esac
         fi
         if [ -f "$done_dir/${task_id}.ok.json" ] || [ -f "$done_dir/${task_id}.err.json" ]; then
@@ -7571,8 +7588,8 @@ worker_current_task_terminal() {
     if [ -r "$status_file" ]; then
         state="$(jq -r '.state // empty' "$status_file" 2>/dev/null)" || return 1
         case "$state" in
-            ready-for-review|done-no-pr) return 0 ;;
-            *)                           return 1 ;;
+            ready-for-review|done-no-pr|blocked) return 0 ;;
+            *)                                   return 1 ;;
         esac
     fi
 
@@ -7597,13 +7614,20 @@ worker_current_task_terminal() {
     # strict-> boundary above, applied to the tie-break too (a self-review
     # finding: picking whichever tied file a glob happens to visit first
     # could let a stale ready-for-review beat an equally-timestamped, more
-    # current blocked record). saw_terminal tracks whether this pass
-    # actually CONFIRMED a terminal record rather than just failing to find
-    # a non-terminal one — another self-review finding: a tied file that's
-    # unreadable or mid-write (jq parse fails, `continue`s) must not read as
-    # an implicit "no objection, must be terminal" default; with nothing
-    # confirmed, this falls through to the same fail-closed return 1 as
-    # every other uncertain case in this function.
+    # current record in some genuinely open state — e.g. still in-flight,
+    # or a status file mid-write). issue #578 made "blocked" terminal
+    # alongside ready-for-review/done-no-pr (see this function's header
+    # comment), so a tie between a stale ready-for-review and a newer
+    # blocked record no longer needs this tie-break to pick a side — both
+    # are terminal either way; the tie-break still matters for a tie
+    # against any OTHER (truly non-terminal) state. saw_terminal tracks
+    # whether this pass actually CONFIRMED a terminal record rather than
+    # just failing to find a non-terminal one — another self-review
+    # finding: a tied file that's unreadable or mid-write (jq parse fails,
+    # `continue`s) must not read as an implicit "no objection, must be
+    # terminal" default; with nothing confirmed, this falls through to the
+    # same fail-closed return 1 as every other uncertain case in this
+    # function.
     local saw_terminal=0
     for f in "$wt_dir/.swarm/tasks/status"/*.json; do
         case "$f" in *.check.json) continue ;; esac
@@ -7611,7 +7635,7 @@ worker_current_task_terminal() {
         [ "$mtime" = "$best_mtime" ] || continue
         state="$(jq -r '.state // empty' "$f" 2>/dev/null)" || continue
         case "$state" in
-            ready-for-review|done-no-pr) saw_terminal=1 ;;
+            ready-for-review|done-no-pr|blocked) saw_terminal=1 ;;
             *)
                 shopt -u nullglob
                 return 1
@@ -7784,10 +7808,12 @@ worker_deliver_record_shell_stall() {
 # Same shape as WORKER_DELIVER_COMPOSER_STALL_BRIEF/_COUNT/_ESCALATED above,
 # for reason=task_not_terminal: worker_current_task_terminal()'s own header
 # comment documents this as a fail-CLOSED gate that can legitimately stay
-# unresolved for a long time (a worker genuinely parked `blocked`, waiting
-# on a human answer) — unlike composer_not_clear/shell, a skip for this
-# reason never even calls worker_deliver_record_failure, so nothing else in
-# this file escalates it. The corpusminder-spring iss-1175 incident (#601)
+# unresolved for a long time — a task genuinely still in flight, or (since
+# issue #578 made `blocked` terminal too) a status-file mismatch/typo the
+# #370/#601 fallbacks don't recognize — unlike composer_not_clear/shell, a
+# skip for this reason never even calls worker_deliver_record_failure, so
+# nothing else in this file escalates it. The corpusminder-spring iss-1175
+# incident (#601)
 # ran task_not_terminal skips every WORKER_COMPACT_SCAN_SECS for ~5.5h with
 # no coord-inbox signal at all — this closes that the same way #436/#559
 # already closed their own reasons. In-memory only, reset on a watcher
@@ -7811,8 +7837,8 @@ worker_deliver_terminal_stall_clear() {
 # alongside that log_event call. Same reset-on-new-brief, escalate-once-at-
 # threshold shape as worker_deliver_record_composer_stall — see that
 # function's header comment. Deliberately does NOT set WORKER_DELIVER_
-# GAVE_UP or otherwise stop retrying: a genuinely `blocked` worker can still
-# self-heal the moment a human answers it (or, per #601, a fixed
+# GAVE_UP or otherwise stop retrying: a task still genuinely in flight can
+# still self-heal the moment it finishes (or, per #370/#601, a fixed
 # worker_current_task_terminal() can start recognizing a completion it
 # previously missed), so there's nothing to give up on, only something to
 # escalate.
@@ -7827,9 +7853,9 @@ worker_deliver_record_terminal_stall() {
     WORKER_DELIVER_TERMINAL_STALL_COUNT[$issue]=$count
     if [ "$count" -ge "$WORKER_DELIVER_TERMINAL_STALL_THRESHOLD" ] && [ -z "${WORKER_DELIVER_TERMINAL_STALL_ESCALATED[$issue]:-}" ]; then
         WORKER_DELIVER_TERMINAL_STALL_ESCALATED[$issue]=1
-        echo "[$(date +%T)] WARNING: worker iss-$issue has skipped brief delivery $count times (reason=task_not_terminal) for the same queued brief ($brief) — its current/most-recently-archived task has never confirmed a ready-for-review/done-no-pr status, which may mean it's genuinely blocked awaiting a human answer, or a status-file mismatch (worker_current_task_terminal's #370/#601 fallbacks); investigate with scripts/capture-worker.sh iss-$issue"
+        echo "[$(date +%T)] WARNING: worker iss-$issue has skipped brief delivery $count times (reason=task_not_terminal) for the same queued brief ($brief) — its current/most-recently-archived task has never confirmed a ready-for-review/done-no-pr/blocked status, which may mean it's still genuinely in flight, or a status-file mismatch (worker_current_task_terminal's #370/#601 fallbacks); investigate with scripts/capture-worker.sh iss-$issue"
         log_event worker.deliver.terminal_stalled "issue=$issue brief=$brief skips=$count"
-        coord_inbox_write deliver_stall "$(printf 'Worker iss-%s: brief delivery has skipped %s times (reason=task_not_terminal) for the queued brief %s.\n\nCheck: scripts/capture-worker.sh iss-%s\n\nThis usually means the windows current (or most recently archived) task never wrote a ready-for-review/done-no-pr status — either it is genuinely `blocked` awaiting your answer (attach and answer it directly, then requeue.sh the queued brief), or its status file is under a different name than worker_current_task_terminal() expects (see that functions #370/#601 header comments).\n' "$issue" "$count" "$brief" "$issue")" || true
+        coord_inbox_write deliver_stall "$(printf 'Worker iss-%s: brief delivery has skipped %s times (reason=task_not_terminal) for the queued brief %s.\n\nCheck: scripts/capture-worker.sh iss-%s\n\nThis usually means the windows current (or most recently archived) task never wrote a ready-for-review/done-no-pr/blocked status — either it is still genuinely in flight, or its status file is under a different name than worker_current_task_terminal() expects (see that functions #370/#601 header comments).\n' "$issue" "$count" "$brief" "$issue")" || true
     fi
 }
 
@@ -7979,11 +8005,15 @@ maybe_worker_deliver_brief() {
 
     # Self-review finding: never end a session whose CURRENT task hasn't
     # positively confirmed finishing — see worker_current_task_terminal()'s
-    # header comment for the false-completion bug this closes (a `blocked`
-    # worker awaiting a decision looks identical to a finished one from pane
-    # state alone). A worker parked `blocked` still needs the documented
-    # manual path (attach and answer it directly) until a future feature can
-    # deliver an answer as a continuing turn instead of ending the session.
+    # header comment for the false-completion bug this originally guarded
+    # against (a `blocked` worker awaiting a decision looks identical to a
+    # finished one from pane state alone) and for why, per issue #578,
+    # `blocked` now counts as confirmed too: write_outcome() already
+    # records a session ended while `blocked` as outcome=err/worker-
+    # blocked, so ending it here to deliver a requeue.sh follow-up (the
+    # unblock path prompts/coordinator.md documents) is safe. A status
+    # file in any OTHER non-terminal state (or no status file yet) still
+    # blocks delivery below.
     if ! worker_current_task_terminal "$wt_dir"; then
         log_event worker.deliver.skip "issue=$issue reason=task_not_terminal"
         worker_deliver_record_terminal_stall "$issue" "$brief_before"
