@@ -130,6 +130,9 @@ delivery_outlook() {
         live-busy:*)
             printf 'window `%s` in tmux session `%s` is inside a live agent process (`%s`). If that session is parked at rest rather than working, the poll loop cannot see this brief until the session ends — a running `coordinator-watch.sh` releases an idle parked session within ~30s (issue #313). **Waiting is usually right, but confirm a new commit before merging.**' \
                 "${win:-?}" "$session" "${state#live-busy:}" ;;
+        sidelined)
+            printf 'the worker for `%s` is **sidelined** (issue #622: window and container stopped to free its slot, worktree kept). A running `coordinator-watch.sh` re-spawns it for this brief within ~60s once a slot is free. **Waiting is the right move, but confirm a new commit before merging.**' \
+                "${win:-?}" ;;
         no-listener)
             printf 'tmux session `%s` is alive but has **no `iss-*` listener window** — nothing is polling this brief, so it will not be delivered on its own. **Do not just wait**: start a listener, or treat the queued fix as not in flight and re-file it (step 3 below).' \
                 "$session" ;;
@@ -388,12 +391,22 @@ fi
 # sit AFTER the notify call — it moved up so the comment can carry the
 # same verdict instead of leaving it in a terminal nobody reads.
 LISTENER_STATE="$(listener_state "$SESSION_NAME" "$WIN")"
+# issue #622: a sidelined worker has no window by design; the watcher's
+# sideline_wake_pass re-spawns it for this brief.
+if [ -e "$WT/.swarm/sidelined" ] && [[ "$LISTENER_STATE" != live-* ]]; then
+    LISTENER_STATE="sidelined"
+fi
 
 notify_pending_brief "$WT" "$TASK_ID" "$LISTENER_STATE" \
     "$SESSION_NAME" "$WIN" "$INBOX/$TASK_ID.md"
 
 # Listener-state hint
 case "$LISTENER_STATE" in
+    sidelined)
+        echo "  (worker is sidelined — coordinator-watch.sh wakes it for this brief within"
+        echo "   WATCH_SIDELINE_SWEEP_SECS, default 60s, once a slot is free; by hand:"
+        echo "   $LLM_SWARM_DIR/scripts/provision-worker.sh --wake ${WIN#iss-})"
+        ;;
     live-idle)
         LISTENERS=$(tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -c '^iss-' || true)
         echo "  (tmux session '$SESSION_NAME' has $LISTENERS listener window(s); pickup expected within ~2s"
