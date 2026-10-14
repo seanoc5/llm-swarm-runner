@@ -278,6 +278,151 @@ if command -v git &>/dev/null && git -C "$PROJECT_DIR" rev-parse --git-dir &>/de
                 fi
             done
             unset _wt_admin _wt_gitdir_file _wt_path _wt_path_real
+
+            # --- Shared .git lockdown: hooks/info/refs/logs (#615) ---
+            # The sibling lockdown above only narrows `worktrees/` — every
+            # OTHER top-level entry in the common dir (`hooks/`, `info/`,
+            # `config`, `refs/`, `logs/`, `packed-refs`) was still part of
+            # the broad rw mount above (`-v "$_git_real:$_git_real:rw"`, or
+            # PROJECT_DIR's own rw mount when this container IS the main
+            # checkout). #615: a worker's own `build.gradle.kts` created
+            # symlinks named exactly `objects`, `refs`, `logs`, `hooks`,
+            # `info`, `worktrees` and `config` pointing INTO the shared
+            # common dir, and a recursive delete through them (Kotlin's
+            # `deleteRecursively()`, which follows symlinks to directories)
+            # emptied whatever they pointed at — permitted only because
+            # those targets were writable. Lost for good: `refs/stash`,
+            # `refs/notes/*`, every reflog, and any custom hooks (loose
+            # objects were recoverable by re-fetching from origin by SHA,
+            # since they're content-addressed and the remote already has a
+            # copy — not true of the rest).
+            #
+            # Design, after two rounds of self-review on earlier attempts
+            # (see below): mount `hooks/` and `info/` read-only outright —
+            # a worker never legitimately writes either — then, for every
+            # OTHER branch's loose ref file under `refs/heads/` (every file
+            # except this worktree's own `$_own_branch`), nest an
+            # individual read-only mount on that one file, plus its mirror
+            # reflog file under `logs/refs/heads/`, and on `refs/notes/`
+            # wholesale. Nothing else under `refs/` or `logs/` is touched
+            # at all — `refs/heads` itself, `refs/remotes`, `refs/tags`,
+            # `refs/stash`, `logs/HEAD` and every other reflog all stay
+            # part of the broad rw mount, same as `objects/` and `config`.
+            #
+            # This is the OPPOSITE direction from the `worktrees/` lockdown
+            # above (that one mounts the whole directory read-only, then
+            # carves the owner's own subdir back to rw; this one leaves
+            # everything rw by default and individually protects what
+            # belongs to someone else) — enumerating per EXACT branch name
+            # rather than mounting a whole subtree read-only avoids two
+            # real bugs self-review found in the first, directory-level
+            # version of this fix:
+            #   - A read-only `refs/` (or `logs/`) mount, carved back to rw
+            #     only for this worktree's own branch's *directory* (not
+            #     the leaf ref file — git updates a ref via a `.lock` file
+            #     in the SAME directory, so the carve-out has to be a
+            #     directory, or the rename has nowhere to stage), is a
+            #     bind mount on a *directory* that the HOST can later
+            #     `rmdir` out from under it: if `git gc`/`pack-refs` packs
+            #     the last loose ref under that directory (routine — e.g.
+            #     this worktree's own branch is often the ONLY one under
+            #     its own slash-prefix), git prunes the now-empty
+            #     directory on the host side, orphaning the container's
+            #     mount — permanently breaking every further commit in
+            #     that worktree until the container restarts. A single
+            #     FILE-level mount has no such parent-directory lifecycle
+            #     to be orphaned by, so this version only ever mounts
+            #     specific *files*, never a directory whose emptiness is
+            #     outside this worktree's control.
+            #   - Mounting all of `refs/` read-only (even with a carve-out
+            #     for the owner's own branch) makes `refs/stash` read-only
+            #     too, since it's a single ref file living directly in
+            #     `refs/` with no narrower directory to carve out — but
+            #     this project's own worker conventions (see this
+            #     repository's worker system prompt) require exactly
+            #     `git stash push -u -m "<tag>"` as the safe way to set
+            #     work aside, so a worker must be able to write it. Never
+            #     giving `refs/` itself a wholesale read-only mount avoids
+            #     this collision outright instead of carving out yet
+            #     another specific exception.
+            #
+            # Trade-off versus the directory-level version: a sibling
+            # branch that's been packed (no loose file under refs/heads
+            # any more — e.g. `git gc` already ran) isn't enumerated here,
+            # so a worker COULD still create a new loose ref that shadows
+            # an already-packed sibling's name. Narrower than it sounds in
+            # practice (a branch has to be both long-lived enough to get
+            # packed AND still matter to something) and no worse than this
+            # fix not existing at all; full closure needs option (b) in
+            # #615 (a separate git dir per worker). This also means every
+            # distinct branch name gets its own protection now, regardless
+            # of a shared slash-prefix — strictly better isolation than
+            # the directory-level version's "whole prefix family" grant,
+            # not merely a different trade-off.
+            #
+            # Second, wider limit of single-file mounts: they protect a
+            # sibling's ref only until that ref is next REWRITTEN by
+            # anyone else. Git updates a loose ref by renaming a `.lock`
+            # file over it; a rename from another mount namespace (the
+            # host, or the sibling's own container) is allowed and makes
+            # the kernel (3.18+) drop this container's mount on that path
+            # at once. So a sibling commit never fails and this container
+            # never sees a stale value, but from then on that one ref is
+            # writable here (as is any branch created after launch).
+            # Reflogs are appended in place, not renamed, so their mounts
+            # hold. Net: refs/heads protection is best-effort, strongest
+            # for branches that are idle while this container lives;
+            # hooks/, info/ and refs/notes/ are the firm part.
+            #
+            # `config`, `logs/HEAD`, `packed-refs` and `refs/stash` all
+            # stay writable on purpose, not by oversight — all four were
+            # found by self-review against earlier drafts of this fix:
+            #   - `config`: `git push -u` (the documented worker flow,
+            #     docs/advanced-usage.md) writes `branch.<name>.remote`
+            #     and `.merge` into it on every first push of a branch.
+            #   - `logs/HEAD`: the main checkout's own HEAD reflog (a
+            #     LINKED worktree's lives in its private
+            #     worktrees/<name>/logs/HEAD instead, already protected by
+            #     the sibling lockdown above) — every commit appends to
+            #     it, and it's a leaf file directly under `logs/`, so
+            #     protecting it would need the same directory-level mount
+            #     this design deliberately avoids.
+            #   - `packed-refs`: every ref deletion (`git branch -d`, a
+            #     pruning fetch) rewrites it by lock-and-rename, and a
+            #     rename over a path that is a mount point in this same
+            #     container fails (EBUSY), so a read-only mount here would
+            #     break those. (A host-side rewrite would merely drop the
+            #     mount, see the limit above.)
+            #   - `refs/stash`: see the second self-review bug above —
+            #     this project's own worker conventions require writing
+            #     it.
+            # Each is a real, accepted gap, not a silent one.
+            for _ro_leaf in hooks info; do
+                if [ -e "$_git_real/$_ro_leaf" ]; then
+                    MOUNTS+=("-v" "$_git_real/$_ro_leaf:$_git_real/$_ro_leaf:ro")
+                fi
+            done
+            unset _ro_leaf
+
+            _own_branch="$(git -C "$PROJECT_DIR" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+            # No own branch (detached HEAD, e.g. launched mid-rebase): skip
+            # sibling protection, since we can't tell which ref the rebase
+            # will need to write when it finishes.
+            if [ -n "$_own_branch" ] && [ -d "$_git_real/refs/heads" ]; then
+                while IFS= read -r -d '' _sib_ref; do
+                    _sib_name="${_sib_ref#"$_git_real/refs/heads/"}"
+                    [ "$_sib_name" = "$_own_branch" ] && continue
+                    MOUNTS+=("-v" "$_sib_ref:$_sib_ref:ro")
+                    _sib_log="$_git_real/logs/refs/heads/$_sib_name"
+                    if [ -f "$_sib_log" ]; then
+                        MOUNTS+=("-v" "$_sib_log:$_sib_log:ro")
+                    fi
+                done < <(find "$_git_real/refs/heads" -type f ! -name '*.lock' -print0)
+            fi
+            if [ -d "$_git_real/refs/notes" ]; then
+                MOUNTS+=("-v" "$_git_real/refs/notes:$_git_real/refs/notes:ro")
+            fi
+            unset _own_branch _sib_ref _sib_name _sib_log
         fi
     fi
 fi
