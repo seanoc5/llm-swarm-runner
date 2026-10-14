@@ -174,9 +174,9 @@ else
     fail "config stays writable (accepted gap: git push -u needs it)" "$out"
 fi
 
-# packed-refs is the third accepted gap (a single-file bind mount would
-# pin the container to a stale inode across a host-side `git gc`/
-# `pack-refs` — see sandbox.sh's #615 comment) — assert it stays
+# packed-refs is the third accepted gap (ref deletion rewrites it by
+# rename, which a read-only mount in this container would refuse — see
+# sandbox.sh's #615 comment) — assert it stays
 # writable too. Doesn't exist yet in this fixture (no gc/pack-refs has
 # run), so a successful append also proves it's creatable, not just
 # modifiable; removed afterward so it doesn't shadow loose refs for the
@@ -428,6 +428,45 @@ elif is_nested_gitconfig_quirk "$main_out"; then
 else
     fail "a commit in the MAIN checkout succeeds (logs/HEAD write didn't fail)" "$main_out"
 fi
+
+# ── 8. A sibling commit made WHILE this container runs must still succeed,
+#       and this container must see the new value (not a stale inode).
+#       Git renames a new file over the ref; the kernel drops this
+#       container's single-file mount instead of refusing the rename.
+#       The ref is then writable here: documented best-effort limit. ──────
+echo ""
+echo "[ 8. Regression: a sibling commit while a container is live succeeds and is seen (protection on that ref then lapses — documented) ]"
+ready="$GITCOMMON/.test-ready-$$"; go="$GITCOMMON/.test-go-$$"
+sib_ref="$GITCOMMON/refs/heads/$BRANCH_B"
+live_out_file="$FIXTURE/live-out"
+run_in_wta "touch '$ready'; i=0; while [ ! -e '$go' ] && [ \$i -lt 120 ]; do sleep 0.5; i=\$((i+1)); done; echo SEEN=\$(cat '$sib_ref'); echo x >> '$sib_ref' 2>/dev/null && echo SIB_WRITABLE || echo SIB_RO" > "$live_out_file" 2>&1 &
+live_pid=$!
+for _ in $(seq 1 120); do [ -e "$ready" ] && break; sleep 0.5; done
+if [ ! -e "$ready" ]; then
+    fail "sibling commit while a container is live" "container never became ready"
+    touch "$go"; wait "$live_pid" || true
+else
+    sib_commit_out=$(git -C "$WTB" -c user.email=test@example.com -c user.name=Test commit --allow-empty -qm "sibling commit while wt-a is live" 2>&1; echo RC=$?)
+    sib_new_sha="$(git -C "$WTB" rev-parse HEAD)"
+    touch "$go"; wait "$live_pid" || true
+    live_out="$(cat "$live_out_file")"
+    if echo "$sib_commit_out" | grep -q "RC=0"; then
+        pass "a sibling commit succeeds while another container has its ref mounted read-only"
+    else
+        fail "a sibling commit succeeds while another container has its ref mounted read-only" "$sib_commit_out"
+    fi
+    if echo "$live_out" | grep -q "SEEN=$sib_new_sha"; then
+        pass "the live container sees the sibling's new ref value (no stale inode)"
+    else
+        fail "the live container sees the sibling's new ref value (no stale inode)" "expected $sib_new_sha" "$live_out"
+    fi
+    if echo "$live_out" | grep -q "SIB_WRITABLE"; then
+        pass "documented limit: after the sibling's rewrite its ref is writable from the live container"
+    else
+        fail "documented limit: after the sibling's rewrite its ref is writable from the live container (if this now fails, protection got firmer than documented; update sandbox.sh's #615 comment and this test together)" "$live_out"
+    fi
+fi
+rm -f "$ready" "$go"
 
 echo ""
 echo "=== Results ==="
