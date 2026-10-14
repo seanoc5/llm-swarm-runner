@@ -360,6 +360,20 @@ if command -v git &>/dev/null && git -C "$PROJECT_DIR" rev-parse --git-dir &>/de
             # the directory-level version's "whole prefix family" grant,
             # not merely a different trade-off.
             #
+            # Second, wider limit of single-file mounts: they protect a
+            # sibling's ref only until that ref is next REWRITTEN by
+            # anyone else. Git updates a loose ref by renaming a `.lock`
+            # file over it; a rename from another mount namespace (the
+            # host, or the sibling's own container) is allowed and makes
+            # the kernel (3.18+) drop this container's mount on that path
+            # at once. So a sibling commit never fails and this container
+            # never sees a stale value, but from then on that one ref is
+            # writable here (as is any branch created after launch).
+            # Reflogs are appended in place, not renamed, so their mounts
+            # hold. Net: refs/heads protection is best-effort, strongest
+            # for branches that are idle while this container lives;
+            # hooks/, info/ and refs/notes/ are the firm part.
+            #
             # `config`, `logs/HEAD`, `packed-refs` and `refs/stash` all
             # stay writable on purpose, not by oversight — all four were
             # found by self-review against earlier drafts of this fix:
@@ -373,14 +387,12 @@ if command -v git &>/dev/null && git -C "$PROJECT_DIR" rev-parse --git-dir &>/de
             #     it, and it's a leaf file directly under `logs/`, so
             #     protecting it would need the same directory-level mount
             #     this design deliberately avoids.
-            #   - `packed-refs`: a single-file bind mount pins the
-            #     container to that file's inode at launch. A later host
-            #     `git gc`/`pack-refs` writes a NEW packed-refs and
-            #     deletes the loose refs it just packed — the container,
-            #     still on the old inode, would see neither, which could
-            #     make a worker's own branch look unborn. Read-only
-            #     doesn't fix this; the staleness comes from binding a
-            #     single file at all, not its permission bit.
+            #   - `packed-refs`: every ref deletion (`git branch -d`, a
+            #     pruning fetch) rewrites it by lock-and-rename, and a
+            #     rename over a path that is a mount point in this same
+            #     container fails (EBUSY), so a read-only mount here would
+            #     break those. (A host-side rewrite would merely drop the
+            #     mount, see the limit above.)
             #   - `refs/stash`: see the second self-review bug above —
             #     this project's own worker conventions require writing
             #     it.
@@ -393,21 +405,22 @@ if command -v git &>/dev/null && git -C "$PROJECT_DIR" rev-parse --git-dir &>/de
             unset _ro_leaf
 
             _own_branch="$(git -C "$PROJECT_DIR" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
-            if [ -n "$_own_branch" ] && [ -f "$_git_real/refs/heads/$_own_branch" ]; then
-                if [ -d "$_git_real/refs/heads" ]; then
-                    while IFS= read -r -d '' _sib_ref; do
-                        _sib_name="${_sib_ref#"$_git_real/refs/heads/"}"
-                        [ "$_sib_name" = "$_own_branch" ] && continue
-                        MOUNTS+=("-v" "$_sib_ref:$_sib_ref:ro")
-                        _sib_log="$_git_real/logs/refs/heads/$_sib_name"
-                        if [ -f "$_sib_log" ]; then
-                            MOUNTS+=("-v" "$_sib_log:$_sib_log:ro")
-                        fi
-                    done < <(find "$_git_real/refs/heads" -type f -print0)
-                fi
-                if [ -d "$_git_real/refs/notes" ]; then
-                    MOUNTS+=("-v" "$_git_real/refs/notes:$_git_real/refs/notes:ro")
-                fi
+            # No own branch (detached HEAD, e.g. launched mid-rebase): skip
+            # sibling protection, since we can't tell which ref the rebase
+            # will need to write when it finishes.
+            if [ -n "$_own_branch" ] && [ -d "$_git_real/refs/heads" ]; then
+                while IFS= read -r -d '' _sib_ref; do
+                    _sib_name="${_sib_ref#"$_git_real/refs/heads/"}"
+                    [ "$_sib_name" = "$_own_branch" ] && continue
+                    MOUNTS+=("-v" "$_sib_ref:$_sib_ref:ro")
+                    _sib_log="$_git_real/logs/refs/heads/$_sib_name"
+                    if [ -f "$_sib_log" ]; then
+                        MOUNTS+=("-v" "$_sib_log:$_sib_log:ro")
+                    fi
+                done < <(find "$_git_real/refs/heads" -type f ! -name '*.lock' -print0)
+            fi
+            if [ -d "$_git_real/refs/notes" ]; then
+                MOUNTS+=("-v" "$_git_real/refs/notes:$_git_real/refs/notes:ro")
             fi
             unset _own_branch _sib_ref _sib_name _sib_log
         fi
