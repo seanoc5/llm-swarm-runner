@@ -3,10 +3,10 @@
 # test-sandbox-git-dir-lockdown.sh — Regression test for issue #615: a
 # worker container must not be able to wipe the shared .git's hooks/,
 # info/, refs/ or logs/ for every worktree, the way one worker's own
-# build script did on 2026-10-11. `config` and `logs/HEAD` are
-# deliberately NOT protected — see the "accepted gaps" section below and
-# the matching comment in sandbox.sh — so this suite tests that they stay
-# writable, not that they survive the attack.
+# build script did on 2026-10-11. `config`, `logs/HEAD` and
+# `packed-refs` are deliberately NOT protected — see the "accepted gaps"
+# section below and the matching comment in sandbox.sh — so this suite
+# tests that they stay writable, not that they survive the attack.
 #
 # Root cause (corpusminder-spring, 2026-10-11): a worker's build.gradle.kts
 # built `build/gitProperties/dotGit` as SYMLINKS into the shared common
@@ -125,14 +125,14 @@ run_in_wta() {
 snapshot_protected() {
     # md5sum of everything this fix is supposed to keep safe, taken before
     # the attack so a later mismatch has a concrete "what changed" answer
-    # instead of just pass/fail. `config` is deliberately excluded — it's
-    # one of the two accepted gaps, not something this fix protects (see
-    # the header comment and sandbox.sh's #615 comment). packed-refs may
-    # not exist (no gc/pack-refs has run) — `find` exits 1 for a
-    # nonexistent start point even with output suppressed, which trips
-    # `pipefail`, so only existing paths are passed to it.
+    # instead of just pass/fail. `config` and `packed-refs` are
+    # deliberately excluded — they're two of the three accepted gaps, not
+    # something this fix protects (see the header comment and sandbox.sh's
+    # #615 comment) — `find` exits 1 for a nonexistent start point even
+    # with output suppressed, which trips `pipefail`, so only existing
+    # paths are passed to it.
     local paths=() p
-    for p in hooks info packed-refs refs/notes refs/stash refs/heads/feat; do
+    for p in hooks info refs/notes refs/stash refs/heads/feat; do
         [ -e "$GITCOMMON/$p" ] && paths+=("$p")
     done
     ( cd "$GITCOMMON" && find "${paths[@]}" -type f 2>/dev/null | sort | xargs -r md5sum )
@@ -163,6 +163,23 @@ if echo "$out" | grep -q "RC=0"; then
 else
     fail "config stays writable (accepted gap: git push -u needs it)" "$out"
 fi
+
+# packed-refs is the third accepted gap (a single-file bind mount would
+# pin the container to a stale inode across a host-side `git gc`/
+# `pack-refs` — see sandbox.sh's #615 comment) — assert it stays
+# writable too. Doesn't exist yet in this fixture (no gc/pack-refs has
+# run), so a successful append also proves it's creatable, not just
+# modifiable; removed afterward so it doesn't shadow loose refs for the
+# rest of this script.
+packed_refs_preexisted=0
+[ -e "$GITCOMMON/packed-refs" ] && packed_refs_preexisted=1
+out=$(run_in_wta "echo '# x' >> '$GITCOMMON/packed-refs' 2>&1; echo RC=\$?" || true)
+if echo "$out" | grep -q "RC=0"; then
+    pass "packed-refs stays writable (accepted gap: single-file mount would go stale)"
+else
+    fail "packed-refs stays writable (accepted gap: single-file mount would go stale)" "$out"
+fi
+[ "$packed_refs_preexisted" = "0" ] && rm -f "$GITCOMMON/packed-refs"
 
 # ── 2. Direct writes to a SIBLING's branch ref / its reflog fail ───────────
 echo ""

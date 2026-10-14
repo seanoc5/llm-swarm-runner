@@ -300,12 +300,12 @@ if command -v git &>/dev/null && git -C "$PROJECT_DIR" rev-parse --git-dir &>/de
             # Fix, same nested-bind-mount technique as the worktrees/
             # lockdown above (verified there to work in both directions —
             # a narrower mount, ro or rw, overrides whatever it's nested
-            # inside): mount `hooks/`, `info/` and `packed-refs` read-only
-            # outright, then mount `refs/` and `logs/refs/` (NOT all of
-            # `logs/` — see below) read-only too, with narrow rw carve-outs
-            # restoring exactly what a normal worker flow (commit, push,
-            # the `git fetch origin <default>` refresh step every brief
-            # starts with) needs:
+            # inside): mount `hooks/` and `info/` read-only outright, then
+            # mount `refs/` and `logs/refs/` (NOT all of `logs/` — see
+            # below) read-only too, with narrow rw carve-outs restoring
+            # exactly what a normal worker flow (commit, push, the
+            # `git fetch origin <default>` refresh step every brief starts
+            # with) needs:
             #   - refs/heads/<this worktree's own branch>'s containing
             #     directory (and the mirror path under logs/refs/) — git
             #     updates a loose ref via a `<ref>.lock` file in the SAME
@@ -329,8 +329,8 @@ if command -v git &>/dev/null && git -C "$PROJECT_DIR" rev-parse --git-dir &>/de
             # ref/reflog stay read-only — exactly the things #615 actually
             # lost.
             #
-            # Two things stay out of the lockdown entirely, both found by
-            # self-review against the first version of this fix:
+            # Three things stay out of the lockdown entirely, all found by
+            # self-review against earlier versions of this fix:
             #   - `config`: `git push -u` (the documented worker flow,
             #     docs/advanced-usage.md) writes `branch.<name>.remote`
             #     and `.merge` into it on every first push of a branch.
@@ -347,6 +347,24 @@ if command -v git &>/dev/null && git -C "$PROJECT_DIR" rev-parse --git-dir &>/de
             #     mechanism as a ref update — so the lockdown mounts
             #     `logs/refs/` read-only rather than all of `logs/`,
             #     leaving `logs/` itself (and thus logs/HEAD) writable.
+            #   - `packed-refs`: a single-file bind mount pins the
+            #     container to that file's inode at launch time. If the
+            #     HOST later runs `git gc`/`pack-refs` (worker containers
+            #     disable their OWN background gc.auto, not the host's),
+            #     it writes a NEW packed-refs and deletes the loose refs
+            #     it just packed — the container, still looking at the old
+            #     inode, would then see neither the new packed-refs
+            #     content nor the now-deleted loose refs for any branch
+            #     that got packed, which could make a worker's own branch
+            #     look unborn. Mounting it read-only bought protection
+            #     against a worker overwriting it directly, but at the
+            #     cost of this staleness risk — not a trade worth making
+            #     for a file git itself only ever rewrites wholesale, never
+            #     edits in place. Left out of the lockdown entirely (not
+            #     even made an explicit rw carve-out, since a plain bind
+            #     mount of this single file has the same staleness problem
+            #     regardless of its read/write mode); it stays part of the
+            #     broad rw mount, same as config.
             #
             # Skips entirely (falls back to the pre-#615 fully-open mount)
             # when the current branch can't be resolved as a loose ref
@@ -354,7 +372,7 @@ if command -v git &>/dev/null && git -C "$PROJECT_DIR" rev-parse --git-dir &>/de
             # packed-refs) — narrowing refs/ without a working carve-out
             # would break every commit, which is worse than the hole this
             # closes.
-            for _ro_leaf in hooks info packed-refs; do
+            for _ro_leaf in hooks info; do
                 if [ -e "$_git_real/$_ro_leaf" ]; then
                     MOUNTS+=("-v" "$_git_real/$_ro_leaf:$_git_real/$_ro_leaf:ro")
                 fi
