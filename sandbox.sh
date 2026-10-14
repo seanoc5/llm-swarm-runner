@@ -297,81 +297,94 @@ if command -v git &>/dev/null && git -C "$PROJECT_DIR" rev-parse --git-dir &>/de
             # since they're content-addressed and the remote already has a
             # copy — not true of the rest).
             #
-            # Fix, same nested-bind-mount technique as the worktrees/
-            # lockdown above (verified there to work in both directions —
-            # a narrower mount, ro or rw, overrides whatever it's nested
-            # inside): mount `hooks/` and `info/` read-only outright, then
-            # mount `refs/` and `logs/refs/` (NOT all of `logs/` — see
-            # below) read-only too, with narrow rw carve-outs restoring
-            # exactly what a normal worker flow (commit, push, the
-            # `git fetch origin <default>` refresh step every brief starts
-            # with) needs:
-            #   - refs/heads/<this worktree's own branch>'s containing
-            #     directory (and the mirror path under logs/refs/) — git
-            #     updates a loose ref via a `<ref>.lock` file in the SAME
-            #     directory then renames over it, so the carve-out has to
-            #     be a directory, not just the leaf ref file, or the
-            #     rename has nowhere to stage. For a slash-named branch
-            #     (this project's convention, e.g. `fix/issue-615`) that
-            #     only reopens the one prefix family (`refs/heads/fix/*`),
-            #     not every branch — a known, accepted narrowing, not full
-            #     per-worker isolation (that needs option (b) in #615: a
-            #     separate git dir per worker). A flat branch name (e.g.
-            #     `master`, the main-checkout case) has no narrower
-            #     directory than refs/heads itself, so it reopens the
-            #     whole thing — no worse than before this fix.
-            #   - refs/remotes/, refs/tags/ and their logs/refs/
-            #     counterparts, wholesale: remote-tracking refs and tags
-            #     are shared bookkeeping, not a per-worker secret, and
-            #     every worker's own startup fetch needs to write both
-            #     (fetch auto-follows tags onto newly-fetched commits).
-            # `refs/stash`, `refs/notes/*` and every OTHER branch's
-            # ref/reflog stay read-only — exactly the things #615 actually
-            # lost.
+            # Design, after two rounds of self-review on earlier attempts
+            # (see below): mount `hooks/` and `info/` read-only outright —
+            # a worker never legitimately writes either — then, for every
+            # OTHER branch's loose ref file under `refs/heads/` (every file
+            # except this worktree's own `$_own_branch`), nest an
+            # individual read-only mount on that one file, plus its mirror
+            # reflog file under `logs/refs/heads/`, and on `refs/notes/`
+            # wholesale. Nothing else under `refs/` or `logs/` is touched
+            # at all — `refs/heads` itself, `refs/remotes`, `refs/tags`,
+            # `refs/stash`, `logs/HEAD` and every other reflog all stay
+            # part of the broad rw mount, same as `objects/` and `config`.
             #
-            # Three things stay out of the lockdown entirely, all found by
-            # self-review against earlier versions of this fix:
+            # This is the OPPOSITE direction from the `worktrees/` lockdown
+            # above (that one mounts the whole directory read-only, then
+            # carves the owner's own subdir back to rw; this one leaves
+            # everything rw by default and individually protects what
+            # belongs to someone else) — enumerating per EXACT branch name
+            # rather than mounting a whole subtree read-only avoids two
+            # real bugs self-review found in the first, directory-level
+            # version of this fix:
+            #   - A read-only `refs/` (or `logs/`) mount, carved back to rw
+            #     only for this worktree's own branch's *directory* (not
+            #     the leaf ref file — git updates a ref via a `.lock` file
+            #     in the SAME directory, so the carve-out has to be a
+            #     directory, or the rename has nowhere to stage), is a
+            #     bind mount on a *directory* that the HOST can later
+            #     `rmdir` out from under it: if `git gc`/`pack-refs` packs
+            #     the last loose ref under that directory (routine — e.g.
+            #     this worktree's own branch is often the ONLY one under
+            #     its own slash-prefix), git prunes the now-empty
+            #     directory on the host side, orphaning the container's
+            #     mount — permanently breaking every further commit in
+            #     that worktree until the container restarts. A single
+            #     FILE-level mount has no such parent-directory lifecycle
+            #     to be orphaned by, so this version only ever mounts
+            #     specific *files*, never a directory whose emptiness is
+            #     outside this worktree's control.
+            #   - Mounting all of `refs/` read-only (even with a carve-out
+            #     for the owner's own branch) makes `refs/stash` read-only
+            #     too, since it's a single ref file living directly in
+            #     `refs/` with no narrower directory to carve out — but
+            #     this project's own worker conventions (see this
+            #     repository's worker system prompt) require exactly
+            #     `git stash push -u -m "<tag>"` as the safe way to set
+            #     work aside, so a worker must be able to write it. Never
+            #     giving `refs/` itself a wholesale read-only mount avoids
+            #     this collision outright instead of carving out yet
+            #     another specific exception.
+            #
+            # Trade-off versus the directory-level version: a sibling
+            # branch that's been packed (no loose file under refs/heads
+            # any more — e.g. `git gc` already ran) isn't enumerated here,
+            # so a worker COULD still create a new loose ref that shadows
+            # an already-packed sibling's name. Narrower than it sounds in
+            # practice (a branch has to be both long-lived enough to get
+            # packed AND still matter to something) and no worse than this
+            # fix not existing at all; full closure needs option (b) in
+            # #615 (a separate git dir per worker). This also means every
+            # distinct branch name gets its own protection now, regardless
+            # of a shared slash-prefix — strictly better isolation than
+            # the directory-level version's "whole prefix family" grant,
+            # not merely a different trade-off.
+            #
+            # `config`, `logs/HEAD`, `packed-refs` and `refs/stash` all
+            # stay writable on purpose, not by oversight — all four were
+            # found by self-review against earlier drafts of this fix:
             #   - `config`: `git push -u` (the documented worker flow,
             #     docs/advanced-usage.md) writes `branch.<name>.remote`
             #     and `.merge` into it on every first push of a branch.
-            #     Read-only here breaks that acceptance criterion outright,
-            #     so config stays in the broad rw mount — a worker can
-            #     still rewrite shared settings (e.g. core.hooksPath), a
-            #     real but accepted gap, not a silent one.
-            #   - `logs/HEAD`: the main checkout's own HEAD reflog (for a
-            #     LINKED worktree this lives in its private
+            #   - `logs/HEAD`: the main checkout's own HEAD reflog (a
+            #     LINKED worktree's lives in its private
             #     worktrees/<name>/logs/HEAD instead, already protected by
-            #     the sibling lockdown above). It sits directly under
-            #     `logs/`, not under `logs/refs/`, and every commit
-            #     appends to it via the same lock-then-rename-in-parent-dir
-            #     mechanism as a ref update — so the lockdown mounts
-            #     `logs/refs/` read-only rather than all of `logs/`,
-            #     leaving `logs/` itself (and thus logs/HEAD) writable.
+            #     the sibling lockdown above) — every commit appends to
+            #     it, and it's a leaf file directly under `logs/`, so
+            #     protecting it would need the same directory-level mount
+            #     this design deliberately avoids.
             #   - `packed-refs`: a single-file bind mount pins the
-            #     container to that file's inode at launch time. If the
-            #     HOST later runs `git gc`/`pack-refs` (worker containers
-            #     disable their OWN background gc.auto, not the host's),
-            #     it writes a NEW packed-refs and deletes the loose refs
-            #     it just packed — the container, still looking at the old
-            #     inode, would then see neither the new packed-refs
-            #     content nor the now-deleted loose refs for any branch
-            #     that got packed, which could make a worker's own branch
-            #     look unborn. Mounting it read-only bought protection
-            #     against a worker overwriting it directly, but at the
-            #     cost of this staleness risk — not a trade worth making
-            #     for a file git itself only ever rewrites wholesale, never
-            #     edits in place. Left out of the lockdown entirely (not
-            #     even made an explicit rw carve-out, since a plain bind
-            #     mount of this single file has the same staleness problem
-            #     regardless of its read/write mode); it stays part of the
-            #     broad rw mount, same as config.
-            #
-            # Skips entirely (falls back to the pre-#615 fully-open mount)
-            # when the current branch can't be resolved as a loose ref
-            # under refs/heads (detached HEAD, or a ref that's only in
-            # packed-refs) — narrowing refs/ without a working carve-out
-            # would break every commit, which is worse than the hole this
-            # closes.
+            #     container to that file's inode at launch. A later host
+            #     `git gc`/`pack-refs` writes a NEW packed-refs and
+            #     deletes the loose refs it just packed — the container,
+            #     still on the old inode, would see neither, which could
+            #     make a worker's own branch look unborn. Read-only
+            #     doesn't fix this; the staleness comes from binding a
+            #     single file at all, not its permission bit.
+            #   - `refs/stash`: see the second self-review bug above —
+            #     this project's own worker conventions require writing
+            #     it.
+            # Each is a real, accepted gap, not a silent one.
             for _ro_leaf in hooks info; do
                 if [ -e "$_git_real/$_ro_leaf" ]; then
                     MOUNTS+=("-v" "$_git_real/$_ro_leaf:$_git_real/$_ro_leaf:ro")
@@ -381,32 +394,22 @@ if command -v git &>/dev/null && git -C "$PROJECT_DIR" rev-parse --git-dir &>/de
 
             _own_branch="$(git -C "$PROJECT_DIR" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
             if [ -n "$_own_branch" ] && [ -f "$_git_real/refs/heads/$_own_branch" ]; then
-                _own_heads_dir="$(dirname "$_git_real/refs/heads/$_own_branch")"
-                MOUNTS+=(
-                    "-v" "$_git_real/refs:$_git_real/refs:ro"
-                    "-v" "$_own_heads_dir:$_own_heads_dir:rw"
-                )
-                if [ -d "$_git_real/refs/remotes" ]; then
-                    MOUNTS+=("-v" "$_git_real/refs/remotes:$_git_real/refs/remotes:rw")
+                if [ -d "$_git_real/refs/heads" ]; then
+                    while IFS= read -r -d '' _sib_ref; do
+                        _sib_name="${_sib_ref#"$_git_real/refs/heads/"}"
+                        [ "$_sib_name" = "$_own_branch" ] && continue
+                        MOUNTS+=("-v" "$_sib_ref:$_sib_ref:ro")
+                        _sib_log="$_git_real/logs/refs/heads/$_sib_name"
+                        if [ -f "$_sib_log" ]; then
+                            MOUNTS+=("-v" "$_sib_log:$_sib_log:ro")
+                        fi
+                    done < <(find "$_git_real/refs/heads" -type f -print0)
                 fi
-                if [ -d "$_git_real/refs/tags" ]; then
-                    MOUNTS+=("-v" "$_git_real/refs/tags:$_git_real/refs/tags:rw")
-                fi
-                if [ -d "$_git_real/logs/refs" ]; then
-                    _own_logs_heads_dir="$(dirname "$_git_real/logs/refs/heads/$_own_branch")"
-                    MOUNTS+=("-v" "$_git_real/logs/refs:$_git_real/logs/refs:ro")
-                    mkdir -p "$_own_logs_heads_dir"
-                    MOUNTS+=("-v" "$_own_logs_heads_dir:$_own_logs_heads_dir:rw")
-                    if [ -d "$_git_real/logs/refs/remotes" ]; then
-                        MOUNTS+=("-v" "$_git_real/logs/refs/remotes:$_git_real/logs/refs/remotes:rw")
-                    fi
-                    if [ -d "$_git_real/logs/refs/tags" ]; then
-                        MOUNTS+=("-v" "$_git_real/logs/refs/tags:$_git_real/logs/refs/tags:rw")
-                    fi
-                    unset _own_logs_heads_dir
+                if [ -d "$_git_real/refs/notes" ]; then
+                    MOUNTS+=("-v" "$_git_real/refs/notes:$_git_real/refs/notes:ro")
                 fi
             fi
-            unset _own_branch _own_heads_dir
+            unset _own_branch _sib_ref _sib_name _sib_log
         fi
     fi
 fi

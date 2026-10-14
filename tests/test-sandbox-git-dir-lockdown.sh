@@ -2,11 +2,18 @@
 #
 # test-sandbox-git-dir-lockdown.sh — Regression test for issue #615: a
 # worker container must not be able to wipe the shared .git's hooks/,
-# info/, refs/ or logs/ for every worktree, the way one worker's own
-# build script did on 2026-10-11. `config`, `logs/HEAD` and
-# `packed-refs` are deliberately NOT protected — see the "accepted gaps"
-# section below and the matching comment in sandbox.sh — so this suite
-# tests that they stay writable, not that they survive the attack.
+# info/, refs/notes/ or another worktree's branch ref/reflog, the way
+# one worker's own build script did on 2026-10-11. The design protects
+# individual files, not whole subtrees: hooks/, info/ and refs/notes/ are
+# mounted read-only wholesale, and every OTHER worktree's branch ref and
+# reflog is mounted read-only file-by-file — never a whole `refs/` or
+# `logs/` tree, since that would also catch this worktree's OWN branch
+# (breaking every commit) or `refs/stash` (breaking the worker-safety
+# stash protocol this very project's own worker conventions require).
+# `config`, `logs/HEAD`, `packed-refs` and `refs/stash` are deliberately
+# NOT protected — see the "accepted gaps" section below and the matching
+# comment in sandbox.sh — so this suite tests that they stay writable,
+# not that they survive the attack.
 #
 # Root cause (corpusminder-spring, 2026-10-11): a worker's build.gradle.kts
 # built `build/gitProperties/dotGit` as SYMLINKS into the shared common
@@ -125,14 +132,17 @@ run_in_wta() {
 snapshot_protected() {
     # md5sum of everything this fix is supposed to keep safe, taken before
     # the attack so a later mismatch has a concrete "what changed" answer
-    # instead of just pass/fail. `config` and `packed-refs` are
-    # deliberately excluded — they're two of the three accepted gaps, not
+    # instead of just pass/fail. `config`, `packed-refs` and `refs/stash`
+    # are deliberately excluded — all three are accepted gaps, not
     # something this fix protects (see the header comment and sandbox.sh's
-    # #615 comment) — `find` exits 1 for a nonexistent start point even
-    # with output suppressed, which trips `pipefail`, so only existing
-    # paths are passed to it.
+    # #615 comment) — and `refs/heads`/`logs/refs/heads` are listed by
+    # the sibling's EXACT branch file, not the whole directory, since
+    # protection is now per exact branch name, not per top-level prefix
+    # (see section 5 below). `find` exits 1 for a nonexistent start point
+    # even with output suppressed, which trips `pipefail`, so only
+    # existing paths are passed to it.
     local paths=() p
-    for p in hooks info refs/notes refs/stash refs/heads/feat; do
+    for p in hooks info refs/notes "refs/heads/$BRANCH_B" "logs/refs/heads/$BRANCH_B"; do
         [ -e "$GITCOMMON/$p" ] && paths+=("$p")
     done
     ( cd "$GITCOMMON" && find "${paths[@]}" -type f 2>/dev/null | sort | xargs -r md5sum )
@@ -141,8 +151,8 @@ snapshot_protected() {
 BEFORE="$(snapshot_protected)"
 
 # ── 1. Direct writes to the clearly-never-needed paths fail outright ───────
-echo "[ 1. Direct writes to hooks/, info/exclude fail (read-only) ]"
-for rel in hooks/pre-commit info/exclude; do
+echo "[ 1. Direct writes to hooks/, info/exclude, refs/notes fail (read-only) ]"
+for rel in hooks/pre-commit info/exclude refs/notes/commits; do
     out=$(run_in_wta "echo x >> '$GITCOMMON/$rel' 2>&1; echo RC=\$?" || true)
     if echo "$out" | grep -qi "read-only file system" && ! echo "$out" | grep -q "RC=0"; then
         pass "direct write to $rel fails"
@@ -181,9 +191,24 @@ else
 fi
 [ "$packed_refs_preexisted" = "0" ] && rm -f "$GITCOMMON/packed-refs"
 
+# refs/stash is the fourth accepted gap: this project's own worker
+# conventions require `git stash push -u -m "<tag>"` as the safe way to
+# set work aside, so it must stay writable even though it's one of the
+# two ref namespaces (with refs/notes) #615's incident actually lost.
+# Appends to it directly rather than invoking `git stash` so this check
+# can't itself collide with the real stash entry created below.
+stash_before="$(cat "$GITCOMMON/refs/stash" 2>/dev/null || true)"
+out=$(run_in_wta "echo '$stash_before' >> '$GITCOMMON/refs/stash' 2>&1; echo RC=\$?" || true)
+if echo "$out" | grep -q "RC=0"; then
+    pass "refs/stash stays writable (accepted gap: git stash push needs it)"
+else
+    fail "refs/stash stays writable (accepted gap: git stash push needs it)" "$out"
+fi
+printf '%s\n' "$stash_before" > "$GITCOMMON/refs/stash"
+
 # ── 2. Direct writes to a SIBLING's branch ref / its reflog fail ───────────
 echo ""
-echo "[ 2. Direct writes to the sibling's (different-prefix) branch ref fail ]"
+echo "[ 2. Direct writes to the sibling's (different-prefix) branch ref/reflog fail ]"
 sib_ref="$GITCOMMON/refs/heads/$BRANCH_B"
 out=$(run_in_wta "echo x >> '$sib_ref' 2>&1; echo RC=\$?" || true)
 if echo "$out" | grep -qi "read-only file system" && ! echo "$out" | grep -q "RC=0"; then
@@ -192,8 +217,33 @@ else
     fail "direct write to sibling's branch ref ($BRANCH_B) fails" "$out"
 fi
 
+# Per exact branch name now, so the sibling's REFLOG file needs its own
+# check too — it's an individually-mounted leaf file (logs/refs/heads/
+# <branch>), not covered by any wholesale logs/ protection (there is
+# none, by design — see the #615 comment in sandbox.sh).
+sib_log="$GITCOMMON/logs/refs/heads/$BRANCH_B"
+if [ -f "$sib_log" ]; then
+    out=$(run_in_wta "echo x >> '$sib_log' 2>&1; echo RC=\$?" || true)
+    if echo "$out" | grep -qi "read-only file system" && ! echo "$out" | grep -q "RC=0"; then
+        pass "direct write to sibling's branch reflog ($BRANCH_B) fails"
+    else
+        fail "direct write to sibling's branch reflog ($BRANCH_B) fails" "$out"
+    fi
+else
+    fail "direct write to sibling's branch reflog ($BRANCH_B) fails" "fixture bug: $sib_log does not exist"
+fi
+
 # ── 3. The #615 attack itself: symlink into the shared dir, then recursive
 #       delete through it — reproducing Kotlin's deleteRecursively ─────────
+# NOTE on fidelity: GNU `rm -r` never dereferences a symlink to recurse
+# into its target (verified separately) — it only unlinks the symlink
+# itself. The real incident's `deleteRecursively()` (Kotlin stdlib) does
+# follow symlinks into directories, which `rm -rf` here does not
+# reproduce. This section is left as originally written (a known,
+# disclosed test-fidelity gap, not something this PR's redesign changed
+# or introduced — see the PR's Findings/Follow-up suggestions for a
+# `find -L ... -delete`-based replacement); sections 1, 2 and 5 below
+# exercise the real RO mounts directly and don't depend on this.
 echo ""
 echo "[ 3. The #615 attack: symlinks into refs/logs/hooks/info, then rm -rf ]"
 attack_out=$(run_in_wta "
@@ -223,24 +273,25 @@ else
     fi
     # Spell out the specific #615 losses individually too, so a partial
     # regression names exactly which protection broke instead of just
-    # "the snapshot differs." `config` is NOT checked here — it's one of
-    # the two accepted gaps (see header comment); this same attack can and
-    # does wipe it, by design trade-off, not by omission.
+    # "the snapshot differs." `config`, `packed-refs` and `refs/stash`
+    # are NOT checked here — all three are accepted gaps (see header
+    # comment); this attack, were it faithful (see the fidelity note
+    # above), could wipe them too, by design trade-off, not by omission.
     [ -x "$GITCOMMON/hooks/pre-commit" ] \
         && pass "custom hook survives" \
         || fail "custom hook survives" "hooks/pre-commit missing or no longer executable"
     grep -qxF 'my-local-marker.tmp' "$GITCOMMON/info/exclude" \
         && pass "info/exclude survives" \
         || fail "info/exclude survives" "$(cat "$GITCOMMON/info/exclude" 2>&1)"
-    git -C "$MAIN" stash list 2>&1 | grep -q "a stash worth keeping" \
-        && pass "refs/stash survives" \
-        || fail "refs/stash survives" "$(git -C "$MAIN" stash list 2>&1)"
     git -C "$MAIN" notes show 2>&1 | grep -q "a note worth keeping" \
         && pass "refs/notes survives" \
         || fail "refs/notes survives" "$(git -C "$MAIN" notes show 2>&1)"
     git -C "$MAIN" show-ref --verify --quiet "refs/heads/$BRANCH_B" \
         && pass "sibling's branch ref ($BRANCH_B) survives" \
         || fail "sibling's branch ref ($BRANCH_B) survives" "refs/heads/$BRANCH_B is gone"
+    [ -f "$GITCOMMON/logs/refs/heads/$BRANCH_B" ] \
+        && pass "sibling's branch reflog ($BRANCH_B) survives" \
+        || fail "sibling's branch reflog ($BRANCH_B) survives" "logs/refs/heads/$BRANCH_B is gone"
 fi
 
 # ── 4. Regression: the own-branch rw carve-out itself, and a real commit ──
@@ -278,20 +329,55 @@ else
     fail "own commit succeeds and updates $BRANCH_A's ref" "$own_out"
 fi
 
-# ── 5. Known, accepted limitation: a SAME-prefix sibling's branch ref is
-#       NOT isolated — document it as tested, not a silent gap ────────────
+# ── 5. Regression confirming a real improvement: a SAME-top-prefix
+#       sibling branch is now isolated too (per-exact-branch-name
+#       enumeration, not the old per-prefix-directory carve-out) ─────────
 echo ""
-echo "[ 5. Known tradeoff: a same-TOP-PREFIX sibling branch is not isolated (see sandbox.sh #615 comment) ]"
+echo "[ 5. Improvement: a same-TOP-PREFIX sibling branch ref is now protected too (per-branch-name enumeration, see sandbox.sh #615 comment) ]"
 git -C "$MAIN" branch "fix/issue-901" "$BRANCH_A"
 same_prefix_ref="$GITCOMMON/refs/heads/fix/issue-901"
 out=$(run_in_wta "echo x >> '$same_prefix_ref' 2>&1; echo RC=\$?" || true)
-if echo "$out" | grep -q "RC=0"; then
-    pass "a same-prefix sibling branch ref (fix/issue-901) IS writable from fix/issue-900's container — accepted, documented narrowing (not full per-worker isolation; see #615's option (b) for that)"
+if echo "$out" | grep -qi "read-only file system" && ! echo "$out" | grep -q "RC=0"; then
+    pass "a same-prefix sibling branch ref (fix/issue-901) is now protected from fix/issue-900's container — the directory-level carve-out the earlier draft used (and this suite used to document as a limitation) is gone; protection is now per exact branch name"
 elif is_nested_gitconfig_quirk "$out"; then
-    skip "a same-prefix sibling branch ref is writable (documented tradeoff)" \
+    skip "a same-prefix sibling branch ref is now protected" \
         "nested-DooD \$HOME/.gitconfig quirk, unrelated to #615"
 else
-    fail "a same-prefix sibling branch ref (fix/issue-901) is writable from fix/issue-900's container (documenting the known tradeoff — if this now fails, the narrowing got stricter than the #615 PR claims; update the sandbox.sh comment and this test together)" "$out"
+    fail "a same-prefix sibling branch ref (fix/issue-901) is now protected from fix/issue-900's container (if this now succeeds, the per-branch-name enumeration regressed back to directory-level — see sandbox.sh's #615 comment)" "$out"
+fi
+
+# ── 5b. New, narrower limitation: a sibling branch that's ALREADY been
+#        packed (no loose file left) isn't individually enumerated, so a
+#        worker can still create a loose ref that shadows its name ──────
+echo ""
+echo "[ 5b. Known tradeoff: an already-PACKED sibling branch is not individually protected (see sandbox.sh #615 comment) ]"
+# `git pack-refs --all --prune` would pack (and remove the loose file
+# for) EVERY branch, including WTA's and WTB's own currently-checked-out
+# branches — breaking the own-branch detection every later check in this
+# suite relies on (confirmed separately: pack-refs --prune does not
+# spare checked-out branches). So this packs only the one sibling branch
+# under test, by writing the packed-refs entry directly — git doesn't
+# require the "# pack-refs with:" header line to read one, confirmed
+# separately too.
+git -C "$MAIN" branch "packed-sibling" "$BRANCH_A"
+packed_sibling_sha="$(git -C "$MAIN" rev-parse packed-sibling)"
+printf '%s refs/heads/packed-sibling\n' "$packed_sibling_sha" >> "$GITCOMMON/packed-refs"
+rm -f "$GITCOMMON/refs/heads/packed-sibling"
+if [ -f "$GITCOMMON/refs/heads/packed-sibling" ]; then
+    fail "an already-packed sibling branch (packed-sibling) is not individually protected (documenting the known tradeoff)" \
+        "fixture bug: refs/heads/packed-sibling is still a loose file"
+else
+    packed_sibling_ref="$GITCOMMON/refs/heads/packed-sibling"
+    out=$(run_in_wta "mkdir -p \"\$(dirname '$packed_sibling_ref')\" && echo x > '$packed_sibling_ref' 2>&1; echo RC=\$?" || true)
+    if echo "$out" | grep -q "RC=0"; then
+        pass "a worker CAN create a new loose ref shadowing an already-packed sibling branch's name (packed-sibling) — accepted, documented narrowing; closing it needs #615's option (b), a separate git dir per worker"
+        rm -f "$GITCOMMON/refs/heads/packed-sibling"
+    elif is_nested_gitconfig_quirk "$out"; then
+        skip "a worker can create a loose ref shadowing an already-packed sibling branch (documented tradeoff)" \
+            "nested-DooD \$HOME/.gitconfig quirk, unrelated to #615"
+    else
+        fail "a worker can create a loose ref shadowing an already-packed sibling branch's name (packed-sibling) (documenting the known tradeoff — if this now fails, the narrowing got stricter than the #615 PR claims; update the sandbox.sh comment and this test together)" "$out"
+    fi
 fi
 
 # ── 6. Regression: refs/tags carve-out (fetch auto-follows tags) ──────────
