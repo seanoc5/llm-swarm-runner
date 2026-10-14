@@ -2,8 +2,11 @@
 #
 # test-sandbox-git-dir-lockdown.sh — Regression test for issue #615: a
 # worker container must not be able to wipe the shared .git's hooks/,
-# info/, config, refs/ or logs/ for every worktree, the way one worker's
-# own build script did on 2026-10-11.
+# info/, refs/ or logs/ for every worktree, the way one worker's own
+# build script did on 2026-10-11. `config` and `logs/HEAD` are
+# deliberately NOT protected — see the "accepted gaps" section below and
+# the matching comment in sandbox.sh — so this suite tests that they stay
+# writable, not that they survive the attack.
 #
 # Root cause (corpusminder-spring, 2026-10-11): a worker's build.gradle.kts
 # built `build/gitProperties/dotGit` as SYMLINKS into the shared common
@@ -57,7 +60,7 @@ IMAGE="llm-swarm-runner:latest"
 SANDBOX_SH="$REPO_ROOT/sandbox.sh"
 
 echo ""
-echo "=== Shared .git lockdown: hooks/info/config/refs/logs (#615) ==="
+echo "=== Shared .git lockdown: hooks/info/refs/logs (#615) ==="
 echo ""
 
 if ! command -v docker &>/dev/null; then
@@ -122,12 +125,14 @@ run_in_wta() {
 snapshot_protected() {
     # md5sum of everything this fix is supposed to keep safe, taken before
     # the attack so a later mismatch has a concrete "what changed" answer
-    # instead of just pass/fail. packed-refs may not exist (no gc/pack-refs
-    # has run) — `find` exits 1 for a nonexistent start point even with
-    # output suppressed, which trips `pipefail`, so only existing paths are
-    # passed to it.
+    # instead of just pass/fail. `config` is deliberately excluded — it's
+    # one of the two accepted gaps, not something this fix protects (see
+    # the header comment and sandbox.sh's #615 comment). packed-refs may
+    # not exist (no gc/pack-refs has run) — `find` exits 1 for a
+    # nonexistent start point even with output suppressed, which trips
+    # `pipefail`, so only existing paths are passed to it.
     local paths=() p
-    for p in hooks info config packed-refs refs/notes refs/stash refs/heads/feat; do
+    for p in hooks info packed-refs refs/notes refs/stash refs/heads/feat; do
         [ -e "$GITCOMMON/$p" ] && paths+=("$p")
     done
     ( cd "$GITCOMMON" && find "${paths[@]}" -type f 2>/dev/null | sort | xargs -r md5sum )
@@ -136,8 +141,8 @@ snapshot_protected() {
 BEFORE="$(snapshot_protected)"
 
 # ── 1. Direct writes to the clearly-never-needed paths fail outright ───────
-echo "[ 1. Direct writes to hooks/, info/exclude, config fail (read-only) ]"
-for rel in hooks/pre-commit info/exclude config; do
+echo "[ 1. Direct writes to hooks/, info/exclude fail (read-only) ]"
+for rel in hooks/pre-commit info/exclude; do
     out=$(run_in_wta "echo x >> '$GITCOMMON/$rel' 2>&1; echo RC=\$?" || true)
     if echo "$out" | grep -qi "read-only file system" && ! echo "$out" | grep -q "RC=0"; then
         pass "direct write to $rel fails"
@@ -145,6 +150,19 @@ for rel in hooks/pre-commit info/exclude config; do
         fail "direct write to $rel fails" "$out"
     fi
 done
+
+# config is an accepted gap (`git push -u` writes branch.<name>.* into it
+# as part of the documented worker flow — see sandbox.sh's #615 comment),
+# so assert the opposite: it stays writable, not that it's locked down.
+# Appends a comment line (`# x`), not a bare `x`, so the shared config
+# file this leaves behind is still valid for every later `git -C "$MAIN"`
+# call in this script.
+out=$(run_in_wta "echo '# x' >> '$GITCOMMON/config' 2>&1; echo RC=\$?" || true)
+if echo "$out" | grep -q "RC=0"; then
+    pass "config stays writable (accepted gap: git push -u needs it)"
+else
+    fail "config stays writable (accepted gap: git push -u needs it)" "$out"
+fi
 
 # ── 2. Direct writes to a SIBLING's branch ref / its reflog fail ───────────
 echo ""
@@ -160,7 +178,7 @@ fi
 # ── 3. The #615 attack itself: symlink into the shared dir, then recursive
 #       delete through it — reproducing Kotlin's deleteRecursively ─────────
 echo ""
-echo "[ 3. The #615 attack: symlinks into refs/logs/hooks/info/config, then rm -rf ]"
+echo "[ 3. The #615 attack: symlinks into refs/logs/hooks/info, then rm -rf ]"
 attack_out=$(run_in_wta "
     set -e
     mkdir -p '$WTA/evil'
@@ -181,23 +199,22 @@ if ! echo "$attack_out" | grep -q "DONE"; then
 else
     AFTER="$(snapshot_protected)"
     if [ "$BEFORE" = "$AFTER" ]; then
-        pass "the symlink+rm -rf attack (refs/logs/hooks/info/config/objects/worktrees) leaves every protected path byte-for-byte unchanged"
+        pass "the symlink+rm -rf attack (refs/logs/hooks/info/objects/worktrees) leaves every protected path byte-for-byte unchanged"
     else
         fail "the symlink+rm -rf attack leaves the protected paths intact" \
             "before: $BEFORE" "after:  $AFTER"
     fi
     # Spell out the specific #615 losses individually too, so a partial
     # regression names exactly which protection broke instead of just
-    # "the snapshot differs."
+    # "the snapshot differs." `config` is NOT checked here — it's one of
+    # the two accepted gaps (see header comment); this same attack can and
+    # does wipe it, by design trade-off, not by omission.
     [ -x "$GITCOMMON/hooks/pre-commit" ] \
         && pass "custom hook survives" \
         || fail "custom hook survives" "hooks/pre-commit missing or no longer executable"
     grep -qxF 'my-local-marker.tmp' "$GITCOMMON/info/exclude" \
         && pass "info/exclude survives" \
         || fail "info/exclude survives" "$(cat "$GITCOMMON/info/exclude" 2>&1)"
-    [ "$(git -C "$MAIN" config --get custom.marker 2>&1)" = "keep-me" ] \
-        && pass "config survives" \
-        || fail "config survives" "$(git -C "$MAIN" config --get custom.marker 2>&1)"
     git -C "$MAIN" stash list 2>&1 | grep -q "a stash worth keeping" \
         && pass "refs/stash survives" \
         || fail "refs/stash survives" "$(git -C "$MAIN" stash list 2>&1)"
@@ -258,6 +275,55 @@ elif is_nested_gitconfig_quirk "$out"; then
         "nested-DooD \$HOME/.gitconfig quirk, unrelated to #615"
 else
     fail "a same-prefix sibling branch ref (fix/issue-901) is writable from fix/issue-900's container (documenting the known tradeoff — if this now fails, the narrowing got stricter than the #615 PR claims; update the sandbox.sh comment and this test together)" "$out"
+fi
+
+# ── 6. Regression: refs/tags carve-out (fetch auto-follows tags) ──────────
+echo ""
+echo "[ 6. Regression: refs/tags stays writable (git fetch auto-follows tags onto new commits) ]"
+out=$(run_in_wta "echo x >> '$GITCOMMON/refs/tags/does-not-exist-yet' 2>&1; echo RC=\$?" || true)
+if echo "$out" | grep -q "RC=0"; then
+    pass "refs/tags is directly writable (the rw carve-out)"
+elif is_nested_gitconfig_quirk "$out"; then
+    skip "refs/tags is directly writable (the rw carve-out)" \
+        "nested-DooD \$HOME/.gitconfig quirk, unrelated to #615"
+else
+    fail "refs/tags is directly writable (the rw carve-out)" "$out"
+fi
+rm -f "$GITCOMMON/refs/tags/does-not-exist-yet"
+
+# ── 7. Regression found by self-review on the first version of this fix:
+#       the MAIN checkout's own HEAD reflog (logs/HEAD, outside logs/refs/)
+#       must stay writable, or every commit in the main checkout breaks ──
+echo ""
+echo "[ 7. Regression: a commit in the MAIN checkout itself still succeeds (logs/HEAD stays writable) ]"
+# Raw filesystem check first, same reasoning as section 4's own-ref probe:
+# no `git` invocation, so it can't trip the nested-DooD gitconfig quirk the
+# full-commit check below can, and it isolates exactly the write the
+# self-review flagged (logs/HEAD, not logs/refs/heads/<branch>).
+main_logs_head="$GITCOMMON/logs/HEAD"
+main_logs_head_before="$(cat "$main_logs_head")"
+raw_main_out=$("$SANDBOX_SH" "$MAIN" "echo x >> '$main_logs_head' 2>&1; echo RC=\$?" 2>&1 || true)
+if echo "$raw_main_out" | grep -q "RC=0"; then
+    pass "MAIN checkout's logs/HEAD is directly writable"
+else
+    fail "MAIN checkout's logs/HEAD is directly writable" "$raw_main_out"
+fi
+printf '%s\n' "$main_logs_head_before" > "$main_logs_head"
+
+main_before_sha="$(git -C "$MAIN" rev-parse HEAD)"
+main_out=$("$SANDBOX_SH" "$MAIN" "echo change2 >> f.txt && git add f.txt && git -c user.email=test@example.com -c user.name=Test commit -qm 'main-checkout commit' && echo MAIN_COMMIT_OK" 2>&1 || true)
+if echo "$main_out" | grep -q "MAIN_COMMIT_OK"; then
+    main_after_sha="$(git -C "$MAIN" rev-parse HEAD)"
+    if [ "$main_after_sha" != "$main_before_sha" ]; then
+        pass "a commit in the MAIN checkout succeeds (logs/HEAD write didn't fail)" "before=$main_before_sha after=$main_after_sha"
+    else
+        fail "a commit in the MAIN checkout succeeds (logs/HEAD write didn't fail)" "ref unchanged: $main_before_sha"
+    fi
+elif is_nested_gitconfig_quirk "$main_out"; then
+    skip "a commit in the MAIN checkout succeeds (logs/HEAD write didn't fail)" \
+        "nested-DooD \$HOME/.gitconfig quirk, unrelated to #615"
+else
+    fail "a commit in the MAIN checkout succeeds (logs/HEAD write didn't fail)" "$main_out"
 fi
 
 echo ""
