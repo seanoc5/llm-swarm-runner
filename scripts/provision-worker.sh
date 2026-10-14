@@ -28,7 +28,12 @@ WHAT IT DOES
        .swarm-policy.md + `gh issue view N`, atomically written to inbox/.
     4. tmux window 'iss-N' running the sandbox listener, then a health poll.
     If a live iss-N window already exists, steps 3-4 only queue a follow-up
-    brief onto it (no caps, no spawn).
+    brief onto it (no caps, no spawn). Otherwise (no window — dead pane
+    reclaimed, or removed outright, e.g. a manual `tmux kill-window`), any
+    *.md left behind in inbox/ or processing/ from a prior session is
+    salvaged to .swarm/salvaged/iss-N/ first (issue #578), so this run's
+    fresh brief is never queued on top of — and claimed ahead of — an
+    already-queued one a human or requeue.sh left unprocessed.
 
     --wake (issue #622): re-spawn a sidelined worker (sideline-worker.sh) on
     its existing worktree for the brief already in its inbox. Skips the
@@ -158,6 +163,58 @@ pane_is_dead() {
 
 window_listed() {
     tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx "$1"
+}
+
+# salvage_stale_queue <reclaim-tag> <sub> [sub...]
+#
+# Moves any leftover *.md briefs in the given .swarm/tasks/ subdirs aside to
+# .swarm/salvaged/<window>/ so a fresh listener never re-runs stale work
+# sitting next to a new brief. Shared by two call sites that both reach "no
+# live window, about to (re)provision": the pane-died-on-its-own case below
+# (worker-listener.sh noticed and exited) and, since issue #578, the
+# window-removed-outright case (`tmux kill-window`, nothing noticed or
+# cleaned up on its own) — without the latter, a plain re-provision after a
+# manual kill left an already-queued follow-up brief (e.g. one requeue.sh
+# dropped to unblock a `blocked` worker) sitting untouched in inbox/, and
+# the new listener claimed it ahead of the freshly-fetched issue brief this
+# script was about to write — reprocessing already-resolved work (harmless
+# here only because the fix already landed; wastes a full worker turn
+# otherwise). `--wake` never calls this for inbox/ (its own call site below
+# only passes `processing`): the one brief in inbox/ IS the thing being
+# woken for, not a stale leftover.
+salvage_stale_queue() {
+    local reclaim_tag="$1"; shift
+    # Deliberately NOT `local`: the EXIT trap below is single-quoted (so
+    # $rc, set only when the trap actually fires, is evaluated then — not
+    # at registration time) and therefore reads stale_briefs/salvage_root
+    # at EXIT time too, which must still resolve once this function has
+    # returned. A `local` here would pop them off the scope stack first,
+    # so the trap would read them as empty instead.
+    stale_briefs=0
+    salvage_root="$PROJECT_DIR/.swarm/salvaged/$WINDOW"
+    local sub f
+    for sub in "$@"; do
+        for f in "$WT/.swarm/tasks/$sub"/*.md; do
+            [ -e "$f" ] || continue
+            mkdir -p "$salvage_root/$sub"
+            mv "$f" "$salvage_root/$sub/" 2>/dev/null && stale_briefs=$((stale_briefs + 1))
+        done
+    done
+    if [ "$stale_briefs" -gt 0 ]; then
+        echo "       Salvaged $stale_briefs stale brief(s) to $salvage_root/ (preserved, not auto-rerun — review and re-file if still relevant)" >&2
+        # If a check below refuses, the issue is left with no window and
+        # no queued brief; say where the briefs went.
+        trap 'rc=$?; [ "$rc" -ne 0 ] && echo "       Note: issue #$ISSUE still has $stale_briefs brief(s) salvaged to $salvage_root/ from the reclaim above, now unqueued until this is retried." >&2; :' EXIT
+    fi
+    # The dead_pane tag always logs (a dead window was actually reclaimed,
+    # even if it happened to hold zero stale briefs); no_window logs only
+    # when it actually found something, so an ordinary first-time provision
+    # (no prior window at all, nothing to salvage) stays silent instead of
+    # emitting a misleading "reclaimed" event for a reclaim that never
+    # happened.
+    if [ "$reclaim_tag" != "no_window" ] || [ "$stale_briefs" -gt 0 ]; then
+        log_event worker.dead_pane_reclaimed "issue=$ISSUE window=$WINDOW stale_briefs_salvaged=$stale_briefs reclaim=$reclaim_tag"
+    fi
 }
 
 # container_listed [-a] <name>: exact-name match (-a includes stopped ones).
@@ -527,7 +584,9 @@ fi
 # remain-on-exit=failed (llm-start.sh) keeps a crashed window listed, so a
 # dead pane is reclaimed and treated as no window (#493).
 WINDOW_EXISTS=0
+WINDOW_WAS_LISTED=0
 if window_listed "$WINDOW"; then
+    WINDOW_WAS_LISTED=1
     WINDOW_EXISTS=1
     if pane_is_dead "$WINDOW"; then
         echo "[*] window $WINDOW exists but its pane is dead — reclaiming" >&2
@@ -535,26 +594,41 @@ if window_listed "$WINDOW"; then
         tmux kill-window -t "$SESSION_NAME:$WINDOW" 2>/dev/null || true
         # Move its unclaimed/abandoned briefs aside so the fresh listener
         # doesn't re-run stale work next to the new brief.
-        stale_briefs=0
-        salvage_root="$PROJECT_DIR/.swarm/salvaged/$WINDOW"
-        reclaim_subs=(inbox processing)
-        [ "$WAKE" = "1" ] && reclaim_subs=(processing)  # the inbox brief is what we wake for
-        for sub in "${reclaim_subs[@]}"; do
-            for f in "$WT/.swarm/tasks/$sub"/*.md; do
-                [ -e "$f" ] || continue
-                mkdir -p "$salvage_root/$sub"
-                mv "$f" "$salvage_root/$sub/" 2>/dev/null && stale_briefs=$((stale_briefs + 1))
-            done
-        done
-        if [ "$stale_briefs" -gt 0 ]; then
-            echo "       Salvaged $stale_briefs stale brief(s) to $salvage_root/ (preserved, not auto-rerun — review and re-file if still relevant)" >&2
-            # If a check below refuses, the issue is left with no window and
-            # no queued brief; say where the briefs went.
-            trap 'rc=$?; [ "$rc" -ne 0 ] && echo "       Note: issue #$ISSUE still has $stale_briefs brief(s) salvaged to $salvage_root/ from the reclaim above, now unqueued until this is retried." >&2; :' EXIT
+        if [ "$WAKE" = "1" ]; then
+            salvage_stale_queue dead_pane processing  # the inbox brief is what we wake for
+        else
+            salvage_stale_queue dead_pane inbox processing
         fi
-        log_event worker.dead_pane_reclaimed "issue=$ISSUE window=$WINDOW stale_briefs_salvaged=$stale_briefs"
         WINDOW_EXISTS=0
     fi
+fi
+
+# issue #578: the window may instead have been removed OUTRIGHT (a manual
+# `tmux kill-window`, not the pane dying on its own) — window_listed above
+# is then false from the start, so the pane-dead branch above never ran and
+# never salvaged anything. Without this, a plain re-provision here would
+# pile the freshly-fetched issue brief (written in step 3 below) on top of
+# whatever a prior session left unclaimed in inbox/ or claimed-but-
+# unfinished in processing/ — including a follow-up brief requeue.sh
+# dropped to unblock a `blocked` worker. Gated on WINDOW_WAS_LISTED=0, not
+# just WINDOW_EXISTS=0: the pane-dead branch above already salvaged (and
+# WINDOW_EXISTS=0 then too) when the window WAS listed but dead, so calling
+# salvage_stale_queue a second time here would be a same-run double-salvage
+# of an already-emptied inbox/processing — which stomps the first call's
+# `stale_briefs`/`salvage_root` (deliberately not `local`, see that
+# function's own comment) with this second call's own count (0), corrupting
+# the one EXIT-trap message that still needs the first call's real count.
+# --wake is exempt: its whole point is to resume the one brief already in
+# inbox/, so salvaging it would defeat the call. A sidelined worktree (#622
+# marker file, window+container deliberately stopped to free its slot,
+# queue kept) is exempt too, --wake or not: self-review finding — a plain
+# (non-wake) re-provision of a sidelined issue is itself a supported path
+# (see this file's own "A live worker is not sidelined, however it got
+# here" comment below), and a human's requeue.sh answer sitting in inbox/
+# while sidelined is exactly the queued, not-yet-claimed brief this whole
+# feature exists to protect, not abandoned work from a dead session.
+if [ "$WINDOW_WAS_LISTED" -eq 0 ] && [ "$WAKE" = "0" ] && [ ! -e "$WT/.swarm/sidelined" ]; then
+    salvage_stale_queue no_window inbox processing
 fi
 
 # Caps run before the brief is written, so a refusal leaves inbox/ untouched

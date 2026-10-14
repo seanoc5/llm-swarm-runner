@@ -141,6 +141,30 @@ grep -q "worker.wake .*issue=5 task_id=20261012-120000-5" "$EVENTS" || red "work
 green "--wake spawns for the queued brief, no issue fetch, no new brief, marker cleared, events logged"
 
 # ============================================================================
+heading "Part 2b: provision-worker.sh plain (non-wake) re-provision of a sidelined issue (issue #578 self-review finding)"
+# ============================================================================
+# A plain re-provision of a sidelined issue is its own supported path (see
+# provision-worker.sh's "A live worker is not sidelined, however it got
+# here" comment), separate from --wake. Issue #578's no_window salvage
+# branch could not tell this apart from a window removed outright, and
+# would have swept away a requeue.sh answer sitting in inbox/ — exactly
+# the queued, not-yet-claimed brief this whole feature exists to protect.
+rm -f "$WT/.swarm/tasks/inbox"/*.md
+printf 'reason=manual\n' > "$WT/.swarm/sidelined"
+echo "answer: proceed" > "$WT/.swarm/tasks/inbox/20200101-000000-5.md"
+: > "$TEST_DIR/gh.log"; : > "$TEST_DIR/tmux.log"
+( cd "$PROJECT_DIR" && env "${off[@]}" bash "$PROVISION" 5 > "$TEST_DIR/plain-reprovision.log" 2>&1 ) \
+    || red "plain re-provision of a sidelined issue should succeed: $(cat "$TEST_DIR/plain-reprovision.log")"
+[ -f "$WT/.swarm/tasks/inbox/20200101-000000-5.md" ] || red "sidelined answer brief must not be salvaged away"
+grep -q 'answer: proceed' "$WT/.swarm/tasks/inbox/20200101-000000-5.md" || red "answer brief content changed"
+[ ! -d "$PROJECT_DIR/.swarm/salvaged/iss-5" ] || red "nothing should have been salvaged: $(find "$PROJECT_DIR/.swarm/salvaged" -type f)"
+[ "$(find "$WT/.swarm/tasks/inbox" -name '*.md' | wc -l)" -eq 2 ] || red "expected the answer brief plus a freshly-fetched issue brief, got: $(ls "$WT/.swarm/tasks/inbox")"
+grep -q "issue view" "$TEST_DIR/gh.log" || red "a plain re-provision still fetches the issue (unlike --wake)"
+grep -q "new-window -d -t llm-proj -n iss-5" "$TEST_DIR/tmux.log" || red "window not spawned: $(cat "$TEST_DIR/tmux.log")"
+[ ! -e "$WT/.swarm/sidelined" ] || red "marker should be cleared once the worker is up"
+green "sidelined answer brief survives a plain re-provision untouched; a fresh issue brief queues alongside it, not instead of it"
+
+# ============================================================================
 heading "Part 3: watcher passes (sideline_idle_pass / sideline_wake_pass)"
 # ============================================================================
 rm -rf "$WT/.swarm/tasks/inbox"/* "$WT/.swarm/tasks/sidelined"

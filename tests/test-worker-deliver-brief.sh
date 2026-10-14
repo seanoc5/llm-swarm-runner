@@ -186,7 +186,11 @@ check "claimed in processing/ but no status file yet -> rc1 (can't confirm; stil
 
 set_current_task "t1" "blocked"
 rc=0; worker_current_task_terminal "$WT_DIR" || rc=$?
-check "status=blocked -> rc1 (awaiting a decision, task did NOT actually conclude)" "1" "$rc"
+check "status=blocked -> rc0 (issue #578: write_outcome() already forces outcome=err for a blocked session, so ending it to deliver a requeue.sh unblock brief is now safe)" "0" "$rc"
+
+set_current_task "t1" "in-progress"
+rc=0; worker_current_task_terminal "$WT_DIR" || rc=$?
+check "status=in-progress -> rc1 (genuinely still in flight, not confirmed terminal)" "1" "$rc"
 
 set_current_task "t1" "ready-for-review"
 rc=0; worker_current_task_terminal "$WT_DIR" || rc=$?
@@ -238,23 +242,26 @@ check "mismatched task_id, but status predates the current claim -> rc1 (stale r
 # NEWEST by mtime, not just the first terminal one a glob happens to visit.
 # Simulates the same anomalous worker session writing under two different
 # mismatched names at different points — first a (wrong) ready-for-review,
-# then genuinely going blocked again and recording THAT under another name.
-# Picking the first terminal match in glob order would wrongly select the
-# stale ready-for-review file and miss the newer, authoritative blocked
-# state — the exact false-completion bug this whole function exists to
-# prevent. "aaa-*"/"zzz-*" prefixes force the stale terminal record to sort
-# first alphabetically, so this only passes if recency (not glob order)
-# decides the outcome.
+# then genuinely going back in-progress again and recording THAT under
+# another name. Picking the first terminal match in glob order would
+# wrongly select the stale ready-for-review file and miss the newer,
+# authoritative non-terminal state — the exact false-completion bug this
+# whole function exists to prevent. (Using "in-progress" here rather than
+# "blocked": since issue #578, blocked is itself terminal-for-delivery, so
+# it no longer exercises this "newer state overrides" path — any other
+# genuinely non-terminal state does.) "aaa-*"/"zzz-*" prefixes force the
+# stale terminal record to sort first alphabetically, so this only passes
+# if recency (not glob order) decides the outcome.
 rm -f "$PROCESSING_DIR"/*.md "$STATUS_DIR"/*.json 2>/dev/null || true
 echo "the current task brief" > "$PROCESSING_DIR/20260906-230823-517.md"
 sleep 1.1
 printf '{"task_id":"aaa-517","state":"ready-for-review","pr":123,"ts":"2026-09-06T23:09:00Z","note":""}' \
     > "$STATUS_DIR/aaa-517.json"
 sleep 1.1
-printf '{"task_id":"zzz-517","state":"blocked","pr":123,"ts":"2026-09-06T23:11:00Z","note":"awaiting decision"}' \
+printf '{"task_id":"zzz-517","state":"in-progress","pr":123,"ts":"2026-09-06T23:11:00Z","note":"still working"}' \
     > "$STATUS_DIR/zzz-517.json"
 rc=0; worker_current_task_terminal "$WT_DIR" || rc=$?
-check "newer mismatched-name record is blocked (supersedes an older stale ready-for-review) -> rc1" "1" "$rc"
+check "newer mismatched-name record is in-progress (supersedes an older stale ready-for-review) -> rc1" "1" "$rc"
 
 # Self-review finding: mtime_epoch/ctime_epoch resolve to whole seconds, so
 # the "newest wins" tie-break above needs its OWN tie-break for two
@@ -263,19 +270,21 @@ check "newer mismatched-name record is blocked (supersedes an older stale ready-
 # rather than relying on two real writes happening to land in the same wall-
 # clock second. On a genuine tie, a non-terminal record must win (fail
 # closed) regardless of which file a glob happens to visit first — reversed
-# alphabetical order from the "newest wins" case above (blocked=aaa-,
+# alphabetical order from the "newest wins" case above (in-progress=aaa-,
 # ready-for-review=zzz-) so this only passes if the tie-break — not glob
-# order — decides the outcome.
+# order — decides the outcome. ("in-progress" rather than "blocked": since
+# issue #578, blocked is itself terminal, so it can no longer stand in for
+# the non-terminal side of this tie.)
 rm -f "$PROCESSING_DIR"/*.md "$STATUS_DIR"/*.json 2>/dev/null || true
 echo "the current task brief" > "$PROCESSING_DIR/20260906-230823-517.md"
 sleep 1.1
-printf '{"task_id":"aaa-517","state":"blocked","pr":123,"ts":"2026-09-06T23:09:00Z","note":"awaiting decision"}' \
+printf '{"task_id":"aaa-517","state":"in-progress","pr":123,"ts":"2026-09-06T23:09:00Z","note":"still working"}' \
     > "$STATUS_DIR/aaa-517.json"
 printf '{"task_id":"zzz-517","state":"ready-for-review","pr":123,"ts":"2026-09-06T23:09:00Z","note":""}' \
     > "$STATUS_DIR/zzz-517.json"
 touch -r "$STATUS_DIR/aaa-517.json" "$STATUS_DIR/zzz-517.json"
 rc=0; worker_current_task_terminal "$WT_DIR" || rc=$?
-check "same-second tie between blocked and ready-for-review records -> rc1 (non-terminal wins, fail closed)" "1" "$rc"
+check "same-second tie between in-progress and ready-for-review records -> rc1 (non-terminal wins, fail closed)" "1" "$rc"
 
 # Self-review finding: the tie-break's second pass must not read "nothing
 # confirmed" as an implicit terminal default. Simulates the newest
@@ -313,7 +322,7 @@ echo "the current task brief" > "$DONE_DIR/t451.md"
 printf '{"task_id":"t451","state":"blocked","pr":null,"ts":"2026-01-01T00:00:00Z","note":""}' \
     > "$STATUS_DIR/t451.json"
 rc=0; worker_current_task_terminal "$WT_DIR" || rc=$?
-check "processing/ empty, archived brief's OWN status file says blocked -> rc1 (not actually done)" "1" "$rc"
+check "processing/ empty, archived brief's OWN status file says blocked -> rc0 (issue #578: terminal-for-delivery)" "0" "$rc"
 
 printf '{"task_id":"t451","state":"ready-for-review","pr":null,"ts":"2026-01-01T00:00:00Z","note":""}' \
     > "$STATUS_DIR/t451.json"
@@ -344,7 +353,7 @@ rm -f "$DONE_DIR"/*.md "$STATUS_DIR"/*.json 2>/dev/null || true
 printf '{"task_id":"t451","state":"blocked","pr":null,"ts":"2026-01-01T00:00:00Z","note":""}' \
     > "$STATUS_DIR/t451.json"
 rc=0; worker_current_task_terminal "$WT_DIR" || rc=$?
-check "brief-less completion (no done/*.md at all, only .ok.json), status=blocked -> rc1 (not actually done)" "1" "$rc"
+check "brief-less completion (no done/*.md at all, only .ok.json), status=blocked -> rc0 (issue #578: terminal-for-delivery)" "0" "$rc"
 
 printf '{"task_id":"t451","state":"ready-for-review","pr":null,"ts":"2026-01-01T00:00:00Z","note":""}' \
     > "$STATUS_DIR/t451.json"
@@ -379,22 +388,38 @@ check "cli state but nothing pending in inbox/ -> nothing logged" "0" "$(wc -l <
 
 echo "a follow-up brief" > "$INBOX_DIR/20260826-120000-42.md"
 
-# The critical self-review-fixed case: a real brief IS pending, but the
-# CURRENT task is merely "blocked" (a decision-needed worker awaiting the
-# coordinator's answer — the exact incident half prompts/coordinator.md's
-# "unblock it with requeue.sh" line describes). Must NOT be treated the same
-# as a finished-and-parked worker.
+# The issue #578 regression case: a real brief IS pending (the requeue.sh
+# follow-up meant to unblock this worker), and the CURRENT task is "blocked"
+# (a decision-needed worker awaiting the coordinator's answer — the exact
+# incident prompts/coordinator.md's "unblock it with requeue.sh" line
+# describes). Before the fix this skipped forever as task_not_terminal,
+# wedging the unblock path; blocked is now treated as terminal-for-delivery
+# (write_outcome() in worker-listener.sh already forces outcome=err for a
+# blocked session, so ending it here can never falsely "complete"
+# unfinished work — see worker_current_task_terminal()'s header comment).
+# Needs a real idle, ctx-rendered composer on screen (not the bare "sleep
+# 300" from the no-brief check above) so this exercises the FULL chain all
+# the way to worker.deliver.attempt, same rendered shape as the "idle,
+# empty-composer" case further down — not just the task_not_terminal gate.
 set_current_task "t1" "blocked"
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.2
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'sonnet · wt-issue-42 · ctx: 20k/1M (2%)'; printf '❯ \n'; sleep 300" Enter
+check_eventually "idle, empty-composer pane (blocked task) -> cli" "cli" "worker_pane_state '$WIN'"
 : > "$EVENTS_LOG"
 maybe_worker_deliver_brief "$WIN"
 if grep -q 'worker.deliver.skip.*reason=task_not_terminal' "$EVENTS_LOG"; then got=skipped; else got=notskipped; fi
-check "current task status=blocked -> skipped as task_not_terminal (never falsely 'completes' unfinished work)" "skipped" "$got"
+check "current task status=blocked -> NOT skipped as task_not_terminal (issue #578)" "notskipped" "$got"
 if grep -q 'worker.deliver.attempt' "$EVENTS_LOG"; then got=attempted; else got=notattempted; fi
-check "blocked task -> delivery never attempted" "notattempted" "$got"
+check "blocked task, brief pending, pane idle -> delivery attempted (issue #578: this is the documented requeue.sh unblock path)" "attempted" "$got"
 
 # From here on, the current task has genuinely finished — the OTHER incident
 # half (a worker that opened its PR, handed off, and simply never ran /quit).
 set_current_task "t1" "ready-for-review"
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.2
+tmux send-keys -t "$SESSION_NAME:$WIN" "sleep 300" Enter
+check_eventually "back to a plain non-shell foreground -> cli" "cli" "worker_pane_state '$WIN'"
 
 # Gate on BOTH the rendered content AND worker_pane_state()'s process-name
 # read (issue #398): the injected command is "clear; echo '...'; sleep 300"
@@ -1025,9 +1050,12 @@ sleep 0.2
 tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'sonnet · wt-issue-42 · ctx: 20k/1M (2%)'; printf '❯ \n'; sleep 300" Enter
 check_eventually "idle, empty-composer pane -> cli" "cli" "worker_pane_state '$WIN'"
 
+# "in-progress", not "blocked": since issue #578, blocked is itself
+# terminal-for-delivery, so it no longer reproduces a task_not_terminal
+# stall — any other genuinely non-terminal state still does.
 STALL_BRIEF="$INBOX_DIR/20261012-000000-42.md"
 echo "a follow-up brief queued behind a current task stuck non-terminal" > "$STALL_BRIEF"
-set_current_task "t1" "blocked"
+set_current_task "t1" "in-progress"
 
 WORKER_DELIVER_TERMINAL_STALL_THRESHOLD=3
 : > "$EVENTS_LOG"

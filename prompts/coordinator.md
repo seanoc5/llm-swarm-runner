@@ -112,7 +112,7 @@ ls .swarm/salvaged/*/{inbox,processing,outbox}/* 2>/dev/null                    
 
 ### Stranded worktree briefs
 
-A tmux restart, or a window-only reap (`kill-finished-workers.sh` without `--with-worktree`, which deliberately keeps the worktree), can leave a worktree with a queued or claimed brief and no `iss-N` listener to drain it. Same triage either way — check `gh pr list --head fix/issue-N`, then re-provision (`provision-worker.sh N` — first move any `processing/` file back to `inbox/`) or archive the file and say why:
+A tmux restart, or a window-only reap (`kill-finished-workers.sh` without `--with-worktree`, which deliberately keeps the worktree), can leave a worktree with a queued or claimed brief and no `iss-N` listener to drain it. Same triage either way — check `gh pr list --head fix/issue-N`, then re-provision (`provision-worker.sh --wake N` — first move any `processing/` file back to `inbox/`) or archive the file and say why. Use `--wake`, not a plain call: since issue #578, a plain re-provision of a window that isn't listed at all salvages stale `inbox/`/`processing/` content aside before writing a fresh issue brief (so a genuinely dead/killed worker's leftovers don't silently double up with a new one) — `--wake` is exempt because its whole point is resuming the exact brief already queued, which is exactly this recovery's intent, and it also skips re-fetching the issue text.
 
 - **At session start:** `llm-start.sh` prints `WARN: stranded worktree wt-issue-N — ... (inbox=X processing=Y)`.
 - **Mid-session (issue #448):** `coordinator-watch.sh`'s periodic sweep (`WATCH_STRANDED_BRIEF_SWEEP_SECS`, default 60s) delivers it as a `stranded_brief` inbox item, deduped per issue until resolved.
