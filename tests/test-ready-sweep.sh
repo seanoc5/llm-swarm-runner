@@ -2,9 +2,9 @@
 #
 # test-ready-sweep.sh — Non-LLM regression test for scripts/ready-sweep.sh
 # (issue #602): only drafts whose SWARM_DRAFT_REASON banner is ci-pending
-# or ci-unknown get pr-ready.sh re-run. gh is a PATH shim that applies the
-# script's own --jq filter (via jq) to a fixture PR list; pr-ready.sh is
-# replaced via PR_READY_SCRIPT.
+# or ci-unknown get pr-ready.sh re-run. gh is a PATH shim that returns the
+# fixture PR list (and, for #635 trigger lookups, applies the real --jq to a
+# per-PR state fixture); pr-ready.sh is replaced via PR_READY_SCRIPT.
 set -euo pipefail
 
 green()   { printf '\033[32m✓ %s\033[0m\n' "$*"; }
@@ -20,13 +20,19 @@ trap 'rm -rf "$TEST_DIR"' EXIT
 mkdir -p "$TEST_DIR/shims"
 FIXTURE="$TEST_DIR/prs.json"
 READY_LOG="$TEST_DIR/ready.log"
+STATES="$TEST_DIR/states.json"
+echo "{}" > "$STATES"
 
 cat > "$TEST_DIR/shims/gh" <<EOF
 #!/usr/bin/env bash
+if [ "\$1 \$2" = "pr view" ]; then
+    # issue #635: trigger lookup — state fixture per PR number, real --jq.
+    jq -c ".[\"\$3\"] // {\"state\":\"OPEN\"}" "$STATES" | jq -r "\${*: -1}"
+    exit
+fi
 [ "\${GH_LIST_FAILS:-0}" = "1" ] && exit 1
 printf '%s\n' "\$*" | grep -q -- '--draft' || { echo "expected --draft" >&2; exit 1; }
-while [ \$# -gt 0 ]; do [ "\$1" = "--jq" ] && { jq -r "\$2" "$FIXTURE"; exit; }; shift; done
-exit 1
+cat "$FIXTURE"
 EOF
 chmod +x "$TEST_DIR/shims/gh"
 
@@ -72,5 +78,34 @@ heading "Test 3: gh pr list failure exits 1"
 rc=0; GH_LIST_FAILS=1 run_sweep || rc=$?
 [ "$rc" -eq 1 ] || red "expected exit 1, got $rc"
 green "list failure is reported, not swallowed"
+
+
+# ============================================================================
+# issue #635: stale waits — a draft whose Next line waits on an already-merged
+# same-repo PR gets one stale-wait line; open triggers, non-Next prose and
+# cross-repo refs stay silent; WATCH_STALE_WAIT_CHECK=0 turns it off.
+# ============================================================================
+cat > "$FIXTURE" <<'JSON'
+[
+  {"number": 21, "body": "> ⛔ **COORDINATOR HOLD** — renumber; fix brief queued to iss-1472.\n> **Next:** coordinator — send the renumber brief — waiting on #1461 merges\nrest"},
+  {"number": 22, "body": "**Next:** worker iss-9 — rebase — waiting on #1500 to merge"},
+  {"number": 23, "body": "prose: we were waiting on #1461 merges last week"},
+  {"number": 24, "body": "**Next:** worker iss-9 — rebase — waiting on other/repo#1461 merges"}
+]
+JSON
+cat > "$STATES" <<'JSON'
+{"1461": {"state": "MERGED", "mergedAt": "2026-10-15T06:52:00Z"}, "1500": {"state": "OPEN", "mergedAt": null}}
+JSON
+
+heading "Test 4: Next line waiting on a merged PR is reported; open, prose and cross-repo are not"
+run_sweep || red "expected exit 0: $(cat "$TEST_DIR/out.log")"
+[ "$(cat "$TEST_DIR/out.log")" = "#21 stale-wait: waiting on #1461, which merged at 2026-10-15T06:52:00Z" ] \
+    || red "expected exactly one stale-wait line for #21: $(cat "$TEST_DIR/out.log")"
+green "only the merged same-repo trigger on a Next line fires"
+
+heading "Test 5: WATCH_STALE_WAIT_CHECK=0 turns the stale-wait check off"
+WATCH_STALE_WAIT_CHECK=0 run_sweep || red "expected exit 0"
+[ ! -s "$TEST_DIR/out.log" ] || red "expected no output with the check off: $(cat "$TEST_DIR/out.log")"
+green "off-switch honoured"
 
 green "ALL TESTS PASSED"

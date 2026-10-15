@@ -1967,6 +1967,7 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     WATCH_PR_POLL_SECS  60        periodic gh-poll backstop reap (0=off); see header comment
     WATCH_ORPHAN_SWEEP_SECS 3600  periodic reap-orphan-worktrees.sh sweep for window-less worktrees (0=off); see header comment
     WATCH_READY_SWEEP_SECS 300   periodic ready-sweep.sh: re-run pr-ready.sh on drafts refused only for CI pending/unreadable (0=off; issue #602)
+    WATCH_STALE_WAIT_CHECK 1     ready-sweep also flags drafts whose **Next:** line waits on an already-merged #N; one coord-inbox note each (0=off; issue #635)
     WATCH_BG_VIOLATION_SWEEP_SECS 0   periodic sweep for backgrounded-shell UI markers on iss-* panes + the coordinator pane (0=off); see header comment
     WATCH_BG_VIOLATION_PATTERN    (auto)  grep -E pattern for the sweep above
     WATCH_TIMEOUT_RETRY_SWEEP_SECS 60  periodic sweep for a worker stuck retrying a command that always hits its timeout (0=off); see header comment (issue #467)
@@ -2581,6 +2582,8 @@ REAP_ORPHAN="${REAP_ORPHAN:-$LLM_SWARM_DIR/scripts/reap-orphan-worktrees.sh}"
 # issue #602: retry drafts that pr-ready.sh refused only for CI pending/unreadable.
 WATCH_READY_SWEEP_SECS="${WATCH_READY_SWEEP_SECS:-300}"
 READY_SWEEP="${READY_SWEEP:-$LLM_SWARM_DIR/scripts/ready-sweep.sh}"
+# issue #635: ready-sweep.sh also reports drafts waiting on an already-merged PR.
+WATCH_STALE_WAIT_CHECK="${WATCH_STALE_WAIT_CHECK:-1}"
 # issue #298 — fallback detection for the foreground-only rule; see header comment.
 WATCH_BG_VIOLATION_SWEEP_SECS="${WATCH_BG_VIOLATION_SWEEP_SECS:-0}"  # #607: off during the background-task trial
 WATCH_BG_VIOLATION_PATTERN="${WATCH_BG_VIOLATION_PATTERN:-Running in the background|[0-9]+ shells? still running}"
@@ -3671,6 +3674,11 @@ WT_INVENTORY_SEEDED=0
 # number reports again instead of staying permanently suppressed.
 declare -A STRANDED_BRIEF_LOGGED=()
 
+# issue #635: ready_sweep_pass's stale-wait dedup, keyed "<pr>:<trigger>".
+# Dropped once ready-sweep.sh stops reporting that pair (Next line rewritten,
+# or the PR left draft), so a later re-occurrence notes again.
+declare -A STALE_WAIT_NOTED=()
+
 # issue #468: a check-fail retry (or any later reconciliation in
 # worker-listener.sh's write_outcome()) can flip a task's outcome level
 # after its FIRST record already fired a real coord.wake — the corrected
@@ -4500,10 +4508,16 @@ orphan_sweep_pass() {
 # for hours with green CI (fand-app #1533/#1534). ready-sweep.sh retries
 # drafts whose SWARM_DRAFT_REASON banner says ci-pending/ci-unknown. It keys
 # off the PR list, not worktrees, because the worktree is often reaped first.
+#
+# issue #635: a "#P stale-wait: waiting on #N, ..." line means PR P's Next
+# line still waits on a merge that already happened (fand-etl #1477 sat 16h
+# that way). Each P:N pair gets ONE coord-inbox note, deduped in
+# STALE_WAIT_NOTED; queueing any named brief stays the coordinator's call.
 ready_sweep_pass() {
-    local dry_arg="" out line
+    local dry_arg="" out line key pr trig k
+    local -A seen=()
     [ "$DRY_RUN" = "1" ] && dry_arg="--dry-run"
-    out="$(cd "$PROJECT_DIR" && "$READY_SWEEP" $dry_arg 2>&1)" || {
+    out="$(cd "$PROJECT_DIR" && WATCH_STALE_WAIT_CHECK="$WATCH_STALE_WAIT_CHECK" "$READY_SWEEP" $dry_arg 2>&1)" || {
         log_event watch.ready_sweep "reason=sweep_failed"
         return 0
     }
@@ -4511,7 +4525,23 @@ ready_sweep_pass() {
         [ -n "$line" ] || continue
         echo "[$(date +%T)] ready-sweep: $line"
         log_event watch.ready_sweep "result=\"$line\""
+        [[ "$line" =~ ^#([0-9]+)\ stale-wait:\ waiting\ on\ #([0-9]+) ]] || continue
+        pr="${BASH_REMATCH[1]}" trig="${BASH_REMATCH[2]}" key="$pr:$trig"
+        seen[$key]=1
+        [ -z "${STALE_WAIT_NOTED[$key]:-}" ] || continue
+        if [ "$DRY_RUN" = "1" ]; then
+            echo "[DRY] would write coord-inbox stale-wait note for PR #$pr (waits on merged #$trig)"
+        elif coord_inbox_write stale_wait "PR #$pr's **Next:** line is still waiting on #$trig to merge, but #$trig merged at ${line##*merged at }. Do that action now (or queue the brief it names), then rewrite PR #$pr's Next line to who acts next — waiting on what."; then
+            log_event coord.inbox.write "trigger=stale_wait pr=$pr waits_on=$trig"
+        else
+            echo "[$(date +%T)] WARN: failed to write coord-inbox stale-wait note for PR #$pr" >&2
+            continue
+        fi
+        STALE_WAIT_NOTED[$key]=1
     done <<<"$out"
+    for k in "${!STALE_WAIT_NOTED[@]}"; do
+        [ -n "${seen[$k]:-}" ] || unset 'STALE_WAIT_NOTED[$k]'
+    done
 }
 
 # swarm_already_reaped <issue> <since-iso8601>

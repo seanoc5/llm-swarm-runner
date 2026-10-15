@@ -188,7 +188,7 @@ Every wake report and status update **ends** with the digest block — panes are
 
 ## Reporting worker outcomes
 
-**Draft first:** `gh pr view <N> --json isDraft,body`. A draft with a placeholder body is a worker mid-self-review, not a violation — report "PR #N opened as a draft (worker still finalizing)" and re-check later. A `⏳ Still a draft` banner means `pr-ready.sh` refused: report its reason (CI ones the watcher retries; review/red-CI ones need the author). Everything below applies once `isDraft` is false.
+**Draft first:** `gh pr view <N> --json isDraft,body`. A draft with a placeholder body is a worker mid-self-review, not a violation — report "PR #N opened as a draft (worker still finalizing)" and re-check later. A `⏳ Still a draft` banner means `pr-ready.sh` refused: report its **Next:** line, not the draft flag. Everything below applies once `isDraft` is false.
 
 Scrape the risk (`gh pr view <N> --json body --jq .body | grep -E 'BLIND_MERGE_RISK|Blind-merge risk'`) and render:
 
@@ -198,7 +198,7 @@ Scrape the risk (`gh pr view <N> --json body --jq .body | grep -E 'BLIND_MERGE_R
 
 Missing marker → "🟡 medium — risk rating not provided by worker; review before merge", flagged as a worker-policy violation.
 
-Then quote the PR's **Bottom line**, **Your move**, and any `#### Decide` table verbatim so the operator can triage from your pane. Older bodies: quote whatever summary lines exist. A body missing the layers entirely is a policy violation — summarize it yourself in 1–2 sentences.
+Then quote the PR's **Next:** line (if two disagree, the newest writer's wins; say so), **Bottom line**, **Your move**, and any `#### Decide` table verbatim so the operator can triage from your pane. Older bodies: quote whatever summary lines exist. A body missing the layers entirely is a policy violation — summarize it yourself in 1–2 sentences.
 
 **Self-review verdict** (🟡/🔴): workers ready via `scripts/pr-ready.sh`, which posts a `SWARM_SELF_REVIEW` marker. `APPROVE` → nothing extra. `APPROVE_WITH_CAVEATS: <text>` → surface the caveat; if you queue a fix, apply draft-as-hold first. `BLOCK: <text>` → flag prominently (the operator may override from a shell: `swarm-merge.sh N --override-review`). Skipped or failed self-review → recommend reading the diff before merging.
 
@@ -255,8 +255,10 @@ GitHub refuses to merge a draft from any surface, so drafting is a mechanical ho
 2. Prepend this banner to the body (`gh pr view <N> --json body -q .body`, prepend, pipe to `gh pr edit <N> --body-file -`):
    ```
    > ⛔ **COORDINATOR HOLD** — <reason, one line>; fix brief queued to <worker>. Do not merge; the coordinator re-readies when the fix is verified.
+   > **Next:** <worker iss-N | coordinator | operator> — <one action> — waiting on <trigger, or "nothing">
 
    ```
+   Delete any `SWARM_DRAFT_REASON` block; the hold's Next line supersedes it. Before writing "waiting on #N merges", run `gh pr view N --json state,mergedAt`: if N already merged, act or queue the brief now instead. The watcher drops a `stale_wait` inbox note when a Next line's #N has merged.
 3. Post a PR comment saying what's pending and who's on it.
 4. When the fix lands or is moot: remove the `> ⛔ **COORDINATOR HOLD**` block from the body, then `gh pr ready <N>`, then comment that the hold is lifted — all before calling the PR mergeable in a digest.
 

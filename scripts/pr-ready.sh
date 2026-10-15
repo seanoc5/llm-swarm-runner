@@ -144,6 +144,11 @@
 # A ci-* banner whose sha= matches the current head means self-review
 # already passed on that commit (review runs before the CI gate), so a
 # re-run skips straight to the CI gate rather than spending another round.
+#
+# issue #635: the banner ends with one `**Next:** <who> — <action> —
+# waiting on <trigger|nothing>` line, so a cold reader knows who acts. The
+# worker is named iss-N from the fix/issue-N branch. On a held PR it defers
+# to the COORDINATOR HOLD banner's own Next line instead of competing.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -206,20 +211,28 @@ write_body() {
 }
 
 refuse() {
-    local reason="$1" code="$2" sha ts text
+    local reason="$1" code="$2" sha ts text who next
     sha="$(head_sha)"
     # Same reason on the same commit: leave the body alone, so the
     # ready-sweep.sh retries don't rewrite it every pass.
     if [ "$reason" != "$OLD_REASON" ] || [ "$sha" != "$OLD_REASON_SHA" ]; then
         ts="$(date -u '+%Y-%m-%d %H:%MZ')"
+        who="$(gh pr view "$PR" --json headRefName --jq .headRefName 2>/dev/null \
+            | sed -nE 's#^.*issue-([0-9]+)$#worker iss-\1#p' || true)"
+        [ -n "$who" ] || who="the PR's worker"
         case "$reason" in
-            review-block) text="self-review returned BLOCK (or failed) at $ts. Fix the finding, then re-run \`pr-ready.sh $PR\`." ;;
-            ci-pending)   text="CI was still running at $ts. The coordinator watcher retries this automatically; by hand: \`pr-ready.sh $PR\`." ;;
-            ci-unknown)   text="CI status couldn't be read at $ts. The coordinator watcher retries this automatically; by hand: \`pr-ready.sh $PR\`." ;;
-            ci-failing)   text="CI failed on ${sha:0:7} at $ts. Push a fix, then re-run \`pr-ready.sh $PR\`." ;;
+            review-block) text="self-review returned BLOCK (or failed) at $ts."
+                          next="$who — fix the finding, push, re-run pr-ready.sh $PR — waiting on nothing" ;;
+            ci-pending)   text="CI was still running at $ts."
+                          next="coordinator (watcher, automatic) — re-runs pr-ready.sh $PR — waiting on CI to finish on ${sha:0:7}" ;;
+            ci-unknown)   text="CI status couldn't be read at $ts."
+                          next="coordinator (watcher, automatic) — re-runs pr-ready.sh $PR — waiting on CI status becoming readable" ;;
+            ci-failing)   text="CI failed on ${sha:0:7} at $ts."
+                          next="$who — push a CI fix, re-run pr-ready.sh $PR — waiting on nothing" ;;
         esac
-        write_body "$(printf '<!-- SWARM_DRAFT_REASON: %s sha=%s -->\n> ⏳ **Still a draft:** %s\n%s\n%s' \
-            "$reason" "$sha" "$text" "$DRAFT_REASON_CLOSE" "$(body_without_reason)")"
+        [ "$HELD" = "1" ] && next="coordinator — whatever the ⛔ COORDINATOR HOLD banner's Next line says (a held PR is the coordinator's) — waiting on that banner's trigger"
+        write_body "$(printf '<!-- SWARM_DRAFT_REASON: %s sha=%s -->\n> ⏳ **Still a draft:** %s\n> **Next:** %s\n%s\n%s' \
+            "$reason" "$sha" "$text" "$next" "$DRAFT_REASON_CLOSE" "$(body_without_reason)")"
     fi
     exit "$code"
 }

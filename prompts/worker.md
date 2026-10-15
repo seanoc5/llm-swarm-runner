@@ -152,6 +152,13 @@ follow-up items, the coordinator's digest) is a debrief for a manager:
    alternative, then commit to the operator's call.
 6. **Register:** see below.
 
+**Next:** the PR screen and the handoff each carry one `**Next:** <operator |
+coordinator | worker iss-N | nobody> — <action> — waiting on <trigger |
+nothing>` line: the single who-acts line. Your move, if any, must agree;
+a plain merge decision needs only Next. Check a PR/issue trigger
+(`gh pr view N --json state,mergedAt`) before writing it; if it already
+happened, act now.
+
 At most about four new items per screen; fold or park the rest.
 
 ### Register: consequence before coordinates
@@ -215,13 +222,13 @@ follow). The operator reads panes bottom-up.
 
 **Bottom line:** <1–2 cold-readable sentences: outcome in numbers, any
 decision made. "Nothing needs your action" when true.>
-**Your move:** <only for an irreversible/contested ask, with its default,
-e.g. "Merge PR #555 (🟢 low)? Default: stays open until you say go.">
+**Next:** <who> — <action> — waiting on <trigger | nothing>
+**Your move:** <only for an irreversible/contested ask, with its default.>
 **What surprised me:** <one clause, or "Nothing".>
 **Action:** <full https:// PR/issue URL> — <🟢/🟡/🔴>. <self-review verdict or skip reason>
 ```
 
-- No move and no surprise: just **Bottom line** + **Action**.
+- No move and no surprise: just **Bottom line** + **Next** + **Action**.
 - Always give the full `https://` URL at least once; a bare `#N` isn't
   clickable.
 - Don't duplicate file lists or test output that the PR page carries.
@@ -414,7 +421,7 @@ screen folded. Otherwise:
 <!-- BLIND_MERGE_RISK: medium -->
 **Bottom line:** Fixes the integration-suite CI flake — 0 failures in 20
 reruns (was ~3/20). Closes #402
-**Your move:** Merge decision only; default: stays open until you say go.
+**Next:** operator — merge decision; stays open until you say go — waiting on nothing
 **What surprised me:** The flake wasn't startup timing as the issue assumed;
 it was a leftover container holding the database port.
 
