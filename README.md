@@ -364,6 +364,8 @@ reap-orphan-worktrees.sh --no-pr-check --yes      # offline; require every commi
 
 Override the default age floor in `<project>/.swarm/.env` via `REAP_MIN_AGE_DAYS=N`.
 
+It also removes **husks**: `wt-issue-*` folders with no `.git` that a build still shutting down re-created after an earlier reap (#632). A husk goes only when it is not in `git worktree list`, holds nothing but build/runtime leftovers (`REAP_HUSK_ALLOWLIST`, default `.gradle build .kotlin out .swarm node_modules`), has been untouched for `REAP_HUSK_QUIET_MINUTES` (default 30), and has no live `iss-N` window or `swarm-*-iss-N` container. Each removal logs `reap.husk issue=N dir=… bytes=…`.
+
 **Cleanup: docker compose teardown.** All three removal paths (`kill-worktree.sh`, `kill-finished-workers.sh --with-worktree`, `reap-orphan-worktrees.sh`) now bring down a worktree's `docker-compose.yml` stack (`--remove-orphans --volumes`, bounded to 30s) before removing the worktree, so a worker's compose containers can't outlive their worktree and squat on a port. Pass `--no-compose-down` to any of them to skip this and keep the containers around for inspection.
 
 ### 4. Run Manual Sandbox (Single Agent)

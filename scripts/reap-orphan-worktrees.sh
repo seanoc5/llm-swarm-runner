@@ -38,6 +38,18 @@
 # worktree prune`) rather than via kill-worktree.sh's `git worktree remove`,
 # which also needs a working registration to succeed. Skipped entirely under
 # --no-pr-check (the cherry check needs a working `git cherry` too).
+#
+# Husks (issue #632): a build process still shutting down after a reap
+# (Gradle daemon, Kotlin compiler) can write one more file into the old
+# path, re-creating a small wt-issue-N folder with no `.git` at all. These
+# used to be skipped forever as "not a worktree". A husk is now removed
+# (plain rm -rf, logged as reap.husk) only when ALL of these hold: no `.git`
+# entry; not listed in this project's `git worktree list`; every top-level
+# entry is in REAP_HUSK_ALLOWLIST (build/runtime leftovers only, so no
+# source can be inside); nothing in it modified within REAP_HUSK_QUIET_MINUTES
+# (so a still-running build is never pulled out from under itself); and no
+# live iss-N tmux window or swarm-*-iss-N container. There's no branch to
+# judge, so this runs in every preservation mode and ignores --min-age-days.
 
 set -euo pipefail
 
@@ -64,6 +76,13 @@ DESCRIPTION
       - skip if the preservation gate fails (default: PR not finalized)
     Survivors get kill-worktree.sh <N> applied.
 
+    A wt-issue-N folder with NO .git entry (a "husk" re-created by a late
+    build write after an earlier reap, issue #632) is removed directly when
+    it isn't in this project's \`git worktree list\`, holds only top-level
+    entries from REAP_HUSK_ALLOWLIST, has nothing modified within
+    REAP_HUSK_QUIET_MINUTES, and has no live iss-N tmux window or
+    swarm-*-iss-N container. Applies in every mode; --min-age-days doesn't.
+
 FLAGS
     -h, --help                  Show this help and exit
     -n, --dry-run               List what would be reaped; take no action
@@ -85,6 +104,9 @@ FLAGS
 
 ENV
     REAP_MIN_AGE_DAYS           Default for --min-age-days (overridden by flag)
+    REAP_HUSK_ALLOWLIST         Space-separated top-level names a husk may hold
+                                (default: .gradle build .kotlin out .swarm node_modules)
+    REAP_HUSK_QUIET_MINUTES     Husk must be unmodified this long (default: 30)
 
 EXAMPLES
     reap-orphan-worktrees.sh --dry-run                     # preview
@@ -109,6 +131,8 @@ MERGED_ONLY=0
 PR_FINALIZED=1     # default mode
 PR_CHECK=1
 MIN_AGE_DAYS="${REAP_MIN_AGE_DAYS:-2}"
+HUSK_ALLOWLIST="${REAP_HUSK_ALLOWLIST:-.gradle build .kotlin out .swarm node_modules}"
+HUSK_QUIET_MINUTES="${REAP_HUSK_QUIET_MINUTES:-30}"
 
 require_value() {
     if [ -z "${2:-}" ] || [[ "${2:-}" == -* ]]; then
@@ -137,6 +161,10 @@ done
 
 if ! [[ "$MIN_AGE_DAYS" =~ ^[0-9]+$ ]]; then
     echo "ERROR: --min-age-days must be a non-negative integer (got: $MIN_AGE_DAYS)" >&2
+    exit 1
+fi
+if ! [[ "$HUSK_QUIET_MINUTES" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: REAP_HUSK_QUIET_MINUTES must be a non-negative integer (got: $HUSK_QUIET_MINUTES)" >&2
     exit 1
 fi
 
@@ -172,6 +200,7 @@ log_event() {
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KILL_WT="$SCRIPT_DIR/kill-worktree.sh"
+SESSION_NAME="llm-$(basename "$PROJECT_DIR")"
 
 # Source the env loader to pick up SWARM_WORKTREE_GROUPING and get
 # swarm_worktree_parent() to derive the scan dir.
@@ -419,6 +448,77 @@ reap_dangling() {
     echo
 }
 
+# husk_keep_reason <issue-number> <dir>
+#
+# issue #632: decides whether a wt-issue-N folder with no `.git` entry is a
+# removable husk. Prints the reason it must STAY (one short phrase), or
+# nothing when every condition in the header holds. Called once during the
+# scan and again right before removal, since a confirmation prompt can sit
+# for a long time and a build may have started writing again meanwhile.
+# Same session/container naming as kill-worktree.sh / provision-worker.sh;
+# the container check is any swarm-*-iss-N, not just this project's, which
+# can only keep a husk, never remove one.
+husk_keep_reason() {
+    local issue="$1" wt="$2" entry base allowed ok recent
+    if [ -L "$wt" ]; then
+        echo "symlink"; return 0
+    fi
+    if [ -e "$wt/.git" ]; then
+        echo "has .git entry"; return 0
+    fi
+    if [ -n "${OWN_WT_SET[$wt]:-}" ]; then
+        echo "listed in git worktree list"; return 0
+    fi
+    for entry in "$wt"/* "$wt"/.[!.]* "$wt"/..?*; do
+        [ -e "$entry" ] || [ -L "$entry" ] || continue
+        base="$(basename "$entry")"
+        ok=0
+        for allowed in $HUSK_ALLOWLIST; do
+            [ "$base" = "$allowed" ] && { ok=1; break; }
+        done
+        if [ "$ok" = "0" ]; then
+            echo "holds non-allowlisted $base"; return 0
+        fi
+    done
+    if [ "$HUSK_QUIET_MINUTES" -gt 0 ]; then
+        recent="$(find "$wt" -mmin "-$HUSK_QUIET_MINUTES" -print -quit 2>/dev/null || true)"
+        if [ -n "$recent" ]; then
+            echo "modified within ${HUSK_QUIET_MINUTES}m"; return 0
+        fi
+    fi
+    if tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx "iss-$issue"; then
+        echo "live tmux window iss-$issue"; return 0
+    fi
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qxE "swarm-.*-iss-$issue"; then
+        echo "running swarm-*-iss-$issue container"; return 0
+    fi
+}
+
+# reap_husk <issue-number>
+#
+# issue #632: removes one husk after re-checking husk_keep_reason. Logs
+# reap.husk only after the rm succeeds (same ordering as reap_dangling's
+# reap.worktree). No branch, admin dir, or archive step: a husk has none of
+# those — its .swarm/, if any, is a late write after the real reap already
+# archived the worktree's own.
+reap_husk() {
+    local issue="$1" wt why bytes
+    wt="$PROJECT_PARENT/wt-issue-$issue"
+    why="$(husk_keep_reason "$issue" "$wt")"
+    if [ -n "$why" ]; then
+        echo "  wt-issue-$issue  [husk, $why since scan → keep]"
+        return 0
+    fi
+    bytes="$(du -sb "$wt" 2>/dev/null | cut -f1)"
+    bytes="${bytes:-0}"
+    if rm -rf -- "$wt"; then
+        log_event reap.husk "issue=$issue dir=$wt bytes=$bytes"
+        echo "  ✓ removed husk wt-issue-$issue ($bytes bytes)"
+    else
+        echo "  ✗ WARN: rm -rf failed for husk $wt (continuing)"
+    fi
+}
+
 # Pre-fetch PR states for every branch in a single gh call -------------------
 # Keyed by the branch name itself (headRefName), not derived from the
 # wt-issue-N dirname — a worktree can be repurposed onto a different branch
@@ -455,6 +555,7 @@ fi
 NOW=$(date +%s)
 declare -a CANDIDATES=()
 declare -a DANGLING_CANDIDATES=()
+declare -a HUSK_CANDIDATES=()
 declare -a SKIPPED=()
 FOUND=0
 
@@ -473,6 +574,7 @@ echo "=== reap-orphan-worktrees ==="
 echo "  project:        $PROJECT_DIR"
 echo "  scan dir:       $PROJECT_PARENT  (SWARM_WORKTREE_GROUPING=${SWARM_WORKTREE_GROUPING:-flat}; own worktrees only — see issue #357)"
 echo "  min-age-days:   $MIN_AGE_DAYS"
+echo "  husks:          quiet ${HUSK_QUIET_MINUTES}m, allowlist: $HUSK_ALLOWLIST"
 if [ "$MERGED_ONLY" = "1" ]; then
     echo "  preservation:   PR must be MERGED"
 elif [ "$PR_FINALIZED" = "1" ]; then
@@ -524,9 +626,18 @@ for WT in "$PROJECT_PARENT"/wt-issue-*/; do
 
     FOUND=$((FOUND + 1))
 
-    # Must look like a worktree (has a .git file/dir pointing into main repo).
+    # No .git entry: not a worktree, but possibly a husk (issue #632) — see
+    # husk_keep_reason. Judged before the age floor and in every mode: a husk
+    # has no branch to check, and its own quiet window replaces the age floor.
     if [ ! -e "$WT/.git" ]; then
-        echo "  $NAME  [no .git entry → skip (not a worktree)]"
+        husk_why="$(husk_keep_reason "$ISSUE" "$WT")"
+        if [ -n "$husk_why" ]; then
+            echo "  $NAME  [no .git entry, $husk_why → skip (not a worktree)]"
+            SKIPPED+=("$NAME(no-git)")
+        else
+            echo "  $NAME  [no .git entry, build leftovers only, quiet ${HUSK_QUIET_MINUTES}m → remove husk]"
+            HUSK_CANDIDATES+=("$ISSUE")
+        fi
         continue
     fi
 
@@ -636,7 +747,7 @@ if [ "$FOUND" -eq 0 ]; then
 fi
 
 TOTAL_CANDIDATES=$(( ${#CANDIDATES[@]} + ${#DANGLING_CANDIDATES[@]} ))
-if [ "$TOTAL_CANDIDATES" -eq 0 ]; then
+if [ "$TOTAL_CANDIDATES" -eq 0 ] && [ "${#HUSK_CANDIDATES[@]}" -eq 0 ]; then
     echo
     echo "Nothing to reap given current filters. (${#SKIPPED[@]} skipped of $FOUND scanned.)"
     exit 0
@@ -646,6 +757,7 @@ if [ "$DRY" = "1" ]; then
     echo
     echo "DRY-RUN — no action taken. Would reap: ${CANDIDATES[*]} ${DANGLING_CANDIDATES[*]}"
     [ "${#DANGLING_CANDIDATES[@]}" -gt 0 ] && echo "  (of which dangling-registration, rm -rf worktree dir + own admin dir: ${DANGLING_CANDIDATES[*]})"
+    [ "${#HUSK_CANDIDATES[@]}" -gt 0 ] && echo "  Would remove husk folder(s) (no .git, build leftovers only): ${HUSK_CANDIDATES[*]}"
     exit 0
 fi
 
@@ -660,6 +772,9 @@ EOF
     if [ "${#DANGLING_CANDIDATES[@]}" -gt 0 ]; then
         echo "Dangling-registration worktrees (${DANGLING_CANDIDATES[*]}) are removed directly"
         echo "(rm -rf worktree dir + its own admin dir) since git itself can't operate on them."
+    fi
+    if [ "${#HUSK_CANDIDATES[@]}" -gt 0 ]; then
+        echo "Husk folders (${HUSK_CANDIDATES[*]}) are removed with rm -rf: no .git, build leftovers only."
     fi
     echo
     read -r -p "Type 'yes' to proceed: " confirm
@@ -689,4 +804,10 @@ for ISSUE in "${DANGLING_CANDIDATES[@]}"; do
     reap_dangling "$ISSUE"
 done
 
-echo "Done. Reaped $TOTAL_CANDIDATES worktree(s) (skipped ${#SKIPPED[@]} of $FOUND scanned)."
+for ISSUE in "${HUSK_CANDIDATES[@]}"; do
+    reap_husk "$ISSUE"
+done
+
+# coordinator-watch.sh's orphan_sweep_pass parses the leading
+# "Done. Reaped N worktree(s)" — keep that prefix stable.
+echo "Done. Reaped $TOTAL_CANDIDATES worktree(s), ${#HUSK_CANDIDATES[@]} husk(s) (skipped ${#SKIPPED[@]} of $FOUND scanned)."
