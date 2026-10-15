@@ -2142,6 +2142,8 @@ EVENTS LOG
                            same event shape, so worktree_vanish_sweep_pass below can check for
                            it regardless of which one triggered the removal, before flagging a
                            disappearance as unblessed
+      reap.husk            (issue #632) reap-orphan-worktrees.sh removed a .git-less wt-issue-N
+                           husk folder (issue, dir, bytes) — never a registered worktree
       reap.worktree.error  (issue #446) the removal at one of those same three call sites
                            failed (issue, branch, dir, reason=remove_failed|rm_failed) — no
                            reap.worktree event was logged for it, so the worktree stays
@@ -3368,6 +3370,7 @@ format_event_line() {
         reap.window)                    glyph="✂"; color=$'\033[36m' ;;
         reap.worktree)                  glyph="✂"; color=$'\033[36m' ;;
         reap.worktree.error)            glyph="✗"; color=$'\033[31m' ;;
+        reap.husk)                      glyph="✂"; color=$'\033[2m'  ;;
         watch.worktree_vanished)        glyph="⚠"; color=$'\033[31m' ;;
         watch.worktree_sweep.error)     glyph="✗"; color=$'\033[31m' ;;
         watch.pending_brief_sweep)      glyph="✉"; color=$'\033[33m' ;;

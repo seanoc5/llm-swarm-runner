@@ -437,6 +437,123 @@ FAKEGH
 }
 test_dangling_reap_ignores_sibling_worktree
 
+# --- Functional: husk folders with no .git (issue #632) ---------------------
+#
+# After a reap, a build still shutting down (Gradle daemon, Kotlin compiler)
+# can write one more file into the old path, re-creating a wt-issue-N folder
+# with no .git. These used to be skipped forever. A husk is removed only
+# when it has no .git, isn't in `git worktree list`, holds only allowlisted
+# build/runtime leftovers, has been quiet REAP_HUSK_QUIET_MINUTES, and has no
+# live iss-N window or swarm-*-iss-N container. Fixtures:
+#   wt-issue-20  build/ + .gradle/ only, old          → removed
+#   wt-issue-21  build/ + src/ (not allowlisted), old  → kept
+#   wt-issue-22  .gradle/ only, modified just now      → kept
+#   wt-issue-23  build/ only, old, live iss-23 window  → kept
+#   wt-issue-24  build/ only, old, running container   → kept
+#   wt-issue-11  registered worktree (its .git removed, only build/ left)
+#                — still in `git worktree list`         → kept
+# tmux/docker/gh are PATH stubs, so no real session or container is queried.
+test_husk_reap() {
+    local name="husk folder reap"
+    echo "Checking $name..."
+
+    local tmproot
+    tmproot="$(mktemp -d)"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$tmproot'" RETURN
+
+    local project="$tmproot/project"
+    git -c init.defaultBranch=main init -q "$project" || { red "  ✗ $name: init failed"; FAIL=$((FAIL + 1)); return; }
+    (
+        cd "$project" &&
+        git config user.email test@example.com &&
+        git config user.name "Test" &&
+        echo x > x && git add x && git commit -qm initial
+    ) >/dev/null 2>&1 || { red "  ✗ $name: initial commit failed"; FAIL=$((FAIL + 1)); return; }
+
+    git -C "$project" worktree add -q -b fix/issue-11 "$tmproot/wt-issue-11" >/dev/null 2>&1 \
+        || { red "  ✗ $name: worktree add failed"; FAIL=$((FAIL + 1)); return; }
+    rm -rf "$tmproot/wt-issue-11/.git" "$tmproot/wt-issue-11/x"
+    mkdir -p "$tmproot/wt-issue-11/build"
+
+    mkdir -p "$tmproot/wt-issue-20/build/kotlin" "$tmproot/wt-issue-20/.gradle/9.7.0"
+    echo gc > "$tmproot/wt-issue-20/.gradle/9.7.0/gc.properties"
+    mkdir -p "$tmproot/wt-issue-21/build" "$tmproot/wt-issue-21/src"
+    echo 'fun main() {}' > "$tmproot/wt-issue-21/src/Main.kt"
+    mkdir -p "$tmproot/wt-issue-22/.gradle"
+    mkdir -p "$tmproot/wt-issue-23/build"
+    mkdir -p "$tmproot/wt-issue-24/build"
+    local d
+    for d in 11 20 21 23 24; do
+        find "$tmproot/wt-issue-$d" -exec touch -d '2 hours ago' {} +
+    done
+    echo fresh > "$tmproot/wt-issue-22/.gradle/gc.properties"
+
+    local fakebin="$tmproot/fakebin"
+    mkdir -p "$fakebin"
+    cat > "$fakebin/gh" <<'FAKEGH'
+#!/usr/bin/env bash
+[ "$1" = "pr" ] && [ "$2" = "list" ] && exit 0
+exit 1
+FAKEGH
+    cat > "$fakebin/tmux" <<'FAKETMUX'
+#!/usr/bin/env bash
+[ "$1" = "list-windows" ] && { echo iss-23; exit 0; }
+exit 1
+FAKETMUX
+    cat > "$fakebin/docker" <<'FAKEDOCKER'
+#!/usr/bin/env bash
+[ "$1" = "ps" ] && { echo swarm-llm-project-iss-24; exit 0; }
+exit 1
+FAKEDOCKER
+    chmod +x "$fakebin/gh" "$fakebin/tmux" "$fakebin/docker"
+
+    local out rc
+    out="$(PATH="$fakebin:$PATH" "$LLM_SWARM_DIR/scripts/reap-orphan-worktrees.sh" \
+            --dry-run --project "$project" 2>&1)" && rc=0 || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        red "  ✗ $name: dry-run exited $rc"; echo "$out"; FAIL=$((FAIL + 1)); return
+    fi
+    if ! echo "$out" | grep -q "wt-issue-20 .*remove husk"; then
+        red "  ✗ $name: dry-run did not flag wt-issue-20 as a husk"; echo "$out"; FAIL=$((FAIL + 1)); return
+    fi
+    for d in 11 20 21 22 23 24; do
+        [ -d "$tmproot/wt-issue-$d" ] || { red "  ✗ $name: dry-run removed wt-issue-$d"; FAIL=$((FAIL + 1)); return; }
+    done
+
+    out="$(PATH="$fakebin:$PATH" "$LLM_SWARM_DIR/scripts/reap-orphan-worktrees.sh" \
+            --pr-finalized --yes --project "$project" 2>&1)" && rc=0 || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        red "  ✗ $name: real run exited $rc"; echo "$out"; FAIL=$((FAIL + 1)); return
+    fi
+    if [ -d "$tmproot/wt-issue-20" ]; then
+        red "  ✗ $name: husk wt-issue-20 was not removed"; echo "$out"; FAIL=$((FAIL + 1)); return
+    fi
+    local want
+    for want in "11:listed in git worktree list" "21:non-allowlisted src" "22:modified within 30m" \
+                "23:live tmux window iss-23" "24:running swarm-\*-iss-24 container"; do
+        d="${want%%:*}"
+        if [ ! -d "$tmproot/wt-issue-$d" ]; then
+            red "  ✗ $name: wt-issue-$d was removed (expected kept: ${want#*:})"; echo "$out"; FAIL=$((FAIL + 1)); return
+        fi
+        if ! echo "$out" | grep -q "wt-issue-$d .*${want#*:}.*skip"; then
+            red "  ✗ $name: wt-issue-$d kept without the expected reason (${want#*:})"; echo "$out"; FAIL=$((FAIL + 1)); return
+        fi
+    done
+    if ! grep -qE 'reap\.husk +issue=20 dir=.*wt-issue-20 bytes=[0-9]+' "$project/.swarm/events.log" 2>/dev/null; then
+        red "  ✗ $name: expected a reap.husk event for issue 20"
+        cat "$project/.swarm/events.log" 2>/dev/null
+        FAIL=$((FAIL + 1)); return
+    fi
+    if grep -qE 'reap\.husk +issue=(11|21|22|23|24) ' "$project/.swarm/events.log"; then
+        red "  ✗ $name: reap.husk logged for a kept folder"; FAIL=$((FAIL + 1)); return
+    fi
+
+    green "  ✓ $name: Passed"
+    PASS=$((PASS + 1))
+}
+test_husk_reap
+
 echo ""
 echo "Summary: $PASS passed, $FAIL failed."
 [[ $FAIL -eq 0 ]] && exit 0 || exit 1
