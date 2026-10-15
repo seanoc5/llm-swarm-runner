@@ -36,15 +36,20 @@
 # rules (self-review round cap, CI-green-before-ready) under "Self-review
 # before merge" plus a one-clause draft-first-checklist pointer to them;
 # trimmed first, still ~700 bytes over even after trimming twice.
+#
+# 2026-10-15: worker budget 23700 -> 24000, worker-bare 11000 -> 11300.
+# Issue #635 adds the one-line **Next:** who-acts rule (plus trigger check)
+# to both worker prompts and folds the routine "Your move: merge decision"
+# example into it; ~400 bytes over, and the rule is the fix itself.
 set -euo pipefail
 
 green() { printf '\033[32m✓ %s\033[0m\n' "$*"; }
 red()   { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORKER_MAX="${WORKER_MD_MAX_BYTES:-23700}"
+WORKER_MAX="${WORKER_MD_MAX_BYTES:-24000}"
 COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-26000}"
-BARE_MAX="${WORKER_BARE_MD_MAX_BYTES:-11000}"   # issue #510 trial prompt; ~7.5KB is script-parsed contract
+BARE_MAX="${WORKER_BARE_MD_MAX_BYTES:-11300}"   # issue #510 trial prompt; ~7.5KB is script-parsed contract
 
 check() {
     local file="$1" max="$2" size

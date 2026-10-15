@@ -79,6 +79,8 @@ if [ "\$1" = "pr" ] && [ "\$2" = "view" ]; then
         else
             echo "\${GH_ROUNDS_DONE:-0}"
         fi
+    elif printf '%s\n' "\$*" | grep -q -- '--json headRefName'; then
+        echo "\${GH_HEAD_REF:-fix/issue-7}"
     elif printf '%s\n' "\$*" | grep -q -- '--json headRefOid'; then
         if [ "\${GH_SHA_LOOKUP_FAILS:-0}" = "1" ]; then
             echo "gh: pr view failed" >&2
@@ -630,6 +632,7 @@ GH_CHECKS_RC=0
 [ -f "$EDITED_BODY" ] || red "expected the PR body to be edited with a banner"
 head -1 "$EDITED_BODY" | grep -qx '<!-- SWARM_DRAFT_REASON: ci-pending sha=deadbeef -->' || red "expected ci-pending banner first: $(cat "$EDITED_BODY")"
 grep -q 'Still a draft:.*CI was still running' "$EDITED_BODY" || red "expected plain-language reason: $(cat "$EDITED_BODY")"
+grep -qxF '> **Next:** coordinator (watcher, automatic) — re-runs pr-ready.sh 42 — waiting on CI to finish on deadbee' "$EDITED_BODY" || red "expected issue #635 Next line: $(cat "$EDITED_BODY")"
 grep -q '^<!-- BLIND_MERGE_RISK: low -->$' "$EDITED_BODY" || red "expected original body kept: $(cat "$EDITED_BODY")"
 green "CI-pending refusal records why on the PR itself"
 
@@ -639,6 +642,7 @@ make_fake_review 2
 rc=0; run_pr_ready || rc=$?
 [ "$rc" -eq 2 ] || red "expected exit 2, got $rc"
 head -1 "$EDITED_BODY" | grep -qx '<!-- SWARM_DRAFT_REASON: review-block sha=deadbeef -->' || red "expected review-block banner: $(cat "$EDITED_BODY" 2>/dev/null)"
+grep -q '^> \*\*Next:\*\* worker iss-7 — fix the finding, push, re-run pr-ready.sh 42 — waiting on nothing$' "$EDITED_BODY" || red "expected Next line naming worker iss-7: $(cat "$EDITED_BODY")"
 green "BLOCK refusal records review-block"
 
 heading "Test 27: ci-pending banner on the current head + green CI — skips self-review, strips banner, readies"
@@ -676,5 +680,15 @@ GH_CHECKS_RC=0
 [ "$rc" -eq 4 ] || red "expected exit 4, got $rc"
 [ ! -f "$EDITED_BODY" ] || red "expected no body edit for an unchanged reason: $(cat "$EDITED_BODY")"
 green "repeat refusal doesn't rewrite the body"
+
+
+heading "Test 31: held PR + BLOCK — the banner's Next line defers to the COORDINATOR HOLD (issue #635)"
+printf '> ⛔ **COORDINATOR HOLD** — fix queued; do not merge\n\n<!-- BLIND_MERGE_RISK: medium -->\nsome change\n' > "$BODY_FILE"
+make_fake_review 2
+rc=0; run_pr_ready || rc=$?
+[ "$rc" -eq 2 ] || red "expected exit 2, got $rc"
+[ "$(grep -c '\*\*Next:\*\*' "$EDITED_BODY")" -eq 1 ] || red "expected exactly one Next line: $(cat "$EDITED_BODY")"
+grep -q '^> \*\*Next:\*\* coordinator — whatever the ⛔ COORDINATOR HOLD banner' "$EDITED_BODY" || red "expected Next to defer to the hold: $(cat "$EDITED_BODY")"
+green "a held PR's draft-reason banner doesn't compete with the hold's own Next line"
 
 green "ALL TESTS PASSED"

@@ -41,8 +41,12 @@ debrief: **Bottom line** in real numbers; **Your move** only for
 irreversible or contested calls, each with its default if the operator
 stays silent; **What surprised me** as the delta from expectation, or
 "Nothing". With no move and no surprise, collapse to the bottom line plus
-the PR link. At most four new items per screen. Define project jargon at
-first use; restate what a referenced issue was before citing it.
+the PR link. One **Next:** line, `<who> — <action> — waiting on
+<trigger | nothing>`, is the single who-acts line; Your move must agree,
+and a plain merge needs only Next. Check a PR/issue trigger (`gh pr view N
+--json state,mergedAt`) before writing it; if it already happened, act now.
+At most four new items per screen. Define project jargon at first use;
+restate what a referenced issue was before citing it.
 
 Consequence before coordinates, in human-facing text:
 
@@ -70,13 +74,13 @@ follow). The operator reads panes bottom-up.
 
 **Bottom line:** <1–2 sentences: outcome in numbers, any decision made.
 "Nothing needs your action" when true.>
-**Your move:** <only for an irreversible/contested ask, with its default,
-e.g. "Merge PR #555 (🟢 low)? Default: stays open until you say go.">
+**Next:** <who> — <action> — waiting on <trigger | nothing>
+**Your move:** <only for an irreversible/contested ask, with its default.>
 **What surprised me:** <one clause, or "Nothing".>
 **Action:** <full https:// PR/issue URL> — <🟢/🟡/🔴>. <self-review verdict or skip reason>
 ```
 
-No move and no surprise: just **Bottom line** + **Action**. A no-PR
+No move and no surprise: just **Bottom line** + **Next** + **Action**. A no-PR
 terminal (`blocked`, `done-no-pr`) has no page behind it, so the bottom
 line may be a short paragraph: files touched, tests run, why no PR.
 
@@ -184,7 +188,7 @@ screen folded. Otherwise:
 <!-- BLIND_MERGE_RISK: medium -->
 **Bottom line:** Fixes the integration-suite CI flake — 0 failures in 20
 reruns (was ~3/20). Closes #402
-**Your move:** Merge decision only; default: stays open until you say go.
+**Next:** operator — merge decision; stays open until you say go — waiting on nothing
 **What surprised me:** The flake wasn't startup timing as the issue assumed;
 it was a leftover container holding the database port.
 
