@@ -14,6 +14,17 @@
 #       PR body's risk rating (👀🟢 / 👀🟡 / 👀🔴, WATCH_WINDOW_FLAG_RISK).
 #       Was a bare 🟡 originally; a non-color glyph now so colored dots
 #       only ever mean merge risk.
+#   ✅  worker is DONE and it is your turn (issue #618): the PR is open and
+#       not a draft, every CI check passed, the worker has no brief left in
+#       inbox/ or processing/ (task-done.sh moved it out), and its pane
+#       is idle. Risk-suffixed like 👀 (✅🟢). Outranks 👀, which still
+#       shows for ready+idle when any of the extra conditions is missing
+#       (CI still running, no CI checks at all, brief not yet declared
+#       done).
+#   ❌  worker's PR (draft or not) has a failed CI check and the pane is
+#       idle — nobody is fixing it.
+#   💤  stalled: the worker still holds a brief in processing/ but its
+#       pane has been idle for WATCH_STALL_FLAG_SECS (default 600).
 #   ✋  worker posted a decision-needed outbox message, still unprocessed
 #   🔔  the coordinator's last turn ended asking for an approval
 #
@@ -30,7 +41,7 @@
 # Kill switch: WATCH_WINDOW_FLAGS=0 turns every set/clear below into a
 # no-op (default 1).
 #
-# All four flags share ONE option slot per window, so a caller never "owns"
+# All flags share ONE option slot per window, so a caller never "owns"
 # the slot outright — it owns exactly the (window, flag) PAIR it passes in.
 # set_window_flag only overwrites a flag of equal or LOWER priority, never
 # silently replacing a more urgent one still pending; clear_window_flag
@@ -39,13 +50,18 @@
 # taken the slot. A flag passed to either function matches any current
 # value that STARTS with it, so "👀" owns every risk-suffixed "👀🟢"-style
 # variant (first glyphs are all distinct, so no other flag can collide).
-# Priority, highest first: ✋ > 👀 > 📬. 🔔 only ever
+# Priority, highest first: ✋ > ❌ > 💤 > ✅ > 👀 > 📬. 🔔 only ever
 # targets the "coordinator" window, which no worker flag ever contends
-# for, so it is not ranked against the other three.
+# for, so it is not ranked against the others. Because set never
+# downgrades, a caller moving a window DOWN the ladder (✅ back to 👀
+# after a new push restarts CI) clears its own higher flag first.
 
 _window_flag_rank() {
     case "$1" in
-        "✋") printf '3\n' ;;
+        "✋") printf '6\n' ;;
+        "❌") printf '5\n' ;;
+        "💤") printf '4\n' ;;
+        "✅"*) printf '3\n' ;;
         "👀"*) printf '2\n' ;;
         "📬") printf '1\n' ;;
         "") printf '0\n' ;;

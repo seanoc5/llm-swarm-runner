@@ -710,6 +710,8 @@ if [ "$WINDOW_EXISTS" -eq 1 ]; then
     # task is stale now. See scripts/_window-flags.sh.
     clear_window_flag "iss-$ISSUE" "📬" "new_brief_claimed task_id=$TASK_ID"
     clear_window_flag "iss-$ISSUE" "👀" "new_brief_claimed task_id=$TASK_ID"
+    clear_window_flag "iss-$ISSUE" "✅" "new_brief_claimed task_id=$TASK_ID"
+    clear_window_flag "iss-$ISSUE" "❌" "new_brief_claimed task_id=$TASK_ID"
     if [ "$WAKE" = "1" ]; then
         rm -f "$WT/.swarm/sidelined"
         log_event worker.wake "issue=$ISSUE task_id=$TASK_ID window=$WINDOW already_live=1"

@@ -10,7 +10,8 @@
 #   - on_outcome's 📬 set/clear from an outcome JSON's task_state (through
 #     the real coordinator-watch.sh, background, same convention as
 #     test-watcher-autoclose.sh).
-#   - pr_poll_pass's 👀 set/clear from gh pr list's state/isDraft, gated on
+#   - pr_poll_pass's 👀/✅/❌ set/clear from gh pr list's state/isDraft and CI
+#     rollup (issue #618), gated on
 #     the worker pane being idle, with the PR body's risk-glyph suffix.
 #   - window_flags_sweep_pass's ✋ set/clear from an outbox decision-needed
 #     message appearing/disappearing.
@@ -206,6 +207,22 @@ set_window_flag "iss-5" "👀🟢" "test_a17"
 [ "$(flag_of "$SESSION_NAME:iss-5")" = "✋" ] || red "👀🟢 incorrectly downgraded ✋"
 green "risk-suffixed 👀 ranks and clears as one family with bare 👀"
 
+# issue #618 ladder: ✋ > ❌ > 💤 > ✅ > 👀 > 📬.
+set_window_flag "iss-6" "👀🟢" "test_a18"
+set_window_flag "iss-6" "✅🟢" "test_a19"
+[ "$(flag_of "$SESSION_NAME:iss-6")" = "✅🟢" ] || red "✅ should outrank 👀"
+set_window_flag "iss-6" "👀🟢" "test_a20"
+[ "$(flag_of "$SESSION_NAME:iss-6")" = "✅🟢" ] || red "👀 incorrectly downgraded ✅"
+set_window_flag "iss-6" "💤" "test_a21"
+[ "$(flag_of "$SESSION_NAME:iss-6")" = "💤" ] || red "💤 should outrank ✅"
+set_window_flag "iss-6" "❌" "test_a22"
+[ "$(flag_of "$SESSION_NAME:iss-6")" = "❌" ] || red "❌ should outrank 💤"
+set_window_flag "iss-6" "✋" "test_a23"
+[ "$(flag_of "$SESSION_NAME:iss-6")" = "✋" ] || red "✋ should outrank ❌"
+set_window_flag "iss-6" "❌" "test_a24"
+[ "$(flag_of "$SESSION_NAME:iss-6")" = "✋" ] || red "❌ incorrectly downgraded ✋"
+green "✋ > ❌ > 💤 > ✅ > 👀 rank ladder holds (issue #618)"
+
 unset SESSION_NAME
 rm -rf "$FLAG_DIR"/*
 
@@ -249,7 +266,8 @@ chmod +x "$FAKE_LLM_START"
 
 # gh stub: pr list reads a 5-column TSV fixture (branch/state/number/
 # createdAt/isDraft, matching pr_poll_pass's --jq projection exactly), or —
-# for pr_risk_glyph's open-PR body lookup — a 2-column number/risk fixture.
+# for pr_open_details_load's open-PR lookup — a number/risk/ci fixture
+# (ci column optional; absent reads as "none", i.e. no CI checks).
 GH_PR_LIST_FILE="$TEST_DIR/gh-pr-list.tsv"
 GH_PR_RISK_FILE="$TEST_DIR/gh-pr-risk.tsv"
 : > "$GH_PR_LIST_FILE"
@@ -259,7 +277,7 @@ cat > "$FAKE_GH" <<EOF
 #!/usr/bin/env bash
 if [ "\$1" = "pr" ] && [ "\$2" = "list" ]; then
     case " \$* " in
-        *" number,body "*) cat "$GH_PR_RISK_FILE" ;;
+        *" number,body,statusCheckRollup "*) cat "$GH_PR_RISK_FILE" ;;
         *)                 cat "$GH_PR_LIST_FILE" ;;
     esac
     exit 0
@@ -665,6 +683,106 @@ stop_watcher
 [ -z "$(flag_of "$SESSION_NAME:coordinator")" ] \
     || red "expected no 🔔 when the last turn isn't an approval ask; got: $(flag_of "$SESSION_NAME:coordinator")"
 green "coord_approval_flag_pass raises no 🔔 for a non-approval last turn"
+
+# ---------------------------------------------------------------------------
+heading "Test B15: pr_poll_pass sets ✅ for ready + CI green + brief declared done + idle (issue #618)"
+# ---------------------------------------------------------------------------
+WT80="$TEST_DIR/wt-issue-80"
+mkdir -p "$WT80/.swarm/tasks/done" "$WT80/.swarm/tasks/processing"
+rm -rf "$FLAG_DIR"/*
+rm -f "$PROJECT_DIR/.swarm/events.log"
+printf 'fix/issue-80\tOPEN\t180\t2026-01-01T00:00:00Z\tfalse\n' > "$GH_PR_LIST_FILE"
+printf '180\t🟡\tpass\n' > "$GH_PR_RISK_FILE"
+
+ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 0 "$TEST_DIR/watch-b15.log"
+sleep 4
+stop_watcher
+[ "$(flag_of "$SESSION_NAME:iss-80")" = "✅🟡" ] \
+    || red "expected ✅🟡 on iss-80; got: $(flag_of "$SESSION_NAME:iss-80"). Watch log:
+$(cat "$TEST_DIR/watch-b15.log")"
+green "pr_poll_pass set ✅ (risk-suffixed) for a done, green, idle worker"
+
+# ---------------------------------------------------------------------------
+heading "Test B16: ✅ drops back to 👀 when CI restarts (new push)"
+# ---------------------------------------------------------------------------
+printf '180\t🟡\tpending\n' > "$GH_PR_RISK_FILE"
+ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 0 "$TEST_DIR/watch-b16.log"
+sleep 4
+stop_watcher
+[ "$(flag_of "$SESSION_NAME:iss-80")" = "👀🟡" ] \
+    || red "expected ✅ to drop to 👀🟡 while CI is pending; got: $(flag_of "$SESSION_NAME:iss-80")"
+green "pending CI shows 👀, not ✅ (the PR 1244 case)"
+
+printf '180\t🟡\n' > "$GH_PR_RISK_FILE"
+ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 0 "$TEST_DIR/watch-b16b.log"
+sleep 4
+stop_watcher
+[ "$(flag_of "$SESSION_NAME:iss-80")" = "👀🟡" ] \
+    || red "a PR with no CI checks reported should stay 👀; got: $(flag_of "$SESSION_NAME:iss-80")"
+green "no CI checks reported shows 👀, not ✅"
+
+# ---------------------------------------------------------------------------
+heading "Test B17: green CI but the brief is still in processing/ → 👀, not ✅"
+# ---------------------------------------------------------------------------
+rm -rf "$FLAG_DIR"/*
+printf '180\t🟡\tpass\n' > "$GH_PR_RISK_FILE"
+echo "brief" > "$WT80/.swarm/tasks/processing/t80.md"
+ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 0 "$TEST_DIR/watch-b17.log"
+sleep 4
+stop_watcher
+[ "$(flag_of "$SESSION_NAME:iss-80")" = "👀🟡" ] \
+    || red "a worker that hasn't run task-done.sh should not get ✅; got: $(flag_of "$SESSION_NAME:iss-80")"
+green "undeclared brief keeps 👀"
+rm -f "$WT80/.swarm/tasks/processing/t80.md"
+
+# ---------------------------------------------------------------------------
+heading "Test B18: ❌ for failed CI on an idle worker (even a draft), cleared once it's busy"
+# ---------------------------------------------------------------------------
+mkdir -p "$TEST_DIR/wt-issue-81/.swarm/tasks/done"
+rm -rf "$FLAG_DIR"/*
+printf 'fix/issue-81\tOPEN\t181\t2026-01-01T00:00:00Z\ttrue\n' > "$GH_PR_LIST_FILE"
+printf '181\t🟢\tfail\n' > "$GH_PR_RISK_FILE"
+ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 0 "$TEST_DIR/watch-b18.log"
+sleep 4
+stop_watcher
+[ "$(flag_of "$SESSION_NAME:iss-81")" = "❌" ] \
+    || red "expected ❌ on iss-81; got: $(flag_of "$SESSION_NAME:iss-81"). Watch log:
+$(cat "$TEST_DIR/watch-b18.log")"
+green "pr_poll_pass set ❌ for an idle worker's red draft PR"
+
+printf 'busy · ↓ 3.2k tokens\n' > "$PANE_DIR/${SESSION_NAME}_iss-81"
+ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 0 "$TEST_DIR/watch-b18b.log"
+sleep 4
+stop_watcher
+rm -f "$PANE_DIR/${SESSION_NAME}_iss-81"
+[ -z "$(flag_of "$SESSION_NAME:iss-81")" ] \
+    || red "❌ should clear once the worker is busy fixing it; got: $(flag_of "$SESSION_NAME:iss-81")"
+green "❌ clears while the worker is busy"
+: > "$GH_PR_RISK_FILE"
+: > "$GH_PR_LIST_FILE"
+
+# ---------------------------------------------------------------------------
+heading "Test B19: window_flags_sweep_pass sets 💤 for a claimed brief on an idle pane, clears it on task-done"
+# ---------------------------------------------------------------------------
+WT82="$TEST_DIR/wt-issue-82"
+mkdir -p "$WT82/.swarm/tasks/processing" "$WT82/.swarm/tasks/done"
+rm -rf "$FLAG_DIR"/*
+echo "brief" > "$WT82/.swarm/tasks/processing/t82.md"
+WATCH_STALL_FLAG_SECS=1 ONCE=0 WATCH_WINDOW_FLAGS_SWEEP_SECS=1 start_watcher 0 "$TEST_DIR/watch-b19.log"
+sleep 4
+stop_watcher
+[ "$(flag_of "$SESSION_NAME:iss-82")" = "💤" ] \
+    || red "expected 💤 on iss-82; got: $(flag_of "$SESSION_NAME:iss-82"). Watch log:
+$(cat "$TEST_DIR/watch-b19.log")"
+green "window_flags_sweep_pass set 💤 for an idle worker still holding a brief"
+
+mv "$WT82/.swarm/tasks/processing/t82.md" "$WT82/.swarm/tasks/done/"
+WATCH_STALL_FLAG_SECS=1 ONCE=0 WATCH_WINDOW_FLAGS_SWEEP_SECS=1 start_watcher 0 "$TEST_DIR/watch-b19b.log"
+sleep 3
+stop_watcher
+[ -z "$(flag_of "$SESSION_NAME:iss-82")" ] \
+    || red "💤 should clear once the brief leaves processing/; got: $(flag_of "$SESSION_NAME:iss-82")"
+green "💤 clears once the worker declares done"
 
 # ---------------------------------------------------------------------------
 heading "Test B14: WATCH_WINDOW_FLAGS=0 suppresses every flag, end to end"

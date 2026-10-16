@@ -2617,7 +2617,7 @@ PROVISION_WORKER="${PROVISION_WORKER:-$LLM_SWARM_DIR/scripts/provision-worker.sh
 WATCH_CHECK_ON_DONE="${WATCH_CHECK_ON_DONE:-1}"
 CHECK_RUNNER="${CHECK_RUNNER:-}"
 SESSION_NAME="${SESSION_NAME:-llm-$(basename "$PROJECT_DIR")}"
-# issue #594 — per-window tmux status flags (📬/👀/✋ on worker windows,
+# issue #594 — per-window tmux status flags (📬/👀/✅/❌/💤/✋ on worker windows,
 # 🔔 on the coordinator window); see scripts/_window-flags.sh for the
 # flags themselves and window_flags_sweep_pass/coord_approval_flag_pass
 # below for the ✋/🔔 derivation. WATCH_WINDOW_FLAGS=0 is the kill switch
@@ -2630,6 +2630,9 @@ WATCH_WINDOW_FLAGS="${WATCH_WINDOW_FLAGS:-1}"
 # Suffix the ready-and-idle 👀 flag with the PR's risk rating (👀🟢); 0 shows
 # a bare 👀. See pr_risk_glyph.
 WATCH_WINDOW_FLAG_RISK="${WATCH_WINDOW_FLAG_RISK:-1}"
+# issue #618: seconds a worker may sit idle while still holding a claimed
+# brief before its window gets 💤 (0 = off). See stall_flag_update.
+WATCH_STALL_FLAG_SECS="${WATCH_STALL_FLAG_SECS:-600}"
 WATCH_WINDOW_FLAGS_SWEEP_SECS="${WATCH_WINDOW_FLAGS_SWEEP_SECS:-10}"
 # shellcheck source=_window-flags.sh
 . "$SCRIPT_DIR/_window-flags.sh"
@@ -3926,6 +3929,8 @@ on_selfheal_claim() {
     # dispatch, rather than this self-heal path).
     clear_window_flag "iss-$issue" "📬" "new_brief_claimed task_id=$task_id"
     clear_window_flag "iss-$issue" "👀" "new_brief_claimed task_id=$task_id"
+    clear_window_flag "iss-$issue" "✅" "new_brief_claimed task_id=$task_id"
+    clear_window_flag "iss-$issue" "❌" "new_brief_claimed task_id=$task_id"
     rm -f "$path" 2>/dev/null || true
 }
 
@@ -4321,29 +4326,86 @@ has_live_window_draining_brief() {
 # claimed into processing/ AFTER that PR already existed, which
 # maybe_run_check excludes via followup_brief_postdates_pr.
 #
-# pr_risk_glyph <pr_number>
+# pr_risk_glyph <pr_number> / pr_ci_state <pr_number>
 #
-# Echoes the PR body's risk rating (first 🟢/🟡/🔴 in the body — the same
-# rule review-scoreboard.sh and swarm-merge.sh use), or nothing when the
-# body has none or WATCH_WINDOW_FLAG_RISK=0. Used to suffix pr_poll_pass's
-# 👀 flag. One lazy `gh pr list --state open` per pass, only on a pass that
-# actually has a ready+idle PR to flag — the main --state all call above
-# deliberately skips bodies (500 of them every 60s).
+# pr_risk_glyph echoes the PR body's risk rating (first 🟢/🟡/🔴 in the
+# body — the same rule review-scoreboard.sh and swarm-merge.sh use), or
+# nothing when the body has none or WATCH_WINDOW_FLAG_RISK=0. Used to
+# suffix pr_poll_pass's 👀/✅ flags.
+#
+# pr_ci_state (issue #618) echoes the PR's combined CI state from its
+# statusCheckRollup: fail (any failed/timed-out/cancelled check), pending
+# (any check not yet completed), pass (every check completed clean), or
+# none (no checks reported — a fresh push GitHub hasn't registered yet
+# looks the same, which is why none never earns ✅).
+#
+# Both read one lazy `gh pr list --state open` per pass, only on a pass
+# that actually has an idle worker with an open PR — the main --state all
+# call below deliberately skips bodies and check rollups (500 of them
+# every 60s).
 declare -gA PR_RISK_CACHE=()
+declare -gA PR_CI_CACHE=()
 PR_RISK_LOADED=0
+pr_open_details_load() {
+    [ "$PR_RISK_LOADED" = "0" ] || return 0
+    PR_RISK_LOADED=1
+    PR_RISK_CACHE=()
+    PR_CI_CACHE=()
+    local n r c
+    while IFS=$'\t' read -r n r c; do
+        [ -n "$n" ] || continue
+        PR_RISK_CACHE[$n]="$r"
+        PR_CI_CACHE[$n]="${c:-none}"
+    done < <(cd "$PROJECT_DIR" && gh pr list --state open --limit 200 \
+            --json number,body,statusCheckRollup \
+            --jq 'def ci: (.statusCheckRollup // []) as $r
+                    | if ($r | length) == 0 then "none"
+                      elif any($r[]; ((.conclusion // "") | test("^(FAILURE|TIMED_OUT|CANCELLED|ACTION_REQUIRED|STARTUP_FAILURE)$"))
+                                     or ((.state // "") | test("^(FAILURE|ERROR)$"))) then "fail"
+                      elif any($r[]; ((.status // "COMPLETED") != "COMPLETED")
+                                     or ((.state // "") | test("^(PENDING|EXPECTED)$"))) then "pending"
+                      else "pass" end;
+                  .[] | "\(.number)\t\(((.body // "") | capture("(?<r>🟢|🟡|🔴)").r?) // "")\t\(ci)"' 2>/dev/null)
+}
 pr_risk_glyph() {
     [ "$WATCH_WINDOW_FLAG_RISK" = "1" ] || return 0
-    if [ "$PR_RISK_LOADED" = "0" ]; then
-        PR_RISK_LOADED=1
-        PR_RISK_CACHE=()
-        local n r
-        while IFS=$'\t' read -r n r; do
-            [ -n "$n" ] && PR_RISK_CACHE[$n]="$r"
-        done < <(cd "$PROJECT_DIR" && gh pr list --state open --limit 200 \
-                --json number,body \
-                --jq '.[] | "\(.number)\t\(((.body // "") | capture("(?<r>🟢|🟡|🔴)").r?) // "")"' 2>/dev/null)
-    fi
+    pr_open_details_load
     printf '%s' "${PR_RISK_CACHE[$1]:-}"
+}
+pr_ci_state() {
+    pr_open_details_load
+    printf '%s' "${PR_CI_CACHE[$1]:-none}"
+}
+
+# worker_brief_pending <wt_dir> (issue #618)
+#
+# True (rc 0) when the worker still has a brief queued in inbox/ or claimed
+# in processing/ — i.e. it has NOT yet declared the task done
+# (task-done.sh moves the brief out of processing/).
+worker_brief_pending() {
+    local d f
+    for d in inbox processing; do
+        for f in "$1/.swarm/tasks/$d"/*.md; do
+            [ -f "$f" ] && return 0
+        done
+    done
+    return 1
+}
+
+# pr_flag_apply <issue> <want> <reason> (issue #618)
+#
+# Moves iss-<issue> to exactly one of pr_poll_pass's own flags (❌/✅/👀,
+# risk-suffixed or not), or to none when <want> is empty: clears each of
+# those three the window no longer qualifies for, then sets <want>.
+# clear_window_flag only acts on a flag this window currently holds, so
+# ✋/💤/📬 are never touched.
+pr_flag_apply() {
+    local issue="$1" want="$2" why="$3" g
+    for g in "❌" "✅" "👀"; do
+        [ -n "$want" ] && [[ "$want" == "$g"* ]] && continue
+        clear_window_flag "iss-$issue" "$g" "$why"
+    done
+    [ -z "$want" ] || set_window_flag "iss-$issue" "$want" "$why"
 }
 
 pr_poll_pass() {
@@ -4407,21 +4469,42 @@ pr_poll_pass() {
         # The bare 🟡 clears below migrate windows flagged by the pre-👀
         # glyph (a watcher restart against a live session) — duct tape,
         # safe to drop once no swarm predates the change.
+        #
+        # issue #618: an idle worker's open PR picks exactly one of
+        # ❌ (a CI check failed — draft or not), ✅ (ready, CI all green,
+        # and the worker declared done: no brief left in inbox/processing),
+        # or 👀 (ready, but CI still running/absent or the brief not yet
+        # declared done). A coordinator-held PR stays draft, so it never
+        # reaches ✅. pr_flag_apply clears whichever of the three this
+        # window no longer qualifies for before setting the new one, since
+        # set_window_flag never moves a window DOWN the rank ladder.
         case "$state" in
             OPEN)
                 clear_window_flag "iss-$issue" "🟡" "legacy_glyph pr=$pr_number"
-                if [ "$is_draft" = "false" ] && ! worker_pane_busy "iss-$issue"; then
-                    set_window_flag "iss-$issue" "👀$(pr_risk_glyph "$pr_number")" "pr_ready_idle pr=$pr_number"
-                elif [ "$is_draft" = "false" ]; then
-                    clear_window_flag "iss-$issue" "👀" "pr_ready_busy pr=$pr_number"
+                local want="" why ci
+                if worker_pane_busy "iss-$issue"; then
+                    why="pr_busy"
                 else
-                    clear_window_flag "iss-$issue" "👀" "pr_draft pr=$pr_number"
+                    # Load in THIS shell: pr_ci_state/pr_risk_glyph run in
+                    # $(...) subshells below, which can't fill the cache.
+                    pr_open_details_load
+                    ci="$(pr_ci_state "$pr_number")"
+                    if [ "$ci" = "fail" ]; then
+                        want="❌" why="pr_ci_failed_idle"
+                    elif [ "$is_draft" = "true" ]; then
+                        why="pr_draft"
+                    elif [ "$ci" = "pass" ] && ! worker_brief_pending "$wt_dir"; then
+                        want="✅$(pr_risk_glyph "$pr_number")" why="pr_done_idle"
+                    else
+                        want="👀$(pr_risk_glyph "$pr_number")" why="pr_ready_idle ci=$ci"
+                    fi
                 fi
+                pr_flag_apply "$issue" "$want" "$why pr=$pr_number"
                 ;;
             MERGED|CLOSED)
                 if ! pr_predates_worktree "$created_at" "$wt_dir"; then
                     clear_window_flag "iss-$issue" "🟡" "legacy_glyph pr=$pr_number"
-                    clear_window_flag "iss-$issue" "👀" "pr_${state,,} pr=$pr_number"
+                    pr_flag_apply "$issue" "" "pr_${state,,} pr=$pr_number"
                 fi
                 ;;
         esac
@@ -6188,7 +6271,35 @@ window_flags_sweep_pass() {
         else
             clear_window_flag "iss-$issue" "✋" "outbox_drained_or_processed"
         fi
+
+        # issue #618: 💤 — a brief still claimed in processing/ while the
+        # pane has sat idle WATCH_STALL_FLAG_SECS. Idle-since lives in
+        # STALL_IDLE_SINCE (this timer loop's own long-lived process), so
+        # a watcher restart just restarts the clock — fails toward no flag.
+        stall_flag_update "$issue" "$wt_dir"
     done < <(own_worktree_dirs_for_scan "$PROJECT_DIR")
+}
+
+declare -gA STALL_IDLE_SINCE=()
+stall_flag_update() {
+    local issue="$1" wt_dir="$2" f claimed=0 now
+    if [ "$WATCH_STALL_FLAG_SECS" -le 0 ]; then
+        clear_window_flag "iss-$issue" "💤" "stall_flag_disabled"
+        return 0
+    fi
+    for f in "$wt_dir/.swarm/tasks/processing"/*.md; do
+        [ -f "$f" ] && { claimed=1; break; }
+    done
+    if [ "$claimed" = "0" ] || worker_pane_busy "iss-$issue"; then
+        unset "STALL_IDLE_SINCE[$issue]" 2>/dev/null || true
+        clear_window_flag "iss-$issue" "💤" "$([ "$claimed" = "0" ] && echo no_brief_claimed || echo worker_busy)"
+        return 0
+    fi
+    now=$(date +%s)
+    [ -n "${STALL_IDLE_SINCE[$issue]:-}" ] || STALL_IDLE_SINCE[$issue]=$now
+    if [ $((now - STALL_IDLE_SINCE[$issue])) -ge "$WATCH_STALL_FLAG_SECS" ]; then
+        set_window_flag "iss-$issue" "💤" "brief_claimed_idle_secs=$((now - STALL_IDLE_SINCE[$issue]))"
+    fi
 }
 
 # coord_approval_flag_pass (issue #594)
