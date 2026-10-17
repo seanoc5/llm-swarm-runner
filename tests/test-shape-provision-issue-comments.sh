@@ -46,6 +46,11 @@ cat > "$TEST_DIR/bin/gh" <<STUB
 if [ "\${1:-}" = "issue" ] && [ "\${2:-}" = "view" ]; then
     n="\${3:-}"
     if [ "\${4:-}" = "--json" ] && [ "\${5:-}" = "comments" ]; then
+        # comments-fail-<N>: the BODY call (plain 'issue view N') succeeds
+        # but this second, comments-only call fails on its own — distinct
+        # from a 404 on the first call, which test-shape-host-admission.sh
+        # already covers.
+        [ -e "$TEST_DIR/comments-fail-\$n" ] && { echo "stub-gh: synthetic --json comments failure" >&2; exit 1; }
         f="$TEST_DIR/comments-\$n.json"
         [ -f "\$f" ] && cat "\$f" || echo '{"comments":[]}'
         exit 0
@@ -182,6 +187,33 @@ BRIEF="$(brief_for 25)"
 grep -q 'REAL correction' "$BRIEF" || red "the real correction should still appear in $BRIEF"
 grep -q 'SWARM_PENDING_BRIEF' "$BRIEF" && red "the swarm's own marker comment should be filtered out of $BRIEF"
 green "a SWARM_PENDING_BRIEF marker comment is filtered out; the real correction survives"
+
+# ============================================================================
+heading "6: a comment with a null body does not crash the whole run (self-review finding)"
+# ============================================================================
+# jq's test() errors on a null input; under set -e that would have aborted
+# the entire provision run (not just dropped the comments section) before
+# this was guarded with (.body // "").
+cat > "$TEST_DIR/comments-26.json" <<'JSON'
+{"comments":[
+  {"createdAt":"2026-10-15T09:00:00Z","author":{"login":"seanoc5"},"body":null},
+  {"createdAt":"2026-10-15T11:00:00Z","author":{"login":"seanoc5"},"body":"SURVIVES: a real comment after a null-body one."}
+]}
+JSON
+rc=$(run_prov 26 "${off[@]}")
+[ "$rc" -eq 0 ] || red "a null-body comment should not abort the whole run, rc=$rc: $(cat "$TEST_DIR/prov-26.log")"
+BRIEF="$(brief_for 26)"
+grep -q 'SURVIVES: a real comment' "$BRIEF" || red "the real comment after the null-body one should still appear in $BRIEF"
+green "a null-body comment is tolerated; the run completes and the next real comment still appears"
+
+# ============================================================================
+heading "7: the body fetch succeeds but the comments fetch fails -> exit 2, nothing queued (self-review finding)"
+# ============================================================================
+: > "$TEST_DIR/comments-fail-27"
+rc=$(run_prov 27 "${off[@]}")
+[ "$rc" -eq 2 ] || red "a failed --json comments call should exit 2 like the body-fetch failure does, rc=$rc: $(cat "$TEST_DIR/prov-27.log")"
+[ -z "$(find "$TEST_DIR" -path "*wt-issue-27/.swarm/tasks/inbox/*" -type f 2>/dev/null)" ] || red "no brief (or .tmp file) should be left in inbox/ when the comments fetch fails"
+green "a comments-fetch failure (body fetch already succeeded) exits 2 with nothing queued, same contract as a body-fetch failure"
 
 echo
 green "all provision-worker.sh issue-comments shape tests passed"

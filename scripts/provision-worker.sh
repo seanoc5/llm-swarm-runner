@@ -484,8 +484,11 @@ format_issue_comments() {
     # round 1 finding): SWARM_PENDING_BRIEF/SWARM_SELF_REVIEW notices are
     # posted via the operator's own `gh` account, which is often the issue
     # author, so without this they'd read as "the issue author's latest
-    # comment" and both crowd out and outrank a real correction.
-    comments_json="$(jq '{comments: (.comments // [] | map(select(.body | test("^<!-- SWARM_") | not)))}' <<<"$comments_json")"
+    # comment" and both crowd out and outrank a real correction. `(.body //
+    # "")` guards a null body (self-review round 2 finding) — `test()` on
+    # null errors under `set -e` and would abort the whole provision run,
+    # not just this section.
+    comments_json="$(jq '{comments: (.comments // [] | map(select((.body // "") | test("^<!-- SWARM_") | not)))}' <<<"$comments_json")"
     n="$(jq '.comments | length' <<<"$comments_json" 2>/dev/null)" || n=0
     [ -n "$n" ] && [ "$n" -gt 0 ] 2>/dev/null || return 0
 
@@ -493,7 +496,8 @@ format_issue_comments() {
     while :; do
         body="$(jq -r --argjson skip "$omitted" '
             .comments[$skip:][]
-            | "### " + .createdAt + " — " + .author.login + "\n\n" + .body + "\n"
+            | "### " + (.createdAt // "") + " — " + (.author.login // "unknown")
+              + "\n\n" + (.body // "") + "\n"
         ' <<<"$comments_json")"
         [ "${#body}" -le "$max_chars" ] && break
         # Can't drop further once only the single newest comment is left —
