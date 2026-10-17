@@ -41,13 +41,18 @@
 # Issue #635 adds the one-line **Next:** who-acts rule (plus trigger check)
 # to both worker prompts and folds the routine "Your move: merge decision"
 # example into it; ~400 bytes over, and the rule is the fix itself.
+#
+# 2026-10-17: worker budget 24000 -> 24100. Issue #634 adds one sentence
+# saying a brief's "Issue comments" section can supersede the body and the
+# issue author's latest comment wins on conflict — already near-minimal
+# after trimming once; only ~50 bytes over even so.
 set -euo pipefail
 
 green() { printf '\033[32m✓ %s\033[0m\n' "$*"; }
 red()   { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORKER_MAX="${WORKER_MD_MAX_BYTES:-24000}"
+WORKER_MAX="${WORKER_MD_MAX_BYTES:-24100}"
 COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-26000}"
 BARE_MAX="${WORKER_BARE_MD_MAX_BYTES:-11300}"   # issue #510 trial prompt; ~7.5KB is script-parsed contract
 

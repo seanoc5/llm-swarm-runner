@@ -25,7 +25,9 @@ WHAT IT DOES
        SWARM_WORKTREE_GROUPING=project.
     2. Queue dirs under <wt>/.swarm/tasks/.
     3. Caps and host admission (below), then the brief: prompts/refs.md +
-       .swarm-policy.md + `gh issue view N`, atomically written to inbox/.
+       .swarm-policy.md + `gh issue view N` (body) + its comments (#634,
+       newest last, may be truncated — see "Issue comments" heading),
+       atomically written to inbox/.
     4. tmux window 'iss-N' running the sandbox listener, then a health poll.
     If a live iss-N window already exists, steps 3-4 only queue a follow-up
     brief onto it (no caps, no spawn). Otherwise (no window — dead pane
@@ -77,6 +79,9 @@ OTHER CONFIG  (shell env > <project>/.swarm/.env > <sandbox>/.env > .env.example
     PROVISION_STALE_CONTAINER_WAIT_SECS  15   wait for a stale container's name to clear
     SANDBOX_SH, LLM_SWARM_DIR            auto
     BRIEF_LINT                           1    run lint-brief.sh (warn-only)
+    BRIEF_COMMENTS_MAX_CHARS             8000 issue-comments section budget
+                                              (#634); oldest comments dropped
+                                              first, newest kept, noted if so
 
 EVENTS  (<project>/.swarm/events.log)
     worker.start                 window spawned (logged before the health poll)
@@ -464,6 +469,50 @@ post_spawn_health_check() {
     exit 6
 }
 
+# issue #634: `gh issue view N` (no --json) prints the body only — an issue
+# author's later corrections posted as comments never reached the brief, so
+# a worker built from the stale body alone. Formats those comments (newest
+# last, the order `gh` already returns them in) under a heading that says
+# they can supersede the body, and drops the oldest ones first (saying so)
+# if the formatted section would exceed max_chars — the newest comments are
+# the ones most likely to carry a correction, so they're worth keeping over
+# older ones.
+format_issue_comments() {
+    local comments_json="$1" max_chars="${2:-8000}"
+    local n
+    # Drop the swarm's own machine-posted marker comments (self-review
+    # round 1 finding): SWARM_PENDING_BRIEF/SWARM_SELF_REVIEW notices are
+    # posted via the operator's own `gh` account, which is often the issue
+    # author, so without this they'd read as "the issue author's latest
+    # comment" and both crowd out and outrank a real correction. `(.body //
+    # "")` guards a null body (self-review round 2 finding) — `test()` on
+    # null errors under `set -e` and would abort the whole provision run,
+    # not just this section.
+    comments_json="$(jq '{comments: (.comments // [] | map(select((.body // "") | test("^<!-- SWARM_") | not)))}' <<<"$comments_json")"
+    n="$(jq '.comments | length' <<<"$comments_json" 2>/dev/null)" || n=0
+    [ -n "$n" ] && [ "$n" -gt 0 ] 2>/dev/null || return 0
+
+    local omitted=0 body=""
+    while :; do
+        body="$(jq -r --argjson skip "$omitted" '
+            .comments[$skip:][]
+            | "### " + (.createdAt // "") + " — " + (.author.login // "unknown")
+              + "\n\n" + (.body // "") + "\n"
+        ' <<<"$comments_json")"
+        [ "${#body}" -le "$max_chars" ] && break
+        # Can't drop further once only the single newest comment is left —
+        # keep it even over budget rather than print nothing.
+        [ "$omitted" -ge "$((n - 1))" ] && break
+        omitted=$((omitted + 1))
+    done
+
+    printf '## Issue comments (may supersede the body)\n\n'
+    if [ "$omitted" -gt 0 ]; then
+        printf '_%s earlier comment(s) omitted here for length — see the issue on GitHub for the full thread._\n\n' "$omitted"
+    fi
+    printf '%s\n' "$body"
+}
+
 # --- main ---------------------------------------------------------------------
 
 echo "=== provision-worker.sh ==="
@@ -586,6 +635,9 @@ if [ "$WAKE" = "1" ]; then
 elif ! ISSUE_TEXT="$(gh issue view "$ISSUE")"; then
     echo "ERROR: gh issue view $ISSUE failed — nothing queued." >&2
     exit 2
+elif ! ISSUE_COMMENTS_JSON="$(gh issue view "$ISSUE" --json comments)"; then
+    echo "ERROR: gh issue view $ISSUE --json comments failed — nothing queued." >&2
+    exit 2
 fi
 
 # A live iss-N window means "queue a follow-up": no caps, no spawn.
@@ -685,6 +737,8 @@ TMP="$(mktemp -p "$INBOX" .tmp.XXXXXX.md)"
     fi
     printf '## Task\n\nFix issue #%s. Details follow.\n\n' "$ISSUE"
     printf '%s\n' "$ISSUE_TEXT"
+    COMMENTS_SECTION="$(format_issue_comments "$ISSUE_COMMENTS_JSON" "${BRIEF_COMMENTS_MAX_CHARS:-8000}")"
+    [ -n "$COMMENTS_SECTION" ] && printf '\n%s\n' "$COMMENTS_SECTION"
 } > "$TMP"
 # `mv -n` never clobbers; if a same-name brief appeared since the check, take
 # the next suffix.
