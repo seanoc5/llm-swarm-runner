@@ -178,7 +178,25 @@ case "$1 $2" in
         [ -n "$runlist_json" ] || runlist_json='[{"status":"completed","conclusion":"success"}]'
         echo "$runlist_json"
         exit "${GH_RUNLIST_RC:-0}" ;;
-    "pr merge") exit 0 ;;
+    "pr merge")
+        # issue #629 self-review follow-up: swarm-merge.sh now pins this
+        # call to the exact commit ci-wait.sh verified via
+        # --match-head-commit. Mimic real `gh`'s own behavior (refuses,
+        # nonzero exit, no merge) when that pinned SHA no longer matches
+        # the PR's real current head — GH_TRUE_HEAD lets a test simulate
+        # a push landing after ci-wait.sh's verification but before this
+        # call. Default matches ci-wait.sh's fixture headRefOid
+        # ("deadbeef"), so every pre-existing test above is unaffected.
+        match=""
+        args=("$@")
+        for i in "${!args[@]}"; do
+            [ "${args[$i]}" = "--match-head-commit" ] && match="${args[$((i+1))]}"
+        done
+        if [ -n "$match" ] && [ "$match" != "${GH_TRUE_HEAD:-deadbeef}" ]; then
+            echo "GraphQL: Head branch was modified. Review and try the merge again. (mergePullRequest)" >&2
+            exit 1
+        fi
+        exit 0 ;;
     "pr list")
         cat "$GH_PR_LIST"; exit 0 ;;
     "issue view")
@@ -290,7 +308,9 @@ if OUT=$(GH_CHECKS_RC=0 "$MERGE" 501 --auto-low 2>&1); then RC=0; else RC=$?; fi
 echo "$OUT" | grep -qi "gate 0" || red "Gate 0 should still be reported as checked"
 echo "$OUT" | grep -qi "gate 2" || red "Gate 2 should still be reported as checked"
 grep -q "pr merge 501" "$GH_LOG" || red "gh pr merge 501 was not called"
-green "--auto-low merges once authorship is clean and CI is verified green"
+grep -q -- "pr merge 501 --squash --match-head-commit deadbeef" "$GH_LOG" \
+    || red "gh pr merge was not pinned to the commit ci-wait.sh actually verified (--match-head-commit). gh log: $(cat "$GH_LOG")"
+green "--auto-low merges once authorship is clean and CI is verified green, pinned to the verified commit"
 # issue #489: the merge no longer uses gh's --delete-branch (it removes the
 # live worker worktree); swarm-merge.sh deletes the REMOTE branch itself.
 # Prove that happened against the fixture remote, then re-seed the branch
@@ -306,6 +326,22 @@ green "remote branch deleted explicitly after merge (no --delete-branch)"
 # re-pushing, for the later tests that reuse PR 501.
 git -C "$CLONE" checkout -q -b fix/issue-501 master
 git -C "$CLONE" push -q origin fix/issue-501
+
+# ============================================================================
+heading "Test 9b: swarm-merge.sh --auto-low refuses the merge, not silently merges the wrong commit, if the PR's real head moved after ci-wait.sh verified it"
+# ============================================================================
+# issue #629 self-review follow-up: simulate a push landing in the narrow
+# window between ci-wait.sh's own "verified-head=deadbeef" and this script's
+# `gh pr merge` call. GH_TRUE_HEAD makes the gh stub's "pr merge" refuse
+# exactly like the real API does on a stale --match-head-commit, instead of
+# the test silently merging a commit nobody actually checked.
+: > "$GH_LOG"
+if OUT=$(GH_CHECKS_RC=0 GH_TRUE_HEAD=newlyracedpush "$MERGE" 501 --auto-low 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -ne 0 ] || red "swarm-merge --auto-low must refuse, not merge, once --match-head-commit no longer matches the real head (rc=$RC, output: $OUT)"
+grep -q -- "pr merge 501 --squash --match-head-commit deadbeef" "$GH_LOG" \
+    || red "gh pr merge should still have been attempted, pinned to the verified (now-stale) commit"
+echo "$OUT" | grep -qi "nothing merged" || red "refusal must say nothing was merged (output: $OUT)"
+green "--auto-low refuses rather than merging an unverified commit when the real head moved after ci-wait.sh's check"
 
 # ============================================================================
 heading "Test 10: swarm-merge.sh --auto-low distinguishes a Gate 0 error (exit 2) from a refusal (exit 1)"

@@ -302,6 +302,15 @@ while true; do
 
     if [ "$PASS_NOW" = "1" ]; then
         echo "ci-wait: $PASS_MSG"
+        # issue #629 self-review follow-up: a caller that merges some time
+        # after this exit has no record of exactly which commit was just
+        # verified (CI can finish on commit A, then a NEW push supersede
+        # it before the merge call runs). Print it in a stable,
+        # machine-parseable form so swarm-merge.sh can pin the actual
+        # `gh pr merge --match-head-commit` to THIS commit — if a newer
+        # push lands in between, the merge is refused instead of silently
+        # merging an unverified commit under the old one's green CI.
+        echo "ci-wait: verified-head=$SHA"
         exit 0
     fi
 
