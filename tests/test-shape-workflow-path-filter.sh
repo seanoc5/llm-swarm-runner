@@ -316,5 +316,21 @@ EOF
 printf 'src/a.py\n' > "$FILES"
 run unknown "{} brace expansion isn't implemented by this matcher — don't guess"
 
+# ─────── Test 21: a filtered pull_request + an unfiltered pull_request_target ─────────────
+# (self-review round-3 caveat on #644, reproduced live: checking only
+# whichever PR-type key is found first wrongly read this as "excluded")
+
+heading "Test 21: pull_request paths-ignore excludes the file, but a bare pull_request_target also exists -> triggers"
+cat > "$WF" <<'EOF'
+name: mixed-triggers
+on:
+  pull_request:
+    paths-ignore:
+      - 'docs/**'
+  pull_request_target:
+EOF
+printf 'docs/a.md\n' > "$FILES"
+run triggers "the unfiltered pull_request_target trigger still fires even though pull_request's filter excludes every changed file"
+
 heading "Results: $PASS checks passed"
 green "All checks passed."

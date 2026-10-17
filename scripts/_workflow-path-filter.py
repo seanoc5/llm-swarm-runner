@@ -191,44 +191,20 @@ def matches_any(path, patterns):
     return any(re.match(path_to_regex(p), path) for p in patterns)
 
 
-def verdict(text, changed_files):
-    lines = parse_lines(text)
+# Both keys use identical paths/paths-ignore syntax and are equally real
+# triggers for this PR — a workflow that defines one filtered and one
+# unfiltered must be read as relevant (it is: GitHub runs the unfiltered
+# one regardless of what the filtered one excludes).
+PR_TRIGGER_KEYS = ("pull_request", "pull_request_target")
 
-    on_rest = None
-    on_idx = None
-    for idx, (indent, content) in enumerate(lines):
-        if indent == 0:
-            m = KEY_RE.match(content)
-            if m and m.group("key") == "on":
-                on_rest, on_idx = m.group("rest").strip(), idx
-                break
-    if on_idx is None:
-        return "unknown"  # not a recognizable workflow file at all
 
-    if on_rest:
-        # Flow/scalar form on the "on:" line itself, e.g. "on: pull_request"
-        # or "on: [push, pull_request]" — neither can carry a path filter.
-        # ("pull_request" is a substring of "pull_request_target", so this
-        # also catches that event correctly.)
-        return "triggers" if "pull_request" in on_rest else "no-trigger"
-
-    on_children = direct_children(lines, on_idx + 1, 0)
-    on_entries = own_level_entries(on_children)
-    # pull_request_target uses the identical paths/paths-ignore syntax and
-    # is just as real a trigger for this PR as pull_request — a block-form
-    # "pull_request_target:" key must not be read as "no-trigger".
-    pr_entry = find_key(on_entries, "pull_request")
-    if pr_entry is None:
-        pr_entry = find_key(on_entries, "pull_request_target")
-    if pr_entry is None:
-        return "no-trigger"
-
-    pr_rest, pr_children = pr_entry
+def _pr_trigger_verdict(pr_rest, pr_children, changed_files):
+    """Verdict for a single already-found pull_request(_target) entry."""
     if pr_rest:
-        # Inline value on the "pull_request:" line itself (e.g. "{}" or a
-        # one-line flow map). Only a flow map could embed a paths filter,
-        # and parsing nested flow maps isn't worth the complexity here —
-        # fail toward "unknown" rather than assume unrestricted.
+        # Inline value on the key's own line (e.g. "{}" or a one-line flow
+        # map). Only a flow map could embed a paths filter, and parsing
+        # nested flow maps isn't worth the complexity here — fail toward
+        # "unknown" rather than assume unrestricted.
         return "unknown" if "paths" in pr_rest else "triggers"
 
     pr_entries = own_level_entries(pr_children)
@@ -254,6 +230,49 @@ def verdict(text, changed_files):
     if not patterns:
         return "triggers"
     return "excluded" if all(matches_any(f, patterns) for f in changed_files) else "triggers"
+
+
+def verdict(text, changed_files):
+    lines = parse_lines(text)
+
+    on_rest = None
+    on_idx = None
+    for idx, (indent, content) in enumerate(lines):
+        if indent == 0:
+            m = KEY_RE.match(content)
+            if m and m.group("key") == "on":
+                on_rest, on_idx = m.group("rest").strip(), idx
+                break
+    if on_idx is None:
+        return "unknown"  # not a recognizable workflow file at all
+
+    if on_rest:
+        # Flow/scalar form on the "on:" line itself, e.g. "on: pull_request"
+        # or "on: [push, pull_request]" — neither can carry a path filter.
+        # ("pull_request" is a substring of "pull_request_target", so this
+        # also catches that event correctly.)
+        return "triggers" if "pull_request" in on_rest else "no-trigger"
+
+    on_children = direct_children(lines, on_idx + 1, 0)
+    on_entries = own_level_entries(on_children)
+
+    # Evaluate every PR-type trigger the workflow defines (not just the
+    # first one found) — the workflow is relevant if ANY of them would
+    # fire, and excluded only if ALL of them are filtered out.
+    verdicts = []
+    for key in PR_TRIGGER_KEYS:
+        entry = find_key(on_entries, key)
+        if entry is not None:
+            pr_rest, pr_children = entry
+            verdicts.append(_pr_trigger_verdict(pr_rest, pr_children, changed_files))
+
+    if not verdicts:
+        return "no-trigger"
+    if "triggers" in verdicts:
+        return "triggers"
+    if "unknown" in verdicts:
+        return "unknown"
+    return "excluded"  # every PR-type trigger present confidently excludes
 
 
 def main(argv):
