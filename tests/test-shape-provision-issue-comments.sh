@@ -163,5 +163,25 @@ grep -q 'NEWEST comment' "$BRIEF" || red "newest comment should survive truncati
 grep -qi 'omitted here for length' "$BRIEF" || red "truncation should be noted in $BRIEF"
 green "truncation drops the oldest comment, keeps the newest, and says so in the brief"
 
+# ============================================================================
+heading "5: the swarm's own SWARM_PENDING_BRIEF marker comment is filtered out (self-review finding)"
+# ============================================================================
+# requeue.sh / worker-listener.sh post these from the operator's own gh
+# account, which is often the issue author — without filtering, a queued
+# marker would outrank (and crowd out) a real correction under the "issue
+# author's latest comment wins" rule in worker.md.
+cat > "$TEST_DIR/comments-25.json" <<'JSON'
+{"comments":[
+  {"createdAt":"2026-10-15T09:00:00Z","author":{"login":"seanoc5"},"body":"REAL correction: use the new deck revision."},
+  {"createdAt":"2026-10-15T11:00:00Z","author":{"login":"seanoc5"},"body":"<!-- SWARM_PENDING_BRIEF: queued -->\nA follow-up brief has been queued."}
+]}
+JSON
+rc=$(run_prov 25 "${off[@]}")
+[ "$rc" -eq 0 ] || red "expected admitted spawn, rc=$rc: $(cat "$TEST_DIR/prov-25.log")"
+BRIEF="$(brief_for 25)"
+grep -q 'REAL correction' "$BRIEF" || red "the real correction should still appear in $BRIEF"
+grep -q 'SWARM_PENDING_BRIEF' "$BRIEF" && red "the swarm's own marker comment should be filtered out of $BRIEF"
+green "a SWARM_PENDING_BRIEF marker comment is filtered out; the real correction survives"
+
 echo
 green "all provision-worker.sh issue-comments shape tests passed"

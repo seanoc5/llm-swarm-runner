@@ -480,6 +480,12 @@ post_spawn_health_check() {
 format_issue_comments() {
     local comments_json="$1" max_chars="${2:-8000}"
     local n
+    # Drop the swarm's own machine-posted marker comments (self-review
+    # round 1 finding): SWARM_PENDING_BRIEF/SWARM_SELF_REVIEW notices are
+    # posted via the operator's own `gh` account, which is often the issue
+    # author, so without this they'd read as "the issue author's latest
+    # comment" and both crowd out and outrank a real correction.
+    comments_json="$(jq '{comments: (.comments // [] | map(select(.body | test("^<!-- SWARM_") | not)))}' <<<"$comments_json")"
     n="$(jq '.comments | length' <<<"$comments_json" 2>/dev/null)" || n=0
     [ -n "$n" ] && [ "$n" -gt 0 ] 2>/dev/null || return 0
 
