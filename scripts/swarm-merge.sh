@@ -55,14 +55,16 @@
 #                         `gh pr checks` to a concluded state, replacing the
 #                         old `gh pr merge --auto` prescription, which
 #                         merged immediately because these repos have no
-#                         branch protection for --auto to defer to. A repo
-#                         with NO CI checks configured at all (ci-wait.sh
-#                         exit 5) is treated as pass-with-a-loud-warning, not
-#                         a refusal — logged as a `merge.gate` event noting
-#                         the CI absence — because "no checks exist" is not
+#                         branch protection for --auto to defer to. ci-wait.sh
+#                         exit 5 — no CI checks configured at all, OR (#639)
+#                         every pull_request workflow's path filter excludes
+#                         this PR's changed files, so no run will ever
+#                         register — is treated as pass-with-a-loud-warning,
+#                         not a refusal — logged as a `merge.gate` event
+#                         noting the CI absence — because neither case is
 #                         evidence of a failure, and refusing here would
-#                         silently strand every CI-less project's auto-merge
-#                         path and point whoever investigates at the wrong
+#                         silently strand every such PR's auto-merge path
+#                         and point whoever investigates at the wrong
 #                         culprit.
 #   Gate 3 (review decision) `gh pr view`'s `reviewDecision` is not
 #                         `CHANGES_REQUESTED`.

@@ -44,6 +44,13 @@ cat > "$TEST_DIR/bin/gh" <<'EOF'
 [ -n "${GH_ARGS_LOG:-}" ] && printf '%s\n' "$*" >> "$GH_ARGS_LOG"
 case "$1 $2" in
     "pr view")
+        if printf '%s\n' "$*" | grep -q -- '--json files'; then
+            # issue #639: ci_fallback_workflows_relevant_to_pr's own changed-
+            # files lookup, a distinct --json shape from the mergeability
+            # probe below.
+            echo "${GH_PR_FILES_JSON:-[]}"
+            exit 0
+        fi
         n=0
         if [ -f "${GH_CALL_COUNT_FILE:-/dev/null}" ]; then n="$(cat "$GH_CALL_COUNT_FILE")"; fi
         n=$((n + 1))
@@ -69,7 +76,18 @@ case "$1 $2" in
         fi
         exit "${GH_CHECKS_RC:-0}" ;;
     "api repos/{owner}/{repo}/actions/workflows"|"api repos/owner/repo/actions/workflows")
-        echo "${GH_WORKFLOW_COUNT:-1}"
+        if printf '%s\n' "$*" | grep -q -- '.total_count'; then
+            echo "${GH_WORKFLOW_COUNT:-1}"
+        else
+            # issue #639: ci_fallback_workflows_relevant_to_pr's own lookup
+            # of active workflow paths — same endpoint, a different --jq.
+            echo "${GH_WORKFLOW_PATHS_JSON:-[]}"
+        fi
+        exit 0 ;;
+    "api -H")
+        # issue #639: ci_fallback_workflows_relevant_to_pr fetching a single
+        # workflow file's raw YAML (gh api -H "Accept: ..." .../contents/<path>).
+        printf '%s' "${GH_WORKFLOW_YAML:-}"
         exit 0 ;;
     "run list")
         rn=0
@@ -190,6 +208,42 @@ out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_WORKFLOW_COUNT=1 \
 check "resolves to green once the real check run registers (not a false exit 5)" '[ "$rc" -eq 0 ]'
 check "message names the pending-not-absent distinction" 'grep -qi "treating as pending, not absent" <<<"$out"'
 check "gh pr checks was actually polled more than once (the race was real)" '[ "$(cat "$CHECKS_COUNT_FILE")" -ge 3 ]'
+
+# ── Test 8b/8c/8d: issue #639 — "no checks reported" with workflows configured, but none apply to THESE changed files ──
+#
+# civicstrata#602/#603 (2026-10-15): a docs-only PR in a repo whose CI
+# `paths-ignore`s docs never gets a run at all — not a race, a permanent
+# fact about the commit. ci_fallback_workflows_relevant_to_pr checks the
+# actual path filters; only its confident "no" should short-circuit the
+# pending wait into exit 5 (same as zero workflows configured).
+
+heading "Test 8b: a docs-only PR excluded by the one workflow's paths-ignore → exit 5, not an unbounded wait"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_NO_CHECKS=1 GH_WORKFLOW_COUNT=1 \
+    GH_PR_FILES_JSON='["docs/foo.md","README.md"]' \
+    GH_WORKFLOW_PATHS_JSON='[".github/workflows/build.yml"]' \
+    GH_WORKFLOW_YAML=$'on:\n  pull_request:\n    paths-ignore:\n      - \x27docs/**\x27\n      - \x27**.md\x27\n' \
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
+check "exits 5 — no run will ever register for an all-ignored changed-file set" '[ "$rc" -eq 5 ]'
+check "message names the path-filter exclusion" 'grep -qi "excluded by every pull_request workflow" <<<"$out"'
+
+heading "Test 8c: changed files touch a NON-ignored path too → treated as the ordinary pending race, not absence"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_NO_CHECKS=1 GH_WORKFLOW_COUNT=1 \
+    GH_PR_FILES_JSON='["docs/foo.md","src/main.py"]' \
+    GH_WORKFLOW_PATHS_JSON='[".github/workflows/build.yml"]' \
+    GH_WORKFLOW_YAML=$'on:\n  pull_request:\n    paths-ignore:\n      - \x27docs/**\x27\n      - \x27**.md\x27\n' \
+    CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 2 2>&1)" || rc=$?
+check "exits 2 (timeout/pending), never 5, once a changed file falls outside paths-ignore" '[ "$rc" -eq 2 ]'
+
+heading "Test 8d: the one workflow has NO path filter at all → still treated as pending (always applies)"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_NO_CHECKS=1 GH_WORKFLOW_COUNT=1 \
+    GH_PR_FILES_JSON='["docs/foo.md"]' \
+    GH_WORKFLOW_PATHS_JSON='[".github/workflows/build.yml"]' \
+    GH_WORKFLOW_YAML=$'on:\n  pull_request:\n  push:\n    branches: [master]\n' \
+    CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 2 2>&1)" || rc=$?
+check "exits 2 (timeout/pending), never 5, when the workflow has no path filter" '[ "$rc" -eq 2 ]'
 
 # ── Test 9: fine-grained token can't read Checks → falls back to gh run list, green ──
 #

@@ -49,6 +49,123 @@
 #       never silently as "failing CI": the whole reason this function
 #       exists is to stop a permission gap from being misread as red CI
 #       (issue #560).
+#
+#   ci_fallback_workflows_relevant_to_pr <pr> [gh-repo-args...]
+#       issue #639: a repo can have `pull_request`-triggered workflows that
+#       are configured but will NEVER run for a given PR — a `paths-ignore`
+#       (or a `paths` allowlist none of the changed files match) means
+#       GitHub creates no run at all, so "no checks reported" is a
+#       permanent fact about this commit, not the ordinary post-push race
+#       the "no checks reported" handling elsewhere in this file already
+#       accounts for (a workflow count of 0 means nothing is configured at
+#       all; this function instead asks "is anything configured that would
+#       apply to THESE files"). Fetches the PR's changed files and every
+#       active workflow's raw YAML, and farms the per-workflow trigger
+#       decision out to `_workflow-path-filter.py` (a tiny stdlib-only
+#       line scanner — no PyYAML dependency) since that parsing isn't
+#       reliable in bash/jq. Only called once a caller has already
+#       confirmed the repo has at least one workflow at all AND `gh pr
+#       checks` reported "no checks reported" — this is not a substitute
+#       for that cheaper check, only a refinement of it.
+#
+#       Sets two globals:
+#         CI_FALLBACK_RELEVANT         "yes" | "no" | "unknown"
+#         CI_FALLBACK_RELEVANT_DETAIL  one-line explanation
+#
+#       "no" means every pull_request-triggered workflow's path filter
+#       excludes ALL of the PR's changed files — no run will ever register.
+#       "yes" means at least one workflow would run, OR nothing could be
+#       determined confidently (fails toward "yes": the safe direction is
+#       to keep treating this as a real, awaitable CI gap, same posture as
+#       every other ambiguous case in this file — never silently treated
+#       the same as "unknown" by a caller). "unknown" is set alongside
+#       "yes" so a caller that wants to say WHY can still tell the two
+#       "yes" paths apart; callers that don't care just check for "no".
+#
+#       Always returns 0 (never fails the caller's `set -e`) — every
+#       failure mode (an unreadable PR, an unreadable workflow list, an
+#       unreadable workflow file, a parse the Python helper couldn't
+#       confidently make) is folded into CI_FALLBACK_RELEVANT=yes/unknown,
+#       not a nonzero return, so callers never need their own try/catch
+#       around this call.
+_CI_FALLBACK_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+ci_fallback_workflows_relevant_to_pr() {
+    local pr="$1"; shift
+    local repo_args=("$@")
+    local repo_path="repos/{owner}/{repo}"
+    local i
+    for ((i = 0; i < ${#repo_args[@]}; i++)); do
+        if [ "${repo_args[$i]}" = "--repo" ]; then
+            repo_path="repos/${repo_args[$((i + 1))]}"
+        fi
+    done
+
+    local files_json files_rc
+    set +e
+    files_json="$(gh pr view "$pr" "${repo_args[@]}" --json files --jq '[.files[].path]' 2>&1)"
+    files_rc=$?
+    set -e
+    if [ "$files_rc" -ne 0 ] || ! jq -e 'type == "array" and length > 0' >/dev/null 2>&1 <<<"$files_json"; then
+        CI_FALLBACK_RELEVANT="yes"
+        CI_FALLBACK_RELEVANT_DETAIL="couldn't read PR #$pr's changed file list"
+        return 0
+    fi
+
+    local wf_json wf_rc
+    set +e
+    wf_json="$(gh api "$repo_path/actions/workflows" --jq '[.workflows[] | select(.state == "active") | .path]' 2>&1)"
+    wf_rc=$?
+    set -e
+    if [ "$wf_rc" -ne 0 ] || ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$wf_json"; then
+        CI_FALLBACK_RELEVANT="yes"
+        CI_FALLBACK_RELEVANT_DETAIL="couldn't list this repo's active workflows"
+        return 0
+    fi
+
+    local tmp_files tmp_wf
+    tmp_files="$(mktemp)"
+    tmp_wf="$(mktemp)"
+    jq -r '.[]' <<<"$files_json" > "$tmp_files"
+
+    local path content content_rc verdict
+    while IFS= read -r path; do
+        [ -n "$path" ] || continue
+        set +e
+        content="$(gh api -H "Accept: application/vnd.github.raw" "$repo_path/contents/$path" 2>&1)"
+        content_rc=$?
+        set -e
+        if [ "$content_rc" -ne 0 ]; then
+            CI_FALLBACK_RELEVANT="yes"
+            CI_FALLBACK_RELEVANT_DETAIL="couldn't read workflow file $path"
+            rm -f "$tmp_files" "$tmp_wf"
+            return 0
+        fi
+        printf '%s' "$content" > "$tmp_wf"
+        verdict="$(python3 "$_CI_FALLBACK_SCRIPT_DIR/_workflow-path-filter.py" "$tmp_wf" "$tmp_files" 2>/dev/null || echo unknown)"
+        case "$verdict" in
+            triggers)
+                CI_FALLBACK_RELEVANT="yes"
+                CI_FALLBACK_RELEVANT_DETAIL="$path has a pull_request trigger matching at least one changed file"
+                rm -f "$tmp_files" "$tmp_wf"
+                return 0
+                ;;
+            unknown)
+                CI_FALLBACK_RELEVANT="yes"
+                CI_FALLBACK_RELEVANT_DETAIL="couldn't confidently parse $path's pull_request trigger"
+                rm -f "$tmp_files" "$tmp_wf"
+                return 0
+                ;;
+            no-trigger|excluded) : ;; # keep checking the remaining workflows
+        esac
+    done < <(jq -r '.[]' <<<"$wf_json")
+    rm -f "$tmp_files" "$tmp_wf"
+
+    CI_FALLBACK_RELEVANT="no"
+    CI_FALLBACK_RELEVANT_DETAIL="every pull_request-triggered workflow's path filter excludes all of PR #$pr's changed files"
+    return 0
+}
+
 ci_fallback_is_token_error() {
     grep -qi "resource not accessible by personal access token" <<<"$1"
 }
