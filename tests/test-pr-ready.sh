@@ -109,7 +109,28 @@ if [ "\$1" = "run" ] && [ "\$2" = "list" ]; then
     exit "\${GH_RUNLIST_RC:-0}"
 fi
 if [ "\$1" = "api" ]; then
-    echo "\${GH_WORKFLOW_COUNT:-0}"
+    args="\$*"
+    if printf '%s\n' "\$args" | grep -q -- 'actions/workflows'; then
+        if printf '%s\n' "\$args" | grep -q -- '.total_count'; then
+            echo "\${GH_WORKFLOW_COUNT:-0}"
+        else
+            # issue #639: the second shape of this same endpoint —
+            # ci_fallback_workflows_relevant_to_pr's own lookup of active
+            # workflow paths, distinguished from the total_count query above
+            # by its --jq expression, not by a second gh subcommand.
+            echo "\${GH_WORKFLOW_PATHS_JSON:-[]}"
+        fi
+    elif printf '%s\n' "\$args" | grep -q -- 'pulls/.*/files'; then
+        # ci_fallback_workflows_relevant_to_pr's changed-files lookup (REST,
+        # --paginate — gh pr view --json files truncates at 100, cli/cli#5366).
+        # GH_PR_FILES_JSON is already the flat ["path", ...] shape, standing
+        # in for the real endpoint's --jq '.[].filename' output.
+        printf '%s' "\${GH_PR_FILES_JSON:-[]}" | jq -r '.[]'
+    elif printf '%s\n' "\$args" | grep -q -- 'contents/'; then
+        printf '%s' "\${GH_WORKFLOW_YAML:-}"
+    else
+        echo "\${GH_WORKFLOW_COUNT:-0}"
+    fi
     exit 0
 fi
 exit 1
@@ -142,6 +163,8 @@ run_pr_ready() {
         GH_COMMENTS_JSON="${GH_COMMENTS_JSON:-}" \
         GH_CHECKS_RC="${GH_CHECKS_RC:-0}" GH_CHECKS_STDERR="${GH_CHECKS_STDERR:-}" \
         GH_WORKFLOW_COUNT="${GH_WORKFLOW_COUNT:-0}" \
+        GH_PR_FILES_JSON="${GH_PR_FILES_JSON:-[]}" GH_WORKFLOW_PATHS_JSON="${GH_WORKFLOW_PATHS_JSON:-[]}" \
+        GH_WORKFLOW_YAML="${GH_WORKFLOW_YAML:-}" \
         GH_SHA="${GH_SHA:-deadbeef}" GH_SHA_LOOKUP_FAILS="${GH_SHA_LOOKUP_FAILS:-0}" \
         GH_RUNLIST_JSON="${GH_RUNLIST_JSON:-[]}" GH_RUNLIST_RC="${GH_RUNLIST_RC:-0}" \
         GH_RUNLIST_STDERR="${GH_RUNLIST_STDERR:-}" \
@@ -329,6 +352,98 @@ GH_WORKFLOW_COUNT=0
 [ "$rc" -eq 4 ] || red "expected exit 4 when checks report absent but workflows exist (round-2 self-review finding), got $rc: $(cat "$TEST_DIR/out.log")"
 gh_ready_called && red "expected gh pr ready NOT to run when this commit's CI run hasn't registered yet"
 green "'no checks reported' with workflows configured is treated as pending, not absent (closes the post-push race self-review found)"
+
+# ============================================================================
+heading "Test 15b: 'no checks reported', a docs-only PR, the one configured workflow paths-ignores docs — WARNs, still readies (issue #639)"
+# ============================================================================
+printf '<!-- BLIND_MERGE_RISK: low -->\nsome change\n' > "$BODY_FILE"
+make_fake_review 0
+GH_CHECKS_RC=1
+GH_CHECKS_STDERR="no checks reported on the 'main' branch"
+GH_WORKFLOW_COUNT=1
+GH_PR_FILES_JSON='["docs/foo.md","README.md"]'
+GH_WORKFLOW_PATHS_JSON='[".github/workflows/build.yml"]'
+GH_WORKFLOW_YAML=$'on:\n  pull_request:\n    paths-ignore:\n      - \x27docs/**\x27\n      - \x27**.md\x27\n'
+rc=0; run_pr_ready || rc=$?
+GH_CHECKS_RC=0
+GH_CHECKS_STDERR=""
+GH_WORKFLOW_COUNT=0
+GH_PR_FILES_JSON=
+GH_WORKFLOW_PATHS_JSON=
+GH_WORKFLOW_YAML=
+[ "$rc" -eq 0 ] || red "expected exit 0 — a docs-only PR excluded by paths-ignore should never wait forever, got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called || red "expected gh pr ready to run once every changed file is excluded by the workflow's paths-ignore"
+grep -qi 'WARN' "$TEST_DIR/out.log" || red "expected a WARN about the path-filtered changed files: $(cat "$TEST_DIR/out.log")"
+green "a docs-only PR whose changed files are all paths-ignored readies with a WARN instead of refusing forever (civicstrata#602/#603)"
+
+# ============================================================================
+heading "Test 15c: 'no checks reported', changed files touch a NON-ignored path too — still refuses ci-pending (the #473 race guard holds)"
+# ============================================================================
+printf '<!-- BLIND_MERGE_RISK: low -->\nsome change\n' > "$BODY_FILE"
+make_fake_review 0
+GH_CHECKS_RC=1
+GH_CHECKS_STDERR="no checks reported on the 'main' branch"
+GH_WORKFLOW_COUNT=1
+GH_PR_FILES_JSON='["docs/foo.md","src/main.py"]'
+GH_WORKFLOW_PATHS_JSON='[".github/workflows/build.yml"]'
+GH_WORKFLOW_YAML=$'on:\n  pull_request:\n    paths-ignore:\n      - \x27docs/**\x27\n      - \x27**.md\x27\n'
+rc=0; run_pr_ready || rc=$?
+GH_CHECKS_RC=0
+GH_CHECKS_STDERR=""
+GH_WORKFLOW_COUNT=0
+GH_PR_FILES_JSON=
+GH_WORKFLOW_PATHS_JSON=
+GH_WORKFLOW_YAML=
+[ "$rc" -eq 4 ] || red "expected exit 4 — a changed file outside paths-ignore means a real run is still pending, got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called && red "expected gh pr ready NOT to run when at least one changed file falls outside every paths-ignore"
+green "a mixed PR (one ignored file, one not) is still treated as the ordinary post-push race, not path-filtered absence"
+
+# ============================================================================
+heading "Test 15d: 'no checks reported', the one workflow has NO path filter at all — still refuses ci-pending"
+# ============================================================================
+printf '<!-- BLIND_MERGE_RISK: low -->\nsome change\n' > "$BODY_FILE"
+make_fake_review 0
+GH_CHECKS_RC=1
+GH_CHECKS_STDERR="no checks reported on the 'main' branch"
+GH_WORKFLOW_COUNT=1
+GH_PR_FILES_JSON='["docs/foo.md"]'
+GH_WORKFLOW_PATHS_JSON='[".github/workflows/build.yml"]'
+GH_WORKFLOW_YAML=$'on:\n  pull_request:\n  push:\n    branches: [master]\n'
+rc=0; run_pr_ready || rc=$?
+GH_CHECKS_RC=0
+GH_CHECKS_STDERR=""
+GH_WORKFLOW_COUNT=0
+GH_PR_FILES_JSON=
+GH_WORKFLOW_PATHS_JSON=
+GH_WORKFLOW_YAML=
+[ "$rc" -eq 4 ] || red "expected exit 4 — an unfiltered pull_request trigger always applies, got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called && red "expected gh pr ready NOT to run when the workflow has no path filter at all"
+green "a workflow with no paths/paths-ignore filter always counts as relevant, even for a docs-only PR"
+
+# ============================================================================
+heading "Test 15e: 'no checks reported', a docs-only PR that ALSO edits a workflow file — never path-filtered (issue #644 round-3 self-review)"
+# ============================================================================
+printf '<!-- BLIND_MERGE_RISK: low -->\nsome change\n' > "$BODY_FILE"
+make_fake_review 0
+GH_CHECKS_RC=1
+GH_CHECKS_STDERR="no checks reported on the 'main' branch"
+GH_WORKFLOW_COUNT=1
+GH_PR_FILES_JSON='["docs/foo.md",".github/workflows/build.yml"]'
+GH_WORKFLOW_PATHS_JSON='[".github/workflows/build.yml"]'
+# A path filter that WOULD exclude every changed file if it were trusted —
+# proves the workflow-edit short-circuit fires before this YAML is ever
+# read, not that the filter happens to still match.
+GH_WORKFLOW_YAML=$'on:\n  pull_request:\n    paths-ignore:\n      - \x27docs/**\x27\n      - \x27**.md\x27\n      - \x27.github/workflows/**\x27\n'
+rc=0; run_pr_ready || rc=$?
+GH_CHECKS_RC=0
+GH_CHECKS_STDERR=""
+GH_WORKFLOW_COUNT=0
+GH_PR_FILES_JSON=
+GH_WORKFLOW_PATHS_JSON=
+GH_WORKFLOW_YAML=
+[ "$rc" -eq 4 ] || red "expected exit 4 — a PR that edits a workflow file must never be read as path-filtered, got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called && red "expected gh pr ready NOT to run when the PR itself touches .github/workflows/"
+green "a PR that changes a workflow file is always treated as CI-relevant, even if every OTHER changed file is path-filtered (GitHub runs the merge-commit YAML, not the base branch's)"
 
 # ============================================================================
 heading "Test 16: self-review round cap reached — skips another round, still readies on CI-green"

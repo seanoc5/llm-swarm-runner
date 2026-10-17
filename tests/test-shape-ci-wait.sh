@@ -68,8 +68,26 @@ case "$1 $2" in
             exit 1
         fi
         exit "${GH_CHECKS_RC:-0}" ;;
+    "api --paginate")
+        # issue #639: ci_fallback_workflows_relevant_to_pr's own changed-
+        # files lookup (REST, --paginate — gh pr view --json files truncates
+        # at 100, cli/cli#5366). GH_PR_FILES_JSON is already the flat
+        # ["path", ...] shape, standing in for the real --jq '.[].filename'.
+        printf '%s' "${GH_PR_FILES_JSON:-[]}" | jq -r '.[]'
+        exit 0 ;;
     "api repos/{owner}/{repo}/actions/workflows"|"api repos/owner/repo/actions/workflows")
-        echo "${GH_WORKFLOW_COUNT:-1}"
+        if printf '%s\n' "$*" | grep -q -- '.total_count'; then
+            echo "${GH_WORKFLOW_COUNT:-1}"
+        else
+            # issue #639: ci_fallback_workflows_relevant_to_pr's own lookup
+            # of active workflow paths — same endpoint, a different --jq.
+            echo "${GH_WORKFLOW_PATHS_JSON:-[]}"
+        fi
+        exit 0 ;;
+    "api -H")
+        # issue #639: ci_fallback_workflows_relevant_to_pr fetching a single
+        # workflow file's raw YAML (gh api -H "Accept: ..." .../contents/<path>).
+        printf '%s' "${GH_WORKFLOW_YAML:-}"
         exit 0 ;;
     "run list")
         rn=0
@@ -190,6 +208,57 @@ out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_WORKFLOW_COUNT=1 \
 check "resolves to green once the real check run registers (not a false exit 5)" '[ "$rc" -eq 0 ]'
 check "message names the pending-not-absent distinction" 'grep -qi "treating as pending, not absent" <<<"$out"'
 check "gh pr checks was actually polled more than once (the race was real)" '[ "$(cat "$CHECKS_COUNT_FILE")" -ge 3 ]'
+
+# ── Test 8b/8c/8d: issue #639 — "no checks reported" with workflows configured, but none apply to THESE changed files ──
+#
+# civicstrata#602/#603 (2026-10-15): a docs-only PR in a repo whose CI
+# `paths-ignore`s docs never gets a run at all — not a race, a permanent
+# fact about the commit. ci_fallback_workflows_relevant_to_pr checks the
+# actual path filters; only its confident "no" should short-circuit the
+# pending wait into exit 5 (same as zero workflows configured).
+
+heading "Test 8b: a docs-only PR excluded by the one workflow's paths-ignore → exit 5, not an unbounded wait"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_NO_CHECKS=1 GH_WORKFLOW_COUNT=1 \
+    GH_PR_FILES_JSON='["docs/foo.md","README.md"]' \
+    GH_WORKFLOW_PATHS_JSON='[".github/workflows/build.yml"]' \
+    GH_WORKFLOW_YAML=$'on:\n  pull_request:\n    paths-ignore:\n      - \x27docs/**\x27\n      - \x27**.md\x27\n' \
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
+check "exits 5 — no run will ever register for an all-ignored changed-file set" '[ "$rc" -eq 5 ]'
+check "message names the path-filter exclusion" 'grep -qi "excluded by every pull_request workflow" <<<"$out"'
+
+heading "Test 8c: changed files touch a NON-ignored path too → treated as the ordinary pending race, not absence"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_NO_CHECKS=1 GH_WORKFLOW_COUNT=1 \
+    GH_PR_FILES_JSON='["docs/foo.md","src/main.py"]' \
+    GH_WORKFLOW_PATHS_JSON='[".github/workflows/build.yml"]' \
+    GH_WORKFLOW_YAML=$'on:\n  pull_request:\n    paths-ignore:\n      - \x27docs/**\x27\n      - \x27**.md\x27\n' \
+    CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 2 2>&1)" || rc=$?
+check "exits 2 (timeout/pending), never 5, once a changed file falls outside paths-ignore" '[ "$rc" -eq 2 ]'
+
+heading "Test 8d: the one workflow has NO path filter at all → still treated as pending (always applies)"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_NO_CHECKS=1 GH_WORKFLOW_COUNT=1 \
+    GH_PR_FILES_JSON='["docs/foo.md"]' \
+    GH_WORKFLOW_PATHS_JSON='[".github/workflows/build.yml"]' \
+    GH_WORKFLOW_YAML=$'on:\n  pull_request:\n  push:\n    branches: [master]\n' \
+    CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 2 2>&1)" || rc=$?
+check "exits 2 (timeout/pending), never 5, when the workflow has no path filter" '[ "$rc" -eq 2 ]'
+
+# issue #644 round-3 self-review: GitHub runs a pull_request event's
+# workflow YAML from the PR's merge commit, not the base branch, so a PR
+# that itself edits a workflow file (here: removes the paths-ignore that
+# would otherwise exclude its own docs change) can get a real run the
+# base-branch YAML this helper reads says will never happen — the fail-open
+# direction the whole helper exists to avoid.
+heading "Test 8e: a docs-only PR that ALSO edits a workflow file → never path-filtered, even though the (untrusted) base-branch YAML would exclude it"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_NO_CHECKS=1 GH_WORKFLOW_COUNT=1 \
+    GH_PR_FILES_JSON='["docs/foo.md",".github/workflows/build.yml"]' \
+    GH_WORKFLOW_PATHS_JSON='[".github/workflows/build.yml"]' \
+    GH_WORKFLOW_YAML=$'on:\n  pull_request:\n    paths-ignore:\n      - \x27docs/**\x27\n      - \x27**.md\x27\n      - \x27.github/workflows/**\x27\n' \
+    CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 2 2>&1)" || rc=$?
+check "exits 2 (timeout/pending), never 5, when the PR itself touches .github/workflows/" '[ "$rc" -eq 2 ]'
 
 # ── Test 9: fine-grained token can't read Checks → falls back to gh run list, green ──
 #

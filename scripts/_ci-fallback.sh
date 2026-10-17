@@ -49,6 +49,166 @@
 #       never silently as "failing CI": the whole reason this function
 #       exists is to stop a permission gap from being misread as red CI
 #       (issue #560).
+#
+#   ci_fallback_workflows_relevant_to_pr <pr> [gh-repo-args...]
+#       issue #639: a repo can have `pull_request`-triggered workflows that
+#       are configured but will NEVER run for a given PR — a `paths-ignore`
+#       (or a `paths` allowlist none of the changed files match) means
+#       GitHub creates no run at all, so "no checks reported" is a
+#       permanent fact about this commit, not the ordinary post-push race
+#       the "no checks reported" handling elsewhere in this file already
+#       accounts for (a workflow count of 0 means nothing is configured at
+#       all; this function instead asks "is anything configured that would
+#       apply to THESE files"). Fetches the PR's changed files and every
+#       active workflow's raw YAML, and farms the per-workflow trigger
+#       decision out to `_workflow-path-filter.py` (a tiny stdlib-only
+#       line scanner — no PyYAML dependency) since that parsing isn't
+#       reliable in bash/jq. Only called once a caller has already
+#       confirmed the repo has at least one workflow at all AND `gh pr
+#       checks` reported "no checks reported" — this is not a substitute
+#       for that cheaper check, only a refinement of it.
+#
+#       issue #644 round-3 self-review: before any of that YAML-fetch-and-
+#       parse, if the PR's own changed files include anything under
+#       .github/workflows/, this short-circuits straight to "yes" without
+#       reading a single workflow file. GitHub evaluates a `pull_request`
+#       event's workflow YAML from the PR's merge commit, not the base
+#       branch, so a PR that removes a paths-ignore entry (or adds a new
+#       workflow) gets a real run the base-branch YAML — which is all this
+#       function can read — says will never happen. That's the fail-open
+#       direction this whole function exists to avoid, so a workflow-file
+#       edit is never read as path-filtered, full stop.
+#
+#       Sets two globals:
+#         CI_FALLBACK_RELEVANT         "yes" | "no" | "unknown"
+#         CI_FALLBACK_RELEVANT_DETAIL  one-line explanation
+#
+#       "no" means every pull_request-triggered workflow's path filter
+#       excludes ALL of the PR's changed files — no run will ever register.
+#       "yes" means at least one workflow would run, OR nothing could be
+#       determined confidently (fails toward "yes": the safe direction is
+#       to keep treating this as a real, awaitable CI gap, same posture as
+#       every other ambiguous case in this file — never silently treated
+#       the same as "unknown" by a caller). "unknown" is set alongside
+#       "yes" so a caller that wants to say WHY can still tell the two
+#       "yes" paths apart; callers that don't care just check for "no".
+#
+#       Always returns 0 (never fails the caller's `set -e`) — every
+#       failure mode (an unreadable PR, an unreadable workflow list, an
+#       unreadable workflow file, a parse the Python helper couldn't
+#       confidently make) is folded into CI_FALLBACK_RELEVANT=yes/unknown,
+#       not a nonzero return, so callers never need their own try/catch
+#       around this call.
+_CI_FALLBACK_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+ci_fallback_workflows_relevant_to_pr() {
+    local pr="$1"; shift
+    local repo_args=("$@")
+    local repo_path="repos/{owner}/{repo}"
+    local i
+    for ((i = 0; i < ${#repo_args[@]}; i++)); do
+        if [ "${repo_args[$i]}" = "--repo" ]; then
+            repo_path="repos/${repo_args[$((i + 1))]}"
+        fi
+    done
+
+    # `gh pr view --json files` truncates at 100 files (cli/cli#5366) — a
+    # large PR past that cap would silently drop files from the relevance
+    # check, so this goes through the REST files endpoint with --paginate
+    # instead, which follows every Link header.
+    local files_list files_rc
+    set +e
+    files_list="$(gh api --paginate "$repo_path/pulls/$pr/files" --jq '.[].filename' 2>&1)"
+    files_rc=$?
+    set -e
+    if [ "$files_rc" -ne 0 ] || [ -z "$files_list" ]; then
+        CI_FALLBACK_RELEVANT="yes"
+        CI_FALLBACK_RELEVANT_DETAIL="couldn't read PR #$pr's changed file list"
+        return 0
+    fi
+
+    # issue #644 round-3 self-review: for `pull_request` events GitHub runs
+    # the workflow YAML from the PR's MERGE COMMIT, not the base branch —
+    # so a PR that itself edits a workflow (removes a paths-ignore entry,
+    # adds a new workflow) can get a real run the base-branch YAML this
+    # function fetches below says will never happen. Parsing the head-ref
+    # YAML instead would just move the trust problem (a PR could edit the
+    # workflow to claim a filter it won't actually run under), so this
+    # takes the cheap, safe-direction fix instead: any changed file under
+    # .github/workflows/ makes CI relevance unconditional, no YAML read or
+    # parse at all. This can never be reached via the "excluded" return
+    # path below with a workflow-editing PR, closing the fail-open.
+    if grep -q '^\.github/workflows/' <<<"$files_list"; then
+        CI_FALLBACK_RELEVANT="yes"
+        CI_FALLBACK_RELEVANT_DETAIL="PR #$pr changes a workflow file itself (.github/workflows/) — GitHub runs the merge-commit version of that workflow, not the base branch's, so path-filter exclusions can't be trusted"
+        return 0
+    fi
+
+    local wf_json wf_rc
+    set +e
+    wf_json="$(gh api "$repo_path/actions/workflows" --jq '[.workflows[] | select(.state == "active") | .path]' 2>&1)"
+    wf_rc=$?
+    set -e
+    if [ "$wf_rc" -ne 0 ] || ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$wf_json"; then
+        CI_FALLBACK_RELEVANT="yes"
+        CI_FALLBACK_RELEVANT_DETAIL="couldn't list this repo's active workflows"
+        return 0
+    fi
+    if ! jq -e 'length > 0' >/dev/null 2>&1 <<<"$wf_json"; then
+        # A caller only reaches this function after confirming the repo's
+        # workflow count is nonzero, so an empty active-workflow list here
+        # is itself a surprise (a race between the two separate `gh api`
+        # calls, a state filter mismatch, ...) — fail toward "yes" rather
+        # than silently concluding "nothing is configured, so nothing can
+        # be relevant."
+        CI_FALLBACK_RELEVANT="yes"
+        CI_FALLBACK_RELEVANT_DETAIL="this repo's active-workflow list came back empty, inconsistent with its own nonzero workflow count"
+        return 0
+    fi
+
+    local tmp_files tmp_wf
+    tmp_files="$(mktemp)"
+    tmp_wf="$(mktemp)"
+    printf '%s\n' "$files_list" > "$tmp_files"
+
+    local path content content_rc verdict
+    while IFS= read -r path; do
+        [ -n "$path" ] || continue
+        set +e
+        content="$(gh api -H "Accept: application/vnd.github.raw" "$repo_path/contents/$path" 2>&1)"
+        content_rc=$?
+        set -e
+        if [ "$content_rc" -ne 0 ]; then
+            CI_FALLBACK_RELEVANT="yes"
+            CI_FALLBACK_RELEVANT_DETAIL="couldn't read workflow file $path"
+            rm -f "$tmp_files" "$tmp_wf"
+            return 0
+        fi
+        printf '%s' "$content" > "$tmp_wf"
+        verdict="$(python3 "$_CI_FALLBACK_SCRIPT_DIR/_workflow-path-filter.py" "$tmp_wf" "$tmp_files" 2>/dev/null || echo unknown)"
+        case "$verdict" in
+            triggers)
+                CI_FALLBACK_RELEVANT="yes"
+                CI_FALLBACK_RELEVANT_DETAIL="$path has a pull_request trigger matching at least one changed file"
+                rm -f "$tmp_files" "$tmp_wf"
+                return 0
+                ;;
+            unknown)
+                CI_FALLBACK_RELEVANT="yes"
+                CI_FALLBACK_RELEVANT_DETAIL="couldn't confidently parse $path's pull_request trigger"
+                rm -f "$tmp_files" "$tmp_wf"
+                return 0
+                ;;
+            no-trigger|excluded) : ;; # keep checking the remaining workflows
+        esac
+    done < <(jq -r '.[]' <<<"$wf_json")
+    rm -f "$tmp_files" "$tmp_wf"
+
+    CI_FALLBACK_RELEVANT="no"
+    CI_FALLBACK_RELEVANT_DETAIL="every pull_request-triggered workflow's path filter excludes all of PR #$pr's changed files"
+    return 0
+}
+
 ci_fallback_is_token_error() {
     grep -qi "resource not accessible by personal access token" <<<"$1"
 }
