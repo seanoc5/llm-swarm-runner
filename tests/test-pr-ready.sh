@@ -79,8 +79,6 @@ if [ "\$1" = "pr" ] && [ "\$2" = "view" ]; then
         else
             echo "\${GH_ROUNDS_DONE:-0}"
         fi
-    elif printf '%s\n' "\$*" | grep -q -- '--json files'; then
-        echo "\${GH_PR_FILES_JSON:-[]}"
     elif printf '%s\n' "\$*" | grep -q -- '--json headRefName'; then
         echo "\${GH_HEAD_REF:-fix/issue-7}"
     elif printf '%s\n' "\$*" | grep -q -- '--json headRefOid'; then
@@ -122,6 +120,12 @@ if [ "\$1" = "api" ]; then
             # by its --jq expression, not by a second gh subcommand.
             echo "\${GH_WORKFLOW_PATHS_JSON:-[]}"
         fi
+    elif printf '%s\n' "\$args" | grep -q -- 'pulls/.*/files'; then
+        # ci_fallback_workflows_relevant_to_pr's changed-files lookup (REST,
+        # --paginate — gh pr view --json files truncates at 100, cli/cli#5366).
+        # GH_PR_FILES_JSON is already the flat ["path", ...] shape, standing
+        # in for the real endpoint's --jq '.[].filename' output.
+        printf '%s' "\${GH_PR_FILES_JSON:-[]}" | jq -r '.[]'
     elif printf '%s\n' "\$args" | grep -q -- 'contents/'; then
         printf '%s' "\${GH_WORKFLOW_YAML:-}"
     else

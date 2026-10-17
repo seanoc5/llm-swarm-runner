@@ -36,16 +36,32 @@ LIST_ITEM_RE = re.compile(r"^-\s*(.+)$")
 KEY_RE = re.compile(r'^(?:["\']?(?P<key>[A-Za-z0-9_-]+)["\']?)\s*:(?P<rest>.*)$')
 
 
+def strip_comment(line):
+    """Drop a trailing `# comment` that isn't inside a quoted string (e.g.
+    `on:  # ci` or `- 'a#b'`). A naive `split('#')[0]` would also cut
+    inside a quoted pattern, so this tracks quote state char by char."""
+    quote = None
+    for i, c in enumerate(line):
+        if quote:
+            if c == quote:
+                quote = None
+        elif c in ("'", '"'):
+            quote = c
+        elif c == "#" and (i == 0 or line[i - 1].isspace()):
+            return line[:i]
+    return line
+
+
 def parse_lines(text):
-    """[(indent, stripped_content), ...] — blanks and full-line comments
-    dropped; indentation is measured in leading spaces (tabs unsupported,
-    same as every real workflow file)."""
+    """[(indent, stripped_content), ...] — blanks and comments (full-line
+    or trailing) dropped; indentation is measured in leading spaces (tabs
+    unsupported, same as every real workflow file)."""
     out = []
     for raw in text.splitlines():
-        stripped = raw.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
         indent = len(raw) - len(raw.lstrip(" "))
+        stripped = strip_comment(raw).strip()
+        if not stripped:
+            continue
         out.append((indent, stripped))
     return out
 
@@ -108,18 +124,26 @@ def extract_list(inline, nested):
             return None  # multi-line flow list — not worth guessing at
         inner = inline[1:-1]
         items = [p.strip().strip("'\"") for p in inner.split(",")]
-        return [p for p in items if p]
-    if inline in ("", "~", "null"):
+        items = [p for p in items if p]
+    elif inline in ("", "~", "null"):
         items = []
         for _indent, content in nested:
             m = LIST_ITEM_RE.match(content)
             if not m:
                 return None  # something other than a plain list item
             items.append(m.group(1).strip().strip("'\""))
-        return items
-    # A bare scalar directly after "paths:" (no list at all) is not valid
-    # GitHub Actions syntax for this key — don't guess.
-    return None
+    else:
+        # A bare scalar directly after "paths:" (no list at all) is not
+        # valid GitHub Actions syntax for this key — don't guess.
+        return None
+    if any(p.startswith("!") for p in items):
+        # A `!pattern` negation re-includes files the earlier patterns
+        # excluded — order-sensitive semantics this matcher doesn't
+        # implement. Don't guess at a result that could be wrong in the
+        # unsafe direction (claiming "excluded" for a file GitHub would
+        # actually run CI on).
+        return None
+    return items
 
 
 def path_to_regex(pattern):
@@ -167,11 +191,18 @@ def verdict(text, changed_files):
     if on_rest:
         # Flow/scalar form on the "on:" line itself, e.g. "on: pull_request"
         # or "on: [push, pull_request]" — neither can carry a path filter.
+        # ("pull_request" is a substring of "pull_request_target", so this
+        # also catches that event correctly.)
         return "triggers" if "pull_request" in on_rest else "no-trigger"
 
     on_children = direct_children(lines, on_idx + 1, 0)
     on_entries = own_level_entries(on_children)
+    # pull_request_target uses the identical paths/paths-ignore syntax and
+    # is just as real a trigger for this PR as pull_request — a block-form
+    # "pull_request_target:" key must not be read as "no-trigger".
     pr_entry = find_key(on_entries, "pull_request")
+    if pr_entry is None:
+        pr_entry = find_key(on_entries, "pull_request_target")
     if pr_entry is None:
         return "no-trigger"
 

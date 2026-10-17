@@ -101,12 +101,16 @@ ci_fallback_workflows_relevant_to_pr() {
         fi
     done
 
-    local files_json files_rc
+    # `gh pr view --json files` truncates at 100 files (cli/cli#5366) — a
+    # large PR past that cap would silently drop files from the relevance
+    # check, so this goes through the REST files endpoint with --paginate
+    # instead, which follows every Link header.
+    local files_list files_rc
     set +e
-    files_json="$(gh pr view "$pr" "${repo_args[@]}" --json files --jq '[.files[].path]' 2>&1)"
+    files_list="$(gh api --paginate "$repo_path/pulls/$pr/files" --jq '.[].filename' 2>&1)"
     files_rc=$?
     set -e
-    if [ "$files_rc" -ne 0 ] || ! jq -e 'type == "array" and length > 0' >/dev/null 2>&1 <<<"$files_json"; then
+    if [ "$files_rc" -ne 0 ] || [ -z "$files_list" ]; then
         CI_FALLBACK_RELEVANT="yes"
         CI_FALLBACK_RELEVANT_DETAIL="couldn't read PR #$pr's changed file list"
         return 0
@@ -122,11 +126,22 @@ ci_fallback_workflows_relevant_to_pr() {
         CI_FALLBACK_RELEVANT_DETAIL="couldn't list this repo's active workflows"
         return 0
     fi
+    if ! jq -e 'length > 0' >/dev/null 2>&1 <<<"$wf_json"; then
+        # A caller only reaches this function after confirming the repo's
+        # workflow count is nonzero, so an empty active-workflow list here
+        # is itself a surprise (a race between the two separate `gh api`
+        # calls, a state filter mismatch, ...) — fail toward "yes" rather
+        # than silently concluding "nothing is configured, so nothing can
+        # be relevant."
+        CI_FALLBACK_RELEVANT="yes"
+        CI_FALLBACK_RELEVANT_DETAIL="this repo's active-workflow list came back empty, inconsistent with its own nonzero workflow count"
+        return 0
+    fi
 
     local tmp_files tmp_wf
     tmp_files="$(mktemp)"
     tmp_wf="$(mktemp)"
-    jq -r '.[]' <<<"$files_json" > "$tmp_files"
+    printf '%s\n' "$files_list" > "$tmp_files"
 
     local path content content_rc verdict
     while IFS= read -r path; do

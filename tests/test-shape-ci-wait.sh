@@ -44,13 +44,6 @@ cat > "$TEST_DIR/bin/gh" <<'EOF'
 [ -n "${GH_ARGS_LOG:-}" ] && printf '%s\n' "$*" >> "$GH_ARGS_LOG"
 case "$1 $2" in
     "pr view")
-        if printf '%s\n' "$*" | grep -q -- '--json files'; then
-            # issue #639: ci_fallback_workflows_relevant_to_pr's own changed-
-            # files lookup, a distinct --json shape from the mergeability
-            # probe below.
-            echo "${GH_PR_FILES_JSON:-[]}"
-            exit 0
-        fi
         n=0
         if [ -f "${GH_CALL_COUNT_FILE:-/dev/null}" ]; then n="$(cat "$GH_CALL_COUNT_FILE")"; fi
         n=$((n + 1))
@@ -75,6 +68,13 @@ case "$1 $2" in
             exit 1
         fi
         exit "${GH_CHECKS_RC:-0}" ;;
+    "api --paginate")
+        # issue #639: ci_fallback_workflows_relevant_to_pr's own changed-
+        # files lookup (REST, --paginate — gh pr view --json files truncates
+        # at 100, cli/cli#5366). GH_PR_FILES_JSON is already the flat
+        # ["path", ...] shape, standing in for the real --jq '.[].filename'.
+        printf '%s' "${GH_PR_FILES_JSON:-[]}" | jq -r '.[]'
+        exit 0 ;;
     "api repos/{owner}/{repo}/actions/workflows"|"api repos/owner/repo/actions/workflows")
         if printf '%s\n' "$*" | grep -q -- '.total_count'; then
             echo "${GH_WORKFLOW_COUNT:-1}"

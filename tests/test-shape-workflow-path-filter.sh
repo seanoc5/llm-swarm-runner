@@ -208,5 +208,50 @@ EOF
 printf 'docs/nested/deep/guide.md\n' > "$FILES"
 run excluded "'**.md' excludes a markdown file several directories deep"
 
+# ─────────────── Test 14: negation pattern -> unknown, not guessed ────────────────────────
+
+heading "Test 14: a paths-ignore list containing a '!' negation -> unknown, not guessed"
+cat > "$WF" <<'EOF'
+name: negated
+on:
+  pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '!docs/keep.md'
+EOF
+printf 'docs/keep.md\n' > "$FILES"
+run unknown "a '!' re-inclusion pattern is order-sensitive and deliberately not parsed"
+
+# ─────────────── Test 15: trailing comment on the "on:" line is stripped ──────────────────
+
+heading "Test 15: a trailing comment on 'on:' doesn't get read as an inline value"
+cat > "$WF" <<'EOF'
+name: commented
+on:  # run on PR and push
+  pull_request:
+    paths-ignore:
+      - 'docs/**'
+  push:
+    branches: [main]
+EOF
+printf 'docs/foo.md\n' > "$FILES"
+run excluded "the comment after 'on:' must not be read as a flow/scalar trigger value"
+
+# ─────────────── Test 16: pull_request_target is recognized like pull_request ─────────────
+
+heading "Test 16: block-form 'pull_request_target:' is recognized, not read as no-trigger"
+cat > "$WF" <<'EOF'
+name: target
+on:
+  pull_request_target:
+    paths-ignore:
+      - 'docs/**'
+EOF
+printf 'docs/foo.md\n' > "$FILES"
+run excluded "pull_request_target uses the same paths-ignore syntax as pull_request"
+
+printf 'docs/foo.md\nsrc/main.py\n' > "$FILES"
+run triggers "pull_request_target still triggers when a changed file falls outside paths-ignore"
+
 heading "Results: $PASS checks passed"
 green "All checks passed."
