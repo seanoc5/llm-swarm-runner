@@ -253,5 +253,68 @@ run excluded "pull_request_target uses the same paths-ignore syntax as pull_requ
 printf 'docs/foo.md\nsrc/main.py\n' > "$FILES"
 run triggers "pull_request_target still triggers when a changed file falls outside paths-ignore"
 
+# ─────────────── Test 17: "src/**/*.py" matches "src/main.py" (zero directories) ──────────
+
+heading "Test 17: 'src/**/*.py' matches a file directly under src/, not just nested deeper"
+cat > "$WF" <<'EOF'
+name: api
+on:
+  pull_request:
+    paths:
+      - 'src/**/*.py'
+EOF
+printf 'src/main.py\n' > "$FILES"
+run triggers "'**/ ' must match zero directories too, not only one-or-more"
+
+# ─────────────── Test 18: "**/*.py" matches a root-level file (zero directories) ──────────
+
+heading "Test 18: '**/*.py' matches a root-level file with no directory at all"
+cat > "$WF" <<'EOF'
+name: api
+on:
+  pull_request:
+    paths:
+      - '**/*.py'
+EOF
+printf 'setup.py\n' > "$FILES"
+run triggers "a leading '**/ ' must match the empty prefix, not require a directory"
+
+# ─────────────── Test 19: "docs/**" matches "docs" itself (zero directories) ──────────────
+
+heading "Test 19: 'docs/**' paths-ignore excludes the bare 'docs' path itself, not just contents"
+cat > "$WF" <<'EOF'
+name: build
+on:
+  pull_request:
+    paths-ignore:
+      - 'docs/**'
+EOF
+printf 'docs\n' > "$FILES"
+run excluded "a trailing '/**' must match zero directories too (the directory entry itself)"
+
+# ─────────────── Test 20: unsupported glob syntax ([...], +, {}) -> unknown, not guessed ──
+
+heading "Test 20: a paths-ignore pattern using a [...] character class -> unknown"
+cat > "$WF" <<'EOF'
+name: charclass
+on:
+  pull_request:
+    paths-ignore:
+      - 'docs/file[0-9].md'
+EOF
+printf 'docs/file1.md\n' > "$FILES"
+run unknown "a [...] character class isn't implemented by this matcher — don't guess"
+
+heading "Test 20b: a paths pattern using {}  brace expansion -> unknown"
+cat > "$WF" <<'EOF'
+name: brace
+on:
+  pull_request:
+    paths:
+      - 'src/{a,b}.py'
+EOF
+printf 'src/a.py\n' > "$FILES"
+run unknown "{} brace expansion isn't implemented by this matcher — don't guess"
+
 heading "Results: $PASS checks passed"
 green "All checks passed."

@@ -34,6 +34,7 @@ import sys
 
 LIST_ITEM_RE = re.compile(r"^-\s*(.+)$")
 KEY_RE = re.compile(r'^(?:["\']?(?P<key>[A-Za-z0-9_-]+)["\']?)\s*:(?P<rest>.*)$')
+UNSUPPORTED_GLOB_RE = re.compile(r"[\[\]+{}]")
 
 
 def strip_comment(line):
@@ -143,18 +144,34 @@ def extract_list(inline, nested):
         # unsafe direction (claiming "excluded" for a file GitHub would
         # actually run CI on).
         return None
+    if any(UNSUPPORTED_GLOB_RE.search(p) for p in items):
+        # `[...]` char classes, `+` (one-or-more-of-preceding) and `{}`
+        # brace expansion are all valid GitHub Actions path-filter glob
+        # syntax that path_to_regex below doesn't implement — fail toward
+        # unknown rather than matching them as literal characters.
+        return None
     return items
 
 
 def path_to_regex(pattern):
-    """GitHub Actions path-filter glob -> anchored regex. `**` matches
-    anything including `/`; `*` and `?` stop at `/`, matching a single
-    path segment's worth of characters."""
+    """GitHub Actions path-filter glob -> anchored regex. `*` and `?` stop
+    at `/`, matching a single path segment's worth of characters. `**`
+    matches anything including `/` — and, in the `**/` or `/**` idiom,
+    the adjacent `/` is part of that match too, so it can also match
+    *zero* directories (`src/**/*.py` matches `src/main.py`, `**/*.py`
+    matches a root-level `setup.py`, `docs/**` matches `docs` itself) —
+    not just one-or-more, which `.*/` or `/.*` alone would require."""
     out = ["^"]
     i, n = 0, len(pattern)
     while i < n:
         c = pattern[i]
-        if pattern[i : i + 2] == "**":
+        if pattern[i : i + 3] == "**/":
+            out.append("(?:.*/)?")
+            i += 3
+        elif pattern[i : i + 3] == "/**" and i + 3 == n:
+            out.append("(?:/.*)?")
+            i += 3
+        elif pattern[i : i + 2] == "**":
             out.append(".*")
             i += 2
         elif c == "*":
