@@ -245,6 +245,21 @@ out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_NO_CHECKS=1 GH_
     CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 2 2>&1)" || rc=$?
 check "exits 2 (timeout/pending), never 5, when the workflow has no path filter" '[ "$rc" -eq 2 ]'
 
+# issue #644 round-3 self-review: GitHub runs a pull_request event's
+# workflow YAML from the PR's merge commit, not the base branch, so a PR
+# that itself edits a workflow file (here: removes the paths-ignore that
+# would otherwise exclude its own docs change) can get a real run the
+# base-branch YAML this helper reads says will never happen — the fail-open
+# direction the whole helper exists to avoid.
+heading "Test 8e: a docs-only PR that ALSO edits a workflow file → never path-filtered, even though the (untrusted) base-branch YAML would exclude it"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_NO_CHECKS=1 GH_WORKFLOW_COUNT=1 \
+    GH_PR_FILES_JSON='["docs/foo.md",".github/workflows/build.yml"]' \
+    GH_WORKFLOW_PATHS_JSON='[".github/workflows/build.yml"]' \
+    GH_WORKFLOW_YAML=$'on:\n  pull_request:\n    paths-ignore:\n      - \x27docs/**\x27\n      - \x27**.md\x27\n      - \x27.github/workflows/**\x27\n' \
+    CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 2 2>&1)" || rc=$?
+check "exits 2 (timeout/pending), never 5, when the PR itself touches .github/workflows/" '[ "$rc" -eq 2 ]'
+
 # ── Test 9: fine-grained token can't read Checks → falls back to gh run list, green ──
 #
 # Issue #513: a fine-grained PAT has Actions:read but no Checks permission,

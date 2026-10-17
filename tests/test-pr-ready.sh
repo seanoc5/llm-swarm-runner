@@ -421,6 +421,31 @@ gh_ready_called && red "expected gh pr ready NOT to run when the workflow has no
 green "a workflow with no paths/paths-ignore filter always counts as relevant, even for a docs-only PR"
 
 # ============================================================================
+heading "Test 15e: 'no checks reported', a docs-only PR that ALSO edits a workflow file — never path-filtered (issue #644 round-3 self-review)"
+# ============================================================================
+printf '<!-- BLIND_MERGE_RISK: low -->\nsome change\n' > "$BODY_FILE"
+make_fake_review 0
+GH_CHECKS_RC=1
+GH_CHECKS_STDERR="no checks reported on the 'main' branch"
+GH_WORKFLOW_COUNT=1
+GH_PR_FILES_JSON='["docs/foo.md",".github/workflows/build.yml"]'
+GH_WORKFLOW_PATHS_JSON='[".github/workflows/build.yml"]'
+# A path filter that WOULD exclude every changed file if it were trusted —
+# proves the workflow-edit short-circuit fires before this YAML is ever
+# read, not that the filter happens to still match.
+GH_WORKFLOW_YAML=$'on:\n  pull_request:\n    paths-ignore:\n      - \x27docs/**\x27\n      - \x27**.md\x27\n      - \x27.github/workflows/**\x27\n'
+rc=0; run_pr_ready || rc=$?
+GH_CHECKS_RC=0
+GH_CHECKS_STDERR=""
+GH_WORKFLOW_COUNT=0
+GH_PR_FILES_JSON=
+GH_WORKFLOW_PATHS_JSON=
+GH_WORKFLOW_YAML=
+[ "$rc" -eq 4 ] || red "expected exit 4 — a PR that edits a workflow file must never be read as path-filtered, got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called && red "expected gh pr ready NOT to run when the PR itself touches .github/workflows/"
+green "a PR that changes a workflow file is always treated as CI-relevant, even if every OTHER changed file is path-filtered (GitHub runs the merge-commit YAML, not the base branch's)"
+
+# ============================================================================
 heading "Test 16: self-review round cap reached — skips another round, still readies on CI-green"
 # ============================================================================
 printf '<!-- BLIND_MERGE_RISK: medium -->\nsome change\n' > "$BODY_FILE"

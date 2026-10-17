@@ -68,6 +68,17 @@
 #       checks` reported "no checks reported" — this is not a substitute
 #       for that cheaper check, only a refinement of it.
 #
+#       issue #644 round-3 self-review: before any of that YAML-fetch-and-
+#       parse, if the PR's own changed files include anything under
+#       .github/workflows/, this short-circuits straight to "yes" without
+#       reading a single workflow file. GitHub evaluates a `pull_request`
+#       event's workflow YAML from the PR's merge commit, not the base
+#       branch, so a PR that removes a paths-ignore entry (or adds a new
+#       workflow) gets a real run the base-branch YAML — which is all this
+#       function can read — says will never happen. That's the fail-open
+#       direction this whole function exists to avoid, so a workflow-file
+#       edit is never read as path-filtered, full stop.
+#
 #       Sets two globals:
 #         CI_FALLBACK_RELEVANT         "yes" | "no" | "unknown"
 #         CI_FALLBACK_RELEVANT_DETAIL  one-line explanation
@@ -113,6 +124,23 @@ ci_fallback_workflows_relevant_to_pr() {
     if [ "$files_rc" -ne 0 ] || [ -z "$files_list" ]; then
         CI_FALLBACK_RELEVANT="yes"
         CI_FALLBACK_RELEVANT_DETAIL="couldn't read PR #$pr's changed file list"
+        return 0
+    fi
+
+    # issue #644 round-3 self-review: for `pull_request` events GitHub runs
+    # the workflow YAML from the PR's MERGE COMMIT, not the base branch —
+    # so a PR that itself edits a workflow (removes a paths-ignore entry,
+    # adds a new workflow) can get a real run the base-branch YAML this
+    # function fetches below says will never happen. Parsing the head-ref
+    # YAML instead would just move the trust problem (a PR could edit the
+    # workflow to claim a filter it won't actually run under), so this
+    # takes the cheap, safe-direction fix instead: any changed file under
+    # .github/workflows/ makes CI relevance unconditional, no YAML read or
+    # parse at all. This can never be reached via the "excluded" return
+    # path below with a workflow-editing PR, closing the fail-open.
+    if grep -q '^\.github/workflows/' <<<"$files_list"; then
+        CI_FALLBACK_RELEVANT="yes"
+        CI_FALLBACK_RELEVANT_DETAIL="PR #$pr changes a workflow file itself (.github/workflows/) — GitHub runs the merge-commit version of that workflow, not the base branch's, so path-filter exclusions can't be trusted"
         return 0
     fi
 
