@@ -19,7 +19,11 @@ grep -q 'git push origin --delete "\$PR_BRANCH"' "$SCRIPT" \
     || fail "swarm-merge.sh no longer deletes the remote branch after merge"
 ok "swarm-merge.sh deletes the remote branch explicitly after merge"
 
-grep -qE 'gh pr merge "\$PR_NUM" --squash \|\| MERGE_RC=\$\?' "$SCRIPT" \
+# issue #629 follow-up: the real merge call now also pins to the verified
+# commit via "${MATCH_ARGS[@]}" (--match-head-commit); match that addition
+# optionally so this still proves the exit is captured (never swallowed),
+# without pinning to the exact pre-#629 argument list.
+grep -qE 'gh pr merge "\$PR_NUM" --squash( "\$\{MATCH_ARGS\[@\]\}")? \|\| MERGE_RC=\$\?' "$SCRIPT" \
     || fail "a refused gh pr merge must abort the script (issue #492)"
 ok "gh pr merge's exit is captured rather than swallowed"
 # Every worker merge now goes through worker-merge.sh, and the worker prompts

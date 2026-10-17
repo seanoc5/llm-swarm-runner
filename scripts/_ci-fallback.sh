@@ -71,8 +71,18 @@ ci_fallback_run_state() {
     rm -f "$err_file"
 
     CI_FALLBACK_DETAIL="$runs_json"
+    # issue #629: plain max_by(.createdAt) breaks a tie (two runs of the same
+    # workflow created in the same second-resolution timestamp — e.g. a
+    # concurrency-cancelled run and the one that superseded it, landing in
+    # the same second) by keeping whichever element is LAST in gh's own
+    # response order, which is not guaranteed to be the one that's actually
+    # still running. Sort by createdAt first, then — only to break an exact
+    # tie — put a non-"completed" run after a "completed" one, so `last`
+    # always prefers "still active" over "finished" when recency alone can't
+    # tell them apart; a real (non-tied) createdAt difference still decides
+    # it on its own, same as before.
     CI_FALLBACK_STATE="$(jq -r '
-        (group_by(.workflowName) | map(max_by(.createdAt))) as $latest |
+        (group_by(.workflowName) | map(sort_by([.createdAt, (if .status == "completed" then 0 else 1 end)]) | last)) as $latest |
         ($latest | map(select(.status == "completed"))) as $done |
         if ($done | map(select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out" or .conclusion == "action_required" or .conclusion == "startup_failure" or .conclusion == "stale")) | length) > 0 then "fail"
         elif (($latest | length) > 0) and (($done | length) == ($latest | length)) and (($done | map(select(.conclusion == "success" or .conclusion == "skipped" or .conclusion == "neutral")) | length) == ($done | length)) then "pass"
