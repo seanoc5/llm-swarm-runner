@@ -134,8 +134,22 @@ case "$1 $2" in
     "api repos/{owner}/{repo}/issues/"*) echo "false"; exit 0 ;;
     "pr view")
         if [[ "$*" == *"mergeable,mergeStateStatus,headRefOid"* ]]; then
-            # ci-wait.sh's call shape.
+            # ci-wait.sh's initial call shape.
             echo "{\"mergeable\":\"${GH_MERGEABLE:-MERGEABLE}\",\"mergeStateStatus\":\"${GH_MERGE_STATE:-CLEAN}\",\"headRefOid\":\"deadbeef\"}"
+        elif [[ "$*" == *"--json headRefOid"* ]]; then
+            # issue #629 follow-up: ci-wait.sh's own per-poll-iteration
+            # re-read, and swarm-merge.sh's fresh-read fallback when Gate 2
+            # produced no verified SHA. GH_HEAD_LIVE lets a test simulate a
+            # push landing mid-wait (differs from the "deadbeef" the initial
+            # read above always returns); defaults to "deadbeef" so every
+            # pre-existing test is unaffected. Real `gh --jq` extracts the
+            # bare value instead of the JSON object — swarm-merge.sh's
+            # fallback call relies on exactly that, so mimic it here too.
+            if [[ "$*" == *"--jq"* ]]; then
+                echo "${GH_HEAD_LIVE:-deadbeef}"
+            else
+                echo "{\"headRefOid\":\"${GH_HEAD_LIVE:-deadbeef}\"}"
+            fi
         elif [[ "$*" == *state,mergeable* ]]; then
             # swarm-merge.sh's main PR_JSON call shape. Defaults make every
             # gate-1/3/4/5 check pass unless a test explicitly overrides one
@@ -543,6 +557,37 @@ echo "$OUT" | grep -qi "override" || red "usage error must name the override fla
 green "--auto-low + --override-migration-gate is refused as a usage error before any gate runs"
 
 # ============================================================================
+# ============================================================================
+heading "Test 20: swarm-merge.sh --auto-low refuses the merge if Gate 2 passes but names no verified commit, rather than falling back to a fresh read"
+# ============================================================================
+# Test 17's pass-with-warning merged and deleted fix/issue-501's remote
+# branch too (same as Test 9), with nothing reseeding it since — needed here
+# so Gate 0 (authorship) can resolve the branch before this test's refusal
+# ever gets exercised.
+if ! git -C "$CLONE" ls-remote --exit-code --heads origin fix/issue-501 >/dev/null 2>&1; then
+    git -C "$CLONE" checkout -q -B fix/issue-501 master
+    git -C "$CLONE" push -q origin fix/issue-501
+fi
+# issue #629 coordinator follow-up (brief 2): if ci-wait.sh exits 0 (a real
+# pass) but its output carries no "verified-head=" line, that's a broken
+# log-capture, not a case safe to merge through on an unrelated fresh read —
+# refuse instead. Exercised via the CI_WAIT_SCRIPT test hook with a fake
+# ci-wait.sh that passes silently, standing in for a real ci-wait.sh whose
+# "verified-head=" line got lost or never printed.
+FAKE_CI_WAIT="$TEST_DIR/fake-ci-wait-no-verified-head.sh"
+cat > "$FAKE_CI_WAIT" <<'FAKE'
+#!/usr/bin/env bash
+echo "ci-wait: fake pass, deliberately no verified-head= line"
+exit 0
+FAKE
+chmod +x "$FAKE_CI_WAIT"
+: > "$GH_LOG"
+if OUT=$(CI_WAIT_SCRIPT="$FAKE_CI_WAIT" "$MERGE" 501 --auto-low 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -ne 0 ] || red "swarm-merge --auto-low should refuse when Gate 2 passes but names no verified commit (rc=$RC, output: $OUT)"
+echo "$OUT" | grep -qi "never named the commit it verified" || red "refusal must explain why: Gate 2 passed but named no verified commit (output: $OUT)"
+grep -q "pr merge" "$GH_LOG" && red "gh pr merge was called despite Gate 2 naming no verified commit"
+green "--auto-low refuses rather than falling back to an unrelated fresh read when Gate 2 passes but names no verified commit"
+
 heading "All coordinator-authorship shape tests passed"
 green "Gates 0/1/2/3/4/5 refusal/pass/fail-closed, no-CI-configured pass-with-warning, --auto-low scoping vs plain merge, override-flag rejection"
 echo ""

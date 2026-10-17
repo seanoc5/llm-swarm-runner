@@ -216,6 +216,22 @@ while true; do
     PASS_NOW=0
     PASS_MSG=""
 
+    # issue #629 follow-up: headRefOid can change DURING the wait — a new
+    # push superseding the commit this loop started watching. SHA was
+    # previously captured once, before the loop, and reused by every
+    # ci_fallback_run_state "$SHA" call for the rest of the run: a late push
+    # would silently keep grading the OLD commit's CI (which could already
+    # be green) instead of the new, unverified one. Re-read it every
+    # iteration instead, and track the move explicitly rather than quietly
+    # carrying on with whichever commit happened to be current at the top.
+    HEAD_JSON="$(gh pr view "$PR" "${REPO_ARGS[@]}" --json headRefOid 2>&1)" \
+        || { echo "ci-wait: gh pr view $PR failed: $HEAD_JSON" >&2; exit 4; }
+    NEW_SHA="$(jq -r '.headRefOid' <<<"$HEAD_JSON")"
+    if [ "$NEW_SHA" != "$SHA" ]; then
+        echo "ci-wait: PR #$PR's head moved from ${SHA:0:12} to ${NEW_SHA:0:12} while waiting — now watching the new commit; the old one's CI result no longer counts." >&2
+        SHA="$NEW_SHA"
+    fi
+
     if [ "$FALLBACK" != "1" ]; then
         set +e
         CHECKS_OUT="$(gh pr checks "$PR" "${REPO_ARGS[@]}" 2>&1)"

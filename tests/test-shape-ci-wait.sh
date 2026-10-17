@@ -48,6 +48,17 @@ case "$1 $2" in
         if [ -f "${GH_CALL_COUNT_FILE:-/dev/null}" ]; then n="$(cat "$GH_CALL_COUNT_FILE")"; fi
         n=$((n + 1))
         [ -n "${GH_CALL_COUNT_FILE:-}" ] && echo "$n" > "$GH_CALL_COUNT_FILE"
+        if [[ "$*" == *"--json headRefOid"* ]] && [[ "$*" != *"mergeable"* ]]; then
+            # issue #629 follow-up: ci-wait.sh's own per-poll-iteration
+            # re-read (bare --json headRefOid, no mergeable/mergeStateStatus)
+            # — distinct from the initial triple-field call below.
+            # GH_VIEW_HEADSHA_MIDWAIT lets a test simulate a push landing
+            # mid-wait; defaults to GH_VIEW_HEADSHA so every pre-existing
+            # test (none of which sets this var) sees the same head
+            # throughout, unaffected.
+            echo "{\"headRefOid\":\"${GH_VIEW_HEADSHA_MIDWAIT:-${GH_VIEW_HEADSHA:-deadbeef}}\"}"
+            exit 0
+        fi
         if [ "$n" = "1" ] && [ "${GH_VIEW_UNKNOWN_FIRST:-0}" = "1" ]; then
             echo "{\"mergeable\":\"UNKNOWN\",\"mergeStateStatus\":\"UNKNOWN\",\"headRefOid\":\"${GH_VIEW_HEADSHA_STALE:-deadbeef}\"}"
         else
@@ -456,6 +467,28 @@ out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_PERM_ERROR=1 \
     GH_RUNLIST_JSON='[{"status":"completed","conclusion":"cancelled","workflowName":"CI","createdAt":"2026-10-13T05:29:22Z"},{"status":"in_progress","conclusion":null,"workflowName":"CI","createdAt":"2026-10-13T05:29:22Z"}]' \
     CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 2 2>&1)" || rc=$?
 check "exits 2 (timeout) with the reverse array order too" '[ "$rc" -eq 2 ]'
+
+# ── Test 18: coordinator follow-up — a push landing MID-POLL (no mergeability retry involved) must not pass on the OLD commit's already-green CI ──
+#
+# Distinct from Test 16: Test 16 covers the pre-loop mergeability-UNKNOWN
+# retry. Here mergeability is normal from the very first read (no retry
+# fires at all) — the only thing that can catch the moved head is the new
+# per-poll-iteration headRefOid re-read inside the loop body itself. The old
+# commit ("oldsha") already has a fully green completed run; the real,
+# current commit ("newsha") is still in_progress. Before this fix, SHA was
+# captured once before the loop and never refreshed, so the cross-check
+# would keep querying oldsha and pass instantly on its stale green run.
+
+heading "Test 18: a push mid-poll (no mergeability retry) must not pass on the old commit's already-green CI"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_VIEW_HEADSHA=oldsha GH_VIEW_HEADSHA_MIDWAIT=newsha \
+    GH_CHECKS_RC=0 \
+    GH_RUNLIST_SHA_A=oldsha GH_RUNLIST_JSON_A='[{"status":"completed","conclusion":"success"}]' \
+    GH_RUNLIST_SHA_B=newsha GH_RUNLIST_JSON_B='[{"status":"in_progress","conclusion":null}]' \
+    CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 2 2>&1)" || rc=$?
+check "never exits 0 on the old commit's stale green run (times out/refuses instead)" '[ "$rc" -ne 0 ]'
+check "exits 2 (timeout), correctly still pending on the real, current head" '[ "$rc" -eq 2 ]'
+check "message logs the head move detected mid-wait" 'grep -qi "head moved" <<<"$out"'
 
 heading "Results: $PASS checks passed"
 green "All checks passed."
