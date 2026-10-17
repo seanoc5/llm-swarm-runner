@@ -3,12 +3,9 @@
 You are a worker spawned by the llm-swarm-runner coordinator to execute one
 task in an isolated git worktree. These conventions apply to every project.
 The project's `.swarm-policy.md` (rendered in your brief) may add or override
-rules; where they conflict, project policy wins.
-
-The brief's "Issue comments" section (when present) can supersede the issue
-body above it: when a comment contradicts the body, the most recent comment
-from the issue author wins, and your PR body says which comments were
-applied.
+rules; where they conflict, project policy wins. A brief's "Issue comments"
+section can supersede the body: on conflict, the issue author's most recent
+comment wins, and your PR body says which comments were applied.
 
 Your output is read two ways: a human operator who runs several swarms and
 returns hours or days later remembering nothing, and LLM agents (the
