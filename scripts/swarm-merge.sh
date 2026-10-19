@@ -149,7 +149,14 @@
 #      local fix/issue-* branch, not one `gh issue view` per branch.
 #   7. Reports final state.
 #
-# Exits 0 on success, non-zero on bailout.
+# A conflicting PR (mergeable=CONFLICTING or mergeStateStatus=DIRTY, before
+# or after the merge attempt) whose worker worktree is still on disk gets a
+# resolve-conflicts brief via requeue.sh — once; a re-run while it is still
+# queued doesn't send another — and the script exits 3. Re-run after the
+# worker pushes. With no worktree, it refuses with exit 1 as before.
+#
+# Exits 0 on success, 3 when a resolve-conflicts brief was queued, other
+# non-zero on bailout.
 
 set -euo pipefail
 
@@ -419,6 +426,53 @@ log_event() {
     printf '%s  %-15s %s\n' "$ts" "$cat" "$*" >> "$EVENTS_LOG" 2>/dev/null || true
 }
 
+# A conflicting PR whose worker is still on disk gets a resolve-conflicts
+# brief instead of a dead-end refusal — the same instruction the operator
+# used to type by hand. Exits 3 when the brief is (or already was) queued,
+# so the caller can retry after the worker pushes; exits 1 when there is no
+# worker to send it to. Never returns.
+CONFLICT_BRIEF_MARKER="swarm-merge:conflict-brief"
+send_conflict_brief_or_die() {
+  local detail="$1" wt base existing
+  echo "       PR #$PR_NUM has merge conflicts ($detail)."
+  wt=""
+  [ -n "$ISSUE" ] && wt=$(swarm_worktree_dir "$MAIN_WT" "$ISSUE")
+  if [ -z "$wt" ] || [ ! -d "$wt/.swarm" ]; then
+    echo "ERROR: PR #$PR_NUM has merge conflicts, and no live worker worktree was" >&2
+    echo "       found to resolve them${wt:+ ($wt)}." >&2
+    echo "       Respawn one (provision-worker.sh ${ISSUE:-<issue#>}) and tell it to resolve" >&2
+    echo "       the conflicts (rebase onto the base branch), or see \$LLM_SWARM_DOCS/VCS/git-github.md." >&2
+    exit 1
+  fi
+  existing=$(grep -l "$CONFLICT_BRIEF_MARKER pr=$PR_NUM " \
+    "$wt"/.swarm/tasks/inbox/*.md "$wt"/.swarm/tasks/processing/*.md 2>/dev/null | head -1 || true)
+  if [ -n "$existing" ]; then
+    echo "       $(c_amber "a resolve-conflicts brief is already queued: $existing")"
+  else
+    base="${PR_BASE:-$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')}"
+    base="${base:-the default branch}"
+    "$SCRIPT_DIR/requeue.sh" "$wt" - <<EOF
+<!-- $CONFLICT_BRIEF_MARKER pr=$PR_NUM -->
+# Resolve merge conflicts on PR #$PR_NUM
+
+\`swarm-merge.sh\` refused PR #$PR_NUM: it conflicts with \`origin/$base\` ($detail).
+
+1. \`git fetch origin\` and rebase this branch onto \`origin/$base\`.
+2. Resolve each conflict, keeping both sides' intent. A conflict you can't
+   resolve mechanically: stop and raise a \`## Decision\`.
+3. Run the fast tier, then \`git push --force-with-lease\`.
+4. \`ci-wait.sh $PR_NUM\` until green. Don't merge — the operator re-runs
+   \`swarm-merge.sh $PR_NUM\`.
+EOF
+    log_event merge.conflict "pr=$PR_NUM issue=$ISSUE action=brief-queued wt=$wt"
+  fi
+  echo "       $(c_amber "→ resolve-conflicts brief sent to the issue #$ISSUE worker.")"
+  local rerun="swarm-merge.sh $PR_NUM"
+  [ "$AUTO_LOW" = 1 ] && rerun="$rerun --auto-low"
+  echo "       Re-run once it has pushed and CI is green: $rerun"
+  exit 3
+}
+
 # Resolve the given number as either an issue or a PR — GitHub shares one
 # numbering sequence, so #N is exactly one object and this is unambiguous.
 INPUT_NUM="$ISSUE"
@@ -508,9 +562,7 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
   case "$PR_STATE" in
     OPEN)
       if [ "$PR_MERGEABLE" = "CONFLICTING" ]; then
-        echo "ERROR: PR #$PR_NUM has merge conflicts. Resolve first." >&2
-        echo "       See \$LLM_SWARM_DOCS/VCS/git-github.md for the playbook." >&2
-        exit 1
+        send_conflict_brief_or_die "mergeable=CONFLICTING"
       fi
       # Pre-merge gate (#492): mergeStateStatus DIRTY means GitHub has already
       # finished recomputing real conflicts against the base branch. This is
@@ -526,9 +578,7 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
       # cost of gates/CI-wait/merge when GitHub happens to have already
       # settled on DIRTY by the time we ask.
       if [ "$PR_MERGE_STATE_STATUS" = "DIRTY" ]; then
-        echo "ERROR: PR #$PR_NUM is not mergeable (mergeStateStatus=DIRTY)." >&2
-        echo "       Rebase onto the default branch and retry." >&2
-        exit 1
+        send_conflict_brief_or_die "mergeStateStatus=DIRTY"
       fi
       # --auto-low Gate 0 (#452): authorship, hard and non-overridable. Only
       # active on the coordinator's unattended SWARM_AUTOMERGE_LOW path; a
@@ -747,9 +797,8 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
             echo "       (gh pr view $PR_NUM) before retrying." >&2
           elif [ "$POST_MERGEABLE" = "CONFLICTING" ] || [ "$POST_MSS" = "DIRTY" ]; then
             # (a) confirmed open, and the refusal is a real conflict.
-            echo "       PR #$PR_NUM is confirmed state=$POST_STATE with a real conflict" >&2
-            echo "       (mergeable=$POST_MERGEABLE, mergeStateStatus=$POST_MSS)." >&2
-            echo "       Rebase onto the default branch and retry." >&2
+            echo "       PR #$PR_NUM is confirmed state=$POST_STATE with a real conflict." >&2
+            send_conflict_brief_or_die "mergeable=$POST_MERGEABLE, mergeStateStatus=$POST_MSS"
           else
             # (a) confirmed open, but nothing indicates a conflict — the
             # refusal is more likely auth, network, or branch protection.
