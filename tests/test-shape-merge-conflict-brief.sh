@@ -88,6 +88,7 @@ n=$(find "$INBOX" -name '*.md' | wc -l)
 BRIEF=$(find "$INBOX" -name '*.md')
 grep -q "swarm-merge:conflict-brief pr=101 " "$BRIEF" || red "brief lacks the dedupe marker:\n$(cat "$BRIEF")"
 grep -q "origin/master" "$BRIEF" || red "brief should name the base branch:\n$(cat "$BRIEF")"
+grep -q "## Conflict notes" "$BRIEF" || red "brief should ask for conflict notes:\n$(cat "$BRIEF")"
 echo "$OUT" | grep -q "Re-run once it has pushed and CI is green: swarm-merge.sh 101$" \
     || red "expected a plain re-run hint, got:\n$OUT"
 green "brief queued, exit 3, no merge attempted"

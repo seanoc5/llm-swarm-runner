@@ -461,7 +461,11 @@ send_conflict_brief_or_die() {
 2. Resolve each conflict, keeping both sides' intent. A conflict you can't
    resolve mechanically: stop and raise a \`## Decision\`.
 3. Run the fast tier, then \`git push --force-with-lease\`.
-4. \`ci-wait.sh $PR_NUM\` until green. Don't merge — the operator re-runs
+4. Post a short PR comment headed \`## Conflict notes\`, written so the
+   operator can learn to read conflicts: per file, what \`$base\` changed
+   and what this branch changed (plain words, one line each), what you
+   kept, and why. Five to ten lines total. End it with "— drafted by claude".
+5. \`ci-wait.sh $PR_NUM\` until green. Don't merge — the operator re-runs
    \`swarm-merge.sh $PR_NUM\`.
 EOF
     log_event merge.conflict "pr=$PR_NUM issue=$ISSUE action=brief-queued wt=$wt"
