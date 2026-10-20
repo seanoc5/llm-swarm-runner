@@ -48,6 +48,19 @@ case "$1 $2" in
         if [ -f "${GH_CALL_COUNT_FILE:-/dev/null}" ]; then n="$(cat "$GH_CALL_COUNT_FILE")"; fi
         n=$((n + 1))
         [ -n "${GH_CALL_COUNT_FILE:-}" ] && echo "$n" > "$GH_CALL_COUNT_FILE"
+        # issue #643 regression: a `gh` that exits 0 but still writes to
+        # stderr (an update notice, a deprecation warning) must never
+        # corrupt the JSON ci-wait.sh parses from stdout.
+        if [ "${GH_VIEW_STDERR_NOISE:-0}" = "1" ]; then
+            echo "warning: a new release of gh is available (simulated)" >&2
+        fi
+        # issue #643 regression: `gh` returning non-JSON on stdout (exit 0)
+        # must fail closed as exit 4, never leak jq's own exit 5 as
+        # ci-wait.sh's exit code (misread downstream as "no CI configured").
+        if [ "${GH_VIEW_BAD_JSON:-0}" = "1" ]; then
+            echo "not valid json {"
+            exit 0
+        fi
         if [[ "$*" == *"--json headRefOid"* ]] && [[ "$*" != *"mergeable"* ]]; then
             # issue #629 follow-up: ci-wait.sh's own per-poll-iteration
             # re-read (bare --json headRefOid, no mergeable/mergeStateStatus)
@@ -522,6 +535,32 @@ out="$(GH_MIDWAIT_CALL_COUNT_FILE="$MIDWAIT_COUNT_FILE_19" GH_VIEW_MIDWAIT_FAIL_
 check "survives the transient failure and still passes (exit 0), never exit 4" '[ "$rc" -eq 0 ]'
 check "message logs the retry, not a hard refusal" 'grep -qi "retrying once" <<<"$out"'
 check "does not report gh pr view failing twice in a row" '! grep -qi "failed twice in a row" <<<"$out"'
+
+# ── Test 20: issue #643 — a stray stderr line from `gh pr view` (exit 0) must never corrupt the JSON parse ──
+#
+# PR #643's coordinator review (BLOCK on c51b8f6): `gh pr view`'s JSON reads
+# captured stdout+stderr into the same variable (`2>&1`). An exit-0 call
+# that still writes a warning/notice to stderr left that variable holding
+# JSON-plus-noise, which `jq -r` then failed to parse with jq's OWN exit
+# code 5 — and `set -e` turned that into ci-wait.sh's exit 5, misread by
+# swarm-merge.sh's Gate 2 as "no CI configured", merging an unverified
+# commit. Confirmed failing against c51b8f6 (exit 5) before this fix.
+
+heading "Test 20: gh pr view exits 0 but writes noise to stderr → stdout JSON still parses clean, exit 0"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_VIEW_STDERR_NOISE=1 GH_CHECKS_RC=0 \
+    GH_RUNLIST_JSON='[{"status":"completed","conclusion":"success"}]' \
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
+check "exits 0 — gh pr view's stderr noise never reached the JSON parse" '[ "$rc" -eq 0 ]'
+
+# ── Test 21: issue #643 — gh pr view returning non-JSON on stdout must fail closed as exit 4, never exit 5 ──
+
+heading "Test 21: gh pr view returns non-JSON on stdout (exit 0) → exit 4 (unparseable), never 5 (misread as no-CI)"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_VIEW_BAD_JSON=1 \
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
+check "exits 4 on unparseable gh pr view output, never misread as exit 5" '[ "$rc" -eq 4 ]'
+check "message names the unparseable output" 'grep -qi "unparseable" <<<"$out"'
 
 heading "Results: $PASS checks passed"
 green "All checks passed."

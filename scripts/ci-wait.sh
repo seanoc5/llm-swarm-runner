@@ -169,11 +169,35 @@ if [ -n "$REPO" ]; then
     API_REPO_PATH="repos/$REPO"
 fi
 
-MERGE_JSON="$(gh pr view "$PR" "${REPO_ARGS[@]}" --json mergeable,mergeStateStatus,headRefOid 2>&1)" \
-    || { echo "ci-wait: gh pr view $PR failed: $MERGE_JSON" >&2; exit 4; }
+# issue #643: every `gh pr view` JSON read below keeps stdout and stderr
+# apart (via GH_ERR_FILE), same as _ci-fallback.sh's `gh run list` read
+# already does. `gh` exiting 0 but printing something to stderr (an update
+# notice, a deprecation warning) used to land in the same variable the JSON
+# came from (`2>&1`); jq then failed on the combined text with ITS OWN exit
+# code 5, which `set -e` turned into ci-wait.sh's exit 5 — read downstream
+# (swarm-merge.sh Gate 2) as "no CI configured on this repo", merging an
+# unverified commit. jq_field fails closed with exit 4 instead, on either a
+# `gh` failure or output that isn't parseable JSON, and never lets a parse
+# problem masquerade as the one genuine exit 5 case (zero workflows
+# configured, below).
+GH_ERR_FILE="$(mktemp)"
+trap 'rm -f "$GH_ERR_FILE"' EXIT
 
-MERGEABLE="$(jq -r '.mergeable' <<<"$MERGE_JSON")"
-MERGE_STATE="$(jq -r '.mergeStateStatus' <<<"$MERGE_JSON")"
+# jq_field <jq-filter> <json> — echoes the extracted value; propagates jq's
+# own exit status so a caller's `|| { ...; exit 4; }` can fail closed. Must
+# NOT call `exit` itself: this runs inside a `$(...)` command substitution,
+# so `exit` there would only end that subshell, not the script.
+jq_field() {
+    jq -r "$1" <<<"$2" 2>/dev/null
+}
+
+MERGE_JSON="$(gh pr view "$PR" "${REPO_ARGS[@]}" --json mergeable,mergeStateStatus,headRefOid 2>"$GH_ERR_FILE")" \
+    || { echo "ci-wait: gh pr view $PR failed: $(cat "$GH_ERR_FILE")" >&2; exit 4; }
+
+MERGEABLE="$(jq_field '.mergeable' "$MERGE_JSON")" \
+    || { echo "ci-wait: gh pr view $PR returned unparseable output: $MERGE_JSON" >&2; exit 4; }
+MERGE_STATE="$(jq_field '.mergeStateStatus' "$MERGE_JSON")" \
+    || { echo "ci-wait: gh pr view $PR returned unparseable output: $MERGE_JSON" >&2; exit 4; }
 
 # GitHub computes mergeability asynchronously — a fresh push can read back
 # UNKNOWN for a few seconds. One short retry before trusting it.
@@ -194,12 +218,17 @@ MERGE_STATE="$(jq -r '.mergeStateStatus' <<<"$MERGE_JSON")"
 # job was still in_progress.
 if [ "$MERGEABLE" = "UNKNOWN" ]; then
     sleep 3
-    MERGE_JSON="$(gh pr view "$PR" "${REPO_ARGS[@]}" --json mergeable,mergeStateStatus,headRefOid 2>&1)" \
-        || { echo "ci-wait: gh pr view $PR failed: $MERGE_JSON" >&2; exit 4; }
-    MERGEABLE="$(jq -r '.mergeable' <<<"$MERGE_JSON")"
-    MERGE_STATE="$(jq -r '.mergeStateStatus' <<<"$MERGE_JSON")"
+    MERGE_JSON="$(gh pr view "$PR" "${REPO_ARGS[@]}" --json mergeable,mergeStateStatus,headRefOid 2>"$GH_ERR_FILE")" \
+        || { echo "ci-wait: gh pr view $PR failed: $(cat "$GH_ERR_FILE")" >&2; exit 4; }
+    MERGEABLE="$(jq_field '.mergeable' "$MERGE_JSON")" \
+        || { echo "ci-wait: gh pr view $PR returned unparseable output: $MERGE_JSON" >&2; exit 4; }
+    MERGE_STATE="$(jq_field '.mergeStateStatus' "$MERGE_JSON")" \
+        || { echo "ci-wait: gh pr view $PR returned unparseable output: $MERGE_JSON" >&2; exit 4; }
 fi
-SHA="$(jq -r '.headRefOid' <<<"$MERGE_JSON")"
+SHA="$(jq_field '.headRefOid' "$MERGE_JSON")" \
+    || { echo "ci-wait: gh pr view $PR returned unparseable output: $MERGE_JSON" >&2; exit 4; }
+[ -n "$SHA" ] && [ "$SHA" != "null" ] \
+    || { echo "ci-wait: gh pr view $PR returned no headRefOid (empty or null): $MERGE_JSON" >&2; exit 4; }
 
 if [ "$MERGEABLE" = "CONFLICTING" ] || [ "$MERGE_STATE" = "DIRTY" ]; then
     echo "ci-wait: PR #$PR is $MERGEABLE/$MERGE_STATE against its base — no pull_request run will ever fire. Rebase onto the base branch and re-push, then re-run ci-wait.sh." >&2
@@ -230,20 +259,23 @@ while true; do
     # if it fails twice in a row. Never fall back to the previous SHA on
     # failure — a failed read means "unknown", not "unchanged".
     set +e
-    HEAD_JSON="$(gh pr view "$PR" "${REPO_ARGS[@]}" --json headRefOid 2>&1)"
+    HEAD_JSON="$(gh pr view "$PR" "${REPO_ARGS[@]}" --json headRefOid 2>"$GH_ERR_FILE")"
     HEAD_RC=$?
     set -e
     if [ "$HEAD_RC" -ne 0 ]; then
-        echo "ci-wait: gh pr view $PR failed (retrying once): $HEAD_JSON" >&2
+        echo "ci-wait: gh pr view $PR failed (retrying once): $(cat "$GH_ERR_FILE")" >&2
         sleep 3
         set +e
-        HEAD_JSON="$(gh pr view "$PR" "${REPO_ARGS[@]}" --json headRefOid 2>&1)"
+        HEAD_JSON="$(gh pr view "$PR" "${REPO_ARGS[@]}" --json headRefOid 2>"$GH_ERR_FILE")"
         HEAD_RC=$?
         set -e
         [ "$HEAD_RC" -eq 0 ] \
-            || { echo "ci-wait: gh pr view $PR failed twice in a row: $HEAD_JSON" >&2; exit 4; }
+            || { echo "ci-wait: gh pr view $PR failed twice in a row: $(cat "$GH_ERR_FILE")" >&2; exit 4; }
     fi
-    NEW_SHA="$(jq -r '.headRefOid' <<<"$HEAD_JSON")"
+    NEW_SHA="$(jq_field '.headRefOid' "$HEAD_JSON")" \
+        || { echo "ci-wait: gh pr view $PR returned unparseable output: $HEAD_JSON" >&2; exit 4; }
+    [ -n "$NEW_SHA" ] && [ "$NEW_SHA" != "null" ] \
+        || { echo "ci-wait: gh pr view $PR returned no headRefOid (empty or null): $HEAD_JSON" >&2; exit 4; }
     if [ "$NEW_SHA" != "$SHA" ]; then
         echo "ci-wait: PR #$PR's head moved from ${SHA:0:12} to ${NEW_SHA:0:12} while waiting — now watching the new commit; the old one's CI result no longer counts." >&2
         SHA="$NEW_SHA"
