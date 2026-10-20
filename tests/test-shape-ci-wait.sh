@@ -75,6 +75,13 @@ case "$1 $2" in
         # ["path", ...] shape, standing in for the real --jq '.[].filename'.
         printf '%s' "${GH_PR_FILES_JSON:-[]}" | jq -r '.[]'
         exit 0 ;;
+    "api repos/{owner}/{repo}/pulls/"*|"api repos/owner/repo/pulls/"*)
+        # issue #644 final round: ci_fallback_workflows_relevant_to_pr's
+        # lookup of the PR's OWN base branch (gh api .../pulls/<pr> --jq
+        # '.base.ref'), used to fetch each workflow file at that ref instead
+        # of the repo default branch.
+        echo "${GH_PR_BASE_REF:-main}"
+        exit 0 ;;
     "api repos/{owner}/{repo}/actions/workflows"|"api repos/owner/repo/actions/workflows")
         if printf '%s\n' "$*" | grep -q -- '.total_count'; then
             echo "${GH_WORKFLOW_COUNT:-1}"
@@ -86,8 +93,15 @@ case "$1 $2" in
         exit 0 ;;
     "api -H")
         # issue #639: ci_fallback_workflows_relevant_to_pr fetching a single
-        # workflow file's raw YAML (gh api -H "Accept: ..." .../contents/<path>).
-        printf '%s' "${GH_WORKFLOW_YAML:-}"
+        # workflow file's raw YAML (gh api -H "Accept: ..." .../contents/<path>
+        # -f ref=<base-branch>). issue #644 final round: serve a DIFFERENT
+        # YAML when the requested ref matches the PR's actual base branch, so
+        # a test can prove the right ref was sent instead of just ignoring it.
+        if [ -n "${GH_PR_BASE_REF:-}" ] && printf '%s\n' "$*" | grep -qF -- "ref=${GH_PR_BASE_REF}"; then
+            printf '%s' "${GH_WORKFLOW_YAML_FOR_BASE_REF:-${GH_WORKFLOW_YAML:-}}"
+        else
+            printf '%s' "${GH_WORKFLOW_YAML:-}"
+        fi
         exit 0 ;;
     "run list")
         rn=0
@@ -283,6 +297,26 @@ out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_NO_CHECKS=1 GH_
     GH_WORKFLOW_YAML=$'on:\n  push:\n    branches: [main]\n    paths-ignore:\n      - \x27docs/**\x27\n      - \x27**.md\x27\n' \
     "$CI_WAIT" 42 5 2>&1)" || rc=$?
 check "exits 5 — a push-only workflow's own paths-ignore excludes an all-docs changed-file set" '[ "$rc" -eq 5 ]'
+
+# ── Test 8h: issue #644 final round — the PR's OWN base branch's workflow copy is read, not the repo default ──
+#
+# A workflow's path filters can differ by target branch. Before this fix,
+# ci_fallback_workflows_relevant_to_pr always fetched the DEFAULT branch's
+# copy of each workflow file — a PR opened against a different base branch
+# with different filters got evaluated against the wrong ones, and could
+# come out "excluded" (exit 5, no wait) even though its real base branch
+# would run CI for real.
+
+heading "Test 8h: PR targets a non-default base branch whose own workflow copy has NO paths-ignore → exit 2 (pending), never 5, even though the default branch's copy ignores docs"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_NO_CHECKS=1 GH_WORKFLOW_COUNT=1 \
+    GH_PR_FILES_JSON='["docs/foo.md","README.md"]' \
+    GH_WORKFLOW_PATHS_JSON='[".github/workflows/build.yml"]' \
+    GH_PR_BASE_REF='release/2.0' \
+    GH_WORKFLOW_YAML=$'on:\n  pull_request:\n    paths-ignore:\n      - \x27docs/**\x27\n      - \x27**.md\x27\n' \
+    GH_WORKFLOW_YAML_FOR_BASE_REF=$'on:\n  pull_request:\n' \
+    CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 2 2>&1)" || rc=$?
+check "exits 2 (timeout/pending), never 5 — the PR's actual base branch has no path filter at all" '[ "$rc" -eq 2 ]'
 
 # ── Test 9: fine-grained token can't read Checks → falls back to gh run list, green ──
 #

@@ -126,8 +126,21 @@ if [ "\$1" = "api" ]; then
         # GH_PR_FILES_JSON is already the flat ["path", ...] shape, standing
         # in for the real endpoint's --jq '.[].filename' output.
         printf '%s' "\${GH_PR_FILES_JSON:-[]}" | jq -r '.[]'
+    elif printf '%s\n' "\$args" | grep -qF -- '.base.ref'; then
+        # issue #644 final round: ci_fallback_workflows_relevant_to_pr's
+        # lookup of the PR's OWN base branch, used to fetch each workflow
+        # file at that ref instead of the repo default branch.
+        echo "\${GH_PR_BASE_REF:-main}"
     elif printf '%s\n' "\$args" | grep -q -- 'contents/'; then
-        printf '%s' "\${GH_WORKFLOW_YAML:-}"
+        # issue #644 final round: the content fetch now carries '-f
+        # ref=<base-branch>' — serve a DIFFERENT workflow YAML when that ref
+        # matches the PR's actual base branch, so a test can prove the right
+        # ref was requested instead of just ignoring it.
+        if [ -n "\${GH_PR_BASE_REF:-}" ] && printf '%s\n' "\$args" | grep -qF -- "ref=\${GH_PR_BASE_REF}"; then
+            printf '%s' "\${GH_WORKFLOW_YAML_FOR_BASE_REF:-\${GH_WORKFLOW_YAML:-}}"
+        else
+            printf '%s' "\${GH_WORKFLOW_YAML:-}"
+        fi
     else
         echo "\${GH_WORKFLOW_COUNT:-0}"
     fi
@@ -165,6 +178,7 @@ run_pr_ready() {
         GH_WORKFLOW_COUNT="${GH_WORKFLOW_COUNT:-0}" \
         GH_PR_FILES_JSON="${GH_PR_FILES_JSON:-[]}" GH_WORKFLOW_PATHS_JSON="${GH_WORKFLOW_PATHS_JSON:-[]}" \
         GH_WORKFLOW_YAML="${GH_WORKFLOW_YAML:-}" \
+        GH_PR_BASE_REF="${GH_PR_BASE_REF:-}" GH_WORKFLOW_YAML_FOR_BASE_REF="${GH_WORKFLOW_YAML_FOR_BASE_REF:-}" \
         GH_SHA="${GH_SHA:-deadbeef}" GH_SHA_LOOKUP_FAILS="${GH_SHA_LOOKUP_FAILS:-0}" \
         GH_RUNLIST_JSON="${GH_RUNLIST_JSON:-[]}" GH_RUNLIST_RC="${GH_RUNLIST_RC:-0}" \
         GH_RUNLIST_STDERR="${GH_RUNLIST_STDERR:-}" \
@@ -492,6 +506,35 @@ GH_WORKFLOW_YAML=
 gh_ready_called || red "expected gh pr ready to run once a push-only workflow's paths-ignore excludes every changed file"
 grep -qi 'WARN' "$TEST_DIR/out.log" || red "expected a WARN about the path-filtered changed files: $(cat "$TEST_DIR/out.log")"
 green "a push-only workflow whose paths-ignore excludes every changed file readies with a WARN, same as a path-filtered pull_request workflow"
+
+# ============================================================================
+heading "Test 15h: 'no checks reported', PR targets a non-default base branch whose own workflow copy has NO paths-ignore — still refuses ci-pending, even though the default branch's copy ignores docs (issue #644 final round)"
+# ============================================================================
+printf '<!-- BLIND_MERGE_RISK: low -->\nsome change\n' > "$BODY_FILE"
+make_fake_review 0
+GH_CHECKS_RC=1
+GH_CHECKS_STDERR="no checks reported on the 'main' branch"
+GH_WORKFLOW_COUNT=1
+GH_PR_FILES_JSON='["docs/foo.md","README.md"]'
+GH_WORKFLOW_PATHS_JSON='[".github/workflows/build.yml"]'
+GH_PR_BASE_REF='release/2.0'
+# The DEFAULT branch's copy ignores docs — if the lookup ever reads this
+# instead of the PR's actual base branch, the PR would wrongly ready.
+GH_WORKFLOW_YAML=$'on:\n  pull_request:\n    paths-ignore:\n      - \x27docs/**\x27\n      - \x27**.md\x27\n'
+# The PR's REAL base branch's copy has no path filter at all.
+GH_WORKFLOW_YAML_FOR_BASE_REF=$'on:\n  pull_request:\n'
+rc=0; run_pr_ready || rc=$?
+GH_CHECKS_RC=0
+GH_CHECKS_STDERR=""
+GH_WORKFLOW_COUNT=0
+GH_PR_FILES_JSON=
+GH_WORKFLOW_PATHS_JSON=
+GH_PR_BASE_REF=
+GH_WORKFLOW_YAML=
+GH_WORKFLOW_YAML_FOR_BASE_REF=
+[ "$rc" -eq 4 ] || red "expected exit 4 — the PR's own base branch has no path filter at all, got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called && red "expected gh pr ready NOT to run — the default branch's paths-ignore must never substitute for the PR's actual base branch"
+green "a non-default-base PR is evaluated against its OWN base branch's workflow copy, not the repo default branch's"
 
 # ============================================================================
 heading "Test 16: self-review round cap reached — skips another round, still readies on CI-green"

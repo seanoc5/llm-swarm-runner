@@ -95,6 +95,22 @@
 #       that wants to say WHY can still tell the two "yes" paths apart;
 #       callers that don't care just check for "no".
 #
+#       issue #644 final round: every workflow file is fetched at the PR's
+#       OWN base branch (`?ref=<baseRefName>`, via `gh api -f ref=...`,
+#       which also takes care of percent-encoding a ref that contains
+#       slashes), never the repo's default branch. Before this fix a PR
+#       opened against a non-default base branch with different
+#       `paths-ignore` filters than the default branch got evaluated
+#       against the WRONG filters — "excluded" could come out of reading
+#       the default branch's copy even though the PR's actual base branch
+#       would run CI for real. ci-wait.sh turns a wrongly-"excluded"
+#       verdict into an early non-polling exit, so this was a real
+#       fail-closed-when-it-should-wait bug, not just a cosmetic one. If
+#       the base-ref lookup itself fails, this folds into the same
+#       fail-toward-"yes" posture as every other error path in this
+#       function — it never reports "excluded" off of an unreadable base
+#       branch.
+#
 #       issue #644 third follow-up: a workflow whose only triggers are
 #       things like `schedule`/`workflow_dispatch` returns "no-trigger"
 #       from the per-workflow filter script, not "excluded" — and
@@ -180,6 +196,20 @@ ci_fallback_workflows_relevant_to_pr() {
         return 0
     fi
 
+    # issue #644 final round: the PR's own base branch, not the repo
+    # default — a workflow's path filters can differ by target branch, and
+    # reading the wrong branch's copy can produce a false "excluded".
+    local base_ref base_ref_rc
+    set +e
+    base_ref="$(gh api "$repo_path/pulls/$pr" --jq '.base.ref' 2>&1)"
+    base_ref_rc=$?
+    set -e
+    if [ "$base_ref_rc" -ne 0 ] || [ -z "$base_ref" ] || [ "$base_ref" = "null" ]; then
+        CI_FALLBACK_RELEVANT="yes"
+        CI_FALLBACK_RELEVANT_DETAIL="couldn't read PR #$pr's base branch"
+        return 0
+    fi
+
     local tmp_files tmp_wf
     tmp_files="$(mktemp)"
     tmp_wf="$(mktemp)"
@@ -190,7 +220,9 @@ ci_fallback_workflows_relevant_to_pr() {
     while IFS= read -r path; do
         [ -n "$path" ] || continue
         set +e
-        content="$(gh api -H "Accept: application/vnd.github.raw" "$repo_path/contents/$path" 2>&1)"
+        # -f ref=... (not a hand-built query string) so `gh` percent-encodes
+        # a base ref containing slashes itself.
+        content="$(gh api -H "Accept: application/vnd.github.raw" "$repo_path/contents/$path" -f ref="$base_ref" 2>&1)"
         content_rc=$?
         set -e
         if [ "$content_rc" -ne 0 ]; then
