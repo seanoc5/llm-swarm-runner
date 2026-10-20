@@ -4334,10 +4334,13 @@ has_live_window_draining_brief() {
 # suffix pr_poll_pass's 👀/✅ flags.
 #
 # pr_ci_state (issue #618) echoes the PR's combined CI state from its
-# statusCheckRollup: fail (any failed/timed-out/cancelled check), pending
-# (any check not yet completed), pass (every check completed clean), or
-# none (no checks reported — a fresh push GitHub hasn't registered yet
-# looks the same, which is why none never earns ✅).
+# statusCheckRollup, first collapsed to the newest run per check name
+# (issue #650 — a concurrency-superseded run otherwise leaves a stale
+# CANCELLED entry next to the current pass): fail (any failed/timed-out/
+# cancelled check), pending (any check not yet completed), pass (every
+# check completed clean), or none (no checks reported — a fresh push
+# GitHub hasn't registered yet looks the same, which is why none never
+# earns ✅).
 #
 # Both read one lazy `gh pr list --state open` per pass, only on a pass
 # that actually has an idle worker with an open PR — the main --state all
@@ -4358,7 +4361,17 @@ pr_open_details_load() {
         PR_CI_CACHE[$n]="${c:-none}"
     done < <(cd "$PROJECT_DIR" && gh pr list --state open --limit 200 \
             --json number,body,statusCheckRollup \
-            --jq 'def ci: (.statusCheckRollup // []) as $r
+            --jq 'def ci: (.statusCheckRollup // []) as $all
+                    # Collapse to the newest run per check (workflow + job
+                    # name, falling back to legacy status-context "context")
+                    # first — a rerun or a concurrency-superseded run leaves
+                    # a stale CANCELLED/FAILURE entry next to the current
+                    # one for the same check, and only the newest should
+                    # count (issue #650).
+                    | ($all
+                       | group_by((.workflowName // "") + "\u0000" + (.name // .context // ""))
+                       | map(max_by(.completedAt // .startedAt // .createdAt // ""))
+                      ) as $r
                     | if ($r | length) == 0 then "none"
                       elif any($r[]; ((.conclusion // "") | test("^(FAILURE|TIMED_OUT|CANCELLED|ACTION_REQUIRED|STARTUP_FAILURE)$"))
                                      or ((.state // "") | test("^(FAILURE|ERROR)$"))) then "fail"
