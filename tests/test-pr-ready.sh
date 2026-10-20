@@ -110,6 +110,15 @@ if [ "\$1" = "run" ] && [ "\$2" = "list" ]; then
 fi
 if [ "\$1" = "api" ]; then
     args="\$*"
+    # issue #644 follow-up: \`gh api\` sends POST, not GET, whenever ANY
+    # -f/-F is given — proven live against real GitHub (a bare -f ref=...
+    # content fetch 404s; the same call with -X GET succeeds). Fail the
+    # stub the same way the real API would 404 it, so this test proves the
+    # METHOD actually sent, not just that the right args were built.
+    if printf '%s\n' "\$args" | grep -qE -- '(^| )-[fF] ' && ! printf '%s\n' "\$args" | grep -q -- '-X GET'; then
+        echo '{"message":"Not Found","status":"404"}' >&2
+        exit 1
+    fi
     if printf '%s\n' "\$args" | grep -q -- 'actions/workflows'; then
         if printf '%s\n' "\$args" | grep -q -- '.total_count'; then
             echo "\${GH_WORKFLOW_COUNT:-0}"

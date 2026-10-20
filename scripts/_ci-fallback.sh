@@ -96,9 +96,14 @@
 #       callers that don't care just check for "no".
 #
 #       issue #644 final round: every workflow file is fetched at the PR's
-#       OWN base branch (`?ref=<baseRefName>`, via `gh api -f ref=...`,
-#       which also takes care of percent-encoding a ref that contains
-#       slashes), never the repo's default branch. Before this fix a PR
+#       OWN base branch (`?ref=<baseRefName>`, via `gh api -X GET -f
+#       ref=...`, which also takes care of percent-encoding a ref that
+#       contains slashes). `-X GET` is mandatory: `gh api` silently
+#       switches its default method to POST whenever a `-f`/`-F` parameter
+#       is given, which 404s this read-only content fetch every time on
+#       live GitHub (issue #644 follow-up) — fails toward "yes" per the
+#       posture below, but defeats the whole point of this fetch. Never the
+#       repo's default branch, either. Before the base-ref fix below, a PR
 #       opened against a non-default base branch with different
 #       `paths-ignore` filters than the default branch got evaluated
 #       against the WRONG filters — "excluded" could come out of reading
@@ -199,16 +204,24 @@ ci_fallback_workflows_relevant_to_pr() {
     # issue #644 final round: the PR's own base branch, not the repo
     # default — a workflow's path filters can differ by target branch, and
     # reading the wrong branch's copy can produce a false "excluded".
-    local base_ref base_ref_rc
+    # issue #644 follow-up: stderr kept apart from base_ref itself (a
+    # separate temp file, same isolation #643 applied to ci-wait.sh's gh pr
+    # view reads) — an exit-0 call that still writes to stderr (an update
+    # notice, a deprecation warning) must never land inside the ref name
+    # this gets percent-encoded and fetched with below.
+    local base_ref base_ref_rc base_ref_err
+    base_ref_err="$(mktemp)"
     set +e
-    base_ref="$(gh api "$repo_path/pulls/$pr" --jq '.base.ref' 2>&1)"
+    base_ref="$(gh api "$repo_path/pulls/$pr" --jq '.base.ref' 2>"$base_ref_err")"
     base_ref_rc=$?
     set -e
     if [ "$base_ref_rc" -ne 0 ] || [ -z "$base_ref" ] || [ "$base_ref" = "null" ]; then
         CI_FALLBACK_RELEVANT="yes"
-        CI_FALLBACK_RELEVANT_DETAIL="couldn't read PR #$pr's base branch"
+        CI_FALLBACK_RELEVANT_DETAIL="couldn't read PR #$pr's base branch: $(cat "$base_ref_err")$base_ref"
+        rm -f "$base_ref_err"
         return 0
     fi
+    rm -f "$base_ref_err"
 
     local tmp_files tmp_wf
     tmp_files="$(mktemp)"
@@ -221,8 +234,10 @@ ci_fallback_workflows_relevant_to_pr() {
         [ -n "$path" ] || continue
         set +e
         # -f ref=... (not a hand-built query string) so `gh` percent-encodes
-        # a base ref containing slashes itself.
-        content="$(gh api -H "Accept: application/vnd.github.raw" "$repo_path/contents/$path" -f ref="$base_ref" 2>&1)"
+        # a base ref containing slashes itself. -X GET is mandatory: `gh
+        # api` defaults to POST whenever ANY -f/-F is present, and this is a
+        # read-only content fetch (issue #644 follow-up).
+        content="$(gh api -H "Accept: application/vnd.github.raw" -X GET "$repo_path/contents/$path" -f ref="$base_ref" 2>&1)"
         content_rc=$?
         set -e
         if [ "$content_rc" -ne 0 ]; then

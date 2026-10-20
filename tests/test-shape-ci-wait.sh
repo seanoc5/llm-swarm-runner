@@ -42,6 +42,15 @@ mkdir -p "$TEST_DIR/bin"
 cat > "$TEST_DIR/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 [ -n "${GH_ARGS_LOG:-}" ] && printf '%s\n' "$*" >> "$GH_ARGS_LOG"
+# issue #644 follow-up: `gh api` sends POST, not GET, whenever ANY -f/-F is
+# given — proven live against real GitHub (a bare -f ref=... content fetch
+# 404s; the same call with -X GET succeeds). Fail the stub the same way the
+# real API would 404 it, so this proves the METHOD actually sent, not just
+# that the right args were built.
+if [ "$1" = "api" ] && printf '%s\n' "$*" | grep -qE -- '(^| )-[fF] ' && ! printf '%s\n' "$*" | grep -q -- '-X GET'; then
+    echo '{"message":"Not Found","status":"404"}' >&2
+    exit 1
+fi
 case "$1 $2" in
     "pr view")
         n=0
