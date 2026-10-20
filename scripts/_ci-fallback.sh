@@ -172,9 +172,19 @@ ci_fallback_workflows_relevant_to_pr() {
     # large PR past that cap would silently drop files from the relevance
     # check, so this goes through the REST files endpoint with --paginate
     # instead, which follows every Link header.
+    #
+    # issue #644 round-5 (coordinator review): a renamed file's OLD path
+    # (`.previous_filename`) must be in this set too, not just its new
+    # `.filename` — a PR that moves `src/Foo.kt` to `docs/Foo.kt` is a real
+    # source change, but with only the new path collected it reads as
+    # docs-only and a paths-ignore filter on docs/ can wrongly return
+    # "excluded". Adding the old path only ever ADDS an entry to the
+    # changed-file set this function checks, which can only push a
+    # per-workflow verdict from "excluded" toward "triggers" — the safe
+    # direction — never the other way.
     local files_list files_rc
     set +e
-    files_list="$(gh api --paginate "$repo_path/pulls/$pr/files" --jq '.[].filename' 2>&1)"
+    files_list="$(gh api --paginate "$repo_path/pulls/$pr/files" --jq '.[] | .filename, (.previous_filename // empty)' 2>&1)"
     files_rc=$?
     set -e
     if [ "$files_rc" -ne 0 ] || [ -z "$files_list" ]; then

@@ -132,9 +132,24 @@ if [ "\$1" = "api" ]; then
     elif printf '%s\n' "\$args" | grep -q -- 'pulls/.*/files'; then
         # ci_fallback_workflows_relevant_to_pr's changed-files lookup (REST,
         # --paginate — gh pr view --json files truncates at 100, cli/cli#5366).
-        # GH_PR_FILES_JSON is already the flat ["path", ...] shape, standing
-        # in for the real endpoint's --jq '.[].filename' output.
-        printf '%s' "\${GH_PR_FILES_JSON:-[]}" | jq -r '.[]'
+        # GH_PR_FILES_JSON is usually the flat ["path", ...] shape (a plain
+        # string element is one changed file with no rename), normalized
+        # below into the real API's per-file object shape; an element
+        # already given as an object (issue #644 round-5) is
+        # {"filename":"new/path","previous_filename":"old/path"}, a real
+        # GitHub rename entry. Unlike a hard-coded stand-in filter, this
+        # extracts and runs THE SCRIPT'S OWN --jq expression against that
+        # normalized fixture, so a regression that drops previous_filename
+        # from the real query is actually caught here.
+        JQ_FILES_EXPR=""
+        prev_fa=""
+        for fa in "\$@"; do
+            [ "\$prev_fa" = "--jq" ] && JQ_FILES_EXPR="\$fa"
+            prev_fa="\$fa"
+        done
+        printf '%s' "\${GH_PR_FILES_JSON:-[]}" \
+            | jq '[.[] | if type == "object" then . else {filename: .} end]' \
+            | jq -r "\$JQ_FILES_EXPR"
     elif printf '%s\n' "\$args" | grep -qF -- '.base.ref'; then
         # issue #644 final round + round-4: ci_fallback_workflows_relevant_to_pr's
         # lookup of the PR's OWN base AND head branch (base, to fetch each
@@ -582,6 +597,33 @@ GH_WORKFLOW_YAML_FOR_BASE_REF=
 [ "$rc" -eq 4 ] || red "expected exit 4 — the PR's own base branch has no path filter at all, got $rc: $(cat "$TEST_DIR/out.log")"
 gh_ready_called && red "expected gh pr ready NOT to run — the default branch's paths-ignore must never substitute for the PR's actual base branch"
 green "a non-default-base PR is evaluated against its OWN base branch's workflow copy, not the repo default branch's"
+
+# ============================================================================
+heading "Test 15j: 'no checks reported', a PR's ONLY change is a rename from a non-ignored path into docs/ — still refuses ci-pending (issue #644 round-5)"
+# ============================================================================
+# The REST files endpoint reports a rename as one entry whose NEW path is
+# docs/Foo.kt and whose OLD path (previous_filename) was src/Foo.kt. Only the
+# new path is under the paths-ignore filter below — if the old path were
+# never added to the changed-file set, this would misread as docs-only and
+# ready early even though it's a real source-file move.
+printf '<!-- BLIND_MERGE_RISK: low -->\nsome change\n' > "$BODY_FILE"
+make_fake_review 0
+GH_CHECKS_RC=1
+GH_CHECKS_STDERR="no checks reported on the 'main' branch"
+GH_WORKFLOW_COUNT=1
+GH_PR_FILES_JSON='[{"filename":"docs/Foo.kt","previous_filename":"src/Foo.kt"}]'
+GH_WORKFLOW_PATHS_JSON='[".github/workflows/build.yml"]'
+GH_WORKFLOW_YAML=$'on:\n  pull_request:\n    paths-ignore:\n      - \x27docs/**\x27\n      - \x27**.md\x27\n'
+rc=0; run_pr_ready || rc=$?
+GH_CHECKS_RC=0
+GH_CHECKS_STDERR=""
+GH_WORKFLOW_COUNT=0
+GH_PR_FILES_JSON=
+GH_WORKFLOW_PATHS_JSON=
+GH_WORKFLOW_YAML=
+[ "$rc" -eq 4 ] || red "expected exit 4 — a rename's OLD path (src/Foo.kt) falls outside paths-ignore, so a real run is still pending, got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called && red "expected gh pr ready NOT to run when a renamed file's old path falls outside every paths-ignore"
+green "a rename into docs/ is judged by its OLD path too, not just its new paths-ignored name"
 
 # ============================================================================
 heading "Test 16: self-review round cap reached — skips another round, still readies on CI-green"

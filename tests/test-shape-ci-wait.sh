@@ -80,9 +80,25 @@ case "$1 $2" in
     "api --paginate")
         # issue #639: ci_fallback_workflows_relevant_to_pr's own changed-
         # files lookup (REST, --paginate — gh pr view --json files truncates
-        # at 100, cli/cli#5366). GH_PR_FILES_JSON is already the flat
-        # ["path", ...] shape, standing in for the real --jq '.[].filename'.
-        printf '%s' "${GH_PR_FILES_JSON:-[]}" | jq -r '.[]'
+        # at 100, cli/cli#5366). GH_PR_FILES_JSON is usually the flat
+        # ["path", ...] shape (a plain string element is one changed file
+        # with no rename), normalized below into the real API's per-file
+        # object shape; an element already given as an object (issue #644
+        # round-5) is {"filename":"new/path","previous_filename":"old/path"},
+        # a real GitHub rename entry. Unlike a hard-coded stand-in filter,
+        # this extracts and runs THE SCRIPT'S OWN --jq expression against
+        # that normalized fixture, so a regression that drops
+        # previous_filename from the real query is actually caught here
+        # rather than only in this stub's separate emulation of it.
+        jq_expr=""
+        prev_arg=""
+        for a in "$@"; do
+            [ "$prev_arg" = "--jq" ] && jq_expr="$a"
+            prev_arg="$a"
+        done
+        printf '%s' "${GH_PR_FILES_JSON:-[]}" \
+            | jq '[.[] | if type == "object" then . else {filename: .} end]' \
+            | jq -r "$jq_expr"
         exit 0 ;;
     "api repos/{owner}/{repo}/pulls/"*|"api repos/owner/repo/pulls/"*)
         # issue #644 final round + round-4: ci_fallback_workflows_relevant_to_pr's
@@ -361,6 +377,21 @@ out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_NO_CHECKS=1 GH_
     GH_WORKFLOW_YAML_FOR_BASE_REF=$'on:\n  pull_request:\n' \
     CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 2 2>&1)" || rc=$?
 check "exits 2 (timeout/pending), never 5 — the PR's actual base branch has no path filter at all" '[ "$rc" -eq 2 ]'
+
+# issue #644 round-5 (coordinator review): the REST files endpoint reports a
+# rename as one entry whose NEW path is docs/Foo.kt and whose OLD path
+# (previous_filename) was src/Foo.kt. Only the new path is under the
+# paths-ignore filter below — if the old path were never added to the
+# changed-file set, this would misread as docs-only and exit 5 even though
+# it's a real source-file move.
+heading "Test 8k: a PR's ONLY change is a rename from a non-ignored path into docs/ → exit 2 (pending), never 5"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_NO_CHECKS=1 GH_WORKFLOW_COUNT=1 \
+    GH_PR_FILES_JSON='[{"filename":"docs/Foo.kt","previous_filename":"src/Foo.kt"}]' \
+    GH_WORKFLOW_PATHS_JSON='[".github/workflows/build.yml"]' \
+    GH_WORKFLOW_YAML=$'on:\n  pull_request:\n    paths-ignore:\n      - \x27docs/**\x27\n      - \x27**.md\x27\n' \
+    CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 2 2>&1)" || rc=$?
+check "exits 2 (timeout/pending), never 5 — a rename's OLD path (src/Foo.kt) falls outside paths-ignore" '[ "$rc" -eq 2 ]'
 
 # ── Test 9: fine-grained token can't read Checks → falls back to gh run list, green ──
 #
