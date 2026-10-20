@@ -33,9 +33,18 @@ PASS=0
 WF="$TEST_DIR/workflow.yml"
 FILES="$TEST_DIR/files.txt"
 
-run() {  # run <expected-verdict> <description>
-    local expected="$1" desc="$2" got
-    got="$(python3 "$FILTER" "$WF" "$FILES")"
+# issue #644 round-4: every call now takes a head-branch argument, used only
+# to evaluate a `push` trigger's branches/branches-ignore filter. Most of the
+# tests below are about pull_request path filtering, or about a push trigger
+# with no branch filter at all, so a default that doesn't collide with any
+# of the literal "main"/"master" branches filters in this file's push
+# fixtures keeps those tests about what they say they're about; tests that
+# are specifically about the branch filter pass their own head branch.
+DEFAULT_HEAD_BRANCH="feature/change"
+
+run() {  # run <expected-verdict> <description> [head-branch]
+    local expected="$1" desc="$2" head="${3:-$DEFAULT_HEAD_BRANCH}" got
+    got="$(python3 "$FILTER" "$WF" "$FILES" "$head")"
     if [ "$got" = "$expected" ]; then
         green "$desc (-> $got)"
         PASS=$((PASS + 1))
@@ -64,7 +73,11 @@ jobs:
     runs-on: ubuntu-latest
 EOF
 printf 'docs/foo.md\nREADME.md\n' > "$FILES"
-run excluded "all changed files under paths-ignore patterns (on BOTH the pull_request and push triggers)"
+# DEFAULT_HEAD_BRANCH ("feature/change") doesn't match the push trigger's
+# `branches: [main]`, so push's own verdict is "no-trigger" (issue #644
+# round-4: its paths-ignore is never even looked at) — pull_request's
+# confident path exclusion is what actually drives "excluded" here.
+run excluded "pull_request's paths-ignore confidently excludes every changed file (push doesn't apply to this head branch at all)"
 
 # ─────────────── Test 2: paths-ignore, one changed file falls outside it → triggers ───────
 
@@ -146,10 +159,13 @@ run triggers "a bare scalar on: pull_request always triggers"
 # ─── Test 9/9b/9c: push-only workflow (no pull_request key at all) — issue ───
 # #644 third follow-up: a same-repo PR's branch push fires a push-only
 # workflow too, and that run lands on the exact commit `gh pr checks`
-# reads, so this must never be read as "no-trigger" — only as "triggers"
-# or "excluded" depending on its own path filter.
+# reads, so this must never be read as "no-trigger" when its branch filter
+# allows this head branch. issue #644 round-4: a push trigger's OWN path
+# filter is never evaluated at all (it applies to the push's own diff, not
+# this PR's changed files) — so a push-only workflow is "triggers" or
+# "no-trigger" purely off its branch filter, never "excluded".
 
-heading "Test 9: block-form on: with only push, no path filter at all -> triggers (never no-trigger)"
+heading "Test 9: block-form on: with only push, branch filter matches, no path filter at all -> triggers"
 cat > "$WF" <<'EOF'
 name: push-only
 on:
@@ -157,9 +173,9 @@ on:
     branches: [main]
 EOF
 printf 'docs/foo.md\n' > "$FILES"
-run triggers "a push-only workflow with no path filter always creates a run on the PR's head commit"
+run triggers "a push-only workflow whose branch filter matches this PR's head branch always creates a run on the PR's head commit" "main"
 
-heading "Test 9b: push-only workflow, paths-ignore covers every changed file -> excluded (docs-only PR may proceed)"
+heading "Test 9b: push-only workflow, branch filter matches, paths-ignore covers every changed file -> triggers anyway (issue #644 round-4 fix — a push's path filter is NEVER read)"
 cat > "$WF" <<'EOF'
 name: push-only-filtered
 on:
@@ -170,11 +186,58 @@ on:
       - '**.md'
 EOF
 printf 'docs/foo.md\nREADME.md\n' > "$FILES"
-run excluded "a push-only workflow's own paths-ignore excludes an all-docs changed-file set"
+run triggers "a push-only workflow's own paths-ignore is irrelevant to the PR's changed files — GitHub evaluates it against the push's own diff, which this scanner can't see, so this must still wait rather than reading as excluded" "main"
 
-heading "Test 9c: push-only workflow, paths-ignore filter, a changed file falls outside it -> triggers (a source change must wait)"
+heading "Test 9c: push-only workflow, branch filter matches, paths-ignore filter, a changed file falls outside it -> still triggers"
 printf 'docs/foo.md\nsrc/main.py\n' > "$FILES"
-run triggers "a push-only workflow with a non-ignored changed file still creates a real run"
+run triggers "a push-only workflow with a non-ignored changed file still creates a real run (same reasoning as 9b: the path filter was never consulted either way)" "main"
+
+heading "Test 9d: push trigger with NO branch filter at all, paths-ignore covers every changed file -> triggers, never excluded"
+cat > "$WF" <<'EOF'
+name: push-no-branch-filter
+on:
+  push:
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+EOF
+printf 'docs/foo.md\nREADME.md\n' > "$FILES"
+run triggers "a push trigger with no branches filter fires for every branch, including this PR's — its paths-ignore (meant for the push's own diff) must never be read as excluding a docs-only PR"
+
+heading "Test 9e: push trigger's branches-ignore matches the PR's own head branch -> no-trigger (legitimate: no push run can ever attach to this head)"
+cat > "$WF" <<'EOF'
+name: push-branches-ignore
+on:
+  push:
+    branches-ignore:
+      - 'release/*'
+EOF
+printf 'src/main.py\n' > "$FILES"
+run no-trigger "a branches-ignore pattern matching the PR's own head branch rules out this push trigger entirely" "release/2.0"
+
+heading "Test 9f: same branches-ignore pattern, a head branch that does NOT match -> triggers"
+run triggers "a branches-ignore pattern that doesn't match this PR's head branch leaves the push trigger fully live" "feature/change"
+
+heading "Test 9g: civicstrata's real build.yml fixture — pull_request + push both paths-ignore docs/md, docs-only PR from a non-master branch -> excluded"
+# civicstrata#602/#603 lineage, issue #644 round-4 coordinator ruling point 2:
+# pull_request's path filter confidently excludes every changed file; push's
+# branches: [master] doesn't match this PR's head branch, so push is
+# legitimately "no-trigger" and contributes no contradicting evidence —
+# overall verdict must still be "excluded".
+cat > "$WF" <<'EOF'
+name: build
+on:
+  pull_request:
+    paths-ignore: ['**.md', 'docs/**']
+  push:
+    branches: [master]
+    paths-ignore: ['**.md', 'docs/**']
+jobs:
+  build:
+    runs-on: ubuntu-latest
+EOF
+printf 'docs/foo.md\nREADME.md\n' > "$FILES"
+run excluded "a docs-only PR from fix/issue-N (not master) comes out confidently excluded, matching civicstrata's real workflow" "fix/issue-N"
 
 # ─────────────── Test 10: inline flow map on pull_request: itself -> unknown (not a guess) ─
 

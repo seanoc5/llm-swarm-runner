@@ -136,10 +136,12 @@ if [ "\$1" = "api" ]; then
         # in for the real endpoint's --jq '.[].filename' output.
         printf '%s' "\${GH_PR_FILES_JSON:-[]}" | jq -r '.[]'
     elif printf '%s\n' "\$args" | grep -qF -- '.base.ref'; then
-        # issue #644 final round: ci_fallback_workflows_relevant_to_pr's
-        # lookup of the PR's OWN base branch, used to fetch each workflow
-        # file at that ref instead of the repo default branch.
-        echo "\${GH_PR_BASE_REF:-main}"
+        # issue #644 final round + round-4: ci_fallback_workflows_relevant_to_pr's
+        # lookup of the PR's OWN base AND head branch (base, to fetch each
+        # workflow file at that ref instead of the repo default branch;
+        # head, to evaluate a push trigger's branches/branches-ignore
+        # filter — never its path filter).
+        printf '%s\t%s\n' "\${GH_PR_BASE_REF:-main}" "\${GH_PR_HEAD_REF:-feature/change}"
     elif printf '%s\n' "\$args" | grep -q -- 'contents/'; then
         # issue #644 final round: the content fetch now carries '-f
         # ref=<base-branch>' — serve a DIFFERENT workflow YAML when that ref
@@ -187,7 +189,7 @@ run_pr_ready() {
         GH_WORKFLOW_COUNT="${GH_WORKFLOW_COUNT:-0}" \
         GH_PR_FILES_JSON="${GH_PR_FILES_JSON:-[]}" GH_WORKFLOW_PATHS_JSON="${GH_WORKFLOW_PATHS_JSON:-[]}" \
         GH_WORKFLOW_YAML="${GH_WORKFLOW_YAML:-}" \
-        GH_PR_BASE_REF="${GH_PR_BASE_REF:-}" GH_WORKFLOW_YAML_FOR_BASE_REF="${GH_WORKFLOW_YAML_FOR_BASE_REF:-}" \
+        GH_PR_BASE_REF="${GH_PR_BASE_REF:-}" GH_PR_HEAD_REF="${GH_PR_HEAD_REF:-}" GH_WORKFLOW_YAML_FOR_BASE_REF="${GH_WORKFLOW_YAML_FOR_BASE_REF:-}" \
         GH_SHA="${GH_SHA:-deadbeef}" GH_SHA_LOOKUP_FAILS="${GH_SHA_LOOKUP_FAILS:-0}" \
         GH_RUNLIST_JSON="${GH_RUNLIST_JSON:-[]}" GH_RUNLIST_RC="${GH_RUNLIST_RC:-0}" \
         GH_RUNLIST_STDERR="${GH_RUNLIST_STDERR:-}" \
@@ -494,8 +496,13 @@ gh_ready_called && red "expected gh pr ready NOT to run when a push-only workflo
 green "a push-only workflow with no path filter is never read as no-trigger — still refuses on a source-file change"
 
 # ============================================================================
-heading "Test 15g: 'no checks reported', a push-only workflow with paths-ignore covering a docs-only PR — WARNs, still readies"
+heading "Test 15g: 'no checks reported', a push-only workflow whose branch filter matches, paths-ignore covering a docs-only PR — still refuses ci-pending (issue #644 round-4 fix)"
 # ============================================================================
+# GitHub evaluates a push trigger's paths-ignore against that PUSH'S OWN
+# diff, never pulls/<pr>/files — a docs-only PR branch can merge master in
+# and carry source files on its next push, so this filter is never read at
+# all (in either direction). Only the branch filter is, and it matches here,
+# so this must still wait rather than readying off a false "excluded".
 printf '<!-- BLIND_MERGE_RISK: low -->\nsome change\n' > "$BODY_FILE"
 make_fake_review 0
 GH_CHECKS_RC=1
@@ -503,6 +510,7 @@ GH_CHECKS_STDERR="no checks reported on the 'main' branch"
 GH_WORKFLOW_COUNT=1
 GH_PR_FILES_JSON='["docs/foo.md","README.md"]'
 GH_WORKFLOW_PATHS_JSON='[".github/workflows/build.yml"]'
+GH_PR_HEAD_REF='main'
 GH_WORKFLOW_YAML=$'on:\n  push:\n    branches: [main]\n    paths-ignore:\n      - \x27docs/**\x27\n      - \x27**.md\x27\n'
 rc=0; run_pr_ready || rc=$?
 GH_CHECKS_RC=0
@@ -510,11 +518,41 @@ GH_CHECKS_STDERR=""
 GH_WORKFLOW_COUNT=0
 GH_PR_FILES_JSON=
 GH_WORKFLOW_PATHS_JSON=
+GH_PR_HEAD_REF=
 GH_WORKFLOW_YAML=
-[ "$rc" -eq 0 ] || red "expected exit 0 — a push-only workflow's own paths-ignore excludes an all-docs changed-file set, got $rc: $(cat "$TEST_DIR/out.log")"
-gh_ready_called || red "expected gh pr ready to run once a push-only workflow's paths-ignore excludes every changed file"
+[ "$rc" -eq 4 ] || red "expected exit 4 — a push trigger's own paths-ignore is never evaluated, only its branch filter, got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called && red "expected gh pr ready NOT to run — the branch filter matches, so this commit's run likely hasn't registered yet"
+green "a push-only workflow's paths-ignore never excuses readying early — only its branch filter is ever consulted"
+
+# ============================================================================
+heading "Test 15i: civicstrata's real build.yml fixture — pull_request + push both paths-ignore docs/md, docs-only PR from fix/issue-639 (not master) — WARNs, still readies"
+# ============================================================================
+# The coordinator's real-world check (issue #644 round-4 point 2): push's
+# branches: [master] doesn't match this PR's head branch (legitimate
+# no-trigger), and pull_request's own paths-ignore confidently excludes
+# every changed file — together, still a confident "no CI will ever
+# register".
+printf '<!-- BLIND_MERGE_RISK: low -->\nsome change\n' > "$BODY_FILE"
+make_fake_review 0
+GH_CHECKS_RC=1
+GH_CHECKS_STDERR="no checks reported on the 'main' branch"
+GH_WORKFLOW_COUNT=1
+GH_PR_FILES_JSON='["docs/foo.md","README.md"]'
+GH_WORKFLOW_PATHS_JSON='[".github/workflows/build.yml"]'
+GH_PR_HEAD_REF='fix/issue-639'
+GH_WORKFLOW_YAML=$'on:\n  pull_request:\n    paths-ignore: [\x27**.md\x27, \x27docs/**\x27]\n  push:\n    branches: [master]\n    paths-ignore: [\x27**.md\x27, \x27docs/**\x27]\n'
+rc=0; run_pr_ready || rc=$?
+GH_CHECKS_RC=0
+GH_CHECKS_STDERR=""
+GH_WORKFLOW_COUNT=0
+GH_PR_FILES_JSON=
+GH_WORKFLOW_PATHS_JSON=
+GH_PR_HEAD_REF=
+GH_WORKFLOW_YAML=
+[ "$rc" -eq 0 ] || red "expected exit 0 — a docs-only PR from a non-master branch is still confidently excluded, got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called || red "expected gh pr ready to run once both triggers confirm no CI will ever register"
 grep -qi 'WARN' "$TEST_DIR/out.log" || red "expected a WARN about the path-filtered changed files: $(cat "$TEST_DIR/out.log")"
-green "a push-only workflow whose paths-ignore excludes every changed file readies with a WARN, same as a path-filtered pull_request workflow"
+green "civicstrata's exact build.yml shape readies with a WARN for a docs-only PR off a non-master branch"
 
 # ============================================================================
 heading "Test 15h: 'no checks reported', PR targets a non-default base branch whose own workflow copy has NO paths-ignore — still refuses ci-pending, even though the default branch's copy ignores docs (issue #644 final round)"

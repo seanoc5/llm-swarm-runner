@@ -6,31 +6,53 @@ commit, for a given set of changed file paths (issue #639, #644 follow-up
 
 Not a full YAML parser (stdlib only, no PyYAML dependency) — a tolerant,
 indentation-based line scanner over the narrow subset of workflow syntax
-that `on:` / `pull_request:` / `push:` / `paths:` / `paths-ignore:`
-actually use: block mappings, block sequences ("- item"), and single-line
-flow lists ("[a, b]"). Good enough for real-world workflow files; anything
-it can't confidently parse prints "unknown" rather than guessing, so a
-caller can fail toward "this workflow still applies" (the safe direction:
-keep waiting on CI) instead of silently warning-and-proceeding on a file
-it misread.
+that `on:` / `pull_request:` / `push:` / `paths:` / `paths-ignore:` /
+`branches:` / `branches-ignore:` actually use: block mappings, block
+sequences ("- item"), and single-line flow lists ("[a, b]"). Good enough
+for real-world workflow files; anything it can't confidently parse prints
+"unknown" rather than guessing, so a caller can fail toward "this workflow
+still applies" (the safe direction: keep waiting on CI) instead of silently
+warning-and-proceeding on a file it misread.
 
 Usage:
-    _workflow-path-filter.py <workflow-yaml-file> <changed-files-file>
+    _workflow-path-filter.py <workflow-yaml-file> <changed-files-file> <head-branch>
+
+<head-branch> is the PR's own head branch name (`head.ref`, not a glob —
+one literal branch name). It is used ONLY to evaluate a `push` trigger's
+`branches`/`branches-ignore` filter (issue #644 round-4): GitHub applies a
+`push` workflow's `paths`/`paths-ignore` to THAT PUSH'S OWN diff, which
+this scanner has no way to know (it only ever sees the PR's changed-file
+list, from `pulls/<pr>/files`) — so a push trigger's path filter is never
+read at all, in either direction. Its branch filter, by contrast, really
+does decide whether a push event can fire for this branch name, so that
+part IS evaluated, against <head-branch>. A push trigger whose branch
+filter excludes <head-branch> can never attach a run to this PR's head, no
+matter what its push diff contains — that is reported as "no-trigger" for
+that trigger, never "excluded" (which this scanner reserves for a
+confident PATH-filter exclusion on pull_request/pull_request_target).
 
 <changed-files-file> is one repo-relative path per line (blank lines
-ignored). Prints exactly one line to stdout and exits 0:
+ignored), and is used only for pull_request/pull_request_target path
+filters, never for push. Prints exactly one line to stdout and exits 0:
 
     no-trigger   the workflow has none of pull_request, pull_request_target,
                  push or workflow_run — nothing that attaches a run to this
                  PR's head commit (a schedule/workflow_dispatch/release-only
-                 workflow, say)
-    triggers     it has a pull_request/pull_request_target/push trigger
-                 with no path filter, or with a filter that at least one
-                 changed file satisfies
-    excluded     it has ONLY path-filtered pull_request/pull_request_target/
-                 push triggers (paths-ignore, or paths) and NONE of the
-                 changed files would satisfy any of them
-    unknown      couldn't confidently parse the trigger or its filters, or
+                 workflow, say) — OR it has only push trigger(s), and every
+                 one's branch filter rules out this PR's own head branch
+                 (issue #644 round-4): legitimate (no push run can ever
+                 attach), but NOT by itself evidence of a confident
+                 exclusion the way "excluded" below is
+    triggers     it has a pull_request/pull_request_target trigger with no
+                 path filter, or with a filter that at least one changed
+                 file satisfies; OR a push trigger whose branch filter (if
+                 any) allows this PR's head branch — a push trigger's own
+                 path filter is NEVER evaluated (see <head-branch> above)
+    excluded     every pull_request/pull_request_target trigger present
+                 confidently path-filters out all of <changed-files-file>
+                 (paths-ignore, or paths), AND no push trigger's branch
+                 filter allows this PR's head branch to fire one instead
+    unknown      couldn't confidently parse a trigger or its filters, or
                  the workflow has a workflow_run trigger (its path filter,
                  if any, isn't evaluated by this scanner at all, and
                  whether it attaches to the PR's head SHA depends on the
@@ -39,11 +61,21 @@ ignored). Prints exactly one line to stdout and exits 0:
 
 A same-repo PR's branch push fires `push`-triggered workflows too, and
 those runs land on the exact head SHA a caller's `gh pr checks` reads —
-a bare `on: push` workflow is therefore just as real a source of CI as
-`pull_request` and must never be read as "no-trigger" (that was issue
-#644's third follow-up: a push-only workflow fell through a caller's
-no-trigger handling straight to "excluded", silently readying any PR,
-source changes included, in a push-only repo).
+a bare `on: push` workflow with no branch filter is therefore just as
+real a source of CI as `pull_request` and must never be read as
+"no-trigger" (that was issue #644's third follow-up: a push-only workflow
+fell through a caller's no-trigger handling straight to "excluded",
+silently readying any PR, source changes included, in a push-only repo).
+
+issue #644 round-4: a `push` trigger's branch filter CAN rule it out for a
+given PR, though — if `branches`/`branches-ignore` means this event can
+never fire for the PR's own head branch, no push run will EVER attach to
+that PR's head commit, full stop. That is reported the same way as a
+workflow with no relevant trigger at all ("no-trigger" for that trigger),
+which is evidence of absence only when paired with another trigger
+(typically `pull_request`) that independently confirms a confident path
+exclusion — see `_path_filtered_trigger_verdict`'s and this scanner's
+overall `verdict()` docstring below for how the two combine.
 
 A non-zero exit (should only happen on a bad invocation, e.g. a missing
 argument) must be treated by the caller the same as "unknown".
@@ -227,7 +259,7 @@ OTHER_RUN_TRIGGER_KEYS = ("workflow_run",)
 
 
 def _path_filtered_trigger_verdict(pr_rest, pr_children, changed_files):
-    """Verdict for a single already-found pull_request(_target)/push entry."""
+    """Verdict for a single already-found pull_request(_target) entry."""
     if pr_rest:
         # Inline value on the key's own line (e.g. "{}" or a one-line flow
         # map). Only a flow map could embed a paths filter, and parsing
@@ -260,7 +292,67 @@ def _path_filtered_trigger_verdict(pr_rest, pr_children, changed_files):
     return "excluded" if all(matches_any(f, patterns) for f in changed_files) else "triggers"
 
 
-def verdict(text, changed_files):
+def _push_trigger_verdict(push_rest, push_children, head_branch):
+    """Verdict for a single already-found `push` entry — branch filter
+    only, never path filter (issue #644 round-4: a push's `paths`/
+    `paths-ignore` apply to THAT PUSH'S OWN diff, which this scanner never
+    sees — only the PR's changed-file list — so reading them at all could
+    produce a confident-looking "excluded" that's actually just wrong).
+    Returns "triggers" (this branch can fire the event, unconditionally,
+    as far as this scanner can tell), "no-trigger" (a branch filter rules
+    <head_branch> out — legitimate: no push run can ever attach to this
+    PR's head commit), or "unknown" (couldn't confidently parse the
+    filter). Never "excluded" — that verdict is reserved for a confident
+    PATH-filter exclusion, which a push trigger can never produce here."""
+    if push_rest:
+        # Inline value (e.g. "{}" or a one-line flow map). Only a flow map
+        # could embed a branches filter — fail toward "unknown" rather than
+        # assume unrestricted.
+        return "unknown" if "branches" in push_rest else "triggers"
+
+    push_entries = own_level_entries(push_children)
+    branches = find_key(push_entries, "branches")
+    branches_ignore = find_key(push_entries, "branches-ignore")
+
+    if branches is None and branches_ignore is None:
+        return "triggers"  # no branch filter at all -> fires for any branch
+
+    if branches is not None:
+        rest, nested = branches
+        patterns = extract_list(rest, nested)
+        if patterns is None:
+            return "unknown"
+        if not patterns:
+            return "triggers"
+        return "triggers" if matches_any(head_branch, patterns) else "no-trigger"
+
+    rest, nested = branches_ignore
+    patterns = extract_list(rest, nested)
+    if patterns is None:
+        return "unknown"
+    if not patterns:
+        return "triggers"
+    return "no-trigger" if matches_any(head_branch, patterns) else "triggers"
+
+
+def verdict(text, changed_files, head_branch):
+    """Overall verdict for the whole workflow file, aggregating every
+    pull_request/pull_request_target/push trigger it defines (there can be
+    more than one — GitHub evaluates each independently, so the workflow
+    is relevant if ANY of them is):
+
+    - any entry "triggers"           -> "triggers"
+    - else any entry "unknown"       -> "unknown"
+    - else all entries "no-trigger"  -> "no-trigger" (nothing here
+      confirms a real exclusion — e.g. a lone push trigger whose branch
+      filter just doesn't match this PR's head branch)
+    - else (at least one "excluded", rest "excluded"/"no-trigger")
+                                      -> "excluded" (issue #644 round-4:
+      only pull_request/pull_request_target can ever contribute
+      "excluded" — see _push_trigger_verdict — so this case always has
+      real path-filter evidence behind it, even when a sibling push
+      entry contributed only "no-trigger")
+    """
     lines = parse_lines(text)
 
     on_rest = None
@@ -289,14 +381,20 @@ def verdict(text, changed_files):
     on_children = direct_children(lines, on_idx + 1, 0)
     on_entries = own_level_entries(on_children)
 
-    # Evaluate every path-filtered trigger the workflow defines (not just
-    # the first one found) — the workflow is relevant if ANY of them would
-    # fire, and excluded only if ALL of them are filtered out.
+    # Evaluate every pull_request(_target)/push trigger the workflow
+    # defines (not just the first one found) — the workflow is relevant if
+    # ANY of them would fire. `push` is dispatched to its own branch-filter
+    # verdict function (issue #644 round-4); it can never contribute
+    # "excluded" to this list.
     verdicts = []
     for key in PATH_FILTERED_TRIGGER_KEYS:
         entry = find_key(on_entries, key)
-        if entry is not None:
-            pr_rest, pr_children = entry
+        if entry is None:
+            continue
+        pr_rest, pr_children = entry
+        if key == "push":
+            verdicts.append(_push_trigger_verdict(pr_rest, pr_children, head_branch))
+        else:
             verdicts.append(_path_filtered_trigger_verdict(pr_rest, pr_children, changed_files))
 
     if not verdicts:
@@ -308,20 +406,23 @@ def verdict(text, changed_files):
         return "triggers"
     if "unknown" in verdicts:
         return "unknown"
-    return "excluded"  # every path-filtered trigger present confidently excludes
+    if all(v == "no-trigger" for v in verdicts):
+        return "no-trigger"
+    return "excluded"  # at least one confident path-filter exclusion, nothing contradicts it
 
 
 def main(argv):
-    if len(argv) != 3:
-        print("usage: _workflow-path-filter.py <workflow-yaml-file> <changed-files-file>", file=sys.stderr)
+    if len(argv) != 4:
+        print("usage: _workflow-path-filter.py <workflow-yaml-file> <changed-files-file> <head-branch>", file=sys.stderr)
         return 2
     with open(argv[1], "r", encoding="utf-8", errors="replace") as fh:
         text = fh.read()
     with open(argv[2], "r", encoding="utf-8", errors="replace") as fh:
         changed_files = [line.strip() for line in fh if line.strip()]
+    head_branch = argv[3]
 
     try:
-        result = verdict(text, changed_files)
+        result = verdict(text, changed_files, head_branch)
     except Exception:  # noqa: BLE001 — a parse surprise must fail toward "unknown", never crash the CI gate
         result = "unknown"
     print(result)

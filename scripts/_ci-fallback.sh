@@ -128,6 +128,24 @@
 #       `paths`/`paths-ignore` at all) is "triggers", never "no-trigger" —
 #       GitHub still creates a real run on the PR's head commit for it.
 #
+#       issue #644 round-4 (coordinator review on this same PR): a `push`
+#       trigger's `paths`/`paths-ignore` are evaluated by GitHub against
+#       THAT PUSH'S OWN diff, never against `pulls/<pr>/files` — a docs-only
+#       PR branch that later merges master in carries source files on its
+#       next push, so a push-triggered run can attach to the PR head even
+#       though this function's only view of "the changed files" (the PR's
+#       own diff) is docs-only. Reading a push trigger's path filter at all
+#       was therefore unsound in the fail-OPEN direction opposite the one
+#       this function exists to prevent: it could read "excluded" for a
+#       push trigger that GitHub will actually fire a real run for. Fixed by
+#       never evaluating a push trigger's path filter, in either direction
+#       — `_workflow-path-filter.py` now evaluates only its branch filter
+#       (`branches`/`branches-ignore`, against the PR's own head branch
+#       name, fetched below alongside the base branch) and reports
+#       "no-trigger" when the branch filter rules out this head branch
+#       (legitimate: no push run can ever attach to it), never "excluded".
+#       `pull_request`/`pull_request_target` path filtering is unaffected.
+#
 #       Always returns 0 (never fails the caller's `set -e`) — every
 #       failure mode (an unreadable PR, an unreadable workflow list, an
 #       unreadable workflow file, a parse the Python helper couldn't
@@ -142,7 +160,10 @@ ci_fallback_workflows_relevant_to_pr() {
     local repo_path="repos/{owner}/{repo}"
     local i
     for ((i = 0; i < ${#repo_args[@]}; i++)); do
-        if [ "${repo_args[$i]}" = "--repo" ]; then
+        # `gh` itself treats --repo and -R as the exact same flag; a caller
+        # passing repo_args straight through from its own -R should get the
+        # same repo_path this function already builds from --repo.
+        if [ "${repo_args[$i]}" = "--repo" ] || [ "${repo_args[$i]}" = "-R" ]; then
             repo_path="repos/${repo_args[$((i + 1))]}"
         fi
     done
@@ -204,24 +225,35 @@ ci_fallback_workflows_relevant_to_pr() {
     # issue #644 final round: the PR's own base branch, not the repo
     # default — a workflow's path filters can differ by target branch, and
     # reading the wrong branch's copy can produce a false "excluded".
-    # issue #644 follow-up: stderr kept apart from base_ref itself (a
+    # issue #644 round-4: also the PR's own head branch, needed below to
+    # evaluate a push trigger's branches/branches-ignore filter (never its
+    # path filter — see the round-4 comment above). One call, one --jq
+    # expression, so there's no second round trip for it.
+    # issue #644 follow-up: stderr kept apart from the refs themselves (a
     # separate temp file, same isolation #643 applied to ci-wait.sh's gh pr
     # view reads) — an exit-0 call that still writes to stderr (an update
-    # notice, a deprecation warning) must never land inside the ref name
-    # this gets percent-encoded and fetched with below.
-    local base_ref base_ref_rc base_ref_err
-    base_ref_err="$(mktemp)"
+    # notice, a deprecation warning) must never land inside a ref name this
+    # gets percent-encoded and fetched with below.
+    local pr_refs pr_refs_rc pr_refs_err base_ref head_ref
+    pr_refs_err="$(mktemp)"
     set +e
-    base_ref="$(gh api "$repo_path/pulls/$pr" --jq '.base.ref' 2>"$base_ref_err")"
-    base_ref_rc=$?
+    pr_refs="$(gh api "$repo_path/pulls/$pr" --jq '[.base.ref, .head.ref] | @tsv' 2>"$pr_refs_err")"
+    pr_refs_rc=$?
     set -e
-    if [ "$base_ref_rc" -ne 0 ] || [ -z "$base_ref" ] || [ "$base_ref" = "null" ]; then
+    if [ "$pr_refs_rc" -ne 0 ] || [ -z "$pr_refs" ]; then
         CI_FALLBACK_RELEVANT="yes"
-        CI_FALLBACK_RELEVANT_DETAIL="couldn't read PR #$pr's base branch: $(cat "$base_ref_err")$base_ref"
-        rm -f "$base_ref_err"
+        CI_FALLBACK_RELEVANT_DETAIL="couldn't read PR #$pr's base/head branch: $(cat "$pr_refs_err")$pr_refs"
+        rm -f "$pr_refs_err"
         return 0
     fi
-    rm -f "$base_ref_err"
+    rm -f "$pr_refs_err"
+    base_ref="$(cut -f1 <<<"$pr_refs")"
+    head_ref="$(cut -f2 <<<"$pr_refs")"
+    if [ -z "$base_ref" ] || [ "$base_ref" = "null" ] || [ -z "$head_ref" ] || [ "$head_ref" = "null" ]; then
+        CI_FALLBACK_RELEVANT="yes"
+        CI_FALLBACK_RELEVANT_DETAIL="PR #$pr's base/head branch came back empty or null"
+        return 0
+    fi
 
     local tmp_files tmp_wf
     tmp_files="$(mktemp)"
@@ -247,7 +279,7 @@ ci_fallback_workflows_relevant_to_pr() {
             return 0
         fi
         printf '%s' "$content" > "$tmp_wf"
-        verdict="$(python3 "$_CI_FALLBACK_SCRIPT_DIR/_workflow-path-filter.py" "$tmp_wf" "$tmp_files" 2>/dev/null || echo unknown)"
+        verdict="$(python3 "$_CI_FALLBACK_SCRIPT_DIR/_workflow-path-filter.py" "$tmp_wf" "$tmp_files" "$head_ref" 2>/dev/null || echo unknown)"
         case "$verdict" in
             triggers)
                 CI_FALLBACK_RELEVANT="yes"
