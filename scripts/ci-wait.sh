@@ -224,8 +224,25 @@ while true; do
     # be green) instead of the new, unverified one. Re-read it every
     # iteration instead, and track the move explicitly rather than quietly
     # carrying on with whichever commit happened to be current at the top.
-    HEAD_JSON="$(gh pr view "$PR" "${REPO_ARGS[@]}" --json headRefOid 2>&1)" \
-        || { echo "ci-wait: gh pr view $PR failed: $HEAD_JSON" >&2; exit 4; }
+    # issue #643 follow-up: a single transient `gh pr view` failure mid-poll
+    # (a rate-limit blip, a flaky network hiccup) must not end the whole
+    # wait — retry once, after a short sleep, before refusing. Exit 4 only
+    # if it fails twice in a row. Never fall back to the previous SHA on
+    # failure — a failed read means "unknown", not "unchanged".
+    set +e
+    HEAD_JSON="$(gh pr view "$PR" "${REPO_ARGS[@]}" --json headRefOid 2>&1)"
+    HEAD_RC=$?
+    set -e
+    if [ "$HEAD_RC" -ne 0 ]; then
+        echo "ci-wait: gh pr view $PR failed (retrying once): $HEAD_JSON" >&2
+        sleep 3
+        set +e
+        HEAD_JSON="$(gh pr view "$PR" "${REPO_ARGS[@]}" --json headRefOid 2>&1)"
+        HEAD_RC=$?
+        set -e
+        [ "$HEAD_RC" -eq 0 ] \
+            || { echo "ci-wait: gh pr view $PR failed twice in a row: $HEAD_JSON" >&2; exit 4; }
+    fi
     NEW_SHA="$(jq -r '.headRefOid' <<<"$HEAD_JSON")"
     if [ "$NEW_SHA" != "$SHA" ]; then
         echo "ci-wait: PR #$PR's head moved from ${SHA:0:12} to ${NEW_SHA:0:12} while waiting — now watching the new commit; the old one's CI result no longer counts." >&2

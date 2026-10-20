@@ -56,6 +56,19 @@ case "$1 $2" in
             # mid-wait; defaults to GH_VIEW_HEADSHA so every pre-existing
             # test (none of which sets this var) sees the same head
             # throughout, unaffected.
+            mn=0
+            if [ -f "${GH_MIDWAIT_CALL_COUNT_FILE:-/dev/null}" ]; then mn="$(cat "$GH_MIDWAIT_CALL_COUNT_FILE")"; fi
+            mn=$((mn + 1))
+            [ -n "${GH_MIDWAIT_CALL_COUNT_FILE:-}" ] && echo "$mn" > "$GH_MIDWAIT_CALL_COUNT_FILE"
+            # issue #643 follow-up: GH_VIEW_MIDWAIT_FAIL_UNTIL=<n> makes this
+            # bare per-poll read fail for its first n calls (a transient
+            # `gh pr view` error), then succeed from call n+1 on — so a test
+            # can prove a single transient failure gets retried rather than
+            # ending the wait.
+            if [ -n "${GH_VIEW_MIDWAIT_FAIL_UNTIL:-}" ] && [ "$mn" -le "$GH_VIEW_MIDWAIT_FAIL_UNTIL" ]; then
+                echo "GraphQL: transient error (simulated)" >&2
+                exit 1
+            fi
             echo "{\"headRefOid\":\"${GH_VIEW_HEADSHA_MIDWAIT:-${GH_VIEW_HEADSHA:-deadbeef}}\"}"
             exit 0
         fi
@@ -489,6 +502,26 @@ out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_VIEW_HEADSHA=oldsha GH
 check "never exits 0 on the old commit's stale green run (times out/refuses instead)" '[ "$rc" -ne 0 ]'
 check "exits 2 (timeout), correctly still pending on the real, current head" '[ "$rc" -eq 2 ]'
 check "message logs the head move detected mid-wait" 'grep -qi "head moved" <<<"$out"'
+
+# ── Test 19: issue #643 — one transient per-poll `gh pr view` failure must be retried once, not end the wait ──
+#
+# The bare --json headRefOid read at the top of the poll loop fails exactly
+# ONCE (a simulated rate-limit/network blip), then succeeds on every call
+# after. Before this fix, ci-wait.sh exited 4 on the very first failure;
+# now it must retry once and carry on to a normal green pass, never
+# surfacing the transient error as a hard refusal.
+
+heading "Test 19: a single transient per-poll gh pr view failure is retried, not treated as exit 4"
+rc=0
+MIDWAIT_COUNT_FILE_19="$TEST_DIR/gh-midwait-call-count-19"
+rm -f "$MIDWAIT_COUNT_FILE_19"
+out="$(GH_MIDWAIT_CALL_COUNT_FILE="$MIDWAIT_COUNT_FILE_19" GH_VIEW_MIDWAIT_FAIL_UNTIL=1 \
+    GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_RC=0 \
+    GH_RUNLIST_JSON='[{"status":"completed","conclusion":"success"}]' \
+    "$CI_WAIT" 42 10 2>&1)" || rc=$?
+check "survives the transient failure and still passes (exit 0), never exit 4" '[ "$rc" -eq 0 ]'
+check "message logs the retry, not a hard refusal" 'grep -qi "retrying once" <<<"$out"'
+check "does not report gh pr view failing twice in a row" '! grep -qi "failed twice in a row" <<<"$out"'
 
 heading "Results: $PASS checks passed"
 green "All checks passed."
