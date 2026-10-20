@@ -275,7 +275,17 @@ done
 # --ref mode has no base/head split and skips this entirely.
 BASE_FLYWAY=""
 BASE_TIP_MAX_VER=""     # full dotted version (e.g. "5.2"), not just the integer prefix
-in_base() { printf '%s\n' "$BASE_FLYWAY" | grep -qxF -- "$1"; }
+in_base() {
+    # A piped "printf | grep -q" races under `set -o pipefail`: grep -q
+    # exits on its first match while printf may still be writing the rest
+    # of a several-hundred-line BASE_FLYWAY, so printf can get SIGPIPE
+    # (141) and, since pipefail reports the rightmost NON-ZERO exit status
+    # across the whole pipeline (not simply the last command's), that 141
+    # outranks grep's own exit 0 — a real match then reads back as "not in
+    # base" at random (#648). A here-string has no second process and no
+    # pipe to race.
+    grep -qxF -- "$1" <<< "$BASE_FLYWAY"
+}
 NEXT_FREE_COMPUTED=0
 OTHER_PR_COUNT=0
 next_ver=0

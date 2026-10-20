@@ -498,6 +498,50 @@ green "collision wins over out-of-order in the overall verdict, while an unrelat
 cd "$OOO_CLONE"
 
 # ============================================================================
+heading "Test 10d: in_base() SIGPIPE race (#648) — docs-only PR against a large base is clean every time"
+# ============================================================================
+# #648: in_base() used to be "printf '%s\n' \"\$BASE_FLYWAY\" | grep -qxF --
+# \"\$1\"" — grep -q exits on its first match while printf may still be
+# writing the rest of a long BASE_FLYWAY, so printf can get SIGPIPE (141);
+# under `set -o pipefail` that 141 outranks grep's own exit 0 (pipefail
+# reports the rightmost NON-ZERO exit status across the pipeline, not
+# simply the last command's), so a real base-side file reads back as
+# head-only at random and gets misreported as out-of-order (exit 3). A
+# single small fixture rarely has enough base-side files for the race to
+# fire, so this uses a wide base (a few hundred files) and many repeated
+# runs — a docs-only PR must be clean (exit 0) on every single run, never
+# flipping to exit 3.
+RACE_ORIGIN="$TEST_DIR/race-origin.git"
+RACE_CLONE="$TEST_DIR/race-clone"
+git init -q --bare -b master "$RACE_ORIGIN"
+git init -q -b master "$RACE_CLONE"
+git -C "$RACE_CLONE" remote add origin "$RACE_ORIGIN"
+race_commit() { git -C "$RACE_CLONE" -c user.email=t@t -c user.name=t commit -q -m "$1"; }
+
+mkdir -p "$RACE_CLONE/$MIG"
+for i in $(seq 1 300); do
+    echo "select $i;" > "$RACE_CLONE/$MIG/V${i}__migration_number_${i}_does_a_thing.sql"
+done
+git -C "$RACE_CLONE" add -A; race_commit "base: V1..V300"
+git -C "$RACE_CLONE" push -q origin master
+
+git -C "$RACE_CLONE" checkout -q -b race-docs-branch master
+echo "docs only, no migration touch" > "$RACE_CLONE/NOTES.md"
+git -C "$RACE_CLONE" add -A; race_commit "docs-only change, no migration file"
+git -C "$RACE_CLONE" push -q origin race-docs-branch
+set_pr 30 master race-docs-branch
+
+cd "$RACE_CLONE"
+RACE_ITERS=30
+for i in $(seq 1 "$RACE_ITERS"); do
+    rc=0
+    OUT=$("$CHECK" 30 2>&1) || rc=$?
+    [ "$rc" -eq 0 ] || red "iteration $i: expected exit 0 for a docs-only PR against a 300-file base, got $rc (output: $OUT)"
+done
+green "docs-only PR against a 300-file base: clean (exit 0) on every one of $RACE_ITERS runs — no SIGPIPE-race false positive"
+cd "$OOO_CLONE"
+
+# ============================================================================
 heading "Test 11: swarm-merge migration gate — out-of-order refuses plain and --auto-low"
 # ============================================================================
 # Both refusal paths run BEFORE the override-proceeds test below, which
