@@ -1214,22 +1214,117 @@ check "WORKER_DELIVER_GAVE_UP itself is untouched by the escalation -- only a re
 maybe_worker_deliver_brief "$WIN"
 check "4th consecutive sweep -> escalation still logged only once (not every sweep)" "1" "$(grep -cF 'worker.deliver.gave_up_stalled' "$EVENTS_LOG")"
 
-# A real success (here: standing in for a human manually releasing the
-# session, the listener_claim_after_quit path) clears GAVE_UP and, via
-# worker_deliver_record_success, this stall tracker too — rather than
-# leaving a stale ESCALATED flag behind for whatever brief lands here next.
+# issue #653 (self-review on #600's PR): a human manually releasing the
+# session (listener_claim_after_quit) must NOT clear GAVE_UP or the
+# gave-up-stall bookkeeping — only a GENUINE late success of this script's
+# OWN /quit (release=auto_deliver late=1, Test 7c) does that. Before this
+# fix, both paths called worker_deliver_record_success, which re-armed
+# automatic /quit delivery on a window whose agent never recognizes /quit
+# at all — see Test 15 below for the concrete consequence that guards
+# against (a fresh round of live /quit injections right after a human just
+# manually released the same stuck session).
 mv "$STALL_BRIEF" "$PROCESSING_DIR/$(basename "$STALL_BRIEF")"
 tmux send-keys -t "$SESSION_NAME:$WIN" C-c
 sleep 0.2
 tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'sonnet · wt-issue-42 · ctx: 20k/1M (2%)'; printf '❯ \n'; sleep 300" Enter
 check_eventually "pane parked in cli again after the manual release" "cli" "worker_pane_state '$WIN'"
 maybe_worker_deliver_brief "$WIN"
-check "the manual release clears GAVE_UP" "" "${WORKER_DELIVER_GAVE_UP[42]:-}"
-check "...and clears the gave-up-stall bookkeeping too" "" "${WORKER_DELIVER_GAVE_UP_STALL_COUNT[42]:-}"
+if grep -qF "brief=$(basename "$STALL_BRIEF") release=listener_claim_after_quit" "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "the manual release is still correctly attributed" "logged" "$got"
+check "...but GAVE_UP is NOT cleared by a human release (issue #653)" "1" "${WORKER_DELIVER_GAVE_UP[42]:-}"
+check "...and the gave-up-stall bookkeeping is untouched too" "4" "${WORKER_DELIVER_GAVE_UP_STALL_COUNT[42]:-}"
 
 rm -f "$INBOX_DIR"/*.md "$PROCESSING_DIR"/*.md
+unset 'WORKER_DELIVER_LAST_FAIL[42]' 'WORKER_DELIVER_FAIL_COUNT[42]' 'WORKER_DELIVER_GAVE_UP[42]'
 unset 'WORKER_DELIVER_GAVE_UP_STALL_BRIEF[42]' 'WORKER_DELIVER_GAVE_UP_STALL_COUNT[42]' 'WORKER_DELIVER_GAVE_UP_STALL_ESCALATED[42]'
 WORKER_DELIVER_GAVE_UP_STALL_THRESHOLD=20
+
+heading "Test 15: issue #653 — a listener_claim_after_quit for an UNRELATED brief must not re-arm /quit delivery on a window whose agent never recognizes /quit"
+# The exact regression the coordinator's review caught: #600's fix made
+# worker_deliver_detect_claim call worker_deliver_record_success on BOTH its
+# success branches, including listener_claim_after_quit. Realistic shape:
+# brief A times out 3x against a FAKE_REPL2-shaped agent (never recognizes
+# /quit) -> GAVE_UP=1, TIMED_OUT_BRIEF=A — and A then sits stuck forever
+# (this agent shape never lets A resolve via auto_deliver OR a plain human
+# /quit, since neither this script's paste nor a typed /quit does anything
+# but echo back as an ordinary line; the only way out is killing the
+# session outright). The operator abandons A directly (deletes the stale
+# inbox file without it ever reaching processing/ — exactly the possibility
+# worker_deliver_detect_claim's own header comment names: "an operator
+# deleting the stale brief outright"), so no late=1 event is ever logged
+# for it — GAVE_UP/TIMED_OUT_BRIEF=A stay exactly as the giving_up left
+# them. A completely unrelated brief B is then queued and delivered the
+# ordinary way (a human attaches, runs /quit, ends the session — ordinary
+# listener_claim_after_quit, since B != TIMED_OUT_BRIEF=A). Under the
+# pre-#653 code this ALSO reset GAVE_UP/LAST_FAIL/FAIL_COUNT, wiping the
+# coordinator's only memory that THIS window's agent doesn't honor /quit —
+# so the NEXT brief C would get a fresh live /quit injection anyway, 3 more
+# timeouts, and a second giving_up. This test proves that no longer
+# happens: GAVE_UP survives B's unrelated delivery, and C gets no
+# injection at all.
+unset 'WORKER_DELIVER_LAST_FAIL[42]' 'WORKER_DELIVER_FAIL_COUNT[42]' 'WORKER_DELIVER_GAVE_UP[42]' 'WORKER_DELIVER_TIMED_OUT_BRIEF[42]' 'WORKER_DELIVER_PENDING_SEEN[42]'
+unset 'WORKER_DELIVER_GAVE_UP_STALL_BRIEF[42]' 'WORKER_DELIVER_GAVE_UP_STALL_COUNT[42]' 'WORKER_DELIVER_GAVE_UP_STALL_ESCALATED[42]'
+: > "$EVENTS_LOG"
+rm -f "$INBOX_DIR"/*.md "$PROCESSING_DIR"/*.md
+BRIEF_A="$INBOX_DIR/20261020-100000-42.md"
+echo "brief A: will time out 3 times in a row against an agent that never recognizes /quit" > "$BRIEF_A"
+set_current_task "t15a" "ready-for-review"   # current task already finished
+
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.3
+tmux send-keys -t "$SESSION_NAME:$WIN" "bash -c 'exec -a gemini bash $FAKE_REPL2'" Enter
+check_eventually "fake non-quitting REPL foreground -> cli" "cli" "worker_pane_state '$WIN'"
+
+WORKER_DELIVER_BACKOFF_SECS=0   # the real 600s default would skip attempts 2/3 as backoff, never reaching 3 failures
+for i in 1 2 3; do
+    WORKER_DELIVER_END_TIMEOUT_SECS=3 WORKER_DELIVER_POLL_SECS=1 maybe_worker_deliver_brief "$WIN"
+done
+WORKER_DELIVER_BACKOFF_SECS=600
+check "3 consecutive timeouts against brief A -> gave up" "1" "${WORKER_DELIVER_GAVE_UP[42]:-}"
+check "A is recorded as the timed-out brief" "$(basename "$BRIEF_A")" "${WORKER_DELIVER_TIMED_OUT_BRIEF[42]:-}"
+
+# The operator abandons brief A directly (rm, not mv to processing/) -- it
+# never resolves via auto_deliver or any /quit, consistent with this fake
+# REPL never honoring /quit at all. Brief B, wholly unrelated to A, is
+# queued immediately after.
+rm -f "$BRIEF_A"
+BRIEF_B="$INBOX_DIR/20261020-103000-42.md"
+echo "brief B: unrelated to A, will be delivered by an ordinary human /quit" > "$BRIEF_B"
+maybe_worker_deliver_brief "$WIN"
+if grep -qF "worker.deliver.ok" "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "A's silent disappearance (never reaching processing/) logs no success of any kind" "missing" "$got"
+check "GAVE_UP/TIMED_OUT_BRIEF untouched by A's abandonment" "$(basename "$BRIEF_A")" "${WORKER_DELIVER_TIMED_OUT_BRIEF[42]:-}"
+
+# Brief B now gets an ordinary human-attended /quit (same simulation
+# Test 9/14 use: move the brief out of inbox/ directly, standing in for the
+# operator attaching and running /quit by hand).
+mv "$BRIEF_B" "$PROCESSING_DIR/$(basename "$BRIEF_B")"
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.2
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'sonnet · wt-issue-42 · ctx: 20k/1M (2%)'; printf '❯ \n'; sleep 300" Enter
+check_eventually "pane parked in cli again after B's manual release" "cli" "worker_pane_state '$WIN'"
+maybe_worker_deliver_brief "$WIN"
+if grep -qF "brief=$(basename "$BRIEF_B") release=listener_claim_after_quit" "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "B's delivery is attributed to a human, not auto_deliver" "logged" "$got"
+check "GAVE_UP survives B's unrelated human-attended delivery (issue #653's fix)" "1" "${WORKER_DELIVER_GAVE_UP[42]:-}"
+
+# A brand-new brief C is now queued behind this same, still-given-up
+# window. With the bug, B's delivery would have cleared GAVE_UP, so C would
+# trigger a fresh live /quit injection here; with the fix, it must not.
+set_current_task "t15b" "ready-for-review"
+: > "$EVENTS_LOG"
+BRIEF_C="$INBOX_DIR/20261020-110000-42.md"
+echo "brief C: queued right after B's unrelated human-attended release" > "$BRIEF_C"
+for i in 1 2 3; do maybe_worker_deliver_brief "$WIN"; done
+check "no /quit injection is attempted against the still-given-up window" "0" "$(grep -cF 'worker.deliver.attempt' "$EVENTS_LOG")"
+rc=0; worker_pending_brief "$WT_DIR" || rc=$?
+check "brief C is left untouched in inbox/, not swallowed" "0" "$rc"
+
+rm -f "$INBOX_DIR"/*.md "$PROCESSING_DIR"/*.md
+unset 'WORKER_DELIVER_LAST_FAIL[42]' 'WORKER_DELIVER_FAIL_COUNT[42]' 'WORKER_DELIVER_GAVE_UP[42]' 'WORKER_DELIVER_TIMED_OUT_BRIEF[42]'
+unset 'WORKER_DELIVER_GAVE_UP_STALL_BRIEF[42]' 'WORKER_DELIVER_GAVE_UP_STALL_COUNT[42]' 'WORKER_DELIVER_GAVE_UP_STALL_ESCALATED[42]'
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.2
 
 echo
 green "All $PASS checks passed."

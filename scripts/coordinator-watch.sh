@@ -2366,11 +2366,14 @@ EVENTS LOG
                            had already flagged as stuck in the exact parked-session scenario
                            worker.deliver.attempt/.skip describe, so this event's presence or
                            absence answers "did WORKER_AUTO_DELIVER=1 do its job, or did a human
-                           have to intervene?" for every such stall. issue #600: either variant
-                           also resets WORKER_DELIVER_LAST_FAIL/FAIL_COUNT/GAVE_UP for this issue
-                           (worker_deliver_record_success) — a giving_up that is followed by one
-                           of these is NOT a permanent give-up, since the delivery actually
-                           succeeded; see worker.deliver.giving_up below)
+                           have to intervene?" for every such stall. issue #600/#653: only the
+                           late=1 variant also resets WORKER_DELIVER_LAST_FAIL/FAIL_COUNT/GAVE_UP
+                           for this issue (worker_deliver_record_success) — a giving_up followed
+                           by a late=1 success is NOT a permanent give-up, since THIS SCRIPT'S OWN
+                           /quit is what actually worked. listener_claim_after_quit deliberately
+                           does NOT reset those (a human's manual release must not re-arm
+                           automatic /quit delivery — see worker_deliver_detect_claim's header
+                           comment); see worker.deliver.giving_up below)
       worker.deliver.timeout  gave up waiting for the session to end after /quit (issue, waited) —
                            counted as a failure (worker_deliver_record_failure)
       worker.deliver.delivered_as_text  composer already empty at the end-timeout — no ghost text
@@ -2380,13 +2383,14 @@ EVENTS LOG
                            retraction events above, applied to a stuck /quit injection (issue)
       worker.deliver.giving_up  (issue #313) N consecutive failed delivery attempts for this window
                            (issue, failures=N) — maybe_worker_deliver_brief stops attempting /quit
-                           for it until EITHER the watcher restarts OR a delivery success is
-                           observed, whichever comes first (issue #600: the timed-out /quit that
-                           triggered this can still land late — see worker.deliver.ok's late=1/
-                           listener_claim_after_quit variants, which reset this via worker_
-                           deliver_record_success); until one of those, the brief stays queued for
-                           a human to release manually (attach and /quit) — logged once, not every
-                           sweep
+                           for it until EITHER the watcher restarts OR a GENUINE late delivery
+                           success is observed, whichever comes first (issue #600: the timed-out
+                           /quit that triggered this can still land late — see worker.deliver.ok's
+                           late=1 variant, which resets this via worker_deliver_record_success;
+                           issue #653: a listener_claim_after_quit — a human's manual release —
+                           deliberately does NOT reset this, see worker_deliver_detect_claim's
+                           header comment); until one of those, the brief stays queued for a human
+                           to release manually (attach and /quit) — logged once, not every sweep
       worker.deliver.composer_stalled  (issue #436) WORKER_DELIVER_COMPOSER_STALL_THRESHOLD
                            worker.deliver.skip reason=composer_not_clear events racked up against
                            the SAME pending brief (issue, brief=<inbox filename>, skips=N) — a
@@ -8216,6 +8220,29 @@ declare -A WORKER_DELIVER_TIMED_OUT_BRIEF=()
 # GAVE_UP flag; without it, maybe_worker_deliver_brief's give-up gate stays
 # tripped forever and silently skips every later sweep for this window, for
 # every future queued brief, with zero worker.deliver.* events logged.
+#
+# issue #653 (coordinator review of #600): worker_deliver_record_success —
+# and so the GAVE_UP/LAST_FAIL/FAIL_COUNT/TIMED_OUT_BRIEF reset — is scoped
+# to the late=1 branch ONLY, not to listener_claim_after_quit. The two
+# branches look like the same kind of "genuine delivery success" but are
+# not interchangeable here: late=1 means THIS SCRIPT'S OWN earlier /quit is
+# what finally worked, so re-arming automatic /quit delivery for this
+# window is exactly correct. listener_claim_after_quit means a HUMAN
+# manually ended the session — on a window whose agent never recognizes
+# /quit at all (a non-claude agent, the Test 7/FAKE_REPL2 shape), clearing
+# GAVE_UP there would buy three more live /quit injections into a pane that
+# may take "/quit" as an ordinary prompt line, immediately followed by a
+# fresh giving_up — worse than doing nothing, since before #600 that window
+# stayed safely given-up after a human release and needed no further
+# action. Only the composer/terminal-stall trackers (#436/#601) are cleared
+# on the human-release path, same as before #600 — a human manually
+# /quit-ing past a stuck composer or a task_not_terminal read does resolve
+# those (they're not about retrying /quit), just not the give-up gate
+# itself. Clearing WORKER_DELIVER_TIMED_OUT_BRIEF on this path would also be
+# wrong on its own: a LATER, unrelated late arrival of the brief this script
+# is still genuinely waiting on would then be misattributed to this
+# unrelated human release instead of correctly recognized as
+# release=auto_deliver late=1 above.
 worker_deliver_detect_claim() {
     local issue="$1" wt_dir="$2" state="$3"
     local current="" prior
@@ -8224,34 +8251,17 @@ worker_deliver_detect_claim() {
     if [ -n "$prior" ] && [ "$prior" != "$current" ] && [ -e "$wt_dir/.swarm/tasks/processing/$prior" ]; then
         if [ -n "${WORKER_DELIVER_TIMED_OUT_BRIEF[$issue]:-}" ] && [ "$prior" = "${WORKER_DELIVER_TIMED_OUT_BRIEF[$issue]}" ]; then
             log_event worker.deliver.ok "issue=$issue brief=$prior release=auto_deliver late=1"
+            worker_deliver_record_success "$issue"
         else
             log_event worker.deliver.ok "issue=$issue brief=$prior release=listener_claim_after_quit"
+            # issue #436/#601, unchanged by #600/#653: a human manually
+            # /quit-ing past a stuck composer or task_not_terminal read
+            # still resolves those stalls — see header comment above for
+            # why GAVE_UP/LAST_FAIL/FAIL_COUNT/TIMED_OUT_BRIEF must NOT also
+            # be cleared here.
+            worker_deliver_composer_stall_clear "$issue"
+            worker_deliver_terminal_stall_clear "$issue"
         fi
-        # issue #600: either branch above is a genuine delivery success —
-        # exactly as much a success as the synchronous auto_deliver path
-        # below that calls worker_deliver_record_success directly — so it
-        # must reset the SAME state that path resets: WORKER_DELIVER_
-        # LAST_FAIL/FAIL_COUNT/GAVE_UP, not just the composer/terminal-stall
-        # trackers. Before this fix, a late=1 success left WORKER_DELIVER_
-        # GAVE_UP=1 standing forever (worker_deliver_record_failure's 3rd
-        # consecutive timeout sets it just before this late success is
-        # observed) — maybe_worker_deliver_brief's own give-up gate, just
-        # below this function, then silently returns on EVERY later sweep
-        # for this window, for every FUTURE queued brief too, logging
-        # nothing at all (no worker.deliver.skip, no .attempt — the
-        # "already warned once" comment at that gate assumes the warning
-        # stays relevant, which it stops being the moment delivery actually
-        # succeeds). This is exactly the fand-etl/corpusminder-spring/
-        # SAMlytics/llm-swarm-runner incidents issue #600 documents: a
-        # giving_up + late deliver.ok sequence, then a NEXT requeued brief
-        # that never gets even one delivery attempt. Same reasoning extends
-        # to the listener_claim_after_quit branch: a human manually
-        # /quit-ing past ANY stuck state (a failed-injection backoff/
-        # give-up as much as a composer/terminal stall) still resolves it,
-        # so the window's backoff bookkeeping must not outlive the human's
-        # fix. worker_deliver_record_success also covers the composer/
-        # terminal-stall clears issue #436/#601 added here directly.
-        worker_deliver_record_success "$issue"
     fi
     WORKER_DELIVER_PENDING_SEEN[$issue]="$current"
 }
