@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """_workflow-path-filter.py — decide whether a single GitHub Actions
-workflow file's `pull_request` trigger would fire for a given set of
-changed file paths (issue #639).
+workflow file's trigger would create a run attached to a given PR's head
+commit, for a given set of changed file paths (issue #639, #644 follow-up
+"no-trigger must not mean no CI coming").
 
 Not a full YAML parser (stdlib only, no PyYAML dependency) — a tolerant,
 indentation-based line scanner over the narrow subset of workflow syntax
-that `on:` / `pull_request:` / `paths:` / `paths-ignore:` actually use:
-block mappings, block sequences ("- item"), and single-line flow lists
-("[a, b]"). Good enough for real-world workflow files; anything it can't
-confidently parse prints "unknown" rather than guessing, so a caller can
-fail toward "this workflow still applies" (the safe direction: keep
-waiting on CI) instead of silently warning-and-proceeding on a file it
-misread.
+that `on:` / `pull_request:` / `push:` / `paths:` / `paths-ignore:`
+actually use: block mappings, block sequences ("- item"), and single-line
+flow lists ("[a, b]"). Good enough for real-world workflow files; anything
+it can't confidently parse prints "unknown" rather than guessing, so a
+caller can fail toward "this workflow still applies" (the safe direction:
+keep waiting on CI) instead of silently warning-and-proceeding on a file
+it misread.
 
 Usage:
     _workflow-path-filter.py <workflow-yaml-file> <changed-files-file>
@@ -19,12 +20,30 @@ Usage:
 <changed-files-file> is one repo-relative path per line (blank lines
 ignored). Prints exactly one line to stdout and exits 0:
 
-    no-trigger   the workflow has no `pull_request` trigger at all
-    triggers     it has a pull_request trigger with no path filter, or
-                 with a filter that at least one changed file satisfies
-    excluded     it has a path filter (paths-ignore, or paths) and NONE
-                 of the changed files would satisfy it
-    unknown      couldn't confidently parse the trigger or its filters
+    no-trigger   the workflow has none of pull_request, pull_request_target,
+                 push or workflow_run — nothing that attaches a run to this
+                 PR's head commit (a schedule/workflow_dispatch/release-only
+                 workflow, say)
+    triggers     it has a pull_request/pull_request_target/push trigger
+                 with no path filter, or with a filter that at least one
+                 changed file satisfies
+    excluded     it has ONLY path-filtered pull_request/pull_request_target/
+                 push triggers (paths-ignore, or paths) and NONE of the
+                 changed files would satisfy any of them
+    unknown      couldn't confidently parse the trigger or its filters, or
+                 the workflow has a workflow_run trigger (its path filter,
+                 if any, isn't evaluated by this scanner at all, and
+                 whether it attaches to the PR's head SHA depends on the
+                 job's own code — never guess, always fail toward "still
+                 relevant")
+
+A same-repo PR's branch push fires `push`-triggered workflows too, and
+those runs land on the exact head SHA a caller's `gh pr checks` reads —
+a bare `on: push` workflow is therefore just as real a source of CI as
+`pull_request` and must never be read as "no-trigger" (that was issue
+#644's third follow-up: a push-only workflow fell through a caller's
+no-trigger handling straight to "excluded", silently readying any PR,
+source changes included, in a push-only repo).
 
 A non-zero exit (should only happen on a bad invocation, e.g. a missing
 argument) must be treated by the caller the same as "unknown".
@@ -191,15 +210,24 @@ def matches_any(path, patterns):
     return any(re.match(path_to_regex(p), path) for p in patterns)
 
 
-# Both keys use identical paths/paths-ignore syntax and are equally real
-# triggers for this PR — a workflow that defines one filtered and one
-# unfiltered must be read as relevant (it is: GitHub runs the unfiltered
-# one regardless of what the filtered one excludes).
-PR_TRIGGER_KEYS = ("pull_request", "pull_request_target")
+# All three use identical paths/paths-ignore syntax and are equally real
+# sources of a run attached to this PR's head commit (push does, for a
+# same-repo PR branch, exactly what pull_request does) — a workflow that
+# defines more than one of these, filtered or not, must be read as
+# relevant if ANY of them is (GitHub runs each independently).
+PATH_FILTERED_TRIGGER_KEYS = ("pull_request", "pull_request_target", "push")
+
+# Triggers this scanner makes no attempt to evaluate path filters for, but
+# whose mere presence can still attach a run to a commit (workflow_run's
+# job can check out and report status against github.event.workflow_run.
+# head_sha, including a PR's head, depending on the job's own code — not
+# something a static path-filter read can rule out). Presence must fail
+# toward "unknown", never silently toward "no-trigger".
+OTHER_RUN_TRIGGER_KEYS = ("workflow_run",)
 
 
-def _pr_trigger_verdict(pr_rest, pr_children, changed_files):
-    """Verdict for a single already-found pull_request(_target) entry."""
+def _path_filtered_trigger_verdict(pr_rest, pr_children, changed_files):
+    """Verdict for a single already-found pull_request(_target)/push entry."""
     if pr_rest:
         # Inline value on the key's own line (e.g. "{}" or a one-line flow
         # map). Only a flow map could embed a paths filter, and parsing
@@ -248,31 +276,39 @@ def verdict(text, changed_files):
 
     if on_rest:
         # Flow/scalar form on the "on:" line itself, e.g. "on: pull_request"
-        # or "on: [push, pull_request]" — neither can carry a path filter.
-        # ("pull_request" is a substring of "pull_request_target", so this
-        # also catches that event correctly.)
-        return "triggers" if "pull_request" in on_rest else "no-trigger"
+        # or "on: [push, pull_request]" — none of these forms can carry a
+        # path filter. ("pull_request" is a substring of
+        # "pull_request_target", so this also catches that event
+        # correctly.)
+        if "pull_request" in on_rest or "push" in on_rest:
+            return "triggers"
+        if any(key in on_rest for key in OTHER_RUN_TRIGGER_KEYS):
+            return "unknown"
+        return "no-trigger"
 
     on_children = direct_children(lines, on_idx + 1, 0)
     on_entries = own_level_entries(on_children)
 
-    # Evaluate every PR-type trigger the workflow defines (not just the
-    # first one found) — the workflow is relevant if ANY of them would
+    # Evaluate every path-filtered trigger the workflow defines (not just
+    # the first one found) — the workflow is relevant if ANY of them would
     # fire, and excluded only if ALL of them are filtered out.
     verdicts = []
-    for key in PR_TRIGGER_KEYS:
+    for key in PATH_FILTERED_TRIGGER_KEYS:
         entry = find_key(on_entries, key)
         if entry is not None:
             pr_rest, pr_children = entry
-            verdicts.append(_pr_trigger_verdict(pr_rest, pr_children, changed_files))
+            verdicts.append(_path_filtered_trigger_verdict(pr_rest, pr_children, changed_files))
 
     if not verdicts:
+        for key in OTHER_RUN_TRIGGER_KEYS:
+            if find_key(on_entries, key) is not None:
+                return "unknown"
         return "no-trigger"
     if "triggers" in verdicts:
         return "triggers"
     if "unknown" in verdicts:
         return "unknown"
-    return "excluded"  # every PR-type trigger present confidently excludes
+    return "excluded"  # every path-filtered trigger present confidently excludes
 
 
 def main(argv):

@@ -95,13 +95,14 @@
 #
 # issue #639: "no checks reported" with workflows configured is ALSO a
 # pass-with-warning, not an endless ci-pending refusal, when every
-# pull_request-triggered workflow's `paths`/`paths-ignore` filter excludes
-# every one of this PR's changed files — a docs-only PR in a repo whose CI
-# skips docs paths will never get a run to wait for (civicstrata#602/#603,
-# 2026-10-15: ci-wait.sh ran its full timeout and the watcher's ready-sweep
-# retried forever). See `ci_fallback_workflows_relevant_to_pr` in
-# `_ci-fallback.sh` for the path-filter check itself; anything it can't
-# confidently resolve still falls through to the ci-pending refusal below.
+# pull_request/push-triggered workflow's `paths`/`paths-ignore` filter
+# excludes every one of this PR's changed files — a docs-only PR in a
+# repo whose CI skips docs paths will never get a run to wait for
+# (civicstrata#602/#603, 2026-10-15: ci-wait.sh ran its full timeout and
+# the watcher's ready-sweep retried forever). See
+# `ci_fallback_workflows_relevant_to_pr` in `_ci-fallback.sh` for the
+# path-filter check itself; anything it can't confidently resolve still
+# falls through to the ci-pending refusal below.
 #
 # issue #534: a PR the coordinator drafted as a hold (draft-as-hold,
 # `prompts/coordinator.md` § "Draft-as-hold") carries a
@@ -488,7 +489,7 @@ case "$CHECKS_RC" in
                 # pending refusal below.
                 ci_fallback_workflows_relevant_to_pr "$PR"
                 if [ "$CI_FALLBACK_RELEVANT" = "no" ]; then
-                    echo "pr-ready: WARN: PR #$PR's changed files are excluded by every pull_request workflow's path filter ($CI_FALLBACK_RELEVANT_DETAIL) — no check will ever register. Proceeding." >&2
+                    echo "pr-ready: WARN: PR #$PR's changed files are excluded by every pull_request/push workflow's path filter ($CI_FALLBACK_RELEVANT_DETAIL) — no check will ever register. Proceeding." >&2
                 else
                     echo "pr-ready: REFUSED — PR #$PR reports 'no checks reported' but this repo has CI configured for these files — this commit's run likely hasn't registered yet." >&2
                     echo "          Run 'scripts/ci-wait.sh $PR' to wait for a real result, then re-run pr-ready.sh." >&2

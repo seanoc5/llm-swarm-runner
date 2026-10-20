@@ -446,6 +446,54 @@ gh_ready_called && red "expected gh pr ready NOT to run when the PR itself touch
 green "a PR that changes a workflow file is always treated as CI-relevant, even if every OTHER changed file is path-filtered (GitHub runs the merge-commit YAML, not the base branch's)"
 
 # ============================================================================
+heading "Test 15f: 'no checks reported', a push-only workflow with NO path filter, a source-file change — still refuses ci-pending (issue #644 third follow-up)"
+# ============================================================================
+# A same-repo PR's branch push fires a push-only workflow too, and that run
+# lands on the exact head SHA gh pr checks reads — a bare 'on: push' with no
+# paths/paths-ignore filter must never be read as no-trigger/excluded.
+printf '<!-- BLIND_MERGE_RISK: low -->\nsome change\n' > "$BODY_FILE"
+make_fake_review 0
+GH_CHECKS_RC=1
+GH_CHECKS_STDERR="no checks reported on the 'main' branch"
+GH_WORKFLOW_COUNT=1
+GH_PR_FILES_JSON='["src/main.py"]'
+GH_WORKFLOW_PATHS_JSON='[".github/workflows/build.yml"]'
+GH_WORKFLOW_YAML=$'on:\n  push:\n    branches: [main]\n'
+rc=0; run_pr_ready || rc=$?
+GH_CHECKS_RC=0
+GH_CHECKS_STDERR=""
+GH_WORKFLOW_COUNT=0
+GH_PR_FILES_JSON=
+GH_WORKFLOW_PATHS_JSON=
+GH_WORKFLOW_YAML=
+[ "$rc" -eq 4 ] || red "expected exit 4 — a push-only workflow with no path filter always applies, got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called && red "expected gh pr ready NOT to run when a push-only workflow has no path filter and a source file changed"
+green "a push-only workflow with no path filter is never read as no-trigger — still refuses on a source-file change"
+
+# ============================================================================
+heading "Test 15g: 'no checks reported', a push-only workflow with paths-ignore covering a docs-only PR — WARNs, still readies"
+# ============================================================================
+printf '<!-- BLIND_MERGE_RISK: low -->\nsome change\n' > "$BODY_FILE"
+make_fake_review 0
+GH_CHECKS_RC=1
+GH_CHECKS_STDERR="no checks reported on the 'main' branch"
+GH_WORKFLOW_COUNT=1
+GH_PR_FILES_JSON='["docs/foo.md","README.md"]'
+GH_WORKFLOW_PATHS_JSON='[".github/workflows/build.yml"]'
+GH_WORKFLOW_YAML=$'on:\n  push:\n    branches: [main]\n    paths-ignore:\n      - \x27docs/**\x27\n      - \x27**.md\x27\n'
+rc=0; run_pr_ready || rc=$?
+GH_CHECKS_RC=0
+GH_CHECKS_STDERR=""
+GH_WORKFLOW_COUNT=0
+GH_PR_FILES_JSON=
+GH_WORKFLOW_PATHS_JSON=
+GH_WORKFLOW_YAML=
+[ "$rc" -eq 0 ] || red "expected exit 0 — a push-only workflow's own paths-ignore excludes an all-docs changed-file set, got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called || red "expected gh pr ready to run once a push-only workflow's paths-ignore excludes every changed file"
+grep -qi 'WARN' "$TEST_DIR/out.log" || red "expected a WARN about the path-filtered changed files: $(cat "$TEST_DIR/out.log")"
+green "a push-only workflow whose paths-ignore excludes every changed file readies with a WARN, same as a path-filtered pull_request workflow"
+
+# ============================================================================
 heading "Test 16: self-review round cap reached — skips another round, still readies on CI-green"
 # ============================================================================
 printf '<!-- BLIND_MERGE_RISK: medium -->\nsome change\n' > "$BODY_FILE"

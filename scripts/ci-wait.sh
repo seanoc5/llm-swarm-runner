@@ -194,10 +194,10 @@ echo "ci-wait: PR #$PR mergeable ($MERGE_STATE), watching checks on ${SHA:0:12} 
 DEADLINE=$(( $(date -u +%s) + TIMEOUT ))
 WORKFLOW_COUNT=""   # lazily resolved at most once, only if "no checks" is ever seen
 PR_CI_RELEVANT=""   # lazily resolved at most once (issue #639): "no" means
-                     # every pull_request workflow's path filter excludes
-                     # this PR's changed files; anything else means keep
-                     # treating "no checks reported" as the ordinary
-                     # post-push race
+                     # every pull_request/push workflow's path filter
+                     # excludes this PR's changed files; anything else
+                     # means keep treating "no checks reported" as the
+                     # ordinary post-push race
 PR_CI_RELEVANT_DETAIL=""
 FALLBACK=0          # set once "gh pr checks" proves unreadable by this token
 while true; do
@@ -287,7 +287,7 @@ while true; do
                         PR_CI_RELEVANT_DETAIL="$CI_FALLBACK_RELEVANT_DETAIL"
                     fi
                     if [ "$PR_CI_RELEVANT" = "no" ]; then
-                        echo "ci-wait: PR #$PR's changed files are excluded by every pull_request workflow's path filter ($PR_CI_RELEVANT_DETAIL) — no check will ever register." >&2
+                        echo "ci-wait: PR #$PR's changed files are excluded by every pull_request/push workflow's path filter ($PR_CI_RELEVANT_DETAIL) — no check will ever register." >&2
                         exit 5
                     fi
                     # Workflows exist (or the workflow-count lookup itself

@@ -56,12 +56,15 @@ on:
       - '**.md'
   push:
     branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
 jobs:
   build:
     runs-on: ubuntu-latest
 EOF
 printf 'docs/foo.md\nREADME.md\n' > "$FILES"
-run excluded "all changed files under paths-ignore patterns"
+run excluded "all changed files under paths-ignore patterns (on BOTH the pull_request and push triggers)"
 
 # ─────────────── Test 2: paths-ignore, one changed file falls outside it → triggers ───────
 
@@ -140,9 +143,13 @@ EOF
 printf 'docs/foo.md\n' > "$FILES"
 run triggers "a bare scalar on: pull_request always triggers"
 
-# ─────────────── Test 9: push-only workflow (pull_request absent from a block on:) ────────
+# ─── Test 9/9b/9c: push-only workflow (no pull_request key at all) — issue ───
+# #644 third follow-up: a same-repo PR's branch push fires a push-only
+# workflow too, and that run lands on the exact commit `gh pr checks`
+# reads, so this must never be read as "no-trigger" — only as "triggers"
+# or "excluded" depending on its own path filter.
 
-heading "Test 9: block-form on: with only push -> no-trigger"
+heading "Test 9: block-form on: with only push, no path filter at all -> triggers (never no-trigger)"
 cat > "$WF" <<'EOF'
 name: push-only
 on:
@@ -150,7 +157,24 @@ on:
     branches: [main]
 EOF
 printf 'docs/foo.md\n' > "$FILES"
-run no-trigger "push-only block-form on: has no pull_request key at all"
+run triggers "a push-only workflow with no path filter always creates a run on the PR's head commit"
+
+heading "Test 9b: push-only workflow, paths-ignore covers every changed file -> excluded (docs-only PR may proceed)"
+cat > "$WF" <<'EOF'
+name: push-only-filtered
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+EOF
+printf 'docs/foo.md\nREADME.md\n' > "$FILES"
+run excluded "a push-only workflow's own paths-ignore excludes an all-docs changed-file set"
+
+heading "Test 9c: push-only workflow, paths-ignore filter, a changed file falls outside it -> triggers (a source change must wait)"
+printf 'docs/foo.md\nsrc/main.py\n' > "$FILES"
+run triggers "a push-only workflow with a non-ignored changed file still creates a real run"
 
 # ─────────────── Test 10: inline flow map on pull_request: itself -> unknown (not a guess) ─
 
@@ -233,6 +257,8 @@ on:  # run on PR and push
       - 'docs/**'
   push:
     branches: [main]
+    paths-ignore:
+      - 'docs/**'
 EOF
 printf 'docs/foo.md\n' > "$FILES"
 run excluded "the comment after 'on:' must not be read as a flow/scalar trigger value"
@@ -331,6 +357,32 @@ on:
 EOF
 printf 'docs/a.md\n' > "$FILES"
 run triggers "the unfiltered pull_request_target trigger still fires even though pull_request's filter excludes every changed file"
+
+# ─── Test 22: a workflow_run trigger, no pull_request/push at all -> unknown ───────────────
+# (issue #644 third follow-up item 4: a workflow_run job can check out and
+# report status against github.event.workflow_run.head_sha, including a
+# PR's head, depending on the job's own code — this scanner can't rule
+# that out, so presence alone must fail toward "unknown", never
+# "no-trigger".)
+
+heading "Test 22: block-form on: with only workflow_run -> unknown, never no-trigger"
+cat > "$WF" <<'EOF'
+name: workflow-run-only
+on:
+  workflow_run:
+    workflows: ['CI']
+    types: [completed]
+EOF
+printf 'docs/foo.md\n' > "$FILES"
+run unknown "a workflow_run-only trigger can still attach a run to a commit — fail toward unknown, not no-trigger"
+
+heading "Test 22b: flow/scalar form 'on: workflow_run' -> unknown, never no-trigger"
+cat > "$WF" <<'EOF'
+name: workflow-run-scalar
+on: workflow_run
+EOF
+printf 'docs/foo.md\n' > "$FILES"
+run unknown "the flow/scalar on: form with workflow_run also fails toward unknown"
 
 heading "Results: $PASS checks passed"
 green "All checks passed."

@@ -83,15 +83,29 @@
 #         CI_FALLBACK_RELEVANT         "yes" | "no" | "unknown"
 #         CI_FALLBACK_RELEVANT_DETAIL  one-line explanation
 #
-#       "no" means every pull_request-triggered workflow's path filter
-#       excludes ALL of the PR's changed files — no run will ever register.
-#       "yes" means at least one workflow would run, OR nothing could be
-#       determined confidently (fails toward "yes": the safe direction is
-#       to keep treating this as a real, awaitable CI gap, same posture as
-#       every other ambiguous case in this file — never silently treated
-#       the same as "unknown" by a caller). "unknown" is set alongside
-#       "yes" so a caller that wants to say WHY can still tell the two
-#       "yes" paths apart; callers that don't care just check for "no".
+#       "no" means at least one active workflow's pull_request/push trigger
+#       is CONFIDENTLY path-filtered-excluded for every one of the PR's
+#       changed files, and no workflow came back "triggers" or "unknown" —
+#       positive evidence that a real exclusion decision was made, not
+#       merely the absence of a relevant trigger. "yes" means at least one
+#       workflow would run, OR nothing could be determined confidently
+#       (fails toward "yes": the safe direction is to keep treating this as
+#       a real, awaitable CI gap, same posture as every other ambiguous
+#       case in this file). "unknown" is set alongside "yes" so a caller
+#       that wants to say WHY can still tell the two "yes" paths apart;
+#       callers that don't care just check for "no".
+#
+#       issue #644 third follow-up: a workflow whose only triggers are
+#       things like `schedule`/`workflow_dispatch` returns "no-trigger"
+#       from the per-workflow filter script, not "excluded" — and
+#       "no-trigger" must NEVER be folded into the same bucket as
+#       "excluded". An all-"no-trigger" result means nothing confirms a
+#       path-filter exclusion actually happened, only that this function
+#       found nothing relevant to check; that is not evidence CI will
+#       never register, so it also falls to "yes". A workflow whose only
+#       PR-type/push trigger is itself unfiltered (`on: push` with no
+#       `paths`/`paths-ignore` at all) is "triggers", never "no-trigger" —
+#       GitHub still creates a real run on the PR's head commit for it.
 #
 #       Always returns 0 (never fails the caller's `set -e`) — every
 #       failure mode (an unreadable PR, an unreadable workflow list, an
@@ -171,7 +185,8 @@ ci_fallback_workflows_relevant_to_pr() {
     tmp_wf="$(mktemp)"
     printf '%s\n' "$files_list" > "$tmp_files"
 
-    local path content content_rc verdict
+    local path content content_rc verdict saw_excluded
+    saw_excluded=0
     while IFS= read -r path; do
         [ -n "$path" ] || continue
         set +e
@@ -189,23 +204,46 @@ ci_fallback_workflows_relevant_to_pr() {
         case "$verdict" in
             triggers)
                 CI_FALLBACK_RELEVANT="yes"
-                CI_FALLBACK_RELEVANT_DETAIL="$path has a pull_request trigger matching at least one changed file"
+                CI_FALLBACK_RELEVANT_DETAIL="$path has a pull_request/push trigger matching at least one changed file"
                 rm -f "$tmp_files" "$tmp_wf"
                 return 0
                 ;;
             unknown)
                 CI_FALLBACK_RELEVANT="yes"
-                CI_FALLBACK_RELEVANT_DETAIL="couldn't confidently parse $path's pull_request trigger"
+                CI_FALLBACK_RELEVANT_DETAIL="couldn't confidently parse $path's trigger (or it has a workflow_run trigger, which this scanner never clears)"
                 rm -f "$tmp_files" "$tmp_wf"
                 return 0
                 ;;
-            no-trigger|excluded) : ;; # keep checking the remaining workflows
+            excluded)
+                # Positive evidence: this workflow DOES have a
+                # pull_request/push trigger, and its path filter
+                # confidently excludes every changed file. Keep checking
+                # the remaining workflows before concluding "no".
+                saw_excluded=1
+                ;;
+            no-trigger)
+                # issue #644 third follow-up: this workflow has no
+                # pull_request/pull_request_target/push/workflow_run
+                # trigger at all (e.g. schedule/workflow_dispatch-only) —
+                # that is NOT the same as a confident path-filter
+                # exclusion, and must never be folded into "excluded".
+                # Keep checking; it contributes no evidence either way.
+                : ;;
         esac
     done < <(jq -r '.[]' <<<"$wf_json")
     rm -f "$tmp_files" "$tmp_wf"
 
-    CI_FALLBACK_RELEVANT="no"
-    CI_FALLBACK_RELEVANT_DETAIL="every pull_request-triggered workflow's path filter excludes all of PR #$pr's changed files"
+    if [ "$saw_excluded" -eq 1 ]; then
+        CI_FALLBACK_RELEVANT="no"
+        CI_FALLBACK_RELEVANT_DETAIL="every pull_request/push-triggered workflow's path filter excludes all of PR #$pr's changed files"
+    else
+        # No workflow was even confidently "excluded" — every one was
+        # "no-trigger" (nothing checked applies to this PR at all). That's
+        # the absence of evidence, not evidence of absence: fail toward
+        # "yes" rather than concluding no CI will ever register.
+        CI_FALLBACK_RELEVANT="yes"
+        CI_FALLBACK_RELEVANT_DETAIL="no active workflow has a confidently path-filtered pull_request/push trigger for PR #$pr — can't confirm no CI will ever register"
+    fi
     return 0
 }
 

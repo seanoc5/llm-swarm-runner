@@ -225,7 +225,7 @@ out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_NO_CHECKS=1 GH_
     GH_WORKFLOW_YAML=$'on:\n  pull_request:\n    paths-ignore:\n      - \x27docs/**\x27\n      - \x27**.md\x27\n' \
     "$CI_WAIT" 42 5 2>&1)" || rc=$?
 check "exits 5 — no run will ever register for an all-ignored changed-file set" '[ "$rc" -eq 5 ]'
-check "message names the path-filter exclusion" 'grep -qi "excluded by every pull_request workflow" <<<"$out"'
+check "message names the path-filter exclusion" 'grep -qi "excluded by every pull_request/push workflow" <<<"$out"'
 
 heading "Test 8c: changed files touch a NON-ignored path too → treated as the ordinary pending race, not absence"
 rc=0
@@ -259,6 +259,30 @@ out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_NO_CHECKS=1 GH_
     GH_WORKFLOW_YAML=$'on:\n  pull_request:\n    paths-ignore:\n      - \x27docs/**\x27\n      - \x27**.md\x27\n      - \x27.github/workflows/**\x27\n' \
     CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 2 2>&1)" || rc=$?
 check "exits 2 (timeout/pending), never 5, when the PR itself touches .github/workflows/" '[ "$rc" -eq 2 ]'
+
+# issue #644 third follow-up: a same-repo PR's branch push fires a
+# push-only workflow too, and that run lands on the exact head SHA
+# `gh pr checks` reads — a bare `on: push` with no path filter at all must
+# never be read as no-trigger/excluded (the fail-open the independent
+# review caught: _ci-fallback.sh used to fold no-trigger into the same
+# bucket as excluded).
+heading "Test 8f: a push-only workflow with NO path filter, a source-file change → exit 2 (pending), never 5"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_NO_CHECKS=1 GH_WORKFLOW_COUNT=1 \
+    GH_PR_FILES_JSON='["src/main.py"]' \
+    GH_WORKFLOW_PATHS_JSON='[".github/workflows/build.yml"]' \
+    GH_WORKFLOW_YAML=$'on:\n  push:\n    branches: [main]\n' \
+    CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 2 2>&1)" || rc=$?
+check "exits 2 (timeout/pending), never 5, when a push-only workflow has no path filter at all" '[ "$rc" -eq 2 ]'
+
+heading "Test 8g: a push-only workflow, paths-ignore covers an all-docs changed-file set → exit 5"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_NO_CHECKS=1 GH_WORKFLOW_COUNT=1 \
+    GH_PR_FILES_JSON='["docs/foo.md","README.md"]' \
+    GH_WORKFLOW_PATHS_JSON='[".github/workflows/build.yml"]' \
+    GH_WORKFLOW_YAML=$'on:\n  push:\n    branches: [main]\n    paths-ignore:\n      - \x27docs/**\x27\n      - \x27**.md\x27\n' \
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
+check "exits 5 — a push-only workflow's own paths-ignore excludes an all-docs changed-file set" '[ "$rc" -eq 5 ]'
 
 # ── Test 9: fine-grained token can't read Checks → falls back to gh run list, green ──
 #
