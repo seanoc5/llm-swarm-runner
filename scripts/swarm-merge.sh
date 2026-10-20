@@ -167,6 +167,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shape test substitute a fake ci-wait.sh to exercise swarm-merge.sh's own
 # handling of ci-wait's output (e.g. a pass with no "verified-head=" line)
 # without needing a real CI backend. Defaults identically to before.
+#
+# PR #643 self-review follow-up: this is a test hook, not a production
+# escape hatch. A caller pointing CI_WAIT_SCRIPT at a stub that prints
+# "verified-head=<sha>" and exits 0 would let --auto-low merge unattended
+# with no real CI check ever run. Honor the override only when the explicit
+# SWARM_MERGE_TEST_HOOKS=1 flag is also set (the shape tests set it);
+# otherwise ignore it, warn, and fall back to the real ci-wait.sh.
+if [ -n "${CI_WAIT_SCRIPT:-}" ] && [ "${SWARM_MERGE_TEST_HOOKS:-0}" != "1" ]; then
+  echo "WARNING: CI_WAIT_SCRIPT is set but SWARM_MERGE_TEST_HOOKS=1 is not — ignoring it and using the real ci-wait.sh. This override exists for shape tests only; set SWARM_MERGE_TEST_HOOKS=1 if that is genuinely intended." >&2
+  unset CI_WAIT_SCRIPT
+fi
 CI_WAIT_SCRIPT="${CI_WAIT_SCRIPT:-$SCRIPT_DIR/ci-wait.sh}"
 
 # --- arg parsing -----------------------------------------------------------
@@ -751,6 +762,25 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
           exit 1
         fi
         MATCH_SHA="$(gh pr view "$PR_NUM" --json headRefOid --jq .headRefOid 2>/dev/null || true)"
+        if [ -z "$MATCH_SHA" ]; then
+          # issue #643 self-review follow-up: this fallback read itself can
+          # fail (transient gh error, auth, rate limit) just like the main
+          # PR_JSON fetch above can. Merging with no --match-head-commit at
+          # all reopens the exact TOCTOU window #629 closed: a push landing
+          # right now would squash-merge unpinned and unnoticed. --auto-low
+          # has no human present to see a warning, so it refuses outright; a
+          # plain (human-driven) merge gets a loud warning plus a merge.gate
+          # event instead, since a person is already watching this merge and
+          # can judge for themselves whether to proceed.
+          if [ "$AUTO_LOW" = 1 ]; then
+            echo "ERROR: PR #$PR_NUM's fallback head-commit read failed (gh pr view --json headRefOid) with no verified commit to pin to — refusing to merge --auto-low unpinned." >&2
+            echo "       Retry, or merge by hand (swarm-merge.sh $PR_NUM, no --auto-low) once you've confirmed the head commit yourself." >&2
+            log_event merge.gate "pr=$PR_NUM gate=match-head-commit result=fallback-read-failed action=refuse-auto-low"
+            exit 1
+          fi
+          echo "       $(c_amber "⚠ could not read PR #$PR_NUM's head commit (gh pr view --json headRefOid failed) — merging WITHOUT --match-head-commit; a push landing right now could merge unpinned and unnoticed")"
+          log_event merge.gate "pr=$PR_NUM gate=match-head-commit result=fallback-read-failed action=proceed-unpinned"
+        fi
       fi
       MATCH_ARGS=()
       [ -n "$MATCH_SHA" ] && MATCH_ARGS=(--match-head-commit "$MATCH_SHA")
