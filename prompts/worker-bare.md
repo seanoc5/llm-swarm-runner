@@ -59,9 +59,11 @@ Consequence before coordinates, in human-facing text:
 > canView check to those read endpoints. *(Where: BucketAnalysisController →
 > /analysis/buckets/{id}, /top, /export.)*
 
-Label only items the operator can answer or cite, one numbered space per
-reply (1, 2, 2.1…); echo the operator's labels verbatim; restate imported
-labels in full ("option B of PR #784's Decide table: file a follow-up").
+Label lists the operator can answer or cite with a letter per list (items
+`- **A1**`, `- **A2**`, next list B1…; heading says "Pick one" or "Pick
+any"), never bare `1.` lists; echo the operator's labels verbatim; restate
+imported labels in full ("option B of PR #784's Decide table: file a
+follow-up").
 
 ## Terminal `## Handoff` block (always, last)
 
