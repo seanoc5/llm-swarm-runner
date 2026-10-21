@@ -79,7 +79,23 @@
 # Exit codes:
 #   0  all required checks passing
 #   1  one or more checks failed
-#   2  timeout — still pending when the deadline hit
+#   2  timeout — still pending when the deadline hit. This is the ONLY exit
+#      code that means "waited"; every other non-zero exit (1/3/4/5) is a
+#      fast refusal reached on or near the first poll, with no deadline
+#      involved at all. issue #629: a caller that sees exit 2 return in far
+#      less than the configured timeout is NOT looking at a documented fast-
+#      refusal case — the deadline check (`[ "$NOW" -lt "$DEADLINE" ]`) can
+#      only fail once that many real wall-clock seconds have actually
+#      elapsed, so a quick exit 2 means either the caller's OWN surrounding
+#      timeout (a shell `timeout`, or a harness's default foreground limit —
+#      see prompts/worker.md "Run long commands in the foreground") killed
+#      the process before ci-wait.sh's internal deadline, with the kill then
+#      misread as this script's own exit code, or TIMEOUT/CI_WAIT_TIMEOUT_SECONDS
+#      resolved to something smaller than intended. To make this unambiguous
+#      without needing to reproduce it, the timeout message below always
+#      names the actual measured elapsed seconds next to the configured
+#      deadline — a real timeout, those two numbers are close; a
+#      caller-side kill misattributed as exit 2, they won't be.
 #   3  PR is CONFLICTING/DIRTY against its base — no run will ever fire;
 #      rebase onto the base branch and re-push before waiting again
 #   4  usage / gh error
@@ -153,22 +169,66 @@ if [ -n "$REPO" ]; then
     API_REPO_PATH="repos/$REPO"
 fi
 
-MERGE_JSON="$(gh pr view "$PR" "${REPO_ARGS[@]}" --json mergeable,mergeStateStatus,headRefOid 2>&1)" \
-    || { echo "ci-wait: gh pr view $PR failed: $MERGE_JSON" >&2; exit 4; }
+# issue #643: every `gh pr view` JSON read below keeps stdout and stderr
+# apart (via GH_ERR_FILE), same as _ci-fallback.sh's `gh run list` read
+# already does. `gh` exiting 0 but printing something to stderr (an update
+# notice, a deprecation warning) used to land in the same variable the JSON
+# came from (`2>&1`); jq then failed on the combined text with ITS OWN exit
+# code 5, which `set -e` turned into ci-wait.sh's exit 5 — read downstream
+# (swarm-merge.sh Gate 2) as "no CI configured on this repo", merging an
+# unverified commit. jq_field fails closed with exit 4 instead, on either a
+# `gh` failure or output that isn't parseable JSON, and never lets a parse
+# problem masquerade as the one genuine exit 5 case (zero workflows
+# configured, below).
+GH_ERR_FILE="$(mktemp)"
+trap 'rm -f "$GH_ERR_FILE"' EXIT
 
-MERGEABLE="$(jq -r '.mergeable' <<<"$MERGE_JSON")"
-MERGE_STATE="$(jq -r '.mergeStateStatus' <<<"$MERGE_JSON")"
-SHA="$(jq -r '.headRefOid' <<<"$MERGE_JSON")"
+# jq_field <jq-filter> <json> — echoes the extracted value; propagates jq's
+# own exit status so a caller's `|| { ...; exit 4; }` can fail closed. Must
+# NOT call `exit` itself: this runs inside a `$(...)` command substitution,
+# so `exit` there would only end that subshell, not the script.
+jq_field() {
+    jq -r "$1" <<<"$2" 2>/dev/null
+}
+
+MERGE_JSON="$(gh pr view "$PR" "${REPO_ARGS[@]}" --json mergeable,mergeStateStatus,headRefOid 2>"$GH_ERR_FILE")" \
+    || { echo "ci-wait: gh pr view $PR failed: $(cat "$GH_ERR_FILE")" >&2; exit 4; }
+
+MERGEABLE="$(jq_field '.mergeable' "$MERGE_JSON")" \
+    || { echo "ci-wait: gh pr view $PR returned unparseable output: $MERGE_JSON" >&2; exit 4; }
+MERGE_STATE="$(jq_field '.mergeStateStatus' "$MERGE_JSON")" \
+    || { echo "ci-wait: gh pr view $PR returned unparseable output: $MERGE_JSON" >&2; exit 4; }
 
 # GitHub computes mergeability asynchronously — a fresh push can read back
 # UNKNOWN for a few seconds. One short retry before trusting it.
+#
+# issue #629: headRefOid must be re-read from this SAME retried response,
+# never left over from the pre-retry one. A `mergeable` of UNKNOWN is GitHub
+# still catching up to a just-landed push — the exact moment headRefOid is
+# also most likely to still be reporting the PREVIOUS commit. Capturing SHA
+# before this retry let it freeze on that stale, already-green commit for
+# the rest of the run: every later ci_fallback_run_state "$SHA" call (the
+# cross-check on a green `gh pr checks` reading, and the fine-grained-PAT
+# fallback) then graded the OLD commit's already-passed CI instead of the
+# new push's, while `gh pr checks` itself (keyed by the PR, not a frozen
+# SHA) kept tracking the real new head — so once gh pr checks had any green
+# reading at all, the stale-SHA cross-check rubber-stamped it instantly, no
+# matter how far the real commit's CI still had to go. corpusminder-spring
+# PR #1280: Gate 2 passed while the new commit's Integration (Testcontainers)
+# job was still in_progress.
 if [ "$MERGEABLE" = "UNKNOWN" ]; then
     sleep 3
-    MERGE_JSON="$(gh pr view "$PR" "${REPO_ARGS[@]}" --json mergeable,mergeStateStatus,headRefOid 2>&1)" \
-        || { echo "ci-wait: gh pr view $PR failed: $MERGE_JSON" >&2; exit 4; }
-    MERGEABLE="$(jq -r '.mergeable' <<<"$MERGE_JSON")"
-    MERGE_STATE="$(jq -r '.mergeStateStatus' <<<"$MERGE_JSON")"
+    MERGE_JSON="$(gh pr view "$PR" "${REPO_ARGS[@]}" --json mergeable,mergeStateStatus,headRefOid 2>"$GH_ERR_FILE")" \
+        || { echo "ci-wait: gh pr view $PR failed: $(cat "$GH_ERR_FILE")" >&2; exit 4; }
+    MERGEABLE="$(jq_field '.mergeable' "$MERGE_JSON")" \
+        || { echo "ci-wait: gh pr view $PR returned unparseable output: $MERGE_JSON" >&2; exit 4; }
+    MERGE_STATE="$(jq_field '.mergeStateStatus' "$MERGE_JSON")" \
+        || { echo "ci-wait: gh pr view $PR returned unparseable output: $MERGE_JSON" >&2; exit 4; }
 fi
+SHA="$(jq_field '.headRefOid' "$MERGE_JSON")" \
+    || { echo "ci-wait: gh pr view $PR returned unparseable output: $MERGE_JSON" >&2; exit 4; }
+[ -n "$SHA" ] && [ "$SHA" != "null" ] \
+    || { echo "ci-wait: gh pr view $PR returned no headRefOid (empty or null): $MERGE_JSON" >&2; exit 4; }
 
 if [ "$MERGEABLE" = "CONFLICTING" ] || [ "$MERGE_STATE" = "DIRTY" ]; then
     echo "ci-wait: PR #$PR is $MERGEABLE/$MERGE_STATE against its base — no pull_request run will ever fire. Rebase onto the base branch and re-push, then re-run ci-wait.sh." >&2
@@ -177,12 +237,49 @@ fi
 
 echo "ci-wait: PR #$PR mergeable ($MERGE_STATE), watching checks on ${SHA:0:12} (deadline ${TIMEOUT}s, poll ${POLL}s)"
 
-DEADLINE=$(( $(date -u +%s) + TIMEOUT ))
+START=$(date -u +%s)
+DEADLINE=$(( START + TIMEOUT ))
 WORKFLOW_COUNT=""   # lazily resolved at most once, only if "no checks" is ever seen
 FALLBACK=0          # set once "gh pr checks" proves unreadable by this token
 while true; do
     PASS_NOW=0
     PASS_MSG=""
+
+    # issue #629 follow-up: headRefOid can change DURING the wait — a new
+    # push superseding the commit this loop started watching. SHA was
+    # previously captured once, before the loop, and reused by every
+    # ci_fallback_run_state "$SHA" call for the rest of the run: a late push
+    # would silently keep grading the OLD commit's CI (which could already
+    # be green) instead of the new, unverified one. Re-read it every
+    # iteration instead, and track the move explicitly rather than quietly
+    # carrying on with whichever commit happened to be current at the top.
+    # issue #643 follow-up: a single transient `gh pr view` failure mid-poll
+    # (a rate-limit blip, a flaky network hiccup) must not end the whole
+    # wait — retry once, after a short sleep, before refusing. Exit 4 only
+    # if it fails twice in a row. Never fall back to the previous SHA on
+    # failure — a failed read means "unknown", not "unchanged".
+    set +e
+    HEAD_JSON="$(gh pr view "$PR" "${REPO_ARGS[@]}" --json headRefOid 2>"$GH_ERR_FILE")"
+    HEAD_RC=$?
+    set -e
+    if [ "$HEAD_RC" -ne 0 ]; then
+        echo "ci-wait: gh pr view $PR failed (retrying once): $(cat "$GH_ERR_FILE")" >&2
+        sleep 3
+        set +e
+        HEAD_JSON="$(gh pr view "$PR" "${REPO_ARGS[@]}" --json headRefOid 2>"$GH_ERR_FILE")"
+        HEAD_RC=$?
+        set -e
+        [ "$HEAD_RC" -eq 0 ] \
+            || { echo "ci-wait: gh pr view $PR failed twice in a row: $(cat "$GH_ERR_FILE")" >&2; exit 4; }
+    fi
+    NEW_SHA="$(jq_field '.headRefOid' "$HEAD_JSON")" \
+        || { echo "ci-wait: gh pr view $PR returned unparseable output: $HEAD_JSON" >&2; exit 4; }
+    [ -n "$NEW_SHA" ] && [ "$NEW_SHA" != "null" ] \
+        || { echo "ci-wait: gh pr view $PR returned no headRefOid (empty or null): $HEAD_JSON" >&2; exit 4; }
+    if [ "$NEW_SHA" != "$SHA" ]; then
+        echo "ci-wait: PR #$PR's head moved from ${SHA:0:12} to ${NEW_SHA:0:12} while waiting — now watching the new commit; the old one's CI result no longer counts." >&2
+        SHA="$NEW_SHA"
+    fi
 
     if [ "$FALLBACK" != "1" ]; then
         set +e
@@ -270,12 +367,26 @@ while true; do
 
     if [ "$PASS_NOW" = "1" ]; then
         echo "ci-wait: $PASS_MSG"
+        # issue #629 self-review follow-up: a caller that merges some time
+        # after this exit has no record of exactly which commit was just
+        # verified (CI can finish on commit A, then a NEW push supersede
+        # it before the merge call runs). Print it in a stable,
+        # machine-parseable form so swarm-merge.sh can pin the actual
+        # `gh pr merge --match-head-commit` to THIS commit — if a newer
+        # push lands in between, the merge is refused instead of silently
+        # merging an unverified commit under the old one's green CI.
+        echo "ci-wait: verified-head=$SHA"
         exit 0
     fi
 
     NOW=$(date -u +%s)
     [ "$NOW" -lt "$DEADLINE" ] || {
-        echo "ci-wait: timed out after ${TIMEOUT}s waiting on PR #$PR (still pending)." >&2
+        # issue #629: name the actual elapsed seconds, not just the
+        # configured timeout — a real timeout has these two numbers close;
+        # a fast refusal misattributed to this exit code (see the exit-code
+        # table above) won't, and this is the only evidence that survives
+        # to tell the two apart after the fact.
+        echo "ci-wait: timed out after $(( NOW - START ))s (configured deadline ${TIMEOUT}s) waiting on PR #$PR (still pending)." >&2
         exit 2
     }
     sleep "$POLL"

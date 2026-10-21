@@ -48,10 +48,47 @@ case "$1 $2" in
         if [ -f "${GH_CALL_COUNT_FILE:-/dev/null}" ]; then n="$(cat "$GH_CALL_COUNT_FILE")"; fi
         n=$((n + 1))
         [ -n "${GH_CALL_COUNT_FILE:-}" ] && echo "$n" > "$GH_CALL_COUNT_FILE"
+        # issue #643 regression: a `gh` that exits 0 but still writes to
+        # stderr (an update notice, a deprecation warning) must never
+        # corrupt the JSON ci-wait.sh parses from stdout.
+        if [ "${GH_VIEW_STDERR_NOISE:-0}" = "1" ]; then
+            echo "warning: a new release of gh is available (simulated)" >&2
+        fi
+        # issue #643 regression: `gh` returning non-JSON on stdout (exit 0)
+        # must fail closed as exit 4, never leak jq's own exit 5 as
+        # ci-wait.sh's exit code (misread downstream as "no CI configured").
+        if [ "${GH_VIEW_BAD_JSON:-0}" = "1" ]; then
+            echo "not valid json {"
+            exit 0
+        fi
+        if [[ "$*" == *"--json headRefOid"* ]] && [[ "$*" != *"mergeable"* ]]; then
+            # issue #629 follow-up: ci-wait.sh's own per-poll-iteration
+            # re-read (bare --json headRefOid, no mergeable/mergeStateStatus)
+            # — distinct from the initial triple-field call below.
+            # GH_VIEW_HEADSHA_MIDWAIT lets a test simulate a push landing
+            # mid-wait; defaults to GH_VIEW_HEADSHA so every pre-existing
+            # test (none of which sets this var) sees the same head
+            # throughout, unaffected.
+            mn=0
+            if [ -f "${GH_MIDWAIT_CALL_COUNT_FILE:-/dev/null}" ]; then mn="$(cat "$GH_MIDWAIT_CALL_COUNT_FILE")"; fi
+            mn=$((mn + 1))
+            [ -n "${GH_MIDWAIT_CALL_COUNT_FILE:-}" ] && echo "$mn" > "$GH_MIDWAIT_CALL_COUNT_FILE"
+            # issue #643 follow-up: GH_VIEW_MIDWAIT_FAIL_UNTIL=<n> makes this
+            # bare per-poll read fail for its first n calls (a transient
+            # `gh pr view` error), then succeed from call n+1 on — so a test
+            # can prove a single transient failure gets retried rather than
+            # ending the wait.
+            if [ -n "${GH_VIEW_MIDWAIT_FAIL_UNTIL:-}" ] && [ "$mn" -le "$GH_VIEW_MIDWAIT_FAIL_UNTIL" ]; then
+                echo "GraphQL: transient error (simulated)" >&2
+                exit 1
+            fi
+            echo "{\"headRefOid\":\"${GH_VIEW_HEADSHA_MIDWAIT:-${GH_VIEW_HEADSHA:-deadbeef}}\"}"
+            exit 0
+        fi
         if [ "$n" = "1" ] && [ "${GH_VIEW_UNKNOWN_FIRST:-0}" = "1" ]; then
-            echo '{"mergeable":"UNKNOWN","mergeStateStatus":"UNKNOWN","headRefOid":"deadbeef"}'
+            echo "{\"mergeable\":\"UNKNOWN\",\"mergeStateStatus\":\"UNKNOWN\",\"headRefOid\":\"${GH_VIEW_HEADSHA_STALE:-deadbeef}\"}"
         else
-            echo "{\"mergeable\":\"${GH_VIEW_MERGEABLE:-MERGEABLE}\",\"mergeStateStatus\":\"${GH_VIEW_STATE:-CLEAN}\",\"headRefOid\":\"deadbeef\"}"
+            echo "{\"mergeable\":\"${GH_VIEW_MERGEABLE:-MERGEABLE}\",\"mergeStateStatus\":\"${GH_VIEW_STATE:-CLEAN}\",\"headRefOid\":\"${GH_VIEW_HEADSHA:-deadbeef}\"}"
         fi
         exit 0 ;;
     "pr checks")
@@ -78,6 +115,23 @@ case "$1 $2" in
         [ -n "${GH_RUNLIST_CALL_COUNT_FILE:-}" ] && echo "$rn" > "$GH_RUNLIST_CALL_COUNT_FILE"
         if [ "${GH_RUNLIST_STDERR_NOISE:-0}" = "1" ]; then
             echo "warning: some deprecation notice from gh itself" >&2
+        fi
+        # issue #629 regression (Test 16): respond differently depending on
+        # which --commit SHA was actually requested, so a test can prove
+        # ci-wait queried the FRESH head and not a stale one left over from
+        # before the mergeability retry.
+        reqsha=""; prevarg=""
+        for a in "$@"; do
+            [ "$prevarg" = "--commit" ] && reqsha="$a"
+            prevarg="$a"
+        done
+        if [ -n "${GH_RUNLIST_SHA_A:-}" ] && [ "$reqsha" = "$GH_RUNLIST_SHA_A" ]; then
+            echo "${GH_RUNLIST_JSON_A}"
+            exit "${GH_RUNLIST_RC:-0}"
+        fi
+        if [ -n "${GH_RUNLIST_SHA_B:-}" ] && [ "$reqsha" = "$GH_RUNLIST_SHA_B" ]; then
+            echo "${GH_RUNLIST_JSON_B}"
+            exit "${GH_RUNLIST_RC:-0}"
         fi
         if [ -n "${GH_RUNLIST_JSON_SEQUENCE:-}" ]; then
             idx="$rn"
@@ -386,6 +440,127 @@ out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_RC=0 GH_RUNLIST
     CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 2 2>&1)" || rc=$?
 check "exits 2 (timeout/refuse), never a false pass, when the cross-check itself can't be read" '[ "$rc" -eq 2 ]'
 check "message says it isn't trusting a bare green reading" 'grep -qi "not trusting a bare green reading" <<<"$out"'
+
+# ── Test 16: issue #629 — headRefOid read before the mergeability retry must not freeze SHA on a stale, already-green commit ──
+#
+# corpusminder-spring PR #1280's real shape: `gh pr view` first reads back
+# UNKNOWN mergeable (GitHub still catching up to a just-landed push) — the
+# same moment headRefOid is also likeliest to still report the PREVIOUS
+# commit, not the new one. Before this fix, SHA was captured from that
+# FIRST (stale) response and never refreshed from the retry's. Here the
+# stale SHA ("oldsha", a commit that already has a fully green completed
+# run) and the real new SHA ("newsha", still in_progress) deliberately
+# resolve to opposite verdicts in gh run list, so a leftover stale SHA
+# shows up as an instant false pass instead of the correct wait.
+
+heading "Test 16: a stale headRefOid read before the mergeability retry must not freeze the cross-check on the OLD, already-green commit"
+rc=0
+COUNT_FILE_16="$TEST_DIR/gh-call-count-16"
+rm -f "$COUNT_FILE_16"
+out="$(GH_CALL_COUNT_FILE="$COUNT_FILE_16" GH_VIEW_UNKNOWN_FIRST=1 GH_VIEW_HEADSHA_STALE=oldsha GH_VIEW_HEADSHA=newsha \
+    GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_RC=0 \
+    GH_RUNLIST_SHA_A=oldsha GH_RUNLIST_JSON_A='[{"status":"completed","conclusion":"success"}]' \
+    GH_RUNLIST_SHA_B=newsha GH_RUNLIST_JSON_B='[{"status":"in_progress","conclusion":null}]' \
+    CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 2 2>&1)" || rc=$?
+check "never exits 0 on the stale commit's old green run (times out/refuses instead)" '[ "$rc" -ne 0 ]'
+check "exits 2 (timeout), correctly still pending on the real new head" '[ "$rc" -eq 2 ]'
+
+# ── Test 17: acceptance criterion — one in-progress run plus a cancelled sibling run of the SAME workflow must never read as pass ──
+#
+# The corpusminder-spring #1280 shape distilled to the exact run-level data:
+# a concurrency-cancelled sibling run and the in-progress run that
+# superseded it, both for the same workflow and commit. Must stay pending
+# (keep polling) however gh orders the two in its response — this locks in
+# both the ordinary non-tied case and the equal-createdAt tie-break fix.
+
+heading "Test 17: one in-progress run plus a cancelled sibling run of the same workflow → stays pending, never a pass"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_PERM_ERROR=1 \
+    GH_RUNLIST_JSON='[{"status":"in_progress","conclusion":null,"workflowName":"CI","createdAt":"2026-10-13T05:29:22Z"},{"status":"completed","conclusion":"cancelled","workflowName":"CI","createdAt":"2026-10-13T05:28:46Z"}]' \
+    CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 2 2>&1)" || rc=$?
+check "exits 2 (timeout) — never a false pass from the cancelled sibling" '[ "$rc" -eq 2 ]'
+
+heading "Test 17b: same shape, but gh returns the two runs with equal createdAt (a real tie), in-progress listed FIRST → still stays pending, not the fail a plain last-wins tie-break would give"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_PERM_ERROR=1 \
+    GH_RUNLIST_JSON='[{"status":"in_progress","conclusion":null,"workflowName":"CI","createdAt":"2026-10-13T05:29:22Z"},{"status":"completed","conclusion":"cancelled","workflowName":"CI","createdAt":"2026-10-13T05:29:22Z"}]' \
+    CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 2 2>&1)" || rc=$?
+check "exits 2 (timeout), not 1 (fail) — the tie never lets the cancelled sibling win" '[ "$rc" -eq 2 ]'
+
+heading "Test 17c: same tie, cancelled run listed FIRST instead → also stays pending (order-independent)"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_PERM_ERROR=1 \
+    GH_RUNLIST_JSON='[{"status":"completed","conclusion":"cancelled","workflowName":"CI","createdAt":"2026-10-13T05:29:22Z"},{"status":"in_progress","conclusion":null,"workflowName":"CI","createdAt":"2026-10-13T05:29:22Z"}]' \
+    CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 2 2>&1)" || rc=$?
+check "exits 2 (timeout) with the reverse array order too" '[ "$rc" -eq 2 ]'
+
+# ── Test 18: coordinator follow-up — a push landing MID-POLL (no mergeability retry involved) must not pass on the OLD commit's already-green CI ──
+#
+# Distinct from Test 16: Test 16 covers the pre-loop mergeability-UNKNOWN
+# retry. Here mergeability is normal from the very first read (no retry
+# fires at all) — the only thing that can catch the moved head is the new
+# per-poll-iteration headRefOid re-read inside the loop body itself. The old
+# commit ("oldsha") already has a fully green completed run; the real,
+# current commit ("newsha") is still in_progress. Before this fix, SHA was
+# captured once before the loop and never refreshed, so the cross-check
+# would keep querying oldsha and pass instantly on its stale green run.
+
+heading "Test 18: a push mid-poll (no mergeability retry) must not pass on the old commit's already-green CI"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_VIEW_HEADSHA=oldsha GH_VIEW_HEADSHA_MIDWAIT=newsha \
+    GH_CHECKS_RC=0 \
+    GH_RUNLIST_SHA_A=oldsha GH_RUNLIST_JSON_A='[{"status":"completed","conclusion":"success"}]' \
+    GH_RUNLIST_SHA_B=newsha GH_RUNLIST_JSON_B='[{"status":"in_progress","conclusion":null}]' \
+    CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 2 2>&1)" || rc=$?
+check "never exits 0 on the old commit's stale green run (times out/refuses instead)" '[ "$rc" -ne 0 ]'
+check "exits 2 (timeout), correctly still pending on the real, current head" '[ "$rc" -eq 2 ]'
+check "message logs the head move detected mid-wait" 'grep -qi "head moved" <<<"$out"'
+
+# ── Test 19: issue #643 — one transient per-poll `gh pr view` failure must be retried once, not end the wait ──
+#
+# The bare --json headRefOid read at the top of the poll loop fails exactly
+# ONCE (a simulated rate-limit/network blip), then succeeds on every call
+# after. Before this fix, ci-wait.sh exited 4 on the very first failure;
+# now it must retry once and carry on to a normal green pass, never
+# surfacing the transient error as a hard refusal.
+
+heading "Test 19: a single transient per-poll gh pr view failure is retried, not treated as exit 4"
+rc=0
+MIDWAIT_COUNT_FILE_19="$TEST_DIR/gh-midwait-call-count-19"
+rm -f "$MIDWAIT_COUNT_FILE_19"
+out="$(GH_MIDWAIT_CALL_COUNT_FILE="$MIDWAIT_COUNT_FILE_19" GH_VIEW_MIDWAIT_FAIL_UNTIL=1 \
+    GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_RC=0 \
+    GH_RUNLIST_JSON='[{"status":"completed","conclusion":"success"}]' \
+    "$CI_WAIT" 42 10 2>&1)" || rc=$?
+check "survives the transient failure and still passes (exit 0), never exit 4" '[ "$rc" -eq 0 ]'
+check "message logs the retry, not a hard refusal" 'grep -qi "retrying once" <<<"$out"'
+check "does not report gh pr view failing twice in a row" '! grep -qi "failed twice in a row" <<<"$out"'
+
+# ── Test 20: issue #643 — a stray stderr line from `gh pr view` (exit 0) must never corrupt the JSON parse ──
+#
+# PR #643's coordinator review (BLOCK on c51b8f6): `gh pr view`'s JSON reads
+# captured stdout+stderr into the same variable (`2>&1`). An exit-0 call
+# that still writes a warning/notice to stderr left that variable holding
+# JSON-plus-noise, which `jq -r` then failed to parse with jq's OWN exit
+# code 5 — and `set -e` turned that into ci-wait.sh's exit 5, misread by
+# swarm-merge.sh's Gate 2 as "no CI configured", merging an unverified
+# commit. Confirmed failing against c51b8f6 (exit 5) before this fix.
+
+heading "Test 20: gh pr view exits 0 but writes noise to stderr → stdout JSON still parses clean, exit 0"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_VIEW_STDERR_NOISE=1 GH_CHECKS_RC=0 \
+    GH_RUNLIST_JSON='[{"status":"completed","conclusion":"success"}]' \
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
+check "exits 0 — gh pr view's stderr noise never reached the JSON parse" '[ "$rc" -eq 0 ]'
+
+# ── Test 21: issue #643 — gh pr view returning non-JSON on stdout must fail closed as exit 4, never exit 5 ──
+
+heading "Test 21: gh pr view returns non-JSON on stdout (exit 0) → exit 4 (unparseable), never 5 (misread as no-CI)"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_VIEW_BAD_JSON=1 \
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
+check "exits 4 on unparseable gh pr view output, never misread as exit 5" '[ "$rc" -eq 4 ]'
+check "message names the unparseable output" 'grep -qi "unparseable" <<<"$out"'
 
 heading "Results: $PASS checks passed"
 green "All checks passed."

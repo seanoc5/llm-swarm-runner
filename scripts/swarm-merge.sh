@@ -170,6 +170,22 @@ AUTO_LOW=0
 ISSUE=""
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Test hook (mirrors worker-merge.sh's own CI_WAIT_SCRIPT, #564): lets a
+# shape test substitute a fake ci-wait.sh to exercise swarm-merge.sh's own
+# handling of ci-wait's output (e.g. a pass with no "verified-head=" line)
+# without needing a real CI backend. Defaults identically to before.
+#
+# PR #643 self-review follow-up: this is a test hook, not a production
+# escape hatch. A caller pointing CI_WAIT_SCRIPT at a stub that prints
+# "verified-head=<sha>" and exits 0 would let --auto-low merge unattended
+# with no real CI check ever run. Honor the override only when the explicit
+# SWARM_MERGE_TEST_HOOKS=1 flag is also set (the shape tests set it);
+# otherwise ignore it, warn, and fall back to the real ci-wait.sh.
+if [ -n "${CI_WAIT_SCRIPT:-}" ] && [ "${SWARM_MERGE_TEST_HOOKS:-0}" != "1" ]; then
+  echo "WARNING: CI_WAIT_SCRIPT is set but SWARM_MERGE_TEST_HOOKS=1 is not — ignoring it and using the real ci-wait.sh. This override exists for shape tests only; set SWARM_MERGE_TEST_HOOKS=1 if that is genuinely intended." >&2
+  unset CI_WAIT_SCRIPT
+fi
+CI_WAIT_SCRIPT="${CI_WAIT_SCRIPT:-$SCRIPT_DIR/ci-wait.sh}"
 
 # --- arg parsing -----------------------------------------------------------
 
@@ -744,7 +760,15 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
       if [ "$AUTO_LOW" = 1 ]; then
         echo "       auto-low gate 2 (CI wait): waiting for a real conclusion…"
         CI_RC=0
-        "$SCRIPT_DIR/ci-wait.sh" "$PR_NUM" || CI_RC=$?
+        # issue #629 self-review follow-up: tee ci-wait.sh's own output so we
+        # can recover the exact commit it verified (its "verified-head=" line)
+        # for --match-head-commit below, while still streaming it live as
+        # before. `set -o pipefail` (already on, line 154) makes $? here
+        # ci-wait.sh's own exit code, since `tee` itself always succeeds.
+        CI_WAIT_LOG="$(mktemp)"
+        "$CI_WAIT_SCRIPT" "$PR_NUM" 2>&1 | tee "$CI_WAIT_LOG" || CI_RC=$?
+        CI_VERIFIED_SHA="$(grep -o 'verified-head=[0-9a-f]\{7,40\}' "$CI_WAIT_LOG" | tail -1 | cut -d= -f2 || true)"
+        rm -f "$CI_WAIT_LOG"
         if [ "$CI_RC" = 5 ]; then
           # No CI checks configured on this repo at all — pass-with-warning,
           # not a refusal (see the Gate 2 note in the header comment above).
@@ -763,8 +787,59 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
       # checked out — the live worker's worktree — with no salvage and no
       # reap.worktree event. Delete the remote branch ourselves instead;
       # the local branch is deleted by kill-worktree.sh / the step-7 sweep.
+      # issue #629 self-review follow-up: pin the actual merge to the exact
+      # commit that was just verified (by ci-wait.sh above, when it ran) —
+      # closes the gap between "CI confirmed green on commit X" and "this
+      # merge call happens some moments later" that ci-wait.sh's own result
+      # alone can't close. If a NEW push supersedes X in that window,
+      # --match-head-commit makes `gh pr merge` refuse instead of silently
+      # squash-merging the new, never-checked commit under X's green CI.
+      # No verified SHA to pin to. Two different reasons land here, and
+      # they get different treatment:
+      #   - Gate 2 skipped entirely (plain merge, no --auto-low), or it
+      #     passed via the no-CI-configured exit 5 (nothing was ever run,
+      #     so there was never a commit to verify) — fall back to a fresh
+      #     read right before merging, which still closes the ordinary
+      #     TOCTOU window even though it can't catch a push that lands in
+      #     the next instant.
+      #   - Gate 2 itself exited 0 (a real pass) but produced no
+      #     "verified-head=" line anyway. ci-wait.sh's own success path
+      #     always prints one, so this means something's wrong with the
+      #     log capture, not a case safe to guess through — refuse rather
+      #     than silently pinning to an unrelated fresh read that was never
+      #     actually checked against the CI result that justified merging
+      #     at all (issue #629 follow-up).
+      MATCH_SHA="${CI_VERIFIED_SHA:-}"
+      if [ -z "$MATCH_SHA" ]; then
+        if [ "${CI_RC:-}" = "0" ]; then
+          echo "ERROR: PR #$PR_NUM's Gate 2 (CI wait) reported a pass but never named the commit it verified — refusing to merge rather than pinning to an unrelated fresh read. Re-run ci-wait.sh by hand ($SCRIPT_DIR/ci-wait.sh $PR_NUM) and check its output." >&2
+          exit 1
+        fi
+        MATCH_SHA="$(gh pr view "$PR_NUM" --json headRefOid --jq .headRefOid 2>/dev/null || true)"
+        if [ -z "$MATCH_SHA" ]; then
+          # issue #643 self-review follow-up: this fallback read itself can
+          # fail (transient gh error, auth, rate limit) just like the main
+          # PR_JSON fetch above can. Merging with no --match-head-commit at
+          # all reopens the exact TOCTOU window #629 closed: a push landing
+          # right now would squash-merge unpinned and unnoticed. --auto-low
+          # has no human present to see a warning, so it refuses outright; a
+          # plain (human-driven) merge gets a loud warning plus a merge.gate
+          # event instead, since a person is already watching this merge and
+          # can judge for themselves whether to proceed.
+          if [ "$AUTO_LOW" = 1 ]; then
+            echo "ERROR: PR #$PR_NUM's fallback head-commit read failed (gh pr view --json headRefOid) with no verified commit to pin to — refusing to merge --auto-low unpinned." >&2
+            echo "       Retry, or merge by hand (swarm-merge.sh $PR_NUM, no --auto-low) once you've confirmed the head commit yourself." >&2
+            log_event merge.gate "pr=$PR_NUM gate=match-head-commit result=fallback-read-failed action=refuse-auto-low"
+            exit 1
+          fi
+          echo "       $(c_amber "⚠ could not read PR #$PR_NUM's head commit (gh pr view --json headRefOid failed) — merging WITHOUT --match-head-commit; a push landing right now could merge unpinned and unnoticed")"
+          log_event merge.gate "pr=$PR_NUM gate=match-head-commit result=fallback-read-failed action=proceed-unpinned"
+        fi
+      fi
+      MATCH_ARGS=()
+      [ -n "$MATCH_SHA" ] && MATCH_ARGS=(--match-head-commit "$MATCH_SHA")
       MERGE_RC=0
-      gh pr merge "$PR_NUM" --squash || MERGE_RC=$?
+      gh pr merge "$PR_NUM" --squash "${MATCH_ARGS[@]}" || MERGE_RC=$?
       if [ "$MERGE_RC" != 0 ]; then
         # issue #492: a nonzero exit here used to be swallowed unconditionally
         # (the old --delete-branch local-delete step could fail harmlessly
