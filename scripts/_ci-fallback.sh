@@ -49,6 +49,293 @@
 #       never silently as "failing CI": the whole reason this function
 #       exists is to stop a permission gap from being misread as red CI
 #       (issue #560).
+#
+#   ci_fallback_workflows_relevant_to_pr <pr> [gh-repo-args...]
+#       issue #639: a repo can have `pull_request`-triggered workflows that
+#       are configured but will NEVER run for a given PR — a `paths-ignore`
+#       (or a `paths` allowlist none of the changed files match) means
+#       GitHub creates no run at all, so "no checks reported" is a
+#       permanent fact about this commit, not the ordinary post-push race
+#       the "no checks reported" handling elsewhere in this file already
+#       accounts for (a workflow count of 0 means nothing is configured at
+#       all; this function instead asks "is anything configured that would
+#       apply to THESE files"). Fetches the PR's changed files and every
+#       active workflow's raw YAML, and farms the per-workflow trigger
+#       decision out to `_workflow-path-filter.py` (a tiny stdlib-only
+#       line scanner — no PyYAML dependency) since that parsing isn't
+#       reliable in bash/jq. Only called once a caller has already
+#       confirmed the repo has at least one workflow at all AND `gh pr
+#       checks` reported "no checks reported" — this is not a substitute
+#       for that cheaper check, only a refinement of it.
+#
+#       issue #644 round-3 self-review: before any of that YAML-fetch-and-
+#       parse, if the PR's own changed files include anything under
+#       .github/workflows/, this short-circuits straight to "yes" without
+#       reading a single workflow file. GitHub evaluates a `pull_request`
+#       event's workflow YAML from the PR's merge commit, not the base
+#       branch, so a PR that removes a paths-ignore entry (or adds a new
+#       workflow) gets a real run the base-branch YAML — which is all this
+#       function can read — says will never happen. That's the fail-open
+#       direction this whole function exists to avoid, so a workflow-file
+#       edit is never read as path-filtered, full stop.
+#
+#       Sets two globals:
+#         CI_FALLBACK_RELEVANT         "yes" | "no" | "unknown"
+#         CI_FALLBACK_RELEVANT_DETAIL  one-line explanation
+#
+#       "no" means at least one active workflow's pull_request/push trigger
+#       is CONFIDENTLY path-filtered-excluded for every one of the PR's
+#       changed files, and no workflow came back "triggers" or "unknown" —
+#       positive evidence that a real exclusion decision was made, not
+#       merely the absence of a relevant trigger. "yes" means at least one
+#       workflow would run, OR nothing could be determined confidently
+#       (fails toward "yes": the safe direction is to keep treating this as
+#       a real, awaitable CI gap, same posture as every other ambiguous
+#       case in this file). "unknown" is set alongside "yes" so a caller
+#       that wants to say WHY can still tell the two "yes" paths apart;
+#       callers that don't care just check for "no".
+#
+#       issue #644 final round: every workflow file is fetched at the PR's
+#       OWN base branch (`?ref=<baseRefName>`, via `gh api -X GET -f
+#       ref=...`, which also takes care of percent-encoding a ref that
+#       contains slashes). `-X GET` is mandatory: `gh api` silently
+#       switches its default method to POST whenever a `-f`/`-F` parameter
+#       is given, which 404s this read-only content fetch every time on
+#       live GitHub (issue #644 follow-up) — fails toward "yes" per the
+#       posture below, but defeats the whole point of this fetch. Never the
+#       repo's default branch, either. Before the base-ref fix below, a PR
+#       opened against a non-default base branch with different
+#       `paths-ignore` filters than the default branch got evaluated
+#       against the WRONG filters — "excluded" could come out of reading
+#       the default branch's copy even though the PR's actual base branch
+#       would run CI for real. ci-wait.sh turns a wrongly-"excluded"
+#       verdict into an early non-polling exit, so this was a real
+#       fail-closed-when-it-should-wait bug, not just a cosmetic one. If
+#       the base-ref lookup itself fails, this folds into the same
+#       fail-toward-"yes" posture as every other error path in this
+#       function — it never reports "excluded" off of an unreadable base
+#       branch.
+#
+#       issue #644 third follow-up: a workflow whose only triggers are
+#       things like `schedule`/`workflow_dispatch` returns "no-trigger"
+#       from the per-workflow filter script, not "excluded" — and
+#       "no-trigger" must NEVER be folded into the same bucket as
+#       "excluded". An all-"no-trigger" result means nothing confirms a
+#       path-filter exclusion actually happened, only that this function
+#       found nothing relevant to check; that is not evidence CI will
+#       never register, so it also falls to "yes". A workflow whose only
+#       PR-type/push trigger is itself unfiltered (`on: push` with no
+#       `paths`/`paths-ignore` at all) is "triggers", never "no-trigger" —
+#       GitHub still creates a real run on the PR's head commit for it.
+#
+#       issue #644 round-4 (coordinator review on this same PR): a `push`
+#       trigger's `paths`/`paths-ignore` are evaluated by GitHub against
+#       THAT PUSH'S OWN diff, never against `pulls/<pr>/files` — a docs-only
+#       PR branch that later merges master in carries source files on its
+#       next push, so a push-triggered run can attach to the PR head even
+#       though this function's only view of "the changed files" (the PR's
+#       own diff) is docs-only. Reading a push trigger's path filter at all
+#       was therefore unsound in the fail-OPEN direction opposite the one
+#       this function exists to prevent: it could read "excluded" for a
+#       push trigger that GitHub will actually fire a real run for. Fixed by
+#       never evaluating a push trigger's path filter, in either direction
+#       — `_workflow-path-filter.py` now evaluates only its branch filter
+#       (`branches`/`branches-ignore`, against the PR's own head branch
+#       name, fetched below alongside the base branch) and reports
+#       "no-trigger" when the branch filter rules out this head branch
+#       (legitimate: no push run can ever attach to it), never "excluded".
+#       `pull_request`/`pull_request_target` path filtering is unaffected.
+#
+#       Always returns 0 (never fails the caller's `set -e`) — every
+#       failure mode (an unreadable PR, an unreadable workflow list, an
+#       unreadable workflow file, a parse the Python helper couldn't
+#       confidently make) is folded into CI_FALLBACK_RELEVANT=yes/unknown,
+#       not a nonzero return, so callers never need their own try/catch
+#       around this call.
+_CI_FALLBACK_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+ci_fallback_workflows_relevant_to_pr() {
+    local pr="$1"; shift
+    local repo_args=("$@")
+    local repo_path="repos/{owner}/{repo}"
+    local i
+    for ((i = 0; i < ${#repo_args[@]}; i++)); do
+        # `gh` itself treats --repo and -R as the exact same flag; a caller
+        # passing repo_args straight through from its own -R should get the
+        # same repo_path this function already builds from --repo.
+        if [ "${repo_args[$i]}" = "--repo" ] || [ "${repo_args[$i]}" = "-R" ]; then
+            repo_path="repos/${repo_args[$((i + 1))]}"
+        fi
+    done
+
+    # `gh pr view --json files` truncates at 100 files (cli/cli#5366) — a
+    # large PR past that cap would silently drop files from the relevance
+    # check, so this goes through the REST files endpoint with --paginate
+    # instead, which follows every Link header.
+    #
+    # issue #644 round-5 (coordinator review): a renamed file's OLD path
+    # (`.previous_filename`) must be in this set too, not just its new
+    # `.filename` — a PR that moves `src/Foo.kt` to `docs/Foo.kt` is a real
+    # source change, but with only the new path collected it reads as
+    # docs-only and a paths-ignore filter on docs/ can wrongly return
+    # "excluded". Adding the old path only ever ADDS an entry to the
+    # changed-file set this function checks, which can only push a
+    # per-workflow verdict from "excluded" toward "triggers" — the safe
+    # direction — never the other way.
+    local files_list files_rc
+    set +e
+    files_list="$(gh api --paginate "$repo_path/pulls/$pr/files" --jq '.[] | .filename, (.previous_filename // empty)' 2>&1)"
+    files_rc=$?
+    set -e
+    if [ "$files_rc" -ne 0 ] || [ -z "$files_list" ]; then
+        CI_FALLBACK_RELEVANT="yes"
+        CI_FALLBACK_RELEVANT_DETAIL="couldn't read PR #$pr's changed file list"
+        return 0
+    fi
+
+    # issue #644 round-3 self-review: for `pull_request` events GitHub runs
+    # the workflow YAML from the PR's MERGE COMMIT, not the base branch —
+    # so a PR that itself edits a workflow (removes a paths-ignore entry,
+    # adds a new workflow) can get a real run the base-branch YAML this
+    # function fetches below says will never happen. Parsing the head-ref
+    # YAML instead would just move the trust problem (a PR could edit the
+    # workflow to claim a filter it won't actually run under), so this
+    # takes the cheap, safe-direction fix instead: any changed file under
+    # .github/workflows/ makes CI relevance unconditional, no YAML read or
+    # parse at all. This can never be reached via the "excluded" return
+    # path below with a workflow-editing PR, closing the fail-open.
+    if grep -q '^\.github/workflows/' <<<"$files_list"; then
+        CI_FALLBACK_RELEVANT="yes"
+        CI_FALLBACK_RELEVANT_DETAIL="PR #$pr changes a workflow file itself (.github/workflows/) — GitHub runs the merge-commit version of that workflow, not the base branch's, so path-filter exclusions can't be trusted"
+        return 0
+    fi
+
+    local wf_json wf_rc
+    set +e
+    wf_json="$(gh api "$repo_path/actions/workflows" --jq '[.workflows[] | select(.state == "active") | .path]' 2>&1)"
+    wf_rc=$?
+    set -e
+    if [ "$wf_rc" -ne 0 ] || ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$wf_json"; then
+        CI_FALLBACK_RELEVANT="yes"
+        CI_FALLBACK_RELEVANT_DETAIL="couldn't list this repo's active workflows"
+        return 0
+    fi
+    if ! jq -e 'length > 0' >/dev/null 2>&1 <<<"$wf_json"; then
+        # A caller only reaches this function after confirming the repo's
+        # workflow count is nonzero, so an empty active-workflow list here
+        # is itself a surprise (a race between the two separate `gh api`
+        # calls, a state filter mismatch, ...) — fail toward "yes" rather
+        # than silently concluding "nothing is configured, so nothing can
+        # be relevant."
+        CI_FALLBACK_RELEVANT="yes"
+        CI_FALLBACK_RELEVANT_DETAIL="this repo's active-workflow list came back empty, inconsistent with its own nonzero workflow count"
+        return 0
+    fi
+
+    # issue #644 final round: the PR's own base branch, not the repo
+    # default — a workflow's path filters can differ by target branch, and
+    # reading the wrong branch's copy can produce a false "excluded".
+    # issue #644 round-4: also the PR's own head branch, needed below to
+    # evaluate a push trigger's branches/branches-ignore filter (never its
+    # path filter — see the round-4 comment above). One call, one --jq
+    # expression, so there's no second round trip for it.
+    # issue #644 follow-up: stderr kept apart from the refs themselves (a
+    # separate temp file, same isolation #643 applied to ci-wait.sh's gh pr
+    # view reads) — an exit-0 call that still writes to stderr (an update
+    # notice, a deprecation warning) must never land inside a ref name this
+    # gets percent-encoded and fetched with below.
+    local pr_refs pr_refs_rc pr_refs_err base_ref head_ref
+    pr_refs_err="$(mktemp)"
+    set +e
+    pr_refs="$(gh api "$repo_path/pulls/$pr" --jq '[.base.ref, .head.ref] | @tsv' 2>"$pr_refs_err")"
+    pr_refs_rc=$?
+    set -e
+    if [ "$pr_refs_rc" -ne 0 ] || [ -z "$pr_refs" ]; then
+        CI_FALLBACK_RELEVANT="yes"
+        CI_FALLBACK_RELEVANT_DETAIL="couldn't read PR #$pr's base/head branch: $(cat "$pr_refs_err")$pr_refs"
+        rm -f "$pr_refs_err"
+        return 0
+    fi
+    rm -f "$pr_refs_err"
+    base_ref="$(cut -f1 <<<"$pr_refs")"
+    head_ref="$(cut -f2 <<<"$pr_refs")"
+    if [ -z "$base_ref" ] || [ "$base_ref" = "null" ] || [ -z "$head_ref" ] || [ "$head_ref" = "null" ]; then
+        CI_FALLBACK_RELEVANT="yes"
+        CI_FALLBACK_RELEVANT_DETAIL="PR #$pr's base/head branch came back empty or null"
+        return 0
+    fi
+
+    local tmp_files tmp_wf
+    tmp_files="$(mktemp)"
+    tmp_wf="$(mktemp)"
+    printf '%s\n' "$files_list" > "$tmp_files"
+
+    local path content content_rc verdict saw_excluded
+    saw_excluded=0
+    while IFS= read -r path; do
+        [ -n "$path" ] || continue
+        set +e
+        # -f ref=... (not a hand-built query string) so `gh` percent-encodes
+        # a base ref containing slashes itself. -X GET is mandatory: `gh
+        # api` defaults to POST whenever ANY -f/-F is present, and this is a
+        # read-only content fetch (issue #644 follow-up).
+        content="$(gh api -H "Accept: application/vnd.github.raw" -X GET "$repo_path/contents/$path" -f ref="$base_ref" 2>&1)"
+        content_rc=$?
+        set -e
+        if [ "$content_rc" -ne 0 ]; then
+            CI_FALLBACK_RELEVANT="yes"
+            CI_FALLBACK_RELEVANT_DETAIL="couldn't read workflow file $path"
+            rm -f "$tmp_files" "$tmp_wf"
+            return 0
+        fi
+        printf '%s' "$content" > "$tmp_wf"
+        verdict="$(python3 "$_CI_FALLBACK_SCRIPT_DIR/_workflow-path-filter.py" "$tmp_wf" "$tmp_files" "$head_ref" 2>/dev/null || echo unknown)"
+        case "$verdict" in
+            triggers)
+                CI_FALLBACK_RELEVANT="yes"
+                CI_FALLBACK_RELEVANT_DETAIL="$path has a pull_request/push trigger matching at least one changed file"
+                rm -f "$tmp_files" "$tmp_wf"
+                return 0
+                ;;
+            unknown)
+                CI_FALLBACK_RELEVANT="yes"
+                CI_FALLBACK_RELEVANT_DETAIL="couldn't confidently parse $path's trigger (or it has a workflow_run trigger, which this scanner never clears)"
+                rm -f "$tmp_files" "$tmp_wf"
+                return 0
+                ;;
+            excluded)
+                # Positive evidence: this workflow DOES have a
+                # pull_request/push trigger, and its path filter
+                # confidently excludes every changed file. Keep checking
+                # the remaining workflows before concluding "no".
+                saw_excluded=1
+                ;;
+            no-trigger)
+                # issue #644 third follow-up: this workflow has no
+                # pull_request/pull_request_target/push/workflow_run
+                # trigger at all (e.g. schedule/workflow_dispatch-only) —
+                # that is NOT the same as a confident path-filter
+                # exclusion, and must never be folded into "excluded".
+                # Keep checking; it contributes no evidence either way.
+                : ;;
+        esac
+    done < <(jq -r '.[]' <<<"$wf_json")
+    rm -f "$tmp_files" "$tmp_wf"
+
+    if [ "$saw_excluded" -eq 1 ]; then
+        CI_FALLBACK_RELEVANT="no"
+        CI_FALLBACK_RELEVANT_DETAIL="every pull_request/push-triggered workflow's path filter excludes all of PR #$pr's changed files"
+    else
+        # No workflow was even confidently "excluded" — every one was
+        # "no-trigger" (nothing checked applies to this PR at all). That's
+        # the absence of evidence, not evidence of absence: fail toward
+        # "yes" rather than concluding no CI will ever register.
+        CI_FALLBACK_RELEVANT="yes"
+        CI_FALLBACK_RELEVANT_DETAIL="no active workflow has a confidently path-filtered pull_request/push trigger for PR #$pr — can't confirm no CI will ever register"
+    fi
+    return 0
+}
+
 ci_fallback_is_token_error() {
     grep -qi "resource not accessible by personal access token" <<<"$1"
 }

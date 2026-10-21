@@ -42,6 +42,15 @@ mkdir -p "$TEST_DIR/bin"
 cat > "$TEST_DIR/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 [ -n "${GH_ARGS_LOG:-}" ] && printf '%s\n' "$*" >> "$GH_ARGS_LOG"
+# issue #644 follow-up: `gh api` sends POST, not GET, whenever ANY -f/-F is
+# given — proven live against real GitHub (a bare -f ref=... content fetch
+# 404s; the same call with -X GET succeeds). Fail the stub the same way the
+# real API would 404 it, so this proves the METHOD actually sent, not just
+# that the right args were built.
+if [ "$1" = "api" ] && printf '%s\n' "$*" | grep -qE -- '(^| )-[fF] ' && ! printf '%s\n' "$*" | grep -q -- '-X GET'; then
+    echo '{"message":"Not Found","status":"404"}' >&2
+    exit 1
+fi
 case "$1 $2" in
     "pr view")
         n=0
@@ -105,8 +114,57 @@ case "$1 $2" in
             exit 1
         fi
         exit "${GH_CHECKS_RC:-0}" ;;
+    "api --paginate")
+        # issue #639: ci_fallback_workflows_relevant_to_pr's own changed-
+        # files lookup (REST, --paginate — gh pr view --json files truncates
+        # at 100, cli/cli#5366). GH_PR_FILES_JSON is usually the flat
+        # ["path", ...] shape (a plain string element is one changed file
+        # with no rename), normalized below into the real API's per-file
+        # object shape; an element already given as an object (issue #644
+        # round-5) is {"filename":"new/path","previous_filename":"old/path"},
+        # a real GitHub rename entry. Unlike a hard-coded stand-in filter,
+        # this extracts and runs THE SCRIPT'S OWN --jq expression against
+        # that normalized fixture, so a regression that drops
+        # previous_filename from the real query is actually caught here
+        # rather than only in this stub's separate emulation of it.
+        jq_expr=""
+        prev_arg=""
+        for a in "$@"; do
+            [ "$prev_arg" = "--jq" ] && jq_expr="$a"
+            prev_arg="$a"
+        done
+        printf '%s' "${GH_PR_FILES_JSON:-[]}" \
+            | jq '[.[] | if type == "object" then . else {filename: .} end]' \
+            | jq -r "$jq_expr"
+        exit 0 ;;
+    "api repos/{owner}/{repo}/pulls/"*|"api repos/owner/repo/pulls/"*)
+        # issue #644 final round + round-4: ci_fallback_workflows_relevant_to_pr's
+        # lookup of the PR's OWN base AND head branch (gh api .../pulls/<pr>
+        # --jq '[.base.ref, .head.ref] | @tsv') — base, to fetch each workflow
+        # file at that ref instead of the repo default branch; head, to
+        # evaluate a push trigger's branches/branches-ignore filter.
+        printf '%s\t%s\n' "${GH_PR_BASE_REF:-main}" "${GH_PR_HEAD_REF:-feature/change}"
+        exit 0 ;;
     "api repos/{owner}/{repo}/actions/workflows"|"api repos/owner/repo/actions/workflows")
-        echo "${GH_WORKFLOW_COUNT:-1}"
+        if printf '%s\n' "$*" | grep -q -- '.total_count'; then
+            echo "${GH_WORKFLOW_COUNT:-1}"
+        else
+            # issue #639: ci_fallback_workflows_relevant_to_pr's own lookup
+            # of active workflow paths — same endpoint, a different --jq.
+            echo "${GH_WORKFLOW_PATHS_JSON:-[]}"
+        fi
+        exit 0 ;;
+    "api -H")
+        # issue #639: ci_fallback_workflows_relevant_to_pr fetching a single
+        # workflow file's raw YAML (gh api -H "Accept: ..." .../contents/<path>
+        # -f ref=<base-branch>). issue #644 final round: serve a DIFFERENT
+        # YAML when the requested ref matches the PR's actual base branch, so
+        # a test can prove the right ref was sent instead of just ignoring it.
+        if [ -n "${GH_PR_BASE_REF:-}" ] && printf '%s\n' "$*" | grep -qF -- "ref=${GH_PR_BASE_REF}"; then
+            printf '%s' "${GH_WORKFLOW_YAML_FOR_BASE_REF:-${GH_WORKFLOW_YAML:-}}"
+        else
+            printf '%s' "${GH_WORKFLOW_YAML:-}"
+        fi
         exit 0 ;;
     "run list")
         rn=0
@@ -244,6 +302,150 @@ out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_WORKFLOW_COUNT=1 \
 check "resolves to green once the real check run registers (not a false exit 5)" '[ "$rc" -eq 0 ]'
 check "message names the pending-not-absent distinction" 'grep -qi "treating as pending, not absent" <<<"$out"'
 check "gh pr checks was actually polled more than once (the race was real)" '[ "$(cat "$CHECKS_COUNT_FILE")" -ge 3 ]'
+
+# ── Test 8b/8c/8d: issue #639 — "no checks reported" with workflows configured, but none apply to THESE changed files ──
+#
+# civicstrata#602/#603 (2026-10-15): a docs-only PR in a repo whose CI
+# `paths-ignore`s docs never gets a run at all — not a race, a permanent
+# fact about the commit. ci_fallback_workflows_relevant_to_pr checks the
+# actual path filters; only its confident "no" should short-circuit the
+# pending wait into exit 5 (same as zero workflows configured).
+
+heading "Test 8b: a docs-only PR excluded by the one workflow's paths-ignore → exit 5, not an unbounded wait"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_NO_CHECKS=1 GH_WORKFLOW_COUNT=1 \
+    GH_PR_FILES_JSON='["docs/foo.md","README.md"]' \
+    GH_WORKFLOW_PATHS_JSON='[".github/workflows/build.yml"]' \
+    GH_WORKFLOW_YAML=$'on:\n  pull_request:\n    paths-ignore:\n      - \x27docs/**\x27\n      - \x27**.md\x27\n' \
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
+check "exits 5 — no run will ever register for an all-ignored changed-file set" '[ "$rc" -eq 5 ]'
+check "message names the path-filter exclusion" 'grep -qi "excluded by every pull_request/push workflow" <<<"$out"'
+
+heading "Test 8c: changed files touch a NON-ignored path too → treated as the ordinary pending race, not absence"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_NO_CHECKS=1 GH_WORKFLOW_COUNT=1 \
+    GH_PR_FILES_JSON='["docs/foo.md","src/main.py"]' \
+    GH_WORKFLOW_PATHS_JSON='[".github/workflows/build.yml"]' \
+    GH_WORKFLOW_YAML=$'on:\n  pull_request:\n    paths-ignore:\n      - \x27docs/**\x27\n      - \x27**.md\x27\n' \
+    CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 2 2>&1)" || rc=$?
+check "exits 2 (timeout/pending), never 5, once a changed file falls outside paths-ignore" '[ "$rc" -eq 2 ]'
+
+heading "Test 8d: the one workflow has NO path filter at all → still treated as pending (always applies)"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_NO_CHECKS=1 GH_WORKFLOW_COUNT=1 \
+    GH_PR_FILES_JSON='["docs/foo.md"]' \
+    GH_WORKFLOW_PATHS_JSON='[".github/workflows/build.yml"]' \
+    GH_WORKFLOW_YAML=$'on:\n  pull_request:\n  push:\n    branches: [master]\n' \
+    CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 2 2>&1)" || rc=$?
+check "exits 2 (timeout/pending), never 5, when the workflow has no path filter" '[ "$rc" -eq 2 ]'
+
+# issue #644 round-3 self-review: GitHub runs a pull_request event's
+# workflow YAML from the PR's merge commit, not the base branch, so a PR
+# that itself edits a workflow file (here: removes the paths-ignore that
+# would otherwise exclude its own docs change) can get a real run the
+# base-branch YAML this helper reads says will never happen — the fail-open
+# direction the whole helper exists to avoid.
+heading "Test 8e: a docs-only PR that ALSO edits a workflow file → never path-filtered, even though the (untrusted) base-branch YAML would exclude it"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_NO_CHECKS=1 GH_WORKFLOW_COUNT=1 \
+    GH_PR_FILES_JSON='["docs/foo.md",".github/workflows/build.yml"]' \
+    GH_WORKFLOW_PATHS_JSON='[".github/workflows/build.yml"]' \
+    GH_WORKFLOW_YAML=$'on:\n  pull_request:\n    paths-ignore:\n      - \x27docs/**\x27\n      - \x27**.md\x27\n      - \x27.github/workflows/**\x27\n' \
+    CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 2 2>&1)" || rc=$?
+check "exits 2 (timeout/pending), never 5, when the PR itself touches .github/workflows/" '[ "$rc" -eq 2 ]'
+
+# issue #644 third follow-up: a same-repo PR's branch push fires a
+# push-only workflow too, and that run lands on the exact head SHA
+# `gh pr checks` reads — a bare `on: push` with no path filter at all must
+# never be read as no-trigger/excluded (the fail-open the independent
+# review caught: _ci-fallback.sh used to fold no-trigger into the same
+# bucket as excluded).
+heading "Test 8f: a push-only workflow with NO path filter, a source-file change → exit 2 (pending), never 5"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_NO_CHECKS=1 GH_WORKFLOW_COUNT=1 \
+    GH_PR_FILES_JSON='["src/main.py"]' \
+    GH_WORKFLOW_PATHS_JSON='[".github/workflows/build.yml"]' \
+    GH_WORKFLOW_YAML=$'on:\n  push:\n    branches: [main]\n' \
+    CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 2 2>&1)" || rc=$?
+check "exits 2 (timeout/pending), never 5, when a push-only workflow has no path filter at all" '[ "$rc" -eq 2 ]'
+
+# issue #644 round-4 (coordinator review): GitHub evaluates a push trigger's
+# paths-ignore against THAT PUSH'S OWN diff, not pulls/<pr>/files — a
+# docs-only PR branch can later merge master in and carry source files on
+# its next push, so reading this filter at all risked a false "excluded"
+# (exit 5) for a push that will actually run for real. Fixed: a push
+# trigger's path filter is never read, in either direction — only its
+# branch filter is, so this push-only workflow (branch filter matches the
+# PR's own head branch) must still be waited on.
+heading "Test 8g: a push-only workflow whose branch filter matches this head branch, paths-ignore covers an all-docs changed-file set → exit 2 (pending), never 5"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_NO_CHECKS=1 GH_WORKFLOW_COUNT=1 \
+    GH_PR_FILES_JSON='["docs/foo.md","README.md"]' \
+    GH_WORKFLOW_PATHS_JSON='[".github/workflows/build.yml"]' \
+    GH_PR_HEAD_REF='main' \
+    GH_WORKFLOW_YAML=$'on:\n  push:\n    branches: [main]\n    paths-ignore:\n      - \x27docs/**\x27\n      - \x27**.md\x27\n' \
+    CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 2 2>&1)" || rc=$?
+check "exits 2 (timeout/pending), never 5 — a push trigger's own paths-ignore is never evaluated, only its branch filter" '[ "$rc" -eq 2 ]'
+
+heading "Test 8i: push trigger's branches-ignore matches this PR's own head branch → legitimate no-trigger, but ALONE still exit 2 (not proof of exclusion by itself)"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_NO_CHECKS=1 GH_WORKFLOW_COUNT=1 \
+    GH_PR_FILES_JSON='["src/main.py"]' \
+    GH_WORKFLOW_PATHS_JSON='[".github/workflows/build.yml"]' \
+    GH_PR_HEAD_REF='release/2.0' \
+    GH_WORKFLOW_YAML=$'on:\n  push:\n    branches-ignore:\n      - \x27release/*\x27\n' \
+    CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 2 2>&1)" || rc=$?
+check "exits 2 (timeout/pending) — a lone push trigger ruled out by its own branch filter is not, by itself, confident evidence that no CI will ever register" '[ "$rc" -eq 2 ]'
+
+heading "Test 8j: civicstrata's real build.yml fixture — pull_request + push both paths-ignore docs/md, docs-only PR from fix/issue-N (not master) → exit 5"
+# The coordinator's real-world check (issue #644 round-4 point 2): push's
+# branches: [master] doesn't match this PR's head branch (legitimate
+# no-trigger), and pull_request's own paths-ignore confidently excludes
+# every changed file — together, still a confident "no CI will ever
+# register", same as before this round's fix.
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_NO_CHECKS=1 GH_WORKFLOW_COUNT=1 \
+    GH_PR_FILES_JSON='["docs/foo.md","README.md"]' \
+    GH_WORKFLOW_PATHS_JSON='[".github/workflows/build.yml"]' \
+    GH_PR_HEAD_REF='fix/issue-639' \
+    GH_WORKFLOW_YAML=$'on:\n  pull_request:\n    paths-ignore: [\x27**.md\x27, \x27docs/**\x27]\n  push:\n    branches: [master]\n    paths-ignore: [\x27**.md\x27, \x27docs/**\x27]\n' \
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
+check "exits 5 — a docs-only PR from a non-master branch is still confidently excluded, matching civicstrata's real workflow" '[ "$rc" -eq 5 ]'
+
+# ── Test 8h: issue #644 final round — the PR's OWN base branch's workflow copy is read, not the repo default ──
+#
+# A workflow's path filters can differ by target branch. Before this fix,
+# ci_fallback_workflows_relevant_to_pr always fetched the DEFAULT branch's
+# copy of each workflow file — a PR opened against a different base branch
+# with different filters got evaluated against the wrong ones, and could
+# come out "excluded" (exit 5, no wait) even though its real base branch
+# would run CI for real.
+
+heading "Test 8h: PR targets a non-default base branch whose own workflow copy has NO paths-ignore → exit 2 (pending), never 5, even though the default branch's copy ignores docs"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_NO_CHECKS=1 GH_WORKFLOW_COUNT=1 \
+    GH_PR_FILES_JSON='["docs/foo.md","README.md"]' \
+    GH_WORKFLOW_PATHS_JSON='[".github/workflows/build.yml"]' \
+    GH_PR_BASE_REF='release/2.0' \
+    GH_WORKFLOW_YAML=$'on:\n  pull_request:\n    paths-ignore:\n      - \x27docs/**\x27\n      - \x27**.md\x27\n' \
+    GH_WORKFLOW_YAML_FOR_BASE_REF=$'on:\n  pull_request:\n' \
+    CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 2 2>&1)" || rc=$?
+check "exits 2 (timeout/pending), never 5 — the PR's actual base branch has no path filter at all" '[ "$rc" -eq 2 ]'
+
+# issue #644 round-5 (coordinator review): the REST files endpoint reports a
+# rename as one entry whose NEW path is docs/Foo.kt and whose OLD path
+# (previous_filename) was src/Foo.kt. Only the new path is under the
+# paths-ignore filter below — if the old path were never added to the
+# changed-file set, this would misread as docs-only and exit 5 even though
+# it's a real source-file move.
+heading "Test 8k: a PR's ONLY change is a rename from a non-ignored path into docs/ → exit 2 (pending), never 5"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_NO_CHECKS=1 GH_WORKFLOW_COUNT=1 \
+    GH_PR_FILES_JSON='[{"filename":"docs/Foo.kt","previous_filename":"src/Foo.kt"}]' \
+    GH_WORKFLOW_PATHS_JSON='[".github/workflows/build.yml"]' \
+    GH_WORKFLOW_YAML=$'on:\n  pull_request:\n    paths-ignore:\n      - \x27docs/**\x27\n      - \x27**.md\x27\n' \
+    CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 2 2>&1)" || rc=$?
+check "exits 2 (timeout/pending), never 5 — a rename's OLD path (src/Foo.kt) falls outside paths-ignore" '[ "$rc" -eq 2 ]'
 
 # ── Test 9: fine-grained token can't read Checks → falls back to gh run list, green ──
 #
@@ -395,6 +597,30 @@ heading "Test 12d: no PR# at all, only --repo → usage error, not a crash"
 rc=0
 out="$("$CI_WAIT" --repo owner/repo 2>&1)" || rc=$?
 check "exits 4 (usage) rather than crashing on an unbound variable" '[ "$rc" -eq 4 ]'
+
+heading "Test 12e: ci_fallback_workflows_relevant_to_pr's own repo_args also recognizes -R, not just --repo (issue #644 round-4, minor)"
+# ci-wait.sh itself only ever builds its REPO_ARGS as (--repo "$REPO"), so
+# this exercises the shared helper directly, standing in for a caller that
+# passes repo_args the way gh itself accepts them (-R is gh's own shorthand
+# for --repo). Checked against the ACTUAL gh invocation, not just the final
+# verdict: the stub's case statement accepts both "repos/{owner}/{repo}"
+# (the unrecognized-flag default) and "repos/owner/repo" (the real -R
+# value) as equally valid paths, so only the logged args can tell apart "-R
+# was parsed" from "-R was silently ignored".
+ARGS_LOG_12E="$TEST_DIR/args-12e.log"
+: > "$ARGS_LOG_12E"
+(
+    # shellcheck source=../scripts/_ci-fallback.sh
+    . "$SCRIPT_DIR/../scripts/_ci-fallback.sh"
+    GH_ARGS_LOG="$ARGS_LOG_12E" GH_WORKFLOW_COUNT=1 GH_PR_FILES_JSON='["docs/foo.md"]' \
+        GH_WORKFLOW_PATHS_JSON='[".github/workflows/build.yml"]' \
+        GH_PR_BASE_REF=main GH_PR_HEAD_REF=feature/change \
+        GH_WORKFLOW_YAML=$'on:\n  pull_request:\n    paths-ignore:\n      - \x27docs/**\x27\n' \
+        ci_fallback_workflows_relevant_to_pr 42 -R owner/repo
+    echo "$CI_FALLBACK_RELEVANT" > "$TEST_DIR/dash-r.out"
+)
+check "a -R repo_args entry is recognized the same as --repo (confidently excluded via the owner/repo path)" '[ "$(cat "$TEST_DIR/dash-r.out")" = "no" ]'
+check "the actual gh api calls used the -R-supplied repo path (repos/owner/repo), not the unrecognized-flag default" 'grep -q "repos/owner/repo" "$ARGS_LOG_12E"'
 
 # ── Test 13: the corpusminder-spring #1126 shape — gh pr checks reads green while the run itself is still in progress ──
 #

@@ -121,6 +121,20 @@
 #      exit 8), not as absence; it either resolves to a real check result or
 #      times out (2) like any other slow-to-start CI.
 #
+#      issue #639: one or more workflows configured is itself not quite
+#      enough — a `pull_request`-triggered workflow with a `paths-ignore`
+#      (or a `paths` allowlist this PR's changed files don't match) will
+#      never produce a run for THIS commit, no matter how long this script
+#      polls (civicstrata#602/#603: a docs-only PR in a repo whose CI
+#      skips docs paths ran the full 595s timeout, exit 124, with zero runs
+#      ever registering). So once the workflow count is confirmed nonzero,
+#      `ci_fallback_workflows_relevant_to_pr` (`_ci-fallback.sh`) checks
+#      the actual path filters against the changed files; only its
+#      confident "no" is treated as absence (exit 5, same as zero
+#      workflows) — anything it can't resolve confidently still falls
+#      through to PENDING, same fail-toward-waiting posture as every other
+#      ambiguous case in this script.
+#
 # Run this in the foreground with an explicit Bash timeout that covers the
 # deadline below (e.g. timeout-seconds + ~30s of slack for gh calls).
 
@@ -240,6 +254,12 @@ echo "ci-wait: PR #$PR mergeable ($MERGE_STATE), watching checks on ${SHA:0:12} 
 START=$(date -u +%s)
 DEADLINE=$(( START + TIMEOUT ))
 WORKFLOW_COUNT=""   # lazily resolved at most once, only if "no checks" is ever seen
+PR_CI_RELEVANT=""   # lazily resolved at most once (issue #639): "no" means
+                     # every pull_request/push workflow's path filter
+                     # excludes this PR's changed files; anything else
+                     # means keep treating "no checks reported" as the
+                     # ordinary post-push race
+PR_CI_RELEVANT_DETAIL=""
 FALLBACK=0          # set once "gh pr checks" proves unreadable by this token
 while true; do
     PASS_NOW=0
@@ -351,11 +371,27 @@ while true; do
                         echo "ci-wait: PR #$PR has no CI checks configured on this repo at all (0 workflows) — nothing ran, so nothing failed." >&2
                         exit 5
                     fi
+                    # issue #639: workflows exist, but may all `paths-ignore`
+                    # (or fail to match a `paths` allowlist) this PR's
+                    # changed files — e.g. a docs-only PR in a repo whose CI
+                    # skips docs paths. No run will EVER register for this
+                    # commit, so this isn't the post-push race below; treat
+                    # it the same as "no CI configured" (exit 5), not an
+                    # unbounded pending wait. Resolved at most once per run.
+                    if [ -z "$PR_CI_RELEVANT" ]; then
+                        ci_fallback_workflows_relevant_to_pr "$PR" "${REPO_ARGS[@]}"
+                        PR_CI_RELEVANT="$CI_FALLBACK_RELEVANT"
+                        PR_CI_RELEVANT_DETAIL="$CI_FALLBACK_RELEVANT_DETAIL"
+                    fi
+                    if [ "$PR_CI_RELEVANT" = "no" ]; then
+                        echo "ci-wait: PR #$PR's changed files are excluded by every pull_request/push workflow's path filter ($PR_CI_RELEVANT_DETAIL) — no check will ever register." >&2
+                        exit 5
+                    fi
                     # Workflows exist (or the workflow-count lookup itself
                     # failed, in which case failing closed means NOT assuming
                     # absence) — this is the run-not-registered-yet race, not a
                     # CI-less repo. Treat as pending, same as exit 8 below.
-                    echo "ci-wait: PR #$PR shows no checks yet, but the repo has CI configured — treating as pending, not absent." >&2
+                    echo "ci-wait: PR #$PR shows no checks yet, but the repo has CI configured for these files — treating as pending, not absent." >&2
                 else
                     echo "ci-wait: PR #$PR has failing checks:"; echo "$CHECKS_OUT" >&2; exit 1
                 fi
