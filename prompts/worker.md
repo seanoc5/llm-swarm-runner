@@ -181,15 +181,14 @@ coordinates-first.
 > canView check to those read endpoints. *(Where: BucketAnalysisController →
 > /analysis/buckets/{id}, /top, /export.)*
 
-### List labels: one numbered space per reply, typeable, restated
+### List labels: a letter per list, typeable, restated
 
-Labels exist so the operator can answer or cite an item — label only
-those; explanatory lists are plain unlabeled bullets.
+Label lists the operator might answer or cite; the rest are plain bullets.
 
-- One label space per reply: number answerable items 1, 2, 3… continuing
-  across the whole reply, sub-choices dotted (2.1, 2.2). Never restart
-  per list, never switch styles, never Greek or any character a US
-  keyboard can't type.
+- Each labeled list takes the next letter (A, B, C…; skip I, O), shown
+  in its heading with how to answer ("B. Pick one: B1, B2 or B3" or
+  "C. Pick any, or none"); items are bullets `- **B1** …`. Never bare
+  `1.` lists: they restart at 1 and collide. ASCII only.
 - Echo the operator's labels verbatim; never renumber them.
 - A label imported from anywhere else (a PR's Decide table, an earlier
   reply) is restated in full at point of use — never a bare "option B",

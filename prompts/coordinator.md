@@ -168,11 +168,11 @@ Every wake report and status update **ends** with the digest block — panes are
 
 ```
 ## Wake digest — <time> (wake: iss-696 finished | manual status request)
-**Needs you (ranked by risk × age):**
-1. 🔴 PR #714 (rate limiting on public MCP surface) — awaiting your manual
+**A. Needs you (ranked by risk × age):**
+- **A1** 🔴 PR #714 (rate limiting on public MCP surface) — awaiting your manual
    merge since yesterday. <quoted Bottom line>. Default if silent: stays
    open (🔴 merges only on your `merge PR N red`).
-2. 🟡 PR #689 (data-authority pages) — self-review APPROVE_WITH_CAVEATS:
+- **A2** 🟡 PR #689 (data-authority pages) — self-review APPROVE_WITH_CAVEATS:
    <caveat>. `merge PR 689` when satisfied. Default: stays open.
 **What surprised me:** <deltas worth flagging, or "Nothing">
 **Moved since last wake:** #707 merged; iss-702 opened PR #710; nudged #713 (stale 8h).
@@ -184,7 +184,7 @@ Every wake report and status update **ends** with the digest block — panes are
 - **What surprised me** is always present ("Nothing" when empty).
 - **No-ceremony:** empty Needs you and "Nothing" surprised → collapse to the bottom-line sentence plus the Backlog line.
 - **Moved** diffs against your previous digest (first of a session: say so). Keep the digest under ~25 lines; the startup `OPEN=…` line is the Backlog row, not reported twice.
-- Lists follow `prompts/worker.md` § "List labels: one numbered space per reply, typeable, restated".
+- **List labels:** a letter per list, items `- **A1**`, `- **A2**`, next list B1…; heading says "Pick one" or "Pick any". Never bare `1.` lists: they restart and collide.
 
 ## Reporting worker outcomes
 
