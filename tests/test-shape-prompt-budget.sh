@@ -46,6 +46,12 @@
 # saying a brief's "Issue comments" section can supersede the body and the
 # issue author's latest comment wins on conflict — already near-minimal
 # after trimming once; only ~50 bytes over even so.
+#
+# 2026-10-22: coordinator budget 26000 -> 26200. Issue #656 adds one
+# sentence: re-check mergeable before listing a merge (the 2026-10-22
+# corpusminder #1513 stale "merge" advice). #655 had already spent the
+# last headroom on delta-only wake reports, trimming a paragraph to fit.
+# coordinator.md's regrowth still owes issue #509 its answer.
 set -euo pipefail
 
 green() { printf '\033[32m✓ %s\033[0m\n' "$*"; }
@@ -53,7 +59,7 @@ red()   { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKER_MAX="${WORKER_MD_MAX_BYTES:-24100}"
-COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-26000}"
+COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-26200}"
 BARE_MAX="${WORKER_BARE_MD_MAX_BYTES:-11300}"   # issue #510 trial prompt; ~7.5KB is script-parsed contract
 
 check() {

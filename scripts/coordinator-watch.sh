@@ -1974,6 +1974,7 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     WATCHER_AUTOCLOSE_MODE merged which terminal PR states are reap-eligible: merged (MERGED only, default) | finalized (MERGED or CLOSED)
     WATCH_PR_POLL_SECS  60        periodic gh-poll backstop reap (0=off); see header comment
     WATCH_ORPHAN_SWEEP_SECS 3600  periodic reap-orphan-worktrees.sh sweep for window-less worktrees (0=off); see header comment
+    WATCH_CONFLICT_BRIEF 1       a ready PR that turns CONFLICTING gets swarm-merge.sh's resolve-conflicts brief, once per head commit (0=off; issue #656)
     WATCH_READY_SWEEP_SECS 300   periodic ready-sweep.sh: re-run pr-ready.sh on drafts refused only for CI pending/unreadable (0=off; issue #602)
     WATCH_STALE_WAIT_CHECK 1     ready-sweep also flags drafts whose **Next:** line waits on an already-merged #N; one coord-inbox note each (0=off; issue #635)
     WATCH_BG_VIOLATION_SWEEP_SECS 0   periodic sweep for backgrounded-shell UI markers on iss-* panes + the coordinator pane (0=off); see header comment
@@ -2616,6 +2617,8 @@ KILL_FINISHED="${KILL_FINISHED:-$LLM_SWARM_DIR/scripts/kill-finished-workers.sh}
 WATCH_PR_POLL_SECS="${WATCH_PR_POLL_SECS:-60}"
 WATCH_ORPHAN_SWEEP_SECS="${WATCH_ORPHAN_SWEEP_SECS:-3600}"
 REAP_ORPHAN="${REAP_ORPHAN:-$LLM_SWARM_DIR/scripts/reap-orphan-worktrees.sh}"
+# issue #656: queue the resolve-conflicts brief when a ready PR turns CONFLICTING.
+WATCH_CONFLICT_BRIEF="${WATCH_CONFLICT_BRIEF:-1}"
 # issue #602: retry drafts that pr-ready.sh refused only for CI pending/unreadable.
 WATCH_READY_SWEEP_SECS="${WATCH_READY_SWEEP_SECS:-300}"
 READY_SWEEP="${READY_SWEEP:-$LLM_SWARM_DIR/scripts/ready-sweep.sh}"
@@ -2673,6 +2676,8 @@ WATCH_STALL_FLAG_SECS="${WATCH_STALL_FLAG_SECS:-600}"
 WATCH_WINDOW_FLAGS_SWEEP_SECS="${WATCH_WINDOW_FLAGS_SWEEP_SECS:-10}"
 # shellcheck source=_window-flags.sh
 . "$SCRIPT_DIR/_window-flags.sh"
+# shellcheck source=_conflict-brief.sh
+. "$SCRIPT_DIR/_conflict-brief.sh"
 WATCHER_QUIET="${WATCHER_QUIET:-0}"
 # issue #296 — see this file's WATCHER_STALE_CHECK header comment.
 WATCHER_STALE_CHECK="${WATCHER_STALE_CHECK:-1}"
@@ -4400,19 +4405,23 @@ has_live_window_draining_brief() {
 # every 60s).
 declare -gA PR_RISK_CACHE=()
 declare -gA PR_CI_CACHE=()
+declare -gA PR_MERGE_CACHE=()   # issue #656: "<mergeable>\t<headRefOid>\t<baseRefName>"
+declare -gA CONFLICT_BRIEF_SENT=()  # issue #656: pr -> head sha already briefed
 PR_RISK_LOADED=0
 pr_open_details_load() {
     [ "$PR_RISK_LOADED" = "0" ] || return 0
     PR_RISK_LOADED=1
     PR_RISK_CACHE=()
     PR_CI_CACHE=()
-    local n r c
-    while IFS=$'\t' read -r n r c; do
+    PR_MERGE_CACHE=()
+    local n r c m h b
+    while IFS=$'\t' read -r n r c m h b; do
         [ -n "$n" ] || continue
         PR_RISK_CACHE[$n]="$r"
         PR_CI_CACHE[$n]="${c:-none}"
+        PR_MERGE_CACHE[$n]="$m"$'\t'"$h"$'\t'"$b"
     done < <(cd "$PROJECT_DIR" && gh pr list --state open --limit 200 \
-            --json number,body,statusCheckRollup \
+            --json number,body,statusCheckRollup,mergeable,headRefOid,baseRefName \
             --jq 'def ci: (.statusCheckRollup // []) as $all
                     # Collapse to the newest run per check (workflow + job
                     # name, falling back to legacy status-context "context")
@@ -4430,7 +4439,7 @@ pr_open_details_load() {
                       elif any($r[]; ((.status // "COMPLETED") != "COMPLETED")
                                      or ((.state // "") | test("^(PENDING|EXPECTED)$"))) then "pending"
                       else "pass" end;
-                  .[] | "\(.number)\t\(((.body // "") | capture("(?<r>🟢|🟡|🔴)").r?) // "")\t\(ci)"' 2>/dev/null)
+                  .[] | "\(.number)\t\(((.body // "") | capture("(?<r>🟢|🟡|🔴)").r?) // "")\t\(ci)\t\(.mergeable // "")\t\(.headRefOid // "")\t\(.baseRefName // "")"' 2>/dev/null)
 }
 pr_risk_glyph() {
     [ "$WATCH_WINDOW_FLAG_RISK" = "1" ] || return 0
@@ -4471,6 +4480,31 @@ pr_flag_apply() {
         clear_window_flag "iss-$issue" "$g" "$why"
     done
     [ -z "$want" ] || set_window_flag "iss-$issue" "$want" "$why"
+}
+
+# conflict_brief_pass_one <issue> <pr> <wt_dir> (issue #656)
+#
+# A ready PR can turn CONFLICTING after its worker finished, when another PR
+# merges on top of it; until now nothing acted until someone tried to merge.
+# Queue swarm-merge.sh's resolve-conflicts brief (_conflict-brief.sh) now,
+# at most once per head commit, and never while the worker still has a
+# brief queued (worker.md has it rebase before CI anyway). UNKNOWN (GitHub
+# still computing) is not a conflict. Caller has run pr_open_details_load.
+conflict_brief_pass_one() {
+    local issue="$1" pr="$2" wt_dir="$3" m h b rc=0
+    IFS=$'\t' read -r m h b <<< "${PR_MERGE_CACHE[$pr]:-}"
+    [ "$m" = "CONFLICTING" ] || return 0
+    [ -n "$h" ] && [ "${CONFLICT_BRIEF_SENT[$pr]:-}" = "$h" ] && return 0
+    worker_brief_pending "$wt_dir" && return 0
+    queue_conflict_brief "$wt_dir" "$pr" "${b:-the default branch}" "mergeable=CONFLICTING" \
+        "The watcher saw PR #$pr turn conflicting" >/dev/null || rc=$?
+    CONFLICT_BRIEF_SENT[$pr]="$h"
+    case "$rc" in
+        0) log_event watch.conflict_brief "issue=$issue pr=$pr head=${h:0:8} action=brief-queued"
+           echo "[$(date +%T)] pr-poll: PR #$pr conflicts — resolve-conflicts brief queued to iss-$issue" ;;
+        2) log_event watch.conflict_brief "issue=$issue pr=$pr head=${h:0:8} action=already-queued" ;;
+        *) log_event watch.conflict_brief "issue=$issue pr=$pr head=${h:0:8} action=requeue-failed" ;;
+    esac
 }
 
 pr_poll_pass() {
@@ -4565,6 +4599,10 @@ pr_poll_pass() {
                     fi
                 fi
                 pr_flag_apply "$issue" "$want" "$why pr=$pr_number"
+                if [ "$WATCH_CONFLICT_BRIEF" = "1" ] && [ "$is_draft" != "true" ]; then
+                    pr_open_details_load
+                    conflict_brief_pass_one "$issue" "$pr_number" "$wt_dir"
+                fi
                 ;;
             MERGED|CLOSED)
                 if ! pr_predates_worktree "$created_at" "$wt_dir"; then

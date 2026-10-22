@@ -449,9 +449,10 @@ log_event() {
 # used to type by hand. Exits 3 when the brief is (or already was) queued,
 # so the caller can retry after the worker pushes; exits 1 when there is no
 # worker to send it to. Never returns.
-CONFLICT_BRIEF_MARKER="swarm-merge:conflict-brief"
+# shellcheck source=_conflict-brief.sh
+. "$SCRIPT_DIR/_conflict-brief.sh"
 send_conflict_brief_or_die() {
-  local detail="$1" wt base existing
+  local detail="$1" wt base out rc=0
   echo "       PR #$PR_NUM has merge conflicts ($detail)."
   wt=""
   [ -n "$ISSUE" ] && wt=$(swarm_worktree_dir "$MAIN_WT" "$ISSUE")
@@ -462,31 +463,17 @@ send_conflict_brief_or_die() {
     echo "       the conflicts (rebase onto the base branch), or see \$LLM_SWARM_DOCS/VCS/git-github.md." >&2
     exit 1
   fi
-  existing=$(grep -l "$CONFLICT_BRIEF_MARKER pr=$PR_NUM " \
-    "$wt"/.swarm/tasks/inbox/*.md "$wt"/.swarm/tasks/processing/*.md 2>/dev/null | head -1 || true)
-  if [ -n "$existing" ]; then
-    echo "       $(c_amber "a resolve-conflicts brief is already queued: $existing")"
-  else
-    base="${PR_BASE:-$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')}"
-    base="${base:-the default branch}"
-    "$SCRIPT_DIR/requeue.sh" "$wt" - <<EOF
-<!-- $CONFLICT_BRIEF_MARKER pr=$PR_NUM -->
-# Resolve merge conflicts on PR #$PR_NUM
-
-\`swarm-merge.sh\` refused PR #$PR_NUM: it conflicts with \`origin/$base\` ($detail).
-
-1. \`git fetch origin\` and rebase this branch onto \`origin/$base\`.
-2. Resolve each conflict, keeping both sides' intent. A conflict you can't
-   resolve mechanically: stop and raise a \`## Decision\`.
-3. Run the fast tier, then \`git push --force-with-lease\`.
-4. Post a short PR comment headed \`## Conflict notes\`, written so the
-   operator can learn to read conflicts: per file, what \`$base\` changed
-   and what this branch changed (plain words, one line each), what you
-   kept, and why. Five to ten lines total. End it with "— drafted by claude".
-5. \`ci-wait.sh $PR_NUM\` until green. Don't merge — the operator re-runs
-   \`swarm-merge.sh $PR_NUM\`.
-EOF
+  base="${PR_BASE:-$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')}"
+  base="${base:-the default branch}"
+  out=$(queue_conflict_brief "$wt" "$PR_NUM" "$base" "$detail" "\`swarm-merge.sh\` refused PR #$PR_NUM") || rc=$?
+  if [ "$rc" = 2 ]; then
+    echo "       $(c_amber "a resolve-conflicts brief is already queued: $out")"
+  elif [ "$rc" = 0 ]; then
+    [ -n "$out" ] && printf '%s\n' "$out"
     log_event merge.conflict "pr=$PR_NUM issue=$ISSUE action=brief-queued wt=$wt"
+  else
+    echo "ERROR: requeue.sh failed to queue the resolve-conflicts brief into $wt." >&2
+    exit 1
   fi
   echo "       $(c_amber "→ resolve-conflicts brief sent to the issue #$ISSUE worker.")"
   local rerun="swarm-merge.sh $PR_NUM"
