@@ -267,7 +267,8 @@ chmod +x "$FAKE_LLM_START"
 # gh stub: pr list reads a 5-column TSV fixture (branch/state/number/
 # createdAt/isDraft, matching pr_poll_pass's --jq projection exactly), or —
 # for pr_open_details_load's open-PR lookup — a number/risk/ci fixture
-# (ci column optional; absent reads as "none", i.e. no CI checks).
+# (ci column optional; absent reads as "none", i.e. no CI checks; issue
+# #656 appends optional mergeable/headRefOid/baseRefName columns).
 GH_PR_LIST_FILE="$TEST_DIR/gh-pr-list.tsv"
 GH_PR_RISK_FILE="$TEST_DIR/gh-pr-risk.tsv"
 : > "$GH_PR_LIST_FILE"
@@ -277,7 +278,7 @@ cat > "$FAKE_GH" <<EOF
 #!/usr/bin/env bash
 if [ "\$1" = "pr" ] && [ "\$2" = "list" ]; then
     case " \$* " in
-        *" number,body,statusCheckRollup "*) cat "$GH_PR_RISK_FILE" ;;
+        *" number,body,statusCheckRollup"*) cat "$GH_PR_RISK_FILE" ;;
         *)                 cat "$GH_PR_LIST_FILE" ;;
     esac
     exit 0
@@ -783,6 +784,47 @@ stop_watcher
 [ -z "$(flag_of "$SESSION_NAME:iss-82")" ] \
     || red "💤 should clear once the brief leaves processing/; got: $(flag_of "$SESSION_NAME:iss-82")"
 green "💤 clears once the worker declares done"
+
+# ---------------------------------------------------------------------------
+heading "Test B20: a ready PR that turns CONFLICTING gets the resolve-conflicts brief, once per head (issue #656)"
+# ---------------------------------------------------------------------------
+WT90="$TEST_DIR/wt-issue-90"
+mkdir -p "$WT90/.swarm/tasks/inbox" "$WT90/.swarm/tasks/done"
+rm -f "$PROJECT_DIR/.swarm/events.log"
+printf 'fix/issue-90\tOPEN\t190\t2026-01-01T00:00:00Z\tfalse\n' > "$GH_PR_LIST_FILE"
+printf '190\t🟡\tpass\tCONFLICTING\tabc12345def\tmaster\n' > "$GH_PR_RISK_FILE"
+ONCE=0 WATCH_PR_POLL_SECS=1 start_watcher 0 "$TEST_DIR/watch-b20.log"
+sleep 2
+n90=$(grep -l 'swarm-merge:conflict-brief pr=190 ' "$WT90"/.swarm/tasks/inbox/*.md 2>/dev/null | wc -l)
+[ "$n90" = 1 ] || { stop_watcher; red "expected 1 conflict brief in iss-90's inbox, got $n90. Watch log:
+$(cat "$TEST_DIR/watch-b20.log")"; }
+grep -q 'origin/master' "$WT90"/.swarm/tasks/inbox/*.md || { stop_watcher; red "brief should name origin/master"; }
+# Worker finishes the brief but the PR still conflicts on the same head:
+# no second brief for that head.
+mv "$WT90"/.swarm/tasks/inbox/*.md "$WT90/.swarm/tasks/done/"
+sleep 3
+stop_watcher
+n90=$(find "$WT90/.swarm/tasks/inbox" -name '*.md' | wc -l)
+[ "$n90" = 0 ] || red "same head should not be briefed twice; inbox has $n90"
+grep -qE 'watch\.conflict_brief +issue=90 pr=190 head=abc12345 action=brief-queued' "$PROJECT_DIR/.swarm/events.log" \
+    || red "expected a watch.conflict_brief brief-queued event"
+green "CONFLICTING ready PR → one brief per head commit"
+
+rm -f "$WT90"/.swarm/tasks/done/*.md
+for case in "draft:true:CONFLICTING:1" "mergeable:false:MERGEABLE:1" "unknown:false:UNKNOWN:1" "knob-off:false:CONFLICTING:0"; do
+    IFS=: read -r label draft merge knob <<< "$case"
+    printf 'fix/issue-90\tOPEN\t190\t2026-01-01T00:00:00Z\t%s\n' "$draft" > "$GH_PR_LIST_FILE"
+    printf '190\t🟡\tpass\t%s\tabc12345def\tmaster\n' "$merge" > "$GH_PR_RISK_FILE"
+    WATCH_CONFLICT_BRIEF="$knob" ONCE=0 WATCH_PR_POLL_SECS=1 start_watcher 0 "$TEST_DIR/watch-b20-$label.log"
+    sleep 2
+    stop_watcher
+    n90=$(find "$WT90/.swarm/tasks/inbox" -name '*.md' | wc -l)
+    [ "$n90" = 0 ] || red "$label: expected no conflict brief, inbox has $n90"
+done
+green "no brief for a draft, a mergeable or still-computing PR, or with WATCH_CONFLICT_BRIEF=0"
+rm -rf "$WT90"
+: > "$GH_PR_RISK_FILE"
+: > "$GH_PR_LIST_FILE"
 
 # ---------------------------------------------------------------------------
 heading "Test B14: WATCH_WINDOW_FLAGS=0 suppresses every flag, end to end"

@@ -180,7 +180,7 @@ Every wake report and status update **ends** with the digest block — panes are
 **Backlog:** OPEN=12 AVAILABLE=6 ALIVE=3/5 WINDOWS=7/10
 ```
 
-- **Needs you:** per PR: plain name, quoted Bottom line, caveat + recommendation, then the command (alternative last), then the default if silent. Full form only when new, changed or asked for; otherwise one line naming the thing and when first asked ("kdeyoga memory raise, asked 18:45"), never an earlier reply's label.
+- **Needs you:** per PR: plain name, quoted Bottom line, caveat + recommendation, then the command (alternative last), then the default if silent. Full form only when new, changed or asked for; otherwise one line naming the thing and when first asked ("kdeyoga memory raise, asked 18:45"), never an earlier reply's label. Re-check `gh pr view N --json mergeable` right before listing a merge: CONFLICTING → "conflicts, its worker is resolving" (the watcher sends the brief), not a merge command.
 - **What surprised me** is always present ("Nothing" when empty).
 - **No-ceremony:** nothing new for the operator (Needs you unchanged, "Nothing" surprised) → bottom line, one-line Needs-you items, Backlog line. Your own background task finishing earns no report unless it changes Needs you.
 - **`<details>` isn't folded in a pane:** put it above the digest.
