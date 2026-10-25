@@ -33,6 +33,7 @@ STUB
 chmod +x "$TEST_DIR/bin/gh"
 export PATH="$TEST_DIR/bin:$PATH"
 cd "$TEST_DIR/wt-issue-900"
+git init -q . && git remote add origin git@github.com:acme/widgets.git
 env LLM_SWARM_DIR= WORKER_MODEL= WORKER_HEADLESS=1 WORKER_CHECK=1 \
     WORKER_CHECK_CMD= WORKER_CHECK_RETRY=0 SWARM_EVAL_LOG="$TEST_DIR/eval.jsonl" \
     bash "$RUNNER/scripts/worker-listener.sh" bash > listener.log 2>&1 &
@@ -81,6 +82,8 @@ run_case unchecked '{}' '' ok not-run
 grep -q 'not verified by the listener' "$TEST_DIR/unchecked.footer" || fail "unchecked reads as verified"
 run_case ready '{"state":"ready-for-review","pr":77}' true ok passed
 grep -q 'handed back PR #77 for review' "$TEST_DIR/ready.footer" || fail "missing PR"
+grep -qF 'Next: review PR #77 (https://github.com/acme/widgets/pull/77)' "$TEST_DIR/ready.footer" \
+    || fail "handed-back PR has no clickable URL"
 grep -q 'not merge approval' "$TEST_DIR/ready.footer" || fail "check pass reads as approval"
 grep -q 'pr comment 77' "$GH_LOG" || fail "successful follow-up did not clear queued marker"
 
@@ -140,5 +143,15 @@ if worker_task_done iss-900 "$TEST_DIR/pane-only"; then fail "source text marked
 eval "$(sed -n '/^detect_state() {/,/^}/p' "$RUNNER/scripts/check-stuck-workers.sh")"
 [ "$(detect_state "$(cat "$TEST_DIR/blocked.footer")")" = IDLE-PARKED ] \
     || fail "new footer no longer recognized as a parked listener"
+
+# pr_url: every GitHub origin form yields a clickable URL; others yield nothing.
+eval "$(sed -n '/^pr_url() {/,/^}/p' "$RUNNER/scripts/worker-listener.sh")"
+for origin in git@github.com:acme/widgets.git ssh://git@github.com/acme/widgets.git \
+        https://github.com/acme/widgets https://x-access-token@github.com/acme/widgets.git; do
+    git remote set-url origin "$origin"
+    [ "$(pr_url 5)" = https://github.com/acme/widgets/pull/5 ] || fail "pr_url mis-parsed $origin"
+done
+git remote set-url origin https://gitlab.com/acme/widgets.git
+[ -z "$(pr_url 5)" ] || fail "pr_url invented a GitHub URL for a non-GitHub origin"
 
 echo "PASS: truthful five-line results, blocked outcomes, scoreboard, legacy and watcher compatibility"
