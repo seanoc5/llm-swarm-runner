@@ -235,6 +235,9 @@ rm -f "$CLOSE_SENTINEL"
 # task completes never quick-closes on a single Ctrl-D.
 IDLE_QUICK_EXIT_SECS="${WORKER_IDLE_QUICK_EXIT_SECS:-3}"
 IDLE_RESPAWNS=0
+# PR the last task handed back for review; the idle-shell banner names it
+# (with a clickable URL) as what this parked worker is waiting on.
+HANDBACK_PR=""
 
 # Per-worktree label used in user-visible messages so it's obvious which
 # worktree's inbox this listener is bound to (and that it does NOT serve
@@ -1042,6 +1045,17 @@ clear_issue_pending_brief_marker() {
         >/dev/null 2>&1 || true
 }
 
+# Full https URL for PR #$1 in this worktree's origin repo, or empty when
+# origin isn't a GitHub remote. A bare "#N" isn't clickable in a terminal;
+# a full URL is (Ctrl+click), so operator-facing PR mentions carry one.
+pr_url() {
+    local origin slug
+    origin="$(git remote get-url origin 2>/dev/null)" || return 0
+    slug="$(printf '%s\n' "$origin" | sed -nE 's#^(git@github\.com:|ssh://git@github\.com/|https://([^@/]*@)?github\.com/)([^/]+/[^/]+)$#\3#p')"
+    slug="${slug%.git}"
+    [ -n "$slug" ] && printf 'https://github.com/%s/pull/%s' "$slug" "$1"
+}
+
 # Print a compact result after the worker process exits. Process exit, task
 # state and executed-check evidence are distinct; none implies merge approval.
 #
@@ -1088,7 +1102,10 @@ print_completion_block() {
         echo "Next: inspect the failure evidence before retrying or considering a merge."
     elif [ -n "$pr" ]; then
         printf '%s: worker handed back PR #%s for review%s.\n' "$subject" "$pr" "${pr_note:+ — $pr_note}"
-        echo "Next: review the result and its verification limits before deciding whether to merge."
+        local url
+        url="$(pr_url "$pr")"
+        printf 'Next: review PR #%s%s and its verification limits before deciding whether to merge.\n' "$pr" "${url:+ ($url)}"
+        HANDBACK_PR="$pr"
     elif [ "$pr_state" = "done-no-pr" ]; then
         printf '%s: worker reports delivery without a PR%s.\n' "$subject" "${pr_note:+ — $pr_note}"
         echo "Next: no merge is needed; check the result against the task's acceptance criteria."
@@ -1313,6 +1330,11 @@ EOF
     echo ""
     echo "[$(date +%T)] Queue empty — dropping to interactive shell in $WT_LABEL/. Polling continues in the background."
     echo "               (a plain 'exit' respawns this shell — close the worker with Ctrl-D twice, Ctrl-C twice, or 'close-worker')"
+    if [ -n "$HANDBACK_PR" ]; then
+        local url
+        url="$(pr_url "$HANDBACK_PR")"
+        echo "               Waiting on: your merge decision for PR #$HANDBACK_PR${url:+ — $url}"
+    fi
     # Run in the FOREGROUND, not backgrounded: this script runs with `set -m`
     # (issue #529's pgid isolation, near the top of the file), and under
     # active job control, backgrounding a command puts it in a NEW process
@@ -1418,6 +1440,7 @@ while true; do
     if claim_next_task; then
         echo "[$(date +%T)] Task received! id=$TASK_ID$([ "$IS_LEGACY" = "1" ] && echo " (v1 legacy)")"
         IDLE_RESPAWNS=0   # new parked stretch after this task — see IDLE_QUICK_EXIT_SECS
+        HANDBACK_PR=""
 
         TASK=$(cat "$TASK_PATH")
 
