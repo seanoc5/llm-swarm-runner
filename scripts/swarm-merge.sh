@@ -663,7 +663,7 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
         if [ "$RATING_MARKER" != "<!-- BLIND_MERGE_RISK: $AUTO_RATING -->" ]; then
           echo "ERROR: PR #$PR_NUM refused by --auto-$AUTO_RATING Gate 1 (rating marker)." >&2
           echo "       First '<!-- BLIND_MERGE_RISK: ... -->' marker in the body is" >&2
-          echo "       '${RATING_MARKER:-<absent>}', not the exact low marker — not" >&2
+          echo "       '${RATING_MARKER:-<absent>}', not the exact $AUTO_RATING marker — not" >&2
           echo "       eligible for unattended merge." >&2
           exit 1
         fi
@@ -708,7 +708,10 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
           REVIEW_JSON="$(gh pr view "$PR_NUM" --json comments,headRefOid 2>/dev/null || true)"
           HEAD_NOW="$(jq -r '.headRefOid // ""' <<<"$REVIEW_JSON" 2>/dev/null || true)"
           # Latest marker from an independent actor; worker rounds don't count.
-          IND_MARKER="$(jq -r '.comments[].body // ""' <<<"$REVIEW_JSON" 2>/dev/null \
+          # Only repo owner/member/collaborator comments are read, so an outside
+          # commenter can't forge one. Workers share the operator's gh account,
+          # so this does not stop a worker posting actor=coordinator itself.
+          IND_MARKER="$(jq -r '.comments[] | select(.authorAssociation as $a | ["OWNER","MEMBER","COLLABORATOR"] | index($a)) | .body // ""' <<<"$REVIEW_JSON" 2>/dev/null \
                         | grep -oE 'SWARM_SELF_REVIEW: [A-Z_]+ actor=(coordinator|operator)( head=[0-9a-f]+)?' \
                         | tail -1 || true)"
           IND_VERDICT="$(sed -E 's/^SWARM_SELF_REVIEW: ([A-Z_]+).*/\1/' <<<"$IND_MARKER")"
