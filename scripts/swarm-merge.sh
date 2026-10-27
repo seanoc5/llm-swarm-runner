@@ -12,7 +12,8 @@
 #   swarm-merge.sh <issue#> --force-cleanup  # housekeep even while the issue is OPEN
 #   swarm-merge.sh <issue#|PR#> --squash  # accepted-and-ignored: squash is the only mode
 #   swarm-merge.sh <issue#|PR#> --auto-low  # unattended low-risk auto-merge path (#452)
-#   swarm-merge.sh --sweep-only       # just run the local-branch sweep
+#   swarm-merge.sh <issue#|PR#> --auto-medium  # unattended 🟡 path (SWARM_AUTOMERGE_MEDIUM=1)
+#   swarm-merge.sh --sweep-only      # just run the local-branch sweep
 #
 # --squash is accepted as a no-op alias (this script always squashes); it is
 # not a mode selector. --merge and --rebase are deliberately NOT supported
@@ -72,6 +73,18 @@
 #                         branch (`origin/HEAD`, falling back to `main`/
 #                         `master`). Never auto-merges feature-to-feature.
 #   Gate 5 (draft)        `isDraft` is false.
+#
+# --auto-medium is the same unattended path for a 🟡 PR, for projects that
+# set SWARM_AUTOMERGE_MEDIUM=1 (refused outright otherwise). It runs every
+# --auto-low gate above, with Gate 1 expecting the exact medium marker, plus:
+#   Gate 8 (hold)         no `> ⛔ **COORDINATOR HOLD**` banner in the body.
+#   Gate 9 (independent APPROVE on head) the latest SWARM_SELF_REVIEW marker
+#                         with actor=coordinator or actor=operator says bare
+#                         APPROVE and its head=<sha> is the PR's current head
+#                         (self-review-pr.sh records it). Caveats, BLOCK, a
+#                         worker-only review, or an older head → refused.
+#                         The merge is then pinned to that reviewed commit,
+#                         and a CI-verified head that differs is refused.
 #
 # --auto-low also refuses outright (usage error, before any gate runs) if
 # combined with --override-review or --override-migration-gate: the
@@ -168,7 +181,9 @@ OVERRIDE_REVIEW=0
 OVERRIDE_MIGRATION_GATE=0
 FORCE_CLEANUP=0
 HOUSEKEEP_ONLY=0
-AUTO_LOW=0
+AUTO_LOW=0          # 1 = an unattended path (--auto-low or --auto-medium)
+AUTO_RATING=""      # low | medium: the rating that unattended path accepts
+REVIEWED_SHA=""
 ISSUE=""
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -198,7 +213,9 @@ for arg in "$@"; do
     --override-review) OVERRIDE_REVIEW=1 ;;
     --override-migration-gate) OVERRIDE_MIGRATION_GATE=1 ;;
     --force-cleanup) FORCE_CLEANUP=1 ;;
-    --auto-low)  AUTO_LOW=1 ;;
+    --auto-low|--auto-medium)
+      [ -z "$AUTO_RATING" ] || { echo "ERROR: give only one of --auto-low / --auto-medium" >&2; exit 2; }
+      AUTO_LOW=1; AUTO_RATING="${arg#--auto-}" ;;
     --squash)    ;;   # no-op: squash is the only mode this script implements
     --merge|--rebase)
       echo "ERROR: swarm-merge.sh always squashes; $arg is not supported" >&2
@@ -223,9 +240,9 @@ done
 # override flag — those exist for a human who read the PR and disagrees
 # with a specific gate, a judgment call --auto-low doesn't get to make.
 if [ "$AUTO_LOW" = 1 ] && { [ "$OVERRIDE_REVIEW" = 1 ] || [ "$OVERRIDE_MIGRATION_GATE" = 1 ]; }; then
-  echo "ERROR: --auto-low may not be combined with --override-review or" >&2
+  echo "ERROR: --auto-$AUTO_RATING may not be combined with --override-review or" >&2
   echo "       --override-migration-gate. The unattended path must not accept" >&2
-  echo "       overrides — re-run without --auto-low if a human is making this call." >&2
+  echo "       overrides — re-run without --auto-$AUTO_RATING if a human is making this call." >&2
   exit 2
 fi
 
@@ -431,6 +448,12 @@ echo "[1/6] working in main worktree: $MAIN_WT"
 # shellcheck source=/dev/null
 . "$SCRIPT_DIR/_load-env.sh" "$MAIN_WT"
 
+if [ "$AUTO_RATING" = medium ] && [ "${SWARM_AUTOMERGE_MEDIUM:-0}" != 1 ]; then
+  echo "ERROR: --auto-medium refused: SWARM_AUTOMERGE_MEDIUM is not 1 for this project." >&2
+  echo "       Set it in <project>/.swarm/.env to opt in, or merge by hand: swarm-merge.sh <N>." >&2
+  exit 1
+fi
+
 # issue #465: swarm-merge.sh no longer removes the worktree itself (see
 # step 5 below, which now calls kill-worktree.sh directly) — but Gate 2's
 # no-checks-configured pass-with-warning below still logs a merge.gate
@@ -477,7 +500,7 @@ send_conflict_brief_or_die() {
   fi
   echo "       $(c_amber "→ resolve-conflicts brief sent to the issue #$ISSUE worker.")"
   local rerun="swarm-merge.sh $PR_NUM"
-  [ "$AUTO_LOW" = 1 ] && rerun="$rerun --auto-low"
+  [ "$AUTO_LOW" = 1 ] && rerun="$rerun --auto-$AUTO_RATING"
   echo "       Re-run once it has pushed and CI is green: $rerun"
   exit 3
 }
@@ -594,17 +617,17 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
       # plain `swarm-merge.sh <N>` skips it. Checked here, first and cheap,
       # before anything that costs real wall-clock time below.
       if [ "$AUTO_LOW" = 1 ]; then
-        echo "       auto-low gate 0 (authorship): checking…"
+        echo "       auto-$AUTO_RATING gate 0 (authorship): checking…"
         AUTH_RC=0
         "$SCRIPT_DIR/check-coordinator-authorship.sh" "$PR_NUM" || AUTH_RC=$?
         if [ "$AUTH_RC" = 1 ]; then
-          echo "ERROR: PR #$PR_NUM refused by --auto-low Gate 0 (authorship)." >&2
+          echo "ERROR: PR #$PR_NUM refused by --auto-$AUTO_RATING Gate 0 (authorship)." >&2
           echo "       This PR carries a coordinator-authored commit and must go to" >&2
           echo "       the operator — there is no override for this gate. A human can" >&2
-          echo "       still merge it directly: swarm-merge.sh $PR_NUM (no --auto-low)." >&2
+          echo "       still merge it directly: swarm-merge.sh $PR_NUM (no --auto-$AUTO_RATING)." >&2
           exit 1
         elif [ "$AUTH_RC" != 0 ]; then
-          echo "ERROR: PR #$PR_NUM refused by --auto-low Gate 0 (authorship, exit $AUTH_RC)." >&2
+          echo "ERROR: PR #$PR_NUM refused by --auto-$AUTO_RATING Gate 0 (authorship, exit $AUTH_RC)." >&2
           echo "       check-coordinator-authorship.sh errored rather than returning a clean" >&2
           echo "       verdict (see its output above) — failing closed, not eligible." >&2
           exit 1
@@ -615,7 +638,7 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
         # `gh` calls. Matches prompts/coordinator.md's 8-gate list; gates 6
         # (diff-scope read) and 7 (migration collision, pre-existing below)
         # aren't repeated here.
-        echo "       auto-low gate 1 (rating marker): checking…"
+        echo "       auto-$AUTO_RATING gate 1 (rating marker): checking…"
         # Self-review finding on this PR: an unanchored substring grep for
         # the exact low marker also matches a PR whose body merely quotes
         # that marker in prose elsewhere (e.g. this PR's own Follow-up/
@@ -637,41 +660,69 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
         # marker — a malformed first marker then simply fails the exact
         # match (refused) rather than being invisible to the search.
         RATING_MARKER="$(grep -m1 -- 'BLIND_MERGE_RISK' <<<"$PR_BODY" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' || true)"
-        if [ "$RATING_MARKER" != "<!-- BLIND_MERGE_RISK: low -->" ]; then
-          echo "ERROR: PR #$PR_NUM refused by --auto-low Gate 1 (rating marker)." >&2
+        if [ "$RATING_MARKER" != "<!-- BLIND_MERGE_RISK: $AUTO_RATING -->" ]; then
+          echo "ERROR: PR #$PR_NUM refused by --auto-$AUTO_RATING Gate 1 (rating marker)." >&2
           echo "       First '<!-- BLIND_MERGE_RISK: ... -->' marker in the body is" >&2
-          echo "       '${RATING_MARKER:-<absent>}', not the exact low marker — not" >&2
+          echo "       '${RATING_MARKER:-<absent>}', not the exact $AUTO_RATING marker — not" >&2
           echo "       eligible for unattended merge." >&2
           exit 1
         fi
 
-        echo "       auto-low gate 3 (review decision): checking…"
+        echo "       auto-$AUTO_RATING gate 3 (review decision): checking…"
         if [ "$PR_REVIEW_DECISION" = "CHANGES_REQUESTED" ]; then
-          echo "ERROR: PR #$PR_NUM refused by --auto-low Gate 3 (review decision)." >&2
+          echo "ERROR: PR #$PR_NUM refused by --auto-$AUTO_RATING Gate 3 (review decision)." >&2
           echo "       reviewDecision is CHANGES_REQUESTED — not eligible for unattended merge." >&2
           exit 1
         fi
 
-        echo "       auto-low gate 4 (base branch): checking…"
+        echo "       auto-$AUTO_RATING gate 4 (base branch): checking…"
         DEFAULT_BRANCH="$(resolve_default_branch)"
         if [ -z "$DEFAULT_BRANCH" ]; then
-          echo "ERROR: PR #$PR_NUM refused by --auto-low Gate 4 (base branch)." >&2
+          echo "ERROR: PR #$PR_NUM refused by --auto-$AUTO_RATING Gate 4 (base branch)." >&2
           echo "       Could not resolve the repo's default branch to compare against —" >&2
           echo "       failing closed rather than guessing." >&2
           exit 1
         fi
         if [ "$PR_BASE" != "$DEFAULT_BRANCH" ]; then
-          echo "ERROR: PR #$PR_NUM refused by --auto-low Gate 4 (base branch)." >&2
+          echo "ERROR: PR #$PR_NUM refused by --auto-$AUTO_RATING Gate 4 (base branch)." >&2
           echo "       base is '$PR_BASE', default branch is '$DEFAULT_BRANCH' — never" >&2
           echo "       auto-merge feature-to-feature." >&2
           exit 1
         fi
 
-        echo "       auto-low gate 5 (draft): checking…"
+        echo "       auto-$AUTO_RATING gate 5 (draft): checking…"
         if [ "$PR_IS_DRAFT" = "true" ]; then
-          echo "ERROR: PR #$PR_NUM refused by --auto-low Gate 5 (draft)." >&2
+          echo "ERROR: PR #$PR_NUM refused by --auto-$AUTO_RATING Gate 5 (draft)." >&2
           echo "       PR is still a draft — not eligible for unattended merge." >&2
           exit 1
+        fi
+
+        if [ "$AUTO_RATING" = medium ]; then
+          echo "       auto-medium gate 8 (hold banner): checking…"
+          if grep -qE '^> ⛔ \*\*COORDINATOR HOLD\*\*' <<<"$PR_BODY"; then
+            echo "ERROR: PR #$PR_NUM refused by --auto-medium Gate 8 (hold): a COORDINATOR HOLD banner is on the body." >&2
+            exit 1
+          fi
+
+          echo "       auto-medium gate 9 (independent APPROVE on head): checking…"
+          REVIEW_JSON="$(gh pr view "$PR_NUM" --json comments,headRefOid 2>/dev/null || true)"
+          HEAD_NOW="$(jq -r '.headRefOid // ""' <<<"$REVIEW_JSON" 2>/dev/null || true)"
+          # Latest marker from an independent actor; worker rounds don't count.
+          # Only repo owner/member/collaborator comments are read, so an outside
+          # commenter can't forge one. Workers share the operator's gh account,
+          # so this does not stop a worker posting actor=coordinator itself.
+          IND_MARKER="$(jq -r '.comments[] | select(.authorAssociation as $a | ["OWNER","MEMBER","COLLABORATOR"] | index($a)) | .body // ""' <<<"$REVIEW_JSON" 2>/dev/null \
+                        | grep -oE 'SWARM_SELF_REVIEW: [A-Z_]+ actor=(coordinator|operator)( head=[0-9a-f]+)?' \
+                        | tail -1 || true)"
+          IND_VERDICT="$(sed -E 's/^SWARM_SELF_REVIEW: ([A-Z_]+).*/\1/' <<<"$IND_MARKER")"
+          IND_HEAD="$(grep -oE 'head=[0-9a-f]+' <<<"$IND_MARKER" | cut -d= -f2 || true)"
+          if [ -z "$HEAD_NOW" ] || [ "$IND_VERDICT" != APPROVE ] || [ "$IND_HEAD" != "$HEAD_NOW" ]; then
+            echo "ERROR: PR #$PR_NUM refused by --auto-medium Gate 9 (independent APPROVE on head)." >&2
+            echo "       Latest coordinator/operator review: '${IND_MARKER:-<none>}'; current head: '${HEAD_NOW:-<unreadable>}'." >&2
+            echo "       Needs a bare APPROVE on this exact head: self-review-pr.sh $PR_NUM --post --force --actor coordinator" >&2
+            exit 1
+          fi
+          REVIEWED_SHA="$HEAD_NOW"
         fi
       fi
       # Self-review verdict gate (ringer concept #2 — docs/ringer-adoptions.md).
@@ -747,7 +798,7 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
       # and the window between "CI confirmed green" and the actual merge
       # stays as narrow as possible.
       if [ "$AUTO_LOW" = 1 ]; then
-        echo "       auto-low gate 2 (CI wait): waiting for a real conclusion…"
+        echo "       auto-$AUTO_RATING gate 2 (CI wait): waiting for a real conclusion…"
         CI_RC=0
         # issue #629 self-review follow-up: tee ci-wait.sh's own output so we
         # can recover the exact commit it verified (its "verified-head=" line)
@@ -761,10 +812,10 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
         if [ "$CI_RC" = 5 ]; then
           # No CI checks configured on this repo at all — pass-with-warning,
           # not a refusal (see the Gate 2 note in the header comment above).
-          echo "       $(c_amber "⚠ auto-low gate 2: no CI checks configured on this repo — proceeding (pass-with-warning)")"
+          echo "       $(c_amber "⚠ auto-$AUTO_RATING gate 2: no CI checks configured on this repo — proceeding (pass-with-warning)")"
           log_event merge.gate "pr=$PR_NUM gate=2-ci-wait result=no-checks-configured action=proceed"
         elif [ "$CI_RC" != 0 ]; then
-          echo "ERROR: PR #$PR_NUM refused by --auto-low Gate 2 (CI wait, exit $CI_RC)." >&2
+          echo "ERROR: PR #$PR_NUM refused by --auto-$AUTO_RATING Gate 2 (CI wait, exit $CI_RC)." >&2
           echo "       See ci-wait.sh's output above for which case fired (red checks," >&2
           echo "       timeout, or CONFLICTING/DIRTY needing a rebase)." >&2
           exit 1
@@ -799,6 +850,15 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
       #     actually checked against the CI result that justified merging
       #     at all (issue #629 follow-up).
       MATCH_SHA="${CI_VERIFIED_SHA:-}"
+      # --auto-medium: CI and the independent review must be about the same
+      # commit, and the merge pins to it (also when no CI is configured).
+      if [ -n "$REVIEWED_SHA" ]; then
+        if [ -n "$MATCH_SHA" ] && [ "$MATCH_SHA" != "$REVIEWED_SHA" ]; then
+          echo "ERROR: PR #$PR_NUM refused by --auto-medium Gate 9: CI verified $MATCH_SHA but the APPROVE was for $REVIEWED_SHA (a push landed in between). Re-review the new head." >&2
+          exit 1
+        fi
+        MATCH_SHA="$REVIEWED_SHA"
+      fi
       if [ -z "$MATCH_SHA" ]; then
         if [ "${CI_RC:-}" = "0" ]; then
           echo "ERROR: PR #$PR_NUM's Gate 2 (CI wait) reported a pass but never named the commit it verified — refusing to merge rather than pinning to an unrelated fresh read. Re-run ci-wait.sh by hand ($SCRIPT_DIR/ci-wait.sh $PR_NUM) and check its output." >&2
@@ -816,8 +876,8 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
           # event instead, since a person is already watching this merge and
           # can judge for themselves whether to proceed.
           if [ "$AUTO_LOW" = 1 ]; then
-            echo "ERROR: PR #$PR_NUM's fallback head-commit read failed (gh pr view --json headRefOid) with no verified commit to pin to — refusing to merge --auto-low unpinned." >&2
-            echo "       Retry, or merge by hand (swarm-merge.sh $PR_NUM, no --auto-low) once you've confirmed the head commit yourself." >&2
+            echo "ERROR: PR #$PR_NUM's fallback head-commit read failed (gh pr view --json headRefOid) with no verified commit to pin to — refusing to merge --auto-$AUTO_RATING unpinned." >&2
+            echo "       Retry, or merge by hand (swarm-merge.sh $PR_NUM, no --auto-$AUTO_RATING) once you've confirmed the head commit yourself." >&2
             log_event merge.gate "pr=$PR_NUM gate=match-head-commit result=fallback-read-failed action=refuse-auto-low"
             exit 1
           fi

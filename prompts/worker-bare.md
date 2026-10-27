@@ -165,8 +165,9 @@ Every ready PR body starts with `<!-- BLIND_MERGE_RISK: low|medium|high -->`
 (lowercase, exact) and ends with the `<sub>` footer in the skeleton. When in
 doubt, rate higher. 🟢 low: docs, test-only, dependency bump with green CI,
 isolated single-file fix with tests. 🟡 medium: source in 1–3 files, CI
-green, no public-API/schema/migration/auth change. 🔴 high: schema,
-migration, auth, multi-file refactor, public API, CI red or skipped.
+green, no API/schema/auth change (add-only Flyway `V*.sql` is
+OK). 🔴 high: other schema/migration, auth, multi-file refactor, public
+API, CI red or skipped.
 
 ### Merging your own PR
 

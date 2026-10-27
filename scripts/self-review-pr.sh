@@ -20,7 +20,8 @@
 #   self-review-pr.sh <PR#> [--post] [--force] [--model <id>] [--actor <name>]
 #
 #   --post    also post the verdict as a PR comment with a
-#             <!-- SWARM_SELF_REVIEW: <VERDICT> actor=<name> --> marker.
+#             <!-- SWARM_SELF_REVIEW: <VERDICT> actor=<name> head=<sha> -->
+#             marker (head= is the PR head commit that was reviewed).
 #             Idempotent: skips posting if a marker comment already exists
 #             (--force re-posts).
 #   --force   run even when WORKER_SELF_REVIEW=0, and re-post over an
@@ -98,6 +99,12 @@ if [ "${WORKER_SELF_REVIEW:-1}" = "0" ] && [ "$FORCE" = "0" ]; then
 fi
 
 # --- gather PR content ------------------------------------------------------
+# Head SHA read BEFORE the diff and recorded in the marker as head=<sha>, so
+# swarm-merge.sh --auto-medium can require an APPROVE on the exact commit it
+# merges. A push landing between these two reads makes the recorded head
+# older than the reviewed diff, which the gate sees as a mismatch and
+# refuses: fail closed.
+HEAD_SHA="$(gh pr view "$PR" --json headRefOid --jq .headRefOid 2>/dev/null || true)"
 DIFF="$(gh pr diff "$PR")" || { echo "ERROR: gh pr diff $PR failed" >&2; exit 1; }
 BODY="$(gh pr view "$PR" --json title,body --jq '"\(.title)\n\n\(.body)"')" \
     || { echo "ERROR: gh pr view $PR failed" >&2; exit 1; }
@@ -163,8 +170,8 @@ if [ "$POST" = "1" ]; then
         # "worker"; the one exception is every marker posted before this
         # change, which pr-ready.sh's own query still treats as a worker
         # round for the same reason.
-        COMMENT="$(printf '<!-- SWARM_SELF_REVIEW: %s actor=%s -->\n## Fresh-context self-review\n\n%s\n\n<sub>Adversarial review by a fresh %s session against prompts/skill-self-review.md — no shared context with the PR author. Machinery: scripts/self-review-pr.sh (docs/ringer-adoptions.md #2).</sub>\n' \
-            "$VERDICT" "$ACTOR" "$REVIEW" "$REVIEW_CMD")"
+        COMMENT="$(printf '<!-- SWARM_SELF_REVIEW: %s actor=%s head=%s -->\n## Fresh-context self-review\n\n%s\n\n<sub>Adversarial review by a fresh %s session against prompts/skill-self-review.md — no shared context with the PR author. Machinery: scripts/self-review-pr.sh (docs/ringer-adoptions.md #2).</sub>\n' \
+            "$VERDICT" "$ACTOR" "${HEAD_SHA:-unknown}" "$REVIEW" "$REVIEW_CMD")"
         gh pr comment "$PR" --body "$COMMENT" \
             || { echo "ERROR: gh pr comment failed" >&2; exit 1; }
         echo "post: verdict comment added to PR #$PR"

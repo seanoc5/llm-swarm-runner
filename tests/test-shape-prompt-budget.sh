@@ -52,6 +52,10 @@
 # corpusminder #1513 stale "merge" advice). #655 had already spent the
 # last headroom on delta-only wake reports, trimming a paragraph to fit.
 # coordinator.md's regrowth still owes issue #509 its answer.
+# 2026-10-26: coordinator budget 26200 -> 26800. One paragraph for the
+# opt-in SWARM_AUTOMERGE_MEDIUM path (operator-approved 🟡 automerge); its
+# gates live in swarm-merge.sh --auto-medium, not in the prompt. Same
+# PR: worker-bare 11300 -> 11400 for the add-only Flyway 🟡 carve-out.
 set -euo pipefail
 
 green() { printf '\033[32m✓ %s\033[0m\n' "$*"; }
@@ -59,8 +63,8 @@ red()   { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKER_MAX="${WORKER_MD_MAX_BYTES:-24100}"
-COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-26200}"
-BARE_MAX="${WORKER_BARE_MD_MAX_BYTES:-11300}"   # issue #510 trial prompt; ~7.5KB is script-parsed contract
+COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-26800}"
+BARE_MAX="${WORKER_BARE_MD_MAX_BYTES:-11400}"   # issue #510 trial prompt; ~7.5KB is script-parsed contract
 
 check() {
     local file="$1" max="$2" size

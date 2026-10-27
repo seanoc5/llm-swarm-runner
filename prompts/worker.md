@@ -365,10 +365,10 @@ skeleton. When in doubt, rate higher.
 
 - **🟢 low:** docs/comments only, dependency bump with green CI, test-only
   addition, isolated single-file fix with tests, lint/format.
-- **🟡 medium:** source in 1–3 files, CI green, no public-API, schema,
-  migration, auth or security change.
-- **🔴 high:** schema/migration, auth/security, multi-file refactor, public
-  API change, CI red or skipped, or anything wanting a second pair of eyes.
+- **🟡 medium:** source in 1–3 files, CI green, no public-API, auth or
+  schema change; one add-only Flyway `V*.sql` (new table/column/index) is OK.
+- **🔴 high:** any other schema/migration, auth/security, multi-file
+  refactor, public API, CI red or skipped, or wanting a second pair of eyes.
 
 ### Merging your own PR
 

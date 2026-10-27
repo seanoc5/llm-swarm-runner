@@ -673,6 +673,99 @@ grep -q "pr merge" "$GH_LOG" && red "gh pr merge was called despite the failed f
 grep -q "merge.gate.*pr=501.*fallback-read-failed.*refuse-auto-low" "$EVENTS_LOG" || red "merge.gate event for the refused fallback read was not logged"
 green "--auto-low refuses rather than merging unpinned when the fallback head-read fails"
 
+# ============================================================================
+# --auto-medium: the --auto-low gates with the medium marker, plus Gate 8
+# (no COORDINATOR HOLD banner) and Gate 9 (latest coordinator/operator
+# self-review is a bare APPROVE recorded against the current head).
+# ============================================================================
+MEDIUM_BODY='<!-- BLIND_MERGE_RISK: medium -->'
+set_reviews() {   # set_reviews <headRefOid> <marker-body>... (ASSOC= sets authorAssociation)
+    local head="$1"; shift
+    printf '%s\n' "$@" | jq -R -s -c --arg h "$head" \
+        --arg a "${ASSOC:-OWNER}" '{headRefOid:$h, comments: (split("\n") | map(select(length>0)) | map({body:., authorAssociation:$a}))}' \
+        > "$GH_COMMENTS_DIR/501.json"
+}
+run_medium() {   # run_medium [env assignments...] — sets OUT/RC
+    : > "$GH_LOG"
+    if OUT=$(env GH_CHECKS_RC=0 GH_PR_BODY="$MEDIUM_BODY" SWARM_AUTOMERGE_MEDIUM=1 "$@" "$MERGE" 501 --auto-medium 2>&1); then RC=0; else RC=$?; fi
+}
+if ! git -C "$CLONE" ls-remote --exit-code --heads origin fix/issue-501 >/dev/null 2>&1; then
+    git -C "$CLONE" checkout -q -B fix/issue-501 master
+    git -C "$CLONE" push -q origin fix/issue-501
+fi
+
+heading "Test M1: --auto-medium refused unless SWARM_AUTOMERGE_MEDIUM=1"
+set_reviews deadbeef '<!-- SWARM_SELF_REVIEW: APPROVE actor=coordinator head=deadbeef -->'
+run_medium SWARM_AUTOMERGE_MEDIUM=0
+[ "$RC" -ne 0 ] || red "--auto-medium must refuse without the opt-in (output: $OUT)"
+echo "$OUT" | grep -q "SWARM_AUTOMERGE_MEDIUM is not 1" || red "refusal must name the knob (output: $OUT)"
+grep -q "pr merge" "$GH_LOG" && red "gh pr merge was called without the opt-in"
+green "--auto-medium needs the per-project opt-in"
+
+heading "Test M2: --auto-low and --auto-medium together → usage error"
+if OUT=$("$MERGE" 501 --auto-low --auto-medium 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -eq 2 ] || red "expected exit 2 for both flags, got $RC (output: $OUT)"
+green "only one unattended mode at a time"
+
+heading "Test M3: --auto-medium on a low-rated PR → Gate 1"
+run_medium GH_PR_BODY='<!-- BLIND_MERGE_RISK: low -->'
+[ "$RC" -ne 0 ] || red "--auto-medium must refuse a non-medium marker"
+echo "$OUT" | grep -q "auto-medium Gate 1" || red "refusal must name Gate 1 (output: $OUT)"
+green "Gate 1 expects the exact medium marker"
+
+heading "Test M4: COORDINATOR HOLD banner → Gate 8"
+run_medium GH_PR_BODY="$MEDIUM_BODY
+> ⛔ **COORDINATOR HOLD** — fix queued"
+[ "$RC" -ne 0 ] || red "--auto-medium must refuse a held PR"
+echo "$OUT" | grep -q "Gate 8" || red "refusal must name Gate 8 (output: $OUT)"
+grep -q "pr merge" "$GH_LOG" && red "gh pr merge was called on a held PR"
+green "Gate 8 refuses a held PR"
+
+heading "Test M5: only the worker's own APPROVE → Gate 9"
+set_reviews deadbeef '<!-- SWARM_SELF_REVIEW: APPROVE actor=worker head=deadbeef -->'
+run_medium
+[ "$RC" -ne 0 ] || red "a worker-only review must not satisfy Gate 9"
+echo "$OUT" | grep -q "Gate 9" || red "refusal must name Gate 9 (output: $OUT)"
+green "Gate 9 ignores the author's own review"
+
+heading "Test M6: coordinator APPROVE on an older head → Gate 9"
+set_reviews deadbeef '<!-- SWARM_SELF_REVIEW: APPROVE actor=coordinator head=0ldc0de -->'
+run_medium
+[ "$RC" -ne 0 ] || red "an APPROVE for another commit must not satisfy Gate 9"
+echo "$OUT" | grep -q "Gate 9" || red "refusal must name Gate 9 (output: $OUT)"
+green "Gate 9 requires the review to be on the current head"
+
+heading "Test M7: newer coordinator APPROVE_WITH_CAVEATS supersedes an APPROVE → Gate 9"
+set_reviews deadbeef '<!-- SWARM_SELF_REVIEW: APPROVE actor=coordinator head=deadbeef -->' \
+    '<!-- SWARM_SELF_REVIEW: APPROVE_WITH_CAVEATS actor=coordinator head=deadbeef -->'
+run_medium
+[ "$RC" -ne 0 ] || red "caveats must not satisfy Gate 9"
+echo "$OUT" | grep -q "Gate 9" || red "refusal must name Gate 9 (output: $OUT)"
+green "Gate 9 wants a bare APPROVE, latest marker wins"
+
+heading "Test M8: marker with no head= (pre-change review) → Gate 9"
+set_reviews deadbeef '<!-- SWARM_SELF_REVIEW: APPROVE actor=coordinator -->'
+run_medium
+[ "$RC" -ne 0 ] || red "a marker with no head= must not satisfy Gate 9"
+green "Gate 9 fails closed on a marker that doesn't name its commit"
+
+heading "Test M8b: APPROVE marker from an outside commenter → Gate 9"
+ASSOC=NONE set_reviews deadbeef '<!-- SWARM_SELF_REVIEW: APPROVE actor=coordinator head=deadbeef -->'
+run_medium
+[ "$RC" -ne 0 ] || red "a marker from a non-collaborator must not satisfy Gate 9"
+echo "$OUT" | grep -q "Gate 9" || red "refusal must name Gate 9 (output: $OUT)"
+green "Gate 9 ignores markers from outside commenters"
+
+heading "Test M9: coordinator APPROVE on head, CI green → merges pinned to the reviewed commit"
+set_reviews deadbeef '<!-- SWARM_SELF_REVIEW: APPROVE actor=worker head=deadbeef -->' \
+    '<!-- SWARM_SELF_REVIEW: APPROVE actor=coordinator head=deadbeef -->'
+run_medium
+[ "$RC" -eq 0 ] || red "--auto-medium should merge once every gate passes (rc=$RC, output: $OUT)"
+echo "$OUT" | grep -q "auto-medium gate 9" || red "Gate 9 should be reported as checked"
+grep -q -- "pr merge 501 --squash --match-head-commit deadbeef" "$GH_LOG" \
+    || red "merge was not pinned to the reviewed commit. gh log: $(cat "$GH_LOG")"
+green "--auto-medium merges a reviewed 🟡 PR, pinned to the reviewed commit"
+
 heading "All coordinator-authorship shape tests passed"
 green "Gates 0/1/2/3/4/5 refusal/pass/fail-closed, no-CI-configured pass-with-warning, --auto-low scoping vs plain merge, override-flag rejection"
 echo ""
