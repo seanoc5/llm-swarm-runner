@@ -480,8 +480,13 @@ reprompt_last_pane_line() {
     #      general ANSI strip — what survives is what a person typed.
     # The NBSP the TUI emits after ❯ is folded to a space so an empty prompt
     # trims to a genuinely empty string.
+    # (2026-10-27) The footer drops "(shift+tab to cycle)" while background
+    # shells or agents run ("⏵⏵ bypass permissions on · 2 shells · ← 3
+    # agents"), so (1) alone let it back in as the last line: corpusminder's
+    # idle coordinator skipped ~170 wakes in an hour on 10-26. Also drop it
+    # by its leading mode glyph, and drop a count-only footer (default mode).
     printf '%s\n' "$clean" \
-        | LC_ALL=C grep -vE 'ctx: [0-9]+[kM]?/[0-9]+[kM]?[[:space:]]*\([0-9]+%\)|\(shift\+tab to cycle\)|^[[:space:]]*[─╭╮╰╯│]+[[:space:]]*$' \
+        | LC_ALL=C grep -vE "ctx: [0-9]+[kM]?/[0-9]+[kM]?[[:space:]]*\([0-9]+%\)|\(shift\+tab to cycle\)|^[[:space:]]*[─╭╮╰╯│]+[[:space:]]*\$|$REPROMPT_FOOTER_PATTERN" \
         | sed -e '/^[[:space:]]*$/d' -e 's/^[[:space:]]*[❯>│|╭╮╰╯─]*[[:space:]]*//' -e 's/[[:space:]]*[│|╭╮╰╯─]*[[:space:]]*$//' | tail -1 || true
 }
 
@@ -528,6 +533,14 @@ reprompt_confirm_submitted() {
 # surrounding whitespace) before this pattern ever sees the line, so by
 # the time it's checked here any such marker is already gone.
 REPROMPT_CHROME_PATTERN="${REPROMPT_CHROME_PATTERN:-^※ recap:|Resume this session with|^[0-9]+\.[[:space:]]*Resume from}"
+# Claude Code's mode footer, under the composer. It carries "(shift+tab to
+# cycle)" only while nothing runs in the background; with background shells
+# or agents it reads "⏵⏵ bypass permissions on · 2 shells · ← 3 agents"
+# (captured live on corpusminder-spring, 2026-10-27), and in default mode
+# it is the counts alone. Matched by the leading mode glyph (⏵⏵ bypass /
+# accept edits, ⏸ plan) or by a line made only of those counts. Literal
+# alternation, not a bracket class, for the multi-byte glyphs (LC_ALL=C).
+REPROMPT_FOOTER_PATTERN="${REPROMPT_FOOTER_PATTERN:-^[[:space:]]*(⏵⏵|⏸)[[:space:]]|^[[:space:]]*([0-9]+ shells?|[0-9]+ background tasks?|← ([0-9]+|for) agents?)([[:space:]]*·[[:space:]]*([0-9]+ shells?|[0-9]+ background tasks?|← ([0-9]+|for) agents?))*[[:space:]]*\$}"
 
 # reprompt_composer_dirty <tmux-target> <busy-pattern>
 #
@@ -574,13 +587,14 @@ REPROMPT_CHROME_PATTERN="${REPROMPT_CHROME_PATTERN:-^※ recap:|Resume this sess
 # queues immediately, as before.
 #
 # Known, accepted limitation (docs/tmux-as-channel.md §1d "Pane content is
-# not verified truth"): Claude Code's dimmed suggested-next-prompt autofill
-# renders identically to typed text in a plain-text capture-pane, so it
-# reads as dirty here too. That's a deliberate fail-safe — never paste
-# over what MIGHT be a draft — trading a deferred wake for a lost or
-# garbled one. Callers must not defer silently forever on the strength of
-# that false-positive risk alone; see coordinator-watch.sh's
-# coord_wake_retry_pass for the bounded-warning backstop.
+# not verified truth"): any TUI chrome reprompt_last_pane_line doesn't yet
+# recognise reads as a draft. The dim autofill suggestion is no longer one
+# (issue #440 strips dim runs); the background-task footer was, until
+# REPROMPT_FOOTER_PATTERN (2026-10-27). Reading dirty is a deliberate
+# fail-safe — never paste over what MIGHT be a draft — trading a deferred
+# wake for a lost or garbled one. Callers must not defer silently forever
+# on that risk; see coordinator-watch.sh's coord_wake_retry_pass for the
+# bounded-warning backstop.
 reprompt_composer_dirty() {
     local target="$1" busy_pattern="$2" content clean last
     content="$(tmux capture-pane -t "$target" -p 2>/dev/null)" || return 1

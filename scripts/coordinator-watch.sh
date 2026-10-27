@@ -2901,6 +2901,14 @@ COMPACT_REPLAY_MIN_REAL_SECS="${COMPACT_REPLAY_MIN_REAL_SECS:-5}"
 # other literal text, which is safe under LC_ALL=C the same way the
 # pattern's other literal strings (e.g. "Baked for") already are.
 COMPACT_COMPOSER_CHROME_PATTERN="${COMPACT_COMPOSER_CHROME_PATTERN:-^※ recap:|^[[:space:]]*(✻|✶)[[:space:]]*(Considering…|Sautéed for|Cooked for|Baked for|Simmered for|Brewed for|Crunched for)?|/clear to save [0-9.]+k tokens}"
+# Claude Code's mode footer, under the composer. It carries "(shift+tab to
+# cycle)" only while nothing runs in the background; with background shells
+# or agents it reads "⏵⏵ bypass permissions on · 2 shells · ← 3 agents"
+# (captured live on corpusminder-spring, 2026-10-27), and in default mode
+# it is the counts alone. Matched by the leading mode glyph (⏵⏵ bypass /
+# accept edits, ⏸ plan) or by a line made only of those counts. Literal
+# alternation, not a bracket class, for the multi-byte glyphs (LC_ALL=C).
+COMPACT_FOOTER_PATTERN="${COMPACT_FOOTER_PATTERN:-^[[:space:]]*(⏵⏵|⏸)[[:space:]]|^[[:space:]]*([0-9]+ shells?|[0-9]+ background tasks?|← ([0-9]+|for) agents?)([[:space:]]*·[[:space:]]*([0-9]+ shells?|[0-9]+ background tasks?|← ([0-9]+|for) agents?))*[[:space:]]*\$}"
 
 case "$WATCHER_AUTOCLOSE_MODE" in
     merged)    AUTOCLOSE_PR_FLAG="--merged-only" ;;
@@ -3073,9 +3081,9 @@ fi
 # this long, coord_wake_retry_pass logs one loud WARN (repeated every
 # further COORD_WAKE_DEFER_WARN_SECS, not every retry tick) instead of
 # retrying silently forever. This is the bound the issue's own constraint
-# calls for: reprompt_composer_dirty has a known false-positive risk (the
-# composer's dimmed autofill suggestion reads identically to a real draft
-# in a plain-text capture — see that function's header comment in
+# calls for: reprompt_composer_dirty has a known false-positive risk (any
+# TUI chrome it doesn't yet recognise reads as a draft — most recently the
+# background-task footer, 2026-10-27; see that function's header comment in
 # llm-start.sh), so an operator needs a visible signal if a wake is stuck
 # behind a misread rather than a real draft — the retry itself never gives
 # up (the wake must not be dropped), only the SILENCE around it is bounded.
@@ -6851,8 +6859,10 @@ compact_last_pane_line() {
     # into the ctx:/shift-tab exclusion above.
     # The NBSP the TUI emits after ❯ is folded to a space so an empty prompt
     # trims to a genuinely empty string.
+    # (2026-10-27) The footer drops "(shift+tab to cycle)" while background
+    # shells or agents run — see COMPACT_FOOTER_PATTERN's header comment.
     printf '%s\n' "$clean" \
-        | LC_ALL=C grep -vE "ctx: [0-9]+[kM]?/[0-9]+[kM]?[[:space:]]*\([0-9]+%\)|\(shift\+tab to cycle\)|^[[:space:]]*[─╭╮╰╯│]+[[:space:]]*\$|$COMPACT_COMPOSER_CHROME_PATTERN" \
+        | LC_ALL=C grep -vE "ctx: [0-9]+[kM]?/[0-9]+[kM]?[[:space:]]*\([0-9]+%\)|\(shift\+tab to cycle\)|^[[:space:]]*[─╭╮╰╯│]+[[:space:]]*\$|$COMPACT_COMPOSER_CHROME_PATTERN|$COMPACT_FOOTER_PATTERN" \
         | sed -e '/^[[:space:]]*$/d' -e 's/^[[:space:]]*[❯>│|╭╮╰╯─]*[[:space:]]*//' -e 's/[[:space:]]*[│|╭╮╰╯─]*[[:space:]]*$//' | tail -1 || true
 }
 
@@ -9617,9 +9627,9 @@ coord_wake_clear_pending() {
 # next tick, so the wake is retried indefinitely and never dropped —
 # only the SILENCE around a long-stuck deferral is bounded, via the
 # COORD_WAKE_DEFER_WARN_SECS WARN below (see that var's header comment for
-# why: reprompt_composer_dirty has one known false-positive source — the
-# TUI's dimmed autofill suggestion reads identically to a real draft in a
-# plain-text capture — so a wake CAN get stuck on a misread rather than a
+# why: reprompt_composer_dirty reads any TUI chrome it doesn't yet
+# recognise as a draft — most recently the background-task footer,
+# 2026-10-27 — so a wake CAN get stuck on a misread rather than a
 # genuine draft, and that needs to be visible to a human, not silent).
 #
 # (issue #430 self-review) Also checks coordinator_pane_busy before
