@@ -3257,6 +3257,24 @@ fi
 # dispatch-bearing doorbells by default.
 WAKE_DEFER_ON_SWARM_BUSY="${WAKE_DEFER_ON_SWARM_BUSY:-0}"
 
+# COORD_HOOK_STATE (issue #666): opt-in, default OFF. When 1,
+# coordinator-claude.sh installs scripts/coord-hook.sh as the coordinator's
+# UserPromptSubmit/Stop/Notification hooks, which write
+# COORD_HOOK_STATE_FILE ("busy|idle|waiting <epoch>") and ring the inbox
+# doorbell themselves at turn end (recorded in COORD_HOOK_RANG_FILE). The
+# wake path then reads busy/idle from that file instead of the screen, and
+# a wake the hook already rang is not pasted again. A "busy" older than
+# COORD_HOOK_BUSY_MAX_SECS (a crashed or killed session never writes idle)
+# and a missing file both fall back to the screen checks.
+COORD_HOOK_STATE="${COORD_HOOK_STATE:-0}"
+COORD_HOOK_STATE_FILE="$PROJECT_DIR/.swarm/coordinator-state"
+COORD_HOOK_RANG_FILE="$PROJECT_DIR/.swarm/coord-hook-rang"
+COORD_HOOK_BUSY_MAX_SECS="${COORD_HOOK_BUSY_MAX_SECS:-3600}"
+if ! [[ "$COORD_HOOK_BUSY_MAX_SECS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: COORD_HOOK_BUSY_MAX_SECS must be a non-negative integer (got: $COORD_HOOK_BUSY_MAX_SECS)" >&2
+    exit 1
+fi
+
 
 # COORD_WAKE_BUSY_RETRY_SECS / COORD_WAKE_BUSY_CEILING_SECS: see their
 # header-comment entries above (near WATCH_CHECK_ON_DONE) for the full
@@ -9379,6 +9397,52 @@ swarm_busy() {
     return 1
 }
 
+# coord_hook_state
+#
+# (issue #666) Echoes busy|idle|waiting from COORD_HOOK_STATE_FILE, or
+# returns 1 (caller falls back to the screen) when the feature is off, the
+# file is missing or unparseable, or a "busy" is older than
+# COORD_HOOK_BUSY_MAX_SECS.
+coord_hook_state() {
+    [ "$COORD_HOOK_STATE" = "1" ] || return 1
+    local state epoch
+    read -r state epoch 2>/dev/null < "$COORD_HOOK_STATE_FILE" || return 1
+    [[ "$epoch" =~ ^[0-9]+$ ]] || return 1
+    case "$state" in
+        busy) [ $(( $(date +%s) - epoch )) -le "$COORD_HOOK_BUSY_MAX_SECS" ] || return 1 ;;
+        idle|waiting) ;;
+        *) return 1 ;;
+    esac
+    printf '%s\n' "$state"
+}
+
+# coord_wake_pane_busy
+#
+# (issue #666) The wake path's busy check: the hook state file when it has
+# an answer, coordinator_pane_busy's screen match otherwise. Auto-compact
+# keeps calling coordinator_pane_busy directly — /compact's own busy phase
+# is not bracketed by the turn hooks.
+coord_wake_pane_busy() {
+    local s
+    if s="$(coord_hook_state)"; then
+        [ "$s" = "busy" ]
+        return
+    fi
+    coordinator_pane_busy
+}
+
+# coord_hook_rang_since <epoch>
+#
+# (issue #666) True when coord-hook.sh rang the inbox doorbell at or after
+# <epoch> — the wake that has been pending since then was delivered at
+# turn end and must not be pasted again.
+coord_hook_rang_since() {
+    [ "$COORD_HOOK_STATE" = "1" ] || return 1
+    local rang
+    read -r rang _ 2>/dev/null < "$COORD_HOOK_RANG_FILE" || return 1
+    [[ "$rang" =~ ^[0-9]+$ ]] && [ "$rang" -ge "$1" ]
+}
+
 # coord_wake_hold_reason
 #
 # (issue #459) The single gate every doorbell path consults. Echoes the
@@ -9404,7 +9468,7 @@ swarm_busy() {
 coord_wake_hold_reason() {
     coord_human_present && { printf 'human_present\n'; return 0; }
     worker_human_present && { printf 'human_present\n'; return 0; }
-    if [ "$COORD_WAKE_BUSY_RETRY_SECS" -gt 0 ] && coordinator_pane_busy; then
+    if [ "$COORD_WAKE_BUSY_RETRY_SECS" -gt 0 ] && coord_wake_pane_busy; then
         printf 'pane_busy\n'; return 0
     fi
     if [ "$WAKE_DEFER_ON_SWARM_BUSY" = "1" ] && swarm_busy; then
@@ -9493,6 +9557,12 @@ coord_wake_hold_retry_pass() {
     if [ "$(coord_inbox_count)" = "0" ]; then
         echo "[$(date +%T)] held coordinator wake's inbox is now empty — clearing without pasting"
         log_event coord.wake.skip "reason=inbox_empty trigger=hold_retry age=${age}s"
+        coord_wake_hold_clear_pending
+        return 0
+    fi
+    # (issue #666) Rung by the coordinator's own Stop hook at turn end.
+    if coord_hook_rang_since "$since"; then
+        log_event coord.wake.skip "reason=hook_rang trigger=hold_retry age=${age}s"
         coord_wake_hold_clear_pending
         return 0
     fi
@@ -9662,6 +9732,16 @@ coord_wake_retry_pass() {
         echo "[$(date +%T)] deferred coordinator wake's inbox is now empty — clearing without pasting"
         log_event coord.wake.skip "reason=inbox_empty trigger=retry age=${age}s"
         coord_wake_clear_pending
+        return 0
+    fi
+    # (issue #666) The turn-end hook rang it, or will: a busy coordinator
+    # gets the doorbell from its own Stop hook, so don't paste over a turn.
+    if coord_hook_rang_since "$since"; then
+        log_event coord.wake.skip "reason=hook_rang trigger=retry age=${age}s"
+        coord_wake_clear_pending
+        return 0
+    fi
+    if [ "$(coord_hook_state 2>/dev/null)" = "busy" ]; then
         return 0
     fi
     if coord_wake_already_submitted "$since"; then
