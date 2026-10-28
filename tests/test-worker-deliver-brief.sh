@@ -83,6 +83,9 @@ COMPACT_SUBMIT_SETTLE_SECS=0
 # `set -u` would otherwise abort the moment compact_last_pane_line
 # references it).
 COMPACT_COMPOSER_CHROME_PATTERN='^※ recap:|^[[:space:]]*(✻|✶)[[:space:]]*(Considering…|Sautéed for|Cooked for|Baked for|Simmered for|Brewed for|Crunched for)?|/clear to save [0-9.]+k tokens'
+# 2026-10-27 — read straight from coordinator-watch.sh so the two never drift;
+# left unset, the empty alternative would make the filter drop every line.
+eval "$(grep '^COMPACT_FOOTER_PATTERN=' "$WATCH")"
 declare -A WORKER_DELIVER_LAST_FAIL=()
 declare -A WORKER_DELIVER_FAIL_COUNT=()
 declare -A WORKER_DELIVER_GAVE_UP=()
