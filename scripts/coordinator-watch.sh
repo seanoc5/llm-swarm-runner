@@ -9593,6 +9593,12 @@ coord_wake_hold_retry_pass() {
         if [ "$reason_now" = "debounce" ]; then
             return 0
         fi
+        # (issue #666) The ceiling guards against a screen match that reads
+        # busy forever. A fresh hook "busy" is the session's own word, and
+        # its Stop hook rings this doorbell at turn end — no forced paste.
+        if [ "$reason_now" = "pane_busy" ] && [ "$(coord_hook_state 2>/dev/null)" = "busy" ]; then
+            return 0
+        fi
         if [ "$COORD_WAKE_BUSY_CEILING_SECS" -eq 0 ] || [ "$age" -lt "$COORD_WAKE_BUSY_CEILING_SECS" ]; then
             return 0
         fi
