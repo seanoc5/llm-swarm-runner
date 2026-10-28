@@ -259,6 +259,7 @@ The coordinator and watcher honor a small set of tunables loaded from four sourc
 | `POLL_SECS`                  | `2`     | Watcher: polling interval when `inotify-tools` isn't installed.                                                   |
 | `SWARM_AUTOMERGE_LOW`        | `0`     | `1` = coordinator may auto-merge a worker's 🟢 low-risk PR once CI is green and its own diff read agrees with the rating (`prompts/coordinator.md` § "Auto-merge low-risk PRs"). Default: off. |
 | `SWARM_AUTOMERGE_MEDIUM`     | `0`     | `1` = coordinator may also auto-merge a 🟡 PR via `swarm-merge.sh <N> --auto-medium`: the 🟢 gates plus no hold banner and an independent (coordinator/operator) bare `APPROVE` on the current head (`prompts/coordinator.md` § "Auto-merge medium-risk PRs"). Default: off. |
+| `COORD_HOOK_STATE`           | `0`     | `1` = the claude coordinator reports busy/idle through hooks (`.swarm/coordinator-state`) and rings the inbox doorbell at turn end instead of having it typed into a busy pane (`scripts/coord-hook.sh`, issue #666). Needs a coordinator restart. Default: off. |
 | `STALE_PR_NUDGE_HOURS`       | `6`     | Hours of PR inactivity before `stale-pr-nudges.sh` flags it for a re-entry nudge comment. `0` disables. |
 | `BRIEF_LINT`                 | `1`     | `provision-worker.sh` warn-only lints a worker's brief before dispatch (flags underspecified briefs; doesn't block). `0` disables. |
 

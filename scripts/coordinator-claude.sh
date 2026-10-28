@@ -86,6 +86,17 @@ ARGS=(--model "$MODEL"
       --append-system-prompt-file "$SYSTEM_PROMPT_FILE"
       --dangerously-skip-permissions)
 [ "${COORDINATOR_HEADLESS:-0}" = "1" ] && ARGS+=(-p)
+# (issue #666) Hooks that write .swarm/coordinator-state and ring the inbox
+# doorbell at turn end, scoped to this process via --settings so workers
+# and ad-hoc sessions in the same project never run them.
+if [ "${COORD_HOOK_STATE:-0}" = "1" ]; then
+    export COORD_HOOK_STATE
+    HOOK="$(cd "$(dirname "$0")" && pwd)/coord-hook.sh"
+    ARGS+=(--settings "$(jq -cn --arg h "$HOOK" '
+        def on(e): [{hooks: [{type: "command", command: (($h | @sh) + " " + e)}]}];
+        {hooks: {UserPromptSubmit: on("UserPromptSubmit"), Stop: on("Stop"),
+                 Notification: on("Notification")}}')")
+fi
 # Trailing positional: initial user message in REPL mode, print-prompt in -p mode.
 ARGS+=("$INITIAL_PROMPT")
 

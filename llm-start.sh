@@ -1047,6 +1047,7 @@ if ! $session_existed || ! $window_exists || $coordinator_idle; then
         [ -n "${COORD_MODEL:-}" ]                && ENV_VARS+="COORD_MODEL=$(printf '%q' "$COORD_MODEL") "
         [ "${COORDINATOR_HEADLESS:-0}" = "1" ]   && ENV_VARS+="COORDINATOR_HEADLESS=1 "
         [ "${COORDINATOR_USE_API_KEY:-0}" = "1" ] && ENV_VARS+="COORDINATOR_USE_API_KEY=1 "
+        [ "${COORD_HOOK_STATE:-0}" = "1" ]       && ENV_VARS+="COORD_HOOK_STATE=1 "
         # Passed explicitly rather than left to coordinator-claude.sh's own
         # fallback (which re-derives the same path from its own $PWD): this
         # script already knows PWD/SESSION_NAME with certainty at the
