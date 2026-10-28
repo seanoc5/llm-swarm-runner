@@ -74,6 +74,8 @@ COMPACT_SUBMIT_SETTLE_SECS=0.3
 # lines and the session-resume picker; see llm-start.sh's
 # reprompt_composer_dirty header comment).
 REPROMPT_CHROME_PATTERN='^※ recap:|Resume this session with|^[0-9]+\.[[:space:]]*Resume from'
+# 2026-10-27 — read straight from llm-start.sh so the two never drift.
+eval "$(grep '^REPROMPT_FOOTER_PATTERN=' "$LLM_START")"
 
 PASS=0
 
@@ -507,7 +509,7 @@ heading "Test 1d: reprompt_composer_dirty — Claude Code 2.1.x idle chrome is n
 # on every idle pane — so ~99% of coordinator wakes deferred forever.
 # The fixture renders real SGR (ESC[2m) so `capture-pane -e` sees exactly
 # what the live TUI emits; tmux preserves the attribute across capture.
-mk_cc_fixture() {   # <path> <composer-line-printf-fmt>
+mk_cc_fixture() {   # <path> <composer-line-printf-fmt> [footer]
     cat > "$1" <<REPL
 #!/usr/bin/env bash
 render() {
@@ -517,7 +519,7 @@ render() {
     printf '$2\\n'
     echo "────────────────────────────────────────"
     echo "  Fable 5 · corpusminder-spring · ctx: 197k/1M (20%)"
-    echo "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+    echo "  ${3:-⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents}"
 }
 render
 while IFS= read -r line; do render; done
@@ -528,15 +530,21 @@ NBSP=$'\xc2\xa0'
 mk_cc_fixture "$TEST_DIR/cc-empty.sh"  "❯${NBSP}\\033[2mTry \"edit <filepath> to...\"\\033[0m"
 mk_cc_fixture "$TEST_DIR/cc-ghost.sh"  "❯${NBSP}\\033[2mmerge\\033[0m \\033[2mPR\\033[0m \\033[2m645"
 mk_cc_fixture "$TEST_DIR/cc-typed.sh"  "❯${NBSP}nudge the coordinator to re-verify and un-draft it"
+# 2026-10-27: with background shells/agents the footer drops the
+# "(shift+tab to cycle)" hint (captured live on corpusminder-spring); an empty
+# composer must still read clear, in bypass mode and in default mode.
+mk_cc_fixture "$TEST_DIR/cc-bgbypass.sh" "❯${NBSP}" "⏵⏵ bypass permissions on · 2 shells · ← 3 agents"
+mk_cc_fixture "$TEST_DIR/cc-bgdefault.sh" "❯${NBSP}" "2 shells · ← 3 agents"
+mk_cc_fixture "$TEST_DIR/cc-bgtyped.sh" "❯${NBSP}q1 yes" "⏵⏵ bypass permissions on · 2 shells · ← 3 agents"
 
-for case in empty:clear ghost:clear typed:dirty; do
+for case in empty:clear ghost:clear typed:dirty bgbypass:clear bgdefault:clear bgtyped:dirty; do
     name="${case%%:*}"; want="${case##*:}"
     CC_SESSION="${SESSION_NAME}-cc-$name"
     tmux new-session -d -s "$CC_SESSION" -n coordinator -x 120 -y 20 2>/dev/null
     sleep 0.3
     tmux send-keys -t "$CC_SESSION:coordinator" "exec -a claude bash $TEST_DIR/cc-$name.sh" Enter
     check_eventually "cc-$name: fixture foreground" "yes" \
-        "pane_contains '$CC_SESSION:coordinator' 'shift+tab to cycle'"
+        "pane_contains '$CC_SESSION:coordinator' '← '"
     if reprompt_composer_dirty "$CC_SESSION:coordinator" "$COORD_BUSY_PATTERN"; then got=dirty; else got=clear; fi
     check "cc-$name composer reads $want (issue #440)" "$want" "$got"
     tmux kill-session -t "$CC_SESSION" 2>/dev/null || true

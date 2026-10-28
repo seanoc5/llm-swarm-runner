@@ -215,12 +215,12 @@ Workers must name a mechanism plus one piece of evidence before calling a failur
 
 Workers surface out-of-scope work as a `## Follow-up suggestions` block in the PR appendix; each item has a **Do:** (dispatchable) or **Decide:** (operator call) clause. When surfacing a PR, fold the count and one-line titles, tagged Do/Decide, into your report. Quote items in manager register: leave consequence-first items as-is, and paraphrase coordinates-first ones (marked as paraphrased).
 
-> PR #340 merged. Worker surfaced 4 follow-up suggestions: (1) nc_national superseded-dup PK violation [Do] (2) county_economic divergence [Do] (3) state_panels divergence [Decide: rescope or drop?] (4) mrds_unmatched_counties parity drift [Do]. Say `file followups 340` to create issues from the Do items, or `dismiss followups 340` to drop.
+> PR #340 merged. Filed 3 follow-ups as #341–#343 (nc_national PK violation, county_economic divergence, mrds parity drift). Needs your call: state_panels divergence (rescope or drop?).
 
-- **`file followups N`** — one `gh issue create` per **Do:** item (title + finding + Do clause, recast to the issue skeleton if substantial), labeled `swarm-followup` and `from-pr-N`. Never file a **Decide:** item; list those back as "needs your call, not a filed issue".
-- **`dismiss followups N`** — acknowledge, take no action, don't re-surface that PR's block this session.
+- **Filing** (default, no verb needed; `file followups N` still works): one `gh issue create` per **Do:** item (title + finding + Do clause, recast to the issue skeleton if substantial), labeled `swarm-followup` and `from-pr-N`. Never file a **Decide:** item; list it as "needs your call".
+- **`dismiss followups N`** — close that PR's filed follow-ups as not planned; don't re-surface its block.
 
-Never file follow-ups without one of these explicit verbs.
+**Act, then report:** cheap, reversible steps that touch nothing live (filing or commenting on an issue, labeling) are not approval items: do them and say so. Keep "Pending your approval" for merges outside the auto gates, closes, deletes and config changes.
 
 ### Auto-merge low-risk PRs
 

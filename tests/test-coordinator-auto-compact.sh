@@ -100,6 +100,8 @@ COMPACT_REPLAY_PATTERN='Not enough messages to compact\.'
 # pane_line references this directly, and this file's `set -u` aborts if
 # it's left unset.
 COMPACT_COMPOSER_CHROME_PATTERN='^※ recap:|^[[:space:]]*(✻|✶)[[:space:]]*(Considering…|Sautéed for|Cooked for|Baked for|Simmered for|Brewed for|Crunched for)?|/clear to save [0-9.]+k tokens'
+# 2026-10-27 — read straight from coordinator-watch.sh so the two never drift.
+eval "$(grep '^COMPACT_FOOTER_PATTERN=' "$WATCH")"
 # issue #292 — lowered from the shipped default (5) so the fixtures below,
 # whose fake "compaction" sleeps only ~2s, still count as long enough to
 # trust a detected replay; Test 19 below overrides this back up locally to
@@ -900,13 +902,13 @@ heading "Test 16b: compact_composer_clear — Claude Code 2.1.x idle chrome is n
 # llm-start.sh's twin deferred ~99% of coordinator wakes. Framework-
 # generated composer text (the dim placeholder, the dim suggested-next-
 # prompt autofill) must read clear; text a human typed (no SGR) must not.
-cc_pane() {   # <composer line, raw bytes incl. SGR>
+cc_pane() {   # <composer line, raw bytes incl. SGR> [footer line]
     printf '✻ Cogitated for 2m 45s · done 5:31 PM\n'
     printf '────────────────────────────────────────\n'
     printf '%s\n' "$1"
     printf '────────────────────────────────────────\n'
     printf '  Fable 5 · corpusminder-spring · ctx: 197k/1M (20%%)\n'
-    printf '  \033[38;5;211m⏵⏵ bypass permissions on\033[38;5;246m (shift+tab to cycle) · ← for agents\033[39m\n'
+    printf '%s\n' "${2:-$(printf '  \033[38;5;211m⏵⏵ bypass permissions on\033[38;5;246m (shift+tab to cycle) · ← for agents\033[39m')}"
 }
 NBSP=$'\xc2\xa0'
 for case in "empty|❯${NBSP}$(printf '\033[2m')Try \"edit <filepath> to...\"$(printf '\033[0m')|clear" \
@@ -917,6 +919,20 @@ for case in "empty|❯${NBSP}$(printf '\033[2m')Try \"edit <filepath> to...\"$(p
     if compact_composer_clear "fake:target"; then got=clear; else got=dirty; fi
     unset -f tmux
     check "compact_composer_clear: 2.1.x pane with $name composer reads $want (issue #440)" "$want" "$got"
+done
+# 2026-10-27: with background shells/agents the footer drops the "(shift+tab
+# to cycle)" hint (captured live on corpusminder-spring, real SGR below), so
+# an empty composer read dirty and idle coordinators skipped every wake.
+BG_BYPASS="  $(printf '\033[38;5;211m')⏵⏵ bypass permissions on$(printf '\033[38;5;246m') · $(printf '\033[38;5;44m')2 shells$(printf '\033[38;5;246m') · ← 3 agents$(printf '\033[39m')"
+BG_DEFAULT="  $(printf '\033[38;5;44m')1 shell$(printf '\033[38;5;246m') · ← 2 agents$(printf '\033[39m')"
+for case in "bgbypass|❯${NBSP}|$BG_BYPASS|clear" \
+            "bgdefault|❯${NBSP}|$BG_DEFAULT|clear" \
+            "bgtyped|❯${NBSP}q1 yes|$BG_BYPASS|dirty"; do
+    IFS='|' read -r name line footer want <<< "$case"
+    tmux() { if [ "$1" = "capture-pane" ]; then cc_pane "$line" "$footer"; return 0; fi; command tmux "$@"; }
+    if compact_composer_clear "fake:target"; then got=clear; else got=dirty; fi
+    unset -f tmux
+    check "compact_composer_clear: background-task footer, $name composer reads $want" "$want" "$got"
 done
 
 heading "Test 17: maybe_auto_compact — composer already empty at a phase=start timeout -> coord.compact.delivered_as_text, not a misleading retraction (issue #292)"
