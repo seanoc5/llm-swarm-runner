@@ -91,6 +91,7 @@ ARGS=(--model "$MODEL"
 # and ad-hoc sessions in the same project never run them.
 if [ "${COORD_HOOK_STATE:-0}" = "1" ]; then
     export COORD_HOOK_STATE
+    [ "${COORD_INBOX_WAITER:-0}" = "1" ] && export COORD_INBOX_WAITER
     HOOK="$(cd "$(dirname "$0")" && pwd)/coord-hook.sh"
     ARGS+=(--settings "$(jq -cn --arg h "$HOOK" '
         def on(e): [{hooks: [{type: "command", command: (($h | @sh) + " " + e)}]}];

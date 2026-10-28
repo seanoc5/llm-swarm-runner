@@ -22,6 +22,15 @@
 #      stop_hook_active=true (we already rang once this turn end) never
 #      rings again, so this cannot loop.
 #
+#   3. Inbox waiter (COORD_INBOX_WAITER=1). An idle coordinator fires no
+#      hooks, so coord-inbox-wait.sh runs as its background shell and wakes
+#      it when an item lands. When no waiter is running, Stop asks the
+#      coordinator to arm one (appended to the doorbell, or on its own).
+#      An ask the coordinator hasn't answered (the waiter deletes
+#      coord-waiter-asked when it arms) isn't repeated for
+#      COORD_INBOX_WAITER_ASK_SECS, so a coordinator that can't arm it
+#      never loops.
+#
 # Fails open: any error leaves the hook silent (exit 0, no output), which
 # Claude Code treats as "no opinion" — the watcher then falls back to its
 # screen-based checks because the state file goes stale.
@@ -57,6 +66,27 @@ log_event() {
     printf '%s  %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$events" 2>/dev/null || true
 }
 
+# waiter_arm_request: prints the "arm the waiter" sentence when
+# COORD_INBOX_WAITER=1, no live waiter heartbeat exists, and no unanswered ask
+# is younger than COORD_INBOX_WAITER_ASK_SECS; records the ask. Prints
+# nothing otherwise.
+waiter_arm_request() {
+    [ "${COORD_INBOX_WAITER:-0}" = "1" ] || return 0
+    local pid_file="$swarm/coord-inbox-waiter" asked_file="$swarm/coord-waiter-asked"
+    local pid m asked
+    if read -r pid _ 2>/dev/null < "$pid_file" && [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+        m="$(stat -c %Y "$pid_file" 2>/dev/null || echo 0)"
+        [ $((now - m)) -le "${COORD_INBOX_WAITER_STALE_SECS:-30}" ] && return 0
+    fi
+    asked="$(cat "$asked_file" 2>/dev/null || echo 0)"
+    [[ "$asked" =~ ^[0-9]+$ ]] || asked=0
+    [ $((now - asked)) -ge "${COORD_INBOX_WAITER_ASK_SECS:-300}" ] || return 0
+    printf '%s\n' "$now" > "$asked_file" 2>/dev/null || true
+    log_event "coord.waiter.ask"
+    printf 'Arm the inbox waiter: run %s %s with run_in_background (Bash), then end your turn. It wakes you when an inbox item lands; nothing more to do with it until then.' \
+        "$(printf '%q' "$(cd "$(dirname "$0")" && pwd)/coord-inbox-wait.sh")" "$(printf '%q' "$project")"
+}
+
 case "$event" in
     UserPromptSubmit) write_state busy ;;
     Notification)     write_state waiting ;;
@@ -77,7 +107,11 @@ case "$event" in
             printf '%s\n' "$now" > "$swarm/coord-wake-last" 2>/dev/null || true
             write_state busy
             log_event "coord.wake.hook_rang items=$count"
-            jq -n --arg r "${template//%N/$count}" '{decision: "block", reason: $r}'
+            arm="$(waiter_arm_request)"
+            jq -n --arg r "${template//%N/$count}${arm:+ $arm}" '{decision: "block", reason: $r}'
+        elif arm="$(waiter_arm_request)" && [ -n "$arm" ]; then
+            write_state busy
+            jq -n --arg r "$arm" '{decision: "block", reason: $r}'
         else
             write_state idle
         fi

@@ -2116,6 +2116,11 @@ EVENTS LOG
                                            permanently; it is now held and re-rung
                              swarm_busy    (issue #459) WAKE_DEFER_ON_SWARM_BUSY=1 and a
                                            worker is mid-turn or holds a queued brief
+                             waiter_armed  COORD_INBOX_WAITER=1 and the coordinator's
+                                           background waiter is running; it rings
+                                           (coord.wake.waiter_rang), or after
+                                           COORD_INBOX_WAITER_GRACE_SECS the wake is
+                                           typed (coord.wake.waiter_overdue)
       coord.wake.defer_ceiling
                            (issue #430) a held wake hit COORD_WAKE_BUSY_CEILING_SECS
                            (15min default) with its gate still closed — delivered anyway
@@ -3282,6 +3287,24 @@ if ! [[ "$COORD_HOOK_BUSY_MAX_SECS" =~ ^[0-9]+$ ]]; then
     echo "ERROR: COORD_HOOK_BUSY_MAX_SECS must be a non-negative integer (got: $COORD_HOOK_BUSY_MAX_SECS)" >&2
     exit 1
 fi
+
+# COORD_INBOX_WAITER: opt-in, default OFF, needs COORD_HOOK_STATE=1. When 1,
+# the coordinator keeps scripts/coord-inbox-wait.sh running in the
+# background; it wakes an idle coordinator when an inbox item lands, without
+# typing. While its heartbeat (COORD_INBOX_WAITER_FILE's mtime) is fresh and
+# its pid alive, wakes are held with reason=waiter_armed; a wake still
+# pending after COORD_INBOX_WAITER_GRACE_SECS falls back to typing.
+COORD_INBOX_WAITER="${COORD_INBOX_WAITER:-0}"
+COORD_INBOX_WAITER_FILE="$PROJECT_DIR/.swarm/coord-inbox-waiter"
+COORD_INBOX_WAITER_STALE_SECS="${COORD_INBOX_WAITER_STALE_SECS:-30}"
+COORD_INBOX_WAITER_GRACE_SECS="${COORD_INBOX_WAITER_GRACE_SECS:-120}"
+for _v in COORD_INBOX_WAITER_STALE_SECS COORD_INBOX_WAITER_GRACE_SECS; do
+    if ! [[ "${!_v}" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: $_v must be a non-negative integer (got: ${!_v})" >&2
+        exit 1
+    fi
+done
+unset _v
 
 
 # COORD_WAKE_BUSY_RETRY_SECS / COORD_WAKE_BUSY_CEILING_SECS: see their
@@ -9453,6 +9476,37 @@ coord_hook_rang_since() {
     [[ "$rang" =~ ^[0-9]+$ ]] && [ "$rang" -ge "$1" ]
 }
 
+# coord_inbox_waiter_armed
+#
+# True when coord-inbox-wait.sh is running for this project: pid alive and
+# heartbeat no older than COORD_INBOX_WAITER_STALE_SECS. It will ring the
+# doorbell itself (recorded in COORD_HOOK_RANG_FILE, like the Stop hook).
+coord_inbox_waiter_armed() {
+    [ "$COORD_HOOK_STATE" = "1" ] && [ "$COORD_INBOX_WAITER" = "1" ] || return 1
+    local pid m
+    read -r pid _ 2>/dev/null < "$COORD_INBOX_WAITER_FILE" || return 1
+    [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null || return 1
+    m=$(mtime_epoch "$COORD_INBOX_WAITER_FILE") || return 1
+    [ $(( $(date +%s) - m )) -le "$COORD_INBOX_WAITER_STALE_SECS" ]
+}
+
+# coord_wake_waiter_hold <since>
+#
+# For the retry passes: true while a wake pending since <since> should keep
+# waiting for the waiter. Past the grace it logs coord.wake.waiter_overdue
+# once per pending wake and returns false so the caller types it.
+COORD_WAKE_WAITER_OVERDUE_SINCE=""
+coord_wake_waiter_hold() {
+    coord_inbox_waiter_armed || return 1
+    local age=$(( $(date +%s) - $1 ))
+    [ "$age" -lt "$COORD_INBOX_WAITER_GRACE_SECS" ] && return 0
+    if [ "$COORD_WAKE_WAITER_OVERDUE_SINCE" != "$1" ]; then
+        log_event coord.wake.waiter_overdue "age=${age}s"
+        COORD_WAKE_WAITER_OVERDUE_SINCE="$1"
+    fi
+    return 1
+}
+
 # coord_wake_hold_reason
 #
 # (issue #459) The single gate every doorbell path consults. Echoes the
@@ -9472,10 +9526,21 @@ coord_hook_rang_since() {
 #                  on its own once the window passes.
 #   swarm_busy     opt-in only (WAKE_DEFER_ON_SWARM_BUSY=1), ceilinged the
 #                  same way pane_busy is.
+#   waiter_armed   COORD_INBOX_WAITER: the coordinator's background waiter
+#                  will ring it. Held for COORD_INBOX_WAITER_GRACE_SECS, then
+#                  re-gated without it (coord_wake_waiter_hold). Outranks
+#                  everything: the waiter never types, so nothing here can
+#                  disturb a human or a turn.
 #
 # Order matters: the reason reported is the one a human reading the log most
 # needs to see, so human presence outranks a busy pane outranks the clock.
 coord_wake_hold_reason() {
+    # (COORD_INBOX_WAITER) The coordinator's background waiter rings this
+    # doorbell itself, without typing. The retry passes pass skip_waiter
+    # once the wake outlives COORD_INBOX_WAITER_GRACE_SECS.
+    if [ "${1:-}" != "skip_waiter" ] && coord_inbox_waiter_armed; then
+        printf 'waiter_armed\n'; return 0
+    fi
     coord_human_present && { printf 'human_present\n'; return 0; }
     worker_human_present && { printf 'human_present\n'; return 0; }
     if [ "$COORD_WAKE_BUSY_RETRY_SECS" -gt 0 ] && coord_wake_pane_busy; then
@@ -9588,6 +9653,10 @@ coord_wake_hold_retry_pass() {
     # the pane was busy, say). The recorded reason only decides the ceiling.
     local reason_now
     reason_now="$(coord_wake_hold_reason)"
+    if [ "$reason_now" = "waiter_armed" ]; then
+        coord_wake_waiter_hold "$since" && return 0
+        reason_now="$(coord_wake_hold_reason skip_waiter)"
+    fi
 
     if [ -n "$reason_now" ]; then
         # issue #459: a present human is NEVER forced over. Unlike a busy
@@ -9800,6 +9869,10 @@ coord_wake_retry_pass() {
     # reason.
     local hold_reason
     hold_reason="$(coord_wake_hold_reason)"
+    if [ "$hold_reason" = "waiter_armed" ]; then
+        coord_wake_waiter_hold "$since" && return 0
+        hold_reason="$(coord_wake_hold_reason skip_waiter)"
+    fi
     if [ -n "$hold_reason" ]; then
         echo "[$(date +%T)] deferred coordinator wake still pending (held: $hold_reason) — retrying next tick"
         log_event coord.wake.skip "reason=$hold_reason trigger=retry age=${age}s"
