@@ -522,7 +522,7 @@ The listener checks v2 inbox first, falls back to v1. Both can be in use simulta
 
 1. **Claim** via atomic `mv` (v2) or rename (v1).
 2. **Echo brief** (first 40 lines) to the pane so attached observers see what's running.
-3. **Dispatch** the configured agent (default claude, override via `WORKER_CMD`; claude workers default to `claude-sonnet-5`, gemini/codex use their CLI's default model — override via `WORKER_MODEL`).
+3. **Dispatch** the configured agent (default claude, override via `WORKER_CMD`; claude workers default to `sonnet` (the newest Sonnet), gemini/codex use their CLI's default model — override via `WORKER_MODEL`).
 4. **Check** (v2 only) — resolve and run the acceptance check, if one is configured; capture exit code + output tail.
 5. **Archive + record** — move brief to `done/` (v2) or `.agent-task-last.md` (v1); for v2 also write `done/<id>.{ok,err}.json` with timing, agent exit code, and check result. This step is now usually pre-empted by the worker itself: `scripts/task-done.sh` (issue #451) is the worker's own mandatory last step (`prompts/worker.md` § "Task completion"), called mid-session — this listener step then just recognizes the record already exists and skips writing a duplicate. It's the fallback for a worker that forgets, and the only writer at all for a headless dispatch or a pre-#451 worktree.
 6. **Loop** back for the next task — interactively via the idle shell described above, headless via the silent poll loop.
@@ -539,7 +539,7 @@ The listener checks v2 inbox first, falls back to v1. Both can be in use simulta
 | Variable              | Default          | Notes                                                                                       |
 |-----------------------|------------------|---------------------------------------------------------------------------------------------|
 | `WORKER_CMD`          | `claude`         | Switches the worker's LLM CLI (`gemini`, `codex`, or `agy` are supported alternatives).       |
-| `WORKER_MODEL`        | `claude-sonnet-5` (claude); CLI default (gemini/codex) | Passed as `--model` (claude) or `-m` (gemini/codex). E.g. `sonnet`, `gemini-2.5-flash`. |
+| `WORKER_MODEL`        | `sonnet` (claude); CLI default (gemini/codex) | Passed as `--model` (claude) or `-m` (gemini/codex). E.g. `sonnet`, `gemini-2.5-flash`. |
 | `WORKER_HEADLESS`     | `0`              | When `1`, run agent with `-p` (print + exit). Required when no human is attached.           |
 | `WORKER_CHECK`        | `1`              | Executed acceptance checks. `0` disables (outcome JSON reverts to agent-exit-only).         |
 | `WORKER_CHECK_CMD`    | (none)           | Listener-wide default check command (e.g. the project test suite). Brief marker / `.swarm/check.sh` take precedence. |

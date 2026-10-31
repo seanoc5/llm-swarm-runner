@@ -249,12 +249,13 @@ WT_LABEL="$(basename "$PWD")"
 LEGACY_TASK_FILE=".agent-task.md"
 
 # Build per-agent model flag from WORKER_MODEL. When unset, claude workers
-# default to Sonnet 5 (near-Opus coding quality at ~half the token price and
-# quota burn — matters with MAX_WORKERS running in parallel; escalate a hard
-# issue with WORKER_MODEL=claude-opus-4-8). gemini/codex workers keep their
-# CLI's own default. claude uses --model, gemini/codex use -m.
+# default to the CLI alias `sonnet`, the newest Sonnet (claude-sonnet-5-5 as of
+# 2026-10-31; it moves with the next Sonnet). Sonnet keeps quota burn down with
+# MAX_WORKERS running in parallel; escalate a hard issue with
+# WORKER_MODEL=default (the account default, Opus today). gemini/codex workers
+# keep their CLI's own default. claude uses --model, gemini/codex use -m.
 if [ -z "$MODEL" ] && [ "$AGENT" = "claude" ]; then
-    MODEL="claude-sonnet-5"
+    MODEL="sonnet"
 fi
 MODEL_OPTS=()
 if [ -n "$MODEL" ]; then

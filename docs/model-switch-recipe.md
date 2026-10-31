@@ -17,7 +17,7 @@ example at the bottom is the 2026-09-23 corpusminder-spring switch (Fable 5 → 
 | Knob | Env var | Built-in default | Set in code at |
 |---|---|---|---|
 | Coordinator (the long-lived planner; one per swarm) | `COORDINATOR_MODEL` | `opus` (alias for the newest Opus; auto-upgrades, see note below) | `llm-start.sh` (`COORD_MODEL_DEFAULT`) and `scripts/coordinator-claude.sh` (`MODEL=`) |
-| Workers (N parallel sandboxed sessions) | `WORKER_MODEL` | `claude-sonnet-5` | `scripts/worker-listener.sh` (`MODEL=` fallback) |
+| Workers (N parallel sandboxed sessions) | `WORKER_MODEL` | `sonnet` (alias for the newest Sonnet; `claude-sonnet-5` before 2026-10-31) | `scripts/worker-listener.sh` (`MODEL=` fallback) |
 
 **Coordinator alias note (2026-10-05).** The claude coordinator defaults to the Claude
 CLI alias `opus`, which resolves to the newest Opus model (`claude-opus-5-5`, 1M context,
@@ -141,7 +141,7 @@ these files carries one — it is how the reasoning survives):
 # Floor: Claude Code >= 2.1.280 (2.1.257 returns HTTP 400 unrecognized_model).
 COORDINATOR_MODEL=claude-opus-5-5
 
-# Workers stay on the claude-sonnet-5 default (cost: MAX_WORKERS in parallel).
+# Workers stay on the sonnet default (cost: MAX_WORKERS in parallel).
 # Escalate one hard issue per-invocation instead — see §5.
 #WORKER_MODEL=
 ```
@@ -176,7 +176,7 @@ tmux -L "$S" kill-session -t "$N"
 cd "$P" && /opt/work/llm-swarm-runner/llm-start.sh
 ```
 
-`pgrep` output lists the workers too (`--model claude-sonnet-5`); the coordinator is
+`pgrep` output lists the workers too (`--model sonnet`); the coordinator is
 the one whose `/proc/<pid>/cwd` is the project root rather than a worktree.
 
 Before killing, check for undelivered briefs — `llm-start.sh` warns about stranded
