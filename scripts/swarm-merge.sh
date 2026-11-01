@@ -735,7 +735,7 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
               # resolves PR numbers, hence the /issues/ url check).
               # It must also be OPEN and mention this PR (#687), so an old,
               # closed or unrelated issue can't stand in for the follow-up.
-              FOLLOWUP_JSON="$(gh issue view "$IND_FOLLOWUP" --json url,state,title,body 2>/dev/null || true)"
+              FOLLOWUP_JSON="$(gh issue view "$IND_FOLLOWUP" --json url,state,title,body,labels 2>/dev/null || true)"
               FOLLOWUP_URL="$(jq -r '.url // ""' <<<"$FOLLOWUP_JSON" 2>/dev/null || true)"
               FOLLOWUP_STATE="$(jq -r '.state // ""' <<<"$FOLLOWUP_JSON" 2>/dev/null || true)"
               FOLLOWUP_REASON=""
@@ -745,9 +745,9 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
               elif [ "$FOLLOWUP_STATE" != OPEN ]; then
                 FOLLOWUP_REASON="not-open"
                 echo "       follow-up #$IND_FOLLOWUP is not OPEN (state '${FOLLOWUP_STATE:-unknown}')." >&2
-              elif ! jq -e --arg re "#$PR_NUM([^0-9]|\$)" '((.title // "") + "\n" + (.body // "")) | test($re)' <<<"$FOLLOWUP_JSON" >/dev/null 2>&1; then
+              elif ! jq -e --arg re "#$PR_NUM([^0-9]|\$)" --arg lb "from-pr-$PR_NUM" '(((.title // "") + "\n" + (.body // "")) | test($re)) or any(.labels[]?; .name == $lb)' <<<"$FOLLOWUP_JSON" >/dev/null 2>&1; then
                 FOLLOWUP_REASON="no-pr-reference"
-                echo "       follow-up #$IND_FOLLOWUP does not mention #$PR_NUM in its title or body." >&2
+                echo "       follow-up #$IND_FOLLOWUP does not mention #$PR_NUM in its title or body and lacks label from-pr-$PR_NUM." >&2
               fi
               if [ -z "$FOLLOWUP_REASON" ]; then
                 GATE9_OK=1

@@ -74,7 +74,7 @@ case "${1:-} ${2:-}" in
             *"--json url"*)
                 n="${3:-}"
                 [[ " ${GH_ISSUES:-} " == *" $n "* ]] || exit 1
-                jq -n -c --arg u "https://github.com/o/r/issues/$n" --arg s "${GH_ISSUE_STATE:-OPEN}" --arg b "${GH_ISSUE_BODY-Follow-up to #42}" '{url:$u,state:$s,title:"follow-up",body:$b}'; exit 0 ;;
+                jq -n -c --arg u "https://github.com/o/r/issues/$n" --arg s "${GH_ISSUE_STATE:-OPEN}" --arg b "${GH_ISSUE_BODY-Follow-up to #42}" --arg l "${GH_ISSUE_LABELS:-}" '{url:$u,state:$s,title:"follow-up",body:$b,labels:($l|split(",")|map(select(length>0)|{name:.}))}'; exit 0 ;;
             *state*)                          echo "OPEN"; exit 0 ;;
         esac
         exit 0 ;;
@@ -282,6 +282,20 @@ if OUT=$(GH_ISSUES=900 GH_ISSUE_BODY="Unrelated; mentions #421 and #4200 only" "
 echo "$OUT" | grep -q "does not mention #42" || red "refusal should say the follow-up lacks the PR reference (output: $OUT)"
 grep -q "pr comment" "$GH_LOG" && red "posted despite an unrelated follow-up issue"
 green "refuses a closed follow-up and one that doesn't reference the PR (#421/#4200 are not #42)"
+
+pr_json abc123 '<!-- SWARM_SELF_REVIEW: APPROVE_WITH_CAVEATS actor=coordinator head=abc123 -->'
+: > "$GH_LOG"
+if OUT=$(GH_ISSUES=900 GH_ISSUE_STATE=CLOSED GH_ISSUE_BODY="Unrelated" GH_ISSUE_LABELS="from-pr-42" "$REVIEW" 42 --caveats-nonblocking 900 --actor coordinator 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -eq 1 ] || red "a CLOSED from-pr-42 follow-up should still exit 1, got $RC"
+grep -q "pr comment" "$GH_LOG" && red "posted despite a closed labelled follow-up"
+: > "$GH_LOG"
+if OUT=$(GH_ISSUES=900 GH_ISSUE_BODY="Unrelated" GH_ISSUE_LABELS="swarm-followup,from-pr-42" "$REVIEW" 42 --caveats-nonblocking 900 --actor coordinator 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -eq 0 ] || red "an OPEN from-pr-42 follow-up with no #42 text should pass, got $RC (output: $OUT)"
+grep -q "pr comment 42" "$GH_LOG" || red "marker not posted for the labelled follow-up"
+if OUT=$(GH_ISSUES=900 GH_ISSUE_BODY="Unrelated" GH_ISSUE_LABELS="from-pr-421" "$REVIEW" 42 --caveats-nonblocking 900 --actor coordinator 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -eq 1 ] || red "label from-pr-421 must not match PR 42, got $RC"
+green "accepts an open from-pr-N-labelled follow-up; closed or other-PR labels refused"
+
 
 pr_json abc123 '<!-- SWARM_SELF_REVIEW: APPROVE_WITH_CAVEATS actor=coordinator head=0ldc0de -->'
 : > "$GH_LOG"
