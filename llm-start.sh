@@ -1043,7 +1043,7 @@ if ! $session_existed || ! $window_exists || $coordinator_idle; then
     # Per-backend launch. Each branch builds the tmux send-keys line tailored
     # to its CLI. The claude branch delegates to scripts/coordinator-claude.sh
     # so the visible pane line stays short and the long flag soup lives in
-    # one maintainable place. The gemini path remains inline (already short).
+    # one maintainable place. The gemini path uses scripts/coordinator-gemini.sh the same way.
     if [ "$COORD_CMD" = "claude" ]; then
         # Host-side announce. The wrapper does the actual stripping/toggling,
         # but flagging the ANTHROPIC_API_KEY case here keeps the warning
@@ -1097,30 +1097,18 @@ if ! $session_existed || ! $window_exists || $coordinator_idle; then
         tmux send-keys -t "$SESSION_NAME:coordinator.0" \
             "${ENV_VARS}exec $(printf '%q' "$WRAPPER") $(printf '%q' "$RENDERED_PROMPT_FILE") $(printf '%q' "$TMP_PROMPT")" C-m
     else
-        # Gemini CLI uses its own system-prompt file and interactive flag.
-        BASE_CMD="GEMINI_SYSTEM_MD='$RENDERED_PROMPT_FILE' gemini -m '$COORD_MODEL' --yolo --skip-trust"
-
-        # COORDINATOR_VERBOSE=1 swaps gemini's -p for -i (--prompt-interactive)
-        # so tool calls stream live in the pane. Trade-off: gemini stays alive
-        # after the prompt; exit with /quit or Ctrl-D.
-        if [ "$COORD_CMD" = "gemini" ] && [ "${COORDINATOR_VERBOSE:-1}" = "1" ]; then
-            PROMPT_FLAG="-i"
+        # Gemini CLI: scripts/coordinator-gemini.sh reloads the project's
+        # .swarm/.env (#691), picks -i vs -p from COORDINATOR_VERBOSE, removes
+        # the request file and surfaces gemini's truncated API errors. No exec,
+        # so the pane drops back to a shell afterwards, as before.
+        if [ "${COORDINATOR_VERBOSE:-1}" = "1" ]; then
             echo "COORDINATOR_VERBOSE=1: gemini will stay interactive after the prompt; exit with /quit."
-        else
-            PROMPT_FLAG="-p"
         fi
-
-        # gemini-cli truncates server-side errors (e.g. INVALID_ARGUMENT on
-        # gemini-3-flash-preview) to "Operation cancelled" in the pane while
-        # writing the full payload to /tmp/gemini-*-error-*.json. The tail
-        # script surfaces the actual message so users don't have to dig.
-        if [ "$COORD_CMD" = "gemini" ]; then
-            ERR_TAIL="; $LLM_SWARM_DIR/scripts/coordinator-error-tail.sh"
-        else
-            ERR_TAIL=''
-        fi
-
-        tmux send-keys -t "$SESSION_NAME:coordinator.0" "$BASE_CMD $PROMPT_FLAG \"\$(cat '$TMP_PROMPT')\"; rm '$TMP_PROMPT'$ERR_TAIL" C-m
+        ENV_VARS=""
+        [ -n "${COORD_MODEL:-}" ] && ENV_VARS+="COORD_MODEL=$(printf '%q' "$COORD_MODEL") "
+        WRAPPER="$LLM_SWARM_DIR/scripts/coordinator-gemini.sh"
+        tmux send-keys -t "$SESSION_NAME:coordinator.0" \
+            "${ENV_VARS}$(printf '%q' "$WRAPPER") $(printf '%q' "$RENDERED_PROMPT_FILE") $(printf '%q' "$TMP_PROMPT")" C-m
     fi
 elif { [ "$COORD_CMD" = "claude" ] || [ "$COORD_CMD" = "agy" ]; } && [ "${COORDINATOR_HEADLESS:-0}" != "1" ]; then
     # Live-REPL re-prompt path: claude is already running in the pane and
