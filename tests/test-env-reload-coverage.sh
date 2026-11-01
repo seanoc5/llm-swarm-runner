@@ -31,6 +31,9 @@ declare -A ALLOW=(
   [sandbox.sh]="worker: invoked by provision-worker.sh with PASS_VARS in its env"
   [entrypoint.sh]="worker: container entrypoint, env from sandbox.sh"
 )
+# These still get the .env.example key check; only the wider "defaulted read"
+# scan is skipped for them.
+declare -A TOOL_ONLY=()
 # Standalone tools whose defaulted ${NAME:-x} reads are ad-hoc/test override
 # knobs (CI_WAIT_*, PR_SCREEN_*, SELF_REVIEW_SCRIPT, ...), never set via a
 # project's .swarm/.env. A NEW script reading a defaulted key lands here only
@@ -39,7 +42,7 @@ for _t in _compose-down-for-worktree _window-flags available-issues ci-wait dail
           demo-driver demo-record-setup gh-token-probe lint-pr-screen nightly-full-tests \
           pr-ready ready-sweep self-review-pr setup statusline-with-context \
           swarm-idle-report task-done; do
-  ALLOW[scripts/$_t.sh]="tool: standalone/test-override knobs, not project config"
+  TOOL_ONLY[scripts/$_t.sh]="tool: standalone/test-override knobs, not project config"
 done
 
 # Names that are never project config: ambient shell/tool variables, or
@@ -69,7 +72,7 @@ scan_root() {
     [ -n "${ALLOW[$rel]:-}" ] && continue
     # Defaulted reads, minus names the script assigns itself (internal vars).
     keys="$( { echo "$example"
-      grep -oE '\$\{[A-Z][A-Z0-9_]{3,}(:-|:=|-)' <<<"$code" | sed -E 's/^\$\{//; s/(:-|:=|-)$//' |
+      [ -n "${TOOL_ONLY[$rel]:-}" ] || grep -oE '\$\{[A-Z][A-Z0-9_]{3,}(:-|:=|-)' <<<"$code" | sed -E 's/^\$\{//; s/(:-|:=|-)$//' |
         sort -u | while read -r k; do
           grep -qE "^[[:space:]]*(export |local |declare -?[a-zA-Z]* )?$k=" <<<"$code" || echo "$k"
         done
