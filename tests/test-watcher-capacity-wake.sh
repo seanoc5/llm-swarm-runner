@@ -23,6 +23,7 @@ COORD_INBOX_SELF_DIR="$PROJECT_DIR/.swarm/coord-inbox-self"
 HOST_STATE_DIR="$T/host"; mkdir -p "$HOST_STATE_DIR"
 DISPATCH_PAUSE_FILE="$HOST_STATE_DIR/dispatch-paused"
 IDLE_CAPACITY_WAKE_FILE="$PROJECT_DIR/.swarm/idle-capacity-wake.last"
+DISPATCH_PAUSE_SEEN_FILE="$PROJECT_DIR/.swarm/dispatch-pause-seen"
 SWARM_PARKED_FILE="$PROJECT_DIR/.swarm/parked"
 COORD_WAKE_LOCK="$T/wake.lock"
 COORD_WAKE_LOCK_TIMEOUT_SECS=5
@@ -36,7 +37,7 @@ eval "$(sed -n '/^coord_inbox_write() {/,/^}/p; /^coord_ring_doorbell() {/,/^}/p
 for fn in coord_ring_doorbell dispatch_pause_wake_pass idle_capacity_wake_pass coord_pending_approval_age; do
     declare -F "$fn" >/dev/null || red "could not extract $fn from coordinator-watch.sh"
 done
-DISPATCH_PAUSE_SEEN=0 LAST_IDLE_CAPACITY_CHECK=0
+LAST_IDLE_CAPACITY_CHECK=0
 
 # ── stubs ────────────────────────────────────────────────────────────────────
 EV="$T/events"; : > "$EV"
@@ -67,10 +68,12 @@ EOF
 chmod +x "$AVAILABLE_ISSUES"
 export AVAILABLE_JSON="$T/available.json"
 echo '[{"number":10,"labels":[{"name":"night-ok"}]},{"number":11,"labels":[{"name":"night-ok"}]},{"number":12,"labels":[]}]' > "$AVAILABLE_JSON"
+export NIGHT_JSON="$T/night.json"; echo "[]" > "$NIGHT_JSON"
+gh() { cat "$NIGHT_JSON"; }
 
 notes() { find "$COORD_INBOX_DIR" -maxdepth 1 -name "*-$1-*.md" 2>/dev/null | wc -l | tr -d ' '; }
 rings() { [ -f "$RANG" ] && wc -l < "$RANG" | tr -d ' ' || echo 0; }
-reset() { rm -rf "$COORD_INBOX_DIR" "$RANG" "$IDLE_CAPACITY_WAKE_FILE"; : > "$EV"; LAST_IDLE_CAPACITY_CHECK=0; HOLD=""; BUSY=0; APPROVAL_AGE=""; }
+reset() { rm -rf "$COORD_INBOX_DIR" "$RANG" "$IDLE_CAPACITY_WAKE_FILE" "$DISPATCH_PAUSE_SEEN_FILE"; : > "$EV"; LAST_IDLE_CAPACITY_CHECK=0; HOLD=""; BUSY=0; APPROVAL_AGE=""; }
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 check "free slots = min(MAX_WORKERS - iss windows, MAX_TMUX_WINDOWS - windows)" "2" "$(capacity_free_slots)"
@@ -96,10 +99,26 @@ check "lift reported once, not every tick" "1" "$(notes dispatch_pause_lifted)"
 
 reset
 echo "$(( $(date +%s) - 5 )) expired" > "$DISPATCH_PAUSE_FILE"
-DISPATCH_PAUSE_SEEN=1
+: > "$DISPATCH_PAUSE_SEEN_FILE"   # left by an earlier watcher process (respawn)
 dispatch_pause_wake_pass
 check "an expired marker counts as lifted" "1" "$(notes dispatch_pause_lifted)"
 rm -f "$DISPATCH_PAUSE_FILE"
+
+# Respawn mid-pause (#688): the first watcher saw the pause and died; the
+# second never ticked while it was active, so only the on-disk marker
+# remembers. A pause-lift while no marker exists stays silent.
+reset
+echo "$(( $(date +%s) + 600 )) nightly" > "$DISPATCH_PAUSE_FILE"
+dispatch_pause_wake_pass
+[ -e "$DISPATCH_PAUSE_SEEN_FILE" ] && got=yes || got=no
+check "active pause persists a seen-marker on disk" "yes" "$got"
+rm -f "$DISPATCH_PAUSE_FILE"
+# "respawn": the new process starts with no in-memory state, only the file.
+unset DISPATCH_PAUSE_SEEN
+dispatch_pause_wake_pass
+check "respawned watcher still fires the lift wake" "1" "$(notes dispatch_pause_lifted)"
+[ -e "$DISPATCH_PAUSE_SEEN_FILE" ] && got=yes || got=no
+check "seen-marker cleared once the lift is reported" "no" "$got"
 
 reset; HOLD=human_present
 echo "$(( $(date +%s) + 600 )) x" > "$DISPATCH_PAUSE_FILE"; dispatch_pause_wake_pass; rm -f "$DISPATCH_PAUSE_FILE"
@@ -132,7 +151,7 @@ coord_pending_approval_age() { [ -n "$APPROVAL_AGE" ] && echo "$APPROVAL_AGE"; }
 reset
 idle_capacity_wake_pass
 check "free slots + dispatchable issues: one idle_capacity note" "1" "$(notes idle_capacity)"
-grep -q "2 open issue(s).*(1 labelled night-ok)" "$COORD_INBOX_DIR"/*-idle_capacity-*.md && got=yes || got=no
+grep -q "2 open issue(s).*(1 labelled night-ok" "$COORD_INBOX_DIR"/*-idle_capacity-*.md && got=yes || got=no
 check "note counts ready and night-ok issues" "yes" "$got"
 check "idle capacity rings the doorbell" "1" "$(rings)"
 mv "$COORD_INBOX_DIR"/*-idle_capacity-*.md "$T/"
@@ -180,6 +199,32 @@ idle_capacity_wake_pass
 check "nothing dispatchable: no note" "0" "$(notes idle_capacity)"
 grep -q "capacity.idle_check slots=2 ready=0 reason=nothing_dispatchable" "$EV" && got=yes || got=no
 check "nothing dispatchable: logged" "yes" "$got"
+
+# AVAILABLE = 0 (available-issues.sh returns nothing) but a night-ok issue
+# exists outside that set (#688): the wake must still fire.
+reset; echo '[]' > "$AVAILABLE_JSON"
+echo '[{"number":20,"labels":[{"name":"night-ok"}]}]' > "$NIGHT_JSON"
+idle_capacity_wake_pass
+check "AVAILABLE=0 + one night-ok issue + free slot: wake note" "1" "$(notes idle_capacity)"
+grep -q "0 open issue(s).*(1 labelled night-ok" "$COORD_INBOX_DIR"/*-idle_capacity-*.md && got=yes || got=no
+check "note counts ready=0, night_ok=1" "yes" "$got"
+grep -q "capacity.idle_wake slots=2 ready=0 night_ok=1" "$EV" && got=yes || got=no
+check "idle_wake logged with night_ok=1" "yes" "$got"
+
+reset; echo '[]' > "$AVAILABLE_JSON"
+echo '[{"number":11,"labels":[{"name":"night-ok"}]}]' > "$NIGHT_JSON"
+idle_capacity_wake_pass
+check "night-ok issue that already has a worktree here: no note" "0" "$(notes idle_capacity)"
+
+reset; echo '[{"number":10,"labels":[{"name":"night-ok"}]}]' > "$AVAILABLE_JSON"
+echo '[{"number":10,"labels":[{"name":"night-ok"}]}]' > "$NIGHT_JSON"
+check "night-ok issue in both sets is counted once" "1 1" "$(dispatchable_issue_counts)"
+
+reset; echo '[]' > "$AVAILABLE_JSON"
+echo 'not json' > "$NIGHT_JSON"
+idle_capacity_wake_pass
+check "garbled night-ok query counts as none: no note" "0" "$(notes idle_capacity)"
+echo "[]" > "$NIGHT_JSON"
 
 reset; WATCH_IDLE_CAPACITY_WAKE_SECS=0
 echo '[{"number":12,"labels":[]}]' > "$AVAILABLE_JSON"
