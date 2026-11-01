@@ -18,6 +18,7 @@
 #
 # Usage:
 #   self-review-pr.sh <PR#> [--post] [--force] [--model <id>] [--actor <name>]
+#   self-review-pr.sh <PR#> --caveats-nonblocking <issue#> --actor coordinator|operator
 #
 #   --post    also post the verdict as a PR comment with a
 #             <!-- SWARM_SELF_REVIEW: <VERDICT> actor=<name> head=<sha> -->
@@ -41,6 +42,16 @@
 #             actor-scoped. Pass --actor coordinator from
 #             prompts/coordinator.md's "Find ≠ fix" dispatch, and --actor
 #             operator for a manual re-review from a shell.
+#   --caveats-nonblocking <issue#>
+#             runs NO review: records that the latest coordinator/operator
+#             APPROVE_WITH_CAVEATS on the current head has only non-blocking
+#             caveats, tracked in follow-up <issue#>, by posting
+#             `<!-- SWARM_SELF_REVIEW: APPROVE_WITH_CAVEATS actor=<name>
+#             head=<sha> caveats=nonblocking followup=<issue#> -->`.
+#             swarm-merge.sh --auto-medium Gate 9 accepts that marker.
+#             Refuses (exit 1) unless the actor is coordinator/operator, the
+#             issue exists, and that review is APPROVE_WITH_CAVEATS on the
+#             current head. Exit 0 once posted.
 #   SELF_REVIEW_CMD selects claude or codex; defaults to WORKER_CMD when
 #             it is codex, otherwise claude for compatibility.
 #
@@ -59,6 +70,7 @@ PR=""
 POST=0
 FORCE=0
 ACTOR="worker"
+NONBLOCKING_FOLLOWUP=""
 MODEL="${SELF_REVIEW_MODEL:-}"
 REVIEW_CMD="${SELF_REVIEW_CMD:-claude}"
 if [ -z "${SELF_REVIEW_CMD:-}" ] && [ "${WORKER_CMD:-}" = "codex" ]; then
@@ -73,7 +85,10 @@ while [ $# -gt 0 ]; do
         --force) FORCE=1 ;;
         --model) shift; MODEL="${1:-}" ;;
         --actor) shift; ACTOR="${1:-}" ;;
-        -h|--help) sed -n '2,51p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --caveats-nonblocking) shift; NONBLOCKING_FOLLOWUP="${1:-}"
+            [[ "$NONBLOCKING_FOLLOWUP" =~ ^[0-9]+$ ]] \
+                || { echo "ERROR: --caveats-nonblocking needs a follow-up issue number" >&2; exit 1; } ;;
+        -h|--help) sed -n '2,63p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         -*) echo "ERROR: unknown flag '$1'" >&2; exit 1 ;;
         *)  [ -z "$PR" ] || { echo "ERROR: multiple PR numbers" >&2; exit 1; }
             PR="$1" ;;
@@ -85,6 +100,35 @@ case "$ACTOR" in
     worker|coordinator|operator) ;;
     *) echo "ERROR: --actor must be worker, coordinator, or operator (got '$ACTOR')" >&2; exit 1 ;;
 esac
+
+# --- record non-blocking caveats (no review run) ----------------------------
+if [ -n "$NONBLOCKING_FOLLOWUP" ]; then
+    command -v gh >/dev/null 2>&1 || { echo "ERROR: gh required" >&2; exit 1; }
+    [ "$ACTOR" != worker ] \
+        || { echo "ERROR: --caveats-nonblocking needs --actor coordinator or operator (the author never judges its own caveats)" >&2; exit 1; }
+    FOLLOWUP_URL="$(gh issue view "$NONBLOCKING_FOLLOWUP" --json url --jq .url 2>/dev/null || true)"
+    [[ "$FOLLOWUP_URL" == */issues/"$NONBLOCKING_FOLLOWUP" ]] \
+        || { echo "ERROR: follow-up #$NONBLOCKING_FOLLOWUP is not an issue in this repo — file it first" >&2; exit 1; }
+    PR_JSON="$(gh pr view "$PR" --json comments,headRefOid)" \
+        || { echo "ERROR: gh pr view $PR failed" >&2; exit 1; }
+    HEAD_SHA="$(jq -r '.headRefOid // ""' <<<"$PR_JSON")"
+    # Same selection as swarm-merge.sh Gate 9: latest independent marker.
+    LAST="$(jq -r '.comments[] | select(.authorAssociation as $a | ["OWNER","MEMBER","COLLABORATOR"] | index($a)) | .body // ""' <<<"$PR_JSON" \
+        | grep -oE 'SWARM_SELF_REVIEW: [A-Z_]+ actor=(coordinator|operator)( head=[0-9a-f]+)?' | tail -1 || true)"
+    LAST_VERDICT="$(sed -E 's/^SWARM_SELF_REVIEW: ([A-Z_]+).*/\1/' <<<"$LAST")"
+    LAST_HEAD="$(grep -oE 'head=[0-9a-f]+' <<<"$LAST" | cut -d= -f2 || true)"
+    if [ -z "$HEAD_SHA" ] || [ "$LAST_VERDICT" != APPROVE_WITH_CAVEATS ] || [ "$LAST_HEAD" != "$HEAD_SHA" ]; then
+        echo "ERROR: latest coordinator/operator review on PR #$PR is '${LAST:-<none>}', not APPROVE_WITH_CAVEATS on head ${HEAD_SHA:-<unreadable>}." >&2
+        echo "       Run self-review-pr.sh $PR --post --force --actor $ACTOR first." >&2
+        exit 1
+    fi
+    COMMENT="$(printf '<!-- SWARM_SELF_REVIEW: APPROVE_WITH_CAVEATS actor=%s head=%s caveats=nonblocking followup=%s -->\n## Caveats recorded as non-blocking\n\nThe %s judged the caveats in the review of %s not about correctness, security, data loss, or schema/migrations. Follow-up: #%s.\n' \
+        "$ACTOR" "$HEAD_SHA" "$NONBLOCKING_FOLLOWUP" "$ACTOR" "${HEAD_SHA:0:7}" "$NONBLOCKING_FOLLOWUP")"
+    gh pr comment "$PR" --body "$COMMENT" || { echo "ERROR: gh pr comment failed" >&2; exit 1; }
+    echo "PR #$PR: caveats recorded as non-blocking (follow-up #$NONBLOCKING_FOLLOWUP, head $HEAD_SHA)"
+    exit 0
+fi
+
 [ -r "$SKILL" ] || { echo "ERROR: skill prompt not readable: $SKILL" >&2; exit 1; }
 command -v gh >/dev/null 2>&1 || { echo "ERROR: gh required" >&2; exit 1; }
 case "$REVIEW_CMD" in

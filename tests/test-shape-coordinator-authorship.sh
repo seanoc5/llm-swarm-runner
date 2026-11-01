@@ -226,6 +226,13 @@ case "$1 $2" in
     "issue view")
         case "$*" in
             *closedByPullRequestsReferences*) echo "$pr_num"; exit 0 ;;
+            *"--json url"*)
+                # Gate 9 follow-up check: only numbers in GH_ISSUES exist.
+                if [[ " ${GH_ISSUES:-} " == *" $pr_num "* ]]; then
+                    echo "https://github.com/o/r/issues/$pr_num"; exit 0
+                fi
+                echo "GraphQL: Could not resolve to an issue or pull request with the number of $pr_num." >&2
+                exit 1 ;;
             *state*) echo "OPEN"; exit 0 ;;
         esac
         exit 0 ;;
@@ -687,6 +694,11 @@ set_reviews() {   # set_reviews <headRefOid> <marker-body>... (ASSOC= sets autho
 }
 run_medium() {   # run_medium [env assignments...] — sets OUT/RC
     : > "$GH_LOG"
+    # A successful merge deletes the remote branch; Gate 0's fetch needs it.
+    if ! git -C "$CLONE" ls-remote --exit-code --heads origin fix/issue-501 >/dev/null 2>&1; then
+        git -C "$CLONE" checkout -q -B fix/issue-501 master
+        git -C "$CLONE" push -q origin fix/issue-501
+    fi
     if OUT=$(env GH_CHECKS_RC=0 GH_PR_BODY="$MEDIUM_BODY" SWARM_AUTOMERGE_MEDIUM=1 "$@" "$MERGE" 501 --auto-medium 2>&1); then RC=0; else RC=$?; fi
 }
 if ! git -C "$CLONE" ls-remote --exit-code --heads origin fix/issue-501 >/dev/null 2>&1; then
@@ -765,6 +777,58 @@ echo "$OUT" | grep -q "auto-medium gate 9" || red "Gate 9 should be reported as 
 grep -q -- "pr merge 501 --squash --match-head-commit deadbeef" "$GH_LOG" \
     || red "merge was not pinned to the reviewed commit. gh log: $(cat "$GH_LOG")"
 green "--auto-medium merges a reviewed 🟡 PR, pinned to the reviewed commit"
+
+CAV='<!-- SWARM_SELF_REVIEW: APPROVE_WITH_CAVEATS actor=coordinator head=deadbeef -->'
+NB='<!-- SWARM_SELF_REVIEW: APPROVE_WITH_CAVEATS actor=coordinator head=deadbeef caveats=nonblocking followup=900 -->'
+
+heading "Test M10: non-blocking caveats + existing follow-up issue → merges, logs the branch"
+set_reviews deadbeef "$CAV" "$NB"
+rm -f "$EVENTS_LOG"
+run_medium GH_ISSUES=900
+[ "$RC" -eq 0 ] || red "non-blocking caveats with a real follow-up should pass Gate 9 (rc=$RC, output: $OUT)"
+grep -q -- "pr merge 501 --squash --match-head-commit deadbeef" "$GH_LOG" \
+    || red "merge was not pinned to the reviewed commit. gh log: $(cat "$GH_LOG")"
+grep -q "merge.gate.*pr=501 gate=9-independent-review result=caveats-nonblocking followup=900.*action=proceed" "$EVENTS_LOG" \
+    || red "merge.gate event for the caveats branch was not logged"
+green "Gate 9 accepts recorded non-blocking caveats with a filed follow-up"
+
+heading "Test M11: non-blocking caveats but no followup= → Gate 9"
+set_reviews deadbeef '<!-- SWARM_SELF_REVIEW: APPROVE_WITH_CAVEATS actor=coordinator head=deadbeef caveats=nonblocking -->'
+rm -f "$EVENTS_LOG"
+run_medium GH_ISSUES=900
+[ "$RC" -ne 0 ] || red "caveats without a follow-up must not satisfy Gate 9"
+echo "$OUT" | grep -q "Gate 9" || red "refusal must name Gate 9 (output: $OUT)"
+grep -q "pr merge" "$GH_LOG" && red "gh pr merge was called without a follow-up"
+grep -q "gate=9-independent-review result=refused.*action=refuse-auto-medium" "$EVENTS_LOG" \
+    || red "merge.gate refusal event was not logged"
+green "Gate 9 refuses caveats with no follow-up"
+
+heading "Test M12: follow-up issue does not exist → Gate 9"
+set_reviews deadbeef "$NB"
+run_medium GH_ISSUES=
+[ "$RC" -ne 0 ] || red "a follow-up that isn't a real issue must not satisfy Gate 9"
+echo "$OUT" | grep -q "Gate 9" || red "refusal must name Gate 9 (output: $OUT)"
+green "Gate 9 checks the follow-up issue exists"
+
+heading "Test M13: non-blocking caveats recorded on an older head → Gate 9"
+set_reviews deadbeef '<!-- SWARM_SELF_REVIEW: APPROVE_WITH_CAVEATS actor=coordinator head=0ldc0de caveats=nonblocking followup=900 -->'
+run_medium GH_ISSUES=900
+[ "$RC" -ne 0 ] || red "non-blocking caveats on another commit must not satisfy Gate 9"
+echo "$OUT" | grep -q "Gate 9" || red "refusal must name Gate 9 (output: $OUT)"
+green "Gate 9 requires the caveats record to be on the current head"
+
+heading "Test M14: worker-recorded non-blocking caveats → Gate 9"
+set_reviews deadbeef '<!-- SWARM_SELF_REVIEW: APPROVE_WITH_CAVEATS actor=worker head=deadbeef caveats=nonblocking followup=900 -->'
+run_medium GH_ISSUES=900
+[ "$RC" -ne 0 ] || red "a worker's own caveats record must not satisfy Gate 9"
+green "Gate 9 ignores a worker-recorded caveats marker"
+
+heading "Test M15: newer BLOCK supersedes a non-blocking caveats record → Gate 9"
+set_reviews deadbeef "$NB" '<!-- SWARM_SELF_REVIEW: BLOCK actor=operator head=deadbeef -->'
+run_medium GH_ISSUES=900
+[ "$RC" -ne 0 ] || red "a later BLOCK must win over a caveats record"
+echo "$OUT" | grep -q "Gate 9" || red "refusal must name Gate 9 (output: $OUT)"
+green "latest independent marker still wins"
 
 heading "All coordinator-authorship shape tests passed"
 green "Gates 0/1/2/3/4/5 refusal/pass/fail-closed, no-CI-configured pass-with-warning, --auto-low scoping vs plain merge, override-flag rejection"

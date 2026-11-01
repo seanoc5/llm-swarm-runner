@@ -241,7 +241,7 @@ Merge only via `scripts/swarm-merge.sh <N> --auto-low`, which re-enforces gates 
 
 ### Auto-merge medium-risk PRs
 
-Opt-in via `SWARM_AUTOMERGE_MEDIUM=1`. For a readied 🟡 PR: run the "Find ≠ fix" coordinator review; on bare `APPROVE`, read the diff (gate 6; hold if Your move or `#### Decide` asks the operator something), then `scripts/swarm-merge.sh <N> --auto-medium` (same timeout as `--auto-low`; it enforces the 🟢 gates, no hold banner, and that APPROVE on the exact head). Caveats or BLOCK → draft-as-hold and requeue. Report `Auto-merged 🟡 PR #N (SWARM_AUTOMERGE_MEDIUM=1, all gates passed).` or the failed gate.
+Opt-in via `SWARM_AUTOMERGE_MEDIUM=1`. For a readied 🟡 PR: run the "Find ≠ fix" coordinator review; on bare `APPROVE`, read the diff (gate 6; hold if Your move or `#### Decide` asks the operator something), then `scripts/swarm-merge.sh <N> --auto-medium` (same timeout as `--auto-low`; it enforces the 🟢 gates, no hold banner, and that review on the exact head). Caveats on correctness, security, data loss or schema/migrations block; others → file a follow-up issue, `scripts/self-review-pr.sh <N> --caveats-nonblocking <issue#> --actor coordinator`, proceed. Blocking caveats or BLOCK → draft-as-hold and requeue. Report `Auto-merged 🟡 PR #N (SWARM_AUTOMERGE_MEDIUM=1, all gates passed).` or the failed gate.
 
 ### Find ≠ fix: independent review dispatch
 
@@ -249,7 +249,7 @@ The agent that wrote a change never judges it.
 - Never ask the authoring worker to review its own PR, and never treat its merge proposal as review evidence.
 - 🟡/🔴 PRs: `scripts/self-review-pr.sh <N> --post --force --actor coordinator` (fresh `claude -p`, zero shared context; `--force` because the worker's own pr-ready.sh round already posted a marker, and `--post` skips over any existing one without it).
 - 🔴 PRs also get a different pair of eyes: another model (`SELF_REVIEW_MODEL=claude-opus-5-5 scripts/self-review-pr.sh <N> --force --post --actor coordinator`) or a read-only review worker ("review PR #N via `gh pr diff N`; do NOT push fixes; report verdict as a PR comment").
-- Always pass `--actor coordinator` on these calls (issue #601): `pr-ready.sh`'s round cap excludes actor=coordinator/operator markers from the WORKER's own budget, so an untagged coordinator review would otherwise eat into rounds the worker never ran (the PR #1176 incident: "8/3 rounds" after one round of its own work). The BLOCK gate itself still honors a coordinator-found BLOCK same as a worker's own.
+- Always pass `--actor coordinator` on these calls (issue #601): untagged, your review eats into the worker's `pr-ready.sh` round cap. A coordinator-found BLOCK still blocks like a worker's own.
 - The reviewer reports; the author fixes. Apply draft-as-hold, then `requeue.sh N <brief>` to the author.
 
 ### Draft-as-hold: mark a PR draft while a fix round-trip is queued

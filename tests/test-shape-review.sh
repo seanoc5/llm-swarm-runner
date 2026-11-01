@@ -45,6 +45,7 @@ trap cleanup EXIT
 export GH_LOG="$TEST_DIR/gh.log"
 export GH_COMMENTS_FILE="$TEST_DIR/comments.txt"
 export CLAUDE_STUB_OUTPUT="$TEST_DIR/review-output.txt"
+export GH_PR_JSON_FILE="$TEST_DIR/pr.json"
 export CODEX_ARGS_LOG="$TEST_DIR/codex.args"
 export CODEX_PAYLOAD_LOG="$TEST_DIR/codex.payload"
 unset SELF_REVIEW_CMD SELF_REVIEW_MODEL WORKER_CMD WORKER_MODEL
@@ -61,6 +62,7 @@ case "${1:-} ${2:-}" in
     "pr merge")   exit 0 ;;
     "pr view")
         case "$*" in
+            *comments,headRefOid*) cat "$GH_PR_JSON_FILE" 2>/dev/null; exit 0 ;;
             *comments*)          cat "$GH_COMMENTS_FILE" 2>/dev/null; exit 0 ;;
             *title,body*)        printf 'Fake PR title\n\nFake PR body\n'; exit 0 ;;
             *state,mergeable*)   echo '{"state":"OPEN","mergeable":"MERGEABLE","headRefName":"fix/issue-9","title":"fake"}'; exit 0 ;;
@@ -69,6 +71,10 @@ case "${1:-} ${2:-}" in
     "issue view")
         case "$*" in
             *closedByPullRequestsReferences*) echo "77"; exit 0 ;;
+            *"--json url"*)
+                n="${3:-}"
+                [[ " ${GH_ISSUES:-} " == *" $n "* ]] || exit 1
+                echo "https://github.com/o/r/issues/$n"; exit 0 ;;
             *state*)                          echo "OPEN"; exit 0 ;;
         esac
         exit 0 ;;
@@ -214,6 +220,45 @@ if "$MERGE" 9 >/dev/null 2>&1; then RC=0; else RC=$?; fi
 [ "$RC" -eq 0 ] || red "merge without verdict comment should proceed (rc=$RC)"
 grep -q "pr merge 77" "$GH_LOG" || red "gh pr merge not called in no-verdict case"
 green "no verdict comment → merge proceeds"
+
+# ============================================================================
+heading "Test N: --caveats-nonblocking records the follow-up marker (no review run)"
+# ============================================================================
+pr_json() {   # pr_json <head> <marker>...
+    local head="$1"; shift
+    printf '%s\n' "$@" | jq -R -s -c --arg h "$head" \
+        '{headRefOid:$h, comments: (split("\n") | map(select(length>0)) | map({body:., authorAssociation:"OWNER"}))}' \
+        > "$GH_PR_JSON_FILE"
+}
+printf 'BLOCK: the stub review must never run in this mode\n' > "$CLAUDE_STUB_OUTPUT"
+pr_json abc123 '<!-- SWARM_SELF_REVIEW: APPROVE_WITH_CAVEATS actor=coordinator head=abc123 -->'
+: > "$GH_LOG"
+if OUT=$(GH_ISSUES=900 "$REVIEW" 42 --caveats-nonblocking 900 --actor coordinator 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -eq 0 ] || red "expected exit 0 recording non-blocking caveats, got $RC (output: $OUT)"
+grep -q "pr comment 42 --body <!-- SWARM_SELF_REVIEW: APPROVE_WITH_CAVEATS actor=coordinator head=abc123 caveats=nonblocking followup=900 -->" "$GH_LOG" \
+    || red "marker with caveats=nonblocking followup=900 not posted. gh log: $(cat "$GH_LOG")"
+grep -q "pr diff" "$GH_LOG" && red "--caveats-nonblocking must not run a review"
+green "--caveats-nonblocking posts the marker on the reviewed head"
+
+: > "$GH_LOG"
+if OUT=$(GH_ISSUES= "$REVIEW" 42 --caveats-nonblocking 900 --actor coordinator 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -eq 1 ] || red "missing follow-up issue should exit 1, got $RC"
+grep -q "pr comment" "$GH_LOG" && red "posted despite a missing follow-up issue"
+green "refuses when the follow-up issue doesn't exist"
+
+if OUT=$(GH_ISSUES=900 "$REVIEW" 42 --caveats-nonblocking 900 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -eq 1 ] || red "actor=worker should be refused, got $RC"
+green "refuses for the worker (author) actor"
+
+pr_json abc123 '<!-- SWARM_SELF_REVIEW: APPROVE_WITH_CAVEATS actor=coordinator head=0ldc0de -->'
+: > "$GH_LOG"
+if OUT=$(GH_ISSUES=900 "$REVIEW" 42 --caveats-nonblocking 900 --actor coordinator 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -eq 1 ] || red "stale-head review should exit 1, got $RC"
+grep -q "pr comment" "$GH_LOG" && red "posted a record for a stale head"
+pr_json abc123 '<!-- SWARM_SELF_REVIEW: BLOCK actor=coordinator head=abc123 -->'
+if OUT=$(GH_ISSUES=900 "$REVIEW" 42 --caveats-nonblocking 900 --actor coordinator 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -eq 1 ] || red "a BLOCK review must not be recorded as non-blocking caveats, got $RC"
+green "refuses on a stale head or a non-caveats verdict"
 
 # ============================================================================
 heading "All self-review machinery shape tests passed"
