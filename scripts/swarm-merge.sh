@@ -974,7 +974,27 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
       # ones; the colour marker alone can't (operator-merged 🟢/🟡 PRs exist).
       if [ "$AUTO_LOW" = 1 ]; then MERGE_MODE="unattended-$AUTO_RATING"; else MERGE_MODE=operator; fi
       log_event merge.done "pr=$PR_NUM issue=${ISSUE:-none} mode=$MERGE_MODE"
-      if git push origin --delete "$PR_BRANCH" >/dev/null 2>&1; then
+      # issue #670: a stacked PR (base = this PR's head branch) is silently
+      # CLOSED by GitHub when that branch is deleted, not retargeted. Move any
+      # open child PRs onto this PR's own base first. If a retarget fails,
+      # keep the branch: a leftover branch is cheap, a closed child PR isn't.
+      KEEP_BRANCH=0
+      if [ -n "$PR_BASE" ]; then
+        CHILD_PRS=$(gh pr list --state open --base "$PR_BRANCH" --json number --jq '.[].number' 2>/dev/null || true)
+        for CHILD in $CHILD_PRS; do
+          if gh pr edit "$CHILD" --base "$PR_BASE" >/dev/null 2>&1; then
+            echo "       retargeted stacked PR #$CHILD from $PR_BRANCH to $PR_BASE"
+            log_event merge.retarget "pr=$PR_NUM child=$CHILD base=$PR_BASE result=ok"
+          else
+            KEEP_BRANCH=1
+            echo "       $(c_amber "⚠ could not retarget stacked PR #$CHILD to $PR_BASE — keeping origin/$PR_BRANCH so GitHub doesn't close it; run: gh pr edit $CHILD --base $PR_BASE")"
+            log_event merge.retarget "pr=$PR_NUM child=$CHILD base=$PR_BASE result=failed"
+          fi
+        done
+      fi
+      if [ "$KEEP_BRANCH" = 1 ]; then
+        echo "       (remote branch origin/$PR_BRANCH not deleted — see retarget warning above)"
+      elif git push origin --delete "$PR_BRANCH" >/dev/null 2>&1; then
         echo "       deleted remote branch origin/$PR_BRANCH"
       else
         echo "       (remote branch origin/$PR_BRANCH not deleted — already gone, or repo auto-deletes head branches)"

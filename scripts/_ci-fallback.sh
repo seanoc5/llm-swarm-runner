@@ -82,6 +82,10 @@
 #       Sets two globals:
 #         CI_FALLBACK_RELEVANT         "yes" | "no" | "unknown"
 #         CI_FALLBACK_RELEVANT_DETAIL  one-line explanation
+#         CI_FALLBACK_RELEVANT_REASON  when RELEVANT=no: "path" (path filter)
+#                                      or "base-branch" (issue #670: the
+#                                      PR's base branch is excluded by every
+#                                      pull_request `branches` filter); else ""
 #
 #       "no" means at least one active workflow's pull_request/push trigger
 #       is CONFIDENTLY path-filtered-excluded for every one of the PR's
@@ -270,8 +274,10 @@ ci_fallback_workflows_relevant_to_pr() {
     tmp_wf="$(mktemp)"
     printf '%s\n' "$files_list" > "$tmp_files"
 
-    local path content content_rc verdict saw_excluded
+    local path content content_rc verdict saw_excluded saw_path_excluded
     saw_excluded=0
+    saw_path_excluded=0
+    CI_FALLBACK_RELEVANT_REASON=""
     while IFS= read -r path; do
         [ -n "$path" ] || continue
         set +e
@@ -289,7 +295,7 @@ ci_fallback_workflows_relevant_to_pr() {
             return 0
         fi
         printf '%s' "$content" > "$tmp_wf"
-        verdict="$(python3 "$_CI_FALLBACK_SCRIPT_DIR/_workflow-path-filter.py" "$tmp_wf" "$tmp_files" "$head_ref" 2>/dev/null || echo unknown)"
+        verdict="$(python3 "$_CI_FALLBACK_SCRIPT_DIR/_workflow-path-filter.py" "$tmp_wf" "$tmp_files" "$head_ref" "$base_ref" 2>/dev/null || echo unknown)"
         case "$verdict" in
             triggers)
                 CI_FALLBACK_RELEVANT="yes"
@@ -309,6 +315,15 @@ ci_fallback_workflows_relevant_to_pr() {
                 # confidently excludes every changed file. Keep checking
                 # the remaining workflows before concluding "no".
                 saw_excluded=1
+                saw_path_excluded=1
+                ;;
+            excluded-base)
+                # issue #670: excluded only because the workflow's
+                # pull_request branches/branches-ignore filter rules out
+                # this PR's base branch (a stacked PR). Same "positive
+                # evidence of a permanent exclusion" as "excluded", but
+                # tracked separately so the message can name the fix.
+                saw_excluded=1
                 ;;
             no-trigger)
                 # issue #644 third follow-up: this workflow has no
@@ -324,7 +339,13 @@ ci_fallback_workflows_relevant_to_pr() {
 
     if [ "$saw_excluded" -eq 1 ]; then
         CI_FALLBACK_RELEVANT="no"
-        CI_FALLBACK_RELEVANT_DETAIL="every pull_request/push-triggered workflow's path filter excludes all of PR #$pr's changed files"
+        if [ "$saw_path_excluded" -eq 1 ]; then
+            CI_FALLBACK_RELEVANT_REASON="path"
+            CI_FALLBACK_RELEVANT_DETAIL="every pull_request/push-triggered workflow's path filter excludes all of PR #$pr's changed files"
+        else
+            CI_FALLBACK_RELEVANT_REASON="base-branch"
+            CI_FALLBACK_RELEVANT_DETAIL="PR #$pr targets base branch '$base_ref', which every pull_request workflow's branches filter excludes (a stacked PR?) — retarget it to the default branch once its parent merges, or run 'gh workflow run' on its head branch"
+        fi
     else
         # No workflow was even confidently "excluded" — every one was
         # "no-trigger" (nothing checked applies to this PR at all). That's

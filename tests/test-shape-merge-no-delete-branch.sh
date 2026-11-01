@@ -32,4 +32,14 @@ if grep -vE '^\s*#' "$HERE/../scripts/worker-merge.sh" | grep -q -- '--delete-br
     fail "worker-merge.sh passes --delete-branch (issue #489: removes the worker's own worktree)"
 fi
 ok "worker-merge.sh never passes --delete-branch"
-echo "All #489 shape tests passed."
+
+# issue #670: GitHub auto-closes (not retargets) a PR whose base branch is
+# deleted, so open stacked children must be retargeted BEFORE the delete.
+retarget_ln=$(grep -n 'gh pr edit "\$CHILD" --base "\$PR_BASE"' "$SCRIPT" | head -1 | cut -d: -f1)
+delete_ln=$(grep -n 'git push origin --delete "\$PR_BRANCH"' "$SCRIPT" | head -1 | cut -d: -f1)
+[ -n "$retarget_ln" ] || fail "swarm-merge.sh no longer retargets stacked child PRs (issue #670)"
+[ "$retarget_ln" -lt "$delete_ln" ] || fail "child PRs must be retargeted before the head branch is deleted (issue #670)"
+ok "stacked child PRs are retargeted before the remote branch is deleted"
+grep -q 'KEEP_BRANCH=1' "$SCRIPT" || fail "a failed retarget must keep the branch (issue #670)"
+ok "a failed retarget keeps the remote branch"
+echo "All #489/#670 shape tests passed."
