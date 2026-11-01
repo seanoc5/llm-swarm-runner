@@ -143,7 +143,10 @@ FLAGS
     -i, --idle-min N        Require N+ minutes since last pane activity
                             (default 0 — any parked window is eligible)
     -w, --with-worktree     Also remove git worktree + delete branch
-                            (calls kill-worktree.sh; uncommitted work LOST)
+                            (calls kill-worktree.sh; unpushed/uncommitted
+                            work is saved to .swarm/reaped/ first; with
+                            --merged-only/--pr-finalized such a worktree
+                            is kept SWARM_REAP_GRACE_SECS, default 4h)
         --no-compose-down   Skip docker compose teardown before worktree
                             removal (preserves containers for inspection;
                             only meaningful with --with-worktree)
@@ -868,6 +871,18 @@ if [ "$CHECK_WINDOWLESS" = "1" ]; then
         [ -n "${WINDOW_ISSUES[$issue]:-}" ] && continue
 
         w="iss-$issue"
+        # Reap grace (kill-worktree.sh --grace): this worktree's window was
+        # already closed on purpose and it is kept for a rescue until the
+        # marker's `until`. Skip it quietly until then rather than logging
+        # a reap.window and a deferred kill-worktree.sh call every pass.
+        grace_marker="$PROJECT_DIR/.swarm/reap-deferred/iss-$issue"
+        if [ -f "$grace_marker" ] && [ "${SWARM_REAP_GRACE_SECS:-14400}" != "0" ]; then
+            grace_until="$(sed -n 's/^until=//p' "$grace_marker" | head -1)"
+            if [[ "$grace_until" =~ ^[0-9]+$ ]] && [ "$(date +%s)" -lt "$grace_until" ]; then
+                echo "  $w  [no window; reap grace for unsaved work until $(sed -n 's/^until_utc=//p' "$grace_marker" | head -1) → skip]"
+                continue
+            fi
+        fi
         reasons=()
         # Same detached-HEAD/corrupt-registration guard as worktree_branch()
         # above: print an explicit skip rather than silently falling back
@@ -973,15 +988,22 @@ for w in "${KILL_LIST[@]}"; do
             KILL_WT_ARGS=("$issue")
             [ "$NO_COMPOSE_DOWN" = "1" ] && KILL_WT_ARGS+=(--no-compose-down)
             [ "$REFUSE_NONEMPTY_INBOX" = "1" ] && KILL_WT_ARGS+=(--refuse-nonempty-inbox)
+            # Reap grace: the PR-state modes are the watcher's unattended
+            # autoclose — a worktree with unsaved work loses its window now
+            # but keeps its files for SWARM_REAP_GRACE_SECS (kill-worktree.sh).
+            if [ "$PR_FINALIZED" = "1" ] || [ "$MERGED_ONLY" = "1" ]; then
+                KILL_WT_ARGS+=(--grace)
+            fi
             kw_rc=0
             "$KILL_WT" "${KILL_WT_ARGS[@]}" || kw_rc=$?
-            # issue #181: exit 75 = deferred (in-flight check-on-done claim),
-            # not a real failure — kill-worktree.sh retries cleanly next pass.
+            # issue #181: exit 75 = deferred (in-flight check-on-done claim,
+            # or a reap grace for unsaved work), not a real failure —
+            # kill-worktree.sh retries cleanly next pass.
             # issue #317: exit 76 = refused (non-empty inbox/outbox under
             # --refuse-nonempty-inbox) — also not a real failure, just a
             # worktree deliberately left in place for a human to drain.
             if [ "$kw_rc" -eq 75 ]; then
-                echo "  ⏸ deferred: in-flight check-on-done claim (retry next reap pass)"
+                echo "  ⏸ deferred: in-flight check-on-done claim or reap grace for unsaved work (see above; retry next reap pass)"
             elif [ "$kw_rc" -eq 76 ]; then
                 echo "  ✗ refused: non-empty inbox/outbox (retry next reap pass, or drop --refuse-nonempty-inbox to salvage+reap)"
             elif [ "$kw_rc" -ne 0 ]; then

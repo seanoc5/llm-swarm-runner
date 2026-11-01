@@ -1,4 +1,4 @@
-# scripts/
+Saves work that is on no remote first — unpushed commits as a git bundle, tracked edits as a patch, untracked files as a tarball (under `SWARM_REAP_SAVE_UNTRACKED_MAX_MB`, default 100) — next to that archive with a `.saved.txt` restore manifest and a `SWARM_WORK_SAVED` PR comment; with `--grace` (passed by `kill-finished-workers.sh`'s `--merged-only`/`--pr-finalized` modes, i.e. the watcher's autoclose) a worktree holding such work loses its window but stays for `SWARM_REAP_GRACE_SECS` (default 14400, 0 = off) behind `<project>/.swarm/reap-deferred/iss-<N>` (exit 75 until then; `--now` overrides). |# scripts/
 
 Helper scripts for the llm-swarm-runner. Each is self-documenting at the top — `head -20 <script>` is the canonical source of truth. This table is an index for quick discovery.
 

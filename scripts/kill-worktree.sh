@@ -3,7 +3,7 @@
 # kill-worktree.sh — remove a worker worktree, its branch, and tmux window.
 #
 # Usage:
-#   kill-worktree.sh <issue-number> [project-dir] [--no-compose-down] [--refuse-nonempty-inbox]
+#   kill-worktree.sh <issue-number> [project-dir] [--no-compose-down] [--refuse-nonempty-inbox] [--grace] [--now]
 #
 # Removes the worktree at <derived path>/wt-issue-<N>, deletes the branch
 # fix/issue-<N>, and kills the tmux window iss-<N> if any. Idempotent —
@@ -22,8 +22,9 @@
 # (issue #105). Pass --no-compose-down to skip this and preserve the
 # containers (e.g. to inspect their logs after the fact).
 #
-# WARNING: --force is used. Any uncommitted work in the worktree is lost.
-# The script prints how-much-work-will-be-lost before deletion.
+# WARNING: --force is used. The script prints the worktree's state before
+# deletion, and (issue: reap saves unpushed work, below) saves anything
+# not already on a remote first.
 #
 # issue #317: requeue.sh delivers follow-up briefs into <worktree>/.swarm/
 # tasks/inbox/ between tasks; worker-listener.sh atomically claims one by
@@ -69,6 +70,30 @@
 # since worker-generated datasets can be large; over the cap it is left in
 # place (still destroyed by the removal, same as before this issue) but
 # its size/path are logged and printed. See archive_worktree_scratch below.
+#
+# Saved work + reap grace: since 2026-10-18 roughly 1 reap in 5 landed
+# mid-task, and none of the salvage above covered the CODE — unpushed
+# commits and uncommitted edits went with `git worktree remove --force`.
+#   G1 (always on): before removal, commits not on any remote-tracking ref
+#   (nor the local default branch) are written as a git bundle, tracked
+#   edits as `git diff HEAD --binary`, and untracked files as a tarball
+#   (under SWARM_REAP_SAVE_UNTRACKED_MAX_MB, default 100), all as
+#   `<project>/.swarm/reaped/iss-<N>-<UTC>.{bundle,patch,untracked.tgz}`
+#   plus a `.saved.txt` manifest with restore commands. Logged as
+#   reap.worktree.saved_work and announced on the PR with a
+#   `<!-- SWARM_WORK_SAVED -->` comment. A squash-merged branch whose
+#   remote ref was deleted (swarm-merge.sh does that) is NOT counted as
+#   unpushed: if merging HEAD into the default branch changes nothing, the
+#   work already landed. Nothing unsaved → nothing written, same as before.
+#   G2 (--grace, passed by kill-finished-workers.sh's PR-state modes — the
+#   watcher's unattended autoclose): with unsaved work, the worker window
+#   is closed and the brief queue salvaged as usual, but the worktree and
+#   branch stay for SWARM_REAP_GRACE_SECS (default 14400 = 4h; 0 disables)
+#   behind a marker at `<project>/.swarm/reap-deferred/iss-<N>`. Exit 75,
+#   the same "deferred, retry next reap pass" code as an in-flight check.
+#   Any later call (watcher's windowless pass, reap-orphan-worktrees.sh,
+#   a human) defers again until the grace is over, then saves and removes.
+#   --now ignores the marker. Clean worktrees are removed immediately.
 set -euo pipefail
 
 # Portable mtime (epoch seconds). GNU coreutils first, BSD fallback. Mirrors
@@ -80,11 +105,15 @@ mtime_epoch() {
 
 NO_COMPOSE_DOWN=0
 REFUSE_NONEMPTY_INBOX=0
+GRACE_REQUESTED=0
+REMOVE_NOW=0
 ARGS=()
 for arg in "$@"; do
     case "$arg" in
         --no-compose-down) NO_COMPOSE_DOWN=1 ;;
         --refuse-nonempty-inbox) REFUSE_NONEMPTY_INBOX=1 ;;
+        --grace) GRACE_REQUESTED=1 ;;
+        --now) REMOVE_NOW=1 ;;
         *) ARGS+=("$arg") ;;
     esac
 done
@@ -340,7 +369,223 @@ archive_worktree_scratch() {
     fi
 }
 
-ISSUE="${1:?usage: kill-worktree.sh <issue-number> [project-dir] [--no-compose-down] [--refuse-nonempty-inbox]}"
+# --- Saved work (G1) + reap grace (G2) — see the header comment ------------
+
+# Worker scratch is archived separately (archive_worktree_scratch), so it is
+# kept out of the "is there unsaved code?" question and out of the patch.
+SAVE_PATHSPEC=(-- . ':(exclude).swarm' ':(exclude).local-data')
+
+# True when merging HEAD into the default branch would change nothing — the
+# branch was squash-merged (or its content otherwise landed) even though its
+# own commits are on no remote ref any more. swarm-merge.sh deletes the
+# remote branch with `git push origin --delete`, which drops the local
+# remote-tracking ref too, so without this every merged worker would look
+# like it had unpushed commits. Fetches the default branch first (best
+# effort, SWARM_REAP_FETCH=0 skips) so a merge seconds ago is visible.
+head_already_landed() {
+    local wt="$1" default="$2" target merged
+    if [ "${SWARM_REAP_FETCH:-1}" = "1" ] && git -C "$wt" remote get-url origin >/dev/null 2>&1; then
+        if command -v timeout >/dev/null 2>&1; then
+            timeout 60 git -C "$wt" fetch -q origin "$default" >/dev/null 2>&1 || true
+        else
+            git -C "$wt" fetch -q origin "$default" >/dev/null 2>&1 || true
+        fi
+    fi
+    if git -C "$wt" rev-parse --verify --quiet "refs/remotes/origin/$default" >/dev/null; then
+        target="refs/remotes/origin/$default"
+    elif git -C "$wt" rev-parse --verify --quiet "refs/heads/$default" >/dev/null; then
+        target="refs/heads/$default"
+    else
+        return 1
+    fi
+    merged="$(git -C "$wt" merge-tree --write-tree "$target" HEAD 2>/dev/null | head -1)" || return 1
+    [ -n "$merged" ] && [ "$merged" = "$(git -C "$wt" rev-parse "$target^{tree}" 2>/dev/null)" ]
+}
+
+# Sets UNSAVED_COMMITS (commits on no remote ref nor the local default
+# branch, minus already-landed work), UNREACHABLE_COMMITS (the same count
+# before the landed check — what a bundle must carry to keep HEAD
+# restorable), LANDED_COMMITS, TRACKED_CHANGES, UNTRACKED_FILES and
+# HAS_UNSAVED. Commits already pushed to the PR branch are safe on origin
+# and are deliberately not counted.
+compute_unsaved_state() {
+    local wt="$1" default="$2"
+    NOT_REFS=(--remotes)
+    if git -C "$wt" show-ref --verify --quiet "refs/heads/$default"; then
+        NOT_REFS+=("refs/heads/$default")
+    fi
+    UNREACHABLE_COMMITS="$(git -C "$wt" rev-list --count HEAD --not "${NOT_REFS[@]}" 2>/dev/null || echo 0)"
+    UNSAVED_COMMITS="$UNREACHABLE_COMMITS"
+    LANDED_COMMITS=0
+    if [ "$UNSAVED_COMMITS" -gt 0 ] && head_already_landed "$wt" "$default"; then
+        LANDED_COMMITS="$UNSAVED_COMMITS"
+        UNSAVED_COMMITS=0
+    fi
+    TRACKED_CHANGES="$(git -C "$wt" diff HEAD --name-only "${SAVE_PATHSPEC[@]}" 2>/dev/null | wc -l | tr -d ' ')"
+    UNTRACKED_FILES="$(git -C "$wt" ls-files --others --exclude-standard "${SAVE_PATHSPEC[@]}" 2>/dev/null | wc -l | tr -d ' ')"
+    HAS_UNSAVED=0
+    if [ "$UNSAVED_COMMITS" -gt 0 ] || [ "$TRACKED_CHANGES" -gt 0 ] || [ "$UNTRACKED_FILES" -gt 0 ]; then
+        HAS_UNSAVED=1
+    fi
+}
+
+# Identity of the unsaved state, so a deferred worktree nobody touched
+# during its grace is not saved (and announced on the PR) a second time.
+work_fingerprint() {
+    local wt="$1"
+    {
+        git -C "$wt" rev-parse HEAD 2>/dev/null
+        git -C "$wt" diff HEAD --binary "${SAVE_PATHSPEC[@]}" 2>/dev/null
+        git -C "$wt" ls-files --others --exclude-standard "${SAVE_PATHSPEC[@]}" 2>/dev/null \
+            | while IFS= read -r f; do
+                printf '%s %s\n' "$f" "$(cd "$wt" && { stat -c '%s.%Y' "$f" 2>/dev/null || stat -f '%z.%m' "$f" 2>/dev/null; })"
+            done
+    } | git hash-object --stdin
+}
+
+# Writes the G1 save set and sets SAVED_FILES (space-separated), SAVED_BUNDLE/PATCH/TGZ
+# and SAVED_MANIFEST. Each piece is best effort: a failure is printed and
+# logged, never fatal — the caller decides whether to remove anyway.
+save_unsaved_work() {
+    local wt="$1" issue="$2" branch="$3" project_dir="$4"
+    local ts base ref head max_mb size_b
+    ts="$(date -u +%Y%m%dT%H%M%SZ)"
+    base="$project_dir/.swarm/reaped/iss-$issue-$ts"
+    mkdir -p "$project_dir/.swarm/reaped" 2>/dev/null || true
+    SAVED_FILES=""
+    SAVED_BUNDLE=""
+    SAVED_PATCH=""
+    SAVED_TGZ=""
+    SAVE_FAILED=""
+    head="$(git -C "$wt" rev-parse HEAD 2>/dev/null || echo unknown)"
+    ref="$(git -C "$wt" symbolic-ref --quiet HEAD 2>/dev/null || echo HEAD)"
+
+    if [ "$UNREACHABLE_COMMITS" -gt 0 ]; then
+        if git -C "$wt" bundle create "$base.bundle" "$ref" --not "${NOT_REFS[@]}" >/dev/null 2>&1; then
+            SAVED_BUNDLE="$base.bundle"
+        else
+            SAVE_FAILED="bundle"
+        fi
+    fi
+    if [ "$TRACKED_CHANGES" -gt 0 ]; then
+        if git -C "$wt" diff HEAD --binary "${SAVE_PATHSPEC[@]}" > "$base.patch" 2>/dev/null; then
+            SAVED_PATCH="$base.patch"
+        else
+            rm -f "$base.patch"
+            SAVE_FAILED="${SAVE_FAILED:+$SAVE_FAILED,}patch"
+        fi
+    fi
+    UNTRACKED_SKIPPED=""
+    if [ "$UNTRACKED_FILES" -gt 0 ]; then
+        max_mb="${SWARM_REAP_SAVE_UNTRACKED_MAX_MB:-100}"
+        size_b="$(git -C "$wt" ls-files -z --others --exclude-standard "${SAVE_PATHSPEC[@]}" 2>/dev/null \
+            | (cd "$wt" && du -cb --files0-from=- 2>/dev/null) | tail -1 | cut -f1)"
+        size_b="${size_b:-0}"
+        if [ "$size_b" -le $((max_mb * 1024 * 1024)) ] 2>/dev/null; then
+            if git -C "$wt" ls-files -z --others --exclude-standard "${SAVE_PATHSPEC[@]}" 2>/dev/null \
+                | tar -C "$wt" --null -T - -czf "$base.untracked.tgz" 2>/dev/null; then
+                SAVED_TGZ="$base.untracked.tgz"
+            else
+                rm -f "$base.untracked.tgz"
+                SAVE_FAILED="${SAVE_FAILED:+$SAVE_FAILED,}untracked"
+            fi
+        else
+            UNTRACKED_SKIPPED="$UNTRACKED_FILES file(s), $((size_b / 1024 / 1024))MB > ${max_mb}MB cap"
+        fi
+    fi
+
+    SAVED_MANIFEST="$base.saved.txt"
+    {
+        echo "# Work saved by kill-worktree.sh before removing $wt"
+        echo "issue=$issue"
+        echo "branch=$branch"
+        echo "head=$head"
+        echo "unpushed_commits=$UNSAVED_COMMITS"
+        echo "tracked_changes=$TRACKED_CHANGES"
+        echo "untracked_files=$UNTRACKED_FILES"
+        [ -n "$UNTRACKED_SKIPPED" ] && echo "untracked_skipped=$UNTRACKED_SKIPPED"
+        [ -n "$SAVE_FAILED" ] && echo "save_failed=$SAVE_FAILED"
+        echo
+        echo "# Restore (run on the swarm host):"
+        restore_commands "$issue" "$head" "$ref"
+    } > "$SAVED_MANIFEST" 2>/dev/null || SAVED_MANIFEST=""
+
+    local f
+    for f in "$SAVED_BUNDLE" "$SAVED_PATCH" "$SAVED_TGZ" "$SAVED_MANIFEST"; do
+        [ -n "$f" ] && SAVED_FILES="${SAVED_FILES:+$SAVED_FILES }$f"
+    done
+    return 0
+}
+
+# Prints the restore commands for the files save_unsaved_work just wrote.
+restore_commands() {
+    local issue="$1" head="$2" ref="$3" dir
+    dir="\$(dirname $PROJECT_DIR)/rescue-issue-$issue"
+    if [ -n "$SAVED_BUNDLE" ]; then
+        printf 'git -C %s fetch %s %s:refs/heads/rescue/issue-%s\n' "$PROJECT_DIR" "$SAVED_BUNDLE" "$ref" "$issue"
+        printf 'git -C %s worktree add %s rescue/issue-%s\n' "$PROJECT_DIR" "$dir" "$issue"
+    else
+        printf 'git -C %s worktree add -b rescue/issue-%s %s %s\n' "$PROJECT_DIR" "$issue" "$dir" "$head"
+    fi
+    [ -n "$SAVED_PATCH" ] && printf 'git -C %s apply %s\n' "$dir" "$SAVED_PATCH"
+    [ -n "$SAVED_TGZ" ] && printf 'tar -xzf %s -C %s\n' "$SAVED_TGZ" "$dir"
+    return 0
+}
+
+# Best effort, same contract as notify_pr_brief_orphaned: no gh, no PR, or
+# any failure is swallowed. $2 is "deferred until <UTC> ..." or "removed".
+notify_pr_work_saved() {
+    local branch="$1" disposition="$2"
+    command -v gh >/dev/null 2>&1 || return 0
+    local pr
+    pr="$(gh pr view "$branch" --json number -q .number 2>/dev/null)" || return 0
+    [ -n "$pr" ] || return 0
+    local -a body=()
+    body+=('<!-- SWARM_WORK_SAVED -->')
+    body+=(':floppy_disk: **Swarm: the worker had unsaved work when this PR finished — it was saved, not lost**')
+    body+=('')
+    body+=("$(printf 'When the worker was reaped (`kill-worktree.sh`), its worktree held %s commit(s) not on any remote, %s changed tracked file(s) and %s untracked file(s). The worktree is %s.' \
+        "$UNSAVED_COMMITS" "$TRACKED_CHANGES" "$UNTRACKED_FILES" "$disposition")")
+    body+=('')
+    body+=('**Saved files** (on the swarm host):')
+    local f
+    for f in $SAVED_FILES; do
+        body+=("$(printf -- '- `%s`' "$f")")
+    done
+    [ -n "$UNTRACKED_SKIPPED" ] && body+=("$(printf -- '- untracked files NOT saved: %s' "$UNTRACKED_SKIPPED")")
+    body+=('')
+    body+=('**Restore** into a fresh worktree:')
+    body+=('```bash')
+    body+=("$(restore_commands "$ISSUE" "$(git -C "$WT" rev-parse HEAD 2>/dev/null || echo HEAD)" \
+        "$(git -C "$WT" symbolic-ref --quiet HEAD 2>/dev/null || echo HEAD)")")
+    body+=('```')
+    body+=('If none of it matters, delete the files above.')
+    body+=('')
+    body+=('<sub>scripts/kill-worktree.sh — saved work before reap (SWARM_REAP_GRACE_SECS).</sub>')
+    gh pr comment "$pr" --body "$(printf '%s\n' "${body[@]}")" >/dev/null 2>&1 || true
+}
+
+# Closes the worker's tmux window(s). Shared by normal removal and by a
+# grace deferral, which closes the window but keeps the worktree.
+close_worker_windows() {
+    if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+        if tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx "iss-$ISSUE"; then
+            tmux kill-window -t "$SESSION_NAME:iss-$ISSUE"
+            echo "  ✓ killed tmux window"
+        else
+            echo "  - tmux window not present (skipped)"
+        fi
+        # issue #550: a check-on-done run normally lives as a PANE inside
+        # iss-$ISSUE (killed above, pane and all) — this only catches the
+        # fallback `chk-$ISSUE` WINDOW execute_check falls back to when no
+        # iss-$ISSUE window existed to host the pane.
+        swarm_close_chk_windows "$SESSION_NAME" "$ISSUE"
+    else
+        echo "  - tmux session not running (skipped window cleanup)"
+    fi
+}
+
+ISSUE="${1:?usage: kill-worktree.sh <issue-number> [project-dir] [--no-compose-down] [--refuse-nonempty-inbox] [--grace] [--now]}"
 PROJECT_DIR="${2:-$PWD}"
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
 
@@ -381,6 +626,7 @@ WT="$(swarm_worktree_dir "$PROJECT_DIR" "$ISSUE")"
 BRANCH="fix/issue-$ISSUE"
 WT="$(resolve_worktree_path "$PROJECT_DIR" "$BRANCH" "$WT")"
 SESSION_NAME="llm-$(basename "$PROJECT_DIR")"
+REAP_MARKER="$PROJECT_DIR/.swarm/reap-deferred/iss-$ISSUE"
 
 cd "$PROJECT_DIR"
 
@@ -443,6 +689,44 @@ if [ -d "$WT" ]; then
         exit 75
     fi
 
+    # Saved work (G1) / reap grace (G2) — see the header comment.
+    compute_unsaved_state "$WT" "$DEFAULT_BRANCH"
+    LANDED_NOTE=""
+    [ "$LANDED_COMMITS" -gt 0 ] && LANDED_NOTE=" ($LANDED_COMMITS more already landed on $DEFAULT_BRANCH)"
+    echo "  Unsaved work: $UNSAVED_COMMITS commit(s) on no remote$LANDED_NOTE, $TRACKED_CHANGES changed tracked file(s), $UNTRACKED_FILES untracked file(s) (.swarm/.local-data excluded)"
+
+    GRACE_SECS="${SWARM_REAP_GRACE_SECS:-14400}"
+    [[ "$GRACE_SECS" =~ ^[0-9]+$ ]] || GRACE_SECS=14400
+    NEW_SAVE=0
+    PRIOR_MARKER=0
+    PRIOR_FINGERPRINT=""
+    PRIOR_SAVED=""
+    if [ -f "$REAP_MARKER" ]; then
+        PRIOR_MARKER=1
+        PRIOR_FINGERPRINT="$(sed -n 's/^fingerprint=//p' "$REAP_MARKER" | head -1)"
+        PRIOR_SAVED="$(sed -n 's/^saved=//p' "$REAP_MARKER" | head -1)"
+        grace_until="$(sed -n 's/^until=//p' "$REAP_MARKER" | head -1)"
+        grace_until_utc="$(sed -n 's/^until_utc=//p' "$REAP_MARKER" | head -1)"
+        if [ "$HAS_UNSAVED" = "0" ]; then
+            echo "  - reap grace marker present, but nothing is unsaved any more — removing now"
+        elif tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx "iss-$ISSUE"; then
+            # The worktree was re-provisioned during its grace (provision-
+            # worker.sh reuses an existing worktree): the marker no longer
+            # describes it. Judge this call afresh.
+            echo "  - stale reap grace marker (live iss-$ISSUE window) — ignoring it"
+            rm -f "$REAP_MARKER"
+            PRIOR_MARKER=0
+            PRIOR_FINGERPRINT=""
+        elif [ "$REMOVE_NOW" = "1" ] || [ "$GRACE_SECS" = "0" ]; then
+            echo "  - reap grace overridden (--now or SWARM_REAP_GRACE_SECS=0) — saving and removing now"
+        elif [[ "$grace_until" =~ ^[0-9]+$ ]] && [ "$(date +%s)" -lt "$grace_until" ]; then
+            echo "  ⏸ reap grace: unsaved work kept in place until ${grace_until_utc:-$grace_until} (saved copies: ${PRIOR_SAVED:-none}) — retry next reap pass; --now removes it immediately"
+            exit 75
+        else
+            echo "  - reap grace over (${grace_until_utc:-$grace_until}) — saving and removing now"
+        fi
+    fi
+
     # issue #317: refuse or salvage unprocessed queued briefs before this
     # worktree is destroyed. inbox/ is requeue.sh's follow-up-brief queue;
     # processing/ holds a brief the listener has already atomically claimed
@@ -476,6 +760,51 @@ if [ -d "$WT" ]; then
         echo "  - skipping compose down (--no-compose-down)"
     else
         "$SCRIPT_DIR/_compose-down-for-worktree.sh" "$WT" || echo "  WARN: compose-down helper exited non-zero (continuing)"
+    fi
+
+    # G1: save unsaved code before anything can remove it. Skipped when a
+    # deferred worktree is unchanged since the save made at deferral time.
+    SAVED_FILES=""
+    if [ "$HAS_UNSAVED" = "1" ]; then
+        FINGERPRINT="$(work_fingerprint "$WT")"
+        if [ -n "$PRIOR_FINGERPRINT" ] && [ "$FINGERPRINT" = "$PRIOR_FINGERPRINT" ] && [ -n "$PRIOR_SAVED" ]; then
+            SAVED_FILES="$PRIOR_SAVED"
+            echo "  - unchanged since the save at deferral time: $PRIOR_SAVED"
+        else
+            save_unsaved_work "$WT" "$ISSUE" "${ACTUAL_BRANCH:-$BRANCH}" "$PROJECT_DIR"
+            echo "  ⚠ SAVED WORK: $SAVED_FILES"
+            [ -n "$UNTRACKED_SKIPPED" ] && echo "  ⚠ untracked files NOT saved ($UNTRACKED_SKIPPED, SWARM_REAP_SAVE_UNTRACKED_MAX_MB)"
+            if [ -n "$SAVE_FAILED" ]; then
+                echo "  ✗ WARN: failed to save: $SAVE_FAILED"
+                log_event reap.worktree.save_failed "issue=$ISSUE which=$SAVE_FAILED"
+            fi
+            log_event reap.worktree.saved_work "issue=$ISSUE branch=${ACTUAL_BRANCH:-$BRANCH} commits=$UNSAVED_COMMITS tracked=$TRACKED_CHANGES untracked=$UNTRACKED_FILES files=${SAVED_FILES// /,}${UNTRACKED_SKIPPED:+ untracked_skipped=yes}"
+            NEW_SAVE=1
+        fi
+
+        # G2: the unattended PR-state reap closes the window but leaves the
+        # worktree for a human to rescue in place, for GRACE_SECS.
+        if [ "$GRACE_REQUESTED" = "1" ] && [ "$PRIOR_MARKER" = "0" ] && [ "$REMOVE_NOW" = "0" ] && [ "$GRACE_SECS" -gt 0 ]; then
+            now_s="$(date +%s)"
+            until_s=$((now_s + GRACE_SECS))
+            until_utc="$(date -u -d "@$until_s" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "$until_s" +%Y-%m-%dT%H:%M:%SZ)"
+            mkdir -p "$(dirname "$REAP_MARKER")"
+            {
+                echo "deferred_at=$now_s"
+                echo "until=$until_s"
+                echo "until_utc=$until_utc"
+                echo "dir=$WT"
+                echo "branch=${ACTUAL_BRANCH:-$BRANCH}"
+                echo "fingerprint=$FINGERPRINT"
+                echo "saved=$SAVED_FILES"
+            } > "$REAP_MARKER.tmp.$$" && mv "$REAP_MARKER.tmp.$$" "$REAP_MARKER"
+            notify_pr_work_saved "${ACTUAL_BRANCH:-$BRANCH}" "kept in place until $until_utc (\`$WT\`), then removed by the next reap pass"
+            log_event reap.worktree.deferred "issue=$ISSUE branch=${ACTUAL_BRANCH:-$BRANCH} dir=$WT until=$until_utc marker=$REAP_MARKER"
+            echo "  ⏸ reap grace: worktree + branch kept until $until_utc (SWARM_REAP_GRACE_SECS=$GRACE_SECS) — marker $REAP_MARKER"
+            close_worker_windows
+            exit 75
+        fi
+        [ "$NEW_SAVE" = "1" ] && notify_pr_work_saved "${ACTUAL_BRANCH:-$BRANCH}" "removed"
     fi
 
     # issue #495: archive .swarm/ (and, size permitting, .local-data/)
@@ -522,6 +851,7 @@ if [ -d "$WT" ]; then
     if git worktree remove --force "$WT"; then
         log_event reap.worktree "issue=$ISSUE branch=${ACTUAL_BRANCH:-$BRANCH} dir=$WT archive=$ARCHIVE_EVENT_FIELD"
         echo "  ✓ removed worktree"
+        rm -f "$REAP_MARKER"
     else
         log_event reap.worktree.error "issue=$ISSUE branch=${ACTUAL_BRANCH:-$BRANCH} dir=$WT reason=remove_failed archive=$ARCHIVE_EVENT_FIELD"
         echo "  ✗ ERROR: git worktree remove failed for $WT — left in place, no reap.worktree event logged" >&2
@@ -529,6 +859,7 @@ if [ -d "$WT" ]; then
     fi
 else
     echo "  - worktree dir not present (skipped)"
+    rm -f "$REAP_MARKER"
 fi
 
 if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
@@ -547,21 +878,7 @@ if [ -n "$ACTUAL_BRANCH" ] && [ "$ACTUAL_BRANCH" != "$BRANCH" ]; then
     fi
 fi
 
-if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
-    if tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx "iss-$ISSUE"; then
-        tmux kill-window -t "$SESSION_NAME:iss-$ISSUE"
-        echo "  ✓ killed tmux window"
-    else
-        echo "  - tmux window not present (skipped)"
-    fi
-    # issue #550: a check-on-done run normally lives as a PANE inside
-    # iss-$ISSUE (killed above, pane and all) — this only catches the
-    # fallback `chk-$ISSUE` WINDOW execute_check falls back to when no
-    # iss-$ISSUE window existed to host the pane.
-    swarm_close_chk_windows "$SESSION_NAME" "$ISSUE"
-else
-    echo "  - tmux session not running (skipped window cleanup)"
-fi
+close_worker_windows
 
 echo
 echo "Done."

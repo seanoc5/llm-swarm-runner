@@ -297,8 +297,15 @@ warn_stranded_worktree_briefs() {
         [ -d "$wt/.swarm/tasks/inbox" ] && inbox_n="$(find "$wt/.swarm/tasks/inbox" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')"
         [ -d "$wt/.swarm/tasks/processing" ] && proc_n="$(find "$wt/.swarm/tasks/processing" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')"
 
+        # A reap-grace worktree (kill-worktree.sh --grace) has no window by
+        # design and its queue was salvaged when the grace began, so a brief
+        # here arrived later — still stranded, but say when it gets reaped.
+        local grace_note="" grace_marker="$project_dir/.swarm/reap-deferred/iss-$issue"
+        if [ -f "$grace_marker" ]; then
+            grace_note=" (in reap grace until $(sed -n 's/^until_utc=//p' "$grace_marker" | head -1) — salvaged then, see $grace_marker)"
+        fi
         if [ "${inbox_n:-0}" -gt 0 ] || [ "${proc_n:-0}" -gt 0 ]; then
-            echo "WARN: stranded worktree wt-issue-$issue — no live iss-$issue window; undelivered brief(s) queued (inbox=$inbox_n processing=$proc_n) — re-provision or archive, see prompts/coordinator.md \"Stranded worktree briefs\"" >&2
+            echo "WARN: stranded worktree wt-issue-$issue — no live iss-$issue window; undelivered brief(s) queued (inbox=$inbox_n processing=$proc_n)$grace_note — re-provision or archive, see prompts/coordinator.md \"Stranded worktree briefs\"" >&2
         fi
     done < <(swarm_own_worktree_dirs "$project_dir")
 }
