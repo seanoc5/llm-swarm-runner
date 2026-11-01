@@ -32,8 +32,13 @@
 # and before posting the thread is read back and skipped if any comment
 # already carries this day's footer ("Daily changelog · <name> · <date>").
 #
+# Catch-up: without --date, each app reports every day after its newest
+# .posted marker up to yesterday (at most $CHANGELOG_MAX_BACKFILL, default 7,
+# newest kept; older days are logged as skipped). An app with no marker yet
+# reports just yesterday.
+#
 # Usage: daily-changelog.sh [--date YYYY-MM-DD] [--app NAME] [--dry-run]
-#   --date     local day to report (default: yesterday in $CHANGELOG_TZ)
+#   --date     one local day to report (default: catch up through yesterday in $CHANGELOG_TZ)
 #   --app      only this app (name column of the config); repeatable
 #   --dry-run  print each digest to stdout; write nothing, call no API
 #
@@ -44,10 +49,11 @@
 # Env: CHANGELOG_TZ (America/New_York), CM_BASE_URL (http://192.168.1.185:8081,
 #   the LAN address: the public hostname sits behind Cloudflare rate limits),
 #   CM_PUBLIC_URL (https://corpusminder.oconeco.com, used for printed links),
-#   CHANGELOG_KEY_DIR (~/.config/swarm-changelog/keys).
+#   CHANGELOG_KEY_DIR (~/.config/swarm-changelog/keys), CHANGELOG_MAX_BACKFILL (7).
 #
-# Exit: 0 all done (including nothing-to-post); 1 a fetch or post failed;
-#   2 usage/config error; 3 a key was missing (digest still written).
+# Exit: 0 all done (including nothing-to-post and a missing key, which only
+#   warns: the digest is still written and posts once the key exists);
+#   1 a fetch or post failed; 2 usage/config error.
 
 set -euo pipefail
 
@@ -58,7 +64,7 @@ CM_BASE_URL="${CM_BASE_URL:-http://192.168.1.185:8081}"
 CM_PUBLIC_URL="${CM_PUBLIC_URL:-https://corpusminder.oconeco.com}"
 ENTITY_TYPE="changelog"
 
-usage() { sed -n '2,50p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,62p' "$0" | sed 's/^# \{0,1\}//'; }
 die() { echo "daily-changelog: ERROR: $*" >&2; exit 2; }
 
 DATE=""
@@ -74,15 +80,47 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-[ -n "$DATE" ] || DATE="$(TZ="$TZ_NAME" date -d yesterday +%F)"
-[[ "$DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || die "--date must be YYYY-MM-DD, got '$DATE'"
-DAY_START="$(TZ="$TZ_NAME" date -d "$DATE 00:00" +%s)" || die "bad --date '$DATE'"
-NEXT_DAY="$(date -d "$DATE 12:00 next day" +%F)"
-DAY_END="$(TZ="$TZ_NAME" date -d "$NEXT_DAY 00:00" +%s)"
-DAY_LABEL="$(TZ="$TZ_NAME" date -d "$DATE 12:00" '+%A, %-d %B %Y')"
-# GitHub's merged: qualifier is UTC-dated; search one day wider each side,
-# then keep exactly the local day with jq below.
-SEARCH="merged:$(date -u -d "@$((DAY_START - 86400))" +%F)..$(date -u -d "@$((DAY_END + 86400))" +%F)"
+YESTERDAY="${CHANGELOG_YESTERDAY:-$(TZ="$TZ_NAME" date -d yesterday +%F)}"  # env override: test hook
+MAX_BACKFILL="${CHANGELOG_MAX_BACKFILL:-7}"
+[[ "$MAX_BACKFILL" =~ ^[1-9][0-9]*$ ]] || die "CHANGELOG_MAX_BACKFILL must be a positive integer"
+if [ -n "$DATE" ]; then
+    [[ "$DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || die "--date must be YYYY-MM-DD, got '$DATE'"
+    TZ="$TZ_NAME" date -d "$DATE 00:00" >/dev/null 2>&1 || die "bad --date '$DATE'"
+fi
+
+# Sets the per-day globals (window, label, search) for one local day.
+set_day() {
+    DATE="$1"
+    DAY_START="$(TZ="$TZ_NAME" date -d "$DATE 00:00" +%s)"
+    NEXT_DAY="$(date -d "$DATE 12:00 next day" +%F)"
+    DAY_END="$(TZ="$TZ_NAME" date -d "$NEXT_DAY 00:00" +%s)"
+    DAY_LABEL="$(TZ="$TZ_NAME" date -d "$DATE 12:00" '+%A, %-d %B %Y')"
+    # GitHub's merged: qualifier is UTC-dated; search one day wider each side,
+    # then keep exactly the local day with jq below.
+    SEARCH="merged:$(date -u -d "@$((DAY_START - 86400))" +%F)..$(date -u -d "@$((DAY_END + 86400))" +%F)"
+}
+
+# Days to report for one app, oldest first: the explicit --date, else every
+# day after the newest .posted marker through yesterday (capped), else just
+# yesterday. Prints a skipped-days note to stderr when the cap bites.
+days_for() {
+    local name="$1" outdir="$2" last d days=() skipped=0
+    if [ -n "$DATE" ]; then echo "$DATE"; return; fi
+    last="$(ls "$outdir" 2>/dev/null | sed -n 's/^\([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\)\.posted$/\1/p' | sort | tail -1)"
+    if [ -z "$last" ]; then echo "$YESTERDAY"; return; fi
+    d="$last"
+    while [[ "$d" < "$YESTERDAY" ]]; do
+        d="$(date -d "$d 12:00 next day" +%F)"
+        days+=("$d")
+    done
+    if [ "${#days[@]}" -gt "$MAX_BACKFILL" ]; then
+        skipped=$(( ${#days[@]} - MAX_BACKFILL ))
+        days=("${days[@]:skipped}")
+        echo "$name: gap since $last is longer than $MAX_BACKFILL days; skipping the $skipped oldest" >&2
+    fi
+    [ "${#days[@]}" -gt 0 ] && printf '%s\n' "${days[@]}"
+    return 0
+}
 
 [ -r "$CONF" ] || die "no config at $CONF (copy examples/changelog-apps.conf.example there)"
 
@@ -205,13 +243,17 @@ post_digest() {
     local q="?externalId=$name"
     key_file="$KEY_DIR/$cm_app.key"
     if [ ! -r "$key_file" ]; then
-        echo "$name: digest written, NOT posted: no key at $key_file (needs a corpusminder API client with app=$cm_app)" >&2
+        echo "$name: WARNING: digest for $DATE written, NOT posted: no key at $key_file (needs a corpusminder API client with app=$cm_app)" >&2
         return 3
     fi
     thread="$(cm_call POST /api/threads "$key_file" \
         "$(jq -nc --arg a "$cm_app" --arg t "$ENTITY_TYPE" --arg x "$name" \
             '{app: $a, entityType: $t, externalId: $x, title: "\($x) changelog"}')")" || return 1
-    qid="$(jq -r '.questionId' <<<"$thread")"
+    qid="$(jq -r '.questionId // empty' <<<"$thread" 2>/dev/null || true)"
+    if ! [[ "$qid" =~ ^[0-9]+$ ]]; then
+        echo "$name: ERROR: POST /api/threads returned no usable questionId (${thread:0:200}); thread.json not written" >&2
+        return 1
+    fi
     jq -n --argjson q "$qid" --arg app "$cm_app" --arg x "$name" --arg u "$CM_PUBLIC_URL/questions/$qid" \
         '{questionId: $q, app: $app, entityType: "changelog", externalId: $x, url: $u}' > "$outdir/thread.json"
 
@@ -230,24 +272,22 @@ post_digest() {
     echo "$name: posted $DATE — $CM_PUBLIC_URL/questions/$qid"
 }
 
-RC=0
-for entry in "${APPS[@]}"; do
-    IFS='|' read -r name dir repo cm_app <<<"$entry"
-    wanted "$name" || continue
-    outdir="$dir/.swarm/changelog"
-
+# One app, one day (DATE and friends already set by set_day). Returns 0 done
+# or skipped, 1 on a fetch/post failure (the caller stops that app's catch-up
+# so a later day's marker can never hide an earlier unposted day).
+do_day() {
+    local name="$1" dir="$2" repo="$3" cm_app="$4" outdir="$5" prs json prc=0
     if [ "$DRY_RUN" = 0 ] && [ -e "$outdir/$DATE.posted" ]; then
         echo "$name: already posted for $DATE"
-        continue
+        return 0
     fi
     if ! prs="$(fetch_prs "$repo")"; then
         echo "$name: ERROR: could not list merged PRs for $repo" >&2
-        RC=1
-        continue
+        return 1
     fi
     if [ "$(jq length <<<"$prs")" -eq 0 ]; then
         echo "$name: nothing merged on $DATE"
-        continue
+        return 0
     fi
     prs="$(add_followups "$repo" "$prs")"
     prs="$(add_modes "$dir" "$prs")"
@@ -258,18 +298,32 @@ for entry in "${APPS[@]}"; do
         echo "===== $name ($DATE) — dry run, would write $outdir/$DATE.md and post to $cm_app/$ENTITY_TYPE/$name ====="
         render_md "$name" "$json"
         echo
-        continue
+        return 0
     fi
 
     mkdir -p "$outdir"
     printf '%s\n' "$json" > "$outdir/$DATE.json"
     render_md "$name" "$json" > "$outdir/$DATE.md"
-    prc=0
     post_digest "$name" "$cm_app" "$outdir" "$outdir/$DATE.md" || prc=$?
     case "$prc" in
-        0) ;;
-        3) [ "$RC" = 1 ] || RC=3 ;;
-        *) echo "$name: ERROR: post failed; digest kept at $outdir/$DATE.md" >&2; RC=1 ;;
+        0|3) return 0 ;;  # 3: no key, already warned; the digest is kept
+        *) echo "$name: ERROR: post failed; digest kept at $outdir/$DATE.md" >&2; return 1 ;;
     esac
+}
+
+RC=0
+for entry in "${APPS[@]}"; do
+    IFS='|' read -r name dir repo cm_app <<<"$entry"
+    wanted "$name" || continue
+    outdir="$dir/.swarm/changelog"
+    mapfile -t days < <(days_for "$name" "$outdir")
+    if [ "${#days[@]}" -eq 0 ]; then
+        echo "$name: already posted through $YESTERDAY"
+        continue
+    fi
+    for day in "${days[@]}"; do
+        set_day "$day"
+        do_day "$name" "$dir" "$repo" "$cm_app" "$outdir" || { RC=1; break; }
+    done
 done
 exit "$RC"
