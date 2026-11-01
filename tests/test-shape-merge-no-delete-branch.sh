@@ -42,4 +42,6 @@ delete_ln=$(grep -n 'git push origin --delete "\$PR_BRANCH"' "$SCRIPT" | head -1
 ok "stacked child PRs are retargeted before the remote branch is deleted"
 grep -q 'KEEP_BRANCH=1' "$SCRIPT" || fail "a failed retarget must keep the branch (issue #670)"
 ok "a failed retarget keeps the remote branch"
+grep -q 'if ! CHILD_PRS=\$(gh pr list' "$SCRIPT" || fail "a failed child-PR lookup must keep the branch too (issue #670 self-review)"
+ok "a failed child-PR lookup keeps the remote branch"
 echo "All #489/#670 shape tests passed."

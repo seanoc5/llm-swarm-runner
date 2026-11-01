@@ -980,7 +980,12 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
       # keep the branch: a leftover branch is cheap, a closed child PR isn't.
       KEEP_BRANCH=0
       if [ -n "$PR_BASE" ]; then
-        CHILD_PRS=$(gh pr list --state open --base "$PR_BRANCH" --json number --jq '.[].number' 2>/dev/null || true)
+        # A failed lookup is "unknown", not "no children": keep the branch.
+        if ! CHILD_PRS=$(gh pr list --state open --base "$PR_BRANCH" --json number --jq '.[].number' 2>/dev/null); then
+          CHILD_PRS=""
+          KEEP_BRANCH=1
+          echo "       $(c_amber "⚠ could not list PRs stacked on $PR_BRANCH — keeping origin/$PR_BRANCH; delete it by hand once none are open")"
+        fi
         for CHILD in $CHILD_PRS; do
           if gh pr edit "$CHILD" --base "$PR_BASE" >/dev/null 2>&1; then
             echo "       retargeted stacked PR #$CHILD from $PR_BRANCH to $PR_BASE"
