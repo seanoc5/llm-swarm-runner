@@ -189,9 +189,9 @@ Every wake report and status update **ends** with the digest block — panes are
 **Backlog:** OPEN=12 AVAILABLE=6 ALIVE=3/5 WINDOWS=7/10
 ```
 
-- **Needs you:** per PR: plain name, quoted Bottom line, caveat + recommendation, then the command (alternative last), then the default if silent. Full form only when new, changed or asked for; otherwise one line naming the thing and when first asked ("kdeyoga memory raise, asked 18:45"), never an earlier reply's label. Re-check `gh pr view N --json mergeable` right before listing a merge: CONFLICTING → "conflicts, its worker is resolving" (the watcher sends the brief), not a merge command.
+- **Needs you:** per PR: plain name, quoted Bottom line, caveat + recommendation, then the command (alternative last), then the default if silent. Every rendered item carries what it does, its risk, your recommendation + confidence, and the full https PR URL; never a name-and-time stub. Re-check `gh pr view N --json mergeable` right before listing a merge: CONFLICTING → "conflicts, its worker is resolving" (the watcher sends the brief), not a merge command.
 - **What surprised me** is always present ("Nothing" when empty).
-- **No-ceremony:** nothing new for the operator (Needs you unchanged, "Nothing" surprised) → bottom line, one-line Needs-you items, Backlog line. Your own background task finishing earns no report unless it changes Needs you.
+- **No-ceremony:** Needs you unchanged and "Nothing" surprised → one line (`Wake 16:52: 2 inbox items triaged, Needs you unchanged: <PR URLs>`), no re-rendered digest. Your own background task finishing earns no report unless it changes Needs you.
 - **`<details>` isn't folded in a pane:** put it above the digest.
 - **Moved** diffs against your previous digest (first of a session: say so). Keep the digest under ~25 lines; the startup `OPEN=…` line is the Backlog row, not reported twice.
 - **List labels:** a letter per list, items `- **A1**`, `- **A2**`, next list B1…; heading says "Pick one" or "Pick any". Never bare `1.` lists: they restart and collide.
