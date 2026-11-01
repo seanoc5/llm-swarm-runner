@@ -64,7 +64,7 @@ check "coordinator busy: waiter leaves it to the Stop hook" "alive" "$(alive "$w
 echo "idle $(date +%s)" > "$S/coordinator-state"
 wait_for 3 dead "$w1" || red "waiter never rang for an idle coordinator"
 wait "$w1" || true
-case "$(cat "$T/w1.out")" in
+case "$(tail -n 1 "$T/w1.out")" in
     "Inbox: 3 item(s) in .swarm/coord-inbox/"*) got=nudge ;; *) got="$(cat "$T/w1.out")" ;;
 esac
 check "rings with the nudge, counting every item" "nudge" "$got"
@@ -91,7 +91,22 @@ kill "$w2"; wait "$w2" 2>/dev/null || true
 bash -c "COORD_INBOX_WAITER=1 '$WAIT' '$P' > '$T/w3.out' & echo \$! > '$T/w3.pid'; sleep 0.5"
 w3="$(cat "$T/w3.pid")"; pids+=("$w3")
 wait_for 3 dead "$w3" || red "orphaned waiter kept running"
-check "orphaned waiter exits silently" "" "$(cat "$T/w3.out")"
+check "orphaned waiter exits without ringing" "0" "$(grep -c '^Inbox:' "$T/w3.out" || true)"
+
+# Startup line and heartbeat (stdout only; the exit is what wakes the session).
+check "startup line names pid and inbox path" "yes" \
+    "$(grep -q "armed pid=$w1, watching $S/coord-inbox" "$T/w1.out" && echo yes || echo no)"
+rm -f "$S/coord-inbox/"*.md "$S/coord-inbox-waiter"
+env COORD_INBOX_WAITER=1 COORD_INBOX_WAIT_HEARTBEAT_SECS=1 "$WAIT" "$P" > "$T/hb.out" & hb=$!; pids+=("$hb")
+wait_for 5 grep -q 'waiting since' "$T/hb.out" || red "no heartbeat line printed"
+grep -Eq '^\[coord-inbox-wait [0-9:]+\] waiting since [0-9:]+ \([0-9]+h[0-9]{2}m\), last poll [0-9:]+, inbox=0, coordinator-state=' "$T/hb.out" && got=yes || got="$(cat "$T/hb.out")"
+check "heartbeat line has the documented shape" "yes" "$got"
+check "heartbeat doesn't end the waiter" "alive" "$(alive "$hb" && echo alive || echo exited)"
+kill "$hb"; wait "$hb" 2>/dev/null || true
+env COORD_INBOX_WAITER=1 COORD_INBOX_WAIT_HEARTBEAT_SECS=0 "$WAIT" "$P" > "$T/hb0.out" & hb0=$!; pids+=("$hb0")
+sleep 1.5
+check "heartbeat 0: startup line only" "1" "$(wc -l < "$T/hb0.out" | tr -d ' ')"
+kill "$hb0"; wait "$hb0" 2>/dev/null || true
 
 # ── the Stop hook's arm request ─────────────────────────────────────────────
 rm -f "$S/coord-inbox/"*.md "$S/coord-waiter-asked" "$S/coord-inbox-waiter"

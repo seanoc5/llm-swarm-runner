@@ -19,6 +19,11 @@
 # at that turn end instead. Exits quietly when its parent shell goes away
 # (the coordinator session ended).
 #
+# Prints a startup line, then a heartbeat line every COORD_INBOX_WAIT_HEARTBEAT_SECS
+# (default 600; 0 disables) so an idle waiter is distinguishable from a hung one
+# in the background-shell panel. Only the exit wakes the session; intermediate
+# stdout from a background shell does not, so heartbeats add no coordinator turns.
+#
 # Usage: coord-inbox-wait.sh [project-dir]
 
 set -uo pipefail
@@ -35,6 +40,8 @@ rang_file="$swarm/coord-hook-rang"
 state_file="$swarm/coordinator-state"
 events="$swarm/events.log"
 poll="${COORD_INBOX_WAITER_POLL_SECS:-2}"
+heartbeat="${COORD_INBOX_WAIT_HEARTBEAT_SECS:-600}"
+[[ "$heartbeat" =~ ^[0-9]+$ ]] || heartbeat=600
 busy_max="${COORD_HOOK_BUSY_MAX_SECS:-3600}"
 # Must match coord-hook.sh and coordinator-watch.sh.
 template="${COORD_INBOX_NUDGE_TEMPLATE:-Inbox: %N item(s) in .swarm/coord-inbox/ — read and triage them (see prompts/coordinator.md \"Inbox\").}"
@@ -63,6 +70,10 @@ release() {
 }
 trap release EXIT
 log_event "coord.waiter.armed pid=$$"
+printf '[coord-inbox-wait %s] armed pid=%s, watching %s (heartbeat %s)\n' \
+    "$(date +%H:%M)" "$$" "$inbox" \
+    "$([ "$heartbeat" -gt 0 ] && echo "every ${heartbeat}s" || echo off)"
+next_beat=$((start + heartbeat))
 
 while :; do
     # Parent gone: the session ended. Exit without ringing.
@@ -94,6 +105,17 @@ while :; do
             log_event "coord.wake.waiter_rang items=$count"
             printf '%s\n' "${template//%N/$count}"
             exit 0
+        fi
+    fi
+    if [ "$heartbeat" -gt 0 ]; then
+        now="$(date +%s)"
+        if [ "$now" -ge "$next_beat" ]; then
+            next_beat=$((now + heartbeat))
+            up=$((now - start))
+            read -r st _ 2>/dev/null < "$state_file" || st=""
+            printf '[coord-inbox-wait %s] waiting since %s (%dh%02dm), last poll %s, inbox=%s, coordinator-state=%s\n' \
+                "$(date +%H:%M)" "$(date -d "@$start" +%H:%M)" $((up / 3600)) $((up % 3600 / 60)) \
+                "$(date +%H:%M:%S)" "$count" "${st:-unknown}"
         fi
     fi
     sleep "$poll"
