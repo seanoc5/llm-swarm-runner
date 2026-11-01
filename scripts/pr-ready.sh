@@ -222,15 +222,18 @@ HOLD_BANNER_RE='^> ⛔ \*\*COORDINATOR HOLD\*\*'
 # `<!-- SWARM_COORDINATOR_HOLD -->` or a line starting `⛔ **COORDINATOR
 # HOLD**`) newer than the last lift comment (marker
 # `<!-- SWARM_COORDINATOR_HOLD_LIFTED -->` or a line starting "COORDINATOR
-# HOLD lifted" / "hold lifted") means held. "Newer" is comment order, which
-# gh returns oldest-first. Comments carrying a SWARM_SELF_REVIEW marker are
-# skipped: review prose may quote the banner and must not hold or lift.
+# HOLD lifted") means held. Lifting is deliberately the strict match: any
+# comment author can write a stray "hold lifted" aside, and a missed lift
+# only leaves the PR held (the coordinator can post the marker), while a
+# false lift readies a held PR. "Newer" is comment order, which gh returns
+# oldest-first. Comments carrying a SWARM_SELF_REVIEW marker are skipped:
+# review prose may quote the banner and must not hold or lift.
 # The jq text deliberately avoids the literal pair the test stub keys on for
 # the self-review queries above.
 HOLD_COMMENT_JQ='[.comments[].body // ""
   | select(contains("SWARM_SELF_REVIEW:") | not)
   | if (contains("<!-- SWARM_COORDINATOR_HOLD -->") or test("(^|\\n)(> )?⛔ \\*\\*COORDINATOR HOLD\\*\\*")) then "held"
-    elif (contains("<!-- SWARM_COORDINATOR_HOLD_LIFTED -->") or test("(^|\\n)(✅ )?(\\*\\*)?(COORDINATOR )?HOLD (is )?lifted"; "i")) then "lifted"
+    elif (contains("<!-- SWARM_COORDINATOR_HOLD_LIFTED -->") or test("(^|\\n)(✅ )?(\\*\\*)?COORDINATOR HOLD lifted")) then "lifted"
     else empty end] | (.[-1] // "")'
 
 HELD=0

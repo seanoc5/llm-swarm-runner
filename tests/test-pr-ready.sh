@@ -1092,11 +1092,14 @@ GH_HOLD_COMMENTS_JSON=
 gh_ready_called && red "expected gh pr ready NOT to run"
 green "only the newest of hold/lift counts"
 
-heading "Test 35: hold-comment text forms — plain 'hold lifted' line lifts; self-review prose that quotes either form does neither"
+heading "Test 35: hold-comment text forms — only the strict lift forms lift; self-review prose that quotes either form does neither"
 printf '<!-- BLIND_MERGE_RISK: low -->\nbody\n' > "$BODY_FILE"
-GH_HOLD_COMMENTS_JSON='{"comments":[{"body":"⛔ **COORDINATOR HOLD** — x"},{"body":"Hold lifted — fix verified"}]}'
+GH_HOLD_COMMENTS_JSON='{"comments":[{"body":"⛔ **COORDINATOR HOLD** — x"},{"body":"COORDINATOR HOLD lifted — fix verified"}]}'
 rc=0; run_pr_ready || rc=$?
-[ "$rc" -eq 0 ] || red "expected a plain 'Hold lifted' line to lift, got $rc: $(cat "$TEST_DIR/out.log")"
+[ "$rc" -eq 0 ] || red "expected a 'COORDINATOR HOLD lifted' line to lift, got $rc: $(cat "$TEST_DIR/out.log")"
+GH_HOLD_COMMENTS_JSON='{"comments":[{"body":"⛔ **COORDINATOR HOLD** — x"},{"body":"Hold lifted — a stray aside from anyone"}]}'
+rc=0; run_pr_ready || rc=$?
+[ "$rc" -eq 3 ] || red "expected a loose 'Hold lifted' aside NOT to lift (fail toward held), got $rc"
 GH_HOLD_COMMENTS_JSON='{"comments":[{"body":"⛔ **COORDINATOR HOLD** — x"},{"body":"<!-- SWARM_SELF_REVIEW: APPROVE actor=worker -->\nreview\nhold lifted\n"}]}'
 rc=0; run_pr_ready || rc=$?
 [ "$rc" -eq 3 ] || red "expected a self-review comment quoting 'hold lifted' NOT to lift, got $rc"
