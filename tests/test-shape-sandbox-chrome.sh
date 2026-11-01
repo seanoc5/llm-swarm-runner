@@ -18,6 +18,6 @@ with_flag=$(grep -E '\| claude "\$\{MODEL_OPTS\[@\]\}"' "$ROOT/scripts/worker-li
 [ "$launches" -eq "$with_flag" ] || red "worker-listener.sh: $with_flag of $launches claude launches pass --no-chrome"
 green "worker-listener.sh: --no-chrome on all $launches claude launches"
 
-grep -E '\| claude -p ' "$ROOT/scripts/self-review-pr.sh" | grep -q -- '--no-chrome' \
+grep -E '(\||\]\}"\)?) claude -p ' "$ROOT/scripts/self-review-pr.sh" | grep -q -- '--no-chrome' \
     || red "self-review-pr.sh launches claude -p without --no-chrome (runs inside worker containers via pr-ready.sh)"
 green "self-review-pr.sh: --no-chrome on the review launch"
