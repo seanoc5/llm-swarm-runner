@@ -9,7 +9,9 @@ Two credentials, not one:
 | Credential | How it gets in | What it authorises | Reach |
 |---|---|---|---|
 | `gh` OAuth token (`gho_…`, scopes `gist read:org repo workflow`) | `sandbox.sh` runs `gh auth token` on the host, injects as `GH_TOKEN` | Every `gh` call: PR create/merge/comment/close, issue create/edit/close, run list, label create, GraphQL | **Every repo the account can reach** |
-| SSH key `~/.ssh` (+ agent socket) | mounted read-only into the container | `git push` / `git fetch` — all remotes are `git@github.com:` | **Every repo the account can reach** |
+| SSH key `~/.ssh` (+ agent socket) | mounted read-only into the container | `git push` / `git fetch` on projects whose `origin` is `git@github.com:` (most of them) | **Every repo the account can reach** |
+
+**Not every remote is SSH.** corpusminder-spring's `origin` is `https://<fine-grained PAT>@github.com/…`, so its pushes authenticate with that embedded PAT, not the SSH key (the mounted key still works if a worker pushes to the `git@github.com:` URL explicitly). Check with `git remote get-url origin`; anything starting `https://` is the HTTPS case, and everything below about SSH push reach applies only to the SSH-origin projects.
 
 This is the finding that changes the earlier framing: **scoping the `gh` token limits the API half only.** A worker could still `git push --force` to any branch of any repo via SSH. Halving the exposure is still worth doing, but it is a half.
 
@@ -30,10 +32,19 @@ Derived by grepping every `gh` call in `scripts/`, `sandbox.sh`, `llm-start.sh`,
 | Commit statuses | **write** | not yet used by any script — prerequisite for the `swarm/worker` status check (#532); probed by `gh-token-probe.sh` so a missing grant surfaces now instead of failing silently later |
 | Actions | read | `gh run list`, `gh run watch`, `gh workflow list` (CI gate + claude-code-action routing) |
 | Checks | **not offered to fine-grained tokens at all** | `gh pr checks` needs it and fails with "Resource not accessible by personal access token" when it's missing; `scripts/ci-wait.sh` (#513) falls back to polling `gh run list --commit` instead, which only needs the Actions: read above |
-| Workflows | **not needed** | the classic `workflow` scope only governs pushing `.github/workflows/*` over HTTPS; the swarm pushes over SSH |
+| Workflows | **write — only for HTTPS-origin projects** that change `.github/workflows/*`; not needed for SSH-origin projects | GitHub refuses a PAT push that creates or updates a workflow file without it ("refusing to allow a Personal Access Token to create or update workflow … without `workflow` scope"; hit on corpusminder-spring #994 and #1042). SSH pushes are not subject to this check |
 | Gist, Org, Projects, Discussions | none | never used |
 
 Repository access: **Only select repositories** → the seven above. Expiry: pick 90 days and put the renewal date somewhere you'll see it — a lapsed token makes every worker die at `gh pr create` with a 401, which the swarm reports as a task failure, not an auth failure.
+
+## Workers that must push a workflow file from an HTTPS-origin project
+
+Two ways to make it work; the operator picks per project:
+
+- **Grant Workflows: read + write** on that project's PAT (keeps the push path HTTPS; widens what a leaked token can do — it can then rewrite CI that runs with repo secrets).
+- **Switch the project's `origin` to SSH:** `git remote set-url origin git@github.com:<owner>/<repo>.git` in the project checkout. Narrower token, but pushes then use the account-wide SSH key (see the SSH half below).
+
+Until one is done, `scripts/provision-worker.sh` prints a `WARN` at spawn when `origin` is HTTPS with an embedded token, and adds a "Push note" to the worker's brief. The documented worker fallback is a one-off push to the SSH URL: `git push git@github.com:<owner>/<repo>.git HEAD` (the mounted SSH key authenticates it). The provisioning script never rewrites the remote itself.
 
 ## The one thing the probe exists to answer
 
