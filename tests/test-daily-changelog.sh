@@ -54,7 +54,7 @@ cat > "$T/shims/gh" <<EOF
 case "\$1 \$2" in
   "pr list")
     [ "\${GH_FAILS:-0}" = 1 ] && exit 1
-    case "\$*" in *"-R o/app1 "*) cat "$T/prs.json" ;; *) echo '[]' ;; esac ;;
+    case "\$*" in *"-R o/app1 "*) cat "$T/prs.json" ;; *"-R o/app3 "*) cat "$T/prs3.json" ;; *) echo '[]' ;; esac ;;
   "issue list")
     label="\$(printf '%s\n' "\$@" | grep -A0 '^from-pr-' | sed 's/from-pr-//')"
     f="$T/issues-\$label.json"; [ -f "\$f" ] || f=/dev/null
@@ -82,6 +82,7 @@ echo "\$method \$url key=\$key" >> "$CURL_LOG"
 [ -f "$COMMENTS" ] || echo '[]' > "$COMMENTS"
 case "\$method \$url" in
   "POST "*/api/threads)
+    [ "\${CM_NULL_QID:-0}" = 1 ] && { printf '{"created": true}\n201'; exit 0; }
     printf '%s\n201' '{"questionId": 42, "url": "http://lan/questions/42", "created": true}' ;;
   "GET "*/api/threads/*)
     printf '%s\n200' "\$(jq -c '{thread: {questionId: 42}, comments: [.[] | {text: ., replies: []}]}' "$COMMENTS")" ;;
@@ -127,10 +128,10 @@ grep -qx 'app2: nothing merged on 2026-10-31' "$T/out.log" || red "empty app lin
 [ ! -e "$T/app1/.swarm" ] || red "dry run wrote files"
 green "local-day window, ordering, title cleanup, risk, caveats, no side effects"
 
-heading "Test 2: missing key writes the digest, posts nothing, exits 3 naming the key"
+heading "Test 2: missing key writes the digest, posts nothing, warns and exits 0 naming the key"
 rc=0; run || rc=$?
-[ "$rc" = 3 ] || red "expected exit 3, got $rc: $(out)"
-grep -q "no key at $T/keys/app-one.key" "$T/out.log" || red "should name the key path: $(out)"
+[ "$rc" = 0 ] || red "expected exit 0, got $rc: $(out)"
+grep -q "WARNING.*no key at $T/keys/app-one.key" "$T/out.log" || red "should name the key path: $(out)"
 [ -s "$T/app1/.swarm/changelog/2026-10-31.md" ] || red "md not written"
 jq -e '.count == 3 and .prs[0].number == 12 and .prs[2].followups == ["https://github.com/o/app1/issues/20"]' \
     "$T/app1/.swarm/changelog/2026-10-31.json" >/dev/null || red "json shape"
@@ -178,6 +179,65 @@ rc=0; run --date 31/10/2026 || rc=$?; [ "$rc" = 2 ] || red "bad --date should ex
 run --dry-run --app app2 || red "--app filter exit"
 grep -q app1 "$T/out.log" && red "--app app2 should skip app1"
 green "bad input refused"
+
+heading "Test 7: a 3-day gap since the last .posted marker posts all three days, oldest first"
+cat > "$T/prs3.json" <<'JSON'
+[
+  {"number": 30, "title": "fix: day before the gap (already posted)",
+   "url": "https://github.com/o/app3/pull/30", "mergedAt": "2026-10-28T15:00:00Z", "body": "", "comments": []},
+  {"number": 31, "title": "fix: first missed day",
+   "url": "https://github.com/o/app3/pull/31", "mergedAt": "2026-10-29T15:00:00Z", "body": "", "comments": []},
+  {"number": 32, "title": "fix: second missed day",
+   "url": "https://github.com/o/app3/pull/32", "mergedAt": "2026-10-30T15:00:00Z", "body": "", "comments": []},
+  {"number": 33, "title": "fix: yesterday",
+   "url": "https://github.com/o/app3/pull/33", "mergedAt": "2026-10-31T15:00:00Z", "body": "", "comments": []}
+]
+JSON
+printf 'app3 %s o/app3 app-three\n' "$T/app3" > "$T/apps3.conf"
+printf 'CORPUSMINDER_API_KEY=cmapi_1_secret\n' > "$T/keys/app-three.key"
+mkdir -p "$T/app3/.swarm/changelog"
+echo 1 > "$T/app3/.swarm/changelog/2026-10-28.posted"
+echo '[]' > "$COMMENTS"; : > "$CURL_LOG"
+run_gap() {
+    PATH="$T/shims:$PATH" CHANGELOG_CONF="$T/apps3.conf" CHANGELOG_KEY_DIR="$T/keys" \
+        CHANGELOG_TZ=America/New_York CHANGELOG_YESTERDAY=2026-10-31 \
+        CM_BASE_URL=http://cm.test CM_PUBLIC_URL=https://cm.public \
+        "$CHANGELOG" "$@" > "$T/out.log" 2>&1
+}
+run_gap || red "gap run should exit 0: $(out)"
+[ "$(jq length "$COMMENTS")" = 3 ] || red "expected 3 posts for the 3 missed days, got $(jq length "$COMMENTS"): $(out)"
+for d in 2026-10-29 2026-10-30 2026-10-31; do
+    [ -e "$T/app3/.swarm/changelog/$d.posted" ] || red "$d not marked posted: $(out)"
+done
+[ ! -e "$T/app3/.swarm/changelog/2026-10-28.md" ] || red "already-posted day must not be re-reported"
+jq -r '.[0]' "$COMMENTS" | grep -q 'pull/31' || red "oldest missed day should post first"
+jq -r '.[2]' "$COMMENTS" | grep -q 'pull/33' || red "yesterday should post last"
+: > "$CURL_LOG"
+run_gap || red "rerun exit: $(out)"
+grep -qx 'app3: already posted through 2026-10-31' "$T/out.log" || red "rerun should be a no-op: $(out)"
+[ ! -s "$CURL_LOG" ] || red "no-op rerun should not call curl"
+green "gap since last marker is caught up; rerun posts nothing"
+
+heading "Test 8: a gap longer than the cap posts only the newest days and says what it skipped"
+rm -f "$T/app3/.swarm/changelog/2026-10-29".* "$T/app3/.swarm/changelog/2026-10-30".* "$T/app3/.swarm/changelog/2026-10-31".*
+echo '[]' > "$COMMENTS"
+CHANGELOG_MAX_BACKFILL=2 run_gap || red "capped run exit: $(out)"
+[ "$(jq length "$COMMENTS")" = 2 ] || red "cap of 2 should post 2 days: $(out)"
+grep -q 'skipping the 1 oldest' "$T/out.log" || red "should log the skipped day: $(out)"
+[ ! -e "$T/app3/.swarm/changelog/2026-10-29.posted" ] || red "oldest day should be skipped"
+green "cap honoured and logged"
+
+heading "Test 9: a thread response without questionId refuses, exits 1, writes no thread.json"
+rm -rf "$T/app3/.swarm/changelog/thread.json" "$T/app3/.swarm/changelog/2026-10-3"*.posted
+echo '[]' > "$COMMENTS"
+rc=0; CM_NULL_QID=1 run_gap --date 2026-10-31 || rc=$?
+[ "$rc" = 1 ] || red "expected exit 1, got $rc: $(out)"
+grep -q 'no usable questionId' "$T/out.log" || red "should explain the refusal: $(out)"
+[ ! -e "$T/app3/.swarm/changelog/thread.json" ] || red "thread.json must not be written"
+[ "$(jq length "$COMMENTS")" = 0 ] || red "nothing may be posted"
+[ ! -e "$T/app3/.swarm/changelog/2026-10-31.posted" ] || red "must not be marked posted"
+grep -q 'questions/null' "$T/out.log" && red "null id leaked into a URL"
+green "null questionId refused cleanly"
 
 echo
 green "All daily-changelog tests passed"
