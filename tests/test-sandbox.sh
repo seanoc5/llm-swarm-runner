@@ -554,7 +554,7 @@ fi
 
 # Headless Chrome must actually start under the same ~/.config/gh bind mount
 # sandbox.sh uses (#592): a root-owned ~/.config made it fail at launch.
-if command -v docker &>/dev/null; then
+if [ -S /var/run/docker.sock ]; then
     _cfg=$(mktemp -d)
     output=$(docker run --rm --network host --user "$(id -u):$(id -g)" \
         -v "$_cfg:/home/sandbox/.config/gh:ro" "$IMAGE" \
@@ -562,6 +562,8 @@ if command -v docker &>/dev/null; then
         && pass "headless Chrome starts with ~/.config/gh mounted (#592)" "$output" \
         || fail "headless Chrome starts with ~/.config/gh mounted (#592)" "$output"
     rm -rf "$_cfg"
+else
+    skip "headless Chrome ~/.config/gh check (no docker socket)"
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────
