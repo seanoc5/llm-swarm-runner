@@ -1943,6 +1943,8 @@
 #                           (and windows < MAX_TMUX_WINDOWS) and
 #                           available-issues.sh returns issues with no own
 #                           worktree here (the note counts night-ok ones).
+#                           Never fires at ready=0: night-ok issues are
+#                           already inside the available-issues.sh set.
 #                           Never while the coordinator is mid-turn, the swarm
 #                           is parked, dispatch is paused, an earlier note is
 #                           unprocessed, or a "Pending your approval:" question
@@ -3450,6 +3452,7 @@ AVAILABLE_ISSUES="${AVAILABLE_ISSUES:-$LLM_SWARM_DIR/scripts/available-issues.sh
 HOST_STATE_DIR="${HOST_STATE_DIR:-${TMPDIR:-/tmp}/llm-swarm-host-$(id -u)}"
 DISPATCH_PAUSE_FILE="$HOST_STATE_DIR/dispatch-paused"
 IDLE_CAPACITY_WAKE_FILE="$PROJECT_DIR/.swarm/idle-capacity-wake.last"
+DISPATCH_PAUSE_SEEN_FILE="$PROJECT_DIR/.swarm/dispatch-pause-seen"
 
 # log_event <category> <key=val>...
 # Writes one line: "<utc-iso8601>  <category>  k=v k=v ..."
@@ -10792,9 +10795,12 @@ capacity_free_slots() {
 # dispatchable_issue_counts: echoes "<ready> <night_ok>" — the mechanical
 # AVAILABLE set (available-issues.sh, the same script the startup checklist
 # runs) minus issues that already have an own worktree here (in progress,
-# including sidelined), and how many of those carry night-ok. The
-# coordinator's judgment filters (epics, open PRs) are not applied, so this
-# can overcount; that costs one wake per WATCH_IDLE_CAPACITY_WAKE_SECS.
+# including sidelined), and how many of those carry night-ok. night-ok issues
+# are already inside AVAILABLE (available-issues.sh only drops blocked,
+# deferred, awaiting-review, demo, other-owner and other-assignee issues, none
+# of which the swarm may take), so no separate night-ok query is made (#688).
+# The coordinator's judgment filters (epics, open PRs) are not applied, so
+# this can overcount; that costs one wake per WATCH_IDLE_CAPACITY_WAKE_SECS.
 dispatchable_issue_counts() {
     local json busy="" wt n
     json="$(cd "$PROJECT_DIR" && "$AVAILABLE_ISSUES" 2>/dev/null)" || return 1
@@ -10810,20 +10816,22 @@ dispatchable_issue_counts() {
 
 # dispatch_pause_wake_pass
 #
-# Remembers seeing an active dispatch pause; on the first tick after it is
+# Remembers (in $DISPATCH_PAUSE_SEEN_FILE, so a respawned watcher keeps it)
+# seeing an active dispatch pause; on the first tick after it is
 # gone (removed by nightly-full-tests.sh's trap, or expired) writes one
 # dispatch_pause_lifted note and rings. Dispatches refused with
 # cap.refused reason=dispatch_paused otherwise waited for the next human
 # turn — overnight, until morning.
-DISPATCH_PAUSE_SEEN=0
 dispatch_pause_wake_pass() {
     [ "$WATCH_DISPATCH_PAUSE_WAKE" = "1" ] || return 0
     if dispatch_pause_active; then
-        DISPATCH_PAUSE_SEEN=1
+        # On disk, not in a shell variable: a watcher respawned mid-pause
+        # (02:05 to ~03:40) must still see the lift (#688).
+        [ -e "$DISPATCH_PAUSE_SEEN_FILE" ] || : > "$DISPATCH_PAUSE_SEEN_FILE" 2>/dev/null || true
         return 0
     fi
-    [ "$DISPATCH_PAUSE_SEEN" = "1" ] || return 0
-    DISPATCH_PAUSE_SEEN=0
+    [ -e "$DISPATCH_PAUSE_SEEN_FILE" ] || return 0
+    rm -f "$DISPATCH_PAUSE_SEEN_FILE" 2>/dev/null || true
 
     local slots
     slots="$(capacity_free_slots)" || slots="?"
@@ -10882,16 +10890,17 @@ idle_capacity_wake_pass() {
     counts="$(dispatchable_issue_counts)" || { log_event capacity.idle_check "reason=available_issues_failed"; return 0; }
     read -r ready night_ok <<< "$counts"
     [[ "${ready:-}" =~ ^[0-9]+$ ]] || return 0
+    [[ "${night_ok:-}" =~ ^[0-9]+$ ]] || night_ok=0
     if [ "$ready" -eq 0 ]; then
         log_event capacity.idle_check "slots=$slots ready=0 reason=nothing_dispatchable"
         return 0
     fi
 
-    log_event capacity.idle_wake "slots=$slots ready=$ready night_ok=${night_ok:-0}"
+    log_event capacity.idle_wake "slots=$slots ready=$ready night_ok=$night_ok"
     printf '%s\n' "$now" > "$IDLE_CAPACITY_WAKE_FILE" 2>/dev/null || true
     if [ "$DRY_RUN" = "1" ]; then
         echo "[DRY] would write coord-inbox entry: trigger=idle_capacity slots=$slots ready=$ready"
-    elif coord_inbox_write idle_capacity "Idle capacity: $slots worker slot(s) free and $ready open issue(s) pass available-issues.sh with no worktree here (${night_ok:-0} labelled night-ok). Dispatch ready / night-ok work now (act, then report); if none of it is really dispatchable (epics, open PRs), say so in one line."; then
+    elif coord_inbox_write idle_capacity "Idle capacity: $slots worker slot(s) free and $ready open issue(s) pass available-issues.sh with no worktree here ($night_ok of them labelled night-ok). Dispatch ready / night-ok work now (act, then report); if none of it is really dispatchable (epics, open PRs), say so in one line."; then
         log_event coord.inbox.write "trigger=idle_capacity slots=$slots ready=$ready"
     else
         echo "[$(date +%T)] WARN: failed to write coord-inbox idle_capacity entry" >&2
