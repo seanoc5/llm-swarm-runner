@@ -41,7 +41,7 @@ state_file="$swarm/coordinator-state"
 events="$swarm/events.log"
 poll="${COORD_INBOX_WAITER_POLL_SECS:-2}"
 heartbeat="${COORD_INBOX_WAIT_HEARTBEAT_SECS:-600}"
-[[ "$heartbeat" =~ ^[0-9]+$ ]] || heartbeat=600
+if [[ "$heartbeat" =~ ^[0-9]+$ ]]; then heartbeat=$((10#$heartbeat)); else heartbeat=600; fi
 busy_max="${COORD_HOOK_BUSY_MAX_SECS:-3600}"
 # Must match coord-hook.sh and coordinator-watch.sh.
 template="${COORD_INBOX_NUDGE_TEMPLATE:-Inbox: %N item(s) in .swarm/coord-inbox/ — read and triage them (see prompts/coordinator.md \"Inbox\").}"
