@@ -542,6 +542,24 @@ if [ -z "$DEFAULT_REMOTE_REF" ]; then
     exit 2
 fi
 
+# 1b. HTTPS origin with an embedded token (issue #576). A PAT without
+#     workflow/Workflows-write permission is refused on any push touching
+#     .github/workflows/*. Warn the operator now and tell the worker (via the
+#     brief) about the SSH fallback. Only the derived SSH URL is printed; the
+#     token never is.
+PUSH_NOTE=""
+ORIGIN_URL="$(git remote get-url origin 2>/dev/null || true)"
+case "$ORIGIN_URL" in
+    https://*@github.com/*)
+        SSH_URL="git@github.com:$(printf '%s' "$ORIGIN_URL" | sed -E 's#^https://[^/]*@github\.com/##')"
+        echo "WARN: origin is HTTPS with an embedded token; pushes that change .github/workflows/* are refused unless the token has Workflows write (see docs/gh-token-scoping.md). Worker fallback: git push $SSH_URL HEAD" >&2
+        PUSH_NOTE="## Push note
+
+This project's origin is HTTPS with an embedded token. A push that creates or updates .github/workflows/* may be refused (\"refusing to allow a Personal Access Token to create or update workflow\"). If so, push over SSH instead: \`git push $SSH_URL HEAD\`, then continue normally. Do not park as blocked for this alone.
+"
+        ;;
+esac
+
 if [ "$WAKE" = "1" ] && [ ! -d "$WT/.swarm/tasks/inbox" ]; then
     echo "ERROR: --wake needs an existing worker queue at $WT/.swarm/tasks/inbox" >&2
     exit 2
@@ -739,6 +757,8 @@ TMP="$(mktemp -p "$INBOX" .tmp.XXXXXX.md)"
     printf '%s\n' "$ISSUE_TEXT"
     COMMENTS_SECTION="$(format_issue_comments "$ISSUE_COMMENTS_JSON" "${BRIEF_COMMENTS_MAX_CHARS:-8000}")"
     [ -n "$COMMENTS_SECTION" ] && printf '\n%s\n' "$COMMENTS_SECTION"
+    [ -n "$PUSH_NOTE" ] && printf '\n%s\n' "$PUSH_NOTE"
+    true
 } > "$TMP"
 # `mv -n` never clobbers; if a same-name brief appeared since the check, take
 # the next suffix.
