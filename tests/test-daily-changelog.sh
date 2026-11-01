@@ -239,5 +239,37 @@ grep -q 'no usable questionId' "$T/out.log" || red "should explain the refusal: 
 grep -q 'questions/null' "$T/out.log" && red "null id leaked into a URL"
 green "null questionId refused cleanly"
 
+heading "Test 10: merge.done lines written by swarm-merge.sh's own code tag only unattended merges"
+# Pull the real log_event and the real MERGE_MODE/merge.done lines out of
+# swarm-merge.sh and run them, so a changed field order or mode value there
+# breaks this test instead of silently dropping the "(auto-merged)" tags.
+MERGE_SH="$SCRIPT_DIR/../scripts/swarm-merge.sh"
+log_event_def="$(sed -n '/^log_event() {$/,/^}$/p' "$MERGE_SH")"
+mode_line="$(grep -F 'MERGE_MODE=operator' "$MERGE_SH" | head -1)"
+done_line="$(grep -F 'log_event merge.done' "$MERGE_SH" | head -1)"
+[ -n "$log_event_def" ] && [ -n "$mode_line" ] && [ -n "$done_line" ] \
+    || red "could not extract log_event / merge.done lines from swarm-merge.sh"
+mkdir -p "$T/app1/.swarm"
+EVENTS_LOG="$T/app1/.swarm/events.log"; : > "$EVENTS_LOG"
+emit_merge_done() {  # emit_merge_done PR AUTO_LOW AUTO_RATING
+    ( PR_NUM="$1" ISSUE=99 AUTO_LOW="$2" AUTO_RATING="$3" EVENTS_LOG="$EVENTS_LOG"
+      eval "$log_event_def"; eval "$mode_line"; eval "$done_line" )
+}
+emit_merge_done 10 1 low
+emit_merge_done 11 1 medium
+emit_merge_done 12 0 ""
+printf '2026-10-31T09:00:00Z  merge.gate      pr=13 issue=none mode=unattended-low\n' >> "$EVENTS_LOG"
+grep -c 'merge\.done' "$EVENTS_LOG" | grep -qx 3 || red "expected 3 merge.done lines: $(cat "$EVENTS_LOG")"
+grep -q 'merge\.done .*pr=10 .*mode=unattended-low' "$EVENTS_LOG" || red "fixture shape drifted: $(cat "$EVENTS_LOG")"
+run --dry-run --app app1 || red "dry run exit: $(out)"
+grep -qx -- '- 🟢 Fix: Stop the wealth chart at the horizon (auto-merged) — https://github.com/o/app1/pull/10' "$T/out.log" \
+    || red "unattended-low should be tagged: $(out)"
+grep -qx -- '- 🟡 New: Add sum-of-children check (auto-merged) — https://github.com/o/app1/pull/11' "$T/out.log" \
+    || red "unattended-medium should be tagged: $(out)"
+grep -qx -- '- ⚪ Change: Plain title with no prefix — https://github.com/o/app1/pull/12' "$T/out.log" \
+    || red "operator merge must not be tagged: $(out)"
+[ "$(grep -c '(auto-merged)' "$T/out.log")" = 2 ] || red "expected exactly 2 auto-merged tags: $(out)"
+green "merge.done contract: unattended-low/medium tagged, operator and non-merge.done lines not"
+
 echo
 green "All daily-changelog tests passed"
