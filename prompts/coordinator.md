@@ -13,8 +13,8 @@ Run these in order when asked to "Execute the Initial Startup Checklist":
 3. **Local state:** `git status`, `git branch`, `git worktree list`, `tmux list-windows`. Count alive workers (`iss-*` windows) and total windows.
 4. **Config from env** (read with `echo`, don't assume defaults): `MAX_WORKERS` (5), `MAX_TMUX_WINDOWS` (10), `TARGET_AVAILABLE` (10), `OWNER_LABELS` (empty), `INCLUDE_ASSIGNED_TO_OTHERS` (0).
 5. **Remote state:** `gh pr list`, compute AVAILABLE (below), report `OPEN=N AVAILABLE=M ALIVE=A/$MAX_WORKERS WINDOWS=W/$MAX_TMUX_WINDOWS`.
-6. **Housekeeping:** if `AVAILABLE < TARGET_AVAILABLE`, file new tmux-friendly issues in the `prompts/worker.md` § "Issue skeleton" shape — the worker gets only the issue body. If `AVAILABLE = 0` while `OPEN >> TARGET_AVAILABLE`, the backlog is stalled: say so and let the operator decide rather than piling on issues.
-7. **Provisioning:** `slots = min(MAX_WORKERS - alive, MAX_TMUX_WINDOWS - total_windows)`. If `slots <= 0`, see "Caps". Otherwise route up to `slots` AVAILABLE items (see "Issue Routing").
+6. **Housekeeping:** if `AVAILABLE < TARGET_AVAILABLE`, file new tmux-friendly issues in the `prompts/worker.md` § "Issue skeleton" shape — the worker gets only the issue body. If `AVAILABLE = 0` while `OPEN >> TARGET_AVAILABLE`, the backlog is stalled: dispatch the "Night queue", say so, and invent nothing beyond it.
+7. **Provisioning:** `slots = min(MAX_WORKERS - alive, MAX_TMUX_WINDOWS - total_windows)`. If `slots <= 0`, see "Caps". Otherwise route up to `slots` AVAILABLE items (see "Issue Routing") without asking.
 
 ## Computing AVAILABLE
 
@@ -33,6 +33,15 @@ Then skip, by judgment:
 Cache the result for this checklist run.
 
 **Overrides:** operator free-text like "grab anything" / "include others" → `INCLUDE_ASSIGNED_TO_OTHERS=1` for this run only (say so); "include the demo issues" → `EXTRA_STOP_LABELS=""` for this run only. A watcher wake carries no override intent. Sticky versions go in `<project>/.swarm/.env`.
+
+## Night queue
+
+Dispatching ready, unblocked work and filing follow-ups are act-then-report: never ask "start workers on #N?" or hold "filing N issues" for approval.
+
+- **Evening** (operator's last interaction, or AVAILABLE low): propose 5–10 self-contained, independently mergeable issues for one batch approval; label approved ones `night-ok` (`gh label create night-ok` if missing). Also re-check open `blocked` issues: if every named blocker (#N, or `owner/repo#N` in that repo) is closed/merged and no other condition is named (operator ruling, files, a person, an outside party), remove `blocked` and list them next message; else put them under "Needs you".
+- **Weekly** (first Monday evening pass, or `night-ok` + AVAILABLE low): propose epics to carve and their child issues as one yes/no; on yes, file them ("Issue skeleton") and label suitable ones `night-ok`.
+- **Overnight, or AVAILABLE = 0 with free slots:** dispatch `night-ok` issues without asking.
+- Inbox items `dispatch_pause_lifted` and `idle_capacity` mean: dispatch now, then report; if nothing really is dispatchable, say so in one line.
 
 ## Caps
 

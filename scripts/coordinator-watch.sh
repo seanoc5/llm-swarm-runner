@@ -1924,9 +1924,39 @@
 #                           Touch this file to suppress stall wakes without
 #                           losing the configured STALL_WAKE_SECS value —
 #                           the operator's park switch for a deliberately
-#                           idled swarm. Checked only by stall_wake_pass;
-#                           every other wake path (a worker actually
-#                           finishing something) is unaffected.
+#                           idled swarm. Checked by stall_wake_pass and
+#                           idle_capacity_wake_pass; every other wake path
+#                           (a worker actually finishing something) is
+#                           unaffected.
+#   WATCH_DISPATCH_PAUSE_WAKE=1
+#                           When nightly-full-tests.sh's host-wide
+#                           $HOST_STATE_DIR/dispatch-paused marker goes from
+#                           present to absent (or expires), write one
+#                           dispatch_pause_lifted coord-inbox note ("N slots
+#                           free, dispatch ready / night-ok work") and ring
+#                           through the usual hold gates. Without it, a
+#                           dispatch refused at 02:05 waited for the next
+#                           human turn. Skipped when no slot is free. 0=off.
+#   WATCH_IDLE_CAPACITY_WAKE_SECS=2700
+#                           At most one idle_capacity coord-inbox note per
+#                           this many seconds while alive workers < MAX_WORKERS
+#                           (and windows < MAX_TMUX_WINDOWS) and
+#                           available-issues.sh returns issues with no own
+#                           worktree here (the note counts night-ok ones).
+#                           Never while the coordinator is mid-turn, the swarm
+#                           is parked, dispatch is paused, an earlier note is
+#                           unprocessed, or a "Pending your approval:" question
+#                           has been open for less than this interval. 0=off.
+#   WATCH_IDLE_CAPACITY_CHECK_SECS=600
+#                           Minimum gap between available-issues.sh (gh)
+#                           queries for the check above.
+#   WATCH_CAPACITY_POLL_SECS=60
+#                           Tick of run_capacity_wake_loop, the own process
+#                           running both checks above.
+#   AVAILABLE_ISSUES=<path> Override path to available-issues.sh.
+#   HOST_STATE_DIR=${TMPDIR:-/tmp}/llm-swarm-host-<uid>
+#                           Where the dispatch-paused marker lives; same
+#                           default as provision-worker.sh.
 #
 # Watch backend (auto-detected):
 #   - inotifywait (preferred): instant response. Install with:
@@ -2053,7 +2083,11 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     COMPACT_COMPOSER_CHROME_PATTERN   (auto)  non-input UI chrome (recap/spinner-verb/"clear to save" hint) excluded from compact_last_pane_line's result (issue #436); see header comment
     STALL_WAKE_SECS     0         (issue #366) periodic quiet-period check-in wake for a fully idle swarm (0=off; suggested 3600); see header comment
     STALL_WAKE_PROMPT   (built-in) coord-inbox instructions written on a stall wake
-    SWARM_PARKED_FILE   (auto)    <project>/.swarm/parked — operator park switch, suppresses stall wakes only
+    SWARM_PARKED_FILE   (auto)    <project>/.swarm/parked — operator park switch, suppresses stall and idle-capacity wakes
+    WATCH_DISPATCH_PAUSE_WAKE 1   coord-inbox note + doorbell when the nightly dispatch-paused marker lifts (0=off)
+    WATCH_IDLE_CAPACITY_WAKE_SECS 2700  at most one idle-capacity note per interval while slots are free and issues are dispatchable (0=off); see header comment
+    WATCH_IDLE_CAPACITY_CHECK_SECS 600  minimum gap between available-issues.sh queries for the above
+    WATCH_CAPACITY_POLL_SECS 60   tick of the loop running both checks above
 
 DEFAULT WAKE_PROMPT (top-up mode)
     Coordinator triages outcomes, then refills workers toward MAX_WORKERS
@@ -2219,6 +2253,13 @@ EVENTS LOG
                            about to write the coord-inbox entry + attempt a wake — followed
                            by the same coord.inbox.write/coord.wake/coord.wake.defer* events
                            every other wake path logs, with trigger=stall
+      capacity.pause_lifted  the nightly dispatch-paused marker went away (slots=N;
+                           reason=no_free_slots when nothing was written) — followed by
+                           coord.inbox.write/coord.wake* with trigger=dispatch_pause_lifted
+      capacity.idle_wake   free slots and dispatchable issues (slots, ready, night_ok) —
+                           followed by coord.inbox.write/coord.wake* with trigger=idle_capacity
+      capacity.idle_check  the idle-capacity gh query found nothing to wake for
+                           (reason=nothing_dispatchable|available_issues_failed)
       watch.worktree_vanished  (issue #439) a tracked worktree disappeared with no
                            reap.worktree event logged for it since it was last
                            confirmed present (issue, dir, reason=no_reap_event) — the
@@ -3386,10 +3427,29 @@ STALL_WAKE_PROMPT="${STALL_WAKE_PROMPT:-Quiet-period check-in: no coordinator wa
 # SWARM_PARKED_FILE: the operator's park switch (issue #366's other
 # suppression knob besides STALL_WAKE_SECS=0) — touch this file to keep a
 # deliberately idled swarm silent without having to also flip
-# STALL_WAKE_SECS back to 0 and lose the value if left set. Checked only by
-# stall_wake_pass; every other wake path is unaffected, since a worker
+# STALL_WAKE_SECS back to 0 and lose the value if left set. Checked by
+# stall_wake_pass and idle_capacity_wake_pass; every other wake path is unaffected, since a worker
 # actually finishing something is never something to suppress.
 SWARM_PARKED_FILE="$PROJECT_DIR/.swarm/parked"
+
+# Night-queue wakes (dispatch pause lifted / idle capacity) — see the header
+# entries for WATCH_DISPATCH_PAUSE_WAKE and WATCH_IDLE_CAPACITY_WAKE_SECS.
+WATCH_DISPATCH_PAUSE_WAKE="${WATCH_DISPATCH_PAUSE_WAKE:-1}"
+WATCH_IDLE_CAPACITY_WAKE_SECS="${WATCH_IDLE_CAPACITY_WAKE_SECS:-2700}"
+WATCH_IDLE_CAPACITY_CHECK_SECS="${WATCH_IDLE_CAPACITY_CHECK_SECS:-600}"
+WATCH_CAPACITY_POLL_SECS="${WATCH_CAPACITY_POLL_SECS:-60}"
+for _v in WATCH_IDLE_CAPACITY_WAKE_SECS WATCH_IDLE_CAPACITY_CHECK_SECS WATCH_CAPACITY_POLL_SECS; do
+    if ! [[ "${!_v}" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: $_v must be a non-negative integer (got: ${!_v})" >&2
+        exit 1
+    fi
+done
+unset _v
+AVAILABLE_ISSUES="${AVAILABLE_ISSUES:-$LLM_SWARM_DIR/scripts/available-issues.sh}"
+# Same default as provision-worker.sh / nightly-full-tests.sh.
+HOST_STATE_DIR="${HOST_STATE_DIR:-${TMPDIR:-/tmp}/llm-swarm-host-$(id -u)}"
+DISPATCH_PAUSE_FILE="$HOST_STATE_DIR/dispatch-paused"
+IDLE_CAPACITY_WAKE_FILE="$PROJECT_DIR/.swarm/idle-capacity-wake.last"
 
 # log_event <category> <key=val>...
 # Writes one line: "<utc-iso8601>  <category>  k=v k=v ..."
@@ -3579,6 +3639,8 @@ worker-compact: $WORKER_AUTO_COMPACT$([ "$WORKER_AUTO_COMPACT" = "1" ] && echo "
 worker-deliver: $WORKER_AUTO_DELIVER$([ "$WORKER_AUTO_DELIVER" = "1" ] && echo " (parked-in-agent requeue.sh briefs released via /quit, end-timeout: ${WORKER_DELIVER_END_TIMEOUT_SECS}s, scan: ${WORKER_COMPACT_SCAN_SECS}s — issue #313)")
 stale-check:   $WATCHER_STALE_CHECK$([ "$WATCHER_STALE_CHECK" = "1" ] && echo " (every ${WATCHER_STALE_CHECK_SECS}s — issue #296; check anytime: coordinator-watch.sh --check-stale)")
 stall-wake:    $([ "$STALL_WAKE_SECS" -gt 0 ] && echo "${STALL_WAKE_SECS}s (park switch: $SWARM_PARKED_FILE — issue #366)" || echo "disabled")
+pause-lift-wake: $([ "$WATCH_DISPATCH_PAUSE_WAKE" = "1" ] && echo "on ($DISPATCH_PAUSE_FILE)" || echo "disabled")
+idle-capacity-wake: $([ "$WATCH_IDLE_CAPACITY_WAKE_SECS" -gt 0 ] && echo "${WATCH_IDLE_CAPACITY_WAKE_SECS}s (gh check every >=${WATCH_IDLE_CAPACITY_CHECK_SECS}s)" || echo "disabled")
 dry-run:       $DRY_RUN
 once:          $ONCE
 pane-echo:     $([ "$WATCHER_QUIET" = "1" ] && echo "disabled (WATCHER_QUIET=1)" || echo "enabled (WATCHER_QUIET=1 to silence)")
@@ -3641,6 +3703,7 @@ WORKER_COMPACT_TIMER_PID=""
 AUTO_COMPACT_POLL_TIMER_PID=""
 STALE_CHECK_PID=""
 STALL_WAKE_TIMER_PID=""
+CAPACITY_WAKE_TIMER_PID=""
 POLL_SLEEP_PID=""
 seen_file=""
 cleanup_on_exit() {
@@ -3649,6 +3712,7 @@ cleanup_on_exit() {
     [ -n "${AUTO_COMPACT_POLL_TIMER_PID:-}" ] && kill "$AUTO_COMPACT_POLL_TIMER_PID" 2>/dev/null || true
     [ -n "${STALE_CHECK_PID:-}" ] && kill "$STALE_CHECK_PID" 2>/dev/null || true
     [ -n "${STALL_WAKE_TIMER_PID:-}" ] && kill "$STALL_WAKE_TIMER_PID" 2>/dev/null || true
+    [ -n "${CAPACITY_WAKE_TIMER_PID:-}" ] && kill "$CAPACITY_WAKE_TIMER_PID" 2>/dev/null || true
     # run_poll's own backgrounded sleep (issues #570/#571) — only set while
     # a tick is actually asleep, so this is a no-op the rest of the time.
     [ -n "${POLL_SLEEP_PID:-}" ] && kill "$POLL_SLEEP_PID" 2>/dev/null || true
@@ -6454,6 +6518,50 @@ stall_flag_update() {
     fi
 }
 
+# coord_last_assistant_turn
+#
+# Sets COORD_LAST_ASSISTANT_EPOCH (0 when none found) and
+# COORD_LAST_ASSISTANT_TEXT from the newest assistant-role line across this
+# project's coordinator transcripts. Shared by coord_approval_flag_pass and
+# coord_pending_approval_age. Globals rather than stdout because the text is
+# multi-line. Returns 1 on missing jq or no transcript dir.
+COORD_LAST_ASSISTANT_EPOCH=0
+COORD_LAST_ASSISTANT_TEXT=""
+coord_last_assistant_turn() {
+    COORD_LAST_ASSISTANT_EPOCH=0
+    COORD_LAST_ASSISTANT_TEXT=""
+    [ "$HAVE_JQ" = "1" ] || return 1
+
+    local dir
+    dir="$(transcript_dir_for "$PROJECT_DIR")"
+    [ -d "$dir" ] || return 1
+
+    # Last assistant-role line of each candidate file (transcripts are
+    # append-only, so a file's OWN last assistant line is always its
+    # newest) — `tail -n 200` bounds the read cost regardless of how large
+    # a long-running session's transcript has grown, since the turn we
+    # want is always near the end of the file.
+    local f line best_epoch=0 best_text="" ts epoch text
+    for f in "$dir"/*.jsonl; do
+        [ -r "$f" ] || continue
+        line="$(tail -n 200 "$f" 2>/dev/null | LC_ALL=C grep -E '"role"[[:space:]]*:[[:space:]]*"assistant"' | tail -n 1)"
+        [ -n "$line" ] || continue
+        ts="$(printf '%s' "$line" | jq -r '.timestamp // empty' 2>/dev/null)" || continue
+        [ -n "$ts" ] || continue
+        epoch=$(date -u -d "$ts" +%s 2>/dev/null) || continue
+        [ "$epoch" -gt "$best_epoch" ] || continue
+        text="$(printf '%s' "$line" | jq -r '
+            .message.content as $c |
+            if ($c | type) == "string" then $c
+            elif ($c | type) == "array" then ([$c[] | select(.type == "text") | .text] | join("\n"))
+            else "" end' 2>/dev/null)" || text=""
+        best_epoch="$epoch"
+        best_text="$text"
+    done
+    COORD_LAST_ASSISTANT_EPOCH="$best_epoch"
+    COORD_LAST_ASSISTANT_TEXT="$best_text"
+}
+
 # coord_approval_flag_pass (issue #594)
 #
 # 🔔 on the "coordinator" window: set when the COORDINATOR's own last
@@ -6478,36 +6586,11 @@ stall_flag_update() {
 # file.
 coord_approval_flag_pass() {
     [ "$WATCH_WINDOW_FLAGS" = "1" ] || return 0
-    [ "$HAVE_JQ" = "1" ] || return 0
+    coord_last_assistant_turn || return 0
 
-    local dir
+    local dir best_epoch="$COORD_LAST_ASSISTANT_EPOCH"
     dir="$(transcript_dir_for "$PROJECT_DIR")"
-    [ -d "$dir" ] || return 0
-
-    # Last assistant-role line of each candidate file (transcripts are
-    # append-only, so a file's OWN last assistant line is always its
-    # newest) — `tail -n 200` bounds the read cost regardless of how large
-    # a long-running session's transcript has grown, since the turn we
-    # want is always near the end of the file.
-    local f line best_epoch=0 best_text="" ts epoch text
-    for f in "$dir"/*.jsonl; do
-        [ -r "$f" ] || continue
-        line="$(tail -n 200 "$f" 2>/dev/null | LC_ALL=C grep -E '"role"[[:space:]]*:[[:space:]]*"assistant"' | tail -n 1)"
-        [ -n "$line" ] || continue
-        ts="$(printf '%s' "$line" | jq -r '.timestamp // empty' 2>/dev/null)" || continue
-        [ -n "$ts" ] || continue
-        epoch=$(date -u -d "$ts" +%s 2>/dev/null) || continue
-        [ "$epoch" -gt "$best_epoch" ] || continue
-        text="$(printf '%s' "$line" | jq -r '
-            .message.content as $c |
-            if ($c | type) == "string" then $c
-            elif ($c | type) == "array" then ([$c[] | select(.type == "text") | .text] | join("\n"))
-            else "" end' 2>/dev/null)" || text=""
-        best_epoch="$epoch"
-        best_text="$text"
-    done
-
-    if [ "$best_epoch" -gt 0 ] && printf '%s' "$best_text" | grep -qF "Pending your approval:"; then
+    if [ "$best_epoch" -gt 0 ] && printf '%s' "$COORD_LAST_ASSISTANT_TEXT" | grep -qF "Pending your approval:"; then
         if human_typed_since "$dir" "$((best_epoch + 1))" "$(coord_paste_epochs)" "$COORD_HUMAN_PASTE_GRACE_SECS"; then
             clear_window_flag coordinator "🔔" "approval_answered"
         else
@@ -6516,6 +6599,21 @@ coord_approval_flag_pass() {
     else
         clear_window_flag coordinator "🔔" "no_pending_approval"
     fi
+}
+
+# coord_pending_approval_age
+#
+# Echoes how many seconds the coordinator's newest turn has been an open
+# "Pending your approval:" question (no human reply since), and returns 0.
+# Returns 1 when no such question is open, or it can't be read (no jq, no
+# transcript) — fail-open, same reading coord_approval_flag_pass uses.
+coord_pending_approval_age() {
+    coord_last_assistant_turn || return 1
+    [ "$COORD_LAST_ASSISTANT_EPOCH" -gt 0 ] || return 1
+    printf '%s' "$COORD_LAST_ASSISTANT_TEXT" | grep -qF "Pending your approval:" || return 1
+    human_typed_since "$(transcript_dir_for "$PROJECT_DIR")" "$((COORD_LAST_ASSISTANT_EPOCH + 1))" \
+        "$(coord_paste_epochs)" "$COORD_HUMAN_PASTE_GRACE_SECS" && return 1
+    printf '%s\n' $(( $(date +%s) - COORD_LAST_ASSISTANT_EPOCH ))
 }
 
 # run_watch_timer_loop
@@ -10616,6 +10714,201 @@ stall_wake_pass() {
     # follows the same rule and has no ONCE handling either.
 }
 
+# ── Night-queue wakes: dispatch pause lifted / idle capacity ────────────────
+#
+# Both write one coord-inbox note and ring through coord_ring_doorbell, so
+# the waiter / human / busy / debounce gates apply exactly as for every
+# other wake. Ticked from run_capacity_wake_loop (own process: a doorbell
+# can block on llm-start.sh, same reasoning as run_stall_wake_loop). See
+# WATCH_DISPATCH_PAUSE_WAKE / WATCH_IDLE_CAPACITY_WAKE_SECS in the header.
+
+# coord_ring_doorbell <trigger> [extra k=v for coord.wake]
+#
+# The gate-and-deliver half of stall_wake_pass, for a note already written
+# with coord_inbox_write: debounce → hold gate → llm-start.sh under
+# COORD_WAKE_LOCK. A held doorbell is marked pending for
+# coord_wake_hold_retry_pass, same as every other path.
+coord_ring_doorbell() {
+    local trigger="$1" extra="${2:-}" now
+    now=$(date +%s)
+    if wake_debounced; then
+        log_event coord.wake.defer "reason=debounce window=${DEBOUNCE_SECS}s trigger=$trigger"
+        coord_wake_hold_mark_pending debounce
+        return 0
+    fi
+    local hold_reason
+    hold_reason="$(coord_wake_hold_reason)"
+    if [ -n "$hold_reason" ]; then
+        log_event coord.wake.defer "reason=$hold_reason trigger=$trigger"
+        coord_wake_hold_mark_pending "$hold_reason"
+    else
+        maybe_auto_compact wake
+        local nudge
+        nudge="$(coord_inbox_nudge_text)"
+        log_event coord.wake "trigger=$trigger${extra:+ $extra}"
+        if [ "$DRY_RUN" = "1" ]; then
+            echo "[DRY] would: cd $PROJECT_DIR && NON_INTERACTIVE=1 $LLM_START \"$nudge\""
+        else
+            local wake_rc=0
+            ( flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 9 && cd "$PROJECT_DIR" && NON_INTERACTIVE=1 "$LLM_START" "$nudge" ) 9>"$COORD_WAKE_LOCK" || wake_rc=$?
+            if [ "$wake_rc" = "3" ]; then
+                log_event coord.wake.deferred "reason=composer_dirty trigger=$trigger"
+                coord_wake_set_pending "$nudge"
+            elif [ "$wake_rc" != "0" ]; then
+                log_event coord.wake.error "trigger=$trigger rc=$wake_rc"
+            else
+                coord_wake_clear_pending
+                coord_wake_hold_clear_pending
+            fi
+        fi
+    fi
+    wake_clock_set "$now"
+}
+
+# dispatch_pause_active: true while nightly-full-tests.sh's host-wide
+# dispatch-paused marker exists and hasn't expired (provision-worker.sh's
+# own reading: an expired or malformed marker no longer blocks).
+dispatch_pause_active() {
+    local until_epoch=""
+    [ -f "$DISPATCH_PAUSE_FILE" ] || return 1
+    read -r until_epoch _ < "$DISPATCH_PAUSE_FILE" 2>/dev/null || true
+    [[ "$until_epoch" =~ ^[0-9]+$ ]] && [ "$until_epoch" -gt "$(date +%s)" ]
+}
+
+# capacity_free_slots: echoes min(MAX_WORKERS - alive iss-* windows,
+# MAX_TMUX_WINDOWS - all windows) for this session; returns 1 when the
+# session isn't there to count.
+capacity_free_slots() {
+    local names alive total a b
+    names="$(tmux list-windows -t "$SESSION_NAME" -F '#{window_name}' 2>/dev/null)" || return 1
+    [ -n "$names" ] || return 1
+    total=$(printf '%s\n' "$names" | wc -l)
+    alive=$(printf '%s\n' "$names" | grep -c '^iss-' || true)
+    a=$(( ${MAX_WORKERS:-5} - alive ))
+    b=$(( ${MAX_TMUX_WINDOWS:-10} - total ))
+    printf '%s\n' $(( a < b ? a : b ))
+}
+
+# dispatchable_issue_counts: echoes "<ready> <night_ok>" — the mechanical
+# AVAILABLE set (available-issues.sh, the same script the startup checklist
+# runs) minus issues that already have an own worktree here (in progress,
+# including sidelined), and how many of those carry night-ok. The
+# coordinator's judgment filters (epics, open PRs) are not applied, so this
+# can overcount; that costs one wake per WATCH_IDLE_CAPACITY_WAKE_SECS.
+dispatchable_issue_counts() {
+    local json busy="" wt n
+    json="$(cd "$PROJECT_DIR" && "$AVAILABLE_ISSUES" 2>/dev/null)" || return 1
+    while IFS= read -r wt; do
+        n="$(basename "$wt" | sed -nE 's/^wt-issue-([0-9]+)$/\1/p')"
+        [ -n "$n" ] && busy="$busy,$n"
+    done < <(own_worktree_dirs_for_scan "$PROJECT_DIR" 2>/dev/null || true)
+    printf '%s' "$json" | jq -r --arg busy "${busy#,}" '
+        ($busy | split(",") | map(select(. != "") | tonumber)) as $b
+        | [.[] | select(.number as $n | $b | index($n) | not)]
+        | "\(length) \([.[] | select(any(.labels[]?; .name == "night-ok"))] | length)"' 2>/dev/null
+}
+
+# dispatch_pause_wake_pass
+#
+# Remembers seeing an active dispatch pause; on the first tick after it is
+# gone (removed by nightly-full-tests.sh's trap, or expired) writes one
+# dispatch_pause_lifted note and rings. Dispatches refused with
+# cap.refused reason=dispatch_paused otherwise waited for the next human
+# turn — overnight, until morning.
+DISPATCH_PAUSE_SEEN=0
+dispatch_pause_wake_pass() {
+    [ "$WATCH_DISPATCH_PAUSE_WAKE" = "1" ] || return 0
+    if dispatch_pause_active; then
+        DISPATCH_PAUSE_SEEN=1
+        return 0
+    fi
+    [ "$DISPATCH_PAUSE_SEEN" = "1" ] || return 0
+    DISPATCH_PAUSE_SEEN=0
+
+    local slots
+    slots="$(capacity_free_slots)" || slots="?"
+    if [ "$slots" != "?" ] && [ "$slots" -le 0 ]; then
+        log_event capacity.pause_lifted "slots=$slots reason=no_free_slots"
+        return 0
+    fi
+    log_event capacity.pause_lifted "slots=$slots"
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "[DRY] would write coord-inbox entry: trigger=dispatch_pause_lifted slots=$slots"
+    elif coord_inbox_write dispatch_pause_lifted "Nightly dispatch pause lifted; $slots worker slot(s) free. Dispatch ready AVAILABLE / night-ok issues now (act, then report) — including any provision-worker.sh call refused earlier with dispatch_paused."; then
+        log_event coord.inbox.write "trigger=dispatch_pause_lifted slots=$slots"
+        # This note already says "dispatch now"; don't stack an idle_capacity
+        # note on it in the same tick.
+        printf '%s\n' "$(date +%s)" > "$IDLE_CAPACITY_WAKE_FILE" 2>/dev/null || true
+    else
+        echo "[$(date +%T)] WARN: failed to write coord-inbox dispatch_pause_lifted entry" >&2
+        return 0
+    fi
+    coord_ring_doorbell dispatch_pause_lifted "slots=$slots"
+}
+
+# idle_capacity_wake_pass
+#
+# At most one idle_capacity note per WATCH_IDLE_CAPACITY_WAKE_SECS (clock
+# on disk, so restarts don't re-fire) when slots are free and dispatchable
+# issues exist. Cheapest checks first; the gh query runs last and at most
+# every WATCH_IDLE_CAPACITY_CHECK_SECS. Skipped (no note at all, not just
+# a held doorbell) while: the swarm is parked, dispatch is paused, the
+# coordinator is mid-turn, an earlier idle_capacity note is still
+# unprocessed, or a "Pending your approval:" question has been open for
+# less than the interval — an unanswered question past that age no longer
+# holds the swarm idle.
+LAST_IDLE_CAPACITY_CHECK=0
+idle_capacity_wake_pass() {
+    [ "$WATCH_IDLE_CAPACITY_WAKE_SECS" -gt 0 ] || return 0
+    [ -e "$SWARM_PARKED_FILE" ] && return 0
+    dispatch_pause_active && return 0
+
+    local now last slots age counts ready night_ok
+    now=$(date +%s)
+    last="$(cat "$IDLE_CAPACITY_WAKE_FILE" 2>/dev/null)" || last=0
+    [[ "$last" =~ ^[0-9]+$ ]] || last=0
+    [ $((now - last)) -ge "$WATCH_IDLE_CAPACITY_WAKE_SECS" ] || return 0
+    [ $((now - LAST_IDLE_CAPACITY_CHECK)) -ge "$WATCH_IDLE_CAPACITY_CHECK_SECS" ] || return 0
+
+    slots="$(capacity_free_slots)" || return 0
+    [ "$slots" -gt 0 ] || return 0
+    coord_wake_pane_busy && return 0
+    if age="$(coord_pending_approval_age)" && [ "$age" -lt "$WATCH_IDLE_CAPACITY_WAKE_SECS" ]; then
+        return 0
+    fi
+    compgen -G "$COORD_INBOX_DIR/*-idle_capacity-*.md" >/dev/null && return 0
+
+    LAST_IDLE_CAPACITY_CHECK=$now
+    counts="$(dispatchable_issue_counts)" || { log_event capacity.idle_check "reason=available_issues_failed"; return 0; }
+    read -r ready night_ok <<< "$counts"
+    [[ "${ready:-}" =~ ^[0-9]+$ ]] || return 0
+    if [ "$ready" -eq 0 ]; then
+        log_event capacity.idle_check "slots=$slots ready=0 reason=nothing_dispatchable"
+        return 0
+    fi
+
+    log_event capacity.idle_wake "slots=$slots ready=$ready night_ok=${night_ok:-0}"
+    printf '%s\n' "$now" > "$IDLE_CAPACITY_WAKE_FILE" 2>/dev/null || true
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "[DRY] would write coord-inbox entry: trigger=idle_capacity slots=$slots ready=$ready"
+    elif coord_inbox_write idle_capacity "Idle capacity: $slots worker slot(s) free and $ready open issue(s) pass available-issues.sh with no worktree here (${night_ok:-0} labelled night-ok). Dispatch ready / night-ok work now (act, then report); if none of it is really dispatchable (epics, open PRs), say so in one line."; then
+        log_event coord.inbox.write "trigger=idle_capacity slots=$slots ready=$ready"
+    else
+        echo "[$(date +%T)] WARN: failed to write coord-inbox idle_capacity entry" >&2
+        return 0
+    fi
+    coord_ring_doorbell idle_capacity "slots=$slots ready=$ready"
+}
+
+# run_capacity_wake_loop: both passes above, every WATCH_CAPACITY_POLL_SECS.
+run_capacity_wake_loop() {
+    while true; do
+        sleep "$WATCH_CAPACITY_POLL_SECS"
+        dispatch_pause_wake_pass || true
+        idle_capacity_wake_pass || true
+    done
+}
+
 # ---------------------------------------------------------------------------
 # Backend: inotify
 # ---------------------------------------------------------------------------
@@ -10937,6 +11230,12 @@ if [ "$STALL_WAKE_SECS" -gt 0 ]; then
     run_stall_wake_loop &
     STALL_WAKE_TIMER_PID=$!
     log_event watch.timer.start "stall_wake_secs=$STALL_WAKE_SECS"
+fi
+# Night-queue wakes: own process, started only when either check is on.
+if [ "$WATCH_CAPACITY_POLL_SECS" -gt 0 ] && { [ "$WATCH_DISPATCH_PAUSE_WAKE" = "1" ] || [ "$WATCH_IDLE_CAPACITY_WAKE_SECS" -gt 0 ]; }; then
+    run_capacity_wake_loop &
+    CAPACITY_WAKE_TIMER_PID=$!
+    log_event watch.timer.start "capacity_poll_secs=$WATCH_CAPACITY_POLL_SECS dispatch_pause_wake=$WATCH_DISPATCH_PAUSE_WAKE idle_capacity_wake_secs=$WATCH_IDLE_CAPACITY_WAKE_SECS"
 fi
 # issue #296 — unconditional (subject only to its own WATCHER_STALE_CHECK
 # flag), unlike the three loops above which only start when their own
