@@ -552,6 +552,18 @@ else
     skip "SANDBOX_BUILD_TMPFS checks (no docker socket)"
 fi
 
+# Headless Chrome must actually start under the same ~/.config/gh bind mount
+# sandbox.sh uses (#592): a root-owned ~/.config made it fail at launch.
+if command -v docker &>/dev/null; then
+    _cfg=$(mktemp -d)
+    output=$(docker run --rm --network host --user "$(id -u):$(id -g)" \
+        -v "$_cfg:/home/sandbox/.config/gh:ro" "$IMAGE" \
+        bash -c '[ -w $HOME/.config ] && timeout 60 google-chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --dump-dom "data:text/html,<p>hi</p>" 2>/dev/null | grep -q "<p>hi</p>"' 2>&1) \
+        && pass "headless Chrome starts with ~/.config/gh mounted (#592)" "$output" \
+        || fail "headless Chrome starts with ~/.config/gh mounted (#592)" "$output"
+    rm -rf "$_cfg"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""

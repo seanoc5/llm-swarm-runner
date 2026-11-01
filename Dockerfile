@@ -184,7 +184,12 @@ ENV NPM_CONFIG_PREFIX=/home/sandbox/.npm-global
 ENV PATH="/home/sandbox/.npm-global/bin:/home/sandbox/.local/bin:${PATH}"
 
 # Pre-create cache directories and set permissions
-RUN mkdir -p /home/sandbox/.npm /home/sandbox/.cache/pip /home/sandbox/.cache/uv \
+# ~/.config MUST exist and be sandbox-owned in the image (#592). sandbox.sh
+# bind-mounts ~/.config/gh into it; if the parent is missing, Docker creates it
+# root-owned at container start, and headless Chrome then cannot create
+# ~/.config/google-chrome (crashpad database): it exits with "Failed to create
+# headless user data directory container" or crashes in chrome_crashpad_handler.
+RUN mkdir -p /home/sandbox/.npm /home/sandbox/.cache/pip /home/sandbox/.cache/uv /home/sandbox/.config/gh \
     && chown -R sandbox:sandbox /home/sandbox
 
 # Add aliases for LLM CLIs
