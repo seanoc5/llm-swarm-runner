@@ -770,18 +770,31 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
               # correctness/security/data loss/schema) are accepted only with
               # a real follow-up ISSUE (not a PR — `gh issue view` also
               # resolves PR numbers, hence the /issues/ url check).
-              FOLLOWUP_URL="$(gh issue view "$IND_FOLLOWUP" --json url --jq .url 2>/dev/null || true)"
-              if [[ "$FOLLOWUP_URL" == */issues/"$IND_FOLLOWUP" ]]; then
+              # It must also be OPEN and mention this PR (#687), so an old,
+              # closed or unrelated issue can't stand in for the follow-up.
+              FOLLOWUP_JSON="$(gh issue view "$IND_FOLLOWUP" --json url,state,title,body,labels 2>/dev/null || true)"
+              FOLLOWUP_URL="$(jq -r '.url // ""' <<<"$FOLLOWUP_JSON" 2>/dev/null || true)"
+              FOLLOWUP_STATE="$(jq -r '.state // ""' <<<"$FOLLOWUP_JSON" 2>/dev/null || true)"
+              FOLLOWUP_REASON=""
+              if [[ "$FOLLOWUP_URL" != */issues/"$IND_FOLLOWUP" ]]; then
+                FOLLOWUP_REASON="not-an-issue"
+                echo "       follow-up #$IND_FOLLOWUP is not an issue in this repo (gh issue view returned '${FOLLOWUP_URL:-nothing}')." >&2
+              elif [ "$FOLLOWUP_STATE" != OPEN ]; then
+                FOLLOWUP_REASON="not-open"
+                echo "       follow-up #$IND_FOLLOWUP is not OPEN (state '${FOLLOWUP_STATE:-unknown}')." >&2
+              elif ! jq -e --arg re "#$PR_NUM([^0-9]|\$)" --arg lb "from-pr-$PR_NUM" '(((.title // "") + "\n" + (.body // "")) | test($re)) or any(.labels[]?; .name == $lb)' <<<"$FOLLOWUP_JSON" >/dev/null 2>&1; then
+                FOLLOWUP_REASON="no-pr-reference"
+                echo "       follow-up #$IND_FOLLOWUP does not mention #$PR_NUM in its title or body and lacks label from-pr-$PR_NUM." >&2
+              fi
+              if [ -z "$FOLLOWUP_REASON" ]; then
                 GATE9_OK=1
                 echo "       $(c_amber "auto-medium gate 9: APPROVE_WITH_CAVEATS accepted — caveats recorded non-blocking, follow-up #$IND_FOLLOWUP")"
                 log_event merge.gate "pr=$PR_NUM gate=9-independent-review result=caveats-nonblocking followup=$IND_FOLLOWUP head=$HEAD_NOW action=proceed"
-              else
-                echo "       follow-up #$IND_FOLLOWUP is not an issue in this repo (gh issue view returned '${FOLLOWUP_URL:-nothing}')." >&2
               fi
             fi
           fi
           if [ "$GATE9_OK" != 1 ]; then
-            log_event merge.gate "pr=$PR_NUM gate=9-independent-review result=refused verdict=${IND_VERDICT:-none} caveats=${IND_CAVEATS:-none} followup=${IND_FOLLOWUP:-none} action=refuse-auto-medium"
+            log_event merge.gate "pr=$PR_NUM gate=9-independent-review result=refused verdict=${IND_VERDICT:-none} caveats=${IND_CAVEATS:-none} followup=${IND_FOLLOWUP:-none} followup_reason=${FOLLOWUP_REASON:-none} action=refuse-auto-medium"
             echo "ERROR: PR #$PR_NUM refused by --auto-medium Gate 9 (independent APPROVE on head)." >&2
             echo "       Latest coordinator/operator review: '${IND_MARKER:-<none>}'; current head: '${HEAD_NOW:-<unreadable>}'." >&2
             echo "       Needs a bare APPROVE on this exact head (self-review-pr.sh $PR_NUM --post --force --actor coordinator)," >&2

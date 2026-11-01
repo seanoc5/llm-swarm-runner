@@ -229,7 +229,7 @@ case "$1 $2" in
             *"--json url"*)
                 # Gate 9 follow-up check: only numbers in GH_ISSUES exist.
                 if [[ " ${GH_ISSUES:-} " == *" $pr_num "* ]]; then
-                    echo "https://github.com/o/r/issues/$pr_num"; exit 0
+                    jq -n -c --arg u "https://github.com/o/r/issues/$pr_num" --arg s "${GH_ISSUE_STATE:-OPEN}" --arg b "${GH_ISSUE_BODY-Follow-up to #501}" --arg l "${GH_ISSUE_LABELS:-}" '{url:$u,state:$s,title:"follow-up",body:$b,labels:($l|split(",")|map(select(length>0)|{name:.}))}'; exit 0
                 fi
                 echo "GraphQL: Could not resolve to an issue or pull request with the number of $pr_num." >&2
                 exit 1 ;;
@@ -809,6 +809,43 @@ run_medium GH_ISSUES=
 [ "$RC" -ne 0 ] || red "a follow-up that isn't a real issue must not satisfy Gate 9"
 echo "$OUT" | grep -q "Gate 9" || red "refusal must name Gate 9 (output: $OUT)"
 green "Gate 9 checks the follow-up issue exists"
+
+heading "Test M12b: follow-up issue is closed → Gate 9"
+set_reviews deadbeef "$NB"
+rm -f "$EVENTS_LOG"
+run_medium GH_ISSUES=900 GH_ISSUE_STATE=CLOSED
+[ "$RC" -ne 0 ] || red "a closed follow-up must not satisfy Gate 9"
+echo "$OUT" | grep -q "Gate 9" || red "refusal must name Gate 9 (output: $OUT)"
+echo "$OUT" | grep -q "not OPEN" || red "refusal must give the reason (output: $OUT)"
+grep -q "gate=9-independent-review result=refused.*followup_reason=not-open.*action=refuse-auto-medium" "$EVENTS_LOG" \
+    || red "merge.gate refusal event lacks the reason. events: $(cat "$EVENTS_LOG" 2>/dev/null)"
+grep -q "pr merge" "$GH_LOG" && red "gh pr merge was called with a closed follow-up"
+green "Gate 9 refuses a closed follow-up and logs the reason"
+
+heading "Test M12c: follow-up issue does not reference the PR → Gate 9"
+set_reviews deadbeef "$NB"
+rm -f "$EVENTS_LOG"
+run_medium GH_ISSUES=900 GH_ISSUE_BODY="Old issue; mentions #5010 and #50 only"
+[ "$RC" -ne 0 ] || red "an unrelated follow-up must not satisfy Gate 9"
+echo "$OUT" | grep -q "does not mention #501" || red "refusal must give the reason (output: $OUT)"
+grep -q "gate=9-independent-review result=refused.*followup_reason=no-pr-reference.*action=refuse-auto-medium" "$EVENTS_LOG" \
+    || red "merge.gate refusal event lacks the reason. events: $(cat "$EVENTS_LOG" 2>/dev/null)"
+grep -q "pr merge" "$GH_LOG" && red "gh pr merge was called with an unrelated follow-up"
+green "Gate 9 refuses an unrelated follow-up and logs the reason"
+
+heading "Test M12d: from-pr-N label without #N text → Gate 9 passes if OPEN, refused if CLOSED"
+set_reviews deadbeef "$NB"
+rm -f "$EVENTS_LOG"
+run_medium GH_ISSUES=900 GH_ISSUE_BODY="Unrelated text" GH_ISSUE_LABELS="swarm-followup,from-pr-501" GH_ISSUE_STATE=CLOSED
+[ "$RC" -ne 0 ] || red "a CLOSED from-pr-501 follow-up must not satisfy Gate 9"
+echo "$OUT" | grep -q "not OPEN" || red "refusal must say not OPEN (output: $OUT)"
+set_reviews deadbeef "$NB"
+run_medium GH_ISSUES=900 GH_ISSUE_BODY="Unrelated text" GH_ISSUE_LABELS="swarm-followup,from-pr-501"
+[ "$RC" -eq 0 ] || red "an OPEN from-pr-501 follow-up with no #501 text should pass Gate 9 (rc=$RC, output: $OUT)"
+set_reviews deadbeef "$NB"
+run_medium GH_ISSUES=900 GH_ISSUE_BODY="Unrelated text" GH_ISSUE_LABELS="from-pr-5010"
+[ "$RC" -ne 0 ] || red "label from-pr-5010 must not match PR 501"
+green "Gate 9 accepts an open from-pr-N-labelled follow-up, refuses closed or other-PR labels"
 
 heading "Test M13: non-blocking caveats recorded on an older head → Gate 9"
 set_reviews deadbeef '<!-- SWARM_SELF_REVIEW: APPROVE_WITH_CAVEATS actor=coordinator head=0ldc0de caveats=nonblocking followup=900 -->'

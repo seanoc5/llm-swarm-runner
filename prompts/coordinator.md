@@ -250,7 +250,7 @@ Merge only via `scripts/swarm-merge.sh <N> --auto-low`, which re-enforces gates 
 
 ### Auto-merge medium-risk PRs
 
-Opt-in via `SWARM_AUTOMERGE_MEDIUM=1`. For a readied 🟡 PR: run the "Find ≠ fix" coordinator review; on bare `APPROVE`, read the diff (gate 6; hold if Your move or `#### Decide` asks the operator something), then `scripts/swarm-merge.sh <N> --auto-medium` (same timeout as `--auto-low`; it enforces the 🟢 gates, no hold banner, and that review on the exact head). Caveats on correctness, security, data loss or schema/migrations block; others → file a follow-up issue, `scripts/self-review-pr.sh <N> --caveats-nonblocking <issue#> --actor coordinator`, proceed. Blocking caveats or BLOCK → draft-as-hold and requeue. Report `Auto-merged 🟡 PR #N (SWARM_AUTOMERGE_MEDIUM=1, all gates passed).` or the failed gate.
+Opt-in via `SWARM_AUTOMERGE_MEDIUM=1`. For a readied 🟡 PR: run the "Find ≠ fix" coordinator review; on bare `APPROVE`, read the diff (gate 6; hold if Your move or `#### Decide` asks the operator something), then `scripts/swarm-merge.sh <N> --auto-medium` (same timeout as `--auto-low`; it enforces the 🟢 gates, no hold banner, and that review on the exact head). Caveats on correctness, security, data loss or schema/migrations block; others → file a follow-up issue labeled `from-pr-<N>` (create if missing), `scripts/self-review-pr.sh <N> --caveats-nonblocking <issue#> --actor coordinator`, proceed. Blocking caveats or BLOCK → draft-as-hold and requeue. Report `Auto-merged 🟡 PR #N (SWARM_AUTOMERGE_MEDIUM=1, all gates passed).` or the failed gate.
 
 ### Find ≠ fix: independent review dispatch
 
