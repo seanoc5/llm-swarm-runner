@@ -68,8 +68,6 @@ EOF
 chmod +x "$AVAILABLE_ISSUES"
 export AVAILABLE_JSON="$T/available.json"
 echo '[{"number":10,"labels":[{"name":"night-ok"}]},{"number":11,"labels":[{"name":"night-ok"}]},{"number":12,"labels":[]}]' > "$AVAILABLE_JSON"
-export NIGHT_JSON="$T/night.json"; echo "[]" > "$NIGHT_JSON"
-gh() { cat "$NIGHT_JSON"; }
 
 notes() { find "$COORD_INBOX_DIR" -maxdepth 1 -name "*-$1-*.md" 2>/dev/null | wc -l | tr -d ' '; }
 rings() { [ -f "$RANG" ] && wc -l < "$RANG" | tr -d ' ' || echo 0; }
@@ -151,7 +149,7 @@ coord_pending_approval_age() { [ -n "$APPROVAL_AGE" ] && echo "$APPROVAL_AGE"; }
 reset
 idle_capacity_wake_pass
 check "free slots + dispatchable issues: one idle_capacity note" "1" "$(notes idle_capacity)"
-grep -q "2 open issue(s).*(1 labelled night-ok" "$COORD_INBOX_DIR"/*-idle_capacity-*.md && got=yes || got=no
+grep -q "2 open issue(s).*(1 of them labelled night-ok" "$COORD_INBOX_DIR"/*-idle_capacity-*.md && got=yes || got=no
 check "note counts ready and night-ok issues" "yes" "$got"
 check "idle capacity rings the doorbell" "1" "$(rings)"
 mv "$COORD_INBOX_DIR"/*-idle_capacity-*.md "$T/"
@@ -200,31 +198,49 @@ check "nothing dispatchable: no note" "0" "$(notes idle_capacity)"
 grep -q "capacity.idle_check slots=2 ready=0 reason=nothing_dispatchable" "$EV" && got=yes || got=no
 check "nothing dispatchable: logged" "yes" "$got"
 
-# AVAILABLE = 0 (available-issues.sh returns nothing) but a night-ok issue
-# exists outside that set (#688): the wake must still fire.
-reset; echo '[]' > "$AVAILABLE_JSON"
-echo '[{"number":20,"labels":[{"name":"night-ok"}]}]' > "$NIGHT_JSON"
-idle_capacity_wake_pass
-check "AVAILABLE=0 + one night-ok issue + free slot: wake note" "1" "$(notes idle_capacity)"
-grep -q "0 open issue(s).*(1 labelled night-ok" "$COORD_INBOX_DIR"/*-idle_capacity-*.md && got=yes || got=no
-check "note counts ready=0, night_ok=1" "yes" "$got"
-grep -q "capacity.idle_wake slots=2 ready=0 night_ok=1" "$EV" && got=yes || got=no
-check "idle_wake logged with night_ok=1" "yes" "$got"
+# night-ok issues are already inside AVAILABLE (#688), so ready=0 must never
+# wake. Drive the REAL available-issues.sh through a gh stub that applies its
+# -label:/assignee filters: a demo-labelled night-ok issue and a night-ok issue
+# assigned to someone else are exactly the ones it drops and the swarm must not
+# take, so neither may produce an idle_capacity note.
+GHBIN="$T/ghbin"; mkdir -p "$GHBIN"
+export GH_ISSUES_JSON="$T/gh-issues.json"
+cat > "$GHBIN/gh" <<'GHEOF'
+#!/bin/bash
+if [ "$1 $2" = "api user" ]; then echo me; exit 0; fi
+assignee="" search=""
+while [ $# -gt 0 ]; do
+    case "$1" in --assignee) assignee="$2"; shift;; --search) search="$2"; shift;; esac
+    shift
+done
+jq --arg a "$assignee" --arg s "$search" '
+    ($s | split(" ") | map(select(startswith("-label:")) | ltrimstr("-label:"))) as $stop
+    | [.[] | select(([.labels[].name] | any(. as $l | $stop | index($l))) | not)
+           | select(if $a != "" then any(.assignees[]?; .login == $a)
+                    elif ($s | contains("no:assignee")) then (.assignees | length) == 0
+                    else true end)]' "$GH_ISSUES_JSON"
+GHEOF
+chmod +x "$GHBIN/gh"
+SAVED_AVAILABLE_ISSUES="$AVAILABLE_ISSUES"; SAVED_PATH="$PATH"
+AVAILABLE_ISSUES="$(cd "$(dirname "$0")/.." && pwd)/scripts/available-issues.sh"
+PATH="$GHBIN:$PATH"
 
-reset; echo '[]' > "$AVAILABLE_JSON"
-echo '[{"number":11,"labels":[{"name":"night-ok"}]}]' > "$NIGHT_JSON"
+reset
+echo '[{"number":30,"labels":[{"name":"night-ok"},{"name":"demo"}],"assignees":[]},
+      {"number":31,"labels":[{"name":"night-ok"}],"assignees":[{"login":"someone-else"}]}]' > "$GH_ISSUES_JSON"
 idle_capacity_wake_pass
-check "night-ok issue that already has a worktree here: no note" "0" "$(notes idle_capacity)"
+check "demo night-ok + other-assignee night-ok only: no wake note" "0" "$(notes idle_capacity)"
+grep -q "capacity.idle_check slots=2 ready=0 reason=nothing_dispatchable" "$EV" && got=yes || got=no
+check "demo/other-assignee night-ok: logged as nothing_dispatchable" "yes" "$got"
 
-reset; echo '[{"number":10,"labels":[{"name":"night-ok"}]}]' > "$AVAILABLE_JSON"
-echo '[{"number":10,"labels":[{"name":"night-ok"}]}]' > "$NIGHT_JSON"
-check "night-ok issue in both sets is counted once" "1 1" "$(dispatchable_issue_counts)"
-
-reset; echo '[]' > "$AVAILABLE_JSON"
-echo 'not json' > "$NIGHT_JSON"
+reset
+echo '[{"number":30,"labels":[{"name":"night-ok"},{"name":"demo"}],"assignees":[]},
+      {"number":32,"labels":[{"name":"night-ok"}],"assignees":[]}]' > "$GH_ISSUES_JSON"
+check "an ordinary night-ok issue is counted inside ready" "1 1" "$(dispatchable_issue_counts)"
 idle_capacity_wake_pass
-check "garbled night-ok query counts as none: no note" "0" "$(notes idle_capacity)"
-echo "[]" > "$NIGHT_JSON"
+check "ordinary night-ok issue: one wake note" "1" "$(notes idle_capacity)"
+
+PATH="$SAVED_PATH"; AVAILABLE_ISSUES="$SAVED_AVAILABLE_ISSUES"
 
 reset; WATCH_IDLE_CAPACITY_WAKE_SECS=0
 echo '[{"number":12,"labels":[]}]' > "$AVAILABLE_JSON"

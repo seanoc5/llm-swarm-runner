@@ -1942,10 +1942,9 @@
 #                           this many seconds while alive workers < MAX_WORKERS
 #                           (and windows < MAX_TMUX_WINDOWS) and
 #                           available-issues.sh returns issues with no own
-#                           worktree here, or open night-ok issues (no
-#                           blocked/deferred/awaiting-review label) with no
-#                           own worktree here even when available-issues.sh
-#                           excludes them (the note counts night-ok ones).
+#                           worktree here (the note counts night-ok ones).
+#                           Never fires at ready=0: night-ok issues are
+#                           already inside the available-issues.sh set.
 #                           Never while the coordinator is mid-turn, the swarm
 #                           is parked, dispatch is paused, an earlier note is
 #                           unprocessed, or a "Pending your approval:" question
@@ -10793,33 +10792,26 @@ capacity_free_slots() {
     printf '%s\n' $(( a < b ? a : b ))
 }
 
-# dispatchable_issue_counts: echoes "<ready> <night_ok>". <ready> is the
-# mechanical AVAILABLE set (available-issues.sh, the same script the startup
-# checklist runs) minus issues that already have an own worktree here (in
-# progress, including sidelined). <night_ok> counts night-ok issues from that
-# set UNION a separate gh query for open night-ok issues without a hard stop
-# label, because the coordinator dispatches night-ok work even when AVAILABLE
-# is 0 (#688); a failed night-ok query counts as none. The coordinator's
-# judgment filters (epics, open PRs) are not applied, so this can overcount;
-# that costs one wake per WATCH_IDLE_CAPACITY_WAKE_SECS.
+# dispatchable_issue_counts: echoes "<ready> <night_ok>" — the mechanical
+# AVAILABLE set (available-issues.sh, the same script the startup checklist
+# runs) minus issues that already have an own worktree here (in progress,
+# including sidelined), and how many of those carry night-ok. night-ok issues
+# are already inside AVAILABLE (available-issues.sh only drops blocked,
+# deferred, awaiting-review, demo, other-owner and other-assignee issues, none
+# of which the swarm may take), so no separate night-ok query is made (#688).
+# The coordinator's judgment filters (epics, open PRs) are not applied, so
+# this can overcount; that costs one wake per WATCH_IDLE_CAPACITY_WAKE_SECS.
 dispatchable_issue_counts() {
-    local json night_json busy="" wt n
+    local json busy="" wt n
     json="$(cd "$PROJECT_DIR" && "$AVAILABLE_ISSUES" 2>/dev/null)" || return 1
-    night_json="$(cd "$PROJECT_DIR" && gh issue list --state open --label night-ok \
-        --search "-label:blocked -label:deferred -label:awaiting-review" \
-        --limit 100 --json number,labels 2>/dev/null)" || night_json="[]"
-    printf '%s' "$night_json" | jq -e 'type == "array"' >/dev/null 2>&1 || night_json="[]"
     while IFS= read -r wt; do
         n="$(basename "$wt" | sed -nE 's/^wt-issue-([0-9]+)$/\1/p')"
         [ -n "$n" ] && busy="$busy,$n"
     done < <(own_worktree_dirs_for_scan "$PROJECT_DIR" 2>/dev/null || true)
-    jq -nr --argjson a "$json" --argjson extra "$night_json" --arg busy "${busy#,}" '
+    printf '%s' "$json" | jq -r --arg busy "${busy#,}" '
         ($busy | split(",") | map(select(. != "") | tonumber)) as $b
-        | def free: select(.number as $n | $b | index($n) | not);
-        [$a[] | free] as $ready
-        | ([$a[], $extra[]] | unique_by(.number)
-           | [.[] | free | select(any(.labels[]?; .name == "night-ok"))]) as $night
-        | "\($ready | length) \($night | length)"' 2>/dev/null
+        | [.[] | select(.number as $n | $b | index($n) | not)]
+        | "\(length) \([.[] | select(any(.labels[]?; .name == "night-ok"))] | length)"' 2>/dev/null
 }
 
 # dispatch_pause_wake_pass
@@ -10899,7 +10891,7 @@ idle_capacity_wake_pass() {
     read -r ready night_ok <<< "$counts"
     [[ "${ready:-}" =~ ^[0-9]+$ ]] || return 0
     [[ "${night_ok:-}" =~ ^[0-9]+$ ]] || night_ok=0
-    if [ "$ready" -eq 0 ] && [ "$night_ok" -eq 0 ]; then
+    if [ "$ready" -eq 0 ]; then
         log_event capacity.idle_check "slots=$slots ready=0 reason=nothing_dispatchable"
         return 0
     fi
@@ -10908,7 +10900,7 @@ idle_capacity_wake_pass() {
     printf '%s\n' "$now" > "$IDLE_CAPACITY_WAKE_FILE" 2>/dev/null || true
     if [ "$DRY_RUN" = "1" ]; then
         echo "[DRY] would write coord-inbox entry: trigger=idle_capacity slots=$slots ready=$ready"
-    elif coord_inbox_write idle_capacity "Idle capacity: $slots worker slot(s) free and $ready open issue(s) pass available-issues.sh with no worktree here ($night_ok labelled night-ok, counted even if available-issues.sh excludes them). Dispatch ready / night-ok work now (act, then report); if none of it is really dispatchable (epics, open PRs), say so in one line."; then
+    elif coord_inbox_write idle_capacity "Idle capacity: $slots worker slot(s) free and $ready open issue(s) pass available-issues.sh with no worktree here ($night_ok of them labelled night-ok). Dispatch ready / night-ok work now (act, then report); if none of it is really dispatchable (epics, open PRs), say so in one line."; then
         log_event coord.inbox.write "trigger=idle_capacity slots=$slots ready=$ready"
     else
         echo "[$(date +%T)] WARN: failed to write coord-inbox idle_capacity entry" >&2
