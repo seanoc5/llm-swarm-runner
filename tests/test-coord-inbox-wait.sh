@@ -64,7 +64,7 @@ check "coordinator busy: waiter leaves it to the Stop hook" "alive" "$(alive "$w
 echo "idle $(date +%s)" > "$S/coordinator-state"
 wait_for 3 dead "$w1" || red "waiter never rang for an idle coordinator"
 wait "$w1" || true
-case "$(cat "$T/w1.out")" in
+case "$(tail -n 1 "$T/w1.out")" in
     "Inbox: 3 item(s) in .swarm/coord-inbox/"*) got=nudge ;; *) got="$(cat "$T/w1.out")" ;;
 esac
 check "rings with the nudge, counting every item" "nudge" "$got"
@@ -91,7 +91,44 @@ kill "$w2"; wait "$w2" 2>/dev/null || true
 bash -c "COORD_INBOX_WAITER=1 '$WAIT' '$P' > '$T/w3.out' & echo \$! > '$T/w3.pid'; sleep 0.5"
 w3="$(cat "$T/w3.pid")"; pids+=("$w3")
 wait_for 3 dead "$w3" || red "orphaned waiter kept running"
-check "orphaned waiter exits silently" "" "$(cat "$T/w3.out")"
+check "orphaned waiter exits without ringing" "0" "$(grep -c '^Inbox:' "$T/w3.out" || true)"
+
+# Startup line and heartbeat. Heartbeats go to a status file, never stdout, so
+# the wake nudge can't be buried (or truncated away) by long idle output.
+check "startup line names pid and inbox path" "yes" \
+    "$(grep -q "armed pid=$w1, watching $S/coord-inbox" "$T/w1.out" && echo yes || echo no)"
+rm -f "$S/coord-inbox/"*.md "$S/coord-inbox-waiter"
+echo "x" > "$S/coord-inbox/20991231T000000Z-activity-9-9.md"   # counts toward inbox=, never wakes
+env COORD_INBOX_WAITER=1 COORD_INBOX_WAIT_HEARTBEAT_SECS=1 "$WAIT" "$P" > "$T/hb.out" & hb=$!; pids+=("$hb")
+wait_for 5 grep -qs 'waiting since' "$S/coord-inbox-waiter.status" || red "no heartbeat written to the status file"
+grep -Eq '^\[coord-inbox-wait [0-9:]+\] waiting since [0-9:]+ \([0-9]+h[0-9]{2}m\), last poll [0-9:]+, inbox=1 \(wake-eligible=0\), coordinator-state=' "$S/coord-inbox-waiter.status" && got=yes || got="$(cat "$S/coord-inbox-waiter.status")"
+check "heartbeat status line shows inbox and wake-eligible counts" "yes" "$got"
+check "heartbeat doesn't end the waiter" "alive" "$(alive "$hb" && echo alive || echo exited)"
+sleep 2.3   # at least two more heartbeats
+check "status file is one overwritten line, not appended" "1" "$(wc -l < "$S/coord-inbox-waiter.status" | tr -d ' ')"
+check "heartbeats never reach stdout" "0" "$(grep -c 'waiting since' "$T/hb.out" || true)"
+# Wake after heartbeats: stdout is exactly the startup line then the nudge, so
+# the nudge survives truncation from either end (head -n 2 and tail -n 1 both see it).
+sleep 0.2
+echo "idle $(date +%s)" > "$S/coordinator-state"
+echo 1 > "$S/coord-hook-rang"
+echo "outcome" > "$S/coord-inbox/20991231T000001Z-outcome-9-9.md"
+wait_for 3 dead "$hb" || red "heartbeating waiter never rang"
+wait "$hb" || true
+check "stdout after heartbeats + wake is exactly 2 lines" "2" "$(wc -l < "$T/hb.out" | tr -d ' ')"
+case "$(tail -n 1 "$T/hb.out")" in
+    "Inbox: 2 item(s) in .swarm/coord-inbox/"*) got=nudge ;; *) got="$(cat "$T/hb.out")" ;;
+esac
+check "nudge is the last line" "nudge" "$got"
+check "nudge survives head-only truncation (head -n 2)" "1" "$(head -n 2 "$T/hb.out" | grep -c '^Inbox: 2 item')"
+check "nudge appears exactly once" "1" "$(grep -c '^Inbox:' "$T/hb.out")"
+check "status file removed on exit" "gone" "$([ -e "$S/coord-inbox-waiter.status" ] && echo present || echo gone)"
+rm -f "$S/coord-inbox/"*.md "$S/coord-inbox-waiter"
+env COORD_INBOX_WAITER=1 COORD_INBOX_WAIT_HEARTBEAT_SECS=0 "$WAIT" "$P" > "$T/hb0.out" & hb0=$!; pids+=("$hb0")
+sleep 1.5
+check "heartbeat 0: startup line only, no status file" "1|gone" \
+    "$(wc -l < "$T/hb0.out" | tr -d ' ')|$([ -e "$S/coord-inbox-waiter.status" ] && echo present || echo gone)"
+kill "$hb0"; wait "$hb0" 2>/dev/null || true
 
 # ── the Stop hook's arm request ─────────────────────────────────────────────
 rm -f "$S/coord-inbox/"*.md "$S/coord-waiter-asked" "$S/coord-inbox-waiter"
