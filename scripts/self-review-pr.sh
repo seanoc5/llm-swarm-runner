@@ -110,9 +110,16 @@ if [ -n "$NONBLOCKING_FOLLOWUP" ]; then
     command -v gh >/dev/null 2>&1 || { echo "ERROR: gh required" >&2; exit 1; }
     [ "$ACTOR" != worker ] \
         || { echo "ERROR: --caveats-nonblocking needs --actor coordinator or operator (the author never judges its own caveats)" >&2; exit 1; }
-    FOLLOWUP_URL="$(gh issue view "$NONBLOCKING_FOLLOWUP" --json url --jq .url 2>/dev/null || true)"
+    # The follow-up must be a real, OPEN issue that mentions this PR, so an
+    # old/closed/unrelated issue can't stand in for it (issue #687).
+    FOLLOWUP_JSON="$(gh issue view "$NONBLOCKING_FOLLOWUP" --json url,state,title,body 2>/dev/null || true)"
+    FOLLOWUP_URL="$(jq -r '.url // ""' <<<"$FOLLOWUP_JSON" 2>/dev/null || true)"
     [[ "$FOLLOWUP_URL" == */issues/"$NONBLOCKING_FOLLOWUP" ]] \
         || { echo "ERROR: follow-up #$NONBLOCKING_FOLLOWUP is not an issue in this repo — file it first" >&2; exit 1; }
+    [ "$(jq -r '.state // ""' <<<"$FOLLOWUP_JSON")" = OPEN ] \
+        || { echo "ERROR: follow-up #$NONBLOCKING_FOLLOWUP is not OPEN — file a new open follow-up for PR #$PR" >&2; exit 1; }
+    jq -e --arg re "#$PR([^0-9]|\$)" '((.title // "") + "\n" + (.body // "")) | test($re)' <<<"$FOLLOWUP_JSON" >/dev/null 2>&1 \
+        || { echo "ERROR: follow-up #$NONBLOCKING_FOLLOWUP does not mention #$PR in its title or body — it must reference the PR whose caveats it tracks" >&2; exit 1; }
     PR_JSON="$(gh pr view "$PR" --json comments,headRefOid)" \
         || { echo "ERROR: gh pr view $PR failed" >&2; exit 1; }
     HEAD_SHA="$(jq -r '.headRefOid // ""' <<<"$PR_JSON")"
