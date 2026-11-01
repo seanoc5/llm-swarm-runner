@@ -297,5 +297,29 @@ set -e
 [ ! -e "$TEST_DIR/proj/.swarm/reap-deferred/iss-86" ] || red "marker left behind"
 green "autoclose pass after the grace removes it"
 
+# ============================================================================
+heading "Test 9: project path with a space → manifest restore commands run as written"
+# ============================================================================
+new_project "sp proj"
+SP="$TEST_DIR/sp proj"
+WT9="$TEST_DIR/wt-issue-87"
+git -C "$SP" worktree add -q -b fix/issue-87 "$WT9" master
+mkdir -p "$WT9/.swarm/logs"
+echo committed > "$WT9/c.txt"; git -C "$WT9" add c.txt; git -C "$WT9" commit -q -m "unpushed 87"
+echo edited >> "$WT9/README.md"
+echo untracked > "$WT9/u.txt"
+run "$TEST_DIR/t9.log" "sp proj" 87
+[ "$RC" -eq 0 ] || red "expected exit 0, got $RC: $(cat "$TEST_DIR/t9.log")"
+[ ! -d "$WT9" ] || red "worktree not removed"
+MAN9="$(ls "$SP/.swarm/reaped/"iss-87-*.saved.txt 2>/dev/null | head -1)"
+[ -n "$MAN9" ] || red "no manifest: $(cat "$TEST_DIR/t9.log")"
+sed -n '/^# Restore/,$p' "$MAN9" | grep -v '^#' > "$TEST_DIR/restore9.sh"
+[ "$(wc -l < "$TEST_DIR/restore9.sh")" -ge 4 ] || red "expected bundle+worktree+patch+tar commands: $(cat "$TEST_DIR/restore9.sh")"
+bash -e "$TEST_DIR/restore9.sh" || red "restore commands failed with a space in the path: $(cat "$TEST_DIR/restore9.sh")"
+RW9="$TEST_DIR/rescue-issue-87"
+[ -f "$RW9/c.txt" ] && grep -q edited "$RW9/README.md" && [ -f "$RW9/u.txt" ] || red "restore incomplete in $RW9"
+green "restore commands from a path with a space run as written and restore everything"
+
+
 echo
 green "ALL TESTS PASSED"
