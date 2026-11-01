@@ -56,10 +56,11 @@
 # opt-in SWARM_AUTOMERGE_MEDIUM path (operator-approved 🟡 automerge); its
 # gates live in swarm-merge.sh --auto-medium, not in the prompt. Same
 # PR: worker-bare 11300 -> 11400 for the add-only Flyway 🟡 carve-out.
-# 2026-11-01: coordinator budget 26800 -> 27600. Operator-approved night
+# 2026-11-01: coordinator budget 26800 -> 28000. Operator-approved night
 # queue: one short section (batch-approved `night-ok` issues dispatched
-# overnight without asking; dispatch/filing is act-then-report) after only
-# 6 of 496 PRs landed 03:00-09:00 across four app swarms.
+# overnight without asking; dispatch/filing is act-then-report; evening
+# stale-`blocked` sweep; weekly epic-carve batch) after only 6 of 496 PRs
+# landed 03:00-09:00 across four app swarms.
 set -euo pipefail
 
 green() { printf '\033[32m✓ %s\033[0m\n' "$*"; }
@@ -67,7 +68,7 @@ red()   { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKER_MAX="${WORKER_MD_MAX_BYTES:-24100}"
-COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-27600}"
+COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-28000}"
 BARE_MAX="${WORKER_BARE_MD_MAX_BYTES:-11400}"   # issue #510 trial prompt; ~7.5KB is script-parsed contract
 
 check() {

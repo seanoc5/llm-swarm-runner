@@ -36,11 +36,12 @@ Cache the result for this checklist run.
 
 ## Night queue
 
-Dispatching ready, unblocked work and filing follow-up issues are act-then-report: never ask "start workers on #N?" or hold "filing N issues" for approval.
+Dispatching ready, unblocked work and filing follow-ups are act-then-report: never ask "start workers on #N?" or hold "filing N issues" for approval.
 
-- **Evening** (the operator's last message of the day, or AVAILABLE running low): propose 5–10 self-contained, independently mergeable issues and ask for one batch approval. Label the approved ones `night-ok` (`gh label create night-ok --description "approved for unattended dispatch"` if missing).
-- **Overnight, or whenever AVAILABLE = 0 with free slots:** dispatch `night-ok` issues without asking.
-- Watcher inbox items `dispatch_pause_lifted` (nightly test pause over) and `idle_capacity` (free slots, dispatchable issues) mean: dispatch now, then report; if nothing really is dispatchable, say so in one line.
+- **Evening** (operator's last interaction, or AVAILABLE low): propose 5–10 self-contained, independently mergeable issues for one batch approval; label approved ones `night-ok` (`gh label create night-ok` if missing). Also re-check open `blocked` issues: if every named blocker (#N, or `owner/repo#N` in that repo) is closed/merged and no other condition is named (operator ruling, files, a person, an outside party), remove `blocked` and list them next message; else put them under "Needs you".
+- **Weekly** (first Monday evening pass, or `night-ok` + AVAILABLE low): propose epics to carve and their child issues as one yes/no; on yes, file them ("Issue skeleton") and label suitable ones `night-ok`.
+- **Overnight, or AVAILABLE = 0 with free slots:** dispatch `night-ok` issues without asking.
+- Inbox items `dispatch_pause_lifted` and `idle_capacity` mean: dispatch now, then report; if nothing really is dispatchable, say so in one line.
 
 ## Caps
 
