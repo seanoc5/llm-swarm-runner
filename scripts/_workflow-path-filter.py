@@ -15,7 +15,16 @@ still applies" (the safe direction: keep waiting on CI) instead of silently
 warning-and-proceeding on a file it misread.
 
 Usage:
-    _workflow-path-filter.py <workflow-yaml-file> <changed-files-file> <head-branch>
+    _workflow-path-filter.py <workflow-yaml-file> <changed-files-file> <head-branch> [<base-branch>]
+
+<base-branch> (optional, issue #670) is the PR's own target branch
+(`base.ref`). A `pull_request`/`pull_request_target` trigger's
+`branches`/`branches-ignore` filter is matched by GitHub against THE BASE
+branch, so a stacked PR (base = another PR's branch) against a workflow
+filtered to `branches: [master]` never gets a run at all — a permanent
+fact, not the post-push race. When given, that filter is evaluated and a
+confident base-branch exclusion is reported as "excluded-base" (below).
+Omitted, base-branch filters are not evaluated (pre-#670 behavior).
 
 <head-branch> is the PR's own head branch name (`head.ref`, not a glob —
 one literal branch name). It is used ONLY to evaluate a `push` trigger's
@@ -48,6 +57,10 @@ filters, never for push. Prints exactly one line to stdout and exits 0:
                  file satisfies; OR a push trigger whose branch filter (if
                  any) allows this PR's head branch — a push trigger's own
                  path filter is NEVER evaluated (see <head-branch> above)
+    excluded-base  like "excluded", but EVERY excluding trigger was excluded
+                 by its `branches`/`branches-ignore` filter against
+                 <base-branch> rather than by a path filter (issue #670),
+                 so the caller can name the real fix (retarget the PR)
     excluded     every pull_request/pull_request_target trigger present
                  confidently path-filters out all of <changed-files-file>
                  (paths-ignore, or paths), AND no push trigger's branch
@@ -258,7 +271,32 @@ PATH_FILTERED_TRIGGER_KEYS = ("pull_request", "pull_request_target", "push")
 OTHER_RUN_TRIGGER_KEYS = ("workflow_run",)
 
 
-def _path_filtered_trigger_verdict(pr_rest, pr_children, changed_files):
+def _base_branch_excluded(pr_entries, base_branch):
+    """True / False / None (couldn't parse). Whether this pull_request(_target)
+    trigger's `branches`/`branches-ignore` filter confidently rules out
+    <base_branch> (issue #670). No filter, or no base_branch given -> False."""
+    if not base_branch:
+        return False
+    branches = find_key(pr_entries, "branches")
+    branches_ignore = find_key(pr_entries, "branches-ignore")
+    if branches is not None:
+        patterns = extract_list(*branches)
+        if patterns is None:
+            return None
+        if not patterns:
+            return False
+        return not matches_any(base_branch, patterns)
+    if branches_ignore is not None:
+        patterns = extract_list(*branches_ignore)
+        if patterns is None:
+            return None
+        if not patterns:
+            return False
+        return matches_any(base_branch, patterns)
+    return False
+
+
+def _path_filtered_trigger_verdict(pr_rest, pr_children, changed_files, base_branch=None):
     """Verdict for a single already-found pull_request(_target) entry."""
     if pr_rest:
         # Inline value on the key's own line (e.g. "{}" or a one-line flow
@@ -268,6 +306,15 @@ def _path_filtered_trigger_verdict(pr_rest, pr_children, changed_files):
         return "unknown" if "paths" in pr_rest else "triggers"
 
     pr_entries = own_level_entries(pr_children)
+
+    # issue #670: a base-branch filter that rules out the PR's target
+    # branch means no run is ever created, whatever the paths say.
+    base_excluded = _base_branch_excluded(pr_entries, base_branch)
+    if base_excluded is None:
+        return "unknown"
+    if base_excluded:
+        return "excluded-base"
+
     paths = find_key(pr_entries, "paths")
     paths_ignore = find_key(pr_entries, "paths-ignore")
 
@@ -335,7 +382,7 @@ def _push_trigger_verdict(push_rest, push_children, head_branch):
     return "no-trigger" if matches_any(head_branch, patterns) else "triggers"
 
 
-def verdict(text, changed_files, head_branch):
+def verdict(text, changed_files, head_branch, base_branch=None):
     """Overall verdict for the whole workflow file, aggregating every
     pull_request/pull_request_target/push trigger it defines (there can be
     more than one — GitHub evaluates each independently, so the workflow
@@ -395,7 +442,7 @@ def verdict(text, changed_files, head_branch):
         if key == "push":
             verdicts.append(_push_trigger_verdict(pr_rest, pr_children, head_branch))
         else:
-            verdicts.append(_path_filtered_trigger_verdict(pr_rest, pr_children, changed_files))
+            verdicts.append(_path_filtered_trigger_verdict(pr_rest, pr_children, changed_files, base_branch))
 
     if not verdicts:
         for key in OTHER_RUN_TRIGGER_KEYS:
@@ -408,21 +455,24 @@ def verdict(text, changed_files, head_branch):
         return "unknown"
     if all(v == "no-trigger" for v in verdicts):
         return "no-trigger"
+    if all(v in ("excluded-base", "no-trigger") for v in verdicts):
+        return "excluded-base"  # issue #670: only base-branch filters excluded anything
     return "excluded"  # at least one confident path-filter exclusion, nothing contradicts it
 
 
 def main(argv):
-    if len(argv) != 4:
-        print("usage: _workflow-path-filter.py <workflow-yaml-file> <changed-files-file> <head-branch>", file=sys.stderr)
+    if len(argv) not in (4, 5):
+        print("usage: _workflow-path-filter.py <workflow-yaml-file> <changed-files-file> <head-branch> [<base-branch>]", file=sys.stderr)
         return 2
     with open(argv[1], "r", encoding="utf-8", errors="replace") as fh:
         text = fh.read()
     with open(argv[2], "r", encoding="utf-8", errors="replace") as fh:
         changed_files = [line.strip() for line in fh if line.strip()]
     head_branch = argv[3]
+    base_branch = argv[4] if len(argv) == 5 else None
 
     try:
-        result = verdict(text, changed_files, head_branch)
+        result = verdict(text, changed_files, head_branch, base_branch)
     except Exception:  # noqa: BLE001 — a parse surprise must fail toward "unknown", never crash the CI gate
         result = "unknown"
     print(result)

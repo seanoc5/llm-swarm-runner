@@ -417,6 +417,30 @@ grep -qi 'WARN' "$TEST_DIR/out.log" || red "expected a WARN about the path-filte
 green "a docs-only PR whose changed files are all paths-ignored readies with a WARN instead of refusing forever (civicstrata#602/#603)"
 
 # ============================================================================
+heading "Test 15b2: 'no checks reported', stacked PR whose base branch every pull_request workflow's branches filter excludes — WARNs, still readies (issue #670)"
+# ============================================================================
+printf '<!-- BLIND_MERGE_RISK: low -->\nsome change\n' > "$BODY_FILE"
+make_fake_review 0
+GH_CHECKS_RC=1
+GH_CHECKS_STDERR="no checks reported on the 'main' branch"
+GH_WORKFLOW_COUNT=1
+GH_PR_FILES_JSON='["src/main.py"]'
+GH_WORKFLOW_PATHS_JSON='[".github/workflows/ci.yml"]'
+GH_WORKFLOW_YAML=$'on:\n  pull_request:\n    branches: [master]\n'
+GH_PR_BASE_REF='fix/issue-1823'
+rc=0; run_pr_ready || rc=$?
+GH_CHECKS_RC=0
+GH_CHECKS_STDERR=""
+GH_WORKFLOW_COUNT=0
+GH_PR_FILES_JSON=
+GH_WORKFLOW_PATHS_JSON=
+GH_WORKFLOW_YAML=
+GH_PR_BASE_REF=
+[ "$rc" -eq 0 ] || red "expected exit 0 — a stacked PR whose base branch is filtered out gets no CI, ever; got $rc: $(cat "$TEST_DIR/out.log")"
+grep -qi 'base branch excluded' "$TEST_DIR/out.log" || red "expected the WARN to name the base-branch cause: $(cat "$TEST_DIR/out.log")"
+green "a stacked PR with an excluded base branch readies with a base-branch WARN instead of refusing as pending forever"
+
+# ============================================================================
 heading "Test 15c: 'no checks reported', changed files touch a NON-ignored path too — still refuses ci-pending (the #473 race guard holds)"
 # ============================================================================
 printf '<!-- BLIND_MERGE_RISK: low -->\nsome change\n' > "$BODY_FILE"

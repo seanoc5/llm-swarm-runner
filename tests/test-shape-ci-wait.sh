@@ -788,5 +788,33 @@ out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_VIEW_BAD_JSON=1 \
 check "exits 4 on unparseable gh pr view output, never misread as exit 5" '[ "$rc" -eq 4 ]'
 check "message names the unparseable output" 'grep -qi "unparseable" <<<"$out"'
 
+# ── Test 22: issue #670 — stacked PR whose base branch every pull_request workflow's branches filter excludes ──
+#
+# fand-etl PR #1839 (2026-10-30): stacked on another PR's branch, workflow
+# filtered to `branches: [master]` → zero runs, ever. Used to read as pending
+# until timeout (ci-wait) / exit 4 "likely hasn't registered yet" (pr-ready).
+
+heading "Test 22: stacked PR, base branch excluded by pull_request branches filter → exit 5 naming the base-branch cause"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_NO_CHECKS=1 GH_WORKFLOW_COUNT=1 \
+    GH_PR_FILES_JSON='["src/main.py"]' \
+    GH_WORKFLOW_PATHS_JSON='[".github/workflows/ci.yml"]' \
+    GH_PR_BASE_REF='fix/issue-1823' \
+    GH_WORKFLOW_YAML=$'on:\n  pull_request:\n    branches: [master]\n' \
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
+check "exits 5 — no run will ever register for this base branch" '[ "$rc" -eq 5 ]'
+check "message says the base branch is excluded" 'grep -qi "base branch excluded" <<<"$out"'
+check "message names the fix (retarget)" 'grep -qi "retarget" <<<"$out"'
+
+heading "Test 22b: same workflow, PR based on master → still the ordinary pending race (exit 2)"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_NO_CHECKS=1 GH_WORKFLOW_COUNT=1 \
+    GH_PR_FILES_JSON='["src/main.py"]' \
+    GH_WORKFLOW_PATHS_JSON='[".github/workflows/ci.yml"]' \
+    GH_PR_BASE_REF='master' \
+    GH_WORKFLOW_YAML=$'on:\n  pull_request:\n    branches: [master]\n' \
+    CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 2 2>&1)" || rc=$?
+check "exits 2 (timeout/pending), never 5 — the base branch is allowed" '[ "$rc" -eq 2 ]'
+
 heading "Results: $PASS checks passed"
 green "All checks passed."

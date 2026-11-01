@@ -42,9 +42,11 @@ FILES="$TEST_DIR/files.txt"
 # are specifically about the branch filter pass their own head branch.
 DEFAULT_HEAD_BRANCH="feature/change"
 
-run() {  # run <expected-verdict> <description> [head-branch]
+run() {  # run <expected-verdict> <description> [head-branch] [base-branch]
     local expected="$1" desc="$2" head="${3:-$DEFAULT_HEAD_BRANCH}" got
-    got="$(python3 "$FILTER" "$WF" "$FILES" "$head")"
+    local base_args=()
+    [ -n "${4:-}" ] && base_args=("$4")
+    got="$(python3 "$FILTER" "$WF" "$FILES" "$head" "${base_args[@]}")"
     if [ "$got" = "$expected" ]; then
         green "$desc (-> $got)"
         PASS=$((PASS + 1))
@@ -446,6 +448,67 @@ on: workflow_run
 EOF
 printf 'docs/foo.md\n' > "$FILES"
 run unknown "the flow/scalar on: form with workflow_run also fails toward unknown"
+
+# ─── Tests 23-23g: issue #670 — pull_request branches/branches-ignore vs the PR's BASE branch ───
+#
+# A stacked PR (base = another PR's branch) never gets a run when every
+# workflow's `pull_request: branches:` allowlist is just the default branch.
+
+heading "Test 23: pull_request branches [master], PR based on a stacked branch -> excluded-base"
+cat > "$WF" <<'EOF'
+name: ci
+on:
+  pull_request:
+    branches: [master]
+EOF
+printf 'src/main.py\n' > "$FILES"
+run excluded-base "a base branch outside the allowlist is a confident, permanent exclusion" feature/change fix/issue-1823
+
+heading "Test 23b: same workflow, base branch IS master -> triggers"
+run triggers "base branch matches the allowlist (src file, no path filter)" feature/change master
+
+heading "Test 23c: no base branch argument -> base filters not evaluated (pre-#670 behavior)"
+run triggers "omitting the base branch leaves branches filters unevaluated"
+
+heading "Test 23d: branches-ignore matching the base branch -> excluded-base"
+cat > "$WF" <<'EOF'
+on:
+  pull_request:
+    branches-ignore:
+      - 'fix/**'
+EOF
+run excluded-base "branches-ignore with a glob that matches the base" feature/change fix/issue-1823
+run triggers "branches-ignore that does not match the base" feature/change master
+
+heading "Test 23e: base allowed but path filter excludes everything -> plain excluded, not excluded-base"
+cat > "$WF" <<'EOF'
+on:
+  pull_request:
+    branches: [master]
+    paths-ignore: ['docs/**']
+EOF
+printf 'docs/a.md\n' > "$FILES"
+run excluded "path exclusion is still reported as excluded" feature/change master
+
+heading "Test 23f: base excluded on pull_request, but an unfiltered push trigger can still fire -> triggers"
+cat > "$WF" <<'EOF'
+on:
+  pull_request:
+    branches: [master]
+  push:
+EOF
+printf 'src/main.py\n' > "$FILES"
+run triggers "the push trigger still attaches a run to the head commit" feature/change fix/issue-1823
+
+heading "Test 23g: unparseable negated branch pattern -> unknown"
+cat > "$WF" <<'EOF'
+on:
+  pull_request:
+    branches:
+      - '**'
+      - '!fix/**'
+EOF
+run unknown "negation in a branch filter is not guessed at" feature/change fix/issue-1823
 
 heading "Results: $PASS checks passed"
 green "All checks passed."

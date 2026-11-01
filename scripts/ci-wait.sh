@@ -260,6 +260,7 @@ PR_CI_RELEVANT=""   # lazily resolved at most once (issue #639): "no" means
                      # means keep treating "no checks reported" as the
                      # ordinary post-push race
 PR_CI_RELEVANT_DETAIL=""
+PR_CI_RELEVANT_REASON=""   # issue #670: "path" | "base-branch" (when RELEVANT=no)
 FALLBACK=0          # set once "gh pr checks" proves unreadable by this token
 while true; do
     PASS_NOW=0
@@ -382,9 +383,18 @@ while true; do
                         ci_fallback_workflows_relevant_to_pr "$PR" "${REPO_ARGS[@]}"
                         PR_CI_RELEVANT="$CI_FALLBACK_RELEVANT"
                         PR_CI_RELEVANT_DETAIL="$CI_FALLBACK_RELEVANT_DETAIL"
+                        PR_CI_RELEVANT_REASON="${CI_FALLBACK_RELEVANT_REASON:-}"
                     fi
                     if [ "$PR_CI_RELEVANT" = "no" ]; then
-                        echo "ci-wait: PR #$PR's changed files are excluded by every pull_request/push workflow's path filter ($PR_CI_RELEVANT_DETAIL) — no check will ever register." >&2
+                        if [ "$PR_CI_RELEVANT_REASON" = "path+base-branch" ]; then
+                            echo "ci-wait: no CI applies to PR #$PR (path filter and base branch both exclude it): $PR_CI_RELEVANT_DETAIL — no check will ever register." >&2
+                        elif [ "$PR_CI_RELEVANT_REASON" = "base-branch" ]; then
+                            # issue #670: stacked PR whose base branch every
+                            # pull_request workflow's branches filter excludes.
+                            echo "ci-wait: no CI applies to PR #$PR (base branch excluded): $PR_CI_RELEVANT_DETAIL — no check will ever register." >&2
+                        else
+                            echo "ci-wait: PR #$PR's changed files are excluded by every pull_request/push workflow's path filter ($PR_CI_RELEVANT_DETAIL) — no check will ever register." >&2
+                        fi
                         exit 5
                     fi
                     # Workflows exist (or the workflow-count lookup itself

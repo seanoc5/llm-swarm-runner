@@ -472,6 +472,42 @@ log_event() {
     printf '%s  %-15s %s\n' "$ts" "$cat" "$*" >> "$EVENTS_LOG" 2>/dev/null || true
 }
 
+# issue #670: retarget open PRs stacked on this PR's head branch onto its own
+# base, before the branch is deleted (GitHub closes, not retargets, them).
+# Reads PR_NUM, PR_BRANCH, PR_BASE, PR_HEAD_SHA; sets KEEP_BRANCH=1 when the
+# branch must not be deleted (lookup or retarget failed). A squash-merge leaves
+# the child holding the parent's original commits, so the message says how to
+# rebase them off. (tests/test-shape-merge-no-delete-branch.sh runs this
+# function against a fake gh — keep it self-contained.)
+retarget_stacked_children() {
+  local child_prs child rebase_from
+  KEEP_BRANCH=0
+  [ -n "$PR_BASE" ] || return 0
+  # A failed lookup is "unknown", not "no children": keep the branch.
+  if ! child_prs=$(gh pr list --state open --base "$PR_BRANCH" --json number --jq '.[].number' 2>/dev/null); then
+    child_prs=""
+    KEEP_BRANCH=1
+    echo "       $(c_amber "⚠ could not list PRs stacked on $PR_BRANCH — keeping origin/$PR_BRANCH; delete it by hand once none are open")"
+  fi
+  # The remote branch is deleted right after this, so the hint must not name
+  # it: prefer the pre-merge head SHA, else resolve the branch's SHA now.
+  rebase_from="$PR_HEAD_SHA"
+  [ -n "$rebase_from" ] || rebase_from=$(git rev-parse --verify --quiet "origin/$PR_BRANCH" 2>/dev/null || true)
+  [ -n "$rebase_from" ] || rebase_from="origin/$PR_BRANCH"
+  for child in $child_prs; do
+    if gh pr edit "$child" --base "$PR_BASE" >/dev/null 2>&1; then
+      echo "       retargeted stacked PR #$child from $PR_BRANCH to $PR_BASE"
+      echo "       it still carries #$PR_NUM's original commits (squash-merge rewrote them); in its worktree run:"
+      echo "         git fetch origin && git rebase --onto origin/$PR_BASE $rebase_from && git push --force-with-lease"
+      log_event merge.retarget "pr=$PR_NUM child=$child base=$PR_BASE result=ok"
+    else
+      KEEP_BRANCH=1
+      echo "       $(c_amber "⚠ could not retarget stacked PR #$child to $PR_BASE — keeping origin/$PR_BRANCH so GitHub doesn't close it; run: gh pr edit $child --base $PR_BASE")"
+      log_event merge.retarget "pr=$PR_NUM child=$child base=$PR_BASE result=failed"
+    fi
+  done
+}
+
 # A conflicting PR whose worker is still on disk gets a resolve-conflicts
 # brief instead of a dead-end refusal — the same instruction the operator
 # used to type by hand. Exits 3 when the brief is (or already was) queued,
@@ -562,7 +598,7 @@ fi
 
 if [ "$HOUSEKEEP_ONLY" = 0 ]; then
   # Inspect PR state.
-  PR_JSON=$(gh pr view "$PR_NUM" --json state,mergeable,mergeStateStatus,headRefName,title,closingIssuesReferences,body,isDraft,reviewDecision,baseRefName)
+  PR_JSON=$(gh pr view "$PR_NUM" --json state,mergeable,mergeStateStatus,headRefName,title,closingIssuesReferences,body,isDraft,reviewDecision,baseRefName,headRefOid)
   PR_STATE=$(echo "$PR_JSON" | jq -r .state)
   PR_MERGEABLE=$(echo "$PR_JSON" | jq -r .mergeable)
   PR_MERGE_STATE_STATUS=$(echo "$PR_JSON" | jq -r '.mergeStateStatus // ""')
@@ -572,6 +608,7 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
   PR_IS_DRAFT=$(echo "$PR_JSON" | jq -r '.isDraft // false')
   PR_REVIEW_DECISION=$(echo "$PR_JSON" | jq -r '.reviewDecision // ""')
   PR_BASE=$(echo "$PR_JSON" | jq -r '.baseRefName // ""')
+  PR_HEAD_SHA=$(echo "$PR_JSON" | jq -r '.headRefOid // ""')
   echo "[3/6] PR #$PR_NUM: state=$PR_STATE mergeable=$PR_MERGEABLE branch=$PR_BRANCH"
   echo "       title: $PR_TITLE"
 
@@ -974,7 +1011,14 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
       # ones; the colour marker alone can't (operator-merged 🟢/🟡 PRs exist).
       if [ "$AUTO_LOW" = 1 ]; then MERGE_MODE="unattended-$AUTO_RATING"; else MERGE_MODE=operator; fi
       log_event merge.done "pr=$PR_NUM issue=${ISSUE:-none} mode=$MERGE_MODE"
-      if git push origin --delete "$PR_BRANCH" >/dev/null 2>&1; then
+      # issue #670: a stacked PR (base = this PR's head branch) is silently
+      # CLOSED by GitHub when that branch is deleted, not retargeted. Move any
+      # open child PRs onto this PR's own base first. If a retarget fails,
+      # keep the branch: a leftover branch is cheap, a closed child PR isn't.
+      retarget_stacked_children
+      if [ "$KEEP_BRANCH" = 1 ]; then
+        echo "       (remote branch origin/$PR_BRANCH not deleted — see retarget warning above)"
+      elif git push origin --delete "$PR_BRANCH" >/dev/null 2>&1; then
         echo "       deleted remote branch origin/$PR_BRANCH"
       else
         echo "       (remote branch origin/$PR_BRANCH not deleted — already gone, or repo auto-deletes head branches)"
