@@ -47,6 +47,10 @@
 # issue author's latest comment wins on conflict — already near-minimal
 # after trimming once; only ~50 bytes over even so.
 #
+# 2026-11-01: worker budget 24100 -> 24200. Issue #587 adds one sentence
+# telling a worker with an empty $TASK_ID to read it from the brief's
+# "[swarm] task_id=" header line; ~20 bytes over after shortening it twice.
+#
 # 2026-10-22: coordinator budget 26000 -> 26200. Issue #656 adds one
 # sentence: re-check mergeable before listing a merge (the 2026-10-22
 # corpusminder #1513 stale "merge" advice). #655 had already spent the
@@ -71,7 +75,7 @@ green() { printf '\033[32m✓ %s\033[0m\n' "$*"; }
 red()   { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORKER_MAX="${WORKER_MD_MAX_BYTES:-24100}"
+WORKER_MAX="${WORKER_MD_MAX_BYTES:-24200}"
 COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-30000}"
 BARE_MAX="${WORKER_BARE_MD_MAX_BYTES:-11400}"   # issue #510 trial prompt; ~7.5KB is script-parsed contract
 
