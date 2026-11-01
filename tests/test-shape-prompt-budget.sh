@@ -61,6 +61,10 @@
 # overnight without asking; dispatch/filing is act-then-report; evening
 # stale-`blocked` sweep; weekly epic-carve batch) after only 6 of 496 PRs
 # landed 03:00-09:00 across four app swarms.
+# 2026-11-01: coordinator budget 28000 -> 30000. Operator-approved stopgap
+# (temporary headroom, not a new baseline): #694 and #696 together landed
+# at 28036. The operator plans to revise and shrink coordinator.md; lower
+# this back when that lands (issue #509).
 set -euo pipefail
 
 green() { printf '\033[32m✓ %s\033[0m\n' "$*"; }
@@ -68,7 +72,7 @@ red()   { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKER_MAX="${WORKER_MD_MAX_BYTES:-24100}"
-COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-28000}"
+COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-30000}"
 BARE_MAX="${WORKER_BARE_MD_MAX_BYTES:-11400}"   # issue #510 trial prompt; ~7.5KB is script-parsed contract
 
 check() {
