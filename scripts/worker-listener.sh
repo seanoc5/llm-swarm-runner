@@ -470,6 +470,15 @@ dispatch_agent() {
     # follow-up session (requeued brief) refused to guess, so its
     # completion was never recorded and coordinator holds never lifted.
     export TASK_ID
+    # issue #587: a pane's scrollback can lose the listener's "Task received!"
+    # echo (seen after a WORKER_AUTO_DELIVER relaunch), so also lead the
+    # prompt itself with one header line. The agent TUI renders its first user
+    # turn, so the id and the brief file stay visible in the pane, and a
+    # worker whose $TASK_ID is unset can read the id from here. The bash
+    # backend runs the text as a script, so it gets none.
+    if [[ "$AGENT" != "bash" && -n "${TASK_ID:-}" ]]; then
+        task_text="[swarm] task_id=$TASK_ID brief=${TASK_PATH:-unknown}"$'\n\n'"$task_text"
+    fi
     local codex_task="$task_text"
     [ -n "$CODEX_PREFIX" ] && codex_task="$CODEX_PREFIX"$'\n\n---\n\n'"$task_text"
 
@@ -1439,7 +1448,7 @@ while true; do
     reap_stale_processing_entries
 
     if claim_next_task; then
-        echo "[$(date +%T)] Task received! id=$TASK_ID$([ "$IS_LEGACY" = "1" ] && echo " (v1 legacy)")"
+        echo "[$(date +%T)] Task received! id=$TASK_ID brief=$TASK_PATH$([ "$IS_LEGACY" = "1" ] && echo " (v1 legacy)")"
         IDLE_RESPAWNS=0   # new parked stretch after this task — see IDLE_QUICK_EXIT_SECS
         HANDBACK_PR=""
 
