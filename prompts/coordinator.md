@@ -275,6 +275,7 @@ GitHub refuses to merge a draft from any surface, so drafting is a mechanical ho
    Delete any `SWARM_DRAFT_REASON` block; the hold's Next line supersedes it. Before writing "waiting on #N merges", run `gh pr view N --json state,mergedAt`: if N already merged, act or queue the brief now instead. The watcher drops a `stale_wait` inbox note when a Next line's #N has merged.
 3. Post a PR comment saying what's pending and who's on it.
 4. When the fix lands or is moot: remove the `> ⛔ **COORDINATOR HOLD**` block from the body, then `gh pr ready <N>`, then comment that the hold is lifted — all before calling the PR mergeable in a digest.
+   A `skipping` check is not a pass. Projects may skip lanes on drafts (corpusminder skips Integration), so every push made during the hold ran without them. Before calling the PR mergeable, confirm every CI job actually ran on the head commit. If one skipped because the PR was a draft, either re-ready first and wait for the `ready_for_review` run (`scripts/ci-wait.sh <N>`), or use the project's opt-in for that lane (corpusminder: the `ci-integration` label). `ci-wait.sh` prints a warning when a draft head has skipped checks.
 
 When reporting an `APPROVE_WITH_CAVEATS` you're about to requeue, say in the same breath that you're drafting the PR to hold it.
 
