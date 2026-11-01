@@ -884,7 +884,15 @@ if ! $session_existed; then
     # those back on this socket a moment later, after that one pane
     # already exists). Harmless on an already-running server (a later
     # `tmux` command on this socket ignores -f).
-    tmux -f /dev/null new-session -d -s "$SESSION_NAME" "${TMUX_ENV_OPTS[@]}" -n "coordinator"
+    # #660: a brand-new tmux server snapshots THIS process env as its global
+    # env, and every later window inherits it with shell-env-wins precedence.
+    # Strip keys _load-env.sh filled from .env.example/.env so they cannot mask
+    # a project's own .swarm/.env; each script re-loads them per project.
+    # Keys the operator exported themselves are not in the list and are kept.
+    (
+        for _k in ${SWARM_ENV_FILE_KEYS:-}; do unset "$_k"; done
+        tmux -f /dev/null new-session -d -s "$SESSION_NAME" "${TMUX_ENV_OPTS[@]}" -n "coordinator"
+    )
 
     # issue #555 self-review: -f /dev/null above means a BRAND-NEW swarm
     # socket never sources ~/.tmux.conf at all — including the Ctrl-Z

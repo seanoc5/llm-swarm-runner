@@ -62,7 +62,13 @@ _apply_env_file() {
                 continue
             fi
             # only export if unset (empty-but-set values from caller still win)
-            [ -z "${!k+x}" ] && export "$k=$v"
+            if [ -z "${!k+x}" ]; then
+                export "$k=$v"
+                # Remember keys filled from files (not the caller) so llm-start.sh
+                # can keep them out of the tmux server's global env (#660).
+                # Plain shell var on purpose: never exported.
+                SWARM_ENV_FILE_KEYS+=" $k"
+            fi
         fi
     done < "$f"
     # Force success — the last iteration's body may return non-zero when
@@ -95,6 +101,7 @@ _expand_extra_mounts() {
 }
 
 _load_env_main() {
+    SWARM_ENV_FILE_KEYS=""
     local proj sandbox
     proj="${1:-$PWD}"
     # Caller may pre-set LLM_SWARM_DIR; otherwise infer from this script's path.
