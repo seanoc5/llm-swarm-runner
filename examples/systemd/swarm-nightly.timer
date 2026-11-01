@@ -1,9 +1,26 @@
+# ~/.config/systemd/user/swarm-nightly.timer — install next to swarm-nightly.service:
+#   systemctl --user daemon-reload && systemctl --user enable --now swarm-nightly.timer
+# Already installed with an older copy of this file? Copy it over, then run the
+# same daemon-reload, then `systemctl --user restart swarm-nightly.timer`
+# (daemon-reload alone re-reads units but the new schedule needs the restart).
+#
+# Persistent=true (issue #631): if the host was suspended/off at 02:05, systemd
+# runs the missed night once on resume/boot instead of skipping it silently.
+# Several missed nights collapse into one catch-up run. Trade-off, chosen on
+# purpose: a catch-up can start while the operator is working, and the run
+# pauses new worker spawns host-wide (dispatch-paused) until it finishes.
+# Workers already running are unaffected. If that bites, set Persistent=false
+# again, or add a guard in scripts/nightly-full-tests.sh that defers while
+# workers are alive.
+# RandomizedDelaySec spreads the catch-up after resume so it does not collide
+# with other resume-time jobs.
 [Unit]
-Description=Run swarm-nightly.service at 02:05
+Description=Run swarm-nightly.service at 02:05 (catch up if missed)
 
 [Timer]
 OnCalendar=*-*-* 02:05
-Persistent=false
+Persistent=true
+RandomizedDelaySec=10min
 
 [Install]
 WantedBy=timers.target
