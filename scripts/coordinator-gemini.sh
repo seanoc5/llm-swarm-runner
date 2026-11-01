@@ -26,6 +26,7 @@ ARGS+=(--yolo --skip-trust)
 # -i (--prompt-interactive) streams tool calls live and keeps gemini alive
 # after the prompt; exit with /quit or Ctrl-D. -p exits after the prompt.
 if [ "${COORDINATOR_VERBOSE:-1}" = "1" ]; then
+    echo "COORDINATOR_VERBOSE=1: gemini will stay interactive after the prompt; exit with /quit."
     ARGS+=(-i)
 else
     ARGS+=(-p)

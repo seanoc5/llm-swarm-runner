@@ -1098,12 +1098,10 @@ if ! $session_existed || ! $window_exists || $coordinator_idle; then
             "${ENV_VARS}exec $(printf '%q' "$WRAPPER") $(printf '%q' "$RENDERED_PROMPT_FILE") $(printf '%q' "$TMP_PROMPT")" C-m
     else
         # Gemini CLI: scripts/coordinator-gemini.sh reloads the project's
-        # .swarm/.env (#691), picks -i vs -p from COORDINATOR_VERBOSE, removes
+        # .swarm/.env (#691), picks -i vs -p from COORDINATOR_VERBOSE (and prints the
+        # stay-interactive notice from the reloaded value), removes
         # the request file and surfaces gemini's truncated API errors. No exec,
         # so the pane drops back to a shell afterwards, as before.
-        if [ "${COORDINATOR_VERBOSE:-1}" = "1" ]; then
-            echo "COORDINATOR_VERBOSE=1: gemini will stay interactive after the prompt; exit with /quit."
-        fi
         ENV_VARS=""
         [ -n "${COORD_MODEL:-}" ] && ENV_VARS+="COORD_MODEL=$(printf '%q' "$COORD_MODEL") "
         WRAPPER="$LLM_SWARM_DIR/scripts/coordinator-gemini.sh"

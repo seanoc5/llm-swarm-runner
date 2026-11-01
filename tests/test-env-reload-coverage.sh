@@ -91,6 +91,15 @@ scan_root() {
   done
 }
 
+# Guard: every TOOL_ONLY entry must still be needed. With the list emptied the
+# scan must flag exactly the listed scripts; a surplus entry would hide a future
+# project-only key from the wider scan.
+_saved=("${!TOOL_ONLY[@]}"); TOOL_ONLY=()
+flagged="$(scan_root "$ROOT" | sed -nE 's/^FAIL: (\S+) reads .*/\1/p' | sort -u)"
+for _s in "${_saved[@]}"; do TOOL_ONLY[$_s]=x; done
+surplus="$(comm -13 <(echo "$flagged") <(printf '%s\n' "${_saved[@]}" | sort -u))"
+if [ -z "$surplus" ]; then ok "every TOOL_ONLY entry (${#_saved[@]}) trips the wider scan"; else bad "surplus TOOL_ONLY entries: $(echo $surplus)"; fi
+
 out="$(scan_root "$ROOT")"
 if [ -n "$out" ]; then echo "$out"; fail=1; else ok "every key-reading script reloads or is passed its keys"; fi
 
