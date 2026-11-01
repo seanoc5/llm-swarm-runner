@@ -26,6 +26,12 @@
 
 set -euo pipefail
 
+# #660: llm-start.sh no longer leaves .env.example/.env defaults in the tmux
+# server env (they masked <project>/.swarm/.env), so reload them here, for the
+# project this pane is in. Caller-set variables still win.
+# shellcheck source=_load-env.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_load-env.sh" "$PWD"
+
 THRESH_HOURS="${STALE_PR_NUDGE_HOURS:-6}"
 if [ "$THRESH_HOURS" = "0" ]; then
     exit 0

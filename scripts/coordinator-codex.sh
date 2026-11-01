@@ -7,6 +7,12 @@
 
 set -euo pipefail
 
+# #660: llm-start.sh no longer leaves .env.example/.env defaults in the tmux
+# server env (they masked <project>/.swarm/.env), so reload them here, for the
+# project this pane is in. Caller-set variables still win.
+# shellcheck source=_load-env.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_load-env.sh" "$PWD"
+
 SYSTEM_PROMPT_FILE="${1:?coordinator-codex.sh: missing system-prompt file (arg 1)}"
 INITIAL_PROMPT_FILE="${2:?coordinator-codex.sh: missing initial-prompt file (arg 2)}"
 
