@@ -970,6 +970,10 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
         fi
         echo "       $(c_amber "⚠ gh pr merge exited $MERGE_RC but PR #$PR_NUM is confirmed MERGED — proceeding")"
       fi
+      # The daily changelog reads this to tell unattended merges from operator
+      # ones; the colour marker alone can't (operator-merged 🟢/🟡 PRs exist).
+      if [ "$AUTO_LOW" = 1 ]; then MERGE_MODE="unattended-$AUTO_RATING"; else MERGE_MODE=operator; fi
+      log_event merge.done "pr=$PR_NUM issue=${ISSUE:-none} mode=$MERGE_MODE"
       if git push origin --delete "$PR_BRANCH" >/dev/null 2>&1; then
         echo "       deleted remote branch origin/$PR_BRANCH"
       else
@@ -1016,11 +1020,13 @@ if [ -n "$ISSUE" ]; then
     # still happen exactly as they would for a watcher-driven reap.
     echo "[5/6] reaping worktree + tmux window for issue #$ISSUE…"
     KILL_RC=0
-    "$SCRIPT_DIR/kill-worktree.sh" "$ISSUE" "$MAIN_WT" || KILL_RC=$?
+    # --grace: a worker with unsaved edits keeps its worktree for
+    # SWARM_REAP_GRACE_SECS (4h) instead of losing it to an immediate reap.
+    "$SCRIPT_DIR/kill-worktree.sh" "$ISSUE" "$MAIN_WT" --grace || KILL_RC=$?
     case "$KILL_RC" in
       0) echo "       reaped ✓" ;;
       75)
-        echo "       $(c_amber "⚠ kill-worktree.sh deferred (in-flight check-claim) — worktree left in place, watcher's own backstop will retry")"
+        echo "       $(c_amber "⚠ kill-worktree.sh deferred (in-flight check-claim, or unsaved work held for the reap grace) — worktree left in place, watcher's own backstop will retry")"
         ;;
       76)
         echo "       $(c_amber "⚠ kill-worktree.sh refused (non-empty inbox, SWARM_REAP_INBOX=refuse) — worktree left in place")"

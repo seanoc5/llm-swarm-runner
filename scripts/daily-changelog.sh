@@ -17,8 +17,8 @@
 # the https PR URL. A PR whose latest `SWARM_SELF_REVIEW: <v> actor=coordinator`
 # verdict is APPROVE_WITH_CAVEATS is flagged, with any follow-up issue
 # labelled `from-pr-N` linked. Whether a merge was unattended or operator-
-# approved is NOT shown: swarm-merge.sh records no merge mode anywhere, and
-# guessing it from the colour would be wrong for operator-merged 🟢/🟡 PRs.
+# approved comes from swarm-merge.sh's `merge.done ... mode=` events in the
+# app's .swarm/events.log; unattended merges are tagged "(auto-merged)".
 #
 # corpusminder side: the external-thread API (`/api/threads`, corpusminder
 # issue #1203). A thread is keyed by (cm_app, "changelog", <name>) and lives
@@ -133,6 +133,17 @@ fetch_prs() {
         | sort_by(.mergedAt)' <<<"$raw"
 }
 
+# Adds .mode from swarm-merge.sh's merge.done events (unattended-low,
+# unattended-medium, operator). PRs merged another way (gh, the web UI, before
+# the event existed) keep mode null and render with no tag.
+add_modes() {
+    local events="$1/.swarm/events.log" prs="$2" modes
+    [ -f "$events" ] || { printf '%s\n' "$prs"; return; }
+    modes="$(sed -n 's/.*merge\.done .*pr=\([0-9]*\) .*mode=\([a-z-]*\).*/\1 \2/p' "$events" \
+        | jq -Rn '[inputs | split(" ") | {key: .[0], value: .[1]}] | from_entries')"
+    jq --argjson m "$modes" 'map(.mode = ($m[.number | tostring] // null))' <<<"$prs"
+}
+
 # Adds follow-up issue URLs (label from-pr-N) to every caveat PR.
 add_followups() {
     local repo="$1" prs="$2" n urls
@@ -154,7 +165,7 @@ render_md() {
         def dot: {low: "🟢", medium: "🟡", high: "🔴"}[.] // "⚪";
         (.prs | length) as $n
         | "## \($name): \($n) \(if $n == 1 then "change" else "changes" end) merged on \($day)\n",
-          (.prs[] | "- \(.risk | dot) \(.summary) — \(.url)",
+          (.prs[] | "- \(.risk | dot) \(.summary)\(if (.mode // "") | startswith("unattended") then " (auto-merged)" else "" end) — \(.url)",
                     (select(.caveats)
                      | "  - ⚠️ Merged with reviewer caveats."
                        + (if (.followups | length) > 0
@@ -239,6 +250,7 @@ for entry in "${APPS[@]}"; do
         continue
     fi
     prs="$(add_followups "$repo" "$prs")"
+    prs="$(add_modes "$dir" "$prs")"
     json="$(jq -n --arg app "$name" --arg repo "$repo" --arg date "$DATE" --argjson prs "$prs" \
         '{app: $app, repo: $repo, date: $date, count: ($prs | length), prs: $prs}')"
 
