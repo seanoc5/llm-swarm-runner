@@ -1092,22 +1092,22 @@ GH_HOLD_COMMENTS_JSON=
 gh_ready_called && red "expected gh pr ready NOT to run"
 green "only the newest of hold/lift counts"
 
-heading "Test 35: hold-comment text forms — only the strict lift forms lift; self-review prose that quotes either form does neither"
+heading "Test 35: comment text forms — only the hold marker holds, only the strict lift forms lift; self-review prose that quotes either form does neither"
 printf '<!-- BLIND_MERGE_RISK: low -->\nbody\n' > "$BODY_FILE"
-GH_HOLD_COMMENTS_JSON='{"comments":[{"body":"⛔ **COORDINATOR HOLD** — x"},{"body":"COORDINATOR HOLD lifted — fix verified"}]}'
+GH_HOLD_COMMENTS_JSON='{"comments":[{"body":"⛔ **COORDINATOR HOLD** — x\n<!-- SWARM_COORDINATOR_HOLD -->"},{"body":"COORDINATOR HOLD lifted — fix verified"}]}'
 rc=0; run_pr_ready || rc=$?
 [ "$rc" -eq 0 ] || red "expected a 'COORDINATOR HOLD lifted' line to lift, got $rc: $(cat "$TEST_DIR/out.log")"
-GH_HOLD_COMMENTS_JSON='{"comments":[{"body":"⛔ **COORDINATOR HOLD** — x"},{"body":"Hold lifted — a stray aside from anyone"}]}'
+GH_HOLD_COMMENTS_JSON='{"comments":[{"body":"⛔ **COORDINATOR HOLD** — x\n<!-- SWARM_COORDINATOR_HOLD -->"},{"body":"Hold lifted — a stray aside from anyone"}]}'
 rc=0; run_pr_ready || rc=$?
 [ "$rc" -eq 3 ] || red "expected a loose 'Hold lifted' aside NOT to lift (fail toward held), got $rc"
-GH_HOLD_COMMENTS_JSON='{"comments":[{"body":"⛔ **COORDINATOR HOLD** — x"},{"body":"<!-- SWARM_SELF_REVIEW: APPROVE actor=worker -->\nreview\nhold lifted\n"}]}'
+GH_HOLD_COMMENTS_JSON='{"comments":[{"body":"⛔ **COORDINATOR HOLD** — x\n<!-- SWARM_COORDINATOR_HOLD -->"},{"body":"<!-- SWARM_SELF_REVIEW: APPROVE actor=worker -->\nreview\nhold lifted\n"}]}'
 rc=0; run_pr_ready || rc=$?
 [ "$rc" -eq 3 ] || red "expected a self-review comment quoting 'hold lifted' NOT to lift, got $rc"
 GH_HOLD_COMMENTS_JSON='{"comments":[{"body":"<!-- SWARM_SELF_REVIEW: APPROVE actor=worker -->\n> ⛔ **COORDINATOR HOLD** quoted in review prose\n"}]}'
 rc=0; run_pr_ready || rc=$?
 GH_HOLD_COMMENTS_JSON=
 [ "$rc" -eq 0 ] || red "expected a self-review comment quoting the banner NOT to hold, got $rc: $(cat "$TEST_DIR/out.log")"
-green "markers and line-start forms decide; review prose is ignored"
+green "the hold marker and strict lift forms decide; review prose is ignored"
 
 heading "Test 36: hold comment lands AFTER the CI snapshot, before gh pr ready — refuses to ready"
 printf '<!-- BLIND_MERGE_RISK: low -->\nfinalizing\n' > "$BODY_FILE"
@@ -1138,5 +1138,18 @@ GH_IS_DRAFT=true
 gh_undo_called || red "expected gh pr ready --undo 42: $(cat "$GH_LOG")"
 gh_ready_called && red "expected the real gh pr ready NOT to run"
 green "a held PR found ready is put back to draft"
+
+heading "Test 39: legacy marker-less hold comment + free-text lift, no banner in the body — NOT re-held (PR #705 review)"
+printf '<!-- BLIND_MERGE_RISK: low -->\nfix landed\n' > "$BODY_FILE"
+# Old-prompt era: the hold comment had no marker (one even starts with the
+# banner text) and the lift was free text. Neither is recognised, so the PR
+# must ready normally instead of being re-held until a lift marker appears.
+GH_HOLD_COMMENTS_JSON='{"comments":[{"body":"Holding this PR: fix brief queued to iss-9."},{"body":"⛔ **COORDINATOR HOLD** — fix queued to iss-9"},{"body":"Hold lifted: fix verified, re-readying."}]}'
+rc=0; run_pr_ready || rc=$?
+GH_HOLD_COMMENTS_JSON=
+[ "$rc" -eq 0 ] || red "expected exit 0 — legacy hold + free-text lift must not re-hold, got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called || red "expected gh pr ready to run: $(cat "$GH_LOG")"
+[ -s "$EDITED_BODY" ] && grep -q 'COORDINATOR HOLD' "$EDITED_BODY" && red "expected no hold banner written to the body: $(cat "$EDITED_BODY")"
+green "marker-less legacy hold comments are ignored, so an old free-text lift cannot re-hold"
 
 green "ALL TESTS PASSED"
