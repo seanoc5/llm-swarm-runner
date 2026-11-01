@@ -41,7 +41,8 @@ declare -A TOOL_ONLY=()
 for _t in _compose-down-for-worktree _window-flags available-issues ci-wait daily-changelog \
           demo-driver demo-record-setup gh-token-probe lint-pr-screen nightly-full-tests \
           pr-ready ready-sweep self-review-pr setup statusline-with-context \
-          swarm-idle-report task-done; do
+          swarm-idle-report task-done build-image check-stuck-workers demo-segments-pick \
+          gh-status-bar install-tmux-binding run-all-tests worker-merge; do
   TOOL_ONLY[scripts/$_t.sh]="tool: standalone/test-override knobs, not project config"
 done
 
@@ -74,7 +75,10 @@ scan_root() {
     keys="$( { echo "$example"
       [ -n "${TOOL_ONLY[$rel]:-}" ] || grep -oE '\$\{[A-Z][A-Z0-9_]{3,}(:-|:=|-)' <<<"$code" | sed -E 's/^\$\{//; s/(:-|:=|-)$//' |
         sort -u | while read -r k; do
-          grep -qE "^[[:space:]]*(export |local |declare -?[a-zA-Z]* )?$k=" <<<"$code" || echo "$k"
+          # Skip only true internals: `X=value` that doesn't read X itself.
+          # `X="${X:-default}"` is the config-knob idiom and must be checked.
+          grep -E "^[[:space:]]*(export |local |declare -?[a-zA-Z]* )?$k=" <<<"$code" |
+              grep -qvE "\\$\\{$k(:-|:=|-)" || echo "$k"
         done
       } | sort -u)"
     for k in $keys; do
