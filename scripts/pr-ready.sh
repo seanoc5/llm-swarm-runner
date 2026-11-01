@@ -496,7 +496,9 @@ case "$CHECKS_RC" in
                 # (including a parse failure) fails toward the pre-existing
                 # pending refusal below.
                 ci_fallback_workflows_relevant_to_pr "$PR"
-                if [ "$CI_FALLBACK_RELEVANT" = "no" ] && [ "${CI_FALLBACK_RELEVANT_REASON:-}" = "base-branch" ]; then
+                if [ "$CI_FALLBACK_RELEVANT" = "no" ] && [ "${CI_FALLBACK_RELEVANT_REASON:-}" = "path+base-branch" ]; then
+                    echo "pr-ready: WARN: no CI applies to PR #$PR (path filter and base branch both exclude it): $CI_FALLBACK_RELEVANT_DETAIL — no check will ever register. Proceeding." >&2
+                elif [ "$CI_FALLBACK_RELEVANT" = "no" ] && [ "${CI_FALLBACK_RELEVANT_REASON:-}" = "base-branch" ]; then
                     # issue #670: stacked PR, base branch excluded by every
                     # pull_request workflow's branches filter.
                     echo "pr-ready: WARN: no CI applies to PR #$PR (base branch excluded): $CI_FALLBACK_RELEVANT_DETAIL — no check will ever register. Proceeding." >&2

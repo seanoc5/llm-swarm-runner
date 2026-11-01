@@ -386,7 +386,9 @@ while true; do
                         PR_CI_RELEVANT_REASON="${CI_FALLBACK_RELEVANT_REASON:-}"
                     fi
                     if [ "$PR_CI_RELEVANT" = "no" ]; then
-                        if [ "$PR_CI_RELEVANT_REASON" = "base-branch" ]; then
+                        if [ "$PR_CI_RELEVANT_REASON" = "path+base-branch" ]; then
+                            echo "ci-wait: no CI applies to PR #$PR (path filter and base branch both exclude it): $PR_CI_RELEVANT_DETAIL — no check will ever register." >&2
+                        elif [ "$PR_CI_RELEVANT_REASON" = "base-branch" ]; then
                             # issue #670: stacked PR whose base branch every
                             # pull_request workflow's branches filter excludes.
                             echo "ci-wait: no CI applies to PR #$PR (base branch excluded): $PR_CI_RELEVANT_DETAIL — no check will ever register." >&2

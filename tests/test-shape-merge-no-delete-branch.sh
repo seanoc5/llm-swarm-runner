@@ -69,7 +69,7 @@ run_fn() { # env: FAKE_* ; prints output, sets KEEP in $TMP/keep
   PATH="$TMP/bin:$PATH" bash -c '
     c_amber() { printf "%s" "$1"; }
     log_event() { echo "event $*" >> "$FAKE_GH_LOG"; }
-    PR_NUM=684 PR_BRANCH=feat/parent PR_BASE=master PR_HEAD_SHA=abc1234
+    PR_NUM=684 PR_BRANCH=feat/parent PR_BASE=master PR_HEAD_SHA="${FAKE_HEAD_SHA-abc1234}"
     . "$1"
     retarget_stacked_children
     echo "$KEEP_BRANCH" > "$2"
@@ -82,6 +82,13 @@ grep -q 'gh pr edit 701 --base master' "$TMP/gh.log" || fail "child #701 was not
 grep -q 'result=ok' "$TMP/gh.log" || fail "successful retarget must log merge.retarget ok"
 grep -q 'git rebase --onto origin/master abc1234' <<<"$out" || fail "retarget message must tell the child to rebase (issue #670 review): $out"
 ok "one stacked child: retargeted to master, branch deletable, rebase command printed"
+
+# Fallback when the parent's head SHA is unknown: the hint must not name the
+# bare branch (gone once the remote branch is deleted); origin/<branch> at worst.
+out=$(FAKE_CHILDREN="701" FAKE_HEAD_SHA="" run_fn)
+grep -q 'git rebase --onto origin/master origin/feat/parent' <<<"$out" || fail "fallback rebase hint must use origin/<branch>, not the bare branch: $out"
+grep -q -- '--onto origin/master feat/parent' <<<"$out" && fail "fallback rebase hint names the bare branch: $out"
+ok "missing head SHA: rebase hint falls back to origin/<branch>"
 
 out=$(FAKE_CHILDREN="" run_fn)
 grep -q 'gh pr edit' "$TMP/gh.log" && fail "no children must not call gh pr edit"

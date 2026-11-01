@@ -480,7 +480,7 @@ log_event() {
 # rebase them off. (tests/test-shape-merge-no-delete-branch.sh runs this
 # function against a fake gh — keep it self-contained.)
 retarget_stacked_children() {
-  local child_prs child
+  local child_prs child rebase_from
   KEEP_BRANCH=0
   [ -n "$PR_BASE" ] || return 0
   # A failed lookup is "unknown", not "no children": keep the branch.
@@ -489,11 +489,16 @@ retarget_stacked_children() {
     KEEP_BRANCH=1
     echo "       $(c_amber "⚠ could not list PRs stacked on $PR_BRANCH — keeping origin/$PR_BRANCH; delete it by hand once none are open")"
   fi
+  # The remote branch is deleted right after this, so the hint must not name
+  # it: prefer the pre-merge head SHA, else resolve the branch's SHA now.
+  rebase_from="$PR_HEAD_SHA"
+  [ -n "$rebase_from" ] || rebase_from=$(git rev-parse --verify --quiet "origin/$PR_BRANCH" 2>/dev/null || true)
+  [ -n "$rebase_from" ] || rebase_from="origin/$PR_BRANCH"
   for child in $child_prs; do
     if gh pr edit "$child" --base "$PR_BASE" >/dev/null 2>&1; then
       echo "       retargeted stacked PR #$child from $PR_BRANCH to $PR_BASE"
       echo "       it still carries #$PR_NUM's original commits (squash-merge rewrote them); in its worktree run:"
-      echo "         git fetch origin && git rebase --onto origin/$PR_BASE ${PR_HEAD_SHA:-$PR_BRANCH} && git push --force-with-lease"
+      echo "         git fetch origin && git rebase --onto origin/$PR_BASE $rebase_from && git push --force-with-lease"
       log_event merge.retarget "pr=$PR_NUM child=$child base=$PR_BASE result=ok"
     else
       KEEP_BRANCH=1

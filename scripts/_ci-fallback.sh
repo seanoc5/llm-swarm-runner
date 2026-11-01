@@ -83,6 +83,8 @@
 #         CI_FALLBACK_RELEVANT         "yes" | "no" | "unknown"
 #         CI_FALLBACK_RELEVANT_DETAIL  one-line explanation
 #         CI_FALLBACK_RELEVANT_REASON  when RELEVANT=no: "path" (path filter)
+#                                      or "path+base-branch" (both kinds of
+#                                      exclusion across workflows)
 #                                      or "base-branch" (issue #670: the
 #                                      PR's base branch is excluded by every
 #                                      pull_request `branches` filter); else ""
@@ -274,9 +276,10 @@ ci_fallback_workflows_relevant_to_pr() {
     tmp_wf="$(mktemp)"
     printf '%s\n' "$files_list" > "$tmp_files"
 
-    local path content content_rc verdict saw_excluded saw_path_excluded
+    local path content content_rc verdict saw_excluded saw_path_excluded saw_base_excluded
     saw_excluded=0
     saw_path_excluded=0
+    saw_base_excluded=0
     CI_FALLBACK_RELEVANT_REASON=""
     while IFS= read -r path; do
         [ -n "$path" ] || continue
@@ -324,6 +327,7 @@ ci_fallback_workflows_relevant_to_pr() {
                 # evidence of a permanent exclusion" as "excluded", but
                 # tracked separately so the message can name the fix.
                 saw_excluded=1
+                saw_base_excluded=1
                 ;;
             no-trigger)
                 # issue #644 third follow-up: this workflow has no
@@ -339,7 +343,10 @@ ci_fallback_workflows_relevant_to_pr() {
 
     if [ "$saw_excluded" -eq 1 ]; then
         CI_FALLBACK_RELEVANT="no"
-        if [ "$saw_path_excluded" -eq 1 ]; then
+        if [ "$saw_path_excluded" -eq 1 ] && [ "$saw_base_excluded" -eq 1 ]; then
+            CI_FALLBACK_RELEVANT_REASON="path+base-branch"
+            CI_FALLBACK_RELEVANT_DETAIL="some pull_request/push workflows' path filters exclude all of PR #$pr's changed files, and the rest' branches filters exclude its base branch '$base_ref' (a stacked PR?)"
+        elif [ "$saw_path_excluded" -eq 1 ]; then
             CI_FALLBACK_RELEVANT_REASON="path"
             CI_FALLBACK_RELEVANT_DETAIL="every pull_request/push-triggered workflow's path filter excludes all of PR #$pr's changed files"
         else
