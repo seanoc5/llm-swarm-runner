@@ -518,17 +518,18 @@ save_unsaved_work() {
 }
 
 # Prints the restore commands for the files save_unsaved_work just wrote.
+# Paths are %q-quoted so the commands run as written when they contain spaces.
 restore_commands() {
     local issue="$1" head="$2" ref="$3" dir
-    dir="\$(dirname $PROJECT_DIR)/rescue-issue-$issue"
+    dir="$(dirname "$PROJECT_DIR")/rescue-issue-$issue"
     if [ -n "$SAVED_BUNDLE" ]; then
-        printf 'git -C %s fetch %s %s:refs/heads/rescue/issue-%s\n' "$PROJECT_DIR" "$SAVED_BUNDLE" "$ref" "$issue"
-        printf 'git -C %s worktree add %s rescue/issue-%s\n' "$PROJECT_DIR" "$dir" "$issue"
+        printf 'git -C %q fetch %q %q:refs/heads/rescue/issue-%s\n' "$PROJECT_DIR" "$SAVED_BUNDLE" "$ref" "$issue"
+        printf 'git -C %q worktree add %q rescue/issue-%s\n' "$PROJECT_DIR" "$dir" "$issue"
     else
-        printf 'git -C %s worktree add -b rescue/issue-%s %s %s\n' "$PROJECT_DIR" "$issue" "$dir" "$head"
+        printf 'git -C %q worktree add -b rescue/issue-%s %q %s\n' "$PROJECT_DIR" "$issue" "$dir" "$head"
     fi
-    [ -n "$SAVED_PATCH" ] && printf 'git -C %s apply %s\n' "$dir" "$SAVED_PATCH"
-    [ -n "$SAVED_TGZ" ] && printf 'tar -xzf %s -C %s\n' "$SAVED_TGZ" "$dir"
+    [ -n "$SAVED_PATCH" ] && printf 'git -C %q apply %q\n' "$dir" "$SAVED_PATCH"
+    [ -n "$SAVED_TGZ" ] && printf 'tar -xzf %q -C %q\n' "$SAVED_TGZ" "$dir"
     return 0
 }
 
