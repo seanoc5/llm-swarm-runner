@@ -194,7 +194,10 @@ cat > "$SHIM_DIR/tmux" <<EOF
 exec "$REAL_TMUX" -L "$TEST_SOCK" "\$@"
 EOF
 chmod +x "$SHIM_DIR/tmux"
-# No open PR for fix/issue-61 → PR-safe under the default parked+PR-safe mode.
+# This test is about the dry-run salvage PREVIEW, not window selection, so
+# selection is pinned with --all --no-pr-check below: since issue #466 an
+# active window with no PR is only reaped once its issue is CLOSED, which
+# made this test fail on master. The stub is a backstop.
 cat > "$SHIM_DIR/gh" <<'EOF'
 #!/usr/bin/env bash
 exit 1
@@ -208,7 +211,7 @@ SESSION4="llm-proj4"
 RUN4="$TEST_DIR/run4.log"
 set +e
 (cd "$PROJ4" && PATH="$SHIM_DIR:$PATH" \
-    "$KILL_FINISHED" --with-worktree --dry-run) > "$RUN4" 2>&1
+    "$KILL_FINISHED" --all --no-pr-check --with-worktree --dry-run) > "$RUN4" 2>&1
 RC4=$?
 set -e
 [ "$RC4" -eq 0 ] || red "expected exit 0, got $RC4. Output:

@@ -641,6 +641,29 @@ for WT in "$PROJECT_PARENT"/wt-issue-*/; do
         continue
     fi
 
+    # Reap grace marker (kill-worktree.sh --grace) ---------------------------
+    # The watcher's autoclose closed this worker's window but kept the
+    # worktree because it held unsaved work. Respect the grace: skip it
+    # until the marker's `until`, then reap it regardless of age/dirty/PR
+    # state — the PR was already finalized when the marker was written, and
+    # kill-worktree.sh saves the work before removing. A live iss-N window
+    # means the worktree was re-provisioned, so the marker is ignored here
+    # (kill-worktree.sh drops it). SWARM_REAP_GRACE_SECS=0 ends every grace.
+    REAP_MARKER="$PROJECT_DIR/.swarm/reap-deferred/iss-$ISSUE"
+    if [ -f "$REAP_MARKER" ] && worktree_registration_ok "$WT" \
+        && ! tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx "iss-$ISSUE"; then
+        g_until="$(sed -n 's/^until=//p' "$REAP_MARKER" | head -1)"
+        g_until_utc="$(sed -n 's/^until_utc=//p' "$REAP_MARKER" | head -1)"
+        if [ "${SWARM_REAP_GRACE_SECS:-14400}" != "0" ] && [[ "$g_until" =~ ^[0-9]+$ ]] && [ "$NOW" -lt "$g_until" ]; then
+            echo "  $NAME  [reap grace for unsaved work until ${g_until_utc:-$g_until} → skip]"
+            SKIPPED+=("$NAME(grace)")
+            continue
+        fi
+        echo "  $NAME  [reap grace over (${g_until_utc:-$g_until}); kill-worktree.sh saves the work first → reap]"
+        CANDIDATES+=("$ISSUE")
+        continue
+    fi
+
     # 1. Age floor ------------------------------------------------------------
     if [ "$MIN_AGE_DAYS" -gt 0 ]; then
         MTIME=$(mtime_epoch "$WT" || echo "$NOW")
@@ -790,10 +813,11 @@ for ISSUE in "${CANDIDATES[@]}"; do
     [ "$NO_COMPOSE_DOWN" = "1" ] && KILL_WT_ARGS+=(--no-compose-down)
     kw_rc=0
     "$KILL_WT" "${KILL_WT_ARGS[@]}" || kw_rc=$?
-    # issue #181: exit 75 = deferred (in-flight check-on-done claim), not a
-    # real failure — kill-worktree.sh retries cleanly next pass.
+    # issue #181: exit 75 = deferred (in-flight check-on-done claim, or a
+    # reap grace for unsaved work), not a real failure — kill-worktree.sh
+    # retries cleanly next pass.
     if [ "$kw_rc" -eq 75 ]; then
-        echo "  ⏸ deferred: in-flight check-on-done claim for #$ISSUE (retry next reap pass)"
+        echo "  ⏸ deferred: in-flight check-on-done claim or reap grace for #$ISSUE (retry next reap pass)"
     elif [ "$kw_rc" -ne 0 ]; then
         echo "  WARN: kill-worktree.sh exited non-zero for #$ISSUE (continuing)"
     fi

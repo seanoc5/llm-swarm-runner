@@ -696,7 +696,16 @@ for issue in <list>; do
 done
 ```
 
-`kill-worktree.sh` prints `<commits ahead, M uncommitted>` before deletion so a worktree with unexpected work doesn't get silently dropped.
+`kill-worktree.sh` prints `<commits ahead, M uncommitted>` before deletion, and saves anything not already on a remote (unpushed commits as a git bundle, edits as a patch, untracked files as a tarball) to `<project>/.swarm/reaped/iss-N-<UTC>.*` with a `.saved.txt` manifest holding the restore commands. Restore:
+
+```bash
+git fetch <project>/.swarm/reaped/iss-N-<UTC>.bundle refs/heads/fix/issue-N:refs/heads/rescue/issue-N
+git worktree add ../rescue-issue-N rescue/issue-N      # or: worktree add -b rescue/issue-N ../rescue-issue-N <head from .saved.txt>
+git -C ../rescue-issue-N apply <project>/.swarm/reaped/iss-N-<UTC>.patch
+tar -xzf <project>/.swarm/reaped/iss-N-<UTC>.untracked.tgz -C ../rescue-issue-N
+```
+
+The watcher's autoclose keeps a worktree that has such work for `SWARM_REAP_GRACE_SECS` (default 4h) before removing it; `kill-worktree.sh N --now` removes it at once.
 
 ### Reviving listeners after a tmux session is killed
 
