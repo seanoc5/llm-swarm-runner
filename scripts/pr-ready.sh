@@ -111,6 +111,17 @@
 # still gets its self-review posted (same rubric as above) but is never
 # un-drafted here — only the coordinator lifts the hold.
 #
+# issue #616: the banner alone is not enough. A worker's body rewrite drops
+# it, and a hold can land while this script is mid-run (self-review and the
+# CI snapshot take minutes) — seen on fand-etl and corpusminder-spring more
+# than ten times in three weeks. So a PR is also held when its newest
+# hold-vs-lift COMMENT is a hold (markers in HOLD_COMMENT_JQ below,
+# prompts/coordinator.md § Draft-as-hold). On a comment-only hold this
+# restores the banner, drafts the PR again if it was readied, and exits 3.
+# The hold is re-read at the start, before the CI gate, immediately before
+# `gh pr ready`, and whenever a refusal writes the body, so no gate runs on
+# the start-of-script copy.
+#
 # issue #560: `gh pr checks` exit 1 for "Resource not accessible by
 # personal access token" (a fine-grained PAT has Actions:read but no Checks
 # permission) was previously indistinguishable from a genuine failing-CI
@@ -129,8 +140,9 @@
 #   2  refused — self-review returned BLOCK, or self-review-pr.sh exited 1
 #      (infra failure or an unparseable verdict, indistinguishable from the
 #      exit code alone — issue #446, treated as blocking either way)
-#   3  held — a COORDINATOR HOLD banner is on the PR body; self-review ran
-#      (and posted) as usual, but gh pr ready was deliberately skipped
+#   3  held — a COORDINATOR HOLD banner is on the PR body, or an unlifted
+#      hold comment is on the PR (issue #616); self-review ran (and posted)
+#      as usual, but gh pr ready was deliberately skipped
 #   4  refused — CI checks on the head commit are not confirmed green
 #      (pending, failing, or an unexpected `gh pr checks` error; also a
 #      confirmed red or still-pending result read via the Actions-runs
@@ -197,14 +209,93 @@ BODY="$(gh pr view "$PR" --json body --jq .body 2>/dev/null)" \
 RISK="$(grep -oE '<!-- BLIND_MERGE_RISK: (low|medium|high) -->' <<<"$BODY" \
     | head -1 | sed -E 's/.*: (low|medium|high) -->/\1/' || true)"
 
-HELD=0
 # Matches the literal draft-as-hold banner (prompts/coordinator.md): a
 # blockquote line starting with the banner, anchored to line-start so a
 # PR body that merely QUOTES or discusses the banner in running prose
 # (e.g. this PR's own appendix, or an inline code span) doesn't also
 # match and self-hold — only the real banner, which the coordinator
 # always prepends as its own leading "> " line, does.
-grep -qE '^> ⛔ \*\*COORDINATOR HOLD\*\*' <<<"$BODY" && HELD=1
+HOLD_BANNER_RE='^> ⛔ \*\*COORDINATOR HOLD\*\*'
+
+# issue #616: the second hold signal, one a worker's body rewrite can't
+# erase. The newest hold-or-lift comment decides: a hold comment (marker
+# `<!-- SWARM_COORDINATOR_HOLD -->` or a line starting `⛔ **COORDINATOR
+# HOLD**`) newer than the last lift comment (marker
+# `<!-- SWARM_COORDINATOR_HOLD_LIFTED -->` or a line starting "COORDINATOR
+# HOLD lifted" / "hold lifted") means held. "Newer" is comment order, which
+# gh returns oldest-first. Comments carrying a SWARM_SELF_REVIEW marker are
+# skipped: review prose may quote the banner and must not hold or lift.
+# The jq text deliberately avoids the literal pair the test stub keys on for
+# the self-review queries above.
+HOLD_COMMENT_JQ='[.comments[].body // ""
+  | select(contains("SWARM_SELF_REVIEW:") | not)
+  | if (contains("<!-- SWARM_COORDINATOR_HOLD -->") or test("(^|\\n)(> )?⛔ \\*\\*COORDINATOR HOLD\\*\\*")) then "held"
+    elif (contains("<!-- SWARM_COORDINATOR_HOLD_LIFTED -->") or test("(^|\\n)(✅ )?(\\*\\*)?(COORDINATOR )?HOLD (is )?lifted"; "i")) then "lifted"
+    else empty end] | (.[-1] // "")'
+
+HELD=0
+HOLD_SOURCE=""   # banner | comment (comment = body banner missing)
+
+# Reads hold state from the CURRENT $BODY plus a fresh comment lookup. A
+# comment-lookup failure fails open (treated as no comment hold), same
+# stance as the round count: the body banner is still honored.
+classify_hold() {
+    local state
+    HELD=0; HOLD_SOURCE=""
+    if grep -qE "$HOLD_BANNER_RE" <<<"$BODY"; then
+        HELD=1; HOLD_SOURCE=banner
+        return 0
+    fi
+    state="$(gh pr view "$PR" --json comments --jq "$HOLD_COMMENT_JQ" 2>/dev/null || true)"
+    if [ "$state" = "held" ]; then
+        HELD=1; HOLD_SOURCE=comment
+    fi
+}
+
+# Re-reads body and comments. Self-review and the CI snapshot take minutes,
+# and the coordinator can hold the PR at any point in that window (#616), so
+# every gate re-checks instead of trusting the state from script start.
+refresh_hold() {
+    local fresh
+    if fresh="$(gh pr view "$PR" --json body --jq .body 2>/dev/null)"; then
+        BODY="$fresh"
+    fi
+    classify_hold
+}
+
+# issue #616: makes a hold visible again. A comment-only hold means the body
+# lost its banner (a worker's body rewrite): put a banner back. A held PR
+# that is no longer a draft is drafted again. Both best-effort.
+enforce_hold() {
+    [ "$HELD" = "1" ] || return 0
+    if [ "$HOLD_SOURCE" = "comment" ]; then
+        echo "pr-ready: PR #$PR has a COORDINATOR HOLD comment newer than any 'hold lifted' comment, but its body has no hold banner (a body rewrite dropped it, issue #616) — restoring the banner."
+        BODY="$(printf '%s\n%s\n\n%s' \
+            '> ⛔ **COORDINATOR HOLD** — restored by pr-ready.sh: the latest coordinator hold comment on this PR has not been lifted; a body rewrite had dropped this banner. Do not merge; the coordinator re-readies when the fix is verified.' \
+            '> **Next:** coordinator — read the hold comment, then lift the hold or finish the queued fix round — waiting on the queued fix brief' \
+            "$(body_without_reason)")"
+        write_body "$BODY"
+        HOLD_SOURCE=banner
+    fi
+    if [ "$(gh pr view "$PR" --json isDraft --jq .isDraft 2>/dev/null || true)" = "false" ]; then
+        echo "pr-ready: held PR #$PR is not a draft — drafting it again."
+        gh pr ready --undo "$PR" >/dev/null 2>&1 \
+            || echo "pr-ready: WARN: couldn't re-draft held PR #$PR" >&2
+    fi
+}
+
+# Exits 3 (held) if the PR is held right now. Called before the CI gate and
+# again immediately before `gh pr ready`.
+hold_gate() {
+    refresh_hold
+    [ "$HELD" = "1" ] || return 0
+    enforce_hold
+    echo "pr-ready: PR #$PR carries a COORDINATOR HOLD ($HOLD_SOURCE) — staying draft."
+    echo "          Self-review above is posted, but only the coordinator lifts the hold and readies this PR."
+    exit 3
+}
+
+classify_hold
 
 # issue #602: the draft-reason banner (see header).
 DRAFT_REASON_OPEN_RE='^<!-- SWARM_DRAFT_REASON: [a-z-]+ sha=[0-9a-f]* -->$'
@@ -226,11 +317,19 @@ body_without_reason() {
 # Best-effort: a failed body edit warns but never changes the exit code.
 write_body() {
     gh pr edit "$PR" --body-file - <<<"$1" >/dev/null 2>&1 \
-        || echo "pr-ready: WARN: couldn't update PR #$PR's body (draft-reason banner)" >&2
+        || echo "pr-ready: WARN: couldn't update PR #$PR's body (banner)" >&2
 }
+
+# Held at script start: restore a dropped banner / re-draft before any
+# self-review time passes (issue #616). No-op when not held.
+enforce_hold
 
 refuse() {
     local reason="$1" code="$2" sha ts text who next
+    # issue #616: self-review may have run for minutes; a hold placed since
+    # must not be overwritten by a body built from the start-of-script copy.
+    refresh_hold
+    enforce_hold
     sha="$(head_sha)"
     # Same reason on the same commit: leave the body alone, so the
     # ready-sweep.sh retries don't rewrite it every pass.
@@ -401,11 +500,7 @@ case "$RISK" in
 esac
 fi
 
-if [ "$HELD" = "1" ]; then
-    echo "pr-ready: PR #$PR carries a COORDINATOR HOLD banner — staying draft."
-    echo "          Self-review above is posted, but only the coordinator lifts the hold and readies this PR."
-    exit 3
-fi
+hold_gate
 
 # issue #473: a single `gh pr checks` snapshot, taken fresh right here, so
 # readying never relies on a CI status the worker merely remembers or
@@ -523,9 +618,14 @@ case "$CHECKS_RC" in
         ;;
 esac
 
+# issue #616: the CI snapshot above takes time too. Re-check the hold, which
+# also refreshes $BODY so the banner strip below edits the live body rather
+# than the start-of-script copy (which would drop a banner added meanwhile).
+hold_gate
 if [ -n "$OLD_REASON_LINE" ]; then
     echo "pr-ready: removing the draft-reason banner from PR #$PR"
     write_body "$(body_without_reason)"
+    hold_gate   # last check, right before gh pr ready
 fi
 
 echo "pr-ready: gh pr ready $PR"

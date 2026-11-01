@@ -58,7 +58,26 @@ cat > "$SHIM_DIR/gh" <<EOF
 echo "\$*" >> "$GH_LOG"
 if [ "\$1" = "pr" ] && [ "\$2" = "view" ]; then
     if printf '%s\n' "\$*" | grep -q -- '--json comments'; then
-        if [ -n "\${GH_COMMENTS_JSON:-}" ]; then
+        if printf '%s\n' "\$*" | grep -q -- 'SWARM_COORDINATOR_HOLD'; then
+            # issue #616: pr-ready.sh's hold-comment lookup. Runs the
+            # script's REAL --jq expression against GH_HOLD_COMMENTS_JSON
+            # (a {"comments":[...]} fixture; none = no comments), or against
+            # GH_HOLD_LATE_COMMENTS_JSON once a \`gh pr checks\` call has
+            # happened — models a hold landing between the CI snapshot and
+            # \`gh pr ready\`.
+            HOLD_JSON="\${GH_HOLD_COMMENTS_JSON:-}"
+            [ -n "\$HOLD_JSON" ] || HOLD_JSON='{"comments":[]}'
+            if [ -e "$TEST_DIR/hold-late" ] && [ -n "\${GH_HOLD_LATE_COMMENTS_JSON:-}" ]; then
+                HOLD_JSON="\$GH_HOLD_LATE_COMMENTS_JSON"
+            fi
+            JQ_EXPR=""
+            prev=""
+            for arg in "\$@"; do
+                [ "\$prev" = "--jq" ] && JQ_EXPR="\$arg"
+                prev="\$arg"
+            done
+            printf '%s' "\$HOLD_JSON" | jq -r "\$JQ_EXPR"
+        elif [ -n "\${GH_COMMENTS_JSON:-}" ]; then
             # issue #601: run pr-ready.sh's REAL --jq expression (the arg
             # right after --jq) against a real comments fixture, instead of
             # the canned GH_ROUNDS_DONE/GH_LATEST_VERDICT stand-ins below —
@@ -87,12 +106,19 @@ if [ "\$1" = "pr" ] && [ "\$2" = "view" ]; then
             exit 1
         fi
         echo "\${GH_SHA:-deadbeef}"
+    elif printf '%s\n' "\$*" | grep -q -- '--json isDraft'; then
+        echo "\${GH_IS_DRAFT:-true}"
     else
         cat "$BODY_FILE"
     fi
     exit 0
 fi
 if [ "\$1" = "pr" ] && [ "\$2" = "checks" ]; then
+    # issue #616: from here on, a "late" hold exists (see the comments
+    # lookup above); GH_HOLD_LATE_BODY swaps in a body that now carries the
+    # banner, as the coordinator's own draft-as-hold edit would.
+    touch "$TEST_DIR/hold-late"
+    [ -z "\${GH_HOLD_LATE_BODY:-}" ] || printf '%s\n' "\$GH_HOLD_LATE_BODY" > "$BODY_FILE"
     [ -n "\${GH_CHECKS_STDERR:-}" ] && echo "\$GH_CHECKS_STDERR" >&2
     exit "\${GH_CHECKS_RC:-0}"
 fi
@@ -189,17 +215,22 @@ EOF
     chmod +x "$FAKE_REVIEW"
 }
 
-gh_ready_called() { grep -q 'pr ready' "$GH_LOG"; }
+# The real "ready" call is logged as `pr ready 42`; the hold's re-draft is
+# `pr ready --undo 42` and must not count (issue #616).
+gh_ready_called() { grep -q '^pr ready 42$' "$GH_LOG"; }
+gh_undo_called() { grep -q '^pr ready --undo 42$' "$GH_LOG"; }
 
 run_pr_ready() {
     : > "$GH_LOG"
-    rm -f "$EDITED_BODY"
+    rm -f "$EDITED_BODY" "$TEST_DIR/hold-late"
     : > "$FAKE_REVIEW_LOG"
     rc=0
     PATH="$SHIM_DIR:$PATH" SELF_REVIEW_SCRIPT="$FAKE_REVIEW" WORKER_SELF_REVIEW="${WORKER_SELF_REVIEW:-1}" \
         WORKER_SELF_REVIEW_MAX_ROUNDS="${WORKER_SELF_REVIEW_MAX_ROUNDS:-3}" \
         GH_ROUNDS_DONE="${GH_ROUNDS_DONE:-0}" GH_LATEST_VERDICT="${GH_LATEST_VERDICT:-}" \
         GH_COMMENTS_JSON="${GH_COMMENTS_JSON:-}" \
+        GH_HOLD_COMMENTS_JSON="${GH_HOLD_COMMENTS_JSON:-}" GH_HOLD_LATE_COMMENTS_JSON="${GH_HOLD_LATE_COMMENTS_JSON:-}" \
+        GH_HOLD_LATE_BODY="${GH_HOLD_LATE_BODY:-}" GH_IS_DRAFT="${GH_IS_DRAFT:-true}" \
         GH_CHECKS_RC="${GH_CHECKS_RC:-0}" GH_CHECKS_STDERR="${GH_CHECKS_STDERR:-}" \
         GH_WORKFLOW_COUNT="${GH_WORKFLOW_COUNT:-0}" \
         GH_PR_FILES_JSON="${GH_PR_FILES_JSON:-[]}" GH_WORKFLOW_PATHS_JSON="${GH_WORKFLOW_PATHS_JSON:-[]}" \
@@ -1019,5 +1050,90 @@ rc=0; run_pr_ready || rc=$?
 [ "$(grep -c '\*\*Next:\*\*' "$EDITED_BODY")" -eq 1 ] || red "expected exactly one Next line: $(cat "$EDITED_BODY")"
 grep -q '^> \*\*Next:\*\* coordinator — whatever the ⛔ COORDINATOR HOLD banner' "$EDITED_BODY" || red "expected Next to defer to the hold: $(cat "$EDITED_BODY")"
 green "a held PR's draft-reason banner doesn't compete with the hold's own Next line"
+
+
+# ============================================================================
+# issue #616: a coordinator hold must survive a worker's body rewrite and a
+# hold that lands while pr-ready.sh is mid-flight. The hold signal is the
+# newest hold-vs-lift COMMENT as well as the body banner.
+# ============================================================================
+HOLD_C='{"body":"⛔ **COORDINATOR HOLD** — fix queued\n<!-- SWARM_COORDINATOR_HOLD -->"}'
+LIFT_C='{"body":"✅ **COORDINATOR HOLD lifted** — fix verified\n<!-- SWARM_COORDINATOR_HOLD_LIFTED -->"}'
+
+heading "Test 32: replay of #616 — hold comment, body rewritten WITHOUT the banner — stays draft, banner restored"
+printf '<!-- BLIND_MERGE_RISK: low -->\nworker rewrote the whole body\n' > "$BODY_FILE"
+GH_HOLD_COMMENTS_JSON="{\"comments\":[$HOLD_C]}"
+GH_IS_DRAFT=false
+make_fake_review 0
+rc=0; run_pr_ready || rc=$?
+GH_HOLD_COMMENTS_JSON=; GH_IS_DRAFT=true
+[ "$rc" -eq 3 ] || red "expected exit 3 (held by comment), got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called && red "expected gh pr ready NOT to run on a comment-held PR"
+gh_undo_called || red "expected the non-draft held PR to be drafted again: $(cat "$GH_LOG")"
+head -1 "$EDITED_BODY" | grep -qE '^> ⛔ \*\*COORDINATOR HOLD\*\*' || red "expected the banner restored on top: $(cat "$EDITED_BODY" 2>/dev/null)"
+grep -q 'worker rewrote the whole body' "$EDITED_BODY" || red "expected the rewritten body kept under the banner: $(cat "$EDITED_BODY")"
+green "a dropped banner is restored and the PR stays draft (exit 3)"
+
+heading "Test 33: hold comment followed by a lift comment — not held, readies"
+printf '<!-- BLIND_MERGE_RISK: low -->\nfix landed\n' > "$BODY_FILE"
+GH_HOLD_COMMENTS_JSON="{\"comments\":[$HOLD_C,$LIFT_C]}"
+rc=0; run_pr_ready || rc=$?
+GH_HOLD_COMMENTS_JSON=
+[ "$rc" -eq 0 ] || red "expected exit 0 once the hold is lifted, got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called || red "expected gh pr ready to run after the lift"
+green "a lift comment newer than the hold releases it"
+
+heading "Test 34: lift comment followed by a NEWER hold comment — held"
+printf '<!-- BLIND_MERGE_RISK: low -->\nsecond round\n' > "$BODY_FILE"
+GH_HOLD_COMMENTS_JSON="{\"comments\":[$HOLD_C,$LIFT_C,$HOLD_C]}"
+rc=0; run_pr_ready || rc=$?
+GH_HOLD_COMMENTS_JSON=
+[ "$rc" -eq 3 ] || red "expected exit 3 for a re-held PR, got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called && red "expected gh pr ready NOT to run"
+green "only the newest of hold/lift counts"
+
+heading "Test 35: hold-comment text forms — plain 'hold lifted' line lifts; self-review prose that quotes either form does neither"
+printf '<!-- BLIND_MERGE_RISK: low -->\nbody\n' > "$BODY_FILE"
+GH_HOLD_COMMENTS_JSON='{"comments":[{"body":"⛔ **COORDINATOR HOLD** — x"},{"body":"Hold lifted — fix verified"}]}'
+rc=0; run_pr_ready || rc=$?
+[ "$rc" -eq 0 ] || red "expected a plain 'Hold lifted' line to lift, got $rc: $(cat "$TEST_DIR/out.log")"
+GH_HOLD_COMMENTS_JSON='{"comments":[{"body":"⛔ **COORDINATOR HOLD** — x"},{"body":"<!-- SWARM_SELF_REVIEW: APPROVE actor=worker -->\nreview\nhold lifted\n"}]}'
+rc=0; run_pr_ready || rc=$?
+[ "$rc" -eq 3 ] || red "expected a self-review comment quoting 'hold lifted' NOT to lift, got $rc"
+GH_HOLD_COMMENTS_JSON='{"comments":[{"body":"<!-- SWARM_SELF_REVIEW: APPROVE actor=worker -->\n> ⛔ **COORDINATOR HOLD** quoted in review prose\n"}]}'
+rc=0; run_pr_ready || rc=$?
+GH_HOLD_COMMENTS_JSON=
+[ "$rc" -eq 0 ] || red "expected a self-review comment quoting the banner NOT to hold, got $rc: $(cat "$TEST_DIR/out.log")"
+green "markers and line-start forms decide; review prose is ignored"
+
+heading "Test 36: hold comment lands AFTER the CI snapshot, before gh pr ready — refuses to ready"
+printf '<!-- BLIND_MERGE_RISK: low -->\nfinalizing\n' > "$BODY_FILE"
+GH_HOLD_LATE_COMMENTS_JSON="{\"comments\":[$HOLD_C]}"
+rc=0; run_pr_ready || rc=$?
+GH_HOLD_LATE_COMMENTS_JSON=
+[ "$rc" -eq 3 ] || red "expected exit 3 for a hold landing mid-run, got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called && red "expected gh pr ready NOT to run after a late hold: $(cat "$GH_LOG")"
+green "the hold is re-checked immediately before gh pr ready"
+
+heading "Test 37: banner lands mid-run while a draft-reason banner is on the body — held, body not overwritten from the stale copy"
+banner ci-pending deadbeef > "$BODY_FILE"
+GH_HOLD_LATE_BODY="$(printf '> ⛔ **COORDINATOR HOLD** — fix queued\n\n<!-- SWARM_DRAFT_REASON: ci-pending sha=deadbeef -->\n> ⏳ **Still a draft:** x\n<!-- /SWARM_DRAFT_REASON -->\n<!-- BLIND_MERGE_RISK: medium -->\nsome change')"
+make_fake_review 2  # skipped: ci-pending on the current head
+rc=0; run_pr_ready || rc=$?
+GH_HOLD_LATE_BODY=
+[ "$rc" -eq 3 ] || red "expected exit 3, got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called && red "expected gh pr ready NOT to run"
+[ ! -f "$EDITED_BODY" ] || red "expected no body rewrite (it would have dropped the new banner): $(cat "$EDITED_BODY")"
+green "a banner added mid-run is never overwritten by the stale start-of-run body"
+
+heading "Test 38: banner-held PR that is no longer a draft is drafted again"
+printf '> ⛔ **COORDINATOR HOLD** — fix queued\n\n<!-- BLIND_MERGE_RISK: low -->\nx\n' > "$BODY_FILE"
+GH_IS_DRAFT=false
+rc=0; run_pr_ready || rc=$?
+GH_IS_DRAFT=true
+[ "$rc" -eq 3 ] || red "expected exit 3, got $rc"
+gh_undo_called || red "expected gh pr ready --undo 42: $(cat "$GH_LOG")"
+gh_ready_called && red "expected the real gh pr ready NOT to run"
+green "a held PR found ready is put back to draft"
 
 green "ALL TESTS PASSED"
