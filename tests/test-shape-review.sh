@@ -48,7 +48,7 @@ export CLAUDE_STUB_OUTPUT="$TEST_DIR/review-output.txt"
 export GH_PR_JSON_FILE="$TEST_DIR/pr.json"
 export CODEX_ARGS_LOG="$TEST_DIR/codex.args"
 export CODEX_PAYLOAD_LOG="$TEST_DIR/codex.payload"
-unset SELF_REVIEW_CMD SELF_REVIEW_MODEL WORKER_CMD WORKER_MODEL
+unset SELF_REVIEW_CMD SELF_REVIEW_MODEL WORKER_CMD WORKER_MODEL SELF_REVIEW_UNSET_API_KEY ANTHROPIC_API_KEY
 : > "$GH_COMMENTS_FILE"
 
 mkdir -p "$TEST_DIR/bin"
@@ -84,7 +84,9 @@ EOF
 cat > "$TEST_DIR/bin/claude" <<'EOF'
 #!/usr/bin/env bash
 cat > /dev/null   # consume the payload from stdin
+echo "key=${ANTHROPIC_API_KEY:-unset}" > "${CLAUDE_ENV_LOG:-/dev/null}"
 cat "$CLAUDE_STUB_OUTPUT"
+exit "${CLAUDE_STUB_EXIT:-0}"
 EOF
 cat > "$TEST_DIR/bin/tmux" <<'EOF'
 #!/usr/bin/env bash
@@ -190,6 +192,24 @@ grep -q -- '--model explicit-sol' "$CODEX_ARGS_LOG" || red "--model must overrid
 if WORKER_CMD=codex CODEX_STUB_EXIT=9 "$REVIEW" 42 >/dev/null 2>&1; then RC=0; else RC=$?; fi
 [ "$RC" -eq 1 ] || red "failed Codex invocation must fail closed (rc=$RC)"
 green "Codex model selection, stdin payload, final verdict, and failure handling"
+
+heading "claude -p failure surfaces its output and the API-key hint (#673)"
+printf 'API Error: 400 You have reached your specified API usage limits\n' > "$CLAUDE_STUB_OUTPUT"
+ERR="$(ANTHROPIC_API_KEY=sk-test CLAUDE_STUB_EXIT=1 "$REVIEW" 42 2>&1 >/dev/null)" && RC=0 || RC=$?
+[ "$RC" -eq 1 ] || red "failed claude -p must exit 1 (rc=$RC)"
+printf '%s' "$ERR" | grep -q 'usage limits' || red "claude -p output not echoed on failure"
+printf '%s' "$ERR" | grep -q 'env -u ANTHROPIC_API_KEY' || red "API-key hint missing"
+printf '%s' "$ERR" | grep -q 'ERROR: claude -p review invocation failed' || red "ERROR line missing"
+ERR="$(CLAUDE_STUB_EXIT=1 "$REVIEW" 42 2>&1 >/dev/null)" && RC=0 || RC=$?
+printf '%s' "$ERR" | grep -q 'API-key auth' && red "API-key hint shown without a key set"
+export CLAUDE_ENV_LOG="$TEST_DIR/claude.env"
+printf 'APPROVE\n' > "$CLAUDE_STUB_OUTPUT"
+ANTHROPIC_API_KEY=sk-test SELF_REVIEW_UNSET_API_KEY=1 "$REVIEW" 42 >/dev/null || red "review with key unset failed"
+grep -q 'key=unset' "$CLAUDE_ENV_LOG" || red "SELF_REVIEW_UNSET_API_KEY=1 did not unset the key"
+ANTHROPIC_API_KEY=sk-test "$REVIEW" 42 >/dev/null || red "review failed"
+grep -q 'key=sk-test' "$CLAUDE_ENV_LOG" || red "key must pass through by default"
+unset CLAUDE_ENV_LOG
+green "failure output echoed, hint shown, unset knob works"
 
 # ============================================================================
 heading "Test 6: swarm-merge BLOCK gate"

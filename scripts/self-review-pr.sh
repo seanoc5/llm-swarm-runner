@@ -54,6 +54,10 @@
 #             current head. Exit 0 once posted.
 #   SELF_REVIEW_CMD selects claude or codex; defaults to WORKER_CMD when
 #             it is codex, otherwise claude for compatibility.
+#   SELF_REVIEW_UNSET_API_KEY=1  run `claude -p` under `env -u
+#             ANTHROPIC_API_KEY`, so the review uses the claude.ai login
+#             instead of an exhausted/unrelated API key a project .envrc
+#             exported (issue #673).
 #
 # Exit codes (gate-friendly — swarm-merge.sh consumes the marker comment):
 #   0  APPROVE
@@ -88,7 +92,7 @@ while [ $# -gt 0 ]; do
         --caveats-nonblocking) shift; NONBLOCKING_FOLLOWUP="${1:-}"
             [[ "$NONBLOCKING_FOLLOWUP" =~ ^[0-9]+$ ]] \
                 || { echo "ERROR: --caveats-nonblocking needs a follow-up issue number" >&2; exit 1; } ;;
-        -h|--help) sed -n '2,63p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,67p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         -*) echo "ERROR: unknown flag '$1'" >&2; exit 1 ;;
         *)  [ -z "$PR" ] || { echo "ERROR: multiple PR numbers" >&2; exit 1; }
             PR="$1" ;;
@@ -171,9 +175,25 @@ if [ "$REVIEW_CMD" = "codex" ]; then
     fi
     REVIEW="$(cat "$REVIEW_FILE")"
 else
-    REVIEW="$(review_payload \
-        | claude -p "${MODEL_OPTS[@]}" --no-chrome --dangerously-skip-permissions)" \
-        || { echo "ERROR: claude -p review invocation failed" >&2; exit 1; }
+    # ANTHROPIC_API_KEY, when set, outranks the claude.ai login. Optionally
+    # drop it for this call (#673).
+    CLAUDE_ENV=()
+    [ "${SELF_REVIEW_UNSET_API_KEY:-0}" = "1" ] && CLAUDE_ENV=(env -u ANTHROPIC_API_KEY)
+    # `claude -p` reports API errors on stdout, so keep REVIEW on failure and
+    # show it instead of discarding it (#673).
+    if REVIEW="$(review_payload \
+            | "${CLAUDE_ENV[@]}" claude -p "${MODEL_OPTS[@]}" --no-chrome --dangerously-skip-permissions)"; then
+        :
+    else
+        echo "--- claude -p output (last 20 lines) ---" >&2
+        printf '%s\n' "$REVIEW" | tail -n 20 >&2
+        echo "---" >&2
+        if [ -n "${ANTHROPIC_API_KEY:-}" ] && [ "${SELF_REVIEW_UNSET_API_KEY:-0}" != "1" ]; then
+            echo "NOTE: ANTHROPIC_API_KEY is set, so the review ran on API-key auth, not the claude.ai login. Retry with: env -u ANTHROPIC_API_KEY (or SELF_REVIEW_UNSET_API_KEY=1)." >&2
+        fi
+        echo "ERROR: claude -p review invocation failed" >&2
+        exit 1
+    fi
 fi
 
 # The review session sometimes wraps the verdict token in markdown
