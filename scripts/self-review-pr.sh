@@ -1,3 +1,18 @@
+
+# Once per (head, actor) (issue #599): a --post run is a no-op when an
+# owner/member/collaborator-authored marker for THIS head by THIS actor already
+# exists, replaying its verdict as the exit code. A worker round plus the
+# coordinator's independent "Find != fix" round on one head is still two
+# reviews (different actors); only a repeat by the same actor is skipped.
+# Markers without head= (pre-#601) never match. --force re-runs.
+if [ "$POST" = "1" ] && [ "$FORCE" = "0" ] && [ -n "$HEAD_SHA" ]; then
+    PRIOR="$(gh pr view "$PR" --json comments 2>/dev/null | jq -r --arg a "$ACTOR" --arg h "$HEAD_SHA" '[.comments[]? | select(.authorAssociation as $x | ["OWNER","MEMBER","COLLABORATOR"] | index($x)) | .body // "" | capture("SWARM_SELF_REVIEW: (?<v>[A-Z_]+) actor=" + $a + " head=" + $h + "(?![0-9a-f])")? | .v] | last // ""' 2>/dev/null || true)"
+    case "$PRIOR" in
+        APPROVE)              echo "self-review: skipped — PR #$PR head ${HEAD_SHA:0:7} already has an actor=$ACTOR review (APPROVE); --force to re-run"; exit 0 ;;
+        APPROVE_WITH_CAVEATS) echo "self-review: skipped — PR #$PR head ${HEAD_SHA:0:7} already has an actor=$ACTOR review (APPROVE_WITH_CAVEATS); --force to re-run"; exit 3 ;;
+        BLOCK)                echo "self-review: skipped — PR #$PR head ${HEAD_SHA:0:7} already has an actor=$ACTOR review (BLOCK); --force to re-run"; exit 2 ;;
+    esac
+fi
 #!/usr/bin/env bash
 #
 # self-review-pr.sh — Run the fresh-context adversarial self-review on an
@@ -160,6 +175,25 @@ fi
 # older than the reviewed diff, which the gate sees as a mismatch and
 # refuses: fail closed.
 HEAD_SHA="$(gh pr view "$PR" --json headRefOid --jq .headRefOid 2>/dev/null || true)"
+
+# Once per (head, actor) (issue #599): a --post run is a no-op when an
+# owner/member/collaborator-authored marker for THIS head by THIS actor
+# already exists; the prior verdict is replayed as the exit code. A worker
+# round plus the coordinator's independent "Find ≠ fix" round on one head
+# are still two reviews (different actors); only a same-actor repeat is
+# skipped. Markers without head= (pre-#601) never match. --force re-runs.
+if [ "$POST" = "1" ] && [ "$FORCE" = "0" ] && [ -n "$HEAD_SHA" ]; then
+    PRIOR="$(gh pr view "$PR" --json comments 2>/dev/null | jq -r --arg a "$ACTOR" --arg h "$HEAD_SHA" '
+        [.comments[]? | select(.authorAssociation as $x | ["OWNER","MEMBER","COLLABORATOR"] | index($x))
+         | (.body // "") | capture("SWARM_SELF_REVIEW: (?<v>[A-Z_]+) actor=" + $a + " head=" + $h + "(?![0-9a-f])")? | .v]
+        | last // ""' 2>/dev/null || true)"
+    case "$PRIOR" in
+        APPROVE|APPROVE_WITH_CAVEATS|BLOCK)
+            echo "self-review: skipped — PR #$PR head ${HEAD_SHA:0:7} already has an actor=$ACTOR review ($PRIOR); --force to re-run"
+            case "$PRIOR" in APPROVE) exit 0 ;; BLOCK) exit 2 ;; *) exit 3 ;; esac ;;
+    esac
+fi
+
 DIFF="$(gh pr diff "$PR")" || { echo "ERROR: gh pr diff $PR failed" >&2; exit 1; }
 BODY="$(gh pr view "$PR" --json title,body --jq '"\(.title)\n\n\(.body)"')" \
     || { echo "ERROR: gh pr view $PR failed" >&2; exit 1; }
@@ -188,8 +222,24 @@ else
     [ "${SELF_REVIEW_UNSET_API_KEY:-0}" = "1" ] && CLAUDE_ENV=(env -u ANTHROPIC_API_KEY)
     # `claude -p` reports API errors on stdout, so keep REVIEW on failure and
     # show it instead of discarding it (#673).
+    #
+    # Read-only (issue #599): the review gets only Read/Grep/Glob plus three
+    # git/gh read prefixes, and `dontAsk` denies everything else instead of
+    # prompting, so it can neither write files nor run a test suite (46 of
+    # 356 fand-etl reviews ran suites; one wrote a probe test into the
+    # worker's worktree). It runs from a scratch dir so stray output cannot
+    # land in a worktree; the repo is readable via --add-dir. GH_REPO keeps
+    # `gh pr diff` working from there.
+    SCRATCH="$(mktemp -d -t swarm-review-scratch-XXXXXX)"
+    trap 'rm -rf "$SCRATCH"' EXIT
+    REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+    : "${GH_REPO:=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)}"
+    [ -z "$GH_REPO" ] || export GH_REPO
+    READONLY_OPTS=(--tools "Read,Grep,Glob,Bash"
+        --allowedTools "Read" "Grep" "Glob" "Bash(gh pr diff:*)" "Bash(git log:*)" "Bash(git show:*)"
+        --permission-mode dontAsk --add-dir "$REPO_ROOT")
     if REVIEW="$(review_payload \
-            | "${CLAUDE_ENV[@]}" claude -p "${MODEL_OPTS[@]}" --no-chrome --dangerously-skip-permissions)"; then
+            | (cd "$SCRATCH" && "${CLAUDE_ENV[@]}" claude -p "${MODEL_OPTS[@]}" --no-chrome "${READONLY_OPTS[@]}"))"; then
         :
     else
         echo "--- claude -p output (last 20 lines) ---" >&2
@@ -229,7 +279,10 @@ echo "---"
 
 # --- optionally post as a PR comment ---------------------------------------
 if [ "$POST" = "1" ]; then
-    if [ "$FORCE" = "0" ] && gh pr view "$PR" --json comments \
+    # With a known head, the (head, actor) no-op above already decided; only an
+    # unreadable head falls back to "any marker blocks the post" (issue #599:
+    # otherwise a worker marker would stop the coordinator's first post).
+    if [ "$FORCE" = "0" ] && [ -z "$HEAD_SHA" ] && gh pr view "$PR" --json comments \
             --jq '.comments[].body' 2>/dev/null | grep -q 'SWARM_SELF_REVIEW:'; then
         echo "post: skipped — PR #$PR already has a SWARM_SELF_REVIEW comment (--force to re-post)"
     else
