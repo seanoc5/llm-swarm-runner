@@ -303,7 +303,7 @@ $LLM_SWARM_DIR/scripts/task-done.sh "$TASK_ID" ok    # or: err "<short reason>"
 ```
 
 Always the `$LLM_SWARM_DIR`-prefixed path (your checkout may have no
-`scripts/` of its own). `$TASK_ID` matches your status file. If `$TASK_ID` is empty in your shell, read it from the first line of your brief (`[swarm] task_id=… brief=…`). `ok` covers
+`scripts/` of its own). `$TASK_ID` matches your status file. If `$TASK_ID` is empty in your shell, read it from the `[swarm] task_id=… brief=…` line at the top of your brief. `ok` covers
 any concluded outcome — PR, `blocked`, `done-no-pr`; use `err` only when
 nothing usable was delivered. It is the coordinator's one reliable
 "worker finished" signal (#451). If the project runs an executed check,
