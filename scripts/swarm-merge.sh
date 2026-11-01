@@ -81,8 +81,13 @@
 #   Gate 9 (independent APPROVE on head) the latest SWARM_SELF_REVIEW marker
 #                         with actor=coordinator or actor=operator says bare
 #                         APPROVE and its head=<sha> is the PR's current head
-#                         (self-review-pr.sh records it). Caveats, BLOCK, a
+#                         (self-review-pr.sh records it). Also accepted:
+#                         APPROVE_WITH_CAVEATS whose marker carries
+#                         `caveats=nonblocking followup=<issue#>` (written by
+#                         self-review-pr.sh --caveats-nonblocking) when that
+#                         follow-up issue exists. Other caveats, BLOCK, a
 #                         worker-only review, or an older head → refused.
+#                         Which branch was taken is logged as merge.gate.
 #                         The merge is then pinned to that reviewed commit,
 #                         and a CI-verified head that differs is refused.
 #
@@ -712,14 +717,38 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
           # commenter can't forge one. Workers share the operator's gh account,
           # so this does not stop a worker posting actor=coordinator itself.
           IND_MARKER="$(jq -r '.comments[] | select(.authorAssociation as $a | ["OWNER","MEMBER","COLLABORATOR"] | index($a)) | .body // ""' <<<"$REVIEW_JSON" 2>/dev/null \
-                        | grep -oE 'SWARM_SELF_REVIEW: [A-Z_]+ actor=(coordinator|operator)( head=[0-9a-f]+)?' \
+                        | grep -oE 'SWARM_SELF_REVIEW: [A-Z_]+ actor=(coordinator|operator)( head=[0-9a-f]+)?( caveats=[a-z]+)?( followup=[0-9]+)?' \
                         | tail -1 || true)"
           IND_VERDICT="$(sed -E 's/^SWARM_SELF_REVIEW: ([A-Z_]+).*/\1/' <<<"$IND_MARKER")"
           IND_HEAD="$(grep -oE 'head=[0-9a-f]+' <<<"$IND_MARKER" | cut -d= -f2 || true)"
-          if [ -z "$HEAD_NOW" ] || [ "$IND_VERDICT" != APPROVE ] || [ "$IND_HEAD" != "$HEAD_NOW" ]; then
+          IND_CAVEATS="$(grep -oE 'caveats=[a-z]+' <<<"$IND_MARKER" | cut -d= -f2 || true)"
+          IND_FOLLOWUP="$(grep -oE 'followup=[0-9]+' <<<"$IND_MARKER" | cut -d= -f2 || true)"
+          GATE9_OK=0
+          if [ -n "$HEAD_NOW" ] && [ "$IND_HEAD" = "$HEAD_NOW" ]; then
+            if [ "$IND_VERDICT" = APPROVE ]; then
+              GATE9_OK=1
+              log_event merge.gate "pr=$PR_NUM gate=9-independent-review result=approve head=$HEAD_NOW action=proceed"
+            elif [ "$IND_VERDICT" = APPROVE_WITH_CAVEATS ] && [ "$IND_CAVEATS" = nonblocking ] && [ -n "$IND_FOLLOWUP" ]; then
+              # Non-blocking caveats (the reviewer judged them not about
+              # correctness/security/data loss/schema) are accepted only with
+              # a real follow-up ISSUE (not a PR — `gh issue view` also
+              # resolves PR numbers, hence the /issues/ url check).
+              FOLLOWUP_URL="$(gh issue view "$IND_FOLLOWUP" --json url --jq .url 2>/dev/null || true)"
+              if [[ "$FOLLOWUP_URL" == */issues/"$IND_FOLLOWUP" ]]; then
+                GATE9_OK=1
+                echo "       $(c_amber "auto-medium gate 9: APPROVE_WITH_CAVEATS accepted — caveats recorded non-blocking, follow-up #$IND_FOLLOWUP")"
+                log_event merge.gate "pr=$PR_NUM gate=9-independent-review result=caveats-nonblocking followup=$IND_FOLLOWUP head=$HEAD_NOW action=proceed"
+              else
+                echo "       follow-up #$IND_FOLLOWUP is not an issue in this repo (gh issue view returned '${FOLLOWUP_URL:-nothing}')." >&2
+              fi
+            fi
+          fi
+          if [ "$GATE9_OK" != 1 ]; then
+            log_event merge.gate "pr=$PR_NUM gate=9-independent-review result=refused verdict=${IND_VERDICT:-none} caveats=${IND_CAVEATS:-none} followup=${IND_FOLLOWUP:-none} action=refuse-auto-medium"
             echo "ERROR: PR #$PR_NUM refused by --auto-medium Gate 9 (independent APPROVE on head)." >&2
             echo "       Latest coordinator/operator review: '${IND_MARKER:-<none>}'; current head: '${HEAD_NOW:-<unreadable>}'." >&2
-            echo "       Needs a bare APPROVE on this exact head: self-review-pr.sh $PR_NUM --post --force --actor coordinator" >&2
+            echo "       Needs a bare APPROVE on this exact head (self-review-pr.sh $PR_NUM --post --force --actor coordinator)," >&2
+            echo "       or non-blocking caveats with a filed follow-up issue (self-review-pr.sh $PR_NUM --caveats-nonblocking <issue#> --actor coordinator)." >&2
             exit 1
           fi
           REVIEWED_SHA="$HEAD_NOW"
@@ -854,7 +883,7 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
       # commit, and the merge pins to it (also when no CI is configured).
       if [ -n "$REVIEWED_SHA" ]; then
         if [ -n "$MATCH_SHA" ] && [ "$MATCH_SHA" != "$REVIEWED_SHA" ]; then
-          echo "ERROR: PR #$PR_NUM refused by --auto-medium Gate 9: CI verified $MATCH_SHA but the APPROVE was for $REVIEWED_SHA (a push landed in between). Re-review the new head." >&2
+          echo "ERROR: PR #$PR_NUM refused by --auto-medium Gate 9: CI verified $MATCH_SHA but the review was for $REVIEWED_SHA (a push landed in between). Re-review the new head." >&2
           exit 1
         fi
         MATCH_SHA="$REVIEWED_SHA"
