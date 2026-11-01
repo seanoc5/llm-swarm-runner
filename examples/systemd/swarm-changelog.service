@@ -1,0 +1,11 @@
+# ~/.config/systemd/user/swarm-changelog.service — edit the path, then:
+#   systemctl --user daemon-reload && systemctl --user enable --now swarm-changelog.timer
+[Unit]
+Description=llm-swarm-runner daily "what merged" changelog posts (all apps)
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/path/to/llm-swarm-runner/scripts/daily-changelog.sh
+Nice=10
+TimeoutStartSec=15min

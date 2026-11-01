@@ -1,0 +1,15 @@
+# changelog apps.conf — apps for scripts/daily-changelog.sh. Copy to
+# ~/.config/swarm-changelog/apps.conf (or point CHANGELOG_CONF at it).
+# One app per line: <name> <repo_dir> <owner/repo> <cm_app>
+#   name     thread key and label in the digest ("<name> changelog")
+#   cm_app   corpusminder app whose "Using <app>" guide forum holds the
+#            thread; the posting key is ~/.config/swarm-changelog/keys/<cm_app>.key
+# An app with nothing merged that day is skipped, so idle apps cost nothing.
+
+corpusminder-spring /opt/work/springboot/corpusminder-spring seanoc5/corpusminder-spring corpusminder
+fand-app            /opt/work/oconeco/fand-app               seanoc5/fand-app            fand-app
+# fand-etl has no guide forum of its own; its thread lives in fand-app's.
+fand-etl            /opt/work/oconeco/fand-etl               seanoc5/fand-etl            fand-app
+SAMlytics           /opt/work/springboot/SAMlytics           seanoc5/SAMlytics           samlytics
+civicstrata         /opt/work/springboot/civicstrata         seanoc5/civicstrata         civicstrata
+oconeco-site        /opt/work/oconeco/oconeco-site           seanoc5/oconeco-site        oconeco-site

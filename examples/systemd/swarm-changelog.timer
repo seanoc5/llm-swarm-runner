@@ -1,0 +1,10 @@
+[Unit]
+Description=Run swarm-changelog.service at 07:30 local
+
+[Timer]
+OnCalendar=*-*-* 07:30
+# Catch up after a sleep/outage; re-runs are idempotent (no double posts).
+Persistent=true
+
+[Install]
+WantedBy=timers.target
