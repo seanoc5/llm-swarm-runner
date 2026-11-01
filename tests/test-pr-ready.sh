@@ -208,7 +208,7 @@ run_pr_ready() {
         GH_SHA="${GH_SHA:-deadbeef}" GH_SHA_LOOKUP_FAILS="${GH_SHA_LOOKUP_FAILS:-0}" \
         GH_RUNLIST_JSON="${GH_RUNLIST_JSON:-[]}" GH_RUNLIST_RC="${GH_RUNLIST_RC:-0}" \
         GH_RUNLIST_STDERR="${GH_RUNLIST_STDERR:-}" \
-        "$PR_READY" ${PR_READY_FLAGS:-} 42 \
+        "$PR_READY" ${PR_READY_FLAGS:-} 42 ${PR_READY_TRAILING:-} \
         > "$TEST_DIR/out.log" 2>&1 || rc=$?
     return "$rc"
 }
@@ -733,6 +733,16 @@ PR_READY_FLAGS=
 [ "$rc" -eq 1 ] || red "expected exit 1 for an unknown flag, got $rc"
 gh_ready_called && red "expected gh pr ready NOT to run on an unknown flag"
 green "-y leaves a cap of 0 alone; unknown flags exit 1 before touching the PR"
+
+# issue #674: a flag AFTER the PR number must be refused, not silently dropped.
+make_fake_review 0
+PR_READY_TRAILING=--one-more-round
+rc=0; run_pr_ready || rc=$?
+PR_READY_TRAILING=
+[ "$rc" -eq 1 ] || red "expected exit 1 for a trailing flag, got $rc: $(cat "$TEST_DIR/out.log")"
+grep -q "must come before the PR number" "$TEST_DIR/out.log" || red "expected usage hint, got: $(cat "$TEST_DIR/out.log")"
+gh_ready_called && red "expected gh pr ready NOT to run on a trailing flag"
+green "trailing flag after the PR number exits 1 and never readies (issue #674)"
 
 # ============================================================================
 heading "Test 19e: coordinator-tagged rounds do not inflate the worker's round count (issue #601)"

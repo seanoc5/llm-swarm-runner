@@ -181,6 +181,14 @@ while [[ "${1:-}" == -* ]]; do
     esac
 done
 PR="${1:?$USAGE}"
+shift
+# issue #674: flags go BEFORE the PR number. Anything left over (e.g.
+# `pr-ready.sh 627 --one-more-round`) used to be dropped silently, so the
+# round cap applied and the PR was readied unreviewed. Refuse instead.
+if [ $# -gt 0 ]; then
+    echo "ERROR: unexpected argument(s) after the PR number: $* (flags must come before the PR number; $USAGE)" >&2
+    exit 1
+fi
 command -v gh >/dev/null 2>&1 || { echo "ERROR: gh required" >&2; exit 1; }
 
 BODY="$(gh pr view "$PR" --json body --jq .body 2>/dev/null)" \
