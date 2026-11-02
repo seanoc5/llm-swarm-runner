@@ -43,6 +43,10 @@ ARG OPENAI_CODEX_VERSION=0.160.0
 ARG PROMPTFOO_VERSION=0.121.9
 ARG DENO_VERSION=2.7.14
 ARG UV_VERSION=0.11.8
+# PostgreSQL client major, from the PGDG apt repo. Keep it >= the servers the
+# workers talk to (both hosts run 18): pg_dump/pg_restore refuse a newer server
+# ("server version mismatch"), and Ubuntu noble's own postgresql-client is 16.
+ARG PG_CLIENT_MAJOR=18
 
 # buildpack-deps:noble already provides:
 #   build-essential, curl, wget, git, ca-certificates, gnupg, and a large set of dev libs.
@@ -57,10 +61,20 @@ RUN apt-get update \
 RUN apt-get update && apt-get install -y --no-install-recommends \
     jq ripgrep fd-find unzip zip sudo \
     openssh-client \
-    postgresql-client \
     less vim tree htop tmux \
     iproute2 net-tools \
     shellcheck \
+    && rm -rf /var/lib/apt/lists/*
+
+# PostgreSQL client from PGDG (see PG_CLIENT_MAJOR above). pg_wrapper makes
+# psql/pg_dump/pg_restore resolve to this major.
+RUN install -d /usr/share/postgresql-common/pgdg \
+    && curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+         https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+    && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt noble-pgdg main" \
+         > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends postgresql-client-${PG_CLIENT_MAJOR} \
     && rm -rf /var/lib/apt/lists/*
 
 # JDK 21
