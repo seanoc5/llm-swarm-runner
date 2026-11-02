@@ -28,8 +28,9 @@
 #            coordinator's per-wake sweep). Advisory: whichever PR merges
 #            first legitimately keeps the number, so callers warn, never
 #            block. Exit 0 no clash, 6 clash, 1 error. Not combinable with
-#            --ref or --post. A PR from a fork (head not fetchable from
-#            origin) is skipped with a note.
+#            --ref or --post. Heads are fetched via refs/pull/<N>/head
+#            (fork PRs included); a PR whose head can't be fetched is skipped
+#            with a note.
 #
 #   --ref    post-merge watchdog mode (#305): scan a SINGLE tree (e.g.
 #            origin/master, HEAD) for the same collisions instead of a PR's
@@ -210,7 +211,10 @@ if [ "$OPEN_PRS" = 1 ]; then
         [ -n "$cands" ] || continue
         base_local="$(opr_base_ref "$base")"
         head_local="refs/migration-collision-check/ohead-$$-$n"
-        if [ -z "$base_local" ] || ! git fetch -q origin "$head:$head_local" 2>/dev/null; then
+        # pull/<N>/head covers fork PRs and can't be confused with a same-named
+        # origin branch; the branch name is only a fallback for hosts without it.
+        if [ -z "$base_local" ] || ! { git fetch -q origin "refs/pull/$n/head:$head_local" 2>/dev/null \
+                                      || git fetch -q origin "$head:$head_local" 2>/dev/null; }; then
             OPR_SKIPPED+=("#$n")      # fork PR, deleted branch, or fetch failure
             continue
         fi
@@ -254,14 +258,18 @@ if [ "$OPEN_PRS" = 1 ]; then
         echo "---"
         printf '%s\n' "${OPR_BODY[@]}"
         echo "Whichever of these PRs merges first keeps the number; every other one must renumber (rebase, then pick the next free version) after it lands. Advisory only — this does not block a merge. Pick a different number now to save a round."
-        [ "${#OPR_SKIPPED[@]}" -eq 0 ] || echo "Not compared (head not fetchable from origin, e.g. fork PRs): ${OPR_SKIPPED[*]}"
+        [ "${#OPR_SKIPPED[@]}" -eq 0 ] || echo "Not compared (head could not be fetched): ${OPR_SKIPPED[*]}"
         echo "---"
         exit 6
     fi
     echo "${PR:+PR #$PR }migration-collision-check --against-open-prs verdict: clean ($SCOPE_OPR)"
     echo "---"
-    echo "No other open PR adds the same Flyway version or Alembic revision id."
-    [ "${#OPR_SKIPPED[@]}" -eq 0 ] || echo "Not compared (head not fetchable from origin, e.g. fork PRs): ${OPR_SKIPPED[*]}"
+    if [ "${#OPR_SKIPPED[@]}" -gt 0 ]; then
+        echo "No clash found among the PRs that could be compared."
+    else
+        echo "No other open PR adds the same Flyway version or Alembic revision id."
+    fi
+    [ "${#OPR_SKIPPED[@]}" -eq 0 ] || echo "Not compared (head could not be fetched): ${OPR_SKIPPED[*]}"
     echo "---"
     exit 0
 fi
