@@ -579,6 +579,84 @@ green "--override-migration-gate proceeds to merge despite out-of-order"
 cd "$CLONE"
 
 # ============================================================================
+heading "Test 13: --against-open-prs — two open PRs claiming the same version (#633)"
+# ============================================================================
+# Each PR passes the base-vs-head check alone; only the open-PR comparison
+# sees that they collide. Fresh fixture repo so the earlier tests' state
+# can't leak in.
+OP_ORIGIN="$TEST_DIR/op-origin.git"; OP_CLONE="$TEST_DIR/op-clone"
+git init -q --bare -b master "$OP_ORIGIN"
+git init -q -b master "$OP_CLONE"
+git -C "$OP_CLONE" remote add origin "$OP_ORIGIN"
+op_commit() { git -C "$OP_CLONE" -c user.email=t@t -c user.name=t commit -q -m "$1"; }
+mkdir -p "$OP_CLONE/db/migration" "$OP_CLONE/app/alembic/versions"
+echo "select 1;" > "$OP_CLONE/db/migration/V1__init.sql"
+printf 'revision = "0117"\ndown_revision = None\n' > "$OP_CLONE/app/alembic/versions/0117_base.py"
+git -C "$OP_CLONE" add -A; op_commit init; git -C "$OP_CLONE" push -q origin master
+op_branch() {  # op_branch <branch> <path> <content>
+    git -C "$OP_CLONE" checkout -q -b "$1" master
+    mkdir -p "$(dirname "$OP_CLONE/$2")"; printf '%b' "$3" > "$OP_CLONE/$2"
+    git -C "$OP_CLONE" add -A; op_commit "$1"; git -C "$OP_CLONE" push -q origin "$1"
+}
+op_branch fly-a db/migration/V2__a.sql "select 2;\n"
+op_branch fly-b db/migration/V2__b.sql "select 3;\n"
+op_branch fly-c db/migration/V3__c.sql "select 4;\n"
+op_branch alem-a app/alembic/versions/0118_a.py 'revision = "0118"\ndown_revision = "0117"\n'
+op_branch alem-b app/alembic/versions/0118_b.py 'revision = "0118"\ndown_revision = "0117"\n'
+op_branch docs-only NOTES.md "hi\n"
+cat > "$GH_PR_LIST" <<'JSON'
+[
+ {"number":41,"baseRefName":"master","headRefName":"fly-a","files":[{"path":"db/migration/V2__a.sql"}]},
+ {"number":42,"baseRefName":"master","headRefName":"fly-b","files":[{"path":"db/migration/V2__b.sql"}]},
+ {"number":43,"baseRefName":"master","headRefName":"fly-c","files":[{"path":"db/migration/V3__c.sql"}]},
+ {"number":44,"baseRefName":"master","headRefName":"alem-a","files":[{"path":"app/alembic/versions/0118_a.py"}]},
+ {"number":45,"baseRefName":"master","headRefName":"alem-b","files":[{"path":"app/alembic/versions/0118_b.py"}]},
+ {"number":46,"baseRefName":"master","headRefName":"docs-only","files":[{"path":"NOTES.md"}]}
+]
+JSON
+cd "$OP_CLONE"
+
+if OUT=$("$CHECK" --against-open-prs 41 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -eq 6 ] || red "expected exit 6 for Flyway V2 claimed by two open PRs, got $RC ($OUT)"
+echo "$OUT" | grep -q "open-pr-clash" || red "verdict line missing"
+echo "$OUT" | grep -q "Flyway V2 is added by:" || red "clashing version not named"
+echo "$OUT" | grep -q "PR #41" && echo "$OUT" | grep -q "PR #42" || red "both PRs must be named"
+echo "$OUT" | grep -qi "merges first keeps the number" || red "first-merger-keeps-it guidance missing"
+green "Flyway clash between open PRs → exit 6, both PRs named"
+
+if OUT=$("$CHECK" --against-open-prs 43 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -eq 0 ] || red "PR #43 (V3, unique) must be clean, got $RC ($OUT)"
+if OUT=$("$CHECK" --against-open-prs 46 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -eq 0 ] || red "docs-only PR #46 must be clean, got $RC ($OUT)"
+green "unique version and docs-only PR → exit 0"
+
+if OUT=$("$CHECK" --against-open-prs 44 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -eq 6 ] || red "expected exit 6 for Alembic 0118 claimed twice, got $RC ($OUT)"
+echo "$OUT" | grep -q "Alembic revision 0118 is added by:" || red "alembic clash not named"
+green "Alembic revision clash between open PRs → exit 6"
+
+if OUT=$("$CHECK" --against-open-prs 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -eq 6 ] || red "all-pairs scan should exit 6, got $RC"
+echo "$OUT" | grep -q "Flyway V2" && echo "$OUT" | grep -q "Alembic revision 0118" || red "all-pairs scan must list both clashes"
+echo "$OUT" | grep -q "V3" && red "all-pairs scan must not list the unique V3"
+green "no-PR# form scans every open pair"
+
+# A version already on the base is not "new": PR #47 touching the existing V1 is ignored.
+op_branch touch-v1 db/migration/V1__init.sql "select 1; -- edited\n"
+jq '. + [{"number":47,"baseRefName":"master","headRefName":"touch-v1","files":[{"path":"db/migration/V1__init.sql"}]},
+         {"number":48,"baseRefName":"master","headRefName":"touch-v1","files":[{"path":"db/migration/V1__init.sql"}]}]' \
+    "$GH_PR_LIST" > "$GH_PR_LIST.tmp" && mv "$GH_PR_LIST.tmp" "$GH_PR_LIST"
+if OUT=$("$CHECK" --against-open-prs 47 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -eq 0 ] || red "editing an existing base migration must not count as a clash, got $RC ($OUT)"
+green "files already on base are not 'new' → exit 0"
+
+if "$CHECK" --against-open-prs --ref HEAD >/dev/null 2>&1; then red "--against-open-prs with --ref must be rejected"; fi
+if "$CHECK" --against-open-prs 41 --post >/dev/null 2>&1; then red "--against-open-prs with --post must be rejected"; fi
+green "--against-open-prs rejects --ref and --post"
+echo '[]' > "$GH_PR_LIST"
+cd "$CLONE"
+
+# ============================================================================
 heading "All migration-collision-check shape tests passed"
 green "Flyway dup detection + remediation recipe (loser/next-free/open-PR sweep/internal dup), dotted-version distinctness, out-of-order merge detection + MIGRATION_ALLOW_OUT_OF_ORDER opt-out (#556), Alembic multi-head, exit 4 skip, --post idempotency, swarm-merge gate + override + kill switch + --auto-low refusal"
 echo ""

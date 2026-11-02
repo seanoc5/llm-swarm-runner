@@ -169,6 +169,7 @@ LLM_SWARM_DIR="${LLM_SWARM_DIR:-$(dirname "$SCRIPT_DIR")}"
 # Overridable for testing (a stub in place of the real self-review-pr.sh,
 # which shells out to `claude -p` and can't be exercised in CI/tests).
 SELF_REVIEW="${SELF_REVIEW_SCRIPT:-$SCRIPT_DIR/self-review-pr.sh}"
+MIGRATION_CHECK="${MIGRATION_CHECK_SCRIPT:-$SCRIPT_DIR/migration-collision-check.sh}"
 
 USAGE="usage: pr-ready.sh [-y|--one-more-round] <PR#>"
 ONE_MORE_ROUND=0
@@ -255,6 +256,17 @@ refuse() {
     fi
     exit "$code"
 }
+
+# Advisory (#633): warn while renumbering is still cheap if another open PR
+# adds the same migration version. Never blocks — the first PR to merge
+# legitimately keeps the number — and any other exit (clean, error, no gh
+# data) stays silent.
+OPEN_PR_CLASH_RC=0
+OPEN_PR_CLASH_OUT="$("$MIGRATION_CHECK" --against-open-prs "$PR" 2>/dev/null)" || OPEN_PR_CLASH_RC=$?
+if [ "$OPEN_PR_CLASH_RC" = 6 ]; then
+    echo "pr-ready: WARN: another open PR adds the same migration version as PR #$PR (not blocking):" >&2
+    printf '%s\n' "$OPEN_PR_CLASH_OUT" | sed 's/^/          /' >&2
+fi
 
 SKIP_REVIEW=0
 if [[ "$OLD_REASON" == ci-* ]] && [ -n "$OLD_REASON_SHA" ] && [ "$OLD_REASON_SHA" = "$(head_sha)" ]; then
