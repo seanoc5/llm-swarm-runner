@@ -1,0 +1,11 @@
+● Bash(./gradlew test --tests "*Importer*")
+  ⎿  Error: Exit code 143
+     Command timed out after 2m 0s
+● The test run was killed by the tool timeout; re-running it.
+● Bash(timeout 580 ./gradlew test --tests "*Importer*")
+  ⎿  Error: Exit code 143
+     Command timed out after 2m 0s
+● Still killed at 2m. Trying once more.
+● Bash(timeout 580 ./gradlew test --tests "*Importer*" 2>&1 | tail -40)
+  ⎿  Error: Exit code 143
+     Command timed out after 2m 0s

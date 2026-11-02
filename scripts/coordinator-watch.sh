@@ -291,7 +291,10 @@
 #                           (issue #467) Override the grep -E pattern
 #                           timeout_retry_sweep_pass matches against each
 #                           iss-* window's cleaned pane text. Defaults to the
-#                           WATCH_TIMEOUT_HIT marker named above. Not
+#                           WATCH_TIMEOUT_HIT marker named above OR the Bash
+#                           tool's own kill text "Command timed out after N"
+#                           (issue #599: a tool-killed command never reaches
+#                           the marker echo). Not
 #                           line-anchored: Claude Code renders a Bash tool's
 #                           stdout indented under a `⎿` glyph, not at column
 #                           0, so an anchor would never match the real echo
@@ -2677,7 +2680,11 @@ WATCH_BG_VIOLATION_SWEEP_SECS="${WATCH_BG_VIOLATION_SWEEP_SECS:-0}"  # #607: off
 WATCH_BG_VIOLATION_PATTERN="${WATCH_BG_VIOLATION_PATTERN:-Running in the background|[0-9]+ shells? still running}"
 # issue #467 — backstop for the "stop after two timeouts" rule; see header comment.
 WATCH_TIMEOUT_RETRY_SWEEP_SECS="${WATCH_TIMEOUT_RETRY_SWEEP_SECS:-60}"
-WATCH_TIMEOUT_RETRY_PATTERN="${WATCH_TIMEOUT_RETRY_PATTERN:-WATCH_TIMEOUT_HIT}"
+# Second alternative (issue #599): the Bash tool's own kill text. The tool kills a
+# command that outlives its `timeout` param with "Command timed out after <N>"
+# (exit 143) and never reaches the worker's marker echo, so the marker alone
+# never fired (0 events across 87 kills in fand-etl).
+WATCH_TIMEOUT_RETRY_PATTERN="${WATCH_TIMEOUT_RETRY_PATTERN:-WATCH_TIMEOUT_HIT|Command timed out after [0-9]}"
 WATCH_TIMEOUT_RETRY_MIN_COUNT="${WATCH_TIMEOUT_RETRY_MIN_COUNT:-3}"
 # issue #392 — periodic backstop for operator actions taken entirely
 # outside this swarm (e.g. merging/closing a PR, or closing an issue,
