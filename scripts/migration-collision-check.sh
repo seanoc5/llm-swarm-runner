@@ -13,6 +13,24 @@
 # Usage:
 #   migration-collision-check.sh <PR#> [--post]
 #   migration-collision-check.sh --ref <ref>
+#   migration-collision-check.sh --against-open-prs [<PR#>]
+#
+#   --against-open-prs  open-PR-vs-open-PR mode (#633). The checks above only
+#            see the default branch plus ONE PR head, so two open PRs that
+#            both claim the next migration number each pass on their own and
+#            the clash surfaces only after the first merges (fand-etl PRs
+#            #1450/#1453 both took Alembic 0118; #1817/#1818 both took 0156).
+#            This mode compares the NEW migration versions each open PR adds
+#            (Flyway V<ver>, Alembic revision id; files already on the PR's
+#            base are not new) against every other open PR's. With a PR# it
+#            reports only clashes involving that PR (the worker view, run by
+#            pr-ready.sh); without one it reports every pairwise clash (the
+#            coordinator's per-wake sweep). Advisory: whichever PR merges
+#            first legitimately keeps the number, so callers warn, never
+#            block. Exit 0 no clash, 6 clash, 1 error. Not combinable with
+#            --ref or --post. Heads are fetched via refs/pull/<N>/head
+#            (fork PRs included); a PR whose head can't be fetched is skipped
+#            with a note.
 #
 #   --ref    post-merge watchdog mode (#305): scan a SINGLE tree (e.g.
 #            origin/master, HEAD) for the same collisions instead of a PR's
@@ -88,6 +106,8 @@
 #   3  out-of-order — a PR-side Flyway file numbered below the base tip's
 #      max version (#556); PR mode only, see --ref note above
 #   4  skipped — no migration files found in the union (nothing to check)
+#   6  open-PR clash — --against-open-prs only (#633): another open PR adds
+#      the same migration version; advisory, never a merge refusal
 #   1  error (gh/git failure, bad args)
 set -euo pipefail
 
@@ -96,25 +116,32 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PR=""
 POST=0
 REF=""
+OPEN_PRS=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --post) POST=1 ;;
+        --against-open-prs) OPEN_PRS=1 ;;
         --ref)
             shift
             [ $# -gt 0 ] || { echo "ERROR: --ref needs a ref argument" >&2; exit 1; }
             REF="$1" ;;
-        -h|--help) sed -n '2,51p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,110p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         -*) echo "ERROR: unknown flag '$1'" >&2; exit 1 ;;
         *)  [ -z "$PR" ] || { echo "ERROR: multiple PR numbers" >&2; exit 1; }
             PR="$1" ;;
     esac
     shift
 done
-if [ -n "$REF" ]; then
+if [ "$OPEN_PRS" = 1 ]; then
+    [ -z "$REF" ] || { echo "ERROR: --against-open-prs and --ref are mutually exclusive" >&2; exit 1; }
+    [ "$POST" = 0 ] || { echo "ERROR: --post is not valid with --against-open-prs" >&2; exit 1; }
+    command -v gh >/dev/null 2>&1 || { echo "ERROR: gh required" >&2; exit 1; }
+    command -v jq >/dev/null 2>&1 || { echo "ERROR: jq required" >&2; exit 1; }
+elif [ -n "$REF" ]; then
     [ -z "$PR" ] || { echo "ERROR: --ref and a PR# are mutually exclusive" >&2; exit 1; }
     [ "$POST" = 0 ] || { echo "ERROR: --post needs a PR#; not valid with --ref" >&2; exit 1; }
 else
-    [ -n "$PR" ] || { echo "Usage: $0 <PR#> [--post]  |  $0 --ref <ref>" >&2; exit 1; }
+    [ -n "$PR" ] || { echo "Usage: $0 <PR#> [--post]  |  $0 --ref <ref>  |  $0 --against-open-prs [<PR#>]" >&2; exit 1; }
     command -v gh >/dev/null 2>&1 || { echo "ERROR: gh required" >&2; exit 1; }
 fi
 command -v git >/dev/null 2>&1 || { echo "ERROR: git required" >&2; exit 1; }
@@ -124,6 +151,156 @@ PROJECT_DIR="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 . "$SCRIPT_DIR/_load-env.sh" "$PROJECT_DIR"
 MIGRATION_GLOB="${MIGRATION_GLOB:-**/db/migration/**/V*__*.sql}"
 MIGRATION_ALLOW_OUT_OF_ORDER="${MIGRATION_ALLOW_OUT_OF_ORDER:-0}"
+
+shopt -s extglob
+
+matches_glob() {
+    # $1 = path, $2 = glob pattern. bash [[ ]] matching gives a bare '*' no
+    # special slash-boundary treatment (it already crosses '/'), but a
+    # literal "**/ " segment needs to also match ZERO directories (e.g.
+    # "**/db/migration/**/V*.sql" must match "db/migration/V1__x.sql" with
+    # no subdirectory either side) — plain [[ ]] can't express that, so
+    # translate each "**/ " into an extglob "optionally-present" group.
+    local pattern="${2//\*\*\//?(*/)}"
+    # glob matching is the intent, not literal == — disable SC2053.
+    # shellcheck disable=SC2053
+    [[ "$1" == $pattern ]]
+}
+
+ver_key() {
+    # Comparable sort key for a dotted Flyway version string ("5", "5.2",
+    # "107.1"): each segment zero-padded to a fixed width and padded out to
+    # a fixed number of segments, so plain string comparison between two
+    # keys matches Flyway's component-wise numeric ordering (V5 < V5.1 <
+    # V5.2 < V6). Needed because out-of-order (#556) must compare the FULL
+    # version, not just the leading integer — V5.1 landing after the base
+    # already has V5.2 is out-of-order too, even though both share integer
+    # prefix 5 (a self-review finding on this PR).
+    local v="$1" seg out="" n=0 part
+    local -a parts
+    IFS='.' read -ra parts <<< "$v"
+    for part in "${parts[@]}"; do
+        printf -v seg '%018d' "$((10#$part))"
+        out+="$seg."
+        n=$((n + 1))
+    done
+    while [ "$n" -lt 8 ]; do
+        out+='000000000000000000.'
+        n=$((n + 1))
+    done
+    printf '%s' "$out"
+}
+
+# --- open-PR vs open-PR mode (#633) -------------------------------------------
+#
+# Everything below this block checks base ∪ ONE head. This mode instead asks
+# "does any other OPEN PR add the same migration version?" — the clash that
+# only appears after the first of two sibling PRs merges. Self-contained and
+# exits before the base/head machinery. Advisory: exit 6 means "warn", the
+# first PR to merge legitimately keeps the number.
+if [ "$OPEN_PRS" = 1 ]; then
+    OPEN_JSON="$(gh pr list --state open --limit 100 --json number,baseRefName,headRefName,files)" \
+        || { echo "ERROR: gh pr list failed" >&2; exit 1; }
+    if [ -n "$PR" ] && ! jq -e --argjson n "$PR" 'any(.[]; .number == $n)' <<< "$OPEN_JSON" >/dev/null 2>&1; then
+        echo "ERROR: PR #$PR is not in the open-PR list" >&2; exit 1
+    fi
+
+    OPR_REFS=()
+    opr_cleanup() { local r; for r in "${OPR_REFS[@]}"; do git update-ref -d "$r" >/dev/null 2>&1 || true; done; }
+    trap opr_cleanup EXIT
+    declare -A OPR_BASE_LOCAL=()   # base branch name -> fetched local ref ("" = fetch failed)
+    declare -A KEY_CLAIMS=()       # "Flyway V118" -> newline list of "N<TAB>path"
+    declare -A KEY_LABEL=()        # claim key -> first-seen display label ("Flyway V2")
+    OPR_SKIPPED=()
+
+    opr_base_ref() {
+        local b="$1"
+        if [ -z "${OPR_BASE_LOCAL[$b]+x}" ]; then
+            local ref="refs/migration-collision-check/obase-$$-${#OPR_BASE_LOCAL[@]}"
+            if git fetch -q origin "$b:$ref" 2>/dev/null; then
+                OPR_REFS+=("$ref"); OPR_BASE_LOCAL["$b"]="$ref"
+            else
+                OPR_BASE_LOCAL["$b"]=""
+            fi
+        fi
+        printf '%s' "${OPR_BASE_LOCAL[$b]}"
+    }
+
+    while IFS=$'\t' read -r n base head; do
+        [ -n "$n" ] || continue
+        # Candidate files: changed paths that look like a migration at all.
+        cands="$(jq -r --argjson n "$n" '.[] | select(.number == $n) | .files[].path' <<< "$OPEN_JSON" \
+            | while IFS= read -r f; do
+                  if matches_glob "$f" "$MIGRATION_GLOB" || [[ "$f" =~ (^|/)versions/[^/]+\.py$ ]]; then echo "$f"; fi
+              done)"
+        [ -n "$cands" ] || continue
+        base_local="$(opr_base_ref "$base")"
+        head_local="refs/migration-collision-check/ohead-$$-$n"
+        # pull/<N>/head covers fork PRs and can't be confused with a same-named
+        # origin branch; the branch name is only a fallback for hosts without it.
+        if [ -z "$base_local" ] || ! { git fetch -q origin "refs/pull/$n/head:$head_local" 2>/dev/null \
+                                      || git fetch -q origin "$head:$head_local" 2>/dev/null; }; then
+            OPR_SKIPPED+=("#$n")      # fork PR, deleted branch, or fetch failure
+            continue
+        fi
+        OPR_REFS+=("$head_local")
+        while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            git cat-file -e "$head_local:$f" 2>/dev/null || continue      # deleted by the PR
+            git cat-file -e "$base_local:$f" 2>/dev/null && continue      # already on base: not new
+            b="$(basename "$f")"
+            key=""; label=""
+            if matches_glob "$f" "$MIGRATION_GLOB" && [[ "$b" =~ ^V([0-9]+(\.[0-9]+)*)__ ]]; then
+                # Key on ver_key so V2 / V2.0 / V02 collide (as the main check treats them);
+                # the label shows the first spelling seen.
+                key="Flyway $(ver_key "${BASH_REMATCH[1]}")"; label="Flyway V${BASH_REMATCH[1]}"
+            elif [[ "$f" =~ (^|/)versions/[^/]+\.py$ ]]; then
+                rev_line="$(git show "$head_local:$f" 2>/dev/null | grep -E '^[[:space:]]*revision[[:space:]]*(:[^=]*)?=' | head -1 || true)"
+                rev="$(printf '%s\n' "$rev_line" | grep -oE "['\"][A-Za-z0-9_]+['\"]" | head -1 | tr -d "'\"" || true)"
+                [ -n "$rev" ] && { key="Alembic revision $rev"; label="$key"; }
+            fi
+            [ -n "$key" ] || continue
+            KEY_LABEL["$key"]="${KEY_LABEL[$key]:-$label}"
+            KEY_CLAIMS["$key"]="${KEY_CLAIMS[$key]:-}$n"$'\t'"$f"$'\n'
+        done <<< "$cands"
+    done < <(jq -r '.[] | [.number, .baseRefName, .headRefName] | @tsv' <<< "$OPEN_JSON")
+
+    OPR_BODY=()
+    while IFS= read -r key; do
+        [ -n "$key" ] || continue
+        claims="${KEY_CLAIMS[$key]}"
+        prs="$(printf '%s' "$claims" | cut -f1 | sort -un)"
+        [ "$(printf '%s\n' "$prs" | grep -c .)" -gt 1 ] || continue       # one PR only (internal dupes belong to the main check)
+        if [ -n "$PR" ] && ! grep -qxF "$PR" <<< "$prs"; then continue; fi
+        line="- ${KEY_LABEL[$key]} is added by:"
+        while IFS=$'\t' read -r cn cf; do
+            [ -n "$cn" ] && line+=" PR #$cn ($cf);"
+        done <<< "$claims"
+        OPR_BODY+=("${line%;}")
+    done < <(printf '%s\n' "${!KEY_CLAIMS[@]}" | sort)
+
+    SCOPE_OPR="${PR:+PR #$PR vs }every other open PR"
+    [ -n "$PR" ] || SCOPE_OPR="all open PRs, pairwise"
+    if [ "${#OPR_BODY[@]}" -gt 0 ]; then
+        echo "${PR:+PR #$PR }migration-collision-check --against-open-prs verdict: open-pr-clash ($SCOPE_OPR)"
+        echo "---"
+        printf '%s\n' "${OPR_BODY[@]}"
+        echo "Whichever of these PRs merges first keeps the number; every other one must renumber (rebase, then pick the next free version) after it lands. Advisory only — this does not block a merge. Pick a different number now to save a round."
+        [ "${#OPR_SKIPPED[@]}" -eq 0 ] || echo "Not compared (head could not be fetched): ${OPR_SKIPPED[*]}"
+        echo "---"
+        exit 6
+    fi
+    echo "${PR:+PR #$PR }migration-collision-check --against-open-prs verdict: clean ($SCOPE_OPR)"
+    echo "---"
+    if [ "${#OPR_SKIPPED[@]}" -gt 0 ]; then
+        echo "No clash found among the PRs that could be compared."
+    else
+        echo "No other open PR adds the same Flyway version or Alembic revision id."
+    fi
+    [ "${#OPR_SKIPPED[@]}" -eq 0 ] || echo "Not compared (head could not be fetched): ${OPR_SKIPPED[*]}"
+    echo "---"
+    exit 0
+fi
 
 # --- resolve refs to scan ----------------------------------------------------
 #
@@ -189,48 +366,9 @@ show_scan_file() {
     done
 }
 
-shopt -s extglob
-
-ver_key() {
-    # Comparable sort key for a dotted Flyway version string ("5", "5.2",
-    # "107.1"): each segment zero-padded to a fixed width and padded out to
-    # a fixed number of segments, so plain string comparison between two
-    # keys matches Flyway's component-wise numeric ordering (V5 < V5.1 <
-    # V5.2 < V6). Needed because out-of-order (#556) must compare the FULL
-    # version, not just the leading integer — V5.1 landing after the base
-    # already has V5.2 is out-of-order too, even though both share integer
-    # prefix 5 (a self-review finding on this PR).
-    local v="$1" seg out="" n=0 part
-    local -a parts
-    IFS='.' read -ra parts <<< "$v"
-    for part in "${parts[@]}"; do
-        printf -v seg '%018d' "$((10#$part))"
-        out+="$seg."
-        n=$((n + 1))
-    done
-    while [ "$n" -lt 8 ]; do
-        out+='000000000000000000.'
-        n=$((n + 1))
-    done
-    printf '%s' "$out"
-}
-
 ver_lt() {
     # $1 < $2, comparing dotted versions via ver_key.
     [[ "$(ver_key "$1")" < "$(ver_key "$2")" ]]
-}
-
-matches_glob() {
-    # $1 = path, $2 = glob pattern. bash [[ ]] matching gives a bare '*' no
-    # special slash-boundary treatment (it already crosses '/'), but a
-    # literal "**/ " segment needs to also match ZERO directories (e.g.
-    # "**/db/migration/**/V*.sql" must match "db/migration/V1__x.sql" with
-    # no subdirectory either side) — plain [[ ]] can't express that, so
-    # translate each "**/ " into an extglob "optionally-present" group.
-    local pattern="${2//\*\*\//?(*/)}"
-    # glob matching is the intent, not literal == — disable SC2053.
-    # shellcheck disable=SC2053
-    [[ "$1" == $pattern ]]
 }
 
 # --- Flyway: duplicate version prefixes -------------------------------------

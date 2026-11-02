@@ -205,6 +205,7 @@ run_pr_ready() {
         GH_PR_FILES_JSON="${GH_PR_FILES_JSON:-[]}" GH_WORKFLOW_PATHS_JSON="${GH_WORKFLOW_PATHS_JSON:-[]}" \
         GH_WORKFLOW_YAML="${GH_WORKFLOW_YAML:-}" \
         GH_PR_BASE_REF="${GH_PR_BASE_REF:-}" GH_PR_HEAD_REF="${GH_PR_HEAD_REF:-}" GH_WORKFLOW_YAML_FOR_BASE_REF="${GH_WORKFLOW_YAML_FOR_BASE_REF:-}" \
+        MIGRATION_CHECK_SCRIPT="${MIGRATION_CHECK_SCRIPT:-}" \
         GH_SHA="${GH_SHA:-deadbeef}" GH_SHA_LOOKUP_FAILS="${GH_SHA_LOOKUP_FAILS:-0}" \
         GH_RUNLIST_JSON="${GH_RUNLIST_JSON:-[]}" GH_RUNLIST_RC="${GH_RUNLIST_RC:-0}" \
         GH_RUNLIST_STDERR="${GH_RUNLIST_STDERR:-}" \
@@ -1019,5 +1020,30 @@ rc=0; run_pr_ready || rc=$?
 [ "$(grep -c '\*\*Next:\*\*' "$EDITED_BODY")" -eq 1 ] || red "expected exactly one Next line: $(cat "$EDITED_BODY")"
 grep -q '^> \*\*Next:\*\* coordinator — whatever the ⛔ COORDINATOR HOLD banner' "$EDITED_BODY" || red "expected Next to defer to the hold: $(cat "$EDITED_BODY")"
 green "a held PR's draft-reason banner doesn't compete with the hold's own Next line"
+
+
+heading "Test 32: open-PR migration clash (check exits 6) — WARN with the clash text, still readies (issue #633)"
+printf '<!-- BLIND_MERGE_RISK: low -->\nsome change\n' > "$BODY_FILE"
+make_fake_review 0
+FAKE_MIGRATION_CHECK="$TEST_DIR/fake-migration-check.sh"
+printf '#!/usr/bin/env bash\necho "- Flyway V9 is added by: PR #42 (a.sql); PR #43 (b.sql)"\nexit 6\n' > "$FAKE_MIGRATION_CHECK"
+chmod +x "$FAKE_MIGRATION_CHECK"
+MIGRATION_CHECK_SCRIPT="$FAKE_MIGRATION_CHECK"
+rc=0; run_pr_ready || rc=$?
+MIGRATION_CHECK_SCRIPT=""
+[ "$rc" -eq 0 ] || red "an open-PR clash must not block, got exit $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called || red "expected gh pr ready to still run despite the clash warning"
+grep -q 'WARN: another open PR adds the same migration version' "$TEST_DIR/out.log" || red "expected the clash WARN: $(cat "$TEST_DIR/out.log")"
+grep -q 'Flyway V9 is added by' "$TEST_DIR/out.log" || red "expected the check's clash text in the WARN: $(cat "$TEST_DIR/out.log")"
+green "exit 6 from the migration check → WARN printed, PR still readied"
+
+heading "Test 33: migration check exits 0 — no warning at all"
+printf '#!/usr/bin/env bash\necho "verdict: clean"\nexit 0\n' > "$FAKE_MIGRATION_CHECK"
+MIGRATION_CHECK_SCRIPT="$FAKE_MIGRATION_CHECK"
+rc=0; run_pr_ready || rc=$?
+MIGRATION_CHECK_SCRIPT=""
+[ "$rc" -eq 0 ] || red "expected exit 0, got $rc: $(cat "$TEST_DIR/out.log")"
+grep -qi 'another open PR' "$TEST_DIR/out.log" && red "clean migration check must be silent: $(cat "$TEST_DIR/out.log")"
+green "exit 0 from the migration check → silent"
 
 green "ALL TESTS PASSED"

@@ -110,8 +110,11 @@ Run on every wake and status request, in addition to the inbox. Always enumerate
 for wt in $("{{LLM_SWARM_DIR}}/scripts/list-own-worktrees.sh" "$PWD"); do ls "$wt"/.swarm/tasks/outbox/*.md 2>/dev/null; done   # worker messages
 ls .swarm/salvaged/*/{inbox,processing,outbox}/* 2>/dev/null                                                              # reaped with work queued
 {{LLM_SWARM_DIR}}/scripts/migration-collision-check.sh --ref origin/<default-branch>
+{{LLM_SWARM_DIR}}/scripts/migration-collision-check.sh --against-open-prs   # exit 6 = two open PRs add the same migration version
 {{LLM_SWARM_DIR}}/scripts/stale-pr-nudges.sh
 ```
+
+**Open-PR migration clash** (exit 6, #633): advisory — the first PR to merge keeps the number. Note it in the digest and, for the PR that will merge later, queue a one-line brief to renumber now (`requeue.sh`) instead of paying a rebase round after the other lands. Never hold a merge on it.
 
 **Worker outbox** (oldest first, by `kind:`): `fyi` → fold into your picture/digest; `decision-needed` → decide if within your authority, else put it on "Needs you" (the worker may be parked `blocked`; unblock with `requeue.sh`); `brief-draft` → review scope, guardrails and duplicates, then dispatch or decline with a reason. Archive to `<its-outbox>/processed/`. Reply only via a queued brief or the operator, never `send-keys`.
 
