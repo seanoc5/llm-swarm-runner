@@ -17,7 +17,7 @@
 # wrote the code; that's the point.
 #
 # Usage:
-#   self-review-pr.sh <PR#> [--post] [--force] [--model <id>] [--actor <name>]
+#   self-review-pr.sh <PR#> [--post] [--force] [--rerun] [--model <id>] [--actor <name>]
 #   self-review-pr.sh <PR#> --caveats-nonblocking <issue#> --actor coordinator|operator
 #
 #   --post    also post the verdict as a PR comment with a
@@ -26,7 +26,12 @@
 #             Idempotent: skips posting if a marker comment already exists
 #             (--force re-posts).
 #   --force   run even when WORKER_SELF_REVIEW=0, and re-post over an
-#             existing marker comment.
+#             existing marker comment when the head is unreadable. It does
+#             NOT re-review a head this actor already reviewed (issue #599:
+#             pr-ready.sh always passes --force, and must still dedupe).
+#   --rerun   re-review a head this actor already reviewed (the once-per-
+#             (head, actor) no-op is skipped). Use for a deliberate second
+#             opinion, e.g. the coordinator's different-model re-review.
 #   --model   model for the review session (default: $SELF_REVIEW_MODEL,
 #             else $WORKER_MODEL for Codex, else the CLI's default).
 #   --actor   who is running this round — "worker" (default), "coordinator",
@@ -73,6 +78,7 @@ SKILL="${LLM_SWARM_DIR:-$SCRIPT_DIR/..}/prompts/skill-self-review.md"
 PR=""
 POST=0
 FORCE=0
+RERUN=0
 ACTOR="worker"
 NONBLOCKING_FOLLOWUP=""
 MODEL="${SELF_REVIEW_MODEL:-}"
@@ -87,12 +93,13 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --post)  POST=1 ;;
         --force) FORCE=1 ;;
+        --rerun) RERUN=1 ;;
         --model) shift; MODEL="${1:-}" ;;
         --actor) shift; ACTOR="${1:-}" ;;
         --caveats-nonblocking) shift; NONBLOCKING_FOLLOWUP="${1:-}"
             [[ "$NONBLOCKING_FOLLOWUP" =~ ^[0-9]+$ ]] \
                 || { echo "ERROR: --caveats-nonblocking needs a follow-up issue number" >&2; exit 1; } ;;
-        -h|--help) sed -n '2,67p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,72p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         -*) echo "ERROR: unknown flag '$1'" >&2; exit 1 ;;
         *)  [ -z "$PR" ] || { echo "ERROR: multiple PR numbers" >&2; exit 1; }
             PR="$1" ;;
@@ -166,15 +173,17 @@ HEAD_SHA="$(gh pr view "$PR" --json headRefOid --jq .headRefOid 2>/dev/null || t
 # already exists; the prior verdict is replayed as the exit code. A worker
 # round plus the coordinator's independent "Find ≠ fix" round on one head
 # are still two reviews (different actors); only a same-actor repeat is
-# skipped. Markers without head= (pre-#601) never match. --force re-runs.
-if [ "$POST" = "1" ] && [ "$FORCE" = "0" ] && [ -n "$HEAD_SHA" ]; then
+# skipped. Markers without head= (pre-#601) never match. --rerun re-runs; --force
+# does not (it only bypasses the WORKER_SELF_REVIEW=0 kill switch).
+if [ "$POST" = "1" ] && [ "$RERUN" = "0" ] && [ -n "$HEAD_SHA" ]; then
     PRIOR="$(gh pr view "$PR" --json comments 2>/dev/null | jq -r --arg a "$ACTOR" --arg h "$HEAD_SHA" '
         [.comments[]? | select(.authorAssociation as $x | ["OWNER","MEMBER","COLLABORATOR"] | index($x))
-         | (.body // "") | capture("SWARM_SELF_REVIEW: (?<v>[A-Z_]+) actor=" + $a + " head=" + $h + "(?![0-9a-f])")? | .v]
+         | (.body // "") | capture("SWARM_SELF_REVIEW: (?<v>[A-Z_]+) actor=(?<a>[A-Za-z0-9_-]+) head=(?<h>[0-9a-f]+)"; "g")
+         | select(.a == $a and .h == $h) | .v]
         | last // ""' 2>/dev/null || true)"
     case "$PRIOR" in
         APPROVE|APPROVE_WITH_CAVEATS|BLOCK)
-            echo "self-review: skipped — PR #$PR head ${HEAD_SHA:0:7} already has an actor=$ACTOR review ($PRIOR); --force to re-run"
+            echo "self-review: skipped — PR #$PR head ${HEAD_SHA:0:7} already has an actor=$ACTOR review ($PRIOR); --rerun to re-run"
             case "$PRIOR" in APPROVE) exit 0 ;; BLOCK) exit 2 ;; *) exit 3 ;; esac ;;
     esac
 fi
