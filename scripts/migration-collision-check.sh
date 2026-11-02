@@ -167,6 +167,30 @@ matches_glob() {
     [[ "$1" == $pattern ]]
 }
 
+ver_key() {
+    # Comparable sort key for a dotted Flyway version string ("5", "5.2",
+    # "107.1"): each segment zero-padded to a fixed width and padded out to
+    # a fixed number of segments, so plain string comparison between two
+    # keys matches Flyway's component-wise numeric ordering (V5 < V5.1 <
+    # V5.2 < V6). Needed because out-of-order (#556) must compare the FULL
+    # version, not just the leading integer — V5.1 landing after the base
+    # already has V5.2 is out-of-order too, even though both share integer
+    # prefix 5 (a self-review finding on this PR).
+    local v="$1" seg out="" n=0 part
+    local -a parts
+    IFS='.' read -ra parts <<< "$v"
+    for part in "${parts[@]}"; do
+        printf -v seg '%018d' "$((10#$part))"
+        out+="$seg."
+        n=$((n + 1))
+    done
+    while [ "$n" -lt 8 ]; do
+        out+='000000000000000000.'
+        n=$((n + 1))
+    done
+    printf '%s' "$out"
+}
+
 # --- open-PR vs open-PR mode (#633) -------------------------------------------
 #
 # Everything below this block checks base ∪ ONE head. This mode instead asks
@@ -186,6 +210,7 @@ if [ "$OPEN_PRS" = 1 ]; then
     trap opr_cleanup EXIT
     declare -A OPR_BASE_LOCAL=()   # base branch name -> fetched local ref ("" = fetch failed)
     declare -A KEY_CLAIMS=()       # "Flyway V118" -> newline list of "N<TAB>path"
+    declare -A KEY_LABEL=()        # claim key -> first-seen display label ("Flyway V2")
     OPR_SKIPPED=()
 
     opr_base_ref() {
@@ -224,15 +249,18 @@ if [ "$OPEN_PRS" = 1 ]; then
             git cat-file -e "$head_local:$f" 2>/dev/null || continue      # deleted by the PR
             git cat-file -e "$base_local:$f" 2>/dev/null && continue      # already on base: not new
             b="$(basename "$f")"
-            key=""
+            key=""; label=""
             if matches_glob "$f" "$MIGRATION_GLOB" && [[ "$b" =~ ^V([0-9]+(\.[0-9]+)*)__ ]]; then
-                key="Flyway V${BASH_REMATCH[1]}"
+                # Key on ver_key so V2 / V2.0 / V02 collide (as the main check treats them);
+                # the label shows the first spelling seen.
+                key="Flyway $(ver_key "${BASH_REMATCH[1]}")"; label="Flyway V${BASH_REMATCH[1]}"
             elif [[ "$f" =~ (^|/)versions/[^/]+\.py$ ]]; then
                 rev_line="$(git show "$head_local:$f" 2>/dev/null | grep -E '^[[:space:]]*revision[[:space:]]*(:[^=]*)?=' | head -1 || true)"
                 rev="$(printf '%s\n' "$rev_line" | grep -oE "['\"][A-Za-z0-9_]+['\"]" | head -1 | tr -d "'\"" || true)"
-                [ -n "$rev" ] && key="Alembic revision $rev"
+                [ -n "$rev" ] && { key="Alembic revision $rev"; label="$key"; }
             fi
             [ -n "$key" ] || continue
+            KEY_LABEL["$key"]="${KEY_LABEL[$key]:-$label}"
             KEY_CLAIMS["$key"]="${KEY_CLAIMS[$key]:-}$n"$'\t'"$f"$'\n'
         done <<< "$cands"
     done < <(jq -r '.[] | [.number, .baseRefName, .headRefName] | @tsv' <<< "$OPEN_JSON")
@@ -244,7 +272,7 @@ if [ "$OPEN_PRS" = 1 ]; then
         prs="$(printf '%s' "$claims" | cut -f1 | sort -un)"
         [ "$(printf '%s\n' "$prs" | grep -c .)" -gt 1 ] || continue       # one PR only (internal dupes belong to the main check)
         if [ -n "$PR" ] && ! grep -qxF "$PR" <<< "$prs"; then continue; fi
-        line="- $key is added by:"
+        line="- ${KEY_LABEL[$key]} is added by:"
         while IFS=$'\t' read -r cn cf; do
             [ -n "$cn" ] && line+=" PR #$cn ($cf);"
         done <<< "$claims"
@@ -336,30 +364,6 @@ show_scan_file() {
             return
         fi
     done
-}
-
-ver_key() {
-    # Comparable sort key for a dotted Flyway version string ("5", "5.2",
-    # "107.1"): each segment zero-padded to a fixed width and padded out to
-    # a fixed number of segments, so plain string comparison between two
-    # keys matches Flyway's component-wise numeric ordering (V5 < V5.1 <
-    # V5.2 < V6). Needed because out-of-order (#556) must compare the FULL
-    # version, not just the leading integer — V5.1 landing after the base
-    # already has V5.2 is out-of-order too, even though both share integer
-    # prefix 5 (a self-review finding on this PR).
-    local v="$1" seg out="" n=0 part
-    local -a parts
-    IFS='.' read -ra parts <<< "$v"
-    for part in "${parts[@]}"; do
-        printf -v seg '%018d' "$((10#$part))"
-        out+="$seg."
-        n=$((n + 1))
-    done
-    while [ "$n" -lt 8 ]; do
-        out+='000000000000000000.'
-        n=$((n + 1))
-    done
-    printf '%s' "$out"
 }
 
 ver_lt() {
