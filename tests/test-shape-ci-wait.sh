@@ -94,6 +94,7 @@ case "$1 $2" in
             echo "{\"headRefOid\":\"${GH_VIEW_HEADSHA_MIDWAIT:-${GH_VIEW_HEADSHA:-deadbeef}}\"}"
             exit 0
         fi
+        if [[ "$*" == *"--json isDraft"* ]]; then echo "${GH_VIEW_ISDRAFT:-false}"; exit 0; fi
         if [ "$n" = "1" ] && [ "${GH_VIEW_UNKNOWN_FIRST:-0}" = "1" ]; then
             echo "{\"mergeable\":\"UNKNOWN\",\"mergeStateStatus\":\"UNKNOWN\",\"headRefOid\":\"${GH_VIEW_HEADSHA_STALE:-deadbeef}\"}"
         else
@@ -105,6 +106,7 @@ case "$1 $2" in
         if [ -f "${GH_CHECKS_CALL_COUNT_FILE:-/dev/null}" ]; then cn="$(cat "$GH_CHECKS_CALL_COUNT_FILE")"; fi
         cn=$((cn + 1))
         [ -n "${GH_CHECKS_CALL_COUNT_FILE:-}" ] && echo "$cn" > "$GH_CHECKS_CALL_COUNT_FILE"
+        if [ -n "${GH_CHECKS_OUT:-}" ]; then printf '%b\n' "$GH_CHECKS_OUT"; fi
         if [ "${GH_CHECKS_PERM_ERROR:-0}" = "1" ]; then
             echo "GraphQL: Resource not accessible by personal access token (node.statusCheckRollup.contexts.nodes)" >&2
             exit 1
@@ -815,6 +817,20 @@ out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_NO_CHECKS=1 GH_
     GH_WORKFLOW_YAML=$'on:\n  pull_request:\n    branches: [master]\n' \
     CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 2 2>&1)" || rc=$?
 check "exits 2 (timeout/pending), never 5 — the base branch is allowed" '[ "$rc" -eq 2 ]'
+
+heading "Test 23: issue #617 — draft PR with a skipping check warns"
+rc=0
+out="$(GH_RUNLIST_JSON='[{"status":"completed","conclusion":"success"}]' GH_VIEW_ISDRAFT=true GH_CHECKS_OUT='Fast\tpass\t1m\turl\nIntegration\tskipping\t0\turl' \
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
+check "still exits 0" '[ "$rc" -eq 0 ]'
+check "warns that a skipped check is not a pass" 'grep -q "WARNING.*draft.*skipping" <<<"$out"'
+
+heading "Test 23b: non-draft PR with a skipping check → no warning"
+rc=0
+out="$(GH_RUNLIST_JSON='[{"status":"completed","conclusion":"success"}]' GH_VIEW_ISDRAFT=false GH_CHECKS_OUT='Fast\tpass\t1m\turl\nIntegration\tskipping\t0\turl' \
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
+check "exits 0" '[ "$rc" -eq 0 ]'
+check "no warning" '! grep -q WARNING <<<"$out"'
 
 heading "Results: $PASS checks passed"
 green "All checks passed."

@@ -345,7 +345,16 @@ while true; do
                 # registers.
                 if ci_fallback_run_state "$SHA" "${REPO_ARGS[@]}"; then
                     case "$CI_FALLBACK_STATE" in
-                        pass) PASS_NOW=1; PASS_MSG="PR #$PR checks green." ;;
+                        pass)
+                            PASS_NOW=1; PASS_MSG="PR #$PR checks green."
+                            # issue #617: a draft PR (e.g. a coordinator hold) may have
+                            # lanes skipped by the project's draft guard; green here
+                            # does not mean those lanes ever ran.
+                            if grep -qP '\tskipping\t' <<<"$CHECKS_OUT" &&
+                               [ "$(gh pr view "$PR" "${REPO_ARGS[@]}" --json isDraft --jq .isDraft 2>/dev/null)" = "true" ]; then
+                                echo "ci-wait: WARNING: PR #$PR is a draft and some checks were skipping — a skipped check is not a pass. Re-ready the PR (and re-run ci-wait) or use the project's opt-in label for that lane before treating CI as green." >&2
+                            fi
+                            ;;
                         pending)
                             echo "ci-wait: gh pr checks shows every currently-known check on PR #$PR green, but the workflow run itself is still in progress (a later job — e.g. one gated on an earlier job's output — hasn't registered its check yet). Treating as pending." >&2
                             ;;
