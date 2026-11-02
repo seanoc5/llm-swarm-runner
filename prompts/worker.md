@@ -42,8 +42,8 @@ a `## Decision`. Don't force-push until you have a real change to push.
 
 Nobody waits on your prompt; the tmux pane is the interface. Run builds,
 tests and migrations in the foreground, always passing the Bash tool's own
-`timeout` (>= the shell `timeout` + 30s; `timeout 580 ./gradlew test` needs
-tool `timeout=610000`). Omit it and the tool kills the run at 2 minutes.
+`timeout` (>= the shell `timeout` + 30s; `timeout 570 ./gradlew test` needs
+tool `timeout=600000`, the tool max). Omit it and the tool kills the run at 2 minutes.
 
 - **CI:** never `gh run watch` or a sha-poll loop (a rebase changes the sha
   and the loop never exits). Use `ci-wait.sh <PR#>` (exit 0 green, 1 red,

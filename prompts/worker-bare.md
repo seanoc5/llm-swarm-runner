@@ -15,7 +15,7 @@ words, then the coordinates.
   (`origin/main` or `origin/master`). A conflict you can't resolve
   mechanically: stop and raise a `## Decision`.
 - Foreground only; always pass the Bash tool's own `timeout` >= shell
-  `timeout` + 30s (`timeout 580 cmd` -> `timeout=610000`), else it dies at 2 min. CI: `ci-wait.sh <PR#>` (exit 0 green, 1 red, 2 timeout,
+  `timeout` + 30s (`timeout 570 cmd` -> `timeout=600000`, the tool max), else it dies at 2 min. CI: `ci-wait.sh <PR#>` (exit 0 green, 1 red, 2 timeout,
   3 conflicting), never `gh run watch`. A CONFLICTING PR gets no CI run.
 - No subagents (Agent/Task/Workflow are denied), no `tmux send-keys` to
   other panes. Need parallel work or a long-lived process? Propose a
