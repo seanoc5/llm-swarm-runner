@@ -64,6 +64,16 @@ touch "$HOME/.claude.json"
 # with no sibling ever sharing the inode there's no reader left for that
 # window to tear.
 #
+# Mid-save interrupts (#630): that same rename-over-mountpoint fallback is an
+# in-place truncate+write, so an interrupted save can leave this file at 0
+# bytes inside a long-lived container (fand-app iss-1616, 2026-10-13). The
+# checks below only run at container START; worker-listener.sh therefore
+# re-validates (and repairs from the newest ~/.claude.json.tmp.*, its
+# last-known-good copy, or ~/.claude/backups) before EVERY claude launch,
+# logging worker.config.repaired. A per-container config DIRECTORY via
+# CLAUDE_CONFIG_DIR (which would let the rename work) was not adopted: it would
+# move the config out of ~ and need per-file sharing of ~/.claude.
+#
 # Key: WORKER_CONTAINER_NAME when set (provision-worker.sh always sets one —
 # stable across a worker's restarts, unique per worker). Ad-hoc invocations
 # (no container name) key off PROJECT_DIR instead, so repeated

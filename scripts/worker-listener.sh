@@ -458,12 +458,83 @@ refresh_stale_runner_checkout() {
     fi
 }
 
+# ── claude config validation before every launch (issue #630) ───────────────
+# sandbox.sh validates/reseeds this container's ~/.claude.json only at
+# CONTAINER start (#286), but this listener relaunches `claude` once per brief
+# inside a long-lived container. The file is a single-file bind mount, so the
+# CLI's write-temp-then-rename save can't replace it and falls back to an
+# in-place truncate+write; an interrupt in between leaves 0 bytes (fand-app
+# iss-1616, 2026-10-13: empty target + complete .claude.json.tmp.* beside it,
+# and the next launch sat at the "invalid JSON" dialog for an hour).
+#
+# So check before EVERY claude launch. Restore order: newest valid
+# of ~/.claude.json.tmp.* (the CLI's finished-but-unrenamed save) and our own
+# last-known-good copy (~/.claude.json.lkg, refreshed on each good check) by
+# mtime, so a stale orphan .tmp never beats a fresher snapshot; then the newest
+# valid CLI backup in ~/.claude/backups. The write is in-place (cat >), since a rename can't replace the bind-mount target.
+# No valid source = return 1: the caller fails the launch with an err outcome
+# naming the cause instead of parking at the dialog. Needs jq (always present
+# in the image); without it the check is skipped.
+CLAUDE_CONFIG_FILE="${CLAUDE_CONFIG_FILE:-$HOME/.claude.json}"
+
+claude_config_valid() { [ -s "$1" ] && jq -e 'type == "object"' "$1" >/dev/null 2>&1; }
+
+ensure_claude_config() {
+    CLAUDE_CONFIG_REPAIR_SOURCE=""
+    command -v jq >/dev/null 2>&1 || return 0
+    local cfg="$CLAUDE_CONFIG_FILE" lkg="$CLAUDE_CONFIG_FILE.lkg"
+    # Absent file: the CLI creates it fresh (sandbox.sh always touches it, so
+    # this only happens outside the container). Only empty/invalid is the bug.
+    [ -e "$cfg" ] || return 0
+    if claude_config_valid "$cfg"; then
+        cp "$cfg" "$lkg.tmp" 2>/dev/null && mv -f "$lkg.tmp" "$lkg" 2>/dev/null || true
+        return 0
+    fi
+
+    local why="empty" src="" cand
+    [ -s "$cfg" ] && why="invalid-json"
+    for cand in $(ls -t "$cfg".tmp.* "$lkg" 2>/dev/null) \
+                $(ls -t "$(dirname "$cfg")"/.claude/backups/.claude.json.* 2>/dev/null); do
+        if claude_config_valid "$cand"; then src="$cand"; break; fi
+    done
+    if [ -z "$src" ]; then
+        CLAUDE_CONFIG_REPAIR_SOURCE="none"
+        echo "ERROR: $cfg is $why and no valid .tmp.*/last-known-good/backup copy exists — cannot launch claude." >&2
+        return 1
+    fi
+    if ! cat "$src" > "$cfg" 2>/dev/null || ! claude_config_valid "$cfg"; then
+        CLAUDE_CONFIG_REPAIR_SOURCE="write-failed"
+        echo "ERROR: restoring $cfg from $src failed — cannot launch claude." >&2
+        return 1
+    fi
+    CLAUDE_CONFIG_REPAIR_SOURCE="$src"
+    echo "[$(date +%T)] worker.config.repaired: $cfg was $why; restored from $src (issue #630)."
+    # The listener can't write events.log (container mounts only this
+    # worktree, see record_selfheal_claim); an outbox fyi gets it to the
+    # coordinator, which logs it.
+    local ob="$QUEUE_ROOT/outbox" tmp
+    mkdir -p "$ob" 2>/dev/null
+    if tmp=$(mktemp -p "$ob" .tmp.XXXXXX 2>/dev/null); then
+        printf -- '---\nkind: fyi\ntask_id: %s\nts: %s\n---\nworker.config.repaired task_id=%s was=%s source=%s\n' \
+            "${TASK_ID:-}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${TASK_ID:-}" "$why" "$src" > "$tmp" &&
+            mv "$tmp" "$ob/$(date -u +%Y%m%dT%H%M%SZ)-config-repaired.md" || rm -f "$tmp"
+    fi
+    return 0
+}
+
 # Dispatch the configured agent on a task text. Sets DISPATCH_RC.
 # Relies on globals set per-task in the main loop: MODEL_OPTS,
 # WORKER_SYSTEM_PROMPT_OPTS, WORKER_SYSTEM_PROMPT_ENV, CODEX_PREFIX.
 # Callable more than once per task (used by the check-failure retry).
 dispatch_agent() {
     local task_text="$1"
+    # issue #630: validate/repair ~/.claude.json before EVERY claude launch.
+    LAUNCH_BLOCKED=""
+    if [[ "$AGENT" == "claude" ]] && ! ensure_claude_config; then
+        LAUNCH_BLOCKED="claude-config-unrecoverable: $CLAUDE_CONFIG_FILE empty/invalid and no valid restore source ($CLAUDE_CONFIG_REPAIR_SOURCE)"
+        DISPATCH_RC=78
+        return 0
+    fi
     # issue #610: prompts/worker.md tells the agent to call task-done.sh
     # "$TASK_ID" and name its status file after it, but TASK_ID was only a
     # listener-shell variable. Agents guessed it from processing/, and a
@@ -870,6 +941,11 @@ write_outcome() {
     # independent proof of real work and is never second-guessed below —
     # only reached when neither exists, on top of zero new commits.
     [ -n "$prior_err_reason" ] && reason="worker-reported: $prior_err_reason"
+    # issue #630: the launch never happened; name the real cause.
+    if [ -n "${LAUNCH_BLOCKED:-}" ]; then
+        TASK_OUTCOME="err"
+        reason="$LAUNCH_BLOCKED"
+    fi
 
     # issue #529 optional extra safety: $rc > 128 is bash's own-process-died-
     # by-signal convention (128 + signal number). Several distinct things
@@ -1542,7 +1618,7 @@ while true; do
             if [ -z "$CHECK_CMD" ] || ! try_reuse_check_on_done; then
                 run_check_claimed
             fi
-            if [ -n "$CHECK_EXIT" ] && [ "$CHECK_EXIT" -ne 0 ] && [ "$CHECK_RETRY" = "1" ]; then
+            if [ -n "$CHECK_EXIT" ] && [ "$CHECK_EXIT" -ne 0 ] && [ "$CHECK_RETRY" = "1" ] && [ -z "${LAUNCH_BLOCKED:-}" ]; then
                 echo "[$(date +%T)] Check failed — retrying once with failure output injected."
                 mv "$DONE/${TASK_ID}.check.log" "$DONE/${TASK_ID}.check.attempt1.log" 2>/dev/null || true
 

@@ -309,6 +309,8 @@ Some full-suite JVM runs need even more headroom — 40g is not unusual on a bee
 
 Instead, `sandbox.sh` seeds a private copy per container under `~/.claude-sandbox-configs/<key>.claude.json` (the key is `WORKER_CONTAINER_NAME` when set, else derived from `PROJECT_DIR`) the first time it sees that key, and reuses it on every relaunch — preserving that container's own login/onboarding/trust state instead of re-syncing from the host each time. A copy that goes missing or turns out to be invalid JSON is reseeded automatically (self-healing the "invalid JSON" failure above without a manual `docker exec` repair).
 
+That check only runs when the container starts, but the listener relaunches `claude` for every brief inside a long-lived container — and a save interrupted mid-write can leave the file at 0 bytes, because a rename cannot replace a single-file bind-mount target ([#630](https://github.com/seanoc5/llm-swarm-runner/issues/630)). So `worker-listener.sh` also validates `~/.claude.json` before **every** `claude` launch. A bad file is restored from whichever is freshest (by modification time) of the valid `~/.claude.json.tmp.*` files the CLI left behind and the listener's own last-known-good copy (`~/.claude.json.lkg`), else the newest valid backup in `~/.claude/backups`; the pane prints `worker.config.repaired` and an outbox `fyi` carries it to the coordinator. If nothing valid exists the launch fails with an `err` outcome (reason `claude-config-unrecoverable`) rather than waiting at the "invalid JSON" dialog.
+
 The trade-off: a container's copy no longer picks up host-side `~/.claude.json` changes (e.g. re-authenticating `claude` on the host) after its first seed. Force a reseed when that's what you want:
 
 ```bash

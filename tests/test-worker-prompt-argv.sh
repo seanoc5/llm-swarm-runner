@@ -75,6 +75,10 @@ extract_fn() { sed -n "/^${1}() {/,/^}/p" "$LISTENER"; }
 DISPATCH_BODY="$(extract_fn dispatch_agent)"
 [ -n "$DISPATCH_BODY" ] || red "could not extract dispatch_agent() from $LISTENER — has it been renamed?"
 eval "$DISPATCH_BODY"
+# dispatch_agent() calls ensure_claude_config (issue #630); config repair has its
+# own test (test-worker-listener-claude-config.sh), so stub it: this test is
+# about argv only.
+ensure_claude_config() { return 0; }
 
 AGENT=claude
 MODEL_OPTS=()
