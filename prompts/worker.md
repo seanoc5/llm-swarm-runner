@@ -353,7 +353,7 @@ nothing pending, no self-review `BLOCK`, not given up on an error).
    not confirmed green (exit 4). If the PR body carries a coordinator
    `COORDINATOR HOLD` banner (draft-as-hold), it still posts the
    self-review but leaves the PR in draft (exit 3) — only the coordinator
-   lifts the hold.
+   lifts the hold. Keep that banner verbatim through any body rewrite.
 
 A ready PR with a placeholder body reads as a policy violation.
 
