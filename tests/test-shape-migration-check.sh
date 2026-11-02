@@ -655,6 +655,22 @@ if OUT=$("$CHECK" --against-open-prs 47 2>&1); then RC=0; else RC=$?; fi
 [ "$RC" -eq 0 ] || red "editing an existing base migration must not count as a clash, got $RC ($OUT)"
 green "files already on base are not 'new' → exit 0"
 
+# Equivalent spellings of one version collide (main check normalises via ver_key).
+op_branch fly-d db/migration/V4__d.sql "select 5;\n"
+op_branch fly-e db/migration/V4.0__e.sql "select 6;\n"
+op_branch fly-f db/migration/V04__f.sql "select 7;\n"
+for pair in 49:fly-d 50:fly-e 51:fly-f; do
+    git -C "$OP_CLONE" push -q origin "refs/heads/${pair#*:}:refs/pull/${pair%%:*}/head"
+done
+jq '. + [{"number":49,"baseRefName":"master","headRefName":"fly-d","files":[{"path":"db/migration/V4__d.sql"}]},
+         {"number":50,"baseRefName":"master","headRefName":"fly-e","files":[{"path":"db/migration/V4.0__e.sql"}]},
+         {"number":51,"baseRefName":"master","headRefName":"fly-f","files":[{"path":"db/migration/V04__f.sql"}]}]' \
+    "$GH_PR_LIST" > "$GH_PR_LIST.tmp" && mv "$GH_PR_LIST.tmp" "$GH_PR_LIST"
+if OUT=$("$CHECK" --against-open-prs 49 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -eq 6 ] || red "V4 vs V4.0 vs V04 across open PRs must clash, got $RC ($OUT)"
+for n in 49 50 51; do echo "$OUT" | grep -q "PR #$n" || red "PR #$n missing from the V4 clash: $OUT"; done
+green "V4 / V4.0 / V04 in different open PRs are one version → exit 6"
+
 if "$CHECK" --against-open-prs --ref HEAD >/dev/null 2>&1; then red "--against-open-prs with --ref must be rejected"; fi
 if "$CHECK" --against-open-prs 41 --post >/dev/null 2>&1; then red "--against-open-prs with --post must be rejected"; fi
 green "--against-open-prs rejects --ref and --post"
