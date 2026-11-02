@@ -604,6 +604,10 @@ op_branch fly-c db/migration/V3__c.sql "select 4;\n"
 op_branch alem-a app/alembic/versions/0118_a.py 'revision = "0118"\ndown_revision = "0117"\n'
 op_branch alem-b app/alembic/versions/0118_b.py 'revision = "0118"\ndown_revision = "0117"\n'
 op_branch docs-only NOTES.md "hi\n"
+# GitHub exposes every PR head as refs/pull/<N>/head; mirror that in the fixture origin.
+for pair in 41:fly-a 42:fly-b 43:fly-c 44:alem-a 45:alem-b 46:docs-only; do
+    git -C "$OP_CLONE" push -q origin "refs/heads/${pair#*:}:refs/pull/${pair%%:*}/head"
+done
 cat > "$GH_PR_LIST" <<'JSON'
 [
  {"number":41,"baseRefName":"master","headRefName":"fly-a","files":[{"path":"db/migration/V2__a.sql"}]},
@@ -643,6 +647,7 @@ green "no-PR# form scans every open pair"
 
 # A version already on the base is not "new": PR #47 touching the existing V1 is ignored.
 op_branch touch-v1 db/migration/V1__init.sql "select 1; -- edited\n"
+for n in 47 48; do git -C "$OP_CLONE" push -q origin "refs/heads/touch-v1:refs/pull/$n/head"; done
 jq '. + [{"number":47,"baseRefName":"master","headRefName":"touch-v1","files":[{"path":"db/migration/V1__init.sql"}]},
          {"number":48,"baseRefName":"master","headRefName":"touch-v1","files":[{"path":"db/migration/V1__init.sql"}]}]' \
     "$GH_PR_LIST" > "$GH_PR_LIST.tmp" && mv "$GH_PR_LIST.tmp" "$GH_PR_LIST"
