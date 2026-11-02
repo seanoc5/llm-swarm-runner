@@ -310,6 +310,8 @@ if OUT=$(GH_ISSUES=900 "$REVIEW" 42 --caveats-nonblocking 900 --actor coordinato
 [ "$RC" -eq 1 ] || red "a BLOCK review must not be recorded as non-blocking caveats, got $RC"
 green "refuses on a stale head or a non-caveats verdict"
 
+[ "$(head -n1 "$REVIEW")" = "#!/usr/bin/env bash" ] || red "self-review-pr.sh must start with its shebang"
+
 # ============================================================================
 heading "Test R: the claude review is read-only and runs from a scratch dir (#599)"
 # ============================================================================

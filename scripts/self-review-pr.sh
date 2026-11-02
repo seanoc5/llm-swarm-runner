@@ -1,18 +1,3 @@
-
-# Once per (head, actor) (issue #599): a --post run is a no-op when an
-# owner/member/collaborator-authored marker for THIS head by THIS actor already
-# exists, replaying its verdict as the exit code. A worker round plus the
-# coordinator's independent "Find != fix" round on one head is still two
-# reviews (different actors); only a repeat by the same actor is skipped.
-# Markers without head= (pre-#601) never match. --force re-runs.
-if [ "$POST" = "1" ] && [ "$FORCE" = "0" ] && [ -n "$HEAD_SHA" ]; then
-    PRIOR="$(gh pr view "$PR" --json comments 2>/dev/null | jq -r --arg a "$ACTOR" --arg h "$HEAD_SHA" '[.comments[]? | select(.authorAssociation as $x | ["OWNER","MEMBER","COLLABORATOR"] | index($x)) | .body // "" | capture("SWARM_SELF_REVIEW: (?<v>[A-Z_]+) actor=" + $a + " head=" + $h + "(?![0-9a-f])")? | .v] | last // ""' 2>/dev/null || true)"
-    case "$PRIOR" in
-        APPROVE)              echo "self-review: skipped — PR #$PR head ${HEAD_SHA:0:7} already has an actor=$ACTOR review (APPROVE); --force to re-run"; exit 0 ;;
-        APPROVE_WITH_CAVEATS) echo "self-review: skipped — PR #$PR head ${HEAD_SHA:0:7} already has an actor=$ACTOR review (APPROVE_WITH_CAVEATS); --force to re-run"; exit 3 ;;
-        BLOCK)                echo "self-review: skipped — PR #$PR head ${HEAD_SHA:0:7} already has an actor=$ACTOR review (BLOCK); --force to re-run"; exit 2 ;;
-    esac
-fi
 #!/usr/bin/env bash
 #
 # self-review-pr.sh — Run the fresh-context adversarial self-review on an
