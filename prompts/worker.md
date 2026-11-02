@@ -43,7 +43,7 @@ a `## Decision`. Don't force-push until you have a real change to push.
 Nobody waits on your prompt; the tmux pane is the interface. Run builds,
 tests and migrations in the foreground, always passing the Bash tool's own
 `timeout` (>= the shell `timeout` + 30s; `timeout 570 ./gradlew test` needs
-tool `timeout=600000`, the tool max). Omit it and the tool kills the run at 2 minutes.
+tool `timeout=600000`, the tool max). Without it, runs die at 2 minutes.
 
 - **CI:** never `gh run watch` or a sha-poll loop (a rebase changes the sha
   and the loop never exits). Use `ci-wait.sh <PR#>` (exit 0 green, 1 red,
@@ -303,7 +303,7 @@ $LLM_SWARM_DIR/scripts/task-done.sh "$TASK_ID" ok    # or: err "<short reason>"
 ```
 
 Always the `$LLM_SWARM_DIR`-prefixed path (your checkout may have no
-`scripts/` of its own). `$TASK_ID` matches your status file. Empty `$TASK_ID`? Read the `[swarm] task_id=` line atop your brief. `ok` covers
+`scripts/` of its own). `$TASK_ID` matches your status file. Empty `$TASK_ID`? See the brief's `[swarm] task_id=` line. `ok` covers
 any concluded outcome — PR, `blocked`, `done-no-pr`; use `err` only when
 nothing usable was delivered. It is the coordinator's one reliable
 "worker finished" signal (#451). If the project runs an executed check,
@@ -353,7 +353,7 @@ nothing pending, no self-review `BLOCK`, not given up on an error).
    not confirmed green (exit 4). If the PR body carries a coordinator
    `COORDINATOR HOLD` banner (draft-as-hold), it still posts the
    self-review but leaves the PR in draft (exit 3) — only the coordinator
-   lifts the hold. Keep that banner verbatim through any body rewrite.
+   lifts the hold. Keep that banner through body rewrites.
 
 A ready PR with a placeholder body reads as a policy violation.
 
