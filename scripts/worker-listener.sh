@@ -468,10 +468,10 @@ refresh_stale_runner_checkout() {
 # and the next launch sat at the "invalid JSON" dialog for an hour).
 #
 # So check before EVERY claude launch. Restore order: newest valid
-# ~/.claude.json.tmp.* (the CLI's finished-but-unrenamed save), then our own
-# last-known-good copy (~/.claude.json.lkg, refreshed on each good check),
-# then the newest valid CLI backup in ~/.claude/backups. The write is
-# in-place (cat >), since a rename can't replace the bind-mount target.
+# of ~/.claude.json.tmp.* (the CLI's finished-but-unrenamed save) and our own
+# last-known-good copy (~/.claude.json.lkg, refreshed on each good check) by
+# mtime, so a stale orphan .tmp never beats a fresher snapshot; then the newest
+# valid CLI backup in ~/.claude/backups. The write is in-place (cat >), since a rename can't replace the bind-mount target.
 # No valid source = return 1: the caller fails the launch with an err outcome
 # naming the cause instead of parking at the dialog. Needs jq (always present
 # in the image); without it the check is skipped.
@@ -493,7 +493,7 @@ ensure_claude_config() {
 
     local why="empty" src="" cand
     [ -s "$cfg" ] && why="invalid-json"
-    for cand in $(ls -t "$cfg".tmp.* 2>/dev/null) "$lkg" \
+    for cand in $(ls -t "$cfg".tmp.* "$lkg" 2>/dev/null) \
                 $(ls -t "$(dirname "$cfg")"/.claude/backups/.claude.json.* 2>/dev/null); do
         if claude_config_valid "$cand"; then src="$cand"; break; fi
     done

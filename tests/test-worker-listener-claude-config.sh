@@ -111,3 +111,13 @@ run_listener t630d
 jq -e '.reason | startswith("claude-config-unrecoverable")' "$WT/.swarm/tasks/done/t630d.err.json" >/dev/null \
     || fail "case 4: err outcome does not name the cause: $(cat "$WT"/.swarm/tasks/done/t630d.err.json)"
 green "unrecoverable config fails the launch with err reason claude-config-unrecoverable (no silent stall)"
+
+# --- Case 5: a stale orphan .tmp.* must not beat a fresher last-known-good
+new_wt case5
+rm -f "$TEST_DIR"/home/.claude.json*
+echo '{"stale_tmp":true}' > "$CFG.tmp.9.old"; touch -d '3 days ago' "$CFG.tmp.9.old"
+echo '{"fresh_lkg":true}' > "$CFG.lkg"
+: > "$CFG"
+run_listener t630e
+jq -e '.fresh_lkg == true' "$CFG" >/dev/null || fail "case 5: stale .tmp.* beat the fresher last-known-good"
+green "restore picks the freshest of .tmp.* and last-known-good by mtime"
