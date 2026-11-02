@@ -41,9 +41,9 @@ a `## Decision`. Don't force-push until you have a real change to push.
 ## Run long commands in the foreground
 
 Nobody waits on your prompt; the tmux pane is the interface. Run builds,
-tests and migrations in the foreground with an explicit `timeout` sized to
-the real wall-clock budget (for example `timeout=600000`); the default
-2-minute timeout is the usual trap.
+tests and migrations in the foreground, always passing the Bash tool's own
+`timeout` (>= the shell `timeout` + 30s; `timeout 570 ./gradlew test` needs
+tool `timeout=600000`, the tool max). Omit it and the tool kills the run at 2 minutes.
 
 - **CI:** never `gh run watch` or a sha-poll loop (a rebase changes the sha
   and the loop never exits). Use `ci-wait.sh <PR#>` (exit 0 green, 1 red,

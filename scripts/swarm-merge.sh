@@ -797,7 +797,7 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
             log_event merge.gate "pr=$PR_NUM gate=9-independent-review result=refused verdict=${IND_VERDICT:-none} caveats=${IND_CAVEATS:-none} followup=${IND_FOLLOWUP:-none} followup_reason=${FOLLOWUP_REASON:-none} action=refuse-auto-medium"
             echo "ERROR: PR #$PR_NUM refused by --auto-medium Gate 9 (independent APPROVE on head)." >&2
             echo "       Latest coordinator/operator review: '${IND_MARKER:-<none>}'; current head: '${HEAD_NOW:-<unreadable>}'." >&2
-            echo "       Needs a bare APPROVE on this exact head (self-review-pr.sh $PR_NUM --post --force --actor coordinator)," >&2
+            echo "       Needs a bare APPROVE on this exact head (self-review-pr.sh $PR_NUM --post --actor coordinator)," >&2
             echo "       or non-blocking caveats with a filed follow-up issue (self-review-pr.sh $PR_NUM --caveats-nonblocking <issue#> --actor coordinator)." >&2
             exit 1
           fi

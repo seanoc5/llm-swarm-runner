@@ -256,8 +256,8 @@ Opt-in via `SWARM_AUTOMERGE_MEDIUM=1`. For a readied 🟡 PR: run the "Find ≠ 
 
 The agent that wrote a change never judges it.
 - Never ask the authoring worker to review its own PR, and never treat its merge proposal as review evidence.
-- 🟡/🔴 PRs: `scripts/self-review-pr.sh <N> --post --force --actor coordinator` (fresh `claude -p`, zero shared context; `--force` because the worker's own pr-ready.sh round already posted a marker, and `--post` skips over any existing one without it).
-- 🔴 PRs also get a different pair of eyes: another model (`SELF_REVIEW_MODEL=claude-opus-5-5 scripts/self-review-pr.sh <N> --force --post --actor coordinator`) or a read-only review worker ("review PR #N via `gh pr diff N`; do NOT push fixes; report verdict as a PR comment").
+- 🟡/🔴 PRs: `scripts/self-review-pr.sh <N> --post --actor coordinator` (fresh read-only `claude -p`, zero shared context). No `--force`: the worker's pr-ready.sh marker is a different actor, so it doesn't block you, but a second run on an unchanged head is a no-op that replays the verdict (`--rerun` re-runs).
+- 🔴 PRs also get a different pair of eyes: another model (`SELF_REVIEW_MODEL=claude-opus-5-5 scripts/self-review-pr.sh <N> --rerun --post --actor coordinator`, `--rerun` since the head already has a coordinator review) or a read-only review worker ("review PR #N via `gh pr diff N`; do NOT push fixes; report verdict as a PR comment").
 - Always pass `--actor coordinator` on these calls (issue #601): untagged, your review eats into the worker's `pr-ready.sh` round cap. A coordinator-found BLOCK still blocks like a worker's own.
 - The reviewer reports; the author fixes. Apply draft-as-hold, then `requeue.sh N <brief>` to the author.
 
