@@ -53,6 +53,25 @@ SOCK="test-bootstrap-$$"
 cleanup() { command tmux -L "$SOCK" kill-server 2>/dev/null || true; rm -rf "$TEST_DIR"; }
 trap cleanup EXIT
 
+# kill-server returns before the dying server has stopped accepting connections.
+# A new-session started in that window attaches to the dying server and prints
+# "server exited unexpectedly" (issue #720; ~1 in 300 locally, near-constant on
+# CI runners). The socket file is NOT unlinked on kill-server, so poll until a
+# connect attempt says "no server running" (nobody is listening) before the
+# next new-session bootstraps a genuinely fresh server.
+reset_server() {
+    local i out
+    command tmux -L "$SOCK" kill-server 2>/dev/null || true
+    for ((i = 0; i < 100; i++)); do
+        out="$(command tmux -L "$SOCK" has-session 2>&1 || true)"
+        case "$out" in
+            *"no server running"*|*"error connecting"*) return 0 ;;
+        esac
+        sleep 0.05
+    done
+    red "tmux server on $SOCK still answering 5s after kill-server"
+}
+
 extract_line() {
     local pattern="$1"
     grep -F "$pattern" "$LLM_START" || red "could not find expected line in llm-start.sh (has it been rewritten?): $pattern"
@@ -122,7 +141,7 @@ check "operator's other conf customizations DO apply (source-file ran)" 'loaded'
 
 # ─────────────────────────── missing conf doesn't error ────────────────────
 heading "Test 3: a missing ~/.tmux.conf is a no-op, not an error"
-command tmux -L "$SOCK" kill-server 2>/dev/null || true
+reset_server
 TMUX_CONF="$TEST_DIR/does-not-exist.conf"
 
 eval "$NEW_SESSION_LINE"
@@ -140,7 +159,7 @@ check "no stray pane-base-index leaks in from a nonexistent conf" "0" "${got:-0}
 # ──────────────────── window-level override survives later drift ──────────
 heading "Test 4: the coordinator window's pane-base-index override survives a LATER global drift (self-review round 8 finding)"
 
-command tmux -L "$SOCK" kill-server 2>/dev/null || true
+reset_server
 TMUX_CONF="$TEST_DIR/does-not-exist.conf"
 eval "$NEW_SESSION_LINE"
 eval "$COORD_WINDOW_OVERRIDE_LINE"
