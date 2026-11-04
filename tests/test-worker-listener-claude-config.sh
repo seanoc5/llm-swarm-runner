@@ -55,7 +55,7 @@ run_listener() {  # run_listener <task-id>
       echo $! > listener.pid )
     LISTENER_PID="$(cat "$WT/listener.pid")"
     for ((i = 0; i < 100; i++)); do
-        compgen -G "$WT/.swarm/tasks/done/$1.*.json" >/dev/null && break
+        grep -q "Wrote outcome" "$WT/listener.log" 2>/dev/null && break
         kill -0 "$LISTENER_PID" 2>/dev/null || break
         sleep 0.1
     done
