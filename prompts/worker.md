@@ -53,8 +53,8 @@ pending and end the task (for a PR, `pr-ready.sh` parks it for the ready-sweep).
 - **A conflicting PR gets no CI run at all.** Before waiting on CI, check
   `gh pr view <N> --json mergeable,mergeStateStatus`; if `CONFLICTING`,
   rebase and push first.
-- **Process searches:** never `pgrep -f "<text>"` or `ps | grep`; they match
-  their own argv. Match an absolute path instead.
+- **Process searches:** never `pgrep -f` or `ps | grep` (they match their own
+  argv, even for a path). Use `pgrep -x <name>` or a PID captured at launch.
 - **Parallelism is not your call.** Need a long-lived process (dev server)?
   Ask the operator to run it in the `util` window. Need two tracks at once?
   Recommend a sibling worker in a `## Decision` (capped by `MAX_WORKERS`? say so).
