@@ -1042,7 +1042,11 @@ write_outcome() {
         fi
     fi
 
-    cat > "$outcome_file" <<EOF
+    # Atomic publish (#722): readers poll for this file and parse it the moment
+    # it exists; a plain `cat >` exposes an empty/partial file in between.
+    local outcome_tmp
+    outcome_tmp="$(mktemp "$DONE/.${TASK_ID}.outcome.XXXXXX")"
+    cat > "$outcome_tmp" <<EOF
 {
   "task_id": "$TASK_ID",
   "started":  "$started",
@@ -1062,6 +1066,8 @@ write_outcome() {
   "retried": ${RETRIED:-false}
 }
 EOF
+    chmod 644 "$outcome_tmp" 2>/dev/null || true
+    mv -f "$outcome_tmp" "$outcome_file"
     echo "[$(date +%T)] Wrote outcome: $outcome_file"
     append_eval_log "$outcome" "$finished" "$duration" "$rc"
 }
