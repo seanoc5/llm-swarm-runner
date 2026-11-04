@@ -839,11 +839,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 # command hits its timeout. gemini/codex have no equivalent switch; for them
 # the prompt rule remains the only guard. (#301)
 #
-# (#298) SANDBOX_ALLOW_BACKGROUND_TASKS=0 in <project>/.swarm/.env turns
-# the restriction on. (#607) Default is now 1 (allowed) as a trial, since
-# the harness's background-task visibility may have improved; review
-# 2026-10-17, then either delete this knob or flip it back.
-SANDBOX_ALLOW_BACKGROUND_TASKS="${SANDBOX_ALLOW_BACKGROUND_TASKS:-1}"
+# (#298) SANDBOX_ALLOW_BACKGROUND_TASKS=1 in <project>/.swarm/.env turns
+# the restriction OFF (default 0 = deny; #715 ended the #607 trial).
+SANDBOX_ALLOW_BACKGROUND_TASKS="${SANDBOX_ALLOW_BACKGROUND_TASKS:-0}"
 FOREGROUND_ONLY_ENV_OPTS=()
 if [ "$SANDBOX_ALLOW_BACKGROUND_TASKS" != "1" ]; then
     FOREGROUND_ONLY_ENV_OPTS=(-e "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1")

@@ -12,25 +12,22 @@ words, then the coordinates.
 ## Working rules
 
 - Before editing, fetch and rebase onto the remote default branch
-  (`origin/main` or `origin/master`). A conflict you can't resolve
-  mechanically: stop and raise a `## Decision`.
-- Foreground only; always pass the Bash tool's own `timeout` >= shell
-  `timeout` + 30s (`timeout 570 cmd` -> `timeout=600000`, the tool max), else it dies at 2 min. CI: `ci-wait.sh <PR#>` (exit 0 green, 1 red, 2 timeout,
-  3 conflicting), never `gh run watch`. A CONFLICTING PR gets no CI run.
+  (`origin/main` or `master`). Unresolvable conflict: stop, raise a `## Decision`.
+- Foreground only: no `run_in_background`, `&`, `nohup`, `until/while ... sleep` loops, or `pgrep -f "<text>"` (matches itself). Outlasts one call (CI)? Write a `ci-pending` outbox note, end the task. Pass the Bash tool's own `timeout` >= shell `timeout` + 30s (max `600000`; default dies at 2 min). CI: `ci-wait.sh <PR#>` (exit 0 green, 1 red, 2 timeout,
+  3 conflicting), never `gh run watch`; CONFLICTING PRs get no CI run.
 - No subagents (Agent/Task/Workflow are denied), no `tmux send-keys` to
   other panes. Need parallel work or a long-lived process? Propose a
   sibling worker or ask the operator in a `## Decision`.
 - Run the whole fast tier once before the final commit (`.swarm/check.sh`,
-  `$WORKER_CHECK_CMD`, or CLAUDE.md's unit command), plus the database tests
-  for any DB code you touched, filtered to that area. CI and the nightly
-  lane run the rest. Don't re-run a green suite.
+  `$WORKER_CHECK_CMD`, or CLAUDE.md's unit command), plus filtered database
+  tests for DB code you touched. CI and the nightly run the rest.
 - "Environmental", "flaky", "pre-existing" need a named mechanism plus one
   piece of evidence you collected (one command, ~2 minutes). Otherwise
   write "cause not established" and say what you touched.
 - Judgment call: a `## Decision` block (question, 2–3 options with one-line
   trade-offs, your recommendation), then proceed. Real bug or wrong
   premise: a `## Note` block, and it lands in the PR's `## Findings`.
-- Anything a PR or issue cites (log excerpt, data table, env capture) is
+- Anything a PR or issue cites (log, table, env capture) is
   committed in the PR or copied to `<project>/.swarm/evidence/iss-<N>/`.
   The worktree's `.swarm/` and `.local-data/` are destroyed at reap.
 
