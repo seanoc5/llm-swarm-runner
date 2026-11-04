@@ -156,7 +156,15 @@ mkfifo "$WT2/stdin.fifo"
     # own INT trap at all (found while writing this test). exec replaces
     # the subshell's process image with the listener directly, so $! is
     # the real target.
-    exec env -u TMUX -u TMUX_PANE HOME="$WT2/home" "$LISTENER" bash \
+    #
+    # --default-signal=INT (issue #720): bash >= 5.3 (ubuntu-26.04, which
+    # ubuntu-latest moved to on 2026-11-02) starts every async `&` child of a
+    # non-job-control script with SIGINT ignored. A signal ignored at entry
+    # can never be trapped, so without this reset the listener inherits
+    # SIG_IGN, its INT trap is a silent no-op, and this test (not the
+    # listener, which a real tmux pane starts with default dispositions)
+    # times out. Bash 5.2 (ubuntu-24.04) left SIGINT alone, hence the delay.
+    exec env --default-signal=INT -u TMUX -u TMUX_PANE HOME="$WT2/home" "$LISTENER" bash \
         < stdin.fifo > listener.log 2>&1
 ) &
 LISTENER_PID=$!
