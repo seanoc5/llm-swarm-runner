@@ -22,7 +22,7 @@ cleanup() {
     rm -rf "$TEST_DIR"
 }
 trap cleanup EXIT
-fail() { echo "FAIL: $*" >&2; [ -f "${LOG:-/nonexistent}" ] && cat "$LOG" >&2; exit 1; }
+fail() { echo "FAIL: $*" >&2; [ -n "${F:-}" ] && cat "$F" >&2; [ -f "${LOG:-/nonexistent}" ] && cat "$LOG" >&2; exit 1; }
 green() { printf '\033[32m✓ %s\033[0m\n' "$*"; }
 
 mkdir -p "$TEST_DIR/bin" "$TEST_DIR/home"
@@ -30,6 +30,12 @@ cat > "$TEST_DIR/bin/claude" <<'FAKE'
 #!/usr/bin/env bash
 cat >/dev/null
 echo launched >> "$FAKE_CLAUDE_LOG"
+# FAKE_CLAUDE_MODE=block-and-break (issue #714): leave a blocked status file and
+# an emptied config behind, as an interrupted first attempt would.
+if [ "${FAKE_CLAUDE_MODE:-}" = "block-and-break" ]; then
+    printf '{"task_id":"%s","outcome":"err","reason":"gave up on attempt 1"}\n' "$TASK_ID" > ".swarm/tasks/done/$TASK_ID.err.json"
+    : > "$CLAUDE_CONFIG_FILE"; rm -f "$CLAUDE_CONFIG_FILE.lkg"
+fi
 FAKE
 chmod +x "$TEST_DIR/bin/claude"
 
@@ -41,15 +47,15 @@ new_wt() {  # new_wt <name>
 }
 run_listener() {  # run_listener <task-id>
     ( cd "$WT"
-      printf 'do nothing\n' > .swarm/tasks/inbox/.tmp.brief
+      printf 'do nothing\n%s\n' "${BRIEF_EXTRA:-}" > .swarm/tasks/inbox/.tmp.brief
       mv .swarm/tasks/inbox/.tmp.brief ".swarm/tasks/inbox/$1.md"
-      env PATH="$TEST_DIR/bin:$PATH" LLM_SWARM_DIR= WORKER_MODEL= WORKER_HEADLESS=1 WORKER_CHECK=0 \
+      env PATH="$TEST_DIR/bin:$PATH" LLM_SWARM_DIR= WORKER_MODEL= WORKER_HEADLESS=1 WORKER_CHECK="${WORKER_CHECK:-0}" \
           CLAUDE_CONFIG_FILE="$TEST_DIR/home/.claude.json" \
           bash "$RUNNER/scripts/worker-listener.sh" claude > listener.log 2>&1 &
       echo $! > listener.pid )
     LISTENER_PID="$(cat "$WT/listener.pid")"
     for ((i = 0; i < 100; i++)); do
-        compgen -G "$WT/.swarm/tasks/done/$1.*.json" >/dev/null && break
+        grep -q "Wrote outcome" "$WT/listener.log" 2>/dev/null && break
         kill -0 "$LISTENER_PID" 2>/dev/null || break
         sleep 0.1
     done
@@ -121,3 +127,30 @@ echo '{"fresh_lkg":true}' > "$CFG.lkg"
 run_listener t630e
 jq -e '.fresh_lkg == true' "$CFG" >/dev/null || fail "case 5: stale .tmp.* beat the fresher last-known-good"
 green "restore picks the freshest of .tmp.* and last-known-good by mtime"
+
+# --- Case 6 (issue #714): config breaks during attempt 1, check fails, the
+# retry launch is blocked. The outcome stays err and must keep attempt 1's
+# specific reason (worker-blocked) with the config cause appended, not replaced.
+new_wt case6
+rm -f "$TEST_DIR"/home/.claude.json*
+echo '{"healthy":true}' > "$CFG"
+FAKE_CLAUDE_MODE=block-and-break WORKER_CHECK=1 BRIEF_EXTRA='<!-- SWARM_CHECK: false -->' run_listener t714a
+F="$WT/.swarm/tasks/done/t714a.err.json"
+[ -f "$F" ] || fail "case 6: expected err outcome"
+[ "$(wc -l < "$FAKE_CLAUDE_LOG")" -eq 1 ] || fail "case 6: expected exactly one claude launch (retry blocked)"
+jq -e '.reason | startswith("worker-reported (attempt 1): gave up on attempt 1")' "$F" >/dev/null || fail "case 6: first attempt's reason was overwritten: $(cat "$F")"
+jq -e '.reason | contains("claude-config-unrecoverable")' "$F" >/dev/null || fail "case 6: config cause missing from reason: $(cat "$F")"
+green "retry-launch config block appends to, not overwrites, the first attempt's reason"
+
+# --- Case 7 (issue #714): no .tmp.* or .lkg; restore from ~/.claude/backups
+new_wt case7
+rm -rf "$TEST_DIR"/home/.claude.json* "$TEST_DIR/home/.claude"
+mkdir -p "$TEST_DIR/home/.claude/backups"
+echo '{"backup":"older"}' > "$TEST_DIR/home/.claude/backups/.claude.json.backup.100"; touch -d '2 min ago' "$TEST_DIR/home/.claude/backups/.claude.json.backup.100"
+echo '{"backup":"newest"}' > "$TEST_DIR/home/.claude/backups/.claude.json.backup.200"
+printf '{"torn":' > "$TEST_DIR/home/.claude/backups/.claude.json.backup.300"
+: > "$CFG"
+run_listener t714b
+assert_launched_not_blocked t714b
+jq -e '.backup == "newest"' "$CFG" >/dev/null || fail "case 7: not restored from the newest VALID backup: $(cat "$CFG")"
+green "empty config falls back to the newest valid ~/.claude/backups copy (skipping a torn one)"

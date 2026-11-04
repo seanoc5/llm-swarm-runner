@@ -941,10 +941,23 @@ write_outcome() {
     # independent proof of real work and is never second-guessed below —
     # only reached when neither exists, on top of zero new commits.
     [ -n "$prior_err_reason" ] && reason="worker-reported: $prior_err_reason"
-    # issue #630: the launch never happened; name the real cause.
+    # issue #630: the launch never happened; name the real cause. Issue #714:
+    # the check-failure retry also launches, so this can fire after attempt 1
+    # already produced a more specific reason (worker-reported / worker-blocked);
+    # append rather than overwrite so that label survives.
     if [ -n "${LAUNCH_BLOCKED:-}" ]; then
         TASK_OUTCOME="err"
-        reason="$LAUNCH_BLOCKED"
+        # The retry path archives attempt 1's err record (see the check-retry
+        # block in the main loop), so recover its reason from the archive.
+        if [ -z "$reason" ] && [ -f "$DONE/${TASK_ID}.err.attempt1.json" ] && command -v jq >/dev/null 2>&1; then
+            prior_err_reason="$(jq -r '.reason // empty' "$DONE/${TASK_ID}.err.attempt1.json" 2>/dev/null)"
+            [ -n "$prior_err_reason" ] && reason="worker-reported (attempt 1): $prior_err_reason"
+        fi
+        if [ -n "$reason" ]; then
+            reason="$reason; then $LAUNCH_BLOCKED"
+        else
+            reason="$LAUNCH_BLOCKED"
+        fi
     fi
 
     # issue #529 optional extra safety: $rc > 128 is bash's own-process-died-
