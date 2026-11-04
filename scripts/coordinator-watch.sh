@@ -1959,7 +1959,8 @@
 #                           While the set of dispatchable issue numbers is
 #                           unchanged since the last idle_capacity note, send
 #                           no further note for this long (#718). Any change
-#                           to the set notes within one poll. Titles starting
+#                           to the set notes at the next pass that clears the
+#                           WAKE_SECS/CHECK_SECS gates. Titles starting
 #                           epic/tracking/tracker/fyi never count.
 #   WATCH_CAPACITY_POLL_SECS=60
 #                           Tick of run_capacity_wake_loop, the own process
@@ -10830,7 +10831,7 @@ dispatchable_issue_counts() {
     out="$(printf '%s' "$json" | jq -r --arg busy "${busy#,}" '
         ($busy | split(",") | map(select(. != "") | tonumber)) as $b
         | [.[] | select(.number as $n | $b | index($n) | not)
-               | select((.title // "") | test("^[\\[( ]*(epic|tracking|tracker|fyi)\\b"; "i") | not)] as $r
+               | select((.title // "") | test("^[\\[( ]*(epic\\b|(tracking|tracker|fyi)[\\])]*\\s*([:\\u2013\\u2014-]|$))"; "i") | not)] as $r
         | "\($r | length) \([$r[] | select(any(.labels[]?; .name == "night-ok"))] | length) \([$r[].number] | sort | join(","))"' 2>/dev/null)" || return 1
     read -r ready night_ok nums <<< "$out"
     printf '%s %s %s\n' "$ready" "$night_ok" "$(printf '%s' "$nums" | cksum | cut -d' ' -f1)"
@@ -10929,12 +10930,12 @@ idle_capacity_wake_pass() {
     fi
 
     log_event capacity.idle_wake "slots=$slots ready=$ready night_ok=$night_ok"
-    printf '%s %s\n' "$set_hash" "$now" > "$IDLE_CAPACITY_SET_FILE" 2>/dev/null || true
     printf '%s\n' "$now" > "$IDLE_CAPACITY_WAKE_FILE" 2>/dev/null || true
     if [ "$DRY_RUN" = "1" ]; then
         echo "[DRY] would write coord-inbox entry: trigger=idle_capacity slots=$slots ready=$ready"
     elif coord_inbox_write idle_capacity "Idle capacity: $slots worker slot(s) free and $ready open issue(s) pass available-issues.sh with no worktree here ($night_ok of them labelled night-ok). Dispatch ready / night-ok work now (act, then report); if none of it is really dispatchable (epics, open PRs), say so in one line."; then
         log_event coord.inbox.write "trigger=idle_capacity slots=$slots ready=$ready"
+        printf '%s %s\n' "$set_hash" "$now" > "$IDLE_CAPACITY_SET_FILE" 2>/dev/null || true
     else
         echo "[$(date +%T)] WARN: failed to write coord-inbox idle_capacity entry" >&2
         return 0

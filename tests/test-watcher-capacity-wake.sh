@@ -292,13 +292,13 @@ grep -q "reason=unchanged_set" "$EV" && got=yes || got=no
 check "unchanged set: logged" "yes" "$got"
 echo '[{"number":10,"labels":[]},{"number":11,"labels":[]},{"number":12,"labels":[]},{"number":13,"labels":[]}]' > "$AVAILABLE_JSON"
 idle_capacity_wake_pass
-check "a new issue number notes again within one poll" "1" "$(notes idle_capacity)"
+check "a new issue number notes again at the next gated pass" "1" "$(notes idle_capacity)"
 mv "$COORD_INBOX_DIR"/*-idle_capacity-*.md "$T/"
 echo "$(( $(date +%s) - 2700 ))" > "$IDLE_CAPACITY_WAKE_FILE"
 echo "$(cut -d' ' -f1 "$IDLE_CAPACITY_SET_FILE") $(( $(date +%s) - 21600 ))" > "$IDLE_CAPACITY_SET_FILE"
 idle_capacity_wake_pass
 check "unchanged set past the repeat window: notes again" "1" "$(notes idle_capacity)"
 
-reset; echo '[{"number":11,"title":"epic: big thing","labels":[]},{"number":12,"title":"Tracking: stuff","labels":[]},{"number":13,"title":"FYI note","labels":[]},{"number":14,"title":"Fix bug","labels":[]}]' > "$AVAILABLE_JSON"
-check "epic/tracking/FYI titles are not counted" "1 0" "$(dispatchable_issue_counts | cut -d' ' -f1,2)"
+reset; echo '[{"number":21,"title":"epic: big thing","labels":[]},{"number":12,"title":"Tracking: stuff","labels":[]},{"number":13,"title":"FYI - note","labels":[]},{"number":14,"title":"Fix bug","labels":[]},{"number":15,"title":"Tracking pixel broken","labels":[]}]' > "$AVAILABLE_JSON"
+check "epic/tracking/FYI titles are not counted (real bugs are)" "2 0" "$(dispatchable_issue_counts | cut -d' ' -f1,2)"
 green "all capacity-wake checks passed"
