@@ -1110,6 +1110,17 @@ GH_HOLD_COMMENTS_JSON=
 [ "$rc" -eq 0 ] || red "expected a self-review comment quoting the banner NOT to hold, got $rc: $(cat "$TEST_DIR/out.log")"
 green "the hold marker and strict lift forms decide; review prose is ignored"
 
+heading "Test 35b: a comment merely QUOTING the hold marker (prose or backticks) does not hold; a real one still does (issue #707)"
+printf '<!-- BLIND_MERGE_RISK: low -->\nbody\n' > "$BODY_FILE"
+GH_HOLD_COMMENTS_JSON='{"comments":[{"body":"The marker `<!-- SWARM_COORDINATOR_HOLD -->` is what pr-ready.sh looks for, and <!-- SWARM_COORDINATOR_HOLD --> in prose is just text."}]}'
+rc=0; run_pr_ready || rc=$?
+[ "$rc" -eq 0 ] || red "expected a comment quoting the marker NOT to hold, got $rc: $(cat "$TEST_DIR/out.log")"
+GH_HOLD_COMMENTS_JSON="{\"comments\":[$HOLD_C]}"
+rc=0; run_pr_ready || rc=$?
+GH_HOLD_COMMENTS_JSON=
+[ "$rc" -eq 3 ] || red "expected a real hold comment to still hold, got $rc: $(cat "$TEST_DIR/out.log")"
+green "only the marker on a line of its own holds"
+
 heading "Test 36: hold comment lands AFTER the CI snapshot, before gh pr ready — refuses to ready"
 printf '<!-- BLIND_MERGE_RISK: low -->\nfinalizing\n' > "$BODY_FILE"
 GH_HOLD_LATE_COMMENTS_JSON="{\"comments\":[$HOLD_C]}"

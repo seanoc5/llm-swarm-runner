@@ -220,7 +220,7 @@ HOLD_BANNER_RE='^> ⛔ \*\*COORDINATOR HOLD\*\*'
 
 # issue #616: the second hold signal, one a worker's body rewrite can't
 # erase. The newest hold-or-lift comment decides: a hold comment (only the
-# marker `<!-- SWARM_COORDINATOR_HOLD -->` counts) newer than the last lift
+# marker `<!-- SWARM_COORDINATOR_HOLD -->` on a line of its own counts, issue #707: prose or a code span quoting it does not) newer than the last lift
 # comment (marker `<!-- SWARM_COORDINATOR_HOLD_LIFTED -->` or a line starting
 # "COORDINATOR HOLD lifted") means held.
 # Legacy marker-less hold comments (the old prompt only said "comment what's
@@ -237,7 +237,7 @@ HOLD_BANNER_RE='^> ⛔ \*\*COORDINATOR HOLD\*\*'
 # the self-review queries above.
 HOLD_COMMENT_JQ='[.comments[].body // ""
   | select(contains("SWARM_SELF_REVIEW:") | not)
-  | if contains("<!-- SWARM_COORDINATOR_HOLD -->") then "held"
+  | if test("(^|\\n)<!-- SWARM_COORDINATOR_HOLD -->\\s*$") then "held"
     elif (contains("<!-- SWARM_COORDINATOR_HOLD_LIFTED -->") or test("(^|\\n)(✅ )?(\\*\\*)?COORDINATOR HOLD lifted")) then "lifted"
     else empty end] | (.[-1] // "")'
 
