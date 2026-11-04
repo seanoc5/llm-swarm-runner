@@ -32,6 +32,8 @@ DRY_RUN=0 DEBOUNCE_SECS=0
 WATCH_DISPATCH_PAUSE_WAKE=1
 WATCH_IDLE_CAPACITY_WAKE_SECS=2700
 WATCH_IDLE_CAPACITY_CHECK_SECS=0
+WATCH_IDLE_CAPACITY_REPEAT_SECS=21600
+IDLE_CAPACITY_SET_FILE="$PROJECT_DIR/.swarm/idle-capacity-set.last"
 
 eval "$(sed -n '/^coord_inbox_write() {/,/^}/p; /^coord_ring_doorbell() {/,/^}/p; /^dispatch_pause_active() {/,/^}/p; /^capacity_free_slots() {/,/^}/p; /^dispatchable_issue_counts() {/,/^}/p; /^dispatch_pause_wake_pass() {/,/^}/p; /^idle_capacity_wake_pass() {/,/^}/p; /^coord_pending_approval_age() {/,/^}/p' "$WATCH")"
 for fn in coord_ring_doorbell dispatch_pause_wake_pass idle_capacity_wake_pass coord_pending_approval_age; do
@@ -71,11 +73,11 @@ echo '[{"number":10,"labels":[{"name":"night-ok"}]},{"number":11,"labels":[{"nam
 
 notes() { find "$COORD_INBOX_DIR" -maxdepth 1 -name "*-$1-*.md" 2>/dev/null | wc -l | tr -d ' '; }
 rings() { [ -f "$RANG" ] && wc -l < "$RANG" | tr -d ' ' || echo 0; }
-reset() { rm -rf "$COORD_INBOX_DIR" "$RANG" "$IDLE_CAPACITY_WAKE_FILE" "$DISPATCH_PAUSE_SEEN_FILE"; : > "$EV"; LAST_IDLE_CAPACITY_CHECK=0; HOLD=""; BUSY=0; APPROVAL_AGE=""; }
+reset() { rm -rf "$COORD_INBOX_DIR" "$RANG" "$IDLE_CAPACITY_WAKE_FILE" "$IDLE_CAPACITY_SET_FILE" "$DISPATCH_PAUSE_SEEN_FILE"; : > "$EV"; LAST_IDLE_CAPACITY_CHECK=0; HOLD=""; BUSY=0; APPROVAL_AGE=""; }
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 check "free slots = min(MAX_WORKERS - iss windows, MAX_TMUX_WINDOWS - windows)" "2" "$(capacity_free_slots)"
-check "dispatchable counts skip issues with an own worktree" "2 1" "$(dispatchable_issue_counts)"
+check "dispatchable counts skip issues with an own worktree" "2 1" "$(dispatchable_issue_counts | cut -d' ' -f1,2)"
 
 # ── dispatch pause lifted ────────────────────────────────────────────────────
 reset
@@ -156,6 +158,7 @@ mv "$COORD_INBOX_DIR"/*-idle_capacity-*.md "$T/"
 idle_capacity_wake_pass
 check "at most one note per interval" "0" "$(notes idle_capacity)"
 echo "$(( $(date +%s) - 2700 ))" > "$IDLE_CAPACITY_WAKE_FILE"
+rm -f "$IDLE_CAPACITY_SET_FILE"   # repeat suppression is covered below
 idle_capacity_wake_pass
 check "fires again once the interval has passed" "1" "$(notes idle_capacity)"
 rm -f "$IDLE_CAPACITY_WAKE_FILE"
@@ -236,7 +239,7 @@ check "demo/other-assignee night-ok: logged as nothing_dispatchable" "yes" "$got
 reset
 echo '[{"number":30,"labels":[{"name":"night-ok"},{"name":"demo"}],"assignees":[]},
       {"number":32,"labels":[{"name":"night-ok"}],"assignees":[]}]' > "$GH_ISSUES_JSON"
-check "an ordinary night-ok issue is counted inside ready" "1 1" "$(dispatchable_issue_counts)"
+check "an ordinary night-ok issue is counted inside ready" "1 1" "$(dispatchable_issue_counts | cut -d" " -f1,2)"
 idle_capacity_wake_pass
 check "ordinary night-ok issue: one wake note" "1" "$(notes idle_capacity)"
 
@@ -277,3 +280,25 @@ case "$out" in *"WATCH_IDLE_CAPACITY_WAKE_SECS must be a non-negative integer"*)
 check "non-integer WATCH_IDLE_CAPACITY_WAKE_SECS is refused" "1" "$got"
 
 green "all capacity-wake tests passed"
+
+# ── repeat suppression (#718) ────────────────────────────────────────────────
+reset
+idle_capacity_wake_pass
+mv "$COORD_INBOX_DIR"/*-idle_capacity-*.md "$T/"
+echo "$(( $(date +%s) - 2700 ))" > "$IDLE_CAPACITY_WAKE_FILE"
+idle_capacity_wake_pass
+check "unchanged issue set inside the repeat window: no note" "0" "$(notes idle_capacity)"
+grep -q "reason=unchanged_set" "$EV" && got=yes || got=no
+check "unchanged set: logged" "yes" "$got"
+echo '[{"number":10,"labels":[]},{"number":11,"labels":[]},{"number":12,"labels":[]},{"number":13,"labels":[]}]' > "$AVAILABLE_JSON"
+idle_capacity_wake_pass
+check "a new issue number notes again within one poll" "1" "$(notes idle_capacity)"
+mv "$COORD_INBOX_DIR"/*-idle_capacity-*.md "$T/"
+echo "$(( $(date +%s) - 2700 ))" > "$IDLE_CAPACITY_WAKE_FILE"
+echo "$(cut -d' ' -f1 "$IDLE_CAPACITY_SET_FILE") $(( $(date +%s) - 21600 ))" > "$IDLE_CAPACITY_SET_FILE"
+idle_capacity_wake_pass
+check "unchanged set past the repeat window: notes again" "1" "$(notes idle_capacity)"
+
+reset; echo '[{"number":11,"title":"epic: big thing","labels":[]},{"number":12,"title":"Tracking: stuff","labels":[]},{"number":13,"title":"FYI note","labels":[]},{"number":14,"title":"Fix bug","labels":[]}]' > "$AVAILABLE_JSON"
+check "epic/tracking/FYI titles are not counted" "1 0" "$(dispatchable_issue_counts | cut -d' ' -f1,2)"
+green "all capacity-wake checks passed"

@@ -1955,6 +1955,12 @@
 #   WATCH_IDLE_CAPACITY_CHECK_SECS=600
 #                           Minimum gap between available-issues.sh (gh)
 #                           queries for the check above.
+#   WATCH_IDLE_CAPACITY_REPEAT_SECS=21600
+#                           While the set of dispatchable issue numbers is
+#                           unchanged since the last idle_capacity note, send
+#                           no further note for this long (#718). Any change
+#                           to the set notes within one poll. Titles starting
+#                           epic/tracking/tracker/fyi never count.
 #   WATCH_CAPACITY_POLL_SECS=60
 #                           Tick of run_capacity_wake_loop, the own process
 #                           running both checks above.
@@ -2092,6 +2098,7 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     WATCH_DISPATCH_PAUSE_WAKE 1   coord-inbox note + doorbell when the nightly dispatch-paused marker lifts (0=off)
     WATCH_IDLE_CAPACITY_WAKE_SECS 2700  at most one idle-capacity note per interval while slots are free and issues are dispatchable (0=off); see header comment
     WATCH_IDLE_CAPACITY_CHECK_SECS 600  minimum gap between available-issues.sh queries for the above
+    WATCH_IDLE_CAPACITY_REPEAT_SECS 21600  no repeat idle-capacity note for an unchanged issue set within this window
     WATCH_CAPACITY_POLL_SECS 60   tick of the loop running both checks above
 
 DEFAULT WAKE_PROMPT (top-up mode)
@@ -3446,8 +3453,9 @@ SWARM_PARKED_FILE="$PROJECT_DIR/.swarm/parked"
 WATCH_DISPATCH_PAUSE_WAKE="${WATCH_DISPATCH_PAUSE_WAKE:-1}"
 WATCH_IDLE_CAPACITY_WAKE_SECS="${WATCH_IDLE_CAPACITY_WAKE_SECS:-2700}"
 WATCH_IDLE_CAPACITY_CHECK_SECS="${WATCH_IDLE_CAPACITY_CHECK_SECS:-600}"
+WATCH_IDLE_CAPACITY_REPEAT_SECS="${WATCH_IDLE_CAPACITY_REPEAT_SECS:-21600}"
 WATCH_CAPACITY_POLL_SECS="${WATCH_CAPACITY_POLL_SECS:-60}"
-for _v in WATCH_IDLE_CAPACITY_WAKE_SECS WATCH_IDLE_CAPACITY_CHECK_SECS WATCH_CAPACITY_POLL_SECS; do
+for _v in WATCH_IDLE_CAPACITY_WAKE_SECS WATCH_IDLE_CAPACITY_CHECK_SECS WATCH_IDLE_CAPACITY_REPEAT_SECS WATCH_CAPACITY_POLL_SECS; do
     if ! [[ "${!_v}" =~ ^[0-9]+$ ]]; then
         echo "ERROR: $_v must be a non-negative integer (got: ${!_v})" >&2
         exit 1
@@ -3459,6 +3467,7 @@ AVAILABLE_ISSUES="${AVAILABLE_ISSUES:-$LLM_SWARM_DIR/scripts/available-issues.sh
 HOST_STATE_DIR="${HOST_STATE_DIR:-${TMPDIR:-/tmp}/llm-swarm-host-$(id -u)}"
 DISPATCH_PAUSE_FILE="$HOST_STATE_DIR/dispatch-paused"
 IDLE_CAPACITY_WAKE_FILE="$PROJECT_DIR/.swarm/idle-capacity-wake.last"
+IDLE_CAPACITY_SET_FILE="$PROJECT_DIR/.swarm/idle-capacity-set.last"
 DISPATCH_PAUSE_SEEN_FILE="$PROJECT_DIR/.swarm/dispatch-pause-seen"
 
 # log_event <category> <key=val>...
@@ -10799,26 +10808,32 @@ capacity_free_slots() {
     printf '%s\n' $(( a < b ? a : b ))
 }
 
-# dispatchable_issue_counts: echoes "<ready> <night_ok>" — the mechanical
+# dispatchable_issue_counts: echoes "<ready> <night_ok> <set_hash>" — the mechanical
 # AVAILABLE set (available-issues.sh, the same script the startup checklist
 # runs) minus issues that already have an own worktree here (in progress,
 # including sidelined), and how many of those carry night-ok. night-ok issues
 # are already inside AVAILABLE (available-issues.sh only drops blocked,
 # deferred, awaiting-review, demo, other-owner and other-assignee issues, none
 # of which the swarm may take), so no separate night-ok query is made (#688).
-# The coordinator's judgment filters (epics, open PRs) are not applied, so
-# this can overcount; that costs one wake per WATCH_IDLE_CAPACITY_WAKE_SECS.
+# Titles starting epic/tracking/tracker/fyi are dropped (never dispatchable,
+# #718); the rest of the coordinator's judgment filters (open PRs, pending
+# proposals) are not applied, so this can still overcount. set_hash is a
+# checksum of the remaining issue numbers: idle_capacity_wake_pass uses it to
+# stay quiet while the same set sits there undispatchable (#718).
 dispatchable_issue_counts() {
-    local json busy="" wt n
+    local json busy="" wt n out nums ready night_ok
     json="$(cd "$PROJECT_DIR" && "$AVAILABLE_ISSUES" 2>/dev/null)" || return 1
     while IFS= read -r wt; do
         n="$(basename "$wt" | sed -nE 's/^wt-issue-([0-9]+)$/\1/p')"
         [ -n "$n" ] && busy="$busy,$n"
     done < <(own_worktree_dirs_for_scan "$PROJECT_DIR" 2>/dev/null || true)
-    printf '%s' "$json" | jq -r --arg busy "${busy#,}" '
+    out="$(printf '%s' "$json" | jq -r --arg busy "${busy#,}" '
         ($busy | split(",") | map(select(. != "") | tonumber)) as $b
-        | [.[] | select(.number as $n | $b | index($n) | not)]
-        | "\(length) \([.[] | select(any(.labels[]?; .name == "night-ok"))] | length)"' 2>/dev/null
+        | [.[] | select(.number as $n | $b | index($n) | not)
+               | select((.title // "") | test("^[\\[( ]*(epic|tracking|tracker|fyi)\\b"; "i") | not)] as $r
+        | "\($r | length) \([$r[] | select(any(.labels[]?; .name == "night-ok"))] | length) \([$r[].number] | sort | join(","))"' 2>/dev/null)" || return 1
+    read -r ready night_ok nums <<< "$out"
+    printf '%s %s %s\n' "$ready" "$night_ok" "$(printf '%s' "$nums" | cksum | cut -d' ' -f1)"
 }
 
 # dispatch_pause_wake_pass
@@ -10878,7 +10893,7 @@ idle_capacity_wake_pass() {
     [ -e "$SWARM_PARKED_FILE" ] && return 0
     dispatch_pause_active && return 0
 
-    local now last slots age counts ready night_ok
+    local now last slots age counts ready night_ok set_hash seen_hash seen_ts
     now=$(date +%s)
     last="$(cat "$IDLE_CAPACITY_WAKE_FILE" 2>/dev/null)" || last=0
     [[ "$last" =~ ^[0-9]+$ ]] || last=0
@@ -10895,7 +10910,7 @@ idle_capacity_wake_pass() {
 
     LAST_IDLE_CAPACITY_CHECK=$now
     counts="$(dispatchable_issue_counts)" || { log_event capacity.idle_check "reason=available_issues_failed"; return 0; }
-    read -r ready night_ok <<< "$counts"
+    read -r ready night_ok set_hash <<< "$counts"
     [[ "${ready:-}" =~ ^[0-9]+$ ]] || return 0
     [[ "${night_ok:-}" =~ ^[0-9]+$ ]] || night_ok=0
     if [ "$ready" -eq 0 ]; then
@@ -10903,7 +10918,18 @@ idle_capacity_wake_pass() {
         return 0
     fi
 
+    # Same issue set as the last note and still inside the repeat window: the
+    # coordinator already looked at exactly these and found nothing (#718).
+    seen_hash=""; seen_ts=0
+    [ -r "$IDLE_CAPACITY_SET_FILE" ] && read -r seen_hash seen_ts < "$IDLE_CAPACITY_SET_FILE"
+    [[ "$seen_ts" =~ ^[0-9]+$ ]] || seen_ts=0
+    if [ -n "$set_hash" ] && [ "$set_hash" = "$seen_hash" ] && [ $((now - seen_ts)) -lt "$WATCH_IDLE_CAPACITY_REPEAT_SECS" ]; then
+        log_event capacity.idle_check "slots=$slots ready=$ready reason=unchanged_set"
+        return 0
+    fi
+
     log_event capacity.idle_wake "slots=$slots ready=$ready night_ok=$night_ok"
+    printf '%s %s\n' "$set_hash" "$now" > "$IDLE_CAPACITY_SET_FILE" 2>/dev/null || true
     printf '%s\n' "$now" > "$IDLE_CAPACITY_WAKE_FILE" 2>/dev/null || true
     if [ "$DRY_RUN" = "1" ]; then
         echo "[DRY] would write coord-inbox entry: trigger=idle_capacity slots=$slots ready=$ready"
