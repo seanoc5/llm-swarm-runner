@@ -299,6 +299,6 @@ echo "$(cut -d' ' -f1 "$IDLE_CAPACITY_SET_FILE") $(( $(date +%s) - 21600 ))" > "
 idle_capacity_wake_pass
 check "unchanged set past the repeat window: notes again" "1" "$(notes idle_capacity)"
 
-reset; echo '[{"number":21,"title":"epic: big thing","labels":[]},{"number":12,"title":"Tracking: stuff","labels":[]},{"number":13,"title":"FYI - note","labels":[]},{"number":14,"title":"Fix bug","labels":[]},{"number":15,"title":"Tracking pixel broken","labels":[]}]' > "$AVAILABLE_JSON"
-check "epic/tracking/FYI titles are not counted (real bugs are)" "2 0" "$(dispatchable_issue_counts | cut -d' ' -f1,2)"
+reset; echo '[{"number":21,"title":"epic: big thing","labels":[]},{"number":12,"title":"Tracking: stuff","labels":[]},{"number":13,"title":"FYI - note","labels":[]},{"number":14,"title":"Fix bug","labels":[]},{"number":15,"title":"Tracking pixel broken","labels":[]},{"number":16,"title":"Tracker UI crash","labels":[]},{"number":17,"title":"FYI update","labels":[]},{"number":18,"title":"Tracking – stuff","labels":[]}]' > "$AVAILABLE_JSON"
+check "epic/tracking/FYI titles are not counted (real bugs are)" "4 0" "$(dispatchable_issue_counts | cut -d' ' -f1,2)"
 green "all capacity-wake checks passed"

@@ -10831,7 +10831,7 @@ dispatchable_issue_counts() {
     out="$(printf '%s' "$json" | jq -r --arg busy "${busy#,}" '
         ($busy | split(",") | map(select(. != "") | tonumber)) as $b
         | [.[] | select(.number as $n | $b | index($n) | not)
-               | select((.title // "") | test("^[\\[( ]*(epic\\b|(tracking|tracker|fyi)[\\])]*\\s*([:\\u2013\\u2014-]|$))"; "i") | not)] as $r
+               | select((.title // "") | test("^[\\[( ]*(epic\\b|(tracking|tracker|fyi)[\\])]*\\s*([:–—-]|$))"; "i") | not)] as $r
         | "\($r | length) \([$r[] | select(any(.labels[]?; .name == "night-ok"))] | length) \([$r[].number] | sort | join(","))"' 2>/dev/null)" || return 1
     read -r ready night_ok nums <<< "$out"
     printf '%s %s %s\n' "$ready" "$night_ok" "$(printf '%s' "$nums" | cksum | cut -d' ' -f1)"
