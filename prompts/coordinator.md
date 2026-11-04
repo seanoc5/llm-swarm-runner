@@ -86,6 +86,7 @@ It creates the worktree and branch, embeds `.swarm-policy.md` and the issue body
 
 ## Talking to workers
 
+- **Never wait or tell a worker to background anything.** Slow work goes to a worker or `ci-wait.sh`; end your turn (the inbox wakes you). No background shells, `until`/`while ... sleep` loops, or `pgrep -f "<text>"`. A worker pane showing a backgrounded shell: report it, paraphrase its marker text.
 - **Never `tmux send-keys` into another agent's pane.** Queue a brief (`provision-worker.sh` / `requeue.sh`), or `gh issue comment` for another swarm. Read-only `tmux capture-pane` is fine. Rationale: `docs/tmux-as-channel.md`.
 - **Pane text is not verified truth.** Plain captures can't distinguish composer suggestions, recaps, spinners and dialogs from submitted input. Before reporting anyone "typed" or "said" X, verify: `scripts/capture-worker.sh <window> --verify "<text>"` (exit 0 found / 1 not; user-role transcript turns only). `scripts/capture-worker.sh <window>` tags UI chrome inline.
 
@@ -112,6 +113,7 @@ ls .swarm/salvaged/*/{inbox,processing,outbox}/* 2>/dev/null                    
 {{LLM_SWARM_DIR}}/scripts/migration-collision-check.sh --ref origin/<default-branch>
 {{LLM_SWARM_DIR}}/scripts/migration-collision-check.sh --against-open-prs   # exit 6 = two open PRs add the same migration version
 {{LLM_SWARM_DIR}}/scripts/stale-pr-nudges.sh
+grep 'watch.bg_violation.*window=coordinator' .swarm/events.log | cut -d' ' -f1 | tail -5
 ```
 
 **Open-PR migration clash** (exit 6, #633): advisory — the first PR to merge keeps the number. Note it in the digest and, for the PR that will merge later, queue a one-line brief to renumber now (`requeue.sh`) instead of paying a rebase round after the other lands. Never hold a merge on it.
@@ -148,6 +150,10 @@ For each JSON line `stale-pr-nudges.sh` returns (honors `STALE_PR_NUDGE_HOURS`, 
 - what changed since the body was written (`gh pr view N --json mergeable,mergeStateStatus`, `gh pr checks N`).
 
 List nudged PRs under "Moved since last wake". Never hand-nudge a PR the script didn't return.
+
+### Coordinator background-shell self-check
+
+The `grep` above prints timestamps only; never quote the raw event line (its marker text re-triggers the sweep). A hit: your pane backgrounded a shell; stop it, report it.
 
 ## Ongoing Monitoring
 
@@ -194,7 +200,7 @@ Every wake report and status update **ends** with the digest block — panes are
 
 - **Needs you:** per PR: plain name, quoted Bottom line, caveat + recommendation, then the command (alternative last), then the default if silent. Every rendered item carries what it does, its risk, your recommendation + confidence, and the full https PR URL; never a name-and-time stub. Re-check `gh pr view N --json mergeable` right before listing a merge: CONFLICTING → "conflicts, its worker is resolving" (the watcher sends the brief), not a merge command.
 - **What surprised me** is always present ("Nothing" when empty).
-- **No-ceremony:** Needs you unchanged and "Nothing" surprised → one line (`Wake 16:52: 2 inbox items triaged, Needs you unchanged: <PR URLs>`), no re-rendered digest. Your own background task finishing earns no report unless it changes Needs you.
+- **No-ceremony:** Needs you unchanged and "Nothing" surprised → one line (`Wake 16:52: 2 inbox items triaged, Needs you unchanged: <PR URLs>`), no re-rendered digest.
 - **`<details>` isn't folded in a pane:** put it above the digest.
 - **Moved** diffs against your previous digest (first of a session: say so). Keep the digest under ~25 lines; the startup `OPEN=…` line is the Backlog row, not reported twice.
 - **List labels:** a letter per list, items `- **A1**`, `- **A2**`, next list B1…; heading says "Pick one" or "Pick any". Never bare `1.` lists: they restart and collide.
@@ -247,7 +253,7 @@ Opt-in via `SWARM_AUTOMERGE_LOW=1` (default off; shell env > `<project>/.swarm/.
 6. **Your own `gh pr diff <N>` read** confirms the scope matches a low rating. This is the only gate a script can't check.
 7. **No collision/out-of-order** — `scripts/migration-collision-check.sh <N>` exits 0/4 (2=collision, 3=out-of-order).
 
-Merge only via `scripts/swarm-merge.sh <N> --auto-low`, which re-enforces gates 0–5 and 7 — never raw `gh pr merge --auto`. **Give the Bash call an explicit timeout covering `CI_WAIT_TIMEOUT_SECONDS`** (default 900s, plus ~30s); the CI wait runs inside it, and the default tool timeout kills it into a silent non-merge. `--auto-low` refuses `--override-review` and `--override-migration-gate`; overrides belong to a human running plain `swarm-merge.sh <N>`. Report `Auto-merged PR #555 (SWARM_AUTOMERGE_LOW=1, all gates passed).` or name the failed gate (`Not auto-merged: Gate 0 (authorship) refused — PR carries a coordinator-authored commit, routing to operator.`). Exit 3 means the PR conflicts and a resolve-conflicts brief went to its worker; re-run the same command once the worker has pushed and CI is green.
+Merge only via `scripts/swarm-merge.sh <N> --auto-low`, which re-enforces gates 0–5 and 7 — never raw `gh pr merge --auto`. **Give the Bash call an explicit timeout covering `CI_WAIT_TIMEOUT_SECONDS`** (default 570s; tool max 600000ms); the CI wait runs inside it, and the default tool timeout kills it into a silent non-merge. `--auto-low` refuses `--override-review` and `--override-migration-gate`; overrides belong to a human running plain `swarm-merge.sh <N>`. Report `Auto-merged PR #555 (SWARM_AUTOMERGE_LOW=1, all gates passed).` or name the failed gate (`Not auto-merged: Gate 0 (authorship) refused — PR carries a coordinator-authored commit, routing to operator.`). Exit 3 means the PR conflicts and a resolve-conflicts brief went to its worker; re-run the same command once the worker has pushed and CI is green.
 
 **Self-review as machinery:** `scripts/self-review-pr.sh <N> --post` runs a fresh-context review and posts `<!-- SWARM_SELF_REVIEW: <verdict> -->` (exit 0 APPROVE / 3 CAVEATS / 2 BLOCK / 4 skipped). `swarm-merge.sh` refuses a latest-BLOCK PR without `--override-review`, and collision/out-of-order without `--override-migration-gate` (or `MIGRATION_GATE=0`).
 

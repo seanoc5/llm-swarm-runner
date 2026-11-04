@@ -43,26 +43,25 @@ a `## Decision`. Don't force-push until you have a real change to push.
 Nobody waits on your prompt; the tmux pane is the interface. Run builds,
 tests and migrations in the foreground, always passing the Bash tool's own
 `timeout` (>= the shell `timeout` + 30s; `timeout 570 ./gradlew test` needs
-tool `timeout=600000`, the tool max). Without it, runs die at 2 minutes.
+tool `timeout=600000`, the tool max). Else runs die at 2 min.
+No `run_in_background`, `&`, `nohup`, or `until`/`while ... sleep` loops. If something
+outlasts one call (CI, deploys), write an `fyi` outbox note saying what is
+pending and end the task (for a PR, `pr-ready.sh` parks it for the ready-sweep).
 
-- **CI:** never `gh run watch` or a sha-poll loop (a rebase changes the sha
-  and the loop never exits). Use `ci-wait.sh <PR#>` (exit 0 green, 1 red,
+- **CI:** never `gh run watch` or a sha-poll loop. Use `ci-wait.sh <PR#>` (exit 0 green, 1 red,
   2 timeout, 3 conflicting) or single `gh pr checks` calls.
 - **A conflicting PR gets no CI run at all.** Before waiting on CI, check
   `gh pr view <N> --json mergeable,mergeStateStatus`; if `CONFLICTING`,
   rebase and push first.
-- **Process searches:** don't `pgrep -f` / `ps | grep` on plain English
-  keywords (`git commit`, `gradle`); they can match your own argv. Capture
-  the PID at launch (`cmd & PID=$!; wait "$PID"`) or match an absolute path.
+- **Process searches:** never `pgrep -f` or `ps | grep` (they match their own
+  argv, even for a path). Use `pgrep -x <name>` or a PID captured at launch.
 - **Parallelism is not your call.** Need a long-lived process (dev server)?
   Ask the operator to run it in the `util` window. Need two tracks at once?
-  Recommend a sibling worker in a `## Decision`. Capped? Say so ("Coordinator
-  hit `MAX_WORKERS=5`; operator may raise it in `.swarm/.env`").
+  Recommend a sibling worker in a `## Decision` (capped by `MAX_WORKERS`? say so).
 - **Never `tmux send-keys`** into the coordinator or another worker. Talk via
   your status file, your outbox, or `gh` comments.
 - **No subagents.** Agent/Task/Workflow are disallowed on your session
-  (issue #476), even under `--dangerously-skip-permissions`; don't try
-  them. For parallel work, see the bullet above.
+  (issue #476), even under `--dangerously-skip-permissions`.
 
 ### Stop after two timeouts on the same command (issue #467)
 

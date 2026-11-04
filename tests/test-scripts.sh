@@ -73,10 +73,10 @@ check_script() {
             FAIL=$((FAIL + 1))
             return
         fi
-        # #607 trial: allow by default; SANDBOX_ALLOW_BACKGROUND_TASKS=0 restores
-        # the mechanical deny (#298). Flip back with the trial if it fails.
-        if ! grep -q 'SANDBOX_ALLOW_BACKGROUND_TASKS:-1' "$script"; then
-            red "  ✗ $script: SANDBOX_ALLOW_BACKGROUND_TASKS knob missing or not defaulting to allow (#607 trial)"
+        # Deny by default (#298, restored by #715 after the #607 trial);
+        # SANDBOX_ALLOW_BACKGROUND_TASKS=1 is the per-project opt-out.
+        if ! grep -q 'SANDBOX_ALLOW_BACKGROUND_TASKS:-0' "$script"; then
+            red "  ✗ $script: SANDBOX_ALLOW_BACKGROUND_TASKS knob missing or not defaulting to deny (#715)"
             FAIL=$((FAIL + 1))
             return
         fi
@@ -93,9 +93,9 @@ check_script() {
             FAIL=$((FAIL + 1))
             return
         fi
-        # #607 trial: allow by default; set the knob to 0 to restore the deny.
-        if ! grep -q 'COORDINATOR_ALLOW_BACKGROUND_TASKS:-1' "$script"; then
-            red "  ✗ $script: COORDINATOR_ALLOW_BACKGROUND_TASKS knob missing or not defaulting to allow (#607 trial)"
+        # Deny by default (#715); the knob set to 1 is the opt-out.
+        if ! grep -q 'COORDINATOR_ALLOW_BACKGROUND_TASKS:-0' "$script"; then
+            red "  ✗ $script: COORDINATOR_ALLOW_BACKGROUND_TASKS knob missing or not defaulting to deny (#715)"
             FAIL=$((FAIL + 1))
             return
         fi

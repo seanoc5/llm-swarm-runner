@@ -286,20 +286,20 @@ fi
 # pattern for every other optional docker-run flag: DEP_CACHE_OPTS,
 # DEP_PROXY_OPTS, ENV_FILE_OPT, etc.).
 if [ -S /var/run/docker.sock ]; then
-    # Unset (default since #607): allowed, so no
-    # CLAUDE_CODE_DISABLE_BACKGROUND_TASKS in the container at all.
-    output=$(env -u SANDBOX_ALLOW_BACKGROUND_TASKS "$REPO_ROOT/sandbox.sh" /tmp printenv CLAUDE_CODE_DISABLE_BACKGROUND_TASKS 2>&1) || true
-    [[ "$output" != *"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"* ]] && [[ "$(tail -n1 <<< "$output")" != "1" ]] \
-        && pass "SANDBOX_ALLOW_BACKGROUND_TASKS unset -> no CLAUDE_CODE_DISABLE_BACKGROUND_TASKS in container" "$output" \
-        || fail "SANDBOX_ALLOW_BACKGROUND_TASKS unset -> no CLAUDE_CODE_DISABLE_BACKGROUND_TASKS in container" "$output"
-
-    # SANDBOX_ALLOW_BACKGROUND_TASKS=0: the restriction is back on and
+    # Unset (default, restored by #715): the restriction is on and
     # CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 reaches the container.
-    output=$(SANDBOX_ALLOW_BACKGROUND_TASKS=0 "$REPO_ROOT/sandbox.sh" /tmp printenv CLAUDE_CODE_DISABLE_BACKGROUND_TASKS 2>&1)
+    output=$(env -u SANDBOX_ALLOW_BACKGROUND_TASKS "$REPO_ROOT/sandbox.sh" /tmp printenv CLAUDE_CODE_DISABLE_BACKGROUND_TASKS 2>&1)
     container_value=$(tail -n1 <<< "$output")
     [[ "$container_value" == "1" ]] \
-        && pass "SANDBOX_ALLOW_BACKGROUND_TASKS=0 -> CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1" "$output" \
-        || fail "SANDBOX_ALLOW_BACKGROUND_TASKS=0 -> CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1" "$output"
+        && pass "SANDBOX_ALLOW_BACKGROUND_TASKS unset -> CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1" "$output" \
+        || fail "SANDBOX_ALLOW_BACKGROUND_TASKS unset -> CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1" "$output"
+
+    # SANDBOX_ALLOW_BACKGROUND_TASKS=1: the opt-out, so no
+    # CLAUDE_CODE_DISABLE_BACKGROUND_TASKS in the container at all.
+    output=$(SANDBOX_ALLOW_BACKGROUND_TASKS=1 "$REPO_ROOT/sandbox.sh" /tmp printenv CLAUDE_CODE_DISABLE_BACKGROUND_TASKS 2>&1) || true
+    [[ "$output" != *"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"* ]] && [[ "$(tail -n1 <<< "$output")" != "1" ]] \
+        && pass "SANDBOX_ALLOW_BACKGROUND_TASKS=1 -> no CLAUDE_CODE_DISABLE_BACKGROUND_TASKS in container" "$output" \
+        || fail "SANDBOX_ALLOW_BACKGROUND_TASKS=1 -> no CLAUDE_CODE_DISABLE_BACKGROUND_TASKS in container" "$output"
 else
     skip "SANDBOX_ALLOW_BACKGROUND_TASKS" "/var/run/docker.sock not present"
 fi

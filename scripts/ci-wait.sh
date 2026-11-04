@@ -73,7 +73,7 @@
 # would have kept Gate 2 waiting right through it.
 #
 # Env:
-#   CI_WAIT_TIMEOUT_SECONDS   default deadline if no arg given (default 900)
+#   CI_WAIT_TIMEOUT_SECONDS   default deadline if no arg given (default 570, under the 600s Bash tool max)
 #   CI_WAIT_POLL_SECONDS      poll interval (default 15)
 #
 # Exit codes:
@@ -173,7 +173,7 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$PR" ] || { echo "$USAGE" >&2; exit 4; }
-TIMEOUT="${TIMEOUT_ARG:-${CI_WAIT_TIMEOUT_SECONDS:-900}}"
+TIMEOUT="${TIMEOUT_ARG:-${CI_WAIT_TIMEOUT_SECONDS:-570}}"
 POLL="${CI_WAIT_POLL_SECONDS:-15}"
 
 REPO_ARGS=()
