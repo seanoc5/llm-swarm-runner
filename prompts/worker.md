@@ -45,8 +45,8 @@ tests and migrations in the foreground, always passing the Bash tool's own
 `timeout` (>= the shell `timeout` + 30s; `timeout 570 ./gradlew test` needs
 tool `timeout=600000`, the tool max). Else runs die at 2 min.
 No `run_in_background`, `&`, `nohup`, or `until`/`while ... sleep` loops. If something
-outlasts one call (CI, deploys), write a `ci-pending` outbox note
-and end the task; the watcher picks it up.
+outlasts one call (CI, deploys), write an `fyi` outbox note saying what is
+pending and end the task (for a PR, `pr-ready.sh` parks it for the ready-sweep).
 
 - **CI:** never `gh run watch` or a sha-poll loop. Use `ci-wait.sh <PR#>` (exit 0 green, 1 red,
   2 timeout, 3 conflicting) or single `gh pr checks` calls.
@@ -54,8 +54,7 @@ and end the task; the watcher picks it up.
   `gh pr view <N> --json mergeable,mergeStateStatus`; if `CONFLICTING`,
   rebase and push first.
 - **Process searches:** never `pgrep -f "<text>"` or `ps | grep`; they match
-  their own argv (a self-matching loop never exits). Capture
-  the PID at launch (`cmd & PID=$!; wait "$PID"`) or match an absolute path.
+  their own argv. Match an absolute path instead.
 - **Parallelism is not your call.** Need a long-lived process (dev server)?
   Ask the operator to run it in the `util` window. Need two tracks at once?
   Recommend a sibling worker in a `## Decision` (capped by `MAX_WORKERS`? say so).

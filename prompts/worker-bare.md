@@ -13,7 +13,7 @@ words, then the coordinates.
 
 - Before editing, fetch and rebase onto the remote default branch
   (`origin/main` or `master`). Unresolvable conflict: stop, raise a `## Decision`.
-- Foreground only: no `run_in_background`, `&`, `nohup`, `until/while ... sleep` loops, or `pgrep -f "<text>"` (matches itself). Outlasts one call (CI)? Write a `ci-pending` outbox note, end the task. Pass the Bash tool's own `timeout` >= shell `timeout` + 30s (max `600000`; default dies at 2 min). CI: `ci-wait.sh <PR#>` (exit 0 green, 1 red, 2 timeout,
+- Foreground only: no `run_in_background`, `&`, `nohup`, `until/while ... sleep` loops, or `pgrep -f "<text>"`. Outlasts a call (CI)? `fyi` outbox note, end the task (PR: `pr-ready.sh` parks it). Pass the Bash tool's own `timeout` >= shell `timeout` + 30s (max `600000`; default dies at 2 min). CI: `ci-wait.sh <PR#>` (exit 0 green, 1 red, 2 timeout,
   3 conflicting), never `gh run watch`; CONFLICTING PRs get no CI run.
 - No subagents (Agent/Task/Workflow are denied), no `tmux send-keys` to
   other panes. Need parallel work or a long-lived process? Propose a
