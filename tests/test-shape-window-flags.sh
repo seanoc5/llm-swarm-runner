@@ -311,6 +311,19 @@ stop_watcher() {
     wait "$WATCH_PID" 2>/dev/null || true
     unset WATCH_PID
 }
+# wait_for_flag <session:window> <want> [max_secs=30]
+# Poll until the flag file holds <want> ("" = cleared). Asserts on a condition
+# instead of a fixed sleep: the 💤 flag needs two sweeps >= WATCH_STALL_FLAG_SECS
+# apart, and watcher startup time on a loaded CI runner is not bounded (#722).
+wait_for_flag() {
+    local win="$1" want="$2" max="${3:-30}" i
+    for ((i=0; i<max*4; i++)); do
+        [ "$(flag_of "$win")" = "$want" ] && return 0
+        sleep 0.25
+    done
+    return 0
+}
+
 wait_for_watcher_exit() {
     local i
     for ((i=0; i<20; i++)); do
@@ -770,7 +783,7 @@ mkdir -p "$WT82/.swarm/tasks/processing" "$WT82/.swarm/tasks/done"
 rm -rf "$FLAG_DIR"/*
 echo "brief" > "$WT82/.swarm/tasks/processing/t82.md"
 WATCH_STALL_FLAG_SECS=1 ONCE=0 WATCH_WINDOW_FLAGS_SWEEP_SECS=1 start_watcher 0 "$TEST_DIR/watch-b19.log"
-sleep 4
+wait_for_flag "$SESSION_NAME:iss-82" "💤"
 stop_watcher
 [ "$(flag_of "$SESSION_NAME:iss-82")" = "💤" ] \
     || red "expected 💤 on iss-82; got: $(flag_of "$SESSION_NAME:iss-82"). Watch log:
@@ -779,7 +792,7 @@ green "window_flags_sweep_pass set 💤 for an idle worker still holding a brief
 
 mv "$WT82/.swarm/tasks/processing/t82.md" "$WT82/.swarm/tasks/done/"
 WATCH_STALL_FLAG_SECS=1 ONCE=0 WATCH_WINDOW_FLAGS_SWEEP_SECS=1 start_watcher 0 "$TEST_DIR/watch-b19b.log"
-sleep 3
+wait_for_flag "$SESSION_NAME:iss-82" ""
 stop_watcher
 [ -z "$(flag_of "$SESSION_NAME:iss-82")" ] \
     || red "💤 should clear once the brief leaves processing/; got: $(flag_of "$SESSION_NAME:iss-82")"
