@@ -5810,7 +5810,7 @@ kind: fyi
 task_id: watcher-bg-violation
 ts: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 ---
-Automated foreground-only check (issue #298, WATCH_BG_VIOLATION_SWEEP_SECS) detected a background-shell UI marker in iss-$issue's tmux pane: "$matched". This usually means a Bash call ran with run_in_background=true (or a shell-level &/nohup/disown), against prompts/worker.md's "Run long commands in the foreground" rule. Flag it in your next report as a worker-policy violation per prompts/coordinator.md's existing "If a worker backgrounds anyway" guidance — the pane may be mid-task, so don't try to autoremediate, just surface it.
+Automated foreground-only check (issue #298, WATCH_BG_VIOLATION_SWEEP_SECS) detected a background-shell UI marker in iss-$issue's tmux pane: "$matched". This usually means a Bash call ran with run_in_background=true (or a shell-level &/nohup/disown), against prompts/worker.md's "Run long commands in the foreground" rule. Flag it in your next report as a worker-policy violation per prompts/coordinator.md "Talking to workers" — the pane may be mid-task, so don't try to autoremediate, just surface it.
 EOF
         mv "$tmp" "$outbox/$(date -u +%Y%m%dT%H%M%SZ)-bg-violation-iss-$issue.md" 2>/dev/null \
             || rm -f "$tmp" 2>/dev/null
