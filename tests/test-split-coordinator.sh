@@ -543,11 +543,11 @@ eval "$(sed -n "/^maybe_auto_compact() {/,/^    fi$/p" "$ROOT/scripts/coordinato
 # shellcheck disable=SC2034
 AUTO_COMPACT=1; : > "$T/ev.log"
 PROJECT_DIR="$P"
-COORD_MODE=split maybe_auto_compact wake; rc=$?
+printf "COORD_MODE=split\n" > "$P/.swarm/.env"; maybe_auto_compact wake; rc=$?
 check "split: maybe_auto_compact returns before touching the pane" "0" "$rc"
 grep -q "reason=split_mode" "$T/ev.log" && got=logged || got=missing
 check "split: maybe_auto_compact logs the skip" "logged" "$got"
-set +e; COORD_MODE=resident maybe_auto_compact wake; rc=$?; set -e
+printf "COORD_MODE=resident\n" > "$P/.swarm/.env"; set +e; maybe_auto_compact wake; rc=$?; set -e
 check "resident: maybe_auto_compact proceeds past the split guard" "99" "$rc"
 
 echo
