@@ -69,4 +69,25 @@ green "follows appended lines and a newer session"
 # ── 6. a bad CONV_HIDE_RE is refused, not silently blanking the view ──
 if CONV_HIDE_RE="(" "$VIEW" --file "$FIX" --once >/dev/null 2>&1; then red "invalid CONV_HIDE_RE accepted"; fi
 green "invalid CONV_HIDE_RE refused"
+
+# ── 7. real operator messages that merely look like doorbells stay visible ──
+# (review of PR #750: prefix/last-line matching hid these; the watcher's
+# human_typed_since matches the whole message, issue #497)
+hum() { jq -nc --arg t "$1" '{type:"user",entrypoint:"cli",timestamp:"2026-11-05T05:00:00.000Z",origin:{kind:"human"},message:{role:"user",content:$t}}'; }
+NUDGE='Inbox: 2 item(s) in .swarm/coord-inbox/ — read and triage them (see prompts/coordinator.md "Inbox"). Woke for: 2 worker results.'
+{
+  hum "Stop hook is broken, fix it"                                  # 1: starts with the old "Stop hook" prefix
+  hum "can you check why the nudge ended with Woke for: 2 workers"   # 2: not a doorbell line at all
+  hum $'Woke for: ci is what I want to rename, thoughts?'            # 2b: line starting with the phrase
+  hum $'Please look at this too.\n'"$NUDGE"                          # 3: operator text sharing a turn with a doorbell
+  hum "$NUDGE"$'\nand also merge PR 12'                              # 3b: same, operator text after the doorbell
+  hum "$NUDGE"                                                       # real doorbell: must stay hidden
+} > "$T/lookalike.jsonl"
+out="$("$VIEW" --file "$T/lookalike.jsonl" --once --tail 100)"
+for want in "Stop hook is broken, fix it" "why the nudge ended with Woke for" "Woke for: ci is what I want to rename" \
+            "Please look at this too." "and also merge PR 12"; do
+    grep -qF "$want" <<<"$out" || red "real operator message hidden: $want"
+done
+[ "$(grep -c '── you' <<<"$out")" = 5 ] || red "expected 5 visible messages (the bare doorbell hidden): $out"
+green "Stop hook / Woke for lookalikes and doorbell-sharing turns stay visible; bare doorbell hidden"
 echo "all coordinator-conversation checks passed"

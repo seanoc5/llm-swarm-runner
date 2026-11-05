@@ -27,8 +27,9 @@ g="$(command tmux -L "$SOCK" show-environment -g SANDBOX_KOTLIN_DAEMON_XMX 2>&1 
 case "$g" in *1536m*) bad "default leaked into tmux global env: $g";; *) ok "default not in tmux global env";; esac
 
 # 3. a deliberate caller export is kept
-# Own socket: reusing SOCK right after kill-server raced the old server's exit
-# ("server exited unexpectedly" in CI, issue #744 PR); a fresh name cannot.
+# Own socket: CI once failed with "server exited unexpectedly" on this step
+# when it reused SOCK right after kill-server. A stale-server race is the
+# suspected cause, not established; a fresh socket name sidesteps any reuse.
 (
   export SANDBOX_KOTLIN_DAEMON_XMX=2048m LLM_SWARM_DIR="$T/sb"
   . "$ROOT/scripts/_load-env.sh" "$T/nonexistent"

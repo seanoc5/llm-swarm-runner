@@ -20,7 +20,8 @@
 #                 session switching)
 #
 # Env: CONV_HIDE_RE  extra ERE (jq/Oniguruma) of operator-message starts to
-#                    hide, appended to the built-in doorbell list.
+#                    hide (use \A/\z for whole-message matches), appended to
+#                    the built-in doorbell list.
 #      CLAUDE_PROJECTS_DIR  override ~/.claude/projects (tests).
 #
 # Session choice: newest top-level *.jsonl in that dir whose entrypoint is
@@ -31,8 +32,9 @@
 # Shown:  user records and queued_command attachments (messages typed while
 #         the coordinator was mid-turn) with origin.kind "human" whose text is not a typed
 #         doorbell (see HIDE_RE), and the text blocks of assistant records.
-# Hidden: tool calls/results, thinking, doorbell nudges ("Inbox:", wake
-#         prompts), stop-hook text, task notifications, peer messages,
+# Hidden: tool calls/results, thinking, doorbell nudges (whole-message match
+#         on "Inbox:" and wake prompts; the stop hook's reason is the same
+#         nudge), task notifications, peer messages,
 #         slash-command output, compaction summaries, subagent turns.
 #
 # Never writes to the transcript, the pane or the inbox.
@@ -56,7 +58,26 @@ done
 case "$TAIL" in ''|*[!0-9]*) echo "coordinator-conversation.sh: --tail must be a number" >&2; exit 2 ;; esac
 
 # Typed doorbells are recorded as ordinary human messages, so match on text.
-HIDE_RE='^\s*(Inbox: [0-9]+ item|Worker\(s\) just finished|Quiet-period check-in|Execute the Initial Startup Checklist|A periodic gh-search poll|Continue your task from where you left off|Stop hook|<task-notification>|<local-command|<command-name>|<system-reminder>|This session is being continued)|Woke for: [^\n]*$'
+# Like human_typed_since (scripts/coordinator-watch.sh, issue #497) this
+# matches the WHOLE message against the doorbell's exact wording, never a
+# prefix or a last line: an operator message that starts with a doorbell
+# phrase ("Stop hook is broken, fix it") or shares a turn with a doorbell
+# must stay visible. Oniguruma's ^/$ are per-line anchors, so use \A and \z.
+# Single-line doorbells may carry a same-line tail (the nudge's "Woke for:"
+# and waiter-arm text); a newline ends the match, so text on its own line
+# keeps the message visible. Each wording is the default of the template that
+# sends it: COORD_INBOX_NUDGE_TEMPLATE (+ "Woke for:" from coord-hook.sh and
+# coord-inbox-wait.sh), WAKE_PROMPT, STALL_WAKE_PROMPT, llm-start.sh's
+# INITIAL_PROMPT, WORKER_COMPACT_NUDGE_PROMPT, and the activity-poll body.
+# The tag/summary prefixes are Claude Code's own wrappers, never typed.
+HIDE_RE='\A\s*(Inbox: [0-9]+ item\(s\) in \.swarm/coord-inbox/[^\n]*'
+HIDE_RE+='|Worker\(s\) just finished\. Triage their outcome JSONs[^\n]*'
+HIDE_RE+='|Quiet-period check-in: no coordinator wake has been delivered for at least [0-9]+s\.[^\n]*'
+HIDE_RE+='|Execute the Initial Startup Checklist\.[^\n]*'
+HIDE_RE+='|Continue your task from where you left off\.[^\n]*'
+HIDE_RE+='|A periodic gh-search poll \(issue #392\) found GitHub activity[\s\S]*pending on these\.'
+HIDE_RE+=')\s*\z'
+HIDE_RE+='|\A\s*(<task-notification>|<local-command|<command-name>|<system-reminder>|This session is being continued)'
 [ -n "${CONV_HIDE_RE:-}" ] && HIDE_RE="$HIDE_RE|$CONV_HIDE_RE"
 
 # A bad CONV_HIDE_RE would make jq fail and blank every message; refuse it.
