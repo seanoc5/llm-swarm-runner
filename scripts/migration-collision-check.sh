@@ -125,7 +125,7 @@ while [ $# -gt 0 ]; do
             shift
             [ $# -gt 0 ] || { echo "ERROR: --ref needs a ref argument" >&2; exit 1; }
             REF="$1" ;;
-        -h|--help) sed -n '2,110p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) awk 'NR>1 && /^#/ {print; next} NR>1 {exit}' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         -*) echo "ERROR: unknown flag '$1'" >&2; exit 1 ;;
         *)  [ -z "$PR" ] || { echo "ERROR: multiple PR numbers" >&2; exit 1; }
             PR="$1" ;;
@@ -226,10 +226,25 @@ if [ "$OPEN_PRS" = 1 ]; then
         printf '%s' "${OPR_BASE_LOCAL[$b]}"
     }
 
+    # Changed paths for open PR $1. `gh pr list --json files` truncates at ~100
+    # files, so a PR at that cap is re-read via `gh pr diff --name-only`; if
+    # that fails too, warn (the check is advisory) and use the truncated list.
+    opr_pr_files() {
+        local n="$1" cnt out cap="${MIGRATION_PR_FILES_CAP:-100}"
+        cnt="$(jq -r --argjson n "$n" '.[] | select(.number == $n) | (.files | length)' <<< "$OPEN_JSON")"
+        if [[ "$cnt" =~ ^[0-9]+$ ]] && [ "$cnt" -ge "$cap" ]; then
+            if out="$(gh pr diff "$n" --name-only 2>/dev/null)" && [ -n "$out" ]; then
+                printf '%s\n' "$out"; return 0
+            fi
+            echo "WARN: PR #$n lists >=$cap files and the full list could not be read; migrations past the first $cnt may be missed" >&2
+        fi
+        jq -r --argjson n "$n" '.[] | select(.number == $n) | .files[].path' <<< "$OPEN_JSON"
+    }
+
     while IFS=$'\t' read -r n base head; do
         [ -n "$n" ] || continue
         # Candidate files: changed paths that look like a migration at all.
-        cands="$(jq -r --argjson n "$n" '.[] | select(.number == $n) | .files[].path' <<< "$OPEN_JSON" \
+        cands="$(opr_pr_files "$n" \
             | while IFS= read -r f; do
                   if matches_glob "$f" "$MIGRATION_GLOB" || [[ "$f" =~ (^|/)versions/[^/]+\.py$ ]]; then echo "$f"; fi
               done)"
