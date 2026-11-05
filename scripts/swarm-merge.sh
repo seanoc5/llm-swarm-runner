@@ -192,6 +192,7 @@ AUTO_RATING=""      # low | medium: the rating that unattended path accepts
 REVIEWED_SHA=""
 EXPECT_HEAD=""      # --expect-head <sha>: refuse unless the PR head still starts with this (#775)
 EXPECT_NEXT=0
+EXPECT_SET=0
 ISSUE=""
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -216,11 +217,11 @@ CI_WAIT_SCRIPT="${CI_WAIT_SCRIPT:-$SCRIPT_DIR/ci-wait.sh}"
 
 for arg in "$@"; do
   if [ "$EXPECT_NEXT" = 1 ]; then
-    EXPECT_HEAD="$arg"; EXPECT_NEXT=0; continue
+    EXPECT_HEAD="$arg"; EXPECT_SET=1; EXPECT_NEXT=0; continue
   fi
   case "$arg" in
     --expect-head) EXPECT_NEXT=1 ;;
-    --expect-head=*) EXPECT_HEAD="${arg#*=}" ;;
+    --expect-head=*) EXPECT_HEAD="${arg#*=}"; EXPECT_SET=1 ;;
     --no-kill)    NO_KILL=1 ;;
     --sweep-only) SWEEP_ONLY=1 ;;
     --override-review) OVERRIDE_REVIEW=1 ;;
@@ -249,7 +250,7 @@ for arg in "$@"; do
   esac
 done
 if [ "$EXPECT_NEXT" = 1 ]; then echo "ERROR: --expect-head needs a SHA" >&2; exit 2; fi
-if [ -n "$EXPECT_HEAD" ] && ! [[ "$EXPECT_HEAD" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+if [ "$EXPECT_SET" = 1 ] && ! [[ "$EXPECT_HEAD" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
   echo "ERROR: --expect-head needs 7-40 hex chars (the short SHA you echoed)" >&2; exit 2
 fi
 EXPECT_HEAD="$(printf "%s" "$EXPECT_HEAD" | tr A-F a-f)"

@@ -127,6 +127,14 @@ green "J4: unreadable re-read with --expect-head fails closed"
 rc=0; ( cd "$REPO" && timeout 30 "$MERGE" 600 --no-kill --expect-head zz >"$TEST_DIR/j5.log" 2>&1 ) || rc=$?
 [ "$rc" = 2 ] || red "bad --expect-head value should exit 2, got $rc"
 green "J5: malformed --expect-head is a usage error"
+for bad in "" ; do
+  rc=0; ( cd "$REPO" && timeout 30 "$MERGE" 600 --no-kill --expect-head "$bad" >"$TEST_DIR/j6.log" 2>&1 ) || rc=$?
+  [ "$rc" = 2 ] || red "empty --expect-head must exit 2, got $rc"
+done
+rc=0; ( cd "$REPO" && timeout 30 "$MERGE" 600 --no-kill --expect-head= >"$TEST_DIR/j6.log" 2>&1 ) || rc=$?
+[ "$rc" = 2 ] || red "--expect-head= must exit 2, got $rc"
+[ "$(merges)" = 0 ] || red "merged with an empty --expect-head"
+green "J6: empty --expect-head is a usage error, not a silent no-op"
 
 # --auto-low path: fake ci-wait.sh that, like the real one, follows a head that
 # arrives during the wait and reports the NEWEST commit as verified-head.
