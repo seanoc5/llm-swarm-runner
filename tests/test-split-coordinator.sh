@@ -536,18 +536,18 @@ check "llm-start.sh does no COORD_MODE tmux-env sync" "none" "$got"
 # Auto-compact never injects /compact into the conversation session.
 heading "auto-compact"
 log_event() { echo "$*" >> "$T/ev.log"; }
+eval "$(sed -n "/^coord_split_active() {/,/^}/p" "$ROOT/scripts/coordinator-watch.sh")"
 eval "$(sed -n "/^maybe_auto_compact() {/,/^    fi$/p" "$ROOT/scripts/coordinator-watch.sh")
     return 99
 }"
 # shellcheck disable=SC2034
 AUTO_COMPACT=1; : > "$T/ev.log"
-PROJECT_DIR="$P"; setmode "$P" split
-COORD_MODE=resident maybe_auto_compact wake; rc=$?
+PROJECT_DIR="$P"
+COORD_MODE=split maybe_auto_compact wake; rc=$?
 check "split: maybe_auto_compact returns before touching the pane" "0" "$rc"
 grep -q "reason=split_mode" "$T/ev.log" && got=logged || got=missing
 check "split: maybe_auto_compact logs the skip" "logged" "$got"
-setmode "$P" resident
-set +e; COORD_MODE=split maybe_auto_compact wake; rc=$?; set -e
+set +e; COORD_MODE=resident maybe_auto_compact wake; rc=$?; set -e
 check "resident: maybe_auto_compact proceeds past the split guard" "99" "$rc"
 
 echo
