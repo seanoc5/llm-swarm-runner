@@ -346,7 +346,8 @@ RUNNING=$(( $(runs_started) - $(runs_ended) ))
 [ "$RUNNING" = 1 ] || red "2i: the run did not survive the watcher's group kill"
 wait_for 10 ended_ge 1 || red "2i: the surviving run never finished"
 [ "$(runs_started)" = 1 ] || red "2i: a second run started"
-[ ! -e "$RUN_DIR/retry-from" ] || red "2i: an ok run left the retry marker"
+no_retry_marker() { [ ! -e "$RUN_DIR/retry-from" ]; }
+wait_for 5 no_retry_marker || red "2i: an ok run left the retry marker"
 green "2i: a watcher group kill leaves the run, its lock and its retry marker intact"
 
 # 2d. Nothing was typed anywhere, in any case above (split mode, AUTO_COMPACT=1

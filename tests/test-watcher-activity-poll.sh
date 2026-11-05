@@ -381,6 +381,9 @@ done
 # test is only about the llm-start.sh serialization, not auto-compact
 # behavior (which has its own dedicated test suite).
 maybe_auto_compact() { :; }
+# issue #765: the wake sites ask coord_split_active first; this harness is the
+# default resident mode, so the question is always "no".
+coord_split_active() { return 1; }
 # cleanup_eligible_workers is only reached when WATCHER_AUTOCLOSE=1 below;
 # stubbed for the same reason (out of scope for this test).
 cleanup_eligible_workers() { :; }
