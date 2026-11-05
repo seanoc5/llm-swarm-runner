@@ -417,7 +417,7 @@ mkdir -p "$TEST_DIR/wt-issue-55/.swarm/tasks/done"
 rm -rf "$FLAG_DIR"/*
 rm -f "$PROJECT_DIR/.swarm/events.log"
 printf 'fix/issue-55\tOPEN\t105\t2026-01-01T00:00:00Z\tfalse\n' > "$GH_PR_LIST_FILE"
-printf '105\t🟢\n' > "$GH_PR_RISK_FILE"
+printf '105\t-\t🟢\n' > "$GH_PR_RISK_FILE"
 
 ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 0 "$TEST_DIR/watch-b4b.log"
 sleep 4
@@ -706,7 +706,7 @@ mkdir -p "$WT80/.swarm/tasks/done" "$WT80/.swarm/tasks/processing"
 rm -rf "$FLAG_DIR"/*
 rm -f "$PROJECT_DIR/.swarm/events.log"
 printf 'fix/issue-80\tOPEN\t180\t2026-01-01T00:00:00Z\tfalse\n' > "$GH_PR_LIST_FILE"
-printf '180\t🟡\tpass\n' > "$GH_PR_RISK_FILE"
+printf '180\t-\t🟡\tpass\n' > "$GH_PR_RISK_FILE"
 
 ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 0 "$TEST_DIR/watch-b15.log"
 sleep 4
@@ -719,7 +719,7 @@ green "pr_poll_pass set ✅ (risk-suffixed) for a done, green, idle worker"
 # ---------------------------------------------------------------------------
 heading "Test B16: ✅ drops back to 👀 when CI restarts (new push)"
 # ---------------------------------------------------------------------------
-printf '180\t🟡\tpending\n' > "$GH_PR_RISK_FILE"
+printf '180\t-\t🟡\tpending\n' > "$GH_PR_RISK_FILE"
 ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 0 "$TEST_DIR/watch-b16.log"
 sleep 4
 stop_watcher
@@ -727,7 +727,7 @@ stop_watcher
     || red "expected ✅ to drop to 👀🟡 while CI is pending; got: $(flag_of "$SESSION_NAME:iss-80")"
 green "pending CI shows 👀, not ✅ (the PR 1244 case)"
 
-printf '180\t🟡\n' > "$GH_PR_RISK_FILE"
+printf '180\t-\t🟡\n' > "$GH_PR_RISK_FILE"
 ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 0 "$TEST_DIR/watch-b16b.log"
 sleep 4
 stop_watcher
@@ -739,7 +739,7 @@ green "no CI checks reported shows 👀, not ✅"
 heading "Test B17: green CI but the brief is still in processing/ → 👀, not ✅"
 # ---------------------------------------------------------------------------
 rm -rf "$FLAG_DIR"/*
-printf '180\t🟡\tpass\n' > "$GH_PR_RISK_FILE"
+printf '180\t-\t🟡\tpass\n' > "$GH_PR_RISK_FILE"
 echo "brief" > "$WT80/.swarm/tasks/processing/t80.md"
 ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 0 "$TEST_DIR/watch-b17.log"
 sleep 4
@@ -755,7 +755,7 @@ heading "Test B18: ❌ for failed CI on an idle worker (even a draft), cleared o
 mkdir -p "$TEST_DIR/wt-issue-81/.swarm/tasks/done"
 rm -rf "$FLAG_DIR"/*
 printf 'fix/issue-81\tOPEN\t181\t2026-01-01T00:00:00Z\ttrue\n' > "$GH_PR_LIST_FILE"
-printf '181\t🟢\tfail\n' > "$GH_PR_RISK_FILE"
+printf '181\t-\t🟢\tfail\n' > "$GH_PR_RISK_FILE"
 ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 0 "$TEST_DIR/watch-b18.log"
 sleep 4
 stop_watcher
@@ -805,7 +805,7 @@ WT90="$TEST_DIR/wt-issue-90"
 mkdir -p "$WT90/.swarm/tasks/inbox" "$WT90/.swarm/tasks/done"
 rm -f "$PROJECT_DIR/.swarm/events.log"
 printf 'fix/issue-90\tOPEN\t190\t2026-01-01T00:00:00Z\tfalse\n' > "$GH_PR_LIST_FILE"
-printf '190\t🟡\tpass\tCONFLICTING\tabc12345def\tmaster\n' > "$GH_PR_RISK_FILE"
+printf '190\t-\t🟡\tpass\tCONFLICTING\tabc12345def\tmaster\n' > "$GH_PR_RISK_FILE"
 ONCE=0 WATCH_PR_POLL_SECS=1 start_watcher 0 "$TEST_DIR/watch-b20.log"
 sleep 2
 n90=$(grep -l 'swarm-merge:conflict-brief pr=190 ' "$WT90"/.swarm/tasks/inbox/*.md 2>/dev/null | wc -l)
@@ -824,17 +824,38 @@ grep -qE 'watch\.conflict_brief +issue=90 pr=190 head=abc12345 action=brief-queu
 green "CONFLICTING ready PR → one brief per head commit"
 
 rm -f "$WT90"/.swarm/tasks/done/*.md
-for case in "draft:true:CONFLICTING:1" "mergeable:false:MERGEABLE:1" "unknown:false:UNKNOWN:1" "knob-off:false:CONFLICTING:0"; do
+for case in "mergeable:false:MERGEABLE:1" "unknown:false:UNKNOWN:1" "knob-off:false:CONFLICTING:0"; do
     IFS=: read -r label draft merge knob <<< "$case"
     printf 'fix/issue-90\tOPEN\t190\t2026-01-01T00:00:00Z\t%s\n' "$draft" > "$GH_PR_LIST_FILE"
-    printf '190\t🟡\tpass\t%s\tabc12345def\tmaster\n' "$merge" > "$GH_PR_RISK_FILE"
+    printf '190\t-\t🟡\tpass\t%s\tabc12345def\tmaster\n' "$merge" > "$GH_PR_RISK_FILE"
     WATCH_CONFLICT_BRIEF="$knob" ONCE=0 WATCH_PR_POLL_SECS=1 start_watcher 0 "$TEST_DIR/watch-b20-$label.log"
     sleep 2
     stop_watcher
     n90=$(find "$WT90/.swarm/tasks/inbox" -name '*.md' | wc -l)
     [ "$n90" = 0 ] || red "$label: expected no conflict brief, inbox has $n90"
 done
-green "no brief for a draft, a mergeable or still-computing PR, or with WATCH_CONFLICT_BRIEF=0"
+green "no brief for a mergeable or still-computing PR, or with WATCH_CONFLICT_BRIEF=0"
+
+# issue #757: a parked draft that turns CONFLICTING is briefed once per head;
+# a coordinator-held draft (hold banner) is left alone.
+printf 'fix/issue-90\tOPEN\t190\t2026-01-01T00:00:00Z\ttrue\n' > "$GH_PR_LIST_FILE"
+printf '190\thold\t🟡\tpass\tCONFLICTING\tabc12345def\tmaster\n' > "$GH_PR_RISK_FILE"
+ONCE=0 WATCH_PR_POLL_SECS=1 start_watcher 0 "$TEST_DIR/watch-b20-held.log"
+sleep 2
+stop_watcher
+n90=$(find "$WT90/.swarm/tasks/inbox" -name '*.md' | wc -l)
+[ "$n90" = 0 ] || red "held draft: expected no conflict brief, inbox has $n90"
+printf '190\t-\t🟡\tpass\tCONFLICTING\tabc12345def\tmaster\n' > "$GH_PR_RISK_FILE"
+ONCE=0 WATCH_PR_POLL_SECS=1 start_watcher 0 "$TEST_DIR/watch-b20-draft.log"
+sleep 2
+n90=$(grep -l 'swarm-merge:conflict-brief pr=190 ' "$WT90"/.swarm/tasks/inbox/*.md 2>/dev/null | wc -l)
+[ "$n90" = 1 ] || { stop_watcher; red "banner-less conflicting draft: expected 1 brief, got $n90"; }
+mv "$WT90"/.swarm/tasks/inbox/*.md "$WT90/.swarm/tasks/done/"
+sleep 3
+stop_watcher
+n90=$(find "$WT90/.swarm/tasks/inbox" -name '*.md' | wc -l)
+[ "$n90" = 0 ] || red "draft: same head should not be briefed twice; inbox has $n90"
+green "conflicting draft briefed once per head; coordinator-held draft left alone"
 rm -rf "$WT90"
 : > "$GH_PR_RISK_FILE"
 : > "$GH_PR_LIST_FILE"

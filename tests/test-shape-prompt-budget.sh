@@ -79,6 +79,10 @@
 # unnoticed): one sweep line plus one paragraph telling the coordinator what
 # the WARN means; ~450 bytes. Still a stopgap until #509 shrinks the file.
 #
+# 2026-11-05: worker budget 24200 -> 24300. Issue #757 adds one line: a draft
+# PR's handoff Action leads with "still draft, waiting on CI|pr-ready" (a
+# green-looking handoff on a stalled civicstrata draft read as ready).
+#
 # 2026-11-05: worker-bare 11400 -> 11600. Issue #573 adds the two 🔴 merge
 # safety rules worker.md already had (no coordinator-relayed approval; a
 # push after approval voids it) to the bare prompt's 🔴 row, ~130 bytes.
@@ -88,7 +92,7 @@ green() { printf '\033[32m✓ %s\033[0m\n' "$*"; }
 red()   { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORKER_MAX="${WORKER_MD_MAX_BYTES:-24200}"
+WORKER_MAX="${WORKER_MD_MAX_BYTES:-24300}"
 COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-31200}"
 BARE_MAX="${WORKER_BARE_MD_MAX_BYTES:-11600}"   # issue #510 trial prompt; ~7.5KB is script-parsed contract
 

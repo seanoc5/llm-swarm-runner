@@ -43,6 +43,13 @@ RINGS="$TEST_DIR/rings.log"
 coord_ring_doorbell() { printf '%s %s\n' "$1" "${2:-}" >> "$RINGS"; }
 declare -A STALE_WAIT_NOTED=()
 declare -A CI_FAILING_NOTED=()
+declare -A PARKED_GREEN_HANDLED=()
+BUSY_ISSUES=""
+worker_pane_busy() { [[ " $BUSY_ISSUES " == *" ${1#iss-} "* ]]; }
+LLM_SWARM_DIR="$TEST_DIR/swarm"
+mkdir -p "$LLM_SWARM_DIR/scripts"
+printf '#!/usr/bin/env bash\necho "$1" >> "%s/ready.log"\nexit 0\n' "$TEST_DIR" > "$LLM_SWARM_DIR/scripts/pr-ready.sh"
+chmod +x "$LLM_SWARM_DIR/scripts/pr-ready.sh"
 CI_FAILING_RING_DIR="$PROJECT_DIR/.swarm/ci-failing-ring-pending"
 
 # shellcheck source=/dev/null
@@ -97,5 +104,25 @@ heading "Test 6 (issue #729): ready_sweep_pass never rings itself; it queues one
 [ "$(ls "$CI_FAILING_RING_DIR" | wc -l | tr -d ' ')" = "2" ] || red "expected 2 queued rings, got: $(ls "$CI_FAILING_RING_DIR")"
 [ -e "$CI_FAILING_RING_DIR/31-deadbeef" ] && [ -e "$CI_FAILING_RING_DIR/31-cafe1234" ] || red "queue lacks pr-sha files: $(ls "$CI_FAILING_RING_DIR")"
 green "no direct ring; ring queued once per new note (deduped repeat adds nothing)"
+
+heading "Test 7 (issue #757): parked-green drafts: low risk runs pr-ready once, other risk writes one note per sha, busy worker skipped"
+pg() { find "$COORD_INBOX_DIR" -maxdepth 1 -name '*-parked_green-*.md' 2>/dev/null | wc -l | tr -d ' '; }
+: > "$TEST_DIR/ready.log"
+cat > "$SWEEP_OUT" <<'OUT'
+#71 parked-green: banner-less draft, green CI (risk=low, issue=71, sha=aaaa1111)
+#72 parked-green: banner-less draft, green CI (risk=high, issue=72, sha=bbbb2222)
+#73 parked-green: banner-less draft, green CI (risk=medium, issue=73, sha=cccc3333)
+OUT
+BUSY_ISSUES="73"
+ready_sweep_pass >/dev/null
+[ "$(cat "$TEST_DIR/ready.log")" = "71" ] || red "expected pr-ready on 71 only: $(cat "$TEST_DIR/ready.log")"
+[ "$(pg)" = "1" ] || red "expected 1 parked_green note (72), got $(pg)"
+grep -q "Draft PR #72 (risk high) has green CI on bbbb222" "$COORD_INBOX_DIR"/*-parked_green-*.md || red "unexpected note: $(cat "$COORD_INBOX_DIR"/*-parked_green-*.md)"
+ready_sweep_pass >/dev/null
+[ "$(wc -l < "$TEST_DIR/ready.log" | tr -d ' ')" = "1" ] && [ "$(pg)" = "1" ] || red "same sha must dedupe (ready: $(cat "$TEST_DIR/ready.log"), notes: $(pg))"
+BUSY_ISSUES=""
+ready_sweep_pass >/dev/null
+[ "$(pg)" = "2" ] || red "PR 73 should be handled once its worker is idle, notes: $(pg)"
+green "pr-ready once for low risk; one note per PR+sha otherwise; live worker deferred"
 
 green "ALL TESTS PASSED"

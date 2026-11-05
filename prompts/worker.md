@@ -228,6 +228,8 @@ decision made. "Nothing needs your action" when true.>
 **Action:** <full https:// PR/issue URL> — <🟢/🟡/🔴>. <self-review verdict or skip reason>
 ```
 
+Draft PR: Action leads "⏳ still draft, waiting on <CI|pr-ready>".
+
 - No move and no surprise: just **Bottom line** + **Next** + **Action**.
 - Always give the full `https://` URL at least once; a bare `#N` isn't
   clickable.

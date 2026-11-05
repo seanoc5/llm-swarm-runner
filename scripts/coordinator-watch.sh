@@ -2051,7 +2051,7 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     WATCHER_AUTOCLOSE_MODE merged which terminal PR states are reap-eligible: merged (MERGED only, default) | finalized (MERGED or CLOSED)
     WATCH_PR_POLL_SECS  60        periodic gh-poll backstop reap (0=off); see header comment
     WATCH_ORPHAN_SWEEP_SECS 3600  periodic reap-orphan-worktrees.sh sweep for window-less worktrees (0=off); see header comment
-    WATCH_CONFLICT_BRIEF 1       a ready PR that turns CONFLICTING gets swarm-merge.sh's resolve-conflicts brief, once per head commit (0=off; issue #656)
+    WATCH_CONFLICT_BRIEF 1       an open PR (draft or ready; coordinator-held drafts excluded) that turns CONFLICTING gets swarm-merge.sh's resolve-conflicts brief, once per head commit (0=off; issue #656)
     WATCH_READY_SWEEP_SECS 300   periodic ready-sweep.sh: re-run pr-ready.sh on drafts refused only for CI pending/unreadable (0=off; issue #602)
     WATCH_STALE_WAIT_CHECK 1     ready-sweep also flags drafts whose **Next:** line waits on an already-merged #N; one coord-inbox note each (0=off; issue #635)
     WATCH_BG_VIOLATION_SWEEP_SECS 60  periodic sweep for backgrounded-shell UI markers on iss-* panes + the coordinator pane (0=off); see header comment
@@ -3950,6 +3950,10 @@ declare -A STALE_WAIT_NOTED=()
 # head sha after a fix push that is red again notes again).
 declare -A CI_FAILING_NOTED=()
 
+# issue #757: ready_sweep_pass's parked-green dedup, keyed "<pr>:<sha>": one
+# pr-ready.sh attempt or one inbox note per head sha of a banner-less green draft.
+declare -A PARKED_GREEN_HANDLED=()
+
 # issue #468: a check-fail retry (or any later reconciliation in
 # worker-listener.sh's write_outcome()) can flip a task's outcome level
 # after its FIRST record already fired a real coord.wake — the corrected
@@ -4619,6 +4623,7 @@ has_live_window_draining_brief() {
 # every 60s).
 declare -gA PR_RISK_CACHE=()
 declare -gA PR_CI_CACHE=()
+declare -gA PR_HOLD_CACHE=()    # issue #757: "hold" when the body carries a COORDINATOR HOLD banner, else "-"
 declare -gA PR_MERGE_CACHE=()   # issue #656: "<mergeable>\t<headRefOid>\t<baseRefName>"
 declare -gA CONFLICT_BRIEF_SENT=()  # issue #656: pr -> head sha already briefed
 PR_RISK_LOADED=0
@@ -4628,9 +4633,11 @@ pr_open_details_load() {
     PR_RISK_CACHE=()
     PR_CI_CACHE=()
     PR_MERGE_CACHE=()
-    local n r c m h b
-    while IFS=$'\t' read -r n r c m h b; do
+    PR_HOLD_CACHE=()
+    local n k r c m h b
+    while IFS=$'\t' read -r n k r c m h b; do
         [ -n "$n" ] || continue
+        PR_HOLD_CACHE[$n]="$k"
         PR_RISK_CACHE[$n]="$r"
         PR_CI_CACHE[$n]="${c:-none}"
         PR_MERGE_CACHE[$n]="$m"$'\t'"$h"$'\t'"$b"
@@ -4653,7 +4660,7 @@ pr_open_details_load() {
                       elif any($r[]; ((.status // "COMPLETED") != "COMPLETED")
                                      or ((.state // "") | test("^(PENDING|EXPECTED)$"))) then "pending"
                       else "pass" end;
-                  .[] | "\(.number)\t\(((.body // "") | capture("(?<r>🟢|🟡|🔴)").r?) // "")\t\(ci)\t\(.mergeable // "")\t\(.headRefOid // "")\t\(.baseRefName // "")"' 2>/dev/null)
+                  .[] | "\(.number)\t\(if ((.body // "") | test("(?m)^> ⛔ \\*\\*COORDINATOR HOLD\\*\\*")) then "hold" else "-" end)\t\(((.body // "") | capture("(?<r>🟢|🟡|🔴)").r?) // "")\t\(ci)\t\(.mergeable // "")\t\(.headRefOid // "")\t\(.baseRefName // "")"' 2>/dev/null)
 }
 pr_risk_glyph() {
     [ "$WATCH_WINDOW_FLAG_RISK" = "1" ] || return 0
@@ -4708,6 +4715,10 @@ conflict_brief_pass_one() {
     local issue="$1" pr="$2" wt_dir="$3" m h b rc=0
     IFS=$'\t' read -r m h b <<< "${PR_MERGE_CACHE[$pr]:-}"
     [ "$m" = "CONFLICTING" ] || return 0
+    # issue #757: drafts get the brief too (a worker that parked before
+    # pr-ready.sh leaves a draft that conflicts after a sibling merges), but a
+    # coordinator-held draft stays the coordinator's to resolve.
+    [ "${PR_HOLD_CACHE[$pr]:-}" = "hold" ] && return 0
     [ -n "$h" ] && [ "${CONFLICT_BRIEF_SENT[$pr]:-}" = "$h" ] && return 0
     worker_brief_pending "$wt_dir" && return 0
     queue_conflict_brief "$wt_dir" "$pr" "${b:-the default branch}" "mergeable=CONFLICTING" \
@@ -4813,7 +4824,7 @@ pr_poll_pass() {
                     fi
                 fi
                 pr_flag_apply "$issue" "$want" "$why pr=$pr_number"
-                if [ "$WATCH_CONFLICT_BRIEF" = "1" ] && [ "$is_draft" != "true" ]; then
+                if [ "$WATCH_CONFLICT_BRIEF" = "1" ]; then
                     pr_open_details_load
                     conflict_brief_pass_one "$issue" "$pr_number" "$wt_dir"
                 fi
@@ -4917,6 +4928,7 @@ ready_sweep_pass() {
     local dry_arg="" out line key pr trig k
     local -A cfseen=()
     local -A seen=()
+    local -A pgseen=()
     [ "$DRY_RUN" = "1" ] && dry_arg="--dry-run"
     out="$(cd "$PROJECT_DIR" && WATCH_STALE_WAIT_CHECK="$WATCH_STALE_WAIT_CHECK" "$READY_SWEEP" $dry_arg 2>&1)" || {
         log_event watch.ready_sweep "reason=sweep_failed"
@@ -4945,6 +4957,32 @@ ready_sweep_pass() {
             CI_FAILING_NOTED[$key]=1
             continue
         fi
+        if [[ "$line" =~ ^#([0-9]+)\ parked-green:.*risk=([a-z]+),\ issue=([0-9]+|none),\ sha=([0-9a-fA-F]+) ]]; then
+            pr="${BASH_REMATCH[1]}" key="${BASH_REMATCH[1]}:${BASH_REMATCH[4]}"
+            local pg_risk="${BASH_REMATCH[2]}" pg_issue="${BASH_REMATCH[3]}" pg_sha="${BASH_REMATCH[4]}"
+            pgseen[$key]=1
+            [ -z "${PARKED_GREEN_HANDLED[$key]:-}" ] || continue
+            # A worker with a live turn will call pr-ready.sh itself.
+            if [ "$pg_issue" != "none" ] && worker_pane_busy "iss-$pg_issue"; then continue; fi
+            if [ "$DRY_RUN" = "1" ]; then
+                echo "[DRY] would handle parked green draft PR #$pr (risk $pg_risk, sha ${pg_sha:0:7})"
+                continue
+            fi
+            if [ "$pg_risk" = "low" ]; then
+                # 🟢 skips self-review, so this is quick; one attempt per head sha.
+                local pg_rc=0
+                (cd "$PROJECT_DIR" && timeout 300 "$LLM_SWARM_DIR/scripts/pr-ready.sh" "$pr" >/dev/null 2>&1) || pg_rc=$?
+                log_event watch.ready_sweep "parked_green pr=$pr sha=${pg_sha:0:8} action=pr-ready rc=$pg_rc"
+                echo "[$(date +%T)] ready-sweep: parked green draft #$pr: pr-ready.sh exit $pg_rc"
+            elif coord_inbox_write parked_green "Draft PR #$pr (risk $pg_risk) has green CI on ${pg_sha:0:7} but its worker parked before running pr-ready.sh, so nothing will ready it. If no live iss window owns it, run pr-ready.sh $pr (it runs the self-review for this risk level). One note per head sha."; then
+                log_event coord.inbox.write "trigger=parked_green pr=$pr sha=$pg_sha"
+            else
+                echo "[$(date +%T)] WARN: failed to write coord-inbox parked-green note for PR #$pr" >&2
+                continue
+            fi
+            PARKED_GREEN_HANDLED[$key]=1
+            continue
+        fi
         [[ "$line" =~ ^#([0-9]+)\ stale-wait:\ waiting\ on\ #([0-9]+) ]] || continue
         pr="${BASH_REMATCH[1]}" trig="${BASH_REMATCH[2]}" key="$pr:$trig"
         seen[$key]=1
@@ -4964,6 +5002,9 @@ ready_sweep_pass() {
     done
     for k in "${!CI_FAILING_NOTED[@]}"; do
         [ -n "${cfseen[$k]:-}" ] || unset 'CI_FAILING_NOTED[$k]'
+    done
+    for k in "${!PARKED_GREEN_HANDLED[@]}"; do
+        [ -n "${pgseen[$k]:-}" ] || unset 'PARKED_GREEN_HANDLED[$k]'
     done
 }
 

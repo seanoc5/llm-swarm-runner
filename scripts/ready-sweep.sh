@@ -22,6 +22,8 @@
 # note. fand-etl #1477 sat 16h "waiting" on a PR that had merged 10h before
 # the handoff was written. WATCH_STALE_WAIT_CHECK=0 turns this part off.
 #
+# issue #757: also reports banner-less green drafts ("parked-green" lines; see below).
+#
 # Usage: ready-sweep.sh [--dry-run]
 # Output: one line per candidate: "#<N> <reason>: readied|still draft (exit <rc>)",
 #   plus "#<P> stale-wait: waiting on #<N>, which merged at <ts>" per stale wait.
@@ -35,7 +37,7 @@ PR_READY="${PR_READY_SCRIPT:-$SCRIPT_DIR/pr-ready.sh}"
 DRY_RUN=0
 [ "${1:-}" = "--dry-run" ] && DRY_RUN=1
 
-DRAFTS="$(gh pr list --state open --draft --limit 100 --json number,body,headRefOid)" \
+DRAFTS="$(gh pr list --state open --draft --limit 100 --json number,body,headRefOid,headRefName,statusCheckRollup)" \
     || { echo "ready-sweep: ERROR: gh pr list failed" >&2; exit 1; }
 CANDIDATES="$(jq -r '.[] | (.body // "" | capture("(?m)^<!-- SWARM_DRAFT_REASON: (?<r>ci-pending|ci-unknown) sha=").r) as $r | "\(.number) \($r)"' <<<"$DRAFTS")"
 
@@ -62,6 +64,24 @@ while read -r pr sha action; do
     fi
     echo "#$pr ci-failing: needs a fix push (sha=$sha)"
 done <<<"$FAILING"
+
+# issue #757: a worker that parks BEFORE ever calling pr-ready.sh leaves no
+# banner, so the loop below never sees its draft (civicstrata #643 sat ~18h
+# with green CI). Report open drafts with no SWARM_DRAFT_REASON banner, no
+# COORDINATOR HOLD banner and green CI on the head (every newest-per-check
+# run completed with SUCCESS/NEUTRAL/SKIPPED, at least one check). This is
+# read-only: the sweep cannot see tmux, so coordinator-watch.sh decides
+# whether a worker still has a live turn, then runs pr-ready.sh (🟢) or writes
+# one inbox note per (PR, sha) (🟡/🔴/unmarked: pr-ready.sh would run a review).
+# Line: "#<N> parked-green: banner-less draft, green CI (risk=<r>, issue=<K>, sha=<S>)"
+jq -r '.[]
+  | select((.body // "") | (test("<!-- SWARM_DRAFT_REASON:") or test("(?m)^> ⛔ \\*\\*COORDINATOR HOLD\\*\\*")) | not)
+  | (.statusCheckRollup // []
+     | group_by((.workflowName // "") + "\u0000" + (.name // .context // ""))
+     | map(max_by(.completedAt // .startedAt // .createdAt // ""))) as $r
+  | select(($r | length) > 0 and all($r[]; ((.status // "COMPLETED") == "COMPLETED")
+        and (((.conclusion // .state // "") | test("^(SUCCESS|NEUTRAL|SKIPPED)$")))))
+  | "#\(.number) parked-green: banner-less draft, green CI (risk=\((.body // "") | (capture("BLIND_MERGE_RISK: (?<r>low|medium|high)").r) // "unknown"), issue=\((.headRefName // "") | (capture("issue-(?<i>[0-9]+)").i) // "none"), sha=\(.headRefOid // "unknown"))"' <<<"$DRAFTS"
 
 while read -r pr reason; do
     [ -n "$pr" ] || continue

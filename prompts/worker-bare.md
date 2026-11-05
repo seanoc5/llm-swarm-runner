@@ -79,6 +79,8 @@ follow). The operator reads panes bottom-up.
 **Action:** <full https:// PR/issue URL> — <🟢/🟡/🔴>. <self-review verdict or skip reason>
 ```
 
+Draft PR: Action leads "⏳ still draft, waiting on <CI|pr-ready>".
+
 No move and no surprise: just **Bottom line** + **Next** + **Action**. A no-PR
 terminal (`blocked`, `done-no-pr`) has no page behind it, so the bottom
 line may be a short paragraph: files touched, tests run, why no PR.
