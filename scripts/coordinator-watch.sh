@@ -3815,7 +3815,9 @@ cleanup_on_exit() {
     [ -n "${STALL_WAKE_TIMER_PID:-}" ] && kill "$STALL_WAKE_TIMER_PID" 2>/dev/null || true
     [ -n "${CAPACITY_WAKE_TIMER_PID:-}" ] && kill "$CAPACITY_WAKE_TIMER_PID" 2>/dev/null || true
     # issue #765: the split-mode tick loop only. A running work run is left to
-    # finish on its own (it holds the lock and logs its own exit).
+    # finish on its own (it holds the lock and logs its own exit). It runs under
+    # setsid, in a process group of its own, so neither this cleanup nor the
+    # staleness self-restart's group kill (kill -KILL -$$) reaches it.
     [ -n "${SPLIT_LOOP_PID:-}" ] && kill "$SPLIT_LOOP_PID" 2>/dev/null || true
     # run_poll's own backgrounded sleep (issues #570/#571) — only set while
     # a tick is actually asleep, so this is a no-op the rest of the time.
@@ -11136,7 +11138,11 @@ coord_split_start_run() {
     (
         rc=0; sig_before=""; sig_after=""; from=0; n=0; now2=0
         sig_before="$(stat -c %y "$COORD_WORK_RUN_DIR/last-start" 2>/dev/null || true)"
-        "$COORD_WORK_RUN" "$PROJECT_DIR" "$prompt" >/dev/null 2>>"$COORD_WORK_RUN_DIR/wrapper.err" || rc=$?
+        # setsid: the run gets its own session and process group, so a watcher
+        # restart (watcher_check_staleness kills this group) or a stop does not
+        # kill the wrapper and leave the command running without the lock held.
+        # -w keeps the wrapper's exit status.
+        setsid -w "$COORD_WORK_RUN" "$PROJECT_DIR" "$prompt" >/dev/null 2>>"$COORD_WORK_RUN_DIR/wrapper.err" || rc=$?
         if [ "$rc" = "75" ]; then
             log_event coord.workrun.busy "trigger=$trigger reason=lock_held_at_start"
         else

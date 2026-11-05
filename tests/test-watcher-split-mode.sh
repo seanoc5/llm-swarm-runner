@@ -201,7 +201,7 @@ start_watcher() {
         AUTO_COMPACT=1 WORKER_AUTO_COMPACT=0 WORKER_AUTO_DELIVER=0 \
         WATCHER_STALE_CHECK=0 STALL_WAKE_SECS=0 \
         WATCHER_QUIET=1 DRY_RUN=0 ONCE=0 POLL_SECS=1 \
-        "$WATCH" "$PROJECT_DIR" > "$TEST_DIR/watch.out" 2>&1 &
+        ${WATCH_PREFIX:-} "$WATCH" "$PROJECT_DIR" > "$TEST_DIR/watch.out" 2>&1 &
     WATCH_PID=$!
     sleep 1.5
 }
@@ -330,6 +330,24 @@ wait_for 8 ended_ge 1 || red "2h: run did not finish after the watcher stopped"
 sleep 3
 [ "$(runs_started)" = 1 ] || red "2h: a run was started on behalf of a stopped watcher"
 green "2h: no run is started after the watcher has stopped"
+
+# 2i. A hard kill of the watcher's whole process group (what the watcher's own
+# staleness self-restart does) must not strand the run: the run keeps its lock
+# (no second run starts) and, if it dies too, the items are retried.
+stop_watcher; reset_state; echo 6 > "$STUB_SECS_FILE"; seed_last_start 5
+WATCH_PREFIX=setsid start_watcher 600; unset WATCH_PREFIX
+drop sidelined_worker 10
+wait_for 8 started_ge 1 || red "2i: run did not start"
+kill -KILL -- "-$WATCH_PID" 2>/dev/null || true
+wait "$WATCH_PID" 2>/dev/null || true; unset WATCH_PID
+sleep 1
+[ -s "$RUN_DIR/retry-from" ] || red "2i: no retry marker while the run is in flight"
+RUNNING=$(( $(runs_started) - $(runs_ended) ))
+[ "$RUNNING" = 1 ] || red "2i: the run did not survive the watcher's group kill"
+wait_for 10 ended_ge 1 || red "2i: the surviving run never finished"
+[ "$(runs_started)" = 1 ] || red "2i: a second run started"
+[ ! -e "$RUN_DIR/retry-from" ] || red "2i: an ok run left the retry marker"
+green "2i: a watcher group kill leaves the run, its lock and its retry marker intact"
 
 # 2d. Nothing was typed anywhere, in any case above (split mode, AUTO_COMPACT=1
 # set on purpose), and the old doorbell was never invoked.

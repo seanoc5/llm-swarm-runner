@@ -23,9 +23,10 @@
 #      The watcher reads it as the "last ring" for batching.
 #   3. Runs the command under `timeout`, output teed to
 #      <project>/.swarm/work-run/<UTC-ts>.log.
-#   3b. After a run that is not "ok", writes <project>/.swarm/work-run/retry-from
-#      ("<epoch> <consecutive-failures>"); an ok run removes it. The watcher
-#      retries still-unhandled inbox items from that epoch after a back-off.
+#   2b. Writes <project>/.swarm/work-run/retry-from ("<epoch> <runs in a row not
+#      yet ok>") before the run; an "ok" run removes it. A run that dies any
+#      other way leaves it, and the watcher retries the inbox items from that
+#      epoch after a back-off, up to a cap.
 #   4. Appends one line to <project>/.swarm/work-run/runs.log:
 #      <end-ts> start=<ts> secs=<n> exit=<rc> status=<ok|timeout|killed|error>
 #      cost_usd=<x> in=<n> out=<n> cache_read=<n> log=<file>
@@ -82,6 +83,16 @@ PREV_LAST=0
 read -r PREV_LAST _ 2>/dev/null < "$RUN_DIR/last-start" || PREV_LAST=0
 [[ "$PREV_LAST" =~ ^[0-9]+$ ]] || PREV_LAST=0
 printf '%s\n' "$((START_EPOCH - 1))" > "$RUN_DIR/last-start"
+# last-start now says the inbox up to here is announced. Record the unfinished
+# window BEFORE the run, so a run that never reaches finish() (SIGKILL, host
+# restart, the watcher's group kill) is still retried: retry-from is "<epoch the
+# window starts> <consecutive runs not yet known to be ok>", kept across
+# failures at its oldest start, and removed by an ok run.
+RF_FROM=$PREV_LAST RF_N=0
+read -r RF_FROM RF_N _ 2>/dev/null < "$RUN_DIR/retry-from" || { RF_FROM=$PREV_LAST; RF_N=0; }
+[[ "$RF_FROM" =~ ^[0-9]+$ ]] || RF_FROM=$PREV_LAST
+[[ "$RF_N" =~ ^[0-9]+$ ]] || RF_N=0
+printf '%s %s\n' "$RF_FROM" "$((RF_N + 1))" > "$RUN_DIR/retry-from"
 
 SYS_FILE=""
 CHILD_PID=""
@@ -118,19 +129,9 @@ finish() {
     printf '%s start=%s secs=%s exit=%s status=%s cost_usd=%s in=%s out=%s cache_read=%s log=%s\n' \
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TS" "$secs" "$RC" "$status" \
         "$cost" "$in_t" "$out_t" "$cache_t" "$(basename "$LOG")" >> "$RUN_DIR/runs.log"
-    # A run that did not finish cleanly may have left inbox items unhandled, but
-    # last-start now says they were announced. Record where the retry window
-    # starts (the OLDEST such point, kept across consecutive failures) and how
-    # many failures in a row; the watcher retries after a back-off, up to a cap.
-    if [ "$status" = ok ]; then
-        rm -f "$RUN_DIR/retry-from"
-    else
-        local from=$PREV_LAST n=0
-        read -r from n _ 2>/dev/null < "$RUN_DIR/retry-from" || { from=$PREV_LAST; n=0; }
-        [[ "$from" =~ ^[0-9]+$ ]] || from=$PREV_LAST
-        [[ "$n" =~ ^[0-9]+$ ]] || n=0
-        printf '%s %s\n' "$from" "$((n + 1))" > "$RUN_DIR/retry-from"
-    fi
+    # An ok run clears the retry marker written at the start; anything else
+    # leaves it for the watcher's back-off retry.
+    [ "$status" = ok ] && rm -f "$RUN_DIR/retry-from"
     [ -n "$SYS_FILE" ] && rm -f "$SYS_FILE"
     [ -n "${FIFO_DIR:-}" ] && rm -rf "$FIFO_DIR"
     return 0
