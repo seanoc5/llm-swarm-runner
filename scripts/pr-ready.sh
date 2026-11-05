@@ -366,10 +366,11 @@ refuse() {
 # Advisory (#633): warn while renumbering is still cheap if another open PR
 # adds the same migration version. Never blocks — the first PR to merge
 # legitimately keeps the number — and any other exit (clean, error, no gh
-# data) stays silent.
+# data) prints nothing but those relayed WARN lines.
 OPEN_PR_CLASH_RC=0
 # Time-bounded: a hung gh/git call must not hold up readying. A timeout (124) logs
-# one line and readying proceeds (#736); other non-6 exits stay silent.
+# one line and readying proceeds (#736). On any other exit the check's stderr WARN
+# lines (truncated PR file lists) are still relayed below; only its stdout stays silent.
 # Output goes to files, not $(...): a surviving grandchild (a stuck gh/git) would
 # otherwise keep the pipe open and block the substitution past the timeout.
 # stderr is captured too so the check's warnings (e.g. the >300-file truncation

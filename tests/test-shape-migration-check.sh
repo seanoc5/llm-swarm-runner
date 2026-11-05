@@ -215,6 +215,28 @@ echo "$OUT" | grep -q "next free version: V109" || red "next free must skip V108
 echo "$OUT" | grep -q "and 1 other open PR" || red "other-open-PR count missing"
 echo "$OUT" | grep -qF "$MIG/V109__worker-claims-it.sql" || red "git mv must use V109"
 green "recipe: open-PR sweep bumps next free past a sibling PR's V108"
+
+# #752: a sibling PR at the file cap is re-read via gh pr diff; a failed re-read must reach the posted comment.
+# PR 9 lists 2 files (cap forced to 2) so its list is "truncated"; the full diff holds V120.
+GH_PR_DIFF_OUT_SAVE="${GH_PR_DIFF_OUT:-}"
+export GH_PR_DIFF_OUT="$TEST_DIR/pr-diff-cap.txt"
+printf 'README.md\nsrc/main/resources/db/migration/V108__sibling-pr.sql\nsrc/main/resources/db/migration/V120__past-the-cut.sql\n' > "$GH_PR_DIFF_OUT"
+if OUT=$(MIGRATION_PR_FILES_CAP=2 "$CHECK" 2 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -eq 2 ] || red "expected exit 2 at the cap, got $RC ($OUT)"
+echo "$OUT" | grep -q "next free version: V121" || red "capped PR #9 must be re-read so V120 counts; expected V121: $OUT"
+echo "$OUT" | grep -q "WARNING" && red "successful re-read must not warn: $OUT"
+green "capped sibling PR re-read via gh pr diff → next free V121"
+
+if OUT=$(GH_PR_DIFF_FAIL=1 MIGRATION_PR_FILES_CAP=2 "$CHECK" 2 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -eq 2 ] || red "expected exit 2 on failed re-read, got $RC"
+echo "$OUT" | grep -q "next free version: V109" || red "failed re-read falls back to the truncated list (V109): $OUT"
+echo "$OUT" | grep -q "^  WARNING: PR #9 lists >=2 files" || red "failed re-read must put a WARNING in the verdict body: $OUT"
+rm -f "$GH_COMMENTS_DIR/2.json"; : > "$GH_LOG"
+GH_PR_DIFF_FAIL=1 MIGRATION_PR_FILES_CAP=2 "$CHECK" 2 --post >/dev/null 2>&1 || true
+jq -e '.comments | map(.body) | any(test("WARNING: PR #9 lists"))' "$GH_COMMENTS_DIR/2.json" >/dev/null || red "--post comment must carry the failed-re-read WARNING"
+rm -f "$GH_COMMENTS_DIR/2.json"
+if [ -n "$GH_PR_DIFF_OUT_SAVE" ]; then export GH_PR_DIFF_OUT="$GH_PR_DIFF_OUT_SAVE"; else unset GH_PR_DIFF_OUT; fi
+green "failed re-read: WARNING appears in output and in the posted comment"
 echo '[]' > "$GH_PR_LIST"
 
 # PR-internal duplicate (both claimants on the head) → no git mv, says so.

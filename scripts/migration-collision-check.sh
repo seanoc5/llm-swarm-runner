@@ -440,6 +440,7 @@ in_base() {
     grep -qxF -- "$1" <<< "$BASE_FLYWAY"
 }
 NEXT_FREE_COMPUTED=0
+NEXT_FREE_WARN=()   # degraded-input notes; shown next to "next free version" in the verdict (#752)
 OTHER_PR_COUNT=0
 next_ver=0
 compute_next_free() {
@@ -465,6 +466,7 @@ compute_next_free() {
         if extra="$(gh pr diff "$m" --name-only 2>/dev/null)" && [ -n "$extra" ]; then
             OTHER_PR_FILES="$(printf '%s\n%s' "$OTHER_PR_FILES" "$extra")"
         else
+            NEXT_FREE_WARN+=("WARNING: PR #$m lists >=$cap files and the full list could not be read; the next free version may be too low")
             echo "WARN: PR #$m lists >=$cap files and the full list could not be read; next free version may be too low" >&2
         fi
     done
@@ -517,6 +519,7 @@ if [ -z "$REF" ] && [ "${#FLYWAY_COLLISIONS[@]}" -gt 0 ]; then
 
     FLYWAY_RECIPE+=("Remediation — rename the PR-side file(s) on branch $HEAD_REF; base-side ($BASE_REF) files are already applied downstream, never move those.")
     FLYWAY_RECIPE+=("  next free version: V$next_ver (max across $BASE_REF, $HEAD_REF, and $OTHER_PR_COUNT other open PR(s))")
+    for c in "${NEXT_FREE_WARN[@]}"; do FLYWAY_RECIPE+=("  $c"); done
     for c in "${FLYWAY_COLLISIONS[@]}"; do
         ver="${c%% claimed by:*}"                    # "V187"
         claimants="${c#* claimed by: }"              # space-joined paths
@@ -577,6 +580,7 @@ if [ "${#OUT_OF_ORDER[@]}" -gt 0 ]; then
     compute_next_free
     OOO_RECIPE+=("Remediation — renumber the PR-side file(s) on branch $HEAD_REF to the next free version; base-side ($BASE_REF, max V$BASE_TIP_MAX_VER) files are already applied downstream and never move.")
     OOO_RECIPE+=("  next free version: V$next_ver (max across $BASE_REF, $HEAD_REF, and $OTHER_PR_COUNT other open PR(s))")
+    for c in "${NEXT_FREE_WARN[@]}"; do OOO_RECIPE+=("  $c"); done
     for o in "${OUT_OF_ORDER[@]}"; do
         f="${o% (V*}"
         fb="$(basename "$f")"
