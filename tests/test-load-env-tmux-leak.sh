@@ -5,8 +5,8 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 command -v tmux >/dev/null || { echo "SKIP: no tmux"; exit 0; }
-T="$(mktemp -d)"; SOCK="t660-$$"
-trap 'command tmux -L "$SOCK" kill-server 2>/dev/null || true; rm -rf "$T"' EXIT
+T="$(mktemp -d)"; SOCK="t660-$$"; SOCK3="t660c-$$"
+trap 'command tmux -L "$SOCK" kill-server 2>/dev/null || true; command tmux -L "$SOCK3" kill-server 2>/dev/null || true; rm -rf "$T"' EXIT
 mkdir -p "$T/sb" "$T/proj/.swarm"
 echo 'SANDBOX_KOTLIN_DAEMON_XMX=1536m' > "$T/sb/.env.example"
 echo 'SANDBOX_KOTLIN_DAEMON_XMX=4096m' > "$T/proj/.swarm/.env"
@@ -27,13 +27,15 @@ g="$(command tmux -L "$SOCK" show-environment -g SANDBOX_KOTLIN_DAEMON_XMX 2>&1 
 case "$g" in *1536m*) bad "default leaked into tmux global env: $g";; *) ok "default not in tmux global env";; esac
 
 # 3. a deliberate caller export is kept
-command tmux -L "$SOCK" kill-server 2>/dev/null || true
+# Own socket: CI once failed with "server exited unexpectedly" on this step
+# when it reused SOCK right after kill-server. A stale-server race is the
+# suspected cause, not established; a fresh socket name sidesteps any reuse.
 (
   export SANDBOX_KOTLIN_DAEMON_XMX=2048m LLM_SWARM_DIR="$T/sb"
   . "$ROOT/scripts/_load-env.sh" "$T/nonexistent"
   for _k in ${SWARM_ENV_FILE_KEYS:-}; do unset "$_k"; done
-  command tmux -L "$SOCK" -f /dev/null new-session -d -s s
+  command tmux -L "$SOCK3" -f /dev/null new-session -d -s s
 )
-g="$(command tmux -L "$SOCK" show-environment -g SANDBOX_KOTLIN_DAEMON_XMX 2>&1 || true)"
+g="$(command tmux -L "$SOCK3" show-environment -g SANDBOX_KOTLIN_DAEMON_XMX 2>&1 || true)"
 case "$g" in *2048m*) ok "deliberate export kept";; *) bad "deliberate export lost: $g";; esac
 exit $fail
