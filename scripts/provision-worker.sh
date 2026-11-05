@@ -51,8 +51,10 @@ EXIT CODES
     3  cap refused (cap.refused event) — the coordinator retries these
     4  spawn confirmed dead: window, container and brief all removed, so a
        retry starts clean
-    5  a same-name container exists AND its iss-N window is alive — a worker
-       is running; use requeue.sh, not a retry
+    5  duplicate dispatch refused (issue #766): a same-name container exists
+       AND its iss-N window is alive, or an issue brief is already queued or
+       claimed for this issue (PROVISION_ALLOW_DUPLICATE=1 overrides the
+       latter) — a worker is running; use requeue.sh, not a retry
     6  still starting after PROVISION_SPAWN_CHECK_SECS (pane alive, container
        not seen yet) — nothing cleaned up; re-running would double-provision.
        Check `docker ps` / `tmux capture-pane`.
@@ -661,6 +663,23 @@ elif ! ISSUE_COMMENTS_JSON="$(gh issue view "$ISSUE" --json comments)"; then
     exit 2
 fi
 
+# issue #766 (ADR 0006 §3): refuse a duplicate dispatch. Two provisions of the
+# same issue (a work run and the operator's conversation session) used to both
+# queue "Fix issue #N" and run the work twice. Serialize per issue under a
+# flock held until this script exits, then refuse when an issue brief is
+# already queued (inbox/) or claimed (processing/) while the worker is live or
+# sidelined (the check itself sits after the window checks below). The lock is
+# taken first, since salvage_stale_queue moves queued briefs aside.
+# --wake resumes an already-queued brief, so it is exempt from the refusal.
+# To send a worker something new, use requeue.sh; to force a second issue
+# brief anyway, set PROVISION_ALLOW_DUPLICATE=1.
+if command -v flock >/dev/null 2>&1; then
+    mkdir -p "$WT/.swarm/tasks/inbox" "$WT/.swarm/tasks/processing"
+    if { exec {DISPATCH_LOCK_FD}>"$WT/.swarm/dispatch.lock"; } 2>/dev/null; then
+        flock -w "${PROVISION_DISPATCH_LOCK_TIMEOUT_SECS:-120}" "$DISPATCH_LOCK_FD" \
+            || { echo "ERROR: another provision of issue #$ISSUE holds the dispatch lock — nothing queued. Retry." >&2; exit 5; }
+    fi
+fi
 # A live iss-N window means "queue a follow-up": no caps, no spawn.
 # remain-on-exit=failed (llm-start.sh) keeps a crashed window listed, so a
 # dead pane is reclaimed and treated as no window (#493).
@@ -710,6 +729,23 @@ fi
 # feature exists to protect, not abandoned work from a dead session.
 if [ "$WINDOW_WAS_LISTED" -eq 0 ] && [ "$WAKE" = "0" ] && [ ! -e "$WT/.swarm/sidelined" ]; then
     salvage_stale_queue no_window inbox processing
+fi
+
+# issue #766: live (or sidelined) worker + an issue brief already queued/claimed
+# = duplicate dispatch. A dead/absent window was salvaged above, so crash
+# recovery (#578) still re-provisions normally.
+if [ "$WAKE" = "0" ] && [ "${PROVISION_ALLOW_DUPLICATE:-0}" != "1" ] \
+    && { [ "$WINDOW_EXISTS" -eq 1 ] || [ -e "$WT/.swarm/sidelined" ]; }; then
+    DUP_BRIEFS="$(grep -lE "^Fix issue #${ISSUE}\\. Details follow" \
+        "$WT"/.swarm/tasks/inbox/*.md "$WT"/.swarm/tasks/processing/*.md 2>/dev/null || true)"
+    if [ -n "$DUP_BRIEFS" ]; then
+        echo "ERROR: issue #$ISSUE already has a dispatched brief — nothing queued (duplicate dispatch refused):" >&2
+        printf '         %s\n' $DUP_BRIEFS >&2
+        echo "       Send the worker something new with: requeue.sh $ISSUE <brief-file>; resume a parked one with: provision-worker.sh --wake $ISSUE;" >&2
+        echo "       or set PROVISION_ALLOW_DUPLICATE=1 to queue a second issue brief anyway." >&2
+        log_event worker.dispatch_refused "issue=$ISSUE reason=duplicate_brief"
+        exit 5
+    fi
 fi
 
 # Caps run before the brief is written, so a refusal leaves inbox/ untouched
@@ -777,6 +813,11 @@ if [ "${BRIEF_LINT:-1}" = "1" ] && [ -x "$SCRIPT_DIR/lint-brief.sh" ]; then
     "$SCRIPT_DIR/lint-brief.sh" "$DEST" || true
 fi
 fi
+
+# Brief is in the inbox: the duplicate-check critical section is over. Drop the
+# dispatch lock now so a tmux server started below can't inherit the fd and
+# hold the lock for its lifetime (issue #766).
+if [ -n "${DISPATCH_LOCK_FD:-}" ]; then exec {DISPATCH_LOCK_FD}>&-; fi
 
 # 4. Spawn (detached, so the coordinator keeps focus).
 if [ "$WINDOW_EXISTS" -eq 1 ]; then

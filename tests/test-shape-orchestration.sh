@@ -190,9 +190,11 @@ cd "$PROJECT_DIR"
 # gone, salvage stale queue contents" and wrongly move Test 1's brief out
 # of inbox/ before writing this one. Mark it alive so this test keeps
 # exercising its own idempotent-append concern, not the #578 reclaim path.
+# Issue #766: a plain re-run against a live worker now refuses (exit 5); this
+# test is about the TASK_ID collision suffix, so it opts into the duplicate.
 echo "iss-99" > "$TEST_DIR/tmux-windows.txt"
 echo "0" > "$TEST_DIR/tmux-pane-dead-iss-99.txt"
-"$PROVISION" 99 > "$TEST_DIR/prov-3.log" 2>&1 || red "provision-worker re-run exit non-zero"
+PROVISION_ALLOW_DUPLICATE=1 "$PROVISION" 99 > "$TEST_DIR/prov-3.log" 2>&1 || red "provision-worker re-run exit non-zero"
 grep -q "worktree already exists — reusing" "$TEST_DIR/prov-3.log" \
     || red "expected 'worktree already exists' message"
 # A second brief should now exist for issue 99

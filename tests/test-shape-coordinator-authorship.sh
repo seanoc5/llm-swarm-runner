@@ -136,6 +136,9 @@ case "$1 $2" in
         if [[ "$*" == *"mergeable,mergeStateStatus,headRefOid"* ]]; then
             # ci-wait.sh's initial call shape.
             echo "{\"mergeable\":\"${GH_MERGEABLE:-MERGEABLE}\",\"mergeStateStatus\":\"${GH_MERGE_STATE:-CLEAN}\",\"headRefOid\":\"deadbeef\"}"
+        elif [[ "$*" == *"--json state,headRefOid"* ]]; then
+            # issue #766: swarm-merge.sh's re-read under the action lock.
+            echo "{\"state\":\"${GH_LOCK_STATE:-OPEN}\",\"headRefOid\":\"${GH_HEAD_LIVE:-deadbeef}\"}"
         elif [[ "$*" == *"--json headRefOid"* ]]; then
             # issue #629 follow-up: ci-wait.sh's own per-poll-iteration
             # re-read, and swarm-merge.sh's fresh-read fallback when Gate 2

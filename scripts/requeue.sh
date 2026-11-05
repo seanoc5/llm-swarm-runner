@@ -355,8 +355,31 @@ else
     cat "$SOURCE" > "$TMP"
 fi
 
+# issue #766 (ADR 0006 §3): refuse a duplicate. If a brief with byte-identical
+# content is already queued (inbox/) or claimed (processing/) for this
+# worktree, a second requeue would run the same instruction twice (the work
+# run and the conversation session both answering one question). The check
+# and the claim below run under the same per-worktree flock provision-worker.sh
+# uses. REQUEUE_ALLOW_DUPLICATE=1 overrides.
+if command -v flock >/dev/null 2>&1 && { exec {DISPATCH_LOCK_FD}>"$WT/.swarm/dispatch.lock"; } 2>/dev/null; then
+    flock -w "${PROVISION_DISPATCH_LOCK_TIMEOUT_SECS:-120}" "$DISPATCH_LOCK_FD" \
+        || { echo "ERROR: another dispatch to $WT holds the dispatch lock — nothing queued. Retry." >&2; rm -f "$TMP"; exit 5; }
+fi
+if [ "${REQUEUE_ALLOW_DUPLICATE:-0}" != "1" ]; then
+    for existing in "$INBOX"/*.md "$WT/.swarm/tasks/processing"/*.md; do
+        [ -f "$existing" ] || continue
+        if cmp -s "$TMP" "$existing"; then
+            echo "ERROR: an identical brief is already pending: $existing — nothing queued (duplicate dispatch refused)." >&2
+            echo "       Set REQUEUE_ALLOW_DUPLICATE=1 to queue it again anyway." >&2
+            rm -f "$TMP"
+            exit 5
+        fi
+    done
+fi
+
 # Atomic claim into the inbox
 mv "$TMP" "$INBOX/$TASK_ID.md"
+if [ -n "${DISPATCH_LOCK_FD:-}" ]; then exec {DISPATCH_LOCK_FD}>&-; fi
 echo "✓ requeued: $INBOX/$TASK_ID.md"
 
 # Resolve the main repo via git so the session-name guess is robust to
