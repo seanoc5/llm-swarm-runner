@@ -96,6 +96,14 @@ COORD_WORK_RUN_CMD='echo after-timeout' "$RUN" "$P1" p >/dev/null 2>&1 || rc=$?
 [ ! -e "$P1/.swarm/work-run/retry-from" ] || red "1c: an ok run did not clear retry-from"
 green "1c: timed-out run is logged and releases the lock"
 
+# 1e. claude -p can report a failed run in its result line and still exit 0.
+COORD_WORK_RUN_CMD='echo "{\"type\":\"result\",\"is_error\":true,\"total_cost_usd\":0.5}"' "$RUN" "$P1" p >/dev/null 2>&1 || true
+tail -n 1 "$RUNS_LOG" | grep -q 'exit=0 status=error' || red "1e: is_error result not logged as error: $(tail -n 1 "$RUNS_LOG")"
+[ -s "$P1/.swarm/work-run/retry-from" ] || red "1e: error result did not leave retry-from"
+COORD_WORK_RUN_CMD='echo fine' "$RUN" "$P1" p >/dev/null 2>&1
+[ ! -e "$P1/.swarm/work-run/retry-from" ] || red "1e: ok run did not clear retry-from"
+green "1e: is_error result with exit 0 counts as a failed run"
+
 # 1d. Killed (TERM to the wrapper): exit 143, logged as killed, lock free, and
 # the command AND the process it started are really gone (not merely detached).
 KPIDS="$TEST_DIR/kill-pids"
@@ -180,6 +188,7 @@ start_watcher() {
         LLM_START="$FAKE_LLM_START" \
         COORD_MODE=split \
         COORD_WORK_RUN_CMD="bash $STUB" \
+        COORD_WORK_RUN="${WORK_RUN_OVERRIDE:-$RUN}" \
         COORD_INBOX_BATCH_SECS="$batch" \
         COORD_SPLIT_TICK_SECS=1 \
         COORD_WORK_RUN_RETRY_SECS=3 COORD_WORK_RUN_MAX_RETRIES=2 \
@@ -290,6 +299,33 @@ sleep 8
 [ "$(runs_started)" = 3 ] || red "2f: retries did not stop at the cap: $(runs_started) runs"
 grep -q 'coord.workrun.gave_up' "$EVENTS_LOG" || red "2f: giving up not logged"
 green "2f: always-failing run is retried at most COORD_WORK_RUN_MAX_RETRIES times"
+
+# 2g. A wrapper that dies before stamping a run (here: exits 1 at once) must
+# not be relaunched in a loop: the watcher applies the same back-off and cap.
+DEAD_WRAPPER="$TEST_DIR/dead-wrapper.sh"
+printf '#!/usr/bin/env bash\necho dead >&2\nexit 1\n' > "$DEAD_WRAPPER"; chmod +x "$DEAD_WRAPPER"
+stop_watcher; reset_state; echo 1 > "$STUB_SECS_FILE"; seed_last_start 20
+WORK_RUN_OVERRIDE="$DEAD_WRAPPER" start_watcher 600
+drop sidelined_worker 7 3
+sleep 14
+n_starts="$(grep -c 'coord.workrun.start' "$EVENTS_LOG" || true)"
+[ "$n_starts" = 3 ] || red "2g: a dead wrapper was started $n_starts times (want 1 + 2 retries)"
+grep -q 'wrapper_did_not_start' "$EVENTS_LOG" || red "2g: dead wrapper not logged"
+grep -q 'coord.workrun.gave_up' "$EVENTS_LOG" || red "2g: giving up not logged"
+green "2g: a wrapper that dies before running is backed off and capped, not looped"
+
+# 2h. Stopping the watcher mid-run must not let the exit recheck start a new run.
+stop_watcher; reset_state; echo 4 > "$STUB_SECS_FILE"; seed_last_start 5
+start_watcher 600
+drop sidelined_worker 8
+wait_for 8 started_ge 1 || red "2h: run did not start"
+sleep 1
+drop sidelined_worker 9          # would be picked up by the exit recheck
+stop_watcher
+wait_for 8 ended_ge 1 || red "2h: run did not finish after the watcher stopped"
+sleep 3
+[ "$(runs_started)" = 1 ] || red "2h: a run was started on behalf of a stopped watcher"
+green "2h: no run is started after the watcher has stopped"
 
 # 2d. Nothing was typed anywhere, in any case above (split mode, AUTO_COMPACT=1
 # set on purpose), and the old doorbell was never invoked.

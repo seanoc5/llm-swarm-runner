@@ -104,6 +104,11 @@ finish() {
     if command -v jq >/dev/null 2>&1; then
         line="$(grep -F '"type":"result"' "$LOG" 2>/dev/null | tail -n 1)"
         if [ -n "$line" ]; then
+            # claude -p can report a failed run (budget, API error) in the
+            # result line and still exit 0: that is not an ok run.
+            if [ "$status" = ok ] && [ "$(printf '%s' "$line" | jq -r '.is_error // false' 2>/dev/null)" = true ]; then
+                status=error
+            fi
             cost="$(printf '%s' "$line" | jq -r '.total_cost_usd // "-"' 2>/dev/null || echo -)"
             in_t="$(printf '%s' "$line" | jq -r '.usage.input_tokens // "-"' 2>/dev/null || echo -)"
             out_t="$(printf '%s' "$line" | jq -r '.usage.output_tokens // "-"' 2>/dev/null || echo -)"

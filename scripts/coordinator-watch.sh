@@ -3680,6 +3680,10 @@ format_event_line() {
 mkdir -p "$WORKSPACE" 2>/dev/null
 [ -d "$WORKSPACE" ]   || { echo "ERROR: workspace not a directory: $WORKSPACE" >&2; exit 1; }
 [ -x "$LLM_START" ]   || { echo "ERROR: llm-start.sh not executable: $LLM_START" >&2; exit 1; }
+if [ "$COORD_MODE" = "split" ] && [ ! -x "$COORD_WORK_RUN" ]; then
+    echo "ERROR: COORD_MODE=split but the work-run wrapper is not executable: $COORD_WORK_RUN" >&2
+    exit 1
+fi
 if [ "$POST_OUTCOMES" = "1" ]; then
     [ -x "$SWEEP" ] || { echo "ERROR: sweep script not executable: $SWEEP" >&2; exit 1; }
 fi
@@ -11130,17 +11134,37 @@ coord_split_start_run() {
     mkdir -p "$COORD_WORK_RUN_DIR" 2>/dev/null || true
     wake_clock_set "$(date +%s)"
     (
-        rc=0
+        rc=0 sig_before sig_after from=0 n=0 now2
+        sig_before="$(stat -c %y "$COORD_WORK_RUN_DIR/last-start" 2>/dev/null || true)"
         "$COORD_WORK_RUN" "$PROJECT_DIR" "$prompt" >/dev/null 2>>"$COORD_WORK_RUN_DIR/wrapper.err" || rc=$?
         if [ "$rc" = "75" ]; then
             log_event coord.workrun.busy "trigger=$trigger reason=lock_held_at_start"
         else
             log_event coord.workrun.exit "trigger=$trigger rc=$rc"
-            if [ "$rc" != "0" ] && read -r _ fails _ 2>/dev/null < "$COORD_WORK_RUN_DIR/retry-from" \
-                && [[ "$fails" =~ ^[0-9]+$ ]] && [ "$fails" -gt "$COORD_WORK_RUN_MAX_RETRIES" ]; then
-                log_event coord.workrun.gave_up "failures=$fails max_retries=$COORD_WORK_RUN_MAX_RETRIES"
+            sig_after="$(stat -c %y "$COORD_WORK_RUN_DIR/last-start" 2>/dev/null || true)"
+            if [ "$sig_after" = "$sig_before" ]; then
+                # The wrapper died before it stamped a run (not executable, env
+                # load or lock open failed): nothing moved the "announced"
+                # mark, so the same items would be due again at once, forever.
+                # Do the wrapper's failure bookkeeping here so the usual
+                # back-off and retry cap apply.
+                now2=$(date +%s)
+                from="$(coord_split_last_start)"
+                read -r from n _ 2>/dev/null < "$COORD_WORK_RUN_DIR/retry-from" || { from="$(coord_split_last_start)"; n=0; }
+                [[ "$from" =~ ^[0-9]+$ ]] || from=0
+                [[ "$n" =~ ^[0-9]+$ ]] || n=0
+                printf '%s\n' "$((now2 - 1))" > "$COORD_WORK_RUN_DIR/last-start"
+                printf '%s %s\n' "$from" "$((n + 1))" > "$COORD_WORK_RUN_DIR/retry-from"
+                log_event coord.workrun.error "trigger=$trigger rc=$rc reason=wrapper_did_not_start see=$COORD_WORK_RUN_DIR/wrapper.err"
+            fi
+            if read -r _ n _ 2>/dev/null < "$COORD_WORK_RUN_DIR/retry-from" \
+                && [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -gt "$COORD_WORK_RUN_MAX_RETRIES" ]; then
+                log_event coord.workrun.gave_up "failures=$n max_retries=$COORD_WORK_RUN_MAX_RETRIES"
             fi
         fi
+        # The watcher was stopped while this run went: do not start another
+        # paid run on its behalf ($$ is the watcher's pid, also in a subshell).
+        kill -0 $$ 2>/dev/null || exit 0
         coord_split_tick exit_recheck
     ) &
     COORD_SPLIT_RUN_PID=$!
