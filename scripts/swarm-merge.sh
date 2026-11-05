@@ -964,10 +964,75 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
           log_event merge.gate "pr=$PR_NUM gate=match-head-commit result=fallback-read-failed action=proceed-unpinned"
         fi
       fi
+      # issue #766 (ADR 0006 §3): action lock, held only from here to the end
+      # of the merge call — never around ci-wait.sh above, which can block
+      # 570 s. It keeps a work run and the operator's conversation session
+      # from both merging one PR. Under the lock, re-read the PR: someone
+      # else may have merged it already (then we skip the merge, not fail),
+      # or the head may have moved since the gates ran (refuse).
+      ACTION_LOCK_FILE="${COORD_ACTIONS_LOCK:-$MAIN_WT/.swarm/coord-actions.lock}"
+      mkdir -p "$(dirname "$ACTION_LOCK_FILE")" 2>/dev/null || true
+      ACTION_LOCK_HELD=0
+      if command -v flock >/dev/null 2>&1 && { exec {ACTION_LOCK_FD}>"$ACTION_LOCK_FILE"; } 2>/dev/null; then
+        if flock -w "${COORD_ACTIONS_LOCK_TIMEOUT_SECS:-120}" "$ACTION_LOCK_FD"; then
+          ACTION_LOCK_HELD=1
+        else
+          echo "ERROR: swarm-merge.sh (exit 1, not provision-worker.sh's exit 5): PR #$PR_NUM: could not get the coordinator action lock ($ACTION_LOCK_FILE) within ${COORD_ACTIONS_LOCK_TIMEOUT_SECS:-120}s — another coordinator action holds it. Nothing merged; safe to re-run swarm-merge.sh once it finishes." >&2
+          log_event merge.gate "pr=$PR_NUM gate=action-lock result=timeout action=refuse"
+          exit 1
+        fi
+      else
+        if [ "$AUTO_LOW" = 1 ]; then
+          echo "ERROR: PR #$PR_NUM: action lock unavailable (no flock, or $ACTION_LOCK_FILE not writable) — refusing to merge --auto-$AUTO_RATING unlocked. A plain swarm-merge.sh $PR_NUM (no --auto-$AUTO_RATING) may proceed without it." >&2
+          log_event merge.gate "pr=$PR_NUM gate=action-lock result=unavailable action=refuse-auto-low"
+          exit 1
+        fi
+        echo "       $(c_amber "⚠ action lock unavailable (no flock, or lock file not writable) — merging without it")"
+        log_event merge.gate "pr=$PR_NUM gate=action-lock result=unavailable action=proceed-unlocked"
+      fi
+      # The head the gates actually saw: the CI-verified or reviewed commit, else the
+      # head from the initial PR read (never the fresh fallback read above).
+      INITIAL_HEAD="$(jq -r '.headRefOid // ""' <<<"$PR_JSON" 2>/dev/null || true)"
+      GATE_SHA="${CI_VERIFIED_SHA:-${REVIEWED_SHA:-$INITIAL_HEAD}}"
+      LOCK_JSON="" ; LOCK_RC=0
+      LOCK_JSON=$(gh pr view "$PR_NUM" --json state,headRefOid 2>/dev/null) || LOCK_RC=$?
+      LOCK_STATE=$(jq -r '.state // ""' <<<"$LOCK_JSON" 2>/dev/null || true)
+      LOCK_HEAD=$(jq -r '.headRefOid // ""' <<<"$LOCK_JSON" 2>/dev/null || true)
+      MERGED_BY_OTHER=0
+      if [ "$LOCK_RC" = 0 ] && [ "$LOCK_STATE" = "MERGED" ]; then
+        MERGED_BY_OTHER=1
+        echo "       $(c_amber "⚠ PR #$PR_NUM was merged by another actor while this merge waited for the action lock — skipping the merge call")"
+        log_event merge.gate "pr=$PR_NUM gate=action-lock result=already-merged action=skip-merge"
+      elif [ "$LOCK_RC" = 0 ] && [ -n "$LOCK_STATE" ] && [ "$LOCK_STATE" != "OPEN" ]; then
+        echo "ERROR: PR #$PR_NUM is $LOCK_STATE at merge time (re-read under the action lock) — nothing merged." >&2
+        log_event merge.gate "pr=$PR_NUM gate=action-lock result=state-$LOCK_STATE action=refuse"
+        exit 1
+      elif [ "$LOCK_RC" = 0 ] && [ -n "$LOCK_HEAD" ] && [ -n "$GATE_SHA" ] && [ "$LOCK_HEAD" != "$GATE_SHA" ]; then
+        echo "ERROR: PR #$PR_NUM's head moved between the gates and the merge (gated $GATE_SHA, now $LOCK_HEAD) — refusing. Re-run the gates on the new head." >&2
+        log_event merge.gate "pr=$PR_NUM gate=action-lock result=head-moved gated=$GATE_SHA now=$LOCK_HEAD action=refuse"
+        exit 1
+      elif [ "$LOCK_RC" = 0 ] && [ -n "$LOCK_HEAD" ] && [ -n "$INITIAL_HEAD" ] && [ "$LOCK_HEAD" != "$INITIAL_HEAD" ]; then
+        # ci-wait.sh follows new commits and reports the newest as verified-head, so
+        # GATE_SHA can equal a head that arrived during the CI wait; the authorship,
+        # review and migration gates only ever read INITIAL_HEAD (PR_JSON).
+        echo "ERROR: PR #$PR_NUM's head is $LOCK_HEAD now but the authorship/review/migration gates read $INITIAL_HEAD (it moved during the CI wait) — refusing. Re-run the gates on the new head." >&2
+        log_event merge.gate "pr=$PR_NUM gate=action-lock result=head-moved-since-gates gated=$INITIAL_HEAD now=$LOCK_HEAD action=refuse"
+        exit 1
+      elif [ "$LOCK_RC" != 0 ] || [ -z "$LOCK_HEAD" ]; then
+        if [ "$AUTO_LOW" = 1 ]; then
+          echo "ERROR: PR #$PR_NUM: re-read under the action lock failed — refusing to merge --auto-$AUTO_RATING without it." >&2
+          log_event merge.gate "pr=$PR_NUM gate=action-lock result=reread-failed action=refuse-auto-low"
+          exit 1
+        fi
+        echo "       $(c_amber "⚠ re-read under the action lock failed — continuing on the earlier read")"
+        log_event merge.gate "pr=$PR_NUM gate=action-lock result=reread-failed action=proceed"
+      fi
       MATCH_ARGS=()
       [ -n "$MATCH_SHA" ] && MATCH_ARGS=(--match-head-commit "$MATCH_SHA")
       MERGE_RC=0
-      gh pr merge "$PR_NUM" --squash "${MATCH_ARGS[@]}" || MERGE_RC=$?
+      if [ "$MERGED_BY_OTHER" = 0 ]; then
+        gh pr merge "$PR_NUM" --squash "${MATCH_ARGS[@]}" || MERGE_RC=$?
+      fi
       if [ "$MERGE_RC" != 0 ]; then
         # issue #492: a nonzero exit here used to be swallowed unconditionally
         # (the old --delete-branch local-delete step could fail harmlessly
@@ -1023,7 +1088,10 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
       # The daily changelog reads this to tell unattended merges from operator
       # ones; the colour marker alone can't (operator-merged 🟢/🟡 PRs exist).
       if [ "$AUTO_LOW" = 1 ]; then MERGE_MODE="unattended-$AUTO_RATING"; else MERGE_MODE=operator; fi
-      log_event merge.done "pr=$PR_NUM issue=${ISSUE:-none} mode=$MERGE_MODE"
+      # Merge call finished: release the action lock before cleanup (issue #766).
+      if [ "$ACTION_LOCK_HELD" = 1 ]; then exec {ACTION_LOCK_FD}>&-; ACTION_LOCK_HELD=0; fi
+      # Whoever actually merged logs merge.done; the loser of a race does not.
+      [ "${MERGED_BY_OTHER:-0}" = 1 ] || log_event merge.done "pr=$PR_NUM issue=${ISSUE:-none} mode=$MERGE_MODE"
       # issue #670: a stacked PR (base = this PR's head branch) is silently
       # CLOSED by GitHub when that branch is deleted, not retargeted. Move any
       # open child PRs onto this PR's own base first. If a retarget fails,
