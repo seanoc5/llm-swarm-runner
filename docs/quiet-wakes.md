@@ -56,3 +56,9 @@ Count every automatic wake (comparable to the issue's 209) with
 That excludes `coord.wake.skip`, `.deferred` and the other `coord.wake.*` bookkeeping lines.
 Baseline from the corpusminder coordinator (Nov 1–4): 31 operator prompts, 209
 automatic wakes, 95 "nothing new" replies.
+
+Per-day counts without grepping: `scripts/swarm-scoreboard.sh --wakes <project-dir | events.log>`
+(add `--json` for machines). It prints wakes per day split by typed doorbell, waiter and
+hook, plus summed `items`/`urgent`/`batched`. Quiet vs full replies cannot be derived:
+no event records which reply form the coordinator chose, so `urgent` vs `batched` is the
+nearest proxy. Logging the reply form would be a coordinator-side change (not done here).
