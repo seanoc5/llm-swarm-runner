@@ -529,7 +529,7 @@
 #                           worktree with a brief in inbox/ (requeue.sh) is
 #                           re-spawned via `provision-worker.sh --wake`,
 #                           which runs the usual caps and host admission —
-#                           a cap refusal (issue #664) is not retried every tick: it
+#                           a cap refusal (issue #664; except spawn_stagger/host_load, #758) is not retried every tick: it
 #                           waits until the iss-* window set changes or
 #                           WATCH_WAKE_BACKOFF_SECS=300 passes. Other
 #                           failures write one coord-inbox note per issue.
@@ -5717,8 +5717,8 @@ sideline_wake_pass() {
                 echo "[$(date +%T)] woke sidelined issue #$issue"
                 ;;
             3)
-                # #758: spawn_stagger / host_load clear within seconds — retry
-                # on the next tick; only slot/pause/memory refusals back off.
+                # #758: spawn_stagger (default 60s gap) and host_load retry
+                # on the next tick (sustained load can log every tick; see PR #763); slot/pause/memory refusals back off.
                 case "$out" in
                     *"cap.refused reason=spawn_stagger"*|*"cap.refused reason=host_load"*)
                         unset "SIDELINE_WAKE_REFUSED[$issue]" 2>/dev/null || true ;;
