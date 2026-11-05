@@ -16,14 +16,14 @@ trap 'rm -rf "$T"' EXIT
 
 # ── 1. fixture: exactly the SHOW lines, nothing HIDE ──
 out="$("$VIEW" --file "$FIX" --once --tail 100)"
-for want in SHOW-reply-one SHOW-operator-one SHOW-reply-two "SHOW-operator-two with a screenshot"; do
+for want in SHOW-reply-one SHOW-operator-one SHOW-reply-two SHOW-operator-queued "SHOW-operator-two with a screenshot"; do
     grep -qF "$want" <<<"$out" || red "missing visible message: $want"
 done
 green "operator and coordinator messages shown"
 if grep -n 'HIDE' <<<"$out"; then red "hidden kind leaked (lines above)"; fi
 green "tool calls/results, thinking, doorbells, stop-hook text, task notifications, compaction, subagent and synthetic turns all hidden"
-[ "$(grep -c '── you' <<<"$out")" = 2 ] && [ "$(grep -c '── coordinator' <<<"$out")" = 2 ] \
-    || red "expected 2 operator + 2 coordinator messages"
+[ "$(grep -c "── you" <<<"$out")" = 3 ] && [ "$(grep -c '── coordinator' <<<"$out")" = 2 ] \
+    || red "expected 3 operator + 2 coordinator messages"
 green "message count and order"
 first="$(grep -m1 -o 'SHOW-[a-z-]*' <<<"$out")"; [ "$first" = "SHOW-reply-one" ] || red "order wrong: $first"
 

@@ -28,7 +28,8 @@
 # `sdk-cli` and are skipped. A restart, /clear or compaction that starts a
 # new file is followed automatically.
 #
-# Shown:  user records with origin.kind "human" whose text is not a typed
+# Shown:  user records and queued_command attachments (messages typed while
+#         the coordinator was mid-turn) with origin.kind "human" whose text is not a typed
 #         doorbell (see HIDE_RE), and the text blocks of assistant records.
 # Hidden: tool calls/results, thinking, doorbell nudges ("Inbox:", wake
 #         prompts), stop-hook text, task notifications, peer messages,
@@ -78,7 +79,15 @@ render() {
         def texts: if (.message.content | type) == "string" then .message.content
                    else [.message.content[]? | select(.type == "text") | .text] | join("\n") end;
         select((.isSidechain // false) | not)
-        | if .type == "user" then
+        | if .type == "attachment" then
+            # A message typed while the coordinator is mid-turn is recorded
+            # only as a queued_command attachment (no user record follows).
+            select(.attachment.type == "queued_command" and .attachment.origin.kind == "human"
+                   and (.attachment.prompt | type) == "string")
+            | (.attachment.prompt | sub("^\\s+"; "") | sub("\\s+$"; "")) as $t
+            | select($t != "" and ($t | test($re) | not))
+            | "\($cy)── you · \(hhmm) ──\($cr)\n\($t)\n\u001e"
+          elif .type == "user" then
             select(.origin.kind == "human" and ((.isMeta // false) | not)
                    and ((.isCompactSummary // false) | not))
             | (texts | sub("^\\s+"; "") | sub("\\s+$"; "")) as $t
