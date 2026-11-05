@@ -190,7 +190,7 @@ start_watcher() {
         COORD_WORK_RUN_CMD="bash $STUB" \
         COORD_WORK_RUN="${WORK_RUN_OVERRIDE:-$RUN}" \
         COORD_INBOX_BATCH_SECS="$batch" \
-        COORD_SPLIT_TICK_SECS=1 \
+        COORD_SPLIT_TICK_SECS="${SPLIT_TICK:-1}" \
         COORD_WORK_RUN_RETRY_SECS=3 COORD_WORK_RUN_MAX_RETRIES=2 \
         SESSION_NAME="$SESSION_NAME" \
         WORKSPACE="$TEST_DIR" \
@@ -242,6 +242,9 @@ drop sidelined_worker 1
 wait_for 8 started_ge 1 || red "2a: urgent item did not start a run"
 [ "$(runs_started)" = 1 ] || red "2a: expected exactly 1 run, got $(runs_started)"
 wait_for 6 ended_ge 1 || red "2a: run did not finish"
+# The exit path (subshell after the wrapper returns) must itself have run: it
+# logs the exit and does the recheck. The 1 s tick loop cannot fake this event.
+wait_for 5 grep -q 'coord.workrun.exit .*rc=0' "$EVENTS_LOG" || red "2a: no coord.workrun.exit event after a successful run (exit subshell died?)"
 green "2a: urgent item starts a run at once"
 
 # 2b. Batched item: no run until the window (8 s after the last start) passes.
@@ -256,7 +259,7 @@ green "2b: batched item waits for the window, then runs"
 
 # 2c. A trigger during a run starts nothing; the exit recheck picks it up.
 stop_watcher; reset_state; echo 5 > "$STUB_SECS_FILE"; seed_last_start 5
-start_watcher 600
+SPLIT_TICK=30 start_watcher 600     # slow tick loop: only the exit recheck can start run 2
 drop sidelined_worker 3
 wait_for 8 started_ge 1 || red "2c: first run did not start"
 sleep 1
@@ -266,6 +269,7 @@ sleep 2
 [ "$(runs_ended)" = 0 ] || red "2c: first run ended earlier than expected"
 wait_for 12 started_ge 2 || red "2c: the item that arrived mid-run was dropped (no recheck run)"
 grep -q 'coord.workrun.busy' "$EVENTS_LOG" || red "2c: busy trigger not logged"
+grep -q 'coord.workrun.start trigger=exit_recheck' "$EVENTS_LOG" || red "2c: the second run was not started by the exit recheck"
 wait_for 10 ended_ge 2 || red "2c: second run did not finish"
 sleep 3
 [ "$(runs_started)" = 2 ] || red "2c: expected exactly 2 runs in total, got $(runs_started)"

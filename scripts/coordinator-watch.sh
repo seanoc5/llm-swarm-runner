@@ -11134,7 +11134,7 @@ coord_split_start_run() {
     mkdir -p "$COORD_WORK_RUN_DIR" 2>/dev/null || true
     wake_clock_set "$(date +%s)"
     (
-        rc=0 sig_before sig_after from=0 n=0 now2
+        rc=0; sig_before=""; sig_after=""; from=0; n=0; now2=0
         sig_before="$(stat -c %y "$COORD_WORK_RUN_DIR/last-start" 2>/dev/null || true)"
         "$COORD_WORK_RUN" "$PROJECT_DIR" "$prompt" >/dev/null 2>>"$COORD_WORK_RUN_DIR/wrapper.err" || rc=$?
         if [ "$rc" = "75" ]; then
