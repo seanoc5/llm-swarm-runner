@@ -10,6 +10,7 @@
 #   E. requeue.sh refuses a byte-identical brief that is already pending
 #   E2. requeue.sh dispatch-lock timeout exits 7, not the duplicate code 5
 #   H. --auto-low/--auto-medium refuse when the action lock is unavailable
+#   J. --expect-head refuses a stale SHA (early and under the lock), fails closed
 # gh/tmux/docker are stubbed on PATH.
 set -euo pipefail
 green()   { printf '\033[32m✓ %s\033[0m\n' "$*"; }
@@ -101,6 +102,31 @@ rc=0; ( cd "$REPO" && timeout 30 "$MERGE" 600 --no-kill >"$TEST_DIR/b.log" 2>&1 
 grep -q 'head moved' "$TEST_DIR/b.log" || red "no head-moved message: $(cat "$TEST_DIR/b.log")"
 [ "$(merges)" = 0 ] || red "gh pr merge was called despite the moved head"
 green "moved head refused, nothing merged"
+
+heading "J: --expect-head (issue #775)"
+reset
+rc=0; ( cd "$REPO" && timeout 30 "$MERGE" 600 --no-kill --expect-head bbb2222 >"$TEST_DIR/j1.log" 2>&1 ) || rc=$?
+[ "$rc" = 1 ] || red "stale --expect-head should exit 1, got $rc: $(cat "$TEST_DIR/j1.log")"
+grep -q 'not the approved bbb2222' "$TEST_DIR/j1.log" || red "no stale-head message: $(cat "$TEST_DIR/j1.log")"
+[ "$(merges)" = 0 ] || red "merged despite a stale --expect-head"
+green "J1: stale --expect-head refused, nothing merged"
+reset
+( cd "$REPO" && timeout 30 "$MERGE" 600 --no-kill --expect-head AAA1111 >"$TEST_DIR/j2.log" 2>&1 ) || red "matching --expect-head (uppercase prefix) failed: $(cat "$TEST_DIR/j2.log")"
+[ "$(merges)" = 1 ] || red "matching --expect-head expected 1 merge, got $(merges)"
+green "J2: matching --expect-head merges"
+reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/move-head"
+rc=0; ( cd "$REPO" && timeout 30 "$MERGE" 600 --no-kill --expect-head aaa1111 >"$TEST_DIR/j3.log" 2>&1 ) || rc=$?
+[ "$rc" = 1 ] || red "push between the early read and the lock should exit 1, got $rc"
+grep -q 'at merge time, not the approved aaa1111' "$TEST_DIR/j3.log" || red "no under-lock message: $(cat "$TEST_DIR/j3.log")"
+[ "$(merges)" = 0 ] || red "merged though the head moved after the early check"
+green "J3: head moved after approval check, caught under the lock"
+reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/fail-reread"
+rc=0; ( cd "$REPO" && timeout 30 "$MERGE" 600 --no-kill --expect-head aaa1111 >"$TEST_DIR/j4.log" 2>&1 ) || rc=$?
+[ "$rc" = 1 ] && [ "$(merges)" = 0 ] || red "unreadable head under the lock must fail closed (rc $rc): $(cat "$TEST_DIR/j4.log")"
+green "J4: unreadable re-read with --expect-head fails closed"
+rc=0; ( cd "$REPO" && timeout 30 "$MERGE" 600 --no-kill --expect-head zz >"$TEST_DIR/j5.log" 2>&1 ) || rc=$?
+[ "$rc" = 2 ] || red "bad --expect-head value should exit 2, got $rc"
+green "J5: malformed --expect-head is a usage error"
 
 # --auto-low path: fake ci-wait.sh that, like the real one, follows a head that
 # arrives during the wait and reports the NEWEST commit as verified-head.
