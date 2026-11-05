@@ -148,6 +148,87 @@ item sidelined_worker >/dev/null
 check "hook: urgent item rings with the woke-for suffix" "yes" \
     "$(hook | jq -r .reason | grep -q 'Woke for: 1 idle capacity, 1 sidelined worker\.$' && echo yes || echo no)"
 
+# ── Stop hook: no arm request when background tasks are off (issue #743) ────
+clear_inbox; rm -f "$S/coord-waiter-asked" "$S/coord-inbox-waiter"
+echo "$(( $(date +%s) - 10 )) 0" > "$S/coord-hook-rang"
+item deliver_stall >/dev/null
+hook_w() { printf '{"stop_hook_active":false}' | CLAUDE_PROJECT_DIR="$P" COORD_HOOK_STATE=1 COORD_INBOX_WAITER=1 "$@" "$HOOK" Stop; }
+hook_w env CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 | jq -r .reason | grep -q 'Arm the inbox waiter' && got=asked || got=silent
+check "hook: no arm request with background tasks disabled" silent "$got"
+echo "$(( $(date +%s) - 10 )) 0" > "$S/coord-hook-rang"
+hook_w env -u CLAUDE_CODE_DISABLE_BACKGROUND_TASKS | jq -r .reason | grep -q 'Arm the inbox waiter' && got=asked || got=silent
+check "hook: still asks to arm when background tasks are allowed" asked "$got"
+
+# ── the watcher's typed doorbell with no armed waiter (issue #743) ──────────
+WATCH="$ROOT/scripts/coordinator-watch.sh"
+clear_inbox; rm -f "$S/coord-waiter-asked" "$S/coord-inbox-waiter"
+eval "$(sed -n '/^mtime_epoch() {/,/^}/p; /^coord_inbox_count() {/,/^}/p; /^coord_inbox_nudge_text() {/,/^}/p; /^coord_inbox_nudge_pattern() {/,/^}/p; /^coord_typed_batching() {/,/^}/p; /^coord_last_ring() {/,/^}/p; /^coord_batch_note_ring() {/,/^}/p; /^coord_inbox_waiter_armed() {/,/^}/p; /^coord_wake_hold_reason() {/,/^}/p; /^coord_batch_window_open() {/,/^}/p' "$WATCH")"
+COORD_INBOX_DIR="$IN" COORD_HOOK_RANG_FILE="$S/coord-hook-rang" COORD_TYPED_RING_FILE="$S/coord-typed-ring" COORD_WAKE_PENDING_FILE="$S/pending.prompt"
+COORD_INBOX_NUDGE_TEMPLATE='Inbox: %N item(s) in .swarm/coord-inbox/ — read and triage them (see prompts/coordinator.md "Inbox").'
+COORD_HOOK_STATE=1 COORD_INBOX_WAITER=1 COORD_QUIET_WAKES=1 COORD_INBOX_BATCH_SECS=900
+COORD_INBOX_WAITER_FILE="$S/coord-inbox-waiter" COORD_INBOX_WAITER_STALE_SECS=30
+COORD_WAKE_BUSY_RETRY_SECS=0 WAKE_DEFER_ON_SWARM_BUSY=0
+coord_human_present() { [ "${HUMAN:-0}" = 1 ]; }
+worker_human_present() { return 1; }
+wake_debounced() { return 1; }
+HUMAN=0
+now=$(date +%s)
+echo "$((now - 10)) 0" > "$COORD_HOOK_RANG_FILE"
+item idle_capacity >/dev/null
+item outcome "Triggering outcome: issue=5 outcome=ok path=/x/a.ok.json" >/dev/null
+check "watcher: all-non-urgent inside the window is held" batch_window "$(coord_wake_hold_reason)"
+echo "$((now - 901)) 0" > "$COORD_HOOK_RANG_FILE"
+check "watcher: window counted from the last ring; elapsed rings" "" "$(coord_wake_hold_reason)"
+echo "$((now - 10)) 0" > "$COORD_HOOK_RANG_FILE"
+item deliver_stall >/dev/null
+check "watcher: an urgent item rings at once" "" "$(coord_wake_hold_reason)"
+HUMAN=1
+check "watcher: a present human still holds before batching" human_present "$(coord_wake_hold_reason)"
+HUMAN=0
+clear_inbox; item idle_capacity >/dev/null
+echo "$((now - 10)) 0" > "$COORD_HOOK_RANG_FILE"
+: > "$COORD_WAKE_PENDING_FILE"
+check "watcher: an already-released (pending) doorbell is not re-held" "" "$(coord_wake_hold_reason)"
+rm -f "$COORD_WAKE_PENDING_FILE"
+echo 0 > "$COORD_HOOK_RANG_FILE"
+check "watcher: no prior ring -> first item rings" "" "$(coord_wake_hold_reason)"
+echo "$((now - 10)) 0" > "$COORD_HOOK_RANG_FILE"
+COORD_QUIET_WAKES=0 COORD_INBOX_BATCH_SECS=0
+check "watcher: COORD_QUIET_WAKES=0 -> no batching" "" "$(coord_wake_hold_reason)"
+COORD_QUIET_WAKES=1 COORD_INBOX_BATCH_SECS=900
+COORD_INBOX_WAITER=0
+check "watcher: COORD_INBOX_WAITER unset -> exactly as before" "" "$(coord_wake_hold_reason)"
+COORD_INBOX_WAITER=1
+
+# nudge suffix + ring stamp
+clear_inbox; item outcome "Triggering outcome: issue=5 outcome=ok path=/x/a.ok.json" >/dev/null; item idle_capacity >/dev/null
+echo "$((now - 2000)) 0" > "$COORD_HOOK_RANG_FILE"
+nudge="$(coord_inbox_nudge_text)"
+case "$nudge" in
+    "Inbox: 2 item(s) in"*" Woke for: 1 outcome, 1 idle capacity.") got=suffixed ;; *) got="[$nudge]" ;;
+esac
+check "watcher: typed nudge ends with Woke for" suffixed "$got"
+nudge_re="^$(coord_inbox_nudge_pattern)\$"
+[[ "$nudge" =~ $nudge_re ]] && got=match || got=nomatch
+check "watcher: the suffixed nudge still matches its own pattern" match "$got"
+# #497: operator text typed after (or inside) a suffixed nudge must not read as the watcher's own paste.
+for extra in $'\n\nhelp me fix the build' ' and also help me' $'\nWoke for: 1 x.'; do
+    [[ "$nudge$extra" =~ $nudge_re ]] && got=match || got=nomatch
+    check "watcher: suffixed nudge + operator text does not match (#497): ${extra//$'\n'/|}" nomatch "$got"
+done
+COORD_INBOX_WAITER=0
+nudge="$(coord_inbox_nudge_text)"
+case "$nudge" in *"Woke for"*) got=suffixed ;; *) got=plain ;; esac
+check "watcher: no suffix when COORD_INBOX_WAITER is unset" plain "$got"
+COORD_INBOX_WAITER=1
+before_hook_rang="$(cat "$COORD_HOOK_RANG_FILE")"
+coord_batch_note_ring
+check "watcher: a typed ring never touches the hook-rang file (a failed paste must not read as delivered)" "$before_hook_rang" "$(cat "$COORD_HOOK_RANG_FILE")"
+check "watcher: coord_last_ring_at (hook/waiter side) sees the typed ring" "yes" "$([ "$(coord_last_ring_at "$S")" -ge "$now" ] && echo yes || echo no)"
+check "watcher: ringing stamps the last-ring file" "yes" "$([ "$(coord_last_ring)" -ge "$now" ] && echo yes || echo no)"
+sleep 1.1; item idle_capacity >/dev/null
+check "watcher: a later non-urgent item is batched from that ring" batch_window "$(coord_wake_hold_reason)"
+
 # ── prompt, env and docs ────────────────────────────────────────────────────
 for needle in 'Woke for:' '.swarm/needs-you.md' 'Quiet reply' 'Your list unchanged'; do
     grep -qF "$needle" "$ROOT/prompts/coordinator.md" && got=yes || got=no

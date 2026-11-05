@@ -95,8 +95,7 @@ while :; do
     { [ "$PPID" = "$parent" ] && kill -0 "$parent" 2>/dev/null; } || exit 0
     touch "$pid_file" 2>/dev/null || true
 
-    last_rang="$(cut -d' ' -f1 "$rang_file" 2>/dev/null || echo 0)"
-    [[ "$last_rang" =~ ^[0-9]+$ ]] || last_rang=0
+    last_rang="$(coord_last_ring_at "$swarm")"
     # Activity-poll items are inbox-only (no doorbell, issue #430): they
     # ride along with the next wake but never trigger one. Items newer than
     # the last ring (waiter or Stop hook) are unannounced: urgent ones ring

@@ -74,6 +74,10 @@ log_event() {
 # nothing otherwise.
 waiter_arm_request() {
     [ "${COORD_INBOX_WAITER:-0}" = "1" ] || return 0
+    # Issue #743: the waiter runs via run_in_background, which does not exist
+    # when background tasks are disabled (the default since #715). Asking for
+    # it would only waste a turn; the watcher batches by typing instead.
+    [ "${CLAUDE_CODE_DISABLE_BACKGROUND_TASKS:-0}" = "1" ] && return 0
     local pid_file="$swarm/coord-inbox-waiter" asked_file="$swarm/coord-waiter-asked"
     local pid m asked
     if read -r pid _ 2>/dev/null < "$pid_file" && [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
@@ -94,8 +98,7 @@ case "$event" in
     Notification)     write_state waiting ;;
     Stop)
         active="$(printf '%s' "$input" | jq -r '.stop_hook_active // false' 2>/dev/null || echo false)"
-        last_rang="$(cut -d' ' -f1 "$rang_file" 2>/dev/null || echo 0)"
-        [[ "$last_rang" =~ ^[0-9]+$ ]] || last_rang=0
+        last_rang="$(coord_last_ring_at "$swarm")"
         # Same urgent-vs-batched gate as coord-inbox-wait.sh (issue #730).
         coord_inbox_scan "$inbox" "$last_rang"
         count="$CIB_TOTAL"

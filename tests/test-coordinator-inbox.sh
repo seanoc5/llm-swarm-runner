@@ -207,6 +207,9 @@ poll_until 20 0.5 bash -c "grep -q 'WAKE:' '$WAKE_LOG'" \
 $(cat "$TEST_DIR/watch-2.log")
 events.log:
 $(cat "$EVENTS_LOG" 2>/dev/null || echo '(missing)')"
+# The watcher logs deferred_delivered after the launcher stub returns (same
+# race as #737): wait for it before stopping the watcher.
+poll_until 10 0.2 bash -c "grep -q 'coord.wake.deferred_delivered .*trigger=pane_busy' '$EVENTS_LOG'" || true
 stop_watcher
 
 grep -q 'Inbox: 1 item(s)' "$WAKE_LOG" || red "expected the inbox nudge in the delivered busy-deferred wake; got: $(cat "$WAKE_LOG")"

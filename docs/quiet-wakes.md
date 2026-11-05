@@ -8,9 +8,10 @@ that changed nothing for you, or you want the old wake-per-item behaviour back.*
 Three parts, all controlled by `COORD_QUIET_WAKES` (default `1`; batching and
 the "Woke for" suffix need `COORD_HOOK_STATE=1` **and** `COORD_INBOX_WAITER=1`.
 Both ship `0`, so out of the box nothing here is active: as of 2026-11-05
-corpusminder is the only project known to set them. Without the waiter the
-watcher still types a plain doorbell per item, with no suffix, so the
-quiet-reply rule never applies):
+corpusminder is the only project known to set them. Since #743 the
+watcher also batches by itself when the waiter cannot run; see "Without a
+waiter" below. With `COORD_INBOX_WAITER` unset nothing here applies and the
+watcher types a plain doorbell per item, with no suffix):
 
 1. **Batching.** Inbox items are classified by kind (filename
    `<ts>-<kind>-<pid>-<rand>.md`). Urgent kinds wake the coordinator at once and
@@ -38,6 +39,33 @@ quiet-reply rule never applies):
 | any unknown kind, or an item whose body can't be read | |
 
 Unclassifiable means urgent: an item is never delayed by a guess.
+
+## Without a waiter (background tasks off)
+
+The waiter (`coord-inbox-wait.sh`) needs the Bash tool's `run_in_background`.
+Coordinators run with `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` by default since
+#715 (`COORDINATOR_ALLOW_BACKGROUND_TASKS=0`), so with `COORD_INBOX_WAITER=1`
+the waiter usually never arms and the idle coordinator is woken by the
+watcher's typed doorbell. Since #743 that path does the same batching:
+
+- All-non-urgent pending items are held (`reason=batch_window` in
+  `coord.wake.defer` / `coord.wake.skip`) until `COORD_INBOX_BATCH_SECS` after
+  the last ring. The last ring is the newest of the waiter / Stop hook
+  (`.swarm/coord-hook-rang`) and the watcher's own typed doorbell
+  (`.swarm/coord-typed-ring`, a separate file so a typed paste that failed is
+  never mistaken for a delivered wake).
+- An urgent item rings at once and flushes the queue. With no previous ring,
+  the first item also rings at once.
+- The typed nudge ends `Woke for: <kinds>.`, so the quiet-reply rule applies.
+- `pane_busy`, `human_present` and debounce still apply first: a working
+  coordinator or present operator is never interrupted. The batch hold clears
+  by itself and has no ceiling.
+- `coord-hook.sh` no longer asks the coordinator to arm the waiter when
+  `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`.
+
+If you do allow background tasks (`COORDINATOR_ALLOW_BACKGROUND_TASKS=1`) and
+the waiter arms, the waiter handles ringing as before; this path is the
+fallback. Restart the watcher after upgrading to pick it up.
 
 ## Settings
 
