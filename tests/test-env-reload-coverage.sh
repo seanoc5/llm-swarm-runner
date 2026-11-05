@@ -25,6 +25,7 @@ passed_keys() {
 # "worker": only runs in worker windows/containers, which get PASS_VARS.
 declare -A ALLOW=(
   [scripts/coord-hook.sh]="inherits: hook child of coordinator-claude.sh, which sources the loader"
+  [scripts/_coord-inbox-batch.sh]="inherits: sourced by coord-hook.sh / coord-inbox-wait.sh / coordinator-watch.sh, which have the key"
   [scripts/coord-inbox-wait.sh]="inherits: armed from inside the coordinator claude process"
   [scripts/dep-proxy.sh]="worker: started by sandbox.sh/provision-worker.sh (PASS_VARS)"
   [scripts/worker-listener.sh]="worker: runs via sandbox.sh listener; PASS_VARS carries its keys"

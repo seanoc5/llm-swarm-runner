@@ -55,6 +55,8 @@ events="$swarm/events.log"
 template="${COORD_INBOX_NUDGE_TEMPLATE:-Inbox: %N item(s) in .swarm/coord-inbox/ — read and triage them (see prompts/coordinator.md \"Inbox\").}"
 
 now="$(date +%s)"
+# shellcheck source=scripts/_coord-inbox-batch.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_coord-inbox-batch.sh"
 
 write_state() {
     local tmp
@@ -92,23 +94,21 @@ case "$event" in
     Notification)     write_state waiting ;;
     Stop)
         active="$(printf '%s' "$input" | jq -r '.stop_hook_active // false' 2>/dev/null || echo false)"
-        count=0 newest=0
-        for f in "$inbox"/*.md; do
-            [ -f "$f" ] || continue
-            count=$((count + 1))
-            m="$(stat -c %Y "$f" 2>/dev/null || echo 0)"
-            [ "$m" -gt "$newest" ] && newest="$m"
-        done
         last_rang="$(cut -d' ' -f1 "$rang_file" 2>/dev/null || echo 0)"
         [[ "$last_rang" =~ ^[0-9]+$ ]] || last_rang=0
-        if [ "$active" != "true" ] && [ "$count" -gt 0 ] && [ "$newest" -gt "$last_rang" ]; then
+        # Same urgent-vs-batched gate as coord-inbox-wait.sh (issue #730).
+        coord_inbox_scan "$inbox" "$last_rang" 0 0
+        count="$CIB_TOTAL"
+        woke="$(coord_woke_for "$inbox" "$last_rang")"
+        if [ "$active" != "true" ] && [ "$count" -gt 0 ] && [ $((CIB_URGENT + CIB_BATCHED)) -gt 0 ] \
+                && coord_should_ring "$last_rang" "$now"; then
             printf '%s %s\n' "$now" "$count" > "$rang_file" 2>/dev/null || true
             # Same debounce clock the watcher stamps when it rings.
             printf '%s\n' "$now" > "$swarm/coord-wake-last" 2>/dev/null || true
             write_state busy
-            log_event "coord.wake.hook_rang items=$count"
+            log_event "coord.wake.hook_rang items=$count urgent=$CIB_URGENT batched=$CIB_BATCHED"
             arm="$(waiter_arm_request)"
-            jq -n --arg r "${template//%N/$count}${arm:+ $arm}" '{decision: "block", reason: $r}'
+            jq -n --arg r "${template//%N/$count}${woke:+ Woke for: $woke.}${arm:+ $arm}" '{decision: "block", reason: $r}'
         elif arm="$(waiter_arm_request)" && [ -n "$arm" ]; then
             write_state busy
             jq -n --arg r "$arm" '{decision: "block", reason: $r}'

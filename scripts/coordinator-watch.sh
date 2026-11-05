@@ -611,6 +611,18 @@
 #                           handling for the same wake, and from
 #                           redeciding the same still-pending note on
 #                           every later tick.
+#   COORD_QUIET_WAKES=1     (issue #730) master switch for quiet wakes: 1 = batch non-urgent
+#                           inbox kinds (COORD_INBOX_BATCH_SECS) and add "Woke for: <kinds>."
+#                           to the nudge, which cues the coordinator's quiet-reply rule;
+#                           0 = every item wakes, no suffix, full digest every time.
+#   COORD_INBOX_BATCH_SECS=900  (issue #730) with COORD_HOOK_STATE=1: non-urgent inbox
+#                           kinds (idle_capacity, ok outcomes, fyi outbox,
+#                           dispatch_pause_lifted) wake the coordinator at most once per
+#                           this many seconds; urgent kinds (deliver_stall, stranded_brief,
+#                           worktree_vanished, sidelined_worker, failed outcomes,
+#                           decision-needed / red-CI outbox, unknown kinds) wake at once
+#                           and flush the queue. 0 = every item wakes. The typed
+#                           waiter_armed fallback waits GRACE + BATCH secs.
 #   COORD_INBOX_NUDGE_TEMPLATE=(built-in)
 #                           (issue #430) The ONE-LINE doorbell text pasted
 #                           into the coordinator's composer once the wake is
@@ -2739,6 +2751,8 @@ WATCH_STALL_FLAG_SECS="${WATCH_STALL_FLAG_SECS:-600}"
 WATCH_WINDOW_FLAGS_SWEEP_SECS="${WATCH_WINDOW_FLAGS_SWEEP_SECS:-10}"
 # shellcheck source=_window-flags.sh
 . "$SCRIPT_DIR/_window-flags.sh"
+# shellcheck source=scripts/_coord-inbox-batch.sh
+. "$SCRIPT_DIR/_coord-inbox-batch.sh"
 # shellcheck source=_conflict-brief.sh
 . "$SCRIPT_DIR/_conflict-brief.sh"
 WATCHER_QUIET="${WATCHER_QUIET:-0}"
@@ -3356,7 +3370,14 @@ COORD_INBOX_WAITER="${COORD_INBOX_WAITER:-0}"
 COORD_INBOX_WAITER_FILE="$PROJECT_DIR/.swarm/coord-inbox-waiter"
 COORD_INBOX_WAITER_STALE_SECS="${COORD_INBOX_WAITER_STALE_SECS:-30}"
 COORD_INBOX_WAITER_GRACE_SECS="${COORD_INBOX_WAITER_GRACE_SECS:-120}"
-for _v in COORD_INBOX_WAITER_STALE_SECS COORD_INBOX_WAITER_GRACE_SECS; do
+# COORD_INBOX_BATCH_SECS (issue #730): the waiter/Stop hook wake for
+# non-urgent inbox kinds at most once per this many seconds (default 900,
+# 0 = every item wakes). The typed fallback below waits that long extra so it
+# never defeats the batching; urgent items are rung by the waiter at once.
+COORD_INBOX_BATCH_SECS="${COORD_INBOX_BATCH_SECS:-900}"
+COORD_QUIET_WAKES="${COORD_QUIET_WAKES:-1}"
+[ "$COORD_QUIET_WAKES" = "0" ] && COORD_INBOX_BATCH_SECS=0
+for _v in COORD_INBOX_WAITER_STALE_SECS COORD_INBOX_WAITER_GRACE_SECS COORD_INBOX_BATCH_SECS; do
     if ! [[ "${!_v}" =~ ^[0-9]+$ ]]; then
         echo "ERROR: $_v must be a non-negative integer (got: ${!_v})" >&2
         exit 1
@@ -9617,7 +9638,7 @@ COORD_WAKE_WAITER_OVERDUE_SINCE=""
 coord_wake_waiter_hold() {
     coord_inbox_waiter_armed || return 1
     local age=$(( $(date +%s) - $1 ))
-    [ "$age" -lt "$COORD_INBOX_WAITER_GRACE_SECS" ] && return 0
+    [ "$age" -lt $(( COORD_INBOX_WAITER_GRACE_SECS + ${COORD_INBOX_BATCH_SECS:-0} )) ] && return 0
     if [ "$COORD_WAKE_WAITER_OVERDUE_SINCE" != "$1" ]; then
         log_event coord.wake.waiter_overdue "age=${age}s"
         COORD_WAKE_WAITER_OVERDUE_SINCE="$1"

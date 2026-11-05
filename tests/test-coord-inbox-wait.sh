@@ -186,6 +186,14 @@ coord_wake_waiter_hold "$((now - 200))" && got="hold" || got="type"
 check "past the grace: fall back to typing" "type" "$got"
 coord_wake_waiter_hold "$((now - 200))" || true
 check "overdue logged once per pending wake" "1" "$(grep -c waiter_overdue "$EV")"
+# Issue #730: with batching on, the typed fallback waits grace + batch secs so
+# it can't defeat the batching.
+COORD_INBOX_BATCH_SECS=900
+coord_wake_waiter_hold "$((now - 200))" && got="hold" || got="type"
+check "batching on: still holding past the plain grace" "hold" "$got"
+coord_wake_waiter_hold "$((now - 1100))" && got="hold" || got="type"
+check "batching on: types after grace + batch secs" "type" "$got"
+unset COORD_INBOX_BATCH_SECS
 
 touch -d '1 minute ago' "$COORD_INBOX_WAITER_FILE"
 check "stale heartbeat: not armed" "" "$(coord_wake_hold_reason)"

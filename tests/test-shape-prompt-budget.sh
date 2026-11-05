@@ -69,6 +69,11 @@
 # (temporary headroom, not a new baseline): #694 and #696 together landed
 # at 28036. The operator plans to revise and shrink coordinator.md; lower
 # this back when that lands (issue #509).
+# 2026-11-05: coordinator budget 30000 -> 30800. Issue #730 (quiet wakes):
+# a "Woke for:" opening line, a standing .swarm/needs-you.md list and a
+# quiet-reply rule that replaces the old no-ceremony bullet; ~700 bytes net
+# after tightening twice. Further detail lives in docs/quiet-wakes.md. Still
+# a stopgap until #509 shrinks the file.
 set -euo pipefail
 
 green() { printf '\033[32m✓ %s\033[0m\n' "$*"; }
@@ -76,7 +81,7 @@ red()   { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKER_MAX="${WORKER_MD_MAX_BYTES:-24200}"
-COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-30000}"
+COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-30800}"
 BARE_MAX="${WORKER_BARE_MD_MAX_BYTES:-11400}"   # issue #510 trial prompt; ~7.5KB is script-parsed contract
 
 check() {
