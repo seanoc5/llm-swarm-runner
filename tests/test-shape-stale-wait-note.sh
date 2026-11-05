@@ -38,7 +38,12 @@ READY_SWEEP="$TEST_DIR/fake-ready-sweep.sh"
 printf '#!/usr/bin/env bash\ncat "%s"\n' "$SWEEP_OUT" > "$READY_SWEEP"
 chmod +x "$READY_SWEEP"
 log_event() { :; }
+RINGS="$TEST_DIR/rings.log"
+: > "$RINGS"
+coord_ring_doorbell() { printf '%s %s\n' "$1" "${2:-}" >> "$RINGS"; }
 declare -A STALE_WAIT_NOTED=()
+declare -A CI_FAILING_NOTED=()
+CI_FAILING_RING_DIR="$PROJECT_DIR/.swarm/ci-failing-ring-pending"
 
 # shellcheck source=/dev/null
 . <(extract_fn coord_inbox_write; extract_fn ready_sweep_pass)
@@ -72,5 +77,25 @@ printf '%s\n' "$MERGED" > "$SWEEP_OUT"
 ready_sweep_pass >/dev/null
 [ "$(notes)" = "2" ] || red "expected a second note, got $(notes)"
 green "re-occurrence isn't permanently suppressed"
+
+heading "Test 5 (issue #729): a parked draft going red writes one ci_failing note per head sha"
+cf() { find "$COORD_INBOX_DIR" -maxdepth 1 -name '*-ci_failing-*.md' 2>/dev/null | wc -l | tr -d ' '; }
+RED='#31 ci-failing: needs a fix push (sha=deadbeef)'
+printf '%s\n' "$RED" > "$SWEEP_OUT"
+ready_sweep_pass >/dev/null
+[ "$(cf)" = "1" ] || red "expected 1 ci_failing note, got $(cf)"
+grep -q "PR #31 has red CI on deadbee" "$COORD_INBOX_DIR"/*-ci_failing-*.md || red "unexpected note: $(cat "$COORD_INBOX_DIR"/*-ci_failing-*.md)"
+ready_sweep_pass >/dev/null
+[ "$(cf)" = "1" ] || red "same sha must dedupe, got $(cf)"
+printf '#31 ci-failing: needs a fix push (sha=cafe1234)\n' > "$SWEEP_OUT"
+ready_sweep_pass >/dev/null
+[ "$(cf)" = "2" ] || red "new head sha must note again, got $(cf)"
+green "one note per PR+sha"
+
+heading "Test 6 (issue #729): ready_sweep_pass never rings itself; it queues one ring per new note"
+[ ! -s "$RINGS" ] || red "ready_sweep_pass must not call coord_ring_doorbell (timer-loop process): $(cat "$RINGS")"
+[ "$(ls "$CI_FAILING_RING_DIR" | wc -l | tr -d ' ')" = "2" ] || red "expected 2 queued rings, got: $(ls "$CI_FAILING_RING_DIR")"
+[ -e "$CI_FAILING_RING_DIR/31-deadbeef" ] && [ -e "$CI_FAILING_RING_DIR/31-cafe1234" ] || red "queue lacks pr-sha files: $(ls "$CI_FAILING_RING_DIR")"
+green "no direct ring; ring queued once per new note (deduped repeat adds nothing)"
 
 green "ALL TESTS PASSED"

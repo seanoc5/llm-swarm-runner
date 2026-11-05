@@ -34,9 +34,11 @@ WATCH_IDLE_CAPACITY_WAKE_SECS=2700
 WATCH_IDLE_CAPACITY_CHECK_SECS=0
 WATCH_IDLE_CAPACITY_REPEAT_SECS=21600
 IDLE_CAPACITY_SET_FILE="$PROJECT_DIR/.swarm/idle-capacity-set.last"
+CI_FAILING_RING_DIR="$PROJECT_DIR/.swarm/ci-failing-ring-pending"
+WATCH_STALE_WAIT_CHECK=1; declare -A STALE_WAIT_NOTED=() CI_FAILING_NOTED=()
 
-eval "$(sed -n '/^coord_inbox_write() {/,/^}/p; /^coord_ring_doorbell() {/,/^}/p; /^dispatch_pause_active() {/,/^}/p; /^capacity_free_slots() {/,/^}/p; /^dispatchable_issue_counts() {/,/^}/p; /^dispatch_pause_wake_pass() {/,/^}/p; /^idle_capacity_wake_pass() {/,/^}/p; /^coord_pending_approval_age() {/,/^}/p' "$WATCH")"
-for fn in coord_ring_doorbell dispatch_pause_wake_pass idle_capacity_wake_pass coord_pending_approval_age; do
+eval "$(sed -n '/^coord_inbox_write() {/,/^}/p; /^coord_ring_doorbell() {/,/^}/p; /^dispatch_pause_active() {/,/^}/p; /^capacity_free_slots() {/,/^}/p; /^dispatchable_issue_counts() {/,/^}/p; /^dispatch_pause_wake_pass() {/,/^}/p; /^idle_capacity_wake_pass() {/,/^}/p; /^ci_failing_ring_pass() {/,/^}/p; /^ready_sweep_pass() {/,/^}/p; /^coord_pending_approval_age() {/,/^}/p' "$WATCH")"
+for fn in coord_ring_doorbell dispatch_pause_wake_pass idle_capacity_wake_pass ci_failing_ring_pass ready_sweep_pass coord_pending_approval_age; do
     declare -F "$fn" >/dev/null || red "could not extract $fn from coordinator-watch.sh"
 done
 LAST_IDLE_CAPACITY_CHECK=0
@@ -73,7 +75,7 @@ echo '[{"number":10,"labels":[{"name":"night-ok"}]},{"number":11,"labels":[{"nam
 
 notes() { find "$COORD_INBOX_DIR" -maxdepth 1 -name "*-$1-*.md" 2>/dev/null | wc -l | tr -d ' '; }
 rings() { [ -f "$RANG" ] && wc -l < "$RANG" | tr -d ' ' || echo 0; }
-reset() { rm -rf "$COORD_INBOX_DIR" "$RANG" "$IDLE_CAPACITY_WAKE_FILE" "$IDLE_CAPACITY_SET_FILE" "$DISPATCH_PAUSE_SEEN_FILE"; : > "$EV"; LAST_IDLE_CAPACITY_CHECK=0; HOLD=""; BUSY=0; APPROVAL_AGE=""; }
+reset() { rm -rf "$CI_FAILING_RING_DIR" "$COORD_INBOX_DIR" "$RANG" "$IDLE_CAPACITY_WAKE_FILE" "$IDLE_CAPACITY_SET_FILE" "$DISPATCH_PAUSE_SEEN_FILE"; : > "$EV"; LAST_IDLE_CAPACITY_CHECK=0; HOLD=""; BUSY=0; APPROVAL_AGE=""; }
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 check "free slots = min(MAX_WORKERS - iss windows, MAX_TMUX_WINDOWS - windows)" "2" "$(capacity_free_slots)"
@@ -308,4 +310,34 @@ check "unchanged set past the repeat window: notes again" "1" "$(notes idle_capa
 
 reset; echo '[{"number":21,"title":"epic: big thing","labels":[]},{"number":12,"title":"Tracking: stuff","labels":[]},{"number":13,"title":"FYI - note","labels":[]},{"number":14,"title":"Fix bug","labels":[]},{"number":15,"title":"Tracking pixel broken","labels":[]},{"number":16,"title":"Tracker UI crash","labels":[]},{"number":17,"title":"FYI update","labels":[]},{"number":18,"title":"Tracking – stuff","labels":[]}]' > "$AVAILABLE_JSON"
 check "epic/tracking/FYI titles are not counted (real bugs are)" "4 0" "$(dispatchable_issue_counts | cut -d' ' -f1,2)"
+
+# ── issue #729: ci_failing rings come from the capacity loop, not the sweep ──
+reset; CI_FAILING_NOTED=()
+FAKE_SWEEP="$T/fake-sweep"; READY_SWEEP="$T/ready-sweep"
+printf '#!/bin/sh\ncat "%s"\n' "$FAKE_SWEEP" > "$READY_SWEEP"; chmod +x "$READY_SWEEP"
+echo '#31 ci-failing: needs a fix push (sha=deadbeef)' > "$FAKE_SWEEP"
+ready_sweep_pass >/dev/null
+check "sweep pass writes the ci_failing inbox note" "1" "$(notes ci_failing)"
+check "sweep pass itself never rings (real coord_ring_doorbell, llm-start stub)" "0" "$(rings)"
+ci_failing_ring_pass
+check "capacity-loop pass rings llm-start once for the queued note" "1" "$(rings)"
+grep -q "trigger=ci_failing pr=31 sha=deadbeef" "$EV" && got=yes || got=no
+check "coord.wake event carries trigger, pr and sha" "yes" "$got"
+ci_failing_ring_pass
+check "queue is consumed: a second pass does not ring again" "1" "$(rings)"
+ready_sweep_pass >/dev/null
+ci_failing_ring_pass
+check "deduped sweep repeat queues nothing, no second ring" "1" "$(rings)"
+printf '%s\n%s\n' '#31 ci-failing: needs a fix push (sha=deadbeef)' '#32 ci-failing: needs a fix push (sha=cafe1234)' > "$FAKE_SWEEP"
+ready_sweep_pass >/dev/null
+ci_failing_ring_pass
+check "two new notes in one sweep: one ring for the batch" "2" "$(rings)"
+reset; CI_FAILING_NOTED=()
+echo '#31 ci-failing: needs a fix push (sha=deadbeef)' > "$FAKE_SWEEP"
+HOLD=pane_busy
+ready_sweep_pass >/dev/null; ci_failing_ring_pass
+grep -q "held pane_busy" "$EV" && got=yes || got=no
+check "held coordinator: ring is deferred and marked pending, not pasted" "yes" "$got"
+check "held coordinator: llm-start not called" "0" "$(rings)"
+
 green "all capacity-wake checks passed"

@@ -3470,6 +3470,9 @@ DISPATCH_PAUSE_FILE="$HOST_STATE_DIR/dispatch-paused"
 IDLE_CAPACITY_WAKE_FILE="$PROJECT_DIR/.swarm/idle-capacity-wake.last"
 IDLE_CAPACITY_SET_FILE="$PROJECT_DIR/.swarm/idle-capacity-set.last"
 DISPATCH_PAUSE_SEEN_FILE="$PROJECT_DIR/.swarm/dispatch-pause-seen"
+# issue #729: ready_sweep_pass (timer-loop process) drops one file per new ci_failing
+# note here; ci_failing_ring_pass (run_capacity_wake_loop process) rings for them.
+CI_FAILING_RING_DIR="$PROJECT_DIR/.swarm/ci-failing-ring-pending"
 
 # log_event <category> <key=val>...
 # Writes one line: "<utc-iso8601>  <category>  k=v k=v ..."
@@ -3871,6 +3874,10 @@ declare -A STRANDED_BRIEF_LOGGED=()
 # Dropped once ready-sweep.sh stops reporting that pair (Next line rewritten,
 # or the PR left draft), so a later re-occurrence notes again.
 declare -A STALE_WAIT_NOTED=()
+
+# issue #729: ready_sweep_pass's ci-failing dedup, keyed "<pr>:<sha>" (a new
+# head sha after a fix push that is red again notes again).
+declare -A CI_FAILING_NOTED=()
 
 # issue #468: a check-fail retry (or any later reconciliation in
 # worker-listener.sh's write_outcome()) can flip a task's outcome level
@@ -4834,6 +4841,7 @@ orphan_sweep_pass() {
 # STALE_WAIT_NOTED; queueing any named brief stays the coordinator's call.
 ready_sweep_pass() {
     local dry_arg="" out line key pr trig k
+    local -A cfseen=()
     local -A seen=()
     [ "$DRY_RUN" = "1" ] && dry_arg="--dry-run"
     out="$(cd "$PROJECT_DIR" && WATCH_STALE_WAIT_CHECK="$WATCH_STALE_WAIT_CHECK" "$READY_SWEEP" $dry_arg 2>&1)" || {
@@ -4844,6 +4852,25 @@ ready_sweep_pass() {
         [ -n "$line" ] || continue
         echo "[$(date +%T)] ready-sweep: $line"
         log_event watch.ready_sweep "result=\"$line\""
+        if [[ "$line" =~ ^#([0-9]+)\ ci-failing:.*\(sha=([0-9a-fA-F]+)\) ]]; then
+            pr="${BASH_REMATCH[1]}" key="${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"
+            cfseen[$key]=1
+            [ -z "${CI_FAILING_NOTED[$key]:-}" ] || continue
+            if [ "$DRY_RUN" = "1" ]; then
+                echo "[DRY] would write coord-inbox ci-failing note for parked PR #$pr (sha ${BASH_REMATCH[2]})"
+            elif coord_inbox_write ci_failing "Parked draft PR #$pr has red CI on ${BASH_REMATCH[2]:0:7}; its worker may already have ended (check for a live iss window first). If nobody owns the fix, queue a fix brief or push it yourself, then re-run pr-ready.sh $pr. One note per head sha."; then
+                log_event coord.inbox.write "trigger=ci_failing pr=$pr sha=${BASH_REMATCH[2]}"
+                # coord_inbox_write drops a self-marker, so on_inbox_drop stays silent. Do NOT ring here:
+                # coord_ring_doorbell can block on llm-start.sh under COORD_WAKE_LOCK and this pass runs in
+                # run_watch_timer_loop. Queue it for ci_failing_ring_pass (capacity-loop process) instead.
+                mkdir -p "$CI_FAILING_RING_DIR" 2>/dev/null && : > "$CI_FAILING_RING_DIR/$pr-${BASH_REMATCH[2]}" 2>/dev/null || true
+            else
+                echo "[$(date +%T)] WARN: failed to write coord-inbox ci-failing note for PR #$pr" >&2
+                continue
+            fi
+            CI_FAILING_NOTED[$key]=1
+            continue
+        fi
         [[ "$line" =~ ^#([0-9]+)\ stale-wait:\ waiting\ on\ #([0-9]+) ]] || continue
         pr="${BASH_REMATCH[1]}" trig="${BASH_REMATCH[2]}" key="$pr:$trig"
         seen[$key]=1
@@ -4860,6 +4887,9 @@ ready_sweep_pass() {
     done <<<"$out"
     for k in "${!STALE_WAIT_NOTED[@]}"; do
         [ -n "${seen[$k]:-}" ] || unset 'STALE_WAIT_NOTED[$k]'
+    done
+    for k in "${!CI_FAILING_NOTED[@]}"; do
+        [ -n "${cfseen[$k]:-}" ] || unset 'CI_FAILING_NOTED[$k]'
     done
 }
 
@@ -10946,12 +10976,39 @@ idle_capacity_wake_pass() {
     coord_ring_doorbell idle_capacity "slots=$slots ready=$ready"
 }
 
-# run_capacity_wake_loop: both passes above, every WATCH_CAPACITY_POLL_SECS.
+# ci_failing_ring_pass (issue #729)
+#
+# Rings once for the ci_failing notes ready_sweep_pass queued in
+# $CI_FAILING_RING_DIR (a directory of "<pr>-<sha>" files: the two loops are
+# separate OS processes, so the hand-off has to live on disk). Files are
+# removed before ringing, so a crash loses at most a doorbell (the inbox note
+# is already durable); a held ring is re-marked by coord_ring_doorbell itself.
+ci_failing_ring_pass() {
+    [ -d "$CI_FAILING_RING_DIR" ] || return 0
+    local f name n=0 first="" list=""
+    for f in "$CI_FAILING_RING_DIR"/*; do
+        [ -e "$f" ] || continue
+        name="${f##*/}"
+        rm -f "$f" 2>/dev/null || continue
+        n=$((n + 1))
+        [ -n "$first" ] || first="$name"
+        list="${list:+$list,}$name"
+    done
+    [ "$n" -gt 0 ] || return 0
+    if [ "$n" = "1" ]; then
+        coord_ring_doorbell ci_failing "pr=${first%%-*} sha=${first#*-}"
+    else
+        coord_ring_doorbell ci_failing "count=$n prs=$list"
+    fi
+}
+
+# run_capacity_wake_loop: the passes above (plus ci_failing_ring_pass), every WATCH_CAPACITY_POLL_SECS.
 run_capacity_wake_loop() {
     while true; do
         sleep "$WATCH_CAPACITY_POLL_SECS"
         dispatch_pause_wake_pass || true
         idle_capacity_wake_pass || true
+        ci_failing_ring_pass || true
     done
 }
 
@@ -11278,7 +11335,7 @@ if [ "$STALL_WAKE_SECS" -gt 0 ]; then
     log_event watch.timer.start "stall_wake_secs=$STALL_WAKE_SECS"
 fi
 # Night-queue wakes: own process, started only when either check is on.
-if [ "$WATCH_CAPACITY_POLL_SECS" -gt 0 ] && { [ "$WATCH_DISPATCH_PAUSE_WAKE" = "1" ] || [ "$WATCH_IDLE_CAPACITY_WAKE_SECS" -gt 0 ]; }; then
+if [ "$WATCH_CAPACITY_POLL_SECS" -gt 0 ] && { [ "$WATCH_DISPATCH_PAUSE_WAKE" = "1" ] || [ "$WATCH_IDLE_CAPACITY_WAKE_SECS" -gt 0 ] || [ "$WATCH_READY_SWEEP_SECS" -gt 0 ]; }; then
     run_capacity_wake_loop &
     CAPACITY_WAKE_TIMER_PID=$!
     log_event watch.timer.start "capacity_poll_secs=$WATCH_CAPACITY_POLL_SECS dispatch_pause_wake=$WATCH_DISPATCH_PAUSE_WAKE idle_capacity_wake_secs=$WATCH_IDLE_CAPACITY_WAKE_SECS"

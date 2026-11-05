@@ -30,6 +30,13 @@ if [ "\$1 \$2" = "pr view" ]; then
     jq -c ".[\"\$3\"] // {\"state\":\"OPEN\"}" "$STATES" | jq -r "\${*: -1}"
     exit
 fi
+if [ "\$1 \$2" = "pr checks" ]; then
+    # issue #729: per-PR CI fixture (file "checks.<N>" = rc then output); logs the call.
+    echo "\$3" >> "$TEST_DIR/checks.log"
+    f="$TEST_DIR/checks.\$3"
+    [ -f "\$f" ] || { echo "no checks fixture" >&2; exit 2; }
+    tail -n +2 "\$f"; exit "\$(head -n1 "\$f")"
+fi
 [ "\${GH_LIST_FAILS:-0}" = "1" ] && exit 1
 printf '%s\n' "\$*" | grep -q -- '--draft' || { echo "expected --draft" >&2; exit 1; }
 cat "$FIXTURE"
@@ -66,6 +73,7 @@ run_sweep || red "expected exit 0: $(cat "$TEST_DIR/out.log")"
 [ "$(sort "$READY_LOG" | tr '\n' ' ')" = "11 12 " ] || red "expected pr-ready on 11 and 12 only, got: $(tr '\n' ' ' < "$READY_LOG")"
 grep -qx '#11 ci-pending: readied' "$TEST_DIR/out.log" || red "expected readied line: $(cat "$TEST_DIR/out.log")"
 grep -qx '#12 ci-unknown: still draft (exit 4)' "$TEST_DIR/out.log" || red "expected still-draft line: $(cat "$TEST_DIR/out.log")"
+grep -qx '#13 ci-failing: needs a fix push (sha=abc)' "$TEST_DIR/out.log" || red "expected ci-failing report for #13: $(cat "$TEST_DIR/out.log")"
 green "ci-failing, review-block, unbannered, null-body and mid-line-quoted drafts are left alone"
 
 heading "Test 2: --dry-run lists candidates without running pr-ready"
@@ -107,5 +115,45 @@ heading "Test 5: WATCH_STALE_WAIT_CHECK=0 turns the stale-wait check off"
 WATCH_STALE_WAIT_CHECK=0 run_sweep || red "expected exit 0"
 [ ! -s "$TEST_DIR/out.log" ] || red "expected no output with the check off: $(cat "$TEST_DIR/out.log")"
 green "off-switch honoured"
+
+heading "Test 6: --dry-run still reports ci-failing drafts (read-only)"
+cat > "$FIXTURE" <<'JSON'
+[{"number": 31, "body": "<!-- SWARM_DRAFT_REASON: ci-failing sha=deadbeef -->\nbody"}]
+JSON
+run_sweep --dry-run || red "expected exit 0"
+grep -qx '#31 ci-failing: needs a fix push (sha=deadbeef)' "$TEST_DIR/out.log" || red "dry run lost ci-failing line: $(cat "$TEST_DIR/out.log")"
+green "ci-failing reported in dry run"
+
+heading "Test 7 (issue #729): head == banner sha is reported ci-failing and NOT retried"
+cat > "$FIXTURE" <<'JSON'
+[{"number": 41, "headRefOid": "0ddba110ddba11", "body": "<!-- SWARM_DRAFT_REASON: ci-failing sha=0ddba110ddba11 -->\nbody"}]
+JSON
+run_sweep || red "expected exit 0"
+grep -qx '#41 ci-failing: needs a fix push (sha=0ddba110ddba11)' "$TEST_DIR/out.log" || red "expected ci-failing line: $(cat "$TEST_DIR/out.log")"
+[ ! -s "$READY_LOG" ] || red "unchanged red head must not be retried: $(cat "$READY_LOG")"
+green "unchanged head reports red"
+
+heading "Test 8 (issue #729): head moved is checked read-only; only verified red is reported, pr-ready never called"
+: > "$TEST_DIR/checks.log"
+printf '1\nlint\tfail\t1m\nunit\tpass\t2m\n' > "$TEST_DIR/checks.51"   # red
+printf '8\nlint\tpending\t0\n' > "$TEST_DIR/checks.52"                    # pending
+printf '0\nlint\tpass\t1m\n' > "$TEST_DIR/checks.53"                      # green
+printf '1\nHTTP 403: Resource not accessible by personal access token\n' > "$TEST_DIR/checks.54"  # unreadable
+printf '2\nboom\n' > "$TEST_DIR/checks.55"                                 # unexpected rc
+cat > "$FIXTURE" <<'JSON'
+[{"number": 51, "headRefOid": "feed5678", "body": "<!-- SWARM_DRAFT_REASON: ci-failing sha=0ddba11 -->\nbody"},
+ {"number": 52, "headRefOid": "feed5678", "body": "<!-- SWARM_DRAFT_REASON: ci-failing sha=0ddba11 -->\nbody"},
+ {"number": 53, "headRefOid": "feed5678", "body": "<!-- SWARM_DRAFT_REASON: ci-failing sha=0ddba11 -->\nbody"},
+ {"number": 54, "headRefOid": "feed5678", "body": "<!-- SWARM_DRAFT_REASON: ci-failing sha=0ddba11 -->\nbody"},
+ {"number": 55, "headRefOid": "feed5678", "body": "<!-- SWARM_DRAFT_REASON: ci-failing sha=0ddba11 -->\nbody"}]
+JSON
+run_sweep || red "expected exit 0: $(cat "$TEST_DIR/out.log")"
+[ "$(cat "$TEST_DIR/out.log")" = "#51 ci-failing: needs a fix push (sha=feed5678)" ] || red "expected only #51 red with the LIVE sha: $(cat "$TEST_DIR/out.log")"
+[ ! -s "$READY_LOG" ] || red "pr-ready must never run on a moved head: $(cat "$READY_LOG")"
+[ "$(sort "$TEST_DIR/checks.log" | tr '\n' ' ')" = "51 52 53 54 55 " ] || red "expected a checks read per moved PR: $(tr '\n' ' ' < "$TEST_DIR/checks.log")"
+run_sweep --dry-run || red "expected exit 0"
+grep -qx '#51 ci-failing: needs a fix push (sha=feed5678)' "$TEST_DIR/out.log" || red "dry run lost the moved-head red note"
+[ ! -s "$READY_LOG" ] || red "dry run must not call pr-ready"
+green "moved head: red notes with live sha; pending, green, unreadable, unexpected stay silent; no pr-ready"
 
 green "ALL TESTS PASSED"

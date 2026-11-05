@@ -8,7 +8,8 @@
 # that refusal, so a draft whose CI goes green a minute later used to sit
 # until a human noticed (fand-app #1533/#1534, 2026-10-10). This picks up
 # the open drafts whose reason is ci-pending or ci-unknown and retries them.
-# review-block and ci-failing need a fix first, so they are left alone.
+# review-block and ci-failing need a fix first, so they are not retried
+# (ci-failing is reported instead; see issue #729 below).
 #
 # The retry costs no extra self-review round: pr-ready.sh skips review when
 # the banner's sha= still matches the head commit. Run from inside the
@@ -34,9 +35,33 @@ PR_READY="${PR_READY_SCRIPT:-$SCRIPT_DIR/pr-ready.sh}"
 DRY_RUN=0
 [ "${1:-}" = "--dry-run" ] && DRY_RUN=1
 
-DRAFTS="$(gh pr list --state open --draft --limit 100 --json number,body)" \
+DRAFTS="$(gh pr list --state open --draft --limit 100 --json number,body,headRefOid)" \
     || { echo "ready-sweep: ERROR: gh pr list failed" >&2; exit 1; }
 CANDIDATES="$(jq -r '.[] | (.body // "" | capture("(?m)^<!-- SWARM_DRAFT_REASON: (?<r>ci-pending|ci-unknown) sha=").r) as $r | "\(.number) \($r)"' <<<"$DRAFTS")"
+
+# issue #729: a parked PR whose CI went red has no live owner (its worker ended
+# after writing an fyi note), so report it; coordinator-watch.sh turns the line
+# into one inbox note per (PR, sha). The banner proves only ITS OWN sha failed:
+#  - head == banner sha: report ci-failing with that sha.
+#  - head moved (a fix push): the banner says nothing about the new head, so do
+#    a read-only `gh pr checks` of the live head. Red: report with the LIVE sha.
+#    Pending, green or unknown: say nothing. pr-ready.sh is never called for
+#    these PRs: it would run a full self-review per sweep (no timeout, spends
+#    worker rounds) and never rewrites a held draft's banner. Cost: a green fix
+#    push on a parked draft waits until someone re-runs pr-ready.sh.
+# A missing headRefOid counts as "head unchanged". Reporting is read-only, so
+# --dry-run reports it too.
+FAILING="$(jq -r '.[] | (.body // "" | capture("(?m)^<!-- SWARM_DRAFT_REASON: ci-failing sha=(?<s>[0-9a-fA-F]+)").s // empty) as $s | (.headRefOid // $s) as $h | if $h == $s then "\(.number) \($s) report" else "\(.number) \($h) check" end' <<<"$DRAFTS")"
+while read -r pr sha action; do
+    [ -n "$pr" ] || continue
+    if [ "$action" = "check" ]; then
+        # exit 1 = a check failed, but a token that cannot read Checks also
+        # exits 1; require an actual `fail` row (tab-separated off a TTY).
+        rc=0; out="$(gh pr checks "$pr" 2>&1)" || rc=$?
+        { [ "$rc" = "1" ] && grep -Eq '[[:space:]]fail[[:space:]]' <<<"$out"; } || continue
+    fi
+    echo "#$pr ci-failing: needs a fix push (sha=$sha)"
+done <<<"$FAILING"
 
 while read -r pr reason; do
     [ -n "$pr" ] || continue
