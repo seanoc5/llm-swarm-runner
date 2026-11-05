@@ -117,4 +117,13 @@ run_sweep --dry-run || red "expected exit 0"
 grep -qx '#31 ci-failing: needs a fix push (sha=deadbeef)' "$TEST_DIR/out.log" || red "dry run lost ci-failing line: $(cat "$TEST_DIR/out.log")"
 green "ci-failing reported in dry run"
 
+heading "Test 7 (issue #729): ci-failing reports the live head sha, not the stale banner sha"
+cat > "$FIXTURE" <<'JSON'
+[{"number": 41, "headRefOid": "feed5678feed5678", "body": "<!-- SWARM_DRAFT_REASON: ci-failing sha=0ddba11 -->\nbody"}]
+JSON
+run_sweep || red "expected exit 0"
+grep -qx '#41 ci-failing: needs a fix push (sha=feed5678feed5678)' "$TEST_DIR/out.log" || red "expected live head sha: $(cat "$TEST_DIR/out.log")"
+! grep -q 0ddba11 "$TEST_DIR/out.log" || red "stale banner sha leaked: $(cat "$TEST_DIR/out.log")"
+green "sweep reports headRefOid"
+
 green "ALL TESTS PASSED"

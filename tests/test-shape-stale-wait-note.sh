@@ -38,6 +38,9 @@ READY_SWEEP="$TEST_DIR/fake-ready-sweep.sh"
 printf '#!/usr/bin/env bash\ncat "%s"\n' "$SWEEP_OUT" > "$READY_SWEEP"
 chmod +x "$READY_SWEEP"
 log_event() { :; }
+RINGS="$TEST_DIR/rings.log"
+: > "$RINGS"
+coord_ring_doorbell() { printf '%s %s\n' "$1" "${2:-}" >> "$RINGS"; }
 declare -A STALE_WAIT_NOTED=()
 declare -A CI_FAILING_NOTED=()
 
@@ -87,5 +90,11 @@ printf '#31 ci-failing: needs a fix push (sha=cafe1234)\n' > "$SWEEP_OUT"
 ready_sweep_pass >/dev/null
 [ "$(cf)" = "2" ] || red "new head sha must note again, got $(cf)"
 green "one note per PR+sha"
+
+heading "Test 6 (issue #729): each new ci_failing note rings the coordinator; a deduped repeat does not"
+[ "$(wc -l < "$RINGS" | tr -d ' ')" = "2" ] || red "expected 2 rings (one per new note), got: $(cat "$RINGS")"
+grep -qx 'ci_failing pr=31 sha=deadbeef' "$RINGS" || red "ring lacks pr=/sha= fields: $(cat "$RINGS")"
+grep -qx 'ci_failing pr=31 sha=cafe1234' "$RINGS" || red "second ring lacks new sha: $(cat "$RINGS")"
+green "doorbell rung once per new note"
 
 green "ALL TESTS PASSED"

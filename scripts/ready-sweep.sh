@@ -34,15 +34,17 @@ PR_READY="${PR_READY_SCRIPT:-$SCRIPT_DIR/pr-ready.sh}"
 DRY_RUN=0
 [ "${1:-}" = "--dry-run" ] && DRY_RUN=1
 
-DRAFTS="$(gh pr list --state open --draft --limit 100 --json number,body)" \
+DRAFTS="$(gh pr list --state open --draft --limit 100 --json number,body,headRefOid)" \
     || { echo "ready-sweep: ERROR: gh pr list failed" >&2; exit 1; }
 CANDIDATES="$(jq -r '.[] | (.body // "" | capture("(?m)^<!-- SWARM_DRAFT_REASON: (?<r>ci-pending|ci-unknown) sha=").r) as $r | "\(.number) \($r)"' <<<"$DRAFTS")"
 
 # issue #729: ci-failing drafts are not retried, but a parked PR whose CI went
 # red has no live owner (its worker ended after writing an fyi note), so report
-# each one with its head sha; coordinator-watch.sh turns it into one inbox note
-# per (PR, sha). Read-only, so --dry-run reports it too.
-jq -r '.[] | (.body // "" | capture("(?m)^<!-- SWARM_DRAFT_REASON: ci-failing sha=(?<s>[0-9a-fA-F]+)").s) as $s | "#\(.number) ci-failing: needs a fix push (sha=\($s))"' <<<"$DRAFTS"
+# each one with its live head sha (headRefOid, not the banner sha: only
+# pr-ready.sh rewrites the banner, so a worker that pushes a red fix and exits
+# leaves it stale; the banner sha is only the fallback);
+# coordinator-watch.sh turns it into one inbox note per (PR, sha). Read-only, so --dry-run reports it too.
+jq -r '.[] | (.body // "" | capture("(?m)^<!-- SWARM_DRAFT_REASON: ci-failing sha=(?<s>[0-9a-fA-F]+)").s) as $s | "#\(.number) ci-failing: needs a fix push (sha=\((.headRefOid // $s)))"' <<<"$DRAFTS"
 
 while read -r pr reason; do
     [ -n "$pr" ] || continue

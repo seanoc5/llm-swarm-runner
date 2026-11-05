@@ -4857,6 +4857,8 @@ ready_sweep_pass() {
                 echo "[DRY] would write coord-inbox ci-failing note for parked PR #$pr (sha ${BASH_REMATCH[2]})"
             elif coord_inbox_write ci_failing "Parked draft PR #$pr has red CI on ${BASH_REMATCH[2]:0:7}; its worker may already have ended (check for a live iss window first). If nobody owns the fix, queue a fix brief or push it yourself, then re-run pr-ready.sh $pr. One note per head sha."; then
                 log_event coord.inbox.write "trigger=ci_failing pr=$pr sha=${BASH_REMATCH[2]}"
+                # coord_inbox_write drops a self-marker, so on_inbox_drop stays silent; ring explicitly.
+                coord_ring_doorbell ci_failing "pr=$pr sha=${BASH_REMATCH[2]}"
             else
                 echo "[$(date +%T)] WARN: failed to write coord-inbox ci-failing note for PR #$pr" >&2
                 continue
