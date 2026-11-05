@@ -7,6 +7,8 @@
 #   D. provision-worker.sh refuses a duplicate dispatch for a live worker,
 #      but still re-provisions after a crash (no window)
 #   E. requeue.sh refuses a byte-identical brief that is already pending
+#   E2. requeue.sh dispatch-lock timeout exits 7, not the duplicate code 5
+#   H. --auto-low/--auto-medium refuse when the action lock is unavailable
 # gh/tmux/docker are stubbed on PATH.
 set -euo pipefail
 green()   { printf '\033[32m✓ %s\033[0m\n' "$*"; }
@@ -207,3 +209,28 @@ green "identical second requeue: exit 5, inbox unchanged"
 echo "different" > "$TEST_DIR/brief2.md"
 ( cd "$PROJECT_DIR" && bash "$LLM_SWARM_DIR/scripts/requeue.sh" "$WT" "$TEST_DIR/brief2.md" >/dev/null 2>&1 ) || red "a different brief should still queue"
 green "a different brief still queues"
+
+heading "E2: requeue.sh dispatch-lock timeout exits 7 (not 5) and says so"
+echo "third brief" > "$TEST_DIR/brief3.md"
+n2=$(find "$WT/.swarm/tasks/inbox" -name '*.md' | wc -l)
+( exec 9>"$(dirname "$WT")/.dispatch-$(basename "$WT").lock"; flock 9; sleep 6 ) & holder=$!
+sleep 1
+rc=0; ( cd "$PROJECT_DIR" && PROVISION_DISPATCH_LOCK_TIMEOUT_SECS=1 bash "$LLM_SWARM_DIR/scripts/requeue.sh" "$WT" "$TEST_DIR/brief3.md" >"$TEST_DIR/e2.log" 2>&1 ) || rc=$?
+kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+[ "$rc" = 7 ] || red "requeue lock timeout should exit 7, got $rc: $(cat "$TEST_DIR/e2.log")"
+grep -q 'not exit 5' "$TEST_DIR/e2.log" || red "requeue timeout message does not distinguish exit 5: $(cat "$TEST_DIR/e2.log")"
+grep -q 'Retry' "$TEST_DIR/e2.log" && red "requeue timeout message still says Retry"
+[ "$(find "$WT/.swarm/tasks/inbox" -name '*.md' | wc -l)" = "$n2" ] || red "a brief was queued despite the lock timeout"
+green "requeue lock timeout: exit 7, nothing queued"
+
+heading "H: action lock unavailable: --auto-low refuses, plain merge proceeds"
+reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/body-low"
+printf x > "$TEST_DIR/not-a-dir"                     # lock path under a regular file: unopenable
+rc=0; COORD_ACTIONS_LOCK="$TEST_DIR/not-a-dir/coord.lock" auto || rc=$?
+[ "$rc" != 0 ] || red "auto-low should refuse without the action lock: $(cat "$TEST_DIR/auto.log")"
+grep -q 'action lock unavailable' "$TEST_DIR/auto.log" || red "no lock-unavailable message: $(cat "$TEST_DIR/auto.log")"
+[ "$(merges)" = 0 ] || red "auto-low merged without the action lock"
+reset
+( cd "$REPO" && COORD_ACTIONS_LOCK="$TEST_DIR/not-a-dir/coord.lock" timeout 30 "$MERGE" 600 --no-kill >"$TEST_DIR/h.log" 2>&1 ) || red "plain merge should proceed without the lock: $(cat "$TEST_DIR/h.log")"
+[ "$(merges)" = 1 ] || red "plain merge expected 1 call, got $(merges)"
+green "no action lock: auto-low refused, plain merge continues with the warning"

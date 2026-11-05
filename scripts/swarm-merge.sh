@@ -982,6 +982,11 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
           exit 1
         fi
       else
+        if [ "$AUTO_LOW" = 1 ]; then
+          echo "ERROR: PR #$PR_NUM: action lock unavailable (no flock, or $ACTION_LOCK_FILE not writable) — refusing to merge --auto-$AUTO_RATING unlocked. A plain swarm-merge.sh $PR_NUM (no --auto-$AUTO_RATING) may proceed without it." >&2
+          log_event merge.gate "pr=$PR_NUM gate=action-lock result=unavailable action=refuse-auto-low"
+          exit 1
+        fi
         echo "       $(c_amber "⚠ action lock unavailable (no flock, or lock file not writable) — merging without it")"
         log_event merge.gate "pr=$PR_NUM gate=action-lock result=unavailable action=proceed-unlocked"
       fi

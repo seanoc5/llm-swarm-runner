@@ -50,6 +50,14 @@
 # whatever PR eventually opens, which links the issue — can see it.
 # worker-listener.sh clears whichever one (PR or issue) actually got the
 # marker once this worktree's queue drains.
+#
+# Exit codes (issue #766): 5 = an identical brief is already pending —
+# duplicate refused, do NOT retry (REQUEUE_ALLOW_DUPLICATE=1 overrides).
+# 7 = timed out waiting for the per-worktree dispatch lock (held by
+# provision-worker.sh through its spawn check) — nothing queued; check the
+# worktree's inbox/ and processing/, then requeue once. Same 5-vs-7 split as
+# provision-worker.sh. The wait is PROVISION_DISPATCH_LOCK_TIMEOUT_SECS,
+# default PROVISION_SPAWN_CHECK_SECS (120) + 60 so a slow spawn doesn't trip it.
 set -euo pipefail
 
 # Self-locate so the printed help text references the actual install path,
@@ -362,8 +370,11 @@ fi
 # and the claim below run under the same per-worktree flock provision-worker.sh
 # uses. REQUEUE_ALLOW_DUPLICATE=1 overrides.
 if command -v flock >/dev/null 2>&1 && { exec {DISPATCH_LOCK_FD}>"$(dirname "$WT")/.dispatch-$(basename "$WT").lock"; } 2>/dev/null; then
-    flock -w "${PROVISION_DISPATCH_LOCK_TIMEOUT_SECS:-120}" "$DISPATCH_LOCK_FD" \
-        || { echo "ERROR: another dispatch to $WT holds the dispatch lock — nothing queued. Retry." >&2; rm -f "$TMP"; exit 5; }
+    # provision-worker.sh holds this lock through its spawn health check
+    # (PROVISION_SPAWN_CHECK_SECS, default 120), so wait longer than that by
+    # default: a requeue during a slow spawn should queue, not time out.
+    flock -w "${PROVISION_DISPATCH_LOCK_TIMEOUT_SECS:-$(( ${PROVISION_SPAWN_CHECK_SECS:-120} + 60 ))}" "$DISPATCH_LOCK_FD" \
+        || { echo "ERROR: requeue.sh exit 7 (dispatch lock timeout, not exit 5): another dispatch to $WT holds the dispatch lock — nothing queued. Check that worktree's inbox/ and processing/ for the brief, then requeue once." >&2; rm -f "$TMP"; exit 7; }
 fi
 if [ "${REQUEUE_ALLOW_DUPLICATE:-0}" != "1" ]; then
     for existing in "$INBOX"/*.md "$WT/.swarm/tasks/processing"/*.md; do
