@@ -622,7 +622,8 @@
 #                           worktree_vanished, sidelined_worker, failed outcomes,
 #                           decision-needed / red-CI outbox, unknown kinds) wake at once
 #                           and flush the queue. 0 = every item wakes. The typed
-#                           waiter_armed fallback waits GRACE + BATCH secs.
+#                           waiter_armed fallback waits GRACE + BATCH secs only while
+#                           everything pending is non-urgent; urgent keeps GRACE.
 #   COORD_INBOX_NUDGE_TEMPLATE=(built-in)
 #                           (issue #430) The ONE-LINE doorbell text pasted
 #                           into the coordinator's composer once the wake is
