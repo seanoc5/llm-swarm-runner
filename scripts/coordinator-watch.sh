@@ -4731,15 +4731,19 @@ pr_comment_hold() {
 # readied-and-automerged draft must not land with work unfinished. Live when
 # (a) its brief is still in inbox/ or processing/ (it has not run
 # task-done.sh — this also covers an interactive worker between turns, which
-# worker_pane_busy reads as idle), (b) its pane is mid-turn, or (c) a CLI is
+# worker_pane_busy reads as idle), or parked in tasks/sidelined/ (a sidelined worker: window stopped, brief set aside), (b) its pane is mid-turn, or (c) a CLI is
 # in the foreground but no "ctx:" statusline parses — a WORKER_HEADLESS=1
 # `claude -p` run renders no TUI chrome, so worker_pane_busy never matches it
 # (the same gate maybe_worker_deliver_brief uses). No worktree and no window
 # (a reaped worker) means finished.
 worker_still_working() {
     local issue="$1" wt_dir win="iss-$1" state
-    if wt_dir="$(own_wt_dir_for_issue "$issue")" && worker_brief_pending "$wt_dir"; then
-        return 0
+    if wt_dir="$(own_wt_dir_for_issue "$issue")"; then
+        worker_brief_pending "$wt_dir" && return 0
+        # A sidelined worker (sideline-worker.sh, issue #622) has its claimed brief
+        # moved to tasks/sidelined/ and its window stopped: unfinished, not done.
+        local sb
+        for sb in "$wt_dir/.swarm/tasks/sidelined"/*.md; do [ -f "$sb" ] && return 0; done
     fi
     state="$(worker_pane_state "$win")" || state="absent"
     [ "$state" = "cli" ] || return 1
