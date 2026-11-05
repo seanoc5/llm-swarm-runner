@@ -451,15 +451,17 @@ case "\$*" in
     *"list-windows -t llm-proj -F #W"*) printf 'coordinator\nutil\n' ;;
     *list-panes*"coordinator"*"PANE_CMD"*) echo "PANE_CMD=bash PANE_DEAD=0" ;;
     *list-panes*llm-proj:util*pane_dead*) cat "$S/util-panes" ;;
+    *display-message*) echo "%9" ;;
     *kill-pane*) [ -f "$S/kill-fails" ] && exit 1 ;;
     *show-environment*) [ -f "$S/sess-env" ] && cat "$S/sess-env" ;;
 esac
 exit 0
 EOF2
-watch_run() {   # <resolved mode> <live watcher start cmd> [WATCH]
+WENV=env
+watch_run() {   # <resolved mode> <live watcher start cmd> [WATCH]  (operator run unless WENV adds NON_INTERACTIVE=1)
     : > "$S/tmux.log"; printf '0 1 %s\n' "$2" > "$S/util-panes"
     set +e
-    (cd "$S/proj" && env -u COORD_MODE COORD_MODE="$1" HOME="$S" NON_INTERACTIVE=1 WATCH="${3:-1}" STATUS=0 "$ROOT/llm-start.sh") > "$S/out.txt" 2>&1
+    (cd "$S/proj" && env -u COORD_MODE -u NON_INTERACTIVE -u TMUX_PANE COORD_MODE="$1" HOME="$S" WATCH="${3:-1}" STATUS=0 $WENV "$ROOT/llm-start.sh" </dev/null) > "$S/out.txt" 2>&1
     wrc=$?; set -e
 }
 wcmd="$ROOT/scripts/coordinator-watch.sh /x"
@@ -479,8 +481,36 @@ grep -qE 'kill-pane -t llm-proj:util\.1' "$S/tmux.log" && grep -qF 'split-window
 check "split now, resident watcher: restarted, not skipped" "restarted" "$got"
 
 watch_run split "$wcmd"
-grep -qE 'kill-pane -t llm-proj:util\.1' "$S/tmux.log" && got=restarted || got=skipped
-check "split now, legacy watcher with no pinned mode: restarted" "restarted" "$got"
+grep -qF 'kill-pane' "$S/tmux.log" && got=killed || got=untouched
+check "split now, unpinned legacy watcher: never killed for an unknown mode" "untouched" "$got"
+grep -q 'WARN: coordinator-watch pane 1 .* runs COORD_MODE=resident but the resolved mode is split' "$S/out.txt" && got=warned || got=silent
+check "split now, unpinned legacy watcher: warned with the restart command" "warned" "$got"
+
+watch_run resident "$wcmd"
+grep -qE 'kill-pane|split-window' "$S/tmux.log" && got=touched || got=untouched
+check "resident now, unpinned watcher: treated as resident, left alone" "untouched" "$got"
+
+# The #405 shape: the watcher runs llm-start.sh for every wake from its OWN pane
+# (NON_INTERACTIVE=1, TMUX_PANE = the watcher pane). A watcher that self-respawned
+# keeps its original unpinned command ("unknown" mode). The wake must neither kill
+# it nor skip delivery, in either direction of mode mismatch.
+for _case in "resident|$wcmd" "split|$wcmd" "resident|COORD_MODE=split $wcmd" "split|COORD_MODE=resident $wcmd"; do
+    WENV="env NON_INTERACTIVE=1 TMUX_PANE=%9"
+    watch_run "${_case%%|*}" "${_case#*|}"
+    WENV=env
+    grep -qF 'kill-pane' "$S/tmux.log" && got=killed || got=survived
+    check "wake from the watcher's own pane (${_case%%|*} wake, '${_case#*|}' watcher): watcher survives" "survived" "$got"
+    grep -qF 'split-window' "$S/tmux.log" && got=respawned || got=none
+    check "wake from the watcher's own pane (${_case%%|*} wake): no second watcher" "none" "$got"
+    check "wake from the watcher's own pane (${_case%%|*} wake): llm-start still exits 0" "0" "$wrc"
+done
+# The wake itself is delivered: resident wake into a live conversation window
+# reaches the reprompt path (paste), split wake still never types into the chat.
+WENV="env NON_INTERACTIVE=1 TMUX_PANE=%9"
+watch_run resident "$wcmd"
+WENV=env
+grep -qE 'paste-buffer|load-buffer|send-keys' "$S/tmux.log" && got=delivered || got=dropped
+check "resident wake via an unpinned self-respawned watcher: delivered, watcher intact" "delivered" "$got"
 
 watch_run split "COORD_MODE=split $wcmd"
 grep -qF 'kill-pane' "$S/tmux.log" && got=killed || got=untouched

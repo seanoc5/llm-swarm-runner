@@ -1268,16 +1268,40 @@ watcher_pane_scan() {
 if [ "${WATCH:-1}" = "1" ]; then
     WATCH_SCRIPT="$LLM_SWARM_DIR/scripts/coordinator-watch.sh"
     WATCH_PANE_SCAN="$(watcher_pane_scan "$SESSION_NAME:util" "$WATCH_SCRIPT")"
-    # A live watcher keeps the COORD_MODE it started with. One whose mode differs
-    # from the resolved mode would write the wrong inbox shape and drop or paste
-    # wakes while logging success, so it is restarted here (#767), or this script
-    # stops loudly if it cannot; never a silent skip.
+    # A live watcher keeps the COORD_MODE it started with. One KNOWN to differ from
+    # the resolved mode would write the wrong inbox shape and drop or paste wakes
+    # while logging success, so an operator-started run restarts it (#767), or stops
+    # loudly if it cannot; never a silent skip.
+    #
+    # Two things must never kill a watcher (#405 failure shape):
+    #  - A wake: the watcher runs this script from its own pane with
+    #    NON_INTERACTIVE=1, so killing "the stale watcher" kills the caller and
+    #    every swarm goes wake-dead. Wakes only warn.
+    #  - An unknown mode: a watcher with no pinned COORD_MODE (started before #767,
+    #    or self-respawned with its original unpinned command) is a resident
+    #    watcher. It is treated as resident, never restarted for being unknown.
+    _may_restart=1
+    [ "${NON_INTERACTIVE:-0}" = "1" ] && _may_restart=0
     _watch_live=0
     for _w in $WATCH_PANE_SCAN; do
+        _widx="${_w#live:}"; _widx="${_widx%%:*}"; _wmode="${_w##*:}"
+        _unk=0; [ "$_wmode" = "unknown" ] && { _wmode=resident; _unk=1; }
         case "$_w" in
-            live:*:"$COORD_MODE") _watch_live=1 ;;
             live:*)
-                _widx="${_w#live:}"; _widx="${_widx%%:*}"; _wmode="${_w##*:}"
+                if [ "$_wmode" = "$COORD_MODE" ]; then
+                    _watch_live=1
+                    continue
+                fi
+                _own=0
+                if [ -n "${TMUX_PANE:-}" ] && [ "$(tmux display-message -p -t "$SESSION_NAME:util.$_widx" '#{pane_id}' 2>/dev/null || true)" = "$TMUX_PANE" ]; then
+                    _own=1
+                fi
+                if [ "$_may_restart" = "0" ] || [ "$_own" = "1" ] || [ "$_unk" = "1" ]; then
+                    # Leave it running: it still delivers wakes, just in its old mode.
+                    _watch_live=1
+                    echo "WARN: coordinator-watch pane $_widx in '$SESSION_NAME:util' runs COORD_MODE=$_wmode but the resolved mode is $COORD_MODE; not restarting it (a wake, its own pane, or an unpinned legacy watcher never restarts). From an operator shell: tmux kill-pane -t '$SESSION_NAME:util.$_widx' && (cd '$PWD' && $LLM_SWARM_DIR/llm-start.sh)" >&2
+                    continue
+                fi
                 echo "coordinator-watch pane $_widx in '$SESSION_NAME:util' runs COORD_MODE=$_wmode but the resolved mode is $COORD_MODE; restarting it."
                 if ! tmux kill-pane -t "$SESSION_NAME:util.$_widx" 2>/dev/null; then
                     echo "ERROR: could not stop the stale coordinator-watch pane. It would keep acting as '$_wmode'. Stop it, then rerun this script:" >&2
@@ -1322,7 +1346,7 @@ else
     # #767: WATCH=0 leaves a running watcher alone, but a wrong-mode one must not
     # go unmentioned.
     for _w in $(watcher_pane_scan "$SESSION_NAME:util" "$LLM_SWARM_DIR/scripts/coordinator-watch.sh" | grep '^live:' || true); do
-        [ "${_w##*:}" = "$COORD_MODE" ] || echo "WARN: coordinator-watch pane $(cut -d: -f2 <<<"$_w") in '$SESSION_NAME:util' runs COORD_MODE=${_w##*:} but the resolved mode is $COORD_MODE. Restart it: tmux kill-pane -t '$SESSION_NAME:util.$(cut -d: -f2 <<<"$_w")' && (cd '$PWD' && WATCH=1 $LLM_SWARM_DIR/llm-start.sh)" >&2
+        [ "${_w##*:}" = "$COORD_MODE" ] || { [ "${_w##*:}" = "unknown" ] && [ "$COORD_MODE" = "resident" ]; } || echo "WARN: coordinator-watch pane $(cut -d: -f2 <<<"$_w") in '$SESSION_NAME:util' runs COORD_MODE=${_w##*:} but the resolved mode is $COORD_MODE. Restart it: tmux kill-pane -t '$SESSION_NAME:util.$(cut -d: -f2 <<<"$_w")' && (cd '$PWD' && WATCH=1 $LLM_SWARM_DIR/llm-start.sh)" >&2
     done
 fi
 

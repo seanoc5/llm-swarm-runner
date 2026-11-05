@@ -35,6 +35,8 @@ To force a mode on purpose, pass `COORD_MODE=<mode>` to the run and make it diff
 
 After step 3 the session env, the coordinator and the watcher all follow `.swarm/.env`. What `llm-start.sh` cannot see keeps its old mode: a shell with `COORD_MODE` exported by hand, and a watcher started by hand outside the `util` window. Restart those yourself.
 
+The restart only happens on an operator-started `llm-start.sh`. A wake (the watcher runs `llm-start.sh` from its own pane) never kills a watcher, and a watcher with no pinned `COORD_MODE` (started before #767, or self-respawned with its original command) is never killed for that: it counts as resident, and `llm-start.sh` prints a `WARN:` with the exact `tmux kill-pane` command to run yourself.
+
 The new files below are inert in resident mode.
 
 ## Telling the work run something
