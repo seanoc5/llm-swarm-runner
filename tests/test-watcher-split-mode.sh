@@ -184,9 +184,10 @@ chmod +x "$STUB"
 # start_watcher <batch-secs>
 start_watcher() {
     local batch="$1"
+    # The mode lives only in the project's .swarm/.env (#767); the caller's env is ignored.
+    printf 'COORD_MODE=%s\n' "${WATCH_MODE:-split}" > "$PROJECT_DIR/.swarm/.env"
     PATH="$SHIM_DIR:$PATH" \
         LLM_START="$FAKE_LLM_START" \
-        COORD_MODE=split \
         COORD_WORK_RUN_CMD="bash $STUB" \
         COORD_WORK_RUN="${WORK_RUN_OVERRIDE:-$RUN}" \
         COORD_INBOX_BATCH_SECS="$batch" \
@@ -349,6 +350,22 @@ wait_for 10 ended_ge 1 || red "2i: the surviving run never finished"
 no_retry_marker() { [ ! -e "$RUN_DIR/retry-from" ]; }
 wait_for 5 no_retry_marker || red "2i: an ok run left the retry marker"
 green "2i: a watcher group kill leaves the run, its lock and its retry marker intact"
+
+# 2j. (#767) The split loop is always started and reads the mode from .swarm/.env
+# on every tick. A watcher started resident: the loop does nothing and logs
+# nothing (no work-run events, no split timer line, no output), and flipping the
+# file to split starts runs without restarting the watcher.
+stop_watcher; reset_state; echo 1 > "$STUB_SECS_FILE"; seed_last_start 5
+WATCH_MODE=resident start_watcher 600
+sleep 4   # several 1 s ticks
+[ "$(runs_started)" = 0 ] || red "2j: resident watcher started a work run"
+! grep -qE 'coord\.workrun|coord_mode=split|split_mode' "$EVENTS_LOG" 2>/dev/null || red "2j: resident watcher logged split events: $(grep -E 'coord\.workrun|coord_mode=split|split_mode' "$EVENTS_LOG" | head -3)"
+! grep -qE 'command not found|ERROR:|WARN:|coord_mode=split|split_mode|workrun' "$TEST_DIR/watch.out" || red "2j: resident watcher printed errors or split output: $(grep -E 'command not found|ERROR:|WARN:|coord_mode=split|split_mode|workrun' "$TEST_DIR/watch.out" | head -3)"
+kill -0 "$WATCH_PID" 2>/dev/null || red "2j: watcher died"
+printf 'COORD_MODE=split\n' > "$PROJECT_DIR/.swarm/.env"
+drop sidelined_worker 20
+wait_for 8 started_ge 1 || red "2j: flipping .swarm/.env to split did not start a run (watcher not restarted)"
+green "2j: resident loop is silent; a flip to split takes effect without a watcher restart"
 
 # 2d. Nothing was typed anywhere, in any case above (split mode, AUTO_COMPACT=1
 # set on purpose), and the old doorbell was never invoked.

@@ -2790,6 +2790,8 @@ WATCH_WINDOW_FLAGS_SWEEP_SECS="${WATCH_WINDOW_FLAGS_SWEEP_SECS:-10}"
 . "$SCRIPT_DIR/_window-flags.sh"
 # shellcheck source=scripts/_coord-inbox-batch.sh
 . "$SCRIPT_DIR/_coord-inbox-batch.sh"
+# shellcheck source=scripts/_coord-split.sh
+. "$SCRIPT_DIR/_coord-split.sh"
 # shellcheck source=_conflict-brief.sh
 . "$SCRIPT_DIR/_conflict-brief.sh"
 WATCHER_QUIET="${WATCHER_QUIET:-0}"
@@ -3159,10 +3161,12 @@ COORD_WAKE_LOCK_TIMEOUT_SECS="${COORD_WAKE_LOCK_TIMEOUT_SECS:-60}"
 # doorbell, the pane gates (human present / composer dirty / pane busy), the
 # retry passes and coordinator auto-compact do not run: nothing is typed into
 # a pane. COORD_SPLIT_TICK_SECS is how often the batch window is rechecked.
-COORD_MODE="${COORD_MODE:-resident}"
-case "$COORD_MODE" in
-    resident|split) ;;
-    *) echo "ERROR: COORD_MODE must be resident or split (got: $COORD_MODE)" >&2; exit 1 ;;
+# The mode has one source, <project>/.swarm/.env (issue #767), read fresh by
+# coord_mode each time it matters; there is no COORD_MODE variable here, and the
+# caller's env is ignored. Only a bad value is rejected at startup.
+case "$(coord_mode_raw "$PROJECT_DIR")" in
+    ""|resident|split) ;;
+    *) echo "ERROR: COORD_MODE must be resident or split (got: $(coord_mode_raw "$PROJECT_DIR") in $PROJECT_DIR/.swarm/.env)" >&2; exit 1 ;;
 esac
 COORD_WORK_RUN="${COORD_WORK_RUN:-$SCRIPT_DIR/coord-work-run.sh}"
 COORD_WORK_RUN_DIR="$PROJECT_DIR/.swarm/work-run"
@@ -3706,7 +3710,7 @@ format_event_line() {
 mkdir -p "$WORKSPACE" 2>/dev/null
 [ -d "$WORKSPACE" ]   || { echo "ERROR: workspace not a directory: $WORKSPACE" >&2; exit 1; }
 [ -x "$LLM_START" ]   || { echo "ERROR: llm-start.sh not executable: $LLM_START" >&2; exit 1; }
-if [ "$COORD_MODE" = "split" ] && [ ! -x "$COORD_WORK_RUN" ]; then
+if [ "$(coord_mode "$PROJECT_DIR")" = "split" ] && [ ! -x "$COORD_WORK_RUN" ]; then
     echo "ERROR: COORD_MODE=split but the work-run wrapper is not executable: $COORD_WORK_RUN" >&2
     exit 1
 fi
@@ -7535,8 +7539,12 @@ compact_retract_queued() {
 maybe_auto_compact() {
     local trigger="${1:-wake}"
     [ "$AUTO_COMPACT" = "1" ] || return 0
-    # issue #765: no coordinator pane is typed into in split mode.
-    coord_split_active && return 0
+    # COORD_MODE=split (#765, #767): nothing types into the coordinator pane
+    # but the operator, so the watcher never injects /compact into it.
+    if coord_split_active; then
+        log_event coord.compact.skip "reason=split_mode trigger=$trigger"
+        return 0
+    fi
 
     # issue #210: this function is now reachable from two separate
     # processes — the wake path (on_outcome, in the main watcher process)
@@ -9348,6 +9356,9 @@ coord_inbox_write() {
     marker="$COORD_INBOX_SELF_DIR/$(basename "$final").self"
     touch "$marker" 2>/dev/null || true
     mv -f "$tmp" "$final" 2>/dev/null || { rm -f "$tmp" "$marker" 2>/dev/null; return 1; }
+    # COORD_MODE=split (issue #767): the conversation session is never woken, so an
+    # urgent item is surfaced as a window flag instead. No-op in resident mode.
+    coord_split_flag_urgent "$final" "$PROJECT_DIR" || true
 }
 
 # coord_inbox_count
@@ -11229,9 +11240,7 @@ coord_ring_doorbell() {
 #
 # coord_split_active: true when this watcher starts work runs instead of
 # typing a doorbell into the coordinator pane.
-coord_split_active() {
-    [ "$COORD_MODE" = "split" ]
-}
+coord_split_active() { [ "$(coord_mode "$PROJECT_DIR")" = "split" ]; }
 
 # coord_split_last_start: epoch of the last work-run start (minus one second,
 # stamped by coord-work-run.sh), 0 when none. Plays the role the last ring
@@ -11373,7 +11382,8 @@ coord_split_wake() {
 
 # run_split_loop: the batch window and any item the event paths did not start
 # a run for (an operator note dropped while the lock was held) are rechecked
-# here every COORD_SPLIT_TICK_SECS.
+# here every COORD_SPLIT_TICK_SECS. coord_split_tick returns first thing when the
+# mode is not split, so a resident watcher's loop does nothing.
 run_split_loop() {
     while true; do
         sleep "$COORD_SPLIT_TICK_SECS"
@@ -11913,10 +11923,12 @@ if [ "$AUTO_COMPACT" = "1" ] && [ "$AUTO_COMPACT_TICK_SECS" -gt 0 ] && ! coord_s
     log_event watch.timer.start "auto_compact_tick_secs=$AUTO_COMPACT_TICK_SECS auto_compact_cooldown_secs=$AUTO_COMPACT_COOLDOWN_SECS"
 fi
 # issue #765: split mode rechecks the inbox on a timer (batch window, items an
-# event path did not start a run for). Resident mode starts nothing here.
+# event path did not start a run for). The loop always runs (#767): the mode is
+# read from .swarm/.env on every tick, so a flip to split needs no watcher
+# restart; while the mode is resident each tick returns at once and logs nothing.
+run_split_loop &
+SPLIT_LOOP_PID=$!
 if coord_split_active; then
-    run_split_loop &
-    SPLIT_LOOP_PID=$!
     log_event watch.timer.start "coord_mode=split split_tick_secs=$COORD_SPLIT_TICK_SECS"
 fi
 # issue #366 Part A — opt-in only; a swarm that never sets STALL_WAKE_SECS

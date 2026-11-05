@@ -290,7 +290,7 @@ swarms' logs from this sandbox, so pick by data on the host: count
 take the lowest non-zero. SAMlytics is a guess, not a finding.
 
 **How.** One setting, `COORD_MODE=split` (default `resident`), in that
-project's `.swarm/.env`. In split mode the watcher starts work runs and
+project's `.swarm/.env`, which is its only source of truth. In split mode the watcher starts work runs and
 `llm-start.sh` launches only the conversation session.
 
 **Prerequisites (each shippable and reversible alone):**
@@ -316,8 +316,19 @@ project's `.swarm/.env`. In split mode the watcher starts work runs and
 - B6. Urgent items start a run within 60 s; green-PR time to merge no worse
   than baseline plus the batch window.
 
-**Rollback.** Unset `COORD_MODE`, restart the coordinator with `llm-start.sh`,
-respawn the watcher. The new files are inert in resident mode and need no
+**Turning it on.** Edit first, then kill: add `COORD_MODE=split` to the
+project's `.swarm/.env`, then `tmux kill-window -t llm-<project>:coordinator`,
+then `cd <project> && <sandbox>/llm-start.sh`. After the edit a wake reads split
+mode and skips the resident coordinator; killing the window first would let a
+wake in the gap relaunch a resident coordinator, and `llm-start.sh` would then
+only attach to it.
+
+**Rollback.** Kill the coordinator window first
+(`tmux kill-window -t llm-<project>:coordinator`, so a wake between steps cannot
+reach the live chat session), then delete the `COORD_MODE` line from the
+project's `.swarm/.env` (the only place the mode is read; env and tmux values
+are ignored), then `cd <project> && <sandbox>/llm-start.sh`. The watcher is not restarted; it reads
+the file at its next wake. The new files are inert in resident mode and need no
 migration. Roll back at once on any lost item or duplicate merge/dispatch, or
 if urgent items take more than 5 minutes to start a run.
 

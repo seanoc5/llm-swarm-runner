@@ -86,6 +86,14 @@
 # 2026-11-05: worker-bare 11400 -> 11600. Issue #573 adds the two 🔴 merge
 # safety rules worker.md already had (no coordinator-relayed approval; a
 # push after approval voids it) to the bare prompt's 🔴 row, ~130 bytes.
+#
+# 2026-11-05: issue #767 adds the split-mode prompts (ADR 0006 section 6):
+# coordinator-shared.md (rules both read), coordinator-work.md (the
+# non-interactive run) and coordinator-chat.md (the conversation session).
+# coordinator.md is untouched, so resident mode costs nothing new. Work was
+# extracted from coordinator.md, so it starts near the old size; the budgets
+# below hold the split files where they landed. Retiring coordinator.md once
+# split is the default (and lowering its budget) is the issue #509 answer.
 set -euo pipefail
 
 green() { printf '\033[32m✓ %s\033[0m\n' "$*"; }
@@ -95,6 +103,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKER_MAX="${WORKER_MD_MAX_BYTES:-24300}"
 COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-31200}"
 BARE_MAX="${WORKER_BARE_MD_MAX_BYTES:-11600}"   # issue #510 trial prompt; ~7.5KB is script-parsed contract
+SHARED_MAX="${COORD_SHARED_MD_MAX_BYTES:-5600}"   # issue #767 split prompts
+WORK_MAX="${COORD_WORK_MD_MAX_BYTES:-24000}"
+CHAT_MAX="${COORD_CHAT_MD_MAX_BYTES:-5000}"
 
 check() {
     local file="$1" max="$2" size
@@ -107,3 +118,6 @@ check() {
 check prompts/worker.md "$WORKER_MAX"
 check prompts/coordinator.md "$COORD_MAX"
 check prompts/worker-bare.md "$BARE_MAX"
+check prompts/coordinator-shared.md "$SHARED_MAX"
+check prompts/coordinator-work.md "$WORK_MAX"
+check prompts/coordinator-chat.md "$CHAT_MAX"

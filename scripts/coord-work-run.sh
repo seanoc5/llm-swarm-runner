@@ -39,10 +39,10 @@
 #                               project dir with the prompt as "$1"
 #   COORD_WORK_RUN_TIMEOUT_SECS hard limit per run (default 1800)
 #   COORD_WORK_RUN_BUDGET_USD   claude --max-budget-usd (default 5)
-#   COORD_WORK_PROMPT_FILE      system prompt template (default
-#                               prompts/coordinator-work.md if present, else
-#                               prompts/coordinator.md); {{LLM_SWARM_DIR}} is
-#                               substituted
+#   COORD_WORK_PROMPT_FILE      single system prompt file used INSTEAD of the
+#                               default (default: render-coordinator-prompt.sh
+#                               work = coordinator-work.md + coordinator-shared.md);
+#                               {{LLM_SWARM_DIR}} is substituted
 #   COORD_MODEL                 model id or alias (default opus)
 #   COORDINATOR_USE_API_KEY=1   keep ANTHROPIC_API_KEY (default: stripped so
 #                               Max OAuth is used, as coordinator-claude.sh)
@@ -164,13 +164,13 @@ cd "$PROJECT_DIR" || exit 1
 if [ -n "${COORD_WORK_RUN_CMD:-}" ]; then
     CMD=(bash -c "$COORD_WORK_RUN_CMD" coord-work-run "$PROMPT")
 else
-    TEMPLATE="${COORD_WORK_PROMPT_FILE:-}"
-    if [ -z "$TEMPLATE" ]; then
-        TEMPLATE="$LLM_SWARM_DIR/prompts/coordinator-work.md"
-        [ -r "$TEMPLATE" ] || TEMPLATE="$LLM_SWARM_DIR/prompts/coordinator.md"
-    fi
     SYS_FILE="$(mktemp -t coord-work-prompt-XXXXXX.md)" || exit 1
-    sed "s|{{LLM_SWARM_DIR}}|$LLM_SWARM_DIR|g" "$TEMPLATE" > "$SYS_FILE"
+    if [ -n "${COORD_WORK_PROMPT_FILE:-}" ]; then
+        sed "s|{{LLM_SWARM_DIR}}|$LLM_SWARM_DIR|g" "$COORD_WORK_PROMPT_FILE" > "$SYS_FILE" || exit 1
+    else
+        # work prompt + the shared rules (no send-keys, report grammar, verdicts)
+        LLM_SWARM_DIR="$LLM_SWARM_DIR" "$SCRIPT_DIR/render-coordinator-prompt.sh" work > "$SYS_FILE" || exit 1
+    fi
     if [ "${COORDINATOR_USE_API_KEY:-0}" != "1" ]; then
         unset ANTHROPIC_API_KEY
     fi
