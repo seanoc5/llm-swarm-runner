@@ -6822,6 +6822,9 @@ coord_pending_approval_age() {
 # after this function.
 run_watch_timer_loop() {
     local last_pr_poll=0 last_orphan_sweep=0 last_ready_sweep=0 last_bg_violation_sweep=0 last_timeout_retry_sweep=0 last_activity_poll=0 last_coord_wake_retry=0 last_coord_wake_busy_retry=0 last_worktree_sweep=0 last_pending_brief_sweep=0 last_stranded_brief_sweep=0 last_sibling_sweep=0 last_window_flags_sweep=0 last_sideline_sweep=0 now
+    # issue #756: first sibling scan one interval after start, not on tick one, so
+    # it never delays the first deferred-wake retry or the startup passes.
+    last_sibling_sweep=$(date +%s)
     while true; do
         sleep 2
         [ "$WATCH_CHECK_ON_DONE" = "1" ] && { status_poll_pass || true; }
