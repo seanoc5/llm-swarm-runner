@@ -373,7 +373,7 @@ OPEN_PR_CLASH_RC=0
 # Output goes to a file, not $(...): a surviving grandchild (a stuck gh/git) would
 # otherwise keep the pipe open and block the substitution past the timeout.
 OPEN_PR_CLASH_TMP="$(mktemp)"
-timeout "${MIGRATION_CHECK_TIMEOUT:-60}" "$MIGRATION_CHECK" --against-open-prs "$PR" >"$OPEN_PR_CLASH_TMP" 2>/dev/null || OPEN_PR_CLASH_RC=$?
+timeout -k 5 "${MIGRATION_CHECK_TIMEOUT:-60}" "$MIGRATION_CHECK" --against-open-prs "$PR" >"$OPEN_PR_CLASH_TMP" 2>/dev/null || OPEN_PR_CLASH_RC=$?
 OPEN_PR_CLASH_OUT="$(cat "$OPEN_PR_CLASH_TMP")"; rm -f "$OPEN_PR_CLASH_TMP"
 if [ "$OPEN_PR_CLASH_RC" = 6 ]; then
     echo "pr-ready: WARN: another open PR adds the same migration version as PR #$PR (not blocking):" >&2
