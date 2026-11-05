@@ -11253,6 +11253,22 @@ coord_split_last_start() {
     printf '%s\n' "$v"
 }
 
+# coord_split_scan <last-start>: coord_inbox_scan against the last work-run
+# start. Uses the sub-second mark when it agrees with last-start (its second is
+# last-start + 1 or + 2); otherwise the integer, as a hand-seeded or stale
+# last-start (tests, older runs) has no trustworthy mark. Issue #774: with the
+# integer alone, the item that triggered a run (same second as the start,
+# stamped start-1) looked unannounced again and skipped the back-off.
+coord_split_scan() {
+    local last="$1" mark="$COORD_WORK_RUN_DIR/last-start.mark" ms=""
+    ms="$(stat -c %Y "$mark" 2>/dev/null)" || ms=""
+    if [[ "$ms" =~ ^[0-9]+$ ]] && [ "$((ms - last))" -ge 1 ] && [ "$((ms - last))" -le 2 ]; then
+        coord_inbox_scan "$COORD_INBOX_DIR" "$last" 1 "$mark"
+    else
+        coord_inbox_scan "$COORD_INBOX_DIR" "$last" 1
+    fi
+}
+
 # coord_split_run_busy: true while some process holds the single-flight run
 # lock. A probe only; coord-work-run.sh makes the real decision, so a race
 # here costs one wrapper start that exits 75.
@@ -11279,7 +11295,7 @@ coord_split_tick() {
     [ -d "$COORD_INBOX_DIR" ] || return 0
     last="$(coord_split_last_start)"
     now=$(date +%s)
-    coord_inbox_scan "$COORD_INBOX_DIR" "$last" 1
+    coord_split_scan "$last"
     since="$last"
     if ! coord_should_ring "$last" "$now"; then
         # Retry of a run that did not finish cleanly: coord-work-run.sh left
@@ -11346,6 +11362,7 @@ coord_split_start_run() {
                 [[ "$from" =~ ^[0-9]+$ ]] || from=0
                 [[ "$n" =~ ^[0-9]+$ ]] || n=0
                 printf '%s\n' "$((now2 - 1))" > "$COORD_WORK_RUN_DIR/last-start"
+                : > "$COORD_WORK_RUN_DIR/last-start.mark"
                 printf '%s %s\n' "$from" "$((n + 1))" > "$COORD_WORK_RUN_DIR/retry-from"
                 log_event coord.workrun.error "trigger=$trigger rc=$rc reason=wrapper_did_not_start see=$COORD_WORK_RUN_DIR/wrapper.err"
             fi

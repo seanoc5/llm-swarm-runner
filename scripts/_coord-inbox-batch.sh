@@ -97,7 +97,7 @@ coord_item_urgency() {
     esac
 }
 
-# coord_inbox_scan <inbox-dir> <last_rang> [skip_activity]
+# coord_inbox_scan <inbox-dir> <last_rang> [skip_activity] [mark-file]
 #
 # Sets globals: CIB_URGENT / CIB_BATCHED = counts of wake-eligible items newer
 # than <last_rang> (the last ring, by the waiter or the Stop hook), i.e. not
@@ -106,15 +106,23 @@ coord_item_urgency() {
 # whose Stop hook was skipped (stop_hook_active) is unannounced, and must ring
 # when the waiter re-arms rather than wait out the typed fallback.
 # skip_activity=1: activity-poll items are inbox-only and never trigger.
+# mark-file (issue #774): a file touched at the moment of the last announcement.
+# When it exists, an item is "newer" iff it is not older than the mark (mtime
+# compared at sub-second precision), so same-second items are told apart; the
+# integer <last_rang> is then ignored.
 coord_inbox_scan() {
-    local dir="$1" last="$2" skip_act="${3:-0}" f m
+    local dir="$1" last="$2" skip_act="${3:-0}" mark="${4:-}" f m
     CIB_URGENT=0 CIB_BATCHED=0 CIB_TOTAL=0
     for f in "$dir"/*.md; do
         [ -f "$f" ] || continue
         CIB_TOTAL=$((CIB_TOTAL + 1))
         [ "$skip_act" = 1 ] && [ "$(coord_item_kind "$f")" = activity ] && continue
-        m="$(stat -c %Y "$f" 2>/dev/null || echo 0)"
-        [ "$m" -gt "$last" ] || continue
+        if [ -n "$mark" ] && [ -e "$mark" ]; then
+            [ "$f" -ot "$mark" ] && continue
+        else
+            m="$(stat -c %Y "$f" 2>/dev/null || echo 0)"
+            [ "$m" -gt "$last" ] || continue
+        fi
         if [ "$(coord_item_urgency "$f")" = urgent ]; then
             CIB_URGENT=$((CIB_URGENT + 1))
         else
