@@ -56,6 +56,10 @@ check "WARN names the restart command" "yes" "$got"
 case "$out" in *"--pause $T/dead"*) got=yes ;; *) got=no ;; esac
 check "WARN says how to silence a planned stop" "yes" "$got"
 
+set +e; out="$("$CHK" --pause "$T/no-such-dir" 2>&1)"; rc=$?; set -e
+check "a bad project path is a usage error (rc 2), --pause writes nothing" "2|no" \
+    "$rc|$([ -e /.swarm/watcher-paused ] && echo yes || echo no)"
+
 # ── deliberate stop vs crash ────────────────────────────────────────────────
 "$CHK" --pause "$T/dead" "deploying" >/dev/null
 out="$("$CHK" "$T/dead")"; rc=$?

@@ -188,7 +188,7 @@ case "${1:-}" in
     -*) echo "watcher-check.sh: unknown option $1 (try --help)" >&2; exit 2 ;;
 esac
 
-dir="$(resolve_dir "${1:-$PWD}")"
+dir="$(resolve_dir "${1:-$PWD}")" || exit 2
 shift || true
 
 # Project .swarm/.env and the sandbox defaults supply the knobs below.
