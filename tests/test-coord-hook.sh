@@ -5,6 +5,7 @@
 # watcher reads that state instead of the screen and does not re-paste a
 # wake the hook already rang. No tmux, no claude: the hook is driven with
 # the JSON Claude Code would send, and coordinator-claude.sh with a stub.
+unset CLAUDE_CODE_DISABLE_BACKGROUND_TASKS   # the hook skips the arm request when set (#743)
 set -euo pipefail
 green() { printf '\033[32m✓ %s\033[0m\n' "$*"; }
 red()   { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }

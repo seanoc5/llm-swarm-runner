@@ -74,6 +74,10 @@ log_event() {
 # nothing otherwise.
 waiter_arm_request() {
     [ "${COORD_INBOX_WAITER:-0}" = "1" ] || return 0
+    # Issue #743: the waiter runs via run_in_background, which does not exist
+    # when background tasks are disabled (the default since #715). Asking for
+    # it would only waste a turn; the watcher batches by typing instead.
+    [ "${CLAUDE_CODE_DISABLE_BACKGROUND_TASKS:-0}" = "1" ] && return 0
     local pid_file="$swarm/coord-inbox-waiter" asked_file="$swarm/coord-waiter-asked"
     local pid m asked
     if read -r pid _ 2>/dev/null < "$pid_file" && [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then

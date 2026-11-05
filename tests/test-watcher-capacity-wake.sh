@@ -61,6 +61,7 @@ coord_wake_hold_clear_pending() { :; }
 wake_clock_set() { :; }
 maybe_auto_compact() { :; }
 coord_inbox_nudge_text() { echo "Inbox: nudge"; }
+coord_batch_note_ring() { :; }
 own_worktree_dirs_for_scan() { printf '%s\n' "$T/wt-issue-11"; }
 LLM_START="$T/llm-start"; RANG="$T/rang"
 printf '#!/bin/sh\necho "$1" >> "%s"\n' "$RANG" > "$LLM_START"; chmod +x "$LLM_START"

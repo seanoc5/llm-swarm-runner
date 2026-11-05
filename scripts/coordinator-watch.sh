@@ -624,6 +624,10 @@
 #                           and flush the queue. 0 = every item wakes. The typed
 #                           waiter_armed fallback waits GRACE + BATCH secs only while
 #                           everything pending is non-urgent; urgent keeps GRACE.
+#                           (issue #743) With no armed waiter (background tasks off)
+#                           the watcher itself holds an all-non-urgent typed doorbell
+#                           for the same window (hold reason batch_window) and adds
+#                           "Woke for: <kinds>." to the nudge.
 #   COORD_INBOX_NUDGE_TEMPLATE=(built-in)
 #                           (issue #430) The ONE-LINE doorbell text pasted
 #                           into the coordinator's composer once the wake is
@@ -9120,9 +9124,44 @@ coord_inbox_count() {
 # a dirty-composer retry) still reports an accurate count instead of a
 # stale one from whenever the defer first started.
 coord_inbox_nudge_text() {
-    local n
+    local n woke="" rang
     n="$(coord_inbox_count)"
-    printf '%s\n' "${COORD_INBOX_NUDGE_TEMPLATE//%N/$n}"
+    # Issue #743: with no waiter to ring it, the typed nudge carries the same
+    # "Woke for: <kinds>." suffix the waiter/Stop hook add (#730), so the
+    # coordinator's quiet-reply rule applies on this path too.
+    if coord_typed_batching; then
+        rang="$(coord_last_ring)"
+        woke="$(coord_woke_for "$COORD_INBOX_DIR" "$rang")"
+    fi
+    printf '%s%s\n' "${COORD_INBOX_NUDGE_TEMPLATE//%N/$n}" "${woke:+ Woke for: $woke.}"
+}
+
+# coord_typed_batching (issue #743)
+#
+# True when quiet-wake batching applies to the watcher's own typed doorbell:
+# COORD_INBOX_WAITER=1 (with COORD_HOOK_STATE=1) opts a swarm into #730's
+# batching, and the waiter may be unable to run (background tasks are off by
+# default since #715). Swarms with COORD_INBOX_WAITER unset: false, unchanged.
+coord_typed_batching() {
+    [ "${COORD_HOOK_STATE:-0}" = "1" ] && [ "${COORD_INBOX_WAITER:-0}" = "1" ] && [ "${COORD_QUIET_WAKES:-1}" != "0" ]
+}
+
+# coord_last_ring: epoch of the last ring (waiter, Stop hook or this watcher's
+# typed doorbell, all recorded in COORD_HOOK_RANG_FILE); 0 when none.
+coord_last_ring() {
+    local r=0
+    read -r r _ 2>/dev/null < "$COORD_HOOK_RANG_FILE" || r=0
+    [[ "$r" =~ ^[0-9]+$ ]] || r=0
+    printf '%s\n' "$r"
+}
+
+# coord_batch_note_ring: call right after rendering the nudge for a doorbell
+# that is actually being rung. Stamps the shared last-ring file so the batch
+# window counts from this ring and the Stop hook does not re-announce items
+# this nudge already named. No-op unless coord_typed_batching.
+coord_batch_note_ring() {
+    coord_typed_batching || return 0
+    printf '%s %s\n' "$(date +%s)" "$(coord_inbox_count)" > "$COORD_HOOK_RANG_FILE" 2>/dev/null || true
 }
 
 # coord_inbox_nudge_pattern
@@ -9136,7 +9175,7 @@ coord_inbox_nudge_text() {
 # in exactly one place.
 coord_inbox_nudge_pattern() {
     printf '%s' "$COORD_INBOX_NUDGE_TEMPLATE" \
-        | sed 's/[][\.^$*+?(){}|\\]/\\&/g; s/%N/[0-9]+/'
+        | sed 's/[][\.^$*+?(){}|\\]/\\&/g; s/%N/[0-9]+/; s/$/( Woke for: .*)?/'
 }
 
 # ── issue #456: the doorbell debounce clock, on disk ─────────────────────────
@@ -9736,7 +9775,31 @@ coord_wake_hold_reason() {
         printf 'swarm_busy\n'; return 0
     fi
     wake_debounced && { printf 'debounce\n'; return 0; }
+    # Issue #743: no armed waiter (it can't start with background tasks off),
+    # so the watcher does the batching itself. Last, so a busy pane / present
+    # human / debounce are still reported as such; self-clearing (see
+    # coord_wake_hold_retry_pass).
+    coord_batch_window_open && { printf 'batch_window\n'; return 0; }
     return 0
+}
+
+# coord_batch_window_open (issue #743)
+#
+# True while everything unannounced in the inbox is non-urgent and the last
+# ring was less than COORD_INBOX_BATCH_SECS ago. Uses _coord-inbox-batch.sh,
+# the same rules as the waiter and Stop hook. An urgent item, no prior ring,
+# nothing classifiable, or a doorbell already released but not yet delivered
+# (COORD_WAKE_PENDING_FILE: a dirty-composer retry) all return false.
+coord_batch_window_open() {
+    coord_typed_batching || return 1
+    [ "${COORD_INBOX_BATCH_SECS:-0}" -gt 0 ] || return 1
+    [ -e "$COORD_WAKE_PENDING_FILE" ] && return 1
+    local rang
+    rang="$(coord_last_ring)"
+    [ "$rang" -gt 0 ] || return 1
+    coord_inbox_scan "$COORD_INBOX_DIR" "$rang" 1
+    [ "$CIB_URGENT" -eq 0 ] && [ "$CIB_BATCHED" -gt 0 ] || return 1
+    ! coord_batch_due "$rang" "$(date +%s)"
 }
 
 # coord_wake_hold_mark_pending <reason>
@@ -9855,7 +9918,7 @@ coord_wake_hold_retry_pass() {
             return 0
         fi
         # Every other reason is self-clearing (debounce) or ceilinged.
-        if [ "$reason_now" = "debounce" ]; then
+        if [ "$reason_now" = "debounce" ] || [ "$reason_now" = "batch_window" ]; then
             return 0
         fi
         # (issue #666) The ceiling guards against a screen match that reads
@@ -9873,6 +9936,7 @@ coord_wake_hold_retry_pass() {
 
     local nudge
     nudge="$(coord_inbox_nudge_text)"
+    coord_batch_note_ring
 
     if [ "$DRY_RUN" = "1" ]; then
         echo "[DRY] would deliver held wake: cd $PROJECT_DIR && NON_INTERACTIVE=1 $LLM_START \"$nudge\" (held ${age}s, reason=$held_for)"
@@ -10254,6 +10318,7 @@ on_outcome() {
         echo "[$(date +%T)] waking coordinator..."
         local nudge
         nudge="$(coord_inbox_nudge_text)"
+        coord_batch_note_ring
         log_event coord.wake "issue=$issue trigger=$(basename "$path")"
 
         if [ "$DRY_RUN" = "1" ]; then
@@ -10387,6 +10452,7 @@ on_message() {
         echo "[$(date +%T)] waking coordinator (outbox)..."
         local nudge
         nudge="$(coord_inbox_nudge_text)"
+        coord_batch_note_ring
         log_event coord.wake "issue=$issue trigger=outbox:$(basename "$path")"
 
         if [ "$DRY_RUN" = "1" ]; then
@@ -10588,6 +10654,7 @@ on_inbox_drop() {
         echo "[$(date +%T)] waking coordinator (inbox drop)..."
         local nudge
         nudge="$(coord_inbox_nudge_text)"
+        coord_batch_note_ring
         log_event coord.wake "trigger=inbox_drop:$(basename "$path")"
 
         if [ "$DRY_RUN" = "1" ]; then
@@ -10768,6 +10835,7 @@ stall_wake_pass() {
         echo "[$(date +%T)] waking coordinator (stall)..."
         local nudge
         nudge="$(coord_inbox_nudge_text)"
+        coord_batch_note_ring
         log_event coord.wake "trigger=stall quiet_secs=$quiet_secs"
 
         if [ "$DRY_RUN" = "1" ]; then
@@ -10833,6 +10901,7 @@ coord_ring_doorbell() {
         maybe_auto_compact wake
         local nudge
         nudge="$(coord_inbox_nudge_text)"
+        coord_batch_note_ring
         log_event coord.wake "trigger=$trigger${extra:+ $extra}"
         if [ "$DRY_RUN" = "1" ]; then
             echo "[DRY] would: cd $PROJECT_DIR && NON_INTERACTIVE=1 $LLM_START \"$nudge\""

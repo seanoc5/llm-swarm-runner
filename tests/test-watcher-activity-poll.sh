@@ -366,7 +366,7 @@ extract_fn() {
     sed -n "/^${fn}() {/,/^}/p" "$WATCH"
 }
 for fn in log_event on_outcome outcome_path_issue outcome_path_task_id coord_wake_set_pending coord_wake_clear_pending \
-          coord_inbox_write coord_inbox_count coord_inbox_nudge_text coord_inbox_nudge_pattern \
+          coord_inbox_write coord_inbox_count coord_inbox_nudge_text coord_inbox_nudge_pattern coord_typed_batching coord_last_ring coord_batch_note_ring coord_batch_window_open \
           coord_wake_hold_mark_pending coord_wake_hold_clear_pending coord_wake_hold_retry_pass \
           coord_wake_retry_pass coord_wake_already_submitted \
           coord_wake_hold_reason coord_human_present worker_human_present swarm_busy \
