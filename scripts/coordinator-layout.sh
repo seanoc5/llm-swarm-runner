@@ -30,7 +30,7 @@ if [ "$cmd" != viewer-loop ]; then
 fi
 case "$cmd" in
     on)  coord_layout_on "$SESSION_NAME" "$project" "$LLM_SWARM_DIR" "${COORD_VIEWER_PCT:-75}" ||
-             { echo "coordinator-layout.sh: no live coordinator pane to attach to" >&2; exit 1; }
+             { echo "coordinator-layout.sh: viewer not added (no live coordinator pane, or the window is too short for the session-pane minimum)" >&2; exit 1; }
          echo "viewer on" ;;
     off) coord_layout_off "$SESSION_NAME"; echo "viewer off" ;;
     status) if [ -n "$(coord_viewer_panes "$SESSION_NAME")" ]; then echo on; else echo off; fi ;;

@@ -36,6 +36,8 @@ heading() { printf '\n\033[1;34m=== %s ===\033[0m\n' "$*"; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCH="$SCRIPT_DIR/../scripts/coordinator-watch.sh"
+# compact_confirm_submitted / compact_retract_queued call coord_pane_busy_match (#785).
+. "$SCRIPT_DIR/../scripts/_coord-layout.sh"
 [ -x "$WATCH" ] || red "coordinator-watch.sh not executable: $WATCH"
 command -v tmux >/dev/null 2>&1 || red "tmux not found — required by this feature and this test"
 command -v jq   >/dev/null 2>&1 || red "jq not found — required by this feature and this test"

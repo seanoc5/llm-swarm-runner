@@ -15,6 +15,7 @@
 # because closing the session pane by hand renumbers the viewer to 0.
 
 COORD_VIEWER_TITLE="coord-viewer"
+COORD_VIEWER_MIN_ROWS=3   # smallest viewer worth adding
 
 # coord_pane_is_viewer <pane-target>: true when that pane is the viewer.
 coord_pane_is_viewer() {
@@ -39,8 +40,26 @@ coord_layout_on() {
     tmux list-windows -t "$session" -F '#W' 2>/dev/null | grep -qx coordinator || return 1
     coord_pane_is_viewer "$session:coordinator.0" && return 1
     [ -n "$(coord_viewer_panes "$session")" ] && return 0
+    # Floor on the session pane (#785 review): the viewer gets pct% of the
+    # window but never so much that the session keeps fewer than
+    # COORD_VIEWER_MIN_SESSION_ROWS rows (one row goes to the border). Busy
+    # and composer checks read that pane's screen; a few rows can push the
+    # "esc to interrupt" line off it. A window too short to hold both gets no
+    # viewer at all (return 1) instead of a session pane that cannot be read.
+    local min_rows="${COORD_VIEWER_MIN_SESSION_ROWS:-12}" height rows max_rows
+    case "$min_rows" in ''|*[!0-9]*) min_rows=12 ;; esac
+    height="$(tmux display-message -p -t "$session:coordinator.0" -F '#{pane_height}' 2>/dev/null)" || height=""
+    case "$height" in ''|*[!0-9]*) return 1 ;; esac
+    max_rows=$((height - min_rows - 1))
+    if [ "$max_rows" -lt "$COORD_VIEWER_MIN_ROWS" ]; then
+        echo "coord-layout: window is $height rows; need >= $((min_rows + 1 + COORD_VIEWER_MIN_ROWS)) for a viewer beside a $min_rows-row session pane; not adding one" >&2
+        return 1
+    fi
+    rows=$((height * pct / 100))
+    [ "$rows" -le "$max_rows" ] || rows="$max_rows"
+    [ "$rows" -ge "$COORD_VIEWER_MIN_ROWS" ] || rows="$COORD_VIEWER_MIN_ROWS"
     local new
-    new="$(tmux split-window -d -v -l "${pct}%" -P -F '#{pane_id}' \
+    new="$(tmux split-window -d -v -l "$rows" -P -F '#{pane_id}' \
         -t "$session:coordinator.0" -c "$project" \
         "exec bash $(printf '%q' "$swarm_dir/scripts/coordinator-layout.sh") viewer-loop $(printf '%q' "$project")")" || return 1
     tmux select-pane -t "$new" -T "$COORD_VIEWER_TITLE"
@@ -82,4 +101,54 @@ coord_layout_viewer_loop() {
         wait "$pid" || echo "[viewer exited rc=$?; restarting in 3s]" >&2
         sleep 3
     done
+}
+
+# coord_pane_busy_match <pane-target> <busy-pattern>: true when the pane is
+# mid-turn. Every busy check on a Claude pane goes through here (#785 review).
+#
+# `capture-pane -p` reads only the visible rows. In a short pane (the session
+# pane beside the viewer, or any pane the user shrank) a long todo list can
+# push the "esc to interrupt" line above the visible rows, and a doorbell or
+# /compact would land mid-turn. So when the pane is shorter than
+# COORD_BUSY_FULL_ROWS (24) and the visible rows show no marker, the last
+# COORD_BUSY_SCROLLBACK_LINES (60) lines of scrollback are searched too.
+#
+# Scrollback can hold a marker from a turn that ended (a redraw taller than
+# the pane leaves old frames behind), and nothing there ever scrolls away on
+# its own. So a scrollback-only match is trusted only while the pane's
+# visible-plus-scrollback text is still changing: the text is hashed, and once
+# it has not changed for COORD_BUSY_SCROLLBACK_MAX_SECS (90) the match is
+# ignored (idle) until the text changes again. Worst case, a stale marker
+# reads busy for 90s. A match on the visible rows needs no such guard. Any
+# tmux failure reads as "not busy", like the visible-only checks did.
+# (grep -E >/dev/null, not grep -q: callers run under pipefail, and -q exiting
+# early SIGPIPEs the sed upstream, so a long capture would never match.)
+coord_pane_busy_match() {
+    local target="$1" pattern="$2" strip content height hist state now
+    strip='s/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g'
+    content="$(tmux capture-pane -t "$target" -p 2>/dev/null)" || return 1
+    printf '%s\n' "$content" | sed "$strip" | LC_ALL=C grep -E "$pattern" >/dev/null && return 0
+    height="$(tmux display-message -p -t "$target" -F '#{pane_height}' 2>/dev/null)" || return 1
+    case "$height" in ''|*[!0-9]*) return 1 ;; esac
+    state="${COORD_BUSY_STATE_FILE:-${TMPDIR:-/tmp}/llm-swarm-busy-$(id -u)-$(printf '%s' "$target" | tr -c 'A-Za-z0-9' _)}"
+    if [ "$height" -ge "${COORD_BUSY_FULL_ROWS:-24}" ]; then
+        rm -f "$state" 2>/dev/null
+        return 1
+    fi
+    hist="$(tmux capture-pane -t "$target" -p -S "-${COORD_BUSY_SCROLLBACK_LINES:-60}" 2>/dev/null)" || return 1
+    if ! printf '%s\n' "$hist" | sed "$strip" | LC_ALL=C grep -E "$pattern" >/dev/null; then
+        rm -f "$state" 2>/dev/null
+        return 1
+    fi
+    local sum since prev_sum prev_since
+    sum="$(printf '%s' "$hist" | cksum | cut -d' ' -f1)"
+    now="$(date +%s)"
+    prev_sum=""; prev_since=""
+    [ -r "$state" ] && read -r prev_sum prev_since < "$state" 2>/dev/null || true
+    case "$prev_since" in ''|*[!0-9]*) prev_sum="" ;; esac
+    if [ "$prev_sum" != "$sum" ]; then
+        printf '%s %s\n' "$sum" "$now" > "$state" 2>/dev/null || true
+        return 0
+    fi
+    [ $((now - prev_since)) -lt "${COORD_BUSY_SCROLLBACK_MAX_SECS:-90}" ]
 }

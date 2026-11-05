@@ -94,8 +94,25 @@ coord_layout_on "$SESSION_NAME" "$PROJECT" "$ROOT" 75
 coord_layout_off "$SESSION_NAME"
 check "layout off closes only the viewer" 1 "$(tmux list-panes -t "$SESSION_NAME:coordinator" | wc -l)"
 
+# --- the viewer closes itself once it is the last pane (PR review focus) -------
+# A separate session, so closing its only window cannot take the other checks down.
+SC="viewer-selfclose"
+tmux -f /dev/null new-session -d -s "$SC" -n coordinator -x 120 -y 40 -c "$PROJECT"
+tmux send-keys -t "$SC:coordinator.0" "exec -a claude bash $TEST_DIR/fake-repl.sh" Enter
+coord_layout_on "$SC" "$PROJECT" "$ROOT" 75
+check "self-close: real viewer-loop is running beside the session" 2 "$(tmux list-panes -t "$SC:coordinator" | wc -l)"
+tmux kill-pane -t "$SC:coordinator.0"
+gone() { tmux has-session -t "$SC" 2>/dev/null && echo no || echo yes; }
+for _ in $(seq 100); do [ "$(gone)" = yes ] && break; sleep 0.1; done
+check "self-close: lone viewer closed its pane (its window and session are gone)" yes "$(gone)"
+check "self-close: the other session was not touched" cli "$(coordinator_pane_state)"
+
 # --- viewer renumbered to pane 0 (session pane closed) is never typed into ------
+# A stand-in viewer (titled pane that just sleeps) so the real viewer's self-close
+# above cannot kill the window while these checks run.
 coord_layout_on "$SESSION_NAME" "$PROJECT" "$ROOT" 75
+tmux respawn-pane -k -t "$SESSION_NAME:coordinator.1" "sleep 120"
+tmux select-pane -t "$SESSION_NAME:coordinator.1" -T "$COORD_VIEWER_TITLE"
 tmux kill-pane -t "$SESSION_NAME:coordinator.0"
 check "viewer is now pane 0" yes "$(coord_pane_is_viewer "$SESSION_NAME:coordinator.0" && echo yes || echo no)"
 check "watcher treats a viewer-only window as absent" absent "$(coordinator_pane_state)"
@@ -104,5 +121,55 @@ printf 'DOORBELL-NOPE\n' > "$TEST_DIR/bell2"
 rc=0; reprompt_inject "$SESSION_NAME:coordinator.0" "$TEST_DIR/bell2" >/dev/null 2>&1 || rc=$?
 check "doorbell to a viewer is deferred (rc 2)" 2 "$rc"
 check "nothing pasted into the viewer" no "$(pane_has "$SESSION_NAME:coordinator.0" DOORBELL-NOPE)"
+tmux kill-session -t "$SESSION_NAME" 2>/dev/null || true
+
+# --- small session pane: busy marker above the visible rows -----------------------
+# A turn with a long todo list: the "esc to interrupt" line is ABOVE the rows the
+# small pane shows. capture-pane -p alone (the pre-fix check) cannot see it.
+SMALL="viewer-small"; SESSION_NAME="$SMALL"
+export COORD_BUSY_STATE_FILE="$TEST_DIR/busy-state"
+cat > "$TEST_DIR/todo-repl.sh" <<FAKE
+#!/usr/bin/env bash
+echo "✻ Working… (esc to interrupt)"
+for i in \$(seq 1 15); do echo "  ☐ todo item \$i"; done
+printf '> '
+while IFS= read -r l; do printf '%s\n' "\$l" >> "$RECV"; done
+FAKE
+tmux -f /dev/null new-session -d -s "$SMALL" -n coordinator -x 80 -y 24 -c "$PROJECT"
+tmux set-window-option -t "$SMALL:coordinator" pane-base-index 0
+# Floor lowered on purpose: this reproduces the user-shrunk / pre-floor small pane.
+COORD_VIEWER_MIN_SESSION_ROWS=1 coord_layout_on "$SMALL" "$PROJECT" "$ROOT" 75
+tmux respawn-pane -k -t "$SMALL:coordinator.0" "exec -a claude bash $TEST_DIR/todo-repl.sh"
+tmux respawn-pane -k -t "$SMALL:coordinator.1" "sleep 120"
+tmux select-pane -t "$SMALL:coordinator.1" -T "$COORD_VIEWER_TITLE"
+eventually yes 'pane_has "$SMALL:coordinator.0" "todo item 15"' || red "todo fake did not render"
+h="$(tmux display-message -p -t "$SMALL:coordinator.0" -F '#{pane_height}')"
+[ "$h" -le 8 ] || red "session pane should be small, got $h rows"
+check "premise: marker is not on the visible rows ($h-row pane)" no "$(pane_has "$SMALL:coordinator.0" "esc to interrupt")"
+check "premise: marker is in scrollback" yes \
+    "$(tmux capture-pane -t "$SMALL:coordinator.0" -p -S -60 | grep -qF 'esc to interrupt' && echo yes || echo no)"
+check "small pane, marker above visible rows: coordinator_pane_busy sees the turn" yes \
+    "$(coordinator_pane_busy && echo yes || echo no)"
+# Stale marker: the pane is now static. After the cap it must read idle, not busy forever.
+COORD_BUSY_SCROLLBACK_MAX_SECS=2
+sleep 3
+check "stale scrollback marker stops reading busy after the cap" no "$(coordinator_pane_busy && echo yes || echo no)"
+tmux send-keys -t "$SMALL:coordinator.0" "new input" Enter
+sleep 0.5
+check "changed pane text re-arms the check (busy again)" yes "$(coordinator_pane_busy && echo yes || echo no)"
+unset COORD_BUSY_SCROLLBACK_MAX_SECS
+tmux kill-session -t "$SMALL" 2>/dev/null || true
+
+# --- the floor: the viewer never squeezes the session pane below the minimum -------
+SESSION_NAME="viewer-floor"
+tmux -f /dev/null new-session -d -s "$SESSION_NAME" -n coordinator -x 80 -y 24 -c "$PROJECT"
+coord_layout_on "$SESSION_NAME" "$PROJECT" "$ROOT" 90
+check "COORD_VIEWER_PCT=90 on a 24-row window keeps >=12 session rows" yes \
+    "$([ "$(tmux display-message -p -t "$SESSION_NAME:coordinator.0" -F '#{pane_height}')" -ge 12 ] && echo yes || echo no)"
+tmux kill-session -t "$SESSION_NAME"
+tmux -f /dev/null new-session -d -s "$SESSION_NAME" -n coordinator -x 80 -y 10 -c "$PROJECT"
+rc=0; coord_layout_on "$SESSION_NAME" "$PROJECT" "$ROOT" 75 2>/dev/null || rc=$?
+check "10-row window: no viewer added (rc 1)" 1 "$rc"
+check "10-row window: session pane left alone" 1 "$(tmux list-panes -t "$SESSION_NAME:coordinator" | wc -l)"
 
 echo "all viewer-layout checks passed"

@@ -7175,11 +7175,9 @@ coordinator_pane_state() {
 # escape sequences and the Unicode spinner glyphs (✻/✶) can otherwise trip
 # bash's here-string handling under a UTF-8 locale.
 coordinator_pane_busy() {
-    local content clean
     coord_pane_is_viewer "$SESSION_NAME:coordinator.0" && return 1   # viewer is never "busy" (#785)
-    content="$(tmux capture-pane -t "$SESSION_NAME:coordinator.0" -p 2>/dev/null)" || return 1
-    clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
-    printf '%s\n' "$clean" | LC_ALL=C grep -qE "$AUTO_COMPACT_BUSY_PATTERN"
+    # Visible rows plus, in a short pane, recent scrollback (#785 review).
+    coord_pane_busy_match "$SESSION_NAME:coordinator.0" "$AUTO_COMPACT_BUSY_PATTERN"
 }
 
 # probe_ctx_used
@@ -7373,10 +7371,9 @@ compact_composer_clear() {
 # <pasted-text>. False (rc 1) only when that exact text is still sitting
 # there un-submitted — the caller resends Enter once in that case.
 compact_confirm_submitted() {
-    local target="$1" busy_pattern="$2" pasted="$3" content clean last
-    content="$(tmux capture-pane -t "$target" -p 2>/dev/null)" || return 1
-    clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
-    printf '%s\n' "$clean" | LC_ALL=C grep -qE "$busy_pattern" && return 0
+    local target="$1" busy_pattern="$2" pasted="$3" last
+    tmux capture-pane -t "$target" -p >/dev/null 2>&1 || return 1
+    coord_pane_busy_match "$target" "$busy_pattern" && return 0
     last="$(compact_last_pane_line "$target")" || true
     case "$last" in
         "$pasted"*) return 1 ;;
@@ -7463,10 +7460,7 @@ compact_retract_queued() {
     local target="$1" prefix="$2" extra="$3" busy_pattern="${4:-}"
 
     if [ -n "$busy_pattern" ]; then
-        local pre_content pre_clean
-        pre_content="$(tmux capture-pane -t "$target" -p 2>/dev/null)" || pre_content=""
-        pre_clean="$(printf '%s\n' "$pre_content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
-        if printf '%s\n' "$pre_clean" | LC_ALL=C grep -qE "$busy_pattern"; then
+        if coord_pane_busy_match "$target" "$busy_pattern"; then
             log_event "${prefix}.retract_skip" "reason=busy $extra"
             return 0
         fi
