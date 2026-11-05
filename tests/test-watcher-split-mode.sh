@@ -303,7 +303,7 @@ start_watcher 600
 drop sidelined_worker 11          # no age: same second as the run's start
 wait_for 8 started_ge 1 || red "2e2: run did not start"
 wait_for 5 grep -q 'coord.workrun.exit .*rc=1' "$EVENTS_LOG" || red "2e2: failed run's exit not logged"
-sleep 1                           # exit recheck and several 1 s ticks, all inside the 3 s back-off
+sleep 0.5                         # the instant relaunch would already have happened; the legal retry is ~2 s after start (last-start is start-1)
 [ "$(runs_started)" = 1 ] || red "2e2: same-second item skipped the back-off ($(runs_started) runs)"
 wait_for 10 started_ge 2 || red "2e2: the failed run's item was never retried"
 wait_for 6 ended_ge 1 || red "2e2: retry run did not finish"
