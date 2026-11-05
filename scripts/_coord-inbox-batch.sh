@@ -33,9 +33,11 @@
 # on purpose: the watcher's "the hook already rang this wake" skip reads
 # coord-hook-rang, and a typed ring that failed to paste must not count there.
 coord_last_ring_at() {
-    local a b
-    a="$(cut -d' ' -f1 "$1/coord-hook-rang" 2>/dev/null || echo 0)"
-    b="$(cut -d' ' -f1 "$1/coord-typed-ring" 2>/dev/null || echo 0)"
+    # Builtins only (no forks): keeps the read-to-scan gap in the waiter's poll
+    # loop as short as it was with a single `cut`.
+    local a=0 b=0
+    read -r a _ 2>/dev/null < "$1/coord-hook-rang" || a=0
+    read -r b _ 2>/dev/null < "$1/coord-typed-ring" || b=0
     [[ "$a" =~ ^[0-9]+$ ]] || a=0
     [[ "$b" =~ ^[0-9]+$ ]] || b=0
     echo $(( a > b ? a : b ))
