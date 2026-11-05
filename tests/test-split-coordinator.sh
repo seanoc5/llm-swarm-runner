@@ -437,6 +437,100 @@ grep -qE 'set-environment .*COORD_MODE split' "$S/tmux.log" && got=set || got=mi
 check "split restart: the tmux session env is set to split" "set" "$got"
 export COORD_MODE=split
 
+# A running watcher keeps the COORD_MODE it started with, and llm-start used to
+# skip any running watcher: after a rollback a stale split watcher kept writing
+# split, and after enabling split a resident one kept pasting wakes into the
+# conversation session. A mode mismatch must restart the watcher (or stop loudly).
+heading "watcher mode mismatch"
+cat > "$T/bin/tmux" <<EOF2
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$S/tmux.log"
+case "\$*" in
+    *"-V"*) echo "tmux 3.4" ;;
+    *has-session*) exit 0 ;;
+    *"list-windows -t llm-proj -F #W"*) printf 'coordinator\nutil\n' ;;
+    *list-panes*"coordinator"*"PANE_CMD"*) echo "PANE_CMD=bash PANE_DEAD=0" ;;
+    *list-panes*llm-proj:util*pane_dead*) cat "$S/util-panes" ;;
+    *kill-pane*) [ -f "$S/kill-fails" ] && exit 1 ;;
+    *show-environment*) [ -f "$S/sess-env" ] && cat "$S/sess-env" ;;
+esac
+exit 0
+EOF2
+watch_run() {   # <resolved mode> <live watcher start cmd> [WATCH]
+    : > "$S/tmux.log"; printf '0 1 %s\n' "$2" > "$S/util-panes"
+    set +e
+    (cd "$S/proj" && env -u COORD_MODE COORD_MODE="$1" HOME="$S" NON_INTERACTIVE=1 WATCH="${3:-1}" STATUS=0 "$ROOT/llm-start.sh") > "$S/out.txt" 2>&1
+    wrc=$?; set -e
+}
+wcmd="$ROOT/scripts/coordinator-watch.sh /x"
+watch_run resident "COORD_MODE=split $wcmd"
+check "resident now, split watcher: llm-start exits 0" "0" "$wrc"
+grep -qE 'kill-pane -t llm-proj:util\.1' "$S/tmux.log" && got=killed || got=kept
+check "resident now, split watcher: the stale watcher pane is killed" "killed" "$got"
+grep -qF 'split-window' "$S/tmux.log" && got=respawned || got=none
+check "resident now, split watcher: a fresh watcher is spawned" "respawned" "$got"
+grep -qF 'split-window' "$S/tmux.log" && grep 'split-window' "$S/tmux.log" | grep -q 'COORD_MODE=resident ' && got=resident || got=wrong
+check "resident now, split watcher: the new watcher is pinned to resident" "resident" "$got"
+grep -q 'runs COORD_MODE=split but the resolved mode is resident' "$S/out.txt" && got=said || got=silent
+check "resident now, split watcher: the restart is announced" "said" "$got"
+
+watch_run split "COORD_MODE=resident $wcmd"
+grep -qE 'kill-pane -t llm-proj:util\.1' "$S/tmux.log" && grep -qF 'split-window' "$S/tmux.log" && got=restarted || got=skipped
+check "split now, resident watcher: restarted, not skipped" "restarted" "$got"
+
+watch_run split "$wcmd"
+grep -qE 'kill-pane -t llm-proj:util\.1' "$S/tmux.log" && got=restarted || got=skipped
+check "split now, legacy watcher with no pinned mode: restarted" "restarted" "$got"
+
+watch_run split "COORD_MODE=split $wcmd"
+grep -qF 'kill-pane' "$S/tmux.log" && got=killed || got=untouched
+check "matching mode: the live watcher is left alone" "untouched" "$got"
+grep -qF 'split-window' "$S/tmux.log" && got=spawned || got=skipped
+check "matching mode: no second watcher is spawned" "skipped" "$got"
+grep -q 'skipping spawn' "$S/out.txt" && got=said || got=silent
+check "matching mode: the skip is announced" "said" "$got"
+
+touch "$S/kill-fails"
+watch_run resident "COORD_MODE=split $wcmd"
+check "stale watcher that cannot be stopped: llm-start exits 1" "1" "$wrc"
+grep -q "tmux kill-pane -t 'llm-proj:util.1'" "$S/out.txt" && got=command || got=missing
+check "stale watcher that cannot be stopped: the exact command is printed" "command" "$got"
+rm -f "$S/kill-fails"
+
+watch_run resident "COORD_MODE=split $wcmd" 0
+grep -qF 'kill-pane' "$S/tmux.log" && got=killed || got=untouched
+check "WATCH=0: a wrong-mode watcher is not killed" "untouched" "$got"
+grep -q 'WARN: coordinator-watch pane 1 .* runs COORD_MODE=split but the resolved mode is resident' "$S/out.txt" && got=warned || got=silent
+check "WATCH=0: a wrong-mode watcher is warned about with the restart command" "warned" "$got"
+
+# Rollback from a session pane (`util`): the pane inherits COORD_MODE=split from
+# the tmux session env, .swarm/.env no longer sets it, and no mode is passed.
+heading "rollback run from a session pane with a stale COORD_MODE"
+printf 'COORD_MODE=split\n' > "$S/sess-env"; : > "$S/util-panes"
+stale_run() {   # <extra env assignment, or empty> -- runs with COORD_MODE=split inherited, none passed on purpose
+    : > "$S/tmux.log"
+    (cd "$S/proj" && env COORD_MODE=split HOME="$S" NON_INTERACTIVE=1 WATCH=0 STATUS=0 "$@" "$ROOT/llm-start.sh") > "$S/out.txt" 2>&1
+}
+stale_run env TMUX=/tmp/fake,1,0
+send_line | grep -q 'COORD_MODE=resident ' && got=resident || got=split
+check "stale session env, no mode passed: resolves resident" "resident" "$got"
+grep -q 'conversation session is live' "$S/out.txt" && got=printed || got=absent
+check "stale session env, no mode passed: no split-mode message" "absent" "$got"
+grep -q 'inherited from the tmux session env' "$S/out.txt" && got=said || got=silent
+check "stale session env, no mode passed: the override is announced" "said" "$got"
+grep -qE 'set-environment .*-u COORD_MODE' "$S/tmux.log" && got=unset || got=kept
+check "stale session env, no mode passed: the session env is cleared" "unset" "$got"
+# Outside tmux the caller's value is a deliberate choice and still wins.
+stale_run env -u TMUX
+send_line | grep -q 'COORD_MODE=split ' && got=split || got=resident
+check "no tmux: an explicit COORD_MODE=split still wins" "split" "$got"
+# Inside tmux, a value that differs from the session env is a deliberate choice too.
+printf 'COORD_MODE=resident\n' > "$S/sess-env"
+stale_run env TMUX=/tmp/fake,1,0
+send_line | grep -q 'COORD_MODE=split ' && got=split || got=resident
+check "tmux, value differs from the session env: explicit choice wins" "split" "$got"
+rm -f "$S/sess-env"
+
 # Auto-compact never injects /compact into the conversation session.
 heading "auto-compact"
 log_event() { echo "$*" >> "$T/ev.log"; }

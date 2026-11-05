@@ -82,8 +82,8 @@ for _ in $(seq 1 50); do
     sleep 0.1
 done
 out="$(watcher_pane_scan "$SESSION:util" "$WATCH_SCRIPT")"
-[ "$out" = "live" ] || red "expected 'live' while the watcher runs; got: '$out'"
-green "running watcher → 'live'"
+[[ "$out" == live:* ]] || red "expected live:<idx>:<mode> while the watcher runs; got: '$out'"
+green "running watcher → live:<idx>:<mode>"
 
 heading "Test 3: THE BUG — watcher exits, pane lingers dead → must NOT be 'live'"
 touch "$TEST_DIR/stop"
@@ -102,7 +102,7 @@ command tmux -L "$SOCKET" list-panes -t "$SESSION:util" \
 green "premise holds: dead pane still reports its start command"
 
 out="$(watcher_pane_scan "$SESSION:util" "$WATCH_SCRIPT")"
-[ "$out" != "live" ] || red "REGRESSION (#391): dead watcher pane reported as 'live' — llm-start.sh would skip the respawn"
+[[ "$out" != live:* ]] || red "REGRESSION (#391): dead watcher pane reported as 'live' — llm-start.sh would skip the respawn"
 [ -n "$out" ] || red "expected the dead pane's index as a corpse; got nothing"
 [[ "$out" =~ ^[0-9]+$ ]] || red "expected a single numeric pane index; got: '$out'"
 green "dead watcher → not 'live', corpse index $out returned for reaping"
@@ -136,7 +136,7 @@ for _ in $(seq 1 100); do
     sleep 0.1
 done
 out="$(watcher_pane_scan "$SESSION:util" "$WATCH_SCRIPT")"
-[ "$out" = "live" ] || red "a live watcher must win over a corpse; got: '$out'"
+[[ "$out" == live:* ]] || red "a live watcher must win over a corpse; got: '$out'"
 green "live watcher + corpse → 'live' (no duplicate watcher spawned)"
 
 printf '\n\033[1;32mAll checks passed.\033[0m\n'

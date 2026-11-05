@@ -15,7 +15,27 @@
 
 The launcher that starts work runs (lock, log, timeout, budget) is **not** part of this change (ADR 0006 step A2). Until it exists a split-mode swarm has nobody triaging the inbox on its own; run a work run by hand with `scripts/render-coordinator-prompt.sh work > /tmp/work.md && claude -p --append-system-prompt-file /tmp/work.md "Run once."` if you want to try one.
 
-Turn it on per project in `<project>/.swarm/.env` (`COORD_MODE=split`), restart the coordinator with `llm-start.sh`, respawn the watcher. Roll back by unsetting it and repeating those two steps; the new files below are inert in resident mode. `llm-start.sh` resets the tmux session's own `COORD_MODE` and passes the resolved mode to the coordinator on every start, so a session first started in split mode does not stay split after the rollback.
+### Turning it on
+
+Run these in order, from a shell in the project (`<project>` is its directory, `<sandbox>` is the llm-swarm-runner checkout, `llm-<project>` is the tmux session name `llm-start.sh` prints):
+
+1. `echo 'COORD_MODE=split' >> <project>/.swarm/.env`
+2. `tmux kill-window -t llm-<project>:coordinator` (ends the running resident coordinator; `llm-start.sh` only relaunches a pane that is gone or idle)
+3. `cd <project> && <sandbox>/llm-start.sh` (opens the conversation session, sets the tmux session's `COORD_MODE` to split, and restarts the watcher if it is still resident: it prints `runs COORD_MODE=resident but the resolved mode is split; restarting it.`)
+
+### Rolling back
+
+1. `sed -i '/^COORD_MODE=/d' <project>/.swarm/.env` (unset means resident)
+2. `tmux kill-window -t llm-<project>:coordinator`
+3. `cd <project> && <sandbox>/llm-start.sh` (works from the `util` pane too: it ignores a `COORD_MODE` that the pane merely inherited from the session, says so, clears the session's value, and restarts a split watcher as resident)
+
+With `WATCH=0` the script leaves a running watcher alone but prints a `WARN:` with the exact `tmux kill-pane ...` command if its mode is wrong; run it, then `WATCH=1 <sandbox>/llm-start.sh`. If `llm-start.sh` cannot stop a stale watcher it exits 1 and prints that command too.
+
+To force a mode on purpose, pass `COORD_MODE=<mode>` to the run and make it differ from the session's value, or clear the session's first: `tmux set-environment -t llm-<project> -u COORD_MODE`.
+
+After step 3 the session env, the coordinator and the watcher all follow `.swarm/.env`. What `llm-start.sh` cannot see keeps its old mode: a shell with `COORD_MODE` exported by hand, and a watcher started by hand outside the `util` window. Restart those yourself.
+
+The new files below are inert in resident mode.
 
 ## Telling the work run something
 

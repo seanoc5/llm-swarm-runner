@@ -202,6 +202,22 @@ INITIAL_PROMPT="${1:-Execute the Initial Startup Checklist.}"
 # loader only fills in still-unset vars. Final precedence:
 #   flag > shell env > <project>/.swarm/.env > <sandbox>/.env
 #        > <sandbox>/.env.example
+# COORD_MODE inherited from the tmux session env is not an operator choice
+# (#767). A session first started in split carries COORD_MODE=split in its env
+# (new-session -e / set-environment below), so every pane, `util` included,
+# inherits it, and _load-env.sh keeps caller values: after the setting is
+# removed from .swarm/.env, a rerun from such a pane would still resolve split.
+# Inside tmux, a caller value that equals the session env's own value is
+# treated as inherited and dropped, so .swarm/.env (unset = resident) decides.
+# Passing COORD_MODE explicitly to differ from the session env still wins.
+if [ -n "${TMUX:-}" ] && [ -n "${COORD_MODE:-}" ]; then
+    _sess_mode="$(tmux show-environment COORD_MODE 2>/dev/null || true)"
+    if [ "$_sess_mode" = "COORD_MODE=$COORD_MODE" ]; then
+        echo "Ignoring COORD_MODE=$COORD_MODE inherited from the tmux session env; using .swarm/.env (unset = resident). To force it, run: tmux set-environment -u COORD_MODE; COORD_MODE=$COORD_MODE ./llm-start.sh" >&2
+        unset COORD_MODE
+    fi
+    unset _sess_mode
+fi
 # shellcheck source=scripts/_load-env.sh
 . "$LLM_SWARM_DIR/scripts/_load-env.sh" "$PWD"
 
@@ -1224,23 +1240,26 @@ fi
 # all when the window has no watcher pane in any state).
 watcher_pane_scan() {
     local target="$1" script="$2"
-    local dead idx startcmd live=0
-    local corpses=()
+    local dead idx startcmd mode
+    local corpses=() lives=()
     while IFS=' ' read -r dead idx startcmd; do
         case "$startcmd" in
             *"$script"*)
                 if [ "$dead" = "1" ]; then
                     corpses+=("$idx")
                 else
-                    live=1
+                    # The watcher pins COORD_MODE at launch (the prefix on its
+                    # start command); one from before #767 has none: "unknown".
+                    mode="$(grep -oE '(^|[[:space:]])COORD_MODE=[a-z]+' <<<"$startcmd" | head -1 | sed -E 's/.*COORD_MODE=//')"
+                    lives+=("live:$idx:${mode:-unknown}")
                 fi
                 ;;
         esac
     done < <(tmux list-panes -t "$target" \
                   -F '#{pane_dead} #{pane_index} #{pane_start_command}' 2>/dev/null)
 
-    if [ "$live" = "1" ]; then
-        echo "live"
+    if [ ${#lives[@]} -gt 0 ]; then
+        printf '%s\n' "${lives[@]}"
     elif [ ${#corpses[@]} -gt 0 ]; then
         printf '%s\n' "${corpses[@]}"
     fi
@@ -1249,12 +1268,31 @@ watcher_pane_scan() {
 if [ "${WATCH:-1}" = "1" ]; then
     WATCH_SCRIPT="$LLM_SWARM_DIR/scripts/coordinator-watch.sh"
     WATCH_PANE_SCAN="$(watcher_pane_scan "$SESSION_NAME:util" "$WATCH_SCRIPT")"
-    if [ "$WATCH_PANE_SCAN" = "live" ]; then
-        echo "coordinator-watch pane already running in '$SESSION_NAME:util' — skipping spawn"
+    # A live watcher keeps the COORD_MODE it started with. One whose mode differs
+    # from the resolved mode would write the wrong inbox shape and drop or paste
+    # wakes while logging success, so it is restarted here (#767), or this script
+    # stops loudly if it cannot; never a silent skip.
+    _watch_live=0
+    for _w in $WATCH_PANE_SCAN; do
+        case "$_w" in
+            live:*:"$COORD_MODE") _watch_live=1 ;;
+            live:*)
+                _widx="${_w#live:}"; _widx="${_widx%%:*}"; _wmode="${_w##*:}"
+                echo "coordinator-watch pane $_widx in '$SESSION_NAME:util' runs COORD_MODE=$_wmode but the resolved mode is $COORD_MODE; restarting it."
+                if ! tmux kill-pane -t "$SESSION_NAME:util.$_widx" 2>/dev/null; then
+                    echo "ERROR: could not stop the stale coordinator-watch pane. It would keep acting as '$_wmode'. Stop it, then rerun this script:" >&2
+                    echo "  tmux kill-pane -t '$SESSION_NAME:util.$_widx' && (cd '$PWD' && $LLM_SWARM_DIR/llm-start.sh)" >&2
+                    exit 1
+                fi
+                ;;
+        esac
+    done
+    if [ "$_watch_live" = "1" ]; then
+        echo "coordinator-watch pane already running in '$SESSION_NAME:util' (COORD_MODE=$COORD_MODE) — skipping spawn"
     else
         # Reap corpses first so the util window doesn't collect one dead pane
         # per restart cycle.
-        for _corpse in $WATCH_PANE_SCAN; do
+        for _corpse in $(grep -E "^[0-9]+\$" <<<"$WATCH_PANE_SCAN" || true); do
             tmux kill-pane -t "$SESSION_NAME:util.$_corpse" 2>/dev/null \
                 && echo "Removed dead coordinator-watch pane $_corpse in '$SESSION_NAME:util' (#391)"
         done
@@ -1281,6 +1319,11 @@ else
     # stays dead and silent. Warn (nothing printed when it is alive, was
     # stopped on purpose, or never ran here).
     "$LLM_SWARM_DIR/scripts/watcher-check.sh" "$PWD" || true
+    # #767: WATCH=0 leaves a running watcher alone, but a wrong-mode one must not
+    # go unmentioned.
+    for _w in $(watcher_pane_scan "$SESSION_NAME:util" "$LLM_SWARM_DIR/scripts/coordinator-watch.sh" | grep '^live:' || true); do
+        [ "${_w##*:}" = "$COORD_MODE" ] || echo "WARN: coordinator-watch pane $(cut -d: -f2 <<<"$_w") in '$SESSION_NAME:util' runs COORD_MODE=${_w##*:} but the resolved mode is $COORD_MODE. Restart it: tmux kill-pane -t '$SESSION_NAME:util.$(cut -d: -f2 <<<"$_w")' && (cd '$PWD' && WATCH=1 $LLM_SWARM_DIR/llm-start.sh)" >&2
+    done
 fi
 
 # Optionally spawn gh-status-bar.sh in a 'status' window. Updates the tmux
