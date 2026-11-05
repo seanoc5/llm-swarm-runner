@@ -33,7 +33,7 @@ watcher types a plain doorbell per item, with no suffix):
 
 | Urgent (wake now) | Batched (wake at most every 900 s) |
 |---|---|
-| deliver_stall, stranded_brief, worktree_vanished, sidelined_worker, sidelined_wake_failed, stall | idle_capacity, activity, dispatch_pause_lifted, stale_wait |
+| deliver_stall, stranded_brief, worktree_vanished, sidelined_worker, sidelined_wake_failed, stall, operator (a note from `scripts/operator-note.sh`) | idle_capacity, activity, dispatch_pause_lifted, stale_wait |
 | outcome that is not `*.ok.json` | outcome `*.ok.json` |
 | outbox `kind: decision-needed`, or text reporting red CI | outbox `kind: fyi` / `brief-draft` |
 | any unknown kind, or an item whose body can't be read | |

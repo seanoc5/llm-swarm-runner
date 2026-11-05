@@ -17,6 +17,8 @@
 #   sidelined_wake_failed stall
 #   outcome whose triggering path is not an *.ok.json (err.json, unknown)
 #   outbox whose message says kind: decision-needed, or reports red CI
+#   operator (scripts/operator-note.sh, issue #767: a note the operator left
+#   for the work run; falls into the unknown-kind default below)
 # BATCHED:
 #   idle_capacity activity dispatch_pause_lifted stale_wait
 #   outcome *.ok.json, outbox kind: fyi / brief-draft (no red-CI text)

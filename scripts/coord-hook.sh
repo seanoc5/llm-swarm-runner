@@ -37,6 +37,13 @@
 #      COORD_INBOX_WAITER_ASK_SECS, so a coordinator that can't arm it
 #      never loops.
 #
+#   4. Split mode (COORD_MODE=split, issue #767). The session is a conversation
+#      nobody wakes, so Stop never rings and never asks for a waiter. On
+#      UserPromptSubmit the hook adds one line of context when
+#      .swarm/needs-you.md changed since it last told the operator's session,
+#      and clears the 📥 window flag (see _coord-split.sh). Active even with
+#      COORD_HOOK_STATE=0; state-file writes still need COORD_HOOK_STATE=1.
+#
 # Fails open: any error leaves the hook silent (exit 0, no output), which
 # Claude Code treats as "no opinion" — the watcher then falls back to its
 # screen-based checks because the state file goes stale.
@@ -45,7 +52,11 @@ set -uo pipefail
 
 event="${1:-}"
 input="$(cat 2>/dev/null || true)"
-[ "${COORD_HOOK_STATE:-0}" = "1" ] || exit 0
+# shellcheck source=scripts/_coord-split.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_coord-split.sh"
+hook_state=0; [ "${COORD_HOOK_STATE:-0}" = "1" ] && hook_state=1
+split=0; [ "$(coord_mode)" = "split" ] && split=1
+[ "$hook_state" = "1" ] || [ "$split" = "1" ] || exit 0
 
 project="${CLAUDE_PROJECT_DIR:-$PWD}"
 swarm="$project/.swarm"
@@ -63,6 +74,9 @@ template="${COORD_INBOX_NUDGE_TEMPLATE:-Inbox: %N item(s) in .swarm/coord-inbox/
 now="$(date +%s)"
 # shellcheck source=scripts/_coord-inbox-batch.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_coord-inbox-batch.sh"
+# shellcheck source=scripts/_window-flags.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_window-flags.sh"
+SESSION_NAME="${SESSION_NAME:-llm-$(basename "$project")}"
 
 write_state() {
     local tmp
@@ -115,9 +129,23 @@ watcher_dead_warning() {
 }
 
 case "$event" in
-    UserPromptSubmit) write_state busy ;;
-    Notification)     write_state waiting ;;
+    UserPromptSubmit)
+        [ "$hook_state" = "1" ] && write_state busy
+        if [ "$split" = "1" ]; then
+            # COORD_MODE=split (issue #767): this session is never woken, so the
+            # operator's next message is where a changed Needs-you list reaches it.
+            clear_window_flag coordinator "📥" "operator_prompt"
+            note="$(coord_needs_you_note "$swarm")"
+            [ -z "$note" ] || jq -n --arg c "$note" '{hookSpecificOutput: {hookEventName: "UserPromptSubmit", additionalContext: $c}}'
+        fi
+        ;;
+    Notification)     [ "$hook_state" = "1" ] && write_state waiting ;;
     Stop)
+        # Split mode never rings: nothing is typed into or blocked on this session.
+        if [ "$split" = "1" ]; then
+            [ "$hook_state" = "1" ] && write_state idle
+            exit 0
+        fi
         active="$(printf '%s' "$input" | jq -r '.stop_hook_active // false' 2>/dev/null || echo false)"
         last_rang="$(coord_last_ring_at "$swarm")"
         # Same urgent-vs-batched gate as coord-inbox-wait.sh (issue #730).

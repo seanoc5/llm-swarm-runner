@@ -27,6 +27,9 @@
 #       pane has been idle for WATCH_STALL_FLAG_SECS (default 600).
 #   ✋  worker posted a decision-needed outbox message, still unprocessed
 #   🔔  the coordinator's last turn ended asking for an approval
+#   📥  COORD_MODE=split only (issue #767): an urgent inbox item arrived and
+#       the conversation session was not woken for it; cleared when the
+#       operator sends their next message (coord-hook.sh UserPromptSubmit)
 #
 # Sourced, not executed: `. "$SCRIPT_DIR/_window-flags.sh"`. Every caller
 # (coordinator-watch.sh, provision-worker.sh, requeue.sh) already defines
@@ -64,6 +67,7 @@ _window_flag_rank() {
         "✅"*) printf '3\n' ;;
         "👀"*) printf '2\n' ;;
         "📬") printf '1\n' ;;
+        "📥") printf '2\n' ;;
         "") printf '0\n' ;;
         *) printf '1\n' ;;
     esac

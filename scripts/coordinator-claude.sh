@@ -92,14 +92,18 @@ ARGS=(--model "$MODEL"
 # (issue #666) Hooks that write .swarm/coordinator-state and ring the inbox
 # doorbell at turn end, scoped to this process via --settings so workers
 # and ad-hoc sessions in the same project never run them.
-if [ "${COORD_HOOK_STATE:-0}" = "1" ]; then
+# COORD_MODE=split (issue #767) installs the hook for its UserPromptSubmit
+# needs-you line even without COORD_HOOK_STATE; Stop/Notification (state file)
+# stay tied to COORD_HOOK_STATE.
+if [ "${COORD_HOOK_STATE:-0}" = "1" ] || [ "${COORD_MODE:-resident}" = "split" ]; then
     export COORD_HOOK_STATE
+    [ "${COORD_MODE:-resident}" = "split" ] && export COORD_MODE
     [ "${COORD_INBOX_WAITER:-0}" = "1" ] && export COORD_INBOX_WAITER
     HOOK="$(cd "$(dirname "$0")" && pwd)/coord-hook.sh"
-    ARGS+=(--settings "$(jq -cn --arg h "$HOOK" '
+    ARGS+=(--settings "$(jq -cn --arg h "$HOOK" --arg state "${COORD_HOOK_STATE:-0}" '
         def on(e): [{hooks: [{type: "command", command: (($h | @sh) + " " + e)}]}];
-        {hooks: {UserPromptSubmit: on("UserPromptSubmit"), Stop: on("Stop"),
-                 Notification: on("Notification")}}')")
+        {hooks: ({UserPromptSubmit: on("UserPromptSubmit")}
+                 + (if $state == "1" then {Stop: on("Stop"), Notification: on("Notification")} else {} end))}')")
 fi
 # Trailing positional: initial user message in REPL mode, print-prompt in -p mode.
 ARGS+=("$INITIAL_PROMPT")

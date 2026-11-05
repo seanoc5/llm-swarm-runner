@@ -2790,6 +2790,8 @@ WATCH_WINDOW_FLAGS_SWEEP_SECS="${WATCH_WINDOW_FLAGS_SWEEP_SECS:-10}"
 . "$SCRIPT_DIR/_window-flags.sh"
 # shellcheck source=scripts/_coord-inbox-batch.sh
 . "$SCRIPT_DIR/_coord-inbox-batch.sh"
+# shellcheck source=scripts/_coord-split.sh
+. "$SCRIPT_DIR/_coord-split.sh"
 # shellcheck source=_conflict-brief.sh
 . "$SCRIPT_DIR/_conflict-brief.sh"
 WATCHER_QUIET="${WATCHER_QUIET:-0}"
@@ -9348,6 +9350,9 @@ coord_inbox_write() {
     marker="$COORD_INBOX_SELF_DIR/$(basename "$final").self"
     touch "$marker" 2>/dev/null || true
     mv -f "$tmp" "$final" 2>/dev/null || { rm -f "$tmp" "$marker" 2>/dev/null; return 1; }
+    # COORD_MODE=split (issue #767): the conversation session is never woken, so an
+    # urgent item is surfaced as a window flag instead. No-op in resident mode.
+    coord_split_flag_urgent "$final" || true
 }
 
 # coord_inbox_count

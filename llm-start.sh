@@ -99,6 +99,7 @@ ENV VARS  (precedence: flag > shell env > <project>/.swarm/.env > <sandbox>/.env
     COORDINATOR_MODEL            (varies)  per-coordinator default
     COORDINATOR_VERBOSE          0         gemini -i instead of -p
     COORDINATOR_HEADLESS         0         1 = claude -p (exits after each prompt)
+    COORD_MODE                   resident  split = launch only the conversation session (docs/split-coordinator.md)
     COORDINATOR_USE_API_KEY      0         keep ANTHROPIC_API_KEY (bills API)
 
   Caps & filters  [also loadable from <project>/.swarm/.env]
@@ -203,6 +204,19 @@ INITIAL_PROMPT="${1:-Execute the Initial Startup Checklist.}"
 #        > <sandbox>/.env.example
 # shellcheck source=scripts/_load-env.sh
 . "$LLM_SWARM_DIR/scripts/_load-env.sh" "$PWD"
+
+# --- COORD_MODE (issue #767, ADR 0006) ----------------------------------------
+# resident (default): one coordinator session does everything, as before.
+# split: this script launches only the conversation session, with the chat
+# prompt; nothing is ever typed into it (work runs do triage and dispatch).
+COORD_MODE="${COORD_MODE:-resident}"
+case "$COORD_MODE" in
+    resident|split) ;;
+    *) echo "ERROR: COORD_MODE must be resident or split (got '$COORD_MODE')." >&2; exit 2 ;;
+esac
+if [ "$COORD_MODE" = "split" ] && [ "$PROMPT_EXPLICIT" = "0" ]; then
+    INITIAL_PROMPT="Read .swarm/needs-you.md and .swarm/operator-notes.md, tell me in two sentences what needs me, then wait for my questions."
+fi
 
 # --- Legacy flat-worktree detection (issue #271) ----------------------------
 # SWARM_WORKTREE_GROUPING flipped its shipped default to `project` in #271.
@@ -844,6 +858,9 @@ if ! $session_existed; then
     if [ -n "${COORDINATOR_HEADLESS:-}" ]; then
         TMUX_ENV_OPTS+=(-e "COORDINATOR_HEADLESS=$COORDINATOR_HEADLESS")
     fi
+    if [ "$COORD_MODE" = "split" ]; then
+        TMUX_ENV_OPTS+=(-e "COORD_MODE=split")
+    fi
     # Propagate sandbox config into the session so the coordinator LLM and
     # any provision-worker.sh invocations within the session see the same
     # caps and filters loaded from .env.example / .swarm/.env above.
@@ -924,6 +941,8 @@ elif ! $window_exists; then
     tmux new-window -d -t "$SESSION_NAME" -n coordinator
 elif $coordinator_idle; then
     echo "Session $SESSION_NAME exists; coordinator pane is idle (previous agent exited). Sending new prompt to existing window."
+elif [ "$COORD_MODE" = "split" ]; then
+    echo "Session $SESSION_NAME exists; split-mode conversation session is live (pane: '$PANE_CMD'). Attaching; nothing is typed into it."
 elif [ "$COORD_CMD" = "claude" ] && [ "${COORDINATOR_HEADLESS:-0}" != "1" ]; then
     # Interactive claude REPL is the new default. When the pane is busy
     # running something (PANE_CMD != shell), assume it's the live coordinator
@@ -1038,7 +1057,11 @@ if ! $session_existed || ! $window_exists || $coordinator_idle; then
     # GEMINI_SYSTEM_MD / --append-system-prompt-file; we let it leak into /tmp
     # since it's tiny, deterministic, and the rendered prompt is harmless.
     RENDERED_PROMPT_FILE=$(mktemp -t coordinator-prompt-XXXXXX.md)
-    sed "s|{{LLM_SWARM_DIR}}|$LLM_SWARM_DIR|g" "$SYSTEM_PROMPT_FILE" > "$RENDERED_PROMPT_FILE"
+    if [ "$COORD_MODE" = "split" ]; then
+        "$LLM_SWARM_DIR/scripts/render-coordinator-prompt.sh" chat > "$RENDERED_PROMPT_FILE"
+    else
+        sed "s|{{LLM_SWARM_DIR}}|$LLM_SWARM_DIR|g" "$SYSTEM_PROMPT_FILE" > "$RENDERED_PROMPT_FILE"
+    fi
 
     # Per-backend launch. Each branch builds the tmux send-keys line tailored
     # to its CLI. The claude branch delegates to scripts/coordinator-claude.sh
@@ -1065,6 +1088,7 @@ if ! $session_existed || ! $window_exists || $coordinator_idle; then
         ENV_VARS=""
         [ -n "${COORD_MODEL:-}" ]                && ENV_VARS+="COORD_MODEL=$(printf '%q' "$COORD_MODEL") "
         [ "${COORDINATOR_HEADLESS:-0}" = "1" ]   && ENV_VARS+="COORDINATOR_HEADLESS=1 "
+        [ "$COORD_MODE" = "split" ]             && ENV_VARS+="COORD_MODE=split "
         [ "${COORDINATOR_USE_API_KEY:-0}" = "1" ] && ENV_VARS+="COORDINATOR_USE_API_KEY=1 "
         [ "${COORD_HOOK_STATE:-0}" = "1" ]       && ENV_VARS+="COORD_HOOK_STATE=1 "
         [ "${COORD_INBOX_WAITER:-0}" = "1" ]     && ENV_VARS+="COORD_INBOX_WAITER=1 "
@@ -1108,6 +1132,11 @@ if ! $session_existed || ! $window_exists || $coordinator_idle; then
         tmux send-keys -t "$SESSION_NAME:coordinator.0" \
             "${ENV_VARS}$(printf '%q' "$WRAPPER") $(printf '%q' "$RENDERED_PROMPT_FILE") $(printf '%q' "$TMP_PROMPT")" C-m
     fi
+elif [ "$COORD_MODE" = "split" ]; then
+    # COORD_MODE=split (issue #767): the conversation session is only ever typed
+    # into by the operator, so a wake prompt is dropped, not pasted. The work
+    # run (not this script) handles the inbox; urgent items show as the 📥 flag.
+    [ "$PROMPT_EXPLICIT" = "1" ] && log_event coord.wake.skip "reason=split_mode"
 elif { [ "$COORD_CMD" = "claude" ] || [ "$COORD_CMD" = "agy" ]; } && [ "${COORDINATOR_HEADLESS:-0}" != "1" ]; then
     # Live-REPL re-prompt path: claude is already running in the pane and
     # we want to send a follow-up message into the existing conversation.
@@ -1209,7 +1238,7 @@ if [ "${WATCH:-1}" = "1" ]; then
         # which matters for OUTCOME_HOOK paths and prompts that may contain
         # spaces or quotes.
         WATCH_CMD=""
-        for _v in POST_OUTCOMES OUTCOME_HOOK DEBOUNCE_SECS WAKE_PROMPT POLL_SECS WORKSPACE SWEEP; do
+        for _v in POST_OUTCOMES OUTCOME_HOOK DEBOUNCE_SECS WAKE_PROMPT POLL_SECS WORKSPACE SWEEP COORD_MODE; do
             _val="${!_v:-}"
             [ -n "$_val" ] && WATCH_CMD+="$_v=$(printf '%q' "$_val") "
         done
