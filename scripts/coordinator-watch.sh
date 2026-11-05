@@ -4855,7 +4855,7 @@ ready_sweep_pass() {
             [ -z "${CI_FAILING_NOTED[$key]:-}" ] || continue
             if [ "$DRY_RUN" = "1" ]; then
                 echo "[DRY] would write coord-inbox ci-failing note for parked PR #$pr (sha ${BASH_REMATCH[2]})"
-            elif coord_inbox_write ci_failing "Parked draft PR #$pr has red CI on ${BASH_REMATCH[2]:0:7}; its worker already ended, so nobody owns the fix. Queue a fix brief to the issue's worker (or push the fix yourself), then re-run pr-ready.sh $pr. One note per head sha."; then
+            elif coord_inbox_write ci_failing "Parked draft PR #$pr has red CI on ${BASH_REMATCH[2]:0:7}; its worker may already have ended (check for a live iss window first). If nobody owns the fix, queue a fix brief or push it yourself, then re-run pr-ready.sh $pr. One note per head sha."; then
                 log_event coord.inbox.write "trigger=ci_failing pr=$pr sha=${BASH_REMATCH[2]}"
             else
                 echo "[$(date +%T)] WARN: failed to write coord-inbox ci-failing note for PR #$pr" >&2
