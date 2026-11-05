@@ -61,20 +61,26 @@ case "$TAIL" in ''|*[!0-9]*) echo "coordinator-conversation.sh: --tail must be a
 # Like human_typed_since (scripts/coordinator-watch.sh, issue #497) this
 # matches the WHOLE message against the doorbell's exact wording, never a
 # prefix or a last line: an operator message that starts with a doorbell
-# phrase ("Stop hook is broken, fix it") or shares a turn with a doorbell
-# must stay visible. Oniguruma's ^/$ are per-line anchors, so use \A and \z.
-# Single-line doorbells may carry a same-line tail (the nudge's "Woke for:"
-# and waiter-arm text); a newline ends the match, so text on its own line
-# keeps the message visible. Each wording is the default of the template that
-# sends it: COORD_INBOX_NUDGE_TEMPLATE (+ "Woke for:" from coord-hook.sh and
-# coord-inbox-wait.sh), WAKE_PROMPT, STALL_WAKE_PROMPT, llm-start.sh's
-# INITIAL_PROMPT, WORKER_COMPACT_NUDGE_PROMPT, and the activity-poll body.
+# phrase ("Stop hook is broken, fix it"), shares a turn with a doorbell, or
+# finishes on the doorbell's own line ("Continue your task from where you
+# left off. Also merge PR 12") must stay visible. No wildcard tails: the only
+# variable parts allowed are the ones the senders really append -- the inbox
+# nudge's " Woke for: 2 outbox, 1 ci." (coord_woke_for) and the Stop hook's
+# waiter-arm sentence (coord-hook.sh waiter_arm_request). Oniguruma's ^/$ are
+# per-line anchors, so use \A and \z.
+# Each wording is the default of the template that sends it:
+# COORD_INBOX_NUDGE_TEMPLATE, WAKE_PROMPT, STALL_WAKE_PROMPT, llm-start.sh's
+# INITIAL_PROMPT, WORKER_COMPACT_NUDGE_PROMPT, and the activity-poll body. A
+# swarm that overrides one of these env knobs gets that doorbell shown, not
+# hidden; add its wording via CONV_HIDE_RE.
 # The tag/summary prefixes are Claude Code's own wrappers, never typed.
-HIDE_RE='\A\s*(Inbox: [0-9]+ item\(s\) in \.swarm/coord-inbox/[^\n]*'
-HIDE_RE+='|Worker\(s\) just finished\. Triage their outcome JSONs[^\n]*'
-HIDE_RE+='|Quiet-period check-in: no coordinator wake has been delivered for at least [0-9]+s\.[^\n]*'
-HIDE_RE+='|Execute the Initial Startup Checklist\.[^\n]*'
-HIDE_RE+='|Continue your task from where you left off\.[^\n]*'
+WOKE_RE=' Woke for: [0-9]+ [^,.\n]+(, [0-9]+ [^,.\n]+)*\.'
+ARM_RE=' Arm the inbox waiter: run (\\.|[^\s\\])+ (\\.|[^\s\\])+ with run_in_background \(Bash\), then end your turn\. It wakes you when an inbox item lands; nothing more to do with it until then\.'
+HIDE_RE='\A\s*(Inbox: [0-9]+ item\(s\) in \.swarm/coord-inbox/ — read and triage them \(see prompts/coordinator\.md "Inbox"\)\.'"($WOKE_RE)?($ARM_RE)?"
+HIDE_RE+='|Worker\(s\) just finished\. Triage their outcome JSONs in worktrees/\.swarm/tasks/done/, then top up workers per the Initial Startup Checklist \(compute AVAILABLE, count alive workers, fill open slots up to MAX_WORKERS subject to MAX_TMUX_WINDOWS\)\. Use the @me-or-unassigned filter unless INCLUDE_ASSIGNED_TO_OTHERS=1\.'
+HIDE_RE+='|Quiet-period check-in: no coordinator wake has been delivered for at least [0-9]+s\. That only proves no doorbell landed in that window — it does NOT mean workers are idle; a swarm with live workers still on long tasks can look exactly like this\. Verify actual worker/PR state before concluding the swarm is idle\. Produce a short wake digest \(swarm state: live workers, open PRs/issues, anything blocked\) and suggest next steps — or say plainly that there is nothing to do right now\.'
+HIDE_RE+='|Execute the Initial Startup Checklist\.'
+HIDE_RE+='|Continue your task from where you left off\.'
 HIDE_RE+='|A periodic gh-search poll \(issue #392\) found GitHub activity[\s\S]*pending on these\.'
 HIDE_RE+=')\s*\z'
 HIDE_RE+='|\A\s*(<task-notification>|<local-command|<command-name>|<system-reminder>|This session is being continued)'

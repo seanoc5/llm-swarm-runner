@@ -81,13 +81,18 @@ NUDGE='Inbox: 2 item(s) in .swarm/coord-inbox/ — read and triage them (see pro
   hum $'Woke for: ci is what I want to rename, thoughts?'            # 2b: line starting with the phrase
   hum $'Please look at this too.\n'"$NUDGE"                          # 3: operator text sharing a turn with a doorbell
   hum "$NUDGE"$'\nand also merge PR 12'                              # 3b: same, operator text after the doorbell
+  hum "$NUDGE also merge PR 13"                                       # 3c: operator text on the doorbell's own line (after Woke for)
+  hum "Continue your task from where you left off. Also merge PR 14"  # 3d: same line, bare nudge
+  hum "Execute the Initial Startup Checklist. Then merge PR 15"       # 3e: same line, startup prompt
+  hum "${NUDGE%% Woke for*} Also merge PR 16"                          # 3f: same line, tail with no Woke for
+  hum "Continue your task from where you left off."                  # real nudge: hidden
   hum "$NUDGE"                                                       # real doorbell: must stay hidden
 } > "$T/lookalike.jsonl"
 out="$("$VIEW" --file "$T/lookalike.jsonl" --once --tail 100)"
 for want in "Stop hook is broken, fix it" "why the nudge ended with Woke for" "Woke for: ci is what I want to rename" \
-            "Please look at this too." "and also merge PR 12"; do
+            "Please look at this too." "and also merge PR 12" "also merge PR 13" "Also merge PR 14" "Then merge PR 15" "Also merge PR 16"; do
     grep -qF "$want" <<<"$out" || red "real operator message hidden: $want"
 done
-[ "$(grep -c '── you' <<<"$out")" = 5 ] || red "expected 5 visible messages (the bare doorbell hidden): $out"
+[ "$(grep -c "── you" <<<"$out")" = 9 ] || red "expected 9 visible messages (the bare doorbells hidden): $out"
 green "Stop hook / Woke for lookalikes and doorbell-sharing turns stay visible; bare doorbell hidden"
 echo "all coordinator-conversation checks passed"
