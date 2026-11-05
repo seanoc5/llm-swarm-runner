@@ -4742,8 +4742,8 @@ worker_still_working() {
         worker_brief_pending "$wt_dir" && return 0
         # A sidelined worker (sideline-worker.sh, issue #622) has its claimed brief
         # moved to tasks/sidelined/ and its window stopped: unfinished, not done.
-        local sb
-        for sb in "$wt_dir/.swarm/tasks/sidelined"/*.md; do [ -f "$sb" ] && return 0; done
+        # Test the marker: nothing clears tasks/sidelined/*.md on wake, only the marker.
+        [ -e "$wt_dir/.swarm/sidelined" ] && return 0
     fi
     state="$(worker_pane_state "$win")" || state="absent"
     [ "$state" = "cli" ] || return 1
@@ -5024,7 +5024,8 @@ ready_sweep_pass() {
                 echo "[DRY] would handle parked green draft PR #$pr (risk $pg_risk, sha ${pg_sha:0:7})"
                 continue
             fi
-            if [ "$pg_risk" = "low" ]; then
+            # issue=none (a repurposed worker on a non-iss-N branch) has no liveness check, so it is note-only, never readied.
+            if [ "$pg_risk" = "low" ] && [ "$pg_issue" != "none" ]; then
                 # 🟢 skips self-review, so this is quick; one attempt per head sha.
                 local pg_rc=0
                 (cd "$PROJECT_DIR" && timeout 300 "$LLM_SWARM_DIR/scripts/pr-ready.sh" "$pr" >/dev/null 2>&1) || pg_rc=$?

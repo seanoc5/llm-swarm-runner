@@ -153,8 +153,11 @@ CLI_ISSUES=""; CTX_ISSUES=""
 mkdir -p "$WORKSPACE/wt-issue-81/.swarm/tasks/inbox"; touch "$WORKSPACE/wt-issue-81/.swarm/tasks/inbox/q.md"
 one 81 aaaa0084; readied "" || red "worker with a brief queued in inbox/ (window gone) must not be readied"
 rm "$WORKSPACE/wt-issue-81/.swarm/tasks/inbox/q.md"
-mkdir -p "$WORKSPACE/wt-issue-81/.swarm/tasks/sidelined"; touch "$WORKSPACE/wt-issue-81/.swarm/tasks/sidelined/s.md"
-one 81 aaaa0089; readied "" || red "sidelined worker (brief parked in tasks/sidelined/, window gone) must not be readied"
+mkdir -p "$WORKSPACE/wt-issue-81/.swarm/tasks/sidelined"; touch "$WORKSPACE/wt-issue-81/.swarm/tasks/sidelined/s.md" "$WORKSPACE/wt-issue-81/.swarm/sidelined"
+one 81 aaaa0089; readied "" || red "sidelined worker (.swarm/sidelined marker, window gone) must not be readied"
+# A woken, finished worker: marker removed on wake, but the parked brief file stays behind.
+rm "$WORKSPACE/wt-issue-81/.swarm/sidelined"
+one 81 aaaa008a; readied "81" || red "woken worker (marker gone, stale tasks/sidelined/s.md left) must not read as unfinished: $(cat "$TEST_DIR/ready.log")"
 rm "$WORKSPACE/wt-issue-81/.swarm/tasks/sidelined/s.md"
 one 81 aaaa0085; readied "81" || red "reaped worker (no window, no brief) should be readied"
 HOLD_C='{"comments":[{"body":"x\n<!-- SWARM_COORDINATOR_HOLD -->"}]}'
@@ -165,6 +168,12 @@ one 81 aaaa0087; readied "81" || red "a lifted comment hold should be readied"
 COMMENTS_81='{"comments":[{"body":"quoting `<!-- SWARM_COORDINATOR_HOLD -->` in prose"}]}'
 one 81 aaaa0088; readied "81" || red "prose quoting the marker is not a hold"
 unset COMMENTS_81
+# issue=none (non-iss-N branch, no liveness check): note only, never readied
+: > "$TEST_DIR/ready.log"; PARKED_GREEN_HANDLED=(); before="$(pg)"
+printf '#91 parked-green: banner-less draft, green CI (risk=low, issue=none, sha=dddd0091)\n' > "$SWEEP_OUT"
+ready_sweep_pass >/dev/null
+readied "" || red "issue=none low-risk draft must not be readied: $(cat "$TEST_DIR/ready.log")"
+[ "$(pg)" = "$((before + 1))" ] || red "issue=none draft should drop one parked_green note (before=$before, now $(pg))"
 green "unfinished worker (headless, between turns, queued brief) and comment-held PRs are deferred; finished/reaped/lifted proceed"
 
 heading "Test 9 (issue #757): the comment-hold jq matches pr-ready.sh's"
