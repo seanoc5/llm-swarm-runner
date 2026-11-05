@@ -1188,4 +1188,18 @@ MIGRATION_CHECK_SCRIPT=""
 grep -qi 'another open PR' "$TEST_DIR/out.log" && red "clean migration check must be silent: $(cat "$TEST_DIR/out.log")"
 green "exit 0 from the migration check → silent"
 
+heading "Test 42: hung migration check is time-bounded — pr-ready still readies (issue #713)"
+# Backgrounded grandchild keeps running after timeout kills the script: the old $(...) capture would block on it.
+printf '#!/usr/bin/env bash\nsleep 30 &\nwait\nexit 6\n' > "$FAKE_MIGRATION_CHECK"
+MIGRATION_CHECK_SCRIPT="$FAKE_MIGRATION_CHECK"
+export MIGRATION_CHECK_TIMEOUT=1
+SECONDS=0; rc=0; run_pr_ready || rc=$?
+unset MIGRATION_CHECK_TIMEOUT
+MIGRATION_CHECK_SCRIPT=""
+[ "$rc" -eq 0 ] || red "expected exit 0 with a hung check, got $rc: $(cat "$TEST_DIR/out.log")"
+[ "$SECONDS" -lt 20 ] || red "pr-ready waited ${SECONDS}s on a hung check"
+grep -qi 'another open PR' "$TEST_DIR/out.log" && red "timed-out check must stay silent"
+gh_ready_called || red "expected gh pr ready to run despite the hung check"
+green "hung check killed by timeout → silent, PR readied"
+
 green "ALL TESTS PASSED"

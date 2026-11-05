@@ -368,7 +368,13 @@ refuse() {
 # legitimately keeps the number — and any other exit (clean, error, no gh
 # data) stays silent.
 OPEN_PR_CLASH_RC=0
-OPEN_PR_CLASH_OUT="$("$MIGRATION_CHECK" --against-open-prs "$PR" 2>/dev/null)" || OPEN_PR_CLASH_RC=$?
+# Time-bounded: a hung gh/git call must not hold up readying. A timeout (124) is
+# neither 6 nor an error we report, so it stays silent like any other non-6 exit.
+# Output goes to a file, not $(...): a surviving grandchild (a stuck gh/git) would
+# otherwise keep the pipe open and block the substitution past the timeout.
+OPEN_PR_CLASH_TMP="$(mktemp)"
+timeout -k 5 "${MIGRATION_CHECK_TIMEOUT:-60}" "$MIGRATION_CHECK" --against-open-prs "$PR" >"$OPEN_PR_CLASH_TMP" 2>/dev/null || OPEN_PR_CLASH_RC=$?
+OPEN_PR_CLASH_OUT="$(cat "$OPEN_PR_CLASH_TMP")"; rm -f "$OPEN_PR_CLASH_TMP"
 if [ "$OPEN_PR_CLASH_RC" = 6 ]; then
     echo "pr-ready: WARN: another open PR adds the same migration version as PR #$PR (not blocking):" >&2
     printf '%s\n' "$OPEN_PR_CLASH_OUT" | sed 's/^/          /' >&2

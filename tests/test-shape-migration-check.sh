@@ -127,6 +127,9 @@ case "$1 $2" in
         done
         if [ -n "$query" ]; then jq -r "$query" "$GH_PR_LIST"; else cat "$GH_PR_LIST"; fi
         exit 0 ;;
+    "pr diff")   # `gh pr diff N --name-only` fixture (full file list); GH_PR_DIFF_FAIL=1 simulates failure
+        [ "${GH_PR_DIFF_FAIL:-0}" = 1 ] && exit 1
+        cat "${GH_PR_DIFF_OUT:-/dev/null}"; exit 0 ;;
     "issue view")
         case "$*" in
             *closedByPullRequestsReferences*) echo "$pr_num"; exit 0 ;;
@@ -674,6 +677,29 @@ green "V4 / V4.0 / V04 in different open PRs are one version → exit 6"
 if "$CHECK" --against-open-prs --ref HEAD >/dev/null 2>&1; then red "--against-open-prs with --ref must be rejected"; fi
 if "$CHECK" --against-open-prs 41 --post >/dev/null 2>&1; then red "--against-open-prs with --post must be rejected"; fi
 green "--against-open-prs rejects --ref and --post"
+
+# #713: `gh pr list --json files` truncates; a PR at the cap is re-read via `gh pr diff --name-only`.
+# PR 41's list shows only docs (truncated, cap forced to 2); the diff shows the V2 migration.
+export GH_PR_DIFF_OUT="$TEST_DIR/pr-diff.txt"
+printf 'README.md\ndb/migration/V2__a.sql\n' > "$GH_PR_DIFF_OUT"
+cat > "$GH_PR_LIST" <<'JSON'
+[
+ {"number":41,"baseRefName":"master","headRefName":"fly-a","files":[{"path":"README.md"},{"path":"NOTES.md"}]},
+ {"number":42,"baseRefName":"master","headRefName":"fly-b","files":[{"path":"db/migration/V2__b.sql"}]}
+]
+JSON
+if OUT=$("$CHECK" --against-open-prs 42 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -eq 0 ] || red "without the cap, truncated PR 41 hides the clash; expected 0, got $RC ($OUT)"
+if OUT=$(MIGRATION_PR_FILES_CAP=2 "$CHECK" --against-open-prs 42 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -eq 6 ] || red "PR at the file cap must be re-read via gh pr diff and clash, got $RC ($OUT)"
+if OUT=$(GH_PR_DIFF_FAIL=1 MIGRATION_PR_FILES_CAP=2 "$CHECK" --against-open-prs 42 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -eq 0 ] || red "failed gh pr diff must degrade to the truncated list, got $RC ($OUT)"
+echo "$OUT" | grep -q "WARN: PR #41 lists >=2 files" || red "expected the truncation WARN: $OUT"
+green "PRs at the file cap fall back to gh pr diff; warn when that fails"
+
+# --help must list every exit code, including the last ("1  error").
+"$CHECK" --help | grep -q '1  error' || red "--help is missing the exit-code 1 line"
+green "--help shows every exit code"
 echo '[]' > "$GH_PR_LIST"
 cd "$CLONE"
 
