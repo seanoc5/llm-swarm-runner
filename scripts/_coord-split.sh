@@ -17,12 +17,16 @@
 # takes effect at the reader's next call. The caller's env and the tmux session
 # env are never consulted for this setting.
 
-# coord_mode_raw [project-dir]: the value .swarm/.env gives COORD_MODE (last
-# assignment wins, quotes and "export" tolerated); empty when unset or no file.
+# coord_mode_raw [project-dir]: the value .swarm/.env gives COORD_MODE, read the
+# way the shell would (last assignment wins, "export" tolerated, a quoted value
+# is taken whole, an unquoted one ends at whitespace so a trailing "# comment"
+# is dropped); empty when unset or no file.
 coord_mode_raw() {
     local f="${1:-$PWD}/.swarm/.env"
     [ -f "$f" ] || return 0
-    sed -nE 's/^[[:space:]]*(export[[:space:]]+)?COORD_MODE=(.*)$/\2/p' "$f" | tail -1 | tr -d "\"'[:space:]"
+    sed -nE 's/^[[:space:]]*(export[[:space:]]+)?COORD_MODE=(.*)$/\2/p' "$f" | tail -1 |
+        sed -E "s/^[[:space:]]+//; s/^\"([^\"]*)\".*/\1/; s/^'([^']*)'.*/\1/; s/[[:space:]#].*//" |
+        tr -d "\"'[:space:]"
 }
 
 # coord_mode [project-dir]: "split" or "resident" (unset or anything else).

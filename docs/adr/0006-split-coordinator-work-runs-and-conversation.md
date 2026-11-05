@@ -309,10 +309,11 @@ project's `.swarm/.env`, which is its only source of truth. In split mode the wa
 - B6. Urgent items start a run within 60 s; green-PR time to merge no worse
   than baseline plus the batch window.
 
-**Rollback.** Delete the `COORD_MODE` line from the project's `.swarm/.env`
-(the only place the mode is read; env and tmux values are ignored), then
-restart the coordinator: `tmux kill-window -t llm-<project>:coordinator` and
-`cd <project> && <sandbox>/llm-start.sh`. The watcher is not restarted; it reads
+**Rollback.** Kill the coordinator window first
+(`tmux kill-window -t llm-<project>:coordinator`, so a wake between steps cannot
+reach the live chat session), then delete the `COORD_MODE` line from the
+project's `.swarm/.env` (the only place the mode is read; env and tmux values
+are ignored), then `cd <project> && <sandbox>/llm-start.sh`. The watcher is not restarted; it reads
 the file at its next wake. The new files are inert in resident mode and need no
 migration. Roll back at once on any lost item or duplicate merge/dispatch, or
 if urgent items take more than 5 minutes to start a run.

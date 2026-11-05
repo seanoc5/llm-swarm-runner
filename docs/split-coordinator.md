@@ -23,14 +23,14 @@ The launcher that starts work runs (lock, log, timeout, budget) is **not** part 
 
 Run these in order, from a shell in the project (`<project>` is its directory, `<sandbox>` is the llm-swarm-runner checkout, `llm-<project>` is the tmux session name `llm-start.sh` prints):
 
-1. `echo 'COORD_MODE=split' >> <project>/.swarm/.env`
-2. `tmux kill-window -t llm-<project>:coordinator` (ends the running resident coordinator; `llm-start.sh` only relaunches a pane that is gone or idle)
+1. `tmux kill-window -t llm-<project>:coordinator` (ends the running resident coordinator first, so a wake before the edit cannot reach it; `llm-start.sh` only relaunches a pane that is gone or idle)
+2. `echo 'COORD_MODE=split' >> <project>/.swarm/.env`
 3. `cd <project> && <sandbox>/llm-start.sh` (opens the conversation session with the chat prompt)
 
 ### Rolling back
 
-1. `sed -i '/^COORD_MODE=/d' <project>/.swarm/.env` (no line means resident)
-2. `tmux kill-window -t llm-<project>:coordinator`
+1. `tmux kill-window -t llm-<project>:coordinator` (first, so a wake before the edit cannot reach the live chat session)
+2. `sed -i '/^COORD_MODE=/d' <project>/.swarm/.env` (no line means resident)
 3. `cd <project> && <sandbox>/llm-start.sh` (opens the resident coordinator again)
 
 That is the whole procedure: no watcher restart and no tmux variable to clear. The next wake already reads the edited file.

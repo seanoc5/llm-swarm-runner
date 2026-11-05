@@ -199,6 +199,16 @@ printf 'COORD_MODE=split\nCOORD_MODE=resident\n' > "$P/.swarm/.env"
 check "coord_mode: the last assignment wins" "resident" "$(coord_mode "$P")"
 setmode "$P" split
 check "coord_mode ignores a conflicting env value" "split" "$(COORD_MODE=resident coord_mode "$P")"
+printf 'COORD_MODE=split # tried it\n' > "$P/.swarm/.env"
+check "coord_mode: inline comment stripped (split)" "split" "$(coord_mode "$P")"
+check "coord_mode_raw: inline comment stripped" "split" "$(coord_mode_raw "$P")"
+printf 'COORD_MODE="split"   # x\n' > "$P/.swarm/.env"
+check "coord_mode_raw: quoted value then comment" "split" "$(coord_mode_raw "$P")"
+printf 'COORD_MODE=resident # was split\n' > "$P/.swarm/.env"
+check "coord_mode_raw: comment naming split does not leak" "resident" "$(coord_mode_raw "$P")"
+printf 'COORD_MODE= # nothing\n' > "$P/.swarm/.env"
+check "coord_mode_raw: empty value with comment" "" "$(coord_mode_raw "$P")"
+setmode "$P" split
 setmode "$P" resident
 COORD_MODE=split coord_split_flag_urgent "$urgent" "$P"
 check "resident in the file: an urgent item sets no flag (stale env says split)" "" "$(flag)"
