@@ -218,7 +218,9 @@ watch log:
 $(cat "$TEST_DIR/watch-3.log")"
 green "held doorbell delivered once the operator idled past COORD_HUMAN_IDLE_SECS"
 
-grep -q 'coord.wake.deferred_delivered .*trigger=human_present' "$EVENTS_LOG" \
+# The launcher writes WAKE: before the watcher logs deferred_delivered (#737),
+# so poll rather than grep once — a slow runner can see the first without the second.
+poll_until 10 0.2 bash -c "grep -q 'coord.wake.deferred_delivered .*trigger=human_present' '$EVENTS_LOG'" \
     || red "expected coord.wake.deferred_delivered trigger=human_present; got:
 $(cat "$EVENTS_LOG")"
 grep -q 'coord.wake.defer_ceiling' "$EVENTS_LOG" \
