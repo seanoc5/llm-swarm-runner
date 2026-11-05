@@ -101,6 +101,8 @@ The doorbell is optional; the files are the truth. Activity-poll findings and st
 1. At the start of every turn.
 2. Right after finishing an operator request — as its own pass, never spliced into the middle of their task. While the operator is active, this is the main path.
 
+A nudge containing `Woke for: <kinds>.` (the waiter arm request may follow it) (docs/quiet-wakes.md): your reply **opens with its own line** `Woke for: 2 worker results, 1 idle slot` (plain words).
+
 Triage `ls .swarm/coord-inbox/*.md` oldest first; `N` in a nudge is the live count. Archive each handled file: `mkdir -p .swarm/coord-inbox/processed && mv <file> .swarm/coord-inbox/processed/`. Anything left un-moved is unhandled.
 
 ## Every wake: sweep
@@ -198,9 +200,11 @@ Every wake report and status update **ends** with the digest block — panes are
 **Backlog:** OPEN=12 AVAILABLE=6 ALIVE=3/5 WINDOWS=7/10
 ```
 
-- **Needs you:** per PR: plain name, quoted Bottom line, caveat + recommendation, then the command (alternative last), then the default if silent. Every rendered item carries what it does, its risk, your recommendation + confidence, and the full https PR URL; never a name-and-time stub. Re-check `gh pr view N --json mergeable` right before listing a merge: CONFLICTING → "conflicts, its worker is resolving" (the watcher sends the brief), not a merge command.
+- **Needs you** (new or changed items): per PR: plain name, quoted Bottom line, caveat + recommendation, then the command (alternative last), then the default if silent. Every rendered item carries what it does, its risk, your recommendation + confidence, and the full https PR URL; never a name-and-time stub. Re-check `gh pr view N --json mergeable` right before listing a merge: CONFLICTING → "conflicts, its worker is resolving" (the watcher sends the brief), not a merge command.
 - **What surprised me** is always present ("Nothing" when empty).
-- **No-ceremony:** Needs you unchanged and "Nothing" surprised → one line (`Wake 16:52: 2 inbox items triaged, Needs you unchanged: <PR URLs>`), no re-rendered digest.
+- **No-ceremony** (nudge has no `Woke for:`): Needs you unchanged and "Nothing" surprised → one line (`Wake 16:52: 2 inbox items triaged, Needs you unchanged: <PR URLs>`), no digest.
+- **Standing list:** `.swarm/needs-you.md` holds the Needs-you list as last rendered (`Updated:` time); rewrite it only when the list changes.
+- **Quiet reply** (nudge carries `Woke for:`): Needs-you unchanged and nothing surprising → the `Woke for:` line plus one line, no digest: `Handled 3 items: 2 merged, 1 idle slot. Your list unchanged (2 items) — details in .swarm/needs-you.md.` Changed list: new/changed items in full plus a count. Status requests get the full list.
 - **`<details>` isn't folded in a pane:** put it above the digest.
 - **Moved** diffs against your previous digest (first of a session: say so). Keep the digest under ~25 lines; the startup `OPEN=…` line is the Backlog row, not reported twice.
 - **List labels:** a letter per list, items `- **A1**`, `- **A2**`, next list B1…; heading says "Pick one" or "Pick any". Never bare `1.` lists: they restart and collide.

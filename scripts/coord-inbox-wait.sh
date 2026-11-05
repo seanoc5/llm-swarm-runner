@@ -15,6 +15,14 @@
 #   .swarm/coord-hook-rang       shared with coord-hook.sh: an item no newer
 #                                than the last ring was already announced.
 #
+# Batching (issue #730, COORD_INBOX_BATCH_SECS, default 900, 0 = off): urgent
+# kinds (deliver_stall, stranded_brief, worktree_vanished, sidelined_worker,
+# non-ok outcomes, decision-needed / red-CI outbox notes, anything unknown)
+# ring at once; idle_capacity, ok outcomes, fyi outbox and
+# dispatch_pause_lifted wait for the window since the last ring. The ring
+# flushes every queued item. The nudge ends with "Woke for: <kinds>." so the
+# coordinator's reply can open by naming its trigger.
+#
 # Doesn't fire while .swarm/coordinator-state reads busy: the Stop hook rings
 # at that turn end instead. Exits quietly when its parent shell goes away
 # (the coordinator session ended).
@@ -48,6 +56,8 @@ poll="${COORD_INBOX_WAITER_POLL_SECS:-2}"
 heartbeat="${COORD_INBOX_WAIT_HEARTBEAT_SECS:-600}"
 if [[ "$heartbeat" =~ ^[0-9]+$ ]]; then heartbeat=$((10#$heartbeat)); else heartbeat=600; fi
 busy_max="${COORD_HOOK_BUSY_MAX_SECS:-3600}"
+# shellcheck source=scripts/_coord-inbox-batch.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_coord-inbox-batch.sh"
 # Must match coord-hook.sh and coordinator-watch.sh.
 template="${COORD_INBOX_NUDGE_TEMPLATE:-Inbox: %N item(s) in .swarm/coord-inbox/ — read and triage them (see prompts/coordinator.md \"Inbox\").}"
 
@@ -85,31 +95,29 @@ while :; do
     { [ "$PPID" = "$parent" ] && kill -0 "$parent" 2>/dev/null; } || exit 0
     touch "$pid_file" 2>/dev/null || true
 
-    count=0 wake_count=0 newest=0
-    for f in "$inbox"/*.md; do
-        [ -f "$f" ] || continue
-        count=$((count + 1))
-        # Activity-poll items are inbox-only (no doorbell, issue #430): they
-        # ride along with the next wake but never trigger one.
-        case "${f##*/}" in *-activity-*) continue ;; esac
-        wake_count=$((wake_count + 1))
-        m="$(stat -c %Y "$f" 2>/dev/null || echo 0)"
-        [ "$m" -gt "$newest" ] && newest="$m"
-    done
     last_rang="$(cut -d' ' -f1 "$rang_file" 2>/dev/null || echo 0)"
     [[ "$last_rang" =~ ^[0-9]+$ ]] || last_rang=0
-    # New since arming, and not already rung by the Stop hook.
-    if [ "$count" -gt 0 ] && [ "$newest" -ge "$start" ] && [ "$newest" -gt "$last_rang" ]; then
+    # Activity-poll items are inbox-only (no doorbell, issue #430): they
+    # ride along with the next wake but never trigger one. Items newer than
+    # the last ring (waiter or Stop hook) are unannounced: urgent ones ring
+    # now; batched ones (idle_capacity, ok outcomes, fyi — see
+    # _coord-inbox-batch.sh) wait for the COORD_INBOX_BATCH_SECS window since
+    # the last ring (issue #730).
+    coord_inbox_scan "$inbox" "$last_rang" 1
+    count="$CIB_TOTAL"
+    wake_count=$((CIB_URGENT + CIB_BATCHED))
+    now="$(date +%s)"
+    if [ "$count" -gt 0 ] && [ "$wake_count" -gt 0 ] && coord_should_ring "$last_rang" "$now"; then
         read -r s e 2>/dev/null < "$state_file" || s=""
-        now="$(date +%s)"
         if ! { [ "$s" = busy ] && [[ "$e" =~ ^[0-9]+$ ]] && [ $((now - e)) -le "$busy_max" ]; }; then
+            woke="$(coord_woke_for "$inbox" "$last_rang")"
             printf '%s %s\n' "$now" "$count" > "$rang_file" 2>/dev/null || true
             printf '%s\n' "$now" > "$swarm/coord-wake-last" 2>/dev/null || true
             # A task-notification wake doesn't fire UserPromptSubmit, so say
             # busy here; the Stop hook writes idle when the turn ends.
             printf 'busy %s\n' "$now" > "$state_file" 2>/dev/null || true
-            log_event "coord.wake.waiter_rang items=$count"
-            printf '%s\n' "${template//%N/$count}"
+            log_event "coord.wake.waiter_rang items=$count urgent=$CIB_URGENT batched=$CIB_BATCHED"
+            printf '%s%s\n' "${template//%N/$count}" "${woke:+ Woke for: $woke.}"
             exit 0
         fi
     fi

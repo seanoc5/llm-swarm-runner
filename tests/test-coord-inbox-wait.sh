@@ -38,9 +38,9 @@ state() { cut -d' ' -f1 "$S/coordinator-state" 2>/dev/null || echo none; }
 out="$(WV=0 waiter)"
 check "COORD_INBOX_WAITER=0: waiter declines and exits" "off" "$(case "$out" in *"is off"*) echo off ;; *) echo "$out" ;; esac)"
 
-echo 1 > "$S/coord-hook-rang"
+echo "$(date +%s)" > "$S/coord-hook-rang"
 date +%s > "$S/coord-waiter-asked"
-touch -d '1 hour ago' "$S/coord-inbox/old-outcome.md"   # predates arming: never rings
+touch -d '1 hour ago' "$S/coord-inbox/old-outcome.md"   # older than the last ring: already announced, never rings
 "${W[@]}" > "$T/w1.out" & w1=$!; pids+=("$w1")
 wait_for 3 test -f "$S/coord-inbox-waiter" || red "waiter never wrote its pid file"
 check "pid file names the waiter" "$w1" "$(cut -d' ' -f1 "$S/coord-inbox-waiter")"
@@ -186,6 +186,25 @@ coord_wake_waiter_hold "$((now - 200))" && got="hold" || got="type"
 check "past the grace: fall back to typing" "type" "$got"
 coord_wake_waiter_hold "$((now - 200))" || true
 check "overdue logged once per pending wake" "1" "$(grep -c waiter_overdue "$EV")"
+# Issue #730: with batching on, the typed fallback waits grace + batch secs so
+# it can't defeat the batching.
+# The extension applies only when everything pending is non-urgent.
+. "$ROOT/scripts/_coord-inbox-batch.sh"
+COORD_INBOX_DIR="$S/coord-inbox"; COORD_HOOK_RANG_FILE="$S/coord-hook-rang"
+rm -f "$COORD_INBOX_DIR"/*.md; echo "$((now - 3000)) 0" > "$COORD_HOOK_RANG_FILE"
+COORD_INBOX_BATCH_SECS=900
+echo x > "$COORD_INBOX_DIR/20991231T000001Z-idle_capacity-1-1.md"
+coord_wake_waiter_hold "$((now - 200))" && got="hold" || got="type"
+check "batching on, only batched pending: holds past the plain grace" "hold" "$got"
+coord_wake_waiter_hold "$((now - 1100))" && got="hold" || got="type"
+check "batching on, only batched pending: types after grace + batch secs" "type" "$got"
+echo x > "$COORD_INBOX_DIR/20991231T000002Z-stall-1-2.md"
+coord_wake_waiter_hold "$((now - 200))" && got="hold" || got="type"
+check "batching on, urgent pending: plain grace applies (types at 200s)" "type" "$got"
+coord_wake_waiter_hold "$((now - 10))" && got="hold" || got="type"
+check "batching on, urgent pending: still holds inside the plain grace" "hold" "$got"
+rm -f "$COORD_INBOX_DIR"/*.md
+unset COORD_INBOX_BATCH_SECS
 
 touch -d '1 minute ago' "$COORD_INBOX_WAITER_FILE"
 check "stale heartbeat: not armed" "" "$(coord_wake_hold_reason)"
