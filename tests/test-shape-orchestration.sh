@@ -1135,6 +1135,43 @@ grep -q 'watch.timeout_retry.*count=3' "$PROJECT_DIR/.swarm/events.log" 2>/dev/n
     || red "expected a watch.timeout_retry event with count=3; log: $(cat "$PROJECT_DIR/.swarm/events.log" 2>/dev/null || echo none)"
 green "3 tool-timeout kills (no marker) -> watch.timeout_retry event + outbox fyi for iss-77"
 
+heading "Test 16y: the fixture echoed by cat does not fire watch.timeout_retry (#712)"
+# A worker that runs `cat tests/fixtures/pane-tool-timeout.txt` gets the fixture
+# back as ordinary command output, which the tool UI nests under the Bash(...)
+# result: every fixture line is re-indented, so the kill text sits deeper than
+# the tool's own 5-space result-continuation shape. Build that pane from the
+# fixture itself (prefix the first line with the result glyph, indent the rest
+# 5 more spaces) so the test cannot drift from the fixture's content.
+rm -rf "$TEST_DIR/wt-issue-77/.swarm/tasks/outbox"
+rm -f "$PROJECT_DIR/.swarm/events.log"
+echo "iss-77" > "$TEST_DIR/tmux-windows.txt"
+{
+    echo '● Bash(cat tests/fixtures/pane-tool-timeout.txt)'
+    sed -e '1s/^/  ⎿  /' -e '2,$s/^/     /' "$SCRIPT_DIR/fixtures/pane-tool-timeout.txt"
+} > "$TEST_DIR/tmux-pane-iss-77.txt"
+[ "$(grep -c 'Command timed out after' "$TEST_DIR/tmux-pane-iss-77.txt")" = "3" ] \
+    || red "echoed-fixture pane should still contain the 3 kill-text lines"
+
+cd "$PROJECT_DIR"
+DRY_RUN=0 WATCH_TIMEOUT_RETRY_SWEEP_SECS=1 WATCH_BG_VIOLATION_SWEEP_SECS=0 WATCH_PR_POLL_SECS=0 \
+    WATCH_ORPHAN_SWEEP_SECS=0 WATCH_CHECK_ON_DONE=0 POLL_SECS=1 \
+    "$WATCH" "$PROJECT_DIR" > "$TEST_DIR/watch-timeoutretry-y.log" 2>&1 &
+WATCH_PID=$!
+sleep 5
+still_running=0
+kill -0 "$WATCH_PID" 2>/dev/null && still_running=1
+kill "$WATCH_PID" 2>/dev/null || true
+wait "$WATCH_PID" 2>/dev/null || true
+unset WATCH_PID
+
+[ "$still_running" = "1" ] || red "watch process exited unexpectedly; log: $(cat "$TEST_DIR/watch-timeoutretry-y.log")"
+outbox_file="$(ls "$TEST_DIR"/wt-issue-77/.swarm/tasks/outbox/*.md 2>/dev/null | head -1)" || true
+[ -z "$outbox_file" ] \
+    || red "the fixture echoed by cat wrongly fired an outbox message; got: $(cat "$outbox_file")"
+grep -q 'watch.timeout_retry' "$PROJECT_DIR/.swarm/events.log" 2>/dev/null \
+    && red "the fixture echoed by cat wrongly logged watch.timeout_retry"
+green "fixture echoed by cat (kill text re-indented under the result) does not fire"
+
 heading "Test 16d: a rendered command SOURCE line (not real output) does not false-positive (#467, self-review finding)"
 # Claude Code renders the command text it ran into the pane verbatim — if
 # prompts/worker.md's example wrote the literal token in the command

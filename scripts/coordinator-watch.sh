@@ -2704,8 +2704,12 @@ WATCH_TIMEOUT_RETRY_SWEEP_SECS="${WATCH_TIMEOUT_RETRY_SWEEP_SECS:-60}"
 # Second alternative (issue #599): the Bash tool's own kill text. The tool kills a
 # command that outlives its `timeout` param with "Command timed out after <N>"
 # (exit 143) and never reaches the worker's marker echo, so the marker alone
-# never fired (0 events across 87 kills in fand-etl).
-WATCH_TIMEOUT_RETRY_PATTERN="${WATCH_TIMEOUT_RETRY_PATTERN:-WATCH_TIMEOUT_HIT|Command timed out after [0-9]}"
+# never fired (0 events across 87 kills in fand-etl). Anchored (issue #712) to the
+# tool UI's exact line shape, a result continuation line indented exactly 5 spaces (written as
+# literal spaces: a {5} quantifier would close the ${VAR:-default} early):
+# when a worker cats a file holding that text (tests/fixtures/pane-tool-timeout.txt),
+# the tool re-indents the echoed output, so it sits deeper and does not match.
+WATCH_TIMEOUT_RETRY_PATTERN="${WATCH_TIMEOUT_RETRY_PATTERN:-WATCH_TIMEOUT_HIT|^     Command timed out after [0-9]}"  # 5 literal spaces: no {5} (the } would end the ${:-} default)
 WATCH_TIMEOUT_RETRY_MIN_COUNT="${WATCH_TIMEOUT_RETRY_MIN_COUNT:-3}"
 # issue #392 — periodic backstop for operator actions taken entirely
 # outside this swarm (e.g. merging/closing a PR, or closing an issue,
