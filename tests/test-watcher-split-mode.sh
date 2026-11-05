@@ -293,6 +293,24 @@ sleep 4
 [ ! -e "$RUN_DIR/retry-from" ] || red "2e: retry-from not cleared after the ok run"
 green "2e: failed run is retried once after the back-off"
 
+# 2e2. Issue #774: the item that triggered a run lands in the run's own start
+# second (NOT back-dated, unlike 2e). A run that fails must not see it as
+# unannounced again and relaunch at once: the back-off applies.
+stop_watcher; reset_state; echo 1 > "$STUB_SECS_FILE"
+touch "$FAIL_FILE"                # first run fails, later ones succeed
+seed_last_start 20
+start_watcher 600
+drop sidelined_worker 11          # no age: same second as the run's start
+wait_for 8 started_ge 1 || red "2e2: run did not start"
+wait_for 5 grep -q 'coord.workrun.exit .*rc=1' "$EVENTS_LOG" || red "2e2: failed run's exit not logged"
+sleep 1                           # exit recheck and several 1 s ticks, all inside the 3 s back-off
+[ "$(runs_started)" = 1 ] || red "2e2: same-second item skipped the back-off ($(runs_started) runs)"
+wait_for 10 started_ge 2 || red "2e2: the failed run's item was never retried"
+wait_for 6 ended_ge 1 || red "2e2: retry run did not finish"
+sleep 4
+[ "$(runs_started)" = 2 ] || red "2e2: expected 2 runs, got $(runs_started)"
+green "2e2: an item in the run's start second gets the back-off, not an instant relaunch"
+
 # 2f. A run that always fails stops being retried after the cap.
 stop_watcher; reset_state; echo 1 > "$STUB_SECS_FILE"; seed_last_start 5
 touch "$FAIL_FILE" "$FAIL_ALWAYS"

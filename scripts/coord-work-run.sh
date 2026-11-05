@@ -19,8 +19,12 @@
 #      is closed for the child, and the kernel drops the lock when this
 #      process dies for any reason, so a killed run cannot leave it held.
 #   2. Stamps <project>/.swarm/work-run/last-start (epoch of the start, minus
-#      one second so an item written in the same second is still "newer").
-#      The watcher reads it as the "last ring" for batching.
+#      one second, so the integer alone still counts a same-second item as
+#      "newer"). Also touches last-start.mark: the watcher compares item mtimes
+#      with the mark at sub-second precision (issue #774), so the item that
+#      triggered this run is not "new" again, while one written after the
+#      stamp, even in the same second, still is. The watcher reads last-start
+#      as the "last ring" for batching.
 #   3. Runs the command under `timeout`, output teed to
 #      <project>/.swarm/work-run/<UTC-ts>.log.
 #   2b. Writes <project>/.swarm/work-run/retry-from ("<epoch> <runs in a row not
@@ -82,6 +86,7 @@ LOG="$RUN_DIR/$TS.log"
 PREV_LAST=0
 read -r PREV_LAST _ 2>/dev/null < "$RUN_DIR/last-start" || PREV_LAST=0
 [[ "$PREV_LAST" =~ ^[0-9]+$ ]] || PREV_LAST=0
+: > "$RUN_DIR/last-start.mark"   # sub-second "announced up to here" (issue #774)
 printf '%s\n' "$((START_EPOCH - 1))" > "$RUN_DIR/last-start"
 # last-start now says the inbox up to here is announced. Record the unfinished
 # window BEFORE the run, so a run that never reaches finish() (SIGKILL, host
