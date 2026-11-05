@@ -71,8 +71,8 @@
 # this back when that lands (issue #509).
 # 2026-11-05: coordinator budget 30000 -> 30800. Issue #730 (quiet wakes):
 # a "Woke for:" opening line, a standing .swarm/needs-you.md list and a
-# quiet-reply rule that replaces the old no-ceremony bullet; ~700 bytes net
-# after tightening twice. Further detail lives in docs/quiet-wakes.md. Still
+# quiet-reply rule beside the kept no-ceremony bullet (used when a wake has no
+# "Woke for:"); ~680 bytes net after tightening twice. Further detail lives in docs/quiet-wakes.md. Still
 # a stopgap until #509 shrinks the file.
 set -euo pipefail
 

@@ -46,6 +46,11 @@ check "brief-draft outbox is batched" batched "$(urg "$(item outbox "Triggering 
 check "decision-needed outbox is urgent" urgent "$(urg "$(item outbox "Triggering message: $(msg decision-needed)")")"
 check "fyi outbox reporting red CI is urgent" urgent "$(urg "$(item outbox "Triggering message: $(msg fyi 'PR 12: CI is red on main')")")"
 check "outbox whose message vanished is urgent" urgent "$(urg "$(item outbox "Triggering message: $T/gone.md")")"
+# A handled message is archived to processed/ mid-turn; its fyi stays batched.
+m="$(msg fyi)"; mkdir -p "$T/processed"; mv "$m" "$T/processed/"
+check "fyi archived to processed/ stays batched" batched "$(urg "$(item outbox "Triggering message: $m")")"
+m="$(msg decision-needed)"; mv "$m" "$T/processed/"
+check "decision-needed archived to processed/ stays urgent" urgent "$(urg "$(item outbox "Triggering message: $m")")"
 check "a file not named like an inbox item is urgent" urgent "$(urg "$IN/old-outcome.md")"
 clear_inbox
 

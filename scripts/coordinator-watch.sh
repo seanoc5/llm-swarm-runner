@@ -615,7 +615,7 @@
 #                           inbox kinds (COORD_INBOX_BATCH_SECS) and add "Woke for: <kinds>."
 #                           to the nudge, which cues the coordinator's quiet-reply rule;
 #                           0 = every item wakes, no suffix, full digest every time.
-#   COORD_INBOX_BATCH_SECS=900  (issue #730) with COORD_HOOK_STATE=1: non-urgent inbox
+#   COORD_INBOX_BATCH_SECS=900  (issue #730) with COORD_HOOK_STATE=1 AND COORD_INBOX_WAITER=1: non-urgent inbox
 #                           kinds (idle_capacity, ok outcomes, fyi outbox,
 #                           dispatch_pause_lifted) wake the coordinator at most once per
 #                           this many seconds; urgent kinds (deliver_stall, stranded_brief,
@@ -3372,8 +3372,9 @@ COORD_INBOX_WAITER_STALE_SECS="${COORD_INBOX_WAITER_STALE_SECS:-30}"
 COORD_INBOX_WAITER_GRACE_SECS="${COORD_INBOX_WAITER_GRACE_SECS:-120}"
 # COORD_INBOX_BATCH_SECS (issue #730): the waiter/Stop hook wake for
 # non-urgent inbox kinds at most once per this many seconds (default 900,
-# 0 = every item wakes). The typed fallback below waits that long extra so it
-# never defeats the batching; urgent items are rung by the waiter at once.
+# 0 = every item wakes). The typed fallback below waits that long extra, but only
+# while everything pending is non-urgent (coord_wake_waiter_hold); urgent
+# items keep the plain grace and are rung by the waiter at once.
 COORD_INBOX_BATCH_SECS="${COORD_INBOX_BATCH_SECS:-900}"
 COORD_QUIET_WAKES="${COORD_QUIET_WAKES:-1}"
 [ "$COORD_QUIET_WAKES" = "0" ] && COORD_INBOX_BATCH_SECS=0
@@ -9637,8 +9638,19 @@ coord_inbox_waiter_armed() {
 COORD_WAKE_WAITER_OVERDUE_SINCE=""
 coord_wake_waiter_hold() {
     coord_inbox_waiter_armed || return 1
-    local age=$(( $(date +%s) - $1 ))
-    [ "$age" -lt $(( COORD_INBOX_WAITER_GRACE_SECS + ${COORD_INBOX_BATCH_SECS:-0} )) ] && return 0
+    local age=$(( $(date +%s) - $1 )) allow="$COORD_INBOX_WAITER_GRACE_SECS" rang=0
+    # Issue #730: the batch window extends the grace only when everything
+    # pending is non-urgent (the waiter is deliberately sitting on it). An
+    # urgent item, or nothing classifiable, keeps the plain grace.
+    if [ "${COORD_INBOX_BATCH_SECS:-0}" -gt 0 ]; then
+        read -r rang _ 2>/dev/null < "$COORD_HOOK_RANG_FILE" || rang=0
+        [[ "$rang" =~ ^[0-9]+$ ]] || rang=0
+        coord_inbox_scan "$COORD_INBOX_DIR" "$rang" 1
+        if [ "$CIB_URGENT" -eq 0 ] && [ "$CIB_BATCHED" -gt 0 ]; then
+            allow=$(( allow + COORD_INBOX_BATCH_SECS ))
+        fi
+    fi
+    [ "$age" -lt "$allow" ] && return 0
     if [ "$COORD_WAKE_WAITER_OVERDUE_SINCE" != "$1" ]; then
         log_event coord.wake.waiter_overdue "age=${age}s"
         COORD_WAKE_WAITER_OVERDUE_SINCE="$1"

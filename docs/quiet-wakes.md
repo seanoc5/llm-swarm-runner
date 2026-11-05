@@ -7,8 +7,10 @@ that changed nothing for you, or you want the old wake-per-item behaviour back.*
 
 Three parts, all controlled by `COORD_QUIET_WAKES` (default `1`; batching and
 the "Woke for" suffix need `COORD_HOOK_STATE=1` **and** `COORD_INBOX_WAITER=1`.
-Without the waiter the watcher still types a plain doorbell per item, with no
-suffix, so the quiet-reply rule never applies):
+Both ship `0`, so out of the box nothing here is active: as of 2026-11-05
+corpusminder is the only project known to set them. Without the waiter the
+watcher still types a plain doorbell per item, with no suffix, so the
+quiet-reply rule never applies):
 
 1. **Batching.** Inbox items are classified by kind (filename
    `<ts>-<kind>-<pid>-<rand>.md`). Urgent kinds wake the coordinator at once and
@@ -16,7 +18,8 @@ suffix, so the quiet-reply rule never applies):
    most once per `COORD_INBOX_BATCH_SECS` (default 900), counted from the last
    ring. Logic: `scripts/_coord-inbox-batch.sh`, used by
    `coord-inbox-wait.sh` (idle coordinator), `coord-hook.sh` (turn end) and
-   `coordinator-watch.sh` (its typed fallback waits grace + batch secs).
+   `coordinator-watch.sh` (its typed fallback waits grace + batch secs only while
+   everything pending is non-urgent; an urgent item keeps the plain 120 s grace).
 2. **"Woke for" line.** The nudge ends `Woke for: 2 outcome, 1 idle capacity.`
    and the coordinator opens its reply with that line.
 3. **Quiet replies.** `.swarm/needs-you.md` holds the standing Needs-you list.

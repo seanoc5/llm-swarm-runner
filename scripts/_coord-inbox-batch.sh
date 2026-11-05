@@ -60,6 +60,11 @@ coord_item_urgency() {
         outbox)
             body="$(cat "$f" 2>/dev/null)" || { echo urgent; return 0; }
             msg="$(printf '%s\n' "$body" | sed -nE 's/^Triggering message: //p' | tail -n 1)"
+            # The coordinator archives a handled message to processed/ mid-turn;
+            # classify it from there rather than turning a fyi urgent.
+            if [ -n "$msg" ] && [ ! -r "$msg" ] && [ -r "${msg%/*}/processed/${msg##*/}" ]; then
+                msg="${msg%/*}/processed/${msg##*/}"
+            fi
             if [ -n "$msg" ] && [ -r "$msg" ]; then
                 if grep -Eiq '(^|[^a-z])(red[ -]ci|ci[ :]*(is )?(red|failing|failed)|checks? (are )?(red|failing|failed))' "$msg" 2>/dev/null; then
                     echo urgent; return 0
