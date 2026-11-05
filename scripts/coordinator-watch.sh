@@ -2053,6 +2053,8 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     COORD_SPLIT_TICK_SECS 5       split mode: how often the batch window / pending inbox is rechecked
     COORD_WORK_RUN_TIMEOUT_SECS 1800  split mode: hard limit per work run (coord-work-run.sh)
     COORD_WORK_RUN_BUDGET_USD 5   split mode: claude --max-budget-usd per work run
+    COORD_WORK_RUN_RETRY_SECS 300 split mode: back-off before retrying inbox items a failed/timed-out run never handled
+    COORD_WORK_RUN_MAX_RETRIES 3  split mode: consecutive failed runs retried before giving up (a new inbox item still starts a run)
     COORD_WAKE_RETRY_SECS 15      retry interval for a wake llm-start.sh deferred (composer held an unsubmitted human draft, issue #422); 0=off
     COORD_WAKE_DEFER_WARN_SECS 300  loud WARN threshold for a wake still deferred this long (issue #422); retries never stop on their own
     COORD_WAKE_BUSY_RETRY_SECS 30  retry interval for a wake deferred because the coordinator pane was mid-turn (issue #430); 0=off (pastes immediately, pre-#430 behavior)
@@ -3146,6 +3148,17 @@ if ! [[ "$COORD_SPLIT_TICK_SECS" =~ ^[1-9][0-9]*$ ]]; then
     echo "ERROR: COORD_SPLIT_TICK_SECS must be a positive integer (got: $COORD_SPLIT_TICK_SECS)" >&2
     exit 1
 fi
+# A run that fails (timeout, crash, over budget) is retried for the inbox items
+# it never handled, no sooner than COORD_WORK_RUN_RETRY_SECS after its start and
+# at most COORD_WORK_RUN_MAX_RETRIES times in a row.
+COORD_WORK_RUN_RETRY_SECS="${COORD_WORK_RUN_RETRY_SECS:-300}"
+COORD_WORK_RUN_MAX_RETRIES="${COORD_WORK_RUN_MAX_RETRIES:-3}"
+for _v in COORD_WORK_RUN_RETRY_SECS COORD_WORK_RUN_MAX_RETRIES; do
+    if ! [[ "${!_v}" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: $_v must be a non-negative integer (got: ${!_v})" >&2
+        exit 1
+    fi
+done
 COORD_SPLIT_RUN_PID=""
 SPLIT_LOOP_PID=""
 if ! [[ "$COORD_WAKE_LOCK_TIMEOUT_SECS" =~ ^[0-9]+$ ]]; then
@@ -11069,14 +11082,28 @@ coord_split_run_busy() {
 # loop, and when a run exits (the recheck that keeps an item arriving
 # mid-run from being dropped).
 coord_split_tick() {
-    local trigger="${1:-tick}" last now
+    local trigger="${1:-tick}" last now from="" fails=0 since
     coord_split_active || return 0
     [ -d "$COORD_INBOX_DIR" ] || return 0
     last="$(coord_split_last_start)"
     now=$(date +%s)
     coord_inbox_scan "$COORD_INBOX_DIR" "$last" 1
+    since="$last"
     if ! coord_should_ring "$last" "$now"; then
-        return 0
+        # Retry of a run that did not finish cleanly: coord-work-run.sh left
+        # retry-from (where the unfinished window starts, and how many runs in
+        # a row failed) because its last-start already counts the items it
+        # never handled as announced. Back off COORD_WORK_RUN_RETRY_SECS from
+        # the failed start and give up after COORD_WORK_RUN_MAX_RETRIES, so a
+        # run that always dies (budget, timeout, crash) cannot loop on spend.
+        read -r from fails _ 2>/dev/null < "$COORD_WORK_RUN_DIR/retry-from" || return 0
+        [[ "$from" =~ ^[0-9]+$ ]] && [[ "$fails" =~ ^[0-9]+$ ]] || return 0
+        [ "$fails" -le "$COORD_WORK_RUN_MAX_RETRIES" ] || return 0
+        [ $((now - last)) -ge "$COORD_WORK_RUN_RETRY_SECS" ] || return 0
+        coord_inbox_scan "$COORD_INBOX_DIR" "$from" 1
+        [ $((CIB_URGENT + CIB_BATCHED)) -gt 0 ] || return 0
+        trigger="retry"
+        since="$from"
     fi
     if coord_split_run_busy; then
         # The exit recheck of the running run picks these items up. The
@@ -11084,7 +11111,7 @@ coord_split_tick() {
         [ "$trigger" = "tick" ] || log_event coord.workrun.busy "trigger=$trigger urgent=$CIB_URGENT batched=$CIB_BATCHED"
         return 0
     fi
-    coord_split_start_run "$trigger" "$last"
+    coord_split_start_run "$trigger" "$since"
 }
 
 # coord_split_start_run <trigger> <last-start>: backgrounds coord-work-run.sh
@@ -11109,6 +11136,10 @@ coord_split_start_run() {
             log_event coord.workrun.busy "trigger=$trigger reason=lock_held_at_start"
         else
             log_event coord.workrun.exit "trigger=$trigger rc=$rc"
+            if [ "$rc" != "0" ] && read -r _ fails _ 2>/dev/null < "$COORD_WORK_RUN_DIR/retry-from" \
+                && [[ "$fails" =~ ^[0-9]+$ ]] && [ "$fails" -gt "$COORD_WORK_RUN_MAX_RETRIES" ]; then
+                log_event coord.workrun.gave_up "failures=$fails max_retries=$COORD_WORK_RUN_MAX_RETRIES"
+            fi
         fi
         coord_split_tick exit_recheck
     ) &

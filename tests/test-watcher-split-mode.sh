@@ -83,26 +83,39 @@ green "1b: second start exits 75 and runs nothing"
 # 1c. Timeout: exit 124, logged as timeout, lock free again even though the
 # command left an orphan behind.
 rc=0
-COORD_WORK_RUN_TIMEOUT_SECS=2 COORD_WORK_RUN_CMD='sleep 7 & sleep 7' "$RUN" "$P1" p >/dev/null 2>&1 || rc=$?
+TO_PIDS="$TEST_DIR/to-pids"
+COORD_WORK_RUN_TIMEOUT_SECS=2 TO_PIDS="$TO_PIDS" COORD_WORK_RUN_CMD='sleep 7 & echo "$!" > "$TO_PIDS"; sleep 7' "$RUN" "$P1" p >/dev/null 2>&1 || rc=$?
 [ "$rc" = 124 ] || red "1c: expected exit 124, got $rc"
 tail -n 1 "$RUNS_LOG" | grep -q 'exit=124 status=timeout' || red "1c: timeout not logged: $(tail -n 1 "$RUNS_LOG")"
+read -r TOPID < "$TO_PIDS"
+! kill -0 "$TOPID" 2>/dev/null || red "1c: the timed-out run left a process behind"
+[ -s "$P1/.swarm/work-run/retry-from" ] || red "1c: failed run did not leave retry-from"
 rc=0
 COORD_WORK_RUN_CMD='echo after-timeout' "$RUN" "$P1" p >/dev/null 2>&1 || rc=$?
 [ "$rc" = 0 ] || red "1c: lock not released after a timeout (rc=$rc)"
+[ ! -e "$P1/.swarm/work-run/retry-from" ] || red "1c: an ok run did not clear retry-from"
 green "1c: timed-out run is logged and releases the lock"
 
-# 1d. Killed (TERM to the wrapper): exit 143, logged as killed, lock free.
-COORD_WORK_RUN_CMD='echo killme-started; sleep 30' "$RUN" "$P1" p >/dev/null 2>&1 &
+# 1d. Killed (TERM to the wrapper): exit 143, logged as killed, lock free, and
+# the command AND the process it started are really gone (not merely detached).
+KPIDS="$TEST_DIR/kill-pids"
+: > "$KPIDS"
+KILL_PIDS="$KPIDS" COORD_WORK_RUN_CMD='sleep 30 & echo "$! $$" > "$KILL_PIDS"; echo killme-started; wait' \
+    "$RUN" "$P1" p >/dev/null 2>&1 &
 KPID=$!
 wait_for 5 logs_have killme-started || red "1d: run never started"
+read -r GRANDCHILD CMDPID < "$KPIDS"
+kill -0 "$GRANDCHILD" 2>/dev/null || red "1d: test setup: grandchild not running"
 kill -TERM "$KPID"
 rc=0; wait "$KPID" || rc=$?
 [ "$rc" = 143 ] || red "1d: expected exit 143, got $rc"
 grep -q 'exit=143 status=killed' "$RUNS_LOG" || red "1d: kill not logged"
+gone() { ! kill -0 "$GRANDCHILD" 2>/dev/null && ! kill -0 "$CMDPID" 2>/dev/null; }
+wait_for 3 gone || red "1d: the killed run's processes are still alive (lock freed while the work continues)"
 rc=0
 COORD_WORK_RUN_CMD='echo after-kill' "$RUN" "$P1" p >/dev/null 2>&1 || rc=$?
 [ "$rc" = 0 ] || red "1d: lock not released after a kill (rc=$rc)"
-green "1d: killed run is logged and releases the lock"
+green "1d: killed run is logged, its processes are gone, the lock is free"
 
 # ── Part 2: the watcher in split mode ───────────────────────────────────────
 heading "coordinator-watch.sh COORD_MODE=split"
@@ -146,11 +159,14 @@ tmux new-session -d -s "$SESSION_NAME" -n coordinator 2>/dev/null
 # records start and end, and runs for the number of seconds in STUB_SECS_FILE.
 STUB_RUNS="$TEST_DIR/stub-runs.log"
 STUB_SECS_FILE="$TEST_DIR/stub-secs"
+FAIL_FILE="$TEST_DIR/stub-fail"
+FAIL_ALWAYS="$TEST_DIR/stub-fail-always"
 STUB="$TEST_DIR/stub.sh"
 cat > "$STUB" <<EOF
 #!/usr/bin/env bash
 echo "start \$(date +%s)" >> "$STUB_RUNS"
 mkdir -p "$INBOX_DIR/processed"
+if [ -e "$FAIL_FILE" ]; then [ -e "$FAIL_ALWAYS" ] || rm -f "$FAIL_FILE"; exit 1; fi
 mv "$INBOX_DIR"/*.md "$INBOX_DIR/processed/" 2>/dev/null || true
 sleep "\$(cat "$STUB_SECS_FILE")"
 echo "end \$(date +%s)" >> "$STUB_RUNS"
@@ -166,6 +182,7 @@ start_watcher() {
         COORD_WORK_RUN_CMD="bash $STUB" \
         COORD_INBOX_BATCH_SECS="$batch" \
         COORD_SPLIT_TICK_SECS=1 \
+        COORD_WORK_RUN_RETRY_SECS=3 COORD_WORK_RUN_MAX_RETRIES=2 \
         SESSION_NAME="$SESSION_NAME" \
         WORKSPACE="$TEST_DIR" \
         WATCHER_AUTOCLOSE=0 WATCH_OUTBOX=0 WATCH_PR_POLL_SECS=0 \
@@ -187,6 +204,7 @@ stop_watcher() {
 }
 reset_state() {
     : > "$STUB_RUNS"
+    rm -f "$FAIL_FILE" "$FAIL_ALWAYS"
     rm -rf "$INBOX_DIR" "$RUN_DIR" "$PROJECT_DIR/.swarm/work-run.lock" \
            "$PROJECT_DIR/.swarm/coord-wake-last"
     rm -f "$EVENTS_LOG"
@@ -198,6 +216,9 @@ seed_last_start() { echo $(( $(date +%s) - $1 )) > "$RUN_DIR/last-start"; }
 drop() {
     local f="$INBOX_DIR/$(date -u +%Y%m%dT%H%M%SZ)-$1-$$-$2.md"
     echo "item $1 $2" > "$f.tmp" && mv "$f.tmp" "$f"
+    # Optional <age-secs>: back-date the item so it is clearly older than the run
+    # that the watcher starts for it (a run stamps its start minus one second).
+    [ -z "${3:-}" ] || touch -d "$3 seconds ago" "$f"
 }
 runs_started() { grep -c '^start' "$STUB_RUNS" || true; }
 runs_ended()   { grep -c '^end' "$STUB_RUNS" || true; }
@@ -240,6 +261,35 @@ wait_for 10 ended_ge 2 || red "2c: second run did not finish"
 sleep 3
 [ "$(runs_started)" = 2 ] || red "2c: expected exactly 2 runs in total, got $(runs_started)"
 green "2c: mid-run trigger starts nothing; exit recheck runs the item once"
+
+# 2e. A run that crashes before handling the inbox is retried after the
+# back-off (its last-start already counts the items as announced).
+stop_watcher; reset_state; echo 1 > "$STUB_SECS_FILE"; seed_last_start 5
+touch "$FAIL_FILE"                # first run fails, later ones succeed
+seed_last_start 20
+start_watcher 600
+drop sidelined_worker 5 3
+wait_for 8 started_ge 1 || red "2e: run did not start"
+sleep 1
+[ "$(runs_started)" = 1 ] || red "2e: retried before the back-off"
+wait_for 10 started_ge 2 || red "2e: the failed run's item was never retried"
+wait_for 6 ended_ge 1 || red "2e: retry run did not finish"
+sleep 4
+[ "$(runs_started)" = 2 ] || red "2e: expected 2 runs, got $(runs_started)"
+[ ! -e "$RUN_DIR/retry-from" ] || red "2e: retry-from not cleared after the ok run"
+green "2e: failed run is retried once after the back-off"
+
+# 2f. A run that always fails stops being retried after the cap.
+stop_watcher; reset_state; echo 1 > "$STUB_SECS_FILE"; seed_last_start 5
+touch "$FAIL_FILE" "$FAIL_ALWAYS"
+seed_last_start 20
+start_watcher 600
+drop sidelined_worker 6 3
+wait_for 25 started_ge 3 || red "2f: expected the first run plus 2 retries, got $(runs_started)"
+sleep 8
+[ "$(runs_started)" = 3 ] || red "2f: retries did not stop at the cap: $(runs_started) runs"
+grep -q 'coord.workrun.gave_up' "$EVENTS_LOG" || red "2f: giving up not logged"
+green "2f: always-failing run is retried at most COORD_WORK_RUN_MAX_RETRIES times"
 
 # 2d. Nothing was typed anywhere, in any case above (split mode, AUTO_COMPACT=1
 # set on purpose), and the old doorbell was never invoked.

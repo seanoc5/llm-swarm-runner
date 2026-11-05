@@ -23,6 +23,9 @@
 #      The watcher reads it as the "last ring" for batching.
 #   3. Runs the command under `timeout`, output teed to
 #      <project>/.swarm/work-run/<UTC-ts>.log.
+#   3b. After a run that is not "ok", writes <project>/.swarm/work-run/retry-from
+#      ("<epoch> <consecutive-failures>"); an ok run removes it. The watcher
+#      retries still-unhandled inbox items from that epoch after a back-off.
 #   4. Appends one line to <project>/.swarm/work-run/runs.log:
 #      <end-ts> start=<ts> secs=<n> exit=<rc> status=<ok|timeout|killed|error>
 #      cost_usd=<x> in=<n> out=<n> cache_read=<n> log=<file>
@@ -75,6 +78,9 @@ LOG="$RUN_DIR/$TS.log"
 # A second run in the same second must not share a log file.
 [ -e "$LOG" ] && LOG="$RUN_DIR/$TS-$$.log"
 : > "$LOG"
+PREV_LAST=0
+read -r PREV_LAST _ 2>/dev/null < "$RUN_DIR/last-start" || PREV_LAST=0
+[[ "$PREV_LAST" =~ ^[0-9]+$ ]] || PREV_LAST=0
 printf '%s\n' "$((START_EPOCH - 1))" > "$RUN_DIR/last-start"
 
 SYS_FILE=""
@@ -107,22 +113,36 @@ finish() {
     printf '%s start=%s secs=%s exit=%s status=%s cost_usd=%s in=%s out=%s cache_read=%s log=%s\n' \
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TS" "$secs" "$RC" "$status" \
         "$cost" "$in_t" "$out_t" "$cache_t" "$(basename "$LOG")" >> "$RUN_DIR/runs.log"
+    # A run that did not finish cleanly may have left inbox items unhandled, but
+    # last-start now says they were announced. Record where the retry window
+    # starts (the OLDEST such point, kept across consecutive failures) and how
+    # many failures in a row; the watcher retries after a back-off, up to a cap.
+    if [ "$status" = ok ]; then
+        rm -f "$RUN_DIR/retry-from"
+    else
+        local from=$PREV_LAST n=0
+        read -r from n _ 2>/dev/null < "$RUN_DIR/retry-from" || { from=$PREV_LAST; n=0; }
+        [[ "$from" =~ ^[0-9]+$ ]] || from=$PREV_LAST
+        [[ "$n" =~ ^[0-9]+$ ]] || n=0
+        printf '%s %s\n' "$from" "$((n + 1))" > "$RUN_DIR/retry-from"
+    fi
     [ -n "$SYS_FILE" ] && rm -f "$SYS_FILE"
+    [ -n "${FIFO_DIR:-}" ] && rm -rf "$FIFO_DIR"
+    return 0
 }
 
 # TERM/INT on the wrapper: stop the child, log the run as killed, release the
 # lock by exiting. (SIGKILL cannot be trapped; the kernel still drops the lock
 # and the run simply has no usage line.)
 on_signal() {
-    :
     STATUS_OVERRIDE=killed
     RC=143
     if [ -n "$CHILD_PID" ]; then
-        # The job runs in its own process group (set -m below): signal the
-        # whole group so timeout, the command and tee all go.
-        kill -TERM -- "-$CHILD_PID" 2>/dev/null
+        # `timeout` forwards a TERM to its own process group (the command and
+        # everything it started); escalate to KILL on that group if it lingers.
+        kill -TERM "$CHILD_PID" 2>/dev/null
         for _ in 1 2 3 4 5 6 7 8 9 10; do
-            kill -0 -- "-$CHILD_PID" 2>/dev/null || break
+            kill -0 "$CHILD_PID" 2>/dev/null || break
             sleep 1
         done
         kill -KILL -- "-$CHILD_PID" 2>/dev/null
@@ -160,18 +180,26 @@ else
 fi
 
 # The child must not inherit the lock fd (9): a stray grandchild would
-# otherwise keep the lock after the run is over. set -m gives the job its own
-# process group so on_signal can stop the whole pipeline; --kill-after reaps a
-# child that ignores the timeout's TERM.
-set -m
-{
-    timeout --kill-after=30 "$TIMEOUT_SECS" "${CMD[@]}" 9>&- 2>&1 | tee -a "$LOG"
-    exit "${PIPESTATUS[0]}"
-} &
+# otherwise keep the lock after the run is over. `timeout` moves itself into a
+# process group of its own (pgid == its pid) and forwards a TERM it receives to
+# that whole group, so on_signal only needs to signal `timeout` itself;
+# --kill-after reaps a child that ignores the TERM. Output goes through a
+# fifo so CHILD_PID is timeout's own pid (a pipeline would hide it).
+FIFO_DIR="$(mktemp -d -t coord-work-fifo-XXXXXX)" || exit 1
+mkfifo "$FIFO_DIR/out" || exit 1
+tee -a "$LOG" < "$FIFO_DIR/out" 9>&- &
+TEE_PID=$!
+timeout --kill-after=30 "$TIMEOUT_SECS" "${CMD[@]}" 9>&- > "$FIFO_DIR/out" 2>&1 &
 CHILD_PID=$!
-set +m
 wait "$CHILD_PID"
 RC=$?
+# Let tee drain what the command printed before the usage line is read, but do
+# not wait on an orphan that still holds the pipe open.
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    kill -0 "$TEE_PID" 2>/dev/null || break
+    sleep 0.3
+done
 CHILD_PID=""
+rm -rf "$FIFO_DIR"
 finish
 exit "$RC"
