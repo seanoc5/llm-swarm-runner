@@ -58,6 +58,10 @@ case "$TAIL" in ''|*[!0-9]*) echo "coordinator-conversation.sh: --tail must be a
 HIDE_RE='^\s*(Inbox: [0-9]+ item|Worker\(s\) just finished|Quiet-period check-in|Execute the Initial Startup Checklist|A periodic gh-search poll|Continue your task from where you left off|Stop hook|<task-notification>|<local-command|<command-name>|<system-reminder>|This session is being continued)|Woke for: [^\n]*$'
 [ -n "${CONV_HIDE_RE:-}" ] && HIDE_RE="$HIDE_RE|$CONV_HIDE_RE"
 
+# A bad CONV_HIDE_RE would make jq fail and blank every message; refuse it.
+jq -n --arg re "$HIDE_RE" '"" | test($re)' >/dev/null 2>&1 \
+    || { echo "coordinator-conversation.sh: CONV_HIDE_RE is not a valid regex" >&2; exit 2; }
+
 if [ -t 1 ]; then
     C_YOU=$'\033[1;36m' C_BOT=$'\033[1;33m' C_DIM=$'\033[2m' C_RST=$'\033[0m'
 else
@@ -142,11 +146,13 @@ consume() {
     [ "$size" -gt "$offset" ] || return 0
     len=$((size - offset))
     if [ -n "$(tail -c1 "$cur")" ]; then
-        part="$(tail -c +"$((offset + 1))" "$cur" | head -c "$len" | tail -n1 | LC_ALL=C wc -c)"
+        # `head -c` closes the pipe before `tail` finishes when the file has
+        # grown since `stat`; that SIGPIPE must not end follow mode.
+        part="$(tail -c +"$((offset + 1))" "$cur" | head -c "$len" | tail -n1 | LC_ALL=C wc -c || true)"
         len=$((len - part))
     fi
     [ "$len" -gt 0 ] || return 0
-    tail -c +"$((offset + 1))" "$cur" | head -c "$len" | render | emit "${1:-}"
+    { tail -c +"$((offset + 1))" "$cur" | head -c "$len" | render | emit "${1:-}"; } || true
     offset=$((offset + len))
 }
 
@@ -160,6 +166,10 @@ while :; do
     if [ "$next" != "$cur" ]; then
         [ -z "$cur" ] || printf '%s── new session ──%s\n\n' "$C_DIM" "$C_RST"
         cur="$next" offset=0
+        # A switched-to session is new to the reader: show its last --tail
+        # messages (20 when --tail 0), so a resumed old session is not replayed.
+        consume "$(( TAIL > 0 ? TAIL : 20 ))"
+        continue
     fi
     consume ""
 done

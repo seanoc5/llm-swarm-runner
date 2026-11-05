@@ -66,4 +66,7 @@ grep -qF SHOW-appended-line "$log" || red "appended line not followed: $(cat "$l
 grep -qF SHOW-new-session "$log" || red "new session not followed: $(cat "$log")"
 ! grep -q HIDE "$log" || red "follow leaked hidden text"
 green "follows appended lines and a newer session"
+# ── 6. a bad CONV_HIDE_RE is refused, not silently blanking the view ──
+if CONV_HIDE_RE="(" "$VIEW" --file "$FIX" --once >/dev/null 2>&1; then red "invalid CONV_HIDE_RE accepted"; fi
+green "invalid CONV_HIDE_RE refused"
 echo "all coordinator-conversation checks passed"
