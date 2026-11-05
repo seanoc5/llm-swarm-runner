@@ -454,6 +454,20 @@ compute_next_free() {
     OTHER_PR_COUNT="$(gh pr list --state open --limit 100 --json number \
         --jq "[.[] | select(.number != $PR)] | length" 2>/dev/null || echo 0)"
     [[ "$OTHER_PR_COUNT" =~ ^[0-9]+$ ]] || OTHER_PR_COUNT=0
+    # `--json files` truncates at ~100 files per PR (same cap opr_pr_files
+    # handles); re-read any PR at the cap via `gh pr diff --name-only` so a
+    # migration past the cut can't hide the true highest version (#736).
+    local cap="${MIGRATION_PR_FILES_CAP:-100}" capped m extra
+    capped="$(gh pr list --state open --limit 100 --json number,files \
+        --jq ".[] | select(.number != $PR and (.files | length) >= $cap) | .number" 2>/dev/null || true)"
+    for m in $capped; do
+        [[ "$m" =~ ^[0-9]+$ ]] || continue
+        if extra="$(gh pr diff "$m" --name-only 2>/dev/null)" && [ -n "$extra" ]; then
+            OTHER_PR_FILES="$(printf '%s\n%s' "$OTHER_PR_FILES" "$extra")"
+        else
+            echo "WARN: PR #$m lists >=$cap files and the full list could not be read; next free version may be too low" >&2
+        fi
+    done
 
     local max_ver=0 f b n
     while IFS= read -r f; do
