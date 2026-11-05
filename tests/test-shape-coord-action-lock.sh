@@ -2,6 +2,7 @@
 #
 # test-shape-coord-action-lock.sh — issue #766 (ADR 0006 §3):
 #   A. two concurrent swarm-merge.sh runs on one PR merge it exactly once
+#      (one gh pr merge call AND one merge.done event)
 #   B. a head that moved between the gates and the merge is refused
 #   C. a normal single merge still merges (and takes no lock beyond the call)
 #   D. provision-worker.sh refuses a duplicate dispatch for a live worker,
@@ -73,8 +74,9 @@ git -C "$REPO" push -q origin master:fix/issue-600
 git -C "$REPO" fetch -q origin
 export COORD_ACTIONS_LOCK="$TEST_DIR/coord-actions.lock"
 MERGE="$ROOT/scripts/swarm-merge.sh"
-reset() { rm -rf "$TEST_DIR/state"; git -C "$REPO" push -q -f origin master:fix/issue-600; }
+reset() { rm -rf "$TEST_DIR/state"; rm -f "$REPO/.swarm/events.log"; git -C "$REPO" push -q -f origin master:fix/issue-600; }
 merges() { [ -f "$TEST_DIR/state/merge-calls" ] && wc -l < "$TEST_DIR/state/merge-calls" || echo 0; }
+done_events() { grep -c "merge\.done" "$REPO/.swarm/events.log" 2>/dev/null || true; }
 
 heading "C: normal merge still merges"
 reset
@@ -89,6 +91,7 @@ reset
 rc1=0; rc2=0; wait $p1 || rc1=$?; wait $p2 || rc2=$?
 [ "$(merges)" = 1 ] || red "expected exactly 1 merge call, got $(merges) (rc $rc1/$rc2)
 $(cat "$TEST_DIR/a1.log" "$TEST_DIR/a2.log")"
+[ "$(done_events)" = 1 ] || red "expected exactly 1 merge.done event, got $(done_events): $(cat "$REPO/.swarm/events.log" 2>/dev/null)"
 green "two concurrent merges -> $(merges) gh pr merge call (rc $rc1/$rc2)"
 
 heading "B: head moved between gates and merge is refused"

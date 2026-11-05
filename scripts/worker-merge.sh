@@ -38,6 +38,11 @@
 #
 # Exit codes: 0 merged, 1 usage/gh error, 2 refused by a gate.
 #
+# Action lock (ADR 0006 §3, issue #773): this script deliberately does NOT take
+# swarm-merge.sh's coordinator action lock. It runs in the sandbox, which cannot
+# reach the main worktree that holds the lock file, and --match-head-commit
+# already makes a race with a locked merge fail safe (one side is refused).
+#
 # Test hooks: CI_WAIT_SCRIPT, MIGRATION_CHECK_SCRIPT.
 
 set -uo pipefail
