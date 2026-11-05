@@ -9161,6 +9161,7 @@ coord_last_ring() {
 # this nudge already named. No-op unless coord_typed_batching.
 coord_batch_note_ring() {
     coord_typed_batching || return 0
+    [ "${DRY_RUN:-0}" = "1" ] && return 0
     printf '%s %s\n' "$(date +%s)" "$(coord_inbox_count)" > "$COORD_HOOK_RANG_FILE" 2>/dev/null || true
 }
 
