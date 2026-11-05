@@ -17,7 +17,10 @@ Issue #785.
 - `scripts/coordinator-layout.sh off` closes the viewer; the session and the
   watcher are not touched. Remove `COORD_VIEWER=1` from `.swarm/.env` so the
   next start doesn't add it back. `scripts/coordinator-layout.sh status` prints on/off.
-- Closing the viewer pane by hand (`prefix` `x`) is equivalent.
+- While `COORD_VIEWER=1` is still set, every `llm-start.sh` run (including each
+  doorbell wake) re-adds a viewer you closed, by `off` or by hand
+  (`prefix` `x`), and that shrinks the session pane again. To keep it closed,
+  remove the setting first.
 
 ## Layout and the pane-0 rule
 
