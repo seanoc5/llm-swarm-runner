@@ -359,6 +359,12 @@ check "split + idle shell pane: a wake types nothing and launches nothing" "unto
 grep -q "coord.wake.skip reason=split_mode" "$S/proj/.swarm/events.log" && got=logged || got=missing
 check "split + idle shell pane: the skip is logged" "logged" "$got"
 
+# Session alive but the coordinator window is gone: a wake still must not launch the chat.
+sed -i 's|coordinator\\nutil|util|' "$T/bin/tmux"
+start split "wake up"
+grep -qE "paste-buffer|load-buffer|claude" "$S/tmux.log" && got=launched || got=untouched
+check "split + missing window: a wake launches nothing" "untouched" "$got"
+
 # Auto-compact never injects /compact into the conversation session.
 heading "auto-compact"
 log_event() { echo "$*" >> "$T/ev.log"; }
@@ -367,6 +373,7 @@ eval "$(sed -n "/^maybe_auto_compact() {/,/^    fi$/p" "$ROOT/scripts/coordinato
 }"
 # shellcheck disable=SC2034
 AUTO_COMPACT=1; : > "$T/ev.log"
+# shellcheck disable=SC2209
 COORD_MODE=split maybe_auto_compact wake; rc=$?
 check "split: maybe_auto_compact returns before touching the pane" "0" "$rc"
 grep -q "reason=split_mode" "$T/ev.log" && got=logged || got=missing

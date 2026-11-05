@@ -1054,7 +1054,7 @@ fi
 # conversation session, even when its pane sits at a shell; only a plain
 # llm-start.sh by the operator launches it.
 SPLIT_WAKE_SKIP=0
-if [ "$COORD_MODE" = "split" ] && [ "$PROMPT_EXPLICIT" = "1" ] && $session_existed && $window_exists; then
+if [ "$COORD_MODE" = "split" ] && [ "$PROMPT_EXPLICIT" = "1" ] && $session_existed; then
     SPLIT_WAKE_SKIP=1
 fi
 if [ "$SPLIT_WAKE_SKIP" = "0" ] && { ! $session_existed || ! $window_exists || $coordinator_idle; }; then
