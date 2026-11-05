@@ -5,8 +5,10 @@ that changed nothing for you, or you want the old wake-per-item behaviour back.*
 
 ## What it does
 
-Three parts, all controlled by `COORD_QUIET_WAKES` (default `1`; needs
-`COORD_HOOK_STATE=1`, the Stop-hook/waiter path):
+Three parts, all controlled by `COORD_QUIET_WAKES` (default `1`; batching and
+the "Woke for" suffix need `COORD_HOOK_STATE=1` **and** `COORD_INBOX_WAITER=1`.
+Without the waiter the watcher still types a plain doorbell per item, with no
+suffix, so the quiet-reply rule never applies):
 
 1. **Batching.** Inbox items are classified by kind (filename
    `<ts>-<kind>-<pid>-<rand>.md`). Urgent kinds wake the coordinator at once and
