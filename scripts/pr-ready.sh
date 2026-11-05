@@ -368,13 +368,25 @@ refuse() {
 # legitimately keeps the number — and any other exit (clean, error, no gh
 # data) stays silent.
 OPEN_PR_CLASH_RC=0
-# Time-bounded: a hung gh/git call must not hold up readying. A timeout (124) is
-# neither 6 nor an error we report, so it stays silent like any other non-6 exit.
-# Output goes to a file, not $(...): a surviving grandchild (a stuck gh/git) would
+# Time-bounded: a hung gh/git call must not hold up readying. A timeout (124) logs
+# one line and readying proceeds (#736); other non-6 exits stay silent.
+# Output goes to files, not $(...): a surviving grandchild (a stuck gh/git) would
 # otherwise keep the pipe open and block the substitution past the timeout.
+# stderr is captured too so the check's warnings (e.g. the >300-file truncation
+# notice) reach the caller instead of /dev/null (#736).
 OPEN_PR_CLASH_TMP="$(mktemp)"
-timeout -k 5 "${MIGRATION_CHECK_TIMEOUT:-60}" "$MIGRATION_CHECK" --against-open-prs "$PR" >"$OPEN_PR_CLASH_TMP" 2>/dev/null || OPEN_PR_CLASH_RC=$?
-OPEN_PR_CLASH_OUT="$(cat "$OPEN_PR_CLASH_TMP")"; rm -f "$OPEN_PR_CLASH_TMP"
+OPEN_PR_CLASH_ERR="$(mktemp)"
+MIGRATION_CHECK_TIMEOUT_S="${MIGRATION_CHECK_TIMEOUT:-60}"
+timeout -k 5 "$MIGRATION_CHECK_TIMEOUT_S" "$MIGRATION_CHECK" --against-open-prs "$PR" >"$OPEN_PR_CLASH_TMP" 2>"$OPEN_PR_CLASH_ERR" || OPEN_PR_CLASH_RC=$?
+OPEN_PR_CLASH_OUT="$(cat "$OPEN_PR_CLASH_TMP")"
+OPEN_PR_CLASH_ERRS="$(grep -E '^WARN' "$OPEN_PR_CLASH_ERR" || true)"
+rm -f "$OPEN_PR_CLASH_TMP" "$OPEN_PR_CLASH_ERR"
+if [ -n "$OPEN_PR_CLASH_ERRS" ]; then
+    printf '%s\n' "$OPEN_PR_CLASH_ERRS" | sed 's/^/pr-ready: migration check: /' >&2
+fi
+if [ "$OPEN_PR_CLASH_RC" = 124 ] || [ "$OPEN_PR_CLASH_RC" = 137 ]; then
+    echo "pr-ready: WARN: open-PR migration check timed out after ${MIGRATION_CHECK_TIMEOUT_S}s (exit $OPEN_PR_CLASH_RC) — a migration clash with a sibling PR may be unseen; readying anyway" >&2
+fi
 if [ "$OPEN_PR_CLASH_RC" = 6 ]; then
     echo "pr-ready: WARN: another open PR adds the same migration version as PR #$PR (not blocking):" >&2
     printf '%s\n' "$OPEN_PR_CLASH_OUT" | sed 's/^/          /' >&2

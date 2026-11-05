@@ -1189,8 +1189,10 @@ grep -qi 'another open PR' "$TEST_DIR/out.log" && red "clean migration check mus
 green "exit 0 from the migration check → silent"
 
 heading "Test 42: hung migration check is time-bounded — pr-ready still readies (issue #713)"
-# Backgrounded grandchild keeps running after timeout kills the script: the old $(...) capture would block on it.
-printf '#!/usr/bin/env bash\nsleep 30 &\nwait\nexit 6\n' > "$FAKE_MIGRATION_CHECK"
+# GNU timeout signals its whole process group, so a plain `sleep 30 &` would die
+# with the script and a $(...) capture would pass too. `setsid` moves the
+# grandchild to its own session so it genuinely survives and holds the pipe open.
+printf '#!/usr/bin/env bash\nsetsid sleep 30 &\nwait\nexit 6\n' > "$FAKE_MIGRATION_CHECK"
 MIGRATION_CHECK_SCRIPT="$FAKE_MIGRATION_CHECK"
 export MIGRATION_CHECK_TIMEOUT=1
 SECONDS=0; rc=0; run_pr_ready || rc=$?
@@ -1198,8 +1200,18 @@ unset MIGRATION_CHECK_TIMEOUT
 MIGRATION_CHECK_SCRIPT=""
 [ "$rc" -eq 0 ] || red "expected exit 0 with a hung check, got $rc: $(cat "$TEST_DIR/out.log")"
 [ "$SECONDS" -lt 20 ] || red "pr-ready waited ${SECONDS}s on a hung check"
-grep -qi 'another open PR' "$TEST_DIR/out.log" && red "timed-out check must stay silent"
+grep -qi 'another open PR' "$TEST_DIR/out.log" && red "timed-out check must not report a clash"
+grep -q 'migration check timed out after 1s' "$TEST_DIR/out.log" || red "expected one timeout line: $(cat "$TEST_DIR/out.log")"
 gh_ready_called || red "expected gh pr ready to run despite the hung check"
-green "hung check killed by timeout → silent, PR readied"
+green "hung check killed by timeout → one timeout line, PR readied"
+
+heading "Test 43: migration check WARN on stderr reaches the caller (issue #736)"
+printf '#!/usr/bin/env bash\necho "WARN: PR #9 lists >=100 files; truncated" >&2\nexit 0\n' > "$FAKE_MIGRATION_CHECK"
+MIGRATION_CHECK_SCRIPT="$FAKE_MIGRATION_CHECK"
+rc=0; run_pr_ready || rc=$?
+MIGRATION_CHECK_SCRIPT=""
+[ "$rc" -eq 0 ] || red "expected exit 0, got $rc: $(cat "$TEST_DIR/out.log")"
+grep -q 'migration check: WARN: PR #9 lists' "$TEST_DIR/out.log" || red "check's stderr warning was dropped: $(cat "$TEST_DIR/out.log")"
+green "stderr warning surfaced"
 
 green "ALL TESTS PASSED"
