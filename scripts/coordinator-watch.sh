@@ -529,7 +529,9 @@
 #                           worktree with a brief in inbox/ (requeue.sh) is
 #                           re-spawned via `provision-worker.sh --wake`,
 #                           which runs the usual caps and host admission —
-#                           a cap refusal just retries next tick. Other
+#                           a cap refusal (issue #664) is not retried every tick: it
+#                           waits until the iss-* window set changes or
+#                           WATCH_WAKE_BACKOFF_SECS=300 passes. Other
 #                           failures write one coord-inbox note per issue.
 #                           0 disables both passes.
 #   COORD_WAKE_RETRY_SECS=15
@@ -5665,10 +5667,23 @@ sideline_idle_pass() {
 # refusal) retries next tick — provision-worker.sh logs cap.refused itself.
 # Any other failure writes one coord-inbox note per issue (deduped until
 # the wake succeeds or the marker goes away).
+#
+# issue #664: a capped wake used to retry every tick (fand-app logged ~1,760
+# cap.refused lines for one issue in two days). After an exit-3 refusal the
+# issue is skipped until the set of iss-* windows changes (a slot may have
+# freed) or WATCH_WAKE_BACKOFF_SECS (default 300) passes — the timeout covers
+# refusals no local window change signals (host cap, spawn stagger, dispatch
+# pause). SIDELINE_WAKE_REFUSED[issue]="<epoch> <window signature>".
 declare -A SIDELINE_WAKE_FAIL_LOGGED=()
+declare -A SIDELINE_WAKE_REFUSED=()
+sideline_wake_windows_sig() {
+    tmux list-windows -t "$SESSION_NAME" -F '#{window_name}' 2>/dev/null \
+        | grep '^iss-' | sort | tr '\n' ',' || true
+}
 sideline_wake_pass() {
-    local wt_dir issue out rc
+    local wt_dir issue out rc refused_at sig
     local -A seen=()
+    sig="$(sideline_wake_windows_sig)"
     while IFS= read -r wt_dir; do
         [ -n "$wt_dir" ] || continue
         [ -e "$wt_dir/.swarm/sidelined" ] || continue
@@ -5680,6 +5695,13 @@ sideline_wake_pass() {
         seen[$issue]=1
         [ -n "$(worker_inbox_brief "$wt_dir")" ] || continue
         has_live_window_draining_brief "$issue" && continue
+        if [ -n "${SIDELINE_WAKE_REFUSED[$issue]:-}" ]; then
+            refused_at="${SIDELINE_WAKE_REFUSED[$issue]%% *}"
+            if [ "${SIDELINE_WAKE_REFUSED[$issue]#* }" = "$sig" ] \
+               && [ $(( $(date +%s) - refused_at )) -lt "${WATCH_WAKE_BACKOFF_SECS:-300}" ]; then
+                continue
+            fi
+        fi
 
         if [ "$DRY_RUN" = "1" ]; then
             echo "[DRY] would wake sidelined issue #$issue"
@@ -5690,10 +5712,11 @@ sideline_wake_pass() {
         case "$rc" in
             0)
                 unset "SIDELINE_WAKE_FAIL_LOGGED[$issue]" 2>/dev/null || true
+                unset "SIDELINE_WAKE_REFUSED[$issue]" 2>/dev/null || true
                 log_event watch.wake "issue=$issue result=ok"
                 echo "[$(date +%T)] woke sidelined issue #$issue"
                 ;;
-            3) ;;
+            3) SIDELINE_WAKE_REFUSED[$issue]="$(date +%s) $sig" ;;
             *)
                 [ -n "${SIDELINE_WAKE_FAIL_LOGGED[$issue]:-}" ] && continue
                 SIDELINE_WAKE_FAIL_LOGGED[$issue]=1
@@ -5706,6 +5729,9 @@ sideline_wake_pass() {
     done < <(own_worktree_dirs_for_scan "$PROJECT_DIR")
     for issue in "${!SIDELINE_WAKE_FAIL_LOGGED[@]}"; do
         [ -n "${seen[$issue]:-}" ] || unset "SIDELINE_WAKE_FAIL_LOGGED[$issue]"
+    done
+    for issue in "${!SIDELINE_WAKE_REFUSED[@]}"; do
+        [ -n "${seen[$issue]:-}" ] || unset "SIDELINE_WAKE_REFUSED[$issue]"
     done
 }
 
