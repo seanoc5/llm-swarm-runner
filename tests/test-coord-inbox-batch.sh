@@ -211,6 +211,11 @@ check "watcher: typed nudge ends with Woke for" suffixed "$got"
 nudge_re="^$(coord_inbox_nudge_pattern)\$"
 [[ "$nudge" =~ $nudge_re ]] && got=match || got=nomatch
 check "watcher: the suffixed nudge still matches its own pattern" match "$got"
+# #497: operator text typed after (or inside) a suffixed nudge must not read as the watcher's own paste.
+for extra in $'\n\nhelp me fix the build' ' and also help me' $'\nWoke for: 1 x.'; do
+    [[ "$nudge$extra" =~ $nudge_re ]] && got=match || got=nomatch
+    check "watcher: suffixed nudge + operator text does not match (#497): ${extra//$'\n'/|}" nomatch "$got"
+done
 COORD_INBOX_WAITER=0
 nudge="$(coord_inbox_nudge_text)"
 case "$nudge" in *"Woke for"*) got=suffixed ;; *) got=plain ;; esac

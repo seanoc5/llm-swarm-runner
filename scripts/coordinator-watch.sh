@@ -9184,7 +9184,7 @@ coord_batch_note_ring() {
 # in exactly one place.
 coord_inbox_nudge_pattern() {
     printf '%s' "$COORD_INBOX_NUDGE_TEMPLATE" \
-        | sed 's/[][\.^$*+?(){}|\\]/\\&/g; s/%N/[0-9]+/; s/$/( Woke for: .*)?/'
+        | sed 's/[][\.^$*+?(){}|\\]/\\&/g; s/%N/[0-9]+/; s/$/( Woke for: [0-9]+ [a-z ]+(, [0-9]+ [a-z ]+)*[.])?/'
 }
 
 # ── issue #456: the doorbell debounce clock, on disk ─────────────────────────
