@@ -75,6 +75,10 @@
 # "Woke for:"); ~680 bytes net after tightening twice. Further detail lives in docs/quiet-wakes.md. Still
 # a stopgap until #509 shrinks the file.
 #
+# 2026-11-05: coordinator budget 30800 -> 31200. Issue #756 (dead watcher goes
+# unnoticed): one sweep line plus one paragraph telling the coordinator what
+# the WARN means; ~450 bytes. Still a stopgap until #509 shrinks the file.
+#
 # 2026-11-05: worker-bare 11400 -> 11600. Issue #573 adds the two 🔴 merge
 # safety rules worker.md already had (no coordinator-relayed approval; a
 # push after approval voids it) to the bare prompt's 🔴 row, ~130 bytes.
@@ -85,7 +89,7 @@ red()   { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKER_MAX="${WORKER_MD_MAX_BYTES:-24200}"
-COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-30800}"
+COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-31200}"
 BARE_MAX="${WORKER_BARE_MD_MAX_BYTES:-11600}"   # issue #510 trial prompt; ~7.5KB is script-parsed contract
 
 check() {

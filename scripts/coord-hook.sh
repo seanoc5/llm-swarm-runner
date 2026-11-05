@@ -22,6 +22,12 @@
 #      stop_hook_active=true (we already rang once this turn end) never
 #      rings again, so this cannot loop.
 #
+#   2b. Dead-watcher WARN (issue #756). On Stop, if watcher-check.sh says this
+#      project's coordinator-watch.sh is gone (and not stopped on purpose),
+#      the WARN with the restart command rides the doorbell or is sent on its
+#      own, at most once per WATCHER_DEAD_WARN_SECS (default 1800), so the
+#      coordinator's next turn shows it and tells the operator.
+#
 #   3. Inbox waiter (COORD_INBOX_WAITER=1). An idle coordinator fires no
 #      hooks, so coord-inbox-wait.sh runs as its background shell and wakes
 #      it when an item lands. When no waiter is running, Stop asks the
@@ -93,6 +99,21 @@ waiter_arm_request() {
         "$(printf '%q' "$(cd "$(dirname "$0")" && pwd)/coord-inbox-wait.sh")" "$(printf '%q' "$project")"
 }
 
+# watcher_dead_warning: prints the one-line WARN (restart command included)
+# when the watcher is dead and none was sent in the last
+# WATCHER_DEAD_WARN_SECS; records the send. Prints nothing otherwise.
+watcher_dead_warning() {
+    local warned_file="$swarm/watcher-dead-warned" warned out
+    out="$("$(cd "$(dirname "$0")" && pwd)/watcher-check.sh" "$project" 2>/dev/null)" || true
+    [ -n "$out" ] || { rm -f "$warned_file" 2>/dev/null; return 0; }
+    warned="$(cat "$warned_file" 2>/dev/null || echo 0)"
+    [[ "$warned" =~ ^[0-9]+$ ]] || warned=0
+    [ $((now - warned)) -ge "${WATCHER_DEAD_WARN_SECS:-1800}" ] || return 0
+    printf '%s\n' "$now" > "$warned_file" 2>/dev/null || true
+    log_event "coord.watcher_dead.warn"
+    printf '%s' "$out" | tr '\n' ' '
+}
+
 case "$event" in
     UserPromptSubmit) write_state busy ;;
     Notification)     write_state waiting ;;
@@ -102,6 +123,8 @@ case "$event" in
         # Same urgent-vs-batched gate as coord-inbox-wait.sh (issue #730).
         coord_inbox_scan "$inbox" "$last_rang"
         count="$CIB_TOTAL"
+        dead=""
+        [ "$active" != "true" ] && dead="$(watcher_dead_warning)"
         woke="$(coord_woke_for "$inbox" "$last_rang")"
         if [ "$active" != "true" ] && [ "$count" -gt 0 ] && [ $((CIB_URGENT + CIB_BATCHED)) -gt 0 ] \
                 && coord_should_ring "$last_rang" "$now"; then
@@ -111,10 +134,13 @@ case "$event" in
             write_state busy
             log_event "coord.wake.hook_rang items=$count urgent=$CIB_URGENT batched=$CIB_BATCHED"
             arm="$(waiter_arm_request)"
-            jq -n --arg r "${template//%N/$count}${woke:+ Woke for: $woke.}${arm:+ $arm}" '{decision: "block", reason: $r}'
+            jq -n --arg r "${template//%N/$count}${woke:+ Woke for: $woke.}${arm:+ $arm}${dead:+ $dead}" '{decision: "block", reason: $r}'
         elif arm="$(waiter_arm_request)" && [ -n "$arm" ]; then
             write_state busy
-            jq -n --arg r "$arm" '{decision: "block", reason: $r}'
+            jq -n --arg r "$arm${dead:+ $dead}" '{decision: "block", reason: $r}'
+        elif [ -n "$dead" ]; then
+            write_state busy
+            jq -n --arg r "$dead Tell the operator; do not restart it yourself unless asked." '{decision: "block", reason: $r}'
         else
             write_state idle
         fi

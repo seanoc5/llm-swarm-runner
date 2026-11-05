@@ -1223,6 +1223,11 @@ if [ "${WATCH:-1}" = "1" ]; then
             echo "  WARN: POST_OUTCOMES=1 but no OUTCOME_HOOK set — sweep will use dry-run stub (no real posts)"
         fi
     fi
+else
+    # issue #756: WATCH=0 spawns no watcher, so a watcher that died earlier
+    # stays dead and silent. Warn (nothing printed when it is alive, was
+    # stopped on purpose, or never ran here).
+    "$LLM_SWARM_DIR/scripts/watcher-check.sh" "$PWD" || true
 fi
 
 # Optionally spawn gh-status-bar.sh in a 'status' window. Updates the tmux
