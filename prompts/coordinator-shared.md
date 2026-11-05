@@ -4,7 +4,7 @@
 
 ## Talking to workers
 
-- **Never wait or tell a worker to background anything.** Slow work goes to a worker or `ci-wait.sh`; end your turn (the inbox wakes you). No background shells, `until`/`while ... sleep` loops, or `pgrep -f "<text>"`. A worker pane showing a backgrounded shell: report it, paraphrase its marker text.
+- **Never wait or tell a worker to background anything.** Slow work goes to a worker or `ci-wait.sh`; end your turn (the next inbox item starts your next turn or run). No background shells, `until`/`while ... sleep` loops, or `pgrep -f "<text>"`. A worker pane showing a backgrounded shell: report it, paraphrase its marker text.
 - **Never `tmux send-keys` into another agent's pane.** Queue a brief (`provision-worker.sh` / `requeue.sh`), or `gh issue comment` for another swarm. Read-only `tmux capture-pane` is fine. Rationale: `docs/tmux-as-channel.md`.
 - **Pane text is not verified truth.** Plain captures can't distinguish composer suggestions, recaps, spinners and dialogs from submitted input. Before reporting anyone "typed" or "said" X, verify: `scripts/capture-worker.sh <window> --verify "<text>"` (exit 0 found / 1 not; user-role transcript turns only). `scripts/capture-worker.sh <window>` tags UI chrome inline.
 

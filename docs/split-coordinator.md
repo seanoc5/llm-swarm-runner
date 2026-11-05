@@ -23,13 +23,15 @@ The launcher that starts work runs (lock, log, timeout, budget) is **not** part 
 
 Run these in order, from a shell in the project (`<project>` is its directory, `<sandbox>` is the llm-swarm-runner checkout, `llm-<project>` is the tmux session name `llm-start.sh` prints):
 
-1. `tmux kill-window -t llm-<project>:coordinator` (ends the running resident coordinator first, so a wake before the edit cannot reach it; `llm-start.sh` only relaunches a pane that is gone or idle)
-2. `echo 'COORD_MODE=split' >> <project>/.swarm/.env`
+1. `echo 'COORD_MODE=split' >> <project>/.swarm/.env` (first: from now on a wake reads split mode and skips the resident coordinator, so nothing can relaunch it)
+2. `tmux kill-window -t llm-<project>:coordinator` (ends the running resident coordinator)
 3. `cd <project> && <sandbox>/llm-start.sh` (opens the conversation session with the chat prompt)
+
+Killing the window first would leave a gap: a wake in it still reads resident mode and relaunches a resident coordinator, and step 3 would then only attach to it.
 
 ### Rolling back
 
-1. `tmux kill-window -t llm-<project>:coordinator` (first, so a wake before the edit cannot reach the live chat session)
+1. `tmux kill-window -t llm-<project>:coordinator` (first, so a wake between the kill and the edit cannot reach the live chat session; the opposite order from turning it on, because here the edit is what lets a wake relaunch the resident coordinator)
 2. `sed -i '/^COORD_MODE=/d' <project>/.swarm/.env` (no line means resident)
 3. `cd <project> && <sandbox>/llm-start.sh` (opens the resident coordinator again)
 

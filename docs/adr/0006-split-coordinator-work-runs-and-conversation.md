@@ -309,6 +309,13 @@ project's `.swarm/.env`, which is its only source of truth. In split mode the wa
 - B6. Urgent items start a run within 60 s; green-PR time to merge no worse
   than baseline plus the batch window.
 
+**Turning it on.** Edit first, then kill: add `COORD_MODE=split` to the
+project's `.swarm/.env`, then `tmux kill-window -t llm-<project>:coordinator`,
+then `cd <project> && <sandbox>/llm-start.sh`. After the edit a wake reads split
+mode and skips the resident coordinator; killing the window first would let a
+wake in the gap relaunch a resident coordinator, and `llm-start.sh` would then
+only attach to it.
+
 **Rollback.** Kill the coordinator window first
 (`tmux kill-window -t llm-<project>:coordinator`, so a wake between steps cannot
 reach the live chat session), then delete the `COORD_MODE` line from the
