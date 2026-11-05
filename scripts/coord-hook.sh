@@ -97,7 +97,7 @@ case "$event" in
         last_rang="$(cut -d' ' -f1 "$rang_file" 2>/dev/null || echo 0)"
         [[ "$last_rang" =~ ^[0-9]+$ ]] || last_rang=0
         # Same urgent-vs-batched gate as coord-inbox-wait.sh (issue #730).
-        coord_inbox_scan "$inbox" "$last_rang" 0 0
+        coord_inbox_scan "$inbox" "$last_rang"
         count="$CIB_TOTAL"
         woke="$(coord_woke_for "$inbox" "$last_rang")"
         if [ "$active" != "true" ] && [ "$count" -gt 0 ] && [ $((CIB_URGENT + CIB_BATCHED)) -gt 0 ] \

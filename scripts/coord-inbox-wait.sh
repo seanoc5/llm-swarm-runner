@@ -98,11 +98,12 @@ while :; do
     last_rang="$(cut -d' ' -f1 "$rang_file" 2>/dev/null || echo 0)"
     [[ "$last_rang" =~ ^[0-9]+$ ]] || last_rang=0
     # Activity-poll items are inbox-only (no doorbell, issue #430): they
-    # ride along with the next wake but never trigger one. Urgent items must
-    # be new since arming and not already rung by the Stop hook; batched ones
-    # (idle_capacity, ok outcomes, fyi — see _coord-inbox-batch.sh) wait for
-    # the COORD_INBOX_BATCH_SECS window since the last ring (issue #730).
-    coord_inbox_scan "$inbox" "$last_rang" "$start" 1
+    # ride along with the next wake but never trigger one. Items newer than
+    # the last ring (waiter or Stop hook) are unannounced: urgent ones ring
+    # now; batched ones (idle_capacity, ok outcomes, fyi — see
+    # _coord-inbox-batch.sh) wait for the COORD_INBOX_BATCH_SECS window since
+    # the last ring (issue #730).
+    coord_inbox_scan "$inbox" "$last_rang" 1
     count="$CIB_TOTAL"
     wake_count=$((CIB_URGENT + CIB_BATCHED))
     now="$(date +%s)"

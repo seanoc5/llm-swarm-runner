@@ -74,35 +74,29 @@ coord_item_urgency() {
     esac
 }
 
-# coord_inbox_scan <inbox-dir> <last_rang> <arm_start> [skip_activity]
+# coord_inbox_scan <inbox-dir> <last_rang> [skip_activity]
 #
 # Sets globals: CIB_URGENT / CIB_BATCHED = counts of wake-eligible items newer
-# than <last_rang>; CIB_TOTAL = every *.md file in the inbox; CIB_NEWEST =
-# newest mtime among them. Urgent items additionally need mtime >= <arm_start>
-# (the waiter's "new since arming" guard; pass 0 to disable). Batched items
-# waive that guard while batching is on: one that landed during a busy turn,
-# before the waiter re-armed, must still get its wake when the window opens.
+# than <last_rang> (the last ring, by the waiter or the Stop hook), i.e. not
+# yet announced; CIB_TOTAL = every *.md file in the inbox.
+# No "newer than the waiter's arming" guard: an item that landed during a turn
+# whose Stop hook was skipped (stop_hook_active) is unannounced, and must ring
+# when the waiter re-arms rather than wait out the typed fallback.
 # skip_activity=1: activity-poll items are inbox-only and never trigger.
 coord_inbox_scan() {
-    local dir="$1" last="$2" start="${3:-0}" skip_act="${4:-0}" f m kind
-    local waive=0
-    [ "$(coord_batch_secs)" -gt 0 ] && waive=1
-    CIB_URGENT=0 CIB_BATCHED=0 CIB_TOTAL=0 CIB_NEWEST=0
+    local dir="$1" last="$2" skip_act="${3:-0}" f m
+    CIB_URGENT=0 CIB_BATCHED=0 CIB_TOTAL=0
     for f in "$dir"/*.md; do
         [ -f "$f" ] || continue
         CIB_TOTAL=$((CIB_TOTAL + 1))
-        kind="$(coord_item_kind "$f")"
-        [ "$skip_act" = 1 ] && [ "$kind" = activity ] && continue
+        [ "$skip_act" = 1 ] && [ "$(coord_item_kind "$f")" = activity ] && continue
         m="$(stat -c %Y "$f" 2>/dev/null || echo 0)"
         [ "$m" -gt "$last" ] || continue
         if [ "$(coord_item_urgency "$f")" = urgent ]; then
-            [ "$m" -ge "$start" ] || continue
             CIB_URGENT=$((CIB_URGENT + 1))
         else
-            [ "$waive" = 1 ] || [ "$m" -ge "$start" ] || continue
             CIB_BATCHED=$((CIB_BATCHED + 1))
         fi
-        [ "$m" -gt "$CIB_NEWEST" ] && CIB_NEWEST="$m"
     done
     return 0
 }

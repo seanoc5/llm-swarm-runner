@@ -38,9 +38,9 @@ state() { cut -d' ' -f1 "$S/coordinator-state" 2>/dev/null || echo none; }
 out="$(WV=0 waiter)"
 check "COORD_INBOX_WAITER=0: waiter declines and exits" "off" "$(case "$out" in *"is off"*) echo off ;; *) echo "$out" ;; esac)"
 
-echo 1 > "$S/coord-hook-rang"
+echo "$(date +%s)" > "$S/coord-hook-rang"
 date +%s > "$S/coord-waiter-asked"
-touch -d '1 hour ago' "$S/coord-inbox/old-outcome.md"   # predates arming: never rings
+touch -d '1 hour ago' "$S/coord-inbox/old-outcome.md"   # older than the last ring: already announced, never rings
 "${W[@]}" > "$T/w1.out" & w1=$!; pids+=("$w1")
 wait_for 3 test -f "$S/coord-inbox-waiter" || red "waiter never wrote its pid file"
 check "pid file names the waiter" "$w1" "$(cut -d' ' -f1 "$S/coord-inbox-waiter")"

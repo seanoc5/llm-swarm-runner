@@ -52,14 +52,14 @@ clear_inbox
 # ── batching decision (pure) ────────────────────────────────────────────────
 now=$(date +%s)
 item idle_capacity >/dev/null
-coord_inbox_scan "$IN" 0 0 1
+coord_inbox_scan "$IN" 0 1
 check "scan: one batched, no urgent" "0 1" "$CIB_URGENT $CIB_BATCHED"
 coord_should_ring $((now - 10)) "$now" && got=ring || got=hold
 check "batched item inside the window is held" hold "$got"
 coord_should_ring $((now - 901)) "$now" && got=ring || got=hold
 check "batched item past the window rings" ring "$got"
 item deliver_stall >/dev/null
-coord_inbox_scan "$IN" 0 0 1
+coord_inbox_scan "$IN" 0 1
 coord_should_ring $((now - 10)) "$now" && got=ring || got=hold
 check "an urgent item rings inside the window" ring "$got"
 check "woke-for names every queued kind" "1 idle capacity, 1 deliver stall" "$(coord_woke_for "$IN" 0)"
@@ -106,6 +106,19 @@ wait_for 3 dead "$w2" || red "stale-but-unrung batched item never rang after the
 wait "$w2" || true
 check "waiter: pre-arming batched item rings after the window" "yes" \
     "$(tail -n 1 "$T/w2.out" | grep -q '^Inbox: 1 item(s)' && echo yes || cat "$T/w2.out")"
+
+# An URGENT item that landed before the waiter armed (turn whose Stop hook was
+# skipped) rings at once, not after the extended typed fallback.
+clear_inbox; rm -f "$S/coord-inbox-waiter"
+item deliver_stall >/dev/null
+touch -d '5 minutes ago' "$IN"/*.md
+echo "$(( $(date +%s) - 10 * 60 )) 0" > "$S/coord-hook-rang"   # rang before the item landed
+echo "idle $(date +%s)" > "$S/coordinator-state"
+"${W[@]}" > "$T/w2b.out" & w2b=$!; pids+=("$w2b")
+wait_for 3 dead "$w2b" || red "pre-arming urgent item never rang"
+wait "$w2b" || true
+check "waiter: pre-arming urgent item rings at once" "yes" \
+    "$(tail -n 1 "$T/w2b.out" | grep -q '^Inbox: 1 item(s)' && echo yes || cat "$T/w2b.out")"
 
 # COORD_QUIET_WAKES=0 restores wake-per-item and drops the suffix.
 clear_inbox; rm -f "$S/coord-inbox-waiter"
