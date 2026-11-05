@@ -95,9 +95,10 @@ ARGS=(--model "$MODEL"
 # COORD_MODE=split (issue #767) installs the hook for its UserPromptSubmit
 # needs-you line even without COORD_HOOK_STATE; Stop/Notification (state file)
 # stay tied to COORD_HOOK_STATE.
-if [ "${COORD_HOOK_STATE:-0}" = "1" ] || [ "${COORD_MODE:-resident}" = "split" ]; then
+# shellcheck source=_coord-split.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_coord-split.sh"
+if [ "${COORD_HOOK_STATE:-0}" = "1" ] || [ "$(coord_mode "$PWD")" = "split" ]; then
     export COORD_HOOK_STATE
-    [ "${COORD_MODE:-resident}" = "split" ] && export COORD_MODE
     [ "${COORD_INBOX_WAITER:-0}" = "1" ] && export COORD_INBOX_WAITER
     HOOK="$(cd "$(dirname "$0")" && pwd)/coord-hook.sh"
     ARGS+=(--settings "$(jq -cn --arg h "$HOOK" --arg state "${COORD_HOOK_STATE:-0}" '

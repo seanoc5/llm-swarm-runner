@@ -11,18 +11,32 @@
 #     (coord_needs_you_note, called by coord-hook.sh on the operator's next
 #     message; it also clears the flag, since the operator is looking now).
 
-# coord_mode: echoes "split" or "resident" (the default; anything else too).
-coord_mode() {
-    [ "${COORD_MODE:-resident}" = "split" ] && echo split || echo resident
+# COORD_MODE has one source of truth: the project's .swarm/.env file. Every
+# reader (llm-start.sh and so every wake, coordinator-claude.sh, coord-hook.sh,
+# the watcher) calls these each time it needs the mode, so an edit to the file
+# takes effect at the reader's next call. The caller's env and the tmux session
+# env are never consulted for this setting.
+
+# coord_mode_raw [project-dir]: the value .swarm/.env gives COORD_MODE (last
+# assignment wins, quotes and "export" tolerated); empty when unset or no file.
+coord_mode_raw() {
+    local f="${1:-$PWD}/.swarm/.env"
+    [ -f "$f" ] || return 0
+    sed -nE 's/^[[:space:]]*(export[[:space:]]+)?COORD_MODE=(.*)$/\2/p' "$f" | tail -1 | tr -d "\"'[:space:]"
 }
 
-# coord_split_flag_urgent <inbox-file>
+# coord_mode [project-dir]: "split" or "resident" (unset or anything else).
+coord_mode() {
+    [ "$(coord_mode_raw "${1:-$PWD}")" = "split" ] && echo split || echo resident
+}
+
+# coord_split_flag_urgent <inbox-file> <project-dir>
 #
 # Needs _window-flags.sh (set_window_flag) and _coord-inbox-batch.sh
 # (coord_item_urgency) sourced and $SESSION_NAME set. No-op in resident mode.
 # Operator notes are skipped: the operator wrote them a moment ago.
 coord_split_flag_urgent() {
-    [ "$(coord_mode)" = "split" ] || return 0
+    [ "$(coord_mode "$2")" = "split" ] || return 0
     local f="$1" kind
     kind="$(coord_item_kind "$f")"
     [ "$kind" = "operator" ] && return 0

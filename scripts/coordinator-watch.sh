@@ -9356,7 +9356,7 @@ coord_inbox_write() {
     mv -f "$tmp" "$final" 2>/dev/null || { rm -f "$tmp" "$marker" 2>/dev/null; return 1; }
     # COORD_MODE=split (issue #767): the conversation session is never woken, so an
     # urgent item is surfaced as a window flag instead. No-op in resident mode.
-    coord_split_flag_urgent "$final" || true
+    coord_split_flag_urgent "$final" "$PROJECT_DIR" || true
 }
 
 # coord_inbox_count

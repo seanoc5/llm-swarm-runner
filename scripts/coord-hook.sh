@@ -37,7 +37,7 @@
 #      COORD_INBOX_WAITER_ASK_SECS, so a coordinator that can't arm it
 #      never loops.
 #
-#   4. Split mode (COORD_MODE=split, issue #767). The session is a conversation
+#   4. Split mode (COORD_MODE=split in .swarm/.env, issue #767). The session is a conversation
 #      nobody wakes, so Stop never rings and never asks for a waiter. On
 #      UserPromptSubmit the hook adds one line of context when
 #      .swarm/needs-you.md changed since it last told the operator's session,
@@ -54,11 +54,11 @@ event="${1:-}"
 input="$(cat 2>/dev/null || true)"
 # shellcheck source=scripts/_coord-split.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_coord-split.sh"
+project="${CLAUDE_PROJECT_DIR:-$PWD}"
 hook_state=0; [ "${COORD_HOOK_STATE:-0}" = "1" ] && hook_state=1
-split=0; [ "$(coord_mode)" = "split" ] && split=1
+split=0; [ "$(coord_mode "$project")" = "split" ] && split=1
 [ "$hook_state" = "1" ] || [ "$split" = "1" ] || exit 0
 
-project="${CLAUDE_PROJECT_DIR:-$PWD}"
 swarm="$project/.swarm"
 [ -d "$swarm" ] || exit 0
 

@@ -51,6 +51,11 @@ EOF
 chmod +x "$T/bin/tmux"
 export PATH="$T/bin:$PATH"
 flag() { cat "$T/flags/llm-proj_coordinator" 2>/dev/null || true; }
+# COORD_MODE lives only in <project>/.swarm/.env (#767): tests flip it there.
+setmode() {   # <dir> <split|resident|banana|unset>
+    mkdir -p "$1/.swarm"
+    case "$2" in unset) rm -f "$1/.swarm/.env" ;; *) printf 'FOO=1\nCOORD_MODE=%s\n' "$2" > "$1/.swarm/.env" ;; esac
+}
 
 # ── operator-note.sh ─────────────────────────────────────────────────────────
 heading "operator-note.sh"
@@ -185,23 +190,31 @@ urgent="$(mk 20261105T120000Z-stall-1-1.md)"
 batched="$(mk 20261105T120001Z-idle_capacity-1-2.md)"
 opnote="$(mk 20261105T120002Z-operator-1-3.md)"
 
-check "coord_mode defaults to resident" "resident" "$(coord_mode)"
-check "coord_mode: garbage -> resident" "resident" "$(COORD_MODE=banana coord_mode)"
-COORD_MODE=resident coord_split_flag_urgent "$urgent"
-check "resident: an urgent item sets no flag" "" "$(flag)"
-export COORD_MODE=split
-coord_split_flag_urgent "$batched"
+check "coord_mode defaults to resident (no file)" "resident" "$(coord_mode "$P")"
+setmode "$P" banana
+check "coord_mode: garbage -> resident" "resident" "$(coord_mode "$P")"
+printf '# c\nexport COORD_MODE="split"\n' > "$P/.swarm/.env"
+check "coord_mode: export + quotes tolerated" "split" "$(coord_mode "$P")"
+printf 'COORD_MODE=split\nCOORD_MODE=resident\n' > "$P/.swarm/.env"
+check "coord_mode: the last assignment wins" "resident" "$(coord_mode "$P")"
+setmode "$P" split
+check "coord_mode ignores a conflicting env value" "split" "$(COORD_MODE=resident coord_mode "$P")"
+setmode "$P" resident
+COORD_MODE=split coord_split_flag_urgent "$urgent" "$P"
+check "resident in the file: an urgent item sets no flag (stale env says split)" "" "$(flag)"
+setmode "$P" split
+coord_split_flag_urgent "$batched" "$P"
 check "split: a batched item sets no flag" "" "$(flag)"
-coord_split_flag_urgent "$opnote"
+coord_split_flag_urgent "$opnote" "$P"
 check "split: the operator's own note sets no flag" "" "$(flag)"
-coord_split_flag_urgent "$urgent"
+coord_split_flag_urgent "$urgent" "$P"
 check "split: an urgent item flags the coordinator window" "📥" "$(flag)"
-WATCH_WINDOW_FLAGS=0 coord_split_flag_urgent "$urgent"   # kill switch: no-op, no error
+WATCH_WINDOW_FLAGS=0 coord_split_flag_urgent "$urgent" "$P"   # kill switch: no-op, no error
 check "split: WATCH_WINDOW_FLAGS=0 leaves the flag untouched" "📥" "$(flag)"
 clear_window_flag coordinator "📥" test
 check "clear_window_flag removes 📥" "" "$(flag)"
 set_window_flag coordinator "🔔" test
-coord_split_flag_urgent "$urgent"
+coord_split_flag_urgent "$urgent" "$P"
 check "📥 (rank 2) replaces the unranked 🔔 (rank 1) on the coordinator window" "📥" "$(flag)"
 clear_window_flag coordinator "📥" test
 
@@ -209,20 +222,26 @@ clear_window_flag coordinator "📥" test
 log_event() { :; }
 eval "$(sed -n '/^coord_inbox_write() {/,/^}/p' "$WATCH")"
 # shellcheck disable=SC2034  # read by the eval-ed coord_inbox_write
-COORD_INBOX_DIR="$P/.swarm/ci" COORD_INBOX_PROCESSED_DIR="$P/.swarm/ci/processed" COORD_INBOX_SELF_DIR="$P/.swarm/ci/self"
+PROJECT_DIR="$P" COORD_INBOX_DIR="$P/.swarm/ci" COORD_INBOX_PROCESSED_DIR="$P/.swarm/ci/processed" COORD_INBOX_SELF_DIR="$P/.swarm/ci/self"
 coord_inbox_write idle_capacity "1 idle slot"
 check "watcher writer: a batched kind sets no flag" "" "$(flag)"
 coord_inbox_write stall "worker iss-5 stalled"
 check "watcher writer: an urgent kind sets 📥 (end to end)" "📥" "$(flag)"
 clear_window_flag coordinator "📥" test
-COORD_MODE=resident coord_inbox_write stall "again"
-check "watcher writer: resident mode sets nothing" "" "$(flag)"
-export COORD_MODE=split
+setmode "$P" resident
+COORD_MODE=split coord_inbox_write stall "again"
+check "watcher writer: resident in the file sets nothing, stale split env or not" "" "$(flag)"
+setmode "$P" split
+coord_inbox_write stall "flipped"
+check "watcher writer: the same writer follows the file back to split, no restart" "📥" "$(flag)"
+clear_window_flag coordinator "📥" test
 
 # ── needs-you hook ───────────────────────────────────────────────────────────
 heading "UserPromptSubmit hook"
-hook() {   # <event> [stdin-json]; split mode, state-file hook off
-    printf '%s' "${2:-{\}}" | CLAUDE_PROJECT_DIR="$P" COORD_MODE="${HM:-split}" COORD_HOOK_STATE="${HS:-0}" "$HOOK" "$1"
+hook() {   # <event> [stdin-json]; mode from the file (HM, default split); the env says the opposite
+    setmode "$P" "${HM:-split}"
+    local stale=resident; [ "${HM:-split}" = resident ] && stale=split
+    printf '%s' "${2:-{\}}" | CLAUDE_PROJECT_DIR="$P" COORD_MODE="$stale" COORD_HOOK_STATE="${HS:-0}" "$HOOK" "$1"
 }
 rm -f "$P/.swarm"/needs-you.* "$P/.swarm/coord-hook-rang" "$P/.swarm/coordinator-state"
 out="$(hook UserPromptSubmit)"
@@ -249,7 +268,8 @@ ctx="$(hook UserPromptSubmit | jq -r .hookSpecificOutput.additionalContext)"
 check "relabelled items are not counted as new" "Needs-you changed since your last message: 0 new item(s), 2 on the list now (see .swarm/needs-you.md)." "$ctx"
 
 echo "- **A9** 🟡 PR #9" >> "$P/.swarm/coord-inbox/a.md"
-printf '%s' '{"stop_hook_active":false}' | CLAUDE_PROJECT_DIR="$P" COORD_MODE=split COORD_HOOK_STATE=1 "$HOOK" Stop > "$T/stop.out"
+setmode "$P" split
+printf '%s' '{"stop_hook_active":false}' | CLAUDE_PROJECT_DIR="$P" COORD_HOOK_STATE=1 "$HOOK" Stop > "$T/stop.out"
 check "split Stop: never blocks or rings a doorbell" "" "$(cat "$T/stop.out")"
 check "split Stop: coord-hook-rang is not written" "none" "$([ -e "$P/.swarm/coord-hook-rang" ] && echo some || echo none)"
 check "split Stop with COORD_HOOK_STATE=1 records idle" "idle" "$(cut -d' ' -f1 "$P/.swarm/coordinator-state")"
@@ -267,9 +287,10 @@ rm -f "$P/.swarm/coord-inbox"/*.md "$P/.swarm"/needs-you.* "$P/.swarm/coordinato
 heading "coordinator-claude.sh"
 printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" > %q\n' "$T/argv" > "$T/bin/claude"; chmod +x "$T/bin/claude"
 echo sys > "$T/sys"
-run_wrapper() {   # <COORD_MODE> <COORD_HOOK_STATE>
-    echo hi > "$T/init"
-    (cd "$P" && env -u COORD_MODE COORD_MODE="$1" COORD_HOOK_STATE="$2" "$ROOT/scripts/coordinator-claude.sh" "$T/sys" "$T/init")
+run_wrapper() {   # <mode in .swarm/.env> <COORD_HOOK_STATE>; the env carries the opposite mode
+    echo hi > "$T/init"; setmode "$P" "$1"
+    local stale=resident; [ "$1" = resident ] && stale=split
+    (cd "$P" && env COORD_MODE="$stale" COORD_HOOK_STATE="$2" "$ROOT/scripts/coordinator-claude.sh" "$T/sys" "$T/init")
 }
 hooks() { grep -A1 -x -- '--settings' "$T/argv" | tail -1 | jq -r '[.hooks | keys[]] | sort | join(",")' 2>/dev/null || echo none; }
 run_wrapper resident 0
@@ -284,9 +305,10 @@ check "split, hook state 1: all three" "Notification,Stop,UserPromptSubmit" "$(h
 settings="$(grep -A1 -x -- '--settings' "$T/argv" | tail -1)"
 cmd="$(jq -r '.hooks.UserPromptSubmit[0].hooks[0].command' <<<"$settings")"
 printf '%s\n' '- **A1** 🟡 PR #1' > "$P/.swarm/needs-you.md"
-ctx="$(printf '{}' | CLAUDE_PROJECT_DIR="$P" bash -c "$cmd" | jq -r .hookSpecificOutput.additionalContext)"
-check "the installed command runs the hook with COORD_MODE exported" "Needs-you changed since your last message: 1 new item(s), 1 on the list now (see .swarm/needs-you.md)." "$ctx"
+ctx="$(printf '{}' | env -u COORD_MODE CLAUDE_PROJECT_DIR="$P" bash -c "$cmd" | jq -r .hookSpecificOutput.additionalContext)"
+check "the installed command runs the hook, which reads the mode from the file" "Needs-you changed since your last message: 1 new item(s), 1 on the list now (see .swarm/needs-you.md)." "$ctx"
 rm -f "$P/.swarm"/needs-you.*
+setmode "$P" unset
 
 # ── llm-start.sh ─────────────────────────────────────────────────────────────
 heading "llm-start.sh"
@@ -298,10 +320,12 @@ case "\$*" in *"-V"*) echo "tmux 3.4";; esac
 case "\$*" in *has-session*) exit 1;; esac
 exit 0
 EOF
-start() {   # <COORD_MODE> [args...]
+start() {   # <mode written to .swarm/.env> [args...]; the caller env carries the OPPOSITE mode, which must lose
     local mode="$1"; shift
+    local stale=resident; [ "$mode" = resident ] && stale=split
+    setmode "$S/proj" "$mode"
     : > "$S/tmux.log"
-    (cd "$S/proj" && env -u COORD_MODE COORD_MODE="$mode" HOME="$S" NON_INTERACTIVE=1 WATCH=0 STATUS=0 "$ROOT/llm-start.sh" "$@") > "$S/out.txt" 2>&1
+    (cd "$S/proj" && env COORD_MODE="$stale" HOME="$S" NON_INTERACTIVE=1 WATCH=0 STATUS=0 "$ROOT/llm-start.sh" "$@") > "$S/out.txt" 2>&1
 }
 send_line() { grep -F 'send-keys' "$S/tmux.log" | head -1; }
 files_of() { local l; l="$(send_line)"; printf '%s\n' "$(grep -oE '/tmp/coordinator-prompt-[A-Za-z0-9]+\.md' <<<"$l")" "$(sed -E 's/ C-m$//' <<<"$l" | awk '{print $NF}')"; }
@@ -312,18 +336,27 @@ grep -q 'COORD_MODE must be resident or split' "$S/out.txt" && got=yes || got=no
 check "COORD_MODE=bogus prints why" "yes" "$got"
 
 start resident
-send_line | grep -q 'COORD_MODE=resident ' && got=passed || got=absent
-check "resident: COORD_MODE=resident is passed explicitly (beats a stale session env)" "passed" "$got"
-grep -qE 'set-environment .*-u COORD_MODE' "$S/tmux.log" && got=unset || got=kept
-check "resident: the session env's COORD_MODE is unset" "unset" "$got"
+grep -q 'WARN: ignoring COORD_MODE=split from the environment' "$S/out.txt" && got=warned || got=silent
+check "caller env disagrees with the file: warned, file followed" "warned" "$got"
+check "the warning appears once" "1" "$(grep -c 'ignoring COORD_MODE' "$S/out.txt")"
+grep -qE 'COORD_MODE([^L]|$)|set-environment' "$S/tmux.log" && got=found || got=none
+check "resident: no COORD_MODE pin or session-env change anywhere in the tmux calls" "none" "$got"
+# A resident swarm that never heard of COORD_MODE: no file entry, no env value.
+setmode "$S/proj" unset; : > "$S/tmux.log"
+(cd "$S/proj" && env -u COORD_MODE HOME="$S" NON_INTERACTIVE=1 WATCH=0 STATUS=0 "$ROOT/llm-start.sh") > "$S/out.txt" 2>&1
+grep -qE 'COORD_MODE([^L]|$)|set-environment' "$S/tmux.log" && got=found || got=none
+check "no COORD_MODE anywhere: the tmux calls carry no mode, as before #767" "none" "$got"
+grep -q 'WARN' "$S/out.txt" && got=warned || got=silent
+check "no COORD_MODE anywhere: no warning" "silent" "$got"
+start resident
 rp="$(files_of | sed -n 1p)"; ip="$(files_of | sed -n 2p)"
 grep -q 'Initial Startup Checklist' "$rp" && got=yes || got=no
 check "resident: system prompt is coordinator.md" "yes" "$got"
 check "resident: initial prompt is the startup checklist" "Execute the Initial Startup Checklist." "$(cat "$ip")"
 
 start split
-send_line | grep -q 'COORD_MODE=split ' && got=passed || got=absent
-check "split: COORD_MODE=split is passed to the wrapper" "passed" "$got"
+grep -qE 'COORD_MODE([^L]|$)|set-environment' "$S/tmux.log" && got=found || got=none
+check "split: no COORD_MODE pin or session-env change in the tmux calls either" "none" "$got"
 rp="$(files_of | sed -n 1p)"; ip="$(files_of | sed -n 2p)"
 grep -q "conversation session" "$rp" && ! grep -q 'Initial Startup Checklist' "$rp" && got=chat || got=other
 check "split: system prompt is the chat prompt, not the startup checklist" "chat" "$got"
@@ -390,12 +423,40 @@ check "split + dead pane: the corpse is cleared as before" "cleared" "$got"
 grep -qE "send-keys|paste-buffer|load-buffer" "$S/tmux.log" && got=launched || got=untouched
 check "split + dead pane: a wake launches nothing and types nothing" "untouched" "$got"
 
-# Rollback: split, then back to resident, then a restart in the SAME tmux session.
-# The session env keeps COORD_MODE=split from `new-session -e`, and _load-env.sh
-# only fills unset vars, so only an explicit prefix on the launch line (plus
-# unsetting the session env) gives resident behaviour. The launch line is run
-# here with COORD_MODE=split already in its environment, as tmux would supply.
-heading "split -> rollback -> restart in the same session"
+# Mode flips in the file; the NEXT run follows it, in both directions, with a
+# stale value of the opposite mode in the caller env every time (#767).
+heading "flip in .swarm/.env, next run follows"
+cat > "$T/bin/tmux" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$S/tmux.log"
+case "\$*" in
+    *"-V"*) echo "tmux 3.4" ;;
+    *has-session*) exit 0 ;;
+    *"list-windows -t llm-proj -F #W"*) printf 'coordinator\nutil\n' ;;
+    *list-panes*"coordinator"*"PANE_CMD"*) echo "PANE_CMD=claude PANE_DEAD=0" ;;
+esac
+exit 0
+EOF
+rm -f "$S/proj/.swarm/events.log"
+start resident "wake"
+grep -qE 'paste-buffer|load-buffer|send-keys' "$S/tmux.log" && got=typed || got=untouched
+check "resident wake into a live session: typed (unchanged)" "typed" "$got"
+start split "wake"
+grep -qE 'paste-buffer|load-buffer|send-keys' "$S/tmux.log" && got=typed || got=untouched
+check "flip resident -> split: the very next wake types nothing" "untouched" "$got"
+grep -q 'coord.wake.skip reason=split_mode' "$S/proj/.swarm/events.log" && got=logged || got=missing
+check "flip resident -> split: the next wake logs the skip" "logged" "$got"
+start resident "wake"
+grep -qE 'paste-buffer|load-buffer|send-keys' "$S/tmux.log" && got=typed || got=untouched
+check "flip split -> resident: the very next wake types again" "typed" "$got"
+setmode "$S/proj" unset
+: > "$S/tmux.log"
+(cd "$S/proj" && env COORD_MODE=split HOME="$S" NON_INTERACTIVE=1 WATCH=0 STATUS=0 "$ROOT/llm-start.sh" "wake") > "$S/out.txt" 2>&1
+grep -qE 'paste-buffer|load-buffer|send-keys' "$S/tmux.log" && got=typed || got=untouched
+check "no COORD_MODE in the file, stale split env: resident behaviour" "typed" "$got"
+
+# The launch line carries no mode; the wrapper reads the file when it starts.
+heading "launched coordinator follows the file"
 cat > "$T/bin/tmux" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$S/tmux.log"
@@ -407,41 +468,33 @@ case "\$*" in
 esac
 exit 0
 EOF
-printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" > %q\nprintf "%%s" "${COORD_MODE:-unset}" > %q\n' "$T/argv" "$T/claude-mode" > "$T/bin/claude"
-rm -f "$T/argv" "$T/claude-mode"
-relaunch() {   # <COORD_MODE> <COORD_HOOK_STATE>: llm-start, then run its launch line under a stale split env
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" > %q\n' "$T/argv" > "$T/bin/claude"
+relaunch() {   # <mode> <COORD_HOOK_STATE>: llm-start writes the launch line; run it with the opposite mode in its env
     start "$1"
     local line; line="$(send_line | sed -E 's/^.*send-keys -t [^ ]+ //; s/ C-m$//')"
     [ -n "$line" ] || { echo "no launch line"; return 1; }
-    rm -f "$T/argv" "$T/claude-mode"
-    (cd "$P" && env COORD_MODE=split COORD_HOOK_STATE="$2" bash -c "$line")
+    rm -f "$T/argv"
+    local stale=resident; [ "$1" = resident ] && stale=split
+    (cd "$S/proj" && env COORD_MODE="$stale" COORD_HOOK_STATE="$2" bash -c "$line")
 }
+P_SAVE="$P"; P="$S/proj"
 relaunch split 0
-check "split launch: the hook is installed and COORD_MODE=split reaches claude" "UserPromptSubmit|split" "$(hooks)|$(cat "$T/claude-mode")"
+check "split launch: only the needs-you hook" "UserPromptSubmit" "$(hooks)"
 relaunch resident 1
-check "rollback restart, stale split session env: claude gets COORD_MODE=resident" "resident" "$(cat "$T/claude-mode")"
-check "rollback restart: resident hooks only (Stop rings again), no needs-you split line" "Notification,Stop,UserPromptSubmit" "$(hooks)"
-settings="$(grep -A1 -x -- '--settings' "$T/argv" | tail -1)"
-cmd="$(jq -r '.hooks.UserPromptSubmit[0].hooks[0].command' <<<"$settings")"
+check "rollback relaunch: resident hooks (Stop rings again)" "Notification,Stop,UserPromptSubmit" "$(hooks)"
 printf '%s\n' '- **A1** 🟡 PR #1' > "$P/.swarm/needs-you.md"; rm -f "$P/.swarm/needs-you.seen"
-out="$(printf '{}' | CLAUDE_PROJECT_DIR="$P" COORD_MODE=resident bash -c "$cmd")"
-check "rollback restart: the installed hook behaves as resident (silent on needs-you)" "" "$out"
+cmd="$(jq -r '.hooks.UserPromptSubmit[0].hooks[0].command' <<<"$(grep -A1 -x -- '--settings' "$T/argv" | tail -1)")"
+out="$(printf '{}' | env COORD_MODE=split CLAUDE_PROJECT_DIR="$P" bash -c "$cmd")"
+check "rollback relaunch: the installed hook is silent on needs-you even with a stale split env" "" "$out"
 rm -f "$P/.swarm"/needs-you.*
 relaunch resident 0
 grep -qx -- '--settings' "$T/argv" && got=settings || got=none
-check "rollback restart, hook state 0: no --settings, as before split existed" "none" "$got"
-grep -qE 'set-environment .*-u COORD_MODE' "$S/tmux.log" && got=unset || got=kept
-check "rollback restart: the tmux session env's COORD_MODE is unset" "unset" "$got"
-start split
-grep -qE 'set-environment .*COORD_MODE split' "$S/tmux.log" && got=set || got=missing
-check "split restart: the tmux session env is set to split" "set" "$got"
-export COORD_MODE=split
+check "resident, hook state 0: no --settings, as before split existed" "none" "$got"
+P="$P_SAVE"
 
-# A running watcher keeps the COORD_MODE it started with, and llm-start used to
-# skip any running watcher: after a rollback a stale split watcher kept writing
-# split, and after enabling split a resident one kept pasting wakes into the
-# conversation session. A mode mismatch must restart the watcher (or stop loudly).
-heading "watcher mode mismatch"
+# A wake never kills or restarts a watcher, whatever the file says and whatever
+# its start command carries: the watcher pane is never touched.
+heading "a wake never touches the watcher"
 cat > "$T/bin/tmux" <<EOF2
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$S/tmux.log"
@@ -450,116 +503,25 @@ case "\$*" in
     *has-session*) exit 0 ;;
     *"list-windows -t llm-proj -F #W"*) printf 'coordinator\nutil\n' ;;
     *list-panes*"coordinator"*"PANE_CMD"*) echo "PANE_CMD=bash PANE_DEAD=0" ;;
-    *list-panes*llm-proj:util*pane_dead*) cat "$S/util-panes" ;;
+    *list-panes*llm-proj:util*pane_dead*) echo "0 1 $ROOT/scripts/coordinator-watch.sh /x" ;;
     *display-message*) echo "%9" ;;
-    *kill-pane*) [ -f "$S/kill-fails" ] && exit 1 ;;
-    *show-environment*) [ -f "$S/sess-env" ] && cat "$S/sess-env" ;;
 esac
 exit 0
 EOF2
-WENV=env
-watch_run() {   # <resolved mode> <live watcher start cmd> [WATCH]  (operator run unless WENV adds NON_INTERACTIVE=1)
-    : > "$S/tmux.log"; printf '0 1 %s\n' "$2" > "$S/util-panes"
-    set +e
-    (cd "$S/proj" && env -u COORD_MODE -u NON_INTERACTIVE -u TMUX_PANE COORD_MODE="$1" HOME="$S" WATCH="${3:-1}" STATUS=0 $WENV "$ROOT/llm-start.sh" </dev/null) > "$S/out.txt" 2>&1
-    wrc=$?; set -e
-}
-wcmd="$ROOT/scripts/coordinator-watch.sh /x"
-watch_run resident "COORD_MODE=split $wcmd"
-check "resident now, split watcher: llm-start exits 0" "0" "$wrc"
-grep -qE 'kill-pane -t llm-proj:util\.1' "$S/tmux.log" && got=killed || got=kept
-check "resident now, split watcher: the stale watcher pane is killed" "killed" "$got"
-grep -qF 'split-window' "$S/tmux.log" && got=respawned || got=none
-check "resident now, split watcher: a fresh watcher is spawned" "respawned" "$got"
-grep -qF 'split-window' "$S/tmux.log" && grep 'split-window' "$S/tmux.log" | grep -q 'COORD_MODE=resident ' && got=resident || got=wrong
-check "resident now, split watcher: the new watcher is pinned to resident" "resident" "$got"
-grep -q 'runs COORD_MODE=split but the resolved mode is resident' "$S/out.txt" && got=said || got=silent
-check "resident now, split watcher: the restart is announced" "said" "$got"
-
-watch_run split "COORD_MODE=resident $wcmd"
-grep -qE 'kill-pane -t llm-proj:util\.1' "$S/tmux.log" && grep -qF 'split-window' "$S/tmux.log" && got=restarted || got=skipped
-check "split now, resident watcher: restarted, not skipped" "restarted" "$got"
-
-watch_run split "$wcmd"
-grep -qF 'kill-pane' "$S/tmux.log" && got=killed || got=untouched
-check "split now, unpinned legacy watcher: never killed for an unknown mode" "untouched" "$got"
-grep -q 'WARN: coordinator-watch pane 1 .* runs COORD_MODE=resident but the resolved mode is split' "$S/out.txt" && got=warned || got=silent
-check "split now, unpinned legacy watcher: warned with the restart command" "warned" "$got"
-
-watch_run resident "$wcmd"
-grep -qE 'kill-pane|split-window' "$S/tmux.log" && got=touched || got=untouched
-check "resident now, unpinned watcher: treated as resident, left alone" "untouched" "$got"
-
-# The #405 shape: the watcher runs llm-start.sh for every wake from its OWN pane
-# (NON_INTERACTIVE=1, TMUX_PANE = the watcher pane). A watcher that self-respawned
-# keeps its original unpinned command ("unknown" mode). The wake must neither kill
-# it nor skip delivery, in either direction of mode mismatch.
-for _case in "resident|$wcmd" "split|$wcmd" "resident|COORD_MODE=split $wcmd" "split|COORD_MODE=resident $wcmd"; do
-    WENV="env NON_INTERACTIVE=1 TMUX_PANE=%9"
-    watch_run "${_case%%|*}" "${_case#*|}"
-    WENV=env
-    grep -qF 'kill-pane' "$S/tmux.log" && got=killed || got=survived
-    check "wake from the watcher's own pane (${_case%%|*} wake, '${_case#*|}' watcher): watcher survives" "survived" "$got"
-    grep -qF 'split-window' "$S/tmux.log" && got=respawned || got=none
-    check "wake from the watcher's own pane (${_case%%|*} wake): no second watcher" "none" "$got"
-    check "wake from the watcher's own pane (${_case%%|*} wake): llm-start still exits 0" "0" "$wrc"
-done
-# The wake itself is delivered: resident wake into a live conversation window
-# reaches the reprompt path (paste), split wake still never types into the chat.
-WENV="env NON_INTERACTIVE=1 TMUX_PANE=%9"
-watch_run resident "$wcmd"
-WENV=env
-grep -qE 'paste-buffer|load-buffer|send-keys' "$S/tmux.log" && got=delivered || got=dropped
-check "resident wake via an unpinned self-respawned watcher: delivered, watcher intact" "delivered" "$got"
-
-watch_run split "COORD_MODE=split $wcmd"
-grep -qF 'kill-pane' "$S/tmux.log" && got=killed || got=untouched
-check "matching mode: the live watcher is left alone" "untouched" "$got"
-grep -qF 'split-window' "$S/tmux.log" && got=spawned || got=skipped
-check "matching mode: no second watcher is spawned" "skipped" "$got"
-grep -q 'skipping spawn' "$S/out.txt" && got=said || got=silent
-check "matching mode: the skip is announced" "said" "$got"
-
-touch "$S/kill-fails"
-watch_run resident "COORD_MODE=split $wcmd"
-check "stale watcher that cannot be stopped: llm-start exits 1" "1" "$wrc"
-grep -q "tmux kill-pane -t 'llm-proj:util.1'" "$S/out.txt" && got=command || got=missing
-check "stale watcher that cannot be stopped: the exact command is printed" "command" "$got"
-rm -f "$S/kill-fails"
-
-watch_run resident "COORD_MODE=split $wcmd" 0
-grep -qF 'kill-pane' "$S/tmux.log" && got=killed || got=untouched
-check "WATCH=0: a wrong-mode watcher is not killed" "untouched" "$got"
-grep -q 'WARN: coordinator-watch pane 1 .* runs COORD_MODE=split but the resolved mode is resident' "$S/out.txt" && got=warned || got=silent
-check "WATCH=0: a wrong-mode watcher is warned about with the restart command" "warned" "$got"
-
-# Rollback from a session pane (`util`): the pane inherits COORD_MODE=split from
-# the tmux session env, .swarm/.env no longer sets it, and no mode is passed.
-heading "rollback run from a session pane with a stale COORD_MODE"
-printf 'COORD_MODE=split\n' > "$S/sess-env"; : > "$S/util-panes"
-stale_run() {   # <extra env assignment, or empty> -- runs with COORD_MODE=split inherited, none passed on purpose
+for m in resident split unset; do
+    setmode "$S/proj" "$m"
     : > "$S/tmux.log"
-    (cd "$S/proj" && env COORD_MODE=split HOME="$S" NON_INTERACTIVE=1 WATCH=0 STATUS=0 "$@" "$ROOT/llm-start.sh") > "$S/out.txt" 2>&1
-}
-stale_run env TMUX=/tmp/fake,1,0
-send_line | grep -q 'COORD_MODE=resident ' && got=resident || got=split
-check "stale session env, no mode passed: resolves resident" "resident" "$got"
-grep -q 'conversation session is live' "$S/out.txt" && got=printed || got=absent
-check "stale session env, no mode passed: no split-mode message" "absent" "$got"
-grep -q 'inherited from the tmux session env' "$S/out.txt" && got=said || got=silent
-check "stale session env, no mode passed: the override is announced" "said" "$got"
-grep -qE 'set-environment .*-u COORD_MODE' "$S/tmux.log" && got=unset || got=kept
-check "stale session env, no mode passed: the session env is cleared" "unset" "$got"
-# Outside tmux the caller's value is a deliberate choice and still wins.
-stale_run env -u TMUX
-send_line | grep -q 'COORD_MODE=split ' && got=split || got=resident
-check "no tmux: an explicit COORD_MODE=split still wins" "split" "$got"
-# Inside tmux, a value that differs from the session env is a deliberate choice too.
-printf 'COORD_MODE=resident\n' > "$S/sess-env"
-stale_run env TMUX=/tmp/fake,1,0
-send_line | grep -q 'COORD_MODE=split ' && got=split || got=resident
-check "tmux, value differs from the session env: explicit choice wins" "split" "$got"
-rm -f "$S/sess-env"
+    set +e
+    (cd "$S/proj" && env COORD_MODE=split HOME="$S" NON_INTERACTIVE=1 TMUX_PANE=%9 WATCH=1 STATUS=0 "$ROOT/llm-start.sh" "wake") > "$S/out.txt" 2>&1
+    rc=$?; set -e
+    grep -qE 'kill-pane|split-window' "$S/tmux.log" && got=touched || got=untouched
+    check "wake with '$m' in the file: the live watcher is neither killed nor duplicated" "untouched" "$got"
+    check "wake with '$m' in the file: llm-start exits 0" "0" "$rc"
+    grep -q 'skipping spawn' "$S/out.txt" && got=skipped || got=other
+    check "wake with '$m' in the file: says it is skipping the spawn" "skipped" "$got"
+done
+grep -n 'COORD_MODE' "$ROOT/llm-start.sh" | grep -E 'set-environment|show-environment|new-session' > /dev/null && got=found || got=none
+check "llm-start.sh does no COORD_MODE tmux-env sync" "none" "$got"
 
 # Auto-compact never injects /compact into the conversation session.
 heading "auto-compact"
@@ -569,12 +531,13 @@ eval "$(sed -n "/^maybe_auto_compact() {/,/^    fi$/p" "$ROOT/scripts/coordinato
 }"
 # shellcheck disable=SC2034
 AUTO_COMPACT=1; : > "$T/ev.log"
-# shellcheck disable=SC2209
-COORD_MODE=split maybe_auto_compact wake; rc=$?
+PROJECT_DIR="$P"; setmode "$P" split
+COORD_MODE=resident maybe_auto_compact wake; rc=$?
 check "split: maybe_auto_compact returns before touching the pane" "0" "$rc"
 grep -q "reason=split_mode" "$T/ev.log" && got=logged || got=missing
 check "split: maybe_auto_compact logs the skip" "logged" "$got"
-set +e; COORD_MODE=resident maybe_auto_compact wake; rc=$?; set -e
+setmode "$P" resident
+set +e; COORD_MODE=split maybe_auto_compact wake; rc=$?; set -e
 check "resident: maybe_auto_compact proceeds past the split guard" "99" "$rc"
 
 echo
