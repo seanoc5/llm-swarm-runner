@@ -44,8 +44,18 @@ coord_ring_doorbell() { printf '%s %s\n' "$1" "${2:-}" >> "$RINGS"; }
 declare -A STALE_WAIT_NOTED=()
 declare -A CI_FAILING_NOTED=()
 declare -A PARKED_GREEN_HANDLED=()
-BUSY_ISSUES=""
-worker_pane_busy() { [[ " $BUSY_ISSUES " == *" ${1#iss-} "* ]]; }
+BUSY_ISSUES=""; CLI_ISSUES=""
+CLI_ISSUES=""   # issues whose window has a CLI in the foreground (else the window is absent)
+CTX_ISSUES=""   # CLI windows that render the interactive ctx statusline (a headless -p run does not)
+WORKSPACE="$TEST_DIR/ws"
+mkdir -p "$WORKSPACE"
+in_list() { [[ " $1 " == *" ${2#iss-} "* ]]; }
+worker_pane_busy() { in_list "$BUSY_ISSUES" "$1"; }
+worker_pane_state() { if in_list "$CLI_ISSUES" "$1"; then echo cli; else echo absent; fi; }
+worker_pane_ctx_used() { in_list "$CTX_ISSUES" "$1" && echo 1000; }
+own_wt_dir_for_issue() { [ -d "$WORKSPACE/wt-issue-$1" ] && echo "$WORKSPACE/wt-issue-$1"; }
+# gh stub: only "pr view <N> --json comments --jq <filter>", answered from COMMENTS_<N> via the real jq filter
+gh() { local v="COMMENTS_$3"; jq -r "$7" <<<"${!v:-{\"comments\":[]}}"; }
 LLM_SWARM_DIR="$TEST_DIR/swarm"
 mkdir -p "$LLM_SWARM_DIR/scripts"
 printf '#!/usr/bin/env bash\necho "$1" >> "%s/ready.log"\nexit 0\n' "$TEST_DIR" > "$LLM_SWARM_DIR/scripts/pr-ready.sh"
@@ -53,7 +63,7 @@ chmod +x "$LLM_SWARM_DIR/scripts/pr-ready.sh"
 CI_FAILING_RING_DIR="$PROJECT_DIR/.swarm/ci-failing-ring-pending"
 
 # shellcheck source=/dev/null
-. <(extract_fn coord_inbox_write; extract_fn ready_sweep_pass)
+. <(extract_fn coord_inbox_write; extract_fn ready_sweep_pass; extract_fn worker_brief_pending; extract_fn pr_comment_hold; extract_fn worker_still_working; sed -n "/^PR_COMMENT_HOLD_JQ=/,/(\.\[-1\] \/\/ \"\")'$/p" "$WATCH")
 declare -F ready_sweep_pass >/dev/null || red "ready_sweep_pass not extracted"
 
 notes() { find "$COORD_INBOX_DIR" -maxdepth 1 -name '*-stale_wait-*.md' 2>/dev/null | wc -l | tr -d ' '; }
@@ -113,16 +123,51 @@ cat > "$SWEEP_OUT" <<'OUT'
 #72 parked-green: banner-less draft, green CI (risk=high, issue=72, sha=bbbb2222)
 #73 parked-green: banner-less draft, green CI (risk=medium, issue=73, sha=cccc3333)
 OUT
-BUSY_ISSUES="73"
+BUSY_ISSUES="73"; CLI_ISSUES="73"
 ready_sweep_pass >/dev/null
 [ "$(cat "$TEST_DIR/ready.log")" = "71" ] || red "expected pr-ready on 71 only: $(cat "$TEST_DIR/ready.log")"
 [ "$(pg)" = "1" ] || red "expected 1 parked_green note (72), got $(pg)"
 grep -q "Draft PR #72 (risk high) has green CI on bbbb222" "$COORD_INBOX_DIR"/*-parked_green-*.md || red "unexpected note: $(cat "$COORD_INBOX_DIR"/*-parked_green-*.md)"
 ready_sweep_pass >/dev/null
 [ "$(wc -l < "$TEST_DIR/ready.log" | tr -d ' ')" = "1" ] && [ "$(pg)" = "1" ] || red "same sha must dedupe (ready: $(cat "$TEST_DIR/ready.log"), notes: $(pg))"
-BUSY_ISSUES=""
+BUSY_ISSUES=""; CLI_ISSUES=""
 ready_sweep_pass >/dev/null
 [ "$(pg)" = "2" ] || red "PR 73 should be handled once its worker is idle, notes: $(pg)"
 green "pr-ready once for low risk; one note per PR+sha otherwise; live worker deferred"
+
+
+heading "Test 8 (issue #757): a parked-green draft is left alone while its worker is unfinished or the PR is comment-held"
+# reset: one PR at a time, risk=low so a handled PR shows up in ready.log
+one() { : > "$TEST_DIR/ready.log"; PARKED_GREEN_HANDLED=(); printf '#%s parked-green: banner-less draft, green CI (risk=low, issue=%s, sha=%s)\n' "$1" "$1" "$2" > "$SWEEP_OUT"; ready_sweep_pass >/dev/null; }
+readied() { [ "$(cat "$TEST_DIR/ready.log")" = "$1" ]; }
+mkdir -p "$WORKSPACE/wt-issue-81/.swarm/tasks/processing" "$WORKSPACE/wt-issue-82/.swarm/tasks/done"
+# own_wt_dir_for_issue stub keys on the directory only, so one dir per scenario
+BUSY_ISSUES=""; CLI_ISSUES="81"; CTX_ISSUES=""
+one 81 aaaa0081; readied "" || red "headless run (CLI, no ctx statusline, not busy) must not be readied: $(cat "$TEST_DIR/ready.log")"
+CTX_ISSUES="81"
+touch "$WORKSPACE/wt-issue-81/.swarm/tasks/processing/t81.md"
+one 81 aaaa0082; readied "" || red "worker between turns (idle TUI, brief still in processing/) must not be readied"
+rm "$WORKSPACE/wt-issue-81/.swarm/tasks/processing/t81.md"
+one 81 aaaa0083; readied "81" || red "finished interactive worker (idle TUI, brief done) should be readied, got: $(cat "$TEST_DIR/ready.log")"
+CLI_ISSUES=""; CTX_ISSUES=""
+mkdir -p "$WORKSPACE/wt-issue-81/.swarm/tasks/inbox"; touch "$WORKSPACE/wt-issue-81/.swarm/tasks/inbox/q.md"
+one 81 aaaa0084; readied "" || red "worker with a brief queued in inbox/ (window gone) must not be readied"
+rm "$WORKSPACE/wt-issue-81/.swarm/tasks/inbox/q.md"
+one 81 aaaa0085; readied "81" || red "reaped worker (no window, no brief) should be readied"
+HOLD_C='{"comments":[{"body":"x\n<!-- SWARM_COORDINATOR_HOLD -->"}]}'
+COMMENTS_81="$HOLD_C"
+one 81 aaaa0086; readied "" || red "comment-only hold must not be readied"
+COMMENTS_81='{"comments":[{"body":"<!-- SWARM_COORDINATOR_HOLD -->"},{"body":"<!-- SWARM_COORDINATOR_HOLD_LIFTED -->"}]}'
+one 81 aaaa0087; readied "81" || red "a lifted comment hold should be readied"
+COMMENTS_81='{"comments":[{"body":"quoting `<!-- SWARM_COORDINATOR_HOLD -->` in prose"}]}'
+one 81 aaaa0088; readied "81" || red "prose quoting the marker is not a hold"
+unset COMMENTS_81
+green "unfinished worker (headless, between turns, queued brief) and comment-held PRs are deferred; finished/reaped/lifted proceed"
+
+heading "Test 9 (issue #757): the comment-hold jq matches pr-ready.sh's"
+norm() { sed -n "/^$1=/,/(\.\[-1\] \/\/ \"\")'\$/p" "$2" | sed -E "s/^$1=//" | tr -s ' \n' ' '; }
+[ -n "$(norm HOLD_COMMENT_JQ "$SCRIPT_DIR/../scripts/pr-ready.sh")" ] || red "could not read pr-ready.sh HOLD_COMMENT_JQ"
+[ "$(norm HOLD_COMMENT_JQ "$SCRIPT_DIR/../scripts/pr-ready.sh")" = "$(norm PR_COMMENT_HOLD_JQ "$WATCH")" ] || red "PR_COMMENT_HOLD_JQ drifted from pr-ready.sh HOLD_COMMENT_JQ"
+green "hold-comment filters identical"
 
 green "ALL TESTS PASSED"

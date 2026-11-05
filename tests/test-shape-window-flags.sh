@@ -271,6 +271,8 @@ chmod +x "$FAKE_LLM_START"
 # #656 appends optional mergeable/headRefOid/baseRefName columns).
 GH_PR_LIST_FILE="$TEST_DIR/gh-pr-list.tsv"
 GH_PR_RISK_FILE="$TEST_DIR/gh-pr-risk.tsv"
+GH_PR_COMMENTS_FILE="$TEST_DIR/gh-pr-comments.json"
+echo '{"comments":[]}' > "$GH_PR_COMMENTS_FILE"
 : > "$GH_PR_LIST_FILE"
 : > "$GH_PR_RISK_FILE"
 FAKE_GH="$TEST_DIR/bin/gh"
@@ -281,6 +283,11 @@ if [ "\$1" = "pr" ] && [ "\$2" = "list" ]; then
         *" number,body,statusCheckRollup"*) cat "$GH_PR_RISK_FILE" ;;
         *)                 cat "$GH_PR_LIST_FILE" ;;
     esac
+    exit 0
+fi
+# issue #757: "pr view N --json comments --jq FILTER" answers from GH_PR_COMMENTS_FILE (the real filter runs)
+if [ "\$1" = "pr" ] && [ "\$2" = "view" ] && [ "\$4" = "--json" ] && [ "\$5" = "comments" ]; then
+    jq -r "\$7" < "$GH_PR_COMMENTS_FILE"
     exit 0
 fi
 exit 0
@@ -856,6 +863,22 @@ stop_watcher
 n90=$(find "$WT90/.swarm/tasks/inbox" -name '*.md' | wc -l)
 [ "$n90" = 0 ] || red "draft: same head should not be briefed twice; inbox has $n90"
 green "conflicting draft briefed once per head; coordinator-held draft left alone"
+
+# issue #757 review fix: a comment-only hold (no body banner) also keeps the
+# brief away, and a later lift lets it through on the next tick.
+rm -f "$WT90"/.swarm/tasks/done/*.md
+echo '{"comments":[{"body":"holding\n<!-- SWARM_COORDINATOR_HOLD -->"}]}' > "$GH_PR_COMMENTS_FILE"
+ONCE=0 WATCH_PR_POLL_SECS=1 start_watcher 0 "$TEST_DIR/watch-b20-chold.log"
+sleep 3
+n90=$(find "$WT90/.swarm/tasks/inbox" -name '*.md' | wc -l)
+[ "$n90" = 0 ] || { stop_watcher; red "comment-held draft: expected no conflict brief, inbox has $n90"; }
+echo '{"comments":[{"body":"<!-- SWARM_COORDINATOR_HOLD -->"},{"body":"<!-- SWARM_COORDINATOR_HOLD_LIFTED -->"}]}' > "$GH_PR_COMMENTS_FILE"
+sleep 3
+stop_watcher
+n90=$(grep -l 'swarm-merge:conflict-brief pr=190 ' "$WT90"/.swarm/tasks/inbox/*.md 2>/dev/null | wc -l)
+[ "$n90" = 1 ] || red "lifted comment hold: expected 1 brief, got $n90"
+echo '{"comments":[]}' > "$GH_PR_COMMENTS_FILE"
+green "comment-only hold keeps the conflict brief away; lifting it releases it"
 rm -rf "$WT90"
 : > "$GH_PR_RISK_FILE"
 : > "$GH_PR_LIST_FILE"

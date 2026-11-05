@@ -4703,6 +4703,51 @@ pr_flag_apply() {
     [ -z "$want" ] || set_window_flag "iss-$issue" "$want" "$why"
 }
 
+# PR_COMMENT_HOLD_JQ — keep identical to HOLD_COMMENT_JQ in pr-ready.sh
+# (tests/test-shape-stale-wait-note.sh checks they match). The newest
+# hold-or-lift comment decides; a SWARM_SELF_REVIEW comment never counts.
+PR_COMMENT_HOLD_JQ='[.comments[].body // ""
+  | select(contains("SWARM_SELF_REVIEW:") | not)
+  | if test("(^|\\n)<!-- SWARM_COORDINATOR_HOLD -->\\s*$") then "held"
+    elif (contains("<!-- SWARM_COORDINATOR_HOLD_LIFTED -->") or test("(^|\\n)(✅ )?(\\*\\*)?COORDINATOR HOLD lifted")) then "lifted"
+    else empty end] | (.[-1] // "")'
+
+# pr_comment_hold <pr> (issue #757)
+#
+# True (rc 0) when PR <pr> is held by a SWARM_COORDINATOR_HOLD comment — the
+# hold signal a worker's body rewrite cannot erase (issue #616), which
+# PR_HOLD_CACHE (body banner only) misses. One gh call per use, so callers
+# ask only once they are about to act. A failed lookup fails open (not held),
+# the same stance pr-ready.sh takes; it still enforces the hold itself.
+pr_comment_hold() {
+    local state
+    state="$(cd "$PROJECT_DIR" && gh pr view "$1" --json comments --jq "$PR_COMMENT_HOLD_JQ" 2>/dev/null || true)"
+    [ "$state" = "held" ]
+}
+
+# worker_still_working <issue> (issue #757)
+#
+# True (rc 0) unless the worker for iss-<issue> has positively finished: a
+# readied-and-automerged draft must not land with work unfinished. Live when
+# (a) its brief is still in inbox/ or processing/ (it has not run
+# task-done.sh — this also covers an interactive worker between turns, which
+# worker_pane_busy reads as idle), (b) its pane is mid-turn, or (c) a CLI is
+# in the foreground but no "ctx:" statusline parses — a WORKER_HEADLESS=1
+# `claude -p` run renders no TUI chrome, so worker_pane_busy never matches it
+# (the same gate maybe_worker_deliver_brief uses). No worktree and no window
+# (a reaped worker) means finished.
+worker_still_working() {
+    local issue="$1" wt_dir win="iss-$1" state
+    if wt_dir="$(own_wt_dir_for_issue "$issue")" && worker_brief_pending "$wt_dir"; then
+        return 0
+    fi
+    state="$(worker_pane_state "$win")" || state="absent"
+    [ "$state" = "cli" ] || return 1
+    worker_pane_busy "$win" && return 0
+    worker_pane_ctx_used "$win" >/dev/null 2>&1 || return 0
+    return 1
+}
+
 # conflict_brief_pass_one <issue> <pr> <wt_dir> (issue #656)
 #
 # A ready PR can turn CONFLICTING after its worker finished, when another PR
@@ -4721,6 +4766,9 @@ conflict_brief_pass_one() {
     [ "${PR_HOLD_CACHE[$pr]:-}" = "hold" ] && return 0
     [ -n "$h" ] && [ "${CONFLICT_BRIEF_SENT[$pr]:-}" = "$h" ] && return 0
     worker_brief_pending "$wt_dir" && return 0
+    # A comment-only hold (the body banner was rewritten away) counts too.
+    # Not recorded in CONFLICT_BRIEF_SENT, so a lifted hold is briefed next tick.
+    pr_comment_hold "$pr" && return 0
     queue_conflict_brief "$wt_dir" "$pr" "${b:-the default branch}" "mergeable=CONFLICTING" \
         "The watcher saw PR #$pr turn conflicting" >/dev/null || rc=$?
     CONFLICT_BRIEF_SENT[$pr]="$h"
@@ -4962,8 +5010,12 @@ ready_sweep_pass() {
             local pg_risk="${BASH_REMATCH[2]}" pg_issue="${BASH_REMATCH[3]}" pg_sha="${BASH_REMATCH[4]}"
             pgseen[$key]=1
             [ -z "${PARKED_GREEN_HANDLED[$key]:-}" ] || continue
-            # A worker with a live turn will call pr-ready.sh itself.
-            if [ "$pg_issue" != "none" ] && worker_pane_busy "iss-$pg_issue"; then continue; fi
+            # A worker that has not finished will call pr-ready.sh itself; readying
+            # now could auto-merge with work unfinished (see worker_still_working).
+            if [ "$pg_issue" != "none" ] && worker_still_working "$pg_issue"; then continue; fi
+            # A comment-only coordinator hold (ready-sweep.sh only sees the body
+            # banner). Not marked handled: re-checked next sweep, so a lift is picked up.
+            if pr_comment_hold "$pr"; then continue; fi
             if [ "$DRY_RUN" = "1" ]; then
                 echo "[DRY] would handle parked green draft PR #$pr (risk $pg_risk, sha ${pg_sha:0:7})"
                 continue
