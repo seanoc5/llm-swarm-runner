@@ -21,6 +21,18 @@ T="$(mktemp -d -t replay-test-XXXXXX)"
 trap 'rm -rf "$T"' EXIT
 export GH_TOKEN=canary-must-not-leak GITHUB_TOKEN=canary-must-not-leak
 
+# A fake "real" home holding file-based canaries: a gh token file, an ssh key, an MCP
+# OAuth token next to the claude.ai login, and a global CLAUDE.md. The run may see only
+# the claude.ai login key (a scratch HOME is built from it); none of the rest may be
+# reachable through $HOME.
+FAKEHOME="$T/realhome"
+mkdir -p "$FAKEHOME/.config/gh" "$FAKEHOME/.ssh" "$FAKEHOME/.claude"
+echo 'github.com: {oauth_token: canary-file-gh-token}' > "$FAKEHOME/.config/gh/hosts.yml"
+echo 'canary-file-ssh-key' > "$FAKEHOME/.ssh/id_ed25519"
+echo 'canary-file-global-claude-md' > "$FAKEHOME/.claude/CLAUDE.md"
+echo '{"claudeAiOauth":{"accessToken":"canary-login-ok"},"mcpOAuth":{"x":{"accessToken":"canary-mcp-token"}}}' > "$FAKEHOME/.claude/.credentials.json"
+export REPLAY_AUTH_HOME="$FAKEHOME"
+
 # fixtures: one open PR (as-of state) and one issue
 mkdir -p "$T/fix" "$T/src"
 jq -n '{number:7,title:"fix thing",state:"OPEN",isDraft:false,headRefOid:"abc1234",body:"b",
@@ -46,6 +58,14 @@ $LLM_SWARM_DIR/scripts/requeue.sh 3 /dev/null
 tmux kill-window -t llm-x:iss-3
 echo "docker_ps=$(docker ps -q | wc -l) docker_bin=$(command -v docker)" >> "$PWD/probe.txt"
 docker stop swarm-live-worker
+docker container stop swarm-live-worker-2
+docker container ls -q > /dev/null
+echo "home=$HOME" >> "$PWD/probe.txt"
+echo "ghfile=$(cat "$HOME/.config/gh/hosts.yml" 2>/dev/null | wc -c)" >> "$PWD/probe.txt"
+echo "sshfile=$(cat "$HOME/.ssh/id_ed25519" 2>/dev/null | wc -c)" >> "$PWD/probe.txt"
+echo "canaries_under_home=$(grep -rl "canary-" "$HOME" 2>/dev/null | sed "s#^$HOME/##" | sort | tr "\n" " ")" >> "$PWD/probe.txt"
+echo "login=$(jq -r "(.claudeAiOauth.accessToken) + \":\" + (if has(\"mcpOAuth\") then \"present\" else \"none\" end)" "$HOME/.claude/.credentials.json" 2>/dev/null || echo missing)" >> "$PWD/probe.txt"
+echo "home_files=$(cd "$HOME" && find . -type f | sort | tr "\n" " ")" >> "$PWD/probe.txt"
 echo "outcome=$(jq -r .outcome /mnt/none 2>/dev/null; ls .swarm/coord-inbox | wc -l)" >> "$PWD/probe.txt"
 '
 "$REPLAY" --out "$T/out" --fixtures "$T/fix" --inbox-src "$T/src" --files 20261231T000000Z-none.md --cmd "$CMD" >/dev/null 2>&1 \
@@ -66,7 +86,18 @@ check "swarm-merge recorded, not run" "1" "$(grep -c $'\tswarm-merge.sh\t7 --aut
 check "requeue recorded, not run" "1" "$(grep -c $'\trequeue.sh\t3' "$A")"
 check "tmux kill-window recorded" "1" "$(grep -c $'\ttmux\tkill-window' "$A")"
 check "docker ps sees an empty host, via the stub" "docker_ps=0 docker_bin=$T/out/bin/docker" "$(grep '^docker_ps=' "$P/probe.txt")"
-check "docker stop recorded, not sent" "1" "$(grep -c $'\tdocker\tstop swarm-live-worker' "$A")"
+check "docker stop recorded, not sent" "1" "$(grep -c $'\tdocker\tstop swarm-live-worker$' "$A")"
+check "docker container stop recorded, not sent" "1" "$(grep -c $'\tdocker\tcontainer stop swarm-live-worker-2' "$A")"
+check "docker container ls is a silent read" "0" "$(grep -c $'\tdocker\tcontainer ls' "$A")"
+
+heading "the run's HOME is a scratch directory, not the real home"
+check "HOME is the scratch dir inside the output dir" "home=$T/out/home" "$(grep '^home=' "$P/probe.txt")"
+check "real gh hosts.yml is not reachable through HOME" "ghfile=0" "$(grep '^ghfile=' "$P/probe.txt")"
+check "real ssh key is not reachable through HOME" "sshfile=0" "$(grep '^sshfile=' "$P/probe.txt")"
+check "only the claude.ai login file is under HOME with a canary" "canaries_under_home=.claude/.credentials.json " "$(grep '^canaries_under_home=' "$P/probe.txt")"
+check "the login file holds the claude.ai key and no MCP token" "login=canary-login-ok:none" "$(grep '^login=' "$P/probe.txt")"
+check "the login file is removed from the output dir after the run" "gone" "$([ -e "$T/out/home/.claude/.credentials.json" ] && echo present || echo gone)"
+check "scratch HOME holds exactly the allowed files" "home_files=./.claude.json ./.claude/.credentials.json ./.gitconfig " "$(grep '^home_files=' "$P/probe.txt")"
 
 heading "inbox copy has host paths rewritten and an outcome stand-in"
 check "inbox item copied" "1" "$(ls "$P"/.swarm/coord-inbox/*.md | wc -l)"

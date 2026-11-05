@@ -36,9 +36,14 @@
 #            operator-note, capture-worker (recorded, not run)
 #   safety   the run gets no GH_TOKEN/GITHUB_TOKEN, no MCP servers (mail, drive,
 #            calendar: a claude shim adds --strict-mcp-config) and no tmux socket path; the
-#            project clone has no git remote. Nothing can reach GitHub or a
-#            live swarm unless the model goes out of its way to find another
-#            credential.
+#            project clone has no git remote. HOME is a scratch directory (DIR/home) holding
+#            only the claude.ai login (claudeAiOauth, no MCP tokens) and a bare gitconfig, so
+#            the real gh, git and ssh find no credentials by default and the real
+#            ~/.config/gh/hosts.yml is not under HOME. THIS IS NOT A SANDBOX: the run uses
+#            --dangerously-skip-permissions and the same unix user, so a model that goes out
+#            of its way can still read the real home by absolute path or reach /usr/bin/gh
+#            with a token it finds. Runs made before this HOME change (R1, R2c, A1 in
+#            docs/replay-768-report.md) used the real HOME.
 #
 # Output in DIR: actions.tsv (every stubbed write, in order), work-run/ (log,
 # runs.log with tokens and cost), project/.swarm (digest, needs-you, inbox
@@ -112,6 +117,9 @@ for s in swarm-merge.sh worker-merge.sh requeue.sh provision-worker.sh llm-start
 done
 
 # gh stub: reads from $REPLAY_FIXTURES, writes recorded.
+# Known gaps (also in docs/replay-768-report.md): `pr list` and `issue list` honour only
+# --state open|all (so --state closed returns an empty list) and ignore --search,
+# --head, --base, --label, --author and --assignee; `pr diff` has no fixture.
 cat > "$OUT/bin/gh" <<'GH'
 #!/usr/bin/env bash
 # replay stub for gh — see scripts/replay-work-run.sh
@@ -215,7 +223,12 @@ chmod +x "$OUT/bin/tmux"
 cat > "$OUT/bin/docker" <<'DK'
 #!/usr/bin/env bash
 case "$1" in
-    ps|images|info|version|inspect|logs|stats|port|top|container|image) exit 0 ;;
+    ps|images|info|version|inspect|logs|stats|port|top) exit 0 ;;
+    container|image|network|volume|system)
+        # `docker container stop/rm/kill` is the same write as `docker stop`: only the
+        # read subcommands are silent, everything else is recorded.
+        case "${2:-}" in ls|list|ps|inspect|logs|stats|port|top|history|df|info) exit 0 ;; esac
+        a="$*"; printf '%s\t%s\t%s\n' "$(date +%s)" docker "${a:0:600}" >> "$REPLAY_ACTIONS" ;;
     *) a="$*"; printf '%s\t%s\t%s\n' "$(date +%s)" docker "${a:0:600}" >> "$REPLAY_ACTIONS" ;;
 esac
 exit 0
@@ -315,7 +328,21 @@ if [ -z "$CMD" ] && [ "$(ls "$P/.swarm/coord-inbox"/*.md 2>/dev/null | wc -l)" -
 fi
 printf 'items\t%s\n' "$(ls "$P/.swarm/coord-inbox"/*.md 2>/dev/null | wc -l)" > "$OUT/summary.txt"
 
-env -i HOME="$HOME" PATH="$OUT/bin:/usr/local/bin:/usr/bin:/bin" \
+# Scratch HOME: only what claude needs to log in. The credentials file also holds MCP
+# OAuth tokens for other services, so copy just the claudeAiOauth key. REPLAY_AUTH_HOME
+# is a test hook (where to take the login from).
+AUTH_HOME="${REPLAY_AUTH_HOME:-$HOME}"
+RH="$OUT/home"
+mkdir -p "$RH/.claude" && chmod 700 "$RH"
+if [ -f "$AUTH_HOME/.claude/.credentials.json" ]; then
+    ( umask 077; jq -c '{claudeAiOauth: .claudeAiOauth} | with_entries(select(.value != null))' \
+        "$AUTH_HOME/.claude/.credentials.json" > "$RH/.claude/.credentials.json" ) 2>/dev/null \
+        || rm -f "$RH/.claude/.credentials.json"
+fi
+echo '{"hasCompletedOnboarding":true}' > "$RH/.claude.json"
+printf '[user]\n\tname = replay\n\temail = replay@invalid\n' > "$RH/.gitconfig"
+
+env -i HOME="$RH" PATH="$OUT/bin:/usr/local/bin:/usr/bin:/bin" \
     TERM="${TERM:-xterm}" LANG="${LANG:-C.UTF-8}" \
     LLM_SWARM_DIR="$OUT/swarm" REPLAY_ACTIONS="$ACTIONS" REPLAY_FIXTURES="$OUT/fixtures" \
     REPLAY_WINDOWS="$WINDOWS" REPLAY_REPO="$REPO" \
@@ -323,6 +350,7 @@ env -i HOME="$HOME" PATH="$OUT/bin:/usr/local/bin:/usr/bin:/bin" \
     ${CMD:+COORD_WORK_RUN_CMD="$CMD"} \
     "$OUT/swarm/scripts/coord-work-run.sh" "$P" "$PROMPT"
 rc=$?
+rm -f "$RH/.claude/.credentials.json"   # do not leave a login token in the output dir
 {
     echo "exit	$rc"
     echo "actions	$(wc -l < "$ACTIONS")"
