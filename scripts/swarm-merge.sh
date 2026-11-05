@@ -7,6 +7,7 @@
 #   swarm-merge.sh <issue#>           # convenience: finds the issue's PR, then
 #                                      # the same as above
 #   swarm-merge.sh <issue#|PR#> --no-kill # skip the worktree/tmux reap step
+#   swarm-merge.sh <issue#|PR#> --expect-head <sha>  # refuse unless the PR head still starts with <sha> (a push after approval)
 #   swarm-merge.sh <issue#|PR#> --override-review  # merge despite a BLOCK verdict
 #   swarm-merge.sh <issue#|PR#> --override-migration-gate  # merge despite a migration collision
 #   swarm-merge.sh <issue#> --force-cleanup  # housekeep even while the issue is OPEN
@@ -189,6 +190,9 @@ HOUSEKEEP_ONLY=0
 AUTO_LOW=0          # 1 = an unattended path (--auto-low or --auto-medium)
 AUTO_RATING=""      # low | medium: the rating that unattended path accepts
 REVIEWED_SHA=""
+EXPECT_HEAD=""      # --expect-head <sha>: refuse unless the PR head still starts with this (#775)
+EXPECT_NEXT=0
+EXPECT_SET=0
 ISSUE=""
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -212,7 +216,12 @@ CI_WAIT_SCRIPT="${CI_WAIT_SCRIPT:-$SCRIPT_DIR/ci-wait.sh}"
 # --- arg parsing -----------------------------------------------------------
 
 for arg in "$@"; do
+  if [ "$EXPECT_NEXT" = 1 ]; then
+    EXPECT_HEAD="$arg"; EXPECT_SET=1; EXPECT_NEXT=0; continue
+  fi
   case "$arg" in
+    --expect-head) EXPECT_NEXT=1 ;;
+    --expect-head=*) EXPECT_HEAD="${arg#*=}"; EXPECT_SET=1 ;;
     --no-kill)    NO_KILL=1 ;;
     --sweep-only) SWEEP_ONLY=1 ;;
     --override-review) OVERRIDE_REVIEW=1 ;;
@@ -240,6 +249,11 @@ for arg in "$@"; do
       ;;
   esac
 done
+if [ "$EXPECT_NEXT" = 1 ]; then echo "ERROR: --expect-head needs a SHA" >&2; exit 2; fi
+if [ "$EXPECT_SET" = 1 ] && ! [[ "$EXPECT_HEAD" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+  echo "ERROR: --expect-head needs 7-40 hex chars (the short SHA you echoed)" >&2; exit 2
+fi
+EXPECT_HEAD="$(printf "%s" "$EXPECT_HEAD" | tr A-F a-f)"
 
 # --auto-low is the coordinator's unattended path; it must never accept an
 # override flag — those exist for a human who read the PR and disagrees
@@ -438,7 +452,7 @@ fi
 
 if [ -z "$ISSUE" ]; then
   echo "ERROR: PR# (or issue#) required (or use --sweep-only)" >&2
-  echo "Usage: $0 <PR#|issue#> [--no-kill]" >&2
+  echo "Usage: $0 <PR#|issue#> [--no-kill] [--expect-head <sha>]" >&2
   exit 2
 fi
 
@@ -611,6 +625,17 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
   PR_HEAD_SHA=$(echo "$PR_JSON" | jq -r '.headRefOid // ""')
   echo "[3/6] PR #$PR_NUM: state=$PR_STATE mergeable=$PR_MERGEABLE branch=$PR_BRANCH"
   echo "       title: $PR_TITLE"
+
+  # issue #775: --expect-head binds this merge to the SHA the operator approved.
+  # Cheap early refusal; the authoritative re-check happens under the action lock.
+  if [ -n "$EXPECT_HEAD" ]; then
+    PR_HEAD_LC="$(printf '%s' "$PR_HEAD_SHA" | tr A-F a-f)"
+    if [ -z "$PR_HEAD_LC" ] || [ "${PR_HEAD_LC#"$EXPECT_HEAD"}" = "$PR_HEAD_LC" ]; then
+      echo "ERROR: PR #$PR_NUM's head is ${PR_HEAD_SHA:-unknown}, not the approved $EXPECT_HEAD (--expect-head) — a push landed after approval. Nothing merged; re-read the PR and re-approve." >&2
+      log_event merge.gate "pr=$PR_NUM gate=expect-head result=head-moved expected=$EXPECT_HEAD now=${PR_HEAD_SHA:-unknown} action=refuse"
+      exit 1
+    fi
+  fi
 
   if [ -z "$ISSUE" ]; then
     # Local artifacts (tmux window, worktree, branch) are keyed on the branch
@@ -1001,6 +1026,18 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
       LOCK_STATE=$(jq -r '.state // ""' <<<"$LOCK_JSON" 2>/dev/null || true)
       LOCK_HEAD=$(jq -r '.headRefOid // ""' <<<"$LOCK_JSON" 2>/dev/null || true)
       MERGED_BY_OTHER=0
+      # issue #775: --expect-head, checked against the head re-read under the
+      # lock. Fails closed: an unreadable head cannot confirm the approved SHA.
+      if [ -n "$EXPECT_HEAD" ] && [ "$LOCK_STATE" != "MERGED" ]; then
+        LOCK_HEAD_LC="$(printf '%s' "$LOCK_HEAD" | tr A-F a-f)"
+        if [ "$LOCK_RC" != 0 ] || [ -z "$LOCK_HEAD_LC" ] || [ "${LOCK_HEAD_LC#"$EXPECT_HEAD"}" = "$LOCK_HEAD_LC" ]; then
+          echo "ERROR: PR #$PR_NUM's head is ${LOCK_HEAD:-unreadable} at merge time, not the approved $EXPECT_HEAD (--expect-head) — refusing. Re-read the PR and re-approve." >&2
+          log_event merge.gate "pr=$PR_NUM gate=expect-head result=head-moved-at-lock expected=$EXPECT_HEAD now=${LOCK_HEAD:-unreadable} action=refuse"
+          exit 1
+        fi
+        # Pin the merge call itself to the approved full SHA.
+        [ -z "$MATCH_SHA" ] && MATCH_SHA="$LOCK_HEAD"
+      fi
       if [ "$LOCK_RC" = 0 ] && [ "$LOCK_STATE" = "MERGED" ]; then
         MERGED_BY_OTHER=1
         echo "       $(c_amber "⚠ PR #$PR_NUM was merged by another actor while this merge waited for the action lock — skipping the merge call")"
