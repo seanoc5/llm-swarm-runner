@@ -69,5 +69,5 @@ Also local to the conversation session: `.swarm/needs-you.seen`, the copy of the
 ## Surfacing changes without waking the session
 
 - **Flag.** `coord_split_flag_urgent` (`scripts/_coord-split.sh`) is called from the watcher's inbox writer. For an urgent kind other than `operator` it sets 📥 on the `coordinator` window via `set_window_flag` (`WATCH_WINDOW_FLAGS=0` turns flags off).
-- **Hook.** `scripts/coord-hook.sh UserPromptSubmit` runs when you press Enter, prints `{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"..."}}` if the list changed, and clears 📥. In split mode `Stop` never rings and never asks for a waiter. `coordinator-claude.sh` installs the hook in split mode even with `COORD_HOOK_STATE=0`.
+- **Hook.** `scripts/coord-hook.sh UserPromptSubmit` runs when you press Enter, prints `{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"..."}}` if the list changed or the watcher is dead (the `WARN: coordinator-watch.sh is NOT running` line with its restart command, on every message while it stays dead; #779), and clears 📥. In split mode `Stop` never rings and never asks for a waiter. `coordinator-claude.sh` installs the hook in split mode even with `COORD_HOOK_STATE=0`.
 - Gemini, codex and agy have no such hook: the chat prompt tells them to read `.swarm/needs-you.md` at the start of each turn.
