@@ -117,13 +117,27 @@ run_sweep --dry-run || red "expected exit 0"
 grep -qx '#31 ci-failing: needs a fix push (sha=deadbeef)' "$TEST_DIR/out.log" || red "dry run lost ci-failing line: $(cat "$TEST_DIR/out.log")"
 green "ci-failing reported in dry run"
 
-heading "Test 7 (issue #729): ci-failing reports the live head sha, not the stale banner sha"
+heading "Test 7 (issue #729): head == banner sha is reported ci-failing and NOT retried"
 cat > "$FIXTURE" <<'JSON'
-[{"number": 41, "headRefOid": "feed5678feed5678", "body": "<!-- SWARM_DRAFT_REASON: ci-failing sha=0ddba11 -->\nbody"}]
+[{"number": 41, "headRefOid": "0ddba110ddba11", "body": "<!-- SWARM_DRAFT_REASON: ci-failing sha=0ddba110ddba11 -->\nbody"}]
 JSON
 run_sweep || red "expected exit 0"
-grep -qx '#41 ci-failing: needs a fix push (sha=feed5678feed5678)' "$TEST_DIR/out.log" || red "expected live head sha: $(cat "$TEST_DIR/out.log")"
-! grep -q 0ddba11 "$TEST_DIR/out.log" || red "stale banner sha leaked: $(cat "$TEST_DIR/out.log")"
-green "sweep reports headRefOid"
+grep -qx '#41 ci-failing: needs a fix push (sha=0ddba110ddba11)' "$TEST_DIR/out.log" || red "expected ci-failing line: $(cat "$TEST_DIR/out.log")"
+[ ! -s "$READY_LOG" ] || red "unchanged red head must not be retried: $(cat "$READY_LOG")"
+green "unchanged head reports red"
+
+heading "Test 8 (issue #729): head moved past the banner sha is retried, never reported red"
+cat > "$FIXTURE" <<'JSON'
+[{"number": 11, "headRefOid": "feed5678feed5678", "body": "<!-- SWARM_DRAFT_REASON: ci-failing sha=0ddba11 -->\nbody"},
+ {"number": 42, "headRefOid": "feed5678feed5678", "body": "<!-- SWARM_DRAFT_REASON: ci-failing sha=0ddba11 -->\nbody"}]
+JSON
+run_sweep || red "expected exit 0"
+! grep -q 'ci-failing: needs a fix push' "$TEST_DIR/out.log" || red "false red note for a moved head: $(cat "$TEST_DIR/out.log")"
+[ "$(sort "$READY_LOG" | tr '\n' ' ')" = "11 42 " ] || red "expected pr-ready on 11 and 42, got: $(tr '\n' ' ' < "$READY_LOG")"
+grep -qx '#11 ci-failing-head-moved: readied' "$TEST_DIR/out.log" || red "expected readied line: $(cat "$TEST_DIR/out.log")"
+grep -qx '#42 ci-failing-head-moved: still draft (exit 4)' "$TEST_DIR/out.log" || red "expected still-draft line: $(cat "$TEST_DIR/out.log")"
+run_sweep --dry-run || red "expected exit 0"
+[ ! -s "$READY_LOG" ] || red "dry run must not call pr-ready"
+green "fix push triggers a retry (pr-ready rewrites the banner), no false red"
 
 green "ALL TESTS PASSED"

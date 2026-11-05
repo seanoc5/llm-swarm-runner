@@ -38,13 +38,23 @@ DRAFTS="$(gh pr list --state open --draft --limit 100 --json number,body,headRef
     || { echo "ready-sweep: ERROR: gh pr list failed" >&2; exit 1; }
 CANDIDATES="$(jq -r '.[] | (.body // "" | capture("(?m)^<!-- SWARM_DRAFT_REASON: (?<r>ci-pending|ci-unknown) sha=").r) as $r | "\(.number) \($r)"' <<<"$DRAFTS")"
 
-# issue #729: ci-failing drafts are not retried, but a parked PR whose CI went
-# red has no live owner (its worker ended after writing an fyi note), so report
-# each one with its live head sha (headRefOid, not the banner sha: only
-# pr-ready.sh rewrites the banner, so a worker that pushes a red fix and exits
-# leaves it stale; the banner sha is only the fallback);
-# coordinator-watch.sh turns it into one inbox note per (PR, sha). Read-only, so --dry-run reports it too.
-jq -r '.[] | (.body // "" | capture("(?m)^<!-- SWARM_DRAFT_REASON: ci-failing sha=(?<s>[0-9a-fA-F]+)").s) as $s | "#\(.number) ci-failing: needs a fix push (sha=\((.headRefOid // $s)))"' <<<"$DRAFTS"
+# issue #729: a parked PR whose CI went red has no live owner (its worker ended
+# after writing an fyi note), so report it; coordinator-watch.sh turns the line
+# into one inbox note per (PR, sha). The banner proves only ITS OWN sha failed,
+# so report ci-failing only while the head still equals the banner sha. When
+# the head has moved (a fix push), the banner says nothing about the new head:
+# retry pr-ready.sh like a ci-pending draft, which rewrites the banner (a red
+# new head then gets its note on a later pass; a green one readies).
+# A missing headRefOid counts as "head unchanged". Reporting is read-only, so
+# --dry-run reports it too.
+FAILING="$(jq -r '.[] | (.body // "" | capture("(?m)^<!-- SWARM_DRAFT_REASON: ci-failing sha=(?<s>[0-9a-fA-F]+)").s // empty) as $s | (.headRefOid // $s) as $h | if $h == $s then "\(.number) \($s) report" else "\(.number) \($s) retry" end' <<<"$DRAFTS")"
+while read -r pr sha action; do
+    [ "$action" = "report" ] || continue
+    echo "#$pr ci-failing: needs a fix push (sha=$sha)"
+done <<<"$FAILING"
+MOVED="$(awk '$3 == "retry" { print $1 " ci-failing-head-moved" }' <<<"$FAILING")"
+[ -z "$MOVED" ] || CANDIDATES="${CANDIDATES:+$CANDIDATES
+}$MOVED"
 
 while read -r pr reason; do
     [ -n "$pr" ] || continue
