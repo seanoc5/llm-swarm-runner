@@ -1,0 +1,5 @@
+items	4
+exit	0
+actions	15
+runs_log	2026-11-05T21:29:30Z start=20261105T212618Z secs=192 exit=0 status=ok cost_usd=1.2296801999999998 in=24 out=20252 cache_read=720241 log=20261105T212618Z.log
+inbox_left	0

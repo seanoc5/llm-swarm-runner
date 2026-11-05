@@ -1,0 +1,9 @@
+1793914539	stale-pr-nudges.sh	
+1793914589	ci-wait.sh	702
+1793914590	gh	workflow list
+1793914606	self-review-pr.sh	699 --post --actor coordinator
+1793914606	gh	pr edit 696 --body-file /tmp/b696n.20783
+1793914606	gh	label create from-pr-684 --color ededed --description Follow-up from PR #684 --force
+1793914606	gh	issue create --title swarm-idle-report.sh needs gawk: test-shape-idle-report.sh fails on mawk hosts --label swarm-followup --label from-pr-684 --body ## Goal \n Make the idle report and its test suite work on a host whose `awk` is mawk, or fail up front with a clear message. \n  \n ## Background \n Follow-up from PR #684. Its worker found `tests/test-shape-idle-report.sh` failing with "function asort never defined": the host awk was mawk 1.3.4 with no gawk, and `scripts/swarm-idle-report.sh` calls gawk's `asort` (line 190 on master at 5682862). The PR did not touch either file. The worker coul
+1793914606	provision-worker.sh	592
+1793914659	kill-finished-workers.sh	--pr-finalized --with-worktree --yes
