@@ -977,7 +977,7 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
         if flock -w "${COORD_ACTIONS_LOCK_TIMEOUT_SECS:-120}" "$ACTION_LOCK_FD"; then
           ACTION_LOCK_HELD=1
         else
-          echo "ERROR: PR #$PR_NUM: could not get the coordinator action lock ($ACTION_LOCK_FILE) within ${COORD_ACTIONS_LOCK_TIMEOUT_SECS:-120}s — another merge is in progress. Nothing merged; retry." >&2
+          echo "ERROR: swarm-merge.sh (exit 1, not provision-worker.sh's exit 5): PR #$PR_NUM: could not get the coordinator action lock ($ACTION_LOCK_FILE) within ${COORD_ACTIONS_LOCK_TIMEOUT_SECS:-120}s — another coordinator action holds it. Nothing merged; safe to re-run swarm-merge.sh once it finishes." >&2
           log_event merge.gate "pr=$PR_NUM gate=action-lock result=timeout action=refuse"
           exit 1
         fi
@@ -987,7 +987,8 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
       fi
       # The head the gates actually saw: the CI-verified or reviewed commit, else the
       # head from the initial PR read (never the fresh fallback read above).
-      GATE_SHA="${CI_VERIFIED_SHA:-${REVIEWED_SHA:-$(jq -r '.headRefOid // ""' <<<"$PR_JSON" 2>/dev/null || true)}}"
+      INITIAL_HEAD="$(jq -r '.headRefOid // ""' <<<"$PR_JSON" 2>/dev/null || true)"
+      GATE_SHA="${CI_VERIFIED_SHA:-${REVIEWED_SHA:-$INITIAL_HEAD}}"
       LOCK_JSON="" ; LOCK_RC=0
       LOCK_JSON=$(gh pr view "$PR_NUM" --json state,headRefOid 2>/dev/null) || LOCK_RC=$?
       LOCK_STATE=$(jq -r '.state // ""' <<<"$LOCK_JSON" 2>/dev/null || true)
@@ -1004,6 +1005,13 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
       elif [ "$LOCK_RC" = 0 ] && [ -n "$LOCK_HEAD" ] && [ -n "$GATE_SHA" ] && [ "$LOCK_HEAD" != "$GATE_SHA" ]; then
         echo "ERROR: PR #$PR_NUM's head moved between the gates and the merge (gated $GATE_SHA, now $LOCK_HEAD) — refusing. Re-run the gates on the new head." >&2
         log_event merge.gate "pr=$PR_NUM gate=action-lock result=head-moved gated=$GATE_SHA now=$LOCK_HEAD action=refuse"
+        exit 1
+      elif [ "$LOCK_RC" = 0 ] && [ -n "$LOCK_HEAD" ] && [ -n "$INITIAL_HEAD" ] && [ "$LOCK_HEAD" != "$INITIAL_HEAD" ]; then
+        # ci-wait.sh follows new commits and reports the newest as verified-head, so
+        # GATE_SHA can equal a head that arrived during the CI wait; the authorship,
+        # review and migration gates only ever read INITIAL_HEAD (PR_JSON).
+        echo "ERROR: PR #$PR_NUM's head is $LOCK_HEAD now but the authorship/review/migration gates read $INITIAL_HEAD (it moved during the CI wait) — refusing. Re-run the gates on the new head." >&2
+        log_event merge.gate "pr=$PR_NUM gate=action-lock result=head-moved-since-gates gated=$INITIAL_HEAD now=$LOCK_HEAD action=refuse"
         exit 1
       elif [ "$LOCK_RC" != 0 ] || [ -z "$LOCK_HEAD" ]; then
         if [ "$AUTO_LOW" = 1 ]; then

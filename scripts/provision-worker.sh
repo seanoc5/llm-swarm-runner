@@ -61,6 +61,10 @@ EXIT CODES
     Caps and admission run before the brief is written, so 2/3/5 leave no
     brief behind (#464). The worktree is kept on refusal; a retry reuses it.
 
+EXIT 5 vs 7: 5 = a worker for this issue is already live (never retry; use
+requeue.sh). 7 = timed out waiting for the per-issue dispatch lock, nothing
+queued (check for an iss-N window, then re-provision once).
+
 CAPS (exit 3)
     MAX_WORKERS              5     alive iss-* windows in this session
     MAX_TMUX_WINDOWS         10    total windows in this session
@@ -147,7 +151,7 @@ mkdir -p "$(dirname "$WT")"
 if command -v flock >/dev/null 2>&1; then
     if { exec {DISPATCH_LOCK_FD}>"$(dirname "$WT")/.dispatch-$(basename "$WT").lock"; } 2>/dev/null; then
         flock -w "${PROVISION_DISPATCH_LOCK_TIMEOUT_SECS:-120}" "$DISPATCH_LOCK_FD" \
-            || { echo "ERROR: another provision of issue #$ISSUE holds the dispatch lock — nothing queued. Retry." >&2; exit 5; }
+            || { echo "ERROR: provision-worker.sh exit 7 (dispatch lock timeout, not exit 5): another provision of issue #$ISSUE holds the dispatch lock — nothing queued. Check for an iss-$ISSUE window and its inbox, then re-provision once." >&2; exit 7; }
     fi
 fi
 

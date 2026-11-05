@@ -57,7 +57,7 @@ Before reporting a cap, reap finished workers (recovery is `gh pr reopen N`):
 
 If still capped: stop provisioning, name the cap, and list remaining `iss-*` windows with PR state and a `tmux kill-window -t iss-N` command each — don't close them yourself, they may hold unpreserved work. A same-issue follow-up needs no slot: `requeue.sh N <brief>`. `provision-worker.sh` re-checks caps and exits 3 when exceeded — a hard stop, not something to retry or bypass.
 
-Other `provision-worker.sh` exits (issue #493, #546): stderr names the next step — read it, don't guess. Never retry exit 5 (a worker is already running: use `requeue.sh`) or exit 6 (slow start, pane alive: re-check, don't re-provision). Exit 4 (spawn died, fully cleaned up) may be re-provisioned once; a spawn-stagger exit 3 right after names its wait.
+Other `provision-worker.sh` exits (issue #493, #546): stderr names the next step — read it, don't guess. Never retry exit 5 (a worker is already running: use `requeue.sh`) or exit 6 (slow start, pane alive: re-check, don't re-provision). Exit 7 (dispatch-lock timeout, not 5) and exit 4 (spawn died, cleaned up) may be re-provisioned once, after checking for an `iss-N` window; a spawn-stagger exit 3 right after names its wait.
 
 ## Issue Routing: tmux Worker vs GH Action
 

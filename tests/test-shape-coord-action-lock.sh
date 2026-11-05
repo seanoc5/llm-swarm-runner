@@ -27,11 +27,15 @@ case "\${1:-} \${2:-}" in
   "api repos/{owner}/{repo}/issues/600") echo true; exit 0 ;;
   "pr view")
     if [ -e "\$S/merged" ]; then st=MERGED; else st=OPEN; fi
-    head=aaa111
-    case "\$*" in *"--jq .headRefOid"*) echo aaa111; exit 0 ;; esac
+    head=aaa1111
+    case "\$*" in *"--jq .headRefOid"*) echo aaa1111; exit 0 ;; esac
     # the re-read under the action lock asks for exactly "state,headRefOid"
-    if [ "\$*" = "pr view 600 --json state,headRefOid" ] && [ -e "\$S/move-head" ]; then head=bbb222; fi
-    printf '{"state":"%s","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefName":"fix/issue-600","title":"t","closingIssuesReferences":[],"body":"","isDraft":false,"reviewDecision":"","baseRefName":"master","headRefOid":"%s"}\n' "\$st" "\$head"
+    if [ "\$*" = "pr view 600 --json state,headRefOid" ]; then
+      [ -e "\$S/fail-reread" ] && exit 1
+      if [ -e "\$S/move-head" ]; then head=bbb2222; fi
+    fi
+    body=""; [ -e "\$S/body-low" ] && body="<!-- BLIND_MERGE_RISK: low -->"
+    printf '{"state":"%s","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefName":"fix/issue-600","title":"t","closingIssuesReferences":[],"body":"%s","isDraft":false,"reviewDecision":"","baseRefName":"master","headRefOid":"%s"}\n' "\$st" "\$body" "\$head"
     exit 0 ;;
   "pr merge")
     sleep 1
@@ -93,6 +97,53 @@ grep -q 'head moved' "$TEST_DIR/b.log" || red "no head-moved message: $(cat "$TE
 [ "$(merges)" = 0 ] || red "gh pr merge was called despite the moved head"
 green "moved head refused, nothing merged"
 
+# --auto-low path: fake ci-wait.sh that, like the real one, follows a head that
+# arrives during the wait and reports the NEWEST commit as verified-head.
+cat > "$TEST_DIR/ci-wait-stub.sh" <<'STUB'
+#!/usr/bin/env bash
+echo "verified-head=${FAKE_VERIFIED_HEAD:-aaa1111}"
+exit 0
+STUB
+chmod +x "$TEST_DIR/ci-wait-stub.sh"
+auto() { ( cd "$REPO" && SWARM_MERGE_TEST_HOOKS=1 CI_WAIT_SCRIPT="$TEST_DIR/ci-wait-stub.sh" timeout 30 "$MERGE" 600 --no-kill --auto-low "$@" >"$TEST_DIR/auto.log" 2>&1 ); }
+
+heading "B2: --auto-low, head moved during the CI wait (CI verified the new head) is refused"
+reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/body-low" "$TEST_DIR/state/move-head"
+rc=0; FAKE_VERIFIED_HEAD=bbb2222 auto || rc=$?
+[ "$rc" != 0 ] || red "auto-low merge should have been refused: $(cat "$TEST_DIR/auto.log")"
+grep -q 'gates read aaa1111' "$TEST_DIR/auto.log" || red "no moved-since-gates message: $(cat "$TEST_DIR/auto.log")"
+[ "$(merges)" = 0 ] || red "gh pr merge was called despite the head moving during the CI wait"
+green "auto-low: head that moved during CI wait refused, nothing merged"
+
+heading "B3: --auto-low with a stable head still merges (control for B2)"
+reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/body-low"
+auto || red "stable-head auto-low merge failed: $(cat "$TEST_DIR/auto.log")"
+[ "$(merges)" = 1 ] || red "expected 1 merge call, got $(merges)"
+green "auto-low: stable head merges"
+
+heading "F: re-read under the lock fails: --auto-low refuses, plain merge proceeds"
+reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/body-low" "$TEST_DIR/state/fail-reread"
+rc=0; auto || rc=$?
+[ "$rc" != 0 ] || red "auto-low should refuse when the re-read fails"
+grep -q 're-read under the action lock failed' "$TEST_DIR/auto.log" || red "no reread-failed message: $(cat "$TEST_DIR/auto.log")"
+[ "$(merges)" = 0 ] || red "auto-low merged despite a failed re-read"
+reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/fail-reread"
+( cd "$REPO" && timeout 30 "$MERGE" 600 --no-kill >"$TEST_DIR/f.log" 2>&1 ) || red "plain merge should proceed on a failed re-read: $(cat "$TEST_DIR/f.log")"
+[ "$(merges)" = 1 ] || red "plain merge expected 1 call, got $(merges)"
+green "failed re-read: auto-low refused, plain merge continues"
+
+heading "G: lock timeout refuses, names swarm-merge.sh, never says exit 5 / Retry"
+reset
+( exec 9>"$COORD_ACTIONS_LOCK"; flock 9; sleep 8 ) & holder=$!
+sleep 1
+rc=0; ( cd "$REPO" && COORD_ACTIONS_LOCK_TIMEOUT_SECS=1 timeout 30 "$MERGE" 600 --no-kill >"$TEST_DIR/g.log" 2>&1 ) || rc=$?
+kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+[ "$rc" = 1 ] || red "lock timeout should exit 1, got $rc: $(cat "$TEST_DIR/g.log")"
+grep -q 'not provision-worker.sh' "$TEST_DIR/g.log" || red "timeout message does not name its script: $(cat "$TEST_DIR/g.log")"
+grep -q 'Retry' "$TEST_DIR/g.log" && red "timeout message still says Retry"
+[ "$(merges)" = 0 ] || red "merged despite the lock timeout"
+green "lock timeout: exit 1, script named, nothing merged"
+
 # ---- dispatch tests -----------------------------------------------------
 PROJECT_DIR="$TEST_DIR/proj"; mkdir -p "$PROJECT_DIR/.swarm"
 git -C "$PROJECT_DIR" init -q -b master
@@ -132,6 +183,17 @@ $(cat "$TEST_DIR/p1.log" "$TEST_DIR/p2.log")"
 [ "$(inbox_count 32)" = 1 ] || red "expected exactly 1 brief, got $(inbox_count 32)"
 [ "$(grep -c iss-32 "$TEST_DIR/windows")" = 1 ] || red "expected exactly one spawned window"
 green "concurrent provisions: one spawned, one refused (exit 5), one brief"
+
+heading "D3: dispatch-lock timeout exits 7 (not 5) and says so"
+WT33="$(dirname "$(find "$TEST_DIR" -maxdepth 3 -type d -name wt-issue-31 | head -1)")/wt-issue-33"
+( exec 9>"$(dirname "$WT33")/.dispatch-wt-issue-33.lock"; flock 9; sleep 6 ) & holder=$!
+sleep 1
+rc=$(set +e; ( cd "$PROJECT_DIR" && env "${off[@]}" PROVISION_DISPATCH_LOCK_TIMEOUT_SECS=1 bash "$LLM_SWARM_DIR/scripts/provision-worker.sh" 33 >"$TEST_DIR/prov.log" 2>&1 ); echo $?)
+kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+[ "$rc" = 7 ] || red "dispatch-lock timeout should exit 7, got $rc: $(cat "$TEST_DIR/prov.log")"
+grep -q 'not exit 5' "$TEST_DIR/prov.log" || red "timeout message does not distinguish exit 5"
+[ "$(inbox_count 33)" = 0 ] || red "a brief was queued despite the lock timeout"
+green "dispatch-lock timeout: exit 7, nothing queued"
 
 heading "E: requeue.sh refuses an identical pending brief"
 WT="$(find "$TEST_DIR" -maxdepth 3 -type d -name wt-issue-31 | head -1)"
