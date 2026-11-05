@@ -36,12 +36,17 @@ coord_needs_you_items() {
     grep -E '^[[:space:]]*-[[:space:]]+\*\*[A-Za-z][0-9]+\*\*' "$1" 2>/dev/null || true
 }
 
+# Item text without its A1/B2 label: renumbering a list is not a new item.
+coord_needs_you_bodies() {
+    coord_needs_you_items "$1" | sed -E 's/^[[:space:]]*-[[:space:]]+\*\*[A-Za-z][0-9]+\*\*[[:space:]]*//'
+}
+
 # coord_needs_you_note <swarm-dir>
 #
 # Prints one line when .swarm/needs-you.md differs from the copy this session
 # last surfaced (.swarm/needs-you.seen), then records the new copy; prints
 # nothing when unchanged, absent, or on the first prompt of a list with no
-# items. New items = lines not present in the previous copy.
+# items. New items = item texts (label ignored) not present in the previous copy.
 coord_needs_you_note() {
     local cur="$1/needs-you.md" seen="$1/needs-you.seen" total new had_seen=0
     [ -f "$cur" ] || return 0
@@ -51,7 +56,7 @@ coord_needs_you_note() {
     fi
     total="$(coord_needs_you_items "$cur" | grep -c . || true)"
     if [ "$had_seen" = 1 ]; then
-        new="$(coord_needs_you_items "$cur" | grep -cvxFf <(coord_needs_you_items "$seen") || true)"
+        new="$(coord_needs_you_bodies "$cur" | grep -cvxFf <(coord_needs_you_bodies "$seen") || true)"
     else
         new="$total"
     fi

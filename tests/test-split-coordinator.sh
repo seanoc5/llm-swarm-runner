@@ -243,6 +243,10 @@ check "one added item -> '1 new item(s), 3 on the list'" "Needs-you changed sinc
 grep -v 'A1' "$P/.swarm/needs-you.md" > "$T/ny" && cp "$T/ny" "$P/.swarm/needs-you.md"
 ctx="$(hook UserPromptSubmit | jq -r .hookSpecificOutput.additionalContext)"
 check "an item resolved -> '0 new item(s), 2 on the list'" "Needs-you changed since your last message: 0 new item(s), 2 on the list now (see .swarm/needs-you.md)." "$ctx"
+# Renumbering (A2 becomes A1 once the old A1 is resolved) is not a new item.
+printf '# Needs you\n- **A1** 🟡 PR #2 ready\n- **A2** 🔴 PR #3 needs you\n' > "$P/.swarm/needs-you.md"
+ctx="$(hook UserPromptSubmit | jq -r .hookSpecificOutput.additionalContext)"
+check "relabelled items are not counted as new" "Needs-you changed since your last message: 0 new item(s), 2 on the list now (see .swarm/needs-you.md)." "$ctx"
 
 echo "- **A9** 🟡 PR #9" >> "$P/.swarm/coord-inbox/a.md"
 printf '%s' '{"stop_hook_active":false}' | CLAUDE_PROJECT_DIR="$P" COORD_MODE=split COORD_HOOK_STATE=1 "$HOOK" Stop > "$T/stop.out"
@@ -308,8 +312,10 @@ grep -q 'COORD_MODE must be resident or split' "$S/out.txt" && got=yes || got=no
 check "COORD_MODE=bogus prints why" "yes" "$got"
 
 start resident
-send_line | grep -q 'COORD_MODE=' && got=passed || got=absent
-check "resident: COORD_MODE is not passed to the wrapper (unchanged)" "absent" "$got"
+send_line | grep -q 'COORD_MODE=resident ' && got=passed || got=absent
+check "resident: COORD_MODE=resident is passed explicitly (beats a stale session env)" "passed" "$got"
+grep -qE 'set-environment .*-u COORD_MODE' "$S/tmux.log" && got=unset || got=kept
+check "resident: the session env's COORD_MODE is unset" "unset" "$got"
 rp="$(files_of | sed -n 1p)"; ip="$(files_of | sed -n 2p)"
 grep -q 'Initial Startup Checklist' "$rp" && got=yes || got=no
 check "resident: system prompt is coordinator.md" "yes" "$got"
@@ -364,6 +370,72 @@ sed -i 's|coordinator\\nutil|util|' "$T/bin/tmux"
 start split "wake up"
 grep -qE "paste-buffer|load-buffer|claude" "$S/tmux.log" && got=launched || got=untouched
 check "split + missing window: a wake launches nothing" "untouched" "$got"
+
+# Pane crashed (remain-on-exit left it dead): llm-start.sh clears it and treats the
+# window as gone, and a wake still must not launch or type into the chat.
+cat > "$T/bin/tmux" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$S/tmux.log"
+case "\$*" in
+    *"-V"*) echo "tmux 3.4" ;;
+    *has-session*) exit 0 ;;
+    *"list-windows -t llm-proj -F #W"*) printf 'coordinator\nutil\n' ;;
+    *list-panes*"coordinator"*"PANE_CMD"*) echo "PANE_CMD=claude PANE_DEAD=1" ;;
+esac
+exit 0
+EOF
+start split "wake up"
+grep -qF 'kill-pane' "$S/tmux.log" && got=cleared || got=left
+check "split + dead pane: the corpse is cleared as before" "cleared" "$got"
+grep -qE "send-keys|paste-buffer|load-buffer" "$S/tmux.log" && got=launched || got=untouched
+check "split + dead pane: a wake launches nothing and types nothing" "untouched" "$got"
+
+# Rollback: split, then back to resident, then a restart in the SAME tmux session.
+# The session env keeps COORD_MODE=split from `new-session -e`, and _load-env.sh
+# only fills unset vars, so only an explicit prefix on the launch line (plus
+# unsetting the session env) gives resident behaviour. The launch line is run
+# here with COORD_MODE=split already in its environment, as tmux would supply.
+heading "split -> rollback -> restart in the same session"
+cat > "$T/bin/tmux" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$S/tmux.log"
+case "\$*" in
+    *"-V"*) echo "tmux 3.4" ;;
+    *has-session*) exit 0 ;;
+    *"list-windows -t llm-proj -F #W"*) printf 'coordinator\nutil\n' ;;
+    *list-panes*"coordinator"*"PANE_CMD"*) echo "PANE_CMD=bash PANE_DEAD=0" ;;
+esac
+exit 0
+EOF
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" > %q\nprintf "%%s" "${COORD_MODE:-unset}" > %q\n' "$T/argv" "$T/claude-mode" > "$T/bin/claude"
+rm -f "$T/argv" "$T/claude-mode"
+relaunch() {   # <COORD_MODE> <COORD_HOOK_STATE>: llm-start, then run its launch line under a stale split env
+    start "$1"
+    local line; line="$(send_line | sed -E 's/^.*send-keys -t [^ ]+ //; s/ C-m$//')"
+    [ -n "$line" ] || { echo "no launch line"; return 1; }
+    rm -f "$T/argv" "$T/claude-mode"
+    (cd "$P" && env COORD_MODE=split COORD_HOOK_STATE="$2" bash -c "$line")
+}
+relaunch split 0
+check "split launch: the hook is installed and COORD_MODE=split reaches claude" "UserPromptSubmit|split" "$(hooks)|$(cat "$T/claude-mode")"
+relaunch resident 1
+check "rollback restart, stale split session env: claude gets COORD_MODE=resident" "resident" "$(cat "$T/claude-mode")"
+check "rollback restart: resident hooks only (Stop rings again), no needs-you split line" "Notification,Stop,UserPromptSubmit" "$(hooks)"
+settings="$(grep -A1 -x -- '--settings' "$T/argv" | tail -1)"
+cmd="$(jq -r '.hooks.UserPromptSubmit[0].hooks[0].command' <<<"$settings")"
+printf '%s\n' '- **A1** 🟡 PR #1' > "$P/.swarm/needs-you.md"; rm -f "$P/.swarm/needs-you.seen"
+out="$(printf '{}' | CLAUDE_PROJECT_DIR="$P" COORD_MODE=resident bash -c "$cmd")"
+check "rollback restart: the installed hook behaves as resident (silent on needs-you)" "" "$out"
+rm -f "$P/.swarm"/needs-you.*
+relaunch resident 0
+grep -qx -- '--settings' "$T/argv" && got=settings || got=none
+check "rollback restart, hook state 0: no --settings, as before split existed" "none" "$got"
+grep -qE 'set-environment .*-u COORD_MODE' "$S/tmux.log" && got=unset || got=kept
+check "rollback restart: the tmux session env's COORD_MODE is unset" "unset" "$got"
+start split
+grep -qE 'set-environment .*COORD_MODE split' "$S/tmux.log" && got=set || got=missing
+check "split restart: the tmux session env is set to split" "set" "$got"
+export COORD_MODE=split
 
 # Auto-compact never injects /compact into the conversation session.
 heading "auto-compact"

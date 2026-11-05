@@ -15,7 +15,7 @@
 
 The launcher that starts work runs (lock, log, timeout, budget) is **not** part of this change (ADR 0006 step A2). Until it exists a split-mode swarm has nobody triaging the inbox on its own; run a work run by hand with `scripts/render-coordinator-prompt.sh work > /tmp/work.md && claude -p --append-system-prompt-file /tmp/work.md "Run once."` if you want to try one.
 
-Turn it on per project in `<project>/.swarm/.env` (`COORD_MODE=split`), restart the coordinator with `llm-start.sh`, respawn the watcher. Roll back by unsetting it and repeating those two steps; the new files below are inert in resident mode.
+Turn it on per project in `<project>/.swarm/.env` (`COORD_MODE=split`), restart the coordinator with `llm-start.sh`, respawn the watcher. Roll back by unsetting it and repeating those two steps; the new files below are inert in resident mode. `llm-start.sh` resets the tmux session's own `COORD_MODE` and passes the resolved mode to the coordinator on every start, so a session first started in split mode does not stay split after the rollback.
 
 ## Telling the work run something
 

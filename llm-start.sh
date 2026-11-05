@@ -1047,6 +1047,16 @@ if ! tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx 'util';
     echo "Created util window (bare bash in $PWD)."
 fi
 
+# COORD_MODE=split rides in the session env (new-session -e), and _load-env.sh only
+# fills unset vars, so a session first started in split keeps it after the setting
+# is removed. Make the session env match the resolved mode on every start, so
+# rollback holds for the watcher, new panes and a restarted coordinator (#767).
+if [ "$COORD_MODE" = "split" ]; then
+    tmux set-environment -t "$SESSION_NAME" COORD_MODE split 2>/dev/null || true
+else
+    tmux set-environment -t "$SESSION_NAME" -u COORD_MODE 2>/dev/null || true
+fi
+
 # Only build + send a launch command when we have an idle/empty pane to
 # send into. (Skipped when an agent is already running in the existing
 # session — that case is handled by the live-REPL reprompt elif below.)
@@ -1099,7 +1109,10 @@ if [ "$SPLIT_WAKE_SKIP" = "0" ] && { ! $session_existed || ! $window_exists || $
         ENV_VARS=""
         [ -n "${COORD_MODEL:-}" ]                && ENV_VARS+="COORD_MODEL=$(printf '%q' "$COORD_MODEL") "
         [ "${COORDINATOR_HEADLESS:-0}" = "1" ]   && ENV_VARS+="COORDINATOR_HEADLESS=1 "
-        [ "$COORD_MODE" = "split" ]             && ENV_VARS+="COORD_MODE=split "
+        # Always the resolved value, never left to inherit: the tmux session env may
+        # still hold COORD_MODE=split from an earlier launch, and a prefix is the
+        # only thing that beats it (rollback, ADR 0006).
+        ENV_VARS+="COORD_MODE=$COORD_MODE "
         [ "${COORDINATOR_USE_API_KEY:-0}" = "1" ] && ENV_VARS+="COORDINATOR_USE_API_KEY=1 "
         [ "${COORD_HOOK_STATE:-0}" = "1" ]       && ENV_VARS+="COORD_HOOK_STATE=1 "
         [ "${COORD_INBOX_WAITER:-0}" = "1" ]     && ENV_VARS+="COORD_INBOX_WAITER=1 "
