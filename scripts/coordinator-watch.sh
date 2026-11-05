@@ -2066,6 +2066,12 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     WATCH_STRANDED_BRIEF_SWEEP_SECS 60  periodic detection of a queued/claimed brief with no live iss-N window to drain it (0=off); see header comment (issue #448)
     WATCH_SIBLING_SWEEP_SECS 300  warn (coord-inbox watcher_dead) about sibling projects whose watcher died while they had recent workers (0=off); see header comment (issue #756)
     COORD_WAKE_LOCK_TIMEOUT_SECS 60  max wait to flock COORD_WAKE_LOCK before a wake gives up (see that lock's header comment)
+    COORD_MODE          resident  resident = typed doorbell (default); split = the watcher starts short work runs via scripts/coord-work-run.sh and types nothing (issue #765, ADR 0006)
+    COORD_SPLIT_TICK_SECS 5       split mode: how often the batch window / pending inbox is rechecked
+    COORD_WORK_RUN_TIMEOUT_SECS 1800  split mode: hard limit per work run (coord-work-run.sh)
+    COORD_WORK_RUN_BUDGET_USD 5   split mode: claude --max-budget-usd per work run
+    COORD_WORK_RUN_RETRY_SECS 300 split mode: back-off before retrying inbox items a failed/timed-out run never handled
+    COORD_WORK_RUN_MAX_RETRIES 3  split mode: consecutive failed runs retried before giving up (a new inbox item still starts a run)
     COORD_WAKE_RETRY_SECS 15      retry interval for a wake llm-start.sh deferred (composer held an unsubmitted human draft, issue #422); 0=off
     COORD_WAKE_DEFER_WARN_SECS 300  loud WARN threshold for a wake still deferred this long (issue #422); retries never stop on their own
     COORD_WAKE_BUSY_RETRY_SECS 30  retry interval for a wake deferred because the coordinator pane was mid-turn (issue #430); 0=off (pastes immediately, pre-#430 behavior)
@@ -3147,6 +3153,38 @@ COORD_WAKE_LOCK="$PROJECT_DIR/.swarm/coord-wake.lock"
 # something is already badly wrong (dead tmux server, full disk) and this
 # is a last-resort escape hatch, not a normal-path timing budget.
 COORD_WAKE_LOCK_TIMEOUT_SECS="${COORD_WAKE_LOCK_TIMEOUT_SECS:-60}"
+# issue #765 (ADR 0006): COORD_MODE=split replaces the typed doorbell with a short
+# non-interactive work run started by scripts/coord-work-run.sh. Default
+# "resident" is the unchanged typed-wake behaviour. In split mode the typed
+# doorbell, the pane gates (human present / composer dirty / pane busy), the
+# retry passes and coordinator auto-compact do not run: nothing is typed into
+# a pane. COORD_SPLIT_TICK_SECS is how often the batch window is rechecked.
+COORD_MODE="${COORD_MODE:-resident}"
+case "$COORD_MODE" in
+    resident|split) ;;
+    *) echo "ERROR: COORD_MODE must be resident or split (got: $COORD_MODE)" >&2; exit 1 ;;
+esac
+COORD_WORK_RUN="${COORD_WORK_RUN:-$SCRIPT_DIR/coord-work-run.sh}"
+COORD_WORK_RUN_DIR="$PROJECT_DIR/.swarm/work-run"
+COORD_WORK_RUN_LOCK="$PROJECT_DIR/.swarm/work-run.lock"
+COORD_SPLIT_TICK_SECS="${COORD_SPLIT_TICK_SECS:-5}"
+if ! [[ "$COORD_SPLIT_TICK_SECS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: COORD_SPLIT_TICK_SECS must be a positive integer (got: $COORD_SPLIT_TICK_SECS)" >&2
+    exit 1
+fi
+# A run that fails (timeout, crash, over budget) is retried for the inbox items
+# it never handled, no sooner than COORD_WORK_RUN_RETRY_SECS after its start and
+# at most COORD_WORK_RUN_MAX_RETRIES times in a row.
+COORD_WORK_RUN_RETRY_SECS="${COORD_WORK_RUN_RETRY_SECS:-300}"
+COORD_WORK_RUN_MAX_RETRIES="${COORD_WORK_RUN_MAX_RETRIES:-3}"
+for _v in COORD_WORK_RUN_RETRY_SECS COORD_WORK_RUN_MAX_RETRIES; do
+    if ! [[ "${!_v}" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: $_v must be a non-negative integer (got: ${!_v})" >&2
+        exit 1
+    fi
+done
+COORD_SPLIT_RUN_PID=""
+SPLIT_LOOP_PID=""
 if ! [[ "$COORD_WAKE_LOCK_TIMEOUT_SECS" =~ ^[0-9]+$ ]]; then
     echo "ERROR: COORD_WAKE_LOCK_TIMEOUT_SECS must be a non-negative integer (got: $COORD_WAKE_LOCK_TIMEOUT_SECS)" >&2
     exit 1
@@ -3668,6 +3706,10 @@ format_event_line() {
 mkdir -p "$WORKSPACE" 2>/dev/null
 [ -d "$WORKSPACE" ]   || { echo "ERROR: workspace not a directory: $WORKSPACE" >&2; exit 1; }
 [ -x "$LLM_START" ]   || { echo "ERROR: llm-start.sh not executable: $LLM_START" >&2; exit 1; }
+if [ "$COORD_MODE" = "split" ] && [ ! -x "$COORD_WORK_RUN" ]; then
+    echo "ERROR: COORD_MODE=split but the work-run wrapper is not executable: $COORD_WORK_RUN" >&2
+    exit 1
+fi
 if [ "$POST_OUTCOMES" = "1" ]; then
     [ -x "$SWEEP" ] || { echo "ERROR: sweep script not executable: $SWEEP" >&2; exit 1; }
 fi
@@ -3798,6 +3840,11 @@ cleanup_on_exit() {
     [ -n "${STALE_CHECK_PID:-}" ] && kill "$STALE_CHECK_PID" 2>/dev/null || true
     [ -n "${STALL_WAKE_TIMER_PID:-}" ] && kill "$STALL_WAKE_TIMER_PID" 2>/dev/null || true
     [ -n "${CAPACITY_WAKE_TIMER_PID:-}" ] && kill "$CAPACITY_WAKE_TIMER_PID" 2>/dev/null || true
+    # issue #765: the split-mode tick loop only. A running work run is left to
+    # finish on its own (it holds the lock and logs its own exit). It runs under
+    # setsid, in a process group of its own, so neither this cleanup nor the
+    # staleness self-restart's group kill (kill -KILL -$$) reaches it.
+    [ -n "${SPLIT_LOOP_PID:-}" ] && kill "$SPLIT_LOOP_PID" 2>/dev/null || true
     # run_poll's own backgrounded sleep (issues #570/#571) — only set while
     # a tick is actually asleep, so this is a no-op the rest of the time.
     [ -n "${POLL_SLEEP_PID:-}" ] && kill "$POLL_SLEEP_PID" 2>/dev/null || true
@@ -6934,7 +6981,7 @@ run_watch_timer_loop() {
                 last_window_flags_sweep=$now
             fi
         fi
-        if [ "$COORD_WAKE_RETRY_SECS" -gt 0 ]; then
+        if [ "$COORD_WAKE_RETRY_SECS" -gt 0 ] && ! coord_split_active; then
             now=$(date +%s)
             if [ $((now - last_coord_wake_retry)) -ge "$COORD_WAKE_RETRY_SECS" ]; then
                 coord_wake_retry_pass || true
@@ -6944,7 +6991,7 @@ run_watch_timer_loop() {
         # issue #430: independent cadence/state from the dirty-draft retry
         # above — see COORD_WAKE_BUSY_RETRY_SECS's header comment for why
         # these are two separate gates rather than one shared retry.
-        if [ "$COORD_WAKE_HOLD_RETRY_SECS" -gt 0 ]; then
+        if [ "$COORD_WAKE_HOLD_RETRY_SECS" -gt 0 ] && ! coord_split_active; then
             now=$(date +%s)
             if [ $((now - last_coord_wake_busy_retry)) -ge "$COORD_WAKE_HOLD_RETRY_SECS" ]; then
                 coord_wake_hold_retry_pass || true
@@ -7488,6 +7535,8 @@ compact_retract_queued() {
 maybe_auto_compact() {
     local trigger="${1:-wake}"
     [ "$AUTO_COMPACT" = "1" ] || return 0
+    # issue #765: no coordinator pane is typed into in split mode.
+    coord_split_active && return 0
 
     # issue #210: this function is now reachable from two separate
     # processes — the wake path (on_outcome, in the main watcher process)
@@ -10489,6 +10538,19 @@ on_outcome() {
     # coord_wake_hold_retry_pass, which rings once the window passes; N
     # skipped doorbells coalesce into one "Inbox: N item(s)" nudge, which is
     # the intended outcome. Zero doorbells was the bug.
+    #
+    # issue #765: split mode starts a work run instead (no debounce, no pane
+    # gates, nothing typed). The inbox item is already on disk; the autoclose
+    # pass below still runs first so the run sees fresh worker slots.
+    if coord_split_active; then
+        if [ "$WATCHER_AUTOCLOSE" = "1" ]; then
+            echo "[$(date +%T)] running autoclose pass before work run..."
+            cleanup_eligible_workers outcome
+        fi
+        echo "[$(date +%T)] outcome: $path"
+        coord_split_wake "outcome:$(basename "$path")" once
+        return 0
+    fi
     if wake_debounced; then
         echo "[$(date +%T)] outcome: $path — within debounce window (${DEBOUNCE_SECS}s), holding doorbell for retry"
         log_event coord.wake.defer "issue=$issue reason=debounce window=${DEBOUNCE_SECS}s trigger=outcome"
@@ -10641,6 +10703,13 @@ on_message() {
 
     # issue #456 — see on_outcome's identical branch for the full rationale
     # (hold, don't drop; the outbox path had the same hole).
+    #
+    # issue #765: split mode starts a work run instead; see on_outcome.
+    if coord_split_active; then
+        echo "[$(date +%T)] message: $path"
+        coord_split_wake "outbox:$(basename "$path")" once
+        return 0
+    fi
     if wake_debounced; then
         echo "[$(date +%T)] message: $path — within debounce window (${DEBOUNCE_SECS}s), holding doorbell for retry"
         log_event coord.wake.defer "issue=$issue reason=debounce window=${DEBOUNCE_SECS}s trigger=outbox"
@@ -10843,6 +10912,14 @@ on_inbox_drop() {
     mkdir -p "$COORD_INBOX_SELF_DIR" 2>/dev/null || true
     touch "$self_marker" 2>/dev/null || true
 
+    # issue #765: split mode starts a work run for the new inbox file (an
+    # operator note, say) instead of typing a doorbell; see on_outcome.
+    if coord_split_active; then
+        echo "[$(date +%T)] inbox: $path"
+        coord_split_wake "inbox_drop:$(basename "$path")" once
+        return 0
+    fi
+
     if wake_debounced; then
         echo "[$(date +%T)] inbox: $path — within debounce window (${DEBOUNCE_SECS}s), holding doorbell for retry"
         log_event coord.wake.defer "reason=debounce window=${DEBOUNCE_SECS}s trigger=inbox_drop"
@@ -11021,6 +11098,15 @@ stall_wake_pass() {
     # skips would keep pushing the window forward and the debounce would
     # never actually clear (same reasoning as on_outcome's own debounce
     # branch, which returns before its wake_clock_set call too).
+    #
+    # issue #765: split mode starts a work run instead. Stamp the clock here
+    # too so a run that could not start (lock held) does not make the next
+    # stall check write a second stall note straight away.
+    if coord_split_active; then
+        coord_split_tick stall
+        wake_clock_set "$now"
+        return 0
+    fi
     if wake_debounced; then
         echo "[$(date +%T)] stall: within debounce window (${DEBOUNCE_SECS}s), holding doorbell for retry"
         log_event coord.wake.defer "reason=debounce window=${DEBOUNCE_SECS}s trigger=stall"
@@ -11099,6 +11185,11 @@ stall_wake_pass() {
 coord_ring_doorbell() {
     local trigger="$1" extra="${2:-}" now
     now=$(date +%s)
+    # issue #765: split mode starts a work run for the note just written.
+    if coord_split_active; then
+        coord_split_tick "$trigger"
+        return 0
+    fi
     if wake_debounced; then
         log_event coord.wake.defer "reason=debounce window=${DEBOUNCE_SECS}s trigger=$trigger"
         coord_wake_hold_mark_pending debounce
@@ -11132,6 +11223,162 @@ coord_ring_doorbell() {
         fi
     fi
     wake_clock_set "$now"
+}
+
+# ── issue #765: COORD_MODE=split — the watcher starts short work runs ───────
+#
+# coord_split_active: true when this watcher starts work runs instead of
+# typing a doorbell into the coordinator pane.
+coord_split_active() {
+    [ "$COORD_MODE" = "split" ]
+}
+
+# coord_split_last_start: epoch of the last work-run start (minus one second,
+# stamped by coord-work-run.sh), 0 when none. Plays the role the last ring
+# plays for the waiter: the batch window counts from it, and only inbox items
+# newer than it are "not yet announced".
+coord_split_last_start() {
+    local v=0
+    read -r v _ 2>/dev/null < "$COORD_WORK_RUN_DIR/last-start" || v=0
+    [[ "$v" =~ ^[0-9]+$ ]] || v=0
+    printf '%s\n' "$v"
+}
+
+# coord_split_run_busy: true while some process holds the single-flight run
+# lock. A probe only; coord-work-run.sh makes the real decision, so a race
+# here costs one wrapper start that exits 75.
+coord_split_run_busy() {
+    # A run this process just started may not hold the lock yet.
+    if [ -n "$COORD_SPLIT_RUN_PID" ] && kill -0 "$COORD_SPLIT_RUN_PID" 2>/dev/null; then
+        return 0
+    fi
+    [ -e "$COORD_WORK_RUN_LOCK" ] || return 1
+    ! ( flock -n 8 ) 8>"$COORD_WORK_RUN_LOCK" 2>/dev/null
+}
+
+# coord_split_tick <trigger>
+#
+# Decides whether a work run is due and starts one. Due = the shared batching
+# rules (_coord-inbox-batch.sh): any urgent item newer than the last run
+# start, or batched items once COORD_INBOX_BATCH_SECS has passed since it.
+# Called after every event that writes an inbox item, by the periodic split
+# loop, and when a run exits (the recheck that keeps an item arriving
+# mid-run from being dropped).
+coord_split_tick() {
+    local trigger="${1:-tick}" last now from="" fails=0 since
+    coord_split_active || return 0
+    [ -d "$COORD_INBOX_DIR" ] || return 0
+    last="$(coord_split_last_start)"
+    now=$(date +%s)
+    coord_inbox_scan "$COORD_INBOX_DIR" "$last" 1
+    since="$last"
+    if ! coord_should_ring "$last" "$now"; then
+        # Retry of a run that did not finish cleanly: coord-work-run.sh left
+        # retry-from (where the unfinished window starts, and how many runs in
+        # a row failed) because its last-start already counts the items it
+        # never handled as announced. Back off COORD_WORK_RUN_RETRY_SECS from
+        # the failed start and give up after COORD_WORK_RUN_MAX_RETRIES, so a
+        # run that always dies (budget, timeout, crash) cannot loop on spend.
+        read -r from fails _ 2>/dev/null < "$COORD_WORK_RUN_DIR/retry-from" || return 0
+        [[ "$from" =~ ^[0-9]+$ ]] && [[ "$fails" =~ ^[0-9]+$ ]] || return 0
+        [ "$fails" -le "$COORD_WORK_RUN_MAX_RETRIES" ] || return 0
+        [ $((now - last)) -ge "$COORD_WORK_RUN_RETRY_SECS" ] || return 0
+        coord_inbox_scan "$COORD_INBOX_DIR" "$from" 1
+        [ $((CIB_URGENT + CIB_BATCHED)) -gt 0 ] || return 0
+        trigger="retry"
+        since="$from"
+    fi
+    if coord_split_run_busy; then
+        # The exit recheck of the running run picks these items up. The
+        # periodic tick stays quiet so a long run does not fill events.log.
+        [ "$trigger" = "tick" ] || log_event coord.workrun.busy "trigger=$trigger urgent=$CIB_URGENT batched=$CIB_BATCHED"
+        return 0
+    fi
+    coord_split_start_run "$trigger" "$since"
+}
+
+# coord_split_start_run <trigger> <last-start>: backgrounds coord-work-run.sh
+# plus the recheck that follows it. Counts as a wake for the debounce / stall
+# clock. Never types anything.
+coord_split_start_run() {
+    local trigger="$1" last="$2" n woke prompt
+    n="$(coord_inbox_count)"
+    woke="$(coord_woke_for "$COORD_INBOX_DIR" "$last")"
+    prompt="${COORD_INBOX_NUDGE_TEMPLATE//%N/$n}${woke:+ Woke for: $woke.}"
+    log_event coord.workrun.start "trigger=$trigger urgent=$CIB_URGENT batched=$CIB_BATCHED items=$n"
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "[DRY] would: $COORD_WORK_RUN $PROJECT_DIR \"$prompt\""
+        return 0
+    fi
+    mkdir -p "$COORD_WORK_RUN_DIR" 2>/dev/null || true
+    wake_clock_set "$(date +%s)"
+    (
+        rc=0; sig_before=""; sig_after=""; from=0; n=0; now2=0
+        sig_before="$(stat -c %y "$COORD_WORK_RUN_DIR/last-start" 2>/dev/null || true)"
+        # setsid: the run gets its own session and process group, so a watcher
+        # restart (watcher_check_staleness kills this group) or a stop does not
+        # kill the wrapper and leave the command running without the lock held.
+        # -w keeps the wrapper's exit status.
+        setsid -w "$COORD_WORK_RUN" "$PROJECT_DIR" "$prompt" >/dev/null 2>>"$COORD_WORK_RUN_DIR/wrapper.err" || rc=$?
+        if [ "$rc" = "75" ]; then
+            log_event coord.workrun.busy "trigger=$trigger reason=lock_held_at_start"
+        else
+            log_event coord.workrun.exit "trigger=$trigger rc=$rc"
+            sig_after="$(stat -c %y "$COORD_WORK_RUN_DIR/last-start" 2>/dev/null || true)"
+            if [ "$sig_after" = "$sig_before" ]; then
+                # The wrapper died before it stamped a run (not executable, env
+                # load or lock open failed): nothing moved the "announced"
+                # mark, so the same items would be due again at once, forever.
+                # Do the wrapper's failure bookkeeping here so the usual
+                # back-off and retry cap apply.
+                now2=$(date +%s)
+                from="$(coord_split_last_start)"
+                read -r from n _ 2>/dev/null < "$COORD_WORK_RUN_DIR/retry-from" || { from="$(coord_split_last_start)"; n=0; }
+                [[ "$from" =~ ^[0-9]+$ ]] || from=0
+                [[ "$n" =~ ^[0-9]+$ ]] || n=0
+                printf '%s\n' "$((now2 - 1))" > "$COORD_WORK_RUN_DIR/last-start"
+                printf '%s %s\n' "$from" "$((n + 1))" > "$COORD_WORK_RUN_DIR/retry-from"
+                log_event coord.workrun.error "trigger=$trigger rc=$rc reason=wrapper_did_not_start see=$COORD_WORK_RUN_DIR/wrapper.err"
+            fi
+            if read -r _ n _ 2>/dev/null < "$COORD_WORK_RUN_DIR/retry-from" \
+                && [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -gt "$COORD_WORK_RUN_MAX_RETRIES" ]; then
+                log_event coord.workrun.gave_up "failures=$n max_retries=$COORD_WORK_RUN_MAX_RETRIES"
+            fi
+        fi
+        # The watcher was stopped while this run went: do not start another
+        # paid run on its behalf ($$ is the watcher's pid, also in a subshell).
+        kill -0 $$ 2>/dev/null || exit 0
+        coord_split_tick exit_recheck
+    ) &
+    COORD_SPLIT_RUN_PID=$!
+}
+
+# coord_split_wake <trigger> [once]
+#
+# The split-mode replacement for a wake site's gate-and-type block. With
+# "once", an ONCE=1 watcher waits for the run it started (if any) and exits,
+# like the resident wake paths do.
+coord_split_wake() {
+    local trigger="$1" mode="${2:-}"
+    coord_split_tick "$trigger"
+    if [ "$mode" = "once" ] && [ "$ONCE" = "1" ]; then
+        [ -n "$COORD_SPLIT_RUN_PID" ] && wait "$COORD_SPLIT_RUN_PID" 2>/dev/null
+        echo "[$(date +%T)] ONCE=1 — exiting after first wake."
+        log_event watch.exit "reason=once"
+        [ "$WATCHER_QUIET" = "1" ] || sleep 1.5
+        exit 0
+    fi
+    return 0
+}
+
+# run_split_loop: the batch window and any item the event paths did not start
+# a run for (an operator note dropped while the lock was held) are rechecked
+# here every COORD_SPLIT_TICK_SECS.
+run_split_loop() {
+    while true; do
+        sleep "$COORD_SPLIT_TICK_SECS"
+        coord_split_tick tick || true
+    done
 }
 
 # dispatch_pause_active: true while nightly-full-tests.sh's host-wide
@@ -11660,10 +11907,17 @@ if [ "$WORKER_AUTO_COMPACT" = "1" ] || [ "$WORKER_AUTO_DELIVER" = "1" ]; then
     WORKER_COMPACT_TIMER_PID=$!
     log_event watch.timer.start "worker_auto_compact=$WORKER_AUTO_COMPACT worker_auto_deliver=$WORKER_AUTO_DELIVER scan_secs=$WORKER_COMPACT_SCAN_SECS"
 fi
-if [ "$AUTO_COMPACT" = "1" ] && [ "$AUTO_COMPACT_TICK_SECS" -gt 0 ]; then
+if [ "$AUTO_COMPACT" = "1" ] && [ "$AUTO_COMPACT_TICK_SECS" -gt 0 ] && ! coord_split_active; then
     run_auto_compact_poll_loop &
     AUTO_COMPACT_POLL_TIMER_PID=$!
     log_event watch.timer.start "auto_compact_tick_secs=$AUTO_COMPACT_TICK_SECS auto_compact_cooldown_secs=$AUTO_COMPACT_COOLDOWN_SECS"
+fi
+# issue #765: split mode rechecks the inbox on a timer (batch window, items an
+# event path did not start a run for). Resident mode starts nothing here.
+if coord_split_active; then
+    run_split_loop &
+    SPLIT_LOOP_PID=$!
+    log_event watch.timer.start "coord_mode=split split_tick_secs=$COORD_SPLIT_TICK_SECS"
 fi
 # issue #366 Part A — opt-in only; a swarm that never sets STALL_WAKE_SECS
 # gets no new process and no behavior change at all.
