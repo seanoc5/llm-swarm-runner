@@ -98,8 +98,7 @@ case "$event" in
     Notification)     write_state waiting ;;
     Stop)
         active="$(printf '%s' "$input" | jq -r '.stop_hook_active // false' 2>/dev/null || echo false)"
-        last_rang="$(cut -d' ' -f1 "$rang_file" 2>/dev/null || echo 0)"
-        [[ "$last_rang" =~ ^[0-9]+$ ]] || last_rang=0
+        last_rang="$(coord_last_ring_at "$swarm")"
         # Same urgent-vs-batched gate as coord-inbox-wait.sh (issue #730).
         coord_inbox_scan "$inbox" "$last_rang"
         count="$CIB_TOTAL"

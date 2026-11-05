@@ -50,8 +50,10 @@ watcher's typed doorbell. Since #743 that path does the same batching:
 
 - All-non-urgent pending items are held (`reason=batch_window` in
   `coord.wake.defer` / `coord.wake.skip`) until `COORD_INBOX_BATCH_SECS` after
-  the last ring. The last ring is any of the waiter, the Stop hook or the
-  watcher's own typed doorbell (all stamp `.swarm/coord-hook-rang`).
+  the last ring. The last ring is the newest of the waiter / Stop hook
+  (`.swarm/coord-hook-rang`) and the watcher's own typed doorbell
+  (`.swarm/coord-typed-ring`, a separate file so a typed paste that failed is
+  never mistaken for a delivered wake).
 - An urgent item rings at once and flushes the queue. With no previous ring,
   the first item also rings at once.
 - The typed nudge ends `Woke for: <kinds>.`, so the quiet-reply rule applies.

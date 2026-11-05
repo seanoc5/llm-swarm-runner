@@ -163,7 +163,7 @@ check "hook: still asks to arm when background tasks are allowed" asked "$got"
 WATCH="$ROOT/scripts/coordinator-watch.sh"
 clear_inbox; rm -f "$S/coord-waiter-asked" "$S/coord-inbox-waiter"
 eval "$(sed -n '/^mtime_epoch() {/,/^}/p; /^coord_inbox_count() {/,/^}/p; /^coord_inbox_nudge_text() {/,/^}/p; /^coord_inbox_nudge_pattern() {/,/^}/p; /^coord_typed_batching() {/,/^}/p; /^coord_last_ring() {/,/^}/p; /^coord_batch_note_ring() {/,/^}/p; /^coord_inbox_waiter_armed() {/,/^}/p; /^coord_wake_hold_reason() {/,/^}/p; /^coord_batch_window_open() {/,/^}/p' "$WATCH")"
-COORD_INBOX_DIR="$IN" COORD_HOOK_RANG_FILE="$S/coord-hook-rang" COORD_WAKE_PENDING_FILE="$S/pending.prompt"
+COORD_INBOX_DIR="$IN" COORD_HOOK_RANG_FILE="$S/coord-hook-rang" COORD_TYPED_RING_FILE="$S/coord-typed-ring" COORD_WAKE_PENDING_FILE="$S/pending.prompt"
 COORD_INBOX_NUDGE_TEMPLATE='Inbox: %N item(s) in .swarm/coord-inbox/ — read and triage them (see prompts/coordinator.md "Inbox").'
 COORD_HOOK_STATE=1 COORD_INBOX_WAITER=1 COORD_QUIET_WAKES=1 COORD_INBOX_BATCH_SECS=900
 COORD_INBOX_WAITER_FILE="$S/coord-inbox-waiter" COORD_INBOX_WAITER_STALE_SECS=30
@@ -216,7 +216,10 @@ nudge="$(coord_inbox_nudge_text)"
 case "$nudge" in *"Woke for"*) got=suffixed ;; *) got=plain ;; esac
 check "watcher: no suffix when COORD_INBOX_WAITER is unset" plain "$got"
 COORD_INBOX_WAITER=1
+before_hook_rang="$(cat "$COORD_HOOK_RANG_FILE")"
 coord_batch_note_ring
+check "watcher: a typed ring never touches the hook-rang file (a failed paste must not read as delivered)" "$before_hook_rang" "$(cat "$COORD_HOOK_RANG_FILE")"
+check "watcher: coord_last_ring_at (hook/waiter side) sees the typed ring" "yes" "$([ "$(coord_last_ring_at "$S")" -ge "$now" ] && echo yes || echo no)"
 check "watcher: ringing stamps the last-ring file" "yes" "$([ "$(coord_last_ring)" -ge "$now" ] && echo yes || echo no)"
 sleep 1.1; item idle_capacity >/dev/null
 check "watcher: a later non-urgent item is batched from that ring" batch_window "$(coord_wake_hold_reason)"

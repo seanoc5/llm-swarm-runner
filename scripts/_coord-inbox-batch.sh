@@ -27,6 +27,20 @@
 # and drops the "Woke for:" suffix, which is also the cue the coordinator
 # prompt keys its quiet-reply rule on, so one setting reverts everything.
 
+# coord_last_ring_at <swarm-dir>: epoch of the last ring, 0 when none. The
+# newer of coord-hook-rang (waiter / Stop hook) and coord-typed-ring (the
+# watcher's own typed doorbell, issue #743). The typed ring has its own file
+# on purpose: the watcher's "the hook already rang this wake" skip reads
+# coord-hook-rang, and a typed ring that failed to paste must not count there.
+coord_last_ring_at() {
+    local a b
+    a="$(cut -d' ' -f1 "$1/coord-hook-rang" 2>/dev/null || echo 0)"
+    b="$(cut -d' ' -f1 "$1/coord-typed-ring" 2>/dev/null || echo 0)"
+    [[ "$a" =~ ^[0-9]+$ ]] || a=0
+    [[ "$b" =~ ^[0-9]+$ ]] || b=0
+    echo $(( a > b ? a : b ))
+}
+
 # coord_batch_secs: echoes the effective batch window in seconds (0 = off).
 coord_batch_secs() {
     [ "${COORD_QUIET_WAKES:-1}" = "0" ] && { echo 0; return 0; }

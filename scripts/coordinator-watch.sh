@@ -3363,6 +3363,9 @@ WAKE_DEFER_ON_SWARM_BUSY="${WAKE_DEFER_ON_SWARM_BUSY:-0}"
 COORD_HOOK_STATE="${COORD_HOOK_STATE:-0}"
 COORD_HOOK_STATE_FILE="$PROJECT_DIR/.swarm/coordinator-state"
 COORD_HOOK_RANG_FILE="$PROJECT_DIR/.swarm/coord-hook-rang"
+# Issue #743: the watcher's own typed ring, kept apart from the file above so a
+# typed ring that never pasted is not mistaken for "the hook already rang".
+COORD_TYPED_RING_FILE="$PROJECT_DIR/.swarm/coord-typed-ring"
 COORD_HOOK_BUSY_MAX_SECS="${COORD_HOOK_BUSY_MAX_SECS:-3600}"
 if ! [[ "$COORD_HOOK_BUSY_MAX_SECS" =~ ^[0-9]+$ ]]; then
     echo "ERROR: COORD_HOOK_BUSY_MAX_SECS must be a non-negative integer (got: $COORD_HOOK_BUSY_MAX_SECS)" >&2
@@ -9146,23 +9149,28 @@ coord_typed_batching() {
     [ "${COORD_HOOK_STATE:-0}" = "1" ] && [ "${COORD_INBOX_WAITER:-0}" = "1" ] && [ "${COORD_QUIET_WAKES:-1}" != "0" ]
 }
 
-# coord_last_ring: epoch of the last ring (waiter, Stop hook or this watcher's
-# typed doorbell, all recorded in COORD_HOOK_RANG_FILE); 0 when none.
+# coord_last_ring: epoch of the last ring (waiter / Stop hook in
+# COORD_HOOK_RANG_FILE, this watcher's typed doorbell in COORD_TYPED_RING_FILE).
 coord_last_ring() {
-    local r=0
+    local r=0 t=0
     read -r r _ 2>/dev/null < "$COORD_HOOK_RANG_FILE" || r=0
+    read -r t _ 2>/dev/null < "$COORD_TYPED_RING_FILE" || t=0
     [[ "$r" =~ ^[0-9]+$ ]] || r=0
-    printf '%s\n' "$r"
+    [[ "$t" =~ ^[0-9]+$ ]] || t=0
+    printf '%s\n' $(( r > t ? r : t ))
 }
 
 # coord_batch_note_ring: call right after rendering the nudge for a doorbell
-# that is actually being rung. Stamps the shared last-ring file so the batch
-# window counts from this ring and the Stop hook does not re-announce items
-# this nudge already named. No-op unless coord_typed_batching.
+# that is being rung. Stamps COORD_TYPED_RING_FILE so the batch window counts
+# from this ring and the waiter / Stop hook (coord_last_ring_at) do not
+# re-announce items this nudge already named. Stamped before delivery, so a
+# failed paste still starts a window; it never touches COORD_HOOK_RANG_FILE,
+# which coord_hook_rang_since reads as "already delivered". No-op unless
+# coord_typed_batching.
 coord_batch_note_ring() {
     coord_typed_batching || return 0
     [ "${DRY_RUN:-0}" = "1" ] && return 0
-    printf '%s %s\n' "$(date +%s)" "$(coord_inbox_count)" > "$COORD_HOOK_RANG_FILE" 2>/dev/null || true
+    printf '%s %s\n' "$(date +%s)" "$(coord_inbox_count)" > "$COORD_TYPED_RING_FILE" 2>/dev/null || true
 }
 
 # coord_inbox_nudge_pattern
