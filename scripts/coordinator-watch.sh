@@ -5664,7 +5664,7 @@ sideline_idle_pass() {
 #
 # A sidelined worktree (marker present) with a brief in inbox/ and no live
 # window gets `provision-worker.sh --wake`. Exit 3 (a cap or host-admission
-# refusal) retries next tick — provision-worker.sh logs cap.refused itself.
+# refusal) backs off (#664, below) — provision-worker.sh logs cap.refused itself.
 # Any other failure writes one coord-inbox note per issue (deduped until
 # the wake succeeds or the marker goes away).
 #
