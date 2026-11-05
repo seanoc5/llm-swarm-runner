@@ -879,6 +879,17 @@ n90=$(grep -l 'swarm-merge:conflict-brief pr=190 ' "$WT90"/.swarm/tasks/inbox/*.
 [ "$n90" = 1 ] || red "lifted comment hold: expected 1 brief, got $n90"
 echo '{"comments":[]}' > "$GH_PR_COMMENTS_FILE"
 green "comment-only hold keeps the conflict brief away; lifting it releases it"
+
+# issue #757: a sidelined worktree (marker present) is never briefed, even for a conflicting draft.
+rm -f "$WT90"/.swarm/tasks/inbox/*.md "$WT90"/.swarm/tasks/done/*.md
+touch "$WT90/.swarm/sidelined"
+ONCE=0 WATCH_PR_POLL_SECS=1 start_watcher 0 "$TEST_DIR/watch-b20-sideline.log"
+sleep 3
+stop_watcher
+n90=$(find "$WT90/.swarm/tasks/inbox" -name '*.md' | wc -l)
+rm -f "$WT90/.swarm/sidelined"
+[ "$n90" = 0 ] || red "sidelined worktree: expected no conflict brief, inbox has $n90"
+green "sidelined worktree gets no conflict brief"
 rm -rf "$WT90"
 : > "$GH_PR_RISK_FILE"
 : > "$GH_PR_LIST_FILE"

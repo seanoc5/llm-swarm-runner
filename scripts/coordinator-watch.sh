@@ -3951,8 +3951,10 @@ declare -A STALE_WAIT_NOTED=()
 declare -A CI_FAILING_NOTED=()
 
 # issue #757: ready_sweep_pass's parked-green dedup, keyed "<pr>:<sha>": one
-# pr-ready.sh attempt or one inbox note per head sha of a banner-less green draft.
+# inbox note per head sha of a banner-less green draft.
+# Also its banner-retry-failure dedup, keyed "<pr>:<exit>" (RETRY_FAILED_NOTED).
 declare -A PARKED_GREEN_HANDLED=()
+declare -A RETRY_FAILED_NOTED=()
 
 # issue #468: a check-fail retry (or any later reconciliation in
 # worker-listener.sh's write_outcome()) can flip a task's outcome level
@@ -4725,33 +4727,6 @@ pr_comment_hold() {
     [ "$state" = "held" ]
 }
 
-# worker_still_working <issue> (issue #757)
-#
-# True (rc 0) unless the worker for iss-<issue> has positively finished: a
-# readied-and-automerged draft must not land with work unfinished. Live when
-# (a) its brief is still in inbox/ or processing/ (it has not run
-# task-done.sh — this also covers an interactive worker between turns, which
-# worker_pane_busy reads as idle), or parked in tasks/sidelined/ (a sidelined worker: window stopped, brief set aside), (b) its pane is mid-turn, or (c) a CLI is
-# in the foreground but no "ctx:" statusline parses — a WORKER_HEADLESS=1
-# `claude -p` run renders no TUI chrome, so worker_pane_busy never matches it
-# (the same gate maybe_worker_deliver_brief uses). No worktree and no window
-# (a reaped worker) means finished.
-worker_still_working() {
-    local issue="$1" wt_dir win="iss-$1" state
-    if wt_dir="$(own_wt_dir_for_issue "$issue")"; then
-        worker_brief_pending "$wt_dir" && return 0
-        # A sidelined worker (sideline-worker.sh, issue #622) has its claimed brief
-        # moved to tasks/sidelined/ and its window stopped: unfinished, not done.
-        # Test the marker: nothing clears tasks/sidelined/*.md on wake, only the marker.
-        [ -e "$wt_dir/.swarm/sidelined" ] && return 0
-    fi
-    state="$(worker_pane_state "$win")" || state="absent"
-    [ "$state" = "cli" ] || return 1
-    worker_pane_busy "$win" && return 0
-    worker_pane_ctx_used "$win" >/dev/null 2>&1 || return 0
-    return 1
-}
-
 # conflict_brief_pass_one <issue> <pr> <wt_dir> (issue #656)
 #
 # A ready PR can turn CONFLICTING after its worker finished, when another PR
@@ -4768,6 +4743,8 @@ conflict_brief_pass_one() {
     # pr-ready.sh leaves a draft that conflicts after a sibling merges), but a
     # coordinator-held draft stays the coordinator's to resolve.
     [ "${PR_HOLD_CACHE[$pr]:-}" = "hold" ] && return 0
+    # A sidelined worker (issue #622) was set aside on purpose; a brief would wake it.
+    [ -e "$wt_dir/.swarm/sidelined" ] && return 0
     [ -n "$h" ] && [ "${CONFLICT_BRIEF_SENT[$pr]:-}" = "$h" ] && return 0
     worker_brief_pending "$wt_dir" && return 0
     # A comment-only hold (the body banner was rewritten away) counts too.
@@ -4981,6 +4958,7 @@ ready_sweep_pass() {
     local -A cfseen=()
     local -A seen=()
     local -A pgseen=()
+    local -A rfseen=()
     [ "$DRY_RUN" = "1" ] && dry_arg="--dry-run"
     out="$(cd "$PROJECT_DIR" && WATCH_STALE_WAIT_CHECK="$WATCH_STALE_WAIT_CHECK" "$READY_SWEEP" $dry_arg 2>&1)" || {
         log_event watch.ready_sweep "reason=sweep_failed"
@@ -5009,29 +4987,36 @@ ready_sweep_pass() {
             CI_FAILING_NOTED[$key]=1
             continue
         fi
+        if [[ "$line" =~ ^#([0-9]+)\ (ci-pending|ci-unknown):\ still\ draft\ \(exit\ (1|124)\) ]]; then
+            pr="${BASH_REMATCH[1]}" key="${BASH_REMATCH[1]}:${BASH_REMATCH[3]}"
+            rfseen[$key]=1
+            [ -z "${RETRY_FAILED_NOTED[$key]:-}" ] || continue
+            if [ "$DRY_RUN" = "1" ]; then
+                echo "[DRY] would write coord-inbox ready-retry note for PR #$pr (exit ${BASH_REMATCH[3]})"
+            elif coord_inbox_write ready_retry_failed "Retrying pr-ready.sh on draft PR #$pr failed (exit ${BASH_REMATCH[3]}$([ "${BASH_REMATCH[3]}" = 124 ] && echo ', timed out')). The sweep will keep retrying, but check the PR: run pr-ready.sh $pr yourself and read its output. One note per PR and exit code."; then
+                log_event coord.inbox.write "trigger=ready_retry_failed pr=$pr exit=${BASH_REMATCH[3]}"
+            else
+                echo "[$(date +%T)] WARN: failed to write coord-inbox ready-retry note for PR #$pr" >&2
+                continue
+            fi
+            RETRY_FAILED_NOTED[$key]=1
+            continue
+        fi
         if [[ "$line" =~ ^#([0-9]+)\ parked-green:.*risk=([a-z]+),\ issue=([0-9]+|none),\ sha=([0-9a-fA-F]+) ]]; then
             pr="${BASH_REMATCH[1]}" key="${BASH_REMATCH[1]}:${BASH_REMATCH[4]}"
-            local pg_risk="${BASH_REMATCH[2]}" pg_issue="${BASH_REMATCH[3]}" pg_sha="${BASH_REMATCH[4]}"
+            local pg_risk="${BASH_REMATCH[2]}" pg_sha="${BASH_REMATCH[4]}"
             pgseen[$key]=1
             [ -z "${PARKED_GREEN_HANDLED[$key]:-}" ] || continue
-            # A worker that has not finished will call pr-ready.sh itself; readying
-            # now could auto-merge with work unfinished (see worker_still_working).
-            if [ "$pg_issue" != "none" ] && worker_still_working "$pg_issue"; then continue; fi
+            # Note-only: this pass never runs pr-ready.sh on a banner-less draft (the
+            # worker may still be working). The coordinator decides.
             # A comment-only coordinator hold (ready-sweep.sh only sees the body
             # banner). Not marked handled: re-checked next sweep, so a lift is picked up.
             if pr_comment_hold "$pr"; then continue; fi
             if [ "$DRY_RUN" = "1" ]; then
-                echo "[DRY] would handle parked green draft PR #$pr (risk $pg_risk, sha ${pg_sha:0:7})"
+                echo "[DRY] would write coord-inbox parked-green note for draft PR #$pr (risk $pg_risk, sha ${pg_sha:0:7})"
                 continue
             fi
-            # issue=none (a repurposed worker on a non-iss-N branch) has no liveness check, so it is note-only, never readied.
-            if [ "$pg_risk" = "low" ] && [ "$pg_issue" != "none" ]; then
-                # 🟢 skips self-review, so this is quick; one attempt per head sha.
-                local pg_rc=0
-                (cd "$PROJECT_DIR" && timeout 300 "$LLM_SWARM_DIR/scripts/pr-ready.sh" "$pr" >/dev/null 2>&1) || pg_rc=$?
-                log_event watch.ready_sweep "parked_green pr=$pr sha=${pg_sha:0:8} action=pr-ready rc=$pg_rc"
-                echo "[$(date +%T)] ready-sweep: parked green draft #$pr: pr-ready.sh exit $pg_rc"
-            elif coord_inbox_write parked_green "Draft PR #$pr (risk $pg_risk) has green CI on ${pg_sha:0:7} but its worker parked before running pr-ready.sh, so nothing will ready it. If no live iss window owns it, run pr-ready.sh $pr (it runs the self-review for this risk level). One note per head sha."; then
+            if coord_inbox_write parked_green "Draft PR #$pr is green with no banner; its worker may have parked (risk $pg_risk, head ${pg_sha:0:7}). Check for a live iss window first; if none, run pr-ready.sh $pr (it runs the self-review for this risk level). One note per head sha."; then
                 log_event coord.inbox.write "trigger=parked_green pr=$pr sha=$pg_sha"
             else
                 echo "[$(date +%T)] WARN: failed to write coord-inbox parked-green note for PR #$pr" >&2
@@ -5059,6 +5044,9 @@ ready_sweep_pass() {
     done
     for k in "${!CI_FAILING_NOTED[@]}"; do
         [ -n "${cfseen[$k]:-}" ] || unset 'CI_FAILING_NOTED[$k]'
+    done
+    for k in "${!RETRY_FAILED_NOTED[@]}"; do
+        [ -n "${rfseen[$k]:-}" ] || unset 'RETRY_FAILED_NOTED[$k]'
     done
     for k in "${!PARKED_GREEN_HANDLED[@]}"; do
         [ -n "${pgseen[$k]:-}" ] || unset 'PARKED_GREEN_HANDLED[$k]'

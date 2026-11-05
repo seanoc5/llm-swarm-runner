@@ -44,6 +44,7 @@ coord_ring_doorbell() { printf '%s %s\n' "$1" "${2:-}" >> "$RINGS"; }
 declare -A STALE_WAIT_NOTED=()
 declare -A CI_FAILING_NOTED=()
 declare -A PARKED_GREEN_HANDLED=()
+declare -A RETRY_FAILED_NOTED=()
 BUSY_ISSUES=""; CLI_ISSUES=""
 CLI_ISSUES=""   # issues whose window has a CLI in the foreground (else the window is absent)
 CTX_ISSUES=""   # CLI windows that render the interactive ctx statusline (a headless -p run does not)
@@ -63,7 +64,7 @@ chmod +x "$LLM_SWARM_DIR/scripts/pr-ready.sh"
 CI_FAILING_RING_DIR="$PROJECT_DIR/.swarm/ci-failing-ring-pending"
 
 # shellcheck source=/dev/null
-. <(extract_fn coord_inbox_write; extract_fn ready_sweep_pass; extract_fn worker_brief_pending; extract_fn pr_comment_hold; extract_fn worker_still_working; sed -n "/^PR_COMMENT_HOLD_JQ=/,/(\.\[-1\] \/\/ \"\")'$/p" "$WATCH")
+. <(extract_fn coord_inbox_write; extract_fn ready_sweep_pass; extract_fn worker_brief_pending; extract_fn pr_comment_hold; sed -n "/^PR_COMMENT_HOLD_JQ=/,/(\.\[-1\] \/\/ \"\")'$/p" "$WATCH")
 declare -F ready_sweep_pass >/dev/null || red "ready_sweep_pass not extracted"
 
 notes() { find "$COORD_INBOX_DIR" -maxdepth 1 -name '*-stale_wait-*.md' 2>/dev/null | wc -l | tr -d ' '; }
@@ -115,66 +116,56 @@ heading "Test 6 (issue #729): ready_sweep_pass never rings itself; it queues one
 [ -e "$CI_FAILING_RING_DIR/31-deadbeef" ] && [ -e "$CI_FAILING_RING_DIR/31-cafe1234" ] || red "queue lacks pr-sha files: $(ls "$CI_FAILING_RING_DIR")"
 green "no direct ring; ring queued once per new note (deduped repeat adds nothing)"
 
-heading "Test 7 (issue #757): parked-green drafts: low risk runs pr-ready once, other risk writes one note per sha, busy worker skipped"
+heading "Test 7 (issue #757): parked-green drafts only ever get one note per PR+sha; pr-ready.sh is never run"
 pg() { find "$COORD_INBOX_DIR" -maxdepth 1 -name '*-parked_green-*.md' 2>/dev/null | wc -l | tr -d ' '; }
 : > "$TEST_DIR/ready.log"
 cat > "$SWEEP_OUT" <<'OUT'
 #71 parked-green: banner-less draft, green CI (risk=low, issue=71, sha=aaaa1111)
 #72 parked-green: banner-less draft, green CI (risk=high, issue=72, sha=bbbb2222)
-#73 parked-green: banner-less draft, green CI (risk=medium, issue=73, sha=cccc3333)
+#73 parked-green: banner-less draft, green CI (risk=medium, issue=none, sha=cccc3333)
 OUT
-BUSY_ISSUES="73"; CLI_ISSUES="73"
 ready_sweep_pass >/dev/null
-[ "$(cat "$TEST_DIR/ready.log")" = "71" ] || red "expected pr-ready on 71 only: $(cat "$TEST_DIR/ready.log")"
-[ "$(pg)" = "1" ] || red "expected 1 parked_green note (72), got $(pg)"
-grep -q "Draft PR #72 (risk high) has green CI on bbbb222" "$COORD_INBOX_DIR"/*-parked_green-*.md || red "unexpected note: $(cat "$COORD_INBOX_DIR"/*-parked_green-*.md)"
+[ ! -s "$TEST_DIR/ready.log" ] || red "pr-ready.sh must never run for a parked-green draft: $(cat "$TEST_DIR/ready.log")"
+[ "$(pg)" = "3" ] || red "expected 3 parked_green notes, got $(pg)"
+grep -q "Draft PR #72 is green with no banner; its worker may have parked (risk high, head bbbb222)" "$COORD_INBOX_DIR"/*-parked_green-*.md || red "unexpected note: $(cat "$COORD_INBOX_DIR"/*-parked_green-*.md)"
 ready_sweep_pass >/dev/null
-[ "$(wc -l < "$TEST_DIR/ready.log" | tr -d ' ')" = "1" ] && [ "$(pg)" = "1" ] || red "same sha must dedupe (ready: $(cat "$TEST_DIR/ready.log"), notes: $(pg))"
-BUSY_ISSUES=""; CLI_ISSUES=""
+[ "$(pg)" = "3" ] || red "same sha must dedupe, notes: $(pg)"
+sed -i 's/sha=aaaa1111/sha=aaaa9999/' "$SWEEP_OUT"
 ready_sweep_pass >/dev/null
-[ "$(pg)" = "2" ] || red "PR 73 should be handled once its worker is idle, notes: $(pg)"
-green "pr-ready once for low risk; one note per PR+sha otherwise; live worker deferred"
+[ "$(pg)" = "4" ] || red "new head sha should note again, notes: $(pg)"
+green "one note per PR+sha, any risk, any issue; pr-ready.sh never called"
 
-
-heading "Test 8 (issue #757): a parked-green draft is left alone while its worker is unfinished or the PR is comment-held"
-# reset: one PR at a time, risk=low so a handled PR shows up in ready.log
-one() { : > "$TEST_DIR/ready.log"; PARKED_GREEN_HANDLED=(); printf '#%s parked-green: banner-less draft, green CI (risk=low, issue=%s, sha=%s)\n' "$1" "$1" "$2" > "$SWEEP_OUT"; ready_sweep_pass >/dev/null; }
-readied() { [ "$(cat "$TEST_DIR/ready.log")" = "$1" ]; }
-mkdir -p "$WORKSPACE/wt-issue-81/.swarm/tasks/processing" "$WORKSPACE/wt-issue-82/.swarm/tasks/done"
-# own_wt_dir_for_issue stub keys on the directory only, so one dir per scenario
-BUSY_ISSUES=""; CLI_ISSUES="81"; CTX_ISSUES=""
-one 81 aaaa0081; readied "" || red "headless run (CLI, no ctx statusline, not busy) must not be readied: $(cat "$TEST_DIR/ready.log")"
-CTX_ISSUES="81"
-touch "$WORKSPACE/wt-issue-81/.swarm/tasks/processing/t81.md"
-one 81 aaaa0082; readied "" || red "worker between turns (idle TUI, brief still in processing/) must not be readied"
-rm "$WORKSPACE/wt-issue-81/.swarm/tasks/processing/t81.md"
-one 81 aaaa0083; readied "81" || red "finished interactive worker (idle TUI, brief done) should be readied, got: $(cat "$TEST_DIR/ready.log")"
-CLI_ISSUES=""; CTX_ISSUES=""
-mkdir -p "$WORKSPACE/wt-issue-81/.swarm/tasks/inbox"; touch "$WORKSPACE/wt-issue-81/.swarm/tasks/inbox/q.md"
-one 81 aaaa0084; readied "" || red "worker with a brief queued in inbox/ (window gone) must not be readied"
-rm "$WORKSPACE/wt-issue-81/.swarm/tasks/inbox/q.md"
-mkdir -p "$WORKSPACE/wt-issue-81/.swarm/tasks/sidelined"; touch "$WORKSPACE/wt-issue-81/.swarm/tasks/sidelined/s.md" "$WORKSPACE/wt-issue-81/.swarm/sidelined"
-one 81 aaaa0089; readied "" || red "sidelined worker (.swarm/sidelined marker, window gone) must not be readied"
-# A woken, finished worker: marker removed on wake, but the parked brief file stays behind.
-rm "$WORKSPACE/wt-issue-81/.swarm/sidelined"
-one 81 aaaa008a; readied "81" || red "woken worker (marker gone, stale tasks/sidelined/s.md left) must not read as unfinished: $(cat "$TEST_DIR/ready.log")"
-rm "$WORKSPACE/wt-issue-81/.swarm/tasks/sidelined/s.md"
-one 81 aaaa0085; readied "81" || red "reaped worker (no window, no brief) should be readied"
-HOLD_C='{"comments":[{"body":"x\n<!-- SWARM_COORDINATOR_HOLD -->"}]}'
-COMMENTS_81="$HOLD_C"
-one 81 aaaa0086; readied "" || red "comment-only hold must not be readied"
+heading "Test 8 (issue #757): a comment-held parked-green draft gets no note until the hold lifts"
+printf '#81 parked-green: banner-less draft, green CI (risk=low, issue=81, sha=aaaa0081)\n' > "$SWEEP_OUT"
+before="$(pg)"
+COMMENTS_81='{"comments":[{"body":"x\n<!-- SWARM_COORDINATOR_HOLD -->"}]}'
+ready_sweep_pass >/dev/null
+[ "$(pg)" = "$before" ] || red "comment-held draft must get no note"
 COMMENTS_81='{"comments":[{"body":"<!-- SWARM_COORDINATOR_HOLD -->"},{"body":"<!-- SWARM_COORDINATOR_HOLD_LIFTED -->"}]}'
-one 81 aaaa0087; readied "81" || red "a lifted comment hold should be readied"
-COMMENTS_81='{"comments":[{"body":"quoting `<!-- SWARM_COORDINATOR_HOLD -->` in prose"}]}'
-one 81 aaaa0088; readied "81" || red "prose quoting the marker is not a hold"
-unset COMMENTS_81
-# issue=none (non-iss-N branch, no liveness check): note only, never readied
-: > "$TEST_DIR/ready.log"; PARKED_GREEN_HANDLED=(); before="$(pg)"
-printf '#91 parked-green: banner-less draft, green CI (risk=low, issue=none, sha=dddd0091)\n' > "$SWEEP_OUT"
 ready_sweep_pass >/dev/null
-readied "" || red "issue=none low-risk draft must not be readied: $(cat "$TEST_DIR/ready.log")"
-[ "$(pg)" = "$((before + 1))" ] || red "issue=none draft should drop one parked_green note (before=$before, now $(pg))"
-green "unfinished worker (headless, between turns, queued brief) and comment-held PRs are deferred; finished/reaped/lifted proceed"
+[ "$(pg)" = "$((before + 1))" ] || red "lifted hold should note on the next sweep"
+COMMENTS_81='{"comments":[{"body":"quoting `<!-- SWARM_COORDINATOR_HOLD -->` in prose"}]}'
+printf '#82 parked-green: banner-less draft, green CI (risk=low, issue=82, sha=aaaa0082)\n' > "$SWEEP_OUT"
+COMMENTS_82="$COMMENTS_81"
+ready_sweep_pass >/dev/null
+[ "$(pg)" = "$((before + 2))" ] || red "prose quoting the marker is not a hold"
+unset COMMENTS_81 COMMENTS_82
+green "comment hold defers the note; lift or prose-only quote does not"
+
+heading "Test 8b (issue #757): banner retry failing with exit 1 or 124 drops one note; other outcomes stay silent"
+rf() { find "$COORD_INBOX_DIR" -maxdepth 1 -name '*-ready_retry_failed-*.md' 2>/dev/null | wc -l | tr -d ' '; }
+cat > "$SWEEP_OUT" <<'OUT'
+#91 ci-pending: still draft (exit 124)
+#92 ci-unknown: still draft (exit 1)
+#93 ci-pending: still draft (exit 4)
+#94 ci-pending: readied
+OUT
+ready_sweep_pass >/dev/null
+[ "$(rf)" = "2" ] || red "expected 2 ready_retry_failed notes (91 timeout, 92 exit 1), got $(rf)"
+grep -q "timed out" "$COORD_INBOX_DIR"/*-ready_retry_failed-*.md || red "timeout note should say so"
+ready_sweep_pass >/dev/null
+[ "$(rf)" = "2" ] || red "same PR+exit must dedupe, got $(rf)"
+green "exit 1 and 124 note once; exit 4 and readied stay silent"
 
 heading "Test 9 (issue #757): the comment-hold jq matches pr-ready.sh's"
 norm() { sed -n "/^$1=/,/(\.\[-1\] \/\/ \"\")'\$/p" "$2" | sed -E "s/^$1=//" | tr -s ' \n' ' '; }

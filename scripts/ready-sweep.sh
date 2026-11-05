@@ -70,9 +70,8 @@ done <<<"$FAILING"
 # with green CI). Report open drafts with no SWARM_DRAFT_REASON banner, no
 # COORDINATOR HOLD banner and green CI on the head (every newest-per-check
 # run completed with SUCCESS/NEUTRAL/SKIPPED, at least one check). This is
-# read-only: the sweep cannot see tmux, so coordinator-watch.sh decides
-# whether a worker still has a live turn, then runs pr-ready.sh (🟢) or writes
-# one inbox note per (PR, sha) (🟡/🔴/unmarked: pr-ready.sh would run a review).
+# read-only: coordinator-watch.sh turns each line into one deduped inbox note
+# per (PR, sha); nothing here or there readies the draft. The coordinator decides.
 # Line: "#<N> parked-green: banner-less draft, green CI (risk=<r>, issue=<K>, sha=<S>)"
 jq -r '.[]
   | select((.body // "") | (test("<!-- SWARM_DRAFT_REASON:") or test("(?m)^> ⛔ \\*\\*COORDINATOR HOLD\\*\\*")) | not)
@@ -90,7 +89,7 @@ while read -r pr reason; do
         continue
     fi
     rc=0
-    "$PR_READY" "$pr" >/dev/null 2>&1 || rc=$?
+    timeout "${READY_SWEEP_PR_READY_TIMEOUT:-300}" "$PR_READY" "$pr" >/dev/null 2>&1 || rc=$?
     if [ "$rc" = "0" ]; then
         echo "#$pr $reason: readied"
     else
