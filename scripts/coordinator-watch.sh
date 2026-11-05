@@ -3533,6 +3533,8 @@ DISPATCH_PAUSE_SEEN_FILE="$PROJECT_DIR/.swarm/dispatch-pause-seen"
 # issue #729: ready_sweep_pass (timer-loop process) drops one file per new ci_failing
 # note here; ci_failing_ring_pass (run_capacity_wake_loop process) rings for them.
 CI_FAILING_RING_DIR="$PROJECT_DIR/.swarm/ci-failing-ring-pending"
+# issue #756: same hand-off for watcher_dead notes (sweep in the timer loop, ring in the capacity loop).
+WATCHER_DEAD_RING_DIR="$PROJECT_DIR/.swarm/watcher-dead-ring-pending"
 
 # log_event <category> <key=val>...
 # Writes one line: "<utc-iso8601>  <category>  k=v k=v ..."
@@ -5568,6 +5570,9 @@ watcher_sibling_sweep_pass() {
         if coord_inbox_write watcher_dead "$body"; then
             log_event watch.sibling_watcher_dead "dir=$dir last_worker_start=$last"
             log_event coord.inbox.write "trigger=watcher_dead dir=$dir"
+            # coord_inbox_write drops a self-marker, so nothing rings for this note. Queue a ring for
+            # watcher_dead_ring_pass (capacity-loop process; ringing here could block the timer loop).
+            mkdir -p "$WATCHER_DEAD_RING_DIR" 2>/dev/null && : > "$WATCHER_DEAD_RING_DIR/$(basename "$dir")" 2>/dev/null || true
             SIBLING_DEAD_LOGGED[$dir]=1
         else
             echo "[$(date +%T)] WARN: failed to write coord-inbox watcher_dead entry for $dir" >&2
@@ -11223,13 +11228,32 @@ ci_failing_ring_pass() {
     fi
 }
 
-# run_capacity_wake_loop: the passes above (plus ci_failing_ring_pass), every WATCH_CAPACITY_POLL_SECS.
+# watcher_dead_ring_pass (issue #756)
+#
+# Rings once for the watcher_dead notes watcher_sibling_sweep_pass queued in
+# $WATCHER_DEAD_RING_DIR (one file per sibling project name), same disk
+# hand-off and remove-before-ring contract as ci_failing_ring_pass.
+watcher_dead_ring_pass() {
+    [ -d "$WATCHER_DEAD_RING_DIR" ] || return 0
+    local f n=0 list=""
+    for f in "$WATCHER_DEAD_RING_DIR"/*; do
+        [ -e "$f" ] || continue
+        rm -f "$f" 2>/dev/null || continue
+        n=$((n + 1))
+        list="${list:+$list,}${f##*/}"
+    done
+    [ "$n" -gt 0 ] || return 0
+    coord_ring_doorbell watcher_dead "count=$n projects=$list"
+}
+
+# run_capacity_wake_loop: the passes above (plus ci_failing_ring_pass, watcher_dead_ring_pass), every WATCH_CAPACITY_POLL_SECS.
 run_capacity_wake_loop() {
     while true; do
         sleep "$WATCH_CAPACITY_POLL_SECS"
         dispatch_pause_wake_pass || true
         idle_capacity_wake_pass || true
         ci_failing_ring_pass || true
+        watcher_dead_ring_pass || true
     done
 }
 

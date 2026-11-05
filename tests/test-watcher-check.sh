@@ -120,6 +120,10 @@ declare -A SIBLING_DEAD_LOGGED=()
 PROJECT_DIR="$T/alive"; DRY_RUN=0; WATCHER_CHECK="$CHK"; LLM_SWARM_DIR="$ROOT"
 COORD_INBOX_DIR="$T/alive/.swarm/coord-inbox"; COORD_INBOX_PROCESSED_DIR="$COORD_INBOX_DIR/processed"
 COORD_INBOX_SELF_DIR="$COORD_INBOX_DIR/.self"; EVENTS_LOG="$T/alive/.swarm/events.log"
+WATCHER_DEAD_RING_DIR="$T/alive/.swarm/watcher-dead-ring-pending"
+eval "$(sed -n '/^watcher_dead_ring_pass() {/,/^}/p' "$WATCH")"
+RINGS="$T/rings.log"; : > "$RINGS"
+coord_ring_doorbell() { echo "$*" >> "$RINGS"; }
 watcher_sibling_sweep_pass
 n="$(find "$COORD_INBOX_DIR" -maxdepth 1 -name '*-watcher_dead-*.md' | wc -l)"
 check "sweep writes one watcher_dead inbox note for the dead sibling" "1" "$n"
@@ -129,6 +133,8 @@ watcher_sibling_sweep_pass
 n="$(find "$COORD_INBOX_DIR" -maxdepth 1 -name '*-watcher_dead-*.md' | wc -l)"
 check "a second sweep does not write a duplicate" "1" "$n"
 "$CHK" --pause "$T/sib-recent" >/dev/null
+watcher_dead_ring_pass; watcher_dead_ring_pass
+check "the note's doorbell rings exactly once, naming the project" "watcher_dead count=1 projects=sib-recent" "$(cat "$RINGS")"
 watcher_sibling_sweep_pass
 check "dedup entry clears once the sibling is silenced" "0" "${#SIBLING_DEAD_LOGGED[@]}"
 "$CHK" --resume "$T/sib-recent" >/dev/null
