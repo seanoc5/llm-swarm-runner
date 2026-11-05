@@ -26,6 +26,34 @@ TMUX_SOCKET="swarm-main-repo"
 tmux_swarm() { command tmux -L "$TMUX_SOCKET" "$@"; }
 
 echo "=== Swarm E2E Test ==="
+
+# Pre-flight (issue #776): the coordinator and workers run in containers that
+# sandbox.sh starts through the host docker daemon with `-v $PWD:$PWD`. When
+# this test itself runs inside a worker sandbox (itself a container sharing the
+# host's /var/run/docker.sock), the sandbox's /tmp is not the daemon's /tmp:
+# the daemon creates an empty root-owned directory at the mount source, the
+# coordinator sees an empty repo, prints nothing, and the stuck-detector below
+# fails the run after 60s. Probe with the same bind-mount form and skip loudly
+# instead of stalling. Run the test from a host shell to exercise it for real.
+# Only "mounted but marker missing" (exit 1) skips; any other docker failure
+# (no daemon, no image) falls through so a real breakage isn't hidden.
+# E2E_SKIP_MOUNT_PROBE=1 bypasses the probe.
+if [ "${E2E_SKIP_MOUNT_PROBE:-0}" != "1" ] && command -v docker >/dev/null 2>&1; then
+    PROBE_DIR="$(mktemp -d /tmp/swarm-e2e-probe.XXXXXX)"
+    : > "$PROBE_DIR/marker"
+    probe_ec=0
+    docker run --rm --entrypoint test -v "$PROBE_DIR:$PROBE_DIR:ro" \
+        "${SANDBOX_IMAGE:-llm-swarm-runner:latest}" -e "$PROBE_DIR/marker" \
+        >/dev/null 2>&1 || probe_ec=$?
+    rm -rf "$PROBE_DIR"
+    if [ "$probe_ec" = "1" ]; then
+        yellow "SKIP: the docker daemon cannot see this shell's /tmp (bind-mount of a /tmp path came back empty)."
+        yellow "This happens when the test runs inside a worker sandbox container; the coordinator would see an empty repo."
+        yellow "Run it from a host shell instead: tests/test-e2e-swarm.sh  (or E2E_SKIP_MOUNT_PROBE=1 to force)."
+        exit 0
+    fi
+fi
+
 yellow "Cleaning up previous sessions..."
 tmux_swarm kill-session -t "llm-main-repo" 2>/dev/null || true
 
