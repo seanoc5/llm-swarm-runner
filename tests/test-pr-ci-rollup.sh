@@ -25,7 +25,7 @@ FILTER="$(sed -n "/--jq 'def ci:/,/\.\[\] | \"\\\\(\.number)/p" "$WATCH" \
 
 run_case() {
     local label="$1" json="$2" expect="$3" got
-    got="$(printf '%s' "$json" | jq -r "$FILTER" | cut -f3)"
+    got="$(printf '%s' "$json" | jq -r "$FILTER" | cut -f4)"
     [ "$got" = "$expect" ] || red "$label: expected ci=$expect, got ci=$got"
     green "$label -> ci=$got"
 }

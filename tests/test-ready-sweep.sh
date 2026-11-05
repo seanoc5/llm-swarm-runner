@@ -156,4 +156,29 @@ grep -qx '#51 ci-failing: needs a fix push (sha=feed5678)' "$TEST_DIR/out.log" |
 [ ! -s "$READY_LOG" ] || red "dry run must not call pr-ready"
 green "moved head: red notes with live sha; pending, green, unreadable, unexpected stay silent; no pr-ready"
 
+heading "Test 9 (issue #757): banner-less green drafts are reported; held, banner, red, pending and empty-CI drafts are not"
+G='[{"name":"unit","status":"COMPLETED","conclusion":"SUCCESS"},{"name":"lint","status":"COMPLETED","conclusion":"SKIPPED"}]'
+cat > "$FIXTURE" <<JSON
+[{"number": 61, "headRefOid": "aaa111", "headRefName": "fix/issue-61", "body": "<!-- BLIND_MERGE_RISK: low -->\nbody", "statusCheckRollup": $G},
+ {"number": 62, "headRefOid": "bbb222", "headRefName": "feat/issue-62", "body": "<!-- BLIND_MERGE_RISK: high -->\nbody", "statusCheckRollup": $G},
+ {"number": 63, "headRefOid": "ccc333", "headRefName": "x", "body": "no marker", "statusCheckRollup": $G},
+ {"number": 64, "headRefOid": "ddd444", "headRefName": "fix/issue-64", "body": "> ⛔ **COORDINATOR HOLD** — wait\nbody", "statusCheckRollup": $G},
+ {"number": 65, "headRefOid": "eee555", "headRefName": "fix/issue-65", "body": "<!-- SWARM_DRAFT_REASON: review-block sha=eee555 -->\nbody", "statusCheckRollup": $G},
+ {"number": 66, "headRefOid": "fff666", "headRefName": "fix/issue-66", "body": "body", "statusCheckRollup": [{"name":"unit","status":"COMPLETED","conclusion":"FAILURE"}]},
+ {"number": 67, "headRefOid": "111777", "headRefName": "fix/issue-67", "body": "body", "statusCheckRollup": [{"name":"unit","status":"IN_PROGRESS"}]},
+ {"number": 68, "headRefOid": "222888", "headRefName": "fix/issue-68", "body": "body", "statusCheckRollup": []},
+ {"number": 69, "headRefOid": "333999", "headRefName": "fix/issue-69", "body": "body", "statusCheckRollup": [{"name":"unit","status":"COMPLETED","conclusion":"FAILURE","completedAt":"2026-01-01T00:00:00Z"},{"name":"unit","status":"COMPLETED","conclusion":"SUCCESS","completedAt":"2026-01-02T00:00:00Z"}]}]
+JSON
+: > "$TEST_DIR/states.json"; echo "{}" > "$STATES"
+run_sweep || red "expected exit 0: $(cat "$TEST_DIR/out.log")"
+want='#61 parked-green: banner-less draft, green CI (risk=low, issue=61, sha=aaa111)
+#62 parked-green: banner-less draft, green CI (risk=high, issue=62, sha=bbb222)
+#63 parked-green: banner-less draft, green CI (risk=unknown, issue=none, sha=ccc333)
+#69 parked-green: banner-less draft, green CI (risk=unknown, issue=69, sha=333999)'
+[ "$(cat "$TEST_DIR/out.log")" = "$want" ] || red "unexpected parked-green output: $(cat "$TEST_DIR/out.log")"
+[ ! -s "$READY_LOG" ] || red "sweep itself must not run pr-ready for parked-green drafts: $(cat "$READY_LOG")"
+run_sweep --dry-run || red "dry run failed"
+[ "$(cat "$TEST_DIR/out.log")" = "$want" ] || red "dry run lost parked-green lines"
+green "banner-less green drafts reported (read-only); held, bannered, red, pending, no-CI left alone; newest run per check wins"
+
 green "ALL TESTS PASSED"

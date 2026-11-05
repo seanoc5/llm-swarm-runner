@@ -2051,7 +2051,7 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     WATCHER_AUTOCLOSE_MODE merged which terminal PR states are reap-eligible: merged (MERGED only, default) | finalized (MERGED or CLOSED)
     WATCH_PR_POLL_SECS  60        periodic gh-poll backstop reap (0=off); see header comment
     WATCH_ORPHAN_SWEEP_SECS 3600  periodic reap-orphan-worktrees.sh sweep for window-less worktrees (0=off); see header comment
-    WATCH_CONFLICT_BRIEF 1       a ready PR that turns CONFLICTING gets swarm-merge.sh's resolve-conflicts brief, once per head commit (0=off; issue #656)
+    WATCH_CONFLICT_BRIEF 1       an open PR (draft or ready; coordinator-held drafts excluded) that turns CONFLICTING gets swarm-merge.sh's resolve-conflicts brief, once per head commit (0=off; issue #656)
     WATCH_READY_SWEEP_SECS 300   periodic ready-sweep.sh: re-run pr-ready.sh on drafts refused only for CI pending/unreadable (0=off; issue #602)
     WATCH_STALE_WAIT_CHECK 1     ready-sweep also flags drafts whose **Next:** line waits on an already-merged #N; one coord-inbox note each (0=off; issue #635)
     WATCH_BG_VIOLATION_SWEEP_SECS 60  periodic sweep for backgrounded-shell UI markers on iss-* panes + the coordinator pane (0=off); see header comment
@@ -3950,6 +3950,12 @@ declare -A STALE_WAIT_NOTED=()
 # head sha after a fix push that is red again notes again).
 declare -A CI_FAILING_NOTED=()
 
+# issue #757: ready_sweep_pass's parked-green dedup, keyed "<pr>:<sha>": one
+# inbox note per head sha of a banner-less green draft.
+# Also its banner-retry-failure dedup, keyed "<pr>:<exit>" (RETRY_FAILED_NOTED).
+declare -A PARKED_GREEN_HANDLED=()
+declare -A RETRY_FAILED_NOTED=()
+
 # issue #468: a check-fail retry (or any later reconciliation in
 # worker-listener.sh's write_outcome()) can flip a task's outcome level
 # after its FIRST record already fired a real coord.wake — the corrected
@@ -4619,6 +4625,7 @@ has_live_window_draining_brief() {
 # every 60s).
 declare -gA PR_RISK_CACHE=()
 declare -gA PR_CI_CACHE=()
+declare -gA PR_HOLD_CACHE=()    # issue #757: "hold" when the body carries a COORDINATOR HOLD banner, else "-"
 declare -gA PR_MERGE_CACHE=()   # issue #656: "<mergeable>\t<headRefOid>\t<baseRefName>"
 declare -gA CONFLICT_BRIEF_SENT=()  # issue #656: pr -> head sha already briefed
 PR_RISK_LOADED=0
@@ -4628,9 +4635,11 @@ pr_open_details_load() {
     PR_RISK_CACHE=()
     PR_CI_CACHE=()
     PR_MERGE_CACHE=()
-    local n r c m h b
-    while IFS=$'\t' read -r n r c m h b; do
+    PR_HOLD_CACHE=()
+    local n k r c m h b
+    while IFS=$'\t' read -r n k r c m h b; do
         [ -n "$n" ] || continue
+        PR_HOLD_CACHE[$n]="$k"
         PR_RISK_CACHE[$n]="$r"
         PR_CI_CACHE[$n]="${c:-none}"
         PR_MERGE_CACHE[$n]="$m"$'\t'"$h"$'\t'"$b"
@@ -4653,7 +4662,7 @@ pr_open_details_load() {
                       elif any($r[]; ((.status // "COMPLETED") != "COMPLETED")
                                      or ((.state // "") | test("^(PENDING|EXPECTED)$"))) then "pending"
                       else "pass" end;
-                  .[] | "\(.number)\t\(((.body // "") | capture("(?<r>🟢|🟡|🔴)").r?) // "")\t\(ci)\t\(.mergeable // "")\t\(.headRefOid // "")\t\(.baseRefName // "")"' 2>/dev/null)
+                  .[] | "\(.number)\t\(if ((.body // "") | test("(?m)^> ⛔ \\*\\*COORDINATOR HOLD\\*\\*")) then "hold" else "-" end)\t\(((.body // "") | capture("(?<r>🟢|🟡|🔴)").r?) // "")\t\(ci)\t\(.mergeable // "")\t\(.headRefOid // "")\t\(.baseRefName // "")"' 2>/dev/null)
 }
 pr_risk_glyph() {
     [ "$WATCH_WINDOW_FLAG_RISK" = "1" ] || return 0
@@ -4696,6 +4705,28 @@ pr_flag_apply() {
     [ -z "$want" ] || set_window_flag "iss-$issue" "$want" "$why"
 }
 
+# PR_COMMENT_HOLD_JQ — keep identical to HOLD_COMMENT_JQ in pr-ready.sh
+# (tests/test-shape-stale-wait-note.sh checks they match). The newest
+# hold-or-lift comment decides; a SWARM_SELF_REVIEW comment never counts.
+PR_COMMENT_HOLD_JQ='[.comments[].body // ""
+  | select(contains("SWARM_SELF_REVIEW:") | not)
+  | if test("(^|\\n)<!-- SWARM_COORDINATOR_HOLD -->\\s*$") then "held"
+    elif (contains("<!-- SWARM_COORDINATOR_HOLD_LIFTED -->") or test("(^|\\n)(✅ )?(\\*\\*)?COORDINATOR HOLD lifted")) then "lifted"
+    else empty end] | (.[-1] // "")'
+
+# pr_comment_hold <pr> (issue #757)
+#
+# True (rc 0) when PR <pr> is held by a SWARM_COORDINATOR_HOLD comment — the
+# hold signal a worker's body rewrite cannot erase (issue #616), which
+# PR_HOLD_CACHE (body banner only) misses. One gh call per use, so callers
+# ask only once they are about to act. A failed lookup fails open (not held),
+# the same stance pr-ready.sh takes; it still enforces the hold itself.
+pr_comment_hold() {
+    local state
+    state="$(cd "$PROJECT_DIR" && gh pr view "$1" --json comments --jq "$PR_COMMENT_HOLD_JQ" 2>/dev/null || true)"
+    [ "$state" = "held" ]
+}
+
 # conflict_brief_pass_one <issue> <pr> <wt_dir> (issue #656)
 #
 # A ready PR can turn CONFLICTING after its worker finished, when another PR
@@ -4708,8 +4739,17 @@ conflict_brief_pass_one() {
     local issue="$1" pr="$2" wt_dir="$3" m h b rc=0
     IFS=$'\t' read -r m h b <<< "${PR_MERGE_CACHE[$pr]:-}"
     [ "$m" = "CONFLICTING" ] || return 0
+    # issue #757: drafts get the brief too (a worker that parked before
+    # pr-ready.sh leaves a draft that conflicts after a sibling merges), but a
+    # coordinator-held draft stays the coordinator's to resolve.
+    [ "${PR_HOLD_CACHE[$pr]:-}" = "hold" ] && return 0
+    # A sidelined worker (issue #622) was set aside on purpose; a brief would wake it.
+    [ -e "$wt_dir/.swarm/sidelined" ] && return 0
     [ -n "$h" ] && [ "${CONFLICT_BRIEF_SENT[$pr]:-}" = "$h" ] && return 0
     worker_brief_pending "$wt_dir" && return 0
+    # A comment-only hold (the body banner was rewritten away) counts too.
+    # Not recorded in CONFLICT_BRIEF_SENT, so a lifted hold is briefed next tick.
+    pr_comment_hold "$pr" && return 0
     queue_conflict_brief "$wt_dir" "$pr" "${b:-the default branch}" "mergeable=CONFLICTING" \
         "The watcher saw PR #$pr turn conflicting" >/dev/null || rc=$?
     CONFLICT_BRIEF_SENT[$pr]="$h"
@@ -4813,7 +4853,7 @@ pr_poll_pass() {
                     fi
                 fi
                 pr_flag_apply "$issue" "$want" "$why pr=$pr_number"
-                if [ "$WATCH_CONFLICT_BRIEF" = "1" ] && [ "$is_draft" != "true" ]; then
+                if [ "$WATCH_CONFLICT_BRIEF" = "1" ]; then
                     pr_open_details_load
                     conflict_brief_pass_one "$issue" "$pr_number" "$wt_dir"
                 fi
@@ -4917,6 +4957,8 @@ ready_sweep_pass() {
     local dry_arg="" out line key pr trig k
     local -A cfseen=()
     local -A seen=()
+    local -A pgseen=()
+    local -A rfseen=()
     [ "$DRY_RUN" = "1" ] && dry_arg="--dry-run"
     out="$(cd "$PROJECT_DIR" && WATCH_STALE_WAIT_CHECK="$WATCH_STALE_WAIT_CHECK" "$READY_SWEEP" $dry_arg 2>&1)" || {
         log_event watch.ready_sweep "reason=sweep_failed"
@@ -4945,6 +4987,44 @@ ready_sweep_pass() {
             CI_FAILING_NOTED[$key]=1
             continue
         fi
+        if [[ "$line" =~ ^#([0-9]+)\ (ci-pending|ci-unknown):\ still\ draft\ \(exit\ (1|124)\) ]]; then
+            pr="${BASH_REMATCH[1]}" key="${BASH_REMATCH[1]}:${BASH_REMATCH[3]}"
+            rfseen[$key]=1
+            [ -z "${RETRY_FAILED_NOTED[$key]:-}" ] || continue
+            if [ "$DRY_RUN" = "1" ]; then
+                echo "[DRY] would write coord-inbox ready-retry note for PR #$pr (exit ${BASH_REMATCH[3]})"
+            elif coord_inbox_write ready_retry_failed "Retrying pr-ready.sh on draft PR #$pr failed (exit ${BASH_REMATCH[3]}$([ "${BASH_REMATCH[3]}" = 124 ] && echo ', timed out')). The sweep will keep retrying, but check the PR: run pr-ready.sh $pr yourself and read its output. One note per PR and exit code."; then
+                log_event coord.inbox.write "trigger=ready_retry_failed pr=$pr exit=${BASH_REMATCH[3]}"
+            else
+                echo "[$(date +%T)] WARN: failed to write coord-inbox ready-retry note for PR #$pr" >&2
+                continue
+            fi
+            RETRY_FAILED_NOTED[$key]=1
+            continue
+        fi
+        if [[ "$line" =~ ^#([0-9]+)\ parked-green:.*risk=([a-z]+),\ issue=([0-9]+|none),\ sha=([0-9a-fA-F]+) ]]; then
+            pr="${BASH_REMATCH[1]}" key="${BASH_REMATCH[1]}:${BASH_REMATCH[4]}"
+            local pg_risk="${BASH_REMATCH[2]}" pg_sha="${BASH_REMATCH[4]}"
+            pgseen[$key]=1
+            [ -z "${PARKED_GREEN_HANDLED[$key]:-}" ] || continue
+            # Note-only: this pass never runs pr-ready.sh on a banner-less draft (the
+            # worker may still be working). The coordinator decides.
+            # A comment-only coordinator hold (ready-sweep.sh only sees the body
+            # banner). Not marked handled: re-checked next sweep, so a lift is picked up.
+            if pr_comment_hold "$pr"; then continue; fi
+            if [ "$DRY_RUN" = "1" ]; then
+                echo "[DRY] would write coord-inbox parked-green note for draft PR #$pr (risk $pg_risk, sha ${pg_sha:0:7})"
+                continue
+            fi
+            if coord_inbox_write parked_green "Draft PR #$pr is green with no banner; its worker may have parked (risk $pg_risk, head ${pg_sha:0:7}). Check for a live iss window first; if none, run pr-ready.sh $pr (it runs the self-review for this risk level). One note per head sha."; then
+                log_event coord.inbox.write "trigger=parked_green pr=$pr sha=$pg_sha"
+            else
+                echo "[$(date +%T)] WARN: failed to write coord-inbox parked-green note for PR #$pr" >&2
+                continue
+            fi
+            PARKED_GREEN_HANDLED[$key]=1
+            continue
+        fi
         [[ "$line" =~ ^#([0-9]+)\ stale-wait:\ waiting\ on\ #([0-9]+) ]] || continue
         pr="${BASH_REMATCH[1]}" trig="${BASH_REMATCH[2]}" key="$pr:$trig"
         seen[$key]=1
@@ -4964,6 +5044,12 @@ ready_sweep_pass() {
     done
     for k in "${!CI_FAILING_NOTED[@]}"; do
         [ -n "${cfseen[$k]:-}" ] || unset 'CI_FAILING_NOTED[$k]'
+    done
+    for k in "${!RETRY_FAILED_NOTED[@]}"; do
+        [ -n "${rfseen[$k]:-}" ] || unset 'RETRY_FAILED_NOTED[$k]'
+    done
+    for k in "${!PARKED_GREEN_HANDLED[@]}"; do
+        [ -n "${pgseen[$k]:-}" ] || unset 'PARKED_GREEN_HANDLED[$k]'
     done
 }
 

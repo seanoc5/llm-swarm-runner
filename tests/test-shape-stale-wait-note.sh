@@ -43,10 +43,28 @@ RINGS="$TEST_DIR/rings.log"
 coord_ring_doorbell() { printf '%s %s\n' "$1" "${2:-}" >> "$RINGS"; }
 declare -A STALE_WAIT_NOTED=()
 declare -A CI_FAILING_NOTED=()
+declare -A PARKED_GREEN_HANDLED=()
+declare -A RETRY_FAILED_NOTED=()
+BUSY_ISSUES=""; CLI_ISSUES=""
+CLI_ISSUES=""   # issues whose window has a CLI in the foreground (else the window is absent)
+CTX_ISSUES=""   # CLI windows that render the interactive ctx statusline (a headless -p run does not)
+WORKSPACE="$TEST_DIR/ws"
+mkdir -p "$WORKSPACE"
+in_list() { [[ " $1 " == *" ${2#iss-} "* ]]; }
+worker_pane_busy() { in_list "$BUSY_ISSUES" "$1"; }
+worker_pane_state() { if in_list "$CLI_ISSUES" "$1"; then echo cli; else echo absent; fi; }
+worker_pane_ctx_used() { in_list "$CTX_ISSUES" "$1" && echo 1000; }
+own_wt_dir_for_issue() { [ -d "$WORKSPACE/wt-issue-$1" ] && echo "$WORKSPACE/wt-issue-$1"; }
+# gh stub: only "pr view <N> --json comments --jq <filter>", answered from COMMENTS_<N> via the real jq filter
+gh() { local v="COMMENTS_$3"; jq -r "$7" <<<"${!v:-{\"comments\":[]}}"; }
+LLM_SWARM_DIR="$TEST_DIR/swarm"
+mkdir -p "$LLM_SWARM_DIR/scripts"
+printf '#!/usr/bin/env bash\necho "$1" >> "%s/ready.log"\nexit 0\n' "$TEST_DIR" > "$LLM_SWARM_DIR/scripts/pr-ready.sh"
+chmod +x "$LLM_SWARM_DIR/scripts/pr-ready.sh"
 CI_FAILING_RING_DIR="$PROJECT_DIR/.swarm/ci-failing-ring-pending"
 
 # shellcheck source=/dev/null
-. <(extract_fn coord_inbox_write; extract_fn ready_sweep_pass)
+. <(extract_fn coord_inbox_write; extract_fn ready_sweep_pass; extract_fn worker_brief_pending; extract_fn pr_comment_hold; sed -n "/^PR_COMMENT_HOLD_JQ=/,/(\.\[-1\] \/\/ \"\")'$/p" "$WATCH")
 declare -F ready_sweep_pass >/dev/null || red "ready_sweep_pass not extracted"
 
 notes() { find "$COORD_INBOX_DIR" -maxdepth 1 -name '*-stale_wait-*.md' 2>/dev/null | wc -l | tr -d ' '; }
@@ -97,5 +115,62 @@ heading "Test 6 (issue #729): ready_sweep_pass never rings itself; it queues one
 [ "$(ls "$CI_FAILING_RING_DIR" | wc -l | tr -d ' ')" = "2" ] || red "expected 2 queued rings, got: $(ls "$CI_FAILING_RING_DIR")"
 [ -e "$CI_FAILING_RING_DIR/31-deadbeef" ] && [ -e "$CI_FAILING_RING_DIR/31-cafe1234" ] || red "queue lacks pr-sha files: $(ls "$CI_FAILING_RING_DIR")"
 green "no direct ring; ring queued once per new note (deduped repeat adds nothing)"
+
+heading "Test 7 (issue #757): parked-green drafts only ever get one note per PR+sha; pr-ready.sh is never run"
+pg() { find "$COORD_INBOX_DIR" -maxdepth 1 -name '*-parked_green-*.md' 2>/dev/null | wc -l | tr -d ' '; }
+: > "$TEST_DIR/ready.log"
+cat > "$SWEEP_OUT" <<'OUT'
+#71 parked-green: banner-less draft, green CI (risk=low, issue=71, sha=aaaa1111)
+#72 parked-green: banner-less draft, green CI (risk=high, issue=72, sha=bbbb2222)
+#73 parked-green: banner-less draft, green CI (risk=medium, issue=none, sha=cccc3333)
+OUT
+ready_sweep_pass >/dev/null
+[ ! -s "$TEST_DIR/ready.log" ] || red "pr-ready.sh must never run for a parked-green draft: $(cat "$TEST_DIR/ready.log")"
+[ "$(pg)" = "3" ] || red "expected 3 parked_green notes, got $(pg)"
+grep -q "Draft PR #72 is green with no banner; its worker may have parked (risk high, head bbbb222)" "$COORD_INBOX_DIR"/*-parked_green-*.md || red "unexpected note: $(cat "$COORD_INBOX_DIR"/*-parked_green-*.md)"
+ready_sweep_pass >/dev/null
+[ "$(pg)" = "3" ] || red "same sha must dedupe, notes: $(pg)"
+sed -i 's/sha=aaaa1111/sha=aaaa9999/' "$SWEEP_OUT"
+ready_sweep_pass >/dev/null
+[ "$(pg)" = "4" ] || red "new head sha should note again, notes: $(pg)"
+green "one note per PR+sha, any risk, any issue; pr-ready.sh never called"
+
+heading "Test 8 (issue #757): a comment-held parked-green draft gets no note until the hold lifts"
+printf '#81 parked-green: banner-less draft, green CI (risk=low, issue=81, sha=aaaa0081)\n' > "$SWEEP_OUT"
+before="$(pg)"
+COMMENTS_81='{"comments":[{"body":"x\n<!-- SWARM_COORDINATOR_HOLD -->"}]}'
+ready_sweep_pass >/dev/null
+[ "$(pg)" = "$before" ] || red "comment-held draft must get no note"
+COMMENTS_81='{"comments":[{"body":"<!-- SWARM_COORDINATOR_HOLD -->"},{"body":"<!-- SWARM_COORDINATOR_HOLD_LIFTED -->"}]}'
+ready_sweep_pass >/dev/null
+[ "$(pg)" = "$((before + 1))" ] || red "lifted hold should note on the next sweep"
+COMMENTS_81='{"comments":[{"body":"quoting `<!-- SWARM_COORDINATOR_HOLD -->` in prose"}]}'
+printf '#82 parked-green: banner-less draft, green CI (risk=low, issue=82, sha=aaaa0082)\n' > "$SWEEP_OUT"
+COMMENTS_82="$COMMENTS_81"
+ready_sweep_pass >/dev/null
+[ "$(pg)" = "$((before + 2))" ] || red "prose quoting the marker is not a hold"
+unset COMMENTS_81 COMMENTS_82
+green "comment hold defers the note; lift or prose-only quote does not"
+
+heading "Test 8b (issue #757): banner retry failing with exit 1 or 124 drops one note; other outcomes stay silent"
+rf() { find "$COORD_INBOX_DIR" -maxdepth 1 -name '*-ready_retry_failed-*.md' 2>/dev/null | wc -l | tr -d ' '; }
+cat > "$SWEEP_OUT" <<'OUT'
+#91 ci-pending: still draft (exit 124)
+#92 ci-unknown: still draft (exit 1)
+#93 ci-pending: still draft (exit 4)
+#94 ci-pending: readied
+OUT
+ready_sweep_pass >/dev/null
+[ "$(rf)" = "2" ] || red "expected 2 ready_retry_failed notes (91 timeout, 92 exit 1), got $(rf)"
+grep -q "timed out" "$COORD_INBOX_DIR"/*-ready_retry_failed-*.md || red "timeout note should say so"
+ready_sweep_pass >/dev/null
+[ "$(rf)" = "2" ] || red "same PR+exit must dedupe, got $(rf)"
+green "exit 1 and 124 note once; exit 4 and readied stay silent"
+
+heading "Test 9 (issue #757): the comment-hold jq matches pr-ready.sh's"
+norm() { sed -n "/^$1=/,/(\.\[-1\] \/\/ \"\")'\$/p" "$2" | sed -E "s/^$1=//" | tr -s ' \n' ' '; }
+[ -n "$(norm HOLD_COMMENT_JQ "$SCRIPT_DIR/../scripts/pr-ready.sh")" ] || red "could not read pr-ready.sh HOLD_COMMENT_JQ"
+[ "$(norm HOLD_COMMENT_JQ "$SCRIPT_DIR/../scripts/pr-ready.sh")" = "$(norm PR_COMMENT_HOLD_JQ "$WATCH")" ] || red "PR_COMMENT_HOLD_JQ drifted from pr-ready.sh HOLD_COMMENT_JQ"
+green "hold-comment filters identical"
 
 green "ALL TESTS PASSED"
