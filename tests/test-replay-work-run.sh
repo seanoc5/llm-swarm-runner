@@ -44,6 +44,8 @@ gh issue create --title t --body b > /dev/null
 $LLM_SWARM_DIR/scripts/swarm-merge.sh 7 --auto-low
 $LLM_SWARM_DIR/scripts/requeue.sh 3 /dev/null
 tmux kill-window -t llm-x:iss-3
+echo "docker_ps=$(docker ps -q | wc -l) docker_bin=$(command -v docker)" >> "$PWD/probe.txt"
+docker stop swarm-live-worker
 echo "outcome=$(jq -r .outcome /mnt/none 2>/dev/null; ls .swarm/coord-inbox | wc -l)" >> "$PWD/probe.txt"
 '
 "$REPLAY" --out "$T/out" --fixtures "$T/fix" --inbox-src "$T/src" --files 20261231T000000Z-none.md --cmd "$CMD" >/dev/null 2>&1 \
@@ -63,6 +65,8 @@ check "issue create recorded" "1" "$(grep -c $'\tgh\tissue create' "$A")"
 check "swarm-merge recorded, not run" "1" "$(grep -c $'\tswarm-merge.sh\t7 --auto-low' "$A")"
 check "requeue recorded, not run" "1" "$(grep -c $'\trequeue.sh\t3' "$A")"
 check "tmux kill-window recorded" "1" "$(grep -c $'\ttmux\tkill-window' "$A")"
+check "docker ps sees an empty host, via the stub" "docker_ps=0 docker_bin=$T/out/bin/docker" "$(grep '^docker_ps=' "$P/probe.txt")"
+check "docker stop recorded, not sent" "1" "$(grep -c $'\tdocker\tstop swarm-live-worker' "$A")"
 
 heading "inbox copy has host paths rewritten and an outcome stand-in"
 check "inbox item copied" "1" "$(ls "$P"/.swarm/coord-inbox/*.md | wc -l)"

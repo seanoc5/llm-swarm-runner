@@ -30,6 +30,7 @@
 #            `claude -p` on the coordinator model, jq/git/sed/etc.
 #   stubbed  gh (reads served from the fixtures, writes recorded and not sent),
 #            tmux (list-windows from --windows, everything else recorded),
+#            docker (reads show an empty host; stop/kill/rm/run recorded),
 #            swarm-merge, requeue, provision-worker, llm-start, pr-ready,
 #            self-review-pr, ci-wait, kill-finished-workers, stale-pr-nudges,
 #            operator-note, capture-worker (recorded, not run)
@@ -106,7 +107,7 @@ esac
 exit 0'
 for s in swarm-merge.sh worker-merge.sh requeue.sh provision-worker.sh llm-start.sh pr-ready.sh \
          self-review-pr.sh ci-wait.sh kill-finished-workers.sh stale-pr-nudges.sh \
-         operator-note.sh capture-worker.sh file-followups.sh; do
+         operator-note.sh capture-worker.sh file-followups.sh sideline-worker.sh; do
     printf '%s\n' "$RECORDER" > "$OUT/swarm/scripts/$s"; chmod +x "$OUT/swarm/scripts/$s"
 done
 
@@ -207,6 +208,19 @@ esac
 exit 0
 TM
 chmod +x "$OUT/bin/tmux"
+
+# docker stub: the replay sees an empty host (no containers); stop/kill/rm/run/
+# compose are recorded, never sent to the real daemon (the real one would show
+# today's containers and `docker stop` would hit live workers).
+cat > "$OUT/bin/docker" <<'DK'
+#!/usr/bin/env bash
+case "$1" in
+    ps|images|info|version|inspect|logs|stats|port|top|container|image) exit 0 ;;
+    *) a="$*"; printf '%s\t%s\t%s\n' "$(date +%s)" docker "${a:0:600}" >> "$REPLAY_ACTIONS" ;;
+esac
+exit 0
+DK
+chmod +x "$OUT/bin/docker"
 
 # ── 3. the project the run works in ─────────────────────────────────────────
 P="$OUT/project"
