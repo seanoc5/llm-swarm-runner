@@ -83,7 +83,7 @@ HIDE_RE+='|Execute the Initial Startup Checklist\.'
 HIDE_RE+='|Continue your task from where you left off\.'
 HIDE_RE+='|A periodic gh-search poll \(issue #392\) found GitHub activity[\s\S]*pending on these\.'
 HIDE_RE+=')\s*\z'
-HIDE_RE+='|\A\s*(<task-notification>|<local-command|<command-name>|<system-reminder>|This session is being continued)'
+HIDE_RE+='|\A\s*(<task-notification>|<local-command|<command-name>|<system-reminder>)'
 [ -n "${CONV_HIDE_RE:-}" ] && HIDE_RE="$HIDE_RE|$CONV_HIDE_RE"
 
 # A bad CONV_HIDE_RE would make jq fail and blank every message; refuse it.
@@ -100,32 +100,39 @@ fi
 # marker line, its text, then a blank line; the NUL-free "\u001e" record
 # separator lets --tail count messages rather than lines.
 render() {
-    jq -r --arg re "$HIDE_RE" --arg cy "$C_YOU" --arg cb "$C_BOT" --arg cd "$C_DIM" --arg cr "$C_RST" '
+    jq -R -r --arg re "$HIDE_RE" --arg cy "$C_YOU" --arg cb "$C_BOT" --arg cd "$C_DIM" --arg cr "$C_RST" '
         def hhmm: (.timestamp // "" | sub("\\.[0-9]+Z$"; "Z")
                    | try (fromdateiso8601 | localtime | strftime("%H:%M")) catch "");
         def texts: if (.message.content | type) == "string" then .message.content
                    else [.message.content[]? | select(.type == "text") | .text] | join("\n") end;
-        select((.isSidechain // false) | not)
+        def show: select((.isSidechain // false) | not)
         | if .type == "attachment" then
             # A message typed while the coordinator is mid-turn is recorded
             # only as a queued_command attachment (no user record follows).
             select(.attachment.type == "queued_command" and .attachment.origin.kind == "human"
                    and (.attachment.prompt | type) == "string")
-            | (.attachment.prompt | sub("^\\s+"; "") | sub("\\s+$"; "")) as $t
+            | (.attachment.prompt | sub("\\A\\s+"; "") | sub("\\s+\\z"; "")) as $t
             | select($t != "" and ($t | test($re) | not))
             | "\($cy)── you · \(hhmm) ──\($cr)\n\($t)\n\u001e"
           elif .type == "user" then
             select(.origin.kind == "human" and ((.isMeta // false) | not)
                    and ((.isCompactSummary // false) | not))
-            | (texts | sub("^\\s+"; "") | sub("\\s+$"; "")) as $t
+            | (texts | sub("\\A\\s+"; "") | sub("\\s+\\z"; "")) as $t
             | select($t != "" and ($t | test($re) | not))
             | "\($cy)── you · \(hhmm) ──\($cr)\n\($t)\n\u001e"
           elif .type == "assistant" then
             select(.message.model != "<synthetic>")
-            | (texts | sub("^\\s+"; "") | sub("\\s+$"; "")) as $t
+            | (texts | sub("\\A\\s+"; "") | sub("\\s+\\z"; "")) as $t
             | select($t != "")
             | "\($cb)── coordinator · \(hhmm) ──\($cr)\n\($t)\n\u001e"
-          else empty end
+          else empty end;
+        # One corrupt or non-object line is skipped with a visible warning; it
+        # must not end the batch (a bare `jq` parse error drops every later line).
+        select(test("\\S"))
+        | . as $raw
+        | (try ($raw | fromjson) catch null) as $r
+        | if ($r | type) == "object" then ($r | show)
+          else "\($cd)── skipped an unparseable transcript line ──\($cr)\n\u001e" end
     ' 2>/dev/null || true
 }
 

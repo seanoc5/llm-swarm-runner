@@ -85,14 +85,30 @@ NUDGE='Inbox: 2 item(s) in .swarm/coord-inbox/ — read and triage them (see pro
   hum "Continue your task from where you left off. Also merge PR 14"  # 3d: same line, bare nudge
   hum "Execute the Initial Startup Checklist. Then merge PR 15"       # 3e: same line, startup prompt
   hum "${NUDGE%% Woke for*} Also merge PR 16"                          # 3f: same line, tail with no Woke for
+  hum "This session is being continued, so please re-read the plan"   # 3g: starts like the old compaction-summary prefix
+  hum $'\n first line  \n  padded\nmultiline reply  \n\n'                           # 3h: multi-line, per-line whitespace must survive
   hum "Continue your task from where you left off."                  # real nudge: hidden
   hum "$NUDGE"                                                       # real doorbell: must stay hidden
 } > "$T/lookalike.jsonl"
 out="$("$VIEW" --file "$T/lookalike.jsonl" --once --tail 100)"
 for want in "Stop hook is broken, fix it" "why the nudge ended with Woke for" "Woke for: ci is what I want to rename" \
-            "Please look at this too." "and also merge PR 12" "also merge PR 13" "Also merge PR 14" "Then merge PR 15" "Also merge PR 16"; do
+            "Please look at this too." "and also merge PR 12" "also merge PR 13" "Also merge PR 14" "Then merge PR 15" "Also merge PR 16" "This session is being continued, so please re-read the plan"; do
     grep -qF "$want" <<<"$out" || red "real operator message hidden: $want"
 done
-[ "$(grep -c "── you" <<<"$out")" = 9 ] || red "expected 9 visible messages (the bare doorbells hidden): $out"
+[ "$(grep -c "── you" <<<"$out")" = 11 ] || red "expected 11 visible messages (the bare doorbells hidden): $out"
 green "Stop hook / Woke for lookalikes and doorbell-sharing turns stay visible; bare doorbell hidden"
+
+# ── 8. multi-line text is trimmed at the message ends only (\A/\z, not per line) ──
+grep -qx "first line  " <<<"$out" || red "leading blank/space not trimmed, or inner trailing spaces lost: $out"
+grep -qx "  padded" <<<"$out" || red "inner line indentation lost (trim must anchor on the whole message): $out"
+grep -qx "multiline reply" <<<"$out" || red "trailing spaces of the last line not trimmed: $out"
+green "multi-line message keeps inner lines, trims only the ends"
+
+# ── 9. one corrupt line is skipped with a warning, not the rest of its batch ──
+{ hum "BEFORE-bad"; echo '{"type":"user", this is not json'; echo '42'; hum "AFTER-bad"; } > "$T/corrupt.jsonl"
+out="$("$VIEW" --file "$T/corrupt.jsonl" --once --tail 100)"
+grep -qF BEFORE-bad <<<"$out" || red "line before the corrupt one lost: $out"
+grep -qF AFTER-bad <<<"$out" || red "line after the corrupt one dropped: $out"
+[ "$(grep -c "skipped an unparseable" <<<"$out")" = 2 ] || red "expected one visible warning per bad line: $out"
+green "corrupt lines skipped with a visible warning; later lines still shown"
 echo "all coordinator-conversation checks passed"
