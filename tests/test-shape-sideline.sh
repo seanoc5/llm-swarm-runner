@@ -181,19 +181,19 @@ log_event() { local c="$1"; shift; printf '%s  %-15s %s\n' "$(date -u +%FT%TZ)" 
 extract_fn() { sed -n "/^${1}() {/,/^}/p" "$WATCH"; }
 for fn in coord_inbox_write mtime_epoch is_own_worktree_dir own_worktree_dirs_for_scan \
           has_live_window_draining_brief worker_inbox_brief sideline_reason sidelined_worker_body \
-          sideline_idle_pass sideline_wake_pass stranded_brief_queue_lines stranded_brief_body \
+          sideline_idle_pass sideline_wake_windows_sig sideline_wake_pass stranded_brief_queue_lines stranded_brief_body \
           stranded_brief_sweep_pass; do
     body="$(extract_fn "$fn")"
     [ -n "$body" ] || red "could not extract '$fn' from $WATCH — renamed?"
     eval "$body"
 done
-declare -A SIDELINE_WAKE_FAIL_LOGGED=() STRANDED_BRIEF_LOGGED=()
+declare -A SIDELINE_WAKE_FAIL_LOGGED=() SIDELINE_WAKE_REFUSED=() STRANDED_BRIEF_LOGGED=()
 
 # tmux as a function: one live iss-5 window with a settable activity time.
-LIVE=1; ACTIVITY=0
+LIVE=1; ACTIVITY=0; OTHER=0
 tmux() {
     case "$1" in
-        list-windows) [ "$LIVE" = 1 ] && echo "iss-5"; echo coordinator ;;
+        list-windows) [ "$LIVE" = 1 ] && echo "iss-5"; [ "$OTHER" = 1 ] && echo "iss-9"; echo coordinator ;;
         list-panes)   echo 0 ;;
         display-message) echo "$ACTIVITY" ;;
     esac
@@ -263,10 +263,27 @@ stranded_brief_sweep_pass
 green "sidelined + queued brief is not reported as stranded"
 
 echo 3 > "$TEST_DIR/provision-rc"
-sideline_wake_pass; sideline_wake_pass
-[ "$(grep -c -- "--wake 5 $PROJECT_DIR" "$TEST_DIR/provision-stub.log")" -eq 2 ] || red "cap refusal should retry each tick"
+wakes() { grep -c -- "--wake 5 $PROJECT_DIR" "$TEST_DIR/provision-stub.log"; }
+sideline_wake_pass; sideline_wake_pass; sideline_wake_pass
+[ "$(wakes)" -eq 1 ] || red "cap refusal must back off, not retry each tick (#664): got $(wakes) attempts"
 [ "$(inbox_notes)" -eq 0 ] || red "cap refusal is not worth a coordinator note"
-green "cap refusal (exit 3) retries quietly every tick"
+green "cap refusal (exit 3): one attempt, quiet, no per-tick retry (#664)"
+
+# Window set changed (a slot may have freed) -> retry immediately.
+OTHER=1; sideline_wake_pass
+[ "$(wakes)" -eq 2 ] || red "a changed iss-* window set must retry the wake, got $(wakes)"
+green "window set changed -> retried"
+
+# Backoff elapsed with no window change (host cap / stagger) -> retry.
+OTHER=0; sideline_wake_pass
+[ "$(wakes)" -eq 3 ] || red "window set going back is again a change, got $(wakes)"
+sideline_wake_pass
+[ "$(wakes)" -eq 3 ] || red "no change within backoff must not retry, got $(wakes)"
+SIDELINE_WAKE_REFUSED[5]="$(( $(date +%s) - 1000 )) ${SIDELINE_WAKE_REFUSED[5]#* }"
+sideline_wake_pass
+[ "$(wakes)" -eq 4 ] || red "elapsed WATCH_WAKE_BACKOFF_SECS must retry, got $(wakes)"
+green "backoff elapsed -> retried"
+unset "SIDELINE_WAKE_REFUSED[5]"
 
 echo 4 > "$TEST_DIR/provision-rc"
 sideline_wake_pass; sideline_wake_pass
