@@ -295,6 +295,13 @@ idle_capacity_wake_pass
 check "a new issue number notes again at the next gated pass" "1" "$(notes idle_capacity)"
 mv "$COORD_INBOX_DIR"/*-idle_capacity-*.md "$T/"
 echo "$(( $(date +%s) - 2700 ))" > "$IDLE_CAPACITY_WAKE_FILE"
+idle_capacity_wake_pass
+check "same set again: still suppressed" "0" "$(notes idle_capacity)"
+echo '[{"number":10,"labels":[]},{"number":11,"labels":[]},{"number":12,"labels":[{"name":"night-ok"}]},{"number":13,"labels":[]}]' > "$AVAILABLE_JSON"
+idle_capacity_wake_pass
+check "night-ok added to an already-listed issue notes again (#728)" "1" "$(notes idle_capacity)"
+mv "$COORD_INBOX_DIR"/*-idle_capacity-*.md "$T/"
+echo "$(( $(date +%s) - 2700 ))" > "$IDLE_CAPACITY_WAKE_FILE"
 echo "$(cut -d' ' -f1 "$IDLE_CAPACITY_SET_FILE") $(( $(date +%s) - 21600 ))" > "$IDLE_CAPACITY_SET_FILE"
 idle_capacity_wake_pass
 check "unchanged set past the repeat window: notes again" "1" "$(notes idle_capacity)"

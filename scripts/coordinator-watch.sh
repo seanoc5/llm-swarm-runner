@@ -10819,8 +10819,10 @@ capacity_free_slots() {
 # Titles starting epic/tracking/tracker/fyi are dropped (never dispatchable,
 # #718); the rest of the coordinator's judgment filters (open PRs, pending
 # proposals) are not applied, so this can still overcount. set_hash is a
-# checksum of the remaining issue numbers: idle_capacity_wake_pass uses it to
-# stay quiet while the same set sits there undispatchable (#718).
+# checksum of the remaining issue numbers plus which of them are night-ok:
+# idle_capacity_wake_pass uses it to stay quiet while the same set sits there
+# undispatchable (#718). The night-ok numbers are in it so labelling an
+# already-listed issue night-ok changes the hash and notes again (#728).
 dispatchable_issue_counts() {
     local json busy="" wt n out nums ready night_ok
     json="$(cd "$PROJECT_DIR" && "$AVAILABLE_ISSUES" 2>/dev/null)" || return 1
@@ -10832,7 +10834,7 @@ dispatchable_issue_counts() {
         ($busy | split(",") | map(select(. != "") | tonumber)) as $b
         | [.[] | select(.number as $n | $b | index($n) | not)
                | select((.title // "") | test("^[\\[( ]*(epic\\b|(tracking|tracker|fyi)[\\])]*\\s*([:–—-]|$))"; "i") | not)] as $r
-        | "\($r | length) \([$r[] | select(any(.labels[]?; .name == "night-ok"))] | length) \([$r[].number] | sort | join(","))"' 2>/dev/null)" || return 1
+        | "\($r | length) \([$r[] | select(any(.labels[]?; .name == "night-ok"))] | length) \([$r[].number] | sort | join(","))|\([$r[] | select(any(.labels[]?; .name == "night-ok")) | .number] | sort | join(","))"' 2>/dev/null)" || return 1
     read -r ready night_ok nums <<< "$out"
     printf '%s %s %s\n' "$ready" "$night_ok" "$(printf '%s' "$nums" | cksum | cut -d' ' -f1)"
 }
@@ -10919,8 +10921,9 @@ idle_capacity_wake_pass() {
         return 0
     fi
 
-    # Same issue set as the last note and still inside the repeat window: the
-    # coordinator already looked at exactly these and found nothing (#718).
+    # Same issue set (and night-ok labels) as the last note and still inside
+    # the repeat window: skip. The state file only records that a note was
+    # written, not that the coordinator found nothing (#718, #728).
     seen_hash=""; seen_ts=0
     [ -r "$IDLE_CAPACITY_SET_FILE" ] && read -r seen_hash seen_ts < "$IDLE_CAPACITY_SET_FILE"
     [[ "$seen_ts" =~ ^[0-9]+$ ]] || seen_ts=0
