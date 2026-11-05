@@ -217,6 +217,7 @@ _caller_coord_mode="${COORD_MODE:-}"
 # prompt; nothing is ever typed into it (work runs do triage and dispatch).
 # shellcheck source=scripts/_coord-split.sh
 . "$LLM_SWARM_DIR/scripts/_coord-split.sh"
+. "$LLM_SWARM_DIR/scripts/_coord-layout.sh"
 _file_coord_mode="$(coord_mode_raw "$PWD")"
 case "$_file_coord_mode" in
     ""|resident|split) ;;
@@ -713,6 +714,12 @@ reprompt_retry_safe() {
 reprompt_inject() {
     local target="$1" prompt_file="$2"
 
+    # COORD_VIEWER (#785): never paste a doorbell into the read-only viewer.
+    if coord_pane_is_viewer "$target"; then
+        log_event coord.wake.skip "reason=target_is_viewer trigger=reprompt"
+        return 2
+    fi
+
     if reprompt_composer_dirty "$target" "$COORD_BUSY_PATTERN"; then
         log_event coord.wake.skip "reason=composer_dirty trigger=reprompt"
         return 2
@@ -816,15 +823,25 @@ PANE_DEAD=0
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
     session_existed=true
     if tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx 'coordinator'; then
+        # COORD_VIEWER (#785): pane 0 is the session, never the viewer. If the
+        # session pane was closed by hand the viewer renumbers to 0; close it
+        # so the window is recreated and nothing is typed into the viewer.
+        if coord_pane_is_viewer "$SESSION_NAME:coordinator.0"; then
+            coord_layout_off "$SESSION_NAME"
+        fi
+    fi
+    if tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx 'coordinator'; then
         # eval-safe: format string is fixed, values are constrained by tmux
         # (pane_current_command is an executable name; pane_dead is 0 or 1).
-        eval "$(tmux list-panes -t "$SESSION_NAME:coordinator" \
+        # Explicit pane .0, not "first listed" (#785).
+        eval "$(tmux display-message -p -t "$SESSION_NAME:coordinator.0" \
                  -F 'PANE_CMD=#{pane_current_command} PANE_DEAD=#{pane_dead}' \
                  2>/dev/null | head -1)"
         if [ "${PANE_DEAD:-0}" = "1" ]; then
             # remain-on-exit=failed left a dead pane after a non-zero exit.
             # Kill it; the window auto-closes when its last pane is gone,
             # collapsing this into the window_exists=false case below.
+            coord_layout_off "$SESSION_NAME"   # viewer would otherwise keep the window open (#785)
             tmux kill-pane -t "$SESSION_NAME:coordinator.0" 2>/dev/null || true
             window_exists=false
             coordinator_idle=true
@@ -1194,6 +1211,14 @@ elif { [ "$COORD_CMD" = "claude" ] || [ "$COORD_CMD" = "agy" ]; } && [ "${COORDI
     else
         log_event coord.wake.skip "reason=bare_rerun_no_prompt"
     fi
+fi
+
+# COORD_VIEWER=1 (#785, docs/coordinator-viewer.md): put the read-only
+# conversation viewer in the coordinator window, below the Claude session
+# (which stays pane 0, so every `.0` target keeps hitting the session). Off by
+# default; idempotent. A failure here never blocks the launch.
+if [ "${COORD_VIEWER:-0}" = "1" ]; then
+    coord_layout_on "$SESSION_NAME" "$PWD" "$LLM_SWARM_DIR" "${COORD_VIEWER_PCT:-75}" || echo "WARN: COORD_VIEWER=1 but the viewer pane could not be added" >&2
 fi
 
 # Optionally spawn coordinator-watch.sh as a second pane inside the util

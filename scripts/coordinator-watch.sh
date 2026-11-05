@@ -2792,6 +2792,7 @@ WATCH_WINDOW_FLAGS_SWEEP_SECS="${WATCH_WINDOW_FLAGS_SWEEP_SECS:-10}"
 . "$SCRIPT_DIR/_coord-inbox-batch.sh"
 # shellcheck source=scripts/_coord-split.sh
 . "$SCRIPT_DIR/_coord-split.sh"
+. "$SCRIPT_DIR/_coord-layout.sh"
 # shellcheck source=_conflict-brief.sh
 . "$SCRIPT_DIR/_conflict-brief.sh"
 WATCHER_QUIET="${WATCHER_QUIET:-0}"
@@ -7151,7 +7152,10 @@ coordinator_pane_state() {
     tmux has-session -t "$SESSION_NAME" 2>/dev/null || { echo absent; return; }
     tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx 'coordinator' || { echo absent; return; }
     local pane_cmd
-    pane_cmd="$(tmux list-panes -t "$SESSION_NAME:coordinator" -F '#{pane_current_command}' 2>/dev/null | head -1)" || pane_cmd=""
+    # Explicit pane .0 = the Claude session (#785); a viewer that has been
+    # renumbered to 0 (session pane closed by hand) is not a session.
+    coord_pane_is_viewer "$SESSION_NAME:coordinator.0" && { echo absent; return; }
+    pane_cmd="$(tmux display-message -p -t "$SESSION_NAME:coordinator.0" -F '#{pane_current_command}' 2>/dev/null)" || pane_cmd=""
     case "$pane_cmd" in
         bash|zsh|sh|fish|"") echo shell ;;
         *)                   echo cli ;;
@@ -7172,6 +7176,7 @@ coordinator_pane_state() {
 # bash's here-string handling under a UTF-8 locale.
 coordinator_pane_busy() {
     local content clean
+    coord_pane_is_viewer "$SESSION_NAME:coordinator.0" && return 1   # viewer is never "busy" (#785)
     content="$(tmux capture-pane -t "$SESSION_NAME:coordinator.0" -p 2>/dev/null)" || return 1
     clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
     printf '%s\n' "$clean" | LC_ALL=C grep -qE "$AUTO_COMPACT_BUSY_PATTERN"
