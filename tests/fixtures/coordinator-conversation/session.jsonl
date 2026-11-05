@@ -1,0 +1,23 @@
+{"type":"permission-mode","permissionMode":"bypassPermissions","sessionId":"s1"}
+{"type":"queue-operation","operation":"enqueue","timestamp":"2026-11-05T02:37:39.387Z","sessionId":"s1","content":"Inbox: 1 item(s) HIDE-queue-op"}
+{"type":"user","entrypoint":"cli","sessionId":"s1","timestamp":"2026-11-05T02:37:40.000Z","origin":{"kind":"human"},"message":{"role":"user","content":"Execute the Initial Startup Checklist. HIDE-startup"}}
+{"type":"assistant","entrypoint":"cli","timestamp":"2026-11-05T02:37:41.000Z","message":{"model":"claude-opus-5-5","role":"assistant","content":[{"type":"thinking","thinking":"HIDE-thinking"}]}}
+{"type":"assistant","entrypoint":"cli","timestamp":"2026-11-05T02:37:42.000Z","message":{"model":"claude-opus-5-5","role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"echo HIDE-tool-call"}}]}}
+{"type":"user","entrypoint":"cli","timestamp":"2026-11-05T02:37:43.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"HIDE-tool-result"}]}}
+{"type":"attachment","timestamp":"2026-11-05T02:37:43.500Z","attachment":{"type":"hook_success","content":"HIDE-hook-success"}}
+{"type":"assistant","entrypoint":"cli","timestamp":"2026-11-05T02:37:44.000Z","message":{"model":"claude-opus-5-5","role":"assistant","content":[{"type":"text","text":"SHOW-reply-one"}]}}
+{"type":"user","entrypoint":"cli","timestamp":"2026-11-05T02:38:00.000Z","origin":{"kind":"human"},"message":{"role":"user","content":"Inbox: 1 item(s) in .swarm/coord-inbox/ — read and triage them. HIDE-doorbell"}}
+{"type":"user","entrypoint":"cli","timestamp":"2026-11-05T02:38:01.000Z","origin":{"kind":"human"},"message":{"role":"user","content":"Inbox: 2 item(s) in .swarm/coord-inbox/ — triage. Woke for: outbox, ci. HIDE-doorbell-woke"}}
+{"type":"user","entrypoint":"cli","timestamp":"2026-11-05T02:38:02.000Z","origin":{"kind":"human"},"message":{"role":"user","content":"Worker(s) just finished. Triage their outcome JSONs. HIDE-wake"}}
+{"type":"user","entrypoint":"cli","timestamp":"2026-11-05T02:38:03.000Z","origin":{"kind":"human"},"message":{"role":"user","content":"Stop hook error: Arm the inbox waiter. HIDE-stop-hook"}}
+{"type":"user","entrypoint":"cli","timestamp":"2026-11-05T02:38:04.000Z","isMeta":true,"message":{"role":"user","content":"Stop hook feedback: HIDE-stop-hook-meta"}}
+{"type":"user","entrypoint":"cli","timestamp":"2026-11-05T02:38:05.000Z","origin":{"kind":"task-notification"},"message":{"role":"user","content":"<task-notification><task-id>b1</task-id><summary>HIDE-bg-task</summary></task-notification>"}}
+{"type":"user","entrypoint":"cli","timestamp":"2026-11-05T02:38:06.000Z","origin":{"kind":"peer"},"isMeta":true,"message":{"role":"user","content":"Another Claude session sent a message: HIDE-peer"}}
+{"type":"user","entrypoint":"cli","timestamp":"2026-11-05T02:38:07.000Z","message":{"role":"user","content":"/compact"}}
+{"type":"system","subtype":"compact_boundary","timestamp":"2026-11-05T02:38:08.000Z","content":"HIDE-boundary"}
+{"type":"user","entrypoint":"cli","timestamp":"2026-11-05T02:38:09.000Z","isCompactSummary":true,"message":{"role":"user","content":"This session is being continued from a previous conversation. HIDE-compaction-summary"}}
+{"type":"user","entrypoint":"cli","timestamp":"2026-11-05T02:38:10.000Z","origin":{"kind":"human"},"message":{"role":"user","content":"SHOW-operator-one: please merge PR 12"}}
+{"type":"assistant","entrypoint":"cli","isSidechain":true,"timestamp":"2026-11-05T02:38:11.000Z","message":{"model":"claude-opus-5-5","role":"assistant","content":[{"type":"text","text":"HIDE-subagent-text"}]}}
+{"type":"assistant","entrypoint":"cli","timestamp":"2026-11-05T02:38:12.000Z","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"HIDE-synthetic-spend-limit"}]}}
+{"type":"assistant","entrypoint":"cli","timestamp":"2026-11-05T02:38:13.000Z","message":{"model":"claude-opus-5-5","role":"assistant","content":[{"type":"text","text":"SHOW-reply-two"}]}}
+{"type":"user","entrypoint":"cli","timestamp":"2026-11-05T02:38:14.000Z","origin":{"kind":"human"},"message":{"role":"user","content":[{"type":"text","text":"SHOW-operator-two with a screenshot"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"HIDE-image"}}]}}

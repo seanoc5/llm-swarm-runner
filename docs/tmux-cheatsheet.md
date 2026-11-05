@@ -157,6 +157,22 @@ Useful for the laptop+desk scenario where you don't want size-fighting AND don't
 
 ---
 
+## 11. Clean conversation view (operator messages + coordinator replies only)
+
+The coordinator pane mixes your conversation with doorbell lines, hook messages, tool calls and program output. `scripts/coordinator-conversation.sh` reads the coordinator's Claude Code transcript (`~/.claude/projects/<encoded-project-dir>/<session>.jsonl`) and prints only what you typed and the text of the coordinator's replies. It is a **reading view** — you still type in the `coordinator` window, and the pane stays the debugging record. Off by default; start it on demand, in a terminal that is **not** a swarm window:
+
+```bash
+/opt/work/llm-swarm-runner/scripts/coordinator-conversation.sh /opt/work/fand-app          # follow live
+/opt/work/llm-swarm-runner/scripts/coordinator-conversation.sh /opt/work/fand-app --once --tail 50   # print and exit
+```
+
+- **Where to run it:** a plain terminal tab, or a window on your *default* tmux server (`tmux new-window '<command>'` from outside the swarm). It deliberately is not a window or pane of the swarm session: `MAX_TMUX_WINDOWS` counts every window in the swarm session (`provision-worker.sh` `list-windows`), and a split pane in `coordinator` risks the watcher's unqualified `session:coordinator` targets landing on it.
+- **Hidden:** tool calls and results, thinking, `Inbox:` and wake-prompt doorbells (typed doorbells are recorded as ordinary human messages, so they are matched by text; add more with `CONV_HIDE_RE`), stop-hook text, background-task notifications, peer messages, slash-command output and compaction summaries, subagent turns.
+- **Session choice:** the newest interactive (`entrypoint: cli`) transcript for the project directory; headless `claude -p` runs (self-review) and worker transcripts (their own worktree directories) are never picked. A restart, `/clear` or compaction that opens a new transcript is followed automatically.
+- **Read-only:** it never writes to the transcript, the pane or the inbox. Needs `jq`. Test: `tests/test-coordinator-conversation.sh`.
+
+---
+
 ## Common scenarios in this project
 
 | Scenario                                                                       | Command                                                                                                            |

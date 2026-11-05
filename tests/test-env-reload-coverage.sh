@@ -43,7 +43,8 @@ for _t in _compose-down-for-worktree _window-flags available-issues ci-wait dail
           demo-driver demo-record-setup gh-token-probe lint-pr-screen nightly-full-tests \
           pr-ready ready-sweep self-review-pr setup statusline-with-context \
           swarm-idle-report task-done build-image check-stuck-workers demo-segments-pick \
-          gh-status-bar install-tmux-binding run-all-tests worker-merge; do
+          gh-status-bar install-tmux-binding run-all-tests worker-merge \
+          coordinator-conversation; do
   TOOL_ONLY[scripts/$_t.sh]="tool: standalone/test-override knobs, not project config"
 done
 
