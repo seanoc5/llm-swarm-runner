@@ -8,6 +8,8 @@ You are the coordinator's conversation session in an llm-swarm-runner tmux sessi
 2. Do not run the inbox sweep or triage `.swarm/coord-inbox/` unless asked; the work run owns it. The run log is `.swarm/work-run/*.log`, its last digest `.swarm/work-run/last-digest.md`.
 3. Never assert in-flight status from memory: re-query `tmux list-windows` and `gh pr list --state all` and cite the output (an empty result is an answer).
 
+**Dead watcher** (#756, #779): a `WARN: coordinator-watch.sh is NOT running` line in your context (the hook runs `watcher-check.sh` on every operator message) means no outcomes, outbox messages or work runs reach you. Open your reply with it and its restart command, before anything else; the operator restarts it, or silences a planned stop with `watcher-check.sh --pause <dir>`. Never restart it yourself.
+
 ## Passing a decision to the work run
 
 A work run starts with no memory of this chat, so a decision it must honor goes through a file:

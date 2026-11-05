@@ -135,6 +135,29 @@ while IFS= read -r h; do
 done < <(awk '/^```/ {f = !f} !f && /^#{2,3} / {sub(/^#+ /, ""); print}' "$ROOT/prompts/coordinator.md")
 check "every coordinator.md section has a home in the split prompts" "" "$missing"
 
+W="$ROOT/prompts/coordinator-work.md"
+# Headings alone are not enough (issue #779): the sweep section of coordinator.md
+# also carries bold-led rules and a script block, and the work prompt dropped
+# the watcher-check.sh line and the Dead watcher rule without any heading
+# changing. Every sweep script and every bold rule lead must survive in the
+# work prompt.
+sweep_of() {   # <file> <heading>: the body of one "## heading" section
+    awk -v h="## $2" '$0 == h {f = 1; next} /^## / {f = 0} f' "$1"
+}
+RES_SWEEP="$(sweep_of "$ROOT/prompts/coordinator.md" "Every wake: sweep")"
+WORK_SWEEP="$(sweep_of "$ROOT/prompts/coordinator-work.md" "Every run: sweep")"
+check "sweep section found in both prompts" "yes" "$([ -n "$RES_SWEEP" ] && [ -n "$WORK_SWEEP" ] && echo yes || echo no)"
+lost=""
+while IFS= read -r s; do
+    grep -qF "scripts/$s" <<<"$WORK_SWEEP" || lost+="[script $s] "
+done < <(grep -oE 'scripts/[A-Za-z0-9_.-]+\.sh' <<<"$RES_SWEEP" | sed 's|scripts/||' | sort -u)
+while IFS= read -r lead; do
+    grep -qF "**$lead" <<<"$WORK_SWEEP" || lost+="[rule $lead] "
+done < <(grep -oE '^\*\*[^*]+\*\*' <<<"$RES_SWEEP" | sed -E 's/^\*\*//; s/\*\*$//; s/ \(.*//; s/:.*//' | sort -u)
+check "work prompt sweep keeps every sweep script and bold rule of coordinator.md" "" "$lost"
+grep -q 'NOT running' "$W" && grep -q 'NOT running' "$ROOT/prompts/coordinator-chat.md" && got=yes || got=no
+check "work and chat prompts both say what to do with the dead-watcher WARN" "yes" "$got"
+
 W="$ROOT/prompts/coordinator-work.md"; C="$ROOT/prompts/coordinator-chat.md"
 grep -q 'only the opt-in automerges' "$W" && got=yes || got=no
 check "work prompt: opt-in automerges only" "yes" "$got"
@@ -283,6 +306,29 @@ printf '%s' '{"stop_hook_active":false}' | CLAUDE_PROJECT_DIR="$P" COORD_HOOK_ST
 check "split Stop: never blocks or rings a doorbell" "" "$(cat "$T/stop.out")"
 check "split Stop: coord-hook-rang is not written" "none" "$([ -e "$P/.swarm/coord-hook-rang" ] && echo some || echo none)"
 check "split Stop with COORD_HOOK_STATE=1 records idle" "idle" "$(cut -d' ' -f1 "$P/.swarm/coordinator-state")"
+
+# Dead watcher (issue #779): split mode must not stay silent. A recorded pid
+# that is gone = dead; the WARN rides every operator message, even with
+# COORD_HOOK_STATE=0, and Stop (which split never blocks) stays silent.
+printf 'pid=999999\nstarted_at=x\n' > "$P/.swarm/coordinator-watch.state"
+touch -d "2 hours ago" "$P/.swarm/coordinator-watch.state"
+rm -f "$P/.swarm"/needs-you.* "$P/.swarm/watcher-dead-warned" "$P/.swarm/watcher-stopped" "$P/.swarm/watcher-paused"
+ctx="$(hook UserPromptSubmit | jq -r .hookSpecificOutput.additionalContext)"
+check "split + dead watcher: the prompt context carries the WARN" "yes" "$(grep -q 'WARN: coordinator-watch.sh is NOT running' <<<"$ctx" && echo yes || echo no)"
+check "split + dead watcher: the restart command is in it" "yes" "$(grep -q 'restart it: cd .*llm-start.sh' <<<"$ctx" && echo yes || echo no)"
+ctx2="$(hook UserPromptSubmit | jq -r .hookSpecificOutput.additionalContext)"
+check "split + dead watcher: the next prompt warns again (no throttle)" "yes" "$(grep -q 'NOT running' <<<"$ctx2" && echo yes || echo no)"
+printf '# Needs you\n- **A1** 🟡 PR #1 ready\n' > "$P/.swarm/needs-you.md"
+ctx3="$(hook UserPromptSubmit | jq -r .hookSpecificOutput.additionalContext)"
+check "WARN and the needs-you line share one context" "yes" "$(grep -q 'NOT running' <<<"$ctx3" && grep -q 'Needs-you changed' <<<"$ctx3" && echo yes || echo no)"
+printf '%s' '{"stop_hook_active":false}' | CLAUDE_PROJECT_DIR="$P" COORD_HOOK_STATE=1 "$HOOK" Stop > "$T/stop.dead.out"
+check "split Stop with a dead watcher still never blocks" "" "$(cat "$T/stop.dead.out")"
+touch "$P/.swarm/watcher-stopped"
+check "stopped on purpose -> no WARN" "" "$(hook UserPromptSubmit | jq -r '.hookSpecificOutput.additionalContext // empty' | grep 'NOT running' || true)"
+rm -f "$P/.swarm/watcher-stopped"
+rm -f "$P/.swarm"/coordinator-watch.state "$P/.swarm"/needs-you.* "$P/.swarm/watcher-dead-warned" "$P/.swarm/coordinator-state"
+out="$(hook UserPromptSubmit)"
+check "no watcher state file (WATCH=0 swarm) -> silent" "" "$out"
 
 # Resident mode: unchanged. Hook is off without COORD_HOOK_STATE, and with it
 # on a UserPromptSubmit still only writes the state file.

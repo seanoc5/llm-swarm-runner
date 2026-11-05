@@ -41,7 +41,9 @@
 #      nobody wakes, so Stop never rings and never asks for a waiter. On
 #      UserPromptSubmit the hook adds one line of context when
 #      .swarm/needs-you.md changed since it last told the operator's session,
-#      and clears the 📥 window flag (see _coord-split.sh). Active even with
+#      and clears the 📥 window flag (see _coord-split.sh). The same hook
+#      prepends the dead-watcher WARN (2b) on every operator message while the
+#      watcher is dead (issue #779); Stop never reaches it. Active even with
 #      COORD_HOOK_STATE=0; state-file writes still need COORD_HOOK_STATE=1.
 #
 # Fails open: any error leaves the hook silent (exit 0, no output), which
@@ -113,16 +115,17 @@ waiter_arm_request() {
         "$(printf '%q' "$(cd "$(dirname "$0")" && pwd)/coord-inbox-wait.sh")" "$(printf '%q' "$project")"
 }
 
-# watcher_dead_warning: prints the one-line WARN (restart command included)
-# when the watcher is dead and none was sent in the last
-# WATCHER_DEAD_WARN_SECS; records the send. Prints nothing otherwise.
+# watcher_dead_warning [min-secs]: prints the one-line WARN (restart command
+# included) when the watcher is dead and none was sent in the last min-secs
+# (default WATCHER_DEAD_WARN_SECS, 1800); records the send. Prints nothing
+# otherwise. Split mode passes 0: every operator message carries the WARN.
 watcher_dead_warning() {
-    local warned_file="$swarm/watcher-dead-warned" warned out
+    local warned_file="$swarm/watcher-dead-warned" warned out min_secs="${1:-${WATCHER_DEAD_WARN_SECS:-1800}}"
     out="$("$(cd "$(dirname "$0")" && pwd)/watcher-check.sh" "$project" 2>/dev/null)" || true
     [ -n "$out" ] || { rm -f "$warned_file" 2>/dev/null; return 0; }
     warned="$(cat "$warned_file" 2>/dev/null || echo 0)"
     [[ "$warned" =~ ^[0-9]+$ ]] || warned=0
-    [ $((now - warned)) -ge "${WATCHER_DEAD_WARN_SECS:-1800}" ] || return 0
+    [ $((now - warned)) -ge "$min_secs" ] || return 0
     printf '%s\n' "$now" > "$warned_file" 2>/dev/null || true
     log_event "coord.watcher_dead.warn"
     printf '%s' "$out" | tr '\n' ' '
@@ -136,6 +139,8 @@ case "$event" in
             # operator's next message is where a changed Needs-you list reaches it.
             clear_window_flag coordinator "📥" "operator_prompt"
             note="$(coord_needs_you_note "$swarm")"
+            dead="$(watcher_dead_warning 0)"   # issue #779: a dead watcher must not stay silent in split mode
+            [ -z "$dead" ] || note="$dead${note:+ $note}"
             [ -z "$note" ] || jq -n --arg c "$note" '{hookSpecificOutput: {hookEventName: "UserPromptSubmit", additionalContext: $c}}'
         fi
         ;;
