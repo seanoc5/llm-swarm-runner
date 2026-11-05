@@ -5672,8 +5672,8 @@ sideline_idle_pass() {
 # cap.refused lines for one issue in two days). After an exit-3 refusal the
 # issue is skipped until the set of iss-* windows changes (a slot may have
 # freed) or WATCH_WAKE_BACKOFF_SECS (default 300) passes — the timeout covers
-# refusals no local window change signals (host cap, spawn stagger, dispatch
-# pause). SIDELINE_WAKE_REFUSED[issue]="<epoch> <window signature>".
+# refusals no local window change signals (host cap, dispatch pause). Short
+# waits (spawn_stagger, host_load; issue #758) are not backed off at all. SIDELINE_WAKE_REFUSED[issue]="<epoch> <window signature>".
 declare -A SIDELINE_WAKE_FAIL_LOGGED=()
 declare -A SIDELINE_WAKE_REFUSED=()
 sideline_wake_windows_sig() {
@@ -5716,7 +5716,14 @@ sideline_wake_pass() {
                 log_event watch.wake "issue=$issue result=ok"
                 echo "[$(date +%T)] woke sidelined issue #$issue"
                 ;;
-            3) SIDELINE_WAKE_REFUSED[$issue]="$(date +%s) $sig" ;;
+            3)
+                # #758: spawn_stagger / host_load clear within seconds — retry
+                # on the next tick; only slot/pause/memory refusals back off.
+                case "$out" in
+                    *"cap.refused reason=spawn_stagger"*|*"cap.refused reason=host_load"*)
+                        unset "SIDELINE_WAKE_REFUSED[$issue]" 2>/dev/null || true ;;
+                    *) SIDELINE_WAKE_REFUSED[$issue]="$(date +%s) $sig" ;;
+                esac ;;
             *)
                 [ -n "${SIDELINE_WAKE_FAIL_LOGGED[$issue]:-}" ] && continue
                 SIDELINE_WAKE_FAIL_LOGGED[$issue]=1

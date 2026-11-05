@@ -209,6 +209,7 @@ STUB
 cat > "$TEST_DIR/provision-stub" <<STUB
 #!/usr/bin/env bash
 echo "\$*" >> "$TEST_DIR/provision-stub.log"
+[ -e "$TEST_DIR/provision-out" ] && cat "$TEST_DIR/provision-out" >&2
 exit "\$(cat "$TEST_DIR/provision-rc")"
 STUB
 chmod +x "$TEST_DIR/sideline-stub" "$TEST_DIR/provision-stub"
@@ -283,6 +284,40 @@ SIDELINE_WAKE_REFUSED[5]="$(( $(date +%s) - 1000 )) ${SIDELINE_WAKE_REFUSED[5]#*
 sideline_wake_pass
 [ "$(wakes)" -eq 4 ] || red "elapsed WATCH_WAKE_BACKOFF_SECS must retry, got $(wakes)"
 green "backoff elapsed -> retried"
+unset "SIDELINE_WAKE_REFUSED[5]"
+
+# #758: short refusals (stagger/load) retry every tick, no backoff.
+before="$(wakes)"
+echo "cap.refused reason=spawn_stagger" > "$TEST_DIR/provision-out"
+sideline_wake_pass; sideline_wake_pass
+[ "$(wakes)" -eq $(( before + 2 )) ] || red "spawn_stagger must retry each tick, got $(( $(wakes) - before ))"
+[ -z "${SIDELINE_WAKE_REFUSED[5]:-}" ] || red "spawn_stagger must not record a backoff"
+echo "cap.refused reason=host_load" > "$TEST_DIR/provision-out"
+sideline_wake_pass
+[ "$(wakes)" -eq $(( before + 3 )) ] || red "host_load must retry each tick"
+rm -f "$TEST_DIR/provision-out"
+green "spawn_stagger / host_load refusals: retried next tick (#758)"
+
+# #758: backoff state clears on a successful wake...
+echo 3 > "$TEST_DIR/provision-rc"; echo "cap.refused reason=max_workers" > "$TEST_DIR/provision-out"
+sideline_wake_pass
+[ -n "${SIDELINE_WAKE_REFUSED[5]:-}" ] || red "max_workers refusal must record a backoff"
+echo 0 > "$TEST_DIR/provision-rc"; rm -f "$TEST_DIR/provision-out"
+SIDELINE_WAKE_REFUSED[5]="$(( $(date +%s) - 1000 )) ${SIDELINE_WAKE_REFUSED[5]#* }"
+sideline_wake_pass
+[ -z "${SIDELINE_WAKE_REFUSED[5]:-}" ] || red "successful wake must clear the backoff state"
+green "backoff state cleared on successful wake (#758)"
+
+# ...and when the sideline marker disappears.
+echo 3 > "$TEST_DIR/provision-rc"; echo "cap.refused reason=max_workers" > "$TEST_DIR/provision-out"
+sideline_wake_pass
+[ -n "${SIDELINE_WAKE_REFUSED[5]:-}" ] || red "max_workers refusal must record a backoff"
+mv "$WT/.swarm/sidelined" "$WT/.swarm/sidelined.off"
+sideline_wake_pass
+[ -z "${SIDELINE_WAKE_REFUSED[5]:-}" ] || red "marker removal must clear the backoff state"
+mv "$WT/.swarm/sidelined.off" "$WT/.swarm/sidelined"
+rm -f "$TEST_DIR/provision-out"
+green "backoff state cleared on marker removal (#758)"
 unset "SIDELINE_WAKE_REFUSED[5]"
 
 echo 4 > "$TEST_DIR/provision-rc"
