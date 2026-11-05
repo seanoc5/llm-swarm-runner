@@ -3872,6 +3872,10 @@ declare -A STRANDED_BRIEF_LOGGED=()
 # or the PR left draft), so a later re-occurrence notes again.
 declare -A STALE_WAIT_NOTED=()
 
+# issue #729: ready_sweep_pass's ci-failing dedup, keyed "<pr>:<sha>" (a new
+# head sha after a fix push that is red again notes again).
+declare -A CI_FAILING_NOTED=()
+
 # issue #468: a check-fail retry (or any later reconciliation in
 # worker-listener.sh's write_outcome()) can flip a task's outcome level
 # after its FIRST record already fired a real coord.wake — the corrected
@@ -4834,6 +4838,7 @@ orphan_sweep_pass() {
 # STALE_WAIT_NOTED; queueing any named brief stays the coordinator's call.
 ready_sweep_pass() {
     local dry_arg="" out line key pr trig k
+    local -A cfseen=()
     local -A seen=()
     [ "$DRY_RUN" = "1" ] && dry_arg="--dry-run"
     out="$(cd "$PROJECT_DIR" && WATCH_STALE_WAIT_CHECK="$WATCH_STALE_WAIT_CHECK" "$READY_SWEEP" $dry_arg 2>&1)" || {
@@ -4844,6 +4849,21 @@ ready_sweep_pass() {
         [ -n "$line" ] || continue
         echo "[$(date +%T)] ready-sweep: $line"
         log_event watch.ready_sweep "result=\"$line\""
+        if [[ "$line" =~ ^#([0-9]+)\ ci-failing:.*\(sha=([0-9a-fA-F]+)\) ]]; then
+            pr="${BASH_REMATCH[1]}" key="${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"
+            cfseen[$key]=1
+            [ -z "${CI_FAILING_NOTED[$key]:-}" ] || continue
+            if [ "$DRY_RUN" = "1" ]; then
+                echo "[DRY] would write coord-inbox ci-failing note for parked PR #$pr (sha ${BASH_REMATCH[2]})"
+            elif coord_inbox_write ci_failing "Parked draft PR #$pr has red CI on ${BASH_REMATCH[2]:0:7}; its worker already ended, so nobody owns the fix. Queue a fix brief to the issue's worker (or push the fix yourself), then re-run pr-ready.sh $pr. One note per head sha."; then
+                log_event coord.inbox.write "trigger=ci_failing pr=$pr sha=${BASH_REMATCH[2]}"
+            else
+                echo "[$(date +%T)] WARN: failed to write coord-inbox ci-failing note for PR #$pr" >&2
+                continue
+            fi
+            CI_FAILING_NOTED[$key]=1
+            continue
+        fi
         [[ "$line" =~ ^#([0-9]+)\ stale-wait:\ waiting\ on\ #([0-9]+) ]] || continue
         pr="${BASH_REMATCH[1]}" trig="${BASH_REMATCH[2]}" key="$pr:$trig"
         seen[$key]=1
@@ -4860,6 +4880,9 @@ ready_sweep_pass() {
     done <<<"$out"
     for k in "${!STALE_WAIT_NOTED[@]}"; do
         [ -n "${seen[$k]:-}" ] || unset 'STALE_WAIT_NOTED[$k]'
+    done
+    for k in "${!CI_FAILING_NOTED[@]}"; do
+        [ -n "${cfseen[$k]:-}" ] || unset 'CI_FAILING_NOTED[$k]'
     done
 }
 

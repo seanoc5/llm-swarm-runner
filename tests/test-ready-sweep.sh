@@ -66,6 +66,7 @@ run_sweep || red "expected exit 0: $(cat "$TEST_DIR/out.log")"
 [ "$(sort "$READY_LOG" | tr '\n' ' ')" = "11 12 " ] || red "expected pr-ready on 11 and 12 only, got: $(tr '\n' ' ' < "$READY_LOG")"
 grep -qx '#11 ci-pending: readied' "$TEST_DIR/out.log" || red "expected readied line: $(cat "$TEST_DIR/out.log")"
 grep -qx '#12 ci-unknown: still draft (exit 4)' "$TEST_DIR/out.log" || red "expected still-draft line: $(cat "$TEST_DIR/out.log")"
+grep -qx '#13 ci-failing: needs a fix push (sha=abc)' "$TEST_DIR/out.log" || red "expected ci-failing report for #13: $(cat "$TEST_DIR/out.log")"
 green "ci-failing, review-block, unbannered, null-body and mid-line-quoted drafts are left alone"
 
 heading "Test 2: --dry-run lists candidates without running pr-ready"
@@ -107,5 +108,13 @@ heading "Test 5: WATCH_STALE_WAIT_CHECK=0 turns the stale-wait check off"
 WATCH_STALE_WAIT_CHECK=0 run_sweep || red "expected exit 0"
 [ ! -s "$TEST_DIR/out.log" ] || red "expected no output with the check off: $(cat "$TEST_DIR/out.log")"
 green "off-switch honoured"
+
+heading "Test 6: --dry-run still reports ci-failing drafts (read-only)"
+cat > "$FIXTURE" <<'JSON'
+[{"number": 31, "body": "<!-- SWARM_DRAFT_REASON: ci-failing sha=deadbeef -->\nbody"}]
+JSON
+run_sweep --dry-run || red "expected exit 0"
+grep -qx '#31 ci-failing: needs a fix push (sha=deadbeef)' "$TEST_DIR/out.log" || red "dry run lost ci-failing line: $(cat "$TEST_DIR/out.log")"
+green "ci-failing reported in dry run"
 
 green "ALL TESTS PASSED"

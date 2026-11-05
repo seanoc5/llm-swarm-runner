@@ -39,6 +39,7 @@ printf '#!/usr/bin/env bash\ncat "%s"\n' "$SWEEP_OUT" > "$READY_SWEEP"
 chmod +x "$READY_SWEEP"
 log_event() { :; }
 declare -A STALE_WAIT_NOTED=()
+declare -A CI_FAILING_NOTED=()
 
 # shellcheck source=/dev/null
 . <(extract_fn coord_inbox_write; extract_fn ready_sweep_pass)
@@ -72,5 +73,19 @@ printf '%s\n' "$MERGED" > "$SWEEP_OUT"
 ready_sweep_pass >/dev/null
 [ "$(notes)" = "2" ] || red "expected a second note, got $(notes)"
 green "re-occurrence isn't permanently suppressed"
+
+heading "Test 5 (issue #729): a parked draft going red writes one ci_failing note per head sha"
+cf() { find "$COORD_INBOX_DIR" -maxdepth 1 -name '*-ci_failing-*.md' 2>/dev/null | wc -l | tr -d ' '; }
+RED='#31 ci-failing: needs a fix push (sha=deadbeef)'
+printf '%s\n' "$RED" > "$SWEEP_OUT"
+ready_sweep_pass >/dev/null
+[ "$(cf)" = "1" ] || red "expected 1 ci_failing note, got $(cf)"
+grep -q "PR #31 has red CI on deadbee" "$COORD_INBOX_DIR"/*-ci_failing-*.md || red "unexpected note: $(cat "$COORD_INBOX_DIR"/*-ci_failing-*.md)"
+ready_sweep_pass >/dev/null
+[ "$(cf)" = "1" ] || red "same sha must dedupe, got $(cf)"
+printf '#31 ci-failing: needs a fix push (sha=cafe1234)\n' > "$SWEEP_OUT"
+ready_sweep_pass >/dev/null
+[ "$(cf)" = "2" ] || red "new head sha must note again, got $(cf)"
+green "one note per PR+sha"
 
 green "ALL TESTS PASSED"

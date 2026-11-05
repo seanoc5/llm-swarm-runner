@@ -38,6 +38,12 @@ DRAFTS="$(gh pr list --state open --draft --limit 100 --json number,body)" \
     || { echo "ready-sweep: ERROR: gh pr list failed" >&2; exit 1; }
 CANDIDATES="$(jq -r '.[] | (.body // "" | capture("(?m)^<!-- SWARM_DRAFT_REASON: (?<r>ci-pending|ci-unknown) sha=").r) as $r | "\(.number) \($r)"' <<<"$DRAFTS")"
 
+# issue #729: ci-failing drafts are not retried, but a parked PR whose CI went
+# red has no live owner (its worker ended after writing an fyi note), so report
+# each one with its head sha; coordinator-watch.sh turns it into one inbox note
+# per (PR, sha). Read-only, so --dry-run reports it too.
+jq -r '.[] | (.body // "" | capture("(?m)^<!-- SWARM_DRAFT_REASON: ci-failing sha=(?<s>[0-9a-fA-F]+)").s) as $s | "#\(.number) ci-failing: needs a fix push (sha=\($s))"' <<<"$DRAFTS"
+
 while read -r pr reason; do
     [ -n "$pr" ] || continue
     if [ "$DRY_RUN" = "1" ]; then
