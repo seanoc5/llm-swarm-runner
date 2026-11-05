@@ -320,6 +320,34 @@ check "the installed command runs the hook, which reads the mode from the file" 
 rm -f "$P/.swarm"/needs-you.*
 setmode "$P" unset
 
+# ── coord-work-run.sh prompt selection ───────────────────────────────────────
+# The real wrapper with a claude stub that keeps the system prompt it is
+# handed. A rule that lives ONLY in coordinator-shared.md must be in it.
+heading "coord-work-run.sh passes the work + shared prompt"
+cat > "$T/bin/claude" <<STUB
+#!/usr/bin/env bash
+while [ \$# -gt 0 ]; do
+    [ "\$1" = --append-system-prompt-file ] && { cp "\$2" "$T/work-sys.md"; break; }
+    shift
+done
+STUB
+chmod +x "$T/bin/claude"
+W="$T/wproj"; mkdir -p "$W/.swarm"; rm -f "$T/work-sys.md"
+(cd "$W" && env -u COORD_WORK_RUN_CMD -u COORD_WORK_PROMPT_FILE LLM_SWARM_DIR="$ROOT" "$ROOT/scripts/coord-work-run.sh" "$W" "Run once." >/dev/null 2>&1) || true
+[ -s "$T/work-sys.md" ] && got=captured || got=missing
+check "the wrapper handed claude a system prompt file" "captured" "$got"
+RULE='Never `tmux send-keys` into another agent'
+grep -qF "$RULE" "$ROOT/prompts/coordinator-shared.md" && ! grep -qF "$RULE" "$ROOT/prompts/coordinator-work.md" && got=shared-only || got=not-shared-only
+check "fixture rule exists only in coordinator-shared.md" "shared-only" "$got"
+grep -qF "$RULE" "$T/work-sys.md" && got=yes || got=no
+check "work-run prompt carries the shared-only no-send-keys rule" "yes" "$got"
+grep -qF 'Report grammar (BLUF)' "$T/work-sys.md" && got=yes || got=no
+check "work-run prompt carries the shared report grammar" "yes" "$got"
+"$RENDER" work | cmp -s - "$T/work-sys.md" && got=same || got=differs
+check "work-run prompt is exactly the work render" "same" "$got"
+grep -qF '{{LLM_SWARM_DIR}}' "$T/work-sys.md" && got=left || got=none
+check "work-run prompt has {{LLM_SWARM_DIR}} substituted" "none" "$got"
+
 # ── llm-start.sh ─────────────────────────────────────────────────────────────
 heading "llm-start.sh"
 S="$T/start"; mkdir -p "$S/proj/.swarm"; (cd "$S/proj" && git init -q . && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m i)

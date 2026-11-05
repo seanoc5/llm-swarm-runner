@@ -13,7 +13,7 @@
 | Prompt for a work run | n/a | `scripts/render-coordinator-prompt.sh work` (`prompts/coordinator-work.md` + shared) |
 | Merges | the session | work run: opt-in automerges only; explicit merges (`merge PR N`, 🔴 `merge PR N red`) are the conversation session's, in your own turn |
 
-The launcher that starts work runs (lock, log, timeout, budget) is **not** part of this change (ADR 0006 step A2). Until it exists a split-mode swarm has nobody triaging the inbox on its own; run a work run by hand with `scripts/render-coordinator-prompt.sh work > /tmp/work.md && claude -p --append-system-prompt-file /tmp/work.md "Run once."` if you want to try one.
+In split mode the watcher starts the work runs itself: `scripts/coord-work-run.sh` (ADR 0006 step A2, issue #765) takes a single-flight lock, keeps the log, bounds time and spend, and renders the system prompt with `scripts/render-coordinator-prompt.sh work` (`prompts/coordinator-work.md` + `prompts/coordinator-shared.md`), so a work run carries the same no-`send-keys` rule, report grammar and verdict handling as the other modes. To try one by hand: `scripts/coord-work-run.sh <project> "Run once."`.
 
 ### Where the mode lives
 
@@ -60,7 +60,7 @@ A work run starts with no memory, so everything it needs is one of these:
 | Your standing instructions | `.swarm/operator-notes.md` | `operator-note.sh --standing` | the run (first), the conversation session |
 | Standing Needs-you list | `.swarm/needs-you.md` | the run, only when the list changes | the conversation session, the hook, you |
 | Previous digest ("Moved since last run" diffs against it) | `.swarm/work-run/last-digest.md` | the run, every run | the next run |
-| Run bookkeeping (start, finish, exit, tokens) | `.swarm/work-run/runs.log` | the run wrapper (ADR step A2, not built yet) | you |
+| Run bookkeeping (start, finish, exit, tokens) | `.swarm/work-run/runs.log` | `scripts/coord-work-run.sh` | you |
 | Worker briefs and outcomes | `.swarm/tasks/` | workers, watcher | the run |
 | Live truth about windows and PRs | `tmux list-windows`, `gh pr list` | n/a | the run, re-queried each time |
 
