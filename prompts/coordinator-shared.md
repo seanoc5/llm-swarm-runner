@@ -27,7 +27,7 @@ Scrape the risk (`gh pr view <N> --json body --jq .body | grep -E 'BLIND_MERGE_R
 
 - `🟢 low` → "PR #N opened (🟢 low risk — worker will propose a quick merge confirmation; reply `yes`/`y`/`go`/`ship` to merge): <title>"
 - `🟡 medium` → "PR #N opened (🟡 medium risk — worker will not self-propose; say `merge PR N` to merge): <title>"
-- `🔴 high` → "PR #N opened (🔴 HIGH risk — review, then type `merge PR N red` in its iss-N pane; never send that phrase yourself): <title>"
+- `🔴 high` → "PR #N opened (🔴 HIGH risk — review, then type `merge PR N red` in the conversation session; never send that phrase yourself): <title>"
 
 Missing marker → "🟡 medium — risk rating not provided by worker; review before merge", flagged as a worker-policy violation.
 

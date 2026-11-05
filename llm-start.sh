@@ -940,7 +940,11 @@ elif ! $window_exists; then
     echo "Session $SESSION_NAME exists but coordinator window is gone. Recreating window."
     tmux new-window -d -t "$SESSION_NAME" -n coordinator
 elif $coordinator_idle; then
+    if [ "$COORD_MODE" = "split" ] && [ "$PROMPT_EXPLICIT" = "1" ]; then
+        echo "Session $SESSION_NAME exists; split-mode conversation pane is idle. A wake never starts it; nothing is typed."
+    else
     echo "Session $SESSION_NAME exists; coordinator pane is idle (previous agent exited). Sending new prompt to existing window."
+    fi
 elif [ "$COORD_MODE" = "split" ]; then
     echo "Session $SESSION_NAME exists; split-mode conversation session is live (pane: '$PANE_CMD'). Attaching; nothing is typed into it."
 elif [ "$COORD_CMD" = "claude" ] && [ "${COORDINATOR_HEADLESS:-0}" != "1" ]; then
@@ -1046,7 +1050,14 @@ fi
 # Only build + send a launch command when we have an idle/empty pane to
 # send into. (Skipped when an agent is already running in the existing
 # session — that case is handled by the live-REPL reprompt elif below.)
-if ! $session_existed || ! $window_exists || $coordinator_idle; then
+# split mode (#767): a wake (explicit prompt) never starts or types into the
+# conversation session, even when its pane sits at a shell; only a plain
+# llm-start.sh by the operator launches it.
+SPLIT_WAKE_SKIP=0
+if [ "$COORD_MODE" = "split" ] && [ "$PROMPT_EXPLICIT" = "1" ] && $session_existed && $window_exists; then
+    SPLIT_WAKE_SKIP=1
+fi
+if [ "$SPLIT_WAKE_SKIP" = "0" ] && { ! $session_existed || ! $window_exists || $coordinator_idle; }; then
     # We pass the prompt via a temporary file to handle multiline strings safely
     TMP_PROMPT=$(mktemp)
     echo "$INITIAL_PROMPT" > "$TMP_PROMPT"

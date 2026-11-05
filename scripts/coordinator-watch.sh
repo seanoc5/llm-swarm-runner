@@ -7537,8 +7537,12 @@ compact_retract_queued() {
 maybe_auto_compact() {
     local trigger="${1:-wake}"
     [ "$AUTO_COMPACT" = "1" ] || return 0
-    # issue #765: no coordinator pane is typed into in split mode.
-    coord_split_active && return 0
+    # COORD_MODE=split (#765, #767): nothing types into the coordinator pane
+    # but the operator, so the watcher never injects /compact into it.
+    if coord_split_active; then
+        log_event coord.compact.skip "reason=split_mode trigger=$trigger"
+        return 0
+    fi
 
     # issue #210: this function is now reachable from two separate
     # processes — the wake path (on_outcome, in the main watcher process)

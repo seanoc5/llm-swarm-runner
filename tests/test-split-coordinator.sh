@@ -351,5 +351,28 @@ check "split + live session: the skip is logged" "logged" "$got"
 grep -q 'split-mode conversation session is live' "$S/out.txt" && got=yes || got=no
 check "split + live session: says nothing was typed" "yes" "$got"
 
+# A pane sitting at a shell: a wake still must not start or type into the chat.
+sed -i "s/PANE_CMD=claude/PANE_CMD=bash/" "$T/bin/tmux"
+start split "wake up"
+grep -qE "send-keys|paste-buffer|load-buffer" "$S/tmux.log" && got=typed || got=untouched
+check "split + idle shell pane: a wake types nothing and launches nothing" "untouched" "$got"
+grep -q "coord.wake.skip reason=split_mode" "$S/proj/.swarm/events.log" && got=logged || got=missing
+check "split + idle shell pane: the skip is logged" "logged" "$got"
+
+# Auto-compact never injects /compact into the conversation session.
+heading "auto-compact"
+log_event() { echo "$*" >> "$T/ev.log"; }
+eval "$(sed -n "/^maybe_auto_compact() {/,/^    fi$/p" "$ROOT/scripts/coordinator-watch.sh")
+    return 99
+}"
+# shellcheck disable=SC2034
+AUTO_COMPACT=1; : > "$T/ev.log"
+COORD_MODE=split maybe_auto_compact wake; rc=$?
+check "split: maybe_auto_compact returns before touching the pane" "0" "$rc"
+grep -q "reason=split_mode" "$T/ev.log" && got=logged || got=missing
+check "split: maybe_auto_compact logs the skip" "logged" "$got"
+set +e; COORD_MODE=resident maybe_auto_compact wake; rc=$?; set -e
+check "resident: maybe_auto_compact proceeds past the split guard" "99" "$rc"
+
 echo
 green "all split-coordinator checks passed"
