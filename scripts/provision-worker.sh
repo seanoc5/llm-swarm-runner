@@ -129,6 +129,28 @@ SANDBOX_SH="${SANDBOX_SH:-$LLM_SWARM_DIR/sandbox.sh}"
 WT="$(swarm_worktree_dir "$PROJECT_DIR" "$ISSUE")"
 mkdir -p "$(dirname "$WT")"
 
+# issue #766 (ADR 0006 §3): refuse a duplicate dispatch. Two provisions of the
+# same issue (a work run and the operator's conversation session) used to both
+# queue "Fix issue #N" and run the work twice. Serialize per issue under a
+# flock held until this script exits (through the spawn: a second provision
+# must not run its window check in the gap before iss-N exists, or it would
+# salvage this run's fresh brief; the tmux session already exists here, so no
+# tmux server is started from this process to inherit the fd), then refuse when an issue brief is
+# already queued (inbox/) or claimed (processing/) while the worker is live or
+# sidelined (the check itself sits after the window checks below). The lock is
+# taken first (before the worktree is created, so two first-time provisions
+# serialize on git worktree add too), since salvage_stale_queue moves queued
+# briefs aside. The lock file sits beside the worktree so it exists before it.
+# --wake resumes an already-queued brief, so it is exempt from the refusal.
+# To send a worker something new, use requeue.sh; to force a second issue
+# brief anyway, set PROVISION_ALLOW_DUPLICATE=1.
+if command -v flock >/dev/null 2>&1; then
+    if { exec {DISPATCH_LOCK_FD}>"$(dirname "$WT")/.dispatch-$(basename "$WT").lock"; } 2>/dev/null; then
+        flock -w "${PROVISION_DISPATCH_LOCK_TIMEOUT_SECS:-120}" "$DISPATCH_LOCK_FD" \
+            || { echo "ERROR: another provision of issue #$ISSUE holds the dispatch lock — nothing queued. Retry." >&2; exit 5; }
+    fi
+fi
+
 MAX_WORKERS="${MAX_WORKERS:-5}"
 MAX_TMUX_WINDOWS="${MAX_TMUX_WINDOWS:-10}"
 HOST_MAX_WORKERS="${HOST_MAX_WORKERS:-8}"
@@ -663,23 +685,6 @@ elif ! ISSUE_COMMENTS_JSON="$(gh issue view "$ISSUE" --json comments)"; then
     exit 2
 fi
 
-# issue #766 (ADR 0006 §3): refuse a duplicate dispatch. Two provisions of the
-# same issue (a work run and the operator's conversation session) used to both
-# queue "Fix issue #N" and run the work twice. Serialize per issue under a
-# flock held until this script exits, then refuse when an issue brief is
-# already queued (inbox/) or claimed (processing/) while the worker is live or
-# sidelined (the check itself sits after the window checks below). The lock is
-# taken first, since salvage_stale_queue moves queued briefs aside.
-# --wake resumes an already-queued brief, so it is exempt from the refusal.
-# To send a worker something new, use requeue.sh; to force a second issue
-# brief anyway, set PROVISION_ALLOW_DUPLICATE=1.
-if command -v flock >/dev/null 2>&1; then
-    mkdir -p "$WT/.swarm/tasks/inbox" "$WT/.swarm/tasks/processing"
-    if { exec {DISPATCH_LOCK_FD}>"$WT/.swarm/dispatch.lock"; } 2>/dev/null; then
-        flock -w "${PROVISION_DISPATCH_LOCK_TIMEOUT_SECS:-120}" "$DISPATCH_LOCK_FD" \
-            || { echo "ERROR: another provision of issue #$ISSUE holds the dispatch lock — nothing queued. Retry." >&2; exit 5; }
-    fi
-fi
 # A live iss-N window means "queue a follow-up": no caps, no spawn.
 # remain-on-exit=failed (llm-start.sh) keeps a crashed window listed, so a
 # dead pane is reclaimed and treated as no window (#493).
@@ -813,11 +818,6 @@ if [ "${BRIEF_LINT:-1}" = "1" ] && [ -x "$SCRIPT_DIR/lint-brief.sh" ]; then
     "$SCRIPT_DIR/lint-brief.sh" "$DEST" || true
 fi
 fi
-
-# Brief is in the inbox: the duplicate-check critical section is over. Drop the
-# dispatch lock now so a tmux server started below can't inherit the fd and
-# hold the lock for its lifetime (issue #766).
-if [ -n "${DISPATCH_LOCK_FD:-}" ]; then exec {DISPATCH_LOCK_FD}>&-; fi
 
 # 4. Spawn (detached, so the coordinator keeps focus).
 if [ "$WINDOW_EXISTS" -eq 1 ]; then

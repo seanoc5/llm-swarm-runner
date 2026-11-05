@@ -361,7 +361,7 @@ fi
 # run and the conversation session both answering one question). The check
 # and the claim below run under the same per-worktree flock provision-worker.sh
 # uses. REQUEUE_ALLOW_DUPLICATE=1 overrides.
-if command -v flock >/dev/null 2>&1 && { exec {DISPATCH_LOCK_FD}>"$WT/.swarm/dispatch.lock"; } 2>/dev/null; then
+if command -v flock >/dev/null 2>&1 && { exec {DISPATCH_LOCK_FD}>"$(dirname "$WT")/.dispatch-$(basename "$WT").lock"; } 2>/dev/null; then
     flock -w "${PROVISION_DISPATCH_LOCK_TIMEOUT_SECS:-120}" "$DISPATCH_LOCK_FD" \
         || { echo "ERROR: another dispatch to $WT holds the dispatch lock — nothing queued. Retry." >&2; rm -f "$TMP"; exit 5; }
 fi

@@ -985,7 +985,9 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
         echo "       $(c_amber "⚠ action lock unavailable (no flock, or lock file not writable) — merging without it")"
         log_event merge.gate "pr=$PR_NUM gate=action-lock result=unavailable action=proceed-unlocked"
       fi
-      GATE_SHA="${MATCH_SHA:-$(jq -r '.headRefOid // ""' <<<"$PR_JSON" 2>/dev/null || true)}"
+      # The head the gates actually saw: the CI-verified or reviewed commit, else the
+      # head from the initial PR read (never the fresh fallback read above).
+      GATE_SHA="${CI_VERIFIED_SHA:-${REVIEWED_SHA:-$(jq -r '.headRefOid // ""' <<<"$PR_JSON" 2>/dev/null || true)}}"
       LOCK_JSON="" ; LOCK_RC=0
       LOCK_JSON=$(gh pr view "$PR_NUM" --json state,headRefOid 2>/dev/null) || LOCK_RC=$?
       LOCK_STATE=$(jq -r '.state // ""' <<<"$LOCK_JSON" 2>/dev/null || true)

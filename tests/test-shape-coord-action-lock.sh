@@ -43,7 +43,16 @@ case "\${1:-} \${2:-}" in
 esac
 exit 0
 STUB
-printf '#!/usr/bin/env bash\ncase "${1:-}" in has-session) exit 0;; list-panes) echo 0;; list-windows) cat "%s/windows" 2>/dev/null;; esac\nexit 0\n' "$TEST_DIR" > "$TEST_DIR/bin/tmux"
+cat > "$TEST_DIR/bin/tmux" <<STUB
+#!/usr/bin/env bash
+case "\${1:-}" in
+  has-session) exit 0 ;;
+  list-panes) echo 0 ;;
+  new-window) sleep 1; echo "\$6" >> "$TEST_DIR/windows" ;;   # window exists once spawned
+  list-windows) cat "$TEST_DIR/windows" 2>/dev/null ;;
+esac
+exit 0
+STUB
 printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_DIR/bin/docker"
 chmod +x "$TEST_DIR"/bin/*
 export PATH="$TEST_DIR/bin:$PATH"
@@ -102,7 +111,7 @@ inbox_count() { find "$TEST_DIR" -path "*wt-issue-$1/.swarm/tasks/inbox/*.md" | 
 heading "D: duplicate provision refused for a live worker; crash recovery still works"
 [ "$(prov 31)" = 0 ] || red "first provision failed: $(cat "$TEST_DIR/prov.log")"
 [ "$(inbox_count 31)" = 1 ] || red "expected 1 brief after first provision"
-echo "iss-31" > "$TEST_DIR/windows"            # worker window is now live
+grep -qx iss-31 "$TEST_DIR/windows" || red "stub tmux should list iss-31 after the spawn"
 rc=$(prov 31)
 [ "$rc" = 5 ] || red "duplicate provision should exit 5, got $rc: $(cat "$TEST_DIR/prov.log")"
 [ "$(inbox_count 31)" = 1 ] || red "duplicate provision queued a second brief"
@@ -111,6 +120,18 @@ rm -f "$TEST_DIR/windows"                       # window gone (crash)
 rc=$(prov 31)
 [ "$rc" = 0 ] || red "re-provision after crash should still work, rc=$rc: $(cat "$TEST_DIR/prov.log")"
 green "no live window: re-provision allowed (stale brief salvaged)"
+
+heading "D2: two simultaneous first provisions of one issue queue one brief"
+rm -f "$TEST_DIR/windows"
+( set +e; ( cd "$PROJECT_DIR" && env "${off[@]}" bash "$LLM_SWARM_DIR/scripts/provision-worker.sh" 32 >"$TEST_DIR/p1.log" 2>&1 ); echo $? >"$TEST_DIR/p1.rc" ) &
+( set +e; ( cd "$PROJECT_DIR" && env "${off[@]}" bash "$LLM_SWARM_DIR/scripts/provision-worker.sh" 32 >"$TEST_DIR/p2.log" 2>&1 ); echo $? >"$TEST_DIR/p2.rc" ) &
+wait
+rcs="$(sort "$TEST_DIR/p1.rc" "$TEST_DIR/p2.rc" | tr '\n' ' ')"
+[ "$rcs" = "0 5 " ] || red "expected one success and one duplicate refusal, got: $rcs
+$(cat "$TEST_DIR/p1.log" "$TEST_DIR/p2.log")"
+[ "$(inbox_count 32)" = 1 ] || red "expected exactly 1 brief, got $(inbox_count 32)"
+[ "$(grep -c iss-32 "$TEST_DIR/windows")" = 1 ] || red "expected exactly one spawned window"
+green "concurrent provisions: one spawned, one refused (exit 5), one brief"
 
 heading "E: requeue.sh refuses an identical pending brief"
 WT="$(find "$TEST_DIR" -maxdepth 3 -type d -name wt-issue-31 | head -1)"
