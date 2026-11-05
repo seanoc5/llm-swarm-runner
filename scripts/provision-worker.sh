@@ -245,6 +245,9 @@ refuse_cap() {
     local reason="$1" msg="$2" hint="$3"; shift 3
     echo "ERROR: $msg" >&2
     [ -n "$hint" ] && echo "       $hint" >&2
+    # Machine-readable reason line: coordinator-watch.sh (#758) keys its wake
+    # backoff on it (short waits like spawn_stagger must not be backed off).
+    echo "cap.refused reason=$reason" >&2
     log_event cap.refused "issue=$ISSUE reason=$reason $*"
     exit 3
 }
