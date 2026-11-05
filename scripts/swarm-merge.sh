@@ -970,6 +970,8 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
       # from both merging one PR. Under the lock, re-read the PR: someone
       # else may have merged it already (then we skip the merge, not fail),
       # or the head may have moved since the gates ran (refuse).
+      # Only this script takes the lock; worker-merge.sh (sandbox) does not and
+      # relies on --match-head-commit instead (issue #773).
       ACTION_LOCK_FILE="${COORD_ACTIONS_LOCK:-$MAIN_WT/.swarm/coord-actions.lock}"
       mkdir -p "$(dirname "$ACTION_LOCK_FILE")" 2>/dev/null || true
       ACTION_LOCK_HELD=0

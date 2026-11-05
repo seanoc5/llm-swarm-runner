@@ -131,6 +131,13 @@ has 26 lines using `flock` in the watcher):
   re-read the PR head and merge state and run `gh pr merge` under the lock. The
   lock must not wrap `ci-wait.sh`, which can block 570 s and would stall the
   operator's own merges.
+  Not every merge path takes it: `scripts/swarm-merge.sh` (coordinator and
+  operator merges, including `--auto-low`/`--auto-medium`) does; `scripts/worker-merge.sh`
+  (a worker merging its own approved PR from the sandbox) does not. The sandbox
+  cannot reach the main worktree where the lock file lives, and the worker path
+  pins the approved head with `--match-head-commit`, so a race with a locked
+  merge ends in one refusal, never a second merge. Manual `gh pr merge` and UI
+  merges take no lock either.
 
 Two rules cut the remaining overlap:
 
