@@ -66,6 +66,32 @@ grep -qF SHOW-appended-line "$log" || red "appended line not followed: $(cat "$l
 grep -qF SHOW-new-session "$log" || red "new session not followed: $(cat "$log")"
 ! grep -q HIDE "$log" || red "follow leaked hidden text"
 green "follows appended lines and a newer session"
+# ── 5b. issue #764: a reply written just before a session switch still shows;
+#        two live sessions flipping "newest" do not replay each other ──
+D2="$T/projects/$SLUG-b"; PROJ2="$T/proj-b"; mkdir -p "$PROJ2"
+SLUG2="$(printf '%s' "$(cd "$PROJ2" && pwd -P)" | sed 's/[^A-Za-z0-9]/-/g')"
+D2="$CLAUDE_PROJECTS_DIR/$SLUG2"; mkdir -p "$D2"
+rec cli "SHOW-old-seed" > "$D2/one.jsonl"; touch -d '2026-11-05 03:00:00' "$D2/one.jsonl"
+log2="$T/flip.out"
+timeout 12 "$VIEW" "$PROJ2" --interval 1 --tail 0 >"$log2" 2>&1 &
+vp=$!
+sleep 2
+# reply lands and the session switches within one poll interval
+rec cli "SHOW-last-before-switch" >> "$D2/one.jsonl"; touch -d 'now + 1 hour' "$D2/one.jsonl"
+rec cli "SHOW-second-session" > "$D2/two.jsonl"; touch -d 'now + 2 hours' "$D2/two.jsonl"
+sleep 2.5
+# flip back and forth: one.jsonl becomes newest again, then two.jsonl
+rec cli "SHOW-one-again" >> "$D2/one.jsonl"; touch -d 'now + 3 hours' "$D2/one.jsonl"
+sleep 2.5
+rec cli "SHOW-two-again" >> "$D2/two.jsonl"; touch -d 'now + 4 hours' "$D2/two.jsonl"
+sleep 2.5
+wait "$vp" 2>/dev/null || true
+grep -qF SHOW-last-before-switch "$log2" || red "reply before session switch was lost: $(cat "$log2")"
+[ "$(grep -cF SHOW-last-before-switch "$log2")" = 1 ] || red "reply replayed on a flip: $(cat "$log2")"
+[ "$(grep -cF SHOW-second-session "$log2")" = 1 ] || red "second session replayed on a flip: $(cat "$log2")"
+grep -qF SHOW-one-again "$log2" && grep -qF SHOW-two-again "$log2" || red "flip-back lines missing: $(cat "$log2")"
+green "last reply before a session switch survives; flipping sessions do not replay"
+
 # ── 6. a bad CONV_HIDE_RE is refused, not silently blanking the view ──
 if CONV_HIDE_RE="(" "$VIEW" --file "$FIX" --once >/dev/null 2>&1; then red "invalid CONV_HIDE_RE accepted"; fi
 green "invalid CONV_HIDE_RE refused"

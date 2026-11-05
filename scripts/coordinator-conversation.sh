@@ -180,6 +180,7 @@ if [ -z "$cur" ]; then
 fi
 
 offset=0
+declare -A seen=()
 
 # Render whatever whole lines were appended since $offset; keep only the last
 # $1 messages when given. A trailing partial line waits for its newline.
@@ -207,10 +208,20 @@ while :; do
     next="$(pick || true)"
     [ -n "$next" ] || continue
     if [ "$next" != "$cur" ]; then
+        # Flush the old transcript first: a reply written just before a restart
+        # or /clear would otherwise be dropped (issue #764).
+        [ -z "$cur" ] || { consume ""; seen["$cur"]=$offset; }
+        if [ -n "${seen[$next]+x}" ]; then
+            # Two live sessions take turns as "newest"; resume the one we
+            # already showed where we left off instead of replaying it.
+            cur="$next" offset="${seen[$next]}"
+            consume ""
+            continue
+        fi
         [ -z "$cur" ] || printf '%s── new session ──%s\n\n' "$C_DIM" "$C_RST"
         cur="$next" offset=0
-        # A switched-to session is new to the reader: show its last --tail
-        # messages (20 when --tail 0), so a resumed old session is not replayed.
+        # A session new to the reader shows its last --tail messages (20 when
+        # --tail 0), so a resumed old session is not replayed.
         consume "$(( TAIL > 0 ? TAIL : 20 ))"
         continue
     fi
