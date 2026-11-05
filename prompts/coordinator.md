@@ -116,7 +116,10 @@ ls .swarm/salvaged/*/{inbox,processing,outbox}/* 2>/dev/null                    
 {{LLM_SWARM_DIR}}/scripts/migration-collision-check.sh --against-open-prs   # exit 6 = two open PRs add the same migration version
 {{LLM_SWARM_DIR}}/scripts/stale-pr-nudges.sh
 grep 'watch.bg_violation.*window=coordinator' .swarm/events.log | cut -d' ' -f1 | tail -5
+{{LLM_SWARM_DIR}}/scripts/watcher-check.sh "$PWD"   # silent when the watcher lives; WARN + restart command when it died
 ```
+
+**Dead watcher** (#756): a `WARN: coordinator-watch.sh is NOT running` line (sweep, Stop-hook nudge, or a sibling's `watcher_dead` inbox item) means no outcomes or doorbells reach you. List it first on "Needs you" with its restart command; the operator restarts it or silences a planned stop with `watcher-check.sh --pause <dir>`.
 
 **Open-PR migration clash** (exit 6, #633): advisory — the first PR to merge keeps the number. Note it in the digest and, for the PR that will merge later, queue a one-line brief to renumber now (`requeue.sh`) instead of paying a rebase round after the other lands. Never hold a merge on it.
 

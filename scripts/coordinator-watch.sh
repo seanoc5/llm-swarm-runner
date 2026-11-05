@@ -613,6 +613,22 @@
 #                           handling for the same wake, and from
 #                           redeciding the same still-pending note on
 #                           every later tick.
+#   WATCH_SIBLING_SWEEP_SECS=300
+#                           (issue #756) Every this many seconds, run
+#                           watcher-check.sh --siblings: sibling projects
+#                           (next to this one, plus WATCH_SIBLING_ROOTS) whose
+#                           watcher is dead, not stopped on purpose, and that
+#                           started a worker within WATCH_SIBLING_RECENT_SECS
+#                           (default 3 days) get ONE coord-inbox note
+#                           (kind watcher_dead, urgent), deduped until that
+#                           sibling's watcher is alive or silenced again. It
+#                           covers a swarm whose own coordinator never wakes
+#                           to run its own check. A watcher stopped with
+#                           Ctrl-C / `kill` writes .swarm/watcher-stopped,
+#                           and `watcher-check.sh --pause <dir>` writes
+#                           .swarm/watcher-paused; either silences the note
+#                           for WATCHER_PAUSE_MAX_SECS (default 3 days), and
+#                           starting a watcher clears both. 0 disables.
 #   COORD_QUIET_WAKES=1     (issue #730) master switch for quiet wakes: 1 = batch non-urgent
 #                           inbox kinds (COORD_INBOX_BATCH_SECS) and add "Woke for: <kinds>."
 #                           to the nudge, which cues the coordinator's quiet-reply rule;
@@ -2048,6 +2064,7 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     WATCH_WORKTREE_SWEEP_SECS 60  periodic detection of a worktree removed outside every blessed reap path (0=off); see header comment (issue #439)
     WATCH_PENDING_BRIEF_SWEEP_SECS 300  periodic backstop posting SWARM_PENDING_BRIEF when a queued brief predates its PR (0=off); see header comment (issue #439)
     WATCH_STRANDED_BRIEF_SWEEP_SECS 60  periodic detection of a queued/claimed brief with no live iss-N window to drain it (0=off); see header comment (issue #448)
+    WATCH_SIBLING_SWEEP_SECS 300  warn (coord-inbox watcher_dead) about sibling projects whose watcher died while they had recent workers (0=off); see header comment (issue #756)
     COORD_WAKE_LOCK_TIMEOUT_SECS 60  max wait to flock COORD_WAKE_LOCK before a wake gives up (see that lock's header comment)
     COORD_WAKE_RETRY_SECS 15      retry interval for a wake llm-start.sh deferred (composer held an unsubmitted human draft, issue #422); 0=off
     COORD_WAKE_DEFER_WARN_SECS 300  loud WARN threshold for a wake still deferred this long (issue #422); retries never stop on their own
@@ -2735,6 +2752,9 @@ WATCH_WORKTREE_SWEEP_SECS="${WATCH_WORKTREE_SWEEP_SECS:-60}"
 WATCH_PENDING_BRIEF_SWEEP_SECS="${WATCH_PENDING_BRIEF_SWEEP_SECS:-300}"
 # issue #448 — see header comment.
 WATCH_STRANDED_BRIEF_SWEEP_SECS="${WATCH_STRANDED_BRIEF_SWEEP_SECS:-60}"
+# issue #756 — sibling-swarm dead-watcher sweep; see header comment.
+WATCH_SIBLING_SWEEP_SECS="${WATCH_SIBLING_SWEEP_SECS:-300}"
+WATCHER_CHECK="${WATCHER_CHECK:-$LLM_SWARM_DIR/scripts/watcher-check.sh}"
 # issue #622 — sidelining idle workers; see header comment.
 WATCH_SIDELINE_SECS="${WATCH_SIDELINE_SECS:-0}"
 WATCH_SIDELINE_SWEEP_SECS="${WATCH_SIDELINE_SWEEP_SECS:-60}"
@@ -3044,6 +3064,10 @@ if ! [[ "$WATCH_WORKTREE_SWEEP_SECS" =~ ^[0-9]+$ ]]; then
 fi
 if ! [[ "$WATCH_PENDING_BRIEF_SWEEP_SECS" =~ ^[0-9]+$ ]]; then
     echo "ERROR: WATCH_PENDING_BRIEF_SWEEP_SECS must be a non-negative integer (got: $WATCH_PENDING_BRIEF_SWEEP_SECS)" >&2
+    exit 1
+fi
+if ! [[ "$WATCH_SIBLING_SWEEP_SECS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: WATCH_SIBLING_SWEEP_SECS must be a non-negative integer (got: $WATCH_SIBLING_SWEEP_SECS)" >&2
     exit 1
 fi
 if ! [[ "$WATCH_STRANDED_BRIEF_SWEEP_SECS" =~ ^[0-9]+$ ]]; then
@@ -3823,8 +3847,12 @@ trap cleanup_on_exit EXIT
 # watcher_check_staleness below, which calls cleanup_on_exit once and
 # then SIGKILLs — SIGKILL skips traps entirely, so that path never
 # re-enters cleanup_on_exit a second time.)
-trap 'cleanup_on_exit; exit 130' INT
-trap 'cleanup_on_exit; exit 143' TERM
+# issue #756: a Ctrl-C or `kill` is a deliberate stop; leave a marker so
+# watcher-check.sh does not report it as a crash. SIGKILL, SIGHUP (tmux pane
+# or session killed) and the stale-code self-shutdown leave none, so those warn.
+mark_deliberate_stop() { : > "$PROJECT_DIR/.swarm/watcher-stopped" 2>/dev/null || true; }
+trap 'mark_deliberate_stop; cleanup_on_exit; exit 130' INT
+trap 'mark_deliberate_stop; cleanup_on_exit; exit 143' TERM
 
 # Shared state
 # issue #459: the outcome and outbox-message doorbell clocks were separate
@@ -3905,6 +3933,11 @@ WT_INVENTORY_SEEDED=0
 # the queue drains — archived), so a future re-strand of the same issue
 # number reports again instead of staying permanently suppressed.
 declare -A STRANDED_BRIEF_LOGGED=()
+
+# issue #756: watcher_sibling_sweep_pass's dedup, keyed by sibling project
+# dir. Cleared once that sibling stops being reported (watcher back, silenced
+# or no recent workers), so a later death notes again.
+declare -A SIBLING_DEAD_LOGGED=()
 
 # issue #635: ready_sweep_pass's stale-wait dedup, keyed "<pr>:<trigger>".
 # Dropped once ready-sweep.sh stops reporting that pair (Next line rewritten,
@@ -4289,6 +4322,9 @@ WATCHER_STATE_FILE="$PROJECT_DIR/.swarm/coordinator-watch.state"
     printf 'script_path=%s\n' "$WATCHER_SELF_PATH"
     printf 'script_mtime_at_launch=%s\n' "$WATCHER_LAUNCH_MTIME"
 } > "$WATCHER_STATE_FILE" 2>/dev/null || true
+# issue #756: a running watcher supersedes any earlier planned or deliberate
+# stop (watcher-check.sh reads these markers to tell a stop from a crash).
+rm -f "$PROJECT_DIR/.swarm/watcher-stopped" "$PROJECT_DIR/.swarm/watcher-paused" 2>/dev/null || true
 
 # watcher_is_stale
 #
@@ -5507,6 +5543,39 @@ stranded_brief_body() {
     local issue="$1" wt_dir="$2" lines="$3"
     printf 'A queued or claimed brief in issue #%s'\''s worktree (%s) has no live iss-%s tmux window left to drain it. A session restart, or a parked/window-only reap (kill-finished-workers.sh with no --with-worktree, which deliberately keeps the worktree) can each leave this behind with no salvage and no other record (issue #448).\n\nQueued file(s) (queue, age, path):\n%s\n\nCheck `gh pr list --head fix/issue-%s`: if the PR already merged (or the work is otherwise moot), archive the file(s) above out of inbox/processing/ and say why. Otherwise re-provision with `provision-worker.sh --wake %s` — move any processing/ entry back to inbox/ first so it is picked up as a fresh claim rather than silently skipped (--wake resumes that exact brief instead of salvaging it aside for a fresh issue fetch, issue #578).\n' \
         "$issue" "$wt_dir" "$issue" "$lines" "$issue" "$issue"
+}
+
+# watcher_sibling_sweep_pass
+#
+# issue #756: tell this swarm's coordinator about a SIBLING project whose
+# watcher is dead while it still has recent workers (civicstrata, 2026-11:
+# no watcher for days, an unread decision-needed file, a green PR stuck in
+# draft). The dead swarm cannot run its own check, so a live one reports.
+watcher_sibling_sweep_pass() {
+    [ -x "$WATCHER_CHECK" ] || return 0
+    local dir secs last body
+    local -A now_dead=()
+    while IFS=$'\t' read -r dir secs last; do
+        [ -n "$dir" ] || continue
+        now_dead["$dir"]=1
+        [ -n "${SIBLING_DEAD_LOGGED[$dir]:-}" ] && continue
+        if [ "$DRY_RUN" = "1" ]; then
+            echo "[DRY] would write coord-inbox watcher_dead entry for $dir"
+            continue
+        fi
+        body="$(printf 'The coordinator-watch.sh watcher for sibling project %s is not running, and that project started a worker at %s. While it is down nothing there delivers outcomes, outbox messages or ready sweeps, and its coordinator may not know (issue #756; a dead watcher is otherwise silent).\n\nIf it was stopped on purpose, silence this with `%s --pause %s`. Otherwise restart it: `cd %s && NON_INTERACTIVE=1 %s/llm-start.sh`. Tell the operator rather than restarting another swarm yourself.\n' \
+            "$dir" "$last" "$WATCHER_CHECK" "$dir" "$dir" "$LLM_SWARM_DIR")"
+        if coord_inbox_write watcher_dead "$body"; then
+            log_event watch.sibling_watcher_dead "dir=$dir last_worker_start=$last"
+            log_event coord.inbox.write "trigger=watcher_dead dir=$dir"
+            SIBLING_DEAD_LOGGED[$dir]=1
+        else
+            echo "[$(date +%T)] WARN: failed to write coord-inbox watcher_dead entry for $dir" >&2
+        fi
+    done < <("$WATCHER_CHECK" --siblings "$PROJECT_DIR" 2>/dev/null || true)
+    for dir in "${!SIBLING_DEAD_LOGGED[@]}"; do
+        [ -n "${now_dead[$dir]:-}" ] || unset "SIBLING_DEAD_LOGGED[$dir]"
+    done
 }
 
 # stranded_brief_sweep_pass
@@ -6752,7 +6821,7 @@ coord_pending_approval_age() {
 # run_auto_compact_poll_loop, started as its own background process right
 # after this function.
 run_watch_timer_loop() {
-    local last_pr_poll=0 last_orphan_sweep=0 last_ready_sweep=0 last_bg_violation_sweep=0 last_timeout_retry_sweep=0 last_activity_poll=0 last_coord_wake_retry=0 last_coord_wake_busy_retry=0 last_worktree_sweep=0 last_pending_brief_sweep=0 last_stranded_brief_sweep=0 last_window_flags_sweep=0 last_sideline_sweep=0 now
+    local last_pr_poll=0 last_orphan_sweep=0 last_ready_sweep=0 last_bg_violation_sweep=0 last_timeout_retry_sweep=0 last_activity_poll=0 last_coord_wake_retry=0 last_coord_wake_busy_retry=0 last_worktree_sweep=0 last_pending_brief_sweep=0 last_stranded_brief_sweep=0 last_sibling_sweep=0 last_window_flags_sweep=0 last_sideline_sweep=0 now
     while true; do
         sleep 2
         [ "$WATCH_CHECK_ON_DONE" = "1" ] && { status_poll_pass || true; }
@@ -6842,6 +6911,13 @@ run_watch_timer_loop() {
             if [ $((now - last_stranded_brief_sweep)) -ge "$WATCH_STRANDED_BRIEF_SWEEP_SECS" ]; then
                 stranded_brief_sweep_pass || true
                 last_stranded_brief_sweep=$now
+            fi
+        fi
+        if [ "$WATCH_SIBLING_SWEEP_SECS" -gt 0 ]; then
+            now=$(date +%s)
+            if [ $((now - last_sibling_sweep)) -ge "$WATCH_SIBLING_SWEEP_SECS" ]; then
+                watcher_sibling_sweep_pass || true
+                last_sibling_sweep=$now
             fi
         fi
         if [ "$WATCH_SIDELINE_SWEEP_SECS" -gt 0 ]; then
@@ -11454,10 +11530,10 @@ run_poll() {
 # restarts. (COORD_WAKE_RETRY_SECS, issue #422's older dirty-draft retry,
 # has this identical gap and predates this fix — out of scope here, but
 # worth folding in alongside this one if it's ever revisited.)
-if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ] || [ "$WATCH_ORPHAN_SWEEP_SECS" -gt 0 ] || [ "$WATCH_READY_SWEEP_SECS" -gt 0 ] || [ "$WATCH_BG_VIOLATION_SWEEP_SECS" -gt 0 ] || [ "$WATCH_TIMEOUT_RETRY_SWEEP_SECS" -gt 0 ] || [ "$WATCH_ACTIVITY_POLL_SECS" -gt 0 ] || [ "$WATCH_WORKTREE_SWEEP_SECS" -gt 0 ] || [ "$WATCH_PENDING_BRIEF_SWEEP_SECS" -gt 0 ] || [ "$WATCH_STRANDED_BRIEF_SWEEP_SECS" -gt 0 ] || [ "$COORD_WAKE_HOLD_RETRY_SECS" -gt 0 ] || [ "$WATCH_SIDELINE_SWEEP_SECS" -gt 0 ] || { [ "$WATCH_WINDOW_FLAGS" = "1" ] && [ "$WATCH_WINDOW_FLAGS_SWEEP_SECS" -gt 0 ]; }; then
+if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ] || [ "$WATCH_ORPHAN_SWEEP_SECS" -gt 0 ] || [ "$WATCH_READY_SWEEP_SECS" -gt 0 ] || [ "$WATCH_BG_VIOLATION_SWEEP_SECS" -gt 0 ] || [ "$WATCH_TIMEOUT_RETRY_SWEEP_SECS" -gt 0 ] || [ "$WATCH_ACTIVITY_POLL_SECS" -gt 0 ] || [ "$WATCH_WORKTREE_SWEEP_SECS" -gt 0 ] || [ "$WATCH_PENDING_BRIEF_SWEEP_SECS" -gt 0 ] || [ "$WATCH_STRANDED_BRIEF_SWEEP_SECS" -gt 0 ] || [ "$WATCH_SIBLING_SWEEP_SECS" -gt 0 ] || [ "$COORD_WAKE_HOLD_RETRY_SECS" -gt 0 ] || [ "$WATCH_SIDELINE_SWEEP_SECS" -gt 0 ] || { [ "$WATCH_WINDOW_FLAGS" = "1" ] && [ "$WATCH_WINDOW_FLAGS_SWEEP_SECS" -gt 0 ]; }; then
     run_watch_timer_loop &
     WATCH_TIMER_PID=$!
-    log_event watch.timer.start "pr_poll_secs=$WATCH_PR_POLL_SECS check_on_done=$WATCH_CHECK_ON_DONE orphan_sweep_secs=$WATCH_ORPHAN_SWEEP_SECS ready_sweep_secs=$WATCH_READY_SWEEP_SECS bg_violation_sweep_secs=$WATCH_BG_VIOLATION_SWEEP_SECS timeout_retry_sweep_secs=$WATCH_TIMEOUT_RETRY_SWEEP_SECS activity_poll_secs=$WATCH_ACTIVITY_POLL_SECS worktree_sweep_secs=$WATCH_WORKTREE_SWEEP_SECS pending_brief_sweep_secs=$WATCH_PENDING_BRIEF_SWEEP_SECS stranded_brief_sweep_secs=$WATCH_STRANDED_BRIEF_SWEEP_SECS window_flags_sweep_secs=$([ "$WATCH_WINDOW_FLAGS" = "1" ] && echo "$WATCH_WINDOW_FLAGS_SWEEP_SECS" || echo 0) sideline_secs=$WATCH_SIDELINE_SECS sideline_sweep_secs=$WATCH_SIDELINE_SWEEP_SECS"
+    log_event watch.timer.start "pr_poll_secs=$WATCH_PR_POLL_SECS check_on_done=$WATCH_CHECK_ON_DONE orphan_sweep_secs=$WATCH_ORPHAN_SWEEP_SECS ready_sweep_secs=$WATCH_READY_SWEEP_SECS bg_violation_sweep_secs=$WATCH_BG_VIOLATION_SWEEP_SECS timeout_retry_sweep_secs=$WATCH_TIMEOUT_RETRY_SWEEP_SECS activity_poll_secs=$WATCH_ACTIVITY_POLL_SECS worktree_sweep_secs=$WATCH_WORKTREE_SWEEP_SECS pending_brief_sweep_secs=$WATCH_PENDING_BRIEF_SWEEP_SECS stranded_brief_sweep_secs=$WATCH_STRANDED_BRIEF_SWEEP_SECS sibling_sweep_secs=$WATCH_SIBLING_SWEEP_SECS window_flags_sweep_secs=$([ "$WATCH_WINDOW_FLAGS" = "1" ] && echo "$WATCH_WINDOW_FLAGS_SWEEP_SECS" || echo 0) sideline_secs=$WATCH_SIDELINE_SECS sideline_sweep_secs=$WATCH_SIDELINE_SWEEP_SECS"
 fi
 if [ "$WORKER_AUTO_COMPACT" = "1" ] || [ "$WORKER_AUTO_DELIVER" = "1" ]; then
     run_worker_compact_loop &
