@@ -60,9 +60,7 @@ set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LLM_SWARM_DIR="${LLM_SWARM_DIR:-$(dirname "$SELF_DIR")}"
-PAUSE_MAX_SECS="${WATCHER_PAUSE_MAX_SECS:-259200}"
-RECENT_SECS="${WATCH_SIBLING_RECENT_SECS:-259200}"
-NOW="${WATCHER_CHECK_NOW:-$(date +%s)}"
+NOW="$(date +%s)"
 
 mtime_epoch() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
 
@@ -192,6 +190,12 @@ esac
 
 dir="$(resolve_dir "${1:-$PWD}")"
 shift || true
+
+# Project .swarm/.env and the sandbox defaults supply the knobs below.
+# shellcheck source=_load-env.sh
+. "$SELF_DIR/_load-env.sh" "$dir"
+PAUSE_MAX_SECS="${WATCHER_PAUSE_MAX_SECS:-259200}"
+RECENT_SECS="${WATCH_SIBLING_RECENT_SECS:-259200}"
 
 case "$mode" in
     check)
