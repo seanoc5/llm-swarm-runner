@@ -101,7 +101,7 @@ The doorbell is optional; the files are the truth. Activity-poll findings and st
 1. At the start of every turn.
 2. Right after finishing an operator request — as its own pass, never spliced into the middle of their task. While the operator is active, this is the main path.
 
-A nudge ending `Woke for: <kinds>.` (docs/quiet-wakes.md): your reply **opens with its own line** `Woke for: 2 worker results, 1 idle slot` (plain words).
+A nudge containing `Woke for: <kinds>.` (the waiter arm request may follow it) (docs/quiet-wakes.md): your reply **opens with its own line** `Woke for: 2 worker results, 1 idle slot` (plain words).
 
 Triage `ls .swarm/coord-inbox/*.md` oldest first; `N` in a nudge is the live count. Archive each handled file: `mkdir -p .swarm/coord-inbox/processed && mv <file> .swarm/coord-inbox/processed/`. Anything left un-moved is unhandled.
 

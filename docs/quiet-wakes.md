@@ -50,7 +50,9 @@ restart the coordinator after changing them.
 ## Measuring
 
 `events.log` records each ring: `coord.wake.waiter_rang items=N urgent=U batched=B`
-and `coord.wake.hook_rang …`. Count rings per day with
-`grep -c 'coord.wake.\(waiter\|hook\)_rang' .swarm/events.log`.
+and `coord.wake.hook_rang …`; the watcher's typed doorbell logs plain `coord.wake …`.
+Count every automatic wake (comparable to the issue's 209) with
+`grep -c -E 'coord.wake( |\.waiter_rang|\.hook_rang)' .swarm/events.log`.
+That excludes `coord.wake.skip`, `.deferred` and the other `coord.wake.*` bookkeeping lines.
 Baseline from the corpusminder coordinator (Nov 1–4): 31 operator prompts, 209
 automatic wakes, 95 "nothing new" replies.

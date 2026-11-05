@@ -56,6 +56,22 @@ check "stop_hook_active=true -> never rings twice in one turn end" "idle|" "$(st
 out="$(hook Stop '{"stop_hook_active":false}')"
 check "no item newer than the last ring -> no repeat ring" "idle|" "$(state)|$out"
 
+# Waiter on, no live waiter heartbeat: the doorbell also carries the arm
+# request, so "Woke for:" is contained in the nudge but not its last words.
+echo 1 > "$P/.swarm/coord-hook-rang"; rm -f "$P/.swarm/coord-wake-last" "$P/.swarm/coord-waiter-asked"
+echo "worker 13 finished" > "$P/.swarm/coord-inbox/b.md"
+out="$(COORD_INBOX_WAITER=1 hook Stop '{"stop_hook_active":false}')"
+reason="$(jq -r .reason <<<"$out")"
+case "$reason" in
+    "Inbox: "*"Woke for: "*) got=contains-woke-for ;; *) got="[$reason]" ;;
+esac
+check "waiter on: nudge contains the Woke for suffix" "contains-woke-for" "$got"
+case "$reason" in
+    *"Woke for: "*"Arm the inbox waiter"*) got=arm-follows ;; *) got="[$reason]" ;;
+esac
+check "waiter on: the arm request follows Woke for, so it is not the last words" "arm-follows" "$got"
+rm -f "$P/.swarm/coord-waiter-asked"
+
 # The hook and the watcher must agree on the nudge text: the watcher spots
 # its own doorbell in the transcript by it.
 hook_t="$(sed -n 's/^template="\${COORD_INBOX_NUDGE_TEMPLATE:-\(.*\)}"$/\1/p' "$HOOK")"
