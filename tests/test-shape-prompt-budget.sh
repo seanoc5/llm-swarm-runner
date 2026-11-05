@@ -74,6 +74,10 @@
 # quiet-reply rule beside the kept no-ceremony bullet (used when a wake has no
 # "Woke for:"); ~680 bytes net after tightening twice. Further detail lives in docs/quiet-wakes.md. Still
 # a stopgap until #509 shrinks the file.
+#
+# 2026-11-05: worker-bare 11400 -> 11600. Issue #573 adds the two 🔴 merge
+# safety rules worker.md already had (no coordinator-relayed approval; a
+# push after approval voids it) to the bare prompt's 🔴 row, ~130 bytes.
 set -euo pipefail
 
 green() { printf '\033[32m✓ %s\033[0m\n' "$*"; }
@@ -82,7 +86,7 @@ red()   { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKER_MAX="${WORKER_MD_MAX_BYTES:-24200}"
 COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-30800}"
-BARE_MAX="${WORKER_BARE_MD_MAX_BYTES:-11400}"   # issue #510 trial prompt; ~7.5KB is script-parsed contract
+BARE_MAX="${WORKER_BARE_MD_MAX_BYTES:-11600}"   # issue #510 trial prompt; ~7.5KB is script-parsed contract
 
 check() {
     local file="$1" max="$2" size
