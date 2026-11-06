@@ -27,6 +27,7 @@ declare -A ALLOW=(
   [scripts/coord-hook.sh]="inherits: hook child of coordinator-claude.sh, which sources the loader"
   [scripts/_coord-inbox-batch.sh]="inherits: sourced by coord-hook.sh / coord-inbox-wait.sh / coordinator-watch.sh, which have the key"
   [scripts/coord-inbox-wait.sh]="inherits: armed from inside the coordinator claude process"
+  [scripts/_coord-layout.sh]="inherits: sourced by llm-start.sh, coordinator-watch.sh and coordinator-layout.sh, which all source the loader"
   [scripts/dep-proxy.sh]="worker: started by sandbox.sh/provision-worker.sh (PASS_VARS)"
   [scripts/worker-listener.sh]="worker: runs via sandbox.sh listener; PASS_VARS carries its keys"
   [sandbox.sh]="worker: invoked by provision-worker.sh with PASS_VARS in its env"

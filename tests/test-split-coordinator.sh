@@ -461,7 +461,7 @@ case "\$*" in
     *"-V"*) echo "tmux 3.4" ;;
     *has-session*) exit 0 ;;
     *"list-windows -t llm-proj -F #W"*) printf 'coordinator\nutil\n' ;;
-    *list-panes*"coordinator"*"PANE_CMD"*) echo "PANE_CMD=claude PANE_DEAD=0" ;;
+    *"coordinator"*"PANE_CMD"*) echo "PANE_CMD=claude PANE_DEAD=0" ;;
 esac
 exit 0
 EOF
@@ -497,7 +497,7 @@ case "\$*" in
     *"-V"*) echo "tmux 3.4" ;;
     *has-session*) exit 0 ;;
     *"list-windows -t llm-proj -F #W"*) printf 'coordinator\nutil\n' ;;
-    *list-panes*"coordinator"*"PANE_CMD"*) echo "PANE_CMD=claude PANE_DEAD=1" ;;
+    *"coordinator"*"PANE_CMD"*) echo "PANE_CMD=claude PANE_DEAD=1" ;;
 esac
 exit 0
 EOF
@@ -517,7 +517,7 @@ case "\$*" in
     *"-V"*) echo "tmux 3.4" ;;
     *has-session*) exit 0 ;;
     *"list-windows -t llm-proj -F #W"*) printf 'coordinator\nutil\n' ;;
-    *list-panes*"coordinator"*"PANE_CMD"*) echo "PANE_CMD=claude PANE_DEAD=0" ;;
+    *"coordinator"*"PANE_CMD"*) echo "PANE_CMD=claude PANE_DEAD=0" ;;
 esac
 exit 0
 EOF
@@ -548,7 +548,7 @@ case "\$*" in
     *"-V"*) echo "tmux 3.4" ;;
     *has-session*) exit 0 ;;
     *"list-windows -t llm-proj -F #W"*) printf 'coordinator\nutil\n' ;;
-    *list-panes*"coordinator"*"PANE_CMD"*) echo "PANE_CMD=bash PANE_DEAD=0" ;;
+    *"coordinator"*"PANE_CMD"*) echo "PANE_CMD=bash PANE_DEAD=0" ;;
 esac
 exit 0
 EOF
@@ -586,7 +586,7 @@ case "\$*" in
     *"-V"*) echo "tmux 3.4" ;;
     *has-session*) exit 0 ;;
     *"list-windows -t llm-proj -F #W"*) printf 'coordinator\nutil\n' ;;
-    *list-panes*"coordinator"*"PANE_CMD"*) echo "PANE_CMD=bash PANE_DEAD=0" ;;
+    *"coordinator"*"PANE_CMD"*) echo "PANE_CMD=bash PANE_DEAD=0" ;;
     *list-panes*llm-proj:util*pane_dead*) echo "0 1 $ROOT/scripts/coordinator-watch.sh /x" ;;
     *display-message*) echo "%9" ;;
 esac

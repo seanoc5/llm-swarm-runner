@@ -2792,6 +2792,7 @@ WATCH_WINDOW_FLAGS_SWEEP_SECS="${WATCH_WINDOW_FLAGS_SWEEP_SECS:-10}"
 . "$SCRIPT_DIR/_coord-inbox-batch.sh"
 # shellcheck source=scripts/_coord-split.sh
 . "$SCRIPT_DIR/_coord-split.sh"
+. "$SCRIPT_DIR/_coord-layout.sh"
 # shellcheck source=_conflict-brief.sh
 . "$SCRIPT_DIR/_conflict-brief.sh"
 WATCHER_QUIET="${WATCHER_QUIET:-0}"
@@ -7151,7 +7152,10 @@ coordinator_pane_state() {
     tmux has-session -t "$SESSION_NAME" 2>/dev/null || { echo absent; return; }
     tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx 'coordinator' || { echo absent; return; }
     local pane_cmd
-    pane_cmd="$(tmux list-panes -t "$SESSION_NAME:coordinator" -F '#{pane_current_command}' 2>/dev/null | head -1)" || pane_cmd=""
+    # Explicit pane .0 = the Claude session (#785); a viewer that has been
+    # renumbered to 0 (session pane closed by hand) is not a session.
+    coord_pane_is_viewer "$SESSION_NAME:coordinator.0" && { echo absent; return; }
+    pane_cmd="$(tmux display-message -p -t "$SESSION_NAME:coordinator.0" -F '#{pane_current_command}' 2>/dev/null)" || pane_cmd=""
     case "$pane_cmd" in
         bash|zsh|sh|fish|"") echo shell ;;
         *)                   echo cli ;;
@@ -7171,10 +7175,19 @@ coordinator_pane_state() {
 # escape sequences and the Unicode spinner glyphs (✻/✶) can otherwise trip
 # bash's here-string handling under a UTF-8 locale.
 coordinator_pane_busy() {
-    local content clean
-    content="$(tmux capture-pane -t "$SESSION_NAME:coordinator.0" -p 2>/dev/null)" || return 1
-    clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
-    printf '%s\n' "$clean" | LC_ALL=C grep -qE "$AUTO_COMPACT_BUSY_PATTERN"
+    coord_pane_is_viewer "$SESSION_NAME:coordinator.0" && return 1   # viewer is never "busy" (#785)
+    # Visible rows plus, in a short pane, recent scrollback (#785 review).
+    coord_pane_busy_match "$SESSION_NAME:coordinator.0" "$AUTO_COMPACT_BUSY_PATTERN"
+}
+
+# coordinator_pane_busy_visible
+#
+# Like coordinator_pane_busy but visible rows only, never scrollback. For the
+# "did the compaction START" wait: a stale marker in scrollback must not read
+# as a started compaction (#785 review).
+coordinator_pane_busy_visible() {
+    coord_pane_is_viewer "$SESSION_NAME:coordinator.0" && return 1
+    coord_pane_busy_visible "$SESSION_NAME:coordinator.0" "$AUTO_COMPACT_BUSY_PATTERN"
 }
 
 # probe_ctx_used
@@ -7368,10 +7381,9 @@ compact_composer_clear() {
 # <pasted-text>. False (rc 1) only when that exact text is still sitting
 # there un-submitted — the caller resends Enter once in that case.
 compact_confirm_submitted() {
-    local target="$1" busy_pattern="$2" pasted="$3" content clean last
-    content="$(tmux capture-pane -t "$target" -p 2>/dev/null)" || return 1
-    clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
-    printf '%s\n' "$clean" | LC_ALL=C grep -qE "$busy_pattern" && return 0
+    local target="$1" busy_pattern="$2" pasted="$3" last
+    tmux capture-pane -t "$target" -p >/dev/null 2>&1 || return 1
+    coord_pane_busy_visible "$target" "$busy_pattern" && return 0
     last="$(compact_last_pane_line "$target")" || true
     case "$last" in
         "$pasted"*) return 1 ;;
@@ -7458,10 +7470,7 @@ compact_retract_queued() {
     local target="$1" prefix="$2" extra="$3" busy_pattern="${4:-}"
 
     if [ -n "$busy_pattern" ]; then
-        local pre_content pre_clean
-        pre_content="$(tmux capture-pane -t "$target" -p 2>/dev/null)" || pre_content=""
-        pre_clean="$(printf '%s\n' "$pre_content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
-        if printf '%s\n' "$pre_clean" | LC_ALL=C grep -qE "$busy_pattern"; then
+        if coord_pane_busy_match "$target" "$busy_pattern"; then
             log_event "${prefix}.retract_skip" "reason=busy $extra"
             return 0
         fi
@@ -7672,7 +7681,7 @@ maybe_auto_compact() {
         # the timeout, something's off (race, rejected input, wrong pane
         # state); log it and fall through rather than block further.
         local waited=0
-        while ! coordinator_pane_busy; do
+        while ! coordinator_pane_busy_visible; do
             sleep "$AUTO_COMPACT_POLL_SECS"
             waited=$((waited + AUTO_COMPACT_POLL_SECS))
             if [ "$waited" -ge "$AUTO_COMPACT_START_TIMEOUT_SECS" ]; then

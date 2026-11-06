@@ -47,11 +47,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
+. "$(dirname "${BASH_SOURCE[0]}")/../scripts/_coord-layout.sh"   # coord_pane_is_viewer (#785)
 extract_fn() {
     local fn="$1"
     sed -n "/^${fn}() {/,/^}/p" "$WATCH"
 }
-for fn in mtime_epoch coordinator_pane_state coordinator_pane_busy probe_ctx_used probe_ctx_window \
+for fn in mtime_epoch coordinator_pane_state coordinator_pane_busy coordinator_pane_busy_visible probe_ctx_used probe_ctx_window \
           coordinator_compact_effective_threshold maybe_auto_compact \
           auto_compact_poll_pass compact_retract_queued compact_last_pane_line compact_composer_clear \
           compact_confirm_submitted compact_replay_detected log_event; do
@@ -332,12 +333,13 @@ fi
 
 heading "Test 6: set -e safety — a forced tmux failure must not abort the process"
 # This file (coordinator-watch.sh) runs under set -euo pipefail. Force
-# `tmux list-panes` to fail mid-call (simulating the TOCTOU window
+# `tmux display-message` to fail mid-call (simulating the TOCTOU window
 # coordinator_pane_state's own has-session/list-windows precondition
 # checks can't fully close) and confirm the function degrades to a safe
 # fallback instead of taking the whole daemon down.
 tmux() {
-    if [ "$1" = "list-panes" ]; then
+    # coordinator_pane_state reads pane .0 via display-message since #785.
+    if [ "$1" = "list-panes" ] || [ "$1" = "display-message" ]; then
         return 7
     fi
     command tmux "$@"

@@ -56,6 +56,8 @@ for fn in log_event reprompt_last_pane_line reprompt_confirm_submitted reprompt_
     eval "$body"
 done
 
+. "$SCRIPT_DIR/../scripts/_coord-layout.sh"   # coord_pane_is_viewer, used by reprompt_inject (#785)
+
 # ─────────────────────────── fixed env the functions expect ────────────────
 EVENTS_LOG="$TEST_DIR/events.log"; : > "$EVENTS_LOG"
 # issue #290/#295 — must match the shipped busy-indicator default (anchored
