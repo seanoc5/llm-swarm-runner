@@ -1,0 +1,6 @@
+1793916882	stale-pr-nudges.sh	
+1793916939	self-review-pr.sh	699 --post --actor coordinator
+1793916939	ci-wait.sh	702
+1793916939	gh	workflow list
+1793916967	provision-worker.sh	592
+1793916967	gh	pr edit 696 --body-file /tmp/claude-1000/pr696-body.md
