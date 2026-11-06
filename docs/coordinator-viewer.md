@@ -76,23 +76,41 @@ and a doorbell or `/compact` would then land mid-turn. Two guards:
   default) gets no viewer at all; `coordinator-layout.sh on` says so and exits 1.
   The floor applies when the viewer is added. If you shrink the terminal or drag
   the border afterwards, nothing re-enforces it.
-- **Scrollback.** For any pane shorter than `COORD_BUSY_FULL_ROWS` (24), if the
-  visible rows show no busy marker, the last `COORD_BUSY_SCROLLBACK_LINES` (60)
-  lines of scrollback are searched too (`coord_pane_busy_match` in
-  `scripts/_coord-layout.sh`; used by the watcher's busy check, the compact
-  confirm/retract checks and `llm-start.sh`'s composer checks).
+- **Scrollback, only while the viewer is on.** When the coordinator window holds
+  a viewer pane and the session pane is shorter than `COORD_BUSY_FULL_ROWS`
+  (24), a "don't interrupt" check that finds no busy marker on the visible rows
+  also searches the last `COORD_BUSY_SCROLLBACK_LINES` (60) lines of scrollback
+  (`coord_pane_busy_match` in `scripts/_coord-layout.sh`). With no viewer pane
+  (the setting off, or the viewer closed) every check reads the visible rows
+  only, at any pane height, exactly as on master.
+
+Which checks use the scrollback read is deliberate. A marker left in
+scrollback can be stale, so the read is used only where a stale marker makes
+the code wait, never where it makes the code act or report success:
+
+- Scrollback read (a stale marker means "wait"): the watcher's hold gate
+  (`coordinator_pane_busy`), the skip-`/compact`-while-busy gate, the
+  don't-send-Escape gate in `compact_retract_queued`.
+- Visible rows only (a stale marker would mean "paste" or "success"):
+  `reprompt_composer_dirty` (a stale marker would read "clear" and paste a
+  doorbell over an operator's draft, the #366 incident), `reprompt_confirm_submitted`
+  and `compact_confirm_submitted` (the paste changes the pane text and re-arms
+  the match, so a swallowed Enter would read as submitted), and the loop that
+  waits for a compaction to start (`coordinator_pane_busy_visible`).
 
 Limits of the scrollback guard:
 
 - A marker left in scrollback by a finished turn reads busy until the pane text
   has been unchanged for `COORD_BUSY_SCROLLBACK_MAX_SECS` (default 90), then
-  idle; any new pane text re-arms it. So a stale marker costs at most about
-  90s of deferred doorbells or auto-compact. State: a small file under
-  `$TMPDIR` (`COORD_BUSY_STATE_FILE` to move it).
+  idle; any new pane text (typing included) re-arms it. So a stale marker costs
+  about 90s of deferred doorbells or auto-compact, longer while the operator is
+  typing. State: a small file under `$TMPDIR` (`COORD_BUSY_STATE_FILE` to move it).
+- The wake path with `COORD_HOOK_STATE=1` does not consult the pane for its busy
+  gate when the hook file has an answer; it reaches `reprompt_composer_dirty`
+  directly. That is why that check must stay visible-only.
 - The reverse also holds: a turn that is genuinely running but prints nothing
   for 90s and has its marker only above the visible rows reads idle after 90s.
-  This is the same blind spot the visible-only check had, narrowed to that case.
-  The wake path prefers the hook state file when it has one, so it is less exposed.
+  The same blind spot the visible-only check had, narrowed to that case.
 - Only the marker search is widened. "Is the composer empty" still looks at the
   bottom non-blank line, which is visible at any height.
 - Not verified against a live Claude Code pane: how its TUI leaves old frames in
@@ -106,9 +124,8 @@ and viewer-aware: `llm-start.sh` pane-state detection (`display-message -t
 ...coordinator.0`) and `coordinator_pane_state` in `coordinator-watch.sh`.
 Unchanged because they already target `.0`: wake and `/compact` paste paths,
 `capture-worker.sh`, dead-pane cleanup. Changed in the small-window review:
-every busy-marker read of a Claude pane (`coordinator_pane_busy`,
-`compact_confirm_submitted`, `compact_retract_queued`, `reprompt_composer_dirty`,
-`reprompt_confirm_submitted`) now goes through `coord_pane_busy_match`, which
-adds scrollback in short panes. The "last composer line" readers stay
+the busy-marker reads of a Claude pane now go through `coord_pane_busy_match`
+(scrollback, viewer on only) or `coord_pane_busy_visible` (visible rows), as
+split out under "Small windows". The "last composer line" readers stay
 visible-only on purpose. The Ctrl-Z scratch pane splits beside the active pane, so it never
 displaces the session from index 0. Window flags are per window, not per pane.

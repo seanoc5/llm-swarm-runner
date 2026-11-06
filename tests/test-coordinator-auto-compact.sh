@@ -52,7 +52,7 @@ extract_fn() {
     local fn="$1"
     sed -n "/^${fn}() {/,/^}/p" "$WATCH"
 }
-for fn in mtime_epoch coordinator_pane_state coordinator_pane_busy probe_ctx_used probe_ctx_window \
+for fn in mtime_epoch coordinator_pane_state coordinator_pane_busy coordinator_pane_busy_visible probe_ctx_used probe_ctx_window \
           coordinator_compact_effective_threshold maybe_auto_compact \
           auto_compact_poll_pass compact_retract_queued compact_last_pane_line compact_composer_clear \
           compact_confirm_submitted compact_replay_detected log_event; do

@@ -103,15 +103,43 @@ coord_layout_viewer_loop() {
     done
 }
 
+# coord_pane_busy_visible <pane-target> <busy-pattern>: true when the VISIBLE
+# rows of the pane match. This is the master behaviour of every busy check.
+# Use it wherever a stale marker would lead to pasting over an operator draft
+# or to reporting that something was submitted or started (#785 review):
+# reprompt_composer_dirty, reprompt_confirm_submitted, compact_confirm_submitted
+# and the wait-for-compaction-to-start loop. A tmux failure reads "not busy".
+# (grep -E >/dev/null, not grep -q: callers run under pipefail, and -q exiting
+# early SIGPIPEs the sed upstream, so a long capture would never match.)
+coord_pane_busy_visible() {
+    local target="$1" pattern="$2" strip content
+    strip='s/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g'
+    content="$(tmux capture-pane -t "$target" -p 2>/dev/null)" || return 1
+    printf '%s\n' "$content" | sed "$strip" | LC_ALL=C grep -E "$pattern" >/dev/null
+}
+
+# coord_viewer_layout_on <pane-target>: true when that pane's window holds a
+# viewer pane, i.e. COORD_VIEWER's layout is actually in effect. Without it
+# every busy check behaves exactly as it did before #785.
+coord_viewer_layout_on() {
+    tmux list-panes -t "$1" -F '#{pane_title}' 2>/dev/null | grep -Fx -- "$COORD_VIEWER_TITLE" >/dev/null
+}
+
 # coord_pane_busy_match <pane-target> <busy-pattern>: true when the pane is
-# mid-turn. Every busy check on a Claude pane goes through here (#785 review).
+# mid-turn, for "don't interrupt" checks ONLY (#785 review): the watcher's hold
+# gate, the skip-compaction gate, the don't-send-Escape gate. Those fail toward
+# waiting when a marker is stale. Never call it where a stale marker would lead
+# to a paste or to reporting success; use coord_pane_busy_visible there.
 #
-# `capture-pane -p` reads only the visible rows. In a short pane (the session
-# pane beside the viewer, or any pane the user shrank) a long todo list can
-# push the "esc to interrupt" line above the visible rows, and a doorbell or
-# /compact would land mid-turn. So when the pane is shorter than
-# COORD_BUSY_FULL_ROWS (24) and the visible rows show no marker, the last
-# COORD_BUSY_SCROLLBACK_LINES (60) lines of scrollback are searched too.
+# With no viewer pane in the window (COORD_VIEWER off) this is exactly
+# coord_pane_busy_visible, whatever the pane's height.
+#
+# With the viewer layout on, the session pane is short. `capture-pane -p` reads
+# only the visible rows, and a long todo list can push the "esc to interrupt"
+# line above them, so a doorbell or /compact would land mid-turn. So when the
+# pane is shorter than COORD_BUSY_FULL_ROWS (24) and the visible rows show no
+# marker, the last COORD_BUSY_SCROLLBACK_LINES (60) lines of scrollback are
+# searched too.
 #
 # Scrollback can hold a marker from a turn that ended (a redraw taller than
 # the pane leaves old frames behind), and nothing there ever scrolls away on
@@ -124,10 +152,10 @@ coord_layout_viewer_loop() {
 # (grep -E >/dev/null, not grep -q: callers run under pipefail, and -q exiting
 # early SIGPIPEs the sed upstream, so a long capture would never match.)
 coord_pane_busy_match() {
-    local target="$1" pattern="$2" strip content height hist state now
+    local target="$1" pattern="$2" strip height hist state now
     strip='s/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g'
-    content="$(tmux capture-pane -t "$target" -p 2>/dev/null)" || return 1
-    printf '%s\n' "$content" | sed "$strip" | LC_ALL=C grep -E "$pattern" >/dev/null && return 0
+    coord_pane_busy_visible "$target" "$pattern" && return 0
+    coord_viewer_layout_on "$target" || return 1   # setting off: master behaviour
     height="$(tmux display-message -p -t "$target" -F '#{pane_height}' 2>/dev/null)" || return 1
     case "$height" in ''|*[!0-9]*) return 1 ;; esac
     state="${COORD_BUSY_STATE_FILE:-${TMPDIR:-/tmp}/llm-swarm-busy-$(id -u)-$(printf '%s' "$target" | tr -c 'A-Za-z0-9' _)}"

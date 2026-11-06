@@ -26,7 +26,8 @@ tmux() { command tmux -L "$SOCK" "$@"; }
 extract_fn() { sed -n "/^${2}() {/,/^}/p" "$1"; }
 for spec in "$LLM_START:log_event" "$LLM_START:reprompt_last_pane_line" "$LLM_START:reprompt_confirm_submitted" \
             "$LLM_START:reprompt_composer_dirty" "$LLM_START:reprompt_retry_safe" "$LLM_START:reprompt_inject" \
-            "$WATCH:coordinator_pane_state" "$WATCH:coordinator_pane_busy"; do
+            "$WATCH:coordinator_pane_state" "$WATCH:coordinator_pane_busy" "$WATCH:coordinator_pane_busy_visible" \
+            "$WATCH:compact_confirm_submitted" "$WATCH:compact_last_pane_line"; do
     body="$(extract_fn "${spec%%:*}" "${spec##*:}")"
     [ -n "$body" ] || red "could not extract ${spec##*:} from ${spec%%:*}"
     eval "$body"
@@ -37,6 +38,7 @@ AUTO_COMPACT_BUSY_PATTERN="$COORD_BUSY_PATTERN"
 COMPACT_SUBMIT_SETTLE_SECS=0.3
 REPROMPT_CHROME_PATTERN='^※ recap:|Resume this session with|^[0-9]+\.[[:space:]]*Resume from'
 eval "$(grep '^REPROMPT_FOOTER_PATTERN=' "$LLM_START")"
+eval "$(grep -E '^COMPACT_(COMPOSER_CHROME|FOOTER)_PATTERN=' "$WATCH")"
 
 check() { [ "$2" = "$3" ] && green "$1" || red "$1 (expected [$2] got [$3])"; }
 pane_has() { tmux capture-pane -t "$1" -p 2>/dev/null | grep -qF -- "$2" && echo yes || echo no; }
@@ -159,6 +161,98 @@ sleep 0.5
 check "changed pane text re-arms the check (busy again)" yes "$(coordinator_pane_busy && echo yes || echo no)"
 unset COORD_BUSY_SCROLLBACK_MAX_SECS
 tmux kill-session -t "$SMALL" 2>/dev/null || true
+
+# --- stale scrollback marker must never lead to a paste or to "submitted" (#785 review) ---
+# Fake session in a small pane: a finished turn's "esc to interrupt" line sits
+# above the visible rows, and the composer is on the last row. Raw-mode input so
+# the fake can keep a draft in the composer and (optionally) swallow Enter.
+cat > "$TEST_DIR/stale-repl.sh" <<'FAKE'
+#!/usr/bin/env bash
+echo "✻ Worked for 12s (esc to interrupt)"
+for i in $(seq 1 15); do echo "  ☑ todo item $i"; done
+buf="${FAKE_DRAFT:-}"
+printf '❯ %s' "$buf"
+stty -icanon -echo
+while IFS= read -rsn1 ch; do
+    case "$ch" in
+        ''|$'\r'|$'\n')
+            [ -n "${FAKE_SWALLOW_ENTER:-}" ] && continue
+            [ -n "$buf" ] && printf '%s\n' "$buf" >> "$RECV_FILE"
+            buf=""; printf '\r\033[K❯ ' ;;
+        *) buf="$buf$ch"; printf '\r\033[K❯ %s' "$buf" ;;
+    esac
+done
+FAKE
+STALE="viewer-stale"
+start_stale() {   # start_stale <session> <viewer:yes|no> [env assignments for the fake...]
+    local s="$1" viewer="$2"; shift 2
+    tmux kill-session -t "$s" 2>/dev/null || true
+    tmux -f /dev/null new-session -d -s "$s" -n coordinator -x 80 -y 24 -c "$PROJECT"
+    tmux set-window-option -t "$s:coordinator" pane-base-index 0
+    if [ "$viewer" = yes ]; then
+        COORD_VIEWER_MIN_SESSION_ROWS=1 coord_layout_on "$s" "$PROJECT" "$ROOT" 75
+        tmux respawn-pane -k -t "$s:coordinator.1" "sleep 120"
+        tmux select-pane -t "$s:coordinator.1" -T "$COORD_VIEWER_TITLE"
+    fi
+    : > "$TEST_DIR/stale-recv"
+    tmux respawn-pane -k -t "$s:coordinator.0" "RECV_FILE=$TEST_DIR/stale-recv $* exec -a claude bash $TEST_DIR/stale-repl.sh"
+}
+SESSION_NAME="$STALE"
+rm -f "$COORD_BUSY_STATE_FILE"
+
+# 1. Operator draft + stale marker above the visible rows: no paste.
+start_stale "$STALE" yes FAKE_DRAFT=my-unsent-operator-draft
+eventually yes 'pane_has "$STALE:coordinator.0" my-unsent-operator-draft' || red "stale fake did not render"
+check "premise: stale marker is not on the visible rows" no "$(pane_has "$STALE:coordinator.0" "esc to interrupt")"
+printf 'DOORBELL-STALE-1\n' > "$TEST_DIR/bell3"
+: > "$EVENTS_LOG"
+rc=0; reprompt_inject "$STALE:coordinator.0" "$TEST_DIR/bell3" >/dev/null 2>&1 || rc=$?
+check "operator draft + stale scrollback marker: wake deferred (rc 2)" 2 "$rc"
+check "operator draft + stale scrollback marker: nothing pasted" no "$(pane_has "$STALE:coordinator.0" DOORBELL-STALE-1)"
+check "operator draft + stale scrollback marker: nothing submitted to the session" no \
+    "$(grep -qF DOORBELL-STALE-1 "$TEST_DIR/stale-recv" && echo yes || echo no)"
+check "operator draft + stale scrollback marker: composer_dirty logged" yes \
+    "$(grep -q 'reason=composer_dirty' "$EVENTS_LOG" && echo yes || echo no)"
+
+# 2. Swallowed Enter: the paste changes the pane text, which re-arms the scrollback
+#    match; the old check then read "busy" and reported the wake as submitted.
+rm -f "$COORD_BUSY_STATE_FILE"; : > "$EVENTS_LOG"
+start_stale "$STALE" yes FAKE_SWALLOW_ENTER=1
+eventually yes 'pane_has "$STALE:coordinator.0" "❯"' || red "stale fake (swallow) did not render"
+printf 'DOORBELL-STALE-2\n' > "$TEST_DIR/bell4"
+rc=0; reprompt_inject "$STALE:coordinator.0" "$TEST_DIR/bell4" >/dev/null 2>&1 || rc=$?
+check "swallowed Enter + stale marker: reprompt_inject reports failure (rc 1)" 1 "$rc"
+check "swallowed Enter + stale marker: submit_failed logged" yes \
+    "$(grep -q 'coord.wake.submit_failed' "$EVENTS_LOG" && echo yes || echo no)"
+check "swallowed Enter: the fake really did not receive it" no "$(grep -qF DOORBELL-STALE-2 "$TEST_DIR/stale-recv" && echo yes || echo no)"
+rm -f "$COORD_BUSY_STATE_FILE"
+start_stale "$STALE" yes FAKE_SWALLOW_ENTER=1   # fresh composer, so "/compact" is its whole content
+eventually yes 'pane_has "$STALE:coordinator.0" "❯"' || red "stale fake (compact) did not render"
+tmux send-keys -t "$STALE:coordinator.0" -l "/compact"
+sleep 0.4
+check "compact_confirm_submitted: swallowed Enter + stale marker is NOT confirmed" 1 \
+    "$(compact_confirm_submitted "$STALE:coordinator.0" "$COORD_BUSY_PATTERN" "/compact" && echo 0 || echo 1)"
+
+# 3. The "did compaction start" wait reads visible rows only; the don't-interrupt
+#    gate keeps the scrollback read while the viewer is on.
+rm -f "$COORD_BUSY_STATE_FILE"
+check "viewer on: coordinator_pane_busy (a hold gate) still sees the stale marker" yes "$(coordinator_pane_busy && echo yes || echo no)"
+check "viewer on: coordinator_pane_busy_visible (start wait) does not" no "$(coordinator_pane_busy_visible && echo yes || echo no)"
+
+# 4. Setting off (no viewer pane): a short pane behaves exactly as on master.
+rm -f "$COORD_BUSY_STATE_FILE"
+SESSION_NAME="viewer-off"
+tmux kill-session -t "$STALE" 2>/dev/null || true
+start_stale "$SESSION_NAME" no
+eventually yes 'pane_has "$SESSION_NAME:coordinator.0" "todo item 15"' || red "viewer-off fake did not render"
+tmux resize-window -t "$SESSION_NAME:coordinator" -y 10 2>/dev/null || true
+sleep 0.3
+check "premise (viewer off): pane is short" yes "$([ "$(tmux display-message -p -t "$SESSION_NAME:coordinator.0" -F '#{pane_height}')" -lt 24 ] && echo yes || echo no)"
+check "premise (viewer off): marker is in scrollback" yes \
+    "$(tmux capture-pane -t "$SESSION_NAME:coordinator.0" -p -S -60 | grep -qF 'esc to interrupt' && echo yes || echo no)"
+check "viewer off, short pane, marker in scrollback: not busy (as on master)" no "$(coordinator_pane_busy && echo yes || echo no)"
+check "viewer off: no scrollback state file written" no "$([ -e "$COORD_BUSY_STATE_FILE" ] && echo yes || echo no)"
+tmux kill-session -t "$SESSION_NAME" 2>/dev/null || true
 
 # --- the floor: the viewer never squeezes the session pane below the minimum -------
 SESSION_NAME="viewer-floor"

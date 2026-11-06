@@ -7180,6 +7180,16 @@ coordinator_pane_busy() {
     coord_pane_busy_match "$SESSION_NAME:coordinator.0" "$AUTO_COMPACT_BUSY_PATTERN"
 }
 
+# coordinator_pane_busy_visible
+#
+# Like coordinator_pane_busy but visible rows only, never scrollback. For the
+# "did the compaction START" wait: a stale marker in scrollback must not read
+# as a started compaction (#785 review).
+coordinator_pane_busy_visible() {
+    coord_pane_is_viewer "$SESSION_NAME:coordinator.0" && return 1
+    coord_pane_busy_visible "$SESSION_NAME:coordinator.0" "$AUTO_COMPACT_BUSY_PATTERN"
+}
+
 # probe_ctx_used
 #
 # Echoes the coordinator's last-reported used-token count and returns 0,
@@ -7373,7 +7383,7 @@ compact_composer_clear() {
 compact_confirm_submitted() {
     local target="$1" busy_pattern="$2" pasted="$3" last
     tmux capture-pane -t "$target" -p >/dev/null 2>&1 || return 1
-    coord_pane_busy_match "$target" "$busy_pattern" && return 0
+    coord_pane_busy_visible "$target" "$busy_pattern" && return 0
     last="$(compact_last_pane_line "$target")" || true
     case "$last" in
         "$pasted"*) return 1 ;;
@@ -7671,7 +7681,7 @@ maybe_auto_compact() {
         # the timeout, something's off (race, rejected input, wrong pane
         # state); log it and fall through rather than block further.
         local waited=0
-        while ! coordinator_pane_busy; do
+        while ! coordinator_pane_busy_visible; do
             sleep "$AUTO_COMPACT_POLL_SECS"
             waited=$((waited + AUTO_COMPACT_POLL_SECS))
             if [ "$waited" -ge "$AUTO_COMPACT_START_TIMEOUT_SECS" ]; then

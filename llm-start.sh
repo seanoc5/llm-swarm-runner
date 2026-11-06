@@ -538,7 +538,7 @@ reprompt_last_pane_line() {
 reprompt_confirm_submitted() {
     local target="$1" busy_pattern="$2" last
     tmux capture-pane -t "$target" -p >/dev/null 2>&1 || return 1
-    coord_pane_busy_match "$target" "$busy_pattern" && return 0
+    coord_pane_busy_visible "$target" "$busy_pattern" && return 0
     last="$(reprompt_last_pane_line "$target")" || true
     [ -z "$last" ]
 }
@@ -631,7 +631,7 @@ REPROMPT_FOOTER_PATTERN="${REPROMPT_FOOTER_PATTERN:-^[[:space:]]*(⏵⏵|⏸)[[:
 reprompt_composer_dirty() {
     local target="$1" busy_pattern="$2" last
     tmux capture-pane -t "$target" -p >/dev/null 2>&1 || return 1
-    coord_pane_busy_match "$target" "$busy_pattern" && return 1
+    coord_pane_busy_visible "$target" "$busy_pattern" && return 1
     last="$(reprompt_last_pane_line "$target")" || true
     [ -n "$last" ] || return 1
     printf '%s\n' "$last" | LC_ALL=C grep -qE "$REPROMPT_CHROME_PATTERN" && return 1
