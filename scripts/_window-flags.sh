@@ -31,6 +31,11 @@
 #       the conversation session was not woken for it; cleared when the
 #       operator sends their next message (coord-hook.sh UserPromptSubmit)
 #
+# The tab bar does NOT show these raw values: llm-start.sh's format maps
+# ✅<risk> to the bare risk dot (🟢/🟡/🔴, ⚪ unrated), folds ✋/❌/💤/📬
+# into ✋ ("stuck, needs you"), and hides 👀. The raw value stays here and
+# in events.log so each owner still clears only its own flag.
+#
 # Sourced, not executed: `. "$SCRIPT_DIR/_window-flags.sh"`. Every caller
 # (coordinator-watch.sh, provision-worker.sh, requeue.sh) already defines
 # $SESSION_NAME (the swarm tmux session) before calling into this file, and
