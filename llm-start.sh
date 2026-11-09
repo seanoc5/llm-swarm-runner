@@ -1037,19 +1037,38 @@ tmux set-window-option -t "$SESSION_NAME:coordinator" pane-base-index 0 2>/dev/n
 # doesn't keep appending. Kill switch: WATCH_WINDOW_FLAGS=0 suppresses the
 # flags themselves (see _window-flags.sh); this format string is harmless
 # left in place either way since an unset @swarm_flag renders as nothing.
+#
+# Display mapping (tab bar only; @swarm_flag and events.log keep the full
+# internal value so each owner still clears only its own flag): the tab
+# shows exactly two families of "your turn" cues —
+#   🟢/🟡/🔴  ready for your merge decision (internal ✅<risk>; an unrated
+#             ✅ shows ⚪)
+#   ✋        stuck, needs you (internal ✋ decision-needed, ❌ CI red and
+#             nobody fixing, 💤 stalled, 📬 finished without a PR)
+# 👀 (ready, but CI still running or the brief not declared done) shows
+# nothing: the worker or CI is still moving. Coordinator 🔔/📥 pass through.
+# A tab bar set up by an older llm-start.sh (raw flag) is upgraded in place.
+_flag_old='#{?@swarm_flag, #{@swarm_flag},}'
+_flag_map='#{s/^(✋|❌|💤|📬)$/✋/:#{s/^👀.*//:#{s/^✅//:#{s/^✅$/✅⚪/:@swarm_flag}}}}'
+_flag_new="#{?${_flag_map}, ${_flag_map},}"
 if [ "${WATCH_WINDOW_FLAGS:-1}" = "1" ]; then
     for _fmt_opt in window-status-format window-status-current-format; do
         _cur_fmt="$(tmux show-window-options -g -v "$_fmt_opt" 2>/dev/null)"
         case "$_cur_fmt" in
-            *'@swarm_flag'*) ;; # already wired up
+            *"$_flag_new"*) ;; # already wired up
+            *"$_flag_old"*)
+                tmux set-window-option -g "$_fmt_opt" \
+                    "${_cur_fmt/"$_flag_old"/"$_flag_new"}" 2>/dev/null || true
+                ;;
             *)
                 tmux set-window-option -g "$_fmt_opt" \
-                    "${_cur_fmt}#{?@swarm_flag, #{@swarm_flag},}" 2>/dev/null || true
+                    "${_cur_fmt}${_flag_new}" 2>/dev/null || true
                 ;;
         esac
     done
     unset _fmt_opt _cur_fmt
 fi
+unset _flag_old _flag_map _flag_new
 
 # Codex deliberately exits after each turn. Keep its completed report visible
 # until the next invocation replaces this dead pane via the detection above.
