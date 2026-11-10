@@ -43,6 +43,7 @@ RINGS="$TEST_DIR/rings.log"
 coord_ring_doorbell() { printf '%s %s\n' "$1" "${2:-}" >> "$RINGS"; }
 declare -A STALE_WAIT_NOTED=()
 declare -A CI_FAILING_NOTED=()
+declare -A CI_CANCELLED_NOTED=()
 declare -A PARKED_GREEN_HANDLED=()
 declare -A RETRY_FAILED_NOTED=()
 BUSY_ISSUES=""; CLI_ISSUES=""
@@ -166,6 +167,21 @@ grep -q "timed out" "$COORD_INBOX_DIR"/*-ready_retry_failed-*.md || red "timeout
 ready_sweep_pass >/dev/null
 [ "$(rf)" = "2" ] || red "same PR+exit must dedupe, got $(rf)"
 green "exit 1 and 124 note once; exit 4 and readied stay silent"
+
+heading "Test 10 (issue #817): a ci-cancelled line writes one ci_cancelled note per PR+sha"
+cc() { find "$COORD_INBOX_DIR" -maxdepth 1 -name '*-ci_cancelled-*.md' 2>/dev/null | wc -l | tr -d ' '; }
+CANC='#41 ci-cancelled: CI was cancelled, re-run it (`gh run rerun <run-id>`), not a fix push (sha=abcd1234)'
+printf '%s\n' "$CANC" > "$SWEEP_OUT"
+ready_sweep_pass >/dev/null
+[ "$(cc)" = "1" ] || red "expected 1 ci_cancelled note, got $(cc)"
+grep -q "PR #41 had its CI cancelled on abcd123" "$COORD_INBOX_DIR"/*-ci_cancelled-*.md || red "unexpected note: $(cat "$COORD_INBOX_DIR"/*-ci_cancelled-*.md)"
+grep -q "gh run rerun" "$COORD_INBOX_DIR"/*-ci_cancelled-*.md || red "note lacks the re-run hint"
+ready_sweep_pass >/dev/null
+[ "$(cc)" = "1" ] || red "same sha must dedupe, got $(cc)"
+printf '#41 ci-cancelled: CI was cancelled, re-run it (`gh run rerun <run-id>`), not a fix push (sha=ef015678)\n' > "$SWEEP_OUT"
+ready_sweep_pass >/dev/null
+[ "$(cc)" = "2" ] || red "new head sha must note again, got $(cc)"
+green "one note per PR+sha"
 
 heading "Test 9 (issue #757): the comment-hold jq matches pr-ready.sh's"
 norm() { sed -n "/^$1=/,/(\.\[-1\] \/\/ \"\")'\$/p" "$2" | sed -E "s/^$1=//" | tr -s ' \n' ' '; }
