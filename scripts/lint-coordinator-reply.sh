@@ -39,7 +39,7 @@ function flush_item(   hit) {
     item = ""; first = ""
 }
 BEGIN {
-    back = "(command|commands|step|steps|link|url|snippet|block)s? (above|below)|from my (last|previous|earlier) (message|reply)|as (before|above)|see (earlier|above|my (last|previous))|in my (previous|last|earlier)|details in [`]?\\.swarm/needs-you\\.md"
+    back = "(command|commands|step|steps|link|url|snippet|block)s? above|from my (last|previous|earlier) (message|reply)|as (before|above)|see (earlier|above|my (last|previous))|in my (previous|last|earlier)|details in [`]?\\.swarm/needs-you\\.md"
     verbs = "(^|[^a-z])(run|start|copy|click|type|paste|execute|open)([^a-z]|$)"
     cmd = "```|`[^`]+`|https://"
     nothing = "^[[:space:]]*(nothing to do|nothing needed|nothing is needed|nothing needed from you)"

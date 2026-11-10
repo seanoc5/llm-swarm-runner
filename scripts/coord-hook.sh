@@ -149,6 +149,7 @@ watcher_dead_warning() {
 reply_lint_message() {
     [ "${COORD_REPLY_LINT:-1}" = "0" ] && return 0
     local text tp hits rules
+    [ "$active" = "true" ] || rm -f "$swarm/coord-lint-blocked" 2>/dev/null || true   # new reply chain
     text="$(printf '%s' "$input" | jq -r '.last_assistant_message // empty' 2>/dev/null || true)"
     if [ -z "$text" ]; then
         tp="$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/null || true)"
@@ -158,10 +159,16 @@ reply_lint_message() {
     hits="$(printf '%s\n' "$text" | "$(cd "$(dirname "$0")" && pwd)/lint-coordinator-reply.sh" 2>/dev/null)" && return 0
     [ -n "$hits" ] || return 0
     rules="$(printf '%s\n' "$hits" | cut -d: -f1 | sort -u | paste -sd, -)"
-    if [ "$active" = "true" ]; then
+    # Block at most once per reply chain: a continuation (stop_hook_active) is
+    # still linted unless this chain's earlier block was itself a lint block.
+    # A doorbell/arm block does not count, so the wake digest that follows it
+    # gets linted (issue #798 review).
+    local blocked_file="$swarm/coord-lint-blocked"
+    if [ "$active" = "true" ] && [ -e "$blocked_file" ]; then
         log_event "coord.reply_lint.unfixed rules=$rules"
         return 0
     fi
+    : > "$blocked_file" 2>/dev/null || true
     log_event "coord.reply_lint.hit rules=$rules"
     printf 'Reply lint failed (%s). Fix before ending your turn: every operator action must carry its full command (fenced) or https URL plus click path in this reply; never point at an earlier message, "above" or .swarm/needs-you.md; end with exactly one closing line. Reprint with: scripts/needs-you.sh render. Offending lines: %s' \
         "$rules" "$(printf '%s' "$hits" | head -3 | tr '\n' '|')"

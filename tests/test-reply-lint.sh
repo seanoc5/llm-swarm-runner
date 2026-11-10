@@ -21,6 +21,7 @@ rules() { "$LINT" < "$1" | cut -d: -f1 | sort -u | paste -sd, -; }
 
 # ── lint: the incidents from the issue, replayed ─────────────────────────────
 check "A13 'Start the load (command above)': backref + no-command" "backref,no-command" "$(rules "$FX/incident-start-load.txt")"
+check "forward pointer 'run the command below' + fence: clean" "" "$(rules "$FX/clean-command-below.txt")"
 check "quiet reply 'details in .swarm/needs-you.md': backref" "backref" "$(rules "$FX/incident-quiet-pointer.txt")"
 check "'same as in my last message': flagged" "backref,no-command" "$(rules "$FX/incident-last-message.txt")"
 check "#801 fixture (Nothing needed + Do now): two-endings" "two-endings" "$(rules "$FX/incident-contradictory-ending.txt")"
@@ -40,6 +41,12 @@ check "add refuses a --do with no command or URL" "2" "$ec"
 set +e; "$NY" add --project "$P" --title "Start load" --do 'run the command above `x`' >/dev/null 2>&1; ec=$?
 "$NY" add --project "$P" --title "Start load" >/dev/null 2>&1; ec2=$?; set -e
 check "add refuses a back-reference and a missing --do" "2 2" "$ec $ec2"
+set +e; "$NY" add --project "$T/bproj" --title "Start load" --do "$(printf 'run the command below
+```
+./load.sh
+```')" >/dev/null 2>&1; ec=$?; set -e
+check "add accepts 'the command below' followed by a fence" "0" "$ec"
+rm -rf "$T/bproj"
 check "refused items leave no store" "none" "$([ -e "$P/.swarm/needs-you.jsonl" ] && echo some || echo none)"
 check "add prints the label" "A1" "$("$NY" add --project "$P" --title "Load kdeyoga data" --risk "writes dev DB" --rec "yes, high confidence" --do 'In 1:util run `./load-tiger.sh kdeyoga`')"
 "$NY" add --project "$P" --title "PR 689" --kind decision --do 'Say `merge PR 689`' --url https://github.com/o/r/pull/689 >/dev/null
