@@ -862,8 +862,10 @@ check "explains the draft→ready gap" 'grep -q "predates the draft" <<<"$out"'
 
 heading "Test 24b: skipping lane, newest run is newer than the ready event → exit 0"
 rc=0
-out="$(GH_RUNLIST_JSON='[{"status":"completed","conclusion":"success","workflowName":"CI","createdAt":"2026-11-10T10:06:00Z"}]' \
-    GH_ISSUE_EVENTS_JSON='[{"event":"ready_for_review","created_at":"2026-11-10T10:05:00Z"}]' \
+# Relative timestamps (inside the grace window, like Test 24): fixed ones aged out and made this duplicate 24d.
+ready_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"; run_at="$(date -u -d "$ready_at +1 second" +%Y-%m-%dT%H:%M:%SZ)"
+out="$(GH_RUNLIST_JSON="[{\"status\":\"completed\",\"conclusion\":\"success\",\"workflowName\":\"CI\",\"createdAt\":\"$run_at\"}]" \
+    GH_ISSUE_EVENTS_JSON="[{\"event\":\"ready_for_review\",\"created_at\":\"$ready_at\"}]" \
     GH_VIEW_ISDRAFT=false GH_CHECKS_OUT='Fast\tpass\t1m\turl\ndb\tskipping\t0\turl' \
     "$CI_WAIT" 42 5 2>&1)" || rc=$?
 check "exits 0" '[ "$rc" -eq 0 ]'

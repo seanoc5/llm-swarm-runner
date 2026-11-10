@@ -52,6 +52,10 @@ scan() {
 }
 
 # 1. Static scan of the real scripts.
+# A listed launcher that is renamed/removed must fail, not silently shrink coverage (awk errors are swallowed by `|| true` in scan).
+for f in "$SCRIPTS"/../llm-start.sh "$SCRIPTS"/../sandbox.sh "$SCRIPTS"/../entrypoint.sh; do
+    [ -f "$f" ] || red "scan target missing: $f (renamed or removed? update this test)"
+done
 hits="$(scan "$SCRIPTS"/*.sh "$SCRIPTS"/../llm-start.sh "$SCRIPTS"/../sandbox.sh "$SCRIPTS"/../entrypoint.sh)"
 [ -z "$hits" ] || red "early-exit reader in a pipe (SIGPIPE race under pipefail):
 $hits"
