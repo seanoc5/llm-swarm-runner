@@ -17,7 +17,7 @@
 #   stale-window an item sends the operator to type something "in its worker
 #                window" / "in its iss-N pane" for a PR or issue whose worker is
 #                on hold (sidelined: no window exists; issue #841). Needs
-#                --project DIR (or $SWARM_PROJECT_DIR); without one this rule
+#                --project DIR; without one this rule
 #                is skipped. A worker counts as on hold when its worktree has
 #                .swarm/sidelined; a PR maps to its worker through the "pr" in
 #                the worktree's .swarm/tasks/status/*.json. Right wording: type
@@ -29,7 +29,7 @@
 # Fixtures: tests/fixtures/reply-lint/.
 set -uo pipefail
 
-PROJECT="${SWARM_PROJECT_DIR:-}"; FILE=""
+PROJECT=""; FILE=""
 while [ $# -gt 0 ]; do
     case "$1" in
         -h|--help) sed -n '3,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -93,7 +93,7 @@ stale_window_hits() {
     local self_dir lister wt issue f p
     local -A hold_issue=() hold_pr=()
     self_dir="$(cd "$(dirname "$0")" && pwd)"
-    lister="${LIST_WORKTREES_SCRIPT:-$self_dir/list-own-worktrees.sh}"
+    lister="$self_dir/list-own-worktrees.sh"
     while IFS= read -r wt; do
         [ -n "$wt" ] && [ -e "$wt/.swarm/sidelined" ] || continue
         issue="$(basename "$wt")"; issue="${issue#wt-issue-}"
