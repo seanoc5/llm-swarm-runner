@@ -223,6 +223,13 @@ REAP_CAPTURE_LINES="${REAP_CAPTURE_LINES:-500}"
 # defeated the way the CLI flag is. Env-overridable (same pattern as
 # REAP_CAPTURE_LINES above) so tests can set it to 0.
 REAP_ISSUE_CLOSED_MIN_IDLE_MIN="${REAP_ISSUE_CLOSED_MIN_IDLE_MIN:-10}"
+
+# issue #802: a branch can carry several slices of one OPEN issue, so an
+# earlier slice's MERGED PR says nothing about the slice being worked now.
+# A window on an OPEN issue with a merged/closed PR is only reaped once its
+# brief queue is empty AND it has been idle this many minutes (a freshly
+# woken worker has idle ~0). Env-overridable so tests can set it to 0.
+REAP_REWAKE_GRACE_MIN="${REAP_REWAKE_GRACE_MIN:-10}"
 log_event() {
     local cat="$1"; shift
     local ts
@@ -663,6 +670,37 @@ issue_closed_reap_eligible() {
     return 0
 }
 
+# issue #802: rewoken_worker_guard <issue> <worktree> <window>
+#
+# Returns 0 (and sets REWAKE_SKIP_REASON) when this window must NOT be reaped
+# on PR grounds: the issue is still OPEN and the worker either has a brief
+# queued/in flight (inbox/ or processing/ non-empty) or was active within
+# REAP_REWAKE_GRACE_MIN minutes. That is the multi-slice case: slices 1 and 2
+# merged as PRs from one branch, the coordinator re-woke the worker
+# (provision-worker.sh --wake) for slice 3, and the stale MERGED PR got the
+# fresh worker reaped 30s later with uncommitted work. A normal finished
+# worker's PR closes its issue, so this never fires for it. Fails OPEN (returns
+# 1) when the issue state can't be read, so a gh outage does not strand every
+# merged worker; the PR lookup has its own failure guard.
+REWAKE_SKIP_REASON=""
+rewoken_worker_guard() {
+    local issue="$1" wt="$2" window="$3" queued idle
+    REWAKE_SKIP_REASON=""
+    fetch_issue_state "$issue" || return 1
+    [ "$ISSUE_STATE" = "OPEN" ] || return 1
+    queued=$(( $(count_queued_files "$wt/.swarm/tasks/inbox") + $(count_queued_files "$wt/.swarm/tasks/processing") ))
+    if [ "$queued" -gt 0 ]; then
+        REWAKE_SKIP_REASON="issue #$issue is still OPEN and $queued brief(s) are queued or in flight (multi-slice branch; the PR covers an earlier slice)"
+        return 0
+    fi
+    idle=$(window_idle_min "$window")
+    if [ "$idle" -lt "$REAP_REWAKE_GRACE_MIN" ]; then
+        REWAKE_SKIP_REASON="issue #$issue is still OPEN and the window was active ${idle}m ago (< ${REAP_REWAKE_GRACE_MIN}m grace; may have just been woken)"
+        return 0
+    fi
+    return 1
+}
+
 # Decide which ones to kill ---------------------------------------------------
 KILL_LIST=()
 declare -A KILL_REASONS KILL_BRANCH
@@ -839,6 +877,15 @@ for w in "${WINDOWS[@]}"; do
         # Already covered by the eligibility gate's "PR-merged" reason
         # above — avoid a redundant token in the kill-line/reap.window log.
         [ "$merged" = "1" ] || reasons+=("PR-safe")
+    fi
+
+    # issue #802: a terminal PR on a still-OPEN issue may be an earlier slice's.
+    # Keep a worker with a brief queued/in flight or recent activity. --all
+    # is the explicit "include active windows" override.
+    if [ "$ALL" != "1" ] && { [ "$PR_STATE" = "MERGED" ] || [ "$PR_STATE" = "CLOSED" ]; } \
+       && rewoken_worker_guard "$issue" "$wt" "$w"; then
+        echo "  $w  [PR $branch is $PR_STATE but $REWAKE_SKIP_REASON → skip]"
+        continue
     fi
 
     # Survived all filters → kill

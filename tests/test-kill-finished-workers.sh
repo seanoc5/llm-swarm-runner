@@ -684,5 +684,62 @@ grep -q 'iss-58.*floor.*actively running' "$RUN_LOG17" \
 $(cat "$RUN_LOG17")"
 green "iss-58 (idle 0m, real default floor) preserved under --merged-only — floor holds outside default mode too"
 
+# ============================================================================
+heading "Test 18: a re-woken worker on a multi-slice OPEN issue is not reaped (issue #802)"
+# ============================================================================
+# Slices 1 and 2 of one issue merged as PRs from the same branch; the
+# coordinator re-woke the worker for slice 3. gh reports the branch's
+# latest PR as MERGED, but the issue is still OPEN. The worker must survive
+# while a brief is queued/in flight, and while its window is freshly active,
+# and only become reapable once both are gone.
+
+git -C "$PROJECT_DIR" worktree add -q -b fix/issue-60 "$TEST_DIR/wt-issue-60"
+git -C "$TEST_DIR/wt-issue-60" push -q -u origin fix/issue-60
+mkdir -p "$TEST_DIR/wt-issue-60/.swarm/tasks/processing"
+echo "slice 3 brief" > "$TEST_DIR/wt-issue-60/.swarm/tasks/processing/20261109-162911-60.md"
+"$SHIM_DIR/tmux" new-window -t "$SESSION" -n iss-60
+sed -i "s#        fix/issue-52) printf#        fix/issue-60) printf 'MERGED\\\\t$FUTURE_ISO\\\\t560\\\\n'; exit 0 ;;\n        fix/issue-52) printf#" "$SHIM_DIR/gh"
+sed -i "s/58) echo CLOSED; exit 0 ;;/58) echo CLOSED; exit 0 ;;\n        60) echo OPEN; exit 0 ;;/" "$SHIM_DIR/gh"
+
+run18() {
+    local log="$1"; shift
+    local rc
+    set +e
+    (cd "$PROJECT_DIR" && PATH="$SHIM_DIR:$PATH" env "$@" "$KILL_FINISHED" --pr-finalized --idle-min 0) > "$log" 2>&1
+    rc=$?
+    set -e
+    [ "$rc" -eq 0 ] || red "expected exit 0, got $rc. Output:
+$(cat "$log")"
+}
+
+# A: brief in processing/ -> survives even with the grace disabled.
+run18 "$TEST_DIR/run18a.log" REAP_REWAKE_GRACE_MIN=0
+"$SHIM_DIR/tmux" list-windows -t "$SESSION" -F '#W' | grep -qx 'iss-60' \
+    || red "iss-60 (issue OPEN, brief in processing/) was reaped on a stale MERGED PR. Output:
+$(cat "$TEST_DIR/run18a.log")"
+grep -q 'iss-60.*MERGED but issue #60 is still OPEN.*queued or in flight.*skip' "$TEST_DIR/run18a.log" \
+    || red "expected iss-60's skip line to cite the queued brief. Output:
+$(cat "$TEST_DIR/run18a.log")"
+green "iss-60 (OPEN issue, brief in processing/) preserved despite MERGED PR"
+
+# B: queue empty, window just active, default grace -> survives.
+rm -f "$TEST_DIR/wt-issue-60/.swarm/tasks/processing/"*
+run18 "$TEST_DIR/run18b.log"
+"$SHIM_DIR/tmux" list-windows -t "$SESSION" -F '#W' | grep -qx 'iss-60' \
+    || red "iss-60 (issue OPEN, freshly active window) was reaped inside the grace window. Output:
+$(cat "$TEST_DIR/run18b.log")"
+grep -q 'iss-60.*active 0m ago.*grace' "$TEST_DIR/run18b.log" \
+    || red "expected iss-60's skip line to cite the recent-activity grace. Output:
+$(cat "$TEST_DIR/run18b.log")"
+green "iss-60 (OPEN issue, freshly active window) preserved inside the grace period"
+
+# C: queue empty and grace elapsed -> reapable as before.
+run18 "$TEST_DIR/run18c.log" REAP_REWAKE_GRACE_MIN=0
+if "$SHIM_DIR/tmux" list-windows -t "$SESSION" -F '#W' | grep -qx 'iss-60'; then
+    red "iss-60 (queue empty, grace elapsed) should be reapable. Output:
+$(cat "$TEST_DIR/run18c.log")"
+fi
+green "iss-60 reaped once its queue is empty and the grace has elapsed"
+
 echo
 green "ALL TESTS PASSED"
