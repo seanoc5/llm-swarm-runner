@@ -111,9 +111,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # render"; ~450/180/170 bytes net. The check itself lives in
 # lint-coordinator-reply.sh, not in prompt prose. Stopgap until #509.
 #
-WORKER_MAX="${WORKER_MD_MAX_BYTES:-24300}"
+# 2026-11-10: worker 24300 -> 24600, worker-bare 11600 -> 11900. Issue #801
+# adds one sentence (~190 bytes) to each PR template: a self-merged PR that
+# needed no human says so ("Needs you: none"), so a closed PR missing from
+# corpusminder explains itself. Stopgap until #509.
+#
+WORKER_MAX="${WORKER_MD_MAX_BYTES:-24600}"
 COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-31900}"
-BARE_MAX="${WORKER_BARE_MD_MAX_BYTES:-11600}"   # issue #510 trial prompt; ~7.5KB is script-parsed contract
+BARE_MAX="${WORKER_BARE_MD_MAX_BYTES:-11900}"   # issue #510 trial prompt; ~7.5KB is script-parsed contract
 SHARED_MAX="${COORD_SHARED_MD_MAX_BYTES:-5600}"   # issue #767 split prompts
 WORK_MAX="${COORD_WORK_MD_MAX_BYTES:-24400}"
 CHAT_MAX="${COORD_CHAT_MD_MAX_BYTES:-5200}"

@@ -32,10 +32,10 @@ msg() {    # msg <kind> [extra text] -> outbox message path
 urg() { coord_item_urgency "$1"; }
 
 # ── classification ──────────────────────────────────────────────────────────
-for k in deliver_stall stranded_brief worktree_vanished sidelined_worker sidelined_wake_failed stall mystery_kind; do
+for k in deliver_stall stranded_brief worktree_vanished sidelined_worker sidelined_wake_failed stall mystery_kind cminder_answer; do
     check "$k is urgent" urgent "$(urg "$(item "$k")")"
 done
-for k in idle_capacity activity dispatch_pause_lifted stale_wait; do
+for k in idle_capacity activity dispatch_pause_lifted stale_wait cminder_info; do
     check "$k is batched" batched "$(urg "$(item "$k")")"
 done
 check "ok outcome is batched" batched "$(urg "$(item outcome "wake\n\nTriggering outcome: issue=5 outcome=ok path=/x/done/a.ok.json")")"
