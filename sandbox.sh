@@ -131,6 +131,17 @@ MOUNTS=(
     -v "$HOME/.npm:/home/sandbox/.npm:rw"
 )
 
+# Global hooks registered in ~/.claude/settings.json (which the container
+# sees via the mount above) are written with the HOST's absolute home, e.g.
+# /home/sean/.claude/hooks/x.sh, but the container's home is /home/sandbox,
+# so the command died with "not found" after every turn (#837). Bind the
+# hooks dir read-only at the host path too (same trick as ~/.ssh above).
+# Skipped when absent, or when the host home is the container home (the
+# rw mount already covers it).
+if [ -d "$HOME/.claude/hooks" ] && [ "$HOME" != "/home/sandbox" ]; then
+    MOUNTS+=(-v "$HOME/.claude/hooks:$HOME/.claude/hooks:ro")
+fi
+
 # ~/.gemini holds gemini-cli's settings.json (auth + MCP server config).
 # Workers inherit the host's config (e.g. the open-brain MCP server) without
 # re-configuring per-container. The dir itself must be writable: gemini-cli
