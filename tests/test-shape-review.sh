@@ -374,6 +374,97 @@ printf '%s\n' '<!-- SWARM_SELF_REVIEW: APPROVE actor=worker head=abc123 -->' | j
 green "same head+actor skipped (verdict replayed); other actor (even with --force), new head, --rerun, untrusted marker all run; --force alone never re-reviews"
 
 # ============================================================================
+heading "Test X: oversized / excluded files are left out, named, and a still-too-big diff fails (#789)"
+# ============================================================================
+BIGDIFF="$TEST_DIR/big.diff"
+{
+    echo "diff --git a/src/a.kt b/src/a.kt"; echo "+val a = 1"
+    echo "diff --git a/data/big.csv b/data/big.csv"
+    for i in $(seq 1 3000); do echo "+row$i,aaaaaaaaaaaaaaaaaaaa,bbbbbbbbbbbbbbbbbbbb"; done
+    echo "diff --git a/docs/keep.lock b/docs/keep.lock"; echo "+lockline"
+} > "$BIGDIFF"
+# Stub gh pr diff to serve the big diff.
+cp "$TEST_DIR/bin/gh" "$TEST_DIR/bin/gh.orig"
+sed -i 's|"pr diff")    echo "diff --git a/f.txt b/f.txt"; exit 0 ;;|"pr diff")    if [ -n "${GH_DIFF_FILE:-}" ]; then cat "$GH_DIFF_FILE"; else echo "diff --git a/f.txt b/f.txt"; fi; exit 0 ;;|' "$TEST_DIR/bin/gh"
+export GH_DIFF_FILE="$BIGDIFF"
+export CODEX_PAYLOAD_LOG
+printf 'APPROVE\n' > "$CLAUDE_STUB_OUTPUT"
+
+# (a) over the prompt limit with no exclusion -> exit 1 naming next step
+if SELF_REVIEW_MAX_FILE_BYTES=0 SELF_REVIEW_MAX_PROMPT_BYTES=50000 "$REVIEW" 42 >"$TEST_DIR/o.out" 2>"$TEST_DIR/o.err"; then RC=0; else RC=$?; fi
+[ "$RC" -eq 1 ] || red "over-limit prompt must exit 1, got $RC"
+grep -q 'SELF_REVIEW_EXCLUDE' "$TEST_DIR/o.err" || red "over-limit error must name the next step"
+
+# (b) default size threshold excludes the CSV; review proceeds; prompt names it
+: > "$GH_LOG"; : > "$GH_COMMENTS_FILE"; echo '{"headRefOid":"","comments":[]}' > "$GH_PR_JSON_FILE"
+if SELF_REVIEW_MAX_FILE_BYTES=20000 SELF_REVIEW_MAX_PROMPT_BYTES=50000 WORKER_CMD=codex "$REVIEW" 42 --post >"$TEST_DIR/o.out" 2>"$TEST_DIR/o.err"; then RC=0; else RC=$?; fi
+[ "$RC" -eq 0 ] || red "diff should be reviewable after exclusion, got $RC: $(cat "$TEST_DIR/o.err")"
+grep -q 'data/big.csv' "$CODEX_PAYLOAD_LOG" || red "prompt must name the excluded file"
+grep -q 'NOT REVIEWED' "$CODEX_PAYLOAD_LOG" || red "prompt must say the file was not reviewed"
+grep -q 'row2999' "$CODEX_PAYLOAD_LOG" && red "excluded file content leaked into the prompt"
+grep -q 'val a = 1' "$CODEX_PAYLOAD_LOG" || red "small file must stay in the prompt"
+grep -qE 'data/big.csv — [0-9]+ bytes, 3001 diff lines' "$TEST_DIR/o.out" || red "printed verdict must list path, size, lines"
+grep -q 'SWARM_SELF_REVIEW: APPROVE actor=worker' "$GH_LOG" || red "marker format must be unchanged"
+sed -n '/^pr comment/,$p' "$GH_LOG" | grep -q 'data/big.csv — [0-9]* bytes' || red "posted comment must list the excluded file"
+
+# (c) glob exclusion (comma list, bare name matches any dir); a .csv in the
+# cwd must not make bash expand the glob
+touch "$TEST_DIR/top.csv"
+if cd "$TEST_DIR" && SELF_REVIEW_MAX_FILE_BYTES=0 SELF_REVIEW_EXCLUDE='*.csv,x/y' WORKER_CMD=codex "$REVIEW" 42 >"$TEST_DIR/o.out" 2>&1; then RC=0; else RC=$?; fi
+cd "$SCRIPT_DIR"
+[ "$RC" -eq 0 ] || red "glob exclusion run failed ($RC)"
+grep -q "matches SELF_REVIEW_EXCLUDE '\*.csv'" "$TEST_DIR/o.out" || red "glob exclusion not reported"
+grep -q 'lockline' "$CODEX_PAYLOAD_LOG" || red "non-matching file must stay"
+unset GH_DIFF_FILE
+cp "$TEST_DIR/bin/gh.orig" "$TEST_DIR/bin/gh"; chmod +x "$TEST_DIR/bin/gh"
+green "large/excluded files left out and named; still-too-big diff fails with next step"
+
+# ============================================================================
+heading "Test Y: excluded=N in the marker; big source files stay in; many-file diffs (#789)"
+# ============================================================================
+BIGSRC="$TEST_DIR/bigsrc.diff"
+{
+    echo "diff --git a/src/Big.kt b/src/Big.kt"
+    for i in $(seq 1 3000); do echo "+val v$i = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\""; done
+    echo "diff --git a/data/big.csv b/data/big.csv"
+    for i in $(seq 1 3000); do echo "+row$i,aaaaaaaaaaaaaaaaaaaa,bbbbbbbbbbbbbbbbbbbb"; done
+} > "$BIGSRC"
+export GH_DIFF_FILE="$BIGSRC"
+sed -i 's|"pr diff")    echo "diff --git a/f.txt b/f.txt"; exit 0 ;;|"pr diff")    if [ -n "${GH_DIFF_FILE:-}" ]; then cat "$GH_DIFF_FILE"; else echo "diff --git a/f.txt b/f.txt"; fi; exit 0 ;;|' "$TEST_DIR/bin/gh"
+printf 'APPROVE\n' > "$CLAUDE_STUB_OUTPUT"
+
+# (a) oversized CSV excluded, oversized .kt kept; marker carries excluded=1
+: > "$GH_LOG"; : > "$GH_COMMENTS_FILE"; echo '{"headRefOid":"abc123","comments":[]}' > "$GH_PR_JSON_FILE"
+if SELF_REVIEW_MAX_FILE_BYTES=20000 SELF_REVIEW_MAX_PROMPT_BYTES=900000 WORKER_CMD=codex "$REVIEW" 42 --post >"$TEST_DIR/o.out" 2>"$TEST_DIR/o.err"; then RC=0; else RC=$?; fi
+[ "$RC" -eq 0 ] || red "run failed ($RC): $(cat "$TEST_DIR/o.err")"
+grep -q 'val v2999' "$CODEX_PAYLOAD_LOG" || red "an oversized source file must stay in the prompt"
+grep -q 'row2999' "$CODEX_PAYLOAD_LOG" && red "oversized csv leaked into the prompt"
+grep -q 'SWARM_SELF_REVIEW: APPROVE actor=worker head=abc123 excluded=1 -->' "$GH_LOG" || red "marker must carry excluded=1 (log: $(grep SWARM "$GH_LOG"))"
+
+# (b) nothing excluded -> no excluded= field at all
+: > "$GH_LOG"; echo '{"headRefOid":"abc124","comments":[]}' > "$GH_PR_JSON_FILE"
+export GH_DIFF_FILE="$TEST_DIR/small.diff"; printf 'diff --git a/a.kt b/a.kt\n+x\n' > "$GH_DIFF_FILE"
+if WORKER_CMD=codex "$REVIEW" 42 --post >"$TEST_DIR/o.out" 2>&1; then RC=0; else RC=$?; fi
+[ "$RC" -eq 0 ] || red "clean run failed ($RC)"
+grep 'SWARM_SELF_REVIEW:' "$GH_LOG" | grep -q excluded= && red "clean review must not carry excluded="
+grep -q "SWARM_SELF_REVIEW: APPROVE actor=worker head=abc123 -->" "$GH_LOG" || red "clean marker format changed: $(grep SWARM "$GH_LOG")"
+
+# (c) oversized source that busts the prompt cap fails with the next step
+export GH_DIFF_FILE="$BIGSRC"
+if SELF_REVIEW_MAX_FILE_BYTES=20000 SELF_REVIEW_MAX_PROMPT_BYTES=50000 WORKER_CMD=codex "$REVIEW" 42 >"$TEST_DIR/o.out" 2>"$TEST_DIR/o.err"; then RC=0; else RC=$?; fi
+[ "$RC" -eq 1 ] && grep -q 'Next step' "$TEST_DIR/o.err" || red "oversized source over the cap must exit 1 with the next step (rc=$RC)"
+
+# (d) 600 files in one diff do not exhaust awk file handles (mawk, ulimit -n 64)
+MANY="$TEST_DIR/many.diff"; : > "$MANY"
+for i in $(seq 1 600); do printf 'diff --git a/f%s.kt b/f%s.kt\n+line%s\n' "$i" "$i" "$i" >> "$MANY"; done
+export GH_DIFF_FILE="$MANY"; echo '{"headRefOid":"abc125","comments":[]}' > "$GH_PR_JSON_FILE"
+if (ulimit -n 64; WORKER_CMD=codex "$REVIEW" 42 >"$TEST_DIR/o.out" 2>"$TEST_DIR/o.err"); then RC=0; else RC=$?; fi
+[ "$RC" -eq 0 ] || red "600-file diff failed under ulimit -n 64 ($RC): $(head -3 "$TEST_DIR/o.err")"
+grep -q 'line600' "$CODEX_PAYLOAD_LOG" || red "last file missing from prompt"
+unset GH_DIFF_FILE
+green "excluded=N only when files were left out; code stays in; many-file diff OK"
+
+# ============================================================================
 heading "All self-review machinery shape tests passed"
 green "verdict parsing, exit codes, --post idempotency, kill switch, merge gate"
 echo ""
