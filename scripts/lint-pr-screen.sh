@@ -72,7 +72,7 @@ esac
 # Screen = everything before the first <details> (or before the trailing
 # metadata footer if there is no appendix), minus the risk HTML comment.
 SCREEN=$(printf '%s\n' "$BODY" \
-    | awk '/<details/{exit} /^<sub>/{exit} {print}' \
+    | awk '/<details/{d=1} /^<sub>/{d=1} !d{print}' \
     | grep -v '<!-- BLIND_MERGE_RISK:' || true)
 
 FINDINGS=0

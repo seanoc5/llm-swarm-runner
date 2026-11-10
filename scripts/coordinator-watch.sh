@@ -6586,7 +6586,7 @@ check_is_duplicate() {
 # @swarm_chk_issue pane option when created), or nothing.
 check_pane_for_issue() {
     tmux list-panes -s -t "$SESSION_NAME" -F '#{pane_id} #{@swarm_chk_issue}' 2>/dev/null \
-        | awk -v i="$1" '$2 == i { print $1; exit }'
+        | awk -v i="$1" '!d && $2 == i { print $1; d=1 }'
 }
 
 # record_check_result <task_id> <issue> <check_json> <exit-code> <head_sha>

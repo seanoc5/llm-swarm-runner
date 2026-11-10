@@ -31,7 +31,7 @@ WINDOW_ID="$(tmux display-message -p -t "$TMUX_PANE" -F '#{window_id}')"
 
 # Find an existing scratch pane in this window by its title tag.
 SCRATCH_PANE="$(tmux list-panes -t "$WINDOW_ID" -F '#{pane_id} #{pane_title}' \
-    | awk '$2 == "coord-scratch" { print $1; exit }')"
+    | awk '!d && $2 == "coord-scratch" { print $1; d=1 }')"
 
 if [ -n "$SCRATCH_PANE" ]; then
     tmux kill-pane -t "$SCRATCH_PANE"
