@@ -1,0 +1,3 @@
+**A. Needs you:**
+- **A1** 🔴 PR #2113 (needs-you store for the cminder page) — rated high, self-review APPROVE. Type `merge PR 2113 red` in the coordinator; it wakes the worker, which is on hold. Default if silent: stays open. https://github.com/seanoc5/corpusminder-spring/pull/2113
+Do now: A1

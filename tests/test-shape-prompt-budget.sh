@@ -116,9 +116,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # needed no human says so ("Needs you: none"), so a closed PR missing from
 # corpusminder explains itself. Stopgap until #509.
 #
-WORKER_MAX="${WORKER_MD_MAX_BYTES:-24600}"
-COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-31900}"
-BARE_MAX="${WORKER_BARE_MD_MAX_BYTES:-11900}"   # issue #510 trial prompt; ~7.5KB is script-parsed contract
+# 2026-11-10 (on top of #801 above): worker 24600 -> 24800, coordinator 31900 -> 32500, worker-bare
+# 11900 -> 12100. Issue #841: a worker on hold (no window) can't take the
+# operator's 🔴 merge phrase, so the resident coordinator queues it with
+# queue-merge-brief.sh and the worker accepts that brief's marker. One table
+# cell each in the worker prompts, one paragraph in coordinator.md. The check
+# for stale "type it in its window" items is lint-coordinator-reply.sh.
+WORKER_MAX="${WORKER_MD_MAX_BYTES:-24800}"
+COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-32500}"
+BARE_MAX="${WORKER_BARE_MD_MAX_BYTES:-12100}"   # issue #510 trial prompt; ~7.5KB is script-parsed contract
 SHARED_MAX="${COORD_SHARED_MD_MAX_BYTES:-5600}"   # issue #767 split prompts
 WORK_MAX="${COORD_WORK_MD_MAX_BYTES:-24400}"
 CHAT_MAX="${COORD_CHAT_MD_MAX_BYTES:-5200}"

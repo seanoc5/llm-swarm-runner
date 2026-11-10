@@ -14,24 +14,39 @@
 #                "Nothing needed ..." together with "Do now:", or two of "Do now:" /
 #                "Pending your approval:" / nothing-lines (#801 fixture).
 #
+#   stale-window an item sends the operator to type something "in its worker
+#                window" / "in its iss-N pane" for a PR or issue whose worker is
+#                on hold (sidelined: no window exists; issue #841). Needs
+#                --project DIR (or $SWARM_PROJECT_DIR); without one this rule
+#                is skipped. A worker counts as on hold when its worktree has
+#                .swarm/sidelined; a PR maps to its worker through the "pr" in
+#                the worktree's .swarm/tasks/status/*.json. Right wording: type
+#                the phrase in the coordinator.
+#
+# Usage: lint-coordinator-reply.sh [--project DIR] [file]
 # Exit 0 clean, 3 hits (printed to stdout), 2 usage error. Naive on purpose:
 # a regex that catches the real incident beats a perfect check nobody runs.
 # Fixtures: tests/fixtures/reply-lint/.
 set -uo pipefail
 
-if [ $# -gt 1 ] || [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
-    sed -n '3,19p' "$0" | sed 's/^# \{0,1\}//'
-    [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ] && exit 0
-    exit 2
-fi
-if [ $# -eq 1 ]; then
-    [ -r "$1" ] || { echo "cannot read $1" >&2; exit 2; }
-    text="$(cat "$1")"
+PROJECT="${SWARM_PROJECT_DIR:-}"; FILE=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help) sed -n '3,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --project) PROJECT="${2:-}"; shift 2 ;;
+        --project=*) PROJECT="${1#*=}"; shift ;;
+        -*) echo "unknown option $1" >&2; exit 2 ;;
+        *) [ -z "$FILE" ] || exit 2; FILE="$1"; shift ;;
+    esac
+done
+if [ -n "$FILE" ]; then
+    [ -r "$FILE" ] || { echo "cannot read $FILE" >&2; exit 2; }
+    text="$(cat "$FILE")"
 else
     text="$(cat)"
 fi
 
-printf '%s\n' "$text" | awk '
+hits="$(printf '%s\n' "$text" | awk '
 function flush_item(   hit) {
     if (item != "" && tolower(item) ~ verbs && item !~ cmd) {
         hits[++n] = "no-command: " first
@@ -70,5 +85,45 @@ END {
     flush_item()
     if (nn + nd + np >= 2) hits[++n] = "two-endings: " nn " nothing-line(s), " nd " Do now, " np " Pending your approval"
     for (i = 1; i <= n; i++) print hits[i]
-    exit (n > 0 ? 3 : 0)
-}'
+}')"
+
+# stale-window (issue #841): needs the project's worktrees, so it is a bash pass.
+stale_window_hits() {
+    [ -n "$PROJECT" ] && [ -d "$PROJECT" ] || return 0
+    local self_dir lister wt issue f p
+    local -A hold_issue=() hold_pr=()
+    self_dir="$(cd "$(dirname "$0")" && pwd)"
+    lister="${LIST_WORKTREES_SCRIPT:-$self_dir/list-own-worktrees.sh}"
+    while IFS= read -r wt; do
+        [ -n "$wt" ] && [ -e "$wt/.swarm/sidelined" ] || continue
+        issue="$(basename "$wt")"; issue="${issue#wt-issue-}"
+        hold_issue[$issue]=1
+        for f in "$wt"/.swarm/tasks/status/*.json "$wt"/.swarm/tasks/done/*.json; do
+            [ -e "$f" ] || continue
+            p="$(jq -r '.pr // empty' "$f" 2>/dev/null)"
+            [[ "$p" =~ ^[0-9]+$ ]] && hold_pr[$p]=1
+        done
+    done < <("$lister" "$PROJECT" 2>/dev/null)
+    [ "${#hold_issue[@]}" -gt 0 ] || return 0
+    local block n
+    while IFS= read -r block; do
+        printf '%s' "$block" | tr 'A-Z' 'a-z' \
+            | grep -E "(in|into) (its|the|that|their) ((iss-[0-9]+|worker|worker.s) )*(window|pane)" >/dev/null || continue
+        while IFS= read -r n; do
+            [ -n "$n" ] || continue
+            if [ -n "${hold_pr[$n]:-}" ] || [ -n "${hold_issue[$n]:-}" ]; then
+                echo "stale-window: ${block:0:200}"; break
+            fi
+        done < <(printf '%s' "$block" | grep -oiE '(PR[ #/]*|pull/|iss-|#)[0-9]+' | grep -oE '[0-9]+')
+    done < <(printf '%s\n' "$text" | awk '
+        function out() { if (b != "") print b; b = "" }
+        /^[[:space:]]*-[[:space:]]+\*\*[A-Za-z][0-9]+\*\*/ { out(); b = $0; next }
+        /^[[:space:]]*$/ || /^(#|\*\*)/ { out(); next }
+        { if (b != "" && $0 ~ /^[[:space:]]/) b = b " " $0; else { out(); b = $0 } }
+        END { out() }')
+}
+stale="$(stale_window_hits)"
+all="$(printf '%s\n%s\n' "$hits" "$stale" | sed '/^$/d')"
+[ -z "$all" ] && exit 0
+printf '%s\n' "$all"
+exit 3
