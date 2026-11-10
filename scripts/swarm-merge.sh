@@ -269,7 +269,7 @@ fi
 
 # `git worktree list` first row is always the main worktree.
 main_worktree() {
-  git worktree list --porcelain | awk '/^worktree / { print $2; exit }'
+  git worktree list --porcelain | awk '!d && /^worktree / { print $2; d=1 }'
 }
 
 # Color helpers; harmless if not a tty.
