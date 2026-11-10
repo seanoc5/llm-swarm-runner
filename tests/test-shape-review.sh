@@ -407,8 +407,11 @@ grep -qE 'data/big.csv — [0-9]+ bytes, 3001 diff lines' "$TEST_DIR/o.out" || r
 grep -q 'SWARM_SELF_REVIEW: APPROVE actor=worker' "$GH_LOG" || red "marker format must be unchanged"
 sed -n '/^pr comment/,$p' "$GH_LOG" | grep -q 'data/big.csv — [0-9]* bytes' || red "posted comment must list the excluded file"
 
-# (c) glob exclusion (comma list, bare name matches any dir)
-if SELF_REVIEW_MAX_FILE_BYTES=0 SELF_REVIEW_EXCLUDE='*.csv,x/y' WORKER_CMD=codex "$REVIEW" 42 >"$TEST_DIR/o.out" 2>&1; then RC=0; else RC=$?; fi
+# (c) glob exclusion (comma list, bare name matches any dir); a .csv in the
+# cwd must not make bash expand the glob
+touch "$TEST_DIR/top.csv"
+if cd "$TEST_DIR" && SELF_REVIEW_MAX_FILE_BYTES=0 SELF_REVIEW_EXCLUDE='*.csv,x/y' WORKER_CMD=codex "$REVIEW" 42 >"$TEST_DIR/o.out" 2>&1; then RC=0; else RC=$?; fi
+cd "$SCRIPT_DIR"
 [ "$RC" -eq 0 ] || red "glob exclusion run failed ($RC)"
 grep -q "matches SELF_REVIEW_EXCLUDE '\*.csv'" "$TEST_DIR/o.out" || red "glob exclusion not reported"
 grep -q 'lockline' "$CODEX_PAYLOAD_LOG" || red "non-matching file must stay"

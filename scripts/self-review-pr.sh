@@ -64,7 +64,7 @@
 #   SELF_REVIEW_EXCLUDE  space- or comma-separated globs (e.g. "data/*.csv
 #             *.lock"); matching files are always left out. `*` matches `/`.
 #             A bare name like "*.csv" matches in any directory.
-#   SELF_REVIEW_MAX_PROMPT_BYTES  (default 3000000) if the prompt is still
+#   SELF_REVIEW_MAX_PROMPT_BYTES  (default 1500000) if the prompt is still
 #             larger after exclusion, exit 1 with the next step instead of
 #             sending it to a model that will refuse it.
 #             Every excluded file is named (path, bytes, lines) in the
@@ -208,11 +208,13 @@ DIFF="$(gh pr diff "$PR")" || { echo "ERROR: gh pr diff $PR failed" >&2; exit 1;
 # SELF_REVIEW_EXCLUDE is replaced by a one-line stub, and listed (path, bytes,
 # lines) in EXCLUDED_NOTE, which goes into the prompt and the posted verdict.
 MAX_FILE_BYTES="${SELF_REVIEW_MAX_FILE_BYTES:-200000}"
-MAX_PROMPT_BYTES="${SELF_REVIEW_MAX_PROMPT_BYTES:-3000000}"
+MAX_PROMPT_BYTES="${SELF_REVIEW_MAX_PROMPT_BYTES:-1500000}"
 EXCLUDE_GLOBS="${SELF_REVIEW_EXCLUDE:-}"
 EXCLUDED_NOTE=""
 filter_diff() {
-    local secdir sec hdr path bytes lines glob hit out="" list=""
+    local secdir sec hdr path bytes lines glob hit out="" list="" GLOBS=()
+    # Split without letting bash expand the globs against the cwd.
+    set -f; read -ra GLOBS <<<"${EXCLUDE_GLOBS//,/ }"; set +f
     secdir="$(mktemp -d -t swarm-review-split-XXXXXX)"
     printf '%s\n' "$DIFF" | awk -v d="$secdir" '
         /^diff --git / { n++ }
@@ -225,7 +227,7 @@ filter_diff() {
         hit=""
         if [[ "$hdr" == "diff --git "* ]]; then
             [ "$MAX_FILE_BYTES" -gt 0 ] && [ "$bytes" -gt "$MAX_FILE_BYTES" ] && hit="over ${MAX_FILE_BYTES} bytes"
-            for glob in ${EXCLUDE_GLOBS//,/ }; do
+            for glob in "${GLOBS[@]}"; do
                 # shellcheck disable=SC2053
                 if [[ "$path" == $glob || "$path" == */$glob ]]; then hit="matches SELF_REVIEW_EXCLUDE '$glob'"; break; fi
             done
