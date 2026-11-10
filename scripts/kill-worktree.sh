@@ -856,11 +856,14 @@ if [ -d "$WT" ]; then
     REMOVE_OK=0
     if git worktree remove --force "$WT"; then
         REMOVE_OK=1
-    elif [ -d "$WT/.swarm" ]; then
+    elif [ -d "$WT/.swarm" ] && [ "$(cd "$WT" && pwd -P)" != "$(cd "$PROJECT_DIR" && pwd -P)" ]; then
         echo "  - removal failed; .swarm/ reappeared after the archive (late writer) — archiving the stub and retrying"
         LATE_DEST="$PROJECT_DIR/.swarm/reaped/iss-$ISSUE-$(date -u +%Y%m%dT%H%M%SZ).swarm-late"
         mkdir -p "$PROJECT_DIR/.swarm/reaped" 2>/dev/null || true
-        mv "$WT/.swarm" "$LATE_DEST" 2>/dev/null || rm -rf "$WT/.swarm"
+        mv "$WT/.swarm" "$LATE_DEST" 2>/dev/null || {
+            log_event reap.worktree.archive_failed "issue=$ISSUE which=swarm-late"
+            rm -rf "$WT/.swarm"
+        }
         if [ -d "$LATE_DEST" ]; then
             if [ "$ARCHIVE_EVENT_FIELD" = "none" ]; then
                 ARCHIVE_EVENT_FIELD="late=$LATE_DEST"
