@@ -370,7 +370,7 @@ wait_for_polls() {
         [ "$(wc -l < "$GH_POLL_LOG" 2>/dev/null || echo 0)" -ge "$want" ] && return 0
         sleep 0.05
     done
-    return 0
+    red "wait_for_polls: tick marker fired $(wc -l < "$GH_POLL_LOG" 2>/dev/null || echo 0) of $want times in ${max}s (a timeout here would make every \"stays clear\" check pass vacuously)"
 }
 # wait_for_more_polls <n>: n further polls beyond the current count.
 wait_for_more_polls() {
@@ -388,7 +388,7 @@ wait_for_brief() {
         [ "$(briefs_for_pr90)" -ge 1 ] && return 0
         sleep 0.05
     done
-    return 0
+    red "wait_for_brief: no PR-190 conflict brief queued within ${max}s"
 }
 
 wait_for_watcher_exit() {

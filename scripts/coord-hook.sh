@@ -171,7 +171,7 @@ reply_lint_message() {
     : > "$blocked_file" 2>/dev/null || true
     log_event "coord.reply_lint.hit rules=$rules"
     printf 'Reply lint failed (%s). Fix before ending your turn: every operator action must carry its full command (fenced) or https URL plus click path in this reply; never point at an earlier message, "above" or .swarm/needs-you.md; end with exactly one closing line. Reprint with: scripts/needs-you.sh render. Offending lines: %s' \
-        "$rules" "$(printf '%s' "$hits" | head -3 | tr '\n' '|')"
+        "$rules" "$(printf '%s' "$hits" | sed -n 1,3p | tr '\n' '|')"
 }
 
 case "$event" in
