@@ -635,6 +635,17 @@ if [ "$WAKE" = "1" ] && [ ! -d "$WT/.swarm/tasks/inbox" ]; then
     exit 2
 fi
 
+# Issue #818: if the PR branch already exists on origin (worktree reaped while
+# the PR is open), base on it. Basing on the default branch would diverge from
+# the open PR and a push would force-replace it.
+BASE_REF="$DEFAULT_REMOTE_REF"
+# Confirm against the live remote: a cached ref can outlive a branch that
+# swarm-merge.sh deleted after a squash merge (fetch runs without --prune).
+if git show-ref --verify --quiet "refs/remotes/origin/$BRANCH" &&
+   [ -n "$(git ls-remote --heads origin "$BRANCH" 2>/dev/null)" ]; then
+    BASE_REF="origin/$BRANCH"
+fi
+
 if [ -d "$WT" ]; then
     # wt-issue-N is namespaced only by issue number, so refuse to reuse a
     # worktree that belongs to another repo sharing this parent dir.
@@ -654,27 +665,30 @@ if [ -d "$WT" ]; then
 elif git show-ref --verify --quiet "refs/heads/$BRANCH"; then
     # Branch exists without a worktree (manual delete, branch sweep #174,
     # grouping change). `worktree add -b` would fail blind, so decide here.
-    unique_commits="$(git rev-list --count "$DEFAULT_REMOTE_REF..$BRANCH" 2>/dev/null || echo "")"
+    unique_commits="$(git rev-list --count "$BASE_REF..$BRANCH" 2>/dev/null || echo "")"
     if [ "$unique_commits" = "0" ]; then
         # Nothing unique, so fast-forwarding to the fresh base is lossless.
-        git branch -f "$BRANCH" "$DEFAULT_REMOTE_REF"
+        git branch -f "$BRANCH" "$BASE_REF"
         git worktree add "$WT" "$BRANCH"
         WT_CREATED_NOW=1
-        echo "[1/4] worktree created (reused stale branch $BRANCH — no unique commits vs $DEFAULT_REMOTE_REF, fast-forwarded)"
+        echo "[1/4] worktree created (reused stale branch $BRANCH — no unique commits vs $BASE_REF, fast-forwarded)"
     else
-        echo "ERROR: branch '$BRANCH' already exists with ${unique_commits:-an unknown number of} commit(s) not on $DEFAULT_REMOTE_REF," >&2
+        echo "ERROR: branch '$BRANCH' already exists with ${unique_commits:-an unknown number of} commit(s) not on $BASE_REF," >&2
         echo "       but no worktree at $WT is attached to it. Refusing to silently discard or" >&2
         echo "       reuse that work." >&2
-        echo "       Remedy: inspect it —  git log $DEFAULT_REMOTE_REF..$BRANCH" >&2
+        echo "       Remedy: inspect it —  git log $BASE_REF..$BRANCH" >&2
         echo "         then either reuse it:  git worktree add '$WT' '$BRANCH'" >&2
         echo "         or discard it:         git branch -D '$BRANCH'   (then re-run this script)" >&2
         log_event provision.stale_branch "issue=$ISSUE branch=$BRANCH unique_commits=${unique_commits:-unknown}"
         exit 2
     fi
 else
-    git worktree add "$WT" -b "$BRANCH" "$DEFAULT_REMOTE_REF"
+    git worktree add "$WT" -b "$BRANCH" "$BASE_REF"
+    if [ "$BASE_REF" != "$DEFAULT_REMOTE_REF" ]; then
+        git -C "$WT" branch --set-upstream-to="$BASE_REF" >/dev/null 2>&1 || true
+    fi
     WT_CREATED_NOW=1
-    echo "[1/4] worktree created (base: $DEFAULT_REMOTE_REF @ $(git rev-parse --short "$DEFAULT_REMOTE_REF"))"
+    echo "[1/4] worktree created (base: $BASE_REF @ $(git rev-parse --short "$BASE_REF"))"
 fi
 
 # Gitignored files the worker needs: .env (project credentials) and
