@@ -33,7 +33,7 @@ case "\${1:-} \${2:-}" in
     if [ -e "\$S/merged" ]; then st=MERGED; else st=OPEN; fi
     head=aaa1111
     if [ -e "\$S/merged-other-head" ]; then st=MERGED; head=bbb2222; fi
-    case "\$*" in *"--jq .headRefOid"*) echo aaa1111; exit 0 ;; esac
+    case "\$*" in *"--jq .headRefOid"*) [ -e "\$S/fail-jq-read" ] && exit 1; echo aaa1111; exit 0 ;; esac
     # the re-read under the action lock asks for exactly "state,headRefOid"
     if [ "\$*" = "pr view 600 --json state,headRefOid" ]; then
       [ -e "\$S/fail-reread" ] && exit 1
@@ -150,10 +150,13 @@ rc=0; ( cd "$REPO" && timeout 30 "$MERGE" 600 --no-kill --expect-head aaa1111 >"
 [ "$rc" = 1 ] && [ "$(merges)" = 0 ] || red "empty re-read (rc 0) under the lock must fail closed (rc $rc): $(cat "$TEST_DIR/j8.log")"
 grep -q "unreadable at merge time" "$TEST_DIR/j8.log" || red "no unreadable message: $(cat "$TEST_DIR/j8.log")"
 green "J8: empty head re-read fails closed"
-reset
+# The early fallback read (--jq .headRefOid) must FAIL here, else MATCH_SHA is
+# already set before the lock and the under-lock pin never runs.
+reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/fail-jq-read"
 ( cd "$REPO" && timeout 30 "$MERGE" 600 --no-kill --expect-head aaa1111 >"$TEST_DIR/j9.log" 2>&1 ) || red "merge failed: $(cat "$TEST_DIR/j9.log")"
+grep -q "could not read PR #600's head commit" "$TEST_DIR/j9.log" || red "J9 did not exercise the failed fallback read: $(cat "$TEST_DIR/j9.log")"
 grep -q -- "--match-head-commit aaa1111" "$TEST_DIR/state/merge-args" || red "merge not pinned to the re-read head: $(cat "$TEST_DIR/state/merge-args")"
-green "J9: merge call pinned to the head re-read under the lock"
+green "J9: fallback read failed -> merge call pinned to the head re-read under the lock"
 
 # --auto-low path: fake ci-wait.sh that, like the real one, follows a head that
 # arrives during the wait and reports the NEWEST commit as verified-head.
