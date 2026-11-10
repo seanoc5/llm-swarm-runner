@@ -23,11 +23,22 @@ watcher types a plain doorbell per item, with no suffix):
    everything pending is non-urgent; an urgent item keeps the plain 120 s grace).
 2. **"Woke for" line.** The nudge ends `Woke for: 2 outcome, 1 idle capacity.`
    and the coordinator opens its reply with that line.
-3. **Quiet replies.** `.swarm/needs-you.md` holds the standing Needs-you list.
-   The coordinator rewrites it only when the list changes. A wake that leaves it
-   unchanged gets one line: `Handled 3 items: 2 merged, 1 idle slot. Your list
-   unchanged (2 items) — details in .swarm/needs-you.md.` Full write-up only for
-   new or changed items.
+3. **Quiet replies.** `.swarm/needs-you.md` holds the standing Needs-you list,
+   kept by `scripts/needs-you.sh add|done|render` (issue #798): `add` refuses an
+   item whose `--do` has no command or https URL. A wake that leaves the list
+   unchanged gets one `Handled ...` line plus the `render` output pasted
+   verbatim, so every open action shows its full command. Only a list of pure
+   yes/no or pick-one decisions may shrink to "Your list unchanged (2 items)"
+   plus PR URLs. Never "details in .swarm/needs-you.md": the operator reads
+   cold and a pointer is another stub. Full write-up for new or changed items.
+4. **Reply lint.** The Stop hook runs `scripts/lint-coordinator-reply.sh` on
+   the coordinator's last reply (resident and split) and blocks once on a
+   back-reference ("command above", "details in .swarm/needs-you.md"), a
+   run/start/click item with no command or URL, or two closing lines. Hits are
+   counted in `.swarm/events.log` as `coord.reply_lint.hit` (blocked) and
+   `coord.reply_lint.unfixed` (still failing after the nudge); per swarm per
+   week: `grep -c coord.reply_lint.hit .swarm/events.log`. Off with
+   `COORD_REPLY_LINT=0`.
 
 ## Urgent vs batched
 

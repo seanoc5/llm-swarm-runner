@@ -355,7 +355,7 @@ check "resident, hook state 0: no --settings (unchanged)" "none" "$got"
 run_wrapper resident 1
 check "resident, hook state 1: the three hooks (unchanged)" "Notification,Stop,UserPromptSubmit" "$(hooks)"
 run_wrapper split 0
-check "split, hook state 0: UserPromptSubmit only" "UserPromptSubmit" "$(hooks)"
+check "split, hook state 0: UserPromptSubmit + Stop (Stop runs the reply lint, #798; no state file)" "Stop,UserPromptSubmit" "$(hooks)"
 run_wrapper split 1
 check "split, hook state 1: all three" "Notification,Stop,UserPromptSubmit" "$(hooks)"
 settings="$(grep -A1 -x -- '--settings' "$T/argv" | tail -1)"
@@ -563,7 +563,7 @@ relaunch() {   # <mode> <COORD_HOOK_STATE>: llm-start writes the launch line; ru
 }
 P_SAVE="$P"; P="$S/proj"
 relaunch split 0
-check "split launch: only the needs-you hook" "UserPromptSubmit" "$(hooks)"
+check "split launch: the needs-you hook + the reply-lint Stop hook (#798)" "Stop,UserPromptSubmit" "$(hooks)"
 relaunch resident 1
 check "rollback relaunch: resident hooks (Stop rings again)" "Notification,Stop,UserPromptSubmit" "$(hooks)"
 printf '%s\n' '- **A1** 🟡 PR #1' > "$P/.swarm/needs-you.md"; rm -f "$P/.swarm/needs-you.seen"

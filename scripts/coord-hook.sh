@@ -46,6 +46,16 @@
 #      watcher is dead (issue #779); Stop never reaches it. Active even with
 #      COORD_HOOK_STATE=0; state-file writes still need COORD_HOOK_STATE=1.
 #
+#   5. Reply lint (issue #798, ADR 0007). On Stop, the coordinator's last reply
+#      goes through lint-coordinator-reply.sh: an action item that points at
+#      text off the screen ("command above", "details in .swarm/needs-you.md"),
+#      a run/start/click item with no command or URL, or two closing lines
+#      blocks the stop once with the findings, so the coordinator reprints
+#      the actions in full (needs-you.sh render). Every hit is counted in
+#      events.log: coord.reply_lint.hit (blocked) / coord.reply_lint.unfixed
+#      (still failing after the nudge; stop_hook_active, so no second block).
+#      COORD_REPLY_LINT=0 turns it off. Runs in split mode too.
+#
 # Fails open: any error leaves the hook silent (exit 0, no output), which
 # Claude Code treats as "no opinion" — the watcher then falls back to its
 # screen-based checks because the state file goes stale.
@@ -131,6 +141,31 @@ watcher_dead_warning() {
     printf '%s' "$out" | tr '\n' ' '
 }
 
+# reply_lint_message: prints the block reason when the last reply fails
+# lint-coordinator-reply.sh (and logs the hit); nothing otherwise. The reply is
+# the hook input's last_assistant_message, else the last assistant text block
+# of its transcript.
+reply_lint_message() {
+    [ "${COORD_REPLY_LINT:-1}" = "0" ] && return 0
+    local text tp hits rules
+    text="$(printf '%s' "$input" | jq -r '.last_assistant_message // empty' 2>/dev/null || true)"
+    if [ -z "$text" ]; then
+        tp="$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/null || true)"
+        [ -n "$tp" ] && [ -r "$tp" ] && text="$(jq -rs '[.[] | select(.type == "assistant") | [.message.content[]? | select(.type == "text") | .text] | select(length > 0) | join("\n")] | last // empty' "$tp" 2>/dev/null || true)"
+    fi
+    [ -n "$text" ] || return 0
+    hits="$(printf '%s\n' "$text" | "$(cd "$(dirname "$0")" && pwd)/lint-coordinator-reply.sh" 2>/dev/null)" && return 0
+    [ -n "$hits" ] || return 0
+    rules="$(printf '%s\n' "$hits" | cut -d: -f1 | sort -u | paste -sd, -)"
+    if [ "$active" = "true" ]; then
+        log_event "coord.reply_lint.unfixed rules=$rules"
+        return 0
+    fi
+    log_event "coord.reply_lint.hit rules=$rules"
+    printf 'Reply lint failed (%s). Fix before ending your turn: every operator action must carry its full command (fenced) or https URL plus click path in this reply; never point at an earlier message, "above" or .swarm/needs-you.md; end with exactly one closing line. Reprint with: scripts/needs-you.sh render. Offending lines: %s' \
+        "$rules" "$(printf '%s' "$hits" | head -3 | tr '\n' '|')"
+}
+
 case "$event" in
     UserPromptSubmit)
         [ "$hook_state" = "1" ] && write_state busy
@@ -146,12 +181,19 @@ case "$event" in
         ;;
     Notification)     [ "$hook_state" = "1" ] && write_state waiting ;;
     Stop)
-        # Split mode never rings: nothing is typed into or blocked on this session.
+        active="$(printf '%s' "$input" | jq -r '.stop_hook_active // false' 2>/dev/null || echo false)"
+        lint="$(reply_lint_message)"
+        # Split mode never rings: nothing is typed into or blocked on this session
+        # (only the reply lint can block it).
         if [ "$split" = "1" ]; then
-            [ "$hook_state" = "1" ] && write_state idle
+            if [ -n "$lint" ]; then
+                [ "$hook_state" = "1" ] && write_state busy
+                jq -n --arg r "$lint" '{decision: "block", reason: $r}'
+            else
+                [ "$hook_state" = "1" ] && write_state idle
+            fi
             exit 0
         fi
-        active="$(printf '%s' "$input" | jq -r '.stop_hook_active // false' 2>/dev/null || echo false)"
         last_rang="$(coord_last_ring_at "$swarm")"
         # Same urgent-vs-batched gate as coord-inbox-wait.sh (issue #730).
         coord_inbox_scan "$inbox" "$last_rang"
@@ -167,7 +209,11 @@ case "$event" in
             write_state busy
             log_event "coord.wake.hook_rang items=$count urgent=$CIB_URGENT batched=$CIB_BATCHED"
             arm="$(waiter_arm_request)"
-            jq -n --arg r "${template//%N/$count}${woke:+ Woke for: $woke.}${arm:+ $arm}${dead:+ $dead}" '{decision: "block", reason: $r}'
+            jq -n --arg r "${template//%N/$count}${woke:+ Woke for: $woke.}${arm:+ $arm}${dead:+ $dead}${lint:+ $lint}" '{decision: "block", reason: $r}'
+        elif [ -n "$lint" ]; then
+            write_state busy
+            arm="$(waiter_arm_request)"
+            jq -n --arg r "$lint${arm:+ $arm}${dead:+ $dead}" '{decision: "block", reason: $r}'
         elif arm="$(waiter_arm_request)" && [ -n "$arm" ]; then
             write_state busy
             jq -n --arg r "$arm${dead:+ $dead}" '{decision: "block", reason: $r}'

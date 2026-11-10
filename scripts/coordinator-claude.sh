@@ -94,7 +94,8 @@ ARGS=(--model "$MODEL"
 # and ad-hoc sessions in the same project never run them.
 # COORD_MODE=split (issue #767) installs the hook for its UserPromptSubmit
 # needs-you line even without COORD_HOOK_STATE; Stop/Notification (state file)
-# stay tied to COORD_HOOK_STATE.
+# stay tied to COORD_HOOK_STATE. Stop is always installed with the hook: it runs
+# the reply lint (issue #798) and writes no state unless COORD_HOOK_STATE=1.
 # shellcheck source=_coord-split.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_coord-split.sh"
 if [ "${COORD_HOOK_STATE:-0}" = "1" ] || [ "$(coord_mode "$PWD")" = "split" ]; then
@@ -104,7 +105,7 @@ if [ "${COORD_HOOK_STATE:-0}" = "1" ] || [ "$(coord_mode "$PWD")" = "split" ]; t
     ARGS+=(--settings "$(jq -cn --arg h "$HOOK" --arg state "${COORD_HOOK_STATE:-0}" '
         def on(e): [{hooks: [{type: "command", command: (($h | @sh) + " " + e)}]}];
         {hooks: ({UserPromptSubmit: on("UserPromptSubmit")}
-                 + (if $state == "1" then {Stop: on("Stop"), Notification: on("Notification")} else {} end))}')")
+                 + (if $state == "1" then {Stop: on("Stop"), Notification: on("Notification")} else {Stop: on("Stop")} end))}')")
 fi
 # Trailing positional: initial user message in REPL mode, print-prompt in -p mode.
 ARGS+=("$INITIAL_PROMPT")
