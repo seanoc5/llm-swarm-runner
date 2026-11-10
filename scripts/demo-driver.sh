@@ -73,7 +73,7 @@ wait_for_text() {
     local pane="$1" text="$2" timeout="${3:-30}"
     local elapsed=0
     while [ "$elapsed" -lt "$timeout" ]; do
-        if tmux capture-pane -t "$pane" -p 2>/dev/null | grep -q -F -- "$text"; then
+        if tmux capture-pane -t "$pane" -p 2>/dev/null | grep -F -- "$text" >/dev/null; then
             return 0
         fi
         sleep 1
@@ -87,7 +87,7 @@ wait_for_window() {
     local elapsed=0
     while [ "$elapsed" -lt "$timeout" ]; do
         if tmux list-windows -t "$SESSION_NAME" -F '#{window_name}' 2>/dev/null \
-            | grep -qE "$pattern"; then
+            | grep -E "$pattern" >/dev/null; then
             return 0
         fi
         sleep 1
@@ -123,7 +123,7 @@ fi
 
 # Ensure the demo label exists on the repo (idempotent — succeeds if already present).
 log "[pre-flight] Ensuring '$DEMO_LABEL' label exists on the repo..."
-if ! gh label list --json name --jq '.[].name' 2>/dev/null | grep -qx "$DEMO_LABEL"; then
+if ! gh label list --json name --jq '.[].name' 2>/dev/null | grep -x "$DEMO_LABEL" >/dev/null; then
     if gh label create "$DEMO_LABEL" \
         --description "Demo-friendly fodder: dispatched by demo-driver.sh during recordings" \
         --color FBCA04 >/dev/null 2>&1; then
@@ -219,7 +219,7 @@ log "[setup] Wrote transient $POLICY_PATH (scope: label=$DEMO_LABEL)."
 restore_policy() {
     # Only act on the file if it still carries our sentinel — if the user
     # (or a worker) replaced it mid-run, leave their content alone.
-    if [ -f "$POLICY_PATH" ] && head -1 "$POLICY_PATH" | grep -qF -- "$POLICY_SENTINEL"; then
+    if [ -f "$POLICY_PATH" ] && head -1 "$POLICY_PATH" | grep -F -- "$POLICY_SENTINEL" >/dev/null; then
         rm -f "$POLICY_PATH"
         log "[cleanup] Removed transient $POLICY_PATH."
     else
@@ -256,7 +256,7 @@ drive_beats() {
     local first_worker_idx
     first_worker_idx=$(tmux list-windows -t "$SESSION_NAME" \
         -F '#{window_index}:#{window_name}' \
-        | grep iss- | head -1 | cut -d: -f1)
+        | grep iss- | sed -n 1p | cut -d: -f1)
     log "[bg] Switching to worker window $first_worker_idx..."
     tmux select-window -t "$SESSION_NAME:$first_worker_idx"
 

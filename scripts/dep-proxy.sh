@@ -52,7 +52,7 @@ usage() {
 }
 
 is_running() {
-    docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$CONTAINER_NAME"
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -x "$CONTAINER_NAME" >/dev/null
 }
 
 cmd_up() {

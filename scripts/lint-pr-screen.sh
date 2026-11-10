@@ -93,7 +93,7 @@ label_words() {
 }
 
 # --- identifiers-above-fold --------------------------------------------------
-if printf '%s\n' "$SCREEN" | grep -q '`'; then
+if printf '%s\n' "$SCREEN" | grep '`' >/dev/null; then
     N=$(printf '%s\n' "$SCREEN" | grep -o '`[^`]*`' | wc -l | tr -d ' ')
     fail identifiers-above-fold \
         "$N code span(s) on the screen — class names, paths, endpoints, commands belong in the appendix; say what it means, not where it lives"
@@ -108,7 +108,7 @@ W=$(label_words "Your move")
 [ "$W" -le "$MOVE_MAX" ] || fail your-move-budget "$W words (max $MOVE_MAX) — use the '#### Your move' bullet list when there is more than one item"
 
 # --- recommendation-in-table -------------------------------------------------
-if printf '%s\n' "$SCREEN" | grep -E '^\|' | grep -q '✅'; then
+if printf '%s\n' "$SCREEN" | grep -E '^\|' | grep '✅' >/dev/null; then
     fail recommendation-in-table \
         "✅ inside a table row — put the recommendation on its own line under the table ('✅ Recommend A — why. Default if silent: …') so it cannot sit on the wrong option's row"
 fi

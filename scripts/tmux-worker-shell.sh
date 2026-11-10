@@ -24,7 +24,7 @@ eval "$(tmux display-message -p -t "$TMUX_PANE" -F 'SESSION=#{session_name}; WIN
 
 CONTAINER="swarm-${SESSION}-${WINDOW}"
 
-if ! docker ps --format '{{.Names}}' | grep -qx "$CONTAINER"; then
+if ! docker ps --format '{{.Names}}' | grep -x "$CONTAINER" >/dev/null; then
     echo "tmux-worker-shell: container '$CONTAINER' is not running." >&2
     echo "tmux-worker-shell: expected swarm-<tmux-session>-<window-name>; check provision-worker.sh." >&2
     docker ps --format '  {{.Names}}\t{{.Status}}' | grep -i swarm >&2 || true

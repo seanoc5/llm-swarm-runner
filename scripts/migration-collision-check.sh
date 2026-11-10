@@ -270,8 +270,8 @@ if [ "$OPEN_PRS" = 1 ]; then
                 # the label shows the first spelling seen.
                 key="Flyway $(ver_key "${BASH_REMATCH[1]}")"; label="Flyway V${BASH_REMATCH[1]}"
             elif [[ "$f" =~ (^|/)versions/[^/]+\.py$ ]]; then
-                rev_line="$(git show "$head_local:$f" 2>/dev/null | grep -E '^[[:space:]]*revision[[:space:]]*(:[^=]*)?=' | head -1 || true)"
-                rev="$(printf '%s\n' "$rev_line" | grep -oE "['\"][A-Za-z0-9_]+['\"]" | head -1 | tr -d "'\"" || true)"
+                rev_line="$(git show "$head_local:$f" 2>/dev/null | grep -E '^[[:space:]]*revision[[:space:]]*(:[^=]*)?=' | sed -n 1p || true)"
+                rev="$(printf '%s\n' "$rev_line" | grep -oE "['\"][A-Za-z0-9_]+['\"]" | sed -n 1p | tr -d "'\"" || true)"
                 [ -n "$rev" ] && { key="Alembic revision $rev"; label="$key"; }
             fi
             [ -n "$key" ] || continue
@@ -615,15 +615,15 @@ if [ -n "$ALEMBIC_FILES" ]; then
         # revision-less file (e.g. versions/__init__.py) would otherwise
         # kill the whole script via set -e. Each pipeline feeding an
         # assignment here needs its own `|| true`.
-        rev_line="$(printf '%s\n' "$content" | grep -E '^[[:space:]]*revision[[:space:]]*(:[^=]*)?=' | head -1 || true)"
-        rev="$(printf '%s\n' "$rev_line" | grep -oE "['\"][A-Za-z0-9_]+['\"]" | head -1 | tr -d "'\"" || true)"
+        rev_line="$(printf '%s\n' "$content" | grep -E '^[[:space:]]*revision[[:space:]]*(:[^=]*)?=' | sed -n 1p || true)"
+        rev="$(printf '%s\n' "$rev_line" | grep -oE "['\"][A-Za-z0-9_]+['\"]" | sed -n 1p | tr -d "'\"" || true)"
         [ -n "$rev" ] || continue
         # Keep every file claiming this id (not just the last one seen) so a
         # duplicate revision id — e.g. three files with revision="0075" —
         # is counted rather than silently overwritten in the map, same
         # pattern as VERSION_FILES above (#350).
         REVISION_FILES["$rev"]="${REVISION_FILES[$rev]:-}$f"$'\n'
-        down_line="$(printf '%s\n' "$content" | grep -E '^[[:space:]]*down_revision[[:space:]]*(:[^=]*)?=' | head -1 || true)"
+        down_line="$(printf '%s\n' "$content" | grep -E '^[[:space:]]*down_revision[[:space:]]*(:[^=]*)?=' | sed -n 1p || true)"
         while IFS= read -r d; do
             if [ -n "$d" ]; then
                 REFERENCED["$d"]=1
@@ -645,7 +645,7 @@ done
 ALEMBIC_HEADS=()
 for rev in "${!REVISION_FILES[@]}"; do
     if [ -z "${REFERENCED[$rev]:-}" ]; then
-        first_file="$(printf '%s' "${REVISION_FILES[$rev]}" | head -1)"
+        first_file="$(printf '%s' "${REVISION_FILES[$rev]}" | sed -n 1p)"
         ALEMBIC_HEADS+=("$rev ($first_file)")
     fi
 done

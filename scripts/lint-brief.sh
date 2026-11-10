@@ -53,9 +53,9 @@ warn() { echo "lint-brief: WARN $1: $2"; FINDINGS=$((FINDINGS + 1)); }
 
 # --- no-done-definition ------------------------------------------------------
 CHECK_CMD=$(printf '%s\n' "$TASK" \
-    | sed -n 's/.*<!-- SWARM_CHECK: \(.*\) -->.*/\1/p' | head -1)
+    | sed -n 's/.*<!-- SWARM_CHECK: \(.*\) -->.*/\1/p' | sed -n 1p)
 HAS_ACCEPTANCE=0
-printf '%s\n' "$TASK" | grep -qiE '(acceptance criteria|acceptance:|definition of done|^- \[ \])' \
+printf '%s\n' "$TASK" | grep -iE '(acceptance criteria|acceptance:|definition of done|^- \[ \])' >/dev/null \
     && HAS_ACCEPTANCE=1
 if [ -z "$CHECK_CMD" ] && [ "$HAS_ACCEPTANCE" = "0" ]; then
     warn no-done-definition \
@@ -75,7 +75,7 @@ fi
 
 # --- no-named-files ----------------------------------------------------------
 # Path-like token: contains a '/' or a filename with an extension.
-if ! printf '%s\n' "$TASK" | grep -qE '([A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+|[A-Za-z0-9_-]+\.[a-z]{1,10}\b)'; then
+if ! printf '%s\n' "$TASK" | grep -E '([A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+|[A-Za-z0-9_-]+\.[a-z]{1,10}\b)' >/dev/null; then
     warn no-named-files \
         "no file or path named in the task — the worker must guess where to work"
 fi

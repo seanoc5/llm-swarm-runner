@@ -16,7 +16,7 @@ CONFLICT_BRIEF_MARKER="swarm-merge:conflict-brief"
 
 conflict_brief_pending() {  # <wt_dir> <pr>
     grep -l "$CONFLICT_BRIEF_MARKER pr=$2 " \
-        "$1"/.swarm/tasks/inbox/*.md "$1"/.swarm/tasks/processing/*.md 2>/dev/null | head -1
+        "$1"/.swarm/tasks/inbox/*.md "$1"/.swarm/tasks/processing/*.md 2>/dev/null | sed -n 1p
 }
 
 queue_conflict_brief() {

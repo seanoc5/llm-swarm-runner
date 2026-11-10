@@ -176,7 +176,7 @@ case "$group $verb" in
     "api user") echo "replay-operator" ;;
     "api "*|"api")
         # reads only: GET with no field flags; anything else is a write
-        if printf '%s ' "$@" | grep -qE -- '(-X|--method|-f|-F|--field|--raw-field|--input)'; then rec "$@"; echo '{}'; exit 0; fi
+        if printf '%s ' "$@" | grep -E -- '(-X|--method|-f|-F|--field|--raw-field|--input)' >/dev/null; then rec "$@"; echo '{}'; exit 0; fi
         nofix "$@" ;;
     "label list") echo "[]" ;;
     "repo view") echo '{"nameWithOwner":"'"${REPLAY_REPO:-OWNER/REPO}"'","defaultBranchRef":{"name":"master"}}' | jq -r "${3:-.}" 2>/dev/null || echo "${REPLAY_REPO:-OWNER/REPO}" ;;
@@ -299,7 +299,7 @@ for f in "$P"/.swarm/coord-inbox/*.md; do [ -f "$f" ] && { rewrite < "$f" > "$f.
 # one, otherwise a stand-in carrying only what the inbox item itself says.
 for f in "$P"/.swarm/coord-inbox/*.md; do
     [ -f "$f" ] || continue
-    line="$(grep -E '^Triggering outcome: ' "$f" | head -1)" || true
+    line="$(grep -E '^Triggering outcome: ' "$f" | sed -n 1p)" || true
     [ -n "$line" ] || continue
     iss="$(sed -E 's/.*issue=([0-9]+).*/\1/' <<<"$line")"
     oc="$(sed -E 's/.*outcome=([A-Za-z-]+).*/\1/' <<<"$line")"
@@ -312,7 +312,7 @@ for f in "$P"/.swarm/coord-inbox/*.md; do
             select((.isSidechain // false) | not) | select(.type == "user" and .timestamp >= $from and .timestamp <= $to)
             | (.message.content | if type == "array" then .[] else empty end) | select(.type == "tool_result")
             | (.content | if type == "array" then (map(.text // "") | join("")) else (. // "") end)
-            | select(contains($tid)) | [match("\\{[^{}]*\"task_id\": *\"" + $tid + "\"[^{}]*\\}"; "g").string] | .[]' "$TRANSCRIPT" 2>/dev/null | head -1)"
+            | select(contains($tid)) | [match("\\{[^{}]*\"task_id\": *\"" + $tid + "\"[^{}]*\\}"; "g").string] | .[]' "$TRANSCRIPT" 2>/dev/null | sed -n 1p)"
     fi
     if [ -n "$rec" ] && printf '%s' "$rec" | jq -e . >/dev/null 2>&1; then
         printf '%s\n' "$rec" > "$path"

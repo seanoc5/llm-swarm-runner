@@ -39,7 +39,7 @@ probe() {
         PASS=$((PASS + 1)); printf '  \033[32m✓\033[0m %s\n' "$label"
     else
         FAIL=$((FAIL + 1)); FAILED+=("$label")
-        printf '  \033[31m✗\033[0m %s\n      %s\n' "$label" "$(printf '%s' "$out" | head -3 | tr '\n' ' ')"
+        printf '  \033[31m✗\033[0m %s\n      %s\n' "$label" "$(printf '%s' "$out" | sed -n '1,3p' | tr '\n' ' ')"
     fi
 }
 
@@ -90,7 +90,7 @@ else
         probe "gh issue edit --add-label"           gh issue edit -R "$PROBE_REPO" "$ISSUE_NUM" --add-label "$STAMP"
         probe "gh issue close"                      gh issue close -R "$PROBE_REPO" "$ISSUE_NUM"
     else
-        FAIL=$((FAIL + 1)); FAILED+=("gh issue create"); printf '  \033[31m✗\033[0m gh issue create\n      %s\n' "$(printf '%s' "$out" | head -2 | tr '\n' ' ')"
+        FAIL=$((FAIL + 1)); FAILED+=("gh issue create"); printf '  \033[31m✗\033[0m gh issue create\n      %s\n' "$(printf '%s' "$out" | sed -n '1,2p' | tr '\n' ' ')"
     fi
     if [ -n "$PROBE_PR" ]; then
         probe "gh pr comment (marker comments)"     gh pr comment -R "$PROBE_REPO" "$PROBE_PR" --body "<!-- PROBE -->probe"
@@ -99,7 +99,7 @@ else
             sha=$(gh pr view -R "$0" "$1" --json headRefOid -q .headRefOid) &&
             gh api repos/"$0"/statuses/"$sha" -f state=success -f context=swarm/probe -f description="token probe $2"
         ' "$PROBE_REPO" "$PROBE_PR" "$STAMP"
-        probe "gh pr ready"                         bash -c 'gh pr ready -R "$0" "$1" 2>&1 | grep -qi "already\|is ready\|marked" || gh pr ready -R "$0" "$1"' "$PROBE_REPO" "$PROBE_PR"
+        probe "gh pr ready"                         bash -c 'gh pr ready -R "$0" "$1" 2>&1 | grep -i "already\|is ready\|marked" >/dev/null || gh pr ready -R "$0" "$1"' "$PROBE_REPO" "$PROBE_PR"
         probe "gh pr close"                         gh pr close -R "$PROBE_REPO" "$PROBE_PR"
         probe "gh pr reopen"                        gh pr reopen -R "$PROBE_REPO" "$PROBE_PR"
         if [ "$PROBE_MERGE" = "1" ]; then

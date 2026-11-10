@@ -91,7 +91,7 @@ case "$HEAD" in
 esac
 
 # Gate 3
-view body .body | grep -q "<!-- BLIND_MERGE_RISK: $RATING -->" \
+view body .body | grep "<!-- BLIND_MERGE_RISK: $RATING -->" >/dev/null \
     || refuse "PR #$PR is not rated $RATING (<!-- BLIND_MERGE_RISK: $RATING --> missing). Re-read the rating and ask the operator again."
 
 # Gate 4
