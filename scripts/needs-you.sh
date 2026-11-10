@@ -17,18 +17,26 @@
 # Store: .swarm/needs-you.jsonl (one JSON object per item; done items stay,
 # marked, so a label is never reused). Every change rewrites the human copy
 # .swarm/needs-you.md (the file coord-hook.sh diffs). `render --json` prints the
-# open items for corpusminder's file_item (DECISION or TODO, fields in jsonb);
-# an MCP tool cannot be called from here, so the coordinator relays them.
+# open items as JSON.
 #
 # render ends with exactly one closing line: "Do now: <label> ..." when items
-# are open, "Nothing to do." when none are.
+# are open, "Nothing to do." when none are. Placeholder values ("none", "nothing",
+# "n/a") for --risk/--rec/--default are dropped: an empty field is left out.
+#
+# Backend (issue #801): NEEDS_YOU_BACKEND=file (default) keeps everything local.
+# NEEDS_YOU_BACKEND=corpusminder also files each item in corpusminder (REST
+# POST /api/items: kind DECISION/TODO, fields in the jsonb "fields", targetUrl =
+# --url) and completes it on `done`. The local files are written either way, so
+# an outage never loses an item (a failed call warns on stderr and moves on).
+# Needs CMINDER_URL + CMINDER_API_KEY; optional CMINDER_FORUM_ID. The answers
+# come back through scripts/cminder-bridge.sh. render never calls corpusminder.
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LINT="$SELF_DIR/lint-coordinator-reply.sh"
 
 die() { echo "needs-you.sh: $*" >&2; exit 2; }
-usage() { sed -n '3,25p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '3,36p' "$0" | sed 's/^# \{0,1\}//'; }
 
 cmd="${1:-}"
 [ -n "$cmd" ] || { usage >&2; exit 2; }
@@ -52,6 +60,11 @@ while [ $# -gt 0 ]; do
         *)         [ -z "$label" ] || die "unexpected argument $1"; label="$1"; shift ;;
     esac
 done
+
+# shellcheck source=scripts/_load-env.sh
+. "$SELF_DIR/_load-env.sh" "$project"
+backend="${NEEDS_YOU_BACKEND:-file}"
+case "$backend" in file|corpusminder) ;; *) die "NEEDS_YOU_BACKEND is file or corpusminder, not '$backend'" ;; esac
 
 swarm="$project/.swarm"
 store="$swarm/needs-you.jsonl"
@@ -84,6 +97,48 @@ render_md() {
     fi
 }
 
+# --- corpusminder backend (issue #801) --------------------------------------
+# cm_api <METHOD> <path> [json-body]: prints the response body, returns non-zero
+# on any failure. Callers warn and carry on: the local files are the fallback.
+cm_api() {
+    local method="$1" path="$2" body="${3-}"
+    [ -n "${CMINDER_URL:-}" ] && [ -n "${CMINDER_API_KEY:-}" ] \
+        || { echo "CMINDER_URL and CMINDER_API_KEY are needed" >&2; return 1; }
+    local args=(-sS --fail --max-time "${CMINDER_TIMEOUT_SECS:-15}" -X "$method"
+        -H "Authorization: Bearer $CMINDER_API_KEY" -H "Accept: application/json")
+    [ -z "$body" ] || args+=(-H "Content-Type: application/json" --data-binary "$body")
+    curl "${args[@]}" "${CMINDER_URL%/}$path"
+}
+
+# is_placeholder <text>: "none", "nothing", "n/a" and friends are not content.
+is_placeholder() {
+    local t
+    t="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/^[[:space:].]+//; s/[[:space:].]+$//')"
+    case "$t" in none|nothing|"nothing needed"|n/a|na|-|--|"no default"|"not applicable") return 0 ;; esac
+    return 1
+}
+
+# cm_file <label>: files the item; prints the corpusminder item id (or nothing).
+cm_file() {
+    local item repo_url repo issue body resp
+    item="$(jq -c --arg l "$1" 'select(.label == $l)' "$store" | tail -n 1)"
+    repo_url="$(git -C "$project" remote get-url origin 2>/dev/null || true)"
+    repo="$(printf '%s' "$repo_url" | sed -E 's#^(git@[^:]+:|https?://[^/]+/)##; s#\.git$##')"
+    issue="$(jq -r '.url | capture("/(issues|pull)/(?<n>[0-9]+)").n // empty' <<<"$item")"
+    body="$(jq -c --arg swarm "$(basename "$project")" --arg repo "$repo" --arg issue "$issue" \
+        --arg forum "${CMINDER_FORUM_ID:-}" --arg lbl "$1" '
+        {kind: (if .kind == "decision" then "DECISION" else "TODO" end),
+         label: .title,
+         description: (.rec),
+         targetUrl: (if .url != "" then .url else null end),
+         fields: ({swarm: $swarm, repo: $repo, issue: $issue, item: $lbl, problem: .title, recommendation: .rec,
+                   blast_radius: .risk, do: .do, default_if_silent: .default}
+                  | with_entries(select(.value != "")))}
+        + (if $forum != "" then {forumId: ($forum | tonumber)} else {} end)
+        | if .description == "" then del(.description) else . end' <<<"$item")"
+    resp="$(cm_api POST /api/items "$body")" && jq -r '.id // empty' <<<"$resp"
+}
+
 write_md() {
     local tmp
     mkdir -p "$swarm"
@@ -101,6 +156,10 @@ case "$cmd" in
         if hits="$("$LINT" <<<"$title $do_ $rec" || true)" && [ -n "$hits" ]; then
             die "item points elsewhere instead of carrying its action (${hits%%:*}); put the full command in --do. Refusing."
         fi
+        # An empty field is left out, not stored as "none" (issue #801).
+        ! is_placeholder "$risk" || risk=""
+        ! is_placeholder "$rec" || rec=""
+        ! is_placeholder "$deflt" || deflt=""
         mkdir -p "$swarm"
         max=0
         if [ -s "$store" ]; then
@@ -111,6 +170,17 @@ case "$cmd" in
             --arg risk "$risk" --arg rec "$rec" --arg default "$deflt" --arg url "$url" \
             --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             '{label: $label, kind: $kind, title: $title, do: $act, risk: $risk, rec: $rec, default: $default, url: $url, added: $at, done: false}' >> "$store"
+        if [ "$backend" = corpusminder ]; then
+            errf="$(mktemp -p "$swarm" .tmp.needs-you-cm.XXXXXX)"
+            if cmid="$(cm_file "$new" 2>"$errf")" && [ -n "$cmid" ]; then
+                tmp="$(mktemp -p "$swarm" .tmp.needs-you-store.XXXXXX)"
+                jq -c --arg l "$new" --argjson id "$cmid" 'if .label == $l then .cm_id = $id else . end' "$store" > "$tmp" \
+                    && mv -f "$tmp" "$store" || rm -f "$tmp"
+            else
+                echo "needs-you.sh: corpusminder filing failed for $new ($(tr '\n' ' ' <"$errf")); kept in the local list only" >&2
+            fi
+            rm -f "$errf"
+        fi
         write_md
         echo "$new"
         ;;
@@ -123,6 +193,13 @@ case "$cmd" in
             'if .label == $l then .done = true | .closed = $at else . end' "$store" > "$tmp" && mv -f "$tmp" "$store" \
             || { rm -f "$tmp"; die "could not update $store"; }
         write_md
+        if [ "$backend" = corpusminder ]; then
+            cmid="$(jq -r --arg l "$label" 'select(.label == $l) | .cm_id // empty' "$store")"
+            if [ -n "$cmid" ]; then
+                cm_api POST "/api/items/$cmid/complete" >/dev/null 2>&1 \
+                    || echo "needs-you.sh: could not complete corpusminder item $cmid for $label; close it there by hand" >&2
+            fi
+        fi
         ;;
     render)
         if [ "$json" = 1 ]; then

@@ -473,6 +473,7 @@ Rules:
   (`## Decisions made`), never both.
 - d. Small 🟢 PRs may drop the appendix.
 - e. No-ceremony rule: no move and no surprise means drop those two lines.
+- e2. Self-merged PR where no human input was needed: add `**Needs you:** none (self-merged)` to the screen.
 - f. **No identifiers above the fold:** no code spans, paths, classes,
   endpoints, migration numbers or commands on the screen. Describe the thing
   in plain words. `Closes #N` is plain text, never in backticks, or GitHub

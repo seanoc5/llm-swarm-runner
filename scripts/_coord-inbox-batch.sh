@@ -21,6 +21,9 @@
 #   for the work run; falls into the unknown-kind default below)
 # BATCHED:
 #   idle_capacity activity dispatch_pause_lifted host_load_cleared stale_wait
+#   cminder_info (issue #801: a corpusminder answer from someone off the
+#   operator allowlist; information only. cminder_answer, the operator's own
+#   answer, is an unknown kind and so URGENT.)
 #   outcome *.ok.json, outbox kind: fyi / brief-draft (no red-CI text)
 # Anything else, and anything whose body can't be read, is URGENT: an
 # unclassifiable item must never be delayed.
@@ -65,7 +68,7 @@ coord_item_urgency() {
     local f="$1" kind body msg
     kind="$(coord_item_kind "$f")"
     case "$kind" in
-        idle_capacity|activity|dispatch_pause_lifted|host_load_cleared|stale_wait)
+        idle_capacity|activity|dispatch_pause_lifted|host_load_cleared|stale_wait|cminder_info)
             echo batched; return 0 ;;
         outcome)
             # Batched only when the body positively names an ok outcome file.
