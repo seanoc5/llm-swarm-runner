@@ -4002,6 +4002,10 @@ declare -A STALE_WAIT_NOTED=()
 # head sha after a fix push that is red again notes again).
 declare -A CI_FAILING_NOTED=()
 
+# issue #817: ready_sweep_pass's ci-cancelled dedup, keyed "<pr>:<sha>": one inbox
+# note per cancelled draft head (a re-run that is cancelled again on a new sha notes again).
+declare -A CI_CANCELLED_NOTED=()
+
 # issue #757: ready_sweep_pass's parked-green dedup, keyed "<pr>:<sha>": one
 # inbox note per head sha of a banner-less green draft.
 # Also its banner-retry-failure dedup, keyed "<pr>:<exit>" (RETRY_FAILED_NOTED).
@@ -5008,6 +5012,7 @@ orphan_sweep_pass() {
 ready_sweep_pass() {
     local dry_arg="" out line key pr trig k
     local -A cfseen=()
+    local -A ccseen=()
     local -A seen=()
     local -A pgseen=()
     local -A rfseen=()
@@ -5037,6 +5042,21 @@ ready_sweep_pass() {
                 continue
             fi
             CI_FAILING_NOTED[$key]=1
+            continue
+        fi
+        if [[ "$line" =~ ^#([0-9]+)\ ci-cancelled:.*\(sha=([0-9a-fA-F]+)\) ]]; then
+            pr="${BASH_REMATCH[1]}" key="${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"
+            ccseen[$key]=1
+            [ -z "${CI_CANCELLED_NOTED[$key]:-}" ] || continue
+            if [ "$DRY_RUN" = "1" ]; then
+                echo "[DRY] would write coord-inbox ci-cancelled note for parked PR #$pr (sha ${BASH_REMATCH[2]})"
+            elif coord_inbox_write ci_cancelled "Parked draft PR #$pr had its CI cancelled on ${BASH_REMATCH[2]:0:7} (runner offline or queued runs dropped), not a test failure. Re-run the cancelled run (gh run rerun <run-id>; find it with gh pr checks $pr), then run pr-ready.sh $pr once it is green. One note per head sha."; then
+                log_event coord.inbox.write "trigger=ci_cancelled pr=$pr sha=${BASH_REMATCH[2]}"
+            else
+                echo "[$(date +%T)] WARN: failed to write coord-inbox ci-cancelled note for PR #$pr" >&2
+                continue
+            fi
+            CI_CANCELLED_NOTED[$key]=1
             continue
         fi
         if [[ "$line" =~ ^#([0-9]+)\ (ci-pending|ci-unknown):\ still\ draft\ \(exit\ (1|124)\) ]]; then
@@ -5096,6 +5116,9 @@ ready_sweep_pass() {
     done
     for k in "${!CI_FAILING_NOTED[@]}"; do
         [ -n "${cfseen[$k]:-}" ] || unset 'CI_FAILING_NOTED[$k]'
+    done
+    for k in "${!CI_CANCELLED_NOTED[@]}"; do
+        [ -n "${ccseen[$k]:-}" ] || unset 'CI_CANCELLED_NOTED[$k]'
     done
     for k in "${!RETRY_FAILED_NOTED[@]}"; do
         [ -n "${rfseen[$k]:-}" ] || unset 'RETRY_FAILED_NOTED[$k]'
