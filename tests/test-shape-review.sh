@@ -442,7 +442,7 @@ grep -q 'row2999' "$CODEX_PAYLOAD_LOG" && red "oversized csv leaked into the pro
 grep -q 'SWARM_SELF_REVIEW: APPROVE actor=worker head=abc123 excluded=1 -->' "$GH_LOG" || red "marker must carry excluded=1 (log: $(grep SWARM "$GH_LOG"))"
 
 # (b) nothing excluded -> no excluded= field at all
-: > "$GH_LOG"; echo '{"headRefOid":"abc124","comments":[]}' > "$GH_PR_JSON_FILE"
+: > "$GH_LOG"; echo '{"comments":[]}' > "$GH_PR_JSON_FILE"
 export GH_DIFF_FILE="$TEST_DIR/small.diff"; printf 'diff --git a/a.kt b/a.kt\n+x\n' > "$GH_DIFF_FILE"
 if WORKER_CMD=codex "$REVIEW" 42 --post >"$TEST_DIR/o.out" 2>&1; then RC=0; else RC=$?; fi
 [ "$RC" -eq 0 ] || red "clean run failed ($RC)"
@@ -457,7 +457,7 @@ if SELF_REVIEW_MAX_FILE_BYTES=20000 SELF_REVIEW_MAX_PROMPT_BYTES=50000 WORKER_CM
 # (d) 600 files in one diff do not exhaust awk file handles (mawk, ulimit -n 64)
 MANY="$TEST_DIR/many.diff"; : > "$MANY"
 for i in $(seq 1 600); do printf 'diff --git a/f%s.kt b/f%s.kt\n+line%s\n' "$i" "$i" "$i" >> "$MANY"; done
-export GH_DIFF_FILE="$MANY"; echo '{"headRefOid":"abc125","comments":[]}' > "$GH_PR_JSON_FILE"
+export GH_DIFF_FILE="$MANY"; echo '{"comments":[]}' > "$GH_PR_JSON_FILE"
 if (ulimit -n 64; WORKER_CMD=codex "$REVIEW" 42 >"$TEST_DIR/o.out" 2>"$TEST_DIR/o.err"); then RC=0; else RC=$?; fi
 [ "$RC" -eq 0 ] || red "600-file diff failed under ulimit -n 64 ($RC): $(head -3 "$TEST_DIR/o.err")"
 grep -q 'line600' "$CODEX_PAYLOAD_LOG" || red "last file missing from prompt"

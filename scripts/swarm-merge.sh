@@ -788,10 +788,11 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
         }
         # Latest marker of any actor, read loosely (any head= token, incl.
         # head=unknown) so the newest marker always wins; then validated
-        # strictly below. An unparseable latest marker fails closed.
+        # strictly below. An unparseable latest marker fails closed. Anchored on
+        # "<!-- " so prose quoting a marker is never read as one (#833).
         G10_LOOSE="$(jq -r '.comments[] | select(.authorAssociation as $a | ["OWNER","MEMBER","COLLABORATOR"] | index($a)) | .body // ""' <<<"$G10_JSON" 2>/dev/null \
-                      | grep -oE "SWARM_SELF_REVIEW: [A-Za-z_]+( [A-Za-z_]+=[^ >]*)*" \
-                      | tail -1 || true)"
+                      | grep -oE "<!-- SWARM_SELF_REVIEW: [A-Za-z_]+( [A-Za-z_]+=[^ >]*)*" \
+                      | sed "s/^<!-- //" | tail -1 || true)"
         G10_STRICT='^SWARM_SELF_REVIEW: [A-Z_]+ actor=[A-Za-z0-9_-]+( head=[^ ]+)?( caveats=[a-z]+)?( followup=[0-9]+)?( excluded=[0-9]+)?$'
         G10_MARKER="$G10_LOOSE"
         G10_BAD=""
@@ -804,8 +805,8 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
         G10_IND=""
         if [ "$AUTO_RATING" = medium ]; then
           G10_IND="$(jq -r '.comments[] | select(.authorAssociation as $a | ["OWNER","MEMBER","COLLABORATOR"] | index($a)) | .body // ""' <<<"$G10_JSON" 2>/dev/null \
-                      | grep -oE "SWARM_SELF_REVIEW: [A-Za-z_]+ actor=(coordinator|operator)( [A-Za-z_]+=[^ >]*)*" \
-                      | tail -1 || true)"
+                      | grep -oE "<!-- SWARM_SELF_REVIEW: [A-Za-z_]+ actor=(coordinator|operator)( [A-Za-z_]+=[^ >]*)*" \
+                      | sed "s/^<!-- //" | tail -1 || true)"
           if [ -n "$G10_IND" ] && ! grep -qE "$G10_STRICT" <<<"$G10_IND"; then
             G10_BAD="the latest coordinator/operator review marker is unparseable: '$G10_IND'"
           fi
