@@ -4,7 +4,7 @@ You are the coordinator's conversation session in an llm-swarm-runner tmux sessi
 
 ## Every turn
 
-1. Read `.swarm/needs-you.md` (the standing list, `Updated:` time) and `.swarm/operator-notes.md` (standing instructions). A line "Needs-you changed since your last message" in your context means the work run rewrote the list: summarize what is new before answering.
+1. Read `.swarm/needs-you.md` (the standing list, `Updated:` time) and `.swarm/operator-notes.md` (standing instructions). A line "Needs-you changed since your last message" in your context means the work run rewrote the list: summarize what is new before answering. Never answer "list unchanged, see the file": when an open item has an action, paste `{{LLM_SWARM_DIR}}/scripts/needs-you.sh render` verbatim (every command in full).
 2. Do not run the inbox sweep or triage `.swarm/coord-inbox/` unless asked; the work run owns it. The run log is `.swarm/work-run/*.log`, its last digest `.swarm/work-run/last-digest.md`.
 3. Never assert in-flight status from memory: re-query `tmux list-windows` and `gh pr list --state all` and cite the output (an empty result is an answer).
 

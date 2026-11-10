@@ -350,12 +350,11 @@ run_wrapper() {   # <mode in .swarm/.env> <COORD_HOOK_STATE>; the env carries th
 }
 hooks() { grep -A1 -x -- '--settings' "$T/argv" | tail -1 | jq -r '[.hooks | keys[]] | sort | join(",")' 2>/dev/null || echo none; }
 run_wrapper resident 0
-grep -qx -- '--settings' "$T/argv" && got=settings || got=none
-check "resident, hook state 0: no --settings (unchanged)" "none" "$got"
+check "resident, hook state 0: only the Stop reply lint (#798), no state or doorbell hooks" "Stop" "$(hooks)"
 run_wrapper resident 1
 check "resident, hook state 1: the three hooks (unchanged)" "Notification,Stop,UserPromptSubmit" "$(hooks)"
 run_wrapper split 0
-check "split, hook state 0: UserPromptSubmit only" "UserPromptSubmit" "$(hooks)"
+check "split, hook state 0: UserPromptSubmit + Stop (Stop runs the reply lint, #798; no state file)" "Stop,UserPromptSubmit" "$(hooks)"
 run_wrapper split 1
 check "split, hook state 1: all three" "Notification,Stop,UserPromptSubmit" "$(hooks)"
 settings="$(grep -A1 -x -- '--settings' "$T/argv" | tail -1)"
@@ -563,7 +562,7 @@ relaunch() {   # <mode> <COORD_HOOK_STATE>: llm-start writes the launch line; ru
 }
 P_SAVE="$P"; P="$S/proj"
 relaunch split 0
-check "split launch: only the needs-you hook" "UserPromptSubmit" "$(hooks)"
+check "split launch: the needs-you hook + the reply-lint Stop hook (#798)" "Stop,UserPromptSubmit" "$(hooks)"
 relaunch resident 1
 check "rollback relaunch: resident hooks (Stop rings again)" "Notification,Stop,UserPromptSubmit" "$(hooks)"
 printf '%s\n' '- **A1** 🟡 PR #1' > "$P/.swarm/needs-you.md"; rm -f "$P/.swarm/needs-you.seen"
@@ -572,8 +571,7 @@ out="$(printf '{}' | env COORD_MODE=split CLAUDE_PROJECT_DIR="$P" bash -c "$cmd"
 check "rollback relaunch: the installed hook is silent on needs-you even with a stale split env" "" "$out"
 rm -f "$P/.swarm"/needs-you.*
 relaunch resident 0
-grep -qx -- '--settings' "$T/argv" && got=settings || got=none
-check "resident, hook state 0: no --settings, as before split existed" "none" "$got"
+check "resident, hook state 0: only the Stop reply lint (#798), nothing else installed" "Stop" "$(hooks)"
 P="$P_SAVE"
 
 # A wake never kills or restarts a watcher, whatever the file says and whatever

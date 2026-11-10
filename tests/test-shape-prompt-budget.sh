@@ -104,12 +104,19 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # 24200. Issue #802 adds one sentence (~160 bytes) to each: give every slice
 # of a multi-slice issue its own issue and branch. Still a stopgap until #509.
 #
+# 2026-11-10: coordinator 31400 -> 31900, coordinator-work 24200 -> 24400,
+# coordinator-chat 5000 -> 5200. Issue #798 replaces the "list unchanged,
+# details in .swarm/needs-you.md" quiet-reply template (which told coordinators
+# to point at a file instead of giving the action) with "paste needs-you.sh
+# render"; ~450/180/170 bytes net. The check itself lives in
+# lint-coordinator-reply.sh, not in prompt prose. Stopgap until #509.
+#
 WORKER_MAX="${WORKER_MD_MAX_BYTES:-24300}"
-COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-31400}"
+COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-31900}"
 BARE_MAX="${WORKER_BARE_MD_MAX_BYTES:-11600}"   # issue #510 trial prompt; ~7.5KB is script-parsed contract
 SHARED_MAX="${COORD_SHARED_MD_MAX_BYTES:-5600}"   # issue #767 split prompts
-WORK_MAX="${COORD_WORK_MD_MAX_BYTES:-24200}"
-CHAT_MAX="${COORD_CHAT_MD_MAX_BYTES:-5000}"
+WORK_MAX="${COORD_WORK_MD_MAX_BYTES:-24400}"
+CHAT_MAX="${COORD_CHAT_MD_MAX_BYTES:-5200}"
 
 check() {
     local file="$1" max="$2" size

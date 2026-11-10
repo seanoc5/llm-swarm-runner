@@ -1,0 +1,5 @@
+Recommended order: llm-swarm-runner #798 first. It's the filing script that refuses items without a command, everything else builds on it, and it's useful even without corpusminder. The two corpusminder issues can run alongside it. #801's answer receiver waits for #2108's stream.
+
+Nothing needed from you right now.
+
+Do now: when you're ready, dispatch https://github.com/seanoc5/llm-swarm-runner/issues/798 to the llm-swarm-runner swarm.

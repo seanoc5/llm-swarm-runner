@@ -1,0 +1,5 @@
+Start the load: run the command below in 1:util.
+```
+./load-tiger.sh kdeyoga
+```
+Do now: run the command below.

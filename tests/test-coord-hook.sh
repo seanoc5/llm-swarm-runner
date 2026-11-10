@@ -114,8 +114,12 @@ run_wrapper() {
     (cd "$P" && PATH="$T/bin:$PATH" COORD_HOOK_STATE="$1" "$ROOT/scripts/coordinator-claude.sh" "$T/sys" "$T/init")
 }
 run_wrapper 0
+settings="$(grep -A1 -x -- '--settings' "$T/argv" | tail -1)"
+got="$(jq -r '[.hooks | keys[]] | sort | join(",")' <<<"$settings" 2>/dev/null || echo none)"
+check "COORD_HOOK_STATE=0, resident: --settings installs only the Stop reply lint (#798)" "Stop" "$got"
+COORD_REPLY_LINT=0 run_wrapper 0
 grep -qx -- '--settings' "$T/argv" && got=yes || got=no
-check "COORD_HOOK_STATE=0: no --settings passed" "no" "$got"
+check "COORD_HOOK_STATE=0 + COORD_REPLY_LINT=0: no --settings passed" "no" "$got"
 run_wrapper 1
 settings="$(grep -A1 -x -- '--settings' "$T/argv" | tail -1)"
 got="$(jq -r '[.hooks | keys[]] | sort | join(",")' <<<"$settings" 2>/dev/null || echo invalid)"
@@ -123,3 +127,25 @@ check "COORD_HOOK_STATE=1: --settings installs the three hooks" "Notification,St
 cmd="$(jq -r '.hooks.Stop[0].hooks[0].command' <<<"$settings")"
 out="$(printf '{}' | CLAUDE_PROJECT_DIR="$P" COORD_HOOK_STATE=1 bash -c "$cmd" && state)"
 check "the installed Stop command runs coord-hook.sh" "idle" "$out"
+
+# ── reply lint right after a doorbell block (issue #798 review) ──────────────
+# The wake digest is the reply that follows a doorbell block, so it arrives with
+# stop_hook_active=true. It must still be linted, still blocking at most once.
+D="$T/dproj"; mkdir -p "$D/.swarm/coord-inbox"
+FXL="$ROOT/tests/fixtures/reply-lint"
+dstop() {   # <fixture> <stop_hook_active>
+    jq -n --rawfile m "$1" --argjson a "$2" '{last_assistant_message: $m, stop_hook_active: $a}' \
+        | CLAUDE_PROJECT_DIR="$D" COORD_HOOK_STATE=1 "$HOOK" Stop
+}
+echo "worker 20 finished" > "$D/.swarm/coord-inbox/a.md"
+out="$(dstop "$FXL/clean-nothing.txt" false)"
+check "doorbell: clean reply + pending inbox -> doorbell block" "block" "$(jq -r .decision <<<"$out")"
+out="$(dstop "$FXL/incident-start-load.txt" true)"
+check "reply after a doorbell block is linted (blocks)" "block" "$(jq -r .decision <<<"$out")"
+case "$(jq -r .reason <<<"$out")" in *"Reply lint failed"*) got=yes ;; *) got=no ;; esac
+check "that block is the lint reason" "yes" "$got"
+out="$(dstop "$FXL/incident-start-load.txt" true)"
+check "lint blocks at most once per reply chain" "" "$out"
+out="$(dstop "$FXL/clean-nothing.txt" false)"
+out="$(dstop "$FXL/incident-start-load.txt" true)"
+check "a new chain (stop_hook_active=false) resets the once-only guard" "block" "$(jq -r .decision <<<"$out")"
