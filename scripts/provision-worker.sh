@@ -664,7 +664,7 @@ if git show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
     if live_heads="$(git ls-remote --heads origin "$BRANCH" 2>/dev/null)"; then
         [ -n "$live_heads" ] && BASE_REF="origin/$BRANCH"
     else
-        echo "WARN: git ls-remote failed — keeping cached origin/$BRANCH as the base (the fetch above just refreshed it)" >&2
+        echo "WARN: git ls-remote failed — keeping cached origin/$BRANCH as the base (cached ref may be stale if the fetch above also failed)" >&2
         BASE_REF="origin/$BRANCH"
     fi
 fi
