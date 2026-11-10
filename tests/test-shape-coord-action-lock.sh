@@ -39,6 +39,7 @@ case "\${1:-} \${2:-}" in
       [ -e "\$S/fail-reread" ] && exit 1
       if [ -e "\$S/move-head" ]; then head=bbb2222; fi
       if [ -e "\$S/empty-head-reread" ]; then head=""; fi
+      if [ -e "\$S/reread-merged-other" ]; then st=MERGED; head=bbb2222; fi
     fi
     body=""; [ -e "\$S/body-low" ] && body="<!-- BLIND_MERGE_RISK: low -->"
     printf '{"state":"%s","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefName":"fix/issue-600","title":"t","closingIssuesReferences":[],"body":"%s","isDraft":false,"reviewDecision":"","baseRefName":"master","headRefOid":"%s"}\n' "\$st" "\$body" "\$head"
@@ -157,6 +158,14 @@ reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/fail-jq-read"
 grep -q "could not read PR #600's head commit" "$TEST_DIR/j9.log" || red "J9 did not exercise the failed fallback read: $(cat "$TEST_DIR/j9.log")"
 grep -q -- "--match-head-commit aaa1111" "$TEST_DIR/state/merge-args" || red "merge not pinned to the re-read head: $(cat "$TEST_DIR/state/merge-args")"
 green "J9: fallback read failed -> merge call pinned to the head re-read under the lock"
+reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/reread-merged-other"
+rc=0; ( cd "$REPO" && timeout 30 "$MERGE" 600 --no-kill --expect-head aaa1111 >"$TEST_DIR/j10.log" 2>&1 ) || rc=$?
+[ "$rc" = 0 ] || red "J10: merged-under-lock at another head should exit 0, got $rc: $(cat "$TEST_DIR/j10.log")"
+grep -q "this run merges nothing" "$TEST_DIR/j10.log" || red "J10: no under-lock MERGED warning: $(cat "$TEST_DIR/j10.log")"
+[ "$(grep -c "merged by another actor while this merge waited" "$TEST_DIR/j10.log")" = 1 ] || red "J10: expected exactly one under-lock warning: $(cat "$TEST_DIR/j10.log")"
+grep -q "it merged at head bbb2222, not the approved aaa1111" "$TEST_DIR/j10.log" || red "J10: no other-head warning: $(cat "$TEST_DIR/j10.log")"
+[ "$(merges)" = 0 ] || red "J10: called gh pr merge though the PR merged under the lock"
+green "J10: early read OPEN, under-lock read MERGED at another head -> one warning, no merge call"
 
 # --auto-low path: fake ci-wait.sh that, like the real one, follows a head that
 # arrives during the wait and reports the NEWEST commit as verified-head.

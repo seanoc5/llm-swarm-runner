@@ -7013,6 +7013,8 @@ run_watch_timer_loop() {
     # issue #756: first sibling scan one interval after start, not on tick one, so
     # it never delays the first deferred-wake retry or the startup passes.
     last_sibling_sweep=$(date +%s)
+    # Tick order matters: tests/test-shape-window-flags.sh treats ready_sweep_pass as the
+    # end-of-tick marker, so keep window sweeps and pr_poll_pass BEFORE ready_sweep_pass.
     while true; do
         sleep "$WATCH_TIMER_TICK_SECS"
         [ "$WATCH_CHECK_ON_DONE" = "1" ] && { status_poll_pass || true; }
