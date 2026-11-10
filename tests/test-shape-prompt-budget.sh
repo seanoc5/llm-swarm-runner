@@ -122,9 +122,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # queue-merge-brief.sh and the worker accepts that brief's marker. One table
 # cell each in the worker prompts, one paragraph in coordinator.md. The check
 # for stale "type it in its window" items is lint-coordinator-reply.sh.
+# 2026-11-10 (PR #852 fix round): coordinator 32500 -> 32800, worker-bare 11800 -> 12200.
+# The operator-words check (queue-merge-brief.sh --check-brief) is a clause in each
+# worker table; the split 🔴 report line (live window vs on hold) is one more line.
 WORKER_MAX="${WORKER_MD_MAX_BYTES:-24800}"
-COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-32500}"
-BARE_MAX="${WORKER_BARE_MD_MAX_BYTES:-12100}"   # issue #510 trial prompt; ~7.5KB is script-parsed contract
+COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-32800}"
+BARE_MAX="${WORKER_BARE_MD_MAX_BYTES:-12200}"   # issue #510 trial prompt; ~7.5KB is script-parsed contract
 SHARED_MAX="${COORD_SHARED_MD_MAX_BYTES:-5600}"   # issue #767 split prompts
 WORK_MAX="${COORD_WORK_MD_MAX_BYTES:-24400}"
 CHAT_MAX="${COORD_CHAT_MD_MAX_BYTES:-5200}"
