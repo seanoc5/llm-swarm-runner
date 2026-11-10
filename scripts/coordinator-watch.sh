@@ -2050,6 +2050,7 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     WATCHER_AUTOCLOSE   1         reap eligible workers (window+worktree+branch) before wake; see WATCHER_AUTOCLOSE_MODE
     WATCHER_AUTOCLOSE_MODE merged which terminal PR states are reap-eligible: merged (MERGED only, default) | finalized (MERGED or CLOSED)
     WATCH_PR_POLL_SECS  60        periodic gh-poll backstop reap (0=off); see header comment
+    WATCH_TIMER_TICK_SECS 2      seconds between timer-loop ticks (tests shorten it; issue #823)
     WATCH_ORPHAN_SWEEP_SECS 3600  periodic reap-orphan-worktrees.sh sweep for window-less worktrees (0=off); see header comment
     WATCH_CONFLICT_BRIEF 1       an open PR (draft or ready; coordinator-held drafts excluded) that turns CONFLICTING gets swarm-merge.sh's resolve-conflicts brief, once per head commit (0=off; issue #656)
     WATCH_READY_SWEEP_SECS 300   periodic ready-sweep.sh: re-run pr-ready.sh on drafts refused only for CI pending/unreadable (0=off; issue #602)
@@ -2786,6 +2787,9 @@ WATCH_WINDOW_FLAG_RISK="${WATCH_WINDOW_FLAG_RISK:-1}"
 # brief before its window gets 💤 (0 = off). See stall_flag_update.
 WATCH_STALL_FLAG_SECS="${WATCH_STALL_FLAG_SECS:-600}"
 WATCH_WINDOW_FLAGS_SWEEP_SECS="${WATCH_WINDOW_FLAGS_SWEEP_SECS:-10}"
+# Seconds between run_watch_timer_loop ticks (every timer pass is gated on a tick).
+# Tests shorten it (issue #823); production keeps 2.
+WATCH_TIMER_TICK_SECS="${WATCH_TIMER_TICK_SECS:-2}"
 # shellcheck source=_window-flags.sh
 . "$SCRIPT_DIR/_window-flags.sh"
 # shellcheck source=scripts/_coord-inbox-batch.sh
@@ -3035,6 +3039,10 @@ case "$WATCHER_AUTOCLOSE_MODE" in
         exit 1
         ;;
 esac
+if ! [[ "$WATCH_TIMER_TICK_SECS" =~ ^[0-9]+(\.[0-9]+)?$ ]] || [ "$WATCH_TIMER_TICK_SECS" = "0" ]; then
+    echo "ERROR: WATCH_TIMER_TICK_SECS must be a positive number (got: $WATCH_TIMER_TICK_SECS)" >&2
+    exit 1
+fi
 if ! [[ "$WATCH_PR_POLL_SECS" =~ ^[0-9]+$ ]]; then
     echo "ERROR: WATCH_PR_POLL_SECS must be a non-negative integer (got: $WATCH_PR_POLL_SECS)" >&2
     exit 1
@@ -6976,7 +6984,7 @@ run_watch_timer_loop() {
     # it never delays the first deferred-wake retry or the startup passes.
     last_sibling_sweep=$(date +%s)
     while true; do
-        sleep 2
+        sleep "$WATCH_TIMER_TICK_SECS"
         [ "$WATCH_CHECK_ON_DONE" = "1" ] && { status_poll_pass || true; }
         if [ "$WATCH_WINDOW_FLAGS" = "1" ] && [ "$WATCH_WINDOW_FLAGS_SWEEP_SECS" -gt 0 ]; then
             now=$(date +%s)
