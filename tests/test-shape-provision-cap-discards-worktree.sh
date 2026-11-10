@@ -47,3 +47,48 @@ git worktree add -q "$WT" -b "$BRANCH"
 ( WT_CREATED_NOW=0; run_refusal ) >/dev/null
 [ -d "$WT" ] || red "pre-existing worktree was removed"
 green "pre-existing worktree kept"
+
+# --- #816: every failing exit discards, and never under the cap lock --------
+git worktree remove --force "$WT"; git branch -D "$BRANCH" >/dev/null
+body="$(sed -n "/^on_exit() {/,/^}/p" "$PROVISION")"
+[ -n "$body" ] || red "could not extract on_exit"
+eval "$body"
+grep -q '^trap on_exit EXIT$' "$PROVISION" || red "on_exit is not registered as the EXIT trap"
+[ "$(grep -c "^ *trap .* EXIT" "$PROVISION")" -eq 1 ] || red "a second EXIT trap would clobber on_exit"
+
+# exit 2 (e.g. gh outage) after creation -> worktree and branch gone.
+git worktree add -q "$WT" -b "$BRANCH"
+( WT_CREATED_NOW=1; trap on_exit EXIT; exit 2 ) >/dev/null 2>&1 || true
+[ ! -e "$WT" ] || red "exit 2 left the fresh worktree behind"
+git show-ref --verify --quiet "refs/heads/$BRANCH" && red "branch survived exit 2"
+grep -q 'reason=exit_2' "$EVENTS_LOG" || red "exit_2 discard not logged"
+green "exit 2 after worktree creation leaves no worktree"
+
+# exit 0 and a pre-existing worktree are untouched.
+git worktree add -q "$WT" -b "$BRANCH"
+( WT_CREATED_NOW=1; trap on_exit EXIT; exit 0 ) >/dev/null 2>&1
+[ -d "$WT" ] || red "successful exit removed the worktree"
+( WT_CREATED_NOW=0; trap on_exit EXIT; exit 2 ) >/dev/null 2>&1 || true
+[ -d "$WT" ] || red "exit 2 removed a pre-existing worktree"
+git worktree remove --force "$WT"; git branch -D "$BRANCH" >/dev/null
+green "exit 0 and pre-existing worktrees kept"
+
+# The cap lock is released before removal (both paths).
+LOCK="$T/cap.lock"
+probe_lock() { # run by the git wrapper: can another process take the lock now?
+    if flock -n "$LOCK" true; then echo free >> "$T/lockstate"; else echo held >> "$T/lockstate"; fi
+}
+git() { if [ "$1" = worktree ] && [ "$2" = remove ]; then probe_lock; fi; command git "$@"; }
+for path in refuse on_exit; do
+    : > "$T/lockstate"
+    command git worktree add -q "$WT" -b "$BRANCH"
+    (
+        exec 9>"$LOCK"; flock 9
+        WT_CREATED_NOW=1
+        if [ "$path" = refuse ]; then refuse_cap spawn_stagger "m" "" since=1
+        else trap on_exit EXIT; exit 2; fi
+    ) >/dev/null 2>&1 || true
+    [ "$(cat "$T/lockstate")" = "free" ] || red "cap lock held during worktree removal ($path): $(cat "$T/lockstate")"
+done
+unset -f git
+green "cap lock released before the worktree is removed"
