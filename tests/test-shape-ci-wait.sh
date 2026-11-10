@@ -116,6 +116,16 @@ case "$1 $2" in
             exit 1
         fi
         exit "${GH_CHECKS_RC:-0}" ;;
+    "api repos/{owner}/{repo}/issues/"*|"api repos/owner/repo/issues/"*)
+        # issue #825: PR timeline events lookup for the ready_for_review time.
+        # Emulates the real call's --jq against GH_ISSUE_EVENTS_JSON.
+        jq_expr=""; prev_arg=""
+        for a in "$@"; do
+            [ "$prev_arg" = "--jq" ] && jq_expr="$a"
+            prev_arg="$a"
+        done
+        printf '%s' "${GH_ISSUE_EVENTS_JSON:-[]}" | jq -r "$jq_expr"
+        exit 0 ;;
     "api --paginate")
         # issue #639: ci_fallback_workflows_relevant_to_pr's own changed-
         # files lookup (REST, --paginate — gh pr view --json files truncates
@@ -840,6 +850,38 @@ out="$(GH_RUNLIST_JSON='[{"status":"completed","conclusion":"success"}]' GH_VIEW
     "$CI_WAIT" 42 5 2>&1)" || rc=$?
 check "exits 0" '[ "$rc" -eq 0 ]'
 check "no warning" '! grep -q WARNING <<<"$out"'
+
+heading "Test 24: issue #825 — skipping lane + ready event newer than newest run → pending (exit 2)"
+rc=0
+out="$(GH_RUNLIST_JSON='[{"status":"completed","conclusion":"success","workflowName":"CI","createdAt":"2020-01-01T00:00:00Z"}]' \
+    GH_ISSUE_EVENTS_JSON="[{\"event\":\"ready_for_review\",\"created_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}]" \
+    GH_VIEW_ISDRAFT=false GH_CHECKS_OUT='Fast\tpass\t1m\turl\ndb\tskipping\t0\turl' \
+    CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 2 2>&1)" || rc=$?
+check "does not accept the pre-ready run (exit 2)" '[ "$rc" -eq 2 ]'
+check "explains the draft→ready gap" 'grep -q "predates the draft" <<<"$out"'
+
+heading "Test 24b: skipping lane, newest run is newer than the ready event → exit 0"
+rc=0
+out="$(GH_RUNLIST_JSON='[{"status":"completed","conclusion":"success","workflowName":"CI","createdAt":"2026-11-10T10:06:00Z"}]' \
+    GH_ISSUE_EVENTS_JSON='[{"event":"ready_for_review","created_at":"2026-11-10T10:05:00Z"}]' \
+    GH_VIEW_ISDRAFT=false GH_CHECKS_OUT='Fast\tpass\t1m\turl\ndb\tskipping\t0\turl' \
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
+check "exits 0" '[ "$rc" -eq 0 ]'
+
+heading "Test 24c: skipping lane, PR never went draft→ready (no event) → exit 0"
+rc=0
+out="$(GH_RUNLIST_JSON='[{"status":"completed","conclusion":"success","workflowName":"CI","createdAt":"2026-11-10T10:00:00Z"}]' \
+    GH_VIEW_ISDRAFT=false GH_CHECKS_OUT='Fast\tpass\t1m\turl\ndb\tskipping\t0\turl' \
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
+check "exits 0" '[ "$rc" -eq 0 ]'
+
+heading "Test 24d: ready event older than the grace window and no newer run → exit 0 (repo does not run on ready_for_review)"
+rc=0
+out="$(GH_RUNLIST_JSON='[{"status":"completed","conclusion":"success","workflowName":"CI","createdAt":"2020-01-01T00:00:00Z"}]' \
+    GH_ISSUE_EVENTS_JSON='[{"event":"ready_for_review","created_at":"2020-01-01T00:05:00Z"}]' \
+    GH_VIEW_ISDRAFT=false GH_CHECKS_OUT='Fast\tpass\t1m\turl\ndb\tskipping\t0\turl' \
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
+check "exits 0" '[ "$rc" -eq 0 ]'
 
 heading "Results: $PASS checks passed"
 green "All checks passed."
