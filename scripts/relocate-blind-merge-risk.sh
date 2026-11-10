@@ -88,7 +88,7 @@ for pr in "${PRS[@]}"; do
   fi
 
   echo "--- proposed diff (first 10 lines of head + last 5 of tail) ---"
-  diff <(printf '%s\n' "$current") <(printf '%s\n' "$new_body") | head -40 || true
+  diff <(printf '%s\n' "$current") <(printf '%s\n' "$new_body") | sed -n '1,40p' || true
   echo "----------------------------------------------------------------"
 
   if [[ $DRY_RUN -eq 1 ]]; then

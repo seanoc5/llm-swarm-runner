@@ -6,7 +6,7 @@
 # and inside `$(...)` / `if` the script either dies silently or a condition
 # flips (swarm-merge.sh died with exit 141 and no output before any gate ran).
 # Same class as #648. Checks:
-#   1. static scan: no script pipes into an early-exit reader — `awk '... exit
+#   1. static scan: no script pipes into an early-exit reader — `awk ... exit ...
 #      ...'`, `head -1` / `head -n1`, `grep -q…`, `grep -m1`. Use a here-string,
 #      `sed -n 1p`, `grep … >/dev/null`, or an awk done-flag instead. A pipe
 #      split across lines is joined first. Opt out one line with a trailing
@@ -27,6 +27,12 @@ red()     { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS="$SCRIPT_DIR/../scripts"
 
+# Readers that can quit before EOF, after a `|`:
+#   awk with an `exit`; ANY `head` (-1, -n N, -N, -n "$var", -c N, bare);
+#   grep with -q / --quiet / -m N / --max-count in ANY flag position
+#   (-q, -Eq, -E -q, -Fq, -m 1, -m1, --max-count=1).
+EARLY_EXIT_RE='\|[[:space:]]*(awk[^|]*[{; ]exit[ ;}]|head([[:space:]]|$)|grep[[:space:]]+([^|]*[[:space:]])?(-[A-Za-z]*[qm][A-Za-z0-9]*|--quiet|--max-count)([[:space:]=]|$))'
+
 # scan FILE... — print `file:line:logical-line` for each early-exit pipe.
 # Lines ending in `|` or `\` are joined with the next line, so a pipe at the
 # end of one line and the reader on the next is still seen. Comment-only lines
@@ -41,7 +47,7 @@ scan() {
               if (line ~ /(\||\\)[[:space:]]*$/) next
               print F ":" start ":" buf; buf = "" }
             END { if (buf != "") print F ":" start ":" buf }' "$f"
-    done | grep -E '\|[[:space:]]*(awk[^|]*[{; ]exit[ ;}]|head[[:space:]]+-(n[[:space:]]*)?1([^0-9]|$)|grep[[:space:]]+(-[a-zA-Z]*q|-m[[:space:]]*1|--quiet))' \
+    done | grep -E "$EARLY_EXIT_RE" \
          | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' | grep -vE 'pipe-ok|exit-ok' || true
 }
 
@@ -49,7 +55,7 @@ scan() {
 hits="$(scan "$SCRIPTS"/*.sh)"
 [ -z "$hits" ] || red "early-exit reader in a pipe (SIGPIPE race under pipefail):
 $hits"
-green "no early-exit pipes (awk exit / head -1 / grep -q / grep -m1) in scripts/"
+green "no early-exit pipes (awk exit, any head, grep -q/-m) in scripts/"
 
 # 2. The scan sees every old form, including a pipe split across lines.
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
@@ -63,9 +69,19 @@ x="$(printf '%s\n' "$r" |
 y="$(git worktree list --porcelain | awk '/^worktree /{print $2; exit}')"
 z="$(producer |
     awk 'NR==1{print; exit}')"
+t="$(tail -n +5 f \
+    | head -n "$max_lines" \
+    | cut -c1-200)"
+u="$(cat f | head -3)"
+v="$(cat f | head -n 5)"
+w="$(cat f | head -c 100)"
+if cat f | grep -E -q x; then :; fi
+if cat f | grep -Fq x; then :; fi
+m="$(cat f | grep -m 1 x)"
+m2="$(cat f | grep --max-count=2 x)"
 FIXTURE
 n="$(scan "$TMP/old.sh" | wc -l)"
-[ "$n" -eq 6 ] || red "scan self-test: expected 6 old-form hits, got $n:
+[ "$n" -eq 14 ] || red "scan self-test: expected 14 old-form hits, got $n:
 $(scan "$TMP/old.sh")"
 cat > "$TMP/new.sh" <<'FIXTURE'
 a="$(git merge-tree --write-tree X HEAD 2>/dev/null | sed -n 1p)" || return 1
@@ -82,6 +98,7 @@ old_head()  { big | head -1; }
 old_grep()  { big | grep -q a; }
 new_head()  { big | sed -n 1p; }
 new_grep()  { big | grep a >/dev/null; }
+new_awk()   { big | awk -v n=1 'NR <= n'; }
 new_here()  { local v; v="$(big)"; grep -q a <<<"$v"; }
 for fn in old_head old_grep; do
     rc="$(status_of bash -c "set -o pipefail; $(declare -f big "$fn"); $fn")"
@@ -89,7 +106,7 @@ for fn in old_head old_grep; do
     # writer EPIPE instead (another nonzero code) — either way the pipeline fails.
     [ "$rc" != 0 ] || red "harness cannot reproduce the race: $fn exited 0"
 done
-for fn in new_head new_grep new_here; do
+for fn in new_head new_grep new_awk new_here; do
     rc="$(status_of bash -c "set -o pipefail; $(declare -f big "$fn"); $fn")"
     [ "$rc" = 0 ] || red "$fn exited $rc on a 2 MB producer"
 done

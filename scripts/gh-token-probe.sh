@@ -39,7 +39,7 @@ probe() {
         PASS=$((PASS + 1)); printf '  \033[32m✓\033[0m %s\n' "$label"
     else
         FAIL=$((FAIL + 1)); FAILED+=("$label")
-        printf '  \033[31m✗\033[0m %s\n      %s\n' "$label" "$(printf '%s' "$out" | head -3 | tr '\n' ' ')"
+        printf '  \033[31m✗\033[0m %s\n      %s\n' "$label" "$(printf '%s' "$out" | sed -n '1,3p' | tr '\n' ' ')"
     fi
 }
 
@@ -90,7 +90,7 @@ else
         probe "gh issue edit --add-label"           gh issue edit -R "$PROBE_REPO" "$ISSUE_NUM" --add-label "$STAMP"
         probe "gh issue close"                      gh issue close -R "$PROBE_REPO" "$ISSUE_NUM"
     else
-        FAIL=$((FAIL + 1)); FAILED+=("gh issue create"); printf '  \033[31m✗\033[0m gh issue create\n      %s\n' "$(printf '%s' "$out" | head -2 | tr '\n' ' ')"
+        FAIL=$((FAIL + 1)); FAILED+=("gh issue create"); printf '  \033[31m✗\033[0m gh issue create\n      %s\n' "$(printf '%s' "$out" | sed -n '1,2p' | tr '\n' ' ')"
     fi
     if [ -n "$PROBE_PR" ]; then
         probe "gh pr comment (marker comments)"     gh pr comment -R "$PROBE_REPO" "$PROBE_PR" --body "<!-- PROBE -->probe"

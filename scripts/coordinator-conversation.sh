@@ -190,13 +190,13 @@ consume() {
     [ "$size" -gt "$offset" ] || return 0
     len=$((size - offset))
     if [ -n "$(tail -c1 "$cur")" ]; then
-        # `head -c` closes the pipe before `tail` finishes when the file has
-        # grown since `stat`; that SIGPIPE must not end follow mode.
-        part="$(tail -c +"$((offset + 1))" "$cur" | head -c "$len" | tail -n1 | LC_ALL=C wc -c || true)"
+        # head -c reads the file directly (no pipe reader quits early), so a file
+        # that grew since `stat` cannot SIGPIPE the producer.
+        part="$(head -c "$size" "$cur" | tail -c "$len" | tail -n1 | LC_ALL=C wc -c || true)"
         len=$((len - part))
     fi
     [ "$len" -gt 0 ] || return 0
-    { tail -c +"$((offset + 1))" "$cur" | head -c "$len" | render | emit "${1:-}"; } || true
+    { head -c "$size" "$cur" | tail -c "$len" | render | emit "${1:-}"; } || true
     offset=$((offset + len))
 }
 

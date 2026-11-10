@@ -1553,7 +1553,7 @@ while true; do
         # actually working on. Truncate at 40 lines; full text always lives
         # in the processing/done file regardless.
         echo "--- Task brief (first 40 lines) ---"
-        printf '%s\n' "$TASK" | head -40
+        printf '%s\n' "$TASK" | sed -n '1,40p'
         TASK_LINES=$(printf '%s\n' "$TASK" | wc -l)
         if [ "$TASK_LINES" -gt 40 ]; then
             echo "... [truncated; $TASK_LINES total lines] ..."

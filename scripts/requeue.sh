@@ -175,7 +175,7 @@ brief_excerpt() {
     start="$(grep -n '^## Task$' "$file" 2>/dev/null | sed -n 1p | cut -d: -f1)"
     start="${start:-1}"
     tail -n "+$start" "$file" 2>/dev/null \
-        | head -n "$max_lines" \
+        | awk -v n="$max_lines" 'NR <= n' \
         | cut -c1-200 \
         | sed -e 's/`\{6,\}/[fence]/g'
     remaining=$((total - start + 1 - max_lines))
