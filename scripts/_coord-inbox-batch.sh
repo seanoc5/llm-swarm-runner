@@ -20,7 +20,7 @@
 #   operator (scripts/operator-note.sh, issue #767: a note the operator left
 #   for the work run; falls into the unknown-kind default below)
 # BATCHED:
-#   idle_capacity activity dispatch_pause_lifted stale_wait
+#   idle_capacity activity dispatch_pause_lifted host_load_cleared stale_wait
 #   outcome *.ok.json, outbox kind: fyi / brief-draft (no red-CI text)
 # Anything else, and anything whose body can't be read, is URGENT: an
 # unclassifiable item must never be delayed.
@@ -65,7 +65,7 @@ coord_item_urgency() {
     local f="$1" kind body msg
     kind="$(coord_item_kind "$f")"
     case "$kind" in
-        idle_capacity|activity|dispatch_pause_lifted|stale_wait)
+        idle_capacity|activity|dispatch_pause_lifted|host_load_cleared|stale_wait)
             echo batched; return 0 ;;
         outcome)
             # Batched only when the body positively names an ok outcome file.

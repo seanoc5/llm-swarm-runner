@@ -2312,6 +2312,10 @@ EVENTS LOG
       capacity.pause_lifted  the nightly dispatch-paused marker went away (slots=N;
                            reason=no_free_slots when nothing was written) — followed by
                            coord.inbox.write/coord.wake* with trigger=dispatch_pause_lifted
+      capacity.load_cleared  (issue #803) a host_load refusal's marker was cleared because load1 and
+                           load5 fell under the ceiling (slots=N; reason=no_free_slots|parked_or_paused
+                           when nothing was written) — followed by coord.inbox.write/coord.wake* with
+                           trigger=host_load_cleared
       capacity.idle_wake   free slots and dispatchable issues (slots, ready, night_ok) —
                            followed by coord.inbox.write/coord.wake* with trigger=idle_capacity
       capacity.idle_check  the idle-capacity gh query found nothing to wake for
@@ -3582,6 +3586,8 @@ DISPATCH_PAUSE_FILE="$HOST_STATE_DIR/dispatch-paused"
 IDLE_CAPACITY_WAKE_FILE="$PROJECT_DIR/.swarm/idle-capacity-wake.last"
 IDLE_CAPACITY_SET_FILE="$PROJECT_DIR/.swarm/idle-capacity-set.last"
 DISPATCH_PAUSE_SEEN_FILE="$PROJECT_DIR/.swarm/dispatch-pause-seen"
+# issue #803: provision-worker.sh writes "<epoch> <max_load> <issue>" here when it refuses for host_load.
+HOST_LOAD_REFUSED_FILE="$PROJECT_DIR/.swarm/host-load-refused"
 # issue #729: ready_sweep_pass (timer-loop process) drops one file per new ci_failing
 # note here; ci_failing_ring_pass (run_capacity_wake_loop process) rings for them.
 CI_FAILING_RING_DIR="$PROJECT_DIR/.swarm/ci-failing-ring-pending"
@@ -11543,6 +11549,50 @@ dispatch_pause_wake_pass() {
     coord_ring_doorbell dispatch_pause_lifted "slots=$slots"
 }
 
+# host_load_wake_pass (issue #803)
+#
+# A dispatch refused for host load (provision-worker.sh exit 3, cap.refused
+# reason=host_load) used to be retried by nobody: idle_capacity_wake_pass
+# stays quiet while the ready set is unchanged, so a swarm sat at 0 workers
+# for ~1h45m after a load spike had already passed. provision-worker.sh now
+# leaves $HOST_LOAD_REFUSED_FILE ("<epoch> <max_load> <issue>"); this pass
+# (cheap: reads loadavg, no gh) clears it and writes one host_load_cleared
+# note once BOTH load1 and load5 are at or under the ceiling the refusal
+# used — load5 so a 45<->80 load1 swing doesn't fire a wake the next
+# dispatch would bounce off. Silent while the marker is absent, the swarm is
+# parked or paused, or nothing is free; those cases drop the marker.
+host_load_wake_pass() {
+    [ -e "$HOST_LOAD_REFUSED_FILE" ] || return 0
+    local _ts max_load issue l1 l5 slots
+    read -r _ts max_load issue < "$HOST_LOAD_REFUSED_FILE" 2>/dev/null || return 0
+    [ -n "$max_load" ] || return 0   # empty read: leave the marker for the next tick
+    [[ "$max_load" =~ ^[0-9]+([.][0-9]+)?$ ]] || { rm -f "$HOST_LOAD_REFUSED_FILE" 2>/dev/null; return 0; }
+    read -r l1 l5 _ < "${HOST_LOADAVG_FILE:-/proc/loadavg}" 2>/dev/null || return 0
+    awk -v a="${l1:-0}" -v b="${l5:-0}" -v m="$max_load" 'BEGIN{exit !(a+0 <= m+0 && b+0 <= m+0)}' || return 0
+    [ "$DRY_RUN" = "1" ] || rm -f "$HOST_LOAD_REFUSED_FILE" 2>/dev/null || true
+    if [ -e "$SWARM_PARKED_FILE" ] || dispatch_pause_active; then
+        log_event capacity.load_cleared "load1=$l1 load5=$l5 max=$max_load reason=parked_or_paused"
+        return 0
+    fi
+    slots="$(capacity_free_slots)" || slots="?"
+    if [ "$slots" != "?" ] && [ "$slots" -le 0 ]; then
+        log_event capacity.load_cleared "load1=$l1 load5=$l5 max=$max_load slots=$slots reason=no_free_slots"
+        return 0
+    fi
+    log_event capacity.load_cleared "load1=$l1 load5=$l5 max=$max_load slots=$slots"
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "[DRY] would write coord-inbox entry: trigger=host_load_cleared slots=$slots"
+    elif coord_inbox_write host_load_cleared "Host load is back under the dispatch ceiling (load1=$l1, load5=$l5, max=$max_load); $slots worker slot(s) free. Dispatch ready AVAILABLE / night-ok issues now (act, then report) — including issue #${issue:-?}, whose provision-worker.sh call was refused with host_load."; then
+        log_event coord.inbox.write "trigger=host_load_cleared slots=$slots"
+        # Already says "dispatch now"; don't stack an idle_capacity note on it.
+        printf '%s\n' "$(date +%s)" > "$IDLE_CAPACITY_WAKE_FILE" 2>/dev/null || true
+    else
+        echo "[$(date +%T)] WARN: failed to write coord-inbox host_load_cleared entry" >&2
+        return 0
+    fi
+    coord_ring_doorbell host_load_cleared "slots=$slots"
+}
+
 # idle_capacity_wake_pass
 #
 # At most one idle_capacity note per WATCH_IDLE_CAPACITY_WAKE_SECS (clock
@@ -11659,6 +11709,7 @@ run_capacity_wake_loop() {
     while true; do
         sleep "$WATCH_CAPACITY_POLL_SECS"
         dispatch_pause_wake_pass || true
+        host_load_wake_pass || true
         idle_capacity_wake_pass || true
         ci_failing_ring_pass || true
         watcher_dead_ring_pass || true

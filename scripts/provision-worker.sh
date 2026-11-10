@@ -401,6 +401,23 @@ host_admission_check() {
             max_load="$HOST_MAX_LOAD1"
         fi
         load1="$(cut -d' ' -f1 "${HOST_LOADAVG_FILE:-/proc/loadavg}" 2>/dev/null || echo 0)"
+        # #803: leave a marker so coordinator-watch.sh's host_load_wake_pass
+        # can tell the coordinator when load falls back under the ceiling;
+        # nothing else retries a host_load refusal. A pass for the same issue clears it.
+        if awk -v l="${load1:-0}" -v m="$max_load" 'BEGIN{exit !(l+0 > m+0)}'; then
+            mkdir -p "$PROJECT_DIR/.swarm" 2>/dev/null || true
+            # tmp+mv: the watcher must never read a half-written marker.
+            printf '%s %s %s\n' "$(date +%s)" "$max_load" "$ISSUE" > "$PROJECT_DIR/.swarm/.host-load-refused.$$" 2>/dev/null \
+                && mv -f "$PROJECT_DIR/.swarm/.host-load-refused.$$" "$PROJECT_DIR/.swarm/host-load-refused" 2>/dev/null || true
+        else
+            # Clear only a marker that names THIS issue: a passing dispatch for
+            # issue B must not erase the pending retry for refused issue A
+            # (marker is "<epoch> <max> <issue>").
+            if [ -e "$PROJECT_DIR/.swarm/host-load-refused" ]; then
+                _hl_issue="$(awk 'NR==1{print $3}' "$PROJECT_DIR/.swarm/host-load-refused" 2>/dev/null || true)"
+                [ "$_hl_issue" = "$ISSUE" ] && rm -f -- "$PROJECT_DIR/.swarm/host-load-refused" 2>/dev/null
+            fi
+        fi
         awk -v l="${load1:-0}" -v m="$max_load" 'BEGIN{exit !(l+0 > m+0)}' && refuse_cap host_load \
             "host load too high for a new worker (load1=$load1, max=$max_load, nproc=$nproc_n)" \
             "Wait for the running workers' compile/test peaks to pass, or set HOST_MAX_LOAD1 in <sandbox>/.env (0 disables)." \

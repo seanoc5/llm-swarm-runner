@@ -24,6 +24,7 @@ HOST_STATE_DIR="$T/host"; mkdir -p "$HOST_STATE_DIR"
 DISPATCH_PAUSE_FILE="$HOST_STATE_DIR/dispatch-paused"
 IDLE_CAPACITY_WAKE_FILE="$PROJECT_DIR/.swarm/idle-capacity-wake.last"
 DISPATCH_PAUSE_SEEN_FILE="$PROJECT_DIR/.swarm/dispatch-pause-seen"
+HOST_LOAD_REFUSED_FILE="$PROJECT_DIR/.swarm/host-load-refused"; HOST_LOADAVG_FILE="$T/loadavg"
 SWARM_PARKED_FILE="$PROJECT_DIR/.swarm/parked"
 COORD_WAKE_LOCK="$T/wake.lock"
 COORD_WAKE_LOCK_TIMEOUT_SECS=5
@@ -37,8 +38,8 @@ IDLE_CAPACITY_SET_FILE="$PROJECT_DIR/.swarm/idle-capacity-set.last"
 CI_FAILING_RING_DIR="$PROJECT_DIR/.swarm/ci-failing-ring-pending"
 WATCH_STALE_WAIT_CHECK=1; declare -A STALE_WAIT_NOTED=() CI_FAILING_NOTED=()
 
-eval "$(sed -n '/^coord_inbox_write() {/,/^}/p; /^coord_ring_doorbell() {/,/^}/p; /^dispatch_pause_active() {/,/^}/p; /^capacity_free_slots() {/,/^}/p; /^dispatchable_issue_counts() {/,/^}/p; /^dispatch_pause_wake_pass() {/,/^}/p; /^idle_capacity_wake_pass() {/,/^}/p; /^ci_failing_ring_pass() {/,/^}/p; /^ready_sweep_pass() {/,/^}/p; /^coord_pending_approval_age() {/,/^}/p' "$WATCH")"
-for fn in coord_ring_doorbell dispatch_pause_wake_pass idle_capacity_wake_pass ci_failing_ring_pass ready_sweep_pass coord_pending_approval_age; do
+eval "$(sed -n '/^coord_inbox_write() {/,/^}/p; /^coord_ring_doorbell() {/,/^}/p; /^dispatch_pause_active() {/,/^}/p; /^capacity_free_slots() {/,/^}/p; /^dispatchable_issue_counts() {/,/^}/p; /^dispatch_pause_wake_pass() {/,/^}/p; /^host_load_wake_pass() {/,/^}/p; /^idle_capacity_wake_pass() {/,/^}/p; /^ci_failing_ring_pass() {/,/^}/p; /^ready_sweep_pass() {/,/^}/p; /^coord_pending_approval_age() {/,/^}/p' "$WATCH")"
+for fn in coord_ring_doorbell dispatch_pause_wake_pass host_load_wake_pass idle_capacity_wake_pass ci_failing_ring_pass ready_sweep_pass coord_pending_approval_age; do
     declare -F "$fn" >/dev/null || red "could not extract $fn from coordinator-watch.sh"
 done
 LAST_IDLE_CAPACITY_CHECK=0
@@ -76,7 +77,7 @@ echo '[{"number":10,"labels":[{"name":"night-ok"}]},{"number":11,"labels":[{"nam
 
 notes() { find "$COORD_INBOX_DIR" -maxdepth 1 -name "*-$1-*.md" 2>/dev/null | wc -l | tr -d ' '; }
 rings() { [ -f "$RANG" ] && wc -l < "$RANG" | tr -d ' ' || echo 0; }
-reset() { rm -rf "$CI_FAILING_RING_DIR" "$COORD_INBOX_DIR" "$RANG" "$IDLE_CAPACITY_WAKE_FILE" "$IDLE_CAPACITY_SET_FILE" "$DISPATCH_PAUSE_SEEN_FILE"; : > "$EV"; LAST_IDLE_CAPACITY_CHECK=0; HOLD=""; BUSY=0; APPROVAL_AGE=""; }
+reset() { rm -rf "$CI_FAILING_RING_DIR" "$COORD_INBOX_DIR" "$RANG" "$IDLE_CAPACITY_WAKE_FILE" "$IDLE_CAPACITY_SET_FILE" "$DISPATCH_PAUSE_SEEN_FILE" "$HOST_LOAD_REFUSED_FILE"; : > "$EV"; LAST_IDLE_CAPACITY_CHECK=0; HOLD=""; BUSY=0; APPROVAL_AGE=""; }
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 check "free slots = min(MAX_WORKERS - iss windows, MAX_TMUX_WINDOWS - windows)" "2" "$(capacity_free_slots)"
@@ -147,6 +148,65 @@ echo "$(( $(date +%s) + 600 )) x" > "$DISPATCH_PAUSE_FILE"; dispatch_pause_wake_
 dispatch_pause_wake_pass
 check "WATCH_DISPATCH_PAUSE_WAKE=0: off" "0" "$(notes dispatch_pause_lifted)"
 WATCH_DISPATCH_PAUSE_WAKE=1
+
+# ── host-load refusal cleared (#803) ─────────────────────────────────────────
+# provision-worker.sh leaves "<epoch> <max> <issue>"; the pass fires once both
+# load1 and load5 are at or under max, even though the ready set never changed.
+reset
+host_load_wake_pass
+check "no refusal marker: nothing written" "0" "$(notes host_load_cleared)"
+echo "$(date +%s) 48 2244" > "$HOST_LOAD_REFUSED_FILE"
+printf '68.47 60.00 50.00 1/1 1\n' > "$HOST_LOADAVG_FILE"
+host_load_wake_pass
+check "load1 still over max: no note, marker kept" "0:yes" "$(notes host_load_cleared):$([ -e "$HOST_LOAD_REFUSED_FILE" ] && echo yes || echo no)"
+printf '40.00 55.00 50.00 1/1 1\n' > "$HOST_LOADAVG_FILE"
+host_load_wake_pass
+check "load1 under but load5 over max (swinging load): no note" "0" "$(notes host_load_cleared)"
+printf '40.00 44.90 50.00 1/1 1\n' > "$HOST_LOADAVG_FILE"
+host_load_wake_pass
+check "load1 and load5 under max: one host_load_cleared note" "1" "$(notes host_load_cleared)"
+grep -q "issue #2244" "$COORD_INBOX_DIR"/*-host_load_cleared-*.md && got=yes || got=no
+check "note names the refused issue" "yes" "$got"
+check "doorbell rung once" "1" "$(rings)"
+grep -q "coord.wake trigger=host_load_cleared slots=2" "$EV" && got=yes || got=no
+check "coord.wake logged with trigger=host_load_cleared" "yes" "$got"
+check "marker consumed" "no" "$([ -e "$HOST_LOAD_REFUSED_FILE" ] && echo yes || echo no)"
+host_load_wake_pass
+check "cleared once, not every tick" "1" "$(notes host_load_cleared)"
+check "idle-capacity clock reset so no idle_capacity note stacks on it" "yes" "$([ -s "$IDLE_CAPACITY_WAKE_FILE" ] && echo yes || echo no)"
+
+reset
+echo "$(date +%s) 48 2244" > "$HOST_LOAD_REFUSED_FILE"
+touch "$SWARM_PARKED_FILE"
+host_load_wake_pass
+check "parked swarm: marker dropped, no note" "0:no" "$(notes host_load_cleared):$([ -e "$HOST_LOAD_REFUSED_FILE" ] && echo yes || echo no)"
+rm -f "$SWARM_PARKED_FILE"
+reset
+echo "$(date +%s) 48 2244" > "$HOST_LOAD_REFUSED_FILE"
+echo "$(( $(date +%s) + 600 )) x" > "$DISPATCH_PAUSE_FILE"
+host_load_wake_pass
+check "dispatch paused: marker dropped, no note" "0:no" "$(notes host_load_cleared):$([ -e "$HOST_LOAD_REFUSED_FILE" ] && echo yes || echo no)"
+rm -f "$DISPATCH_PAUSE_FILE"
+reset
+: > "$HOST_LOAD_REFUSED_FILE"   # mid-write empty read must not lose the retry
+host_load_wake_pass
+check "empty marker (mid-write): kept for the next tick" "0:yes" "$(notes host_load_cleared):$([ -e "$HOST_LOAD_REFUSED_FILE" ] && echo yes || echo no)"
+reset
+echo "$(date +%s) 48 2244" > "$HOST_LOAD_REFUSED_FILE"
+DRY_RUN=1 host_load_wake_pass
+check "dry run: marker not consumed" "yes" "$([ -e "$HOST_LOAD_REFUSED_FILE" ] && echo yes || echo no)"
+reset
+echo "$(date +%s) 48 2244" > "$HOST_LOAD_REFUSED_FILE"
+WINDOWS="coordinator
+iss-1
+iss-2
+iss-3"
+host_load_wake_pass
+check "no free slot: marker dropped, no note" "0:no" "$(notes host_load_cleared):$([ -e "$HOST_LOAD_REFUSED_FILE" ] && echo yes || echo no)"
+WINDOWS="coordinator
+util
+iss-1"
+reset
 
 # ── idle capacity ────────────────────────────────────────────────────────────
 coord_pending_approval_age() { [ -n "$APPROVAL_AGE" ] && echo "$APPROVAL_AGE"; }
