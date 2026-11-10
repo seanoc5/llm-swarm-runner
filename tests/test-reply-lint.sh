@@ -55,6 +55,13 @@ check "render --json lists open items" "A1,A2" "$("$NY" render --json --project 
 check "done closes one" "A2" "$("$NY" render --json --project "$P" | jq -r 'map(.label) | join(",")')"
 check "labels are never reused" "A3" "$("$NY" add --project "$P" --title t --do 'run `x`')"
 "$NY" done A2 --project "$P"; "$NY" done A3 --project "$P"
+# a fenced --do: the fence must open on its own line and Do now: must show the command
+F="$T/fproj"; mkdir -p "$F/.swarm"
+"$NY" add --project "$F" --title "Load data" --do "$(printf '```\n./load.sh kdeyoga\n```')" >/dev/null
+out="$("$NY" render --project "$F")"
+check "fenced --do: opening fence starts its own line" "1" "$(grep -c '^```$' <<<"$out" | awk '{print ($1 == 2) ? 1 : 0}')"
+check "fenced --do: Do now shows the command, not a bare fence" "Do now: A1 — ./load.sh kdeyoga" "$(grep '^Do now:' <<<"$out")"
+check "fenced --do: render passes the reply lint" "" "$("$LINT" <<<"$out" | cut -d: -f1 | paste -sd, -)"
 check "empty list renders 'Nothing to do.'" "Nothing to do." "$("$NY" render --project "$P" | tail -1)"
 
 # ── Stop hook ────────────────────────────────────────────────────────────────

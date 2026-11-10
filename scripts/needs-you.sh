@@ -74,11 +74,11 @@ render_md() {
         "- **\(.label)** \(.title)"
         + (if .risk != "" then " (risk: \(.risk))" else "" end)
         + (if .rec != "" then " — \(.rec)" else "" end)
-        + "\n  Do: \(.do)"
+        + (if (.do | contains("\n")) then "\n  Do:\n\(.do)" else "\n  Do: \(.do)" end)
         + (if .url != "" then "\n  \(.url)" else "" end)
         + (if .default != "" then "\n  Default if silent: \(.default)" else "" end)' <<<"$items"
     if [ "$n" -gt 0 ]; then
-        printf '\nDo now: %s\n' "$(jq -r '.[0] | "\(.label) — \(.do | split("\n")[0])"' <<<"$items")"
+        printf '\nDo now: %s\n' "$(jq -r '.[0] | "\(.label) — \([.do | split("\n")[] | select((test("^[[:space:]]*```") or test("^[[:space:]]*$")) | not)] | first // .do)"' <<<"$items")"
     else
         printf '\nNothing to do.\n'
     fi
