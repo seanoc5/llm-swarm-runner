@@ -900,6 +900,30 @@ if OUT=$(GH_CHECKS_RC=0 "$MERGE" 501 --auto-low 2>&1); then RC=0; else RC=$?; fi
 [ "$RC" -eq 0 ] || red "--auto-low with a clean marker should merge (rc=$RC, output: $OUT)"
 green "--auto-low honours Gate 10"
 
+heading "Test M18: coordinator excluded=1 then a later clean worker marker on the same head → Gate 10 (#789)"
+set_reviews deadbeef '<!-- SWARM_SELF_REVIEW: APPROVE actor=coordinator head=deadbeef excluded=1 -->' \
+    '<!-- SWARM_SELF_REVIEW: APPROVE actor=worker head=deadbeef -->'
+run_medium
+[ "$RC" -ne 0 ] && echo "$OUT" | grep -q "Gate 10" || red "a clean worker marker must not mask the coordinator's excluded=1 (rc=$RC, output: $OUT)"
+grep -q "pr merge" "$GH_LOG" && red "gh pr merge was called despite Gate 10 refusal"
+green "Gate 10 also checks the marker Gate 9 trusts"
+
+heading "Test M19: latest marker head=unknown excluded=1 after an older clean one → Gate 10 (#789)"
+set_reviews deadbeef '<!-- SWARM_SELF_REVIEW: APPROVE actor=coordinator head=deadbeef -->' \
+    '<!-- SWARM_SELF_REVIEW: APPROVE actor=coordinator head=unknown excluded=1 -->'
+run_medium
+[ "$RC" -ne 0 ] && echo "$OUT" | grep -q "Gate 10" || red "head=unknown marker must win and refuse (rc=$RC, output: $OUT)"
+set_reviews deadbeef '<!-- SWARM_SELF_REVIEW: APPROVE actor=worker head=deadbeef -->' \
+    '<!-- SWARM_SELF_REVIEW: APPROVE actor=worker head=unknown excluded=1 -->'
+: > "$GH_LOG"
+if OUT=$(GH_CHECKS_RC=0 "$MERGE" 501 --auto-low 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -ne 0 ] && echo "$OUT" | grep -q "Gate 10" || red "--auto-low: head=unknown marker must win (rc=$RC, output: $OUT)"
+set_reviews deadbeef '<!-- SWARM_SELF_REVIEW: APPROVE actor=worker head=deadbeef -->' \
+    '<!-- SWARM_SELF_REVIEW: APPROVE actor=worker head=deadbeef excluded=x -->'
+if OUT=$(GH_CHECKS_RC=0 "$MERGE" 501 --auto-low 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -ne 0 ] && echo "$OUT" | grep -q "unparseable" || red "unparseable latest marker must fail closed (rc=$RC, output: $OUT)"
+green "latest marker always wins; unparseable fails closed"
+
 heading "All coordinator-authorship shape tests passed"
 green "Gates 0/1/2/3/4/5 refusal/pass/fail-closed, no-CI-configured pass-with-warning, --auto-low scoping vs plain merge, override-flag rejection"
 echo ""
