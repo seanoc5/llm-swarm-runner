@@ -27,7 +27,7 @@ grep -q '^    WT_CREATED_NOW=0$' "$PROVISION" || red "admitted path does not cle
 
 git init -q "$T/proj" && git -C "$T/proj" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
 cd "$T/proj"
-ISSUE=794; BRANCH="fix/issue-794"; EVENTS_LOG="$T/events.log"; : > "$EVENTS_LOG"
+ISSUE=794; export ISSUE; BRANCH="fix/issue-794"; EVENTS_LOG="$T/events.log"; : > "$EVENTS_LOG"
 log_event() { shift; echo "$*" >> "$EVENTS_LOG"; }
 
 run_refusal() { ( refuse_cap host_max_workers "cap" "hint" total=15 ) 2>&1 >/dev/null || true; }
@@ -75,13 +75,18 @@ green "exit 0 and pre-existing worktrees kept"
 
 # The cap lock is released before removal (both paths).
 LOCK="$T/cap.lock"
-probe_lock() { # run by the git wrapper: can another process take the lock now?
+REALGIT="$(command -v git)"; mkdir -p "$T/shim"
+cat > "$T/shim/git" <<SHIM
+#!/usr/bin/env bash
+if [ "\$1" = worktree ] && [ "\$2" = remove ]; then
     if flock -n "$LOCK" true; then echo free >> "$T/lockstate"; else echo held >> "$T/lockstate"; fi
-}
-git() { if [ "$1" = worktree ] && [ "$2" = remove ]; then probe_lock; fi; command git "$@"; }
+fi
+exec "$REALGIT" "\$@"
+SHIM
+chmod +x "$T/shim/git"; PATH="$T/shim:$PATH"
 for path in refuse on_exit; do
     : > "$T/lockstate"
-    command git worktree add -q "$WT" -b "$BRANCH"
+    git worktree add -q "$WT" -b "$BRANCH"
     (
         exec 9>"$LOCK"; flock 9
         WT_CREATED_NOW=1
@@ -90,5 +95,5 @@ for path in refuse on_exit; do
     ) >/dev/null 2>&1 || true
     [ "$(cat "$T/lockstate")" = "free" ] || red "cap lock held during worktree removal ($path): $(cat "$T/lockstate")"
 done
-unset -f git
+PATH="${PATH#$T/shim:}"
 green "cap lock released before the worktree is removed"
