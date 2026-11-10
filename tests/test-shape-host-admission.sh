@@ -137,6 +137,13 @@ rc=$(run_prov 13 HOST_LOADAVG_FILE="$TEST_DIR/loadavg" HOST_MAX_LOAD1=12 HOST_MI
 [ "$rc" -eq 3 ] && grep -q 'reason=host_load load1=12.90 max=12' "$PROJECT_DIR/.swarm/events.log" || red "fractional load refusal: rc=$rc $(cat "$TEST_DIR/prov-13.log")"
 green "load1 12.90 > 12 refused (decimals compared, not truncated)"
 printf '1.00 1.00 1.00 1/1 1\n' > "$TEST_DIR/loadavg"
+# Issue 13 is refused (marker names 13). A passing dispatch for a DIFFERENT issue (14)
+# must leave that marker so 13's retry wake still fires.
+rc=$(run_prov 14 HOST_LOADAVG_FILE="$TEST_DIR/loadavg" HOST_MAX_LOAD1=48 HOST_MIN_MEM_AVAIL_MB=0 HOST_SPAWN_STAGGER_SECS=0 PROVISION_SPAWN_CHECK_SECS=0)
+[ "$rc" -eq 0 ] || red "issue 14 should pass the load check, rc=$rc: $(cat "$TEST_DIR/prov-14.log")"
+[ -s "$PROJECT_DIR/.swarm/host-load-refused" ] && awk '{exit !($3==13)}' "$PROJECT_DIR/.swarm/host-load-refused" || red "a passing dispatch for issue 14 must not clear issue 13's retry marker (#803)"
+green "passing dispatch for another issue keeps the refused issue's marker (#803)"
+rm -f "$HOST_STATE_DIR"/pending-* "$HOST_STATE_DIR/last-spawn"   # the admitted spawn above must not stagger later cases
 rc=$(run_prov 13 HOST_LOADAVG_FILE="$TEST_DIR/loadavg" HOST_MEMINFO_FILE="$TEST_DIR/meminfo" HOST_MAX_LOAD1=48 HOST_MIN_MEM_AVAIL_MB=16384 HOST_SPAWN_STAGGER_SECS=0)
 [ ! -e "$PROJECT_DIR/.swarm/host-load-refused" ] || red "a load check that passes must clear the retry marker (#803)"
 green "passing load check clears the retry marker (#803)"
