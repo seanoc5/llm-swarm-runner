@@ -84,14 +84,16 @@ new_head()  { big | sed -n 1p; }
 new_grep()  { big | grep a >/dev/null; }
 new_here()  { local v; v="$(big)"; grep -q a <<<"$v"; }
 for fn in old_head old_grep; do
-    [ "$(status_of bash -c "set -o pipefail; $(declare -f big "$fn"); $fn")" = 141 ] \
-        || red "harness cannot reproduce the race: $fn did not exit 141"
+    rc="$(status_of bash -c "set -o pipefail; $(declare -f big "$fn"); $fn")"
+    # 141 normally; a CI runner that starts us with SIGPIPE ignored gives the
+    # writer EPIPE instead (another nonzero code) — either way the pipeline fails.
+    [ "$rc" != 0 ] || red "harness cannot reproduce the race: $fn exited 0"
 done
 for fn in new_head new_grep new_here; do
     rc="$(status_of bash -c "set -o pipefail; $(declare -f big "$fn"); $fn")"
     [ "$rc" = 0 ] || red "$fn exited $rc on a 2 MB producer"
 done
-green "old head -1 / grep -q die with 141 on a 2 MB producer; replacements exit 0"
+green "old head -1 / grep -q fail (141) on a 2 MB producer; replacements exit 0"
 
 # 4. No-regression loop on the real function (cannot reproduce the race; see header).
 git init -q "$TMP/main"
