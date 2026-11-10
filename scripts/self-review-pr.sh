@@ -145,16 +145,17 @@ if [ -n "$NONBLOCKING_FOLLOWUP" ]; then
     HEAD_SHA="$(jq -r '.headRefOid // ""' <<<"$PR_JSON")"
     # Same selection as swarm-merge.sh Gate 9: latest independent marker.
     LAST="$(jq -r '.comments[] | select(.authorAssociation as $a | ["OWNER","MEMBER","COLLABORATOR"] | index($a)) | .body // ""' <<<"$PR_JSON" \
-        | grep -oE 'SWARM_SELF_REVIEW: [A-Z_]+ actor=(coordinator|operator)( head=[0-9a-f]+)?' | tail -1 || true)"
+        | grep -oE 'SWARM_SELF_REVIEW: [A-Z_]+ actor=(coordinator|operator)( head=[0-9a-f]+)?( excluded=[0-9]+)?' | tail -1 || true)"
     LAST_VERDICT="$(sed -E 's/^SWARM_SELF_REVIEW: ([A-Z_]+).*/\1/' <<<"$LAST")"
     LAST_HEAD="$(grep -oE 'head=[0-9a-f]+' <<<"$LAST" | cut -d= -f2 || true)"
+    LAST_EXCLUDED="$(grep -oE 'excluded=[0-9]+' <<<"$LAST" | cut -d= -f2 || true)"
     if [ -z "$HEAD_SHA" ] || [ "$LAST_VERDICT" != APPROVE_WITH_CAVEATS ] || [ "$LAST_HEAD" != "$HEAD_SHA" ]; then
         echo "ERROR: latest coordinator/operator review on PR #$PR is '${LAST:-<none>}', not APPROVE_WITH_CAVEATS on head ${HEAD_SHA:-<unreadable>}." >&2
         echo "       Run self-review-pr.sh $PR --post --force --actor $ACTOR first." >&2
         exit 1
     fi
-    COMMENT="$(printf '<!-- SWARM_SELF_REVIEW: APPROVE_WITH_CAVEATS actor=%s head=%s caveats=nonblocking followup=%s -->\n## Caveats recorded as non-blocking\n\nThe %s judged the caveats in the review of %s not about correctness, security, data loss, or schema/migrations. Follow-up: #%s.\n' \
-        "$ACTOR" "$HEAD_SHA" "$NONBLOCKING_FOLLOWUP" "$ACTOR" "${HEAD_SHA:0:7}" "$NONBLOCKING_FOLLOWUP")"
+    COMMENT="$(printf '<!-- SWARM_SELF_REVIEW: APPROVE_WITH_CAVEATS actor=%s head=%s caveats=nonblocking followup=%s%s -->\n## Caveats recorded as non-blocking\n\nThe %s judged the caveats in the review of %s not about correctness, security, data loss, or schema/migrations. Follow-up: #%s.\n' \
+        "$ACTOR" "$HEAD_SHA" "$NONBLOCKING_FOLLOWUP" "${LAST_EXCLUDED:+ excluded=$LAST_EXCLUDED}" "$ACTOR" "${HEAD_SHA:0:7}" "$NONBLOCKING_FOLLOWUP")"
     gh pr comment "$PR" --body "$COMMENT" || { echo "ERROR: gh pr comment failed" >&2; exit 1; }
     echo "PR #$PR: caveats recorded as non-blocking (follow-up #$NONBLOCKING_FOLLOWUP, head $HEAD_SHA)"
     exit 0
@@ -211,6 +212,15 @@ MAX_FILE_BYTES="${SELF_REVIEW_MAX_FILE_BYTES:-200000}"
 MAX_PROMPT_BYTES="${SELF_REVIEW_MAX_PROMPT_BYTES:-1500000}"
 EXCLUDE_GLOBS="${SELF_REVIEW_EXCLUDE:-}"
 EXCLUDED_NOTE=""
+EXCLUDED_COUNT=0
+# Non-code = data extensions, dump/lock/generated files, or git-marked binary.
+is_noncode_file() {   # is_noncode_file <path> <diff-section-file>
+    case "${1,,}" in
+        *.csv|*.tsv|*.json|*.jsonl|*.ndjson|*.parquet|*.avro|*.orc|*.xlsx|*.xls|*.geojson) return 0 ;;
+        *dump*.sql|*.sql.gz|*.lock|*.min.js|*.min.css|*.map|*.snap|*.svg) return 0 ;;
+    esac
+    grep -qE '^(Binary files .* differ|GIT binary patch)' "$2"
+}
 filter_diff() {
     local secdir sec hdr path bytes lines glob hit out="" list="" GLOBS=()
     # Split without letting bash expand the globs against the cwd.
@@ -218,7 +228,10 @@ filter_diff() {
     secdir="$(mktemp -d -t swarm-review-split-XXXXXX)"
     printf '%s\n' "$DIFF" | awk -v d="$secdir" '
         /^diff --git / { n++ }
-        { f = sprintf("%s/sec.%06d", d, n); print > f }'
+        { f = sprintf("%s/sec.%06d", d, n)
+          if (f != prev) { if (prev != "") close(prev); prev = f }
+          print > f }
+        END { if (prev != "") close(prev) }'
     for sec in "$secdir"/sec.*; do
         [ -e "$sec" ] || continue
         hdr="$(head -n1 "$sec")"
@@ -226,7 +239,13 @@ filter_diff() {
         path="${hdr##* b/}"
         hit=""
         if [[ "$hdr" == "diff --git "* ]]; then
-            [ "$MAX_FILE_BYTES" -gt 0 ] && [ "$bytes" -gt "$MAX_FILE_BYTES" ] && hit="over ${MAX_FILE_BYTES} bytes"
+            # Size alone only excludes NON-code (data/generated/binary). A big
+            # source file stays in the prompt, so an APPROVE never silently
+            # skipped code; if it makes the prompt too big, the prompt cap
+            # below fails the run with the next step instead.
+            if [ "$MAX_FILE_BYTES" -gt 0 ] && [ "$bytes" -gt "$MAX_FILE_BYTES" ] && is_noncode_file "$path" "$sec"; then
+                hit="over ${MAX_FILE_BYTES} bytes, non-code"
+            fi
             for glob in "${GLOBS[@]}"; do
                 # shellcheck disable=SC2053
                 if [[ "$path" == $glob || "$path" == */$glob ]]; then hit="matches SELF_REVIEW_EXCLUDE '$glob'"; break; fi
@@ -242,6 +261,7 @@ filter_diff() {
     rm -rf "$secdir"
     DIFF="${out%$'\n'}"
     EXCLUDED_NOTE="$list"
+    EXCLUDED_COUNT="$(printf '%s' "$list" | grep -c '^- ' || true)"
 }
 filter_diff
 if [ -n "$EXCLUDED_NOTE" ]; then
@@ -357,8 +377,10 @@ if [ "$POST" = "1" ]; then
         # "worker"; the one exception is every marker posted before this
         # change, which pr-ready.sh's own query still treats as a worker
         # round for the same reason.
-        COMMENT="$(printf '<!-- SWARM_SELF_REVIEW: %s actor=%s head=%s -->\n## Fresh-context self-review\n\n%s\n%s\n\n<sub>Adversarial review by a fresh %s session against prompts/skill-self-review.md — no shared context with the PR author. Machinery: scripts/self-review-pr.sh (docs/ringer-adoptions.md #2).</sub>\n' \
-            "$VERDICT" "$ACTOR" "${HEAD_SHA:-unknown}" "$REVIEW" "${EXCLUDED_NOTE:+$'\n'$EXCLUDED_NOTE}" "$REVIEW_CMD")"
+        # excluded=N (issue #789) only when files were left out: the merge
+        # gates read the marker, not the body, and refuse unattended merge.
+        COMMENT="$(printf '<!-- SWARM_SELF_REVIEW: %s actor=%s head=%s%s -->\n## Fresh-context self-review\n\n%s\n%s\n\n<sub>Adversarial review by a fresh %s session against prompts/skill-self-review.md — no shared context with the PR author. Machinery: scripts/self-review-pr.sh (docs/ringer-adoptions.md #2).</sub>\n' \
+            "$VERDICT" "$ACTOR" "${HEAD_SHA:-unknown}" "$([ "$EXCLUDED_COUNT" -gt 0 ] && printf ' excluded=%s' "$EXCLUDED_COUNT")" "$REVIEW" "${EXCLUDED_NOTE:+$'\n'$EXCLUDED_NOTE}" "$REVIEW_CMD")"
         gh pr comment "$PR" --body "$COMMENT" \
             || { echo "ERROR: gh pr comment failed" >&2; exit 1; }
         echo "post: verdict comment added to PR #$PR"

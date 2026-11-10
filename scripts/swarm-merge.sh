@@ -91,6 +91,10 @@
 #                         Which branch was taken is logged as merge.gate.
 #                         The merge is then pinned to that reviewed commit,
 #                         and a CI-verified head that differs is refused.
+#   Gate 10 (full review, #789) both --auto-low and --auto-medium: the latest
+#                         trusted SWARM_SELF_REVIEW marker (any actor)
+#                         must not carry `excluded=N` (N>0 = files left out of
+#                         the review). Plain `swarm-merge.sh <N>` is unaffected.
 #
 # --auto-low also refuses outright (usage error, before any gate runs) if
 # combined with --override-review or --override-migration-gate: the
@@ -764,6 +768,27 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
           exit 1
         fi
 
+        # Gate 10 (#789): a review that left files out (marker carries
+        # excluded=N) is not a full review. Unattended merge refuses; an
+        # operator's plain merge is unaffected. Latest trusted marker of any
+        # actor wins, any head (a stale exclusion needs a fresh full review).
+        echo "       auto-$AUTO_RATING gate 10 (full review, no excluded files): checking…"
+        G10_JSON="$(gh pr view "$PR_NUM" --json comments,headRefOid 2>/dev/null || true)"
+        [ -n "$G10_JSON" ] || {
+          echo "ERROR: PR #$PR_NUM refused by --auto-$AUTO_RATING Gate 10: could not read the PR's review markers." >&2
+          exit 1
+        }
+        G10_MARKER="$(jq -r '.comments[] | select(.authorAssociation as $a | ["OWNER","MEMBER","COLLABORATOR"] | index($a)) | .body // ""' <<<"$G10_JSON" 2>/dev/null \
+                      | grep -oE "SWARM_SELF_REVIEW: [A-Z_]+ actor=[A-Za-z0-9_-]+ head=[0-9a-f]+( caveats=[a-z]+)?( followup=[0-9]+)?( excluded=[0-9]+)?" \
+                      | tail -1 || true)"
+        G10_EXCLUDED="$(grep -oE 'excluded=[0-9]+' <<<"$G10_MARKER" | cut -d= -f2 || true)"
+        if [ "${G10_EXCLUDED:-0}" -gt 0 ]; then
+          log_event merge.gate "pr=$PR_NUM gate=10-full-review result=refused excluded=$G10_EXCLUDED action=refuse-auto-$AUTO_RATING"
+          echo "ERROR: PR #$PR_NUM refused by --auto-$AUTO_RATING Gate 10 (full review): the latest review left out $G10_EXCLUDED file(s), so it is not a full review." >&2
+          echo "       Re-run self-review-pr.sh $PR_NUM --post --rerun with a smaller diff, or merge it yourself: swarm-merge.sh $PR_NUM (no --auto-$AUTO_RATING)." >&2
+          exit 1
+        fi
+
         if [ "$AUTO_RATING" = medium ]; then
           echo "       auto-medium gate 8 (hold banner): checking…"
           if grep -qE '^> ⛔ \*\*COORDINATOR HOLD\*\*' <<<"$PR_BODY"; then
@@ -779,7 +804,7 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
           # commenter can't forge one. Workers share the operator's gh account,
           # so this does not stop a worker posting actor=coordinator itself.
           IND_MARKER="$(jq -r '.comments[] | select(.authorAssociation as $a | ["OWNER","MEMBER","COLLABORATOR"] | index($a)) | .body // ""' <<<"$REVIEW_JSON" 2>/dev/null \
-                        | grep -oE 'SWARM_SELF_REVIEW: [A-Z_]+ actor=(coordinator|operator)( head=[0-9a-f]+)?( caveats=[a-z]+)?( followup=[0-9]+)?' \
+                        | grep -oE 'SWARM_SELF_REVIEW: [A-Z_]+ actor=(coordinator|operator)( head=[0-9a-f]+)?( caveats=[a-z]+)?( followup=[0-9]+)?( excluded=[0-9]+)?' \
                         | tail -1 || true)"
           IND_VERDICT="$(sed -E 's/^SWARM_SELF_REVIEW: ([A-Z_]+).*/\1/' <<<"$IND_MARKER")"
           IND_HEAD="$(grep -oE 'head=[0-9a-f]+' <<<"$IND_MARKER" | cut -d= -f2 || true)"
