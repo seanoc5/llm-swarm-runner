@@ -849,13 +849,49 @@ if [ -d "$WT" ]; then
     # happened correctly by this point). Accepted trade: a rare false
     # positive here beats a false negative that could hide a real
     # unblessed removal.
+    # issue #795: a watcher/listener writer (e.g. <task_id>.check.json) can
+    # recreate `.swarm/` AFTER the archive above, so git's removal dies with
+    # "Directory not empty" on that stub. On failure, archive whatever
+    # reappeared (a late stub, kept beside the main archive) and retry once.
+    REMOVE_OK=0
+    LATE_RETRIED=0
     if git worktree remove --force "$WT"; then
+        REMOVE_OK=1
+    elif [ -d "$WT/.swarm" ] && [ "$(cd "$WT" && pwd -P)" != "$(cd "$PROJECT_DIR" && pwd -P)" ]; then
+        echo "  - removal failed; .swarm/ reappeared after the archive (late writer) — archiving the stub and retrying"
+        LATE_DEST="$PROJECT_DIR/.swarm/reaped/iss-$ISSUE-$(date -u +%Y%m%dT%H%M%SZ).swarm-late"
+        mkdir -p "$PROJECT_DIR/.swarm/reaped" 2>/dev/null || true
+        LATE_RETRIED=1
+        mv "$WT/.swarm" "$LATE_DEST" 2>/dev/null || {
+            # Never silent: the stub is about to be deleted unarchived.
+            log_event reap.worktree.archive_failed "issue=$ISSUE which=swarm-late path=$WT/.swarm action=deleted"
+            echo "  ✗ WARN: could not archive late .swarm stub at $WT/.swarm; deleting it so removal can proceed" >&2
+            rm -rf "$WT/.swarm"
+        }
+        if [ -d "$LATE_DEST" ]; then
+            if [ "$ARCHIVE_EVENT_FIELD" = "none" ]; then
+                ARCHIVE_EVENT_FIELD="late=$LATE_DEST"
+            else
+                ARCHIVE_EVENT_FIELD="$ARCHIVE_EVENT_FIELD,late=$LATE_DEST"
+            fi
+        fi
+        git worktree remove --force "$WT" && REMOVE_OK=1
+    fi
+    if [ "$REMOVE_OK" = "1" ]; then
         log_event reap.worktree "issue=$ISSUE branch=${ACTUAL_BRANCH:-$BRANCH} dir=$WT archive=$ARCHIVE_EVENT_FIELD"
         echo "  ✓ removed worktree"
         rm -f "$REAP_MARKER"
     else
         log_event reap.worktree.error "issue=$ISSUE branch=${ACTUAL_BRANCH:-$BRANCH} dir=$WT reason=remove_failed archive=$ARCHIVE_EVENT_FIELD"
         echo "  ✗ ERROR: git worktree remove failed for $WT — left in place, no reap.worktree event logged" >&2
+        # issue #795: close the tmux window ONLY after the late-writer retry
+        # also failed (a lingering window made kill-finished-workers.sh skip
+        # it, "can't resolve worktree branch"). Any other removal failure
+        # (locked worktree, permissions) may still have a live worker, so
+        # the window stays open and the operator sees the error.
+        if [ "$LATE_RETRIED" = "1" ]; then
+            close_worker_windows || true
+        fi
         exit 1
     fi
 else
