@@ -658,9 +658,15 @@ fi
 BASE_REF="$DEFAULT_REMOTE_REF"
 # Confirm against the live remote: a cached ref can outlive a branch that
 # swarm-merge.sh deleted after a squash merge (fetch runs without --prune).
-if git show-ref --verify --quiet "refs/remotes/origin/$BRANCH" &&
-   [ -n "$(git ls-remote --heads origin "$BRANCH" 2>/dev/null)" ]; then
-    BASE_REF="origin/$BRANCH"
+if git show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
+    # Check ls-remote's exit status apart from its output: an unreachable
+    # remote prints nothing too, and must not read as "branch deleted" (#840).
+    if live_heads="$(git ls-remote --heads origin "$BRANCH" 2>/dev/null)"; then
+        [ -n "$live_heads" ] && BASE_REF="origin/$BRANCH"
+    else
+        echo "WARN: git ls-remote failed — keeping cached origin/$BRANCH as the base (cached ref may be stale if the fetch above also failed)" >&2
+        BASE_REF="origin/$BRANCH"
+    fi
 fi
 
 if [ -d "$WT" ]; then

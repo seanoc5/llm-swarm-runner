@@ -65,3 +65,18 @@ git -C c4 show-ref --verify -q refs/remotes/origin/fix/issue-7 || red "test setu
 got="$(provision "$TEST_DIR/c4")"
 [ "$got" = "$(git -C c4 rev-parse origin/master)" ] || red "deleted remote branch: worktree on $got, expected origin/master"
 green "deleted remote branch (stale cached ref) ignored; based on master"
+
+# Unreachable remote (#840): ls-remote fails, so "empty output" must not read as
+# "branch deleted". Keep the cached origin/fix/issue-7 and warn on stderr.
+# Re-create the remote branch at the PR commit, then stub only ls-remote to fail.
+git --git-dir=origin.git update-ref refs/heads/fix/issue-7 "$PR_SHA"
+git clone -q origin.git c5; git -C c5 config user.email t@t; git -C c5 config user.name t
+got="$( cd c5; ISSUE=7; BRANCH="fix/issue-7"; WT="$TEST_DIR/wt-c5"
+        DEFAULT_REMOTE_REF=origin/master; WT_CREATED_NOW=0
+        log_event() { :; }
+        git() { if [ "${1:-}" = ls-remote ]; then return 128; fi; command git "$@"; }
+        eval "$body" >/dev/null 2>"$TEST_DIR/c5.err"
+        git -C "$WT" rev-parse HEAD )"
+[ "$got" = "$PR_SHA" ] || red "ls-remote failure: worktree on $got, expected cached origin/fix/issue-7 ($PR_SHA)"
+grep -q 'WARN: git ls-remote failed' "$TEST_DIR/c5.err" || red "ls-remote failure: no WARN on stderr"
+green "failing ls-remote keeps cached origin/fix/issue-7 and warns"
