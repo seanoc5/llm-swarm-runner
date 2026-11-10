@@ -369,7 +369,13 @@ while true; do
                                     READY_AT="$(gh api "$API_REPO_PATH/issues/$PR/events" --paginate \
                                         --jq '[.[] | select(.event == "ready_for_review") | .created_at] | max // empty' 2>/dev/null | sort | tail -1 || true)"
                                     NEWEST_RUN="$(jq -r '[.[].createdAt // empty] | max // empty' <<<"$CI_FALLBACK_DETAIL" 2>/dev/null || true)"
-                                    if [ -n "$READY_AT" ] && [[ "$NEWEST_RUN" < "$READY_AT" ]]; then
+                                    READY_GRACE="${CI_WAIT_READY_GRACE_SECONDS:-300}"
+                                    READY_EPOCH="$(date -u -d "$READY_AT" +%s 2>/dev/null || echo 0)"
+                                    # Grace window: a repo whose workflows do not subscribe to
+                                    # ready_for_review never registers a post-ready run, so only
+                                    # hold while the ready event is recent enough that one would
+                                    # have appeared by now (self-review of #838).
+                                    if [ -n "$READY_AT" ] && [[ "$NEWEST_RUN" < "$READY_AT" ]] && [ $(( $(date -u +%s) - READY_EPOCH )) -lt "$READY_GRACE" ]; then
                                         PASS_NOW=0; PASS_MSG=""
                                         echo "ci-wait: PR #$PR has skipping checks and was marked ready at $READY_AT, after its newest run (${NEWEST_RUN:-none}) — that run predates the draft→ready transition, so its skipped lanes never ran. Treating as pending until the ready_for_review run registers." >&2
                                     fi
