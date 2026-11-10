@@ -806,6 +806,8 @@ if [ "$WINDOW_EXISTS" -eq 0 ]; then
     check_stale_container "$ISSUE" "$CONTAINER"
     WT_CREATED_NOW=0
 fi
+# A live window means the worktree predates this call (and holds its brief).
+[ "$WINDOW_EXISTS" -eq 1 ] && WT_CREATED_NOW=0
 
 # 3. Brief, written atomically (mktemp + rename in the same dir). TASK_ID
 #    gets a -2, -3... suffix on a same-second collision. PROVISION_NOW_EPOCH
