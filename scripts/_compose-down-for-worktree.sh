@@ -54,7 +54,7 @@ find_compose_file() {
         [ -f "$WT/$f" ] && { printf '%s\n' "$WT/$f"; return 0; }
     done
     # Non-standard names, e.g. fand-etl's docker-compose.test.yml.
-    f=$(find "$WT" -maxdepth 1 \( -name 'docker-compose*.y*ml' -o -name 'compose*.y*ml' \) 2>/dev/null | sort | head -1)
+    f=$(find "$WT" -maxdepth 1 \( -name 'docker-compose*.y*ml' -o -name 'compose*.y*ml' \) 2>/dev/null | sort | sed -n 1p)
     [ -n "$f" ] && { printf '%s\n' "$f"; return 0; }
     return 1
 }
@@ -74,7 +74,7 @@ if [ -n "$COMPOSE_FILE" ]; then
     # than risk mis-parsing. Strip a trailing YAML comment (unlike .env,
     # YAML genuinely supports `name: foo # comment` — without this, the
     # comment text gets glued onto the name after normalization).
-    _n=$(grep -E '^name:[[:space:]]*' "$COMPOSE_FILE" 2>/dev/null | head -1 | cut -d: -f2- | sed -E 's/#.*//' | tr -d '"'\'' ')
+    _n=$(grep -E '^name:[[:space:]]*' "$COMPOSE_FILE" 2>/dev/null | sed -n 1p | cut -d: -f2- | sed -E 's/#.*//' | tr -d '"'\'' ')
     [ -n "${_n:-}" ] && PROJECT_NAME="$_n"
 fi
 if [ -f "$WT/.env" ]; then

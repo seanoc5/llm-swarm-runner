@@ -150,7 +150,7 @@ pick_session() {
     local dir="$1" f
     while IFS= read -r f; do
         [ -n "$f" ] || continue
-        if [ "$(jq -r 'select(.entrypoint != null) | .entrypoint' "$f" 2>/dev/null | head -n1)" = "cli" ]; then
+        if [ "$(jq -r 'select(.entrypoint != null) | .entrypoint' "$f" 2>/dev/null | sed -n 1p)" = "cli" ]; then
             printf '%s\n' "$f"; return 0
         fi
     done < <(ls -t "$dir"/*.jsonl 2>/dev/null)

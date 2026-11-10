@@ -3808,7 +3808,7 @@ if [ "$WATCHER_QUIET" != "1" ]; then
     # suppressed below, the whole pane-echo feature would silently vanish
     # rather than degrade to plain default-interval following.
     TAIL_OPTS=(-n 1 -F)
-    tail --help 2>/dev/null | grep -q -- '--sleep-interval' && TAIL_OPTS+=(--sleep-interval=0.2)
+    tail --help 2>/dev/null | grep -- '--sleep-interval' >/dev/null && TAIL_OPTS+=(--sleep-interval=0.2)
     tail "${TAIL_OPTS[@]}" "$EVENTS_LOG" 2>/dev/null | while IFS= read -r line; do
         format_event_line "$line"
     done &
@@ -4606,7 +4606,7 @@ followup_brief_postdates_pr() {
 # slower hourly orphan_sweep_pass. See has_live_window_draining_brief below
 # for the issue #493 case that DOES need pane liveness.
 has_live_window() {
-    tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx "iss-$1"
+    tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -x "iss-$1" >/dev/null
 }
 
 # has_live_window_draining_brief <issue>
@@ -4624,9 +4624,9 @@ has_live_window() {
 # above) — that path is already reaped correctly regardless of pane state.
 has_live_window_draining_brief() {
     local win="iss-$1"
-    tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx "$win" || return 1
+    tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -x "$win" >/dev/null || return 1
     local pane_dead
-    pane_dead="$(tmux list-panes -t "$SESSION_NAME:$win" -F '#{pane_dead}' 2>/dev/null | head -1)"
+    pane_dead="$(tmux list-panes -t "$SESSION_NAME:$win" -F '#{pane_dead}' 2>/dev/null | sed -n 1p)"
     # self-review (13th pass): a window that vanished between the
     # list-windows check above and this list-panes call returns empty here,
     # not "0" — treat that the same as dead (same empty-means-dead rule as
@@ -5806,7 +5806,7 @@ stranded_brief_sweep_pass() {
 
 # worker_inbox_brief <worktree-dir>: oldest real (non-tmp) inbox brief.
 worker_inbox_brief() {
-    find "$1/.swarm/tasks/inbox" -maxdepth 1 -type f -name '*.md' -not -name '.tmp.*' 2>/dev/null | sort | head -1
+    find "$1/.swarm/tasks/inbox" -maxdepth 1 -type f -name '*.md' -not -name '.tmp.*' 2>/dev/null | sort | sed -n 1p
 }
 
 # sideline_reason <worktree-dir>: finished | stalled | waiting
@@ -5815,7 +5815,7 @@ sideline_reason() {
     compgen -G "$wt_dir/.swarm/tasks/processing/*.md" >/dev/null || { echo finished; return; }
     for f in "$wt_dir/.swarm/tasks/outbox"/*.md; do
         [ -f "$f" ] || continue
-        if head -20 "$f" 2>/dev/null | grep -qE '^kind:[[:space:]]*decision-needed[[:space:]]*$'; then
+        if head -20 "$f" 2>/dev/null | grep -E '^kind:[[:space:]]*decision-needed[[:space:]]*$' >/dev/null; then
             echo waiting; return
         fi
     done
@@ -6001,7 +6001,7 @@ bg_violation_sweep_pass() {
 
     local windows
     windows="$(tmux list-windows -t "$SESSION_NAME" -F '#{window_name}' 2>/dev/null | grep '^iss-' || true)"
-    if tmux list-windows -t "$SESSION_NAME" -F '#{window_name}' 2>/dev/null | grep -qx 'coordinator'; then
+    if tmux list-windows -t "$SESSION_NAME" -F '#{window_name}' 2>/dev/null | grep -x 'coordinator' >/dev/null; then
         windows="$(printf '%s\n%s\n' "$windows" 'coordinator' | sed '/^$/d')"
     fi
     [ -n "$windows" ] || return 0
@@ -6311,7 +6311,7 @@ pr_state_for_worktree() {
 # Extracts .state from a *.check.json without requiring jq (this runs from
 # both the jq-gated status_poll_pass and the always-on pr_poll_pass).
 check_json_state() {
-    sed -n 's/.*"state":"\([a-zA-Z_]*\)".*/\1/p' "$1" 2>/dev/null | head -1
+    sed -n 's/.*"state":"\([a-zA-Z_]*\)".*/\1/p' "$1" 2>/dev/null | sed -n 1p
 }
 
 # reconcile_missing_outcome <worktree-dir> <issue> <task_id> <reason>
@@ -6520,9 +6520,9 @@ maybe_run_check() {
     #   3. listener-wide env default
     local check_cmd="" brief
     brief=$(find "$wt_dir/.swarm/tasks/processing" "$wt_dir/.swarm/tasks/done" \
-                -maxdepth 1 -name "${task_id}*.md" 2>/dev/null | head -1)
+                -maxdepth 1 -name "${task_id}*.md" 2>/dev/null | sed -n 1p)
     if [ -n "$brief" ]; then
-        check_cmd=$(sed -n 's/.*<!-- SWARM_CHECK: \(.*\) -->.*/\1/p' "$brief" | head -1)
+        check_cmd=$(sed -n 's/.*<!-- SWARM_CHECK: \(.*\) -->.*/\1/p' "$brief" | sed -n 1p)
     fi
     if [ -z "$check_cmd" ] && [ -r "$wt_dir/.swarm/check.sh" ]; then
         check_cmd="bash .swarm/check.sh"
@@ -6753,7 +6753,7 @@ SCRIPT
     if [ -n "$pane" ]; then
         how="reused"
         tmux respawn-pane -k -t "$pane" -c "$wt_dir" bash "$runner_script" 2>/dev/null || pane=""
-    elif tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx "iss-$issue"; then
+    elif tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -x "iss-$issue" >/dev/null; then
         how="split"
         pane="$(tmux split-window -d -v -l 35% -t "$SESSION_NAME:iss-$issue" -c "$wt_dir" \
                     -P -F '#{pane_id}' bash "$runner_script" 2>/dev/null)" || pane=""
@@ -6804,7 +6804,7 @@ window_flags_sweep_pass() {
         shopt -s nullglob
         for f in "$wt_dir/.swarm/tasks/outbox"/*.md; do
             [ -f "$f" ] || continue
-            if head -20 "$f" 2>/dev/null | grep -qE '^kind:[[:space:]]*decision-needed[[:space:]]*$'; then
+            if head -20 "$f" 2>/dev/null | grep -E '^kind:[[:space:]]*decision-needed[[:space:]]*$' >/dev/null; then
                 has_decision=1
                 break
             fi
@@ -6919,7 +6919,7 @@ coord_approval_flag_pass() {
 
     local dir best_epoch="$COORD_LAST_ASSISTANT_EPOCH"
     dir="$(transcript_dir_for "$PROJECT_DIR")"
-    if [ "$best_epoch" -gt 0 ] && printf '%s' "$COORD_LAST_ASSISTANT_TEXT" | grep -qF "Pending your approval:"; then
+    if [ "$best_epoch" -gt 0 ] && printf '%s' "$COORD_LAST_ASSISTANT_TEXT" | grep -F "Pending your approval:" >/dev/null; then
         if human_typed_since "$dir" "$((best_epoch + 1))" "$(coord_paste_epochs)" "$COORD_HUMAN_PASTE_GRACE_SECS"; then
             clear_window_flag coordinator "🔔" "approval_answered"
         else
@@ -6939,7 +6939,7 @@ coord_approval_flag_pass() {
 coord_pending_approval_age() {
     coord_last_assistant_turn || return 1
     [ "$COORD_LAST_ASSISTANT_EPOCH" -gt 0 ] || return 1
-    printf '%s' "$COORD_LAST_ASSISTANT_TEXT" | grep -qF "Pending your approval:" || return 1
+    printf '%s' "$COORD_LAST_ASSISTANT_TEXT" | grep -F "Pending your approval:" >/dev/null || return 1
     human_typed_since "$(transcript_dir_for "$PROJECT_DIR")" "$((COORD_LAST_ASSISTANT_EPOCH + 1))" \
         "$(coord_paste_epochs)" "$COORD_HUMAN_PASTE_GRACE_SECS" && return 1
     printf '%s\n' $(( $(date +%s) - COORD_LAST_ASSISTANT_EPOCH ))
@@ -7150,7 +7150,7 @@ run_worker_compact_loop() {
 # Mirrors llm-start.sh's coordinator_idle detection (pane_current_command).
 coordinator_pane_state() {
     tmux has-session -t "$SESSION_NAME" 2>/dev/null || { echo absent; return; }
-    tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx 'coordinator' || { echo absent; return; }
+    tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -x 'coordinator' >/dev/null || { echo absent; return; }
     local pane_cmd
     # Explicit pane .0 = the Claude session (#785); a viewer that has been
     # renumbered to 0 (session pane closed by hand) is not a session.
@@ -7845,7 +7845,7 @@ auto_compact_poll_pass() {
     maybe_auto_compact poll
     after=$(wc -l < "$EVENTS_LOG" 2>/dev/null || echo 0)
     if [ "$after" -gt "$before" ] \
-        && tail -n "$((after - before))" "$EVENTS_LOG" 2>/dev/null | grep -q 'coord.compact  .*trigger=poll'; then
+        && tail -n "$((after - before))" "$EVENTS_LOG" 2>/dev/null | grep 'coord.compact  .*trigger=poll' >/dev/null; then
         LAST_AUTO_COMPACT_POLL_TRIGGER=$now
     fi
 }
@@ -7872,9 +7872,9 @@ auto_compact_poll_pass() {
 worker_pane_state() {
     local win="$1"
     tmux has-session -t "$SESSION_NAME" 2>/dev/null || { echo absent; return; }
-    tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx "$win" || { echo absent; return; }
+    tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -x "$win" >/dev/null || { echo absent; return; }
     local pane_cmd
-    pane_cmd="$(tmux list-panes -t "$SESSION_NAME:$win" -F '#{pane_current_command}' 2>/dev/null | head -1)" || pane_cmd=""
+    pane_cmd="$(tmux list-panes -t "$SESSION_NAME:$win" -F '#{pane_current_command}' 2>/dev/null | sed -n 1p)" || pane_cmd=""
     case "$pane_cmd" in
         bash|zsh|sh|fish|"") echo shell ;;
         *)                   echo cli ;;
@@ -8066,7 +8066,7 @@ worker_has_open_pr() {
 worker_task_done() {
     local win="$1" wt_dir="$2"
 
-    if [ -z "$(find "$wt_dir/.swarm/tasks/processing" -maxdepth 1 -type f 2>/dev/null | head -1)" ]; then
+    if [ -z "$(find "$wt_dir/.swarm/tasks/processing" -maxdepth 1 -type f 2>/dev/null | sed -n 1p)" ]; then
         local f
         shopt -s nullglob
         for f in "$wt_dir/.swarm/tasks/done"/*.ok.json "$wt_dir/.swarm/tasks/done"/*.err.json; do
@@ -8126,7 +8126,7 @@ worker_task_done() {
 # it's reporting on, not just "something".
 worker_pending_brief_path() {
     local wt_dir="$1"
-    find "$wt_dir/.swarm/tasks/inbox" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | sort | head -1
+    find "$wt_dir/.swarm/tasks/inbox" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | sort | sed -n 1p
 }
 
 # worker_pending_brief <worktree-dir>
@@ -8260,7 +8260,7 @@ worker_current_task_terminal() {
     local wt_dir="$1"
     [ "$HAVE_JQ" = "1" ] || return 1
     local proc_file task_id status_file state
-    proc_file="$(find "$wt_dir/.swarm/tasks/processing" -maxdepth 1 -type f 2>/dev/null | head -1)"
+    proc_file="$(find "$wt_dir/.swarm/tasks/processing" -maxdepth 1 -type f 2>/dev/null | sed -n 1p)"
     if [ -z "$proc_file" ]; then
         # issue #451 self-review finding: scripts/task-done.sh (the
         # worker's own mandatory last step) moves processing/<id>.md into
@@ -9669,7 +9669,7 @@ human_typed_since() {
     # one that survives both exclusions. tac + grep on the raw line keeps jq
     # off every line of what can be a very large transcript.
     local line ts epoch text text_trimmed p wake_head
-    wake_head="$(printf '%s' "$WAKE_PROMPT" | head -1)"
+    wake_head="$(printf '%s' "$WAKE_PROMPT" | sed -n 1p)"
     # Trim wake_head's own surrounding whitespace too, so it compares on the
     # same "modulo surrounding whitespace" footing as the turn text below.
     wake_head="${wake_head#"${wake_head%%[![:space:]]*}"}"

@@ -246,7 +246,7 @@ swarm_own_worktree_dirs() {
         [ -d "$cand" ] || continue
         [ -n "${seen[$cand]:-}" ] && continue
         [ -f "$cand/.git" ] || continue
-        admin_dir="$(sed -n 's/^gitdir: //p' "$cand/.git" 2>/dev/null | head -n1)"
+        admin_dir="$(sed -n 's/^gitdir: //p' "$cand/.git" 2>/dev/null | sed -n 1p)"
         case "$admin_dir" in
             "$common_dir/worktrees/"*) seen["$cand"]=1 ;;
         esac

@@ -335,7 +335,7 @@ fi
 # window (or any other split) can be the ACTIVE pane, and a bare window
 # target captures whichever pane is active, not the worker's Claude pane.
 is_parked() {
-    tmux capture-pane -t "$SESSION_NAME:$1.0" -p -S -5 2>/dev/null | grep -q '\[polling for next brief'
+    tmux capture-pane -t "$SESSION_NAME:$1.0" -p -S -5 2>/dev/null | grep '\[polling for next brief' >/dev/null
 }
 
 # Returns minutes since last pane activity. Uses tmux's window_activity
@@ -924,9 +924,9 @@ if [ "$CHECK_WINDOWLESS" = "1" ]; then
         # a reap.window and a deferred kill-worktree.sh call every pass.
         grace_marker="$PROJECT_DIR/.swarm/reap-deferred/iss-$issue"
         if [ -f "$grace_marker" ] && [ "${SWARM_REAP_GRACE_SECS:-14400}" != "0" ]; then
-            grace_until="$(sed -n 's/^until=//p' "$grace_marker" | head -1)"
+            grace_until="$(sed -n 's/^until=//p' "$grace_marker" | sed -n 1p)"
             if [[ "$grace_until" =~ ^[0-9]+$ ]] && [ "$(date +%s)" -lt "$grace_until" ]; then
-                echo "  $w  [no window; reap grace for unsaved work until $(sed -n 's/^until_utc=//p' "$grace_marker" | head -1) → skip]"
+                echo "  $w  [no window; reap grace for unsaved work until $(sed -n 's/^until_utc=//p' "$grace_marker" | sed -n 1p) → skip]"
                 continue
             fi
         fi

@@ -99,7 +99,7 @@ else
             sha=$(gh pr view -R "$0" "$1" --json headRefOid -q .headRefOid) &&
             gh api repos/"$0"/statuses/"$sha" -f state=success -f context=swarm/probe -f description="token probe $2"
         ' "$PROBE_REPO" "$PROBE_PR" "$STAMP"
-        probe "gh pr ready"                         bash -c 'gh pr ready -R "$0" "$1" 2>&1 | grep -qi "already\|is ready\|marked" || gh pr ready -R "$0" "$1"' "$PROBE_REPO" "$PROBE_PR"
+        probe "gh pr ready"                         bash -c 'gh pr ready -R "$0" "$1" 2>&1 | grep -i "already\|is ready\|marked" >/dev/null || gh pr ready -R "$0" "$1"' "$PROBE_REPO" "$PROBE_PR"
         probe "gh pr close"                         gh pr close -R "$PROBE_REPO" "$PROBE_PR"
         probe "gh pr reopen"                        gh pr reopen -R "$PROBE_REPO" "$PROBE_PR"
         if [ "$PROBE_MERGE" = "1" ]; then

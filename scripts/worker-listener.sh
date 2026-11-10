@@ -342,7 +342,7 @@ claim_next_task() {
     # v2 queue: oldest non-tmp file in inbox
     local next_inbox
     next_inbox=$(find "$INBOX" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null \
-                  | sort | head -1)
+                  | sort | sed -n 1p)
     if [ -n "$next_inbox" ]; then
         TASK_ID=$(basename "$next_inbox" .md)
         local target
@@ -618,7 +618,7 @@ resolve_check_cmd() {
     [ "$CHECK_ENABLED" = "1" ] || return 0
     # 1. per-task marker in the brief (mirrors ringer's per-task `check` field)
     CHECK_CMD=$(printf '%s\n' "$TASK" \
-                | sed -n 's/.*<!-- SWARM_CHECK: \(.*\) -->.*/\1/p' | head -1)
+                | sed -n 's/.*<!-- SWARM_CHECK: \(.*\) -->.*/\1/p' | sed -n 1p)
     [ -n "$CHECK_CMD" ] && return 0
     # 2. standing per-issue check in the worktree
     if [ -r ".swarm/check.sh" ]; then
@@ -635,14 +635,14 @@ resolve_check_cmd() {
 # single-line-record assumption) so both sides agree on the format with no
 # shared library and no new hard dependency.
 json_str_field() {
-    sed -n "s/.*\"$2\":\"\([^\"]*\)\".*/\1/p" "$1" 2>/dev/null | head -1
+    sed -n "s/.*\"$2\":\"\([^\"]*\)\".*/\1/p" "$1" 2>/dev/null | sed -n 1p
 }
 
 # json_num_field <path> <field> — a bare number field; echoes "" for `null`
 # (or anything else unparseable), matching CHECK_EXIT's own "" = not run
 # convention used throughout this file.
 json_num_field() {
-    sed -n "s/.*\"$2\":\([0-9-][0-9]*\).*/\1/p" "$1" 2>/dev/null | head -1
+    sed -n "s/.*\"$2\":\([0-9-][0-9]*\).*/\1/p" "$1" 2>/dev/null | sed -n 1p
 }
 
 # try_reuse_check_on_done (issue #579) — see the "Executed acceptance
@@ -1110,8 +1110,8 @@ EOF
 clear_pr_pending_brief_marker() {
     local pr="$1" inbox="$2" processing="$3"
     command -v gh >/dev/null 2>&1 || return 0
-    if find "$inbox" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | grep -q . \
-        || find "$processing" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | grep -q .; then
+    if find "$inbox" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | grep . >/dev/null \
+        || find "$processing" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | grep . >/dev/null; then
         return 0
     fi
     # See requeue.sh's notify_pr_pending_brief for why this must anchor to
@@ -1136,8 +1136,8 @@ clear_pr_pending_brief_marker() {
 clear_issue_pending_brief_marker() {
     local issue_num="$1" inbox="$2" processing="$3"
     command -v gh >/dev/null 2>&1 || return 0
-    if find "$inbox" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | grep -q . \
-        || find "$processing" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | grep -q .; then
+    if find "$inbox" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | grep . >/dev/null \
+        || find "$processing" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | grep . >/dev/null; then
         return 0
     fi
     local last
@@ -1275,7 +1275,7 @@ poll_for_brief() {
         sleep 2
         [ -d "$INBOX" ] && [ -d "$PWD" ] || return 0
         local next
-        next=$(find "$INBOX" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | head -1)
+        next=$(find "$INBOX" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | sed -n 1p)
         if [ -n "$next" ]; then
             touch "$IDLE_SENTINEL" 2>/dev/null
             break
@@ -1512,7 +1512,7 @@ EOF
     # matching; with a brief pending, the main loop dispatches as normal.
     if [ "$IDLE_RESPAWNS" -ge 2 ] && [ "$lifetime" -le "$IDLE_QUICK_EXIT_SECS" ]; then
         local pending
-        pending=$(find "$INBOX" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | head -1)
+        pending=$(find "$INBOX" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | sed -n 1p)
         if [ -z "$pending" ]; then
             # Same Ctrl-C-during-the-wait guard as the close-worker branch
             # above — see that one's comment for why, including the

@@ -187,7 +187,7 @@ EXIT=0
 while IFS= read -r win; do
     [ -n "$win" ] || continue
     # First pane's index + dead flag
-    pane_info="$(tmux -L "$SOCKET" list-panes -t "$SESSION:$win" -F '#{pane_dead}|#{pane_index}|#{pane_current_command}' | head -1)"
+    pane_info="$(tmux -L "$SOCKET" list-panes -t "$SESSION:$win" -F '#{pane_dead}|#{pane_index}|#{pane_current_command}' | sed -n 1p)"
     IFS='|' read -r pane_dead pane_idx pane_cmd <<<"$pane_info"
 
     state=""; detail=""
@@ -199,7 +199,7 @@ while IFS= read -r win; do
     else
         container="swarm-${SESSION}-${win}"
         container_alive=0
-        if docker ps --format '{{.Names}}' | grep -qx "$container"; then
+        if docker ps --format '{{.Names}}' | grep -x "$container" >/dev/null; then
             container_alive=1
         fi
 

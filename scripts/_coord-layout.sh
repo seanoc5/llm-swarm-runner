@@ -37,7 +37,7 @@ coord_layout_on() {
     local session="$1" project="$2" swarm_dir="$3" pct="${4:-75}"
     case "$pct" in ''|*[!0-9]*) pct=75 ;; esac
     [ "$pct" -ge 10 ] && [ "$pct" -le 90 ] || pct=75
-    tmux list-windows -t "$session" -F '#W' 2>/dev/null | grep -qx coordinator || return 1
+    tmux list-windows -t "$session" -F '#W' 2>/dev/null | grep -x coordinator >/dev/null || return 1
     coord_pane_is_viewer "$session:coordinator.0" && return 1
     [ -n "$(coord_viewer_panes "$session")" ] && return 0
     # Floor on the session pane (#785 review): the viewer gets pct% of the

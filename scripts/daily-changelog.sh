@@ -134,7 +134,7 @@ done < "$CONF"
 
 if [ "${#ONLY_APPS[@]}" -gt 0 ]; then
     for want in "${ONLY_APPS[@]}"; do
-        printf '%s\n' "${APPS[@]}" | grep -q "^$want|" || die "--app '$want' is not in $CONF"
+        printf '%s\n' "${APPS[@]}" | grep "^$want|" >/dev/null || die "--app '$want' is not in $CONF"
     done
 fi
 

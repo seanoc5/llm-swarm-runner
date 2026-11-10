@@ -157,13 +157,13 @@ salvaged_excerpt() {
     local file=""
     local d
     for d in inbox processing outbox; do
-        file="$(find "$salvage_dir/$d" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | sort | head -1)"
+        file="$(find "$salvage_dir/$d" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | sort | sed -n 1p)"
         [ -n "$file" ] && break
     done
     [ -n "$file" ] && [ -r "$file" ] || return 0
     local total start remaining
     total="$(wc -l < "$file" 2>/dev/null || echo 0)"
-    start="$(grep -n '^## Task$' "$file" 2>/dev/null | head -1 | cut -d: -f1)"
+    start="$(grep -n '^## Task$' "$file" 2>/dev/null | sed -n 1p | cut -d: -f1)"
     start="${start:-1}"
     tail -n "+$start" "$file" 2>/dev/null \
         | head -n "$max_lines" \
@@ -398,7 +398,7 @@ head_already_landed() {
     else
         return 1
     fi
-    merged="$(git -C "$wt" merge-tree --write-tree "$target" HEAD 2>/dev/null | head -1)" || return 1
+    merged="$(git -C "$wt" merge-tree --write-tree "$target" HEAD 2>/dev/null | sed -n 1p)" || return 1
     [ -n "$merged" ] && [ "$merged" = "$(git -C "$wt" rev-parse "$target^{tree}" 2>/dev/null)" ]
 }
 
@@ -570,7 +570,7 @@ notify_pr_work_saved() {
 # grace deferral, which closes the window but keeps the worktree.
 close_worker_windows() {
     if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
-        if tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx "iss-$ISSUE"; then
+        if tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -x "iss-$ISSUE" >/dev/null; then
             tmux kill-window -t "$SESSION_NAME:iss-$ISSUE"
             echo "  ✓ killed tmux window"
         else
@@ -704,13 +704,13 @@ if [ -d "$WT" ]; then
     PRIOR_SAVED=""
     if [ -f "$REAP_MARKER" ]; then
         PRIOR_MARKER=1
-        PRIOR_FINGERPRINT="$(sed -n 's/^fingerprint=//p' "$REAP_MARKER" | head -1)"
-        PRIOR_SAVED="$(sed -n 's/^saved=//p' "$REAP_MARKER" | head -1)"
-        grace_until="$(sed -n 's/^until=//p' "$REAP_MARKER" | head -1)"
-        grace_until_utc="$(sed -n 's/^until_utc=//p' "$REAP_MARKER" | head -1)"
+        PRIOR_FINGERPRINT="$(sed -n 's/^fingerprint=//p' "$REAP_MARKER" | sed -n 1p)"
+        PRIOR_SAVED="$(sed -n 's/^saved=//p' "$REAP_MARKER" | sed -n 1p)"
+        grace_until="$(sed -n 's/^until=//p' "$REAP_MARKER" | sed -n 1p)"
+        grace_until_utc="$(sed -n 's/^until_utc=//p' "$REAP_MARKER" | sed -n 1p)"
         if [ "$HAS_UNSAVED" = "0" ]; then
             echo "  - reap grace marker present, but nothing is unsaved any more — removing now"
-        elif tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx "iss-$ISSUE"; then
+        elif tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -x "iss-$ISSUE" >/dev/null; then
             # The worktree was re-provisioned during its grace (provision-
             # worker.sh reuses an existing worktree): the marker no longer
             # describes it. Judge this call afresh.

@@ -122,7 +122,7 @@ fi
 # single-line regex, so we check the stripped version (managed block
 # removed) for any `tmux-worker-shell` reference — anything that survives
 # is unmanaged.
-if [ "$UNINSTALL" -eq 0 ] && echo "$STRIPPED" | grep -q 'tmux-worker-shell'; then
+if [ "$UNINSTALL" -eq 0 ] && echo "$STRIPPED" | grep 'tmux-worker-shell' >/dev/null; then
     yellow "Note: another C-z worker-shell binding exists in $TMUX_CONF outside the managed block:"
     echo "$STRIPPED" | grep -n 'tmux-worker-shell' | sed 's/^/  /'
     yellow "  tmux's last-binding-wins semantics mean the managed block (appended last) will take effect,"
@@ -191,7 +191,7 @@ green "Reloading config on ${#SOCKETS[@]} tmux socket(s):"
 for sock in "${SOCKETS[@]}"; do
     if command tmux -L "$sock" source-file "$TMUX_CONF" 2>/dev/null; then
         # Verify the binding is actually present after the reload.
-        if command tmux -L "$sock" list-keys -T root 2>/dev/null | grep -q 'C-z.*tmux-worker-shell'; then
+        if command tmux -L "$sock" list-keys -T root 2>/dev/null | grep 'C-z.*tmux-worker-shell' >/dev/null; then
             green "  $sock — reloaded, C-z binding active"
         else
             yellow "  $sock — reloaded, but C-z binding not detected (check for syntax errors)"

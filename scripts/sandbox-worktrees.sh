@@ -80,7 +80,7 @@ fi
 # --- Multi-worktree mode: list (and optionally create tmux windows) ---
 
 # Resolve the main repo root (handles being called from a worktree)
-MAIN_REPO="$(git -C "$PROJECT_DIR" worktree list --porcelain | head -1 | sed 's/^worktree //')"
+MAIN_REPO="$(git -C "$PROJECT_DIR" worktree list --porcelain | sed -n 1p | sed 's/^worktree //')"
 
 # Collect all worktrees (main first, then extras sorted by path)
 mapfile -t WORKTREES < <(git -C "$MAIN_REPO" worktree list --porcelain | grep '^worktree ' | sed 's/^worktree //')
@@ -112,7 +112,7 @@ for wt in "${WORKTREES[@]}"; do
         echo "  Window $WINDOW: $wt_name ($branch)"
 
         # Create tmux window (or reuse if it already exists at that index)
-        if tmux list-windows -F '#{window_index}' | grep -q "^${WINDOW}$"; then
+        if tmux list-windows -F '#{window_index}' | grep "^${WINDOW}$" >/dev/null; then
             echo "    -> window $WINDOW already exists, skipping creation"
         else
             tmux new-window -t "$WINDOW" -n "$short_branch" -c "$wt"

@@ -128,7 +128,7 @@ if [ -z "$VERIFY_TEXT" ]; then
         exit 2
     fi
 
-    if ! tmux -L "$SOCKET" list-windows -t "$SESSION" -F '#{window_name}' | grep -qx "$WINDOW"; then
+    if ! tmux -L "$SOCKET" list-windows -t "$SESSION" -F '#{window_name}' | grep -x "$WINDOW" >/dev/null; then
         echo "ERROR: no window '$WINDOW' in session '$SESSION'" >&2
         exit 2
     fi

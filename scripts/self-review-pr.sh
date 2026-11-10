@@ -254,7 +254,7 @@ fi
 # case patterns below match with arbitrary suffixes.
 VERDICT_LINE="$(printf '%s\n' "$REVIEW" \
     | sed 's/^[[:space:]`*]*//' \
-    | grep -m1 -E '^(APPROVE|APPROVE_WITH_CAVEATS:|BLOCK:)' || true)"
+    | awk '/^(APPROVE|APPROVE_WITH_CAVEATS:|BLOCK:)/ && !d {print; d=1}' || true)"
 case "$VERDICT_LINE" in
     APPROVE*CAVEATS:*) VERDICT="APPROVE_WITH_CAVEATS"; EXIT=3 ;;
     APPROVE*)          VERDICT="APPROVE";              EXIT=0 ;;
@@ -277,7 +277,7 @@ if [ "$POST" = "1" ]; then
     # unreadable head falls back to "any marker blocks the post" (issue #599:
     # otherwise a worker marker would stop the coordinator's first post).
     if [ "$FORCE" = "0" ] && [ -z "$HEAD_SHA" ] && gh pr view "$PR" --json comments \
-            --jq '.comments[].body' 2>/dev/null | grep -q 'SWARM_SELF_REVIEW:'; then
+            --jq '.comments[].body' 2>/dev/null | grep 'SWARM_SELF_REVIEW:' >/dev/null; then
         echo "post: skipped — PR #$PR already has a SWARM_SELF_REVIEW comment (--force to re-post)"
     else
         # actor=<ACTOR> (issue #601): scripts/pr-ready.sh's round cap reads

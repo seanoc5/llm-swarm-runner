@@ -66,7 +66,7 @@ for sock in "$SOCK_DIR"/*; do
     if out=$(command tmux -L "$name" list-sessions -F '#{session_name}:#{session_windows}' 2>/dev/null); then
         sessions=$(echo "$out" | cut -d: -f1 | paste -sd, -)
         windows=$(echo "$out" | cut -d: -f2 | awk '{print $0"w"}' | paste -sd, -)
-        first_session=$(echo "$out" | head -1 | cut -d: -f1)
+        first_session=$(echo "$out" | sed -n 1p | cut -d: -f1)
         attach="tmux -L $name attach -t $first_session"
         printf "%s%-32s %-7s %-28s %-8s %s%s\n" "$C_GRN" "$name" "LIVE" "$sessions" "$windows" "$attach" "$C_RST"
     else

@@ -116,7 +116,7 @@ listener_state() {
     # window's actual pane state rather than assuming the fast path.
     local pane_cmd=""
     if [ -n "$win" ]; then
-        pane_cmd="$(tmux list-panes -t "$session:$win" -F '#{pane_current_command}' 2>/dev/null | head -1)"
+        pane_cmd="$(tmux list-panes -t "$session:$win" -F '#{pane_current_command}' 2>/dev/null | sed -n 1p)"
     fi
     # An empty pane_cmd means the window name didn't resolve (non-standard
     # worktree basename) — assume the fast path, matching the terminal
@@ -172,7 +172,7 @@ brief_excerpt() {
     [ -r "$file" ] || return 0
     local total start remaining
     total="$(wc -l < "$file" 2>/dev/null || echo 0)"
-    start="$(grep -n '^## Task$' "$file" 2>/dev/null | head -1 | cut -d: -f1)"
+    start="$(grep -n '^## Task$' "$file" 2>/dev/null | sed -n 1p | cut -d: -f1)"
     start="${start:-1}"
     tail -n "+$start" "$file" 2>/dev/null \
         | head -n "$max_lines" \

@@ -208,7 +208,7 @@ BODY="$(gh pr view "$PR" --json body --jq .body 2>/dev/null)" \
     || { echo "ERROR: gh pr view $PR failed" >&2; exit 1; }
 
 RISK="$(grep -oE '<!-- BLIND_MERGE_RISK: (low|medium|high) -->' <<<"$BODY" \
-    | head -1 | sed -E 's/.*: (low|medium|high) -->/\1/' || true)"
+    | sed -n 1p | sed -E 's/.*: (low|medium|high) -->/\1/' || true)"
 
 # Matches the literal draft-as-hold banner (prompts/coordinator.md): a
 # blockquote line starting with the banner, anchored to line-start so a

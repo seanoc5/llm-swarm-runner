@@ -190,12 +190,12 @@ log_event() {
 # can vanish between list-windows and here; `|| true` keeps set -e out of it).
 pane_is_dead() {
     local pd
-    pd="$(tmux list-panes -t "$SESSION_NAME:$1" -F '#{pane_dead}' 2>/dev/null | head -1)" || true
+    pd="$(tmux list-panes -t "$SESSION_NAME:$1" -F '#{pane_dead}' 2>/dev/null | sed -n 1p)" || true
     [ "${pd:-1}" = "1" ]
 }
 
 window_listed() {
-    tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx "$1"
+    tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -x "$1" >/dev/null
 }
 
 # salvage_stale_queue <reclaim-tag> <sub> [sub...]
@@ -254,7 +254,7 @@ salvage_stale_queue() {
 container_listed() {
     local all=()
     [ "$1" = "-a" ] && { all=(-a); shift; }
-    docker ps "${all[@]}" --filter "name=^$1\$" --format '{{.Names}}' 2>/dev/null | grep -qx "$1"
+    docker ps "${all[@]}" --filter "name=^$1\$" --format '{{.Names}}' 2>/dev/null | grep -x "$1" >/dev/null
 }
 
 remove_container() {
@@ -676,7 +676,7 @@ fi
 # already written.
 # --wake brings its own brief (already in inbox/), so there is nothing to fetch.
 if [ "$WAKE" = "1" ]; then
-    WAKE_BRIEF="$(find "$WT/.swarm/tasks/inbox" -maxdepth 1 -type f -name "*.md" -not -name ".tmp.*" 2>/dev/null | sort | head -1)"
+    WAKE_BRIEF="$(find "$WT/.swarm/tasks/inbox" -maxdepth 1 -type f -name "*.md" -not -name ".tmp.*" 2>/dev/null | sort | sed -n 1p)"
     if [ -z "$WAKE_BRIEF" ]; then
         echo "ERROR: --wake: no brief in $WT/.swarm/tasks/inbox/ — nothing to wake for." >&2
         exit 2

@@ -247,7 +247,7 @@ is_clean_tree() {
 all_commits_upstream() {
     local out
     out=$(git -C "$1" cherry "origin/$DEFAULT_BRANCH" HEAD 2>/dev/null || true)
-    ! echo "$out" | grep -q '^+'
+    ! echo "$out" | grep '^+' >/dev/null
 }
 
 # Portable mtime (epoch seconds). GNU coreutils first, BSD fallback.
@@ -382,7 +382,7 @@ reap_dangling() {
 
     admin_dir=""
     if [ -f "$wt/.git" ]; then
-        admin_dir="$(sed -n 's/^gitdir: //p' "$wt/.git" 2>/dev/null | head -n1)"
+        admin_dir="$(sed -n 's/^gitdir: //p' "$wt/.git" 2>/dev/null | sed -n 1p)"
     fi
     if [ -z "$admin_dir" ]; then
         admin_dir="$common_dir/worktrees/$(basename "$wt")"
@@ -486,10 +486,10 @@ husk_keep_reason() {
             echo "modified within ${HUSK_QUIET_MINUTES}m"; return 0
         fi
     fi
-    if tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx "iss-$issue"; then
+    if tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -x "iss-$issue" >/dev/null; then
         echo "live tmux window iss-$issue"; return 0
     fi
-    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qxE "swarm-.*-iss-$issue"; then
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -xE "swarm-.*-iss-$issue" >/dev/null; then
         echo "running swarm-*-iss-$issue container"; return 0
     fi
 }
@@ -609,7 +609,7 @@ for WT in "$PROJECT_PARENT"/wt-issue-*/; do
     else
         _admin_dir=""
         if [ -f "$WT/.git" ]; then
-            _admin_dir="$(sed -n 's/^gitdir: //p' "$WT/.git" 2>/dev/null | head -n1)"
+            _admin_dir="$(sed -n 's/^gitdir: //p' "$WT/.git" 2>/dev/null | sed -n 1p)"
         fi
         if [ -n "$_admin_dir" ]; then
             case "$_admin_dir" in
@@ -651,9 +651,9 @@ for WT in "$PROJECT_PARENT"/wt-issue-*/; do
     # (kill-worktree.sh drops it). SWARM_REAP_GRACE_SECS=0 ends every grace.
     REAP_MARKER="$PROJECT_DIR/.swarm/reap-deferred/iss-$ISSUE"
     if [ -f "$REAP_MARKER" ] && worktree_registration_ok "$WT" \
-        && ! tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx "iss-$ISSUE"; then
-        g_until="$(sed -n 's/^until=//p' "$REAP_MARKER" | head -1)"
-        g_until_utc="$(sed -n 's/^until_utc=//p' "$REAP_MARKER" | head -1)"
+        && ! tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -x "iss-$ISSUE" >/dev/null; then
+        g_until="$(sed -n 's/^until=//p' "$REAP_MARKER" | sed -n 1p)"
+        g_until_utc="$(sed -n 's/^until_utc=//p' "$REAP_MARKER" | sed -n 1p)"
         if [ "${SWARM_REAP_GRACE_SECS:-14400}" != "0" ] && [[ "$g_until" =~ ^[0-9]+$ ]] && [ "$NOW" -lt "$g_until" ]; then
             echo "  $NAME  [reap grace for unsaved work until ${g_until_utc:-$g_until} → skip]"
             SKIPPED+=("$NAME(grace)")
