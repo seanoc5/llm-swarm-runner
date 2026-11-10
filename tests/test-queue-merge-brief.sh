@@ -16,7 +16,6 @@ check()   { [ "$2" = "$3" ] && green "$1" || red "$1 (expected [$2] got [$3])"; 
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 QMB="$ROOT/scripts/queue-merge-brief.sh"
-WM="$ROOT/scripts/worker-merge.sh"
 LINT="$ROOT/scripts/lint-coordinator-reply.sh"
 FX="$ROOT/tests/fixtures/reply-lint"
 T="$(mktemp -d -t queue-merge-brief-XXXXXX)"
