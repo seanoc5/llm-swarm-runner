@@ -357,9 +357,23 @@ while true; do
                             # issue #617: a draft PR (e.g. a coordinator hold) may have
                             # lanes skipped by the project's draft guard; green here
                             # does not mean those lanes ever ran.
-                            if grep -qP '\tskipping\t' <<<"$CHECKS_OUT" &&
-                               [ "$(gh pr view "$PR" "${REPO_ARGS[@]}" --json isDraft --jq .isDraft 2>/dev/null)" = "true" ]; then
-                                echo "ci-wait: WARNING: PR #$PR is a draft and some checks were skipping — a skipped check is not a pass. Re-ready the PR (and re-run ci-wait) or use the project's opt-in label for that lane before treating CI as green." >&2
+                            if grep -qP '\tskipping\t' <<<"$CHECKS_OUT"; then
+                                if [ "$(gh pr view "$PR" "${REPO_ARGS[@]}" --json isDraft --jq .isDraft 2>/dev/null)" = "true" ]; then
+                                    echo "ci-wait: WARNING: PR #$PR is a draft and some checks were skipping — a skipped check is not a pass. Re-ready the PR (and re-run ci-wait) or use the project's opt-in label for that lane before treating CI as green." >&2
+                                else
+                                    # issue #825: the PR was a draft when the runs we see
+                                    # were created (draft guard skipped a lane), then marked
+                                    # ready. The ready_for_review run may not be registered
+                                    # yet, so this green is the OLD run's. Newest run older
+                                    # than the latest ready event => keep waiting.
+                                    READY_AT="$(gh api "$API_REPO_PATH/issues/$PR/events" --paginate \
+                                        --jq '[.[] | select(.event == "ready_for_review") | .created_at] | max // empty' 2>/dev/null | sort | tail -1 || true)"
+                                    NEWEST_RUN="$(jq -r '[.[].createdAt // empty] | max // empty' <<<"$CI_FALLBACK_DETAIL" 2>/dev/null || true)"
+                                    if [ -n "$READY_AT" ] && [[ "$NEWEST_RUN" < "$READY_AT" ]]; then
+                                        PASS_NOW=0; PASS_MSG=""
+                                        echo "ci-wait: PR #$PR has skipping checks and was marked ready at $READY_AT, after its newest run (${NEWEST_RUN:-none}) — that run predates the draft→ready transition, so its skipped lanes never ran. Treating as pending until the ready_for_review run registers." >&2
+                                    fi
+                                fi
                             fi
                             ;;
                         pending)
