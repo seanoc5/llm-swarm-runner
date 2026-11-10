@@ -639,7 +639,10 @@ fi
 # the PR is open), base on it. Basing on the default branch would diverge from
 # the open PR and a push would force-replace it.
 BASE_REF="$DEFAULT_REMOTE_REF"
-if git show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
+# Confirm against the live remote: a cached ref can outlive a branch that
+# swarm-merge.sh deleted after a squash merge (fetch runs without --prune).
+if git show-ref --verify --quiet "refs/remotes/origin/$BRANCH" &&
+   [ -n "$(git ls-remote --heads origin "$BRANCH" 2>/dev/null)" ]; then
     BASE_REF="origin/$BRANCH"
 fi
 

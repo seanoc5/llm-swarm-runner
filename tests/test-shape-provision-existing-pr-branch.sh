@@ -55,3 +55,13 @@ git -C c3 branch fix/issue-7 origin/fix/issue-7 && git -C c3 config user.email t
 git -C c3 update-ref refs/heads/fix/issue-7 "$(git -C c3 commit-tree -p "$PR_SHA" -m local "$PR_SHA^{tree}")"
 if provision "$TEST_DIR/c3" 2>/dev/null; then red "local-only commits were silently discarded"; fi
 green "local-only commits still refused"
+
+# Merged PR whose remote branch was deleted: cached origin/fix/issue-7 lingers
+# (fetch without --prune). Must base on master, not the old branch.
+git clone -q origin.git c4
+git --git-dir=origin.git branch -q -D fix/issue-7   # remote branch gone; c4 cached ref stays
+git -C c4 config user.email t@t; git -C c4 config user.name t
+git -C c4 show-ref --verify -q refs/remotes/origin/fix/issue-7 || red "test setup: cached ref missing"
+got="$(provision "$TEST_DIR/c4")"
+[ "$got" = "$(git -C c4 rev-parse origin/master)" ] || red "deleted remote branch: worktree on $got, expected origin/master"
+green "deleted remote branch (stale cached ref) ignored; based on master"
