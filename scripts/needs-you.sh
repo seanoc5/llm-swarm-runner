@@ -96,7 +96,7 @@ case "$cmd" in
         [ -n "$title" ] || die "add needs --title"
         [ -n "$do_" ] || die "add needs --do: the exact command (in backticks or a fenced block) or an https URL plus click path. An item without one is a stub; refusing."
         case "$kind" in decision|todo) ;; *) die "--kind is decision or todo" ;; esac
-        printf '%s' "$do_" | grep -qE '`[^`]+`|```|https://' \
+        grep -qE '`[^`]+`|```|https://' <<<"$do_" \
             || die "--do has no command or https URL. Put the command in backticks, or give the URL and the click path. Refusing: $do_"
         if hits="$("$LINT" <<<"$title $do_ $rec" || true)" && [ -n "$hits" ]; then
             die "item points elsewhere instead of carrying its action (${hits%%:*}); put the full command in --do. Refusing."
