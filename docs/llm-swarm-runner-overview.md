@@ -695,6 +695,8 @@ The `Dockerfile` pins all upstream-version-sensitive tools via `ARG`-driven vers
 
 Apt-managed tools (Java, ripgrep, gh, docker-cli) are intentionally NOT pinned to dpkg version strings — too fragile for a personal sandbox. Major versions are still pinned via package selection (`openjdk-21`, `setup_22.x`).
 
+The image guarantees `gawk` (and `awk` resolves to it, asserted at build time), so gawk-only scripts (`asort`, `gensub`, `FPAT`) behave in workers as on the hosts. Rebuild with `scripts/build-image.sh` to pick it up.
+
 **Upgrade workflow:**
 ```bash
 # Find the current latest of any pinned tool
