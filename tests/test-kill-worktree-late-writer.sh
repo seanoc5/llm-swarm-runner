@@ -40,6 +40,19 @@ exec "$REAL_GIT" "\$@"
 SHIM
 chmod +x "$TEST_DIR/shim/git"
 
+# tmux shim: never touch a real session. Session exists, window iss-795
+# listed, kill-window recorded.
+cat > "$TEST_DIR/shim/tmux" <<SHIM
+#!/usr/bin/env bash
+case "\${1:-}" in
+    has-session) exit 0 ;;
+    list-windows) echo iss-795; exit 0 ;;
+    kill-window) echo "\$*" >> "$TEST_DIR/killed"; exit 0 ;;
+esac
+exit 0
+SHIM
+chmod +x "$TEST_DIR/shim/tmux"
+
 set +e
 (cd "$PROJ" && PATH="$TEST_DIR/shim:$PATH" "$KILL_WT" 795 "$PROJ") > "$TEST_DIR/run.log" 2>&1
 RC=$?
@@ -48,6 +61,8 @@ set -e
 [ -e "$TEST_DIR/shim/fired" ] || red "shim never fired"
 [ ! -d "$WT" ] || red "worktree still present"
 green "worktree removed after late-writer retry"
+[ -s "$TEST_DIR/killed" ] || red "tmux window not closed on success: $(cat "$TEST_DIR/run.log")"
+green "tmux window closed (via shim)"
 ls "$PROJ"/.swarm/reaped/ | grep -q 'swarm-late$' || red "late stub not archived: $(ls "$PROJ/.swarm/reaped")"
 find "$PROJ"/.swarm/reaped/*swarm-late -name 'pr-issue-795.check.json' | grep -q . || red "stub file missing from archive"
 green "late stub archived, not destroyed"
