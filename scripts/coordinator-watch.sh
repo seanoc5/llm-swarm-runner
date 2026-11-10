@@ -3039,9 +3039,10 @@ case "$WATCHER_AUTOCLOSE_MODE" in
         exit 1
         ;;
 esac
-if ! [[ "$WATCH_TIMER_TICK_SECS" =~ ^[0-9]+(\.[0-9]+)?$ ]] || [ "$WATCH_TIMER_TICK_SECS" = "0" ]; then
-    echo "ERROR: WATCH_TIMER_TICK_SECS must be a positive number (got: $WATCH_TIMER_TICK_SECS)" >&2
-    exit 1
+# A zero tick (0, 0.0, 0.00) would spin the timer loop with no pause: fall back to the default.
+if ! [[ "$WATCH_TIMER_TICK_SECS" =~ ^[0-9]+(\.[0-9]+)?$ ]] || ! awk -v v="$WATCH_TIMER_TICK_SECS" 'BEGIN { exit !(v + 0 > 0) }'; then
+    echo "WARN: WATCH_TIMER_TICK_SECS must be a positive number (got: $WATCH_TIMER_TICK_SECS); using default 2" >&2
+    WATCH_TIMER_TICK_SECS=2
 fi
 if ! [[ "$WATCH_PR_POLL_SECS" =~ ^[0-9]+$ ]]; then
     echo "ERROR: WATCH_PR_POLL_SECS must be a non-negative integer (got: $WATCH_PR_POLL_SECS)" >&2

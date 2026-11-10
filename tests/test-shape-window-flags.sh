@@ -885,7 +885,7 @@ grep -q 'origin/master' "$WT90"/.swarm/tasks/inbox/*.md || { stop_watcher; red "
 # Worker finishes the brief but the PR still conflicts on the same head:
 # no second brief for that head.
 mv "$WT90"/.swarm/tasks/inbox/*.md "$WT90/.swarm/tasks/done/"
-wait_for_more_polls 1
+wait_for_more_polls 2
 stop_watcher
 n90=$(find "$WT90/.swarm/tasks/inbox" -name '*.md' | wc -l)
 [ "$n90" = 0 ] || red "same head should not be briefed twice; inbox has $n90"
@@ -922,7 +922,7 @@ wait_for_brief
 n90=$(briefs_for_pr90)
 [ "$n90" = 1 ] || { stop_watcher; red "banner-less conflicting draft: expected 1 brief, got $n90"; }
 mv "$WT90"/.swarm/tasks/inbox/*.md "$WT90/.swarm/tasks/done/"
-wait_for_more_polls 1
+wait_for_more_polls 2
 stop_watcher
 n90=$(find "$WT90/.swarm/tasks/inbox" -name '*.md' | wc -l)
 [ "$n90" = 0 ] || red "draft: same head should not be briefed twice; inbox has $n90"
