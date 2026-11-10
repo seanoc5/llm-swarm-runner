@@ -32,11 +32,13 @@ case "\${1:-} \${2:-}" in
   "pr view")
     if [ -e "\$S/merged" ]; then st=MERGED; else st=OPEN; fi
     head=aaa1111
-    case "\$*" in *"--jq .headRefOid"*) echo aaa1111; exit 0 ;; esac
+    if [ -e "\$S/merged-other-head" ]; then st=MERGED; head=bbb2222; fi
+    case "\$*" in *"--jq .headRefOid"*) [ -e "\$S/fail-jq-read" ] && exit 1; echo aaa1111; exit 0 ;; esac
     # the re-read under the action lock asks for exactly "state,headRefOid"
     if [ "\$*" = "pr view 600 --json state,headRefOid" ]; then
       [ -e "\$S/fail-reread" ] && exit 1
       if [ -e "\$S/move-head" ]; then head=bbb2222; fi
+      if [ -e "\$S/empty-head-reread" ]; then head=""; fi
     fi
     body=""; [ -e "\$S/body-low" ] && body="<!-- BLIND_MERGE_RISK: low -->"
     printf '{"state":"%s","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefName":"fix/issue-600","title":"t","closingIssuesReferences":[],"body":"%s","isDraft":false,"reviewDecision":"","baseRefName":"master","headRefOid":"%s"}\n' "\$st" "\$body" "\$head"
@@ -44,6 +46,7 @@ case "\${1:-} \${2:-}" in
   "pr merge")
     sleep 1
     echo "\$\$" >> "\$S/merge-calls"
+    echo "\$*" >> "\$S/merge-args"
     touch "\$S/merged"; exit 0 ;;
   "pr list") echo "[]"; exit 0 ;;
   "issue view")
@@ -135,6 +138,25 @@ rc=0; ( cd "$REPO" && timeout 30 "$MERGE" 600 --no-kill --expect-head= >"$TEST_D
 [ "$rc" = 2 ] || red "--expect-head= must exit 2, got $rc"
 [ "$(merges)" = 0 ] || red "merged with an empty --expect-head"
 green "J6: empty --expect-head is a usage error, not a silent no-op"
+reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/merged-other-head"
+rc=0; ( cd "$REPO" && timeout 30 "$MERGE" 600 --no-kill --expect-head aaa1111 >"$TEST_DIR/j7.log" 2>&1 ) || rc=$?
+[ "$rc" = 0 ] || red "already-merged PR at another head should exit 0 (nothing to refuse), got $rc: $(cat "$TEST_DIR/j7.log")"
+grep -q "already MERGED, at head bbb2222 rather than the approved aaa1111" "$TEST_DIR/j7.log" || red "no already-merged message: $(cat "$TEST_DIR/j7.log")"
+! grep -q "Nothing merged" "$TEST_DIR/j7.log" || red "claimed Nothing merged for an already-merged PR"
+[ "$(merges)" = 0 ] || red "called gh pr merge on an already-merged PR"
+green "J7: already-merged PR at another head -> one warning, exit 0, no merge call"
+reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/empty-head-reread"
+rc=0; ( cd "$REPO" && timeout 30 "$MERGE" 600 --no-kill --expect-head aaa1111 >"$TEST_DIR/j8.log" 2>&1 ) || rc=$?
+[ "$rc" = 1 ] && [ "$(merges)" = 0 ] || red "empty re-read (rc 0) under the lock must fail closed (rc $rc): $(cat "$TEST_DIR/j8.log")"
+grep -q "unreadable at merge time" "$TEST_DIR/j8.log" || red "no unreadable message: $(cat "$TEST_DIR/j8.log")"
+green "J8: empty head re-read fails closed"
+# The early fallback read (--jq .headRefOid) must FAIL here, else MATCH_SHA is
+# already set before the lock and the under-lock pin never runs.
+reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/fail-jq-read"
+( cd "$REPO" && timeout 30 "$MERGE" 600 --no-kill --expect-head aaa1111 >"$TEST_DIR/j9.log" 2>&1 ) || red "merge failed: $(cat "$TEST_DIR/j9.log")"
+grep -q "could not read PR #600's head commit" "$TEST_DIR/j9.log" || red "J9 did not exercise the failed fallback read: $(cat "$TEST_DIR/j9.log")"
+grep -q -- "--match-head-commit aaa1111" "$TEST_DIR/state/merge-args" || red "merge not pinned to the re-read head: $(cat "$TEST_DIR/state/merge-args")"
+green "J9: fallback read failed -> merge call pinned to the head re-read under the lock"
 
 # --auto-low path: fake ci-wait.sh that, like the real one, follows a head that
 # arrives during the wait and reports the NEWEST commit as verified-head.

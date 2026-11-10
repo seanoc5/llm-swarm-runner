@@ -634,7 +634,15 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
   # Cheap early refusal; the authoritative re-check happens under the action lock.
   if [ -n "$EXPECT_HEAD" ]; then
     PR_HEAD_LC="$(printf '%s' "$PR_HEAD_SHA" | tr A-F a-f)"
-    if [ -z "$PR_HEAD_LC" ] || [ "${PR_HEAD_LC#"$EXPECT_HEAD"}" = "$PR_HEAD_LC" ]; then
+    if [ "$PR_STATE" = "MERGED" ]; then
+      # Already merged (issue #786): there is nothing left to bind a merge to, so
+      # this is not a refusal. Same wording and exit as the under-lock path
+      # (merged by another actor: warn, continue to cleanup, exit 0).
+      if [ -z "$PR_HEAD_LC" ] || [ "${PR_HEAD_LC#"$EXPECT_HEAD"}" = "$PR_HEAD_LC" ]; then
+        echo "       $(c_amber "⚠ PR #$PR_NUM is already MERGED, at head ${PR_HEAD_SHA:-unknown} rather than the approved $EXPECT_HEAD (--expect-head) — this run merges nothing; continuing to cleanup")"
+        log_event merge.gate "pr=$PR_NUM gate=expect-head result=already-merged-other-head expected=$EXPECT_HEAD now=${PR_HEAD_SHA:-unknown} action=skip-merge"
+      fi
+    elif [ -z "$PR_HEAD_LC" ] || [ "${PR_HEAD_LC#"$EXPECT_HEAD"}" = "$PR_HEAD_LC" ]; then
       echo "ERROR: PR #$PR_NUM's head is ${PR_HEAD_SHA:-unknown}, not the approved $EXPECT_HEAD (--expect-head) — a push landed after approval. Nothing merged; re-read the PR and re-approve." >&2
       log_event merge.gate "pr=$PR_NUM gate=expect-head result=head-moved expected=$EXPECT_HEAD now=${PR_HEAD_SHA:-unknown} action=refuse"
       exit 1
@@ -1094,6 +1102,12 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
       if [ "$LOCK_RC" = 0 ] && [ "$LOCK_STATE" = "MERGED" ]; then
         MERGED_BY_OTHER=1
         echo "       $(c_amber "⚠ PR #$PR_NUM was merged by another actor while this merge waited for the action lock — skipping the merge call")"
+        if [ -n "$EXPECT_HEAD" ]; then
+          LOCK_HEAD_LC="$(printf '%s' "$LOCK_HEAD" | tr A-F a-f)"
+          if [ -z "$LOCK_HEAD_LC" ] || [ "${LOCK_HEAD_LC#"$EXPECT_HEAD"}" = "$LOCK_HEAD_LC" ]; then
+            echo "       $(c_amber "⚠ it merged at head ${LOCK_HEAD:-unknown}, not the approved $EXPECT_HEAD (--expect-head); this run merges nothing")"
+          fi
+        fi
         log_event merge.gate "pr=$PR_NUM gate=action-lock result=already-merged action=skip-merge"
       elif [ "$LOCK_RC" = 0 ] && [ -n "$LOCK_STATE" ] && [ "$LOCK_STATE" != "OPEN" ]; then
         echo "ERROR: PR #$PR_NUM is $LOCK_STATE at merge time (re-read under the action lock) — nothing merged." >&2
