@@ -329,7 +329,7 @@ warn_stranded_worktree_briefs() {
         # here arrived later — still stranded, but say when it gets reaped.
         local grace_note="" grace_marker="$project_dir/.swarm/reap-deferred/iss-$issue"
         if [ -f "$grace_marker" ]; then
-            grace_note=" (in reap grace until $(sed -n 's/^until_utc=//p' "$grace_marker" | head -1) — salvaged then, see $grace_marker)"
+            grace_note=" (in reap grace until $(sed -n 's/^until_utc=//p' "$grace_marker" | sed -n 1p) — salvaged then, see $grace_marker)"
         fi
         if [ "${inbox_n:-0}" -gt 0 ] || [ "${proc_n:-0}" -gt 0 ]; then
             echo "WARN: stranded worktree wt-issue-$issue — no live iss-$issue window; undelivered brief(s) queued (inbox=$inbox_n processing=$proc_n)$grace_note — re-provision or archive, see prompts/coordinator.md \"Stranded worktree briefs\"" >&2
@@ -795,9 +795,9 @@ fi
 # tmux server, and has-session/list-windows above are the only tmux calls on
 # a brand-new socket that tolerate a not-yet-running server.
 TMUX_VERSION_RAW="$(tmux -V 2>/dev/null || true)"
-TMUX_VERSION_NUM="$(printf '%s' "$TMUX_VERSION_RAW" | grep -oE '[0-9]+\.[0-9]+' | head -1)"
+TMUX_VERSION_NUM="$(printf '%s' "$TMUX_VERSION_RAW" | grep -oE '[0-9]+\.[0-9]+' | sed -n 1p)"
 if [ -n "$TMUX_VERSION_NUM" ] && \
-   [ "$(printf '%s\n%s\n' "$TMUX_VERSION_NUM" "3.2" | sort -V | head -1)" = "3.2" ]; then
+   [ "$(printf '%s\n%s\n' "$TMUX_VERSION_NUM" "3.2" | sort -V | sed -n 1p)" = "3.2" ]; then
     REMAIN_ON_EXIT_VALUE="failed"
 else
     echo "WARN: tmux '${TMUX_VERSION_RAW:-unknown}' predates 3.2 — 'remain-on-exit failed' unsupported. Falling back to 'on' (panes stay [dead] even after a clean exit)." >&2
@@ -820,7 +820,7 @@ PANE_CMD=""
 PANE_DEAD=0
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
     session_existed=true
-    if tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx 'coordinator'; then
+    if tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -x 'coordinator' >/dev/null; then
         # COORD_VIEWER (#785): pane 0 is the session, never the viewer. If the
         # session pane was closed by hand the viewer renumbers to 0; close it
         # so the window is recreated and nothing is typed into the viewer.
@@ -828,13 +828,13 @@ if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
             coord_layout_off "$SESSION_NAME"
         fi
     fi
-    if tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx 'coordinator'; then
+    if tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -x 'coordinator' >/dev/null; then
         # eval-safe: format string is fixed, values are constrained by tmux
         # (pane_current_command is an executable name; pane_dead is 0 or 1).
         # Explicit pane .0, not "first listed" (#785).
         eval "$(tmux display-message -p -t "$SESSION_NAME:coordinator.0" \
                  -F 'PANE_CMD=#{pane_current_command} PANE_DEAD=#{pane_dead}' \
-                 2>/dev/null | head -1)"
+                 2>/dev/null | sed -n 1p)"
         if [ "${PANE_DEAD:-0}" = "1" ]; then
             # remain-on-exit=failed left a dead pane after a non-zero exit.
             # Kill it; the window auto-closes when its last pane is gone,
@@ -1082,7 +1082,7 @@ fi
 # coordinator-watch.sh is added as a second pane in this window instead
 # of taking its own window slot, which saves a window and puts the
 # watcher next to a live shell you can use to react to its output.
-if ! tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx 'util'; then
+if ! tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -x 'util' >/dev/null; then
     # -a -t coordinator inserts after the coordinator window. tmux shifts
     # any existing windows at that index up to make room, so util ends up
     # at slot 2 (right after coordinator at slot 1).
@@ -1326,7 +1326,7 @@ fi
 # status bar polls gh on its own cadence (default 60s) regardless of
 # whether worker outcomes are landing.
 if [ "${STATUS:-0}" = "1" ]; then
-    if tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -qx 'status'; then
+    if tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -x 'status' >/dev/null; then
         echo "tmux window '$SESSION_NAME:status' already exists — skipping status spawn"
     else
         STATUS_SCRIPT="$LLM_SWARM_DIR/scripts/gh-status-bar.sh"

@@ -52,10 +52,10 @@ scan() {
 }
 
 # 1. Static scan of the real scripts.
-hits="$(scan "$SCRIPTS"/*.sh)"
+hits="$(scan "$SCRIPTS"/*.sh "$SCRIPTS"/../llm-start.sh "$SCRIPTS"/../sandbox.sh "$SCRIPTS"/../entrypoint.sh)"
 [ -z "$hits" ] || red "early-exit reader in a pipe (SIGPIPE race under pipefail):
 $hits"
-green "no early-exit pipes (awk exit, any head, grep -q/-m) in scripts/"
+green "no early-exit pipes (awk exit, any head, grep -q/-m) in scripts/*.sh + llm-start.sh, sandbox.sh, entrypoint.sh"
 
 # 2. The scan sees every old form, including a pipe split across lines.
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
