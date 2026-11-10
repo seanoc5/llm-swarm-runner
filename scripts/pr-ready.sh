@@ -353,6 +353,8 @@ refuse() {
                           next="coordinator (watcher, automatic) — re-runs pr-ready.sh $PR — waiting on CI to finish on ${sha:0:7}" ;;
             ci-unknown)   text="CI status couldn't be read at $ts."
                           next="coordinator (watcher, automatic) — re-runs pr-ready.sh $PR — waiting on CI status becoming readable" ;;
+            ci-cancelled) text="CI run was cancelled or timed out on ${sha:0:7} at $ts (no check ever ran to a result)."
+                          next="coordinator — 'gh run rerun <run-id>', then re-run pr-ready.sh $PR — waiting on the re-run finishing" ;;
             ci-failing)   text="CI failed on ${sha:0:7} at $ts."
                           next="$who — push a CI fix, re-run pr-ready.sh $PR — waiting on nothing" ;;
         esac
@@ -551,6 +553,19 @@ CHECKS_RC=$?
 set -e
 case "$CHECKS_RC" in
     0)
+        # issue #793: gh pr checks exits 0 for a CANCELLED-only run while still
+        # printing a `fail` row. Never read exit 0 as green over such a row.
+        if ci_checks_output_has_bad_row "$CHECKS_OUT"; then
+            if ci_rollup_cancelled_only "$PR"; then
+                echo "pr-ready: REFUSED — PR #$PR's CI run was cancelled or timed out, not failed (gh pr checks exited 0 but shows a fail row):" >&2
+                echo "$CHECKS_OUT" >&2
+                echo "          Re-run it with 'gh run rerun <run-id>' (find the id via 'gh run list --branch <branch>'), then re-run pr-ready.sh." >&2
+                refuse ci-cancelled 4
+            fi
+            echo "pr-ready: REFUSED — PR #$PR has failing CI checks (gh pr checks exited 0 but shows a fail row):" >&2
+            echo "$CHECKS_OUT" >&2
+            refuse ci-failing 4
+        fi
         echo "pr-ready: CI checks green on PR #$PR."
         ;;
     8)
