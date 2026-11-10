@@ -241,6 +241,15 @@ out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_RC=1 \
     "$CI_WAIT" 42 5 2>&1)" || rc=$?
 check "exits 1 on failing checks" '[ "$rc" -eq 1 ]'
 
+heading "Test 3b: gh pr checks exits 0 but prints a fail row (cancelled-only run) → exit 1 (issue #793)"
+rc=0
+out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_RC=0 \
+    GH_CHECKS_OUT='build\tfail\t24h0m0s\thttps://example/runs/1' \
+    GH_RUNLIST_JSON='[{"status":"completed","conclusion":"success"}]' \
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
+check "exits 1, never green, on an exit-0 fail row" '[ "$rc" -eq 1 ]'
+check "message names the re-run remedy" 'grep -q "gh run rerun" <<<"$out"'
+
 # ─────────────────────────── Test 4: mergeable + checks pending ⇒ timeout ───
 
 heading "Test 4: mergeable PR, checks pending past deadline → exit 2 (timeout)"

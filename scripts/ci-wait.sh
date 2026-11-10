@@ -336,6 +336,13 @@ while true; do
     else
         case "$CHECKS_RC" in
             0)
+                # issue #793: exit 0 is also what gh returns for a CANCELLED-only
+                # run, with a `fail` row in the output. Fail closed on any such row.
+                if ci_checks_output_has_bad_row "$CHECKS_OUT"; then
+                    echo "ci-wait: PR #$PR: gh pr checks exited 0 but shows a fail/cancel row — not green (a cancelled or timed-out run: re-run it with 'gh run rerun <run-id>'):" >&2
+                    echo "$CHECKS_OUT" >&2
+                    exit 1
+                fi
                 # issue #596: don't trust "every check gh pr checks currently
                 # knows about is green" as "this commit's CI is really done" —
                 # cross-check against the run-level signal (ci_fallback_run_state,

@@ -412,3 +412,29 @@ ci_fallback_run_state() {
     }
     return 0
 }
+
+# issue #793: `gh pr checks` exits 0 when the only check concluded CANCELLED
+# (GitHub cancels a run after 24h queued, e.g. an offline self-hosted runner)
+# yet still prints a `fail` row. Exit 0 is therefore a candidate, not a
+# verdict. Non-TTY rows are tab-separated: name<TAB>state<TAB>elapsed<TAB>url.
+#
+#   ci_checks_output_has_bad_row <gh-pr-checks-output>
+#       True (exit 0) if any row's state column is fail or cancel.
+ci_checks_output_has_bad_row() {
+    grep -Eq $'\t(fail|cancel)\t' <<<"$1"
+}
+
+#   ci_rollup_cancelled_only <pr> [gh-repo-args...]
+#       True (exit 0) only when the PR's statusCheckRollup holds at least one
+#       CANCELLED/TIMED_OUT/STARTUP_FAILURE entry and no genuine failure
+#       (FAILURE/ERROR/ACTION_REQUIRED/STALE). A re-run fixes that case, a fix
+#       push does not. Unreadable rollup -> false (callers treat as failing).
+ci_rollup_cancelled_only() {
+    local pr="$1"; shift
+    local json
+    json="$(gh pr view "$pr" "$@" --json statusCheckRollup 2>/dev/null)" || return 1
+    jq -e '[.statusCheckRollup[]? | (.conclusion // .state // "")] as $c
+        | ($c | any(test("^(CANCELLED|TIMED_OUT|STARTUP_FAILURE)$")))
+          and ($c | any(test("^(FAILURE|ERROR|ACTION_REQUIRED|STALE)$")) | not)' \
+        <<<"$json" >/dev/null 2>&1
+}

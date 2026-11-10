@@ -106,6 +106,8 @@ if [ "\$1" = "pr" ] && [ "\$2" = "view" ]; then
             exit 1
         fi
         echo "\${GH_SHA:-deadbeef}"
+    elif printf '%s\n' "\$*" | grep -q -- '--json statusCheckRollup'; then
+        echo "\${GH_ROLLUP_JSON:-{\"statusCheckRollup\":[]\}}"
     elif printf '%s\n' "\$*" | grep -q -- '--json isDraft'; then
         echo "\${GH_IS_DRAFT:-true}"
     else
@@ -120,6 +122,7 @@ if [ "\$1" = "pr" ] && [ "\$2" = "checks" ]; then
     touch "$TEST_DIR/hold-late"
     [ -z "\${GH_HOLD_LATE_BODY:-}" ] || printf '%s\n' "\$GH_HOLD_LATE_BODY" > "$BODY_FILE"
     [ -n "\${GH_CHECKS_STDERR:-}" ] && echo "\$GH_CHECKS_STDERR" >&2
+    [ -n "\${GH_CHECKS_STDOUT:-}" ] && printf '%b\n' "\$GH_CHECKS_STDOUT"
     exit "\${GH_CHECKS_RC:-0}"
 fi
 if [ "\$1" = "pr" ] && [ "\$2" = "ready" ]; then
@@ -231,7 +234,7 @@ run_pr_ready() {
         GH_COMMENTS_JSON="${GH_COMMENTS_JSON:-}" \
         GH_HOLD_COMMENTS_JSON="${GH_HOLD_COMMENTS_JSON:-}" GH_HOLD_LATE_COMMENTS_JSON="${GH_HOLD_LATE_COMMENTS_JSON:-}" \
         GH_HOLD_LATE_BODY="${GH_HOLD_LATE_BODY:-}" GH_IS_DRAFT="${GH_IS_DRAFT:-true}" \
-        GH_CHECKS_RC="${GH_CHECKS_RC:-0}" GH_CHECKS_STDERR="${GH_CHECKS_STDERR:-}" \
+        GH_CHECKS_RC="${GH_CHECKS_RC:-0}" GH_CHECKS_STDERR="${GH_CHECKS_STDERR:-}" GH_CHECKS_STDOUT="${GH_CHECKS_STDOUT:-}" GH_ROLLUP_JSON="${GH_ROLLUP_JSON:-}" \
         GH_WORKFLOW_COUNT="${GH_WORKFLOW_COUNT:-0}" \
         GH_PR_FILES_JSON="${GH_PR_FILES_JSON:-[]}" GH_WORKFLOW_PATHS_JSON="${GH_WORKFLOW_PATHS_JSON:-[]}" \
         GH_WORKFLOW_YAML="${GH_WORKFLOW_YAML:-}" \
@@ -392,6 +395,32 @@ GH_CHECKS_STDERR=""
 gh_ready_called && red "expected gh pr ready NOT to run with failing CI checks"
 grep -qi 'REFUSED' "$TEST_DIR/out.log" || red "expected a REFUSED message in output: $(cat "$TEST_DIR/out.log")"
 green "failing CI checks refuse to ready the PR (the fand-etl PR #1063 bug this issue closes)"
+
+# ============================================================================
+heading "Test 13b: gh pr checks exits 0 but prints a fail row (cancelled-only run) — refuses as ci-cancelled (issue #793)"
+# ============================================================================
+printf '<!-- BLIND_MERGE_RISK: low -->\nsome change\n' > "$BODY_FILE"
+make_fake_review 0
+GH_CHECKS_RC=0
+GH_CHECKS_STDOUT='build\tfail\t24h0m0s\thttps://example/runs/1'
+GH_ROLLUP_JSON='{"statusCheckRollup":[{"conclusion":"CANCELLED","status":"COMPLETED"}]}'
+rc=0; run_pr_ready || rc=$?
+[ "$rc" -eq 4 ] || red "expected exit 4 for exit-0 + cancelled row, got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called && red "expected gh pr ready NOT to run for a cancelled-only run"
+grep -q 'gh run rerun' "$TEST_DIR/out.log" || red "expected the re-run hint: $(cat "$TEST_DIR/out.log")"
+grep -q 'SWARM_DRAFT_REASON: ci-cancelled' "$EDITED_BODY" || red "expected a ci-cancelled banner: $(cat "$EDITED_BODY" 2>/dev/null)"
+green "exit-0 + fail row with a CANCELLED-only rollup refuses as ci-cancelled"
+
+printf '<!-- BLIND_MERGE_RISK: low -->\nsome change\n' > "$BODY_FILE"
+GH_ROLLUP_JSON='{"statusCheckRollup":[{"conclusion":"FAILURE","status":"COMPLETED"},{"conclusion":"CANCELLED","status":"COMPLETED"}]}'
+rc=0; run_pr_ready || rc=$?
+[ "$rc" -eq 4 ] || red "expected exit 4 for exit-0 + real failure row, got $rc"
+gh_ready_called && red "expected gh pr ready NOT to run"
+grep -q 'SWARM_DRAFT_REASON: ci-failing' "$EDITED_BODY" || red "expected ci-failing banner for a real failure: $(cat "$EDITED_BODY")"
+green "exit-0 + fail row with a genuine FAILURE refuses as ci-failing"
+
+GH_CHECKS_STDOUT=""
+GH_ROLLUP_JSON=""
 
 # ============================================================================
 heading "Test 14: no CI checks configured at all (0 workflows) — WARNs, still readies"
