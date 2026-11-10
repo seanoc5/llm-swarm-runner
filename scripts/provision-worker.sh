@@ -386,7 +386,9 @@ host_admission_check() {
         # nothing else retries a host_load refusal. A pass clears it.
         if awk -v l="${load1:-0}" -v m="$max_load" 'BEGIN{exit !(l+0 > m+0)}'; then
             mkdir -p "$PROJECT_DIR/.swarm" 2>/dev/null || true
-            printf '%s %s %s\n' "$(date +%s)" "$max_load" "$ISSUE" > "$PROJECT_DIR/.swarm/host-load-refused" 2>/dev/null || true
+            # tmp+mv: the watcher must never read a half-written marker.
+            printf '%s %s %s\n' "$(date +%s)" "$max_load" "$ISSUE" > "$PROJECT_DIR/.swarm/.host-load-refused.$$" 2>/dev/null \
+                && mv -f "$PROJECT_DIR/.swarm/.host-load-refused.$$" "$PROJECT_DIR/.swarm/host-load-refused" 2>/dev/null || true
         else
             rm -f -- "$PROJECT_DIR/.swarm/host-load-refused" 2>/dev/null || true
         fi

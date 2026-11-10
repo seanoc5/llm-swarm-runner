@@ -183,6 +183,20 @@ check "parked swarm: marker dropped, no note" "0:no" "$(notes host_load_cleared)
 rm -f "$SWARM_PARKED_FILE"
 reset
 echo "$(date +%s) 48 2244" > "$HOST_LOAD_REFUSED_FILE"
+echo "$(( $(date +%s) + 600 )) x" > "$DISPATCH_PAUSE_FILE"
+host_load_wake_pass
+check "dispatch paused: marker dropped, no note" "0:no" "$(notes host_load_cleared):$([ -e "$HOST_LOAD_REFUSED_FILE" ] && echo yes || echo no)"
+rm -f "$DISPATCH_PAUSE_FILE"
+reset
+: > "$HOST_LOAD_REFUSED_FILE"   # mid-write empty read must not lose the retry
+host_load_wake_pass
+check "empty marker (mid-write): kept for the next tick" "0:yes" "$(notes host_load_cleared):$([ -e "$HOST_LOAD_REFUSED_FILE" ] && echo yes || echo no)"
+reset
+echo "$(date +%s) 48 2244" > "$HOST_LOAD_REFUSED_FILE"
+DRY_RUN=1 host_load_wake_pass
+check "dry run: marker not consumed" "yes" "$([ -e "$HOST_LOAD_REFUSED_FILE" ] && echo yes || echo no)"
+reset
+echo "$(date +%s) 48 2244" > "$HOST_LOAD_REFUSED_FILE"
 WINDOWS="coordinator
 iss-1
 iss-2

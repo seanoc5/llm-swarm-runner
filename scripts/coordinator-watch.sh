@@ -11533,10 +11533,11 @@ host_load_wake_pass() {
     [ -e "$HOST_LOAD_REFUSED_FILE" ] || return 0
     local _ts max_load issue l1 l5 slots
     read -r _ts max_load issue < "$HOST_LOAD_REFUSED_FILE" 2>/dev/null || return 0
+    [ -n "$max_load" ] || return 0   # empty read: leave the marker for the next tick
     [[ "$max_load" =~ ^[0-9]+([.][0-9]+)?$ ]] || { rm -f "$HOST_LOAD_REFUSED_FILE" 2>/dev/null; return 0; }
     read -r l1 l5 _ < "${HOST_LOADAVG_FILE:-/proc/loadavg}" 2>/dev/null || return 0
     awk -v a="${l1:-0}" -v b="${l5:-0}" -v m="$max_load" 'BEGIN{exit !(a+0 <= m+0 && b+0 <= m+0)}' || return 0
-    rm -f "$HOST_LOAD_REFUSED_FILE" 2>/dev/null || true
+    [ "$DRY_RUN" = "1" ] || rm -f "$HOST_LOAD_REFUSED_FILE" 2>/dev/null || true
     if [ -e "$SWARM_PARKED_FILE" ] || dispatch_pause_active; then
         log_event capacity.load_cleared "load1=$l1 load5=$l5 max=$max_load reason=parked_or_paused"
         return 0
