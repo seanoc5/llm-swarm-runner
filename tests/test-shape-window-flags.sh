@@ -264,6 +264,19 @@ exit 0
 EOF
 chmod +x "$FAKE_LLM_START"
 
+# Tick marker (#823). ready_sweep_pass runs after pr_poll_pass and the window
+# sweeps within the same timer tick, so each call here proves everything
+# earlier in that tick has finished. wait_for_polls counts these calls, which
+# lets "flag stays clear" assertions wait on a condition, not a fixed sleep.
+GH_POLL_LOG="$TEST_DIR/tick.log"
+FAKE_READY_SWEEP="$TEST_DIR/fake-ready-sweep.sh"
+cat > "$FAKE_READY_SWEEP" <<EOF2
+#!/usr/bin/env bash
+echo x >> "$GH_POLL_LOG"
+exit 0
+EOF2
+chmod +x "$FAKE_READY_SWEEP"
+
 # gh stub: pr list reads a 5-column TSV fixture (branch/state/number/
 # createdAt/isDraft, matching pr_poll_pass's --jq projection exactly), or —
 # for pr_open_details_load's open-PR lookup — a number/risk/ci fixture
@@ -272,7 +285,6 @@ chmod +x "$FAKE_LLM_START"
 GH_PR_LIST_FILE="$TEST_DIR/gh-pr-list.tsv"
 GH_PR_RISK_FILE="$TEST_DIR/gh-pr-risk.tsv"
 GH_PR_COMMENTS_FILE="$TEST_DIR/gh-pr-comments.json"
-GH_POLL_LOG="$TEST_DIR/gh-poll.log"
 echo '{"comments":[]}' > "$GH_PR_COMMENTS_FILE"
 : > "$GH_PR_LIST_FILE"
 : > "$GH_PR_RISK_FILE"
@@ -282,7 +294,7 @@ cat > "$FAKE_GH" <<EOF
 if [ "\$1" = "pr" ] && [ "\$2" = "list" ]; then
     case " \$* " in
         *" number,body,statusCheckRollup"*) cat "$GH_PR_RISK_FILE" ;;
-        *)                 echo x >> "$GH_POLL_LOG"; cat "$GH_PR_LIST_FILE" ;;
+        *)                 cat "$GH_PR_LIST_FILE" ;;
     esac
     exit 0
 fi
@@ -305,6 +317,7 @@ start_watcher() {
         WORKSPACE="$TEST_DIR" \
         WATCH_PR_POLL_SECS="${WATCH_PR_POLL_SECS:-0}" \
         WATCH_ORPHAN_SWEEP_SECS=0 \
+        READY_SWEEP="$FAKE_READY_SWEEP" WATCH_READY_SWEEP_SECS=1 \
         WATCH_TIMER_TICK_SECS="${WATCH_TIMER_TICK_SECS:-0.2}" \
         WATCH_CHECK_ON_DONE=0 \
         WATCH_WINDOW_FLAGS="${WATCH_WINDOW_FLAGS:-1}" \
@@ -348,11 +361,9 @@ wait_for_flag() {
 }
 
 # wait_for_polls <n> [max_secs=30]
-# Poll until pr_poll_pass has started its <n>th gh call since start_watcher.
-# Passes run sequentially in the timer loop, so the <n>th call proves pass n-1
-# (and, within a tick, the window-flag sweeps that run before pr_poll_pass) has
-# finished. That lets a "flag stays clear" assertion wait on a condition
-# instead of a fixed sleep (#823).
+# Poll until the fake ready-sweep tick marker has fired <n> times since start_watcher.
+# Each call comes after that tick's window sweeps and pr_poll_pass (see the
+# tick marker above), so the <n>th call proves <n> full ticks of them are done.
 wait_for_polls() {
     local want="$1" max="${2:-30}" i
     for ((i=0; i<max*20; i++)); do
@@ -460,7 +471,7 @@ rm -f "$PROJECT_DIR/.swarm/events.log"
 printf 'fix/issue-50\tOPEN\t101\t2026-01-01T00:00:00Z\tfalse\n' > "$GH_PR_LIST_FILE"
 
 ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 0 "$TEST_DIR/watch-b4.log"
-wait_for_polls 2
+wait_for_polls 1
 stop_watcher
 
 [ "$(flag_of "$SESSION_NAME:iss-50")" = "👀" ] \
@@ -478,7 +489,7 @@ printf 'fix/issue-55\tOPEN\t105\t2026-01-01T00:00:00Z\tfalse\n' > "$GH_PR_LIST_F
 printf '105\t-\t🟢\n' > "$GH_PR_RISK_FILE"
 
 ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 0 "$TEST_DIR/watch-b4b.log"
-wait_for_polls 2
+wait_for_polls 1
 stop_watcher
 
 [ "$(flag_of "$SESSION_NAME:iss-55")" = "👀🟢" ] \
@@ -488,7 +499,7 @@ green "pr_poll_pass suffixes 👀 with the risk rating (👀🟢)"
 
 rm -rf "$FLAG_DIR"/*
 WATCH_WINDOW_FLAG_RISK=0 ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 0 "$TEST_DIR/watch-b4b2.log"
-wait_for_polls 2
+wait_for_polls 1
 stop_watcher
 [ "$(flag_of "$SESSION_NAME:iss-55")" = "👀" ] \
     || red "WATCH_WINDOW_FLAG_RISK=0 should show a bare 👀; got: $(flag_of "$SESSION_NAME:iss-55")"
@@ -508,7 +519,7 @@ printf '✶ Blanching… (2h 7m 37s · ↓ 48.1k tokens)\n  esc to interrupt\n' 
 printf 'fix/issue-56\tOPEN\t106\t2026-01-01T00:00:00Z\tfalse\n' > "$GH_PR_LIST_FILE"
 
 ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 0 "$TEST_DIR/watch-b4c.log"
-wait_for_polls 2
+wait_for_polls 1
 stop_watcher
 
 [ -z "$(flag_of "$SESSION_NAME:iss-56")" ] \
@@ -518,7 +529,7 @@ green "pr_poll_pass clears/withholds 👀 while the worker is mid-turn"
 
 rm -f "$PANE_DIR/${SESSION_NAME}_iss-56"
 ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 0 "$TEST_DIR/watch-b4c2.log"
-wait_for_polls 2
+wait_for_polls 1
 stop_watcher
 [ "$(flag_of "$SESSION_NAME:iss-56")" = "👀" ] \
     || red "expected 👀 once the worker pane went idle; got: $(flag_of "$SESSION_NAME:iss-56")"
@@ -535,7 +546,7 @@ printf 'busy · ↓ 3.2k tokens\n' > "$PANE_DIR/${SESSION_NAME}_iss-57"
 printf 'fix/issue-57\tOPEN\t107\t2026-01-01T00:00:00Z\tfalse\n' > "$GH_PR_LIST_FILE"
 
 ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 0 "$TEST_DIR/watch-b4d.log"
-wait_for_polls 2
+wait_for_polls 1
 stop_watcher
 rm -f "$PANE_DIR/${SESSION_NAME}_iss-57"
 
@@ -555,7 +566,7 @@ printf '👀' > "$FLAG_DIR/${SESSION_NAME}_iss-51"
 printf 'fix/issue-51\tOPEN\t102\t2026-01-01T00:00:00Z\ttrue\n' > "$GH_PR_LIST_FILE"
 
 ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 0 "$TEST_DIR/watch-b5.log"
-wait_for_polls 2
+wait_for_polls 1
 stop_watcher
 
 [ -z "$(flag_of "$SESSION_NAME:iss-51")" ] \
@@ -579,7 +590,7 @@ NOW_ISO="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 printf 'fix/issue-52\tMERGED\t103\t%s\tfalse\n' "$NOW_ISO" > "$GH_PR_LIST_FILE"
 
 ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 0 "$TEST_DIR/watch-b6.log"
-wait_for_polls 2
+wait_for_polls 1
 stop_watcher
 
 [ -z "$(flag_of "$SESSION_NAME:iss-52")" ] \
@@ -605,7 +616,7 @@ printf 'fix/issue-54\tOPEN\t201\t2026-01-01T00:00:00Z\tfalse\nfix/issue-54\tCLOS
     > "$GH_PR_LIST_FILE"
 
 ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 0 "$TEST_DIR/watch-b6b.log"
-wait_for_polls 2
+wait_for_polls 1
 stop_watcher
 
 [ "$(flag_of "$SESSION_NAME:iss-54")" = "👀" ] \
@@ -624,7 +635,7 @@ printf '✋' > "$FLAG_DIR/${SESSION_NAME}_iss-53"
 printf 'fix/issue-53\tOPEN\t104\t2026-01-01T00:00:00Z\tfalse\n' > "$GH_PR_LIST_FILE"
 
 ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 0 "$TEST_DIR/watch-b7.log"
-wait_for_polls 2
+wait_for_polls 1
 stop_watcher
 
 [ "$(flag_of "$SESSION_NAME:iss-53")" = "✋" ] \
@@ -648,7 +659,7 @@ ts: 2026-01-01T00:00:00Z
 Which way should we go?
 EOF
 
-ONCE=0 WATCH_WINDOW_FLAGS_SWEEP_SECS=1 WATCH_PR_POLL_SECS=1 start_watcher 0 "$TEST_DIR/watch-b8.log"
+ONCE=0 WATCH_WINDOW_FLAGS_SWEEP_SECS=2 start_watcher 0 "$TEST_DIR/watch-b8.log"
 wait_for_polls 1
 stop_watcher
 
@@ -663,7 +674,7 @@ heading "Test B9: window_flags_sweep_pass clears ✋ once the message is archive
 mkdir -p "$WT60/.swarm/tasks/outbox/processed"
 mv "$WT60/.swarm/tasks/outbox/20260101T000000Z-need-call.md" "$WT60/.swarm/tasks/outbox/processed/"
 
-ONCE=0 WATCH_WINDOW_FLAGS_SWEEP_SECS=1 WATCH_PR_POLL_SECS=1 start_watcher 0 "$TEST_DIR/watch-b9.log"
+ONCE=0 WATCH_WINDOW_FLAGS_SWEEP_SECS=2 start_watcher 0 "$TEST_DIR/watch-b9.log"
 wait_for_polls 1
 stop_watcher
 
@@ -686,7 +697,7 @@ ts: 2026-01-01T00:00:00Z
 Just a heads up.
 EOF
 
-ONCE=0 WATCH_WINDOW_FLAGS_SWEEP_SECS=1 WATCH_PR_POLL_SECS=1 start_watcher 0 "$TEST_DIR/watch-b10.log"
+ONCE=0 WATCH_WINDOW_FLAGS_SWEEP_SECS=2 start_watcher 0 "$TEST_DIR/watch-b10.log"
 wait_for_polls 1
 stop_watcher
 
@@ -711,7 +722,7 @@ cat > "$TRANSCRIPT_DIR/session.jsonl" <<'EOF'
 {"timestamp":"2026-01-01T00:05:00Z","message":{"role":"assistant","content":[{"type":"text","text":"Pending your approval: merge PR #99 (yes/no)"}]}}
 EOF
 
-ONCE=0 WATCH_WINDOW_FLAGS_SWEEP_SECS=1 WATCH_PR_POLL_SECS=1 FAKE_HOME="$FAKE_HOME" start_watcher 0 "$TEST_DIR/watch-b11.log"
+ONCE=0 WATCH_WINDOW_FLAGS_SWEEP_SECS=2 FAKE_HOME="$FAKE_HOME" start_watcher 0 "$TEST_DIR/watch-b11.log"
 wait_for_polls 1
 stop_watcher
 
@@ -727,8 +738,8 @@ cat >> "$TRANSCRIPT_DIR/session.jsonl" <<'EOF'
 {"timestamp":"2026-01-01T00:06:00Z","message":{"role":"user","content":"yes, go ahead"},"promptSource":"typed"}
 EOF
 
-ONCE=0 WATCH_WINDOW_FLAGS_SWEEP_SECS=1 WATCH_PR_POLL_SECS=1 FAKE_HOME="$FAKE_HOME" start_watcher 0 "$TEST_DIR/watch-b12.log"
-wait_for_polls 2
+ONCE=0 WATCH_WINDOW_FLAGS_SWEEP_SECS=2 FAKE_HOME="$FAKE_HOME" start_watcher 0 "$TEST_DIR/watch-b12.log"
+wait_for_polls 1
 stop_watcher
 
 [ -z "$(flag_of "$SESSION_NAME:coordinator")" ] \
@@ -748,7 +759,7 @@ cat > "$TRANSCRIPT_DIR_B13/session.jsonl" <<'EOF'
 {"timestamp":"2026-01-01T00:05:00Z","message":{"role":"assistant","content":[{"type":"text","text":"Nothing needed from you right now."}]}}
 EOF
 
-ONCE=0 WATCH_WINDOW_FLAGS_SWEEP_SECS=1 WATCH_PR_POLL_SECS=1 FAKE_HOME="$FAKE_HOME_B13" start_watcher 0 "$TEST_DIR/watch-b13.log"
+ONCE=0 WATCH_WINDOW_FLAGS_SWEEP_SECS=2 FAKE_HOME="$FAKE_HOME_B13" start_watcher 0 "$TEST_DIR/watch-b13.log"
 wait_for_polls 1
 stop_watcher
 
@@ -767,7 +778,7 @@ printf 'fix/issue-80\tOPEN\t180\t2026-01-01T00:00:00Z\tfalse\n' > "$GH_PR_LIST_F
 printf '180\t-\t🟡\tpass\n' > "$GH_PR_RISK_FILE"
 
 ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 0 "$TEST_DIR/watch-b15.log"
-wait_for_polls 2
+wait_for_polls 1
 stop_watcher
 [ "$(flag_of "$SESSION_NAME:iss-80")" = "✅🟡" ] \
     || red "expected ✅🟡 on iss-80; got: $(flag_of "$SESSION_NAME:iss-80"). Watch log:
@@ -779,7 +790,7 @@ heading "Test B16: ✅ drops back to 👀 when CI restarts (new push)"
 # ---------------------------------------------------------------------------
 printf '180\t-\t🟡\tpending\n' > "$GH_PR_RISK_FILE"
 ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 0 "$TEST_DIR/watch-b16.log"
-wait_for_polls 2
+wait_for_polls 1
 stop_watcher
 [ "$(flag_of "$SESSION_NAME:iss-80")" = "👀🟡" ] \
     || red "expected ✅ to drop to 👀🟡 while CI is pending; got: $(flag_of "$SESSION_NAME:iss-80")"
@@ -787,7 +798,7 @@ green "pending CI shows 👀, not ✅ (the PR 1244 case)"
 
 printf '180\t-\t🟡\n' > "$GH_PR_RISK_FILE"
 ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 0 "$TEST_DIR/watch-b16b.log"
-wait_for_polls 2
+wait_for_polls 1
 stop_watcher
 [ "$(flag_of "$SESSION_NAME:iss-80")" = "👀🟡" ] \
     || red "a PR with no CI checks reported should stay 👀; got: $(flag_of "$SESSION_NAME:iss-80")"
@@ -800,7 +811,7 @@ rm -rf "$FLAG_DIR"/*
 printf '180\t-\t🟡\tpass\n' > "$GH_PR_RISK_FILE"
 echo "brief" > "$WT80/.swarm/tasks/processing/t80.md"
 ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 0 "$TEST_DIR/watch-b17.log"
-wait_for_polls 2
+wait_for_polls 1
 stop_watcher
 [ "$(flag_of "$SESSION_NAME:iss-80")" = "👀🟡" ] \
     || red "a worker that hasn't run task-done.sh should not get ✅; got: $(flag_of "$SESSION_NAME:iss-80")"
@@ -815,7 +826,7 @@ rm -rf "$FLAG_DIR"/*
 printf 'fix/issue-81\tOPEN\t181\t2026-01-01T00:00:00Z\ttrue\n' > "$GH_PR_LIST_FILE"
 printf '181\t-\t🟢\tfail\n' > "$GH_PR_RISK_FILE"
 ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 0 "$TEST_DIR/watch-b18.log"
-wait_for_polls 2
+wait_for_polls 1
 stop_watcher
 [ "$(flag_of "$SESSION_NAME:iss-81")" = "❌" ] \
     || red "expected ❌ on iss-81; got: $(flag_of "$SESSION_NAME:iss-81"). Watch log:
@@ -824,7 +835,7 @@ green "pr_poll_pass set ❌ for an idle worker's red draft PR"
 
 printf 'busy · ↓ 3.2k tokens\n' > "$PANE_DIR/${SESSION_NAME}_iss-81"
 ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 0 "$TEST_DIR/watch-b18b.log"
-wait_for_polls 2
+wait_for_polls 1
 stop_watcher
 rm -f "$PANE_DIR/${SESSION_NAME}_iss-81"
 [ -z "$(flag_of "$SESSION_NAME:iss-81")" ] \
@@ -865,7 +876,7 @@ rm -f "$PROJECT_DIR/.swarm/events.log"
 printf 'fix/issue-90\tOPEN\t190\t2026-01-01T00:00:00Z\tfalse\n' > "$GH_PR_LIST_FILE"
 printf '190\t-\t🟡\tpass\tCONFLICTING\tabc12345def\tmaster\n' > "$GH_PR_RISK_FILE"
 ONCE=0 WATCH_PR_POLL_SECS=1 start_watcher 0 "$TEST_DIR/watch-b20.log"
-wait_for_polls 2
+wait_for_polls 1
 wait_for_brief
 n90=$(briefs_for_pr90)
 [ "$n90" = 1 ] || { stop_watcher; red "expected 1 conflict brief in iss-90's inbox, got $n90. Watch log:
@@ -874,7 +885,7 @@ grep -q 'origin/master' "$WT90"/.swarm/tasks/inbox/*.md || { stop_watcher; red "
 # Worker finishes the brief but the PR still conflicts on the same head:
 # no second brief for that head.
 mv "$WT90"/.swarm/tasks/inbox/*.md "$WT90/.swarm/tasks/done/"
-wait_for_more_polls 2
+wait_for_more_polls 1
 stop_watcher
 n90=$(find "$WT90/.swarm/tasks/inbox" -name '*.md' | wc -l)
 [ "$n90" = 0 ] || red "same head should not be briefed twice; inbox has $n90"
@@ -888,7 +899,7 @@ for case in "mergeable:false:MERGEABLE:1" "unknown:false:UNKNOWN:1" "knob-off:fa
     printf 'fix/issue-90\tOPEN\t190\t2026-01-01T00:00:00Z\t%s\n' "$draft" > "$GH_PR_LIST_FILE"
     printf '190\t-\t🟡\tpass\t%s\tabc12345def\tmaster\n' "$merge" > "$GH_PR_RISK_FILE"
     WATCH_CONFLICT_BRIEF="$knob" ONCE=0 WATCH_PR_POLL_SECS=1 start_watcher 0 "$TEST_DIR/watch-b20-$label.log"
-    wait_for_polls 2
+    wait_for_polls 1
     stop_watcher
     n90=$(find "$WT90/.swarm/tasks/inbox" -name '*.md' | wc -l)
     [ "$n90" = 0 ] || red "$label: expected no conflict brief, inbox has $n90"
@@ -900,18 +911,18 @@ green "no brief for a mergeable or still-computing PR, or with WATCH_CONFLICT_BR
 printf 'fix/issue-90\tOPEN\t190\t2026-01-01T00:00:00Z\ttrue\n' > "$GH_PR_LIST_FILE"
 printf '190\thold\t🟡\tpass\tCONFLICTING\tabc12345def\tmaster\n' > "$GH_PR_RISK_FILE"
 ONCE=0 WATCH_PR_POLL_SECS=1 start_watcher 0 "$TEST_DIR/watch-b20-held.log"
-wait_for_polls 2
+wait_for_polls 1
 stop_watcher
 n90=$(find "$WT90/.swarm/tasks/inbox" -name '*.md' | wc -l)
 [ "$n90" = 0 ] || red "held draft: expected no conflict brief, inbox has $n90"
 printf '190\t-\t🟡\tpass\tCONFLICTING\tabc12345def\tmaster\n' > "$GH_PR_RISK_FILE"
 ONCE=0 WATCH_PR_POLL_SECS=1 start_watcher 0 "$TEST_DIR/watch-b20-draft.log"
-wait_for_polls 2
+wait_for_polls 1
 wait_for_brief
 n90=$(briefs_for_pr90)
 [ "$n90" = 1 ] || { stop_watcher; red "banner-less conflicting draft: expected 1 brief, got $n90"; }
 mv "$WT90"/.swarm/tasks/inbox/*.md "$WT90/.swarm/tasks/done/"
-wait_for_more_polls 2
+wait_for_more_polls 1
 stop_watcher
 n90=$(find "$WT90/.swarm/tasks/inbox" -name '*.md' | wc -l)
 [ "$n90" = 0 ] || red "draft: same head should not be briefed twice; inbox has $n90"
@@ -922,7 +933,7 @@ green "conflicting draft briefed once per head; coordinator-held draft left alon
 rm -f "$WT90"/.swarm/tasks/done/*.md
 echo '{"comments":[{"body":"holding\n<!-- SWARM_COORDINATOR_HOLD -->"}]}' > "$GH_PR_COMMENTS_FILE"
 ONCE=0 WATCH_PR_POLL_SECS=1 start_watcher 0 "$TEST_DIR/watch-b20-chold.log"
-wait_for_polls 2
+wait_for_polls 1
 n90=$(find "$WT90/.swarm/tasks/inbox" -name '*.md' | wc -l)
 [ "$n90" = 0 ] || { stop_watcher; red "comment-held draft: expected no conflict brief, inbox has $n90"; }
 echo '{"comments":[{"body":"<!-- SWARM_COORDINATOR_HOLD -->"},{"body":"<!-- SWARM_COORDINATOR_HOLD_LIFTED -->"}]}' > "$GH_PR_COMMENTS_FILE"
@@ -937,7 +948,7 @@ green "comment-only hold keeps the conflict brief away; lifting it releases it"
 rm -f "$WT90"/.swarm/tasks/inbox/*.md "$WT90"/.swarm/tasks/done/*.md
 touch "$WT90/.swarm/sidelined"
 ONCE=0 WATCH_PR_POLL_SECS=1 start_watcher 0 "$TEST_DIR/watch-b20-sideline.log"
-wait_for_polls 2
+wait_for_polls 1
 stop_watcher
 n90=$(find "$WT90/.swarm/tasks/inbox" -name '*.md' | wc -l)
 rm -f "$WT90/.swarm/sidelined"
