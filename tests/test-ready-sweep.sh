@@ -181,4 +181,19 @@ run_sweep --dry-run || red "dry run failed"
 [ "$(cat "$TEST_DIR/out.log")" = "$want" ] || red "dry run lost parked-green lines"
 green "banner-less green drafts reported (read-only); held, bannered, red, pending, no-CI left alone; newest run per check wins"
 
+heading "Test 10 (issue #808): ci-cancelled drafts are reported with a re-run hint, not retried"
+cat > "$FIXTURE" <<'JSON'
+[{"number": 71, "headRefOid": "cab0071", "body": "<!-- SWARM_DRAFT_REASON: ci-cancelled sha=cab0071 -->\nbody"},
+ {"number": 72, "headRefOid": "newhead", "body": "<!-- SWARM_DRAFT_REASON: ci-cancelled sha=cab0072 -->\nbody"},
+ {"number": 73, "body": "<!-- SWARM_DRAFT_REASON: ci-cancelled sha=cab0073 -->\nbody"}]
+JSON
+want='#71 ci-cancelled: CI was cancelled, re-run it (`gh run rerun <run-id>`), not a fix push (sha=cab0071)
+#73 ci-cancelled: CI was cancelled, re-run it (`gh run rerun <run-id>`), not a fix push (sha=cab0073)'
+run_sweep || red "expected exit 0: $(cat "$TEST_DIR/out.log")"
+[ "$(cat "$TEST_DIR/out.log")" = "$want" ] || red "unexpected ci-cancelled output: $(cat "$TEST_DIR/out.log")"
+[ ! -s "$READY_LOG" ] || red "ci-cancelled must not call pr-ready: $(cat "$READY_LOG")"
+run_sweep --dry-run || red "dry run failed"
+[ "$(cat "$TEST_DIR/out.log")" = "$want" ] || red "dry run lost ci-cancelled lines"
+green "cancelled drafts reported with re-run hint (moved head silent), never retried"
+
 green "ALL TESTS PASSED"

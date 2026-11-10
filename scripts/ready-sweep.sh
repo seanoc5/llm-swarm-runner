@@ -65,6 +65,12 @@ while read -r pr sha action; do
     echo "#$pr ci-failing: needs a fix push (sha=$sha)"
 done <<<"$FAILING"
 
+# issue #808: a draft parked as ci-cancelled (runner offline, queued runs
+# cancelled after 24h; #793) needs a CI re-run, not a fix push, so it gets its
+# own line. Only while head == banner sha: a moved head means the banner says
+# nothing about the new commit. Read-only, so --dry-run reports it too.
+jq -r '.[] | (.body // "" | capture("(?m)^<!-- SWARM_DRAFT_REASON: ci-cancelled sha=(?<s>[0-9a-fA-F]+)").s // empty) as $s | select((.headRefOid // $s) == $s) | "#\(.number) ci-cancelled: CI was cancelled, re-run it (`gh run rerun <run-id>`), not a fix push (sha=\($s))"' <<<"$DRAFTS"
+
 # issue #757: a worker that parks BEFORE ever calling pr-ready.sh leaves no
 # banner, so the loop below never sees its draft (civicstrata #643 sat ~18h
 # with green CI). Report open drafts with no SWARM_DRAFT_REASON banner, no
