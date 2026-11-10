@@ -266,13 +266,11 @@ set -e
 grep -q "HOST_MAX_WORKERS cap reached" "$TEST_DIR/prov-3d-refused.log" \
     || red "expected HOST_MAX_WORKERS refusal message; got: $(cat "$TEST_DIR/prov-3d-refused.log")"
 WT103="$TEST_DIR/wt-issue-103"
-# Decision (issue #464): the worktree from step 1 is harmless and left in
-# place even on refusal — a retry reuses it instead of recreating it.
-[ -d "$WT103" ] || red "expected worktree to still be created despite the cap refusal (see #464 decision)"
-# The core fix: a cap refusal must leave NO brief behind.
-briefs_after_refusal=$(find "$WT103/.swarm/tasks/inbox" -maxdepth 1 -name '*.md' | wc -l)
-[ "$briefs_after_refusal" -eq 0 ] \
-    || red "cap refusal should leave zero briefs in inbox/, found $briefs_after_refusal"
+# Issue #794 reverses the #464 decision to keep the step-1 worktree: an empty
+# worktree hides the issue from coordinator-watch.sh idle_capacity, so a cap
+# refusal now removes the worktree this call created. That also guarantees the
+# core #464 fix (no brief left behind) trivially.
+[ ! -d "$WT103" ] || red "cap refusal should remove the worktree this call created (#794)"
 grep -qE 'new-window .* iss-103' "$TEST_DIR/tmux.log" \
     && red "tmux window should NOT have been spawned for the cap-refused issue"
 
@@ -291,7 +289,7 @@ briefs_after_retry=$(find "$WT103/.swarm/tasks/inbox" -maxdepth 1 -name '*.md' |
 grep -qE 'new-window .* iss-103' "$TEST_DIR/tmux.log" \
     || red "expected tmux new-window for iss-103 after capacity freed; got: $(cat "$TEST_DIR/tmux.log")"
 rm -f "$TEST_DIR/docker-containers.txt"
-green "cap refusal (exit 3) leaves no brief and no tmux window; worktree persists; retry queues exactly 1 brief"
+green "cap refusal (exit 3) leaves no brief, no tmux window and no worktree (#794); retry queues exactly 1 brief"
 
 # Remove this test's worktree so it doesn't inflate Test 6's worktree count
 # below (which asserts an exact count of 4: main + wt-issue-99/100/101).
