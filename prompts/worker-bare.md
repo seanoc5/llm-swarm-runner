@@ -227,7 +227,7 @@ recommendation under it (`✅ Recommend B — <why>. Default if silent: …`).
 No code spans, paths, classes or commands on the screen; `Closes #N` is
 plain text. Bottom line ≤ 60 words, Your move ≤ 40, What surprised me ≤ 50,
 screen ≤ 25 non-blank lines. `lint-pr-screen.sh` enforces these. Small 🟢
-PRs may drop the appendix. Self-merged PR where no human input was needed: add `**Needs you:** none (self-merged, no corpusminder item)` to the screen, so a closed PR missing from corpusminder explains itself.
+PRs may drop the appendix. Self-merged PR where no human input was needed: add `**Needs you:** none (self-merged)` to the screen.
 
 ## Post-merge handoff
 

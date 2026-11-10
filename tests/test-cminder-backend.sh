@@ -150,4 +150,52 @@ check "...and warns at startup" "1" "$(grep -c 'ANSWER_AUTHORS is empty' "$T/bri
 set +e; env -u CMINDER_API_KEY "$BRIDGE" >/dev/null 2>&1; ec=$?; set -e
 check "the bridge refuses to start without its key" "2" "$ec"
 
+
+# ── answers are never lost: hold when the swarm is down, keep the id on failure ──
+export CMINDER_ANSWER_AUTHORS=7
+export CMINDER_BRIDGE_HELD="$T/held"
+LP="$T/late-proj"; mkdir -p "$LP/.swarm"
+rm -f "$T/last-id"
+printf 'id: 20\nevent: answer\ndata: {"id":20,"itemId":42,"swarm":"late","answer":"go ahead","authorUserId":7}\n\n' > "$SSE"
+CMINDER_SWARM_DIRS="swarm-proj=$BP" "$BRIDGE" 2>"$T/bridge.err"
+check "swarm down at arrival: nothing delivered yet" "0" "$(find "$LP/.swarm/coord-inbox" -type f 2>/dev/null | wc -l)"
+check "...the answer is held for later" "1" "$(find "$T/held" -type f 2>/dev/null | wc -l)"
+check "...the id is recorded (the answer is safe on disk)" "20" "$(cat "$T/last-id")"
+: > "$SSE"
+CMINDER_SWARM_DIRS="swarm-proj=$BP late=$LP" "$BRIDGE" 2>"$T/bridge.err"
+check "swarm back up: the held answer is delivered" "1" "$(ls "$LP/.swarm/coord-inbox/" 2>/dev/null | grep -c cminder_answer || true)"
+check "...with its text" "1" "$(cat "$LP"/.swarm/coord-inbox/*cminder_answer* 2>/dev/null | grep -c 'go ahead' || true)"
+check "...and the held copy is gone" "0" "$(find "$T/held" -type f 2>/dev/null | wc -l)"
+CMINDER_SWARM_DIRS="swarm-proj=$BP late=$LP" "$BRIDGE" 2>/dev/null
+check "...and it is not delivered twice" "1" "$(ls "$LP/.swarm/coord-inbox/" | grep -c cminder_answer || true)"
+
+FP="$T/fail-proj"; mkdir -p "$FP/.swarm"; : > "$FP/.swarm/coord-inbox"   # a file where the dir should be
+printf '10\n' > "$T/last-id"
+printf 'id: 11\nevent: answer\ndata: {"id":11,"itemId":42,"swarm":"failing","answer":"a","authorUserId":7}\n\nid: 12\nevent: answer\ndata: {"id":12,"itemId":42,"swarm":"swarm-proj","answer":"b","authorUserId":7}\n\n' > "$SSE"
+rm -f "$BP/.swarm/coord-inbox/"*
+CMINDER_SWARM_DIRS="swarm-proj=$BP failing=$FP" "$BRIDGE" 2>"$T/bridge.err"
+check "a delivery failure does not advance the saved id" "10" "$(cat "$T/last-id")"
+check "...and later events wait for the replay" "0" "$(find "$BP/.swarm/coord-inbox" -type f | wc -l)"
+
+# ── default swarm lookup (the tmux branch), with stubs ───────────────────────
+TP="$T/tmux-proj"; mkdir -p "$TP/.swarm"
+cat > "$T/ls.sh" <<'LS'
+#!/usr/bin/env bash
+printf 'swarm-a.b LIVE 1 session\nswarm-dead DEAD\n'
+LS
+cat > "$T/bin/tmux" <<'TM'
+#!/usr/bin/env bash
+cat >/dev/null   # a child that reads stdin would eat the SSE stream
+echo "$TP"
+TM
+chmod +x "$T/ls.sh" "$T/bin/tmux"; export TP
+rm -f "$T/last-id"; rm -rf "$T/held"
+printf 'id: 30\nevent: answer\ndata: {"id":30,"itemId":42,"swarm":"a.b","answer":"via tmux","authorUserId":7}\n\nid: 31\nevent: answer\ndata: {"id":31,"itemId":42,"swarm":"axb","answer":"regex must not match","authorUserId":7}\n\nid: 32\nevent: answer\ndata: {"id":32,"itemId":42,"swarm":"dead","answer":"x","authorUserId":7}\n\nid: 33\nevent: answer\ndata: {"id":33,"itemId":42,"swarm":"a.b","answer":"second, stream intact","authorUserId":7}\n\n' > "$SSE"
+CMINDER_LIST_SWARMS="$T/ls.sh" CMINDER_SWARM_DIRS="" "$BRIDGE" 2>"$T/bridge.err"
+tin() { cat "$TP"/.swarm/coord-inbox/* 2>/dev/null | grep -c "$1" || true; }
+check "tmux lookup: a LIVE swarm's answer lands in its start dir" "1" "$(tin 'via tmux')"
+check "...the swarm name is matched literally (a.b is not axb)" "0" "$(tin 'regex must not')"
+check "...a DEAD or unplaceable swarm is held, not delivered" "2" "$(find "$T/held" -type f | wc -l)"
+check "...children never eat the stream (the answer after them arrives)" "1" "$(tin 'second, stream intact')"
+
 echo "all cminder backend checks passed"

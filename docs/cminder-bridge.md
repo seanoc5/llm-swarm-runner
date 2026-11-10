@@ -33,4 +33,11 @@ Empty means nobody: every answer arrives as information, and the bridge warns.
 The swarm is found by `CMINDER_SWARM_DIRS` (`name=/path`), else the live tmux
 socket `swarm-<name>` (`list-swarms.sh`) and its session start directory.
 
+Answers are never dropped. If the target swarm is not live when an answer
+arrives, the bridge holds it in `~/.local/state/llm-swarm/cminder-held/<swarm>/`
+(override: `CMINDER_BRIDGE_HELD`) and delivers it once the swarm is found live
+(retried on every reconnect and after every event). The last event id is saved
+only after an answer is delivered or held; a failed inbox write stops the
+stream, and the reconnect replays from the last saved id.
+
 Tests: `tests/test-cminder-backend.sh` (curl is stubbed; no network).
