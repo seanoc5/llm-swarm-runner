@@ -100,7 +100,7 @@ EVENTS  (<project>/.swarm/events.log)
                                  salvaged to .swarm/salvaged/iss-N/
     provision.stale_container    state=cleared|window_alive|removal_timeout
     provision.stale_branch       fix/issue-N has unique commits, no worktree
-    worktree.discarded           fresh worktree removed after a cap refusal (#794)
+    worktree.discarded           fresh worktree removed after a failing exit (#794, #816)
     cap.refused                  reason=max_workers|max_tmux_windows|dispatch_paused|
                                  host_max_workers|host_load|host_mem|spawn_stagger
 EOF
@@ -238,9 +238,7 @@ salvage_stale_queue() {
     done
     if [ "$stale_briefs" -gt 0 ]; then
         echo "       Salvaged $stale_briefs stale brief(s) to $salvage_root/ (preserved, not auto-rerun — review and re-file if still relevant)" >&2
-        # If a check below refuses, the issue is left with no window and
-        # no queued brief; say where the briefs went.
-        trap 'rc=$?; [ "$rc" -ne 0 ] && echo "       Note: issue #$ISSUE still has $stale_briefs brief(s) salvaged to $salvage_root/ from the reclaim above, now unqueued until this is retried." >&2; :' EXIT
+        # If a check below refuses, on_exit (below) says where the briefs went.
     fi
     # The dead_pane tag always logs (a dead window was actually reclaimed,
     # even if it happened to hold zero stale briefs); no_window logs only
@@ -278,13 +276,32 @@ drop_pending_marker() {
 WT_CREATED_NOW=0
 discard_fresh_worktree() {
     [ "$WT_CREATED_NOW" = "1" ] || return 0
+    local reason="${1:-cap_refused}"
     git worktree remove --force "$WT" >/dev/null 2>&1 || rm -rf -- "$WT"
     git worktree prune >/dev/null 2>&1 || true
     git branch -D "$BRANCH" >/dev/null 2>&1 || true
     WT_CREATED_NOW=0
     echo "       Removed the empty worktree this call created ($WT); the retry recreates it." >&2
-    log_event worktree.discarded "issue=$ISSUE reason=cap_refused"
+    log_event worktree.discarded "issue=$ISSUE reason=$reason"
 }
+
+# Single EXIT handler (#816): every failing exit after a worktree was created
+# by this call (exit 2: gh outage, no tmux session, stuck container; exit 3:
+# caps) discards it, so the issue stays visible to idle_capacity. Registered
+# once; salvage_stale_queue used to own the EXIT trap and would have clobbered
+# this. Reads stale_briefs/salvage_root, deliberately not local there.
+on_exit() {
+    local rc=$?
+    { exec 9>&-; } 2>/dev/null || true  # never remove a worktree under the host cap lock
+    if [ "$rc" -ne 0 ]; then
+        discard_fresh_worktree "exit_$rc"
+        if [ "${stale_briefs:-0}" -gt 0 ]; then
+            echo "       Note: issue #$ISSUE still has $stale_briefs brief(s) salvaged to $salvage_root/ from the reclaim above, now unqueued until this is retried." >&2
+        fi
+    fi
+    return "$rc"
+}
+trap on_exit EXIT
 
 # refuse_cap <reason> <message> <hint> [k=v ...]  -> exit 3
 refuse_cap() {
@@ -295,6 +312,9 @@ refuse_cap() {
     # backoff on it (short waits like spawn_stagger must not be backed off).
     echo "cap.refused reason=$reason" >&2
     log_event cap.refused "issue=$ISSUE reason=$reason $*"
+    # Release the host cap lock first (#816): removing and later re-checking-out
+    # a large worktree must not block other swarms' cap checks.
+    { exec 9>&-; } 2>/dev/null || true
     discard_fresh_worktree
     exit 3
 }
@@ -786,6 +806,8 @@ if [ "$WINDOW_EXISTS" -eq 0 ]; then
     check_stale_container "$ISSUE" "$CONTAINER"
     WT_CREATED_NOW=0
 fi
+# A live window means the worktree predates this call (and holds its brief).
+[ "$WINDOW_EXISTS" -eq 1 ] && WT_CREATED_NOW=0
 
 # 3. Brief, written atomically (mktemp + rename in the same dir). TASK_ID
 #    gets a -2, -3... suffix on a same-second collision. PROVISION_NOW_EPOCH
