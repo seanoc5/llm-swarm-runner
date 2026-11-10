@@ -130,11 +130,17 @@ printf '99.00 50.00 20.00 1/1 1\n' > "$TEST_DIR/loadavg"
 printf 'MemTotal: 131072000 kB\nMemAvailable: 4194304 kB\n' > "$TEST_DIR/meminfo"
 rc=$(run_prov 13 HOST_LOADAVG_FILE="$TEST_DIR/loadavg" HOST_MAX_LOAD1=48 HOST_MIN_MEM_AVAIL_MB=0 HOST_SPAWN_STAGGER_SECS=0)
 [ "$rc" -eq 3 ] && grep -q 'reason=host_load load1=99.00 max=48' "$PROJECT_DIR/.swarm/events.log" || red "load refusal: rc=$rc $(cat "$TEST_DIR/prov-13.log")"
-green "load1 99 > 48 refused (exit 3, reason=host_load)"
+[ -s "$PROJECT_DIR/.swarm/host-load-refused" ] && awk '{exit !($2==48 && $3==13)}' "$PROJECT_DIR/.swarm/host-load-refused" || red "host_load refusal must leave .swarm/host-load-refused (<epoch> 48 13) for the watcher (#803)"
+green "host_load refusal leaves the retry marker (#803)"
 printf '12.90 5.00 1.00 1/1 1\n' > "$TEST_DIR/loadavg"
 rc=$(run_prov 13 HOST_LOADAVG_FILE="$TEST_DIR/loadavg" HOST_MAX_LOAD1=12 HOST_MIN_MEM_AVAIL_MB=0 HOST_SPAWN_STAGGER_SECS=0)
 [ "$rc" -eq 3 ] && grep -q 'reason=host_load load1=12.90 max=12' "$PROJECT_DIR/.swarm/events.log" || red "fractional load refusal: rc=$rc $(cat "$TEST_DIR/prov-13.log")"
 green "load1 12.90 > 12 refused (decimals compared, not truncated)"
+printf '1.00 1.00 1.00 1/1 1\n' > "$TEST_DIR/loadavg"
+rc=$(run_prov 13 HOST_LOADAVG_FILE="$TEST_DIR/loadavg" HOST_MEMINFO_FILE="$TEST_DIR/meminfo" HOST_MAX_LOAD1=48 HOST_MIN_MEM_AVAIL_MB=16384 HOST_SPAWN_STAGGER_SECS=0)
+[ ! -e "$PROJECT_DIR/.swarm/host-load-refused" ] || red "a load check that passes must clear the retry marker (#803)"
+green "passing load check clears the retry marker (#803)"
+
 rc=$(run_prov 13 HOST_MEMINFO_FILE="$TEST_DIR/meminfo" HOST_MAX_LOAD1=0 HOST_MIN_MEM_AVAIL_MB=16384 HOST_SPAWN_STAGGER_SECS=0)
 [ "$rc" -eq 3 ] && grep -q 'reason=host_mem avail_mb=4096 min_mb=16384' "$PROJECT_DIR/.swarm/events.log" || red "mem refusal: rc=$rc $(cat "$TEST_DIR/prov-13.log")"
 green "MemAvailable 4096 MB < 16384 refused (exit 3, reason=host_mem)"
