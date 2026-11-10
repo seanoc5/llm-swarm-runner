@@ -114,8 +114,12 @@ run_wrapper() {
     (cd "$P" && PATH="$T/bin:$PATH" COORD_HOOK_STATE="$1" "$ROOT/scripts/coordinator-claude.sh" "$T/sys" "$T/init")
 }
 run_wrapper 0
+settings="$(grep -A1 -x -- '--settings' "$T/argv" | tail -1)"
+got="$(jq -r '[.hooks | keys[]] | sort | join(",")' <<<"$settings" 2>/dev/null || echo none)"
+check "COORD_HOOK_STATE=0, resident: --settings installs only the Stop reply lint (#798)" "Stop" "$got"
+COORD_REPLY_LINT=0 run_wrapper 0
 grep -qx -- '--settings' "$T/argv" && got=yes || got=no
-check "COORD_HOOK_STATE=0: no --settings passed" "no" "$got"
+check "COORD_HOOK_STATE=0 + COORD_REPLY_LINT=0: no --settings passed" "no" "$got"
 run_wrapper 1
 settings="$(grep -A1 -x -- '--settings' "$T/argv" | tail -1)"
 got="$(jq -r '[.hooks | keys[]] | sort | join(",")' <<<"$settings" 2>/dev/null || echo invalid)"

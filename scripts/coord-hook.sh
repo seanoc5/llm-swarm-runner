@@ -69,7 +69,8 @@ input="$(cat 2>/dev/null || true)"
 project="${CLAUDE_PROJECT_DIR:-$PWD}"
 hook_state=0; [ "${COORD_HOOK_STATE:-0}" = "1" ] && hook_state=1
 split=0; [ "$(coord_mode "$project")" = "split" ] && split=1
-[ "$hook_state" = "1" ] || [ "$split" = "1" ] || exit 0
+lint_on=1; [ "${COORD_REPLY_LINT:-1}" = "0" ] && lint_on=0
+[ "$hook_state" = "1" ] || [ "$split" = "1" ] || [ "$lint_on" = "1" ] || exit 0
 
 swarm="$project/.swarm"
 [ -d "$swarm" ] || exit 0
@@ -184,8 +185,9 @@ case "$event" in
         active="$(printf '%s' "$input" | jq -r '.stop_hook_active // false' 2>/dev/null || echo false)"
         lint="$(reply_lint_message)"
         # Split mode never rings: nothing is typed into or blocked on this session
-        # (only the reply lint can block it).
-        if [ "$split" = "1" ]; then
+        # (only the reply lint can block it). The same holds for a resident
+        # coordinator with COORD_HOOK_STATE=0: lint only, no state, no doorbell.
+        if [ "$split" = "1" ] || [ "$hook_state" = "0" ]; then
             if [ -n "$lint" ]; then
                 [ "$hook_state" = "1" ] && write_state busy
                 jq -n --arg r "$lint" '{decision: "block", reason: $r}'

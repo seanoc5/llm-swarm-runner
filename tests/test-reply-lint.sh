@@ -89,6 +89,17 @@ out="$(HM=split HS=0 stop "$FX/clean-nothing.txt" false)"
 check "split mode: clean reply -> silent" "" "$out"
 out="$(COORD_REPLY_LINT=0 stop "$FX/incident-start-load.txt" false)"
 check "COORD_REPLY_LINT=0 disables it" "" "$out"
+# resident coordinator, default COORD_HOOK_STATE=0: lint blocks, nothing else happens
+rm -f "$H/.swarm/coordinator-state" "$H/.swarm/coord-hook-rang"; echo 1 > "$H/.swarm/coord-hook-rang"
+echo "worker finished" > "$H/.swarm/coord-inbox/b.md"
+out="$(HS=0 stop "$FX/incident-start-load.txt" false)"
+check "resident + COORD_HOOK_STATE=0: lint blocks (default install)" "block" "$(jq -r .decision <<<"$out")"
+case "$(jq -r .reason <<<"$out")" in "Reply lint failed"*) got=lint-only ;; *) got="$(jq -r .reason <<<"$out")" ;; esac
+check "...with no doorbell text" "lint-only" "$got"
+check "...and no state file written" "none" "$([ -e "$H/.swarm/coordinator-state" ] && echo some || echo none)"
+out="$(HS=0 stop "$FX/clean-nothing.txt" false)"
+check "resident + COORD_HOOK_STATE=0: clean reply -> silent, no ring" "" "$out"
+rm -f "$H/.swarm/coord-inbox/b.md"
 # transcript fallback
 jq -cn --rawfile m "$FX/incident-quiet-pointer.txt" '{type:"assistant",message:{content:[{type:"text",text:$m}]}}' > "$T/tr.jsonl"
 out="$(jq -n --arg p "$T/tr.jsonl" '{transcript_path: $p, stop_hook_active: false}' | CLAUDE_PROJECT_DIR="$H" COORD_HOOK_STATE=1 "$HOOK" Stop)"

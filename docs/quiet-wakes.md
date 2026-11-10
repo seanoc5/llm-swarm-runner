@@ -37,7 +37,9 @@ watcher types a plain doorbell per item, with no suffix):
    run/start/click item with no command or URL, or two closing lines. Hits are
    counted in `.swarm/events.log` as `coord.reply_lint.hit` (blocked) and
    `coord.reply_lint.unfixed` (still failing after the nudge); per swarm per
-   week: `grep -c coord.reply_lint.hit .swarm/events.log`. Off with
+   week: `grep -c coord.reply_lint.hit .swarm/events.log`. Installed for every
+   coordinator, including resident with `COORD_HOOK_STATE=0` (lint only, no state
+   file or doorbell). Off with
    `COORD_REPLY_LINT=0`.
 
 ## Urgent vs batched

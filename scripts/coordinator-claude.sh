@@ -94,18 +94,21 @@ ARGS=(--model "$MODEL"
 # and ad-hoc sessions in the same project never run them.
 # COORD_MODE=split (issue #767) installs the hook for its UserPromptSubmit
 # needs-you line even without COORD_HOOK_STATE; Stop/Notification (state file)
-# stay tied to COORD_HOOK_STATE. Stop is always installed with the hook: it runs
-# the reply lint (issue #798) and writes no state unless COORD_HOOK_STATE=1.
+# stay tied to COORD_HOOK_STATE. Stop alone is installed for every coordinator
+# (issue #798): it runs the reply lint, and with COORD_HOOK_STATE=0 in resident
+# mode that is all it does (no state file, no doorbell). COORD_REPLY_LINT=0
+# removes it again.
 # shellcheck source=_coord-split.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_coord-split.sh"
-if [ "${COORD_HOOK_STATE:-0}" = "1" ] || [ "$(coord_mode "$PWD")" = "split" ]; then
+if [ "${COORD_HOOK_STATE:-0}" = "1" ] || [ "$(coord_mode "$PWD")" = "split" ] || [ "${COORD_REPLY_LINT:-1}" != "0" ]; then
     export COORD_HOOK_STATE
     [ "${COORD_INBOX_WAITER:-0}" = "1" ] && export COORD_INBOX_WAITER
     HOOK="$(cd "$(dirname "$0")" && pwd)/coord-hook.sh"
-    ARGS+=(--settings "$(jq -cn --arg h "$HOOK" --arg state "${COORD_HOOK_STATE:-0}" '
+    ARGS+=(--settings "$(jq -cn --arg h "$HOOK" --arg state "${COORD_HOOK_STATE:-0}" --arg split "$(coord_mode "$PWD")" --arg lint "${COORD_REPLY_LINT:-1}" '
         def on(e): [{hooks: [{type: "command", command: (($h | @sh) + " " + e)}]}];
-        {hooks: ({UserPromptSubmit: on("UserPromptSubmit")}
-                 + (if $state == "1" then {Stop: on("Stop"), Notification: on("Notification")} else {Stop: on("Stop")} end))}')")
+        {hooks: (if ($state == "1" or $split == "split") then {UserPromptSubmit: on("UserPromptSubmit")} else {} end
+                 + (if $state == "1" then {Stop: on("Stop"), Notification: on("Notification")}
+                    elif $lint != "0" or $split == "split" then {Stop: on("Stop")} else {} end))}')")
 fi
 # Trailing positional: initial user message in REPL mode, print-prompt in -p mode.
 ARGS+=("$INITIAL_PROMPT")
