@@ -59,7 +59,9 @@ EXIT CODES
        not seen yet) — nothing cleaned up; re-running would double-provision.
        Check `docker ps` / `tmux capture-pane`.
     Caps and admission run before the brief is written, so 2/3/5 leave no
-    brief behind (#464). The worktree is kept on refusal; a retry reuses it.
+    brief behind (#464). A worktree this call created is removed again on a
+    cap refusal (exit 3, #794), so the issue stays visible to idle_capacity; a
+    pre-existing worktree is kept and a retry reuses it.
 
 EXIT 5 vs 7: 5 = a worker for this issue is already live (never retry; use
 requeue.sh). 7 = timed out waiting for the per-issue dispatch lock, nothing
@@ -98,6 +100,7 @@ EVENTS  (<project>/.swarm/events.log)
                                  salvaged to .swarm/salvaged/iss-N/
     provision.stale_container    state=cleared|window_alive|removal_timeout
     provision.stale_branch       fix/issue-N has unique commits, no worktree
+    worktree.discarded           fresh worktree removed after a cap refusal (#794)
     cap.refused                  reason=max_workers|max_tmux_windows|dispatch_paused|
                                  host_max_workers|host_load|host_mem|spawn_stagger
 EOF
@@ -268,6 +271,21 @@ drop_pending_marker() {
     rm -f -- "$HOST_STATE_DIR/pending-$1"
 }
 
+# issue #794: set to 1 only by the branches below that create the worktree in
+# this very call. A cap refusal then removes it again; an empty worktree would
+# hide the issue from coordinator-watch.sh idle_capacity (which skips issues
+# that already have a worktree), so the coordinator is never woken to retry.
+WT_CREATED_NOW=0
+discard_fresh_worktree() {
+    [ "$WT_CREATED_NOW" = "1" ] || return 0
+    git worktree remove --force "$WT" >/dev/null 2>&1 || rm -rf -- "$WT"
+    git worktree prune >/dev/null 2>&1 || true
+    git branch -D "$BRANCH" >/dev/null 2>&1 || true
+    WT_CREATED_NOW=0
+    echo "       Removed the empty worktree this call created ($WT); the retry recreates it." >&2
+    log_event worktree.discarded "issue=$ISSUE reason=cap_refused"
+}
+
 # refuse_cap <reason> <message> <hint> [k=v ...]  -> exit 3
 refuse_cap() {
     local reason="$1" msg="$2" hint="$3"; shift 3
@@ -277,6 +295,7 @@ refuse_cap() {
     # backoff on it (short waits like spawn_stagger must not be backed off).
     echo "cap.refused reason=$reason" >&2
     log_event cap.refused "issue=$ISSUE reason=$reason $*"
+    discard_fresh_worktree
     exit 3
 }
 
@@ -620,6 +639,7 @@ elif git show-ref --verify --quiet "refs/heads/$BRANCH"; then
         # Nothing unique, so fast-forwarding to the fresh base is lossless.
         git branch -f "$BRANCH" "$DEFAULT_REMOTE_REF"
         git worktree add "$WT" "$BRANCH"
+        WT_CREATED_NOW=1
         echo "[1/4] worktree created (reused stale branch $BRANCH — no unique commits vs $DEFAULT_REMOTE_REF, fast-forwarded)"
     else
         echo "ERROR: branch '$BRANCH' already exists with ${unique_commits:-an unknown number of} commit(s) not on $DEFAULT_REMOTE_REF," >&2
@@ -633,6 +653,7 @@ elif git show-ref --verify --quiet "refs/heads/$BRANCH"; then
     fi
 else
     git worktree add "$WT" -b "$BRANCH" "$DEFAULT_REMOTE_REF"
+    WT_CREATED_NOW=1
     echo "[1/4] worktree created (base: $DEFAULT_REMOTE_REF @ $(git rev-parse --short "$DEFAULT_REMOTE_REF"))"
 fi
 
@@ -763,6 +784,7 @@ if [ "$WINDOW_EXISTS" -eq 0 ]; then
     session_cap_check
     host_admission_check
     check_stale_container "$ISSUE" "$CONTAINER"
+    WT_CREATED_NOW=0
 fi
 
 # 3. Brief, written atomically (mktemp + rename in the same dir). TASK_ID
