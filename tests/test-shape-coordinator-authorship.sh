@@ -924,6 +924,20 @@ if OUT=$(GH_CHECKS_RC=0 "$MERGE" 501 --auto-low 2>&1); then RC=0; else RC=$?; fi
 [ "$RC" -ne 0 ] && echo "$OUT" | grep -q "unparseable" || red "unparseable latest marker must fail closed (rc=$RC, output: $OUT)"
 green "latest marker always wins; unparseable fails closed"
 
+heading "Test M20: a later trusted comment that quotes a marker in prose does not change Gate 10 (#833)"
+set_reviews deadbeef '<!-- SWARM_SELF_REVIEW: APPROVE actor=coordinator head=deadbeef -->' \
+    'Note: the old marker SWARM_SELF_REVIEW: BLOCK was superseded; see SWARM_SELF_REVIEW: APPROVE actor=coordinator head=deadbeef excluded=4 above'
+run_medium
+echo "$OUT" | grep -q "Gate 10" && red "prose quoting a marker must not hit Gate 10 (rc=$RC, output: $OUT)"
+set_reviews deadbeef '<!-- SWARM_SELF_REVIEW: APPROVE actor=worker head=deadbeef -->' \
+    'quoting SWARM_SELF_REVIEW: APPROVE actor=worker head=unknown excluded=1 in a note'
+git -C "$CLONE" ls-remote --exit-code --heads origin fix/issue-501 >/dev/null 2>&1 || { git -C "$CLONE" checkout -q -B fix/issue-501 master; git -C "$CLONE" push -q origin fix/issue-501; }
+: > "$GH_LOG"
+if OUT=$(GH_CHECKS_RC=0 "$MERGE" 501 --auto-low 2>&1); then RC=0; else RC=$?; fi
+echo "$OUT" | grep -q "Gate 10" && red "--auto-low: quoted marker must not hit Gate 10 (rc=$RC, output: $OUT)"
+[ "$RC" -eq 0 ] || red "--auto-low with a clean marker plus a quoted one should merge (rc=$RC, output: $OUT)"
+green "Gate 10 reads only '<!-- ' markers"
+
 heading "All coordinator-authorship shape tests passed"
 green "Gates 0/1/2/3/4/5 refusal/pass/fail-closed, no-CI-configured pass-with-warning, --auto-low scoping vs plain merge, override-flag rejection"
 echo ""
