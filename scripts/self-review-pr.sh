@@ -57,6 +57,19 @@
 #             Refuses (exit 1) unless the actor is coordinator/operator, the
 #             issue exists, and that review is APPROVE_WITH_CAVEATS on the
 #             current head. Exit 0 once posted.
+#   SELF_REVIEW_MAX_FILE_BYTES  (default 200000) a file whose diff section is
+#             larger than this is left out of the review prompt (issue #789:
+#             a 2.8 MB CSV pushed a PR past the model's context limit).
+#             0 disables the size threshold.
+#   SELF_REVIEW_EXCLUDE  space- or comma-separated globs (e.g. "data/*.csv
+#             *.lock"); matching files are always left out. `*` matches `/`.
+#             A bare name like "*.csv" matches in any directory.
+#   SELF_REVIEW_MAX_PROMPT_BYTES  (default 3000000) if the prompt is still
+#             larger after exclusion, exit 1 with the next step instead of
+#             sending it to a model that will refuse it.
+#             Every excluded file is named (path, bytes, lines) in the
+#             review prompt and in the printed/posted verdict. Nothing is
+#             truncated: a file is either in the prompt whole or listed.
 #   SELF_REVIEW_CMD selects claude or codex; defaults to WORKER_CMD when
 #             it is codex, otherwise claude for compatibility.
 #   SELF_REVIEW_UNSET_API_KEY=1  run `claude -p` under `env -u
@@ -99,7 +112,7 @@ while [ $# -gt 0 ]; do
         --caveats-nonblocking) shift; NONBLOCKING_FOLLOWUP="${1:-}"
             [[ "$NONBLOCKING_FOLLOWUP" =~ ^[0-9]+$ ]] \
                 || { echo "ERROR: --caveats-nonblocking needs a follow-up issue number" >&2; exit 1; } ;;
-        -h|--help) sed -n '2,72p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,85p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         -*) echo "ERROR: unknown flag '$1'" >&2; exit 1 ;;
         *)  [ -z "$PR" ] || { echo "ERROR: multiple PR numbers" >&2; exit 1; }
             PR="$1" ;;
@@ -189,6 +202,51 @@ if [ "$POST" = "1" ] && [ "$RERUN" = "0" ] && [ -n "$HEAD_SHA" ]; then
 fi
 
 DIFF="$(gh pr diff "$PR")" || { echo "ERROR: gh pr diff $PR failed" >&2; exit 1; }
+
+# --- leave oversized / excluded files out of the diff (issue #789) ----------
+# Split the diff per file; a file over SELF_REVIEW_MAX_FILE_BYTES or matching
+# SELF_REVIEW_EXCLUDE is replaced by a one-line stub, and listed (path, bytes,
+# lines) in EXCLUDED_NOTE, which goes into the prompt and the posted verdict.
+MAX_FILE_BYTES="${SELF_REVIEW_MAX_FILE_BYTES:-200000}"
+MAX_PROMPT_BYTES="${SELF_REVIEW_MAX_PROMPT_BYTES:-3000000}"
+EXCLUDE_GLOBS="${SELF_REVIEW_EXCLUDE:-}"
+EXCLUDED_NOTE=""
+filter_diff() {
+    local secdir sec hdr path bytes lines glob hit out="" list=""
+    secdir="$(mktemp -d -t swarm-review-split-XXXXXX)"
+    printf '%s\n' "$DIFF" | awk -v d="$secdir" '
+        /^diff --git / { n++ }
+        { f = sprintf("%s/sec.%06d", d, n); print > f }'
+    for sec in "$secdir"/sec.*; do
+        [ -e "$sec" ] || continue
+        hdr="$(head -n1 "$sec")"
+        bytes="$(wc -c < "$sec")"; lines="$(wc -l < "$sec")"
+        path="${hdr##* b/}"
+        hit=""
+        if [[ "$hdr" == "diff --git "* ]]; then
+            [ "$MAX_FILE_BYTES" -gt 0 ] && [ "$bytes" -gt "$MAX_FILE_BYTES" ] && hit="over ${MAX_FILE_BYTES} bytes"
+            for glob in ${EXCLUDE_GLOBS//,/ }; do
+                # shellcheck disable=SC2053
+                if [[ "$path" == $glob || "$path" == */$glob ]]; then hit="matches SELF_REVIEW_EXCLUDE '$glob'"; break; fi
+            done
+        fi
+        if [ -n "$hit" ]; then
+            list+="- ${path} — ${bytes} bytes, ${lines} diff lines (${hit})"$'\n'
+            out+="${hdr}"$'\n'"[FILE EXCLUDED FROM REVIEW: ${bytes} bytes, ${lines} diff lines — not shown]"$'\n'
+        else
+            out+="$(cat "$sec")"$'\n'
+        fi
+    done
+    rm -rf "$secdir"
+    DIFF="${out%$'\n'}"
+    EXCLUDED_NOTE="$list"
+}
+filter_diff
+if [ -n "$EXCLUDED_NOTE" ]; then
+    EXCLUDED_NOTE="Files left out of this review (too large or excluded by project setting) — their content was NOT reviewed:
+${EXCLUDED_NOTE}"
+    echo "self-review: ${EXCLUDED_NOTE}" >&2
+fi
 BODY="$(gh pr view "$PR" --json title,body --jq '"\(.title)\n\n\(.body)"')" \
     || { echo "ERROR: gh pr view $PR failed" >&2; exit 1; }
 
@@ -196,8 +254,16 @@ BODY="$(gh pr view "$PR" --json title,body --jq '"\(.title)\n\n\(.body)"')" \
 MODEL_OPTS=()
 [ -n "$MODEL" ] && MODEL_OPTS=(--model "$MODEL")
 review_payload() {
-    printf '%s\n\n--- PR ---\n%s\n\n--- DIFF ---\n%s\n' "$(cat "$SKILL")" "$BODY" "$DIFF"
+    printf '%s\n\n--- PR ---\n%s\n\n' "$(cat "$SKILL")" "$BODY"
+    [ -z "$EXCLUDED_NOTE" ] || printf -- '--- NOT REVIEWED ---\n%s\nState in your review that these files were not examined.\n\n' "$EXCLUDED_NOTE"
+    printf -- '--- DIFF ---\n%s\n' "$DIFF"
 }
+PAYLOAD_BYTES="$(review_payload | wc -c)"
+if [ "$PAYLOAD_BYTES" -gt "$MAX_PROMPT_BYTES" ]; then
+    echo "ERROR: review prompt is ${PAYLOAD_BYTES} bytes, over SELF_REVIEW_MAX_PROMPT_BYTES=${MAX_PROMPT_BYTES}, even after excluding large files." >&2
+    echo "       Next step: split the PR, or add the bulky paths to SELF_REVIEW_EXCLUDE (e.g. SELF_REVIEW_EXCLUDE='data/*'), or lower SELF_REVIEW_MAX_FILE_BYTES (now ${MAX_FILE_BYTES})." >&2
+    exit 1
+fi
 if [ "$REVIEW_CMD" = "codex" ]; then
     # Capture only the final answer: progress/tool output must not be parsed
     # as a verdict. A review has no reason to write to the project checkout.
@@ -269,6 +335,7 @@ esac
 echo "PR #$PR self-review verdict: $VERDICT"
 echo "---"
 printf '%s\n' "$REVIEW"
+[ -z "$EXCLUDED_NOTE" ] || printf '\n%s' "$EXCLUDED_NOTE"
 echo "---"
 
 # --- optionally post as a PR comment ---------------------------------------
@@ -288,8 +355,8 @@ if [ "$POST" = "1" ]; then
         # "worker"; the one exception is every marker posted before this
         # change, which pr-ready.sh's own query still treats as a worker
         # round for the same reason.
-        COMMENT="$(printf '<!-- SWARM_SELF_REVIEW: %s actor=%s head=%s -->\n## Fresh-context self-review\n\n%s\n\n<sub>Adversarial review by a fresh %s session against prompts/skill-self-review.md — no shared context with the PR author. Machinery: scripts/self-review-pr.sh (docs/ringer-adoptions.md #2).</sub>\n' \
-            "$VERDICT" "$ACTOR" "${HEAD_SHA:-unknown}" "$REVIEW" "$REVIEW_CMD")"
+        COMMENT="$(printf '<!-- SWARM_SELF_REVIEW: %s actor=%s head=%s -->\n## Fresh-context self-review\n\n%s\n%s\n\n<sub>Adversarial review by a fresh %s session against prompts/skill-self-review.md — no shared context with the PR author. Machinery: scripts/self-review-pr.sh (docs/ringer-adoptions.md #2).</sub>\n' \
+            "$VERDICT" "$ACTOR" "${HEAD_SHA:-unknown}" "$REVIEW" "${EXCLUDED_NOTE:+$'\n'$EXCLUDED_NOTE}" "$REVIEW_CMD")"
         gh pr comment "$PR" --body "$COMMENT" \
             || { echo "ERROR: gh pr comment failed" >&2; exit 1; }
         echo "post: verdict comment added to PR #$PR"
