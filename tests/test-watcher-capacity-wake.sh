@@ -282,6 +282,14 @@ out="$(WATCH_IDLE_CAPACITY_WAKE_SECS=abc "$WATCH" "$PROJECT_DIR" 2>&1)" && rc=0 
 case "$out" in *"WATCH_IDLE_CAPACITY_WAKE_SECS must be a non-negative integer"*) got="$rc" ;; *) got="rc=$rc $out" ;; esac
 check "non-integer WATCH_IDLE_CAPACITY_WAKE_SECS is refused" "1" "$got"
 
+# issue #823: a zero tick (0, 0.0, 0.00) would spin the timer loop; each falls back to the default with a log line.
+# A later bad knob makes the watcher exit right after validation, so no real watch starts.
+for z in 0 0.0 0.00; do
+    out="$(WATCH_TIMER_TICK_SECS=$z WATCH_IDLE_CAPACITY_WAKE_SECS=abc "$WATCH" "$PROJECT_DIR" 2>&1)" || true
+    case "$out" in *"WATCH_TIMER_TICK_SECS must be a positive number (got: $z); using default 2"*) got=warned ;; *) got="$out" ;; esac
+    check "WATCH_TIMER_TICK_SECS=$z falls back to the default with a log line" "warned" "$got"
+done
+
 green "all capacity-wake tests passed"
 
 # ── repeat suppression (#718) ────────────────────────────────────────────────
