@@ -83,3 +83,13 @@ green "--days clips each stretch to the window"
 
 "$REPORT" --days x "$TEST_DIR/alpha" >/dev/null 2>&1 && red "--days x should fail"
 green "--days rejects non-numbers"
+
+# Without gawk the report must fail loudly and name gawk (not die on asort).
+NOGAWK_BIN="$(mktemp -d)"
+for t in bash env dirname grep sort date mktemp rm basename sed find cat; do
+    p="$(command -v "$t" || true)"; [ -n "$p" ] && ln -s "$p" "$NOGAWK_BIN/$t"
+done
+err="$(PATH="$NOGAWK_BIN" "$REPORT" "$TEST_DIR/alpha" 2>&1 >/dev/null)" && red "missing gawk should exit non-zero"
+rm -rf "$NOGAWK_BIN"
+grep -q "gawk" <<< "$err" || red "missing-gawk message should name gawk: $err"
+green "missing gawk fails with a message naming gawk"

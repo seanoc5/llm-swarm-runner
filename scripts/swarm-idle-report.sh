@@ -52,6 +52,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 [[ "$DAYS" =~ ^[0-9]+$ ]] || { echo "swarm-idle-report.sh: --days must be a whole number" >&2; exit 2; }
+command -v gawk >/dev/null 2>&1 || { echo "swarm-idle-report.sh: needs gawk (asort, mktime); install it with: sudo apt-get install gawk" >&2; exit 1; }
 
 if [ ${#DIRS[@]} -eq 0 ]; then
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -87,7 +88,7 @@ done | sort -s -k1,1 > "$STREAM"
 # Two passes over the stream: the first learns when each worker actually
 # ended (so a worker whose reap was never logged does not count as occupying
 # a slot at later refusals); the second does the accounting.
-TZ=UTC awk -v now="$NOW" -v since="$SINCE" -v running="$RUNNING" '
+TZ=UTC gawk -v now="$NOW" -v since="$SINCE" -v running="$RUNNING" '
 function epoch(iso,   s) {
     s = iso; gsub(/[-T:Z]/, " ", s)
     return mktime(s)

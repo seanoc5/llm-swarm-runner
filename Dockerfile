@@ -59,12 +59,18 @@ RUN apt-get update \
 
 # Tools not covered by buildpack-deps or ubuntu-standard
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    jq ripgrep fd-find unzip zip sudo \
+    jq ripgrep fd-find unzip zip sudo gawk \
     openssh-client \
     less vim tree htop tmux \
     iproute2 net-tools \
     shellcheck \
     && rm -rf /var/lib/apt/lists/*
+
+# Workers must run gawk-only scripts (asort, gensub, FPAT) like the hosts do.
+# The package normally makes awk -> gawk via alternatives; assert it, and set
+# it explicitly if mawk won.
+RUN update-alternatives --set awk /usr/bin/gawk \
+    && awk --version | head -1 | grep -q "GNU Awk"
 
 # PostgreSQL client from PGDG (see PG_CLIENT_MAJOR above). pg_wrapper makes
 # psql/pg_dump/pg_restore resolve to this major.
