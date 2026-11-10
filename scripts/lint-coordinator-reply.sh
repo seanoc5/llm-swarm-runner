@@ -33,7 +33,7 @@ PROJECT="${SWARM_PROJECT_DIR:-}"; FILE=""
 while [ $# -gt 0 ]; do
     case "$1" in
         -h|--help) sed -n '3,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-        --project) PROJECT="${2:-}"; shift 2 ;;
+        --project) [ $# -ge 2 ] || { echo "--project needs a value" >&2; exit 2; }; PROJECT="$2"; shift 2 ;;
         --project=*) PROJECT="${1#*=}"; shift ;;
         -*) echo "unknown option $1" >&2; exit 2 ;;
         *) [ -z "$FILE" ] || exit 2; FILE="$1"; shift ;;

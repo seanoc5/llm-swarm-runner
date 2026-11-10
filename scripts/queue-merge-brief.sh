@@ -28,7 +28,7 @@
 # Exit 5 or 7 are requeue.sh's (identical brief already pending / lock timeout).
 #
 # Only the coordinator conversation session may call this, and only for a
-# phrase the operator typed in that session (prompts/coordinator-chat.md).
+# phrase the operator typed in that session (prompts/coordinator.md; the split-mode conversation session merges with swarm-merge.sh itself).
 # Test hooks: REQUEUE_SCRIPT, LIST_WORKTREES_SCRIPT.
 set -uo pipefail
 
@@ -41,6 +41,9 @@ refuse() { echo "queue-merge-brief: REFUSED — $*" >&2; exit 2; }
 
 PR="" RATING="" EXPECT="" PROJECT="$PWD"
 while [ $# -gt 0 ]; do
+    case "$1" in
+        --rating|--expect-head|--project) [ $# -ge 2 ] || { echo "queue-merge-brief: $1 needs a value" >&2; usage; } ;;
+    esac
     case "$1" in
         --rating) RATING="${2:-}"; shift 2 ;;
         --rating=*) RATING="${1#*=}"; shift ;;
