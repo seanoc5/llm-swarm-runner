@@ -133,6 +133,8 @@ grep 'watch.bg_violation.*window=coordinator' .swarm/events.log | cut -d' ' -f1 
 
 A tmux restart, or a window-only reap (`kill-finished-workers.sh` without `--with-worktree`, which deliberately keeps the worktree), can leave a worktree with a queued or claimed brief and no `iss-N` listener to drain it. Same triage either way — check `gh pr list --head fix/issue-N`, then re-provision (`provision-worker.sh --wake N` — first move any `processing/` file back to `inbox/`) or archive the file and say why. Use `--wake`, not a plain call: a plain re-provision salvages the queued brief aside and writes a fresh issue brief (issue #578); `--wake` resumes the queued one.
 
+Give each slice of a multi-slice issue its own issue and branch: an earlier slice's merged PR on a shared branch looks like finished work to the reaper (#802).
+
 - **At session start:** `llm-start.sh` prints `WARN: stranded worktree wt-issue-N — ... (inbox=X processing=Y)`.
 - **Mid-session (issue #448):** `coordinator-watch.sh`'s periodic sweep (`WATCH_STRANDED_BRIEF_SWEEP_SECS`, default 60s) delivers it as a `stranded_brief` inbox item, deduped per issue until resolved.
 
