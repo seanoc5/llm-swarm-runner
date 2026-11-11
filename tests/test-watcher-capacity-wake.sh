@@ -425,6 +425,36 @@ check "PR leaving the list clears the key (re-listed sha notes again)" "2" "$(no
 echo '#33 ci-failing: needs a fix push (sha=def67890)' > "$FAKE_SWEEP"
 ready_sweep_pass >/dev/null
 check "new head notes again" "3" "$(notes ci_failing)"
+# issue #869: the unconfirmed line is echoed but never logged as a watch.ready_sweep event (it repeats every sweep)
+reset; CI_FAILING_NOTED=()
+echo '#34 ci-failing-unconfirmed: live head not verifiably red (sha=beef0001)' > "$FAKE_SWEEP"
+out="$(ready_sweep_pass)"
+case "$out" in *"ci-failing-unconfirmed"*"beef0001"*) got=yes ;; *) got=no ;; esac
+check "unconfirmed line is still echoed" "yes" "$got"
+grep -q "watch.ready_sweep" "$EV" && got=logged || got=silent
+check "unconfirmed line logs no watch.ready_sweep event" "silent" "$got"
+echo '#34 ci-failing: needs a fix push (sha=beef0001)' > "$FAKE_SWEEP"
+ready_sweep_pass >/dev/null
+grep -q 'watch.ready_sweep result="#34 ci-failing:' "$EV" && got=logged || got=silent
+check "a real ci-failing line is still logged" "logged" "$got"
+
+# ── issue #869: the real coord_ring_doorbell's exit status (it is stubbed in the retry test below) ──
+doorbell_rc() { local rc=0; coord_ring_doorbell ci_failing "pr=1 sha=abc" >/dev/null 2>&1 || rc=$?; echo "$rc"; }
+LLM_START_OK="$LLM_START"
+printf '#!/bin/sh\nexit 1\n' > "$T/llm-start-fail"; chmod +x "$T/llm-start-fail"
+printf '#!/bin/sh\nexit 3\n' > "$T/llm-start-dirty"; chmod +x "$T/llm-start-dirty"
+reset; LLM_START="$T/llm-start-fail"
+check "failed wake (llm-start exits 1): doorbell returns nonzero" "1" "$(doorbell_rc)"
+reset; LLM_START="$T/llm-start-dirty"
+check "composer-dirty (llm-start exits 3): doorbell returns 0" "0" "$(doorbell_rc)"
+reset; LLM_START="$LLM_START_OK"
+check "successful wake: doorbell returns 0" "0" "$(doorbell_rc)"
+reset; LLM_START="$T/llm-start-fail"; HOLD=pane_busy
+check "held doorbell returns 0 even with a failing llm-start" "0" "$(doorbell_rc)"
+reset; wake_debounced() { return 0; }
+check "debounced doorbell returns 0" "0" "$(doorbell_rc)"
+wake_debounced() { return 1; }
+LLM_START="$LLM_START_OK"; reset
 
 # ── issue #739: a failed ring is retried, then given up after the cap ──
 reset; CI_FAILING_NOTED=(); rm -rf "$CI_FAILING_RING_DIR"
