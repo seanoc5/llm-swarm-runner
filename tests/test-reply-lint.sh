@@ -130,6 +130,17 @@ out="$(COORD_REPLY_LINT=0 stop "$FX/incident-start-load.txt" false)"
 check "COORD_REPLY_LINT=0 disables it" "" "$out"
 out="$(PATH="$T/ghbin:$PATH" stop "$FX/incident-issue-merged.txt" false)"
 check "Stop hook blocks an issue-merged reply and names the fix" "block yes" "$(jq -r .decision <<<"$out") $(case "$(jq -r .reason <<<"$out")" in *"issue-merged"*"fix PR for #N merges"*) echo yes;; *) echo no;; esac)"
+# #880: the hook's cwd is outside the project; the lookup must still run in
+# CLAUDE_PROJECT_DIR. This gh stub only answers when its cwd is the project.
+mkdir -p "$T/ghcwd" "$T/elsewhere"
+cat > "$T/ghcwd/gh" <<'GHEOF'
+#!/usr/bin/env bash
+[ "$PWD" = "$GH_WANT_CWD" ] || exit 1
+case "$2" in */issues/1910) echo false ;; *) exit 1 ;; esac
+GHEOF
+chmod +x "$T/ghcwd/gh"
+out="$(cd "$T/elsewhere" && GH_WANT_CWD="$(cd "$H" && pwd)" PATH="$T/ghcwd:$PATH" stop "$FX/incident-issue-merged.txt" false)"
+check "Stop hook with cwd outside the project still flags '#N merges' for an issue" "block yes" "$(jq -r .decision <<<"$out") $(case "$(jq -r .reason <<<"$out")" in *"issue-merged"*) echo yes;; *) echo no;; esac)"
 # resident coordinator, default COORD_HOOK_STATE=0: lint blocks, nothing else happens
 rm -f "$H/.swarm/coordinator-state" "$H/.swarm/coord-hook-rang"; echo 1 > "$H/.swarm/coord-hook-rang"
 echo "worker finished" > "$H/.swarm/coord-inbox/b.md"
