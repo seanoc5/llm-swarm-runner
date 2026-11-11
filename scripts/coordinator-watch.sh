@@ -7419,18 +7419,39 @@ compact_last_pane_line() {
 
 # compact_composer_marker_line <tmux-target>
 #
-# (issue #874) Echoes the text after the LAST prompt-marker line (one that
-# starts with the composer's ❯ or > marker) of <target>'s pane, ANSI-stripped,
-# dim text dropped, trimmed. Unlike compact_last_pane_line this survives an
-# open slash-command autocomplete menu: its rows render BELOW the composer and
-# so become the "last line", but they carry no prompt marker and are skipped.
+# (issue #874) Echoes the text of the composer's prompt-marker line (one that
+# starts with ❯ or >) of <target>'s pane, ANSI-stripped, dim text dropped,
+# trimmed. Unlike compact_last_pane_line this survives an open slash-command
+# autocomplete menu.
+#
+# Which marker line is "the composer" is decided by position, NOT by what the
+# text looks like. Live capture (Claude Code, 2026-11-11, `/comp` typed): the
+# menu's HIGHLIGHTED row is itself drawn `❯ /compact  <description>`, with the
+# description in plain grey (ESC[38;5;..m, not ESC[2m), so neither "has a ❯"
+# nor "dim text stripped" tells it from the input line. The input line is the
+# one inside the box: directly below a horizontal-rule line (─────, or ╭──╮ in
+# the boxed layout) with a closing rule somewhere after it. A menu row below
+# the box follows the bottom rule but never has a closing rule after it, and a
+# menu row above the box is not directly under a rule. When several boxes are
+# visible the last one wins; with no complete box on screen (unbordered
+# layouts, or the test fixtures) it falls back to the last marker line.
 compact_composer_marker_line() {
     local target="$1" content
     content="$(tmux capture-pane -e -t "$target" -p 2>/dev/null)" || { echo ""; return 1; }
     printf '%s\n' "$content" \
         | LC_ALL=C sed 's/\x1b\[2m[^\x1b]*//g' \
         | LC_ALL=C sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g; s/\xc2\xa0/ /g' \
-        | LC_ALL=C grep -E '^[[:space:]]*(│)?[[:space:]]*(❯|>)' \
+        | LC_ALL=C awk '
+            /^[ \t]*(╭|╰)?──────/ { if (pend != "") { boxed = pend; pend = "" } prevrule = 1; next }
+            /^[ \t]*(│)?[ \t]*(❯|>)/ {
+                last = $0
+                if (prevrule && pend == "") pend = $0
+                prevrule = 0
+                next
+            }
+            /^[ \t]*$/ { next }
+            { prevrule = 0 }
+            END { if (boxed != "") print boxed; else if (last != "") print last }' \
         | sed -e 's/^[[:space:]]*\(│\)\{0,1\}[[:space:]]*\(❯\|>\)[[:space:]]*//' -e 's/[[:space:]]*│[[:space:]]*$//' -e 's/[[:space:]]*$//' | tail -1 || true
 }
 

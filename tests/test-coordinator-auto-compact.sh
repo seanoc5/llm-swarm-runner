@@ -975,6 +975,58 @@ FAKE
     tmux kill-session -t "$S14E" 2>/dev/null || true
 done
 
+heading "Test 14f: compact_retract_queued — operator draft '/c' is NOT cleared when a HIGHLIGHTED menu row reads '❯ /compact' (issue #874, PR #885 review)"
+# Live capture of the real CLI (2026-11-11, '/comp' typed): the highlighted
+# slash-menu row is itself drawn "❯ /compact  <description>" and the menu sits
+# ABOVE the input box; the description is plain grey, not ESC[2m dim. A
+# hypothetical layout draws the menu BELOW the box with a dim description,
+# which after dim-stripping leaves a bare "❯ /compact" that a tail -1 lookup
+# would take for the input line. Neither may make "/c" look like a stranded
+# "/compact": the lookup must use the line inside the box.
+RULE="$(printf '─%.0s' $(seq 1 60))"
+for layout in menu-above-plain menu-below-dim; do
+    {
+        echo '#!/usr/bin/env bash'
+        echo 'echo "Compacting conversation… (12s)"'
+        if [ "$layout" = menu-above-plain ]; then
+            echo "printf '\\033[38;5;153m❯ /\\033[1mcomp\\033[0m\\033[38;5;153mact      Free up context by summarizing\\033[39m\\n'"
+            echo "printf '\\033[38;5;246m  /autocompact      Set how full the context gets\\033[39m\\n'"
+            echo "echo '$RULE'"
+            echo "printf '❯\\xc2\\xa0/c\\n'"
+            echo "echo '$RULE'"
+        else
+            echo "echo '$RULE'"
+            echo "printf '❯\\xc2\\xa0/c\\n'"
+            echo "echo '$RULE'"
+            echo "printf '❯ /compact  \\033[2mFree up context by summarizing\\033[22m\\n'"
+            echo "printf '  /autocompact  \\033[2mSet how full the context gets\\033[22m\\n'"
+        fi
+        echo 'sleep 60'
+    } > "$TEST_DIR/hl-$layout.sh"
+    S14F="${SESSION_NAME}-retract8$layout"
+    tmux new-session -d -s "$S14F" -n coordinator 2>/dev/null
+    tmux send-keys -t "$S14F:coordinator" "bash $TEST_DIR/hl-$layout.sh" Enter
+    check_eventually "hl-$layout: fixture rendered" "ready" \
+        "tmux capture-pane -t '$S14F:coordinator' -p 2>/dev/null | grep -q 'autocompact' && echo ready || echo wait"
+    got="$(compact_composer_marker_line "$S14F:coordinator")"
+    check "hl-$layout: marker lookup returns the box line, not the menu row" "/c" "$got"
+    : > "$TMUX_CALL_LOG"
+    tmux() {
+        printf '%s\n' "$*" >> "$TMUX_CALL_LOG"
+        command tmux "$@"
+    }
+    : > "$EVENTS_LOG"
+    COMPACT_RETRACT_BACKSPACES=12
+    compact_retract_queued "$S14F:coordinator" coord.compact "trigger=wake" "$AUTO_COMPACT_BUSY_PATTERN" || true
+    unset -f tmux
+    COMPACT_RETRACT_BACKSPACES=3
+    if grep -q "send-keys -t $S14F:coordinator \(BSpace\|Escape\)" "$TMUX_CALL_LOG"; then got=sent; else got=none; fi
+    check "hl-$layout: nothing cleared (no Backspace/Escape into the draft)" "none" "$got"
+    if grep -q 'coord.compact.retract_skip.*reason=busy' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+    check "hl-$layout: retract_skip reason=busy logged" "logged" "$got"
+    tmux kill-session -t "$S14F" 2>/dev/null || true
+done
+
 heading "Test 15: maybe_auto_compact — Enter eaten by the autocomplete menu is retried once (issue #290)"
 # Models the ROOT CAUSE bug this issue fixes: the first Enter after pasting
 # "/compact" is consumed by the CLI's slash-command autocomplete menu --
