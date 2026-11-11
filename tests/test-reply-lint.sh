@@ -62,6 +62,8 @@ printf '```\nuntil #1910 merges\n```\n' > "$T/m3"
 printf '%s\n' "the fix PR for #1910 merges" "PR #1913 merges and #1910 closes" "Merge conflict on #1910 is resolved." "#1910 merge conflict" "Merged the PR for #1910." > "$T/m4"
 check "suggested wordings (fix PR for #N merges, #N closes, merge conflict) pass for an issue #N" "" "$(gl < "$T/m4" | paste -sd, -)"
 check "a fenced line is skipped" "" "$(gl < "$T/m3" | paste -sd, -)"
+printf '~~~\nuntil #1910 merges\n~~~\n' > "$T/m5"
+check "a ~~~ fenced line is skipped too" "" "$(gl < "$T/m5" | paste -sd, -)"
 check "gh failing: never flags" "" "$(GH_FAIL=1 gl < "$FX/incident-issue-merged.txt" | paste -sd, -)"
 set +e; gl < "$FX/incident-issue-merged.txt" >/dev/null; ec=$?; set -e
 check "issue-merged exits 3" "3" "$ec"
