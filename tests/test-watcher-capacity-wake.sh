@@ -409,4 +409,34 @@ grep -q "held pane_busy" "$EV" && got=yes || got=no
 check "held coordinator: ring is deferred and marked pending, not pasted" "yes" "$got"
 check "held coordinator: llm-start not called" "0" "$(rings)"
 
+# ── issue #739: a failed CI read between two red sweeps keeps the dedup key ──
+reset; CI_FAILING_NOTED=()
+echo '#33 ci-failing: needs a fix push (sha=abc12345)' > "$FAKE_SWEEP"
+ready_sweep_pass >/dev/null
+echo '#33 ci-failing-unconfirmed: live head not verifiably red (sha=abc12345)' > "$FAKE_SWEEP"
+ready_sweep_pass >/dev/null
+echo '#33 ci-failing: needs a fix push (sha=abc12345)' > "$FAKE_SWEEP"
+ready_sweep_pass >/dev/null
+check "failed read between two red sweeps: still ONE note for the sha" "1" "$(notes ci_failing)"
+: > "$FAKE_SWEEP"; ready_sweep_pass >/dev/null
+echo '#33 ci-failing: needs a fix push (sha=abc12345)' > "$FAKE_SWEEP"
+ready_sweep_pass >/dev/null
+check "PR leaving the list clears the key (re-listed sha notes again)" "2" "$(notes ci_failing)"
+echo '#33 ci-failing: needs a fix push (sha=def67890)' > "$FAKE_SWEEP"
+ready_sweep_pass >/dev/null
+check "new head notes again" "3" "$(notes ci_failing)"
+
+# ── issue #739: a failed ring is retried, then given up after the cap ──
+reset; CI_FAILING_NOTED=(); rm -rf "$CI_FAILING_RING_DIR"
+mkdir -p "$CI_FAILING_RING_DIR"; : > "$CI_FAILING_RING_DIR/41-feedbeef"
+coord_ring_doorbell() { return 1; }
+ci_failing_ring_pass
+[ -e "$CI_FAILING_RING_DIR/41-feedbeef" ] && got=yes || got=no
+check "failed ring re-queues the note for the next pass" "yes" "$got"
+ci_failing_ring_pass; ci_failing_ring_pass
+[ -e "$CI_FAILING_RING_DIR/41-feedbeef" ] && got=yes || got=no
+check "after CI_FAILING_RING_MAX_TRIES (3) failures the note is dropped" "no" "$got"
+grep -q "coord.wake.giveup trigger=ci_failing note=41-feedbeef" "$EV" && got=yes || got=no
+check "giveup is logged" "yes" "$got"
+
 green "all capacity-wake checks passed"

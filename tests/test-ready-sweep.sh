@@ -148,13 +148,18 @@ cat > "$FIXTURE" <<'JSON'
  {"number": 55, "headRefOid": "feed5678", "body": "<!-- SWARM_DRAFT_REASON: ci-failing sha=0ddba11 -->\nbody"}]
 JSON
 run_sweep || red "expected exit 0: $(cat "$TEST_DIR/out.log")"
-[ "$(cat "$TEST_DIR/out.log")" = "#51 ci-failing: needs a fix push (sha=feed5678)" ] || red "expected only #51 red with the LIVE sha: $(cat "$TEST_DIR/out.log")"
+want='#51 ci-failing: needs a fix push (sha=feed5678)
+#52 ci-failing-unconfirmed: live head not verifiably red (sha=feed5678)
+#53 ci-failing-unconfirmed: live head not verifiably red (sha=feed5678)
+#54 ci-failing-unconfirmed: live head not verifiably red (sha=feed5678)
+#55 ci-failing-unconfirmed: live head not verifiably red (sha=feed5678)'
+[ "$(cat "$TEST_DIR/out.log")" = "$want" ] || red "expected #51 red with the LIVE sha, others unconfirmed: $(cat "$TEST_DIR/out.log")"
 [ ! -s "$READY_LOG" ] || red "pr-ready must never run on a moved head: $(cat "$READY_LOG")"
 [ "$(sort "$TEST_DIR/checks.log" | tr '\n' ' ')" = "51 52 53 54 55 " ] || red "expected a checks read per moved PR: $(tr '\n' ' ' < "$TEST_DIR/checks.log")"
 run_sweep --dry-run || red "expected exit 0"
 grep -qx '#51 ci-failing: needs a fix push (sha=feed5678)' "$TEST_DIR/out.log" || red "dry run lost the moved-head red note"
 [ ! -s "$READY_LOG" ] || red "dry run must not call pr-ready"
-green "moved head: red notes with live sha; pending, green, unreadable, unexpected stay silent; no pr-ready"
+green "moved head: red notes with live sha; pending, green, unreadable, unexpected report ci-failing-unconfirmed (no note); no pr-ready"
 
 heading "Test 9 (issue #757): banner-less green drafts are reported; held, banner, red, pending and empty-CI drafts are not"
 G='[{"name":"unit","status":"COMPLETED","conclusion":"SUCCESS"},{"name":"lint","status":"COMPLETED","conclusion":"SKIPPED"}]'
