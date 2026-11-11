@@ -129,10 +129,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # 2026-11-10 (PR #852 fix round): coordinator 32500 -> 32800, worker-bare 11800 -> 12200.
 # The operator-words check (queue-merge-brief.sh --check-brief) is a clause in each
 # worker table; the split 🔴 report line (live window vs on hold) is one more line.
+# 2026-11-11: coordinator 32800 -> 33400. Issue #642 adds one bullet (~480 bytes,
+# also in coordinator-shared.md, 5600 -> 5800): briefs restate prior-session
+# specifics inline.
 WORKER_MAX="${WORKER_MD_MAX_BYTES:-24800}"
-COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-32800}"
+COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-33400}"
 BARE_MAX="${WORKER_BARE_MD_MAX_BYTES:-12200}"   # issue #510 trial prompt; ~7.5KB is script-parsed contract
-SHARED_MAX="${COORD_SHARED_MD_MAX_BYTES:-5600}"   # issue #767 split prompts
+SHARED_MAX="${COORD_SHARED_MD_MAX_BYTES:-5800}"   # issue #767 split prompts
 WORK_MAX="${COORD_WORK_MD_MAX_BYTES:-24400}"
 CHAT_MAX="${COORD_CHAT_MD_MAX_BYTES:-5500}"
 
