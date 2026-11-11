@@ -548,6 +548,24 @@ if [ -n "${SANDBOX_DEP_CACHE:-}" ]; then
     unset _dep_cache_gradle
 fi
 
+# Gradle wrapper distributions (#796). The module cache above does not hold
+# the Gradle distribution itself (~130 MB zip fetched by ./gradlew from
+# services.gradle.org), so every fresh container re-downloaded it, and an
+# outage there (504 for over an hour on 2026-11-08) left workers unable to
+# compile. A host-seeded copy of ~/.gradle/wrapper/dists lives at
+# $SANDBOX_DEP_CACHE/gradle-dists, mounted :ro and exported as
+# GRADLE_DISTS_SEED; entrypoint.sh copies it into the container's writable
+# ~/.gradle/wrapper/dists at start (the wrapper needs a writable .lck file,
+# so it cannot read the :ro mount in place). Optional: no gradle-dists dir
+# means no mount and no env var, silently. Seed with:
+#   rsync -a --exclude='*.lck' ~/.gradle/wrapper/dists/ "$SANDBOX_DEP_CACHE/gradle-dists/"
+if [ -n "${SANDBOX_DEP_CACHE:-}" ] && [ -d "$SANDBOX_DEP_CACHE/gradle-dists" ]; then
+    _dep_cache_dists="$SANDBOX_DEP_CACHE/gradle-dists"
+    MOUNTS+=(-v "$_dep_cache_dists:$_dep_cache_dists:ro")
+    DEP_CACHE_OPTS+=(-e "GRADLE_DISTS_SEED=$_dep_cache_dists")
+    unset _dep_cache_dists
+fi
+
 # Shared uv package cache (#434), same SANDBOX_DEP_CACHE knob as the Gradle
 # cache above but a DIFFERENT mount shape: uv has no read-only shared-cache
 # mode. Verified directly — pointing UV_CACHE_DIR at a :ro mount makes even
