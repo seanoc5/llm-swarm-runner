@@ -63,9 +63,9 @@ docker container ls -q > /dev/null
 echo "home=$HOME" >> "$PWD/probe.txt"
 echo "ghfile=$(cat "$HOME/.config/gh/hosts.yml" 2>/dev/null | wc -c)" >> "$PWD/probe.txt"
 echo "sshfile=$(cat "$HOME/.ssh/id_ed25519" 2>/dev/null | wc -c)" >> "$PWD/probe.txt"
-echo "canaries_under_home=$(grep -rl "canary-" "$HOME" 2>/dev/null | sed "s#^$HOME/##" | sort | tr "\n" " ")" >> "$PWD/probe.txt"
+echo "canaries_under_home=$(grep -rl "canary-" "$HOME" 2>/dev/null | sed "s#^$HOME/##" | LC_ALL=C sort | tr "\n" " ")" >> "$PWD/probe.txt"
 echo "login=$(jq -r "(.claudeAiOauth.accessToken) + \":\" + (if has(\"mcpOAuth\") then \"present\" else \"none\" end)" "$HOME/.claude/.credentials.json" 2>/dev/null || echo missing)" >> "$PWD/probe.txt"
-echo "home_files=$(cd "$HOME" && find . -type f | sort | tr "\n" " ")" >> "$PWD/probe.txt"
+echo "home_files=$(cd "$HOME" && find . -type f | LC_ALL=C sort | tr "\n" " ")" >> "$PWD/probe.txt"
 echo "outcome=$(jq -r .outcome /mnt/none 2>/dev/null; ls .swarm/coord-inbox | wc -l)" >> "$PWD/probe.txt"
 '
 "$REPLAY" --out "$T/out" --fixtures "$T/fix" --inbox-src "$T/src" --files 20261231T000000Z-none.md --cmd "$CMD" >/dev/null 2>&1 \

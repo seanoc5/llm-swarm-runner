@@ -13,7 +13,9 @@ concurrency:
 jobs:
   shell-lint:
     name: bash -n + shellcheck
-    runs-on: ubuntu-latest
+    # CI_RUNNER=self-hosted sends this to the minti9 runners (GitHub-hosted
+    # minutes cost money on the Free plan); unset falls back to ubuntu-latest.
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -47,7 +49,9 @@ jobs:
 
   shape-tests:
     name: CI-safe suites (shard ${{ matrix.shard }}/4)
-    runs-on: ubuntu-latest
+    # CI_RUNNER=self-hosted sends this to the minti9 runners (GitHub-hosted
+    # minutes cost money on the Free plan); unset falls back to ubuntu-latest.
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     # The suites took ~13 min run serially in one job. Each shard runs every
     # 4th non-excluded suite on its own runner, so suites never share a
     # machine (temp dirs, tmux sockets) and wall-clock is ~1/4.
@@ -57,6 +61,24 @@ jobs:
         shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@v4
+
+      - name: Isolate from the host's live swarm (self-hosted runner)
+        # On minti9 the runner is the same user that runs the real swarms.
+        # A fresh HOME hides gh auth, ~/.claude and swarm state; a private
+        # TMUX_TMPDIR keeps every tmux call (stubbed or real -L) off the live
+        # tmux servers. Same starting point as a GitHub-hosted runner.
+        if: runner.environment == 'self-hosted'
+        run: |
+          set -euo pipefail
+          iso="$RUNNER_TEMP/iso"
+          rm -rf "$iso" && mkdir -p "$iso/home" "$iso/tmux"
+          git config --file "$iso/home/.gitconfig" user.name "CI"
+          git config --file "$iso/home/.gitconfig" user.email "ci@localhost"
+          {
+            echo "HOME=$iso/home"
+            echo "TMUX_TMPDIR=$iso/tmux"
+            echo "TMUX="
+          } >> "$GITHUB_ENV"
 
       - name: Run CI-safe suites
         # Everything under tests/test-*.sh EXCEPT the six below is
