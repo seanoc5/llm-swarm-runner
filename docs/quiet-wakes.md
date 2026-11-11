@@ -103,6 +103,8 @@ Baseline from the corpusminder coordinator (Nov 1–4): 31 operator prompts, 209
 automatic wakes, 95 "nothing new" replies.
 
 Per-day counts without grepping: `scripts/swarm-scoreboard.sh --wakes <project-dir | events.log>`
+
+Last night per hour, with a dropped-wake canary line on top (ADR-0008 D8): `scripts/swarm-scoreboard.sh --night [YYYY-MM-DD] <project-dir | events.log>`
 (add `--json` for machines). It prints wakes per day split by typed doorbell, waiter and
 hook, plus summed `items`/`urgent`/`batched`. Quiet vs full replies cannot be derived:
 no event records which reply form the coordinator chose, so `urgent` vs `batched` is the
