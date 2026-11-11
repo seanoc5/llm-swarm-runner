@@ -124,12 +124,14 @@ heading "resident-action extractor reads a transcript"
 cat > "$T/t.jsonl" <<'EOF'
 {"type":"user","timestamp":"2026-11-01T19:12:42.000Z","message":{"content":"Inbox: 1 item(s) in .swarm/coord-inbox/ — read and triage them"}}
 {"type":"assistant","timestamp":"2026-11-01T19:12:50.000Z","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cat .swarm/coord-inbox/20261101T191201Z-outcome-1-1.md; gh pr merge 5 --squash"}}]}}
+{"type":"assistant","timestamp":"2026-11-01T19:12:52.000Z","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"scripts/kill-finished-workers.sh"}}]}}
 {"type":"assistant","timestamp":"2026-11-01T19:12:55.000Z","message":{"content":[{"type":"text","text":"Merged PR 5.\nmore"}]}}
 EOF
 OUTX="$("$RESIDENT" "$T/t.jsonl")"
 check "wake row" "1" "$(printf '%s\n' "$OUTX" | grep -c $'\twake\t')"
 check "read row names the inbox file" "1" "$(printf '%s\n' "$OUTX" | grep -c $'\tread\t20261101T191201Z-outcome-1-1.md')"
 check "act row for the merge" "1" "$(printf '%s\n' "$OUTX" | grep -c $'\tact\t.*gh pr merge 5')"
+check "act row for a kill-finished-workers.sh call" "1" "$(printf '%s\n' "$OUTX" | grep -c $'\tact\t.*kill-finished-workers')"
 check "say row is the first line only" "Merged PR 5." "$(printf '%s\n' "$OUTX" | awk -F'\t' '$2=="say"{print $3}')"
 
 printf '\n\033[1;32mAll replay-work-run tests passed.\033[0m\n'
