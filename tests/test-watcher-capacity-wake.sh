@@ -55,6 +55,9 @@ tmux() { [ "$1" = list-windows ] || return 1; printf '%s\n' "$WINDOWS"; }
 HOLD=""; BUSY=0; APPROVAL_AGE=""
 coord_wake_hold_reason() { printf '%s' "$HOLD"; }
 coord_wake_pane_busy() { [ "$BUSY" = 1 ]; }
+SPLIT=0; RUNBUSY=0
+coord_split_active() { [ "$SPLIT" = 1 ]; }
+coord_split_run_busy() { [ "$RUNBUSY" = 1 ]; }
 wake_debounced() { return 1; }
 coord_wake_hold_mark_pending() { echo "held $1" >> "$EV"; }
 coord_wake_set_pending() { :; }
@@ -489,6 +492,9 @@ check "note unread, young: nothing logged yet" "0" "$(grep -c dispatch.idle_none
 mv "$COORD_INBOX_DIR"/*-idle_capacity-*.md "$T/"
 BUSY=1; idle_capacity_outcome_pass
 check "coordinator still mid-turn: nothing logged" "0" "$(grep -c dispatch.idle_none "$EV" || true)"
+SPLIT=1; RUNBUSY=1; idle_capacity_outcome_pass
+check "split mode, work run still going: nothing logged" "0" "$(grep -c dispatch.idle_none "$EV" || true)"
+RUNBUSY=0; SPLIT=0
 BUSY=0; idle_capacity_outcome_pass
 grep -q "dispatch.idle_none reason=none_started slots=2 ready=2 night_ok=1" "$EV" && got=yes || got=no
 check "turn consumed note, no worker started: dispatch.idle_none logged" "yes" "$got"

@@ -12022,6 +12022,8 @@ idle_capacity_outcome_pass() {
         [ -n "$reason" ] || return 0
     else
         coord_wake_pane_busy && return 0
+        # Split mode: the pane is only a viewer; the headless work run is the turn.
+        coord_split_active && coord_split_run_busy && return 0
         names="$(tmux list-windows -t "$SESSION_NAME" -F '#{window_name}' 2>/dev/null)" || return 0
         while IFS= read -r w; do
             case "$w" in iss-*) tail -n +2 "$IDLE_CAPACITY_OUTCOME_FILE" | grep -qxF "$w" || started=1;; esac
