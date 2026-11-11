@@ -256,6 +256,25 @@ printf "%s 9 stall.1\n" "$((now + 1))" > "$COORD_TYPED_RING_FILE"   # stall loop
 coord_batch_unnote_ring                    # main's wake times out on the lock
 check "watcher: undoing a failed ring keeps a newer stall-wake stamp" "$((now + 1)) 9 stall.1" "$(cat "$COORD_TYPED_RING_FILE")"
 check "watcher: the main ring's own stamp differed from the stall stamp" "yes" "$([ "$main_mine" != "$(cat "$COORD_TYPED_RING_FILE")" ] && echo yes || echo no)"
+# issue #872 (PR #883 review): the ring-stamp lock really is held. Hold it from
+# the test shell (own open file description, so the function's fd 8 conflicts
+# without a background process); the stamp must not be written, and the failure
+# must be logged rather than silenced.
+log_event() { printf '%s %s\n' "$1" "$*" >> "$S/lock-events.log"; }
+rm -f "$S/lock-events.log"
+printf "%s 3\n" "$((now - 500))" > "$COORD_TYPED_RING_FILE"
+exec 7>"$COORD_TYPED_RING_FILE.lock"; flock -n 7
+COORD_TYPED_RING_LOCK_WAIT=1 COORD_TYPED_RING_MINE=stale
+COORD_TYPED_RING_LOCK_WAIT=1 coord_batch_note_ring
+check "watcher: a held ring-stamp lock blocks the stamp write (fails if the lock never takes effect)" "$((now - 500)) 3" "$(cat "$COORD_TYPED_RING_FILE")"
+check "watcher: a lock timeout leaves no ring of its own to undo" "" "$COORD_TYPED_RING_MINE"
+grep -q 'coord.ring.lock_failed.*WARN' "$S/lock-events.log" 2>/dev/null && got=yes || got=no
+check "watcher: a ring-stamp lock timeout logs a WARN, not silence" yes "$got"
+exec 7>&-
+coord_batch_note_ring
+check "watcher: with the lock free the ring stamps again" "no" "$([ "$(cat "$COORD_TYPED_RING_FILE")" = "$((now - 500)) 3" ] && echo yes || echo no)"
+check "watcher: the stamp's previous value is returned under the lock" "$((now - 500)) 3" "$COORD_TYPED_RING_PREV"
+rm -f "$COORD_TYPED_RING_FILE"; echo 0 > "$COORD_HOOK_RANG_FILE"
 rm -f "$COORD_TYPED_RING_FILE"; echo 0 > "$COORD_HOOK_RANG_FILE"
 # every wake path that logs coord.wake.error undoes the stamp
 errs=$(grep -c 'log_event coord.wake.error "\(issue=\$issue \)\?trigger=.*rc=\$wake_rc' "$WATCH")

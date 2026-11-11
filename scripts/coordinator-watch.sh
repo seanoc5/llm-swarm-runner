@@ -9604,16 +9604,29 @@ coord_batch_note_ring() {
     # Save the previous stamp and remember this ring's own line (a third field,
     # pid.nanoseconds, makes it unique even within one second) so the undo can
     # tell whether the file is still ours. Readers only parse the first field.
-    local line
+    local line rc=0
     line="$(date +%s) $(coord_inbox_count) ${BASHPID:-$$}.$(date +%N)"
-    COORD_TYPED_RING_MINE="$line"
     # The old stamp comes back on stdout (no shared temp file: the stall loop is
-    # a background subshell with the same $$).
+    # a background subshell with the same $$). The fd-8 redirect sits INSIDE the
+    # substitution: on an assignment bash runs the substitution before it opens a
+    # redirect written after it, so flock would see no fd 8 and the lock would
+    # silently never be held. A lock timeout exits 9 without writing.
     COORD_TYPED_RING_PREV="$(
-        flock -w 5 8 2>/dev/null || true
-        [ -e "$COORD_TYPED_RING_FILE" ] && cat "$COORD_TYPED_RING_FILE" 2>/dev/null
-        printf '%s\n' "$line" > "$COORD_TYPED_RING_FILE" 2>/dev/null || true
-    )" 8>"$COORD_TYPED_RING_FILE.lock" 2>/dev/null
+        (
+            flock -w "${COORD_TYPED_RING_LOCK_WAIT:-5}" 8 || exit 9
+            [ -e "$COORD_TYPED_RING_FILE" ] && cat "$COORD_TYPED_RING_FILE" 2>/dev/null
+            printf '%s\n' "$line" > "$COORD_TYPED_RING_FILE" 2>/dev/null || true
+        ) 8>"$COORD_TYPED_RING_FILE.lock"
+    )" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        # Not stamped: nothing for the undo to give back, and the next item rings
+        # again rather than waiting out a batch window on a stamp we never wrote.
+        COORD_TYPED_RING_MINE=""
+        COORD_TYPED_RING_PREV=""
+        log_event coord.ring.lock_failed "WARN: could not lock $COORD_TYPED_RING_FILE.lock (rc=$rc); typed ring not stamped"
+        return 0
+    fi
+    COORD_TYPED_RING_MINE="$line"
 }
 
 # coord_batch_unnote_ring (issue #761): undo coord_batch_note_ring for a wake
@@ -9628,8 +9641,9 @@ coord_batch_unnote_ring() {
     # stamped after ours, the file no longer holds our line and its newer stamp
     # must survive; only our own stamp is given back.
     [ -n "${COORD_TYPED_RING_MINE:-}" ] || return 0
+    local urc=0
     (
-        flock -w 5 8 2>/dev/null || true
+        flock -w "${COORD_TYPED_RING_LOCK_WAIT:-5}" 8 || exit 9
         cur=""
         [ -e "$COORD_TYPED_RING_FILE" ] && cur="$(cat "$COORD_TYPED_RING_FILE" 2>/dev/null)"
         [ "$cur" = "$COORD_TYPED_RING_MINE" ] || exit 0
@@ -9638,7 +9652,8 @@ coord_batch_unnote_ring() {
         else
             rm -f "$COORD_TYPED_RING_FILE" 2>/dev/null || true
         fi
-    ) 8>"$COORD_TYPED_RING_FILE.lock" 2>/dev/null
+    ) 8>"$COORD_TYPED_RING_FILE.lock" 2>/dev/null || urc=$?
+    [ "$urc" -ne 9 ] || log_event coord.ring.lock_failed "WARN: could not lock $COORD_TYPED_RING_FILE.lock; failed-wake ring stamp left in place"
     COORD_TYPED_RING_MINE=""
 }
 
