@@ -7524,8 +7524,8 @@ compact_retract_queued() {
             # composer (later read as an operator draft, deferring every wake).
             # If the composer's last line is exactly our "/compact", clear it
             # with Backspace ONLY -- never Escape, which could interrupt a real
-            # turn. A genuinely busy pane has an empty composer, so this is a
-            # no-op there.
+            # turn. Known limit: an operator draft that is literally "/compact"
+            # typed during a turn would be cleared too.
             local last
             last="$(compact_last_pane_line "$target")" || true
             if printf '%s\n' "$last" | LC_ALL=C grep -qE '^/compact[[:space:]]*$'; then
