@@ -3202,6 +3202,7 @@ for _v in COORD_WORK_RUN_RETRY_SECS COORD_WORK_RUN_MAX_RETRIES; do
     fi
 done
 COORD_SPLIT_RUN_PID=""
+COORD_SPLIT_LOCK_FD=""
 SPLIT_LOOP_PID=""
 if ! [[ "$COORD_WAKE_LOCK_TIMEOUT_SECS" =~ ^[0-9]+$ ]]; then
     echo "ERROR: COORD_WAKE_LOCK_TIMEOUT_SECS must be a non-negative integer (got: $COORD_WAKE_LOCK_TIMEOUT_SECS)" >&2
@@ -11357,9 +11358,62 @@ coord_split_run_busy() {
 # loop, and when a run exits (the recheck that keeps an item arriving
 # mid-run from being dropped).
 coord_split_tick() {
-    local trigger="${1:-tick}" last now from="" fails=0 since
+    local trigger="${1:-tick}" rc=0
     coord_split_active || return 0
     [ -d "$COORD_INBOX_DIR" ] || return 0
+    mkdir -p "$COORD_WORK_RUN_DIR" 2>/dev/null || true
+    # Issue #878: the periodic tick, inbox_drop and the exit recheck run in
+    # different processes. Without this lock two of them read the same
+    # last-start, both decide a run is due, and both launch a wrapper before
+    # either has stamped it. Decide and launch under one flock. The launch then
+    # stays "in flight" (launch-inflight marker, cleared by the launch's own
+    # subshell once its wrapper has exited and any failure back-off is
+    # recorded), so a path that gets the lock next backs off.
+    if ! exec {COORD_SPLIT_LOCK_FD}>"$COORD_WORK_RUN_DIR/launch.lock" 2>/dev/null; then
+        COORD_SPLIT_LOCK_FD=""
+        coord_split_tick_locked "$trigger"
+        return $?
+    fi
+    if flock -w "${COORD_SPLIT_LAUNCH_LOCK_SECS:-30}" "$COORD_SPLIT_LOCK_FD" 2>/dev/null; then
+        coord_split_tick_locked "$trigger" || rc=$?
+    else
+        log_event coord.workrun.busy "trigger=$trigger reason=launch_lock_timeout"
+    fi
+    exec {COORD_SPLIT_LOCK_FD}>&-
+    COORD_SPLIT_LOCK_FD=""
+    return $rc
+}
+
+# coord_split_launch_inflight: true while a launch this or another watcher
+# process made has not finished its start-up bookkeeping. The marker holds
+# "<subshell pid> <epoch>"; a dead pid or one older than the run timeout plus
+# slack (pid reuse after a crash) does not count.
+coord_split_launch_inflight() {
+    local pid="" at="" f="$COORD_WORK_RUN_DIR/launch-inflight" lim
+    read -r pid at _ 2>/dev/null < "$f" || return 1
+    [[ "$pid" =~ ^[0-9]+$ ]] && [[ "$at" =~ ^[0-9]+$ ]] || return 1
+    lim=$(( ${COORD_WORK_RUN_TIMEOUT_SECS:-1800} + 300 ))
+    [ $(( $(date +%s) - at )) -le "$lim" ] || return 1
+    kill -0 "$pid" 2>/dev/null
+}
+
+# coord_split_clear_inflight <pid>: drop the in-flight marker, but only if it is
+# still this launch's. Another launch may own it by now (a later run's marker
+# must survive an older run finishing). Takes the launch lock first so the
+# launcher's own marker write, made under that lock after the spawn, has landed.
+coord_split_clear_inflight() {
+    local me="$1" f="$COORD_WORK_RUN_DIR/launch-inflight" pid="" fd
+    if exec {fd}>"$COORD_WORK_RUN_DIR/launch.lock" 2>/dev/null; then
+        flock -w "${COORD_SPLIT_LAUNCH_LOCK_SECS:-30}" "$fd" 2>/dev/null || true
+        read -r pid _ 2>/dev/null < "$f" || pid=""
+        [ "$pid" = "$me" ] && rm -f "$f" 2>/dev/null
+        exec {fd}>&-
+    fi
+    return 0
+}
+
+coord_split_tick_locked() {
+    local trigger="${1:-tick}" last now from="" fails=0 since
     last="$(coord_split_last_start)"
     now=$(date +%s)
     coord_split_scan "$last"
@@ -11380,7 +11434,7 @@ coord_split_tick() {
         trigger="retry"
         since="$from"
     fi
-    if coord_split_run_busy; then
+    if coord_split_launch_inflight || coord_split_run_busy; then
         # The exit recheck of the running run picks these items up. The
         # periodic tick stays quiet so a long run does not fill events.log.
         [ "$trigger" = "tick" ] || log_event coord.workrun.busy "trigger=$trigger urgent=$CIB_URGENT batched=$CIB_BATCHED"
@@ -11406,6 +11460,9 @@ coord_split_start_run() {
     wake_clock_set "$(date +%s)"
     (
         rc=0; sig_before=""; sig_after=""; from=0; n=0; now2=0
+        # Do not carry the launch lock into the run (it would stay held for the
+        # whole run): the in-flight marker, not the fd, covers the launch.
+        [ -n "$COORD_SPLIT_LOCK_FD" ] && eval "exec $COORD_SPLIT_LOCK_FD>&-"
         sig_before="$(stat -c %y "$COORD_WORK_RUN_DIR/last-start" 2>/dev/null || true)"
         # setsid: the run gets its own session and process group, so a watcher
         # restart (watcher_check_staleness kills this group) or a stop does not
@@ -11441,9 +11498,13 @@ coord_split_start_run() {
         # The watcher was stopped while this run went: do not start another
         # paid run on its behalf ($$ is the watcher's pid, also in a subshell).
         kill -0 $$ 2>/dev/null || exit 0
+        # Launch bookkeeping is done: last-start is stamped (or the failure
+        # recorded), so other paths may decide from it again.
+        coord_split_clear_inflight "$BASHPID"
         coord_split_tick exit_recheck
     ) &
     COORD_SPLIT_RUN_PID=$!
+    printf '%s %s\n' "$COORD_SPLIT_RUN_PID" "$(date +%s)" > "$COORD_WORK_RUN_DIR/launch-inflight" 2>/dev/null || true
 }
 
 # coord_split_wake <trigger> [once]
