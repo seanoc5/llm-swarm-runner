@@ -9606,17 +9606,14 @@ coord_batch_note_ring() {
     # tell whether the file is still ours. Readers only parse the first field.
     local line
     line="$(date +%s) $(coord_inbox_count) ${BASHPID:-$$}.$(date +%N)"
-    COORD_TYPED_RING_PREV=""
     COORD_TYPED_RING_MINE="$line"
-    (
+    # The old stamp comes back on stdout (no shared temp file: the stall loop is
+    # a background subshell with the same $$).
+    COORD_TYPED_RING_PREV="$(
         flock -w 5 8 2>/dev/null || true
-        [ -e "$COORD_TYPED_RING_FILE" ] && cat "$COORD_TYPED_RING_FILE" 2>/dev/null > "$COORD_TYPED_RING_FILE.prev.$$"
+        [ -e "$COORD_TYPED_RING_FILE" ] && cat "$COORD_TYPED_RING_FILE" 2>/dev/null
         printf '%s\n' "$line" > "$COORD_TYPED_RING_FILE" 2>/dev/null || true
-    ) 8>"$COORD_TYPED_RING_FILE.lock" 2>/dev/null
-    if [ -e "$COORD_TYPED_RING_FILE.prev.$$" ]; then
-        COORD_TYPED_RING_PREV="$(cat "$COORD_TYPED_RING_FILE.prev.$$" 2>/dev/null)"
-        rm -f "$COORD_TYPED_RING_FILE.prev.$$"
-    fi
+    )" 8>"$COORD_TYPED_RING_FILE.lock" 2>/dev/null
 }
 
 # coord_batch_unnote_ring (issue #761): undo coord_batch_note_ring for a wake
