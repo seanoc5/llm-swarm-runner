@@ -190,6 +190,9 @@ HEADLESS="${WORKER_HEADLESS:-0}"
 CHECK_ENABLED="${WORKER_CHECK:-1}"
 CHECK_TIMEOUT="${WORKER_CHECK_TIMEOUT:-600}"
 CHECK_RETRY="${WORKER_CHECK_RETRY:-1}"
+# issue #494: seconds between "check still running" lines while a check runs
+# (0 disables them).
+CHECK_HEARTBEAT="${WORKER_CHECK_HEARTBEAT:-30}"
 NOOP_DETECT_ENABLED="${WORKER_NOOP_DETECT:-1}"
 MIN_TRANSCRIPT_BYTES="${WORKER_MIN_TRANSCRIPT_BYTES:-200}"
 
@@ -748,10 +751,29 @@ run_check() {
     CHECK_EXIT=""
     CHECK_TAIL=""
     [ -n "$CHECK_CMD" ] || return 0
-    echo "[$(date +%T)] Running acceptance check: $CHECK_CMD"
     local check_log="$DONE/${TASK_ID}.check.log"
+    # issue #494: a long check used to print one line and then nothing, which
+    # read as a hang. Say what runs, since when and for how long at most, and
+    # (below) print the log's last line every CHECK_HEARTBEAT seconds.
+    echo "[$(date +%T)] Running acceptance check: $CHECK_CMD"
+    echo "[$(date +%T)]   started $(date +%T), timeout ${CHECK_TIMEOUT}s, full log: $check_log"
+    local hb_pid="" t0
+    t0=$(date +%s)
+    if [ "${CHECK_HEARTBEAT:-0}" -gt 0 ] 2>/dev/null; then
+        (
+            while sleep "$CHECK_HEARTBEAT"; do
+                last=$(tail -n 1 "$check_log" 2>/dev/null | cut -c1-160)
+                echo "[$(date +%T)]   check still running ($(( $(date +%s) - t0 ))s of max ${CHECK_TIMEOUT}s): ${last:-<no output yet>}"
+            done
+        ) &
+        hb_pid=$!
+    fi
     timeout "$CHECK_TIMEOUT" bash -c "$CHECK_CMD" > "$check_log" 2>&1 \
         && CHECK_EXIT=0 || CHECK_EXIT=$?
+    if [ -n "$hb_pid" ]; then
+        kill "$hb_pid" 2>/dev/null || true
+        wait "$hb_pid" 2>/dev/null || true
+    fi
     CHECK_TAIL=$(tail -n 20 "$check_log" 2>/dev/null)
     if [ "$CHECK_EXIT" -eq 0 ]; then
         echo "[$(date +%T)] Acceptance check PASS (exit 0)."
@@ -759,6 +781,20 @@ run_check() {
         echo "[$(date +%T)] Acceptance check FAIL (exit $CHECK_EXIT; 124 = timed out after ${CHECK_TIMEOUT}s). Output tail:"
         printf '%s\n' "$CHECK_TAIL" | sed 's/^/    /'
     fi
+}
+
+# issue #494: true only when this session provably changed nothing — HEAD is
+# the commit the task started on AND the working tree is clean (ignored paths
+# such as .swarm/ don't count). Anything we can't establish (not a git repo,
+# git error, no recorded start commit) returns false, so the check runs as
+# before. Sets nothing; the caller records CHECK_SKIPPED.
+no_change_since_start() {
+    [ -n "${TASK_START_HEAD:-}" ] || return 1
+    local head_now porcelain
+    head_now="$(git rev-parse HEAD 2>/dev/null)" || return 1
+    [ "$head_now" = "$TASK_START_HEAD" ] || return 1
+    porcelain="$(git status --porcelain 2>/dev/null)" || return 1
+    [ -z "$porcelain" ]
 }
 
 # Append one JSONL eval row per completed v2 task — the durable record the
@@ -777,7 +813,7 @@ append_eval_log() {
     jq -cn \
         --arg ts "$finished" --arg task_id "$TASK_ID" --arg issue "$issue" \
         --arg agent "$AGENT" --arg model "$MODEL" \
-        --arg check_cmd "${CHECK_CMD:-}" --arg check_exit "${CHECK_EXIT:-}" \
+        --arg check_cmd "${CHECK_CMD:-}" --arg check_exit "${CHECK_EXIT:-${CHECK_SKIPPED:-}}" \
         --arg task_state "${TASK_STATE:-}" --arg verification "$VERIFICATION" \
         --argjson duration "$duration" --argjson exit_code "$rc" \
         --argjson retried "${RETRIED:-false}" --arg outcome "$outcome" \
@@ -787,7 +823,7 @@ append_eval_log() {
           model: (if $model == "" then null else $model end),
           duration_seconds: $duration, exit_code: $exit_code,
           check_cmd: (if $check_cmd == "" then null else $check_cmd end),
-          check_exit: (if $check_exit == "" then null else ($check_exit | tonumber) end),
+          check_exit: (if $check_exit == "" then null else ($check_exit | tonumber? // $check_exit) end),
           retried: $retried, outcome: $outcome,
           task_state: (if $task_state == "" then null else $task_state end),
           verification: $verification}' >> "$log" 2>/dev/null \
@@ -1053,6 +1089,11 @@ write_outcome() {
             check_cmd_json=$(printf '%s' "$CHECK_CMD" | jq -Rs .)
             check_tail_json=$(printf '%s' "$CHECK_TAIL" | jq -Rs .)
         fi
+    elif [ -n "${CHECK_SKIPPED:-}" ]; then
+        # issue #494: check resolved but deliberately not run. check_exit is
+        # the string "skipped_no_change" (numbers mean a check ran).
+        check_exit_json="\"$CHECK_SKIPPED\""
+        command -v jq >/dev/null 2>&1 && check_cmd_json=$(printf '%s' "$CHECK_CMD" | jq -Rs .)
     fi
 
     # Atomic publish (#722): readers poll for this file and parse it the moment
@@ -1563,6 +1604,10 @@ while true; do
         echo "[$(date +%T)] Executing task..."
         STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
         STARTED_EPOCH=$(date +%s)
+        # issue #494: remember where the worktree started so the acceptance
+        # check can be skipped when the session changed nothing.
+        TASK_START_HEAD="$(git rev-parse HEAD 2>/dev/null || true)"
+        CHECK_SKIPPED=""
         [ "$IS_LEGACY" = "1" ] || record_selfheal_claim "$TASK_ID"
 
         # Worker system prompt: prompts/worker.md (the universal worker
@@ -1634,7 +1679,14 @@ while true; do
             # for this task_id/commit instead of running a second, redundant
             # $CHECK_CMD in this worktree — see try_reuse_check_on_done()'s
             # own header and the "Executed acceptance checks" section above.
-            if [ -z "$CHECK_CMD" ] || ! try_reuse_check_on_done; then
+            if [ -n "$CHECK_CMD" ] && no_change_since_start; then
+                # issue #494: clean tree, same HEAD as at task start — nothing
+                # for the check to verify, and a full suite can take minutes.
+                CHECK_EXIT=""
+                CHECK_TAIL=""
+                CHECK_SKIPPED="skipped_no_change"
+                echo "[$(date +%T)] Acceptance check SKIPPED (skipped_no_change): worker changed nothing (clean tree, HEAD ${TASK_START_HEAD:0:12} unchanged). Would have run: $CHECK_CMD"
+            elif [ -z "$CHECK_CMD" ] || ! try_reuse_check_on_done; then
                 run_check_claimed
             fi
             if [ -n "$CHECK_EXIT" ] && [ "$CHECK_EXIT" -ne 0 ] && [ "$CHECK_RETRY" = "1" ] && [ -z "${LAUNCH_BLOCKED:-}" ]; then

@@ -250,6 +250,7 @@ run_pr_ready() {
     rm -f "$EDITED_BODY" "$TEST_DIR/hold-late"
     : > "$FAKE_REVIEW_LOG"; : > "$FAKE_FLOOR_LOG"
     rc=0
+    pushd "${PR_READY_CWD:-.}" >/dev/null
     PATH="$SHIM_DIR:$PATH" SELF_REVIEW_SCRIPT="$FAKE_REVIEW" RISK_FLOOR_SCRIPT="$FAKE_FLOOR" WORKER_SELF_REVIEW="${WORKER_SELF_REVIEW:-1}" \
         WORKER_SELF_REVIEW_MAX_ROUNDS="${WORKER_SELF_REVIEW_MAX_ROUNDS:-3}" \
         GH_ROUNDS_DONE="${GH_ROUNDS_DONE:-0}" GH_LATEST_VERDICT="${GH_LATEST_VERDICT:-}" \
@@ -267,6 +268,7 @@ run_pr_ready() {
         GH_RUNLIST_STDERR="${GH_RUNLIST_STDERR:-}" \
         "$PR_READY" ${PR_READY_FLAGS:-} 42 ${PR_READY_TRAILING:-} \
         > "$TEST_DIR/out.log" 2>&1 || rc=$?
+    popd >/dev/null
     return "$rc"
 }
 
@@ -1358,5 +1360,66 @@ rc=0; GREEN_REVIEW=1 run_pr_ready || rc=$?
 grep -q -- '--model' "$FAKE_REVIEW_LOG" && red "🟡 must keep the default model, log: $(cat "$FAKE_REVIEW_LOG")"
 [ ! -s "$FAKE_FLOOR_LOG" ] || red "floor is only consulted for 🟢, log: $(cat "$FAKE_FLOOR_LOG")"
 green "🟡 unaffected"
+
+# issue #494 (Tests 44-48): optional WORKER_PR_READY_CHECK_CMD gate. It only runs when
+# the caller's cwd HEAD is the PR head, so tests 45-47 run from a throwaway checkout
+# whose HEAD is the faked PR head (GH_SHA); test 48 is the mismatch case.
+CHECKOUT="$TEST_DIR/ready-checkout"
+mkdir -p "$CHECKOUT"
+git -C "$CHECKOUT" init -q
+git -C "$CHECKOUT" -c user.name=t -c user.email=t@t commit -q --allow-empty -m base
+CHECKOUT_SHA="$(git -C "$CHECKOUT" rev-parse HEAD)"
+heading "Test 44: WORKER_PR_READY_CHECK_CMD unset — behaves as before, nothing run"
+printf '<!-- BLIND_MERGE_RISK: low -->\nsome change\n' > "$BODY_FILE"
+unset WORKER_PR_READY_CHECK_CMD
+rc=0; run_pr_ready || rc=$?
+[ "$rc" -eq 0 ] || red "expected exit 0, got $rc: $(cat "$TEST_DIR/out.log")"
+grep -q 'WORKER_PR_READY_CHECK_CMD' "$TEST_DIR/out.log" && red "unset knob must print nothing: $(cat "$TEST_DIR/out.log")"
+gh_ready_called || red "expected gh pr ready to run"
+green "unset → no check, readied"
+
+heading "Test 45: ready check passes — runs once, PR readied"
+export WORKER_PR_READY_CHECK_CMD="echo ran >> '$TEST_DIR/ready-check.ran'"
+export PR_READY_CWD="$CHECKOUT" GH_SHA="$CHECKOUT_SHA"
+rm -f "$TEST_DIR/ready-check.ran"
+rc=0; run_pr_ready || rc=$?
+[ "$rc" -eq 0 ] || red "expected exit 0, got $rc: $(cat "$TEST_DIR/out.log")"
+[ "$(wc -l < "$TEST_DIR/ready-check.ran")" -eq 1 ] || red "expected the check to run exactly once"
+grep -q 'ready check PASS' "$TEST_DIR/out.log" || red "expected a PASS line: $(cat "$TEST_DIR/out.log")"
+gh_ready_called || red "expected gh pr ready after a passing check"
+green "passing ready check → run once, readied"
+
+heading "Test 46: ready check fails — refuses (exit 6), writes check-failing banner, never readies, self-review not spent"
+printf '<!-- BLIND_MERGE_RISK: medium -->\nsome change\n' > "$BODY_FILE"
+make_fake_review 0
+export WORKER_PR_READY_CHECK_CMD='echo suite-broke; exit 3'
+rc=0; run_pr_ready || rc=$?
+[ "$rc" -eq 6 ] || red "expected exit 6, got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called && red "gh pr ready must not run after a failed ready check"
+[ ! -s "$FAKE_REVIEW_LOG" ] || red "self-review should not run before the ready check passes"
+grep -q 'suite-broke' "$TEST_DIR/out.log" || red "expected the check's output tail: $(cat "$TEST_DIR/out.log")"
+head -1 "$EDITED_BODY" | grep -qx "<!-- SWARM_DRAFT_REASON: check-failing sha=$CHECKOUT_SHA -->" || red "expected check-failing banner: $(cat "$EDITED_BODY" 2>/dev/null)"
+green "failing ready check → exit 6, banner, no ready, no review round"
+
+heading "Test 47: ready check timeout also refuses"
+export WORKER_PR_READY_CHECK_CMD='sleep 20' WORKER_PR_READY_CHECK_TIMEOUT=1
+rc=0; run_pr_ready || rc=$?
+unset WORKER_PR_READY_CHECK_CMD WORKER_PR_READY_CHECK_TIMEOUT PR_READY_CWD GH_SHA
+[ "$rc" -eq 6 ] || red "expected exit 6 on timeout, got $rc: $(cat "$TEST_DIR/out.log")"
+grep -q '124 = timed out' "$TEST_DIR/out.log" || red "expected the timeout hint: $(cat "$TEST_DIR/out.log")"
+green "timed-out ready check → exit 6"
+
+heading "Test 48: cwd HEAD is not the PR head — check skipped with one stderr line, not refused, PR still readied"
+printf '<!-- BLIND_MERGE_RISK: low -->\nsome change\n' > "$BODY_FILE"
+rm -f "$TEST_DIR/ready-check.ran"
+export WORKER_PR_READY_CHECK_CMD="echo ran >> '$TEST_DIR/ready-check.ran'"
+export PR_READY_CWD="$CHECKOUT" GH_SHA=cafef00dcafef00dcafef00dcafef00dcafef00d
+rc=0; run_pr_ready || rc=$?
+unset WORKER_PR_READY_CHECK_CMD PR_READY_CWD GH_SHA
+[ "$rc" -eq 0 ] || red "expected exit 0 (skip, not refuse), got $rc: $(cat "$TEST_DIR/out.log")"
+[ ! -e "$TEST_DIR/ready-check.ran" ] || red "check must not run when cwd is not at the PR head"
+grep -qx "pr-ready: pre-ready check skipped: cwd is not at PR head cafef00" "$TEST_DIR/out.log" || red "expected the skip line: $(cat "$TEST_DIR/out.log")"
+gh_ready_called || red "expected gh pr ready after a skipped check"
+green "mismatched cwd → skipped, readied"
 
 green "ALL TESTS PASSED"

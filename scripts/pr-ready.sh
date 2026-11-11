@@ -158,6 +158,13 @@
 #      either (`gh pr view` for the head SHA, or `gh run list`, failed).
 #      Distinct from exit 4 on purpose — this means "unknown", not
 #      "confirmed failing" (issue #560).
+#   6  refused — WORKER_PR_READY_CHECK_CMD (issue #494; optional, unset =
+#      skipped) exited non-zero or timed out
+#      (WORKER_PR_READY_CHECK_TIMEOUT, default 1800s). Runs once, before
+#      self-review and the CI gate, in the caller's cwd — and only when
+#      that checkout's HEAD equals the PR head SHA; otherwise it is skipped
+#      with one stderr line (never a refusal), so a coordinator running this
+#      from its own checkout doesn't test unrelated code.
 #   1  usage / gh error resolving the PR body
 #
 # issue #602: every refusal (exits 2, 4 and 5) also writes a marked
@@ -362,6 +369,8 @@ refuse() {
                           next="coordinator (watcher, automatic) — re-runs pr-ready.sh $PR — waiting on CI status becoming readable" ;;
             ci-cancelled) text="CI run was cancelled or timed out on ${sha:0:7} at $ts (no check ever ran to a result)."
                           next="coordinator — 'gh run rerun <run-id>', then re-run pr-ready.sh $PR — waiting on the re-run finishing" ;;
+            check-failing) text="the project's pre-ready check (WORKER_PR_READY_CHECK_CMD) failed on ${sha:0:7} at $ts."
+                          next="$who — fix the failure, push, re-run pr-ready.sh $PR — waiting on nothing" ;;
             ci-failing)   text="CI failed on ${sha:0:7} at $ts."
                           next="$who — push a CI fix, re-run pr-ready.sh $PR — waiting on nothing" ;;
         esac
@@ -437,6 +446,44 @@ REVIEW_MODEL_ARGS=()
 if [ "$RISK" = "low" ] && [ "${GREEN_REVIEW:-0}" = "1" ]; then
     REVIEW_KIND=green
     REVIEW_MODEL_ARGS=(--model "${GREEN_REVIEW_MODEL:-haiku}")
+fi
+
+# issue #494: optional full check, once, right before readying. Projects keep
+# the per-session check (WORKER_CHECK_CMD) fast and put the slow suite here.
+# Unset/empty = no change in behaviour. Runs in the caller's cwd, but only when
+# that checkout's HEAD is the PR head: the coordinator also runs this script
+# from its own checkout (coordinator-watch.sh parked_green / ci_failing notes),
+# where the check would test unrelated code and give a false pass or fail. On a
+# mismatch it is skipped with a stderr line, never refused. A last-refusal
+# banner of ci-* on this same commit means this script already got past this
+# gate on it (the check runs before self-review and the CI gate), so a
+# ready-sweep retry doesn't re-run a slow suite.
+READY_CHECK_CMD="${WORKER_PR_READY_CHECK_CMD:-}"
+if [ -n "$READY_CHECK_CMD" ]; then
+    READY_CHECK_PR_HEAD="$(head_sha)"
+    READY_CHECK_CWD_HEAD="$(git rev-parse HEAD 2>/dev/null || true)"
+    if [ -z "$READY_CHECK_PR_HEAD" ] || [ "$READY_CHECK_CWD_HEAD" != "$READY_CHECK_PR_HEAD" ]; then
+        READY_CHECK_PR_SHORT="${READY_CHECK_PR_HEAD:0:7}"
+        echo "pr-ready: pre-ready check skipped: cwd is not at PR head ${READY_CHECK_PR_SHORT:-(unknown)}" >&2
+    elif [[ "$OLD_REASON" == ci-* ]] && [ -n "$OLD_REASON_SHA" ] && [ "$OLD_REASON_SHA" = "$(head_sha)" ]; then
+        echo "pr-ready: ready check already passed on ${OLD_REASON_SHA:0:7} (last refusal was $OLD_REASON on this same commit) — not re-running"
+    else
+        READY_CHECK_TIMEOUT="${WORKER_PR_READY_CHECK_TIMEOUT:-1800}"
+        READY_CHECK_LOG="$(mktemp)"
+        echo "pr-ready: running WORKER_PR_READY_CHECK_CMD (started $(date +%T), timeout ${READY_CHECK_TIMEOUT}s): $READY_CHECK_CMD"
+        set +e
+        timeout -k 10 "$READY_CHECK_TIMEOUT" bash -c "$READY_CHECK_CMD" >"$READY_CHECK_LOG" 2>&1
+        READY_CHECK_RC=$?
+        set -e
+        if [ "$READY_CHECK_RC" -ne 0 ]; then
+            echo "pr-ready: REFUSED — WORKER_PR_READY_CHECK_CMD exited $READY_CHECK_RC (124 = timed out after ${READY_CHECK_TIMEOUT}s). Output tail:" >&2
+            tail -n 20 "$READY_CHECK_LOG" | sed 's/^/    /' >&2
+            rm -f "$READY_CHECK_LOG"
+            refuse check-failing 6
+        fi
+        rm -f "$READY_CHECK_LOG"
+        echo "pr-ready: ready check PASS (exit 0)."
+    fi
 fi
 
 SKIP_REVIEW=0
