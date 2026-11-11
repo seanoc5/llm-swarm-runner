@@ -59,6 +59,7 @@ green "2: clear_inflight keeps a marker owned by another pid and removes its own
 
 # --- 3. a failed marker write logs a warning ---------------------------------
 unset -f coord_split_start_run; eval "$(extract_fn coord_split_start_run)"
+coord_split_tick() { :; }   # the launch subshell's exit recheck must not chain another launch
 coord_inbox_count() { echo 0; }
 coord_woke_for() { :; }
 wake_clock_set() { :; }
