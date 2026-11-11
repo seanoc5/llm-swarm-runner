@@ -5039,6 +5039,13 @@ ready_sweep_pass() {
     while IFS= read -r line; do
         [ -n "$line" ] || continue
         echo "[$(date +%T)] ready-sweep: $line"
+        # issue #739: a moved head whose CI could not be read as red (rate limit, re-run, pending).
+        # Keep that head's dedup key alive; the key clears only when the head changes or the PR leaves.
+        # Echoed but NOT logged as an event: it repeats every sweep for every moved-head draft (#869).
+        if [[ "$line" =~ ^#([0-9]+)\ ci-failing-unconfirmed:.*\(sha=([0-9a-fA-F]+)\) ]]; then
+            cfseen["${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"]=1
+            continue
+        fi
         log_event watch.ready_sweep "result=\"$line\""
         if [[ "$line" =~ ^#([0-9]+)\ ci-failing:.*\(sha=([0-9a-fA-F]+)\) ]]; then
             pr="${BASH_REMATCH[1]}" key="${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"
@@ -5057,12 +5064,6 @@ ready_sweep_pass() {
                 continue
             fi
             CI_FAILING_NOTED[$key]=1
-            continue
-        fi
-        # issue #739: a moved head whose CI could not be read as red (rate limit, re-run, pending).
-        # Keep that head's dedup key alive; the key clears only when the head changes or the PR leaves.
-        if [[ "$line" =~ ^#([0-9]+)\ ci-failing-unconfirmed:.*\(sha=([0-9a-fA-F]+)\) ]]; then
-            cfseen["${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"]=1
             continue
         fi
         if [[ "$line" =~ ^#([0-9]+)\ ci-cancelled:.*\(sha=([0-9a-fA-F]+)\) ]]; then
