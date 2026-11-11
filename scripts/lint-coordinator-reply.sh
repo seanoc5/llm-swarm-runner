@@ -14,6 +14,11 @@
 #                "Nothing needed ..." together with "Do now:", or two of "Do now:" /
 #                "Pending your approval:" / nothing-lines (#801 fixture).
 #
+#   bare-list    a line outside a code fence starts with a bare number ("1." or "1)"):
+#                the terminal renumbers every such list from 1, so two lists both read
+#                "1, 2, 3" and "your 2" is ambiguous (issue #800). Say A1, B1... instead.
+#                The same regex backs the user-level Stop hook scripts/hooks/no-bare-numbered-lists.sh.
+#
 #   stale-window an item sends the operator to type something "in its worker
 #                window" / "in its iss-N pane" for a PR or issue whose worker is
 #                on hold (sidelined: no window exists; issue #841). Needs
@@ -31,17 +36,21 @@
 #                offline or failing gh stays silent. Say "the fix PR for #N merges"
 #                or "#N closes".
 #
-# Usage: lint-coordinator-reply.sh [--project DIR] [file]
+# Usage: lint-coordinator-reply.sh [--project DIR] [--only RULE[,RULE]] [file]
+# --only keeps just the named rules (and skips the slow gh/worktree passes when
+# their rule is not named); the Stop hook uses --only bare-list.
 # Exit 0 clean, 3 hits (printed to stdout), 2 usage error. Naive on purpose:
 # a regex that catches the real incident beats a perfect check nobody runs.
 # Fixtures: tests/fixtures/reply-lint/.
 set -uo pipefail
 
-PROJECT=""; FILE=""
+PROJECT=""; FILE=""; ONLY=""
 while [ $# -gt 0 ]; do
     case "$1" in
-        -h|--help) sed -n '3,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '3,52p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         --project) [ $# -ge 2 ] || { echo "--project needs a value" >&2; exit 2; }; PROJECT="$2"; shift 2 ;;
+        --only) [ $# -ge 2 ] || { echo "--only needs a value" >&2; exit 2; }; ONLY=",$2,"; shift 2 ;;
+        --only=*) ONLY=",${1#*=},"; shift ;;
         --project=*) PROJECT="${1#*=}"; shift ;;
         -*) echo "unknown option $1" >&2; exit 2 ;;
         *) [ -z "$FILE" ] || exit 2; FILE="$1"; shift ;;
@@ -68,17 +77,19 @@ BEGIN {
     nothing = "^[[:space:]]*(nothing to do|nothing needed|nothing is needed|nothing needed from you)"
     dono = "^[[:space:]]*(\\*\\*)?do now(\\*\\*)?:"
     pend = "^[[:space:]]*(\\*\\*)?pending your approval(\\*\\*)?:"
+    bl = 0
     infence = 0; item = ""; first = ""; n = 0; nn = 0; nd = 0; np = 0
 }
 {
     line = $0; l = tolower(line)
-    if (line ~ /^[[:space:]]*```/) {
+    if (line ~ /^[[:space:]]*(```|~~~)/) {
         infence = !infence
         if (item != "") item = item "\n" line
         next
     }
     if (infence) { if (item != "") item = item "\n" line; next }
     if (l ~ back) hits[++n] = "backref: " line
+    if (line ~ /^[[:space:]]*[0-9]+[.)][[:space:]]/ && !bl++) hits[++n] = "bare-list: " line
     if (line ~ /^[[:space:]]*-[[:space:]]+\*\*[A-Za-z][0-9]+\*\*/) {
         flush_item(); item = line; first = line
     } else if (item != "") {
@@ -165,9 +176,14 @@ issue_merged_hits() {
     done < <(printf '%s\n' "$text" | awk '/^[[:space:]]*```/ { f = !f; next } !f')
 }
 
-stale="$(stale_window_hits)"
-issue="$(issue_merged_hits)"
+want() { [ -z "$ONLY" ] || [[ "$ONLY" == *",$1,"* ]]; }
+stale=""; issue=""
+want stale-window && stale="$(stale_window_hits)"
+want issue-merged && issue="$(issue_merged_hits)"
 all="$(printf '%s\n%s\n%s\n' "$hits" "$stale" "$issue" | sed '/^$/d')"
+if [ -n "$ONLY" ]; then
+    all="$(printf '%s\n' "$all" | awk -v only="$ONLY" '{ split($0, p, ":"); if (index(only, "," p[1] ",")) print }')"
+fi
 [ -z "$all" ] && exit 0
 printf '%s\n' "$all"
 exit 3
