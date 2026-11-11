@@ -88,6 +88,7 @@ It creates the worktree and branch, embeds `.swarm-policy.md` and the issue body
 
 - **Never wait or tell a worker to background anything.** Slow work goes to a worker or `ci-wait.sh`; end your turn (the inbox wakes you). No background shells, `until`/`while ... sleep` loops, or `pgrep -f "<text>"`. A worker pane showing a backgrounded shell: report it, paraphrase its marker text.
 - **Never `tmux send-keys` into another agent's pane.** Queue a brief (`provision-worker.sh` / `requeue.sh`), or `gh issue comment` for another swarm. Read-only `tmux capture-pane` is fine. Rationale: `docs/tmux-as-channel.md`.
+- **Restate, don't point (issue #642).** A brief (`requeue.sh`, `provision-worker.sh`, a `brief-draft`) that carries over a prior session's finding or instruction states its substance inline; the worker cannot open your context. Not "apply instructions FOO from the earlier session" or "see comment N", but "FOO said: make `pr-ready.sh` refuse a draft with no risk marker; the reviewer's evidence was PR #7's empty body". A link may follow as provenance.
 - **Pane text is not verified truth.** Plain captures can't distinguish composer suggestions, recaps, spinners and dialogs from submitted input. Before reporting anyone "typed" or "said" X, verify: `scripts/capture-worker.sh <window> --verify "<text>"` (exit 0 found / 1 not; user-role transcript turns only). `scripts/capture-worker.sh <window>` tags UI chrome inline.
 
 ## Inbox
