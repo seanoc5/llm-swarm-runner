@@ -3506,7 +3506,7 @@ fi
 # fire, fall back to a 30s tick.
 COORD_WAKE_HOLD_RETRY_SECS="$COORD_WAKE_BUSY_RETRY_SECS"
 if [ "$COORD_WAKE_HOLD_RETRY_SECS" -eq 0 ] && \
-   { [ "$COORD_HUMAN_IDLE_SECS" -gt 0 ] || [ "$WORKER_HUMAN_IDLE_SECS" -gt 0 ] || [ "$DEBOUNCE_SECS" -gt 0 ]; }; then
+   { [ "$COORD_HUMAN_IDLE_SECS" -gt 0 ] || [ "$WORKER_HUMAN_IDLE_SECS" -gt 0 ] || [ "$DEBOUNCE_SECS" -gt 0 ] || [ "${COORD_INBOX_BATCH_SECS:-0}" -gt 0 ]; }; then
     COORD_WAKE_HOLD_RETRY_SECS=30
 fi
 
@@ -9517,14 +9517,31 @@ coord_last_ring() {
 # coord_batch_note_ring: call right after rendering the nudge for a doorbell
 # that is being rung. Stamps COORD_TYPED_RING_FILE so the batch window counts
 # from this ring and the waiter / Stop hook (coord_last_ring_at) do not
-# re-announce items this nudge already named. Stamped before delivery, so a
-# failed paste still starts a window; it never touches COORD_HOOK_RANG_FILE,
+# re-announce items this nudge already named. Stamped before delivery and undone by
+# coord_batch_unnote_ring when the wake fails; it never touches COORD_HOOK_RANG_FILE,
 # which coord_hook_rang_since reads as "already delivered". No-op unless
 # coord_typed_batching.
 coord_batch_note_ring() {
     coord_typed_batching || return 0
     [ "${DRY_RUN:-0}" = "1" ] && return 0
+    COORD_TYPED_RING_PREV=""
+    [ -e "$COORD_TYPED_RING_FILE" ] && COORD_TYPED_RING_PREV="$(cat "$COORD_TYPED_RING_FILE" 2>/dev/null)"
     printf '%s %s\n' "$(date +%s)" "$(coord_inbox_count)" > "$COORD_TYPED_RING_FILE" 2>/dev/null || true
+}
+
+# coord_batch_unnote_ring (issue #761): undo coord_batch_note_ring for a wake
+# that failed (neither delivered nor handed to the dirty-composer retry), by
+# putting the previous stamp back. Otherwise the items that nudge named count
+# as announced and later non-urgent items can wait a whole batch window without
+# being re-announced. Not called for rc 3: that nudge is still pending delivery.
+coord_batch_unnote_ring() {
+    coord_typed_batching || return 0
+    [ "${DRY_RUN:-0}" = "1" ] && return 0
+    if [ -n "${COORD_TYPED_RING_PREV:-}" ]; then
+        printf '%s\n' "$COORD_TYPED_RING_PREV" > "$COORD_TYPED_RING_FILE" 2>/dev/null || true
+    else
+        rm -f "$COORD_TYPED_RING_FILE" 2>/dev/null || true
+    fi
 }
 
 # coord_inbox_nudge_pattern
@@ -10329,6 +10346,7 @@ coord_wake_hold_retry_pass() {
         *)
             echo "[$(date +%T)] WARN: held coordinator wake retry exited non-zero (continuing watch)"
             log_event coord.wake.error "trigger=${held_for}_retry rc=$wake_rc age=${age}s"
+            coord_batch_unnote_ring
             ;;
     esac
 }
@@ -10723,6 +10741,7 @@ on_outcome() {
             elif [ "$wake_rc" != "0" ]; then
                 echo "[$(date +%T)] WARN: coordinator wake exited non-zero (continuing watch)"
                 log_event coord.wake.error "issue=$issue rc=$wake_rc"
+                coord_batch_unnote_ring
             else
                 # issue #422 self-review finding: this fresh wake just landed
                 # directly — drop any STALE prompt left over from an earlier
@@ -10746,7 +10765,7 @@ on_outcome() {
             fi
         fi
     fi
-    wake_clock_set "$now"
+    [ "${hold_reason:-}" = "batch_window" ] || wake_clock_set "$now"
 
     if [ "$ONCE" = "1" ]; then
         echo "[$(date +%T)] ONCE=1 — exiting after first wake."
@@ -10854,6 +10873,7 @@ on_message() {
             elif [ "$wake_rc" != "0" ]; then
                 echo "[$(date +%T)] WARN: coordinator wake exited non-zero (continuing watch)"
                 log_event coord.wake.error "issue=$issue trigger=outbox rc=$wake_rc"
+                coord_batch_unnote_ring
             else
                 # issue #422 self-review finding — see on_outcome's identical
                 # branch for the full rationale (drop a stale pending prompt
@@ -10867,7 +10887,7 @@ on_message() {
             fi
         fi
     fi
-    wake_clock_set "$now"
+    [ "${hold_reason:-}" = "batch_window" ] || wake_clock_set "$now"
 
     if [ "$ONCE" = "1" ]; then
         echo "[$(date +%T)] ONCE=1 — exiting after first wake."
@@ -11060,13 +11080,14 @@ on_inbox_drop() {
             elif [ "$wake_rc" != "0" ]; then
                 echo "[$(date +%T)] WARN: coordinator wake exited non-zero (continuing watch)"
                 log_event coord.wake.error "trigger=inbox_drop rc=$wake_rc"
+                coord_batch_unnote_ring
             else
                 coord_wake_clear_pending
                 coord_wake_hold_clear_pending
             fi
         fi
     fi
-    wake_clock_set "$now"
+    [ "${hold_reason:-}" = "batch_window" ] || wake_clock_set "$now"
 
     if [ "$ONCE" = "1" ]; then
         echo "[$(date +%T)] ONCE=1 — exiting after first wake."
@@ -11253,13 +11274,14 @@ stall_wake_pass() {
             elif [ "$wake_rc" != "0" ]; then
                 echo "[$(date +%T)] WARN: coordinator wake exited non-zero (continuing watch)"
                 log_event coord.wake.error "trigger=stall rc=$wake_rc"
+                coord_batch_unnote_ring
             else
                 coord_wake_clear_pending
                 coord_wake_hold_clear_pending
             fi
         fi
     fi
-    wake_clock_set "$now"
+    [ "${hold_reason:-}" = "batch_window" ] || wake_clock_set "$now"
     # No ONCE=1 exit branch here, unlike on_outcome/on_message: this function
     # runs inside run_stall_wake_loop's OWN backgrounded process (`&`), so an
     # `exit` here would only kill that background timer — not the watcher —
@@ -11319,13 +11341,14 @@ coord_ring_doorbell() {
             elif [ "$wake_rc" != "0" ]; then
                 log_event coord.wake.error "trigger=$trigger rc=$wake_rc"
                 ring_failed=1
+                coord_batch_unnote_ring
             else
                 coord_wake_clear_pending
                 coord_wake_hold_clear_pending
             fi
         fi
     fi
-    wake_clock_set "$now"
+    [ "${hold_reason:-}" = "batch_window" ] || wake_clock_set "$now"
     # issue #739: nonzero only when the wake itself failed (lock timeout or llm-start error); a hold,
     # debounce or composer-dirty deferral is already re-marked pending and returns 0.
     [ "$ring_failed" = "0" ]

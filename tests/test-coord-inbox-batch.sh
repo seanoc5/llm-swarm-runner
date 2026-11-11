@@ -162,7 +162,7 @@ check "hook: still asks to arm when background tasks are allowed" asked "$got"
 # ── the watcher's typed doorbell with no armed waiter (issue #743) ──────────
 WATCH="$ROOT/scripts/coordinator-watch.sh"
 clear_inbox; rm -f "$S/coord-waiter-asked" "$S/coord-inbox-waiter"
-eval "$(sed -n '/^mtime_epoch() {/,/^}/p; /^coord_inbox_count() {/,/^}/p; /^coord_inbox_nudge_text() {/,/^}/p; /^coord_inbox_nudge_pattern() {/,/^}/p; /^coord_typed_batching() {/,/^}/p; /^coord_last_ring() {/,/^}/p; /^coord_batch_note_ring() {/,/^}/p; /^coord_inbox_waiter_armed() {/,/^}/p; /^coord_wake_hold_reason() {/,/^}/p; /^coord_batch_window_open() {/,/^}/p' "$WATCH")"
+eval "$(sed -n '/^mtime_epoch() {/,/^}/p; /^coord_inbox_count() {/,/^}/p; /^coord_inbox_nudge_text() {/,/^}/p; /^coord_inbox_nudge_pattern() {/,/^}/p; /^coord_typed_batching() {/,/^}/p; /^coord_last_ring() {/,/^}/p; /^coord_batch_note_ring() {/,/^}/p; /^coord_batch_unnote_ring() {/,/^}/p; /^coord_inbox_waiter_armed() {/,/^}/p; /^coord_wake_hold_reason() {/,/^}/p; /^coord_batch_window_open() {/,/^}/p' "$WATCH")"
 COORD_INBOX_DIR="$IN" COORD_HOOK_RANG_FILE="$S/coord-hook-rang" COORD_TYPED_RING_FILE="$S/coord-typed-ring" COORD_WAKE_PENDING_FILE="$S/pending.prompt"
 COORD_INBOX_NUDGE_TEMPLATE='Inbox: %N item(s) in .swarm/coord-inbox/ — read and triage them (see prompts/coordinator.md "Inbox").'
 COORD_HOOK_STATE=1 COORD_INBOX_WAITER=1 COORD_QUIET_WAKES=1 COORD_INBOX_BATCH_SECS=900
@@ -228,6 +228,31 @@ check "watcher: coord_last_ring_at (hook/waiter side) sees the typed ring" "yes"
 check "watcher: ringing stamps the last-ring file" "yes" "$([ "$(coord_last_ring)" -ge "$now" ] && echo yes || echo no)"
 sleep 1.1; item idle_capacity >/dev/null
 check "watcher: a later non-urgent item is batched from that ring" batch_window "$(coord_wake_hold_reason)"
+
+# issue #761: a failed wake gives back its ring stamp, so its items are announced again
+rm -f "$COORD_TYPED_RING_FILE"; clear_inbox
+item outcome "Triggering outcome: issue=5 outcome=ok path=/x/a.ok.json" >/dev/null
+echo "$((now - 10)) 0" > "$COORD_HOOK_RANG_FILE"
+coord_batch_note_ring
+coord_batch_unnote_ring
+check "watcher: a failed wake with no earlier typed ring removes the stamp" "no" "$([ -e "$COORD_TYPED_RING_FILE" ] && echo yes || echo no)"
+printf "%s 3\n" "$((now - 500))" > "$COORD_TYPED_RING_FILE"
+coord_batch_note_ring
+coord_batch_unnote_ring
+check "watcher: a failed wake restores the earlier typed ring" "$((now - 500)) 3" "$(cat "$COORD_TYPED_RING_FILE")"
+rm -f "$COORD_TYPED_RING_FILE"; echo 0 > "$COORD_HOOK_RANG_FILE"
+check "watcher: after a failed wake the item rings again (no prior ring)" "" "$(coord_wake_hold_reason)"
+# every wake path that logs coord.wake.error undoes the stamp
+errs=$(grep -c 'log_event coord.wake.error "\(issue=\$issue \)\?trigger=.*rc=\$wake_rc' "$WATCH")
+undo=$(grep -c '^ *coord_batch_unnote_ring$' "$WATCH")
+check "watcher: each wake error branch undoes the ring stamp (retry pass excluded)" "yes" "$([ "$undo" -ge $((errs - 1)) ] && [ "$undo" -ge 6 ] && echo yes || echo no)"
+# a batch_window hold must not stamp the debounce clock
+held=$(grep -c 'batch_window" ] || wake_clock_set "\$now"' "$WATCH")
+bare=$(grep -c '^    wake_clock_set "\$now"$' "$WATCH" || true)
+check "watcher: held wakes skip the debounce clock stamp (5 wake paths)" "5 0" "$held $bare"
+# the 30s hold-retry tick also runs when only batching is on
+grep -q 'COORD_INBOX_BATCH_SECS:-0}" -gt 0 ]; }; then' "$WATCH" && got=yes || got=no
+check "watcher: tick fallback honours batch_window" yes "$got"
 
 # ── prompt, env and docs ────────────────────────────────────────────────────
 for needle in 'Woke for:' '.swarm/needs-you.md' 'Quiet reply' 'Your list unchanged'; do
