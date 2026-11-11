@@ -185,6 +185,18 @@ if [ -S /var/run/docker.sock ]; then
         && pass "SANDBOX_DEP_CACHE valid path -> GRADLE_RO_DEP_CACHE=<dir>/gradle" "$output" \
         || fail "SANDBOX_DEP_CACHE valid path -> GRADLE_RO_DEP_CACHE=<dir>/gradle" "$output"
 
+    # #796: gradle-dists seed. Absent -> no GRADLE_DISTS_SEED; present -> env
+    # exported and mount is read-only.
+    output=$(SANDBOX_DEP_CACHE="$_dep_cache_fixture" "$REPO_ROOT/sandbox.sh" /tmp printenv GRADLE_DISTS_SEED 2>&1) || true
+    [[ "$output" != *"gradle-dists"* ]] \
+        && pass "no gradle-dists dir -> no GRADLE_DISTS_SEED" "$output" \
+        || fail "no gradle-dists dir -> no GRADLE_DISTS_SEED" "$output"
+    mkdir -p "$_dep_cache_fixture/gradle-dists"
+    output=$(SANDBOX_DEP_CACHE="$_dep_cache_fixture" "$REPO_ROOT/sandbox.sh" /tmp printenv GRADLE_DISTS_SEED 2>&1)
+    [[ "$(tail -n1 <<< "$output")" == "$_dep_cache_fixture/gradle-dists" ]] \
+        && pass "gradle-dists dir -> GRADLE_DISTS_SEED=<dir>/gradle-dists" "$output" \
+        || fail "gradle-dists dir -> GRADLE_DISTS_SEED=<dir>/gradle-dists" "$output"
+
     # NOTE: pass the script as a single argument, NOT as separate "bash" "-c"
     # words — sandbox.sh's AGENT detection only special-cases the literal
     # tokens claude/gemini/codex/listener, so an explicit "bash" is never

@@ -218,6 +218,14 @@ Re-run the same command any time the seed goes stale (new dependency versions la
 
 Unset or empty (the default) produces byte-identical `docker run` args to before this knob existed — no extra mount, no `GRADLE_RO_DEP_CACHE`. If the configured path exists but has no `<dir>/gradle/modules-2`, `sandbox.sh` warns to stderr and skips the mount rather than blocking worker launch — a stale or mistyped host config shouldn't make every worker unlaunchable.
 
+**Gradle wrapper distributions (`<dir>/gradle-dists`).** The module cache does not include the Gradle distribution that `./gradlew` downloads (about 130 MB from services.gradle.org), so each new container fetched it again, and a services.gradle.org outage blocked workers from compiling ([#796](https://github.com/seanoc5/llm-swarm-runner/issues/796)). If `<dir>/gradle-dists` exists, `sandbox.sh` mounts it read-only and exports `GRADLE_DISTS_SEED`; `entrypoint.sh` copies it into the container's own `~/.gradle/wrapper/dists` at start (a copy, because the wrapper needs a writable lock file). No directory means no mount and no warning. Seed or refresh it from a host that has run the project's wrapper once:
+
+```bash
+rsync -a --exclude='*.lck' ~/.gradle/wrapper/dists/ /opt/swarm-cache/gradle-dists/
+```
+
+The `entrypoint.sh` change is baked into the image, so rebuild the worker image once for existing setups. Verify with `./gradlew --version` in a fresh container with services.gradle.org unreachable.
+
 This covers the Gradle half only. Maven's local repo (`~/.m2/repository`) isn't safe to mount `:ro` the same way — Maven writes `_remote.repositories`/`.lastUpdated` markers during normal resolution and has no read-only shared-cache mode, so a `:ro` mount reads cache hits but fails hard on the first miss instead of falling back to the network. A Maven-side equivalent, if needed, would be a mirror/proxy rather than a direct mount (tracked separately, not covered by this knob). The Python/uv half is covered by the same `SANDBOX_DEP_CACHE` knob, next.
 
 ### Shared uv package cache (`SANDBOX_DEP_CACHE`)
