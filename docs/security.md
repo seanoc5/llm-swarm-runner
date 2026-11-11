@@ -25,7 +25,7 @@ Mounting `/var/run/docker.sock` gives the container full Docker daemon access. T
 *   **Risk:** Anyone with access to the Docker socket can theoretically achieve root access to the host machine by spinning up a privileged container. 
 
 ### Credentials
-*   **SSH keys:** Mounted `ro` (read-only). The agent can use them to sign commits or push to GitHub, but it cannot modify them.
+*   **SSH keys (#638):** Not mounted and the SSH agent is not forwarded by default, so a worker cannot `ssh` to other hosts as you (your key logs in to live servers). Git remotes `git@github.com:` and `ssh://git@github.com/` are rewritten to HTTPS inside the container and authenticate with `GH_TOKEN`; commit and tag signing is turned off because the signing key is the SSH key, so worker commits are unsigned. `SANDBOX_SSH=1` restores the old behaviour (`~/.ssh` read-only plus agent forwarding). This guards against accidents, not a determined agent: the Docker socket can still reach host files.
 *   **Agent config:** Claude and Codex config directories are mounted `rw` for persisted login state. Gemini config is mounted `ro` when present.
 *   **GH_TOKEN injection:** `sandbox.sh` reads the host's `gh auth token` at every launch and injects it into the container as the `GH_TOKEN` env var (passed via `-e GH_TOKEN` so the value itself never appears in argv — but it's fully readable from the container's environment). This gives the agent your full `gh` scope; treat it as exfiltratable like any other mounted credential.
 *   **Exfiltration:** An actively malicious agent could read mounted credentials and exfiltrate them via the network. You must trust the LLM provider (Anthropic, Google, or OpenAI) you are using.

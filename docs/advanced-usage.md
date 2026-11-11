@@ -125,7 +125,7 @@ Author:     swarm <swarm@oconeco.dev>      # the agent wrote it
 Committer:  <your ~/.gitconfig identity>   # your credentials shipped it
 ```
 
-Only the author is overridden. Keeping the committer as the host identity is deliberate: your credentials really did push the commit, and it leaves commit signing intact (the signature covers the committer, whose key is the one mounted at `~/.ssh`).
+Only the author is overridden. Keeping the committer as the host identity is deliberate: your credentials really did push the commit, and it leaves commit signing intact when `SANDBOX_SSH=1` (the signature covers the committer, whose key is the one mounted at `~/.ssh`). By default (#638) `~/.ssh` is not mounted and signing is disabled in the container.
 
 Because it rides `docker run` rather than a prompt, it applies whether or not the agent cooperates, in every project, for every agent CLI — unlike a PR-title convention, which fails silently when a worker forgets it.
 

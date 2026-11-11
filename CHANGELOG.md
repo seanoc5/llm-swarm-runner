@@ -9,6 +9,10 @@ style when they are written.
 
 ## [Unreleased]
 
+### Changed
+
+- Workers no longer get the operator's SSH identity. `sandbox.sh` stopped mounting `~/.ssh` and forwarding `SSH_AUTH_SOCK` by default, because that key logs in to live hosts (kdeyoga) with no password, so a stray `ssh` in a worker had operator rights there. Inside the container, `git@github.com:` and `ssh://git@github.com/` remotes are rewritten to HTTPS (env-based git config, host `.git/config` untouched) and authenticate with `GH_TOKEN`. Commit and tag signing is disabled in the container because the signing key is the SSH key, so worker commits are now unsigned. `SANDBOX_SSH=1` restores the old mounts, agent and signing. (#638)
+
 ### Fixed
 - A parked worker's suggested next prompt no longer blocks brief delivery. The busy check read the pane as plain text, so dim suggestion text on the `❯` line counted as live activity (PR #867's fix brief sat 230 sweeps, 02:38Z–04:34Z, `reason=pane_busy`). `worker_pane_busy` now drops dim runs on the composer line only (the spinner's dim "(esc to interrupt)" still reads busy). New `WORKER_DELIVER_BUSY_STALL_SECS` (900; 0 = off): a brief held by `pane_busy` that long after its task finished writes one `deliver_stall` coord-inbox item naming the window and composer text; the existing composer-stall item now names the composer text too. (#871)
 - A coordinator report can no longer say "#N merges" about an issue. On 2026-11-02 the fand-app coordinator told the operator to hold deploys "until #1910 merges" three wakes running, but #1910 was an issue whose fix PR did not exist yet. `lint-coordinator-reply.sh` gains an `issue-merged` rule: each `#N` within two words of merge/merged/merges/merging is looked up with `gh api repos/{owner}/{repo}/issues/N` and flagged only when GitHub confirms it is an issue (a failing lookup stays silent). The Stop hook blocks the reply with "write the fix PR for #N merges, or #N closes". (#716)
