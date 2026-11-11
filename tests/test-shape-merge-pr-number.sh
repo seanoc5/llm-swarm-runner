@@ -304,7 +304,7 @@ case "${1:-} ${2:-}" in
         echo "OPEN"; exit 0 ;;
     "pr list")
         case "$*" in
-            *"--head fix/issue-1133"*) echo "1138"; exit 0 ;;
+            *"--state open"*) echo "1138"; exit 0 ;;
         esac
         exit 0 ;;
     "pr view")
@@ -346,9 +346,43 @@ OUT=$(timeout 5 "$MERGE" 601 --no-kill 2>&1)
 RC=$?
 set -e
 [ "$RC" -ne 0 ] || red "expected non-zero exit for an ambiguous branch, got 0:\n$OUT"
-echo "$OUT" | grep -q "2 open PRs on" || red "expected the ambiguity error, got:\n$OUT"
+echo "$OUT" | grep -q "maps to 2 PRs" || red "expected the ambiguity error, got:\n$OUT"
 echo "$OUT" | grep -q "Pass the PR number" || red "expected the pass-the-PR# hint, got:\n$OUT"
 green "two open PRs on the branch is ambiguous — refuses rather than guessing"
+
+# ============================================================================
+heading "Test 6c (#906): closing-keyword PR plus a different open branch PR — refuses and lists both"
+# ============================================================================
+cat > "$TEST_DIR/bin/gh" <<'EOS'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+    "api repos/{owner}/{repo}/issues/602") echo "false"; exit 0 ;;
+    "issue view") echo "620"; exit 0 ;;
+    "pr list") echo "621"; exit 0 ;;
+esac
+exit 0
+EOS
+chmod +x "$TEST_DIR/bin/gh"
+set +e
+OUT=$(timeout 5 "$MERGE" 602 --no-kill 2>&1)
+RC=$?
+set -e
+[ "$RC" -ne 0 ] || red "expected refusal with two candidate PRs, got 0:\n$OUT"
+echo "$OUT" | grep -q "#620 #621" || red "expected both PRs listed, got:\n$OUT"
+green "multiple candidate PRs: refuses and lists them instead of picking the first"
+
+# ============================================================================
+heading "Test 6d (#906): the jq filter matches fix/issue-N and fix/issue-N-suffix but not fix/issue-N0"
+# ============================================================================
+# The gh stub ignores --jq, so run the script's real filter through jq itself.
+FILTER=$(grep 'select(.headRefName' "$SCRIPT_DIR/../scripts/swarm-merge.sh" | head -1)
+FILTER=${FILTER#*select(}; FILTER=${FILTER%%) | .number*}; FILTER="select($FILTER)"
+[ -n "$FILTER" ] || red "could not extract the branch filter from swarm-merge.sh"
+FILTER=${FILTER//\\\"/\"}; FILTER=${FILTER//\$ISSUE/118}; FILTER=${FILTER//\\\$/\$}
+GOT=$(echo '[{"number":1,"headRefName":"fix/issue-118"},{"number":2,"headRefName":"fix/issue-118-cluster-a"},{"number":3,"headRefName":"fix/issue-1180"},{"number":4,"headRefName":"fix/issue-11"}]' \
+      | jq -r ".[] | $FILTER | .number" | tr '\n' ' ')
+[ "$GOT" = "1 2 " ] || red "branch filter matched '$GOT', expected '1 2 '"
+green "branch filter matches the exact and suffixed branch, rejects fix/issue-1180 and fix/issue-11"
 
 # ============================================================================
 heading "Test 7: PR names the issue with a closing keyword (plus one more) — report says GitHub closes both"
