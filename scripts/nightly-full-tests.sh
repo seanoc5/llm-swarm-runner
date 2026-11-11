@@ -108,6 +108,15 @@ for dir in "${REPOS[@]}"; do
            && git -C "$clone" clean -q -fdx; }; then
         log "$name: could not sync clone to origin/$branch"; INFRA=1; continue
     fi
+    # Submodules: checkout/clean leave them at the old pin (and clean -fdx stops at
+    # their boundary), so a bumped pin would be silently ignored. No-op without .gitmodules.
+    if [ -f "$clone/.gitmodules" ]; then
+        if ! { git -C "$clone" submodule sync -q --recursive \
+               && git -C "$clone" submodule update -q --init --recursive --force \
+               && git -C "$clone" submodule foreach -q --recursive 'git clean -q -ffdx'; }; then
+            log "$name: could not update submodules to the pinned commits"; INFRA=1; continue
+        fi
+    fi
     sha="$(git -C "$clone" rev-parse --short HEAD)"
     log "$name: clone at origin/$branch @ $sha"
     for f in ${COPIES[$dir]:-}; do
