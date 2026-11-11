@@ -63,3 +63,24 @@ t0=$(date +%s)
 SWARM_REAP_HOOK_TIMEOUT=1 "$HELPER" "$WT" 741 "$PROJ" >/dev/null 2>&1 && red "hang: expected non-zero" || true
 [ $(( $(date +%s) - t0 )) -lt 20 ] || red "hang: hook not bounded"
 green "hanging hook is killed at the timeout"
+
+# --- Case 5: grace deferral keeps the worktree, so the hook must NOT run ----
+setup grace
+mkdir -p "$TEST_DIR/shim"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_DIR/shim/gh"; cp "$TEST_DIR/shim/gh" "$TEST_DIR/shim/tmux"
+chmod +x "$TEST_DIR/shim/gh" "$TEST_DIR/shim/tmux"
+git init -q --bare "$TEST_DIR/grace/origin.git"; git -C "$PROJ" remote add origin "$TEST_DIR/grace/origin.git"
+git -C "$PROJ" push -q origin HEAD:refs/heads/master 2>/dev/null || true
+echo unpushed > "$WT/unpushed.txt"; git -C "$WT" add unpushed.txt; git -C "$WT" commit -q -m unpushed
+cat > "$PROJ/.swarm/reap-hook.sh" <<HOOK
+#!/usr/bin/env bash
+echo ran >> "$TEST_DIR/grace-hook.log"
+HOOK
+chmod +x "$PROJ/.swarm/reap-hook.sh"
+set +e
+(cd "$PROJ" && PATH="$TEST_DIR/shim:$PATH" SWARM_REAP_GRACE_SECS=3600 "$KILL_WT" 741 "$PROJ" --no-compose-down --grace) > "$TEST_DIR/run.log" 2>&1
+rc=$?; set -e
+[ "$rc" -eq 75 ] || red "grace: expected exit 75 (deferred), got $rc: $(cat "$TEST_DIR/run.log")"
+[ -d "$WT" ] || red "grace: worktree should be kept"
+[ ! -e "$TEST_DIR/grace-hook.log" ] || red "grace: hook ran although the worktree was kept"
+green "grace deferral: worktree kept, hook not run"

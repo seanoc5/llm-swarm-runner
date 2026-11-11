@@ -763,9 +763,6 @@ if [ -d "$WT" ]; then
         "$SCRIPT_DIR/_compose-down-for-worktree.sh" "$WT" || echo "  WARN: compose-down helper exited non-zero (continuing)"
     fi
 
-    # issue #741: project-owned cleanup (e.g. drop this worktree's test DB).
-    "$SCRIPT_DIR/_project-reap-hook.sh" "$WT" "$ISSUE" "$PROJECT_DIR" || true
-
     # G1: save unsaved code before anything can remove it. Skipped when a
     # deferred worktree is unchanged since the save made at deferral time.
     SAVED_FILES=""
@@ -810,6 +807,11 @@ if [ -d "$WT" ]; then
         fi
         [ "$NEW_SAVE" = "1" ] && notify_pr_work_saved "${ACTUAL_BRANCH:-$BRANCH}" "removed"
     fi
+
+    # issue #741: project-owned cleanup (e.g. drop this worktree's test DB).
+    # Deliberately AFTER the G2 grace exit above: a deferred worktree is kept
+    # for a human to rescue, so its external state must survive too.
+    "$SCRIPT_DIR/_project-reap-hook.sh" "$WT" "$ISSUE" "$PROJECT_DIR" || true
 
     # issue #495: archive .swarm/ (and, size permitting, .local-data/)
     # before the force-removal below discards them for good. See
