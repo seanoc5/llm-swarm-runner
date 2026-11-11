@@ -62,11 +62,15 @@ the waiter usually never arms and the idle coordinator is woken by the
 watcher's typed doorbell. Since #743 that path does the same batching:
 
 - All-non-urgent pending items are held (`reason=batch_window` in
-  `coord.wake.defer` / `coord.wake.skip`) until `COORD_INBOX_BATCH_SECS` after
+  `coord.wake.defer`) until `COORD_INBOX_BATCH_SECS` after
   the last ring. The last ring is the newest of the waiter / Stop hook
   (`.swarm/coord-hook-rang`) and the watcher's own typed doorbell
   (`.swarm/coord-typed-ring`, a separate file so a typed paste that failed is
-  never mistaken for a delivered wake).
+  never mistaken for a delivered wake). A failed paste (llm-start.sh exiting
+  other than 0 or 3) restores the previous stamp, so its items are announced
+  again. A held wake does not stamp the debounce clock, so an urgent item right
+  after it rings at once, and the 30s hold-retry tick runs whenever the batch
+  window is on.
 - An urgent item rings at once and flushes the queue. With no previous ring,
   the first item also rings at once.
 - The typed nudge ends `Woke for: <kinds>.`, so the quiet-reply rule applies.
