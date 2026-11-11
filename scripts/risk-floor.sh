@@ -119,7 +119,14 @@ fi
 if rule_on tests; then
     DELETED_TESTS="$(awk -F'\t' '$2=="removed"{print $1}' <<<"$FILES_TSV" | grep -E -- "$TEST_RE" || true)"
     [ -z "$DELETED_TESTS" ] || raise medium "rule: tests — deletes test files ($(join_first <<<"$DELETED_TESTS"))"
-    DIFF="$(gh pr diff "$PR" 2>/dev/null)" || { echo "ERROR: couldn't read PR #$PR's diff" >&2; exit 1; }
+    # GitHub refuses to serve a very large diff (HTTP 406, ~20k lines). That is
+    # itself an answer: raise the floor rather than erroring out, so a huge PR
+    # is bumped (and explained) instead of refused with no comment.
+    DIFF=""
+    if ! DIFF="$(gh pr diff "$PR" 2>/dev/null)"; then
+        DIFF=""
+        raise medium "rule: tests — the diff could not be read (GitHub refuses very large diffs), so the disabled-test check was skipped"
+    fi
     # added lines as "path<TAB>content"; the regex runs in grep, not awk, so
     # the user-supplied ERE means the same thing here as everywhere else
     SKIP_HITS="$(awk '/^\+\+\+ /{f=substr($0,7); next} /^\+/{print f "\t" substr($0,2)}' <<<"$DIFF" \

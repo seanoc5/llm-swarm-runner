@@ -25,7 +25,7 @@ All raise the floor to 🟡. Patterns are extended regexes on the repo-relative 
 | `migrations` | a changed path matches Flyway `db/migration/`, Alembic `alembic/versions/`, or `migrations/*.sql\|py` | `RISK_FLOOR_MIGRATION_RE` |
 | `sensitive` | a changed path is a Gradle/pyproject/pom file, a Dockerfile, a compose file, a GitHub workflow, or a `*Security*Config*` / `*Auth*Config*` class | `RISK_FLOOR_SENSITIVE_RE` |
 | `lines` | additions + deletions exceed the limit (default 300) | `RISK_FLOOR_MAX_LINES` |
-| `tests` | a test file is deleted, or a line like `@Disabled`, `@pytest.mark.skip`, `it.skip(` is added to one | `RISK_FLOOR_TEST_RE`, `RISK_FLOOR_SKIP_RE` |
+| `tests` | a test file is deleted, a line like `@Disabled`, `@pytest.mark.skip`, `it.skip(` is added to one, or GitHub refuses to serve the diff (very large PR; the check can't run, so it raises the floor instead of erroring) | `RISK_FLOOR_TEST_RE`, `RISK_FLOOR_SKIP_RE` |
 | `scope` | **advisory only, never bumps.** A changed file under no path the brief or issue text mentions. Skipped when no text is available. | — |
 
 `RISK_FLOOR_DISABLE="tests lines"` switches individual rules off; `RISK_FLOOR=0` switches the whole check off. Set them per project in `<project>/.swarm/.env` (defaults in `.env.example`).

@@ -34,7 +34,7 @@ cat > "$SHIM_DIR/gh" <<SHIM
 echo "\$*" >> "$GH_LOG"
 case "\$1 \$2" in
   "api "*) printf '%b' "\${GH_FILES_TSV:-}" ;;
-  "pr diff") printf '%b' "\${GH_DIFF:-}" ;;
+  "pr diff") [ "\${GH_DIFF_FAIL:-0}" = 1 ] && { echo "HTTP 406: diff too large" >&2; exit 1; }; printf '%b' "\${GH_DIFF:-}" ;;
   "pr view")
     if   grep -q -- 'headRefOid' <<<"\$*"; then echo abc1234
     elif grep -q -- '--json comments' <<<"\$*"; then
@@ -121,6 +121,21 @@ GH_DIFF='diff --git a/src/test/kotlin/XTest.kt b/src/test/kotlin/XTest.kt\n--- a
 files 'src/test/kotlin/XTest.kt\tmodified\t1\t0'; export GH_DIFF; run_floor 7; floor_is low; no_rule tests
 GH_DIFF=""; export GH_DIFF
 green "disabled tests"
+
+heading "Test 6b: GitHub refuses the diff (very large PR) → floor medium with a reason, not an error"
+files 'src/Foo.kt\tmodified\t10\t2'
+GH_DIFF_FAIL=1 run_floor 7
+[ "$rc" -eq 0 ] || red "an unreadable diff must not error out, got rc=$rc: $OUT $(cat "$TEST_DIR/err.log")"
+floor_is medium; has_rule tests
+grep -q 'could not be read' <<<"$OUT" || red "reason missing: $OUT"
+# ... and --apply still bumps and comments for it
+printf '<!-- BLIND_MERGE_RISK: low -->\nbody\n' > "$BODY_FILE"; : > "$COMMENT_LOG"
+GH_DIFF_FAIL=1 run_floor --apply 7
+[ "$rc" -eq 10 ] || red "expected the huge-diff PR to be bumped (10), got $rc"
+grep -q 'could not be read' "$COMMENT_LOG" || red "comment must explain: $(cat "$COMMENT_LOG")"
+# the disabled-test rule off → the unreadable diff is not consulted at all
+RISK_FLOOR_DISABLE=tests GH_DIFF_FAIL=1 run_floor 7; floor_is low
+green "unreadable diff raises the floor and is explained"
 
 heading "Test 7: scope — advisory note only, never bumps; skipped with no brief text"
 files 'src/main/kotlin/Foo.kt\tmodified\t5\t1' 'scripts/unrelated.sh\tmodified\t5\t1'
