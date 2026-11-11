@@ -170,12 +170,18 @@ CMINDER_SWARM_DIRS="swarm-proj=$BP late=$LP" "$BRIDGE" 2>/dev/null
 check "...and it is not delivered twice" "1" "$(ls "$LP/.swarm/coord-inbox/" | grep -c cminder_answer || true)"
 
 FP="$T/fail-proj"; mkdir -p "$FP/.swarm"; : > "$FP/.swarm/coord-inbox"   # a file where the dir should be
-printf '10\n' > "$T/last-id"
+printf '10\n' > "$T/last-id"; rm -rf "$T/held"
 printf 'id: 11\nevent: answer\ndata: {"id":11,"itemId":42,"swarm":"failing","answer":"a","authorUserId":7}\n\nid: 12\nevent: answer\ndata: {"id":12,"itemId":42,"swarm":"swarm-proj","answer":"b","authorUserId":7}\n\n' > "$SSE"
 rm -f "$BP/.swarm/coord-inbox/"*
 CMINDER_SWARM_DIRS="swarm-proj=$BP failing=$FP" "$BRIDGE" 2>"$T/bridge.err"
-check "a delivery failure does not advance the saved id" "10" "$(cat "$T/last-id")"
-check "...and later events wait for the replay" "0" "$(find "$BP/.swarm/coord-inbox" -type f | wc -l)"
+check "a write failure holds the answer" "1" "$(find "$T/held/failing" -name '11.json' 2>/dev/null | wc -l)"
+check "...and the saved id advances past it" "12" "$(cat "$T/last-id")"
+check "...and a healthy swarm's later event is delivered in the same stream" "1" "$(find "$BP/.swarm/coord-inbox" -type f | wc -l)"
+check "...and each failed retry is logged (after each of the two events)" "2" "$(grep -c 'still cannot be written' "$T/bridge.err" || true)"
+rm -f "$FP/.swarm/coord-inbox"; : > "$SSE"
+CMINDER_SWARM_DIRS="swarm-proj=$BP failing=$FP" "$BRIDGE" 2>/dev/null
+check "once the inbox is writable the held answer is delivered" "1" "$(cat "$FP"/.swarm/coord-inbox/*cminder_answer* 2>/dev/null | grep -c '^a$' || true)"
+check "...and the held copy is removed" "0" "$(find "$T/held/failing" -type f 2>/dev/null | wc -l)"
 
 # ── default swarm lookup (the tmux branch), with stubs ───────────────────────
 TP="$T/tmux-proj"; mkdir -p "$TP/.swarm"

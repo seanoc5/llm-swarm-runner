@@ -30,8 +30,9 @@
 # (default ${HOST_STATE_DIR:-~/.local/state/llm-swarm}/cminder-held) and delivered
 # when the swarm is next found live; the bridge retries held answers at every
 # (re)connect and after every event. The last event id is saved only once an
-# answer is delivered or safely held; a failed delivery stops the stream and the
-# reconnect replays from the last saved id, so an answer is never lost.
+# answer is delivered or safely held; a write failure is held the same way (a
+# broken inbox must not stall other swarms) and retried by replay_held, so an
+# answer is never lost.
 #
 # Env (host .env): CMINDER_URL, CMINDER_API_KEY, CMINDER_WORKSPACE_ID,
 # CMINDER_ANSWER_AUTHORS. Run it in its own tmux window or under a watcher; it
@@ -76,7 +77,7 @@ project_for() {
 
 # deliver <event-json>: one answer into one swarm's inbox.
 # Returns 0 delivered (or unplaceable forever: no swarm field), 3 swarm not
-# found live (caller holds it), 1 write failure (caller must not advance the id).
+# found live (caller holds it), 1 write failure (caller holds it too).
 deliver() {
     local ev="$1" swarm item_id author text proj label title kind ts f tmp quoted body
     swarm="$(jq -r '.swarm // empty' <<<"$ev")"
@@ -111,14 +112,14 @@ deliver() {
     log "delivered answer $(jq -r .id <<<"$ev") as $kind to $swarm ($(basename "$f"))"
 }
 
-# hold <event-json>: keep an answer whose swarm is not live yet.
+# hold <event-json>: keep an answer that cannot be delivered right now (swarm not live, or its inbox unwritable).
 hold() {
     local ev="$1" swarm id d
     swarm="$(jq -r '.swarm' <<<"$ev" | tr -c 'A-Za-z0-9._\n-' '_')"
     id="$(jq -r '.id' <<<"$ev" | tr -c 'A-Za-z0-9._\n-' '_')"
     d="$held/$swarm"
     mkdir -p "$d" && printf '%s\n' "$ev" > "$d/$id.json.tmp" && mv -f "$d/$id.json.tmp" "$d/$id.json" || return 1
-    log "no live swarm '$(jq -r .swarm <<<"$ev")' for answer $(jq -r .id <<<"$ev"); held until it is live"
+    log "held answer $(jq -r .id <<<"$ev") for swarm '$(jq -r .swarm <<<"$ev")' until it can be delivered"
 }
 
 # replay_held: deliver held answers whose swarm is live now. Quiet when still down.
@@ -128,19 +129,26 @@ replay_held() {
         [ -f "$f" ] || continue
         deliver "$(cat "$f")"; rc=$?
         [ "$rc" -eq 0 ] && rm -f "$f"
+        [ "$rc" -eq 1 ] && log "held answer $(basename "$f" .json) still cannot be written to its swarm's inbox; keeping it held"
     done
     return 0
 }
 
 # handle <event-json>: deliver or hold. Non-zero = not safe; do not advance the id.
+# A write failure (1) is held like an unplaceable swarm (3), so one broken inbox
+# cannot stall the stream for every other swarm; replay_held retries it.
 handle() {
     local rc
     deliver "$1"; rc=$?
-    [ "$rc" -eq 3 ] && { hold "$1"; return $?; }
+    if [ "$rc" -eq 3 ] || [ "$rc" -eq 1 ]; then
+        [ "$rc" -eq 3 ] && log "no live swarm '$(jq -r .swarm <<<"$1")' for answer $(jq -r .id <<<"$1")"
+        [ "$rc" -eq 1 ] && log "write failed for answer $(jq -r .id <<<"$1") (swarm $(jq -r .swarm <<<"$1")); holding it"
+        hold "$1"; return $?
+    fi
     return "$rc"
 }
 
-# stream_once: one SSE connection; returns 0 when it closes, 1 on a delivery failure.
+# stream_once: one SSE connection; returns 0 when it closes, 1 if an answer could not even be held.
 stream_once() {
     local last="" args id="" data="" line
     read -r last < "$state" 2>/dev/null || last=""
