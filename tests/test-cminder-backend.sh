@@ -30,7 +30,7 @@ unset NEEDS_YOU_BACKEND CMINDER_URL CMINDER_API_KEY CMINDER_FORUM_ID CMINDER_WOR
       CMINDER_ANSWER_AUTHORS CMINDER_SWARM_DIRS HOST_STATE_DIR
 
 # curl stub: logs "<args>\t<body>" per call; FAIL=1 simulates an outage;
-# a stream URL prints $SSE.
+# a stream URL prints $SSE (then, if SSE_MID is set, sleeps 1s, evals it, prints $SSE2).
 cat > "$T/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 body=""; prev=""
@@ -38,7 +38,9 @@ for a in "$@"; do [ "$prev" = "--data-binary" ] && body="$a"; prev="$a"; done
 printf '%s\t%s\n' "$*" "$body" >> "$CALLS"
 [ "${FAIL:-0}" = 1 ] && { echo "curl: (22) The requested URL returned error: 503" >&2; exit 22; }
 case "$*" in
-    *answers/stream*) cat "$SSE" ;;
+    *answers/stream*) cat "$SSE"
+                      # SSE_MID: after the first part is consumed, run a command (fs change) then send $SSE2
+                      [ -n "${SSE_MID:-}" ] && { sleep 1; eval "$SSE_MID"; cat "$SSE2"; } ;;
     *"/complete"*)    echo '{"id":42,"status":"DONE"}' ;;
     *"/api/items"*)   echo '{"id":42}' ;;
 esac
@@ -182,6 +184,22 @@ rm -f "$FP/.swarm/coord-inbox"; : > "$SSE"
 CMINDER_SWARM_DIRS="swarm-proj=$BP failing=$FP" "$BRIDGE" 2>/dev/null
 check "once the inbox is writable the held answer is delivered" "1" "$(cat "$FP"/.swarm/coord-inbox/*cminder_answer* 2>/dev/null | grep -c '^a$' || true)"
 check "...and the held copy is removed" "0" "$(find "$T/held/failing" -type f 2>/dev/null | wc -l)"
+
+# ── per-swarm ordering: a later answer never overtakes a held earlier one ────
+# 11 fails (inbox unwritable) and is held; the inbox becomes writable mid-stream;
+# 13 (same swarm) arrives before anything has replayed 11. 13 must queue behind 11.
+rm -rf "$T/held" "$FP/.swarm/coord-inbox"; : > "$FP/.swarm/coord-inbox"
+printf '10\n' > "$T/last-id"; rm -f "$BP/.swarm/coord-inbox/"*
+printf 'id: 11\nevent: answer\ndata: {"id":11,"itemId":42,"swarm":"failing","answer":"do X","authorUserId":7}\n\n' > "$SSE"
+export SSE2="$T/sse2.txt" FP
+printf 'id: 13\nevent: answer\ndata: {"id":13,"itemId":42,"swarm":"failing","answer":"do not X","authorUserId":7}\n\nid: 14\nevent: answer\ndata: {"id":14,"itemId":42,"swarm":"swarm-proj","answer":"other swarm","authorUserId":7}\n\n' > "$SSE2"
+SSE_MID='rm -f "$FP/.swarm/coord-inbox"; mkdir -p "$FP/.swarm/coord-inbox"' CMINDER_SWARM_DIRS="swarm-proj=$BP failing=$FP" "$BRIDGE" 2>"$T/bridge.err"
+check "ordering: 13 was held behind 11, not delivered directly" "1" "$(grep -c "holding answer 13 behind them" "$T/bridge.err" || true)"
+check "...11 is replayed (delivered) before 13" "1" "$(grep -n 'delivered answer 11 \|delivered answer 13 ' "$T/bridge.err" | cut -d: -f1 | paste -sd' ' | awk '{print ($1 < $2) ? 1 : 0}')"
+check "...both reach the swarm's inbox" "2" "$(ls "$FP/.swarm/coord-inbox/" | grep -c cminder_answer || true)"
+check "...another swarm's later event is unaffected (delivered directly)" "1" "$(ls "$BP/.swarm/coord-inbox/" | grep -c cminder_answer || true)"
+check "...nothing is left held" "0" "$(find "$T/held" -type f | wc -l)"
+unset SSE2
 
 # ── default swarm lookup (the tmux branch), with stubs ───────────────────────
 TP="$T/tmux-proj"; mkdir -p "$TP/.swarm"
