@@ -279,6 +279,31 @@ grep -q 'watch.worktree_vanished.*issue=301' "$EVENTS_LOG" \
     && red "a slow-but-blessed removal spanning nearly two ticks must NOT be flagged, events.log: $(cat "$EVENTS_LOG")"
 green "the 2x since-buffer tolerates a last-seen bump spanning nearly two sweep intervals"
 
+# ============================================================================
+heading "Test 5b (#835): provision refusal's worktree.discarded is blessed; symlink spellings dedupe"
+# ============================================================================
+git -C "$PROJECT_DIR" worktree add -q -b fix/issue-835 "$TEST_DIR/wt-issue-835" master
+declare -A KNOWN_WORKTREE_SEEN=()
+WT_INVENTORY_SEEDED=0
+worktree_vanish_sweep_pass   # seed
+: > "$EVENTS_LOG"
+git -C "$PROJECT_DIR" worktree remove --force "$TEST_DIR/wt-issue-835"
+log_event worktree.discarded "issue=835 reason=exit_3"
+rm -f "$COORD_INBOX_DIR"/* 2>/dev/null || true
+worktree_vanish_sweep_pass
+grep -q 'watch.worktree_vanished' "$EVENTS_LOG" \
+    && red "provision cap-refusal discard (worktree.discarded) must not be flagged, events.log: $(cat "$EVENTS_LOG")"
+green "worktree.discarded counts as a blessed removal"
+
+ln -sfn "$TEST_DIR" "$TEST_DIR/alias"
+git -C "$PROJECT_DIR" worktree add -q -b fix/issue-836 "$TEST_DIR/wt-issue-836" master
+declare -A KNOWN_WORKTREE_SEEN=()
+WT_INVENTORY_SEEDED=0
+worktree_vanish_sweep_pass   # seed
+n_keys="${#KNOWN_WORKTREE_SEEN[@]}"
+for k in "${!KNOWN_WORKTREE_SEEN[@]}"; do [ "$k" = "$(realpath -m -- "$k")" ] || red "inventory key not canonical: $k"; done
+green "inventory keys are canonical paths ($n_keys tracked)"
+
 # ─────────────────────────── gh stub (ask 2) ────────────────────────────────
 
 SHIM_DIR="$TEST_DIR/shims"
