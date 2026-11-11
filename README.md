@@ -20,7 +20,7 @@ Also works as a single-agent sandbox if you don't want the swarm — `sandbox.sh
 > without setting up your own project.
 
 > ⚠️ **This is NOT a security boundary against a hostile / compromised agent.**
-> The container runs with `--network host`, mounts `/var/run/docker.sock` for Docker-out-of-Docker, mounts `~/.claude` and `~/.codex` rw plus `~/.ssh` ro, and the agents run with backend-specific auto-approval flags. A sufficiently-capable agent inside the container can spawn sibling containers with `-v /:/host`, exfiltrate your gh token, push to your repos, etc. Treat the agents as **trusted-but-fallible**, not as adversaries. See [`docs/security.md`](./docs/security.md) for blast-radius details.
+> The container runs with `--network host`, mounts `/var/run/docker.sock` for Docker-out-of-Docker, mounts `~/.claude` and `~/.codex` rw (plus `~/.ssh` ro only with `SANDBOX_SSH=1`), and the agents run with backend-specific auto-approval flags. A sufficiently-capable agent inside the container can spawn sibling containers with `-v /:/host`, exfiltrate your gh token, push to your repos, etc. Treat the agents as **trusted-but-fallible**, not as adversaries. See [`docs/security.md`](./docs/security.md) for blast-radius details.
 
 ## Who this is for / not for
 
@@ -393,10 +393,10 @@ Every sandbox container is memory-capped at `SANDBOX_MEM_LIMIT` (default `8g`, a
 
 ## ✨ Features at a glance
 
-- **Identity Persistence**: Automatically mounts your host's Claude, Gemini, Codex, GitHub, Git, and SSH configs. No re-authentication needed.
+- **Identity Persistence**: Automatically mounts your host's Claude, Gemini, Codex, GitHub, and Git configs (SSH only with `SANDBOX_SSH=1`). No re-authentication needed.
 - **Pre-baked Toolchain**: Node.js 22, Java 21, Python 3 (with `uv`), Deno, Docker CLI, and LLM CLIs.
 - **GitHub CLI Auth**: Injects your host's `gh` token seamlessly so agents can create PRs out of the box.
-- **Git Commit Signing**: Mounts `~/.ssh` correctly so SSH-signed commits pass.
+- **Git Commit Signing (opt-in)**: By default workers get no SSH key (#638), git goes over HTTPS with `GH_TOKEN`, and worker commits are **unsigned**. Set `SANDBOX_SSH=1` to mount `~/.ssh` and get SSH-signed commits again.
 - **Docker-outside-of-Docker (DooD)**: Full support for Testcontainers.
 - **Full Linux Userland**: Based on `ubuntu-standard` so agents have `less`, `vim`, `strace`, etc.
 - **Auto-top-up Swarm**: Watcher refills workers up to `MAX_WORKERS` as issues finish; hard cap on total tmux windows prevents runaway sessions.

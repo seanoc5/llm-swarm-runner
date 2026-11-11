@@ -2,7 +2,8 @@
 #
 # test-shape-provision-https-origin.sh — Regression test for #576: a project
 # whose origin is https://<token>@github.com/... gets a workflow-push warning
-# plus a worker-brief "Push note" naming the SSH URL, and the token never
+# plus a worker-brief "Push note" (workflow scope / outbox / SANDBOX_SSH=1; no
+# SSH-URL retry since #638 rewrites it to HTTPS), and the token never
 # appears in either. SSH-origin projects get neither.
 #
 # The snippet is lifted from provision-worker.sh with sed (never hand-copied),
@@ -32,7 +33,10 @@ run_with_origin() {
 SECRET="github_pat_SECRET123"
 note="$(run_with_origin "https://$SECRET@github.com/seanoc5/corpusminder-spring.git")"
 err="$(cat "$TEST_DIR/stderr")"
-grep -q 'git@github.com:seanoc5/corpusminder-spring.git' <<<"$note" || red "note lacks derived SSH URL: $note"
+grep -q 'workflow scope' <<<"$note" || red "note lacks the workflow-scope advice: $note"
+grep -q 'SANDBOX_SSH=1' <<<"$note" || red "note lacks the SANDBOX_SSH opt-in: $note"
+grep -q 'decision-needed' <<<"$note" || red "note lacks the outbox hand-back: $note"
+if grep -q 'git push git@github.com' <<<"$note"; then red "note still advises an SSH-URL push (rewritten to HTTPS, same refusal)"; fi
 grep -q '^## Push note' <<<"$note" || red "note lacks heading"
 grep -q 'WARN: origin is HTTPS' <<<"$err" || red "no WARN on stderr: $err"
 if grep -q "$SECRET" <<<"$note$err"; then red "token leaked into note or warning"; fi

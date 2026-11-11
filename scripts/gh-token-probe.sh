@@ -118,7 +118,10 @@ if [ "$FAIL" -gt 0 ]; then
     printf '  failed: %s\n' "${FAILED[@]}"
 fi
 echo
-echo "NOTE: git push/pull are NOT exercised here. The swarm's remotes are SSH"
-echo "      (git@github.com:...), so pushes are authorised by the mounted ~/.ssh"
-echo "      key, not by this token. Scoping the token limits API-side actions only."
+echo "NOTE: git push/pull are NOT exercised here. Since #638 workers have no SSH"
+echo "      by default: git@github.com: remotes are rewritten to HTTPS and"
+echo "      authenticate with GH_TOKEN, so this token also gates git push (a"
+echo "      workflow-file push needs the workflow scope). With SANDBOX_SSH=1 the"
+echo "      mounted ~/.ssh key authorises pushes instead, and the token limits"
+echo "      API-side actions only."
 [ "$FAIL" -eq 0 ]

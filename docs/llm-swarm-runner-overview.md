@@ -39,7 +39,7 @@ Running autonomous LLM agents directly on your host is risky: a hallucinated `rm
 
 1. A **containment layer** (Docker) so destructive commands hit a container, not the host.
 2. A **multi-agent orchestrator** (tmux + worktrees) so multiple agents work in parallel without stepping on each other's files.
-3. **Identity passthrough** (mounted `~/.claude`, `~/.ssh`, `~/.config/gh`) so the agent inherits your auth without re-login or copying secrets.
+3. **Identity passthrough** (mounted `~/.claude`, `~/.config/gh`, plus `GH_TOKEN`; `~/.ssh` only with `SANDBOX_SSH=1`) so the agent inherits your auth without re-login or copying secrets.
 
 ## Architecture at a Glance
 
@@ -91,12 +91,12 @@ For a consolidated treatment of tmux as an inter-agent channel — what works to
 Generalized launcher: `sandbox.sh <project-dir> <agent> [extra-args]`
 
 - `<agent>` ∈ `{claude, gemini, codex, listener, bash}` (default `bash`).
-- Mounts: project dir (rw), `~/.claude` (rw), a per-container copy of `~/.claude.json` (rw — see below), `~/.codex` (rw), `~/.ssh` (ro), `~/.gitconfig` (ro), `~/.config/gh` (ro), `~/.npm-global` (rw), `~/.npm` (rw), and the script's own dir (ro, so worker-listener.sh is reachable).
+- Mounts: project dir (rw), `~/.claude` (rw), a per-container copy of `~/.claude.json` (rw — see below), `~/.codex` (rw), `~/.ssh` (ro, only with `SANDBOX_SSH=1` — #638), `~/.gitconfig` (ro), `~/.config/gh` (ro), `~/.npm-global` (rw), `~/.npm` (rw), and the script's own dir (ro, so worker-listener.sh is reachable).
 - **`~/.claude.json` isolation (#286):** rather than bind-mounting the host's `~/.claude.json` directly (which pinned an inode that the CLI's write-temp-then-rename rewrites and sibling containers' rewrites could orphan or tear), `sandbox.sh` seeds a private copy per container under `~/.claude-sandbox-configs/` — keyed by `WORKER_CONTAINER_NAME` when set, else by `PROJECT_DIR` — and reuses it across relaunches. `SANDBOX_REFRESH_CLAUDE_CONFIG=1` forces a reseed from the host file.
 - Auto-mounts the **git common dir** when invoked on a worktree whose `.git` file points outside the project dir.
 - **Docker-out-of-Docker (DooD):** mounts `/var/run/docker.sock` so Testcontainers / `docker` CLI work inside the sandbox; `--group-add` gives the sandbox user write perms on the socket.
 - **GH token passthrough:** reads `gh auth token` on the host and injects as `GH_TOKEN` (necessary because `gh` stores its token in the system keyring on Linux, not in the mounted config dir). **Scoping (#418):** a `GH_TOKEN=github_pat_…` line in `<project>/.sandbox-env` replaces it for that project's workers — Docker reads the file, the host token is not injected on top, and the session header names the source. Verify a candidate token first with `scripts/gh-token-probe.sh`; permissions and procedure in [gh-token-scoping.md](./gh-token-scoping.md).
-- **SSH agent forwarding** when `SSH_AUTH_SOCK` is set.
+- **No SSH by default (#638):** no `~/.ssh` mount and no agent forwarding, because the operator's key logs in to other hosts. `git@github.com:` / `ssh://git@github.com/` remotes are rewritten to HTTPS inside the container (host `.git/config` untouched) and authenticate with `GH_TOKEN`; commit/tag signing is turned off (the signing key is the SSH key), so **worker commits are unsigned**. `SANDBOX_SSH=1` (per project in `.swarm/.env`) restores the mounts, agent forwarding when `SSH_AUTH_SOCK` is set, and signing.
 - **Memory cap:** `SANDBOX_MEM_LIMIT` (default `8g`) is applied as `--memory`/`--memory-swap` on every container; set higher (e.g. `24g`) for heavyweight builds or `0` to disable. Exit code 137 inside the sandbox usually means this cap fired — see [advanced-usage.md](./advanced-usage.md#memory-limit-sandbox_mem_limit).
 - `EXTRA_MOUNTS` env var: comma-separated `host:container[:ro|:rw]` extra bind mounts.
 - `.sandbox-env` file in the project dir is auto-loaded as a Docker `--env-file`.

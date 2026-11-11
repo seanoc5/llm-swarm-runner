@@ -156,7 +156,8 @@ SANDBOX_GIT_CFG_VALS=()
 # sees via the mount above) are written with the HOST's absolute home, e.g.
 # /home/sean/.claude/hooks/x.sh, but the container's home is /home/sandbox,
 # so the command died with "not found" after every turn (#837). Bind the
-# hooks dir read-only at the host path too (same trick as ~/.ssh above).
+# hooks dir read-only at the host path too (same trick as the opt-in ~/.ssh
+# mount above, SANDBOX_SSH=1).
 # Skipped when absent, or when the host home is the container home (the
 # rw mount already covers it).
 if [ -d "$HOME/.claude/hooks" ] && [ "$HOME" != "/home/sandbox" ]; then
