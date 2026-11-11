@@ -29,6 +29,8 @@ yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
 heading(){ printf '\n\033[1;34m=== %s ===\033[0m\n' "$*"; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# issue #731: this test is about other gates — stub the risk floor (Gate 1b) to "rating is fine".
+export RISK_FLOOR_SCRIPT="$SCRIPT_DIR/fixtures/risk-floor-ok.sh"
 CHECK="$SCRIPT_DIR/../scripts/migration-collision-check.sh"
 MERGE="$SCRIPT_DIR/../scripts/swarm-merge.sh"
 for s in "$CHECK" "$MERGE"; do

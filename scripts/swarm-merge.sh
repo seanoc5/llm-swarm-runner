@@ -53,6 +53,12 @@
 #   Gate 1 (rating marker) body contains the exact marker
 #                         `<!-- BLIND_MERGE_RISK: low -->`. Absent, or any
 #                         other value (medium/high/malformed) → refused.
+#   Gate 1b (risk floor, #731) scripts/risk-floor.sh --apply <N>: refuse when the
+#                         diff trips a risk-floor rule that a 🟢 may not have
+#                         (migration, build/CI/auth config, large diff, deleted or
+#                         disabled tests). The script bumps the marker to 🟡 and
+#                         comments the rule; an error in it refuses too (fail
+#                         closed). RISK_FLOOR=0 skips it. See docs/risk-floor.md.
 #   Gate 2 (CI wait)      scripts/ci-wait.sh <N> — a real bounded poll of
 #                         `gh pr checks` to a concluded state, replacing the
 #                         old `gh pr merge --auto` prescription, which
@@ -745,6 +751,28 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
           echo "       '${RATING_MARKER:-<absent>}', not the exact $AUTO_RATING marker — not" >&2
           echo "       eligible for unattended merge." >&2
           exit 1
+        fi
+
+        # Gate 1b (#731): the marker is the worker's self-rating; this is the
+        # deterministic check that the diff allows it. risk-floor.sh --apply
+        # bumps a too-low marker itself (and comments with the rule), so a
+        # refused PR is already a 🟡 PR for the operator. Fails closed: any
+        # exit other than 0/10 refuses. RISK_FLOOR=0 turns it off.
+        if [ "${RISK_FLOOR:-1}" != "0" ]; then
+          echo "       auto-$AUTO_RATING gate 1b (risk floor): checking…"
+          FLOOR_RC=0
+          FLOOR_OUT="$("${RISK_FLOOR_SCRIPT:-$SCRIPT_DIR/risk-floor.sh}" --apply "$PR_NUM" 2>&1)" || FLOOR_RC=$?
+          if [ "$FLOOR_RC" = 10 ]; then
+            echo "ERROR: PR #$PR_NUM refused by --auto-$AUTO_RATING Gate 1b (risk floor)." >&2
+            echo "       The diff is riskier than the $AUTO_RATING rating; the marker was bumped and a comment names the rule:" >&2
+            sed 's/^/       /' <<<"$FLOOR_OUT" >&2
+            exit 1
+          elif [ "$FLOOR_RC" != 0 ]; then
+            echo "ERROR: PR #$PR_NUM refused by --auto-$AUTO_RATING Gate 1b (risk floor, exit $FLOOR_RC)." >&2
+            echo "       risk-floor.sh errored rather than returning a verdict — failing closed:" >&2
+            sed 's/^/       /' <<<"$FLOOR_OUT" >&2
+            exit 1
+          fi
         fi
 
         echo "       auto-$AUTO_RATING gate 3 (review decision): checking…"
