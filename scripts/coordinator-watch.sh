@@ -3203,6 +3203,7 @@ for _v in COORD_WORK_RUN_RETRY_SECS COORD_WORK_RUN_MAX_RETRIES; do
 done
 COORD_SPLIT_RUN_PID=""
 COORD_SPLIT_LOCK_FD=""
+SPLIT_TRIGGER="" SPLIT_SINCE=""
 SPLIT_LOOP_PID=""
 if ! [[ "$COORD_WAKE_LOCK_TIMEOUT_SECS" =~ ^[0-9]+$ ]]; then
     echo "ERROR: COORD_WAKE_LOCK_TIMEOUT_SECS must be a non-negative integer (got: $COORD_WAKE_LOCK_TIMEOUT_SECS)" >&2
@@ -11361,21 +11362,25 @@ coord_split_tick() {
     local trigger="${1:-tick}" rc=0
     coord_split_active || return 0
     [ -d "$COORD_INBOX_DIR" ] || return 0
+    # Unlocked, read-only pre-check: an idle tick takes no lock and writes nothing.
+    coord_split_decide "$trigger" || return 0
     mkdir -p "$COORD_WORK_RUN_DIR" 2>/dev/null || true
     # Issue #878: the periodic tick, inbox_drop and the exit recheck run in
     # different processes. Without this lock two of them read the same
     # last-start, both decide a run is due, and both launch a wrapper before
-    # either has stamped it. Decide and launch under one flock. The launch then
-    # stays "in flight" (launch-inflight marker, cleared by the launch's own
+    # either has stamped it. Decide again and launch under one flock. The launch
+    # then stays "in flight" (launch-inflight marker, cleared by the launch's own
     # subshell once its wrapper has exited and any failure back-off is
     # recorded), so a path that gets the lock next backs off.
     if ! exec {COORD_SPLIT_LOCK_FD}>"$COORD_WORK_RUN_DIR/launch.lock" 2>/dev/null; then
         COORD_SPLIT_LOCK_FD=""
-        coord_split_tick_locked "$trigger"
+        coord_split_start_run "$SPLIT_TRIGGER" "$SPLIT_SINCE"
         return $?
     fi
     if flock -w "${COORD_SPLIT_LAUNCH_LOCK_SECS:-30}" "$COORD_SPLIT_LOCK_FD" 2>/dev/null; then
-        coord_split_tick_locked "$trigger" || rc=$?
+        if coord_split_decide "$trigger"; then
+            coord_split_start_run "$SPLIT_TRIGGER" "$SPLIT_SINCE" || rc=$?
+        fi
     else
         log_event coord.workrun.busy "trigger=$trigger reason=launch_lock_timeout"
     fi
@@ -11412,7 +11417,10 @@ coord_split_clear_inflight() {
     return 0
 }
 
-coord_split_tick_locked() {
+# coord_split_decide <trigger>: read-only. Returns 0 and sets SPLIT_TRIGGER /
+# SPLIT_SINCE when a run is due and none is running or being launched; returns
+# 1 otherwise. Idle ticks therefore write nothing under work-run/.
+coord_split_decide() {
     local trigger="${1:-tick}" last now from="" fails=0 since
     last="$(coord_split_last_start)"
     now=$(date +%s)
@@ -11425,12 +11433,12 @@ coord_split_tick_locked() {
         # never handled as announced. Back off COORD_WORK_RUN_RETRY_SECS from
         # the failed start and give up after COORD_WORK_RUN_MAX_RETRIES, so a
         # run that always dies (budget, timeout, crash) cannot loop on spend.
-        read -r from fails _ 2>/dev/null < "$COORD_WORK_RUN_DIR/retry-from" || return 0
-        [[ "$from" =~ ^[0-9]+$ ]] && [[ "$fails" =~ ^[0-9]+$ ]] || return 0
-        [ "$fails" -le "$COORD_WORK_RUN_MAX_RETRIES" ] || return 0
-        [ $((now - last)) -ge "$COORD_WORK_RUN_RETRY_SECS" ] || return 0
+        read -r from fails _ 2>/dev/null < "$COORD_WORK_RUN_DIR/retry-from" || return 1
+        [[ "$from" =~ ^[0-9]+$ ]] && [[ "$fails" =~ ^[0-9]+$ ]] || return 1
+        [ "$fails" -le "$COORD_WORK_RUN_MAX_RETRIES" ] || return 1
+        [ $((now - last)) -ge "$COORD_WORK_RUN_RETRY_SECS" ] || return 1
         coord_inbox_scan "$COORD_INBOX_DIR" "$from" 1
-        [ $((CIB_URGENT + CIB_BATCHED)) -gt 0 ] || return 0
+        [ $((CIB_URGENT + CIB_BATCHED)) -gt 0 ] || return 1
         trigger="retry"
         since="$from"
     fi
@@ -11438,9 +11446,10 @@ coord_split_tick_locked() {
         # The exit recheck of the running run picks these items up. The
         # periodic tick stays quiet so a long run does not fill events.log.
         [ "$trigger" = "tick" ] || log_event coord.workrun.busy "trigger=$trigger urgent=$CIB_URGENT batched=$CIB_BATCHED"
-        return 0
+        return 1
     fi
-    coord_split_start_run "$trigger" "$since"
+    SPLIT_TRIGGER="$trigger" SPLIT_SINCE="$since"
+    return 0
 }
 
 # coord_split_start_run <trigger> <last-start>: backgrounds coord-work-run.sh
