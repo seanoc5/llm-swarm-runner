@@ -59,6 +59,8 @@ check "a four-word gap is out of range (naive on purpose); '#1913 merging' is a 
 printf 'Merging #1910 now.\n' > "$T/m2"
 check "reverse order 'merging #1910': issue-merged" "issue-merged" "$(gl < "$T/m2" | cut -d: -f1 | paste -sd, -)"
 printf '```\nuntil #1910 merges\n```\n' > "$T/m3"
+printf '%s\n' "the fix PR for #1910 merges" "PR #1913 merges and #1910 closes" "Merge conflict on #1910 is resolved." "#1910 merge conflict" "Merged the PR for #1910." > "$T/m4"
+check "suggested wordings (fix PR for #N merges, #N closes, merge conflict) pass for an issue #N" "" "$(gl < "$T/m4" | paste -sd, -)"
 check "a fenced line is skipped" "" "$(gl < "$T/m3" | paste -sd, -)"
 check "gh failing: never flags" "" "$(GH_FAIL=1 gl < "$FX/incident-issue-merged.txt" | paste -sd, -)"
 set +e; gl < "$FX/incident-issue-merged.txt" >/dev/null; ec=$?; set -e
