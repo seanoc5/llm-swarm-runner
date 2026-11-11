@@ -18,7 +18,11 @@
 # SWARM_REAP_HOOK_TIMEOUT (default 60 s), with
 #   $1 = worktree path   $2 = issue number
 #   SWARM_REAP_WORKTREE, SWARM_REAP_ISSUE, SWARM_REAP_PROJECT_DIR in its env.
-# The worktree still exists when the hook runs, so it can read its .env etc.
+# The worktree normally still exists when the hook runs, so it can read its
+# .env etc. But the hook ALSO runs when the folder is already gone (deleted by
+# hand, or left by a failed earlier reap, or on a repeat reap of the same
+# issue): the hook must be idempotent. Then $1 is a path that does not
+# exist, and the hook must cope by keying off $2 (the issue number).
 # A failing hook is reported on stderr and exits 1; callers treat that as a
 # warning and keep reaping (cleanup must never block a reap).
 set -uo pipefail

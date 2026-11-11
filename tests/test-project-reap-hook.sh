@@ -84,3 +84,43 @@ rc=$?; set -e
 [ -d "$WT" ] || red "grace: worktree should be kept"
 [ ! -e "$TEST_DIR/grace-hook.log" ] || red "grace: hook ran although the worktree was kept"
 green "grace deferral: worktree kept, hook not run"
+
+# --- Case 6 (issue #889): worktree folder already gone: hook still runs -----
+setup gone
+cat > "$PROJ/.swarm/reap-hook.sh" <<HOOK
+#!/usr/bin/env bash
+echo "\$1 \$2 present=\$([ -d "\$1" ] && echo yes || echo no)" >> "$TEST_DIR/gone-hook.log"
+HOOK
+chmod +x "$PROJ/.swarm/reap-hook.sh"
+rm -rf "$WT"; git -C "$PROJ" worktree prune
+reap || red "gone: reap failed: $(cat "$TEST_DIR/run.log")"
+[ -f "$TEST_DIR/gone-hook.log" ] || red "gone: hook did not run for a missing folder: $(cat "$TEST_DIR/run.log")"
+[ "$(wc -l < "$TEST_DIR/gone-hook.log")" -eq 1 ] || red "gone: hook should run exactly once"
+grep -qx "$WT 741 present=no" "$TEST_DIR/gone-hook.log" || red "gone: wrong hook args: $(cat "$TEST_DIR/gone-hook.log")"
+green "missing folder: hook still runs once with path + issue"
+
+# --- Case 7 (issue #889): reap_dangling call site runs the hook -------------
+setup dangling
+REAP_ORPHAN="$SCRIPT_DIR/../scripts/reap-orphan-worktrees.sh"
+cat > "$PROJ/.swarm/reap-hook.sh" <<HOOK
+#!/usr/bin/env bash
+echo "\$1 \$2" >> "$TEST_DIR/dangling-hook.log"
+HOOK
+chmod +x "$PROJ/.swarm/reap-hook.sh"
+rm -rf "$PROJ/.git/worktrees/$(basename "$WT")"
+git -C "$WT" rev-parse --git-dir >/dev/null 2>&1 && red "dangling: fixture did not corrupt the registration"
+mkdir -p "$TEST_DIR/fakebin"
+cat > "$TEST_DIR/fakebin/gh" <<'FAKEGH'
+#!/usr/bin/env bash
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then printf 'fix/issue-741\tMERGED\n'; exit 0; fi
+exit 1
+FAKEGH
+chmod +x "$TEST_DIR/fakebin/gh"
+set +e
+(cd "$PROJ" && PATH="$TEST_DIR/fakebin:$PATH" "$REAP_ORPHAN" --yes --min-age-days 0 --project "$PROJ") > "$TEST_DIR/run.log" 2>&1
+rc=$?; set -e
+[ "$rc" -eq 0 ] || red "dangling: reap-orphan exit $rc: $(cat "$TEST_DIR/run.log")"
+[ ! -d "$WT" ] || red "dangling: worktree not removed: $(cat "$TEST_DIR/run.log")"
+[ -f "$TEST_DIR/dangling-hook.log" ] || red "dangling: hook did not run: $(cat "$TEST_DIR/run.log")"
+grep -qx "$WT 741" "$TEST_DIR/dangling-hook.log" || red "dangling: wrong hook args: $(cat "$TEST_DIR/dangling-hook.log")"
+green "dangling registration: reap_dangling runs the hook with path + issue"
