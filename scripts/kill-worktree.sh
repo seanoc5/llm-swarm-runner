@@ -763,6 +763,9 @@ if [ -d "$WT" ]; then
         "$SCRIPT_DIR/_compose-down-for-worktree.sh" "$WT" || echo "  WARN: compose-down helper exited non-zero (continuing)"
     fi
 
+    # issue #741: project-owned cleanup (e.g. drop this worktree's test DB).
+    "$SCRIPT_DIR/_project-reap-hook.sh" "$WT" "$ISSUE" "$PROJECT_DIR" || true
+
     # G1: save unsaved code before anything can remove it. Skipped when a
     # deferred worktree is unchanged since the save made at deferral time.
     SAVED_FILES=""
