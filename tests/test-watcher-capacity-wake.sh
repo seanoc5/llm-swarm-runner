@@ -504,8 +504,8 @@ reset
 echo '[{"number":12,"labels":[]}]' > "$AVAILABLE_JSON"
 idle_capacity_wake_pass || true; mv "$COORD_INBOX_DIR"/*-idle_capacity-*.md "$T/"
 idle_capacity_outcome_pass
-grep -q "dispatch.idle_none reason=night_ok_zero" "$EV" && got=yes || got=no
-check "night_ok=0 and nothing started: reason=night_ok_zero" "yes" "$got"
+grep -q "dispatch.idle_none reason=none_started slots=[0-9]* ready=[0-9]* night_ok=0" "$EV" && got=yes || got=no
+check "night_ok=0 and nothing started: reason=none_started with night_ok=0 field" "yes" "$got"
 
 reset
 echo '[{"number":10,"labels":[{"name":"night-ok"}]}]' > "$AVAILABLE_JSON"

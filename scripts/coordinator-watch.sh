@@ -2323,7 +2323,7 @@ EVENTS LOG
       capacity.idle_check  the idle-capacity gh query found nothing to wake for
                            (reason=nothing_dispatchable|available_issues_failed)
       dispatch.idle_none   (issue #901) an idle_capacity wake was consumed and no worker window
-                           appeared (reason=night_ok_zero|none_started|note_unprocessed)
+                           appeared (reason=none_started|note_unprocessed; night_ok=N is logged beside it)
       watch.worktree_vanished  (issue #439) a tracked worktree disappeared with no
                            reap.worktree event logged for it since it was last
                            confirmed present (issue, dir, reason=no_reap_event) — the
@@ -12006,10 +12006,11 @@ host_load_wake_pass() {
 # (wake time, slots/ready/night_ok, the iss-* windows open then) in
 # IDLE_CAPACITY_OUTCOME_FILE. Once the coordinator has consumed the note and is
 # idle again, a window not in the snapshot means a worker started (silent);
-# none logs `dispatch.idle_none reason=<night_ok_zero|none_started|
-# note_unprocessed>` so "36 wakes, no work, cause not established" becomes a
-# countable event. night_ok_zero = the turn started nothing while night_ok=0, the
-# misread the Night-queue wording now rules out.
+# none logs `dispatch.idle_none reason=<none_started|note_unprocessed>` so "36
+# wakes, no work, cause not established" becomes a countable event. The reason
+# states only what was observed; night_ok is logged as its own field. Count
+# night_ok=0 events to estimate the Night-queue misread, but note that a wake with
+# nothing dispatchable also lands there (cause not detected here).
 idle_capacity_outcome_pass() {
     [ -s "$IDLE_CAPACITY_OUTCOME_FILE" ] || return 0
     local ts slots ready night_ok now names w before nl reason="" started=0
@@ -12032,7 +12033,6 @@ idle_capacity_outcome_pass() {
         done <<< "$names"
         if [ "$started" = 1 ]; then rm -f "$IDLE_CAPACITY_OUTCOME_FILE"; return 0; fi
         reason=none_started
-        [ "${night_ok:-0}" = 0 ] && reason=night_ok_zero
     fi
     log_event dispatch.idle_none "reason=$reason slots=${slots:-?} ready=${ready:-?} night_ok=${night_ok:-?} wake_age=$((now - ts))s"
     rm -f "$IDLE_CAPACITY_OUTCOME_FILE"
