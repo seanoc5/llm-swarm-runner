@@ -31,14 +31,14 @@ attribution below is inferred, not read from their logs.
 
 **F1. The finding reproduces exactly, and it has since closed.** PRs per local
 hour over 2026-10-12..26, all five repos: 0h:29 1h:19 2h:21 3h:6 4h:4 5h:0 6h:0
-7h:0 8h:1 9h:3. PRs created 03:00–08:59, same-length windows:
+7h:0 8h:1 9h:3. PRs created 03:00–08:59, same-length windows (total 11 vs 100):
 
 | repo | 10-12..26 | 10-27..11-10 |
 |---|---|---|
-| corpusminder-spring | 6 | 44 |
-| fand-etl | 4 | 44 |
-| fand-app | 1 | 16 |
-| civicstrata | 0 | 7 |
+| corpusminder-spring | 6 | 36 |
+| fand-etl | 4 | 40 |
+| fand-app | 1 | 14 |
+| civicstrata | 0 | 4 |
 | SAMlytics | 0 | 6 |
 
 By day, 03:00–08:59 PRs were 0 on every day from 10-23 through 11-01 and
@@ -172,7 +172,7 @@ canary: any night with skips > 0 and wakes delivered = 0 is the F2 pattern.)
   or to a worker's own `Do:` line.
 - Swarms with no `night-ok` issues (corpusminder-spring today: 0) do nothing
   overnight beyond follow-ups, which is the intended middle ground but a
-  visible drop from the 44 PRs it opened 03:00–09:00 over 10-27..11-10. That
+  visible drop from the 36 PRs it opened 03:00–09:00 over 10-27..11-10. That
   swarm's operator labelling step becomes the throughput lever.
 - Risk: E3 child detection by label convention can misclassify; a wrong
   miss only means a skipped issue, never an unlabelled dispatch.
