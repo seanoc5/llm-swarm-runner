@@ -23,6 +23,14 @@
 #                the worktree's .swarm/tasks/status/*.json. Right wording: type
 #                the phrase in the coordinator.
 #
+#   issue-merged "#N merges/merged" where #N is an issue, not a PR (issue #716:
+#                "hold deploys until #1910 merges" when #1910 was an issue and its fix
+#                PR did not exist yet). Resolves each #N within two words of
+#                merge/merges/merged/merging via gh api repos/{owner}/{repo}/issues/N
+#                (in --project, else the cwd); flags only a confirmed issue, so an
+#                offline or failing gh stays silent. Say "the fix PR for #N merges"
+#                or "#N closes".
+#
 # Usage: lint-coordinator-reply.sh [--project DIR] [file]
 # Exit 0 clean, 3 hits (printed to stdout), 2 usage error. Naive on purpose:
 # a regex that catches the real incident beats a perfect check nobody runs.
@@ -32,7 +40,7 @@ set -uo pipefail
 PROJECT=""; FILE=""
 while [ $# -gt 0 ]; do
     case "$1" in
-        -h|--help) sed -n '3,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '3,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         --project) [ $# -ge 2 ] || { echo "--project needs a value" >&2; exit 2; }; PROJECT="$2"; shift 2 ;;
         --project=*) PROJECT="${1#*=}"; shift ;;
         -*) echo "unknown option $1" >&2; exit 2 ;;
@@ -122,8 +130,44 @@ stale_window_hits() {
         { if (b != "" && $0 ~ /^[[:space:]]/) b = b " " $0; else { out(); b = $0 } }
         END { out() }')
 }
+# issue-merged (issue #716): "#N merges" where #N is an issue. Candidates are a
+# "#N" within two words of merge/merges/merged/merging on one line (either order,
+# "merge conflict" excluded, fenced lines skipped); each distinct N is resolved
+# with `gh api repos/{owner}/{repo}/issues/N` (run in --project, else the cwd) and
+# flagged only when GitHub says it is not a pull request. A lookup that fails
+# (offline, 404, no gh) never flags: the rule only fires on a confirmed issue.
+issue_merged_hits() {
+    command -v gh >/dev/null 2>&1 || return 0
+    local w='[A-Za-z0-9_'"'"'-]+' mw='merg(e|es|ed|ing)' line n verdict looked=0
+    local -A is_issue=(); local t0=$SECONDS
+    local pf="(PR|pull[[:space:]]+request)[[:space:]]+for"
+    local fwd="(${pf}[[:space:]]+)?#[0-9]+([[:space:]]+$w){0,2}[[:space:]]+$mw([^A-Za-z]|\$)"
+    local rev="(^|[^A-Za-z])$mw([[:space:]]+$w){0,2}[[:space:]]+#[0-9]+"
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        local cands body; body="$(printf '%s\n' "$line" | sed -E "s/${mw}[[:space:]]+conflicts?//Ig")"
+        # Dropped: "merge conflict" (stripped first), "the fix PR for #N merges" (the suggested wording), and
+        # a rev match whose gap crosses a conjunction ("PR #1913 merges and #1910 closes").
+        cands="$( { printf "%s\n" "$body" | grep -oiE "$fwd" | grep -viE "^$pf" | grep -oE '#[0-9]+'
+                    printf "%s\n" "$body" | grep -oiE "$rev" | grep -viE "[[:space:]](and|or|but|then|while|which|that)[[:space:]]|${pf}[[:space:]]+#" | grep -oE '#[0-9]+$'; } | tr -d "#" | sort -un)"
+        local hit=0
+        while IFS= read -r n; do
+            [ -n "$n" ] || continue
+            if [ -z "${is_issue[$n]+x}" ]; then
+                [ "$looked" -lt 10 ] && [ $((SECONDS - t0)) -lt 15 ] || continue    # cap: 10 calls and 15s in total per reply (the Stop hook gets 60s)
+                looked=$((looked + 1))
+                verdict="$( cd "${PROJECT:-.}" 2>/dev/null && timeout 5 gh api "repos/{owner}/{repo}/issues/$n" --jq '.pull_request != null' 2>/dev/null )" || verdict=""
+                case "$verdict" in false) is_issue[$n]=1 ;; *) is_issue[$n]=0 ;; esac
+            fi
+            [ "${is_issue[$n]}" = 1 ] && hit=1
+        done <<<"$cands"
+        [ "$hit" = 1 ] && echo "issue-merged: $line"
+    done < <(printf '%s\n' "$text" | awk '/^[[:space:]]*```/ { f = !f; next } !f')
+}
+
 stale="$(stale_window_hits)"
-all="$(printf '%s\n%s\n' "$hits" "$stale" | sed '/^$/d')"
+issue="$(issue_merged_hits)"
+all="$(printf '%s\n%s\n%s\n' "$hits" "$stale" "$issue" | sed '/^$/d')"
 [ -z "$all" ] && exit 0
 printf '%s\n' "$all"
 exit 3

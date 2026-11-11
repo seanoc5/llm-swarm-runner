@@ -1,0 +1,2 @@
+- **A1** Hold kdeyoga deploys until #1910 merges.
+Do now: say `hold kdeyoga`
