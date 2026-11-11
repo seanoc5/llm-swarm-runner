@@ -784,6 +784,97 @@ check "NO Escape sent into the genuinely-busy pane" "absent" "$got"
 if grep -q "send-keys -t $RETRACT_SESSION3:coordinator.0 BSpace" "$TMUX_CALL_LOG"; then got=present; else got=absent; fi
 check "NO Backspace sent into the genuinely-busy pane" "absent" "$got"
 
+heading "Test 14b: compact_retract_queued — busy-looking pane holding our own stranded /compact is cleared with Backspace only (issue #790)"
+# A swallowed Enter leaves "/compact" in the composer; the paste changed the
+# pane text so the busy read (scrollback, viewer on) still matches. The old
+# code logged retract_skip and left the text for later wakes to read as an
+# operator draft. Expect: Backspace sent, no Escape, composer cleared.
+RETRACT_SESSION4="${SESSION_NAME}-retract4"
+tmux new-session -d -s "$RETRACT_SESSION4" -n coordinator 2>/dev/null
+tmux send-keys -t "$RETRACT_SESSION4:coordinator" "clear; echo 'Compacting conversation… (12s)'; printf '❯ '; cat" Enter
+check_eventually "stranded-compact session: fixture composer ready" "busy" \
+    "tmux capture-pane -t '$RETRACT_SESSION4:coordinator' -p 2>/dev/null | grep -q '^❯' && echo busy || echo idle"
+tmux send-keys -t "$RETRACT_SESSION4:coordinator" -l "/compact"
+check_eventually "stranded-compact session: /compact sits in the composer" "present" \
+    "tmux capture-pane -t '$RETRACT_SESSION4:coordinator' -p 2>/dev/null | grep -q '/compact' && echo present || echo absent"
+
+: > "$TMUX_CALL_LOG"
+tmux() {
+    printf '%s\n' "$*" >> "$TMUX_CALL_LOG"
+    command tmux "$@"
+}
+: > "$EVENTS_LOG"
+COMPACT_RETRACT_BACKSPACES=12
+if compact_retract_queued "$RETRACT_SESSION4:coordinator" coord.compact "trigger=wake" "$AUTO_COMPACT_BUSY_PATTERN"; then
+    rc=0
+else
+    rc=$?
+fi
+unset -f tmux
+COMPACT_RETRACT_BACKSPACES=3
+check "stranded /compact: retraction succeeds" "0" "$rc"
+if grep -q 'coord.compact.retracted.*mode=backspace_only' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "stranded /compact: logged retracted mode=backspace_only" "logged" "$got"
+if grep -q "send-keys -t $RETRACT_SESSION4:coordinator Escape" "$TMUX_CALL_LOG"; then got=present; else got=absent; fi
+check "stranded /compact: NO Escape sent" "absent" "$got"
+check_eventually "stranded /compact: composer left clear (later wakes not deferred)" "clear" \
+    "tmux capture-pane -t '$RETRACT_SESSION4:coordinator' -p 2>/dev/null | grep -q '/compact' && echo stuck || echo clear"
+tmux kill-session -t "$RETRACT_SESSION4" 2>/dev/null || true
+
+heading "Test 14c: compact_retract_queued — viewer on, busy marker ONLY in scrollback, stranded /compact is still cleared (issue #790)"
+# The real #790 shape: with the viewer pane present the session pane is short,
+# the "esc to interrupt" line has scrolled above the visible rows, and only the
+# scrollback read (coord_pane_busy_match) sees it. Master's retraction took the
+# retract_skip branch here and left "/compact" in the composer.
+RETRACT_SESSION5="${SESSION_NAME}-retract5"
+export COORD_BUSY_STATE_FILE="$TEST_DIR/busy-state-14c"
+rm -f "$COORD_BUSY_STATE_FILE"
+cat > "$TEST_DIR/scrollback-repl.sh" <<'FAKE'
+#!/usr/bin/env bash
+echo "✻ Working… (esc to interrupt)"
+for i in $(seq 1 15); do echo "  ☐ todo item $i"; done
+printf '❯ '
+cat
+FAKE
+tmux -f /dev/null new-session -d -s "$RETRACT_SESSION5" -n coordinator -x 80 -y 24 2>/dev/null
+tmux set-window-option -t "$RETRACT_SESSION5:coordinator" pane-base-index 0 2>/dev/null
+tmux split-window -d -v -l 15 -t "$RETRACT_SESSION5:coordinator.0" "sleep 120" 2>/dev/null
+tmux select-pane -t "$RETRACT_SESSION5:coordinator.1" -T "$COORD_VIEWER_TITLE" 2>/dev/null
+tmux respawn-pane -k -t "$RETRACT_SESSION5:coordinator.0" "bash $TEST_DIR/scrollback-repl.sh" 2>/dev/null
+check_eventually "scrollback-only session: composer ready" "ready" \
+    "tmux capture-pane -t '$RETRACT_SESSION5:coordinator.0' -p 2>/dev/null | grep -q '^❯' && echo ready || echo wait"
+tmux send-keys -t "$RETRACT_SESSION5:coordinator.0" -l "/compact"
+check_eventually "scrollback-only session: /compact sits in the composer" "present" \
+    "tmux capture-pane -t '$RETRACT_SESSION5:coordinator.0' -p 2>/dev/null | grep -q '/compact' && echo present || echo absent"
+check "premise: busy marker is NOT on the visible rows" "no" \
+    "$(tmux capture-pane -t "$RETRACT_SESSION5:coordinator.0" -p | grep -qF 'esc to interrupt' && echo yes || echo no)"
+check "premise: busy marker IS in scrollback" "yes" \
+    "$(tmux capture-pane -t "$RETRACT_SESSION5:coordinator.0" -p -S -60 | grep -qF 'esc to interrupt' && echo yes || echo no)"
+
+: > "$TMUX_CALL_LOG"
+tmux() {
+    printf '%s\n' "$*" >> "$TMUX_CALL_LOG"
+    command tmux "$@"
+}
+: > "$EVENTS_LOG"
+COMPACT_RETRACT_BACKSPACES=12
+if compact_retract_queued "$RETRACT_SESSION5:coordinator.0" coord.compact "trigger=wake" "$AUTO_COMPACT_BUSY_PATTERN"; then
+    rc=0
+else
+    rc=$?
+fi
+unset -f tmux
+COMPACT_RETRACT_BACKSPACES=3
+check "scrollback-only: retraction succeeds" "0" "$rc"
+if grep -q 'coord.compact.retracted.*mode=backspace_only' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "scrollback-only: logged retracted mode=backspace_only (master logs retract_skip)" "logged" "$got"
+if grep -q "send-keys -t $RETRACT_SESSION5:coordinator.0 Escape" "$TMUX_CALL_LOG"; then got=present; else got=absent; fi
+check "scrollback-only: NO Escape sent" "absent" "$got"
+check_eventually "scrollback-only: composer left clear" "clear" \
+    "tmux capture-pane -t '$RETRACT_SESSION5:coordinator.0' -p 2>/dev/null | grep -q '/compact' && echo stuck || echo clear"
+tmux kill-session -t "$RETRACT_SESSION5" 2>/dev/null || true
+unset COORD_BUSY_STATE_FILE
+
 heading "Test 15: maybe_auto_compact — Enter eaten by the autocomplete menu is retried once (issue #290)"
 # Models the ROOT CAUSE bug this issue fixes: the first Enter after pasting
 # "/compact" is consumed by the CLI's slash-command autocomplete menu --

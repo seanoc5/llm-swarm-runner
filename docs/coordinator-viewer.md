@@ -91,6 +91,18 @@ the code wait, never where it makes the code act or report success:
 - Scrollback read (a stale marker means "wait"): the watcher's hold gate
   (`coordinator_pane_busy`), the skip-`/compact`-while-busy gate, the
   don't-send-Escape gate in `compact_retract_queued`.
+- Scrollback read, finish-wait loop: after a compaction has started,
+  `maybe_auto_compact` waits for it to end with `coordinator_pane_busy`, which
+  includes the scrollback read. A stale marker there only makes the loop wait
+  longer (bounded by the `COORD_BUSY_SCROLLBACK_MAX_SECS` quiet period and
+  `AUTO_COMPACT_FINISH_TIMEOUT_SECS`), never act early (#790).
+- Stranded `/compact` (#790): a swallowed Enter leaves our pasted `/compact` in
+  the composer. The paste changed the pane text, so the busy read (scrollback)
+  can still match when the start wait times out. `compact_retract_queued` then
+  checks the composer's last line: if it is exactly `/compact`, it clears it with
+  Backspace only (no Escape, which could interrupt a real turn) and logs
+  `retracted mode=backspace_only`. Any other busy pane still logs `retract_skip`
+  and sends nothing.
 - Visible rows only (a stale marker would mean "paste" or "success"):
   `reprompt_composer_dirty` (a stale marker would read "clear" and paste a
   doorbell over an operator's draft, the #366 incident), `reprompt_confirm_submitted`

@@ -7525,6 +7525,34 @@ compact_retract_queued() {
 
     if [ -n "$busy_pattern" ]; then
         if coord_pane_busy_match "$target" "$busy_pattern"; then
+            # issue #790: with the viewer on, the busy read includes scrollback,
+            # and our own pasted "/compact" changes the pane text, so a
+            # swallowed Enter reads busy here and used to leave the text in the
+            # composer (later read as an operator draft, deferring every wake).
+            # If the composer's last line is exactly our "/compact", clear it
+            # with Backspace ONLY -- never Escape, which could interrupt a real
+            # turn. Known limit: an operator draft that is literally "/compact"
+            # typed during a turn would be cleared too.
+            local last
+            last="$(compact_last_pane_line "$target")" || true
+            if printf '%s\n' "$last" | LC_ALL=C grep -qE '^/compact[[:space:]]*$'; then
+                local j
+                for ((j = 0; j < COMPACT_RETRACT_BACKSPACES; j++)); do
+                    tmux send-keys -t "$target" BSpace 2>/dev/null || true
+                done
+                sleep 1
+                # Same two-part success test as the normal path below: the
+                # queued-input marker must be gone too, not just the composer.
+                local bclean
+                bclean="$(tmux capture-pane -t "$target" -p 2>/dev/null | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')" || bclean=""
+                if ! LC_ALL=C grep -qE "$COMPACT_QUEUED_MARKER_PATTERN" <<<"$bclean" \
+                    && compact_composer_clear "$target"; then
+                    log_event "${prefix}.retracted" "mode=backspace_only $extra"
+                    return 0
+                fi
+                log_event "${prefix}.retract_failed" "mode=backspace_only $extra"
+                return 1
+            fi
             log_event "${prefix}.retract_skip" "reason=busy $extra"
             return 0
         fi
