@@ -54,7 +54,7 @@ extract_fn() {
 }
 for fn in mtime_epoch coordinator_pane_state coordinator_pane_busy coordinator_pane_busy_visible probe_ctx_used probe_ctx_window \
           coordinator_compact_effective_threshold maybe_auto_compact \
-          auto_compact_poll_pass compact_retract_queued compact_last_pane_line compact_composer_clear \
+          auto_compact_poll_pass compact_retract_queued compact_last_pane_line compact_composer_marker_line compact_composer_clear \
           compact_confirm_submitted compact_replay_detected log_event; do
     body="$(extract_fn "$fn")"
     [ -n "$body" ] || red "could not extract function '$fn' from $WATCH — has it been renamed?"
@@ -874,6 +874,68 @@ check_eventually "scrollback-only: composer left clear" "clear" \
     "tmux capture-pane -t '$RETRACT_SESSION5:coordinator.0' -p 2>/dev/null | grep -q '/compact' && echo stuck || echo clear"
 tmux kill-session -t "$RETRACT_SESSION5" 2>/dev/null || true
 unset COORD_BUSY_STATE_FILE
+
+heading "Test 14d: compact_retract_queued — stranded /compact is cleared while the slash-command menu is still open (issue #874)"
+# With the autocomplete menu open, its rows render BELOW the composer, so the
+# pane's last line is a menu row, not "/compact". The fixture redraws on every
+# key and shows menu rows only while the composer starts with "/" (like the
+# real CLI), so the menu closes once Backspace empties the composer.
+cat > "$TEST_DIR/menu-repl.sh" <<'FAKE'
+#!/usr/bin/env bash
+composer=""
+stty -echo -icanon 2>/dev/null || true
+render() {
+    printf '\033[2J\033[H'
+    echo "Compacting conversation… (12s)"
+    printf '\xe2\x9d\xaf %s\n' "$composer"
+    case "$composer" in
+        /*)
+            echo "  /compact    Clear conversation history but keep a summary"
+            echo "  /context    Visualize current context usage"
+            ;;
+    esac
+}
+render
+while IFS= read -rn1 -d '' ch; do
+    case "$ch" in
+        $'\x7f'|$'\x08') composer="${composer%?}" ;;
+        $'\r'|$'\n'|$'\x1b') : ;;
+        *) composer="$composer$ch" ;;
+    esac
+    render
+done
+FAKE
+RETRACT_SESSION6="${SESSION_NAME}-retract6"
+tmux new-session -d -s "$RETRACT_SESSION6" -n coordinator 2>/dev/null
+tmux send-keys -t "$RETRACT_SESSION6:coordinator" "bash $TEST_DIR/menu-repl.sh" Enter
+check_eventually "menu-open session: fixture composer ready" "ready" \
+    "tmux capture-pane -t '$RETRACT_SESSION6:coordinator' -p 2>/dev/null | grep -q '^❯' && echo ready || echo wait"
+tmux send-keys -t "$RETRACT_SESSION6:coordinator" -l "/compact"
+check_eventually "menu-open session: menu is open under the composer" "open" \
+    "tmux capture-pane -t '$RETRACT_SESSION6:coordinator' -p 2>/dev/null | grep -q '/context' && echo open || echo closed"
+
+: > "$TMUX_CALL_LOG"
+tmux() {
+    printf '%s\n' "$*" >> "$TMUX_CALL_LOG"
+    command tmux "$@"
+}
+: > "$EVENTS_LOG"
+COMPACT_RETRACT_BACKSPACES=12
+if compact_retract_queued "$RETRACT_SESSION6:coordinator" coord.compact "trigger=wake" "$AUTO_COMPACT_BUSY_PATTERN"; then
+    rc=0
+else
+    rc=$?
+fi
+unset -f tmux
+COMPACT_RETRACT_BACKSPACES=3
+check "menu-open stranded /compact: retraction succeeds" "0" "$rc"
+if grep -q 'coord.compact.retracted.*mode=backspace_only' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "menu-open stranded /compact: logged retracted mode=backspace_only" "logged" "$got"
+if grep -q "send-keys -t $RETRACT_SESSION6:coordinator Escape" "$TMUX_CALL_LOG"; then got=present; else got=absent; fi
+check "menu-open stranded /compact: NO Escape sent" "absent" "$got"
+check_eventually "menu-open stranded /compact: composer left clear" "clear" \
+    "tmux capture-pane -t '$RETRACT_SESSION6:coordinator' -p 2>/dev/null | grep -q '/compact' && echo stuck || echo clear"
+tmux kill-session -t "$RETRACT_SESSION6" 2>/dev/null || true
 
 heading "Test 15: maybe_auto_compact — Enter eaten by the autocomplete menu is retried once (issue #290)"
 # Models the ROOT CAUSE bug this issue fixes: the first Enter after pasting

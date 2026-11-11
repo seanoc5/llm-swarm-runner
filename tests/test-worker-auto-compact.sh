@@ -62,7 +62,7 @@ for fn in worker_pane_state worker_pane_busy worker_pane_ctx_used worker_pane_ct
           worker_compact_effective_threshold worker_has_open_pr \
           worker_task_done worker_compact_record_failure worker_compact_record_success \
           is_own_worktree_dir own_wt_dir_for_issue \
-          maybe_worker_compact compact_retract_queued compact_last_pane_line compact_composer_clear \
+          maybe_worker_compact compact_retract_queued compact_last_pane_line compact_composer_marker_line compact_composer_clear \
           compact_confirm_submitted compact_replay_detected log_event; do
     body="$(extract_fn "$fn")"
     [ -n "$body" ] || red "could not extract function '$fn' from $WATCH — has it been renamed?"

@@ -7417,6 +7417,23 @@ compact_last_pane_line() {
         | sed -e '/^[[:space:]]*$/d' -e 's/^[[:space:]]*[❯>│|╭╮╰╯─]*[[:space:]]*//' -e 's/[[:space:]]*[│|╭╮╰╯─]*[[:space:]]*$//' | tail -1 || true
 }
 
+# compact_composer_marker_line <tmux-target>
+#
+# (issue #874) Echoes the text after the LAST prompt-marker line (one that
+# starts with the composer's ❯ or > marker) of <target>'s pane, ANSI-stripped,
+# dim text dropped, trimmed. Unlike compact_last_pane_line this survives an
+# open slash-command autocomplete menu: its rows render BELOW the composer and
+# so become the "last line", but they carry no prompt marker and are skipped.
+compact_composer_marker_line() {
+    local target="$1" content
+    content="$(tmux capture-pane -e -t "$target" -p 2>/dev/null)" || { echo ""; return 1; }
+    printf '%s\n' "$content" \
+        | LC_ALL=C sed 's/\x1b\[2m[^\x1b]*//g' \
+        | LC_ALL=C sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g; s/\xc2\xa0/ /g' \
+        | LC_ALL=C grep -E '^[[:space:]]*(❯|>)' \
+        | sed -e 's/^[[:space:]]*\(❯\|>\)[[:space:]]*//' -e 's/[[:space:]]*$//' | tail -1 || true
+}
+
 # compact_composer_clear <tmux-target>
 #
 # (issue #290) True (rc 0) if compact_last_pane_line's trimmed result is
@@ -7540,9 +7557,12 @@ compact_retract_queued() {
             # with Backspace ONLY -- never Escape, which could interrupt a real
             # turn. Known limit: an operator draft that is literally "/compact"
             # typed during a turn would be cleared too.
-            local last
+            # issue #874: an open slash-command menu makes a menu row the last
+            # line, so also look the composer up by its prompt marker.
+            local last mlast
             last="$(compact_last_pane_line "$target")" || true
-            if printf '%s\n' "$last" | LC_ALL=C grep -qE '^/compact[[:space:]]*$'; then
+            mlast="$(compact_composer_marker_line "$target")" || true
+            if printf '%s\n%s\n' "$last" "$mlast" | LC_ALL=C grep -qE '^/compact[[:space:]]*$'; then
                 local j
                 for ((j = 0; j < COMPACT_RETRACT_BACKSPACES; j++)); do
                     tmux send-keys -t "$target" BSpace 2>/dev/null || true

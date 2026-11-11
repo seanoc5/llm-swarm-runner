@@ -46,7 +46,7 @@ extract_fn() {
     sed -n "/^${fn}() {/,/^}/p" "$WATCH"
 }
 for fn in worker_pane_state worker_pane_busy worker_pane_composer_text worker_deliver_busy_stall_clear worker_deliver_record_busy_stall worker_pane_ctx_used worker_pending_brief_path worker_pending_brief \
-          worker_current_task_terminal mtime_epoch ctime_epoch compact_last_pane_line compact_composer_clear \
+          worker_current_task_terminal mtime_epoch ctime_epoch compact_last_pane_line compact_composer_marker_line compact_composer_clear \
           compact_confirm_submitted compact_retract_queued worker_deliver_record_failure \
           worker_deliver_record_success worker_deliver_detect_claim maybe_worker_deliver_brief log_event \
           is_own_worktree_dir own_wt_dir_for_issue worker_deliver_composer_stall_clear \
