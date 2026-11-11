@@ -60,7 +60,12 @@ while read -r pr sha action; do
         # exit 1 = a check failed, but a token that cannot read Checks also
         # exits 1; require an actual `fail` row (tab-separated off a TTY).
         rc=0; out="$(gh pr checks "$pr" 2>&1)" || rc=$?
-        { [ "$rc" = "1" ] && grep -Eq '[[:space:]]fail[[:space:]]' <<<"$out"; } || continue
+        if ! { [ "$rc" = "1" ] && grep -Eq '[[:space:]]fail[[:space:]]' <<<"$out"; }; then
+            # issue #739: say the head was not (verifiably) red, so the watcher keeps its
+            # one-note-per-sha key across a failed read or a CI re-run instead of pruning it.
+            echo "#$pr ci-failing-unconfirmed: live head not verifiably red (sha=$sha)"
+            continue
+        fi
     fi
     echo "#$pr ci-failing: needs a fix push (sha=$sha)"
 done <<<"$FAILING"

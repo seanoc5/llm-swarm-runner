@@ -5059,6 +5059,12 @@ ready_sweep_pass() {
             CI_FAILING_NOTED[$key]=1
             continue
         fi
+        # issue #739: a moved head whose CI could not be read as red (rate limit, re-run, pending).
+        # Keep that head's dedup key alive; the key clears only when the head changes or the PR leaves.
+        if [[ "$line" =~ ^#([0-9]+)\ ci-failing-unconfirmed:.*\(sha=([0-9a-fA-F]+)\) ]]; then
+            cfseen["${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"]=1
+            continue
+        fi
         if [[ "$line" =~ ^#([0-9]+)\ ci-cancelled:.*\(sha=([0-9a-fA-F]+)\) ]]; then
             pr="${BASH_REMATCH[1]}" key="${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"
             ccseen[$key]=1
@@ -11250,7 +11256,7 @@ stall_wake_pass() {
 # COORD_WAKE_LOCK. A held doorbell is marked pending for
 # coord_wake_hold_retry_pass, same as every other path.
 coord_ring_doorbell() {
-    local trigger="$1" extra="${2:-}" now
+    local trigger="$1" extra="${2:-}" now ring_failed=0
     now=$(date +%s)
     # issue #765: split mode starts a work run for the note just written.
     if coord_split_active; then
@@ -11283,6 +11289,7 @@ coord_ring_doorbell() {
                 coord_wake_set_pending "$nudge"
             elif [ "$wake_rc" != "0" ]; then
                 log_event coord.wake.error "trigger=$trigger rc=$wake_rc"
+                ring_failed=1
             else
                 coord_wake_clear_pending
                 coord_wake_hold_clear_pending
@@ -11290,6 +11297,9 @@ coord_ring_doorbell() {
         fi
     fi
     wake_clock_set "$now"
+    # issue #739: nonzero only when the wake itself failed (lock timeout or llm-start error); a hold,
+    # debounce or composer-dirty deferral is already re-marked pending and returns 0.
+    [ "$ring_failed" = "0" ]
 }
 
 # ── issue #765: COORD_MODE=split — the watcher starts short work runs ───────
@@ -11676,12 +11686,18 @@ idle_capacity_wake_pass() {
 # separate OS processes, so the hand-off has to live on disk). Files are
 # removed before ringing, so a crash loses at most a doorbell (the inbox note
 # is already durable); a held ring is re-marked by coord_ring_doorbell itself.
+# issue #739: a ring that FAILED (lock timeout, llm-start error) re-queues its
+# files, each holding its attempt count, up to CI_FAILING_RING_MAX_TRIES; past
+# that the note waits for the coordinator's next wake (logged, not retried).
 ci_failing_ring_pass() {
     [ -d "$CI_FAILING_RING_DIR" ] || return 0
-    local f name n=0 first="" list=""
+    local f name n=0 first="" list="" tries rc=0 max="${CI_FAILING_RING_MAX_TRIES:-3}"
+    local -A attempts=()
     for f in "$CI_FAILING_RING_DIR"/*; do
         [ -e "$f" ] || continue
         name="${f##*/}"
+        tries="$(cat "$f" 2>/dev/null)"; [[ "$tries" =~ ^[0-9]+$ ]] || tries=0
+        attempts[$name]=$((tries + 1))
         rm -f "$f" 2>/dev/null || continue
         n=$((n + 1))
         [ -n "$first" ] || first="$name"
@@ -11689,10 +11705,18 @@ ci_failing_ring_pass() {
     done
     [ "$n" -gt 0 ] || return 0
     if [ "$n" = "1" ]; then
-        coord_ring_doorbell ci_failing "pr=${first%%-*} sha=${first#*-}"
+        coord_ring_doorbell ci_failing "pr=${first%%-*} sha=${first#*-}" || rc=$?
     else
-        coord_ring_doorbell ci_failing "count=$n prs=$list"
+        coord_ring_doorbell ci_failing "count=$n prs=$list" || rc=$?
     fi
+    [ "$rc" != "0" ] || return 0
+    for name in "${!attempts[@]}"; do
+        if [ "${attempts[$name]}" -ge "$max" ]; then
+            log_event coord.wake.giveup "trigger=ci_failing note=$name tries=${attempts[$name]}"
+        else
+            mkdir -p "$CI_FAILING_RING_DIR" 2>/dev/null && printf '%s' "${attempts[$name]}" > "$CI_FAILING_RING_DIR/$name" 2>/dev/null || true
+        fi
+    done
 }
 
 # watcher_dead_ring_pass (issue #756)
