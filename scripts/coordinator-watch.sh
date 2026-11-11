@@ -7538,7 +7538,7 @@ compact_retract_queued() {
                 # queued-input marker must be gone too, not just the composer.
                 local bclean
                 bclean="$(tmux capture-pane -t "$target" -p 2>/dev/null | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')" || bclean=""
-                if ! printf '%s\n' "$bclean" | LC_ALL=C grep -qE "$COMPACT_QUEUED_MARKER_PATTERN" \
+                if ! LC_ALL=C grep -qE "$COMPACT_QUEUED_MARKER_PATTERN" <<<"$bclean" \
                     && compact_composer_clear "$target"; then
                     log_event "${prefix}.retracted" "mode=backspace_only $extra"
                     return 0
