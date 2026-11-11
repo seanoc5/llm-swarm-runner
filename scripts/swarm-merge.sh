@@ -333,7 +333,7 @@ resolve_pr_for_issue() {
   count=$(printf '%s\n' "$all" | grep -c '^[0-9][0-9]*$' || true)
   if [ "$count" = 1 ]; then
     PR_NUM="$all"
-    if printf '%s\n' "$closing_prs" | grep -qx "$PR_NUM"; then
+    if grep -qx "$PR_NUM" <<<"$closing_prs"; then
       PR_VIA="closing keyword"
     else
       PR_VIA="open PR on branch fix/issue-$ISSUE"
