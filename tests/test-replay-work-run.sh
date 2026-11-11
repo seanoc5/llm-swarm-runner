@@ -105,6 +105,17 @@ grep -q "$T/out/worktrees" "$P"/.swarm/coord-inbox/*.md && green "worktree path 
 check "outcome stand-in written at the rewritten path" "ok" "$(jq -r .outcome "$T/out/worktrees/wt-issue-3/.swarm/tasks/done/20260101-000000-3.ok.json")"
 check "project has no git remote" "0" "$(git -C "$P" remote | wc -l)"
 
+heading "an outcome path that was not rewritten is refused, no real file changes"
+mkdir -p "$T/real/done" "$T/src2"
+echo canary-real-outcome > "$T/real/done/20260101-000000-4.ok.json"
+printf 'Worker(s) just finished.\n\nTriggering outcome: issue=4 outcome=ok path=%s/real/done/20260101-000000-4.ok.json\n' "$T" > "$T/src2/20260101T000000Z-outcome-4-1.md"
+"$REPLAY" --out "$T/out2" --fixtures "$T/fix" --inbox-src "$T/src2" --files 20260101T000000Z-outcome-4-1.md --cmd true >/dev/null 2>"$T/err2.txt" \
+    && green "replay still completes" || red "replay should not abort on a refused stand-in"
+check "real outcome file is untouched" "canary-real-outcome" "$(cat "$T/real/done/20260101-000000-4.ok.json")"
+check "no extra file created beside the real one" "1" "$(ls "$T/real/done" | wc -l)"
+check "refusal is reported on stderr" "1" "$(grep -c '^refused: outcome path' "$T/err2.txt")"
+check "refusal is recorded in the output dir" "1" "$(grep -c refused_outcome "$T/out2/refused.txt")"
+
 heading "reuse of an output dir is refused"
 "$REPLAY" --out "$T/out" --fixtures "$T/fix" --inbox-src "$T/src" --files 20260101T000000Z-outcome-1-1.md --cmd true >/dev/null 2>&1 \
     && red "reuse must fail" || green "existing project/ is not overwritten"
@@ -113,12 +124,14 @@ heading "resident-action extractor reads a transcript"
 cat > "$T/t.jsonl" <<'EOF'
 {"type":"user","timestamp":"2026-11-01T19:12:42.000Z","message":{"content":"Inbox: 1 item(s) in .swarm/coord-inbox/ — read and triage them"}}
 {"type":"assistant","timestamp":"2026-11-01T19:12:50.000Z","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cat .swarm/coord-inbox/20261101T191201Z-outcome-1-1.md; gh pr merge 5 --squash"}}]}}
+{"type":"assistant","timestamp":"2026-11-01T19:12:52.000Z","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"scripts/kill-finished-workers.sh"}}]}}
 {"type":"assistant","timestamp":"2026-11-01T19:12:55.000Z","message":{"content":[{"type":"text","text":"Merged PR 5.\nmore"}]}}
 EOF
 OUTX="$("$RESIDENT" "$T/t.jsonl")"
 check "wake row" "1" "$(printf '%s\n' "$OUTX" | grep -c $'\twake\t')"
 check "read row names the inbox file" "1" "$(printf '%s\n' "$OUTX" | grep -c $'\tread\t20261101T191201Z-outcome-1-1.md')"
 check "act row for the merge" "1" "$(printf '%s\n' "$OUTX" | grep -c $'\tact\t.*gh pr merge 5')"
+check "act row for a kill-finished-workers.sh call" "1" "$(printf '%s\n' "$OUTX" | grep -c $'\tact\t.*kill-finished-workers')"
 check "say row is the first line only" "Merged PR 5." "$(printf '%s\n' "$OUTX" | awk -F'\t' '$2=="say"{print $3}')"
 
 printf '\n\033[1;32mAll replay-work-run tests passed.\033[0m\n'

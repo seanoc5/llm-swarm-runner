@@ -35,8 +35,11 @@ while [ $# -gt 0 ]; do
 done
 [ -r "$TRANSCRIPT" ] || { echo "cannot read $TRANSCRIPT" >&2; exit 1; }
 
-# Verbs that change state. Keep in step with ACTION_RE in replay-work-run.sh.
-ACTION_RE='swarm-merge\.sh|worker-merge\.sh|requeue\.sh|provision-worker\.sh|llm-start\.sh|gh (pr|issue) (merge|comment|edit|close|reopen|create|ready|review)|gh api .*(-X|--method) *(POST|PUT|PATCH|DELETE)|tmux (kill|send-keys|new-window)|docker (stop|kill|rm|run|compose)|sideline-worker\.sh|git (push|worktree (add|remove))|file-followups|operator-note\.sh'
+# Verbs that change state. Keep in step with the stub list in replay-work-run.sh
+# (the `for s in swarm-merge.sh ...` loop) and its gh/tmux/docker stubs.
+# kill-finished-workers.sh counts (kills windows, removes worktrees). Left out on
+# purpose: stale-pr-nudges.sh (only lists PRs) and capture-worker.sh (only reads a pane).
+ACTION_RE='swarm-merge\.sh|worker-merge\.sh|pr-ready\.sh|self-review-pr\.sh|requeue\.sh|provision-worker\.sh|llm-start\.sh|gh (pr|issue) (merge|comment|edit|close|reopen|create|ready|review)|gh api .*(-X|--method) *(POST|PUT|PATCH|DELETE)|tmux (kill|send-keys|new-window)|docker (stop|kill|rm|run|compose)|sideline-worker\.sh|git (push|worktree (add|remove))|file-followups|operator-note\.sh|kill-finished-workers\.sh'
 
 jq -r --arg from "$FROM" --arg to "$TO" --arg re "$ACTION_RE" '
   select((.isSidechain // false) | not)
