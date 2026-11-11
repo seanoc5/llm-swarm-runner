@@ -399,6 +399,9 @@ reap_dangling() {
         "$SCRIPT_DIR/_compose-down-for-worktree.sh" "$wt" || echo "  WARN: compose-down helper exited non-zero (continuing)"
     fi
 
+    # issue #741: project-owned cleanup (e.g. drop this worktree's test DB).
+    [ -x "$SCRIPT_DIR/_project-reap-hook.sh" ] && { "$SCRIPT_DIR/_project-reap-hook.sh" "$wt" "$issue" "$PROJECT_DIR" || true; }
+
     # issue #495: this path can't call kill-worktree.sh (no working git
     # inside a dangling registration), so it archives .swarm/.local-data
     # itself — see archive_worktree_scratch above.

@@ -808,6 +808,11 @@ if [ -d "$WT" ]; then
         [ "$NEW_SAVE" = "1" ] && notify_pr_work_saved "${ACTUAL_BRANCH:-$BRANCH}" "removed"
     fi
 
+    # issue #741: project-owned cleanup (e.g. drop this worktree's test DB).
+    # Deliberately AFTER the G2 grace exit above: a deferred worktree is kept
+    # for a human to rescue, so its external state must survive too.
+    "$SCRIPT_DIR/_project-reap-hook.sh" "$WT" "$ISSUE" "$PROJECT_DIR" || true
+
     # issue #495: archive .swarm/ (and, size permitting, .local-data/)
     # before the force-removal below discards them for good. See
     # archive_worktree_scratch's own comment for the full rationale.

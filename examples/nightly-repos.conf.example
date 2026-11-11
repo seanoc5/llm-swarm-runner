@@ -24,5 +24,10 @@
 
 # Host postgres, not Docker. The clone's dir name (nightly-fand-etl) gives it
 # its own TEST_DB. test_makefile_test_db_clean drops other checkouts' DBs.
+# The clone is wiped (git clean -fdx) every night, so git-ignored staged data
+# fixes in .local-data/ are gone; point FAND_LOCAL_DATA_ROOT at the dev
+# checkout's copy instead of `@copy .local-data` (415 MB per night). Caveat:
+# fand-etl tooling writes frozen-inputs-hash-cache.json there, so the nightly
+# writes into the dev checkout's directory.
 /opt/work/oconeco/fand-etl @copy .env
-/opt/work/oconeco/fand-etl full FAND_DATA_ROOT=/opt/data/onedrive/OconEco make test PYTEST_ARGS="--ignore=tests/test_makefile_test_db_clean.py"
+/opt/work/oconeco/fand-etl full FAND_LOCAL_DATA_ROOT=/opt/work/oconeco/fand-etl/.local-data FAND_DATA_ROOT=/opt/data/onedrive/OconEco make test PYTEST_ARGS="--ignore=tests/test_makefile_test_db_clean.py"
