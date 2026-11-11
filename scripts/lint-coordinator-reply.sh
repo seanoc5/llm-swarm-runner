@@ -141,15 +141,15 @@ issue_merged_hits() {
     local w='[A-Za-z0-9_'"'"'-]+' mw='merg(e|es|ed|ing)' line n verdict looked=0
     local -A is_issue=(); local t0=$SECONDS
     local pf="(PR|pull[[:space:]]+request)[[:space:]]+for"
-    local fwd="($pf[[:space:]]+)?#[0-9]+([[:space:]]+$w){0,2}[[:space:]]+$mw([^A-Za-z]|\$)"
+    local fwd="(${pf}[[:space:]]+)?#[0-9]+([[:space:]]+$w){0,2}[[:space:]]+$mw([^A-Za-z]|\$)"
     local rev="(^|[^A-Za-z])$mw([[:space:]]+$w){0,2}[[:space:]]+#[0-9]+"
     while IFS= read -r line; do
         [ -n "$line" ] || continue
-        local cands body; body="$(printf '%s\n' "$line" | sed -E "s/$mw[[:space:]]+conflicts?//Ig")"
+        local cands body; body="$(printf '%s\n' "$line" | sed -E "s/${mw}[[:space:]]+conflicts?//Ig")"
         # Dropped: "merge conflict" (stripped first), "the fix PR for #N merges" (the suggested wording), and
         # a rev match whose gap crosses a conjunction ("PR #1913 merges and #1910 closes").
         cands="$( { printf "%s\n" "$body" | grep -oiE "$fwd" | grep -viE "^$pf" | grep -oE '#[0-9]+'
-                    printf "%s\n" "$body" | grep -oiE "$rev" | grep -viE "[[:space:]](and|or|but|then|while|which|that)[[:space:]]|$pf[[:space:]]+#" | grep -oE '#[0-9]+$'; } | tr -d "#" | sort -un)"
+                    printf "%s\n" "$body" | grep -oiE "$rev" | grep -viE "[[:space:]](and|or|but|then|while|which|that)[[:space:]]|${pf}[[:space:]]+#" | grep -oE '#[0-9]+$'; } | tr -d "#" | sort -un)"
         local hit=0
         while IFS= read -r n; do
             [ -n "$n" ] || continue
