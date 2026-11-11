@@ -132,7 +132,7 @@ else
 fi
 
 ARGV="$(run_sandbox)"
-if argv_has "$ARGV" "GIT_CONFIG_KEY_4=credential.https://github.com.helper" && argv_has "$ARGV" "GIT_CONFIG_VALUE_4=!gh auth git-credential"; then
+if argv_grep "$ARGV" "^GIT_CONFIG_KEY_[0-9]*=credential.https://github.com.helper$" && argv_has "$ARGV" "GIT_CONFIG_VALUE_5=!gh auth git-credential"; then
     ok "10. default: gh credential helper is set in the container, not left to the host gitconfig"
 else
     bad "10. default: gh credential helper set" "$(printf '%s\n' "$ARGV" | grep GIT_CONFIG | tr '\n' ' ')"
