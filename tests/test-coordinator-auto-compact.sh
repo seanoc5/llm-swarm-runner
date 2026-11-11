@@ -1006,6 +1006,7 @@ cc_pane() {   # <composer line, raw bytes incl. SGR> [footer line]
 NBSP=$'\xc2\xa0'
 for case in "empty|❯${NBSP}$(printf '\033[2m')Try \"edit <filepath> to...\"$(printf '\033[0m')|clear" \
             "ghost|❯${NBSP}$(printf '\033[2m')merge$(printf '\033[0m') $(printf '\033[2m')PR$(printf '\033[0m') $(printf '\033[2m')645|clear" \
+            "combined-dim|❯${NBSP}$(printf '\033[2;38;5;244m')Try \"edit <filepath> to...\"$(printf '\033[0m')|clear" \
             "typed|❯${NBSP}nudge the coordinator to re-verify and un-draft it|dirty"; do
     IFS='|' read -r name line want <<< "$case"
     tmux() { if [ "$1" = "capture-pane" ]; then cc_pane "$line"; return 0; fi; command tmux "$@"; }

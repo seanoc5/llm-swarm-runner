@@ -7368,7 +7368,7 @@ coordinator_compact_effective_threshold() {
 compact_last_pane_line() {
     local target="$1" content clean
     content="$(tmux capture-pane -e -t "$target" -p 2>/dev/null)" || { echo ""; return 1; }
-    clean="$(printf '%s\n' "$content" | LC_ALL=C sed 's/\x1b\[2m[^\x1b]*//g' | LC_ALL=C sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g; s/\xc2\xa0/ /g')"
+    clean="$(printf '%s\n' "$content" | LC_ALL=C sed -E 's/\x1b\[((0|1|3|4|5|7|9|22|23|24|27|29|3[0-79]|4[0-79]|9[0-7]|10[0-7]);)*2(;[0-9;]*)?m([^\x1b]|\x1b\[[349][0-9;]*m)*//g' | LC_ALL=C sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g; s/\xc2\xa0/ /g')"
     # `|| true` on the whole pipeline: under this file's `set -o pipefail`,
     # a captured pane whose EVERY line happens to match the ctx: exclusion
     # below (grep -v then produces zero lines and exits 1) would otherwise
@@ -7987,7 +7987,7 @@ worker_pane_state() {
 worker_pane_busy() {
     local win="$1" content clean
     content="$(tmux capture-pane -e -t "$SESSION_NAME:$win.0" -p 2>/dev/null)" || return 1
-    clean="$(printf '%s\n' "$content" | LC_ALL=C sed '/^\(\x1b\[[0-9;?]*[A-Za-z]\)*[[:space:]]*❯/ s/\x1b\[2m[^\x1b]*//g' | LC_ALL=C sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
+    clean="$(printf '%s\n' "$content" | LC_ALL=C sed -E '/^(\x1b\[[0-9;?]*[A-Za-z])*[[:space:]]*❯/ s/\x1b\[((0|1|3|4|5|7|9|22|23|24|27|29|3[0-79]|4[0-79]|9[0-7]|10[0-7]);)*2(;[0-9;]*)?m([^\x1b]|\x1b\[[349][0-9;]*m)*//g' | LC_ALL=C sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
     printf '%s\n' "$clean" | LC_ALL=C grep -qE "$WORKER_COMPACT_BUSY_PATTERN"
 }
 

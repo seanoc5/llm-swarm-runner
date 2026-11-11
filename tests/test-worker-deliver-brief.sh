@@ -1362,6 +1362,18 @@ maybe_worker_deliver_brief "$WIN"
 check "parked prompt + suggestion: delivery proceeds (attempt logged)" "1" "$(grep -cF 'worker.deliver.attempt' "$EVENTS_LOG")"
 check "no pane_busy skip for the suggestion" "0" "$(grep -cF 'reason=pane_busy' "$EVENTS_LOG")"
 
+# (issue #876) Combined SGR: dim merged with a colour (ESC[2;38;5;244m) and
+# with another attribute (ESC[1;2m) must be stripped like the bare ESC[2m.
+for sgr871 in '\033[2;38;5;244m' '\033[1;2m'; do
+    render871 "❯ ${sgr871}check CI (esc to interrupt)\\033[0m"
+    rc=0; worker_pane_busy "$WIN" || rc=$?
+    check "combined dim SGR ($sgr871) on the composer line does not read as busy" "1" "$rc"
+done
+# A 256-colour index of 2 (ESC[38;5;2m, green) is not dim: text stays busy.
+render871 '❯ \033[38;5;2mcheck CI (esc to interrupt)\033[0m'
+rc=0; worker_pane_busy "$WIN" || rc=$?
+check "green 38;5;2 is not mistaken for dim" "0" "$rc"
+
 # The spinner's own dim "(esc to interrupt)" hint (not on a ❯ line) must still read busy.
 render871 '✻ Considering… \033[2m(esc to interrupt)\033[0m'
 rc=0; worker_pane_busy "$WIN" || rc=$?
