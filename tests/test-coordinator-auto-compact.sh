@@ -54,7 +54,7 @@ extract_fn() {
 }
 for fn in mtime_epoch coordinator_pane_state coordinator_pane_busy coordinator_pane_busy_visible probe_ctx_used probe_ctx_window \
           coordinator_compact_effective_threshold maybe_auto_compact \
-          auto_compact_poll_pass compact_retract_queued compact_last_pane_line compact_composer_clear \
+          auto_compact_poll_pass compact_retract_queued compact_last_pane_line compact_composer_marker_line compact_composer_clear \
           compact_confirm_submitted compact_replay_detected log_event; do
     body="$(extract_fn "$fn")"
     [ -n "$body" ] || red "could not extract function '$fn' from $WATCH — has it been renamed?"
@@ -874,6 +874,234 @@ check_eventually "scrollback-only: composer left clear" "clear" \
     "tmux capture-pane -t '$RETRACT_SESSION5:coordinator.0' -p 2>/dev/null | grep -q '/compact' && echo stuck || echo clear"
 tmux kill-session -t "$RETRACT_SESSION5" 2>/dev/null || true
 unset COORD_BUSY_STATE_FILE
+
+heading "Test 14d: compact_retract_queued — stranded /compact is cleared while the slash-command menu is still open (issue #874)"
+# With the autocomplete menu open, its rows render BELOW the composer, so the
+# pane's last line is a menu row, not "/compact". The fixture redraws on every
+# key and shows menu rows only while the composer starts with "/" (like the
+# real CLI), so the menu closes once Backspace empties the composer.
+cat > "$TEST_DIR/menu-repl.sh" <<'FAKE'
+#!/usr/bin/env bash
+composer=""
+stty -echo -icanon 2>/dev/null || true
+render() {
+    printf '\033[2J\033[H'
+    echo "Compacting conversation… (12s)"
+    printf '\xe2\x9d\xaf %s\n' "$composer"
+    case "$composer" in
+        /*)
+            echo "  /compact    Clear conversation history but keep a summary"
+            echo "  /context    Visualize current context usage"
+            ;;
+    esac
+}
+render
+while IFS= read -rn1 -d '' ch; do
+    case "$ch" in
+        $'\x7f'|$'\x08') composer="${composer%?}" ;;
+        $'\r'|$'\n'|$'\x1b') : ;;
+        *) composer="$composer$ch" ;;
+    esac
+    render
+done
+FAKE
+RETRACT_SESSION6="${SESSION_NAME}-retract6"
+tmux new-session -d -s "$RETRACT_SESSION6" -n coordinator 2>/dev/null
+tmux send-keys -t "$RETRACT_SESSION6:coordinator" "bash $TEST_DIR/menu-repl.sh" Enter
+check_eventually "menu-open session: fixture composer ready" "ready" \
+    "tmux capture-pane -t '$RETRACT_SESSION6:coordinator' -p 2>/dev/null | grep -q '^❯' && echo ready || echo wait"
+tmux send-keys -t "$RETRACT_SESSION6:coordinator" -l "/compact"
+check_eventually "menu-open session: menu is open under the composer" "open" \
+    "tmux capture-pane -t '$RETRACT_SESSION6:coordinator' -p 2>/dev/null | grep -q '/context' && echo open || echo closed"
+
+: > "$TMUX_CALL_LOG"
+tmux() {
+    printf '%s\n' "$*" >> "$TMUX_CALL_LOG"
+    command tmux "$@"
+}
+: > "$EVENTS_LOG"
+COMPACT_RETRACT_BACKSPACES=12
+if compact_retract_queued "$RETRACT_SESSION6:coordinator" coord.compact "trigger=wake" "$AUTO_COMPACT_BUSY_PATTERN"; then
+    rc=0
+else
+    rc=$?
+fi
+unset -f tmux
+COMPACT_RETRACT_BACKSPACES=3
+check "menu-open stranded /compact: retraction succeeds" "0" "$rc"
+if grep -q 'coord.compact.retracted.*mode=backspace_only' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "menu-open stranded /compact: logged retracted mode=backspace_only" "logged" "$got"
+if grep -q "send-keys -t $RETRACT_SESSION6:coordinator Escape" "$TMUX_CALL_LOG"; then got=present; else got=absent; fi
+check "menu-open stranded /compact: NO Escape sent" "absent" "$got"
+check_eventually "menu-open stranded /compact: composer left clear" "clear" \
+    "tmux capture-pane -t '$RETRACT_SESSION6:coordinator' -p 2>/dev/null | grep -q '/compact' && echo stuck || echo clear"
+tmux kill-session -t "$RETRACT_SESSION6" 2>/dev/null || true
+
+heading "Test 14e: compact_retract_queued — operator draft in the composer is NOT cleared when an older '> /compact' echo is visible (issue #874 self-review)"
+# Both an unboxed (❯) and a boxed (│ > ... │) composer layout: the marker
+# lookup must pick the composer line, not the stale history echo above it.
+for layout in plain boxed; do
+    cat > "$TEST_DIR/draft-$layout.sh" <<FAKE
+#!/usr/bin/env bash
+echo "Compacting conversation… (12s)"
+if [ "$layout" = boxed ]; then
+    echo "│ > /compact                      │"
+    echo "│ > my unfinished operator draft  │"
+else
+    echo "❯ /compact"
+    echo "❯ my unfinished operator draft"
+fi
+sleep 60
+FAKE
+    S14E="${SESSION_NAME}-retract7$layout"
+    tmux new-session -d -s "$S14E" -n coordinator 2>/dev/null
+    tmux send-keys -t "$S14E:coordinator" "bash $TEST_DIR/draft-$layout.sh" Enter
+    check_eventually "draft-$layout: fixture rendered" "ready" \
+        "tmux capture-pane -t '$S14E:coordinator' -p 2>/dev/null | grep -q 'unfinished' && echo ready || echo wait"
+    : > "$TMUX_CALL_LOG"
+    tmux() {
+        printf '%s\n' "$*" >> "$TMUX_CALL_LOG"
+        command tmux "$@"
+    }
+    : > "$EVENTS_LOG"
+    COMPACT_RETRACT_BACKSPACES=12
+    compact_retract_queued "$S14E:coordinator" coord.compact "trigger=wake" "$AUTO_COMPACT_BUSY_PATTERN" || true
+    unset -f tmux
+    COMPACT_RETRACT_BACKSPACES=3
+    if grep -q "send-keys -t $S14E:coordinator \(BSpace\|Escape\)" "$TMUX_CALL_LOG"; then got=sent; else got=none; fi
+    check "draft-$layout: no Backspace/Escape sent into the operator's draft" "none" "$got"
+    if grep -q 'coord.compact.retract_skip.*reason=busy' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+    check "draft-$layout: retract_skip reason=busy logged" "logged" "$got"
+    tmux kill-session -t "$S14E" 2>/dev/null || true
+done
+
+heading "Test 14f: compact_retract_queued — operator draft '/c' is NOT cleared when a HIGHLIGHTED menu row reads '❯ /compact' (issue #874, PR #885 review)"
+# Live capture of the real CLI (2026-11-11, '/comp' typed): the highlighted
+# slash-menu row is itself drawn "❯ /compact  <description>" and the menu sits
+# ABOVE the input box; the description is plain grey, not ESC[2m dim. A
+# hypothetical layout draws the menu BELOW the box with a dim description,
+# which after dim-stripping leaves a bare "❯ /compact" that a tail -1 lookup
+# would take for the input line. Neither may make "/c" look like a stranded
+# "/compact": the lookup must use the line inside the box.
+RULE="$(printf '─%.0s' $(seq 1 60))"
+for layout in menu-above-plain menu-below-dim; do
+    {
+        echo '#!/usr/bin/env bash'
+        echo 'echo "Compacting conversation… (12s)"'
+        if [ "$layout" = menu-above-plain ]; then
+            echo "printf '\\033[38;5;153m❯ /\\033[1mcomp\\033[0m\\033[38;5;153mact      Free up context by summarizing\\033[39m\\n'"
+            echo "printf '\\033[38;5;246m  /autocompact      Set how full the context gets\\033[39m\\n'"
+            echo "echo '$RULE'"
+            echo "printf '❯\\xc2\\xa0/c\\n'"
+            echo "echo '$RULE'"
+        else
+            echo "echo '$RULE'"
+            echo "printf '❯\\xc2\\xa0/c\\n'"
+            echo "echo '$RULE'"
+            echo "printf '❯ /compact  \\033[2mFree up context by summarizing\\033[22m\\n'"
+            echo "printf '  /autocompact  \\033[2mSet how full the context gets\\033[22m\\n'"
+        fi
+        echo 'sleep 60'
+    } > "$TEST_DIR/hl-$layout.sh"
+    S14F="${SESSION_NAME}-retract8$layout"
+    tmux new-session -d -s "$S14F" -n coordinator 2>/dev/null
+    tmux send-keys -t "$S14F:coordinator" "bash $TEST_DIR/hl-$layout.sh" Enter
+    check_eventually "hl-$layout: fixture rendered" "ready" \
+        "tmux capture-pane -t '$S14F:coordinator' -p 2>/dev/null | grep -q 'autocompact' && echo ready || echo wait"
+    got="$(compact_composer_marker_line "$S14F:coordinator")"
+    check "hl-$layout: marker lookup returns the box line, not the menu row" "/c" "$got"
+    : > "$TMUX_CALL_LOG"
+    tmux() {
+        printf '%s\n' "$*" >> "$TMUX_CALL_LOG"
+        command tmux "$@"
+    }
+    : > "$EVENTS_LOG"
+    COMPACT_RETRACT_BACKSPACES=12
+    compact_retract_queued "$S14F:coordinator" coord.compact "trigger=wake" "$AUTO_COMPACT_BUSY_PATTERN" || true
+    unset -f tmux
+    COMPACT_RETRACT_BACKSPACES=3
+    if grep -q "send-keys -t $S14F:coordinator \(BSpace\|Escape\)" "$TMUX_CALL_LOG"; then got=sent; else got=none; fi
+    check "hl-$layout: nothing cleared (no Backspace/Escape into the draft)" "none" "$got"
+    if grep -q 'coord.compact.retract_skip.*reason=busy' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+    check "hl-$layout: retract_skip reason=busy logged" "logged" "$got"
+    tmux kill-session -t "$S14F" 2>/dev/null || true
+done
+
+heading "Test 14g: compact_retract_queued — stranded /compact inside a COMPLETE input box is cleared, menu absent or open above (issue #874, PR #885 round 3)"
+# The real CLI always draws the input box (rule, ❯ line, rule). This is the
+# production path of compact_composer_marker_line's box anchoring: the positive
+# case (a stranded /compact must be found and cleared) must work through the
+# box, not only through the unboxed fallback that Test 14d covers. Redrawing
+# fixture: the "menu above" variant shows, while the composer starts with "/",
+# a HIGHLIGHTED row "❯ /compact  <description>" (plain grey, as in the live
+# capture) above the top rule; the menu closes once Backspace empties the box.
+BOXRULE="$(printf '─%.0s' $(seq 1 60))"
+for variant in nomenu menu-above; do
+    cat > "$TEST_DIR/box-repl-$variant.sh" <<FAKE
+#!/usr/bin/env bash
+composer=""
+variant="$variant"
+rule="$BOXRULE"
+stty -echo -icanon 2>/dev/null || true
+render() {
+    printf '\033[2J\033[H'
+    echo "Compacting conversation… (12s)"
+    if [ "\$variant" = menu-above ]; then
+        case "\$composer" in
+            /*)
+                printf '\033[38;5;153m❯ /compact      Free up context by summarizing\033[39m\n'
+                printf '\033[38;5;246m  /context      Visualize current context usage\033[39m\n'
+                ;;
+        esac
+    fi
+    echo "\$rule"
+    printf '❯\xc2\xa0%s\n' "\$composer"
+    echo "\$rule"
+    echo "  ⏵⏵ bypass permissions on (shift+tab to cycle)"
+}
+render
+while IFS= read -rn1 -d '' ch; do
+    case "\$ch" in
+        \$'\x7f'|\$'\x08') composer="\${composer%?}" ;;
+        \$'\r'|\$'\n'|\$'\x1b') : ;;
+        *) composer="\$composer\$ch" ;;
+    esac
+    render
+done
+FAKE
+    S14G="${SESSION_NAME}-retract9$variant"
+    tmux new-session -d -s "$S14G" -n coordinator 2>/dev/null
+    tmux send-keys -t "$S14G:coordinator" "bash $TEST_DIR/box-repl-$variant.sh" Enter
+    check_eventually "box-$variant: fixture composer ready" "ready" \
+        "tmux capture-pane -t '$S14G:coordinator' -p 2>/dev/null | grep -q '^❯' && echo ready || echo wait"
+    tmux send-keys -t "$S14G:coordinator" -l "/compact"
+    check_eventually "box-$variant: stranded /compact visible in the box" "typed" \
+        "tmux capture-pane -t '$S14G:coordinator' -p 2>/dev/null | grep -q '^❯.*/compact\$' && echo typed || echo wait"
+    got="$(compact_composer_marker_line "$S14G:coordinator")"
+    check "box-$variant: marker lookup returns the boxed input line" "/compact" "$got"
+    : > "$TMUX_CALL_LOG"
+    tmux() {
+        printf '%s\n' "$*" >> "$TMUX_CALL_LOG"
+        command tmux "$@"
+    }
+    : > "$EVENTS_LOG"
+    COMPACT_RETRACT_BACKSPACES=12
+    if compact_retract_queued "$S14G:coordinator" coord.compact "trigger=wake" "$AUTO_COMPACT_BUSY_PATTERN"; then
+        rc=0
+    else
+        rc=$?
+    fi
+    unset -f tmux
+    COMPACT_RETRACT_BACKSPACES=3
+    check "box-$variant: retraction succeeds" "0" "$rc"
+    if grep -q 'coord.compact.retracted.*mode=backspace_only' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+    check "box-$variant: logged retracted mode=backspace_only" "logged" "$got"
+    if grep -q "send-keys -t $S14G:coordinator Escape" "$TMUX_CALL_LOG"; then got=present; else got=absent; fi
+    check "box-$variant: NO Escape sent" "absent" "$got"
+    check_eventually "box-$variant: composer left clear" "clear" \
+        "tmux capture-pane -t '$S14G:coordinator' -p 2>/dev/null | grep -q '/compact' && echo stuck || echo clear"
+    tmux kill-session -t "$S14G" 2>/dev/null || true
+done
 
 heading "Test 15: maybe_auto_compact — Enter eaten by the autocomplete menu is retried once (issue #290)"
 # Models the ROOT CAUSE bug this issue fixes: the first Enter after pasting
