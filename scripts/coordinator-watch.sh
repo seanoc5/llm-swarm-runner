@@ -11372,7 +11372,9 @@ coord_split_tick() {
     # then stays "in flight" (launch-inflight marker, cleared by the launch's own
     # subshell once its wrapper has exited and any failure back-off is
     # recorded), so a path that gets the lock next backs off.
-    if ! exec {COORD_SPLIT_LOCK_FD}>"$COORD_WORK_RUN_DIR/launch.lock" 2>/dev/null; then
+    # The group keeps 2>/dev/null on the open alone: a bare `exec ... 2>/dev/null`
+    # would redirect this process's stderr for good and swallow every later ERROR:.
+    if ! { exec {COORD_SPLIT_LOCK_FD}>"$COORD_WORK_RUN_DIR/launch.lock"; } 2>/dev/null; then
         COORD_SPLIT_LOCK_FD=""
         coord_split_start_run "$SPLIT_TRIGGER" "$SPLIT_SINCE"
         return $?
@@ -11390,7 +11392,8 @@ coord_split_tick() {
 }
 
 # coord_split_launch_inflight: true while a launch this or another watcher
-# process made has not finished its start-up bookkeeping. The marker holds
+# process made is still going: the marker lasts until the launch subshell has
+# seen its wrapper exit and recorded any failure back-off. The marker holds
 # "<subshell pid> <epoch>"; a dead pid or one older than the run timeout plus
 # slack (pid reuse after a crash) does not count.
 coord_split_launch_inflight() {
@@ -11408,7 +11411,7 @@ coord_split_launch_inflight() {
 # launcher's own marker write, made under that lock after the spawn, has landed.
 coord_split_clear_inflight() {
     local me="$1" f="$COORD_WORK_RUN_DIR/launch-inflight" pid="" fd
-    if exec {fd}>"$COORD_WORK_RUN_DIR/launch.lock" 2>/dev/null; then
+    if { exec {fd}>"$COORD_WORK_RUN_DIR/launch.lock"; } 2>/dev/null; then
         flock -w "${COORD_SPLIT_LAUNCH_LOCK_SECS:-30}" "$fd" 2>/dev/null || true
         read -r pid _ 2>/dev/null < "$f" || pid=""
         [ "$pid" = "$me" ] && rm -f "$f" 2>/dev/null
@@ -11513,7 +11516,10 @@ coord_split_start_run() {
         coord_split_tick exit_recheck
     ) &
     COORD_SPLIT_RUN_PID=$!
-    printf '%s %s\n' "$COORD_SPLIT_RUN_PID" "$(date +%s)" > "$COORD_WORK_RUN_DIR/launch-inflight" 2>/dev/null || true
+    # Grouped so the failed open is catchable without touching fd 2. Without the
+    # marker a second path could start a run alongside this one: say so.
+    { printf '%s %s\n' "$COORD_SPLIT_RUN_PID" "$(date +%s)" > "$COORD_WORK_RUN_DIR/launch-inflight"; } 2>/dev/null ||
+        log_event coord.workrun.warn "reason=inflight_marker_write_failed dir=$COORD_WORK_RUN_DIR"
 }
 
 # coord_split_wake <trigger> [once]
