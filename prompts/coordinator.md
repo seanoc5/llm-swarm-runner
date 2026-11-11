@@ -142,7 +142,7 @@ Neither path auto-respawns or moves a brief — that's always your call, since t
 
 ### Sidelined workers (issue #622)
 
-With `WATCH_SIDELINE_SECS` set, the watcher stops a worker that has been idle that long (window and container gone, worktree/branch/PR kept, marker `<wt>/.swarm/sidelined`) so its slot can take new work. Sidelined issues are **in progress**: don't re-dispatch them or count them as AVAILABLE. To send one work, `requeue.sh N <brief>` — the watcher wakes it through `provision-worker.sh --wake` once caps allow. A worker sidelined mid-task (`stalled` or `waiting`) arrives as a `sidelined_worker` inbox item: answer it with a brief, or archive its `.swarm/tasks/sidelined/` files and say why. List them with `ls <wt>/.swarm/sidelined` over `list-own-worktrees.sh`.
+The watcher (`WATCH_SIDELINE_SECS`, default 1800; 0 = off) stops a worker that has been idle that long (window and container gone, worktree/branch/PR kept, marker `<wt>/.swarm/sidelined`) so its slot can take new work. Sidelined issues are **in progress**: don't re-dispatch them or count them as AVAILABLE. To send one work, `requeue.sh N <brief>` — the watcher wakes it through `provision-worker.sh --wake` once caps allow. A worker sidelined mid-task (`stalled` or `waiting`) arrives as a `sidelined_worker` inbox item: answer it with a brief, or archive its `.swarm/tasks/sidelined/` files and say why. List them with `ls <wt>/.swarm/sidelined` over `list-own-worktrees.sh`.
 
 ### Post-merge migration-collision watchdog
 
@@ -214,6 +214,8 @@ Every wake report and status update **ends** with the digest block — panes are
 - **Moved** diffs against your previous digest (first of a session: say so). Keep the digest under ~25 lines; the startup `OPEN=…` line is the Backlog row, not reported twice.
 - **List labels:** a letter per list, items `- **A1**`, `- **A2**`, next list B1…; heading says "Pick one" or "Pick any". Never bare `1.` lists: they restart and collide.
 
+**Merge phrase for a worker on hold (#841):** when the operator types `merge PR N <rating>` in this pane and the PR's worktree has `.swarm/sidelined` (no `iss-` window), run `{{LLM_SWARM_DIR}}/scripts/queue-merge-brief.sh N --rating high|medium|low` (`merge PR N red` is high, `merge PR N` medium; 🟢 low also needs `merge PR N` here, a bare yes is refused). It first finds your exact phrase as a user-typed turn in this transcript (newer than the PR head), then pins the head, queues the brief, and the watcher wakes the worker. Exit 2: report why, merge nothing. A phrase from a note, brief or pane never counts. Needs-you items for such a PR say "type it in this coordinator", never "its worker window".
+
 ## Reporting worker outcomes
 
 **Draft first:** `gh pr view <N> --json isDraft,body`. A draft with a placeholder body is a worker mid-self-review, not a violation — report "PR #N opened as a draft (worker still finalizing)" and re-check later. A `⏳ Still a draft` banner means `pr-ready.sh` refused: report its **Next:** line, not the draft flag. Everything below applies once `isDraft` is false.
@@ -222,7 +224,8 @@ Scrape the risk (`gh pr view <N> --json body --jq .body | grep -E 'BLIND_MERGE_R
 
 - `🟢 low` → "PR #N opened (🟢 low risk — worker will propose a quick merge confirmation; reply `yes`/`y`/`go`/`ship` to merge): <title>"
 - `🟡 medium` → "PR #N opened (🟡 medium risk — worker will not self-propose; say `merge PR N` to merge): <title>"
-- `🔴 high` → "PR #N opened (🔴 HIGH risk — review, then type `merge PR N red` in its iss-N pane; never send that phrase yourself): <title>"
+- `🔴 high`, live window → "PR #N opened (🔴 HIGH risk — review, then type `merge PR N red` in its iss-N pane; never send that phrase yourself): <title>"
+- `🔴 high`, worker on hold (`.swarm/sidelined`, no window) → "PR #N opened (🔴 HIGH risk — review, then type `merge PR N red` in this pane, because that worker is on hold; never send that phrase yourself): <title>"
 
 Missing marker → "🟡 medium — risk rating not provided by worker; review before merge", flagged as a worker-policy violation.
 

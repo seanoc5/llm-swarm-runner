@@ -508,7 +508,7 @@
 #                           stranded_brief_sweep_pass. Worktrees carrying a
 #                           .swarm/sidelined marker (issue #622) are skipped:
 #                           sideline_wake_pass owns their queued briefs.
-#   WATCH_SIDELINE_SECS=0   (issue #622) Sideline a worker whose iss-N window
+#   WATCH_SIDELINE_SECS=1800 (issue #622, default on since #841) Sideline a worker whose iss-N window
 #                           has printed nothing for this many seconds (tmux
 #                           window_activity), whose pane is not mid-turn
 #                           (worker_pane_busy) and whose inbox is empty:
@@ -520,7 +520,7 @@
 #                           unprocessed decision-needed outbox message); the
 #                           last two write a coord-inbox note, since only a
 #                           new brief brings that worker back. 0 = off
-#                           (default); e.g. 3600 in <project>/.swarm/.env.
+#                           e.g. 3600 in <project>/.swarm/.env.
 #   WATCH_SIDELINE_SWEEP_SECS=60
 #                           (issue #622) Cadence of sideline_idle_pass and
 #                           sideline_wake_pass. The wake pass runs even with
@@ -2767,7 +2767,7 @@ WATCH_STRANDED_BRIEF_SWEEP_SECS="${WATCH_STRANDED_BRIEF_SWEEP_SECS:-60}"
 WATCH_SIBLING_SWEEP_SECS="${WATCH_SIBLING_SWEEP_SECS:-300}"
 WATCHER_CHECK="${WATCHER_CHECK:-$LLM_SWARM_DIR/scripts/watcher-check.sh}"
 # issue #622 — sidelining idle workers; see header comment.
-WATCH_SIDELINE_SECS="${WATCH_SIDELINE_SECS:-0}"
+WATCH_SIDELINE_SECS="${WATCH_SIDELINE_SECS:-1800}"
 WATCH_SIDELINE_SWEEP_SECS="${WATCH_SIDELINE_SWEEP_SECS:-60}"
 SIDELINE_WORKER="${SIDELINE_WORKER:-$LLM_SWARM_DIR/scripts/sideline-worker.sh}"
 PROVISION_WORKER="${PROVISION_WORKER:-$LLM_SWARM_DIR/scripts/provision-worker.sh}"

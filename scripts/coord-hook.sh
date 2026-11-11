@@ -156,7 +156,7 @@ reply_lint_message() {
         [ -n "$tp" ] && [ -r "$tp" ] && text="$(jq -rs '[.[] | select(.type == "assistant") | [.message.content[]? | select(.type == "text") | .text] | select(length > 0) | join("\n")] | last // empty' "$tp" 2>/dev/null || true)"
     fi
     [ -n "$text" ] || return 0
-    hits="$(printf '%s\n' "$text" | "$(cd "$(dirname "$0")" && pwd)/lint-coordinator-reply.sh" 2>/dev/null)" && return 0
+    hits="$(printf '%s\n' "$text" | "$(cd "$(dirname "$0")" && pwd)/lint-coordinator-reply.sh" --project "$project" 2>/dev/null)" && return 0
     [ -n "$hits" ] || return 0
     rules="$(printf '%s\n' "$hits" | cut -d: -f1 | sort -u | paste -sd, -)"
     # Block at most once per reply chain: a continuation (stop_hook_active) is

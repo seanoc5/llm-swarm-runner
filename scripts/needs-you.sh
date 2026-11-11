@@ -153,7 +153,7 @@ case "$cmd" in
         case "$kind" in decision|todo) ;; *) die "--kind is decision or todo" ;; esac
         printf '%s' "$do_" | grep -E '`[^`]+`|```|https://' >/dev/null \
             || die "--do has no command or https URL. Put the command in backticks, or give the URL and the click path. Refusing: $do_"
-        if hits="$("$LINT" <<<"$title $do_ $rec" || true)" && [ -n "$hits" ]; then
+        if hits="$("$LINT" --project "$project" <<<"$title $do_ $rec" || true)" && [ -n "$hits" ]; then
             die "item points elsewhere instead of carrying its action (${hits%%:*}); put the full command in --do. Refusing."
         fi
         # An empty field is left out, not stored as "none" (issue #801).

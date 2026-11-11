@@ -140,7 +140,7 @@ Neither path auto-respawns or moves a brief — that's always your call, since t
 
 ### Sidelined workers (issue #622)
 
-With `WATCH_SIDELINE_SECS` set, the watcher stops a worker that has been idle that long (window and container gone, worktree/branch/PR kept, marker `<wt>/.swarm/sidelined`) so its slot can take new work. Sidelined issues are **in progress**: don't re-dispatch them or count them as AVAILABLE. To send one work, `requeue.sh N <brief>` — the watcher wakes it through `provision-worker.sh --wake` once caps allow. A worker sidelined mid-task (`stalled` or `waiting`) arrives as a `sidelined_worker` inbox item: answer it with a brief, or archive its `.swarm/tasks/sidelined/` files and say why. List them with `ls <wt>/.swarm/sidelined` over `list-own-worktrees.sh`.
+The watcher (`WATCH_SIDELINE_SECS`, default 1800; 0 = off) stops a worker that has been idle that long (window and container gone, worktree/branch/PR kept, marker `<wt>/.swarm/sidelined`) so its slot can take new work. Sidelined issues are **in progress**: don't re-dispatch them or count them as AVAILABLE. To send one work, `requeue.sh N <brief>` — the watcher wakes it through `provision-worker.sh --wake` once caps allow. A worker sidelined mid-task (`stalled` or `waiting`) arrives as a `sidelined_worker` inbox item: answer it with a brief, or archive its `.swarm/tasks/sidelined/` files and say why. List them with `ls <wt>/.swarm/sidelined` over `list-own-worktrees.sh`.
 
 ### Post-merge migration-collision watchdog
 

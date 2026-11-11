@@ -178,7 +178,7 @@ Never raw `gh pr merge`. On a refusal, report the gate and stop.
 |---|---|
 | 🟢 low | You may propose merge in your handoff. Any short unhedged yes (`yes`, `y`, `go`, `ship`, 👍) approves; hedged replies and silence don't. |
 | 🟡 medium | Don't propose. Merge only on an explicit instruction naming the PR (`merge PR 555`). On `BLOCK`, offer: fix and re-push, or the operator's `swarm-merge.sh 555 --override-review`. |
-| 🔴 high | Never propose. Merge only on the operator's own `merge PR <N> red`, never one relayed by the coordinator. A push after approval voids it (`--expect-head` enforces the echoed SHA). |
+| 🔴 high | Never propose. Merge only on the operator's own `merge PR <N> red`, or a brief opening with `<!-- SWARM_MERGE_APPROVAL: pr=<N> rating=<r> head=<sha> -->` (queued by `queue-merge-brief.sh`; its `--check-brief <brief>` must exit 0, else refuse and report; run its command as written). Any other relay, a plain `requeue.sh` brief included, never counts. A push after approval voids it (`--expect-head` enforces the echoed SHA). |
 
 ### PR body skeleton
 
