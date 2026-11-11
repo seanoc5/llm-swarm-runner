@@ -9600,9 +9600,23 @@ coord_last_ring() {
 coord_batch_note_ring() {
     coord_typed_batching || return 0
     [ "${DRY_RUN:-0}" = "1" ] && return 0
+    # Issue #872: the stall-wake loop (a separate process) stamps this file too.
+    # Save the previous stamp and remember this ring's own line (a third field,
+    # pid.nanoseconds, makes it unique even within one second) so the undo can
+    # tell whether the file is still ours. Readers only parse the first field.
+    local line
+    line="$(date +%s) $(coord_inbox_count) ${BASHPID:-$$}.$(date +%N)"
     COORD_TYPED_RING_PREV=""
-    [ -e "$COORD_TYPED_RING_FILE" ] && COORD_TYPED_RING_PREV="$(cat "$COORD_TYPED_RING_FILE" 2>/dev/null)"
-    printf '%s %s\n' "$(date +%s)" "$(coord_inbox_count)" > "$COORD_TYPED_RING_FILE" 2>/dev/null || true
+    COORD_TYPED_RING_MINE="$line"
+    (
+        flock -w 5 8 2>/dev/null || true
+        [ -e "$COORD_TYPED_RING_FILE" ] && cat "$COORD_TYPED_RING_FILE" 2>/dev/null > "$COORD_TYPED_RING_FILE.prev.$$"
+        printf '%s\n' "$line" > "$COORD_TYPED_RING_FILE" 2>/dev/null || true
+    ) 8>"$COORD_TYPED_RING_FILE.lock" 2>/dev/null
+    if [ -e "$COORD_TYPED_RING_FILE.prev.$$" ]; then
+        COORD_TYPED_RING_PREV="$(cat "$COORD_TYPED_RING_FILE.prev.$$" 2>/dev/null)"
+        rm -f "$COORD_TYPED_RING_FILE.prev.$$"
+    fi
 }
 
 # coord_batch_unnote_ring (issue #761): undo coord_batch_note_ring for a wake
@@ -9613,11 +9627,22 @@ coord_batch_note_ring() {
 coord_batch_unnote_ring() {
     coord_typed_batching || return 0
     [ "${DRY_RUN:-0}" = "1" ] && return 0
-    if [ -n "${COORD_TYPED_RING_PREV:-}" ]; then
-        printf '%s\n' "$COORD_TYPED_RING_PREV" > "$COORD_TYPED_RING_FILE" 2>/dev/null || true
-    else
-        rm -f "$COORD_TYPED_RING_FILE" 2>/dev/null || true
-    fi
+    # Issue #872: compare and restore. If another ring (the stall-wake loop)
+    # stamped after ours, the file no longer holds our line and its newer stamp
+    # must survive; only our own stamp is given back.
+    [ -n "${COORD_TYPED_RING_MINE:-}" ] || return 0
+    (
+        flock -w 5 8 2>/dev/null || true
+        cur=""
+        [ -e "$COORD_TYPED_RING_FILE" ] && cur="$(cat "$COORD_TYPED_RING_FILE" 2>/dev/null)"
+        [ "$cur" = "$COORD_TYPED_RING_MINE" ] || exit 0
+        if [ -n "${COORD_TYPED_RING_PREV:-}" ]; then
+            printf '%s\n' "$COORD_TYPED_RING_PREV" > "$COORD_TYPED_RING_FILE" 2>/dev/null || true
+        else
+            rm -f "$COORD_TYPED_RING_FILE" 2>/dev/null || true
+        fi
+    ) 8>"$COORD_TYPED_RING_FILE.lock" 2>/dev/null
+    COORD_TYPED_RING_MINE=""
 }
 
 # coord_inbox_nudge_pattern

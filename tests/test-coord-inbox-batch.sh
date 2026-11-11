@@ -241,7 +241,22 @@ coord_batch_note_ring
 coord_batch_unnote_ring
 check "watcher: a failed wake restores the earlier typed ring" "$((now - 500)) 3" "$(cat "$COORD_TYPED_RING_FILE")"
 rm -f "$COORD_TYPED_RING_FILE"; echo 0 > "$COORD_HOOK_RANG_FILE"
+# issue #872: exercise the real undo (no hand-deleted ring file)
+coord_batch_note_ring
+check "watcher: a fresh ring stamps the ring file before the wake fails" "yes" "$([ -e "$COORD_TYPED_RING_FILE" ] && echo yes || echo no)"
+coord_batch_unnote_ring
+check "watcher: the undo removes that stamp (fails if the undo step is removed)" "no" "$([ -e "$COORD_TYPED_RING_FILE" ] && echo yes || echo no)"
 check "watcher: after a failed wake the item rings again (no prior ring)" "" "$(coord_wake_hold_reason)"
+# issue #872: main rings, the stall loop rings after it, then main's wake fails:
+# the stall ring's newer stamp must survive the undo
+printf "%s 3\n" "$((now - 500))" > "$COORD_TYPED_RING_FILE"
+coord_batch_note_ring                      # main ring (saves the old stamp)
+main_mine="$COORD_TYPED_RING_MINE"
+printf "%s 9 stall.1\n" "$((now + 1))" > "$COORD_TYPED_RING_FILE"   # stall loop stamps after main
+coord_batch_unnote_ring                    # main's wake times out on the lock
+check "watcher: undoing a failed ring keeps a newer stall-wake stamp" "$((now + 1)) 9 stall.1" "$(cat "$COORD_TYPED_RING_FILE")"
+check "watcher: the main ring's own stamp differed from the stall stamp" "yes" "$([ "$main_mine" != "$(cat "$COORD_TYPED_RING_FILE")" ] && echo yes || echo no)"
+rm -f "$COORD_TYPED_RING_FILE"; echo 0 > "$COORD_HOOK_RANG_FILE"
 # every wake path that logs coord.wake.error undoes the stamp
 errs=$(grep -c 'log_event coord.wake.error "\(issue=\$issue \)\?trigger=.*rc=\$wake_rc' "$WATCH")
 undo=$(grep -c '^ *coord_batch_unnote_ring$' "$WATCH")
