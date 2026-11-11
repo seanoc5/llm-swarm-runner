@@ -1,0 +1,10 @@
+Woke for: 1 idle capacity.
+**A. Needs you:**
+- **A1** 🟡 Load the kdeyoga TIGER data (risk: writes the dev DB). Recommend yes, high confidence.
+  Do:
+  ```
+  cd /opt/work/civicstrata && ./gradlew bootRun --args='--load=tiger'
+  ```
+- **A2** 🟡 PR #689 ready. Run `merge PR 689` in the conversation session. https://github.com/o/r/pull/689
+
+Do now: A1 (its command is in the block under A1).

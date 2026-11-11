@@ -1,0 +1,6 @@
+## Task
+
+Make the thing faster and cleaner overall, whatever you think is best. Take your time, look around the project, and pick the parts that seem slow. We will review the result later and decide.
+
+## Acceptance criteria
+- [ ] it is faster

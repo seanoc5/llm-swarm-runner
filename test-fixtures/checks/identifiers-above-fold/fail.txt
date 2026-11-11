@@ -1,0 +1,3 @@
+<!-- BLIND_MERGE_RISK: low -->
+**Bottom line:** Fixed the flake in `ReadyTest`.
+**Next:** operator — merge — waiting on nothing

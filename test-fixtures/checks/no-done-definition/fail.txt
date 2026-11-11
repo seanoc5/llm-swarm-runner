@@ -1,0 +1,3 @@
+## Task
+
+Fix issue #1. Update scripts/foo.sh so that it prints the version, add a test in tests/test-foo.sh, and document the flag in docs/foo.md. Keep the change small and do not touch the unrelated lint scripts or the runner configuration files.

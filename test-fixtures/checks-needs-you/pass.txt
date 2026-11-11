@@ -1,0 +1,4 @@
+**A. Needs you:**
+- **A1** Load the data: run `./load.sh kdeyoga`.
+
+Do now: run `./load.sh kdeyoga`.

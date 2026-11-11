@@ -1,0 +1,9 @@
+<!-- BLIND_MERGE_RISK: low -->
+**Bottom line:** Pick an approach.
+
+| Option | Why |
+|---|---|
+| A | simple |
+| B | fast |
+
+✅ Recommend A — simple. Default if silent: A.

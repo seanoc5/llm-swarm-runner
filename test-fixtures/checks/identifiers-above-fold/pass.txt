@@ -1,0 +1,3 @@
+<!-- BLIND_MERGE_RISK: low -->
+**Bottom line:** Fixed the flaky readiness test.
+**Next:** operator — merge — waiting on nothing
