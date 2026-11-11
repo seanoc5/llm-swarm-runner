@@ -2129,6 +2129,7 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     WORKER_DELIVER_COMPOSER_STALL_THRESHOLD 20      (issue #436) composer_not_clear skips racked up against the same pending brief (not reset by an interleaved skip for a different reason) before a loud, once-only escalation; see header comment
     WORKER_DELIVER_SHELL_STALL_THRESHOLD    20      (issue #559) same shape as composer_not_clear's threshold above, for a window parked "shell" instead of "cli"; see header comment
     WORKER_DELIVER_TERMINAL_STALL_THRESHOLD 20      (issue #601) same shape again, for reason=task_not_terminal — a worker_current_task_terminal() refusal that never self-heals or escalates on its own otherwise; see header comment
+    WORKER_DELIVER_BUSY_STALL_SECS          900     (issue #871) seconds a done worker's brief may be held by reason=pane_busy before one deliver_stall coord-inbox item (names the composer text); 0=off
     WORKER_DELIVER_GAVE_UP_STALL_THRESHOLD  20      (issue #600) same shape again, for a window stuck at the give-up gate (WORKER_DELIVER_GAVE_UP=1) — the one case that otherwise logs nothing at all, every sweep, forever; see header comment
     COMPACT_QUEUED_MARKER_PATTERN     (auto)  queued-input marker checked when retracting a stuck phase=start injection; see header comment
     COMPACT_RETRACT_BACKSPACES        12      Backspace keystrokes sent alongside the retraction Escape (coord + worker, shared; issue #265/#290)
@@ -2930,6 +2931,10 @@ WORKER_DELIVER_SHELL_STALL_THRESHOLD="${WORKER_DELIVER_SHELL_STALL_THRESHOLD:-20
 # still refusing before worker_deliver_record_terminal_stall logs one
 # worker.deliver.terminal_stalled and writes a coord-inbox stall item.
 WORKER_DELIVER_TERMINAL_STALL_THRESHOLD="${WORKER_DELIVER_TERMINAL_STALL_THRESHOLD:-20}"
+# issue #871 — a brief held by reason=pane_busy for this many SECONDS (same
+# brief, task already terminal) escalates once to the coord-inbox. Time-based,
+# not sweep-counted, because the busy gate sits before the sweep-counted gates.
+WORKER_DELIVER_BUSY_STALL_SECS="${WORKER_DELIVER_BUSY_STALL_SECS:-900}"
 # issue #600 — once WORKER_DELIVER_GAVE_UP[$issue]=1 (3 consecutive /quit
 # timeouts), maybe_worker_deliver_brief's give-up gate returns before
 # logging even a worker.deliver.skip, so the one-time worker.deliver.
@@ -7969,11 +7974,33 @@ worker_pane_state() {
 # WORKER_COMPACT_BUSY_PATTERN — mid-turn (or at the exit-confirmation
 # prompt) rather than idle. Same technique as coordinator_pane_busy /
 # check-stuck-workers.sh's detect_state(), parameterized by window.
+#
+# (issue #871) Dim (ESC[2m) runs on the composer's own `❯` line are dropped
+# before matching: that is Claude Code's suggested-next-prompt / placeholder
+# text, which the operator never typed and which must not read as live
+# activity (a parked worker showed `❯ check CI on <sha>` and delivery
+# skipped reason=pane_busy for ~2h). Only the composer line is stripped —
+# the spinner's own "(esc to interrupt)" hint renders dim too and is the
+# very thing this check exists to see — so dim handling is scoped to `❯`.
 worker_pane_busy() {
     local win="$1" content clean
-    content="$(tmux capture-pane -t "$SESSION_NAME:$win.0" -p 2>/dev/null)" || return 1
-    clean="$(printf '%s\n' "$content" | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
+    content="$(tmux capture-pane -e -t "$SESSION_NAME:$win.0" -p 2>/dev/null)" || return 1
+    clean="$(printf '%s\n' "$content" | LC_ALL=C sed '/^\(\x1b\[[0-9;?]*[A-Za-z]\)*[[:space:]]*❯/ s/\x1b\[2m[^\x1b]*//g' | LC_ALL=C sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
     printf '%s\n' "$clean" | LC_ALL=C grep -qE "$WORKER_COMPACT_BUSY_PATTERN"
+}
+
+# worker_pane_composer_text <window>
+#
+# (issue #871) Echoes the last `❯` composer line's text as rendered (dim
+# suggestion text INCLUDED, ANSI-stripped, prompt marker trimmed) so a
+# stall note can show the operator exactly what the composer holds. Empty
+# output when there is no composer line. Never fails.
+worker_pane_composer_text() {
+    local win="$1"
+    tmux capture-pane -t "$SESSION_NAME:$win.0" -p 2>/dev/null \
+        | LC_ALL=C sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\xc2\xa0/ /g' \
+        | LC_ALL=C grep '^[[:space:]]*❯' | tail -1 \
+        | sed -e 's/^[[:space:]]*❯[[:space:]]*//' -e 's/[[:space:]]*$//' || true
 }
 
 # worker_pane_ctx_used <window>
@@ -8516,6 +8543,7 @@ worker_deliver_record_success() {
     unset "WORKER_DELIVER_LAST_FAIL[$issue]" "WORKER_DELIVER_FAIL_COUNT[$issue]" "WORKER_DELIVER_GAVE_UP[$issue]" "WORKER_DELIVER_TIMED_OUT_BRIEF[$issue]"
     worker_deliver_composer_stall_clear "$issue"
     worker_deliver_terminal_stall_clear "$issue"
+    worker_deliver_busy_stall_clear "$issue"
     worker_deliver_gave_up_stall_clear "$issue"
 }
 
@@ -8588,7 +8616,51 @@ worker_deliver_record_composer_stall() {
         WORKER_DELIVER_COMPOSER_STALL_ESCALATED[$issue]=1
         echo "[$(date +%T)] WARNING: worker iss-$issue has skipped brief delivery $count times (reason=composer_not_clear) for the same queued brief ($brief) — its composer may be misread as dirty (see COMPACT_COMPOSER_CHROME_PATTERN's header comment), or a real draft/decision is genuinely sitting there; investigate with scripts/capture-worker.sh iss-$issue"
         log_event worker.deliver.composer_stalled "issue=$issue brief=$brief skips=$count"
-        coord_inbox_write deliver_stall "$(printf 'Worker iss-%s: brief delivery has skipped %s times (reason=composer_not_clear) for the queued brief %s.\n\nCheck: scripts/capture-worker.sh iss-%s\n\nThe composer-clear check may be misreading UI chrome as a draft (docs/tmux-as-channel.md §1d), or a human/decision is genuinely blocking the pane. If the pane really is stuck, attach and either clear the composer or run /quit manually so the queued brief can be claimed.\n' "$issue" "$count" "$brief" "$issue")" || true
+        coord_inbox_write deliver_stall "$(printf 'Worker iss-%s: brief delivery has skipped %s times (reason=composer_not_clear) for the queued brief %s.\n\nComposer text: %s\n\nCheck: scripts/capture-worker.sh iss-%s\n\nThe composer-clear check may be misreading UI chrome as a draft (docs/tmux-as-channel.md §1d), or a human/decision is genuinely blocking the pane. If the pane really is stuck, attach and either clear the composer or run /quit manually so the queued brief can be claimed.\n' "$issue" "$count" "$brief" "$(worker_pane_composer_text "iss-$issue")" "$issue")" || true
+    fi
+}
+
+# WORKER_DELIVER_BUSY_STALL_BRIEF / _SINCE / _ESCALATED (issue #871)
+#
+# Time-based tracker for reason=pane_busy against a task that is already
+# terminal. Unlike composer_not_clear this is measured in seconds since the
+# first busy skip for the brief: a pane that never stops reading busy (a
+# misread suggestion, a wedged spinner) otherwise skips every sweep forever
+# with nothing escalating — 230 skips / ~2h on PR #867's brief. In-memory
+# only, reset on a watcher restart, like every other WORKER_DELIVER_* tracker.
+declare -A WORKER_DELIVER_BUSY_STALL_BRIEF=()
+declare -A WORKER_DELIVER_BUSY_STALL_SINCE=()
+declare -A WORKER_DELIVER_BUSY_STALL_ESCALATED=()
+
+worker_deliver_busy_stall_clear() {
+    local issue="$1"
+    unset "WORKER_DELIVER_BUSY_STALL_BRIEF[$issue]" "WORKER_DELIVER_BUSY_STALL_SINCE[$issue]" "WORKER_DELIVER_BUSY_STALL_ESCALATED[$issue]"
+}
+
+# worker_deliver_record_busy_stall <issue> <brief> <window>
+#
+# Called on every worker.deliver.skip reason=pane_busy. A different brief
+# restarts the clock. Once the same brief has been held for
+# WORKER_DELIVER_BUSY_STALL_SECS, logs ONE worker.deliver.busy_stalled and
+# writes ONE deliver_stall coord-inbox item naming the window and the
+# composer text. Never changes delivery behavior: a genuinely busy worker
+# is still never interrupted, this only makes the hold visible.
+worker_deliver_record_busy_stall() {
+    local issue="$1" brief="$2" win="$3" now since composer
+    [ "${WORKER_DELIVER_BUSY_STALL_SECS:-0}" -gt 0 ] || return 0
+    now=$(date +%s)
+    if [ "${WORKER_DELIVER_BUSY_STALL_BRIEF[$issue]:-}" != "$brief" ]; then
+        WORKER_DELIVER_BUSY_STALL_BRIEF[$issue]="$brief"
+        WORKER_DELIVER_BUSY_STALL_SINCE[$issue]=$now
+        unset "WORKER_DELIVER_BUSY_STALL_ESCALATED[$issue]"
+    fi
+    since="${WORKER_DELIVER_BUSY_STALL_SINCE[$issue]}"
+    if [ $(( now - since )) -ge "$WORKER_DELIVER_BUSY_STALL_SECS" ] && [ -z "${WORKER_DELIVER_BUSY_STALL_ESCALATED[$issue]:-}" ]; then
+        WORKER_DELIVER_BUSY_STALL_ESCALATED[$issue]=1
+        composer="$(worker_pane_composer_text "$win")"
+        echo "[$(date +%T)] WARNING: worker iss-$issue has held brief $brief for $(( now - since ))s with its task done (reason=pane_busy) — investigate with scripts/capture-worker.sh iss-$issue"
+        log_event worker.deliver.busy_stalled "issue=$issue brief=$brief held=$(( now - since ))s"
+        coord_inbox_write deliver_stall "$(printf 'Worker iss-%s (window %s): the queued brief %s has been held for %ss with the task already done, because the pane reads busy (reason=pane_busy).\n\nComposer text: %s\n\nCheck: scripts/capture-worker.sh iss-%s\n\nIf the composer shows only a dim suggested prompt, the busy check is misreading it (issue #871); if it shows real typed text or a live turn, a human or the agent is genuinely using the pane. Attach and /quit manually so the queued brief can be claimed.\n' "$issue" "$win" "$brief" "$(( now - since ))" "${composer:-<none found>}" "$issue")" || true
     fi
 }
 
@@ -8973,8 +9045,10 @@ maybe_worker_deliver_brief() {
 
     if worker_pane_busy "$win"; then
         log_event worker.deliver.skip "issue=$issue reason=pane_busy"
+        worker_deliver_record_busy_stall "$issue" "$brief_before" "$win"
         return 0   # never interrupt a live turn — see docs/tmux-as-channel.md
     fi
+    worker_deliver_busy_stall_clear "$issue"
 
     # Self-review finding: a WORKER_HEADLESS=1 worker's `claude -p` run
     # renders no interactive TUI chrome at all — worker_pane_busy() never
