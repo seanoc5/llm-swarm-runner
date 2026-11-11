@@ -45,7 +45,7 @@ extract_fn() {
     local fn="$1"
     sed -n "/^${fn}() {/,/^}/p" "$WATCH"
 }
-for fn in worker_pane_state worker_pane_busy worker_pane_ctx_used worker_pending_brief_path worker_pending_brief \
+for fn in worker_pane_state worker_pane_busy worker_pane_composer_text worker_deliver_busy_stall_clear worker_deliver_record_busy_stall worker_pane_ctx_used worker_pending_brief_path worker_pending_brief \
           worker_current_task_terminal mtime_epoch ctime_epoch compact_last_pane_line compact_composer_clear \
           compact_confirm_submitted compact_retract_queued worker_deliver_record_failure \
           worker_deliver_record_success worker_deliver_detect_claim maybe_worker_deliver_brief log_event \
@@ -73,6 +73,7 @@ WORKER_DELIVER_MAX_FAILURES=3
 WORKER_DELIVER_COMPOSER_STALL_THRESHOLD=20
 WORKER_DELIVER_SHELL_STALL_THRESHOLD=20
 WORKER_DELIVER_TERMINAL_STALL_THRESHOLD=20
+WORKER_DELIVER_BUSY_STALL_SECS=900
 WORKER_DELIVER_GAVE_UP_STALL_THRESHOLD=20
 COMPACT_QUEUED_MARKER_PATTERN='Press up to edit queued messages'
 COMPACT_RETRACT_BACKSPACES=3
@@ -96,6 +97,9 @@ declare -A WORKER_DELIVER_COMPOSER_STALL_ESCALATED=()
 declare -A WORKER_DELIVER_SHELL_STALL_BRIEF=()
 declare -A WORKER_DELIVER_SHELL_STALL_COUNT=()
 declare -A WORKER_DELIVER_SHELL_STALL_ESCALATED=()
+declare -A WORKER_DELIVER_BUSY_STALL_BRIEF=()
+declare -A WORKER_DELIVER_BUSY_STALL_SINCE=()
+declare -A WORKER_DELIVER_BUSY_STALL_ESCALATED=()
 declare -A WORKER_DELIVER_TERMINAL_STALL_BRIEF=()
 declare -A WORKER_DELIVER_TERMINAL_STALL_COUNT=()
 declare -A WORKER_DELIVER_TERMINAL_STALL_ESCALATED=()
@@ -1176,6 +1180,7 @@ check "once terminal, delivery is attempted on the very next sweep (issue #601: 
 rm -f "$INBOX_DIR"/*.md "$STALL_BRIEF"
 unset 'WORKER_DELIVER_TERMINAL_STALL_BRIEF[42]' 'WORKER_DELIVER_TERMINAL_STALL_COUNT[42]' 'WORKER_DELIVER_TERMINAL_STALL_ESCALATED[42]'
 WORKER_DELIVER_TERMINAL_STALL_THRESHOLD=20
+WORKER_DELIVER_BUSY_STALL_SECS=900
 
 heading "Test 14: give-up stall escalation (issue #600) — a window stuck at the give-up gate re-surfaces after N sweeps instead of staying silently stuck forever behind its one-time WARNING"
 # Unlike composer_stalled/shell_stall/terminal_stalled (Tests 10-13), the
@@ -1326,6 +1331,76 @@ check "brief C is left untouched in inbox/, not swallowed" "0" "$rc"
 rm -f "$INBOX_DIR"/*.md "$PROCESSING_DIR"/*.md
 unset 'WORKER_DELIVER_LAST_FAIL[42]' 'WORKER_DELIVER_FAIL_COUNT[42]' 'WORKER_DELIVER_GAVE_UP[42]' 'WORKER_DELIVER_TIMED_OUT_BRIEF[42]'
 unset 'WORKER_DELIVER_GAVE_UP_STALL_BRIEF[42]' 'WORKER_DELIVER_GAVE_UP_STALL_COUNT[42]' 'WORKER_DELIVER_GAVE_UP_STALL_ESCALATED[42]'
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.2
+
+unset 'WORKER_DELIVER_LAST_FAIL[42]' 'WORKER_DELIVER_FAIL_COUNT[42]' 'WORKER_DELIVER_GAVE_UP[42]'
+heading "Test 31: parked prompt with dim suggestion text (issue #871) — delivery proceeds; typed text and a live busy pane are held and escalate once"
+unset 'WORKER_DELIVER_COMPOSER_STALL_BRIEF[42]' 'WORKER_DELIVER_COMPOSER_STALL_COUNT[42]' 'WORKER_DELIVER_COMPOSER_STALL_ESCALATED[42]'
+rm -rf "$COORD_INBOX_DIR"; mkdir -p "$COORD_INBOX_DIR"
+rm -f "$INBOX_DIR"/*.md "$PROCESSING_DIR"/*.md "$STATUS_DIR"/*.json
+DRY_RUN_871="$DRY_RUN"; DRY_RUN=1   # attempt is logged, no real /quit sent
+B871="$INBOX_DIR/20261110-040000-42.md"
+echo "PR #867's fix brief" > "$B871"
+set_current_task "t871" "ready-for-review"
+render871() {   # $1 = composer line printf format (no % allowed)
+    tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+    sleep 0.2
+    tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'sonnet · wt-issue-42 · ctx: 20k/1M (2%)'; printf '$1\n'; sleep 300" Enter
+    check_eventually "pane renders the fixture -> cli" "cli" "worker_pane_state '$WIN'"
+    sleep 0.3
+}
+
+# The dim suggestion deliberately contains a busy marker: a plain-text read
+# would call this pane busy; only the dim-aware read sees it is idle.
+render871 '❯ \033[2mcheck CI (esc to interrupt)\033[0m'
+rc=0; worker_pane_busy "$WIN" || rc=$?
+check "dim suggestion text on the composer line does not read as busy" "1" "$rc"
+check "composer text helper still shows the suggestion for the stall note" "check CI (esc to interrupt)" "$(worker_pane_composer_text "$WIN")"
+: > "$EVENTS_LOG"
+maybe_worker_deliver_brief "$WIN"
+check "parked prompt + suggestion: delivery proceeds (attempt logged)" "1" "$(grep -cF 'worker.deliver.attempt' "$EVENTS_LOG")"
+check "no pane_busy skip for the suggestion" "0" "$(grep -cF 'reason=pane_busy' "$EVENTS_LOG")"
+
+# The spinner's own dim "(esc to interrupt)" hint (not on a ❯ line) must still read busy.
+render871 '✻ Considering… \033[2m(esc to interrupt)\033[0m'
+rc=0; worker_pane_busy "$WIN" || rc=$?
+check "dim spinner hint off the composer line still reads busy" "0" "$rc"
+
+# Real typed text (no SGR): held as composer_not_clear, escalates once at threshold.
+render871 '❯ please also rebase first'
+rc=0; worker_pane_busy "$WIN" || rc=$?
+check "typed text does not read busy" "1" "$rc"
+WORKER_DELIVER_COMPOSER_STALL_THRESHOLD=3
+: > "$EVENTS_LOG"
+for i in 1 2 3 4; do maybe_worker_deliver_brief "$WIN"; done
+check "typed text: delivery held every sweep (no attempt)" "0" "$(grep -cF 'worker.deliver.attempt' "$EVENTS_LOG")"
+check "typed text: exactly one inbox item after the threshold" "1" "$(find "$COORD_INBOX_DIR" -maxdepth 1 -name '*.md' -type f | wc -l | tr -d '[:space:]')"
+if grep -qF 'please also rebase first' "$COORD_INBOX_DIR"/*.md; then got=named; else got=missing; fi
+check "typed-text inbox item names the composer text" "named" "$got"
+WORKER_DELIVER_COMPOSER_STALL_THRESHOLD=20
+
+# Genuinely busy pane: held, and escalates once after the busy-stall window.
+rm -rf "$COORD_INBOX_DIR"; mkdir -p "$COORD_INBOX_DIR"
+render871 '✻ Considering… (esc to interrupt)\n❯ draft text'
+: > "$EVENTS_LOG"
+maybe_worker_deliver_brief "$WIN"
+check "busy pane: first skip starts the clock, no inbox item yet" "0" "$(find "$COORD_INBOX_DIR" -maxdepth 1 -name '*.md' -type f | wc -l | tr -d '[:space:]')"
+WORKER_DELIVER_BUSY_STALL_SINCE[42]=$(( $(date +%s) - 1000 ))   # pretend 1000s have passed (threshold 900s)
+maybe_worker_deliver_brief "$WIN"
+maybe_worker_deliver_brief "$WIN"
+check "busy pane held past the threshold: one busy_stalled event" "1" "$(grep -cF 'worker.deliver.busy_stalled' "$EVENTS_LOG")"
+check "busy pane held past the threshold: exactly one inbox item (not one per sweep)" "1" "$(find "$COORD_INBOX_DIR" -maxdepth 1 -name '*.md' -type f | wc -l | tr -d '[:space:]')"
+if grep -qF 'draft text' "$COORD_INBOX_DIR"/*.md && grep -qF 'iss-42' "$COORD_INBOX_DIR"/*.md; then got=named; else got=missing; fi
+check "busy-stall inbox item names the window and the composer text" "named" "$got"
+
+# Pane goes idle: the clock resets.
+render871 '❯ '
+maybe_worker_deliver_brief "$WIN"
+check "once the pane stops reading busy the busy-stall tracker resets" "" "${WORKER_DELIVER_BUSY_STALL_BRIEF[42]:-}"
+unset -f render871
+DRY_RUN="$DRY_RUN_871"
+rm -f "$INBOX_DIR"/*.md "$PROCESSING_DIR"/*.md "$STATUS_DIR"/*.json
 tmux send-keys -t "$SESSION_NAME:$WIN" C-c
 sleep 0.2
 

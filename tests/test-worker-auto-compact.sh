@@ -156,7 +156,7 @@ check_eventually() {
     local desc="$1" expect="$2" cmd="$3" max="${4:-30}"
     local got=""
     for ((i = 0; i < max; i++)); do
-        got="$(eval "$cmd")"
+        got="$(eval "$cmd")" || true   # a not-yet-rendered pane makes the probe return 1; under set -e that aborted the suite silently (seen 2026-11-11)
         if [ "$expect" = "$got" ]; then
             green "$desc"
             PASS=$((PASS + 1))
