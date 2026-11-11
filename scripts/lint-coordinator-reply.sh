@@ -63,7 +63,8 @@ else
     text="$(cat)"
 fi
 
-hits="$(printf '%s\n' "$text" | awk '
+FENCE_RE='^[[:space:]]*(```|~~~)'   # one fence definition for the main pass and issue_merged_hits
+hits="$(printf '%s\n' "$text" | awk -v fence="$FENCE_RE" '
 function flush_item(   hit) {
     if (item != "" && tolower(item) ~ verbs && item !~ cmd) {
         hits[++n] = "no-command: " first
@@ -82,7 +83,7 @@ BEGIN {
 }
 {
     line = $0; l = tolower(line)
-    if (line ~ /^[[:space:]]*(```|~~~)/) {
+    if (line ~ fence) {
         infence = !infence
         if (item != "") item = item "\n" line
         next
@@ -173,7 +174,7 @@ issue_merged_hits() {
             [ "${is_issue[$n]}" = 1 ] && hit=1
         done <<<"$cands"
         [ "$hit" = 1 ] && echo "issue-merged: $line"
-    done < <(printf '%s\n' "$text" | awk '/^[[:space:]]*```/ { f = !f; next } !f')
+    done < <(printf '%s\n' "$text" | awk -v fence="$FENCE_RE" '$0 ~ fence { f = !f; next } !f')
 }
 
 want() { [ -z "$ONLY" ] || [[ "$ONLY" == *",$1,"* ]]; }

@@ -35,13 +35,18 @@ check "hook allows a lettered reply" "0" "$(hook "$(j $'- A1 a\n- A2 b')" | cut 
 check "hook allows a continuation (stop_hook_active) so it cannot loop" "0" "$(hook "$(j $'1. a' true)" | cut -d'|' -f1)"
 NO_BARE_LISTS_HOOK=0 true
 check "NO_BARE_LISTS_HOOK=0 opts out" "0" "$(printf '%s' "$(j $'1. a')" | NO_BARE_LISTS_HOOK=0 "$HOOK" >/dev/null 2>&1; echo $?)"
-# transcript fallback: the LAST assistant message is the one judged
+# transcript fallback: every assistant text record since the last user prompt is judged
 printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"1. old"}]}}' \
     '{"type":"user","message":{"content":"hi"}}' \
     '{"type":"assistant","message":{"content":[{"type":"text","text":"- A1 fine"}]}}' > "$T/t.jsonl"
-check "transcript fallback judges only the last assistant message" "0" "$(hook "$(jq -cn --arg p "$T/t.jsonl" '{transcript_path:$p}')" | cut -d'|' -f1)"
+check "transcript fallback ignores assistant text from before the last user prompt" "0" "$(hook "$(jq -cn --arg p "$T/t.jsonl" '{transcript_path:$p}')" | cut -d'|' -f1)"
 printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"1. bad"}]}}' > "$T/t2.jsonl"
 check "transcript fallback blocks a bare list" "2" "$(hook "$(jq -cn --arg p "$T/t2.jsonl" '{transcript_path:$p}')" | cut -d'|' -f1)"
+printf '%s\n' '{"type":"user","message":{"content":"hi"}}' \
+    '{"type":"assistant","message":{"content":[{"type":"text","text":"1. bad before the tool call"},{"type":"tool_use","id":"t1","name":"Bash","input":{}}]}}' \
+    '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}' \
+    '{"type":"assistant","message":{"content":[{"type":"text","text":"- A1 fine after"}]}}' > "$T/t3.jsonl"
+check "transcript fallback blocks a bare list before a tool call (text, tool, text)" "2" "$(hook "$(jq -cn --arg p "$T/t3.jsonl" '{transcript_path:$p}')" | cut -d'|' -f1)"
 check "hook through a symlink still finds the lint" "2" "$(ln -s "$HOOK" "$T/link.sh"; printf '%s' "$(j $'1. a')" | "$T/link.sh" >/dev/null 2>&1; echo $?)"
 check "garbage stdin: allowed" "0" "$(printf 'not json' | "$HOOK" >/dev/null 2>&1; echo $?)"
 echo "all passed"

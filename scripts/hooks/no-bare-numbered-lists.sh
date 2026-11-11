@@ -27,7 +27,8 @@ command -v jq >/dev/null 2>&1 || exit 0
 text="$(printf '%s' "$input" | jq -r '.last_assistant_message // empty' 2>/dev/null || true)"
 if [ -z "$text" ]; then
     tp="$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/null || true)"
-    [ -n "$tp" ] && [ -r "$tp" ] && text="$(jq -rs '[.[] | select(.type == "assistant") | [.message.content[]? | select(.type == "text") | .text] | select(length > 0) | join("\n")] | last // empty' "$tp" 2>/dev/null || true)"
+    # Text blocks of every assistant entry after the last real user prompt (a reply split by tool calls spans several records).
+    [ -n "$tp" ] && [ -r "$tp" ] && text="$(jq -rs '(to_entries | map(select(.value.type=="user" and ((.value.message.content|type)=="string" or ((.value.message.content|type)=="array" and (.value.message.content|any(.type=="text")))))) | last | .key // -1) as $u | .[$u+1:][] | select(.type=="assistant") | .message.content[]? | select(.type=="text") | .text' "$tp" 2>/dev/null || true)"
 fi
 [ -n "$text" ] || exit 0
 self="$(readlink -f "${BASH_SOURCE[0]}")"
