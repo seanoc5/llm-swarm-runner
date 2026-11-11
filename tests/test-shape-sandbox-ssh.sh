@@ -108,6 +108,29 @@ else
     bad "7. caller's GIT_CONFIG_* entries are kept" "$(printf '%s\n' "$ARGV" | grep GIT_CONFIG | tr '\n' ' ')"
 fi
 
+# SANDBOX_SSH set in a project .swarm/.env must reach worker windows, which
+# only get the vars provision-worker.sh hands over in PASS_VARS.
+if grep -qE '^[[:space:]]+.*\bSANDBOX_SSH\b' "$REPO_ROOT/scripts/provision-worker.sh"; then
+    ok "8. SANDBOX_SSH is in provision-worker.sh PASS_VARS (per-project knob reaches workers)"
+else
+    bad "8. SANDBOX_SSH is in provision-worker.sh PASS_VARS"
+fi
+
+# A project with a worktrees/ admin dir takes the gc.auto lockdown branch;
+# gc.auto must still go out, alongside the SSH entries, with one count.
+WT_MAIN="$TMP/wtmain"; mkdir -p "$WT_MAIN"
+git -C "$WT_MAIN" init -q 2>/dev/null
+git -C "$WT_MAIN" -c user.name=t -c user.email=t@t commit -q --allow-empty -m init 2>/dev/null
+git -C "$WT_MAIN" worktree add -q "$TMP/wtlinked" -b wtb 2>/dev/null
+PROJECT="$TMP/wtlinked"
+ARGV="$(run_sandbox)"
+if argv_has "$ARGV" "GIT_CONFIG_COUNT=5" && argv_has "$ARGV" "GIT_CONFIG_KEY_0=gc.auto" && argv_has "$ARGV" "GIT_CONFIG_VALUE_0=0" \
+   && argv_has "$ARGV" "GIT_CONFIG_KEY_1=url.https://github.com/.insteadOf"; then
+    ok "9. worktree project: gc.auto=0 still emitted, with the SSH entries, one count"
+else
+    bad "9. worktree project: gc.auto=0 still emitted" "$(printf '%s\n' "$ARGV" | grep GIT_CONFIG | tr '\n' ' ')"
+fi
+
 echo ""
 echo "Passed: $PASS  Failed: $FAIL"
 [ "$FAIL" -eq 0 ]
