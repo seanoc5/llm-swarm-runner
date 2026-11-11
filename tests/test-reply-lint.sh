@@ -3,7 +3,7 @@
 # commands. Covers lint-coordinator-reply.sh against the incident fixtures,
 # needs-you.sh (refuses a stub, renders every `do:` in full, one closing line),
 # and the Stop hook's reply lint (blocks once, counts hits in events.log),
-# in resident and split mode. No tmux, no claude.
+# in resident and split mode. Also #716 issue-merged (gh stubbed). No tmux, no claude.
 set -euo pipefail
 green() { printf '\033[32m✓ %s\033[0m\n' "$*"; }
 red()   { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
@@ -33,6 +33,36 @@ printf 'Pending your approval: merge PR 4 (yes/no)\nDo now: say yes\n' > "$T/two
 check "Pending your approval + Do now: two-endings" "two-endings" "$(rules "$T/two")"
 printf -- '- **A1** Click the Approve button\n  https://github.com/o/r/pull/4 (Files changed > Review)\n' > "$T/url"
 check "a click item with an https URL is clean" "" "$(rules "$T/url")"
+
+# ── issue-merged (issue #716): gh stubbed; #1910 is an issue, #1913 and #1909 are PRs ──
+mkdir -p "$T/ghbin"
+cat > "$T/ghbin/gh" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >> "${GH_LOG:-/dev/null}"
+[ "${GH_FAIL:-0}" = 1 ] && exit 1
+case "$2" in
+    */issues/1913|*/issues/1909) echo true ;;
+    */issues/1910) echo false ;;
+    *) exit 1 ;;
+esac
+EOF
+chmod +x "$T/ghbin/gh"
+export GH_LOG="$T/gh.log"
+gl() { PATH="$T/ghbin:$PATH" "$LINT" "$@"; }
+check "'until #1910 merges' (an issue): issue-merged" "issue-merged" "$(gl < "$FX/incident-issue-merged.txt" | cut -d: -f1 | sort -u | paste -sd, -)"
+check "'PR #1913 merged' (a PR), #1910 closes, merge conflict: clean" "" "$(gl < "$FX/clean-pr-merged.txt" | cut -d: -f1 | paste -sd, -)"
+check "the lookup asks the issues endpoint for that number" "yes" "$(grep -q 'repos/{owner}/{repo}/issues/1910' "$GH_LOG" && echo yes || echo no)"
+printf 'Waiting on #1910 to be merged.\n' > "$T/m1"
+check "'#1910 to be merged' (two words between): issue-merged" "issue-merged" "$(gl < "$T/m1" | cut -d: -f1 | paste -sd, -)"
+printf 'Waiting on #1910 which is expected to be merged; #1913 merging.\n' > "$T/m1b"
+check "a four-word gap is out of range (naive on purpose); '#1913 merging' is a PR: clean" "" "$(gl < "$T/m1b" | paste -sd, -)"
+printf 'Merging #1910 now.\n' > "$T/m2"
+check "reverse order 'merging #1910': issue-merged" "issue-merged" "$(gl < "$T/m2" | cut -d: -f1 | paste -sd, -)"
+printf '```\nuntil #1910 merges\n```\n' > "$T/m3"
+check "a fenced line is skipped" "" "$(gl < "$T/m3" | paste -sd, -)"
+check "gh failing: never flags" "" "$(GH_FAIL=1 gl < "$FX/incident-issue-merged.txt" | paste -sd, -)"
+set +e; gl < "$FX/incident-issue-merged.txt" >/dev/null; ec=$?; set -e
+check "issue-merged exits 3" "3" "$ec"
 
 # ── needs-you.sh ─────────────────────────────────────────────────────────────
 P="$T/proj"; mkdir -p "$P/.swarm"
@@ -96,6 +126,8 @@ out="$(HM=split HS=0 stop "$FX/clean-nothing.txt" false)"
 check "split mode: clean reply -> silent" "" "$out"
 out="$(COORD_REPLY_LINT=0 stop "$FX/incident-start-load.txt" false)"
 check "COORD_REPLY_LINT=0 disables it" "" "$out"
+out="$(PATH="$T/ghbin:$PATH" stop "$FX/incident-issue-merged.txt" false)"
+check "Stop hook blocks an issue-merged reply and names the fix" "block yes" "$(jq -r .decision <<<"$out") $(case "$(jq -r .reason <<<"$out")" in *"issue-merged"*"fix PR for #N merges"*) echo yes;; *) echo no;; esac)"
 # resident coordinator, default COORD_HOOK_STATE=0: lint blocks, nothing else happens
 rm -f "$H/.swarm/coordinator-state" "$H/.swarm/coord-hook-rang"; echo 1 > "$H/.swarm/coord-hook-rang"
 echo "worker finished" > "$H/.swarm/coord-inbox/b.md"
