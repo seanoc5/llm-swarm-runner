@@ -415,9 +415,27 @@ cd "$SCRIPT_DIR"
 [ "$RC" -eq 0 ] || red "glob exclusion run failed ($RC)"
 grep -q "matches SELF_REVIEW_EXCLUDE '\*.csv'" "$TEST_DIR/o.out" || red "glob exclusion not reported"
 grep -q 'lockline' "$CODEX_PAYLOAD_LOG" || red "non-matching file must stay"
+# (d) pure deletion of a data file collapses to a stat line (#828), even
+# under the byte threshold; a small deletion and a code deletion stay.
+DELDIFF="$TEST_DIR/del.diff"
+{
+    echo "diff --git a/src/a.kt b/src/a.kt"; echo "+val a = 1"
+    echo "diff --git a/params/x.csv b/params/x.csv"; echo "deleted file mode 100644"
+    echo "--- a/params/x.csv"; echo "+++ /dev/null"; echo "@@ -1,600 +0,0 @@"
+    for i in $(seq 1 600); do echo "-delrow$i,1"; done
+    echo "diff --git a/params/small.csv b/params/small.csv"; echo "deleted file mode 100644"
+    echo "--- a/params/small.csv"; echo "+++ /dev/null"; echo "-smallrow,1"
+} > "$DELDIFF"
+export GH_DIFF_FILE="$DELDIFF"
+: > "$GH_LOG"; : > "$GH_COMMENTS_FILE"; echo '{"headRefOid":"","comments":[]}' > "$GH_PR_JSON_FILE"
+if WORKER_CMD=codex "$REVIEW" 42 >"$TEST_DIR/o.out" 2>"$TEST_DIR/o.err"; then RC=0; else RC=$?; fi
+[ "$RC" -eq 0 ] || red "deletion diff run failed ($RC): $(cat "$TEST_DIR/o.err")"
+grep -q 'params/x.csv: deleted, 600 lines (content omitted)' "$CODEX_PAYLOAD_LOG" || red "big deleted CSV must collapse to a stat line"
+grep -q 'delrow599' "$CODEX_PAYLOAD_LOG" && red "deleted file content leaked into the prompt"
+grep -q 'smallrow' "$CODEX_PAYLOAD_LOG" || red "small deletion must stay in the prompt"
 unset GH_DIFF_FILE
 cp "$TEST_DIR/bin/gh.orig" "$TEST_DIR/bin/gh"; chmod +x "$TEST_DIR/bin/gh"
-green "large/excluded files left out and named; still-too-big diff fails with next step"
+green "large/excluded files left out and named; still-too-big diff fails with next step; big data deletions collapse to a stat line"
 
 # ============================================================================
 heading "Test Y: excluded=N in the marker; big source files stay in; many-file diffs (#789)"

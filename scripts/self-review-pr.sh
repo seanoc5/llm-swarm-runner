@@ -61,6 +61,10 @@
 #             larger than this is left out of the review prompt (issue #789:
 #             a 2.8 MB CSV pushed a PR past the model's context limit).
 #             0 disables the size threshold.
+#   SELF_REVIEW_MAX_DELETED_LINES  (default 500) a deleted data file (non-code
+#             extension) with more removed lines than this, or any deleted file
+#             over SELF_REVIEW_MAX_FILE_BYTES, collapses to one stat line
+#             "path: deleted, N lines (content omitted)" (issue #828). 0 = off.
 #   SELF_REVIEW_EXCLUDE  space- or comma-separated globs (e.g. "data/*.csv
 #             *.lock"); matching files are always left out. `*` matches `/`.
 #             A bare name like "*.csv" matches in any directory.
@@ -209,6 +213,7 @@ DIFF="$(gh pr diff "$PR")" || { echo "ERROR: gh pr diff $PR failed" >&2; exit 1;
 # SELF_REVIEW_EXCLUDE is replaced by a one-line stub, and listed (path, bytes,
 # lines) in EXCLUDED_NOTE, which goes into the prompt and the posted verdict.
 MAX_FILE_BYTES="${SELF_REVIEW_MAX_FILE_BYTES:-200000}"
+MAX_DELETED_LINES="${SELF_REVIEW_MAX_DELETED_LINES:-500}"
 MAX_PROMPT_BYTES="${SELF_REVIEW_MAX_PROMPT_BYTES:-1500000}"
 EXCLUDE_GLOBS="${SELF_REVIEW_EXCLUDE:-}"
 EXCLUDED_NOTE=""
@@ -222,7 +227,7 @@ is_noncode_file() {   # is_noncode_file <path> <diff-section-file>
     grep -qE '^(Binary files .* differ|GIT binary patch)' "$2"
 }
 filter_diff() {
-    local secdir sec hdr path bytes lines glob hit out="" list="" GLOBS=()
+    local secdir sec hdr path bytes lines glob hit del_lines out="" list="" GLOBS=()
     # Split without letting bash expand the globs against the cwd.
     set -f; read -ra GLOBS <<<"${EXCLUDE_GLOBS//,/ }"; set +f
     secdir="$(mktemp -d -t swarm-review-split-XXXXXX)"
@@ -237,7 +242,7 @@ filter_diff() {
         hdr="$(head -n1 "$sec")"
         bytes="$(wc -c < "$sec")"; lines="$(wc -l < "$sec")"
         path="${hdr##* b/}"
-        hit=""
+        hit=""; del_lines=""
         if [[ "$hdr" == "diff --git "* ]]; then
             # Size alone only excludes NON-code (data/generated/binary). A big
             # source file stays in the prompt, so an APPROVE never silently
@@ -246,12 +251,27 @@ filter_diff() {
             if [ "$MAX_FILE_BYTES" -gt 0 ] && [ "$bytes" -gt "$MAX_FILE_BYTES" ] && is_noncode_file "$path" "$sec"; then
                 hit="over ${MAX_FILE_BYTES} bytes, non-code"
             fi
+            # Pure deletion (issue #828): the removed content is not code to
+            # review, so a deleted data file of >MAX_DELETED_LINES lines, or a
+            # deleted file of any kind over MAX_FILE_BYTES, collapses to a
+            # stat line (a 73,706-row CSV deletion blew the prompt past 1.5M tokens).
+            if [ -z "$hit" ] && grep -q '^deleted file mode' "$sec"; then
+                local dl; dl="$(grep -c '^-[^-]' "$sec" || true)"
+                if { [ "$MAX_DELETED_LINES" -gt 0 ] && [ "$dl" -gt "$MAX_DELETED_LINES" ] && is_noncode_file "$path" "$sec"; } ||
+                   { [ "$MAX_FILE_BYTES" -gt 0 ] && [ "$bytes" -gt "$MAX_FILE_BYTES" ]; }; then
+                    del_lines="$(printf "%'d" "$dl")"
+                    hit="deleted file, content omitted"
+                fi
+            fi
             for glob in "${GLOBS[@]}"; do
                 # shellcheck disable=SC2053
                 if [[ "$path" == $glob || "$path" == */$glob ]]; then hit="matches SELF_REVIEW_EXCLUDE '$glob'"; break; fi
             done
         fi
-        if [ -n "$hit" ]; then
+        if [ -n "$del_lines" ]; then
+            list+="- ${path}: deleted, ${del_lines} lines (content omitted) — ${bytes} bytes, ${lines} diff lines (${hit})"$'\n'
+            out+="${hdr}"$'\n'"[${path}: deleted, ${del_lines} lines (content omitted)]"$'\n'
+        elif [ -n "$hit" ]; then
             list+="- ${path} — ${bytes} bytes, ${lines} diff lines (${hit})"$'\n'
             out+="${hdr}"$'\n'"[FILE EXCLUDED FROM REVIEW: ${bytes} bytes, ${lines} diff lines — not shown]"$'\n'
         else
