@@ -2560,7 +2560,7 @@ EVENTS LOG
                            (issue, brief, result=ok|retry — retry: the wake was refused or failed and
                            the .swarm/sidelined marker left behind lets sideline_wake_pass retry it).
       worker.deliver.hard_restart_skip  (issue #659) hard restart declined, logged once per brief
-                           (issue, brief, reason=dirty|unpushed|git_failed|disabled): the gate falls
+                           (issue, brief, reason=dirty|unpushed|git_failed|marker_unwritable|disabled): the gate falls
                            through to the existing deliver_stall escalation, unchanged.
       worker.listener.selfheal  (issue #506) worker-listener.sh's own ordinary self-heal
                            path claimed a queued v2 brief on its own — an idle listener, or
@@ -8911,8 +8911,8 @@ declare -A WORKER_DELIVER_HARD_RESTART_SKIP_BRIEF=()
 # works with no upstream configured). A dirty tree, unpushed commits or a git
 # failure return 1 so the caller escalates exactly as before.
 #
-# The .swarm/sidelined marker (same file sideline-worker.sh writes) is left
-# before the kill: if --wake is refused (caps, host load) or fails, the
+# The .swarm/sidelined marker (same file sideline-worker.sh writes) is written
+# BEFORE the kill (an unwritable marker declines the restart, rc 1): if --wake is refused (caps, host load) or fails, the
 # window is gone and no /quit sweep sees this issue anymore, so
 # sideline_wake_pass retries it with its normal backoff; --wake removes the
 # marker once the worker is up.
@@ -8945,11 +8945,21 @@ worker_deliver_hard_restart() {
         echo "[DRY] would kill window iss-$issue + container, then provision-worker.sh --wake $issue"
         return 0
     fi
-    {
-        printf 'sidelined_at=%s\n' "$(date -u +%Y%m%dT%H%M%SZ)"
-        printf 'reason=deliver_hard_restart\n'
-        printf 'capture=\n'
-    } > "$wt_dir/.swarm/sidelined" 2>/dev/null || true
+    # Marker FIRST: if it cannot be written, killing the window would leave no
+    # window, a reset streak and nothing for sideline_wake_pass to retry, so the
+    # brief would sit unclaimed with no alert. Decline instead; the caller then
+    # escalates (deliver_stall) with the window still up.
+    if ! { mkdir -p "$wt_dir/.swarm" && {
+               printf 'sidelined_at=%s\n' "$(date -u +%Y%m%dT%H%M%SZ)"
+               printf 'reason=deliver_hard_restart\n'
+               printf 'capture=\n'
+           } > "$wt_dir/.swarm/sidelined"; } 2>/dev/null; then
+        if [ "${WORKER_DELIVER_HARD_RESTART_SKIP_BRIEF[$issue]:-}" != "$brief" ]; then
+            WORKER_DELIVER_HARD_RESTART_SKIP_BRIEF[$issue]="$brief"
+            log_event worker.deliver.hard_restart_skip "issue=$issue brief=$brief reason=marker_unwritable"
+        fi
+        return 1
+    fi
     tmux kill-window -t "$SESSION_NAME:iss-$issue" 2>/dev/null || true
     docker stop -t 10 "swarm-${SESSION_NAME}-iss-${issue}" >/dev/null 2>&1 || true
 

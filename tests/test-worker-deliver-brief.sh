@@ -1498,13 +1498,33 @@ tmux new-window -d -t "$SESSION_NAME" -n "$WIN" "sleep 300"
 rm -f "$WT_DIR/.swarm/sidelined"
 export FAKE_PROVISION_RC=3
 : > "$EVENTS_LOG"; : > "$PROVISION_LOG"
-tmux new-window -d -t "$SESSION_NAME" -n "$WIN" "sleep 300" 2>/dev/null || true
 worker_deliver_hard_restart 42 "$WT_DIR" "$(basename "$BRIEF16")" || true
 unset FAKE_PROVISION_RC
 if grep -qF 'result=retry rc=3' "$EVENTS_LOG"; then got=retry; else got=missing; fi
 check "wake refused (rc 3): logged result=retry" "retry" "$got"
 if grep -qF 'reason=deliver_hard_restart' "$WT_DIR/.swarm/sidelined" 2>/dev/null; then got=marker; else got=missing; fi
 check "wake refused: .swarm/sidelined marker left so sideline_wake_pass retries" "marker" "$got"
+
+# 16f: marker cannot be written (a directory sits where the file goes) -> the
+# window must NOT be killed and the deliver_stall escalation must still fire,
+# else the brief sits unclaimed with no alert.
+rm -rf "$WT_DIR/.swarm/sidelined"; mkdir -p "$WT_DIR/.swarm/sidelined"
+tmux kill-window -t "$SESSION_NAME:$WIN" 2>/dev/null || true
+tmux new-window -d -t "$SESSION_NAME" -n "$WIN" "printf '❯ \n'; sleep 300"
+check_eventually "16f: idle pane -> cli" "cli" "worker_pane_state '$WIN'"
+unset 'WORKER_DELIVER_HARD_RESTART_SKIP_BRIEF[42]' 'WORKER_DELIVER_GAVE_UP_STALL_BRIEF[42]' 'WORKER_DELIVER_GAVE_UP_STALL_COUNT[42]' 'WORKER_DELIVER_GAVE_UP_STALL_ESCALATED[42]'
+WORKER_DELIVER_GAVE_UP[42]=1
+rm -rf "$COORD_INBOX_DIR"; mkdir -p "$COORD_INBOX_DIR"
+: > "$EVENTS_LOG"; : > "$PROVISION_LOG"
+for i in 1 2 3; do maybe_worker_deliver_brief "$WIN"; done
+check "unwritable marker: window iss-42 NOT killed" "cli" "$(worker_pane_state "$WIN")"
+check "unwritable marker: no provision --wake call" "0" "$(wc -l < "$PROVISION_LOG" | tr -d '[:space:]')"
+if grep -qF 'reason=marker_unwritable' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "unwritable marker: skip logged with reason=marker_unwritable" "logged" "$got"
+check "unwritable marker: gave_up_stalled escalation still fires once" "1" "$(grep -cF 'worker.deliver.gave_up_stalled' "$EVENTS_LOG")"
+check "unwritable marker: deliver_stall inbox item written" "1" "$(find "$COORD_INBOX_DIR" -maxdepth 1 -name '*.md' -type f | wc -l | tr -d '[:space:]')"
+check "unwritable marker: failure streak NOT reset" "1" "${WORKER_DELIVER_GAVE_UP[42]:-}"
+rm -rf "$WT_DIR/.swarm/sidelined"
 
 # 16e: knob off -> escalate only.
 WORKER_DELIVER_HARD_RESTART=0
