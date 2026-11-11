@@ -139,7 +139,7 @@ stale_window_hits() {
 issue_merged_hits() {
     command -v gh >/dev/null 2>&1 || return 0
     local w='[A-Za-z0-9_'"'"'-]+' mw='merg(e|es|ed|ing)' line n verdict looked=0
-    local -A is_issue=()
+    local -A is_issue=(); local t0=$SECONDS
     local pf="(PR|pull[[:space:]]+request)[[:space:]]+for"
     local fwd="($pf[[:space:]]+)?#[0-9]+([[:space:]]+$w){0,2}[[:space:]]+$mw([^A-Za-z]|\$)"
     local rev="(^|[^A-Za-z])$mw([[:space:]]+$w){0,2}[[:space:]]+#[0-9]+"
@@ -154,9 +154,9 @@ issue_merged_hits() {
         while IFS= read -r n; do
             [ -n "$n" ] || continue
             if [ -z "${is_issue[$n]+x}" ]; then
-                [ "$looked" -lt 10 ] || continue    # cap the API calls per reply
+                [ "$looked" -lt 10 ] && [ $((SECONDS - t0)) -lt 15 ] || continue    # cap: 10 calls and 15s in total per reply (the Stop hook gets 60s)
                 looked=$((looked + 1))
-                verdict="$( cd "${PROJECT:-.}" 2>/dev/null && timeout 15 gh api "repos/{owner}/{repo}/issues/$n" --jq '.pull_request != null' 2>/dev/null )" || verdict=""
+                verdict="$( cd "${PROJECT:-.}" 2>/dev/null && timeout 5 gh api "repos/{owner}/{repo}/issues/$n" --jq '.pull_request != null' 2>/dev/null )" || verdict=""
                 case "$verdict" in false) is_issue[$n]=1 ;; *) is_issue[$n]=0 ;; esac
             fi
             [ "${is_issue[$n]}" = 1 ] && hit=1
