@@ -35,6 +35,17 @@
 #                sum the ring lines' counters. Quiet vs full replies are NOT
 #                derivable: no event records which reply form the coordinator
 #                chose (issue #738), so the output says so.
+#   --night [YYYY-MM-DD]
+#                per-hour row for one night (00:00-09:00 LOCAL, per $TZ) from
+#                events.log: PRs created, worker starts, wakes delivered, wakes
+#                skipped by reason (ADR-0008 D8, issue #900). Default night is
+#                the most recent one whose 09:00 has passed. First line is a
+#                CANARY when any hour has non-inbox_empty wake skips > 0 and
+#                wakes delivered = 0 (skips other than inbox_empty mean the
+#                inbox was non-empty: the Oct-14 dropped-wake pattern).
+#                "PRs created" = distinct pr=N values first seen that hour
+#                (events.log has no pr.created event; this is a proxy). Reads
+#                only the swarm's own events.log. --json emits the rows.
 #
 # Columns:
 #   tasks     rows for the group
@@ -51,12 +62,18 @@ command -v jq >/dev/null 2>&1 || { echo "swarm-scoreboard.sh: jq required" >&2; 
 
 JSON_OUT=0
 WAKES=0
+NIGHT=0
+NIGHT_DATE=""
 ARGS=()
-for a in "$@"; do
+while [ $# -gt 0 ]; do
+    a="$1"; shift
     case "$a" in
         --json) JSON_OUT=1 ;;
         --wakes) WAKES=1 ;;
-        -h|--help) sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --night) NIGHT=1
+                 # optional YYYY-MM-DD operand (local date of the night)
+                 if [ $# -gt 0 ] && [[ "$1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then NIGHT_DATE="$1"; shift; fi ;;
+        -h|--help) sed -n '2,50p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) ARGS+=("$a") ;;
     esac
 done
@@ -67,6 +84,61 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # scoped via `git worktree list` against each dir arg's own repo.
 # shellcheck source=_load-env.sh
 . "$SCRIPT_DIR/_load-env.sh" "${ARGS[0]}"
+
+if [ "$NIGHT" = "1" ]; then
+    EVENT_LOGS=()
+    for a in "${ARGS[@]}"; do
+        if [ -f "$a" ]; then EVENT_LOGS+=("$a")
+        elif [ -d "$a" ] && [ -f "$a/.swarm/events.log" ]; then EVENT_LOGS+=("$a/.swarm/events.log")
+        else echo "swarm-scoreboard.sh: no events.log at: $a" >&2; fi
+    done
+    [ ${#EVENT_LOGS[@]} -gt 0 ] || { echo "No events.log found." >&2; exit 1; }
+    if [ -z "$NIGHT_DATE" ]; then
+        if [ "$(date +%-H)" -ge 9 ]; then NIGHT_DATE=$(date +%F); else NIGHT_DATE=$(date -d yesterday +%F); fi
+    fi
+    # Line shape: "<ISO-UTC-ts>  <event> [k=v ...]". Bucket by local hour.
+    NIGHT_AGG=$(cat "${EVENT_LOGS[@]}" | jq -R -s --arg night "$NIGHT_DATE" '
+        [split("\n")[]
+         | capture("^(?<ts>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8})Z\\s+(?<ev>\\S+)(?:\\s+(?<rest>.*))?$")
+         | .rest = (.rest // "")
+         | (.ts + "Z" | fromdateiso8601 | localtime | strftime("%Y-%m-%d %H")) as $lh
+         | select(($lh | .[0:10]) == $night and (($lh | .[11:13] | tonumber) < 9))
+         | .hour = ($lh | .[11:13] | tonumber)
+         | .pr = ((.rest | capture("(?:^| )pr=(?<n>[0-9]+)") | .n) // null)
+         | .reason = ((.rest | capture("(?:^| )reason=(?<r>[A-Za-z0-9_]+)") | .r) // "unknown")] as $evs
+        | ([$evs[] | select(.pr != null) | {pr, hour}] | group_by(.pr) | map(min_by(.hour))) as $firstpr
+        | [range(0; 9) as $h
+           | ($evs | map(select(.hour == $h))) as $e
+           | {hour: $h,
+              prs: ($firstpr | map(select(.hour == $h)) | length),
+              starts: ($e | map(select(.ev == "worker.start")) | length),
+              delivered: ($e | map(select(.ev == "coord.wake" or .ev == "coord.wake.waiter_rang" or .ev == "coord.wake.hook_rang")) | length),
+              skipped: ($e | map(select(.ev == "coord.wake.skip")) | group_by(.reason) | map({key: .[0].reason, value: length}) | from_entries)}
+           | .skipped_total = ([.skipped[]] | add // 0)
+           | .skipped_inbox = (.skipped_total - (.skipped.inbox_empty // 0))
+           | .canary = (.skipped_inbox > 0 and .delivered == 0)]')
+    CANARY_HOURS=$(printf '%s\n' "$NIGHT_AGG" | jq -r '[.[] | select(.canary) | "0\(.hour):00"] | join(", ")')
+    if [ "$JSON_OUT" = "1" ]; then
+        printf '%s\n' "$NIGHT_AGG" | jq --arg n "$NIGHT_DATE" '{night: $n, canary: (map(.canary) | any), hours: .}'
+        exit 0
+    fi
+    if [ -n "$CANARY_HOURS" ]; then
+        echo "CANARY: dropped wakes on $NIGHT_DATE in hour(s) $CANARY_HOURS (skips > 0, 0 delivered, inbox non-empty): ADR-0008 F2 pattern"
+    else
+        echo "Canary: clear for night $NIGHT_DATE (no hour with wake skips and 0 wakes delivered)"
+    fi
+    echo ""
+    {
+        echo "HOUR|PRS|STARTS|WAKES|SKIPPED|SKIP-REASONS"
+        printf '%s\n' "$NIGHT_AGG" | jq -r '.[] |
+            [(("0" + (.hour | tostring))[-2:] + ":00"), .prs, .starts, .delivered, .skipped_total,
+             (if .skipped_total == 0 then "-" else (.skipped | to_entries | map("\(.key)=\(.value)") | join(" ")) end)]
+            | join("|")'
+    } | column -t -s'|'
+    echo ""
+    echo "Local night 00:00-09:00 (TZ=${TZ:-system}). PRS = distinct pr=N first seen that hour (proxy: no pr.created event)."
+    exit 0
+fi
 
 if [ "$WAKES" = "1" ]; then
     EVENT_LOGS=()
