@@ -2131,6 +2131,7 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     WORKER_DELIVER_TERMINAL_STALL_THRESHOLD 20      (issue #601) same shape again, for reason=task_not_terminal — a worker_current_task_terminal() refusal that never self-heals or escalates on its own otherwise; see header comment
     WORKER_DELIVER_BUSY_STALL_SECS          900     (issue #871) seconds a done worker's brief may be held by reason=pane_busy before one deliver_stall coord-inbox item (names the composer text); 0=off
     WORKER_DELIVER_GAVE_UP_STALL_THRESHOLD  20      (issue #600) same shape again, for a window stuck at the give-up gate (WORKER_DELIVER_GAVE_UP=1) — the one case that otherwise logs nothing at all, every sweep, forever; see header comment
+    WORKER_DELIVER_HARD_RESTART             1       (issue #659) at the give-up gate, hard-restart a worker whose worktree is clean (kill window+container, provision-worker.sh --wake) so it claims its queued brief; dirty worktree still escalates; 0=escalate only
     COMPACT_QUEUED_MARKER_PATTERN     (auto)  queued-input marker checked when retracting a stuck phase=start injection; see header comment
     COMPACT_RETRACT_BACKSPACES        12      Backspace keystrokes sent alongside the retraction Escape (coord + worker, shared; issue #265/#290)
     COMPACT_SUBMIT_SETTLE_SECS        1       settle delay around the injection-submit Enter (coord + worker, shared; issue #290); see header comment
@@ -2553,6 +2554,14 @@ EVENTS LOG
                            is a loud, once-per-streak WARNING plus a durable coord_inbox_write so
                            a stall that outlives the original WARNING still surfaces on the
                            coordinator's next wake, same as its composer/shell/terminal siblings.
+      worker.deliver.hard_restart  (issue #659) the give-up gate found the worktree clean (no uncommitted
+                           files, no commits missing from every remote) and killed the window +
+                           container, then ran provision-worker.sh --wake for the queued brief
+                           (issue, brief, result=ok|retry — retry: the wake was refused or failed and
+                           the .swarm/sidelined marker left behind lets sideline_wake_pass retry it).
+      worker.deliver.hard_restart_skip  (issue #659) hard restart declined, logged once per brief
+                           (issue, brief, reason=dirty|unpushed|git_failed|marker_unwritable|disabled): the gate falls
+                           through to the existing deliver_stall escalation, unchanged.
       worker.listener.selfheal  (issue #506) worker-listener.sh's own ordinary self-heal
                            path claimed a queued v2 brief on its own — an idle listener, or
                            one draining several queued briefs back-to-back — and is about
@@ -2948,6 +2957,12 @@ WORKER_DELIVER_BUSY_STALL_SECS="${WORKER_DELIVER_BUSY_STALL_SECS:-900}"
 # doesn't leave the window stuck silently for hours (issue #600's own
 # incidents: several hours to over a day).
 WORKER_DELIVER_GAVE_UP_STALL_THRESHOLD="${WORKER_DELIVER_GAVE_UP_STALL_THRESHOLD:-20}"
+# issue #659 — at the give-up gate, a worker whose worktree is clean (nothing
+# uncommitted, nothing unpushed) is hard-restarted (kill window + container,
+# provision-worker.sh --wake) instead of only escalating: an idle session with
+# an active /loop wakeup or attached background agents ignores /quit forever.
+# 0 = escalate only (the pre-#659 behavior). A dirty worktree always escalates.
+WORKER_DELIVER_HARD_RESTART="${WORKER_DELIVER_HARD_RESTART:-1}"
 # issue #265 — shared between the coordinator and per-window retraction
 # paths; see this file's COMPACT_QUEUED_MARKER_PATTERN header comment above.
 COMPACT_QUEUED_MARKER_PATTERN="${COMPACT_QUEUED_MARKER_PATTERN:-Press up to edit queued messages}"
@@ -3685,6 +3700,8 @@ format_event_line() {
         worker.deliver.shell_stall)      glyph="⚠"; color=$'\033[31m' ;;
         worker.deliver.terminal_stalled)   glyph="⚠"; color=$'\033[31m' ;;
         worker.deliver.gave_up_stalled)    glyph="⚠"; color=$'\033[31m' ;;
+        worker.deliver.hard_restart)       glyph="↻"; color=$'\033[33m' ;;
+        worker.deliver.hard_restart_skip)  glyph="·"; color=$'\033[2m'  ;;
         worker.listener.selfheal)        glyph="◐"; color=$'\033[36m' ;;
         worker.listener.selfheal.skip)      glyph="·"; color=$'\033[2m'  ;;
         watch.autoclose)               glyph="♻"; color=$'\033[36m' ;;
@@ -8874,6 +8891,92 @@ worker_deliver_record_gave_up_stall() {
     fi
 }
 
+# WORKER_DELIVER_HARD_RESTART_SKIP_BRIEF (issue #659)
+#
+# Per-issue: the brief a worker.deliver.hard_restart_skip was last logged for,
+# so a dirty worktree logs the skip once per brief, not every sweep.
+declare -A WORKER_DELIVER_HARD_RESTART_SKIP_BRIEF=()
+
+# worker_deliver_hard_restart <issue> <wt_dir> <brief>
+#
+# Issue #659: a done worker whose session ignores /quit (an active /loop
+# wakeup, or background agents still attached — fand-etl iss-1674/iss-1692)
+# never claims its queued brief, and the old give-up gate only escalated.
+# When the worktree is clean the session holds nothing worth keeping, so do
+# what the coordinator did by hand: kill the window and container, then
+# provision-worker.sh --wake the queued brief.
+#
+# Clean = no uncommitted files (git status --porcelain; .swarm/ is ignored)
+# AND no commits missing from every remote (rev-list HEAD --not --remotes —
+# works with no upstream configured). A dirty tree, unpushed commits or a git
+# failure return 1 so the caller escalates exactly as before.
+#
+# The .swarm/sidelined marker (same file sideline-worker.sh writes) is written
+# BEFORE the kill (an unwritable marker declines the restart, rc 1): if --wake is refused (caps, host load) or fails, the
+# window is gone and no /quit sweep sees this issue anymore, so
+# sideline_wake_pass retries it with its normal backoff; --wake removes the
+# marker once the worker is up.
+#
+# Returns 0 when handled (restart attempted — result=ok or retry), 1 when
+# the caller should fall through to the escalation.
+worker_deliver_hard_restart() {
+    local issue="$1" wt_dir="$2" brief="$3" reason="" porcelain unpushed
+    # Off: silent, so the gate behaves byte-for-byte as before #659.
+    [ "${WORKER_DELIVER_HARD_RESTART:-1}" = "1" ] || return 1
+    if ! porcelain="$(git -C "$wt_dir" status --porcelain 2>/dev/null)"; then
+        reason=git_failed
+    elif [ -n "$porcelain" ]; then
+        reason=dirty
+    elif ! unpushed="$(git -C "$wt_dir" rev-list --count HEAD --not --remotes 2>/dev/null)"; then
+        reason=git_failed
+    elif [ "$unpushed" != "0" ]; then
+        reason=unpushed
+    fi
+    if [ -n "$reason" ]; then
+        if [ "${WORKER_DELIVER_HARD_RESTART_SKIP_BRIEF[$issue]:-}" != "$brief" ]; then
+            WORKER_DELIVER_HARD_RESTART_SKIP_BRIEF[$issue]="$brief"
+            log_event worker.deliver.hard_restart_skip "issue=$issue brief=$brief reason=$reason"
+        fi
+        return 1
+    fi
+
+    echo "[$(date +%T)] worker iss-$issue ignored /quit $WORKER_DELIVER_MAX_FAILURES times and its worktree is clean — hard-restarting it so the queued brief ($brief) is claimed..."
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "[DRY] would kill window iss-$issue + container, then provision-worker.sh --wake $issue"
+        return 0
+    fi
+    # Marker FIRST: if it cannot be written, killing the window would leave no
+    # window, a reset streak and nothing for sideline_wake_pass to retry, so the
+    # brief would sit unclaimed with no alert. Decline instead; the caller then
+    # escalates (deliver_stall) with the window still up.
+    if ! { mkdir -p "$wt_dir/.swarm" && {
+               printf 'sidelined_at=%s\n' "$(date -u +%Y%m%dT%H%M%SZ)"
+               printf 'reason=deliver_hard_restart\n'
+               printf 'capture=\n'
+           } > "$wt_dir/.swarm/sidelined"; } 2>/dev/null; then
+        if [ "${WORKER_DELIVER_HARD_RESTART_SKIP_BRIEF[$issue]:-}" != "$brief" ]; then
+            WORKER_DELIVER_HARD_RESTART_SKIP_BRIEF[$issue]="$brief"
+            log_event worker.deliver.hard_restart_skip "issue=$issue brief=$brief reason=marker_unwritable"
+        fi
+        return 1
+    fi
+    tmux kill-window -t "$SESSION_NAME:iss-$issue" 2>/dev/null || true
+    docker stop -t 10 "swarm-${SESSION_NAME}-iss-${issue}" >/dev/null 2>&1 || true
+
+    local out rc=0 result=ok
+    out="$("$PROVISION_WORKER" --wake "$issue" "$PROJECT_DIR" 2>&1)" || rc=$?
+    if [ "$rc" != "0" ]; then
+        result=retry
+        echo "[$(date +%T)] hard restart of iss-$issue: provision-worker.sh --wake exited $rc (sideline_wake_pass will retry): $(printf '%s\n' "$out" | tail -3)"
+    fi
+    log_event worker.deliver.hard_restart "issue=$issue brief=$brief result=$result rc=$rc"
+    # Fresh session either way: the old window's failure streak no longer applies.
+    WORKER_DELIVER_PENDING_SEEN[$issue]=""
+    worker_deliver_record_success "$issue"
+    unset "WORKER_DELIVER_HARD_RESTART_SKIP_BRIEF[$issue]"
+    return 0
+}
+
 # WORKER_DELIVER_PENDING_SEEN (issue #437)
 #
 # Cross-sweep bookkeeping keyed by issue: the pending brief's basename last
@@ -9074,6 +9177,8 @@ maybe_worker_deliver_brief() {
         # sweeps later. Never clears GAVE_UP itself: only a real success
         # (worker_deliver_record_success, via worker_deliver_detect_claim's
         # late-success path above) does that.
+        # issue #659: a clean worktree is hard-restarted instead of escalated.
+        worker_deliver_hard_restart "$issue" "$wt_dir" "$brief_before" && return 0
         worker_deliver_record_gave_up_stall "$issue" "$brief_before"
         return 0
     fi
