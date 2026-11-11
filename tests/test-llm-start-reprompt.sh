@@ -531,6 +531,7 @@ REPL
 NBSP=$'\xc2\xa0'
 mk_cc_fixture "$TEST_DIR/cc-empty.sh"  "❯${NBSP}\\033[2mTry \"edit <filepath> to...\"\\033[0m"
 mk_cc_fixture "$TEST_DIR/cc-ghost.sh"  "❯${NBSP}\\033[2mmerge\\033[0m \\033[2mPR\\033[0m \\033[2m645"
+mk_cc_fixture "$TEST_DIR/cc-colourdim.sh" "❯${NBSP}\\033[2;38;5;244mTry \"edit <filepath> to...\"\\033[0m"
 mk_cc_fixture "$TEST_DIR/cc-typed.sh"  "❯${NBSP}nudge the coordinator to re-verify and un-draft it"
 # 2026-10-27: with background shells/agents the footer drops the
 # "(shift+tab to cycle)" hint (captured live on corpusminder-spring); an empty
@@ -539,7 +540,7 @@ mk_cc_fixture "$TEST_DIR/cc-bgbypass.sh" "❯${NBSP}" "⏵⏵ bypass permissions
 mk_cc_fixture "$TEST_DIR/cc-bgdefault.sh" "❯${NBSP}" "2 shells · ← 3 agents"
 mk_cc_fixture "$TEST_DIR/cc-bgtyped.sh" "❯${NBSP}q1 yes" "⏵⏵ bypass permissions on · 2 shells · ← 3 agents"
 
-for case in empty:clear ghost:clear typed:dirty bgbypass:clear bgdefault:clear bgtyped:dirty; do
+for case in empty:clear ghost:clear colourdim:clear typed:dirty bgbypass:clear bgdefault:clear bgtyped:dirty; do
     name="${case%%:*}"; want="${case##*:}"
     CC_SESSION="${SESSION_NAME}-cc-$name"
     tmux new-session -d -s "$CC_SESSION" -n coordinator -x 120 -y 20 2>/dev/null

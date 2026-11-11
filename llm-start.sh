@@ -491,7 +491,7 @@ COORD_BUSY_PATTERN="${COORD_BUSY_PATTERN:-\(esc to interrupt\)|Press Ctrl-C agai
 reprompt_last_pane_line() {
     local target="$1" content clean
     content="$(tmux capture-pane -e -t "$target" -p -J 2>/dev/null)" || { echo ""; return 1; }
-    clean="$(printf '%s\n' "$content" | LC_ALL=C sed 's/\x1b\[2m[^\x1b]*//g' | LC_ALL=C sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g; s/\xc2\xa0/ /g')"
+    clean="$(printf '%s\n' "$content" | LC_ALL=C sed -E 's/\x1b\[((0|1|3|4|5|7|9|22|23|24|27|29|3[0-79]|4[0-79]|9[0-7]|10[0-7]);)*2(;[0-9;]*)?m([^\x1b]|\x1b\[[349][0-9;]*m)*//g' | LC_ALL=C sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g; s/\xc2\xa0/ /g')"
     # (issue #440) Three things the pre-#440 version misread as composer
     # content, each of which made an EMPTY idle composer look "dirty":
     #   1. Claude Code 2.1.x's persistent mode footer ("⏵⏵ bypass permissions
