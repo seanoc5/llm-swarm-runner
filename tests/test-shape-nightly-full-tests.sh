@@ -79,5 +79,33 @@ grep -q '| beta | broken | skipped (Docker unreachable) |' "$T/out.log" || red "
 [ ! -s "$T/gh.log" ] || ! grep -q issue "$T/gh.log" || red "skip should not touch issues"
 green "beta skipped with Docker down, alpha excluded by --only"
 
+heading "4: a bumped submodule pin reaches the existing clone; stale submodule files are cleaned"
+export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=protocol.file.allow GIT_CONFIG_VALUE_0=always  # local-path submodules
+G="-c user.name=t -c user.email=t@t"
+git init -q -b master "$T/sub"; echo v1 > "$T/sub/ver"; git -C "$T/sub" add ver; git -C "$T/sub" $G commit -q -m v1
+mkrepo gamma
+git -C "$T/gamma" checkout -q -- marker
+git -C "$T/gamma" submodule add -q "$T/sub" ui
+git -C "$T/gamma" $G commit -q -am "add submodule at v1"
+git -C "$T/gamma" push -q origin master
+cat > "$NIGHTLY_CONF" <<CONF
+$T/gamma ui cat ui/ver
+CONF
+rc=$(run)
+grep -q '| gamma | ui | pass |' "$T/out.log" || red "gamma first run should pass: $(cat "$T/out.log")"
+echo v2 > "$T/sub/ver"; git -C "$T/sub" $G commit -q -am v2          # upstream submodule moves on
+git -C "$T/gamma/ui" pull -q origin master
+git -C "$T/gamma" $G commit -q -am "bump pin to v2"; git -C "$T/gamma" push -q origin master
+echo stale > "$T/clones/nightly-gamma/ui/stale-untracked"            # leftover inside the submodule
+cat > "$NIGHTLY_CONF" <<CONF
+$T/gamma ui grep -qx v2 ui/ver && [ ! -e ui/stale-untracked ]
+$T/alpha plain grep -qx origin-content marker
+CONF
+rc=$(run)
+[ "$rc" -eq 0 ] || red "expected pass after pin bump, rc=$rc: $(cat "$T/out.log")"
+grep -q '| gamma | ui | pass |' "$T/out.log" || red "clone's submodule should be at the new pin, clean: $(cat "$T/out.log")"
+grep -q '| alpha | plain | pass |' "$T/out.log" || red "repo without submodules should behave as before"
+green "submodule moved to pinned commit, stale file gone, no-submodule repo unchanged"
+
 echo
 green "all nightly-full-tests shape tests passed"
