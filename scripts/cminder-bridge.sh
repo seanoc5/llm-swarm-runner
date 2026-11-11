@@ -144,7 +144,7 @@ replay_held() {
         [ -d "$d" ] || continue
         while IFS= read -r f; do
             [ -f "$f" ] || continue
-            deliver "$(cat "$f")"; rc=$?
+            deliver "$(cat "$f")" </dev/null; rc=$?   # </dev/null: nothing in deliver may eat the find list
             if [ "$rc" -eq 0 ]; then rm -f "$f"; continue; fi
             [ "$rc" -eq 1 ] && log "held answer $(basename "$f" .json) still cannot be written to its swarm's inbox; keeping it held"
             break
