@@ -304,6 +304,18 @@ for f in "$P"/.swarm/coord-inbox/*.md; do
     iss="$(sed -E 's/.*issue=([0-9]+).*/\1/' <<<"$line")"
     oc="$(sed -E 's/.*outcome=([A-Za-z-]+).*/\1/' <<<"$line")"
     path="$(sed -E 's/.*path=([^ ]+).*/\1/' <<<"$line")"
+    # Only write inside the replay tree. A path that `rewrite` missed (or one with ..) would
+    # point at a real host file; refuse it rather than overwrite (issue #788).
+    case "$path" in
+        */../*|*/..) path="" ;;
+        "$OUT"/worktrees/*|"$P"/*) ;;
+        *) path="" ;;
+    esac
+    if [ -z "$path" ]; then
+        echo "refused: outcome path in $(basename "$f") is outside the replay tree; no stand-in written" >&2
+        printf 'refused_outcome\t%s\n' "$(basename "$f")" >> "$OUT/refused.txt"
+        continue
+    fi
     mkdir -p "$(dirname "$path")"
     tid="$(basename "$path" | sed -E 's/\.(ok|err|blocked|done-no-pr)(\.attempt[0-9]+)?\.json$//')"
     rec=""

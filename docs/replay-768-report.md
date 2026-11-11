@@ -122,6 +122,9 @@ open issues). The stub `gh pr list` and `gh issue list` honour only `--state ope
 ignore `--search`, `--head`, `--base`, `--label`, `--author` and `--assignee`, and
 `--state closed` returns an empty list (so a run asking for recently closed PRs or issues sees
 none). `gh pr diff` always fails, so no run saw a diff. Old worker outcome files are reaped, so outcomes
-are stand-ins. Chat-only operator instructions are invisible to a fresh run. R1 and A1 ran
+are stand-ins. **Rewound fixtures can leak future CI:** when every check on a PR finished after the --asof
+time, the rewind keeps the original check list instead of emptying it, so the run sees checks
+that had not finished at the wake. R1 woke at 19:12Z but saw #681's checks finishing 19:17-19:26Z,
+so its CI-dependent choices (e.g. merging on green) are not a clean test of what the resident knew. Chat-only operator instructions are invisible to a fresh run. R1 and A1 ran
 before the docker stub, so any host-capacity figure in their digests may reflect live containers.
 Total replay spend, all six runs including three discarded: about $6.72.

@@ -105,6 +105,17 @@ grep -q "$T/out/worktrees" "$P"/.swarm/coord-inbox/*.md && green "worktree path 
 check "outcome stand-in written at the rewritten path" "ok" "$(jq -r .outcome "$T/out/worktrees/wt-issue-3/.swarm/tasks/done/20260101-000000-3.ok.json")"
 check "project has no git remote" "0" "$(git -C "$P" remote | wc -l)"
 
+heading "an outcome path that was not rewritten is refused, no real file changes"
+mkdir -p "$T/real/done" "$T/src2"
+echo canary-real-outcome > "$T/real/done/20260101-000000-4.ok.json"
+printf 'Worker(s) just finished.\n\nTriggering outcome: issue=4 outcome=ok path=%s/real/done/20260101-000000-4.ok.json\n' "$T" > "$T/src2/20260101T000000Z-outcome-4-1.md"
+"$REPLAY" --out "$T/out2" --fixtures "$T/fix" --inbox-src "$T/src2" --files 20260101T000000Z-outcome-4-1.md --cmd true >/dev/null 2>"$T/err2.txt" \
+    && green "replay still completes" || red "replay should not abort on a refused stand-in"
+check "real outcome file is untouched" "canary-real-outcome" "$(cat "$T/real/done/20260101-000000-4.ok.json")"
+check "no extra file created beside the real one" "1" "$(ls "$T/real/done" | wc -l)"
+check "refusal is reported on stderr" "1" "$(grep -c '^refused: outcome path' "$T/err2.txt")"
+check "refusal is recorded in the output dir" "1" "$(grep -c refused_outcome "$T/out2/refused.txt")"
+
 heading "reuse of an output dir is refused"
 "$REPLAY" --out "$T/out" --fixtures "$T/fix" --inbox-src "$T/src" --files 20260101T000000Z-outcome-1-1.md --cmd true >/dev/null 2>&1 \
     && red "reuse must fail" || green "existing project/ is not overwritten"
