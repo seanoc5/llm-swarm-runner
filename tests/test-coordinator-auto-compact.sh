@@ -937,6 +937,44 @@ check_eventually "menu-open stranded /compact: composer left clear" "clear" \
     "tmux capture-pane -t '$RETRACT_SESSION6:coordinator' -p 2>/dev/null | grep -q '/compact' && echo stuck || echo clear"
 tmux kill-session -t "$RETRACT_SESSION6" 2>/dev/null || true
 
+heading "Test 14e: compact_retract_queued — operator draft in the composer is NOT cleared when an older '> /compact' echo is visible (issue #874 self-review)"
+# Both an unboxed (❯) and a boxed (│ > ... │) composer layout: the marker
+# lookup must pick the composer line, not the stale history echo above it.
+for layout in plain boxed; do
+    cat > "$TEST_DIR/draft-$layout.sh" <<FAKE
+#!/usr/bin/env bash
+echo "Compacting conversation… (12s)"
+if [ "$layout" = boxed ]; then
+    echo "│ > /compact                      │"
+    echo "│ > my unfinished operator draft  │"
+else
+    echo "❯ /compact"
+    echo "❯ my unfinished operator draft"
+fi
+sleep 60
+FAKE
+    S14E="${SESSION_NAME}-retract7$layout"
+    tmux new-session -d -s "$S14E" -n coordinator 2>/dev/null
+    tmux send-keys -t "$S14E:coordinator" "bash $TEST_DIR/draft-$layout.sh" Enter
+    check_eventually "draft-$layout: fixture rendered" "ready" \
+        "tmux capture-pane -t '$S14E:coordinator' -p 2>/dev/null | grep -q 'unfinished' && echo ready || echo wait"
+    : > "$TMUX_CALL_LOG"
+    tmux() {
+        printf '%s\n' "$*" >> "$TMUX_CALL_LOG"
+        command tmux "$@"
+    }
+    : > "$EVENTS_LOG"
+    COMPACT_RETRACT_BACKSPACES=12
+    compact_retract_queued "$S14E:coordinator" coord.compact "trigger=wake" "$AUTO_COMPACT_BUSY_PATTERN" || true
+    unset -f tmux
+    COMPACT_RETRACT_BACKSPACES=3
+    if grep -q "send-keys -t $S14E:coordinator \(BSpace\|Escape\)" "$TMUX_CALL_LOG"; then got=sent; else got=none; fi
+    check "draft-$layout: no Backspace/Escape sent into the operator's draft" "none" "$got"
+    if grep -q 'coord.compact.retract_skip.*reason=busy' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+    check "draft-$layout: retract_skip reason=busy logged" "logged" "$got"
+    tmux kill-session -t "$S14E" 2>/dev/null || true
+done
+
 heading "Test 15: maybe_auto_compact — Enter eaten by the autocomplete menu is retried once (issue #290)"
 # Models the ROOT CAUSE bug this issue fixes: the first Enter after pasting
 # "/compact" is consumed by the CLI's slash-command autocomplete menu --

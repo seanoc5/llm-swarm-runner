@@ -7430,8 +7430,8 @@ compact_composer_marker_line() {
     printf '%s\n' "$content" \
         | LC_ALL=C sed 's/\x1b\[2m[^\x1b]*//g' \
         | LC_ALL=C sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g; s/\xc2\xa0/ /g' \
-        | LC_ALL=C grep -E '^[[:space:]]*(❯|>)' \
-        | sed -e 's/^[[:space:]]*\(❯\|>\)[[:space:]]*//' -e 's/[[:space:]]*$//' | tail -1 || true
+        | LC_ALL=C grep -E '^[[:space:]]*(│)?[[:space:]]*(❯|>)' \
+        | sed -e 's/^[[:space:]]*\(│\)\{0,1\}[[:space:]]*\(❯\|>\)[[:space:]]*//' -e 's/[[:space:]]*│[[:space:]]*$//' -e 's/[[:space:]]*$//' | tail -1 || true
 }
 
 # compact_composer_clear <tmux-target>
