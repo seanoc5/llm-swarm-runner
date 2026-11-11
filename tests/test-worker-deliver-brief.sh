@@ -52,7 +52,7 @@ for fn in worker_pane_state worker_pane_busy worker_pane_composer_text worker_de
           is_own_worktree_dir own_wt_dir_for_issue worker_deliver_composer_stall_clear \
           worker_deliver_record_composer_stall worker_deliver_record_shell_stall coord_inbox_write \
           worker_deliver_terminal_stall_clear worker_deliver_record_terminal_stall \
-          worker_deliver_gave_up_stall_clear worker_deliver_record_gave_up_stall; do
+          worker_deliver_gave_up_stall_clear worker_deliver_record_gave_up_stall worker_deliver_hard_restart; do
     body="$(extract_fn "$fn")"
     [ -n "$body" ] || red "could not extract function '$fn' from $WATCH — has it been renamed?"
     eval "$body"
@@ -75,6 +75,9 @@ WORKER_DELIVER_SHELL_STALL_THRESHOLD=20
 WORKER_DELIVER_TERMINAL_STALL_THRESHOLD=20
 WORKER_DELIVER_BUSY_STALL_SECS=900
 WORKER_DELIVER_GAVE_UP_STALL_THRESHOLD=20
+# issue #659: off for Tests 1-14 (their fixtures are not git repos); Test 16 turns it on.
+WORKER_DELIVER_HARD_RESTART=0
+declare -A WORKER_DELIVER_HARD_RESTART_SKIP_BRIEF=()
 COMPACT_QUEUED_MARKER_PATTERN='Press up to edit queued messages'
 COMPACT_RETRACT_BACKSPACES=3
 COMPACT_SUBMIT_SETTLE_SECS=0
@@ -1415,6 +1418,102 @@ DRY_RUN="$DRY_RUN_871"
 rm -f "$INBOX_DIR"/*.md "$PROCESSING_DIR"/*.md "$STATUS_DIR"/*.json
 tmux send-keys -t "$SESSION_NAME:$WIN" C-c
 sleep 0.2
+
+heading "Test 16: hard-restart fallback at the give-up gate (issue #659) — a clean worktree whose session ignores /quit is killed and re-woken; a dirty one still escalates"
+WORKER_DELIVER_HARD_RESTART=1
+PROVISION_LOG="$TEST_DIR/provision.log"; : > "$PROVISION_LOG"
+PROVISION_RC=0
+PROVISION_WORKER="$TEST_DIR/fake-provision.sh"
+cat > "$PROVISION_WORKER" <<STUB
+#!/usr/bin/env bash
+echo "\$*" >> "$PROVISION_LOG"
+exit \${FAKE_PROVISION_RC:-0}
+STUB
+chmod +x "$PROVISION_WORKER"
+
+# A real repo: origin (bare) + the worker's clone, with .swarm/ ignored the
+# way the project's worktrees ignore it.
+ORIGIN16="$TEST_DIR/origin16.git"
+git init -q --bare "$ORIGIN16"
+rm -rf "$WT_DIR/.git"
+git -C "$WT_DIR" init -q -b fix/issue-42
+git -C "$WT_DIR" config user.email t@example.com
+git -C "$WT_DIR" config user.name t
+printf '.swarm/\n' > "$WT_DIR/.gitignore"
+git -C "$WT_DIR" add .gitignore
+git -C "$WT_DIR" commit -q -m init
+git -C "$WT_DIR" remote add origin "$ORIGIN16"
+git -C "$WT_DIR" push -q origin fix/issue-42 2>/dev/null
+git -C "$WT_DIR" fetch -q origin
+
+tmux send-keys -t "$SESSION_NAME:$WIN" C-c
+sleep 0.2
+tmux send-keys -t "$SESSION_NAME:$WIN" "clear; echo 'sonnet · wt-issue-42 · ctx: 20k/1M (2%)'; printf '❯ \n'; sleep 300" Enter
+tmux new-window -d -t "$SESSION_NAME" -n keepalive "sleep 600"   # the hard restart kills iss-42; keep the session alive
+check_eventually "idle pane -> cli" "cli" "worker_pane_state '$WIN'"
+set_current_task "t16" "ready-for-review"
+rm -rf "$COORD_INBOX_DIR"; mkdir -p "$COORD_INBOX_DIR"
+BRIEF16="$INBOX_DIR/20261111-000000-42.md"
+echo "a brief behind a session that ignores /quit" > "$BRIEF16"
+
+# 16a: dirty worktree -> declined once, escalation path untouched.
+echo scratch > "$WT_DIR/untracked.txt"
+WORKER_DELIVER_GAVE_UP[42]=1
+WORKER_DELIVER_GAVE_UP_STALL_THRESHOLD=2
+DRY_RUN=0
+: > "$EVENTS_LOG"
+for i in 1 2 3; do maybe_worker_deliver_brief "$WIN"; done
+check "dirty worktree: no provision --wake call" "0" "$(wc -l < "$PROVISION_LOG" | tr -d '[:space:]')"
+check "dirty worktree: skip logged once per brief, reason=dirty" "1" "$(grep -cF 'worker.deliver.hard_restart_skip' "$EVENTS_LOG")"
+if grep -qF 'reason=dirty' "$EVENTS_LOG"; then got=dirty; else got=other; fi
+check "dirty worktree: skip reason names dirty" "dirty" "$got"
+check "dirty worktree: existing deliver_stall escalation still fires once" "1" "$(grep -cF 'worker.deliver.gave_up_stalled' "$EVENTS_LOG")"
+check "dirty worktree: window left alone" "cli" "$(worker_pane_state "$WIN")"
+rm -f "$WT_DIR/untracked.txt"
+
+# 16b: unpushed commit -> declined, reason=unpushed.
+unset 'WORKER_DELIVER_HARD_RESTART_SKIP_BRIEF[42]' 'WORKER_DELIVER_GAVE_UP_STALL_BRIEF[42]' 'WORKER_DELIVER_GAVE_UP_STALL_COUNT[42]' 'WORKER_DELIVER_GAVE_UP_STALL_ESCALATED[42]'
+echo work > "$WT_DIR/work.txt"; git -C "$WT_DIR" add work.txt; git -C "$WT_DIR" commit -q -m wip
+: > "$EVENTS_LOG"
+maybe_worker_deliver_brief "$WIN"
+if grep -qF 'reason=unpushed' "$EVENTS_LOG"; then got=unpushed; else got=other; fi
+check "unpushed commit: hard restart declined, reason=unpushed" "unpushed" "$got"
+check "unpushed commit: no provision --wake call" "0" "$(wc -l < "$PROVISION_LOG" | tr -d '[:space:]')"
+
+# 16c: pushed + clean -> window killed, --wake called, state reset.
+git -C "$WT_DIR" push -q origin fix/issue-42 2>/dev/null
+git -C "$WT_DIR" fetch -q origin
+unset 'WORKER_DELIVER_HARD_RESTART_SKIP_BRIEF[42]'
+: > "$EVENTS_LOG"
+maybe_worker_deliver_brief "$WIN"
+check "clean + pushed: provision-worker.sh --wake 42 called once" "--wake 42 $PROJECT_DIR" "$(cat "$PROVISION_LOG")"
+if grep -qF "worker.deliver.hard_restart issue=42 brief=$(basename "$BRIEF16") result=ok" "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "clean + pushed: worker.deliver.hard_restart logged with result=ok" "logged" "$got"
+check "clean + pushed: window iss-42 was killed" "absent" "$(worker_pane_state "$WIN")"
+check "clean + pushed: failure streak cleared (GAVE_UP reset)" "" "${WORKER_DELIVER_GAVE_UP[42]:-}"
+check "clean + pushed: brief untouched in inbox/ for the woken listener" "0" "$(worker_pending_brief "$WT_DIR"; echo $?)"
+
+# 16d: wake refused -> logged as retry, sideline marker left for sideline_wake_pass.
+tmux new-window -d -t "$SESSION_NAME" -n "$WIN" "sleep 300"
+rm -f "$WT_DIR/.swarm/sidelined"
+export FAKE_PROVISION_RC=3
+: > "$EVENTS_LOG"; : > "$PROVISION_LOG"
+tmux new-window -d -t "$SESSION_NAME" -n "$WIN" "sleep 300" 2>/dev/null || true
+worker_deliver_hard_restart 42 "$WT_DIR" "$(basename "$BRIEF16")" || true
+unset FAKE_PROVISION_RC
+if grep -qF 'result=retry rc=3' "$EVENTS_LOG"; then got=retry; else got=missing; fi
+check "wake refused (rc 3): logged result=retry" "retry" "$got"
+if grep -qF 'reason=deliver_hard_restart' "$WT_DIR/.swarm/sidelined" 2>/dev/null; then got=marker; else got=missing; fi
+check "wake refused: .swarm/sidelined marker left so sideline_wake_pass retries" "marker" "$got"
+
+# 16e: knob off -> escalate only.
+WORKER_DELIVER_HARD_RESTART=0
+: > "$EVENTS_LOG"; : > "$PROVISION_LOG"
+rc=0; worker_deliver_hard_restart 42 "$WT_DIR" "other-brief.md" || rc=$?
+check "WORKER_DELIVER_HARD_RESTART=0 -> declined (rc1), no provision call" "1:0" "$rc:$(wc -l < "$PROVISION_LOG" | tr -d '[:space:]')"
+
+rm -f "$INBOX_DIR"/*.md "$PROCESSING_DIR"/*.md "$STATUS_DIR"/*.json "$WT_DIR/.swarm/sidelined"
+DRY_RUN=1
 
 echo
 green "All $PASS checks passed."
