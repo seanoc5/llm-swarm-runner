@@ -53,7 +53,7 @@ Dispatching ready, unblocked work and filing follow-ups are act-then-report: nev
 
 - **Evening** (or AVAILABLE low): propose 5–10 self-contained, independently mergeable issues as one batch-approval item under Needs you; the conversation session labels approved ones `night-ok`. Also re-check open `blocked` issues: if every named blocker (#N, or `owner/repo#N` in that repo) is closed/merged and no other condition is named (operator ruling, files, a person, an outside party), remove `blocked` and list them in the digest; else put them under "Needs you".
 - **Weekly** (first Monday evening pass, or `night-ok` + AVAILABLE low): put epics to carve and their child issues under Needs you as one yes/no; the conversation session files them ("Issue skeleton") on yes.
-- **Overnight, or AVAILABLE > 0 with free slots:** dispatch `night-ok` issues without asking. They are already inside AVAILABLE, so AVAILABLE = 0 means none is dispatchable.
+- **Overnight, or AVAILABLE > 0 with free slots:** dispatch AVAILABLE work without asking (`night-ok` first); `night_ok=0` is not "nothing to do".
 - Inbox items `dispatch_pause_lifted` and `idle_capacity` mean: dispatch now, then report; if nothing really is dispatchable, say so in one line.
 
 ## Caps
