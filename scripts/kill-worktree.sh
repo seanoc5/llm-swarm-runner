@@ -902,6 +902,10 @@ if [ -d "$WT" ]; then
 else
     echo "  - worktree dir not present (skipped)"
     rm -f "$REAP_MARKER"
+    # issue #889: the folder is gone (deleted by hand, or a failed earlier
+    # reap) but external per-worktree state, such as a test database, may
+    # remain. Run the hook anyway; it can key off the issue number.
+    "$SCRIPT_DIR/_project-reap-hook.sh" "$WT" "$ISSUE" "$PROJECT_DIR" || true
 fi
 
 if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
