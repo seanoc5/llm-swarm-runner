@@ -157,6 +157,8 @@ done < <(grep -oE '^\*\*[^*]+\*\*' <<<"$RES_SWEEP" | sed -E 's/^\*\*//; s/\*\*$/
 check "work prompt sweep keeps every sweep script and bold rule of coordinator.md" "" "$lost"
 grep -q 'NOT running' "$W" && grep -q 'NOT running' "$ROOT/prompts/coordinator-chat.md" && got=yes || got=no
 check "work and chat prompts both say what to do with the dead-watcher WARN" "yes" "$got"
+grep -q 'scripts/watcher-check.sh "\$PWD"' "$ROOT/prompts/coordinator-chat.md" && grep -q 'watcher-check.sh "\$PWD"' "$ROOT/docs/split-coordinator.md" && got=yes || got=no
+check "issue #781: chat prompt has hook-less sessions run watcher-check.sh, and the docs say so" "yes" "$got"
 
 W="$ROOT/prompts/coordinator-work.md"; C="$ROOT/prompts/coordinator-chat.md"
 grep -q 'only the opt-in automerges' "$W" && got=yes || got=no

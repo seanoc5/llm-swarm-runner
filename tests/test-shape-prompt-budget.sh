@@ -100,6 +100,10 @@ green() { printf '\033[32m✓ %s\033[0m\n' "$*"; }
 red()   { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# 2026-11-11: coordinator-chat 5200 -> 5500. Issue #781 adds one sentence
+# (~220 bytes): conversation sessions without a UserPromptSubmit hook run
+# watcher-check.sh each turn. Stopgap until #509.
+#
 # 2026-11-10: coordinator budget 31200 -> 31400, coordinator-work 24000 ->
 # 24200. Issue #802 adds one sentence (~160 bytes) to each: give every slice
 # of a multi-slice issue its own issue and branch. Still a stopgap until #509.
@@ -130,7 +134,7 @@ COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-32800}"
 BARE_MAX="${WORKER_BARE_MD_MAX_BYTES:-12200}"   # issue #510 trial prompt; ~7.5KB is script-parsed contract
 SHARED_MAX="${COORD_SHARED_MD_MAX_BYTES:-5600}"   # issue #767 split prompts
 WORK_MAX="${COORD_WORK_MD_MAX_BYTES:-24400}"
-CHAT_MAX="${COORD_CHAT_MD_MAX_BYTES:-5200}"
+CHAT_MAX="${COORD_CHAT_MD_MAX_BYTES:-5500}"
 
 check() {
     local file="$1" max="$2" size
