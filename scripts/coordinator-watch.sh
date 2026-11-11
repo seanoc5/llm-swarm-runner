@@ -5381,11 +5381,16 @@ activity_poll_pass() {
 # swarm-merge.sh's fallback removal) already logs reap.worktree itself, so
 # reap.window brings no additional real coverage, only a false-negative
 # risk.
+#
+# issue #835: also accepts `worktree.discarded` — provision-worker.sh logs it
+# when a cap refusal (spawn_stagger, host_load, ...) removes the empty
+# worktree that same call created. That removal is blessed; without this the
+# sweep raised a worktree_vanished alarm for it. A bare rm -rf logs neither.
 wt_reap_event_since() {
     local issue="$1" since="$2"
     [ -f "$EVENTS_LOG" ] || return 1
     awk -v since="$since" -v needle="issue=$issue " '
-        $1 >= since && $2 == "reap.worktree" && index($0, needle) { found=1; exit }
+        $1 >= since && ($2 == "reap.worktree" || $2 == "worktree.discarded") && index($0, needle) { found=1; exit }
         END { exit !found }
     ' "$EVENTS_LOG"
 }
@@ -5474,8 +5479,10 @@ worktree_vanish_sweep_pass() {
     fi
 
     local -a current_dirs=()
+    # issue #835: key on the canonical path so two spellings of one worktree
+    # (/opt/work/... vs /mnt/wd1t/... symlink) are one entry, one alarm.
     while IFS= read -r dir; do
-        [ -n "$dir" ] && [ -d "$dir" ] && current_dirs+=("$dir")
+        [ -n "$dir" ] && [ -d "$dir" ] && current_dirs+=("$(realpath -m -- "$dir" 2>/dev/null || printf '%s' "$dir")")
     done < <(own_worktree_dirs_for_scan "$PROJECT_DIR")
 
     if [ "$WT_INVENTORY_SEEDED" != "1" ]; then
