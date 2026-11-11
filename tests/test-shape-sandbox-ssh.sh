@@ -69,7 +69,7 @@ else
     else
         ok "2. default: agent is not forwarded (SSH_AUTH_SOCK unset in container)"
     fi
-    if argv_has "$ARGV" "GIT_CONFIG_COUNT=4" \
+    if argv_has "$ARGV" "GIT_CONFIG_COUNT=5" \
        && argv_has "$ARGV" "GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf" \
        && argv_has "$ARGV" "GIT_CONFIG_VALUE_0=git@github.com:" \
        && argv_has "$ARGV" "GIT_CONFIG_KEY_1=url.https://github.com/.insteadOf" \
@@ -101,7 +101,7 @@ fi
 
 # A caller's own GIT_CONFIG_* entries must survive: ours append after them.
 ARGV="$(run_sandbox GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=foo.bar GIT_CONFIG_VALUE_0=baz)"
-if argv_has "$ARGV" "GIT_CONFIG_COUNT=5" && argv_has "$ARGV" "GIT_CONFIG_KEY_0" \
+if argv_has "$ARGV" "GIT_CONFIG_COUNT=6" && argv_has "$ARGV" "GIT_CONFIG_KEY_0" \
    && argv_has "$ARGV" "GIT_CONFIG_KEY_1=url.https://github.com/.insteadOf"; then
     ok "7. caller's GIT_CONFIG_* entries are kept; sandbox entries append after them"
 else
@@ -124,11 +124,18 @@ git -C "$WT_MAIN" -c user.name=t -c user.email=t@t commit -q --allow-empty -m in
 git -C "$WT_MAIN" worktree add -q "$TMP/wtlinked" -b wtb 2>/dev/null
 PROJECT="$TMP/wtlinked"
 ARGV="$(run_sandbox)"
-if argv_has "$ARGV" "GIT_CONFIG_COUNT=5" && argv_has "$ARGV" "GIT_CONFIG_KEY_0=gc.auto" && argv_has "$ARGV" "GIT_CONFIG_VALUE_0=0" \
+if argv_has "$ARGV" "GIT_CONFIG_COUNT=6" && argv_has "$ARGV" "GIT_CONFIG_KEY_0=gc.auto" && argv_has "$ARGV" "GIT_CONFIG_VALUE_0=0" \
    && argv_has "$ARGV" "GIT_CONFIG_KEY_1=url.https://github.com/.insteadOf"; then
     ok "9. worktree project: gc.auto=0 still emitted, with the SSH entries, one count"
 else
     bad "9. worktree project: gc.auto=0 still emitted" "$(printf '%s\n' "$ARGV" | grep GIT_CONFIG | tr '\n' ' ')"
+fi
+
+ARGV="$(run_sandbox)"
+if argv_has "$ARGV" "GIT_CONFIG_KEY_4=credential.https://github.com.helper" && argv_has "$ARGV" "GIT_CONFIG_VALUE_4=!gh auth git-credential"; then
+    ok "10. default: gh credential helper is set in the container, not left to the host gitconfig"
+else
+    bad "10. default: gh credential helper set" "$(printf '%s\n' "$ARGV" | grep GIT_CONFIG | tr '\n' ' ')"
 fi
 
 echo ""

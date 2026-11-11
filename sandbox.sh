@@ -801,6 +801,10 @@ else
     # Consequence: worker commits are unsigned unless SANDBOX_SSH=1.
     SANDBOX_GIT_CFG_KEYS+=("commit.gpgsign" "tag.gpgsign")
     SANDBOX_GIT_CFG_VALS+=("false" "false")
+    # Don't rely on the host gitconfig having a credential helper: add the gh
+    # helper here too (multi-valued, so a duplicate of the host's is harmless).
+    SANDBOX_GIT_CFG_KEYS+=("credential.https://github.com.helper")
+    SANDBOX_GIT_CFG_VALS+=("!gh auth git-credential")
     # SSH_AUTH_SOCK is not forwarded (docker does not inherit host env), so
     # it is unset in the container.
 fi
