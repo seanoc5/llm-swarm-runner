@@ -1,0 +1,2 @@
+Woke for: 1 idle capacity.
+Handled 3 items: 2 merged, 1 idle slot. Your list hasn't changed (2 items, details in .swarm/needs-you.md).
