@@ -160,6 +160,17 @@ chmod +x "$FAKE_TMUX"
 
 export PATH="$TEST_DIR/bin:$PATH"
 
+# End-of-tick marker (issue #832, same technique as test-shape-window-flags.sh):
+# a stub ready-sweep that records each call; see wait_for_polls.
+TICK_LOG="$TEST_DIR/tick.log"
+FAKE_READY_SWEEP="$TEST_DIR/fake-ready-sweep.sh"
+cat > "$FAKE_READY_SWEEP" <<EOF
+#!/usr/bin/env bash
+echo x >> "$TICK_LOG"
+exit 0
+EOF
+chmod +x "$FAKE_READY_SWEEP"
+
 # Helper: start watcher in background with given WATCHER_AUTOCLOSE value.
 # Returns PID via global. Uses ONCE=1 so it exits after first wake.
 #
@@ -173,6 +184,7 @@ export PATH="$TEST_DIR/bin:$PATH"
 # accidentally shell out to the genuine reap-orphan-worktrees.sh.
 start_watcher() {
     local autoclose="$1" logfile="$2"
+    : > "$TICK_LOG"
     WATCHER_AUTOCLOSE="$autoclose" \
         WATCHER_AUTOCLOSE_MODE="${WATCHER_AUTOCLOSE_MODE:-}" \
         KILL_FINISHED="$FAKE_KILL" \
@@ -183,11 +195,35 @@ start_watcher() {
         WATCH_ORPHAN_SWEEP_SECS="${WATCH_ORPHAN_SWEEP_SECS:-0}" \
         WATCH_CHECK_ON_DONE="${WATCH_CHECK_ON_DONE:-0}" \
         CHECK_RUNNER="${CHECK_RUNNER:-}" \
-        DRY_RUN=0 ONCE="${ONCE:-1}" POLL_SECS=1 DEBOUNCE_SECS=0 \
+        READY_SWEEP="$FAKE_READY_SWEEP" WATCH_READY_SWEEP_SECS=1 \
+        WATCH_TIMER_TICK_SECS=0.2 \
+        DRY_RUN=0 ONCE="${ONCE:-1}" POLL_SECS=0.2 DEBOUNCE_SECS=0 \
         "$WATCH" "$PROJECT_DIR" > "$logfile" 2>&1 &
     WATCH_PID=$!
-    # Let the watcher baseline existing outcomes before we drop a new one
-    sleep 1.5
+    # The boot banner prints before the outcome baseline is taken and there is
+    # no file signal for "baseline done", so keep a short settle: it only has
+    # to cover one find over a handful of fixture worktrees.
+    local i
+    for ((i=0; i<100; i++)); do
+        grep -q '^poll interval:' "$logfile" 2>/dev/null && break
+        sleep 0.05
+    done
+    sleep 0.5
+}
+
+# wait_for_polls <n> [max_secs=30]: wait until the timer loop's end-of-tick
+# marker has fired <n> times since start_watcher. ready_sweep_pass runs after
+# status_poll_pass, pr_poll_pass and orphan_sweep_pass inside one tick, so the
+# <n>th call proves <n> complete passes of all of them started after the watcher
+# came up (state the test seeded before start_watcher is therefore seen).
+# Fails on timeout so a "never invoked" assertion cannot pass vacuously.
+wait_for_polls() {
+    local want="$1" max="${2:-30}" i
+    for ((i=0; i<max*20; i++)); do
+        [ "$(wc -l < "$TICK_LOG" 2>/dev/null || echo 0)" -ge "$want" ] && return 0
+        sleep 0.05
+    done
+    red "wait_for_polls: tick marker fired $(wc -l < "$TICK_LOG" 2>/dev/null || echo 0) of $want times in ${max}s (a timeout here would make every \"never invoked\" check pass vacuously)"
 }
 
 # Helper: stop a background (ONCE=0) watcher started via start_watcher.
@@ -201,9 +237,9 @@ stop_watcher() {
 # Helper: wait for watcher to exit (it should after first wake under ONCE=1)
 wait_for_watcher_exit() {
     local i
-    for ((i=0; i<20; i++)); do
+    for ((i=0; i<200; i++)); do
         if ! kill -0 "$WATCH_PID" 2>/dev/null; then break; fi
-        sleep 0.5
+        sleep 0.1
     done
     wait "$WATCH_PID" 2>/dev/null || true
     unset WATCH_PID
@@ -432,8 +468,8 @@ printf 'fix/issue-50\tMERGED\t101\n' > "$GH_PR_LIST_FILE"
 # would (correctly) route this into the orphan_no_window path instead.
 echo "iss-50" > "$TMUX_WINDOWS_FILE"
 
-ONCE=0 WATCH_PR_POLL_SECS=2 start_watcher 1 "$TEST_DIR/watch-5.log"
-sleep 5
+ONCE=0 WATCH_PR_POLL_SECS=1 start_watcher 1 "$TEST_DIR/watch-5.log"
+wait_for_polls 2
 stop_watcher
 
 [ -s "$KILL_LOG" ] || red "pr-poll backstop did not invoke kill-finished-workers.sh for a merged PR with no outcome.json. Watch log:
@@ -471,7 +507,7 @@ echo '{"task_id":"t60","state":"ready-for-review","pr":77,"ts":"2026-07-19T00:00
 
 ONCE=0 WATCH_CHECK_ON_DONE=1 CHECK_RUNNER="$FAKE_CHECK_RUNNER" \
     start_watcher 0 "$TEST_DIR/watch-6.log"
-sleep 4
+wait_for_polls 2
 stop_watcher
 
 [ -s "$CHECK_RUNNER_LOG" ] || red "check-on-done did not invoke CHECK_RUNNER for a ready-for-review status file. Watch log:
@@ -509,9 +545,9 @@ echo '{"task_id":"t70","state":"ready-for-review","pr":88,"ts":"2026-07-19T00:00
     > "$TEST_DIR/wt-issue-70/.swarm/tasks/status/t70.json"
 printf 'fix/issue-70\tOPEN\t88\n' > "$GH_PR_LIST_FILE"
 
-ONCE=0 WATCH_PR_POLL_SECS=2 WATCH_CHECK_ON_DONE=1 CHECK_RUNNER="$FAKE_CHECK_RUNNER" \
+ONCE=0 WATCH_PR_POLL_SECS=1 WATCH_CHECK_ON_DONE=1 CHECK_RUNNER="$FAKE_CHECK_RUNNER" \
     start_watcher 0 "$TEST_DIR/watch-7.log"
-sleep 6
+wait_for_polls 3
 stop_watcher
 
 RUNS=$(grep -c "wt-issue-70" "$CHECK_RUNNER_LOG" || true)
@@ -539,7 +575,7 @@ echo '{"task_id":"20261006-120000-75","state":"ready-for-review","ts":"2026-10-0
 
 ONCE=0 WATCH_CHECK_ON_DONE=1 CHECK_RUNNER="$FAKE_CHECK_RUNNER" \
     start_watcher 0 "$TEST_DIR/watch-7b.log"
-sleep 4
+wait_for_polls 2
 stop_watcher
 
 RUNS=$(grep -c "wt-issue-75" "$CHECK_RUNNER_LOG" || true)
@@ -677,9 +713,9 @@ echo '{"task_id":"t95","state":"ready-for-review","pr":99,"ts":"2026-07-20T00:00
 printf 'fix/issue-95\tMERGED\t99\n' > "$GH_PR_LIST_FILE"
 echo "iss-95" > "$TMUX_WINDOWS_FILE"   # issue #225 — see Test 5's comment
 
-ONCE=0 WATCH_PR_POLL_SECS=2 WATCH_CHECK_ON_DONE=1 CHECK_RUNNER="$FAKE_CHECK_RUNNER" \
+ONCE=0 WATCH_PR_POLL_SECS=1 WATCH_CHECK_ON_DONE=1 CHECK_RUNNER="$FAKE_CHECK_RUNNER" \
     start_watcher 1 "$TEST_DIR/watch-13.log"
-sleep 5
+wait_for_polls 2
 stop_watcher
 
 if grep -q "wt-issue-95" "$CHECK_RUNNER_LOG"; then
@@ -718,7 +754,7 @@ printf 'fix/issue-96\tOPEN\t96\n' > "$GH_PR_LIST_FILE"
 
 ONCE=0 WATCH_CHECK_ON_DONE=1 CHECK_RUNNER="$FAKE_CHECK_RUNNER" \
     start_watcher 0 "$TEST_DIR/watch-14.log"
-sleep 5
+wait_for_polls 2
 stop_watcher
 
 RUNS=$(grep -c "wt-issue-96" "$CHECK_RUNNER_LOG" || true)
@@ -755,8 +791,8 @@ mkdir -p "$TEST_DIR/wt-issue-100/.swarm/tasks/done"
 printf 'fix/issue-100\tCLOSED\t101\t2020-01-01T00:00:00Z\n' > "$GH_PR_LIST_FILE"
 : > "$TMUX_WINDOWS_FILE"   # irrelevant here — stale-PR check short-circuits before has_live_window
 
-ONCE=0 WATCH_PR_POLL_SECS=2 WATCHER_AUTOCLOSE_MODE=finalized start_watcher 1 "$TEST_DIR/watch-15.log"
-sleep 5
+ONCE=0 WATCH_PR_POLL_SECS=1 WATCHER_AUTOCLOSE_MODE=finalized start_watcher 1 "$TEST_DIR/watch-15.log"
+wait_for_polls 2
 stop_watcher
 
 [ ! -s "$KILL_LOG" ] \
@@ -779,8 +815,8 @@ NOW_ISO="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 printf 'fix/issue-102\tCLOSED\t103\t%s\n' "$NOW_ISO" > "$GH_PR_LIST_FILE"
 echo "iss-102" > "$TMUX_WINDOWS_FILE"   # issue #225 — see Test 5's comment
 
-ONCE=0 WATCH_PR_POLL_SECS=2 WATCHER_AUTOCLOSE_MODE=finalized start_watcher 1 "$TEST_DIR/watch-15b.log"
-sleep 5
+ONCE=0 WATCH_PR_POLL_SECS=1 WATCHER_AUTOCLOSE_MODE=finalized start_watcher 1 "$TEST_DIR/watch-15b.log"
+wait_for_polls 2
 stop_watcher
 
 [ -s "$KILL_LOG" ] \
@@ -803,8 +839,8 @@ NOW_ISO_103="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 printf 'fix/issue-103\tCLOSED\t104\t%s\n' "$NOW_ISO_103" > "$GH_PR_LIST_FILE"
 echo "iss-103" > "$TMUX_WINDOWS_FILE"
 
-ONCE=0 WATCH_PR_POLL_SECS=2 WATCHER_AUTOCLOSE_MODE= start_watcher 1 "$TEST_DIR/watch-15c.log"
-sleep 5
+ONCE=0 WATCH_PR_POLL_SECS=1 WATCHER_AUTOCLOSE_MODE= start_watcher 1 "$TEST_DIR/watch-15c.log"
+wait_for_polls 2
 stop_watcher
 
 [ ! -s "$KILL_LOG" ] \
@@ -824,8 +860,8 @@ green "no terminal_pr_detected logged for the CLOSED-without-merge PR under defa
 # what held it back above.
 : > "$KILL_LOG"
 rm -f "$PROJECT_DIR/.swarm/events.log"
-ONCE=0 WATCH_PR_POLL_SECS=2 WATCHER_AUTOCLOSE_MODE=finalized start_watcher 1 "$TEST_DIR/watch-15c-control.log"
-sleep 5
+ONCE=0 WATCH_PR_POLL_SECS=1 WATCHER_AUTOCLOSE_MODE=finalized start_watcher 1 "$TEST_DIR/watch-15c-control.log"
+wait_for_polls 2
 stop_watcher
 
 [ -s "$KILL_LOG" ] \
@@ -928,7 +964,7 @@ mkdir -p "$TEST_DIR/wt-issue-200/.swarm/tasks/done"
 printf 'fix/issue-200\tMERGED\t201\n' > "$GH_PR_LIST_FILE"
 
 ONCE=0 WATCH_PR_POLL_SECS=1 WATCH_ORPHAN_SWEEP_SECS=0 start_watcher 1 "$TEST_DIR/watch-17.log"
-sleep 6
+wait_for_polls 3
 stop_watcher
 
 [ ! -s "$KILL_LOG" ] \
@@ -960,7 +996,7 @@ make_reap_orphan_stub "Done. Reaped 2 worktree(s) (skipped 1 of 3 scanned)."
 
 ONCE=0 WATCH_PR_POLL_SECS=0 WATCH_ORPHAN_SWEEP_SECS=1 \
     REAP_ORPHAN="$FAKE_REAP_ORPHAN" start_watcher 1 "$TEST_DIR/watch-18a.log"
-sleep 4
+wait_for_polls 2
 stop_watcher
 
 [ -s "$REAP_ORPHAN_LOG" ] \
@@ -982,7 +1018,7 @@ green "events.log recorded watch.orphan_sweep with the parsed reaped=N count"
 rm -f "$PROJECT_DIR/.swarm/events.log"
 ONCE=0 WATCH_PR_POLL_SECS=0 WATCH_ORPHAN_SWEEP_SECS=1 \
     REAP_ORPHAN="$FAKE_REAP_ORPHAN" start_watcher 0 "$TEST_DIR/watch-18b.log"
-sleep 4
+wait_for_polls 2
 stop_watcher
 
 [ ! -s "$REAP_ORPHAN_LOG" ] \
@@ -1015,7 +1051,7 @@ echo '{"task_id":"t190","state":"ready-for-review","pr":99,"ts":"2026-08-27T00:0
     > "$TEST_DIR/wt-issue-190/.swarm/tasks/status/t190.json"
 
 ONCE=0 WATCH_CHECK_ON_DONE=1 start_watcher 0 "$TEST_DIR/watch-19.log"
-sleep 5
+wait_for_polls 2
 stop_watcher
 
 [ ! -f "$TEST_DIR/wt-issue-190/.swarm/tasks/done/t190.ok.json" ] \
@@ -1057,7 +1093,7 @@ echo '{"task_id":"t191","state":"ready-for-review","pr":100,"ts":"2026-08-27T00:
     > "$TEST_DIR/wt-issue-191/.swarm/tasks/status/t191.json"
 
 ONCE=0 WATCH_CHECK_ON_DONE=1 start_watcher 0 "$TEST_DIR/watch-19b.log"
-sleep 5
+wait_for_polls 3
 stop_watcher
 
 [ ! -f "$TEST_DIR/wt-issue-191/.swarm/tasks/done/t191-191.ok.json" ] \
@@ -1088,8 +1124,8 @@ mkdir -p "$TEST_DIR/wt-issue-193/.swarm/tasks/inbox"
 # Deliberately NO .swarm/tasks/status/ file for this worktree.
 printf 'fix/issue-193\tOPEN\t102\n' > "$GH_PR_LIST_FILE"
 
-ONCE=0 WATCH_PR_POLL_SECS=2 WATCH_CHECK_ON_DONE=1 start_watcher 0 "$TEST_DIR/watch-19c.log"
-sleep 5
+ONCE=0 WATCH_PR_POLL_SECS=1 WATCH_CHECK_ON_DONE=1 start_watcher 0 "$TEST_DIR/watch-19c.log"
+wait_for_polls 2
 stop_watcher
 
 [ ! -f "$TEST_DIR/wt-issue-193/.swarm/tasks/done/pr-issue-193.ok.json" ] \
@@ -1128,7 +1164,7 @@ echo '# fix merge conflict on PR 104' > "$TEST_DIR/wt-issue-195/.swarm/tasks/pro
 printf 'fix/issue-195\tOPEN\t104\t2020-01-01T00:00:00Z\n' > "$GH_PR_LIST_FILE"
 
 ONCE=0 WATCH_PR_POLL_SECS=1 WATCH_CHECK_ON_DONE=1 start_watcher 0 "$TEST_DIR/watch-19d.log"
-sleep 6
+wait_for_polls 3
 stop_watcher
 
 [ ! -f "$TEST_DIR/wt-issue-195/.swarm/tasks/status/pr-issue-195.check.json" ] \
@@ -1157,8 +1193,8 @@ green "followup_brief_postdates_pr logged exactly once despite multiple WATCH_PR
 rm -f "$TEST_DIR/wt-issue-195/.swarm/tasks/processing/20260926-175653-195.md"
 rm -f "$PROJECT_DIR/.swarm/events.log"
 
-ONCE=0 WATCH_PR_POLL_SECS=2 WATCH_CHECK_ON_DONE=1 start_watcher 0 "$TEST_DIR/watch-19d-b.log"
-sleep 5
+ONCE=0 WATCH_PR_POLL_SECS=1 WATCH_CHECK_ON_DONE=1 start_watcher 0 "$TEST_DIR/watch-19d-b.log"
+wait_for_polls 2
 stop_watcher
 
 grep -q 'watch\.reconcile .*issue=195 task_id=pr-issue-195 reason=pr_open_no_outcome' "$PROJECT_DIR/.swarm/events.log" \
@@ -1184,8 +1220,8 @@ echo '# original task' > "$TEST_DIR/wt-issue-196/.swarm/tasks/processing/2026092
 # i.e. the brief predates the PR, the ordinary case.
 printf 'fix/issue-196\tOPEN\t105\t2099-01-01T00:00:00Z\n' > "$GH_PR_LIST_FILE"
 
-ONCE=0 WATCH_PR_POLL_SECS=2 WATCH_CHECK_ON_DONE=1 start_watcher 0 "$TEST_DIR/watch-19e.log"
-sleep 5
+ONCE=0 WATCH_PR_POLL_SECS=1 WATCH_CHECK_ON_DONE=1 start_watcher 0 "$TEST_DIR/watch-19e.log"
+wait_for_polls 2
 stop_watcher
 
 grep -q 'watch\.pr_poll .*reason=followup_brief_postdates_pr issue=196' "$PROJECT_DIR/.swarm/events.log" 2>/dev/null \
@@ -1226,7 +1262,7 @@ echo '{"task_id":"t194","outcome":"ok"}' \
 
 wake_count() { wc -l < "$WAKE_LOG" 2>/dev/null || echo 0; }
 i=0
-while [ "$(wake_count)" -lt 1 ] && [ "$i" -lt 20 ]; do sleep 0.5; i=$((i+1)); done
+while [ "$(wake_count)" -lt 1 ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i+1)); done
 [ "$(wake_count)" -eq 1 ] \
     || red "provisional ok.json should have fired exactly one coord.wake by now (got $(wake_count)). Watch log:
 $(cat "$TEST_DIR/watch-20.log")"
@@ -1239,9 +1275,15 @@ rm -f "$TEST_DIR/wt-issue-194/.swarm/tasks/done/t194.ok.json"
 echo '{"task_id":"t194","outcome":"err","exit_code":1}' \
     > "$TEST_DIR/wt-issue-194/.swarm/tasks/done/t194.err.json"
 
-# Give the poll backend several ticks to (wrongly, pre-#468) fire a second
-# wake if it were going to.
-sleep 4
+# The outcome poll loop is not the timer loop, so the tick marker proves
+# nothing here. Wait for the event the poll emits once it has processed the
+# corrected record (proves a poll started after the change), then give it a
+# few 0.2 s polls to (wrongly, pre-#468) fire a second wake.
+i=0
+while ! grep -q 'worker\.finish\.corrected' "$PROJECT_DIR/.swarm/events.log" 2>/dev/null && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i+1)); done
+grep -q 'worker\.finish\.corrected' "$PROJECT_DIR/.swarm/events.log" 2>/dev/null \
+    || red "the corrected err.json was never processed by the poll backend within 10 s"
+sleep 0.8
 stop_watcher
 
 [ "$(wake_count)" -eq 1 ] \
@@ -1291,7 +1333,7 @@ printf 'fix/issue-465\tMERGED\t466\n' > "$GH_PR_LIST_FILE"
 # swarm-merge.sh's immediate kill-worktree.sh reap having already removed it.
 
 ONCE=0 WATCH_PR_POLL_SECS=1 WATCH_ORPHAN_SWEEP_SECS=0 start_watcher 1 "$TEST_DIR/watch-21.log"
-sleep 6
+wait_for_polls 3
 stop_watcher
 
 [ ! -s "$KILL_LOG" ] \

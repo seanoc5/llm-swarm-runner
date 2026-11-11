@@ -70,7 +70,7 @@ grep -q 'hello the-prompt' "$LOGF" || red "1a: run output not teed to its log"
 green "1a: run logged with usage line and output"
 
 # 1b. Single flight: a second start while one runs exits 75 and starts nothing.
-COORD_WORK_RUN_CMD='echo first-started; sleep 4' "$RUN" "$P1" p >/dev/null &
+COORD_WORK_RUN_CMD='echo first-started; sleep 1' "$RUN" "$P1" p >/dev/null &
 FIRST=$!
 wait_for 5 logs_have first-started || red "1b: first run never started"
 rc=0
@@ -84,7 +84,7 @@ green "1b: second start exits 75 and runs nothing"
 # command left an orphan behind.
 rc=0
 TO_PIDS="$TEST_DIR/to-pids"
-COORD_WORK_RUN_TIMEOUT_SECS=2 TO_PIDS="$TO_PIDS" COORD_WORK_RUN_CMD='sleep 7 & echo "$!" > "$TO_PIDS"; sleep 7' "$RUN" "$P1" p >/dev/null 2>&1 || rc=$?
+COORD_WORK_RUN_TIMEOUT_SECS=1 TO_PIDS="$TO_PIDS" COORD_WORK_RUN_CMD='sleep 4 & echo "$!" > "$TO_PIDS"; sleep 4' "$RUN" "$P1" p >/dev/null 2>&1 || rc=$?
 [ "$rc" = 124 ] || red "1c: expected exit 124, got $rc"
 tail -n 1 "$RUNS_LOG" | grep -q 'exit=124 status=timeout' || red "1c: timeout not logged: $(tail -n 1 "$RUNS_LOG")"
 read -r TOPID < "$TO_PIDS"
@@ -192,7 +192,7 @@ start_watcher() {
         COORD_WORK_RUN="${WORK_RUN_OVERRIDE:-$RUN}" \
         COORD_INBOX_BATCH_SECS="$batch" \
         COORD_SPLIT_TICK_SECS="${SPLIT_TICK:-1}" \
-        COORD_WORK_RUN_RETRY_SECS=3 COORD_WORK_RUN_MAX_RETRIES=2 \
+        COORD_WORK_RUN_RETRY_SECS=2 COORD_WORK_RUN_MAX_RETRIES=2 \
         SESSION_NAME="$SESSION_NAME" \
         WORKSPACE="$TEST_DIR" \
         WATCHER_AUTOCLOSE=0 WATCH_OUTBOX=0 WATCH_PR_POLL_SECS=0 \
@@ -204,7 +204,13 @@ start_watcher() {
         WATCHER_QUIET=1 DRY_RUN=0 ONCE=0 POLL_SECS=1 \
         ${WATCH_PREFIX:-} "$WATCH" "$PROJECT_DIR" > "$TEST_DIR/watch.out" 2>&1 &
     WATCH_PID=$!
-    sleep 1.5
+    # Split mode logs watch.timer.start once its loops are up; the resident
+    # watcher logs nothing by design (2j), so it keeps a short fixed settle.
+    if [ "${WATCH_MODE:-split}" = split ]; then
+        wait_for 10 grep -qs "watch.timer.start" "$EVENTS_LOG" || red "start_watcher: split loop never started"
+    else
+        sleep 1.5
+    fi
 }
 stop_watcher() {
     [ -n "${WATCH_PID:-}" ] || return 0
@@ -234,6 +240,8 @@ runs_started() { grep -c '^start' "$STUB_RUNS" || true; }
 runs_ended()   { grep -c '^end' "$STUB_RUNS" || true; }
 started_ge() { [ "$(runs_started)" -ge "$1" ]; }
 ended_ge() { [ "$(runs_ended)" -ge "$1" ]; }
+inbox_triaged() { ! ls "$INBOX_DIR"/*.md >/dev/null 2>&1; }   # the stub archived the inbox
+event_ge() { [ "$(grep -c "$1" "$EVENTS_LOG" 2>/dev/null || true)" -ge "$2" ]; }  # event_ge <pattern> <n>
 
 # 2a. Urgent item: a run starts at once, although the batch window (600 s)
 # has not elapsed.
@@ -249,30 +257,30 @@ wait_for 5 grep -q 'coord.workrun.exit .*rc=0' "$EVENTS_LOG" || red "2a: no coor
 green "2a: urgent item starts a run at once"
 
 # 2b. Batched item: no run until the window (8 s after the last start) passes.
-stop_watcher; reset_state; echo 1 > "$STUB_SECS_FILE"; seed_last_start 0
-start_watcher 8
+stop_watcher; reset_state; echo 1 > "$STUB_SECS_FILE"; seed_last_start 1   # 1 s back: an item in the stamp's own second counts as already announced
+start_watcher 4
 drop idle_capacity 2
-sleep 4
+sleep 1.2
 [ "$(runs_started)" = 0 ] || red "2b: batched item started a run inside the window"
 wait_for 10 started_ge 1 || red "2b: batched item never started a run after the window"
 wait_for 6 ended_ge 1 || red "2b: run did not finish"
 green "2b: batched item waits for the window, then runs"
 
 # 2c. A trigger during a run starts nothing; the exit recheck picks it up.
-stop_watcher; reset_state; echo 5 > "$STUB_SECS_FILE"; seed_last_start 5
+stop_watcher; reset_state; echo 2 > "$STUB_SECS_FILE"; seed_last_start 5
 SPLIT_TICK=30 start_watcher 600     # slow tick loop: only the exit recheck can start run 2
 drop sidelined_worker 3
 wait_for 8 started_ge 1 || red "2c: first run did not start"
-sleep 1
+wait_for 3 inbox_triaged || red "2c: the first run never triaged the inbox"
 drop sidelined_worker 4          # arrives mid-run, after the stub triaged
-sleep 2
+wait_for 5 grep -q 'coord.workrun.busy' "$EVENTS_LOG" || red "2c: the mid-run trigger never reached the watcher"
 [ "$(runs_started)" = 1 ] || red "2c: a second run started while the first was going"
 [ "$(runs_ended)" = 0 ] || red "2c: first run ended earlier than expected"
 wait_for 12 started_ge 2 || red "2c: the item that arrived mid-run was dropped (no recheck run)"
 grep -q 'coord.workrun.busy' "$EVENTS_LOG" || red "2c: busy trigger not logged"
 grep -q 'coord.workrun.start trigger=exit_recheck' "$EVENTS_LOG" || red "2c: the second run was not started by the exit recheck"
 wait_for 10 ended_ge 2 || red "2c: second run did not finish"
-sleep 3
+sleep 1.2
 [ "$(runs_started)" = 2 ] || red "2c: expected exactly 2 runs in total, got $(runs_started)"
 green "2c: mid-run trigger starts nothing; exit recheck runs the item once"
 
@@ -284,11 +292,11 @@ seed_last_start 20
 start_watcher 600
 drop sidelined_worker 5 3
 wait_for 8 started_ge 1 || red "2e: run did not start"
-sleep 1
+wait_for 5 grep -q 'coord.workrun.exit .*rc=1' "$EVENTS_LOG" || red "2e: failed run's exit not logged"
 [ "$(runs_started)" = 1 ] || red "2e: retried before the back-off"
 wait_for 10 started_ge 2 || red "2e: the failed run's item was never retried"
 wait_for 6 ended_ge 1 || red "2e: retry run did not finish"
-sleep 4
+sleep 1.2
 [ "$(runs_started)" = 2 ] || red "2e: expected 2 runs, got $(runs_started)"
 [ ! -e "$RUN_DIR/retry-from" ] || red "2e: retry-from not cleared after the ok run"
 green "2e: failed run is retried once after the back-off"
@@ -303,11 +311,11 @@ start_watcher 600
 drop sidelined_worker 11          # no age: same second as the run's start
 wait_for 8 started_ge 1 || red "2e2: run did not start"
 wait_for 5 grep -q 'coord.workrun.exit .*rc=1' "$EVENTS_LOG" || red "2e2: failed run's exit not logged"
-sleep 0.5                         # the instant relaunch would already have happened; the legal retry is ~2 s after start (last-start is start-1)
+sleep 0.5                         # the instant relaunch would already have happened; the legal retry is ~1 s after start (last-start is start-1, back-off 2 s)
 [ "$(runs_started)" = 1 ] || red "2e2: same-second item skipped the back-off ($(runs_started) runs)"
 wait_for 10 started_ge 2 || red "2e2: the failed run's item was never retried"
 wait_for 6 ended_ge 1 || red "2e2: retry run did not finish"
-sleep 4
+sleep 1.2
 [ "$(runs_started)" = 2 ] || red "2e2: expected 2 runs, got $(runs_started)"
 green "2e2: an item in the run's start second gets the back-off, not an instant relaunch"
 
@@ -318,7 +326,8 @@ seed_last_start 20
 start_watcher 600
 drop sidelined_worker 6 3
 wait_for 25 started_ge 3 || red "2f: expected the first run plus 2 retries, got $(runs_started)"
-sleep 8
+wait_for 5 grep -q 'coord.workrun.gave_up' "$EVENTS_LOG" || red "2f: giving up not logged"
+sleep 2.1                        # two more 1 s ticks: a 4th run would start by now
 [ "$(runs_started)" = 3 ] || red "2f: retries did not stop at the cap: $(runs_started) runs"
 grep -q 'coord.workrun.gave_up' "$EVENTS_LOG" || red "2f: giving up not logged"
 green "2f: always-failing run is retried at most COORD_WORK_RUN_MAX_RETRIES times"
@@ -330,7 +339,8 @@ printf '#!/usr/bin/env bash\necho dead >&2\nexit 1\n' > "$DEAD_WRAPPER"; chmod +
 stop_watcher; reset_state; echo 1 > "$STUB_SECS_FILE"; seed_last_start 20
 WORK_RUN_OVERRIDE="$DEAD_WRAPPER" start_watcher 600
 drop sidelined_worker 7 3
-sleep 14
+wait_for 20 grep -q 'coord.workrun.gave_up' "$EVENTS_LOG" || red "2g: giving up not logged"
+sleep 2.1                        # two more 1 s ticks: a 4th start would happen by now
 n_starts="$(grep -c 'coord.workrun.start' "$EVENTS_LOG" || true)"
 [ "$n_starts" = 3 ] || red "2g: a dead wrapper was started $n_starts times (want 1 + 2 retries)"
 grep -q 'wrapper_did_not_start' "$EVENTS_LOG" || red "2g: dead wrapper not logged"
@@ -338,28 +348,27 @@ grep -q 'coord.workrun.gave_up' "$EVENTS_LOG" || red "2g: giving up not logged"
 green "2g: a wrapper that dies before running is backed off and capped, not looped"
 
 # 2h. Stopping the watcher mid-run must not let the exit recheck start a new run.
-stop_watcher; reset_state; echo 4 > "$STUB_SECS_FILE"; seed_last_start 5
+stop_watcher; reset_state; echo 2 > "$STUB_SECS_FILE"; seed_last_start 5
 start_watcher 600
 drop sidelined_worker 8
 wait_for 8 started_ge 1 || red "2h: run did not start"
-sleep 1
+wait_for 3 inbox_triaged || red "2h: the run never triaged the inbox"
 drop sidelined_worker 9          # would be picked up by the exit recheck
 stop_watcher
 wait_for 8 ended_ge 1 || red "2h: run did not finish after the watcher stopped"
-sleep 3
+sleep 1.2
 [ "$(runs_started)" = 1 ] || red "2h: a run was started on behalf of a stopped watcher"
 green "2h: no run is started after the watcher has stopped"
 
 # 2i. A hard kill of the watcher's whole process group (what the watcher's own
 # staleness self-restart does) must not strand the run: the run keeps its lock
 # (no second run starts) and, if it dies too, the items are retried.
-stop_watcher; reset_state; echo 6 > "$STUB_SECS_FILE"; seed_last_start 5
+stop_watcher; reset_state; echo 3 > "$STUB_SECS_FILE"; seed_last_start 5
 WATCH_PREFIX=setsid start_watcher 600; unset WATCH_PREFIX
 drop sidelined_worker 10
 wait_for 8 started_ge 1 || red "2i: run did not start"
 kill -KILL -- "-$WATCH_PID" 2>/dev/null || true
 wait "$WATCH_PID" 2>/dev/null || true; unset WATCH_PID
-sleep 1
 [ -s "$RUN_DIR/retry-from" ] || red "2i: no retry marker while the run is in flight"
 RUNNING=$(( $(runs_started) - $(runs_ended) ))
 [ "$RUNNING" = 1 ] || red "2i: the run did not survive the watcher's group kill"
@@ -375,7 +384,7 @@ green "2i: a watcher group kill leaves the run, its lock and its retry marker in
 # file to split starts runs without restarting the watcher.
 stop_watcher; reset_state; echo 1 > "$STUB_SECS_FILE"; seed_last_start 5
 WATCH_MODE=resident start_watcher 600
-sleep 4   # several 1 s ticks
+sleep 3   # several 1 s ticks
 [ "$(runs_started)" = 0 ] || red "2j: resident watcher started a work run"
 ! grep -qE 'coord\.workrun|coord_mode=split|split_mode' "$EVENTS_LOG" 2>/dev/null || red "2j: resident watcher logged split events: $(grep -E 'coord\.workrun|coord_mode=split|split_mode' "$EVENTS_LOG" | head -3)"
 ! grep -qE 'command not found|ERROR:|WARN:|coord_mode=split|split_mode|workrun' "$TEST_DIR/watch.out" || red "2j: resident watcher printed errors or split output: $(grep -E 'command not found|ERROR:|WARN:|coord_mode=split|split_mode|workrun' "$TEST_DIR/watch.out" | head -3)"
