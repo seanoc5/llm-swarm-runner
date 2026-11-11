@@ -12012,7 +12012,7 @@ host_load_wake_pass() {
 # misread the Night-queue wording now rules out.
 idle_capacity_outcome_pass() {
     [ -s "$IDLE_CAPACITY_OUTCOME_FILE" ] || return 0
-    local ts slots ready night_ok now names w reason="" started=0
+    local ts slots ready night_ok now names w before nl reason="" started=0
     read -r ts slots ready night_ok < "$IDLE_CAPACITY_OUTCOME_FILE"
     [[ "$ts" =~ ^[0-9]+$ ]] || { rm -f "$IDLE_CAPACITY_OUTCOME_FILE"; return 0; }
     now=$(date +%s)
@@ -12025,8 +12025,10 @@ idle_capacity_outcome_pass() {
         # Split mode: the pane is only a viewer; the headless work run is the turn.
         coord_split_active && coord_split_run_busy && return 0
         names="$(tmux list-windows -t "$SESSION_NAME" -F '#{window_name}' 2>/dev/null)" || return 0
+        nl=$'\n'
+        before="$(tail -n +2 "$IDLE_CAPACITY_OUTCOME_FILE")"
         while IFS= read -r w; do
-            case "$w" in iss-*) tail -n +2 "$IDLE_CAPACITY_OUTCOME_FILE" | grep -qxF "$w" || started=1;; esac
+            case "$w" in iss-*) case "$nl$before$nl" in *"$nl$w$nl"*) ;; *) started=1;; esac;; esac
         done <<< "$names"
         if [ "$started" = 1 ]; then rm -f "$IDLE_CAPACITY_OUTCOME_FILE"; return 0; fi
         reason=none_started
