@@ -140,10 +140,10 @@ scripts/update-worker-claude.sh            # or: scripts/update-worker-claude.sh
 ```
 
 Update model: **workers track `latest` on purpose, but only through this script.**
-In-worker auto-update is off (`DISABLE_AUTOUPDATER=1`) and the mount is read-only, so a
-running worker's binary never changes underneath it and parallel workers cannot race
-writing it. Running workers keep their process; new or restarted workers get the new
-version. Roll back with `scripts/update-worker-claude.sh <old version>`.
+In-worker auto-update is off (`DISABLE_AUTOUPDATER=1`) and the mount is read-only, so
+parallel workers cannot race writing it and only your deliberate update changes it.
+Running workers keep their process; new or restarted workers get the new version.
+Update when few workers are mid-run if you can (mid-run replacement is untested). Roll back with `scripts/update-worker-claude.sh <old version>`.
 
 ### Step 3 — Edit the one config file
 
