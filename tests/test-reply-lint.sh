@@ -104,6 +104,9 @@ check "add refuses a --do with no command or URL" "2" "$ec"
 set +e; "$NY" add --project "$P" --title "Start load" --do 'run the command above `x`' >/dev/null 2>&1; ec=$?
 "$NY" add --project "$P" --title "Start load" >/dev/null 2>&1; ec2=$?; set -e
 check "add refuses a back-reference and a missing --do" "2 2" "$ec $ec2"
+set +e; "$NY" add --project "$P" --title "Review plan" --do 'run `./review.sh` for the plan in §4' >/dev/null 2>&1; ec=$?
+mkdir -p "$T/cproj/.swarm"; "$NY" add --project "$T/cproj" --title "Review the Tailwind carve plan" --rec "yes: the carve order keeps the layout stable and touches only templates, so rollback is one revert" --do 'run `./review.sh tailwind`' >/dev/null 2>&1; ec2=$?; set -e
+check "add refuses a bare section pointer (carryover) and accepts a self-contained item" "2 0" "$ec $ec2"
 set +e; "$NY" add --project "$T/bproj" --title "Start load" --do "$(printf 'run the command below
 ```
 ./load.sh
