@@ -46,6 +46,17 @@ watch_pause_read() {
     now="$(date +%s)"
     if [ "$now" -ge "$WP_UNTIL" ]; then
         if mv "$f" "$f.expired.$$" 2>/dev/null; then
+            # A new pause may have replaced the expired file between the read
+            # and the rename. If what we claimed is still live, put it back
+            # (-n: never over a newer one) and treat the pause as in force.
+            local claimed
+            claimed="$(sed -n 's/^until=//p' "$f.expired.$$" 2>/dev/null | head -n 1)"
+            if [[ "$claimed" =~ ^[0-9]+$ ]] && [ "$claimed" -gt "$(date +%s)" ]; then
+                mv -n "$f.expired.$$" "$f" 2>/dev/null || true
+                rm -f "$f.expired.$$"
+                watch_pause_read "$1"
+                return
+            fi
             rm -f "$f.expired.$$"
             watch_pause_log "$1" "coord.resume reason=expired mode=$WP_MODE"
         fi

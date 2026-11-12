@@ -100,7 +100,30 @@ watch_pause_full "$SW" && red "quiet pause counted as full" || green "a quiet pa
 watch_pause_full "$SW" && green "a full pause stops the sweeps" || red "full pause not seen"
 "$PAUSE" --resume --project "$P" >/dev/null
 
-echo "== Stop hook and waiter"
-grep -q 'watch_pause_active "\$swarm"' "$ROOT/scripts/coord-hook.sh" && green "coord-hook.sh checks the pause before ringing" || red "hook"
-grep -q 'watch_pause_active "\$swarm"' "$ROOT/scripts/coord-inbox-wait.sh" && green "coord-inbox-wait.sh checks the pause before ringing" || red "waiter"
+echo "== Stop hook and waiter, run for real"
+HP="$T/hp"; HS="$HP/.swarm"; mkdir -p "$HS/coord-inbox"
+HOOK="$ROOT/scripts/coord-hook.sh"; WAIT="$ROOT/scripts/coord-inbox-wait.sh"
+hook_out() { printf '{"stop_hook_active":false}' | CLAUDE_PROJECT_DIR="$HP" COORD_HOOK_STATE=1 COORD_INBOX_WAITER=0 "$HOOK" Stop; }
+echo "$(( $(date +%s) - 3600 ))" > "$HS/coord-hook-rang"
+echo "stall" > "$HS/coord-inbox/20991231T000000Z-stall-1-1.md"   # urgent kind, newer than the last ring
+"$PAUSE" 10m --project "$HP" >/dev/null
+out="$(hook_out)"
+check "paused: Stop hook does not ring" "" "$out"
+"$PAUSE" --resume --project "$HP" >/dev/null
+case "$(hook_out | jq -r .reason 2>/dev/null)" in Inbox:*) got=rang ;; *) got=silent ;; esac
+check "resumed: the same Stop hook rings" "rang" "$got"
+
+echo "$(( $(date +%s) - 3600 ))" > "$HS/coord-hook-rang"
+rm -f "$HS/coordinator-state"   # the hook's ring above marked the coordinator busy; the waiter waits that out
+"$PAUSE" 10m --project "$HP" >/dev/null
+COORD_INBOX_WAITER_POLL_SECS=0.2 COORD_INBOX_WAITER=1 "$WAIT" "$HP" > "$T/wait.out" 2>&1 & wpid=$!
+sleep 1.5
+kill -0 "$wpid" 2>/dev/null && got=waiting || got=rang
+check "paused: the waiter holds its ring" "waiting" "$got"
+"$PAUSE" --resume --project "$HP" >/dev/null
+n=40; while [ "$n" -gt 0 ] && kill -0 "$wpid" 2>/dev/null; do sleep 0.1; n=$((n - 1)); done
+kill -0 "$wpid" 2>/dev/null && { kill "$wpid" 2>/dev/null || true; got=still-waiting; } || got=rang
+check "resumed: the waiter rings with the live count" "rang" "$got"
+grep -q '^Inbox: 1 item' "$T/wait.out" && green "waiter nudge carries the true item count" || red "waiter output: $(cat "$T/wait.out")"
+
 echo "all watch-pause checks passed"
