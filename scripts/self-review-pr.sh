@@ -400,7 +400,6 @@ review_payload() {
             printf -- '--- CHANGES SINCE LAST REVIEW ---\n(not available: %s)\n\n' "$SINCE_NOTE"
         fi
     fi
->>>>>>> 4b88184 (feat(self-review): later rounds see prior findings and the since-last-review diff; BLOCK only on unresolved or new BLOCKs (#611))
     [ -z "$EXCLUDED_NOTE" ] || printf -- '--- NOT REVIEWED ---\n%s\nState in your review that these files were not examined.\n\n' "$EXCLUDED_NOTE"
     printf -- '--- DIFF ---\n%s\n' "$DIFF"
 }

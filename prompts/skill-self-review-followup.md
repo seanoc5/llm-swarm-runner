@@ -20,9 +20,10 @@ Your verdict may only get stricter if there is **new evidence**. So:
    stated intent) that the `CHANGES SINCE LAST REVIEW` introduced.
 2. **Do not BLOCK on anything else**, including problems in code that was
    already in the diff at the last round and that earlier rounds did not flag.
-   If you now notice such a problem and it is real, put it in the caveat
-   line, not in a BLOCK: you had the same diff last round, so it is not
-   evidence that the author's fixes failed.
+   If you now notice such a problem, put it in the caveat line: you had the
+   same diff last round, so it is not evidence that the author's fixes failed.
+   **One exception:** a clear data-loss, security or destructive-migration
+   problem may BLOCK even in code earlier rounds saw; say it is newly noticed.
 3. **Minor items** (style, wording, small test gaps, register of the PR body)
    go in an `APPROVE_WITH_CAVEATS:` line, never a `BLOCK:`.
 4. If every prior BLOCK is resolved and the new changes introduce no
