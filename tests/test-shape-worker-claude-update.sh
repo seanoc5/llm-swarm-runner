@@ -25,4 +25,4 @@ green "update-worker-claude.sh present and parses"
 
 grep -q '^ARG CLAUDE_CODE_VERSION=latest$' "$ROOT/Dockerfile" \
     || red "Dockerfile CLAUDE_CODE_VERSION is no longer the 'latest' fallback; update its header and docs/model-switch-recipe.md together"
-green "Dockerfile: claude-code fallback tracks latest"
+green "Dockerfile: claude-code fallback is the latest ARG"

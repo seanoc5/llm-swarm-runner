@@ -30,7 +30,7 @@ docker image inspect "$IMAGE" >/dev/null 2>&1 \
 mkdir -p "$PREFIX_DIR"
 
 installed() {
-    jq -r '.version // "none"' "$PREFIX_DIR/lib/node_modules/$PKG/package.json" 2>/dev/null || echo none
+    sed -n 's/^ *"version": *"\([^"]*\)".*/\1/p' "$PREFIX_DIR/lib/node_modules/$PKG/package.json" 2>/dev/null | head -1
 }
 
 before="$(installed)"

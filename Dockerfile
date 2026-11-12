@@ -22,8 +22,8 @@ ENV LC_ALL=C.utf8
 # ~/.npm-global read-only over /home/sandbox/.npm-global, which is first on
 # PATH, so a worker's `claude` is whatever scripts/update-worker-claude.sh
 # last installed there (#742). CLAUDE_CODE_VERSION below is only the fallback
-# for a host whose ~/.npm-global is empty, so it tracks `latest` rather than
-# a pin implying a version nobody runs. gemini-cli, codex and promptfoo are
+# for a host whose ~/.npm-global is empty, so it is `latest` as of the last cache-free build rather than
+# a pin implying a version nobody runs (docker caches that layer; use --no-cache to refresh). gemini-cli, codex and promptfoo are
 # NOT shadowed (the mount holds only claude), so their pins are what runs.
 #
 # To upgrade a pinned tool, bump its ARG below or pass

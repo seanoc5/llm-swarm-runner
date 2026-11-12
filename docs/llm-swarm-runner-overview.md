@@ -686,7 +686,7 @@ The `Dockerfile` pins all upstream-version-sensitive tools via `ARG`-driven vers
 | ARG | Default | Notes |
 |---|---|---|
 | `NODE_MAJOR` | `22` | Major only — NodeSource ships stable patches inside a major. |
-| `CLAUDE_CODE_VERSION` | `latest` | Fallback only (#742): workers run the host's `~/.npm-global` copy, mounted read-only and updated by `scripts/update-worker-claude.sh`. The image copy runs only when that directory is empty. |
+| `CLAUDE_CODE_VERSION` | `latest` | Fallback only (#742): workers run the host's `~/.npm-global` copy, mounted read-only and updated by `scripts/update-worker-claude.sh`. The image copy runs only when that directory is empty and is as new as the last `--no-cache` build. |
 | `GEMINI_CLI_VERSION` | `0.62.0` | Bump cautiously — gemini-cli's tool-call protocol has changed across versions. |
 | `OPENAI_CODEX_VERSION` | `0.128.0` | Less load-bearing — we don't currently script against it. |
 | `PROMPTFOO_VERSION` | `0.121.9` | Same. |
