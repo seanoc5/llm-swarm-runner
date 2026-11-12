@@ -34,7 +34,8 @@ watcher types a plain doorbell per item, with no suffix):
 4. **Reply lint.** The Stop hook runs `scripts/lint-coordinator-reply.sh` on
    the coordinator's last reply (resident and split) and blocks once on a
    back-reference ("command above", "details in .swarm/needs-you.md"), a
-   run/start/click item with no command or URL, or two closing lines. Hits are
+   run/start/click item with no command or URL, two closing lines, or a carried-over
+   item referred to by label, section number or "from earlier" without restating it (`carryover`, #646). Hits are
    counted in `.swarm/events.log` as `coord.reply_lint.hit` (blocked) and
    `coord.reply_lint.unfixed` (still failing after the nudge); per swarm per
    week: `grep -c coord.reply_lint.hit .swarm/events.log`. Installed for every

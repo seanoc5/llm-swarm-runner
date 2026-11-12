@@ -68,6 +68,35 @@ check "gh failing: never flags" "" "$(GH_FAIL=1 gl < "$FX/incident-issue-merged.
 set +e; gl < "$FX/incident-issue-merged.txt" >/dev/null; ec=$?; set -e
 check "issue-merged exits 3" "3" "$ec"
 
+# ── carryover (issue #646): a bare backward reference with no gloss ─────────
+cr() { printf '%s\n' "$1" | "$LINT" --only carryover | cut -d: -f1 | paste -sd, -; }
+check "carryover: 'h1 and h2 from earlier' (SAMlytics 2026-10-15)" "carryover" "$(cr 'Needs you: n1 below, plus h1 and h2 from earlier')"
+check "carryover: 'follow-ups A-D from earlier' (civicstrata 2026-10-15)" "carryover" "$(cr 'Pending your approval: follow-ups A–D from earlier')"
+check "carryover: a section pointer with no gloss (the Tailwind '§4' incident)" "carryover" "$(cr 'Tailwind plan, carve order in §4: review it')"
+check "carryover: 'from my M1-M3 report'" "carryover" "$(cr 'Run the sudo fix from my M1-M3 report.')"
+check "carryover: 'your d)' undefined" "carryover" "$(cr 'Pending: your d) and the 12 drafts.')"
+check "carryover: a long line that explains the reference passes" "" "$(cr 'The key rotation from earlier still needs doing: the vendor key expires Friday, so rotate it before the deploy window opens.')"
+check "carryover: a label defined by a bullet on the same screen passes" "" "$(cr "$(printf -- '- **h1** Widen the index so search stops timing out.\nNeeds you: h1 below.')")"
+check "carryover: an inline 'X:' definition passes" "" "$(cr 'h1: widen the index. Needs you: h1.')"
+check "carryover: a heading that introduces restated items passes" "" "$(cr "$(printf 'Needs you (carried over):\n- Widen the search index so the nightly job stops timing out; yes or no, I recommend yes.\n- Rotate the vendor key before Friday; yes or no, I recommend yes.')")"
+check "carryover: the same heading with nothing under it is flagged" "carryover" "$(cr 'Needs you (carried over):')"
+check "carryover: a fenced line, a code span and a URL are not labels" "" "$(cr "$(printf '```\nh1 from earlier\n```\nSee `h1` and https://example.com/a1/b2 now.')")"
+check "carryover: PR/issue numbers, versions, quarters and table ids are not labels" "" "$(cr 'Bump to v2 for Q3 (#1215) using table B19301 on s3.')"
+check "carryover: English 'A recommended fix' is not a label" "" "$(cr 'A recommended fix is on the PR.')"
+check "carryover: '(carry-over, A recommended)' is flagged" "carryover" "$(cr 'Forest dual-write ruling (carry-over, A recommended)')"
+check "carryover: rule is off under --only backref" "" "$(printf 'h1 from earlier\n' | "$LINT" --only backref | paste -sd, -)"
+check "carryover: --gloss 2 lets a short gloss pass" "" "$(printf 'Review §4 now please\n' | "$LINT" --only carryover --gloss 2 | paste -sd, -)"
+check "carryover: the needs-you render, clean fixtures and the #801 fixture add no carryover hit" "" "$(cat "$FX"/clean-*.txt "$FX"/incident-contradictory-ending.txt | "$LINT" --only carryover | paste -sd, -)"
+# the 13-row fixture from docs/research/issue-645-reporting-rules.md section 2: every expect=flag row is flagged, every expect=miss row is not
+got=""; want=""
+while IFS=$'\t' read -r row _ _ expect text; do
+    case "$row" in ''|'#'*) continue ;; esac
+    hit="$(printf "%s\n" "$text" | "$LINT" --only carryover,backref | paste -sd, - || true)"
+    [ -n "$hit" ] && got="$got$row," || true
+    [ "$expect" = flag ] && want="$want$row," || true
+done < "$FX/carryover-incidents.tsv"
+check "13-row incident fixture: flagged rows are exactly the expect=flag rows" "$want" "$got"
+
 # ── needs-you.sh ─────────────────────────────────────────────────────────────
 P="$T/proj"; mkdir -p "$P/.swarm"
 set +e; "$NY" add --project "$P" --title "Start load" --do "Start it in 1:util" >/dev/null 2>&1; ec=$?; set -e

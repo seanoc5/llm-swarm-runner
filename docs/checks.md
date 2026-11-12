@@ -29,7 +29,7 @@ One object per finding, nothing printed when clean:
 
 - `brief` (warn, wraps `lint-brief.sh`): no-done-definition, check-cannot-fail, no-named-files, underspecified.
 - `pr-screen` (error, wraps `lint-pr-screen.sh`): identifiers-above-fold, bottom-line-budget, surprise-budget, your-move-budget, recommendation-in-table, screen-too-long.
-- `reply` and `needs-you` (error, wrap `lint-coordinator-reply.sh`): backref, no-command, two-endings, stale-window (set `CHECKS_PROJECT=DIR`), issue-merged (#716; needs `gh`, has no fixture dir because it calls GitHub; `tests/test-reply-lint.sh` covers it with a stub).
+- `reply` and `needs-you` (error, wrap `lint-coordinator-reply.sh`): backref, no-command, two-endings, stale-window (set `CHECKS_PROJECT=DIR`), issue-merged (#716; needs `gh`, has no fixture dir because it calls GitHub; `tests/test-reply-lint.sh` covers it with a stub), carryover (#646; a label, section number or "from earlier" with no restatement; numbers in `docs/reply-lint-carryover-evaluation.md`).
 
 `check-coordinator-authorship.sh` is a PR-merge gate on git history, not text, so it is not behind this runner.
 
