@@ -34,7 +34,12 @@ cat > "$SHIM_DIR/gh" <<SHIM
 echo "\$*" >> "$GH_LOG"
 case "\$1 \$2" in
   "api "*) printf '%b' "\${GH_FILES_TSV:-}" ;;
-  "pr diff") [ "\${GH_DIFF_FAIL:-0}" = 1 ] && { echo "HTTP 406: diff too large" >&2; exit 1; }; printf '%b' "\${GH_DIFF:-}" ;;
+  "pr diff")
+    # GH_DIFF_FAIL: 1 = HTTP 406 too large, 2 = persistent 502, 3 = 502 once then ok
+    [ "\${GH_DIFF_FAIL:-0}" = 1 ] && { echo "could not find pull request diff: HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000)" >&2; exit 1; }
+    [ "\${GH_DIFF_FAIL:-0}" = 2 ] && { echo "HTTP 502: Bad Gateway" >&2; echo "second line" >&2; exit 1; }
+    if [ "\${GH_DIFF_FAIL:-0}" = 3 ] && [ ! -e "$TEST_DIR/diff-retried" ]; then touch "$TEST_DIR/diff-retried"; echo "HTTP 502: Bad Gateway" >&2; exit 1; fi
+    printf '%b' "\${GH_DIFF:-}" ;;
   "pr view")
     if   grep -q -- 'headRefOid' <<<"\$*"; then echo abc1234
     elif grep -q -- '--json comments' <<<"\$*"; then
@@ -128,6 +133,7 @@ GH_DIFF_FAIL=1 run_floor 7
 [ "$rc" -eq 0 ] || red "an unreadable diff must not error out, got rc=$rc: $OUT $(cat "$TEST_DIR/err.log")"
 floor_is medium; has_rule tests
 grep -q 'could not be read' <<<"$OUT" || red "reason missing: $OUT"
+grep -q 'very large diffs' <<<"$OUT" || red "406 path must keep the large-diff wording: $OUT"
 # ... and --apply still bumps and comments for it
 printf '<!-- BLIND_MERGE_RISK: low -->\nbody\n' > "$BODY_FILE"; : > "$COMMENT_LOG"
 GH_DIFF_FAIL=1 run_floor --apply 7
@@ -136,6 +142,24 @@ grep -q 'could not be read' "$COMMENT_LOG" || red "comment must explain: $(cat "
 # the disabled-test rule off → the unreadable diff is not consulted at all
 RISK_FLOOR_DISABLE=tests GH_DIFF_FAIL=1 run_floor 7; floor_is low
 green "unreadable diff raises the floor and is explained"
+
+heading "Test 6c: a non-406 gh pr diff failure → real reason, never 'very large diffs' (#898)"
+files 'src/Foo.kt\tmodified\t10\t2'
+GH_DIFF_FAIL=2 run_floor 7
+[ "$rc" -eq 0 ] || red "a failed diff must not error out, got rc=$rc"
+floor_is medium; has_rule tests
+grep -q 'could not read the diff: HTTP 502: Bad Gateway' <<<"$OUT" || red "real reason missing: $OUT"
+! grep -q 'very large' <<<"$OUT" || red "non-406 must not blame large diffs: $OUT"
+[ "$(grep -c '^pr diff' "$GH_LOG")" -eq 2 ] || red "expected one retry (2 diff calls), log: $(cat "$GH_LOG")"
+printf '<!-- BLIND_MERGE_RISK: low -->\nbody\n' > "$BODY_FILE"; : > "$COMMENT_LOG"
+GH_DIFF_FAIL=2 run_floor --apply 7
+[ "$rc" -eq 10 ] || red "expected bump (10), got $rc"
+grep -q 'HTTP 502' "$COMMENT_LOG" || red "comment must carry the real error: $(cat "$COMMENT_LOG")"
+! grep -q 'very large' "$COMMENT_LOG" || red "comment must not blame large diffs"
+# a transient blip that the retry clears leaves the rating alone
+rm -f "$TEST_DIR/diff-retried"
+GH_DIFF_FAIL=3 run_floor 7; floor_is low; no_rule tests
+green "non-406 failure retried once, then reported with its own error"
 
 heading "Test 7: scope — advisory note only, never bumps; skipped with no brief text"
 files 'src/main/kotlin/Foo.kt\tmodified\t5\t1' 'scripts/unrelated.sh\tmodified\t5\t1'

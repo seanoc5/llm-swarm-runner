@@ -121,12 +121,26 @@ if rule_on tests; then
     [ -z "$DELETED_TESTS" ] || raise medium "rule: tests — deletes test files ($(join_first <<<"$DELETED_TESTS"))"
     # GitHub refuses to serve a very large diff (HTTP 406, ~20k lines). That is
     # itself an answer: raise the floor rather than erroring out, so a huge PR
-    # is bumped (and explained) instead of refused with no comment.
+    # is bumped (and explained) instead of refused with no comment. Any other
+    # failure (network blip, auth, rate limit) is retried once, and if it
+    # persists the comment names the real error, not "very large diffs" (#898).
     DIFF=""
-    if ! DIFF="$(gh pr diff "$PR" 2>/dev/null)"; then
+    DIFF_ERR_FILE="$(mktemp)"
+    if ! DIFF="$(gh pr diff "$PR" 2>"$DIFF_ERR_FILE")"; then
         DIFF=""
-        raise medium "rule: tests — the diff could not be read (GitHub refuses very large diffs), so the disabled-test check was skipped"
+        if grep -qE 'HTTP 406|diff exceeded the maximum|too_large' "$DIFF_ERR_FILE"; then
+            raise medium "rule: tests — the diff could not be read (GitHub refuses very large diffs), so the disabled-test check was skipped"
+        else
+            if DIFF="$(gh pr diff "$PR" 2>"$DIFF_ERR_FILE")"; then
+                :
+            else
+                DIFF=""
+                REASON="$(grep -v '^[[:space:]]*$' "$DIFF_ERR_FILE" | sed -n 1p | cut -c1-200)"
+                raise medium "rule: tests — could not read the diff: ${REASON:-unknown error}; the disabled-test check was skipped"
+            fi
+        fi
     fi
+    rm -f "$DIFF_ERR_FILE"
     # added lines as "path<TAB>content"; the regex runs in grep, not awk, so
     # the user-supplied ERE means the same thing here as everywhere else
     SKIP_HITS="$(awk '/^\+\+\+ /{f=substr($0,7); next} /^\+/{print f "\t" substr($0,2)}' <<<"$DIFF" \
