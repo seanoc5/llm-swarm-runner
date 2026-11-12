@@ -61,7 +61,9 @@ while read -r pr sha action; do
     if [ "$action" = "check" ]; then
         # exit 1 = a check failed, but a token that cannot read Checks also
         # exits 1; require an actual `fail` row (tab-separated off a TTY).
-        rc=0; out="$(gh pr checks "$pr" 2>&1)" || rc=$?
+        # ci_pr_checks drops the swarm/worker liveness status (a dead worker's
+        # failure is not red CI, #536) and sets CHECKS_OUT / CHECKS_RC.
+        ci_pr_checks "$pr"; rc="$CHECKS_RC"; out="$CHECKS_OUT"
         if ! { [ "$rc" = "1" ] && grep -Eq '[[:space:]]fail[[:space:]]' <<<"$out"; }; then
             # issue #739: say the head was not (verifiably) red, so the watcher keeps its
             # one-note-per-sha key across a failed read or a CI re-run instead of pruning it.

@@ -80,8 +80,9 @@ if grep -nE 'gh pr checks|statusCheckRollup' "$SCRIPTS/swarm-merge.sh" | grep -v
     red "swarm-merge.sh reads CI state directly; it must go through ci-wait.sh"
 fi
 grep -q 'ci_pr_checks' "$SCRIPTS/ci-wait.sh" || red "ci-wait.sh no longer uses ci_pr_checks"
+grep -q 'ci_pr_checks' "$SCRIPTS/ready-sweep.sh" || red "ready-sweep.sh no longer uses ci_pr_checks"
 grep -q 'ci_pr_checks' "$SCRIPTS/pr-ready.sh" || red "pr-ready.sh no longer uses ci_pr_checks"
-if grep -nE 'gh pr checks "\$PR"' "$SCRIPTS/ci-wait.sh" "$SCRIPTS/pr-ready.sh" | grep -v '^[^:]*:[0-9]*:[[:space:]]*#'; then
+if grep -nE 'gh pr checks "\$(PR|pr)"' "$SCRIPTS/ci-wait.sh" "$SCRIPTS/pr-ready.sh" "$SCRIPTS/ready-sweep.sh" | grep -v '^[^:]*:[0-9]*:[[:space:]]*#'; then
     red "a bare gh pr checks call bypasses the liveness filter"
 fi
 green "swarm-merge.sh reads CI only via ci-wait.sh; ci-wait.sh and pr-ready.sh only via ci_pr_checks"
