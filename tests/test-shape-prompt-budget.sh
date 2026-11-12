@@ -132,10 +132,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # 2026-11-11: coordinator 32800 -> 33400. Issue #642 adds one bullet (~480 bytes,
 # also in coordinator-shared.md, 5600 -> 5800): briefs restate prior-session
 # specifics inline.
-WORKER_MAX="${WORKER_MD_MAX_BYTES:-24800}"
-COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-33400}"
+# 2026-11-12: worker 24800 -> 25000, coordinator 33400 -> 33700, coordinator-shared
+# 5800 -> 6000. Issue #533 adds one "action items stand alone" rule per file
+# (~190-350 bytes each; the rule is the fix). Stopgap until #509.
+WORKER_MAX="${WORKER_MD_MAX_BYTES:-25000}"
+COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-33700}"
 BARE_MAX="${WORKER_BARE_MD_MAX_BYTES:-12200}"   # issue #510 trial prompt; ~7.5KB is script-parsed contract
-SHARED_MAX="${COORD_SHARED_MD_MAX_BYTES:-5800}"   # issue #767 split prompts
+SHARED_MAX="${COORD_SHARED_MD_MAX_BYTES:-6000}"   # issue #767 split prompts
 WORK_MAX="${COORD_WORK_MD_MAX_BYTES:-24400}"
 CHAT_MAX="${COORD_CHAT_MD_MAX_BYTES:-5500}"
 
