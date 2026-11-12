@@ -21,6 +21,12 @@
 # watch_pause_file <swarm-dir>
 watch_pause_file() { printf '%s/watch-paused\n' "$1"; }
 
+# watch_pause_stamp_end <swarm-dir> <epoch>
+# Records when the last pause ended (watch-paused-ended), so a held wake's age
+# can exclude paused time: resume behaves like a fresh hold, and the retry
+# pass's ceiling cannot force-deliver the instant the pause ends.
+watch_pause_stamp_end() { printf '%s\n' "$2" > "$1/watch-paused-ended" 2>/dev/null || true; }
+
 # watch_pause_read <swarm-dir>
 # Sets WP_UNTIL, WP_MODE, WP_REASON, WP_SINCE and returns 0 while a pause is
 # in force. Returns 1 (and clears the WP_* vars) when there is none, the file
@@ -58,6 +64,7 @@ watch_pause_read() {
                 return
             fi
             rm -f "$f.expired.$$"
+            watch_pause_stamp_end "$1" "$WP_UNTIL"
             watch_pause_log "$1" "coord.resume reason=expired mode=$WP_MODE"
         fi
         WP_UNTIL="" WP_MODE="" WP_REASON="" WP_SINCE=""

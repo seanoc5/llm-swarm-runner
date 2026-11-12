@@ -126,4 +126,61 @@ kill -0 "$wpid" 2>/dev/null && { kill "$wpid" 2>/dev/null || true; got=still-wai
 check "resumed: the waiter rings with the live count" "rang" "$got"
 grep -q '^Inbox: 1 item' "$T/wait.out" && green "waiter nudge carries the true item count" || red "waiter output: $(cat "$T/wait.out")"
 
+echo "== retry pass after a pause, run for real (one nudge, true count, fresh hold)"
+# Real coord_wake_hold_retry_pass / hold_reason / mark+clear / count / nudge text,
+# only the outside world (llm-start, pane state, transcript checks) is stubbed.
+eval "$(for fn in coord_wake_hold_retry_pass coord_wake_hold_reason coord_wake_hold_mark_pending coord_wake_hold_clear_pending \
+                  coord_inbox_count coord_inbox_nudge_text coord_typed_batching mtime_epoch; do sed -n "/^${fn}() {/,/^}/p" "$WATCH"; done)"
+for fn in coord_wake_hold_retry_pass coord_wake_hold_mark_pending coord_inbox_nudge_text mtime_epoch; do declare -F "$fn" >/dev/null || red "could not extract $fn"; done
+coord_hook_rang_since() { return 1; }; coord_wake_already_submitted() { return 1; }; coord_hook_state() { echo idle; }
+coord_wake_pane_busy() { [ -e "$T/pane-busy" ]; }
+coord_batch_window_open() { return 1; }; wake_debounced() { return 1; }; swarm_busy() { return 1; }
+coord_wake_set_pending() { :; }; wake_clock_set() { :; }; coord_batch_note_ring() { :; }; coord_batch_unnote_ring() { :; }
+log_event() { echo "$*" >> "$T/wev"; }
+COORD_WAKE_HOLD_PENDING_FILE="$SW/coord-wake-busy-pending"; COORD_INBOX_DIR="$SW/coord-inbox-r"; mkdir -p "$COORD_INBOX_DIR"
+COORD_INBOX_NUDGE_TEMPLATE="Inbox: %N item(s)"; COORD_WAKE_BUSY_CEILING_SECS=600; COORD_WAKE_BUSY_RETRY_SECS=30
+LLM_START="$T/llm-start-r"; RANG="$T/rang-r"; : > "$RANG"
+printf '#!/bin/sh\necho "$1" >> "%s"\n' "$RANG" > "$LLM_START"; chmod +x "$LLM_START"
+rm -f "$SW/watch-paused" "$SW/watch-paused-ended" "$T/pane-busy"; : > "$T/wev"
+
+"$PAUSE" 30m --project "$P" >/dev/null
+for i in 1 2 3; do echo "outcome $i" > "$COORD_INBOX_DIR/20990101T00000${i}Z-outcome-$i.md"; done
+coord_wake_hold_mark_pending paused
+touch -d '2 hours ago' "$COORD_WAKE_HOLD_PENDING_FILE"   # held far longer than the 600s ceiling
+coord_wake_hold_retry_pass >/dev/null
+check "paused: retry pass delivers nothing" "0" "$(wc -l < "$RANG" | tr -d ' ')"
+[ -e "$COORD_WAKE_HOLD_PENDING_FILE" ] && green "paused: the held wake is kept" || red "hold marker lost during pause"
+echo "outcome 4" > "$COORD_INBOX_DIR/20990101T000004Z-outcome-4.md"   # arrives mid-pause
+printf 'until=%s\nmode=quiet\nsince=%s\n' "$(( $(date +%s) - 2 ))" "$(( $(date +%s) - 7200 ))" > "$SW/watch-paused"   # pause just expired
+: > "$T/pane-busy"
+coord_wake_hold_retry_pass >/dev/null
+check "just resumed, pane busy: paused time does not trip the ceiling" "0" "$(wc -l < "$RANG" | tr -d ' ')"
+grep -q 'defer_ceiling' "$T/wev" && red "ceiling fired on paused time" || green "no defer_ceiling logged"
+rm -f "$T/pane-busy"
+coord_wake_hold_retry_pass >/dev/null
+check "resumed, pane idle: exactly one nudge" "1" "$(wc -l < "$RANG" | tr -d ' ')"
+check "the nudge carries the true count (3 queued + 1 arrived mid-pause)" "Inbox: 4 item(s)" "$(cat "$RANG")"
+[ ! -e "$COORD_WAKE_HOLD_PENDING_FILE" ] && green "hold marker cleared after delivery" || red "hold marker left behind"
+coord_wake_hold_retry_pass >/dev/null
+check "a further pass sends nothing more" "1" "$(wc -l < "$RANG" | tr -d ' ')"
+
+# Manual --resume: same fresh-hold behavior.
+: > "$RANG"; : > "$T/wev"
+"$PAUSE" 30m --project "$P" >/dev/null
+coord_wake_hold_mark_pending paused; touch -d '2 hours ago' "$COORD_WAKE_HOLD_PENDING_FILE"
+"$PAUSE" --resume --project "$P" >/dev/null
+: > "$T/pane-busy"; coord_wake_hold_retry_pass >/dev/null
+check "manual resume, pane busy: not force-delivered" "0" "$(wc -l < "$RANG" | tr -d ' ')"
+# A wake that was already over the ceiling long after the pause ended is still forced.
+echo "$(( $(date +%s) - 700 ))" > "$SW/watch-paused-ended"
+coord_wake_hold_retry_pass >/dev/null
+check "ceiling still applies once the post-pause hold is old enough" "1" "$(wc -l < "$RANG" | tr -d ' ')"
+rm -f "$T/pane-busy"
+
+echo "== watcher hands the terminal back on exit"
+body="$(sed -n '/^cleanup_on_exit() {/,/^}/p' "$WATCH")"
+case "$body" in *'stty "$WATCHER_STTY_SAVED"'*) green "EXIT trap restores the saved stty" ;; *) red "cleanup_on_exit does not restore stty" ;; esac
+grep -q 'WATCHER_STTY_SAVED="$(stty -g' "$WATCH" && green "stty is saved before susp is undefined" || red "stty not saved"
+[ "$(grep -n 'stty -g' "$WATCH" | head -1 | cut -d: -f1)" -lt "$(grep -n 'stty susp undef' "$WATCH" | head -1 | cut -d: -f1)" ] && green "saved before changed" || red "order"
+
 echo "all watch-pause checks passed"

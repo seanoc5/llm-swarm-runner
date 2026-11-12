@@ -48,6 +48,7 @@ status)
 resume)
     if watch_pause_read "$swarm"; then
         rm -f "$f"
+        watch_pause_stamp_end "$swarm" "$(date +%s)"
         watch_pause_log "$swarm" "coord.resume reason=manual mode=$WP_MODE"
         echo "resumed; the watcher rings once on its next retry tick if anything is waiting"
     else

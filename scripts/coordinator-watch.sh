@@ -3873,7 +3873,12 @@ fi
 # suspended would also be invisible and would never resume by itself; the
 # declared, self-expiring pause (watch-pause.sh) has neither problem.
 WATCHER_CTRLZ_PID=""
+WATCHER_STTY_SAVED=""
 if [ -t 0 ] && [ -r /dev/tty ]; then
+    # Saved so the EXIT trap can hand the terminal back: a watcher started by
+    # hand would otherwise leave the shell without Ctrl-Z (and, if the reader
+    # below is killed mid-read -s, without echo).
+    WATCHER_STTY_SAVED="$(stty -g 2>/dev/null)" || WATCHER_STTY_SAVED=""
     stty susp undef 2>/dev/null || true
     (
         while IFS= read -rsn1 _ch < /dev/tty 2>/dev/null; do
@@ -3911,6 +3916,8 @@ POLL_SLEEP_PID=""
 seen_file=""
 cleanup_on_exit() {
     [ -n "${WATCHER_CTRLZ_PID:-}" ] && kill "$WATCHER_CTRLZ_PID" 2>/dev/null || true   # issue #457
+    # issue #457: undo `stty susp undef` (and any echo-off left by the killed reader).
+    [ -n "${WATCHER_STTY_SAVED:-}" ] && { stty "$WATCHER_STTY_SAVED" 2>/dev/null || true; }
     [ -n "${WATCH_TIMER_PID:-}" ] && kill "$WATCH_TIMER_PID" 2>/dev/null || true
     [ -n "${WORKER_COMPACT_TIMER_PID:-}" ] && kill "$WORKER_COMPACT_TIMER_PID" 2>/dev/null || true
     [ -n "${AUTO_COMPACT_POLL_TIMER_PID:-}" ] && kill "$AUTO_COMPACT_POLL_TIMER_PID" 2>/dev/null || true
@@ -10587,8 +10594,20 @@ coord_wake_hold_retry_pass() {
     # the pane was busy, say). The recorded reason only decides the ceiling.
     local reason_now
     reason_now="$(coord_wake_hold_reason)"
+    # issue #457: held-wake age counts from when the wake was held OR when the
+    # last pause ended, whichever is later, so paused time never counts toward
+    # a ceiling or the waiter grace and resume behaves like a fresh hold.
+    # (The coord_wake_hold_reason call above stamps an expired pause;
+    # watch-pause.sh --resume stamps a manual one.)
+    local ended ceil_age="$age" base_since="$since"
+    read -r ended 2>/dev/null < "$PROJECT_DIR/.swarm/watch-paused-ended" || ended=""
+    if [[ "$ended" =~ ^[0-9]+$ ]] && [ "$ended" -gt "$since" ]; then
+        base_since="$ended"
+        ceil_age=$((now - ended))
+        [ "$ceil_age" -ge 0 ] || ceil_age=0
+    fi
     if [ "$reason_now" = "waiter_armed" ]; then
-        coord_wake_waiter_hold "$since" && return 0
+        coord_wake_waiter_hold "$base_since" && return 0
         reason_now="$(coord_wake_hold_reason skip_waiter)"
     fi
 
@@ -10616,11 +10635,11 @@ coord_wake_hold_retry_pass() {
         if [ "$reason_now" = "pane_busy" ] && [ "$(coord_hook_state 2>/dev/null)" = "busy" ]; then
             return 0
         fi
-        if [ "$COORD_WAKE_BUSY_CEILING_SECS" -eq 0 ] || [ "$age" -lt "$COORD_WAKE_BUSY_CEILING_SECS" ]; then
+        if [ "$COORD_WAKE_BUSY_CEILING_SECS" -eq 0 ] || [ "$ceil_age" -lt "$COORD_WAKE_BUSY_CEILING_SECS" ]; then
             return 0
         fi
         echo "[$(date +%T)] coordinator wake held for ${reason_now} hit its ${COORD_WAKE_BUSY_CEILING_SECS}s ceiling — delivering anyway"
-        log_event coord.wake.defer_ceiling "age=${age}s reason=$reason_now"
+        log_event coord.wake.defer_ceiling "age=${ceil_age}s reason=$reason_now"
     fi
 
     local nudge
