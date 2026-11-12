@@ -483,6 +483,56 @@ unset GH_DIFF_FILE
 green "excluded=N only when files were left out; code stays in; many-file diff OK"
 
 # ============================================================================
+heading "Test: later rounds get prior findings + since-last-review diff (issue #611)"
+# ============================================================================
+# Use this checkout's prompts even when the caller exports LLM_SWARM_DIR elsewhere.
+export LLM_SWARM_DIR="$SCRIPT_DIR/.."
+# gh api compare stub: serves a distinctive "since" diff, or fails when GH_COMPARE_FAIL=1.
+sed -i 's#^    "pr diff")#    "api repos/{owner}/{repo}/compare/"*) [ "${GH_COMPARE_FAIL:-0}" = 1 ] \&\& exit 1; printf "diff --git a/fix.kt b/fix.kt\\n+SINCE_MARKER_LINE\\n"; exit 0 ;;\n    "pr diff")#' "$TEST_DIR/bin/gh"
+unset GH_DIFF_FILE
+printf 'APPROVE\n' > "$CLAUDE_STUB_OUTPUT"
+R1='<!-- SWARM_SELF_REVIEW: BLOCK actor=worker head=a1d1111 -->
+## Fresh-context self-review
+
+BLOCK: missing null check in PRIORFINDING_XYZ
+
+<sub>footer must not be replayed</sub>'
+
+# (a) first round: no prior sections, no follow-up instructions
+echo '{"headRefOid":"b2e2222","comments":[]}' > "$GH_PR_JSON_FILE"; export GH_HEAD=b2e2222
+WORKER_CMD=codex "$REVIEW" 42 >"$TEST_DIR/o.out" 2>&1 || red "first round failed"
+grep -q 'PRIOR ROUNDS' "$CODEX_PAYLOAD_LOG" && red "first round must not carry PRIOR ROUNDS"
+grep -q 'Self-Review, Later Round' "$CODEX_PAYLOAD_LOG" && red "first round must not carry the follow-up instructions"
+
+# (b) round 2: prior BLOCK text, since-diff, instructions, full diff all present
+jq -n -c --arg b "$R1" '{headRefOid:"b2e2222",comments:[{body:$b,authorAssociation:"OWNER"}]}' > "$GH_PR_JSON_FILE"
+WORKER_CMD=codex "$REVIEW" 42 >"$TEST_DIR/o.out" 2>&1 || red "round 2 failed"
+grep -q -- '--- PRIOR ROUNDS ---' "$CODEX_PAYLOAD_LOG" || red "round 2 missing PRIOR ROUNDS"
+grep -q 'PRIORFINDING_XYZ' "$CODEX_PAYLOAD_LOG" || red "round 2 missing the prior finding text"
+grep -q 'on head a1d1111' "$CODEX_PAYLOAD_LOG" || red "round 2 must name the reviewed head"
+grep -q 'footer must not be replayed' "$CODEX_PAYLOAD_LOG" && red "footer leaked into prior rounds"
+grep -q -- '--- CHANGES SINCE LAST REVIEW ---' "$CODEX_PAYLOAD_LOG" || red "round 2 missing the since-last-review section"
+grep -q 'SINCE_MARKER_LINE' "$CODEX_PAYLOAD_LOG" || red "round 2 missing the since-last-review diff"
+grep -q 'Self-Review, Later Round' "$CODEX_PAYLOAD_LOG" || red "round 2 missing the converging instructions"
+grep -q -- '--- DIFF ---' "$CODEX_PAYLOAD_LOG" || red "round 2 must still carry the full diff"
+grep -q 'compare/a1d1111...b2e2222' "$GH_LOG" || red "since diff must be fetched old...new"
+
+# (c) compare failure (force-push): section says so instead of silently vanishing
+GH_COMPARE_FAIL=1 WORKER_CMD=codex "$REVIEW" 42 >"$TEST_DIR/o.out" 2>&1 || red "round 2 with compare failure failed"
+grep -q 'not available: could not fetch the diff' "$CODEX_PAYLOAD_LOG" || red "failed compare must be stated in the prompt"
+grep -q 'PRIORFINDING_XYZ' "$CODEX_PAYLOAD_LOG" || red "prior findings must survive a compare failure"
+
+# (d) untrusted author's marker is ignored; SELF_REVIEW_CONVERGE=0 turns it off
+jq -n -c --arg b "$R1" '{headRefOid:"b2e2222",comments:[{body:$b,authorAssociation:"NONE"}]}' > "$GH_PR_JSON_FILE"
+WORKER_CMD=codex "$REVIEW" 42 >"$TEST_DIR/o.out" 2>&1 || red "untrusted run failed"
+grep -q 'PRIORFINDING_XYZ' "$CODEX_PAYLOAD_LOG" && red "a non-collaborator's marker must not be replayed"
+jq -n -c --arg b "$R1" '{headRefOid:"b2e2222",comments:[{body:$b,authorAssociation:"OWNER"}]}' > "$GH_PR_JSON_FILE"
+SELF_REVIEW_CONVERGE=0 WORKER_CMD=codex "$REVIEW" 42 >"$TEST_DIR/o.out" 2>&1 || red "converge=0 run failed"
+grep -q 'PRIORFINDING_XYZ' "$CODEX_PAYLOAD_LOG" && red "SELF_REVIEW_CONVERGE=0 must not replay prior rounds"
+unset GH_HEAD
+green "prompt assembly: first round clean; round 2 has prior findings, since-diff, instructions; failure and trust paths covered"
+
+# ============================================================================
 heading "All self-review machinery shape tests passed"
 green "verdict parsing, exit codes, --post idempotency, kill switch, merge gate"
 echo ""
