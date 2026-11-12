@@ -1392,6 +1392,7 @@ green "passing ready check → run once, readied"
 heading "Test 46: ready check fails — refuses (exit 6), writes check-failing banner, never readies, self-review not spent"
 printf '<!-- BLIND_MERGE_RISK: medium -->\nsome change\n' > "$BODY_FILE"
 make_fake_review 0
+rm -f "$CHECKOUT/.git/swarm-ready-check-pass"
 export WORKER_PR_READY_CHECK_CMD='echo suite-broke; exit 3'
 rc=0; run_pr_ready || rc=$?
 [ "$rc" -eq 6 ] || red "expected exit 6, got $rc: $(cat "$TEST_DIR/out.log")"
@@ -1421,5 +1422,35 @@ unset WORKER_PR_READY_CHECK_CMD PR_READY_CWD GH_SHA
 grep -qx "pr-ready: pre-ready check skipped: cwd is not at PR head cafef00" "$TEST_DIR/out.log" || red "expected the skip line: $(cat "$TEST_DIR/out.log")"
 gh_ready_called || red "expected gh pr ready after a skipped check"
 green "mismatched cwd → skipped, readied"
+
+
+heading "Test 53: ci-* refusal on the same SHA but no pass record — the ready check still runs"
+rm -f "$CHECKOUT/.git/swarm-ready-check-pass" "$TEST_DIR/ready-check.ran"
+banner ci-pending "$CHECKOUT_SHA" > "$BODY_FILE"
+export WORKER_PR_READY_CHECK_CMD="echo ran >> '$TEST_DIR/ready-check.ran'"
+export PR_READY_CWD="$CHECKOUT" GH_SHA="$CHECKOUT_SHA"
+rc=0; run_pr_ready || rc=$?
+[ "$rc" -eq 0 ] || red "expected exit 0, got $rc: $(cat "$TEST_DIR/out.log")"
+[ "$(wc -l < "$TEST_DIR/ready-check.ran")" -eq 1 ] || red "check must run when no pass record exists: $(cat "$TEST_DIR/out.log")"
+grep -q 'ready check already passed' "$TEST_DIR/out.log" && red "must not claim an unrecorded pass: $(cat "$TEST_DIR/out.log")"
+[ "$(cat "$CHECKOUT/.git/swarm-ready-check-pass")" = "pass sha=$CHECKOUT_SHA" ] || red "expected a pass record after the check exited 0"
+green "ci-* banner alone → check runs, pass recorded"
+
+heading "Test 54: pass record matching the head SHA + ci-* refusal — check skipped"
+rm -f "$TEST_DIR/ready-check.ran"
+banner ci-pending "$CHECKOUT_SHA" > "$BODY_FILE"
+rc=0; run_pr_ready || rc=$?
+[ "$rc" -eq 0 ] || red "expected exit 0, got $rc: $(cat "$TEST_DIR/out.log")"
+[ ! -e "$TEST_DIR/ready-check.ran" ] || red "check must not re-run when the pass record matches"
+grep -q 'ready check already passed' "$TEST_DIR/out.log" || red "expected the already-passed line: $(cat "$TEST_DIR/out.log")"
+green "matching pass record → not re-run"
+
+heading "Test 55: pass record for a different SHA — check runs again"
+printf 'pass sha=0000000000000000000000000000000000000000\n' > "$CHECKOUT/.git/swarm-ready-check-pass"
+rc=0; run_pr_ready || rc=$?
+unset WORKER_PR_READY_CHECK_CMD PR_READY_CWD GH_SHA
+[ "$rc" -eq 0 ] || red "expected exit 0, got $rc: $(cat "$TEST_DIR/out.log")"
+[ -e "$TEST_DIR/ready-check.ran" ] || red "stale-SHA pass record must not skip the check"
+green "stale record → check runs"
 
 green "ALL TESTS PASSED"

@@ -458,15 +458,24 @@ fi
 # banner of ci-* on this same commit means this script already got past this
 # gate on it (the check runs before self-review and the CI gate), so a
 # ready-sweep retry doesn't re-run a slow suite.
+# CORRECTION: that inference was unsound (the banner may come from a run that
+# skipped the check), so the skip now needs an explicit pass record instead:
+# `.git/.../swarm-ready-check-pass` holding `pass sha=<full head sha>`, written
+# only after the check ran and exited 0.
 READY_CHECK_CMD="${WORKER_PR_READY_CHECK_CMD:-}"
 if [ -n "$READY_CHECK_CMD" ]; then
     READY_CHECK_PR_HEAD="$(head_sha)"
     READY_CHECK_CWD_HEAD="$(git rev-parse HEAD 2>/dev/null || true)"
+    # Pass record keyed by full head SHA, inside the checkout's git dir (never
+    # tracked, gone with the worktree). A ci-* refusal banner is NOT proof the
+    # check ran: it can come from a run that skipped the check (cwd not at the
+    # PR head) or before the knob was set.
+    READY_CHECK_PASS_FILE="$(git rev-parse --git-path swarm-ready-check-pass 2>/dev/null || echo /nonexistent/swarm-ready-check-pass)"
     if [ -z "$READY_CHECK_PR_HEAD" ] || [ "$READY_CHECK_CWD_HEAD" != "$READY_CHECK_PR_HEAD" ]; then
         READY_CHECK_PR_SHORT="${READY_CHECK_PR_HEAD:0:7}"
         echo "pr-ready: pre-ready check skipped: cwd is not at PR head ${READY_CHECK_PR_SHORT:-(unknown)}" >&2
-    elif [[ "$OLD_REASON" == ci-* ]] && [ -n "$OLD_REASON_SHA" ] && [ "$OLD_REASON_SHA" = "$(head_sha)" ]; then
-        echo "pr-ready: ready check already passed on ${OLD_REASON_SHA:0:7} (last refusal was $OLD_REASON on this same commit) — not re-running"
+    elif [ -f "$READY_CHECK_PASS_FILE" ] && [ "$(cat "$READY_CHECK_PASS_FILE" 2>/dev/null)" = "pass sha=$READY_CHECK_PR_HEAD" ]; then
+        echo "pr-ready: ready check already passed on ${READY_CHECK_PR_HEAD:0:7} (pass record found) — not re-running"
     else
         READY_CHECK_TIMEOUT="${WORKER_PR_READY_CHECK_TIMEOUT:-1800}"
         READY_CHECK_LOG="$(mktemp)"
@@ -482,6 +491,9 @@ if [ -n "$READY_CHECK_CMD" ]; then
             refuse check-failing 6
         fi
         rm -f "$READY_CHECK_LOG"
+        # Explicit pass record, written only here (the check ran and exited 0).
+        mkdir -p "$(dirname "$READY_CHECK_PASS_FILE")" 2>/dev/null || true
+        printf 'pass sha=%s\n' "$READY_CHECK_PR_HEAD" > "$READY_CHECK_PASS_FILE" 2>/dev/null || true
         echo "pr-ready: ready check PASS (exit 0)."
     fi
 fi
