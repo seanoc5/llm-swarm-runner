@@ -143,9 +143,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # swapped in each worker prompt, one outbox sentence, and one clause in each
 # coordinator's worker-outbox rule. The wording is pinned by
 # tests/test-shape-ci-handoff.sh.
-WORKER_MAX="${WORKER_MD_MAX_BYTES:-25500}"
+# 2026-11-13 (#584, on top of #572): worker 25500 -> 26000, worker-bare 12400 -> 12800.
+# Issue #584 adds two rules to both worker prompts (an unrunnable check ships as a
+# draft marked "unverified"; a status answer re-queries the PR and leads with a
+# one-line status).
+WORKER_MAX="${WORKER_MD_MAX_BYTES:-26000}"
 COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-34200}"
-BARE_MAX="${WORKER_BARE_MD_MAX_BYTES:-12400}"   # issue #510 trial prompt; ~7.5KB is script-parsed contract
+BARE_MAX="${WORKER_BARE_MD_MAX_BYTES:-12800}"   # issue #510 trial prompt; ~7.5KB is script-parsed contract
 SHARED_MAX="${COORD_SHARED_MD_MAX_BYTES:-6000}"   # issue #767 split prompts
 WORK_MAX="${COORD_WORK_MD_MAX_BYTES:-25100}"
 CHAT_MAX="${COORD_CHAT_MD_MAX_BYTES:-5500}"
