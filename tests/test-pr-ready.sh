@@ -1423,6 +1423,22 @@ grep -qx "pr-ready: pre-ready check skipped: cwd is not at PR head cafef00" "$TE
 gh_ready_called || red "expected gh pr ready after a skipped check"
 green "mismatched cwd → skipped, readied"
 
+heading "Test 56: dirty working tree at the PR head — check skipped with one stderr line, no pass record, PR still readied"
+printf '<!-- BLIND_MERGE_RISK: low -->\nsome change\n' > "$BODY_FILE"
+rm -f "$TEST_DIR/ready-check.ran" "$CHECKOUT/.git/swarm-ready-check-pass"
+echo dirty > "$CHECKOUT/uncommitted.txt"
+export WORKER_PR_READY_CHECK_CMD="echo ran >> '$TEST_DIR/ready-check.ran'"
+export PR_READY_CWD="$CHECKOUT" GH_SHA="$CHECKOUT_SHA"
+rc=0; run_pr_ready || rc=$?
+unset WORKER_PR_READY_CHECK_CMD PR_READY_CWD GH_SHA
+rm -f "$CHECKOUT/uncommitted.txt"
+[ "$rc" -eq 0 ] || red "expected exit 0 (skip, not refuse), got $rc: $(cat "$TEST_DIR/out.log")"
+[ ! -e "$TEST_DIR/ready-check.ran" ] || red "check must not run on a dirty tree"
+[ ! -e "$CHECKOUT/.git/swarm-ready-check-pass" ] || red "no pass may be recorded on a dirty tree"
+grep -q "pre-ready check skipped: working tree has uncommitted changes" "$TEST_DIR/out.log" || red "expected the dirty-tree skip line: $(cat "$TEST_DIR/out.log")"
+gh_ready_called || red "expected gh pr ready after a skipped check"
+green "dirty tree → skipped, no pass record, readied"
+
 
 heading "Test 53: ci-* refusal on the same SHA but no pass record — the ready check still runs"
 rm -f "$CHECKOUT/.git/swarm-ready-check-pass" "$TEST_DIR/ready-check.ran"

@@ -474,6 +474,9 @@ if [ -n "$READY_CHECK_CMD" ]; then
     if [ -z "$READY_CHECK_PR_HEAD" ] || [ "$READY_CHECK_CWD_HEAD" != "$READY_CHECK_PR_HEAD" ]; then
         READY_CHECK_PR_SHORT="${READY_CHECK_PR_HEAD:0:7}"
         echo "pr-ready: pre-ready check skipped: cwd is not at PR head ${READY_CHECK_PR_SHORT:-(unknown)}" >&2
+    elif [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+        # Uncommitted edits would be checked (and a pass recorded) as if they were the pushed head.
+        echo "pr-ready: pre-ready check skipped: working tree has uncommitted changes (checked code would not be PR head ${READY_CHECK_PR_HEAD:0:7})" >&2
     elif [ -f "$READY_CHECK_PASS_FILE" ] && [ "$(cat "$READY_CHECK_PASS_FILE" 2>/dev/null)" = "pass sha=$READY_CHECK_PR_HEAD" ]; then
         echo "pr-ready: ready check already passed on ${READY_CHECK_PR_HEAD:0:7} (pass record found) — not re-running"
     else
