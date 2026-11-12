@@ -5736,7 +5736,8 @@ PR_STATUS_BACKOFF_UNTIL=0          # issue #536: epoch; skip the pass until then
 # open PR whose head branch is an own worktree's branch, so a draft PR shows
 # whether its worker is busy, idle, dead or held. Reuses worker_pane_state /
 # worker_pane_busy (no new pane parser). Precedence: hold banner, then
-# non-draft (success), then window liveness (draft with no window = failure).
+# non-draft (success), then window liveness (draft with no window, or a window
+# whose pane is a bare shell = failure; only a live CLI reads busy or idle).
 # Dedupe key is (sha, state, description WITHOUT the "as of HH:MM" time) so a
 # worker that stays busy doesn't repost every cycle; a new push changes the
 # SHA and reposts. Fails open: an API error logs pr.status.skip
@@ -5774,6 +5775,10 @@ pr_status_sweep_pass() {
             pstate="$(worker_pane_state "$win")"
             if [ "$pstate" = "absent" ]; then
                 state=failure; desc="no worker attached"; key="$desc"
+            elif [ "$pstate" != "cli" ]; then
+                # Window exists but no CLI in the foreground (crashed or exited, bare shell
+                # left behind): a draft PR with no live worker is a failure, not "idle".
+                state=failure; desc="worker exited: no CLI in window"; key="$desc"
             elif [ "$pstate" = "cli" ] && worker_pane_busy "$win"; then
                 state=pending; desc="working: iss-$issue, busy as of $hhmm"; key="working: iss-$issue"
             else

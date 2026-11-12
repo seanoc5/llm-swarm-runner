@@ -26,7 +26,7 @@ PR_STATUS_BACKOFF_UNTIL=0
 # Fixture: own worktrees on branches fix/issue-N (PROJECT_DIR is not a git
 # repo, so is_own_worktree_dir fails open).
 WORKSPACE="$T/ws"; PROJECT_DIR="$T/proj"; mkdir -p "$WORKSPACE" "$PROJECT_DIR"
-for n in 1 2 3 4 5; do
+for n in 1 2 3 4 5 6; do
     git init -q -b "fix/issue-$n" "$WORKSPACE/wt-issue-$n"
 done
 EVENTS_LOG="$T/events.log"; : > "$EVENTS_LOG"
@@ -35,7 +35,11 @@ DRY_RUN=0; SWARM_PR_STATUS=1; WATCH_PR_STATUS_SWEEP_SECS=60
 SESSION_NAME=s
 
 # Stub pane helpers: windows listed in $T/windows; "busy" ones in $T/busy.
-worker_pane_state() { grep -qx "$1" "$T/windows" && echo cli || echo absent; }
+worker_pane_state() {
+    if grep -qx "$1" "$T/shells"; then echo shell
+    elif grep -qx "$1" "$T/windows"; then echo cli
+    else echo absent; fi
+}
 worker_pane_busy() { grep -qx "$1" "$T/busy"; }
 
 # gh stub: `pr list` prints $T/prs (already tsv); `api` logs args.
@@ -53,9 +57,11 @@ tab() { local IFS=$'\t'; printf '%s\n' "$*"; }
   tab 3 fix/issue-3 sha3 true hold
   tab 4 fix/issue-4 sha4 true -
   tab 5 fix/issue-5 sha5 false -
+  tab 6 fix/issue-6 sha6 true -
   tab 9 operator/own-branch sha9 true -
   tab 8 fix/issue-8 sha8 true -; } > "$T/prs"   # 8: no own worktree
 printf 'iss-1\niss-2\niss-3\n' > "$T/windows"   # 4 has no window
+printf 'iss-6\n' > "$T/shells"   # 6: window exists, CLI gone (bare shell)
 printf 'iss-1\n' > "$T/busy"
 
 pr_status_sweep_pass
@@ -65,19 +71,20 @@ has 'statuses/sha1 -f state=pending .*description=working: iss-1, busy as of [0-
 has 'statuses/sha2 -f state=pending .*description=idle: waiting on review/input'; green "idle -> pending idle"
 has 'statuses/sha3 -f state=pending .*description=held by coordinator'; green "hold banner -> pending held"
 has 'statuses/sha4 -f state=failure .*description=no worker attached'; green "no window -> failure"
+has 'statuses/sha6 -f state=failure .*description=worker exited: no CLI in window'; green "bare shell (CLI exited) -> failure"
 has 'statuses/sha5 -f state=success .*description=ready'; green "ready PR -> success"
 has 'context=swarm/worker' ; green "context swarm/worker"
-[ "$(wc -l < "$T/api.log")" = 5 ] || red "expected 5 posts (operator PR and foreign-issue PR skipped), got $(wc -l < "$T/api.log")"
+[ "$(wc -l < "$T/api.log")" = 6 ] || red "expected 6 posts (operator PR and foreign-issue PR skipped), got $(wc -l < "$T/api.log")"
 green "operator's own and foreign PRs untouched"
 
 pr_status_sweep_pass
-[ "$(wc -l < "$T/api.log")" = 5 ] || red "unchanged second cycle made an API call"
+[ "$(wc -l < "$T/api.log")" = 6 ] || red "unchanged second cycle made an API call"
 grep -q 'reason=unchanged' "$EVENTS_LOG" || red "no unchanged skip event"
 green "unchanged second cycle: no API call"
 
 tab 1 fix/issue-1 sha1b true - > "$T/prs"
 pr_status_sweep_pass
-[ "$(wc -l < "$T/api.log")" = 6 ] || red "new SHA should repost"
+[ "$(wc -l < "$T/api.log")" = 7 ] || red "new SHA should repost"
 green "new push (new SHA) reposts"
 
 # Fail open: API error logs, backs off, does not abort.
