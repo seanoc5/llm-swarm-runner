@@ -3874,7 +3874,17 @@ fi
 # declared, self-expiring pause (watch-pause.sh) has neither problem.
 WATCHER_CTRLZ_PID=""
 WATCHER_STTY_SAVED=""
-if [ -t 0 ] && [ -r /dev/tty ]; then
+# Only in the terminal's foreground process group: a watcher started by hand as
+# `coordinator-watch.sh &` still has a tty on stdin, but stty (SIGTTOU) and the
+# /dev/tty read (SIGTTIN) from a background group would freeze it before its
+# first tick.
+watcher_in_tty_foreground() {
+    local tp pg
+    tp="$(ps -o tpgid= -p $$ 2>/dev/null | tr -d ' ')"
+    pg="$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')"
+    [ -n "$tp" ] && [ "$tp" = "$pg" ]
+}
+if [ -t 0 ] && [ -r /dev/tty ] && watcher_in_tty_foreground; then
     # Saved so the EXIT trap can hand the terminal back: a watcher started by
     # hand would otherwise leave the shell without Ctrl-Z (and, if the reader
     # below is killed mid-read -s, without echo).

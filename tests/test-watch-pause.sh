@@ -184,3 +184,14 @@ grep -q 'WATCHER_STTY_SAVED="$(stty -g' "$WATCH" && green "stty is saved before 
 [ "$(grep -n 'stty -g' "$WATCH" | head -1 | cut -d: -f1)" -lt "$(grep -n 'stty susp undef' "$WATCH" | head -1 | cut -d: -f1)" ] && green "saved before changed" || red "order"
 
 echo "all watch-pause checks passed"
+
+echo "== Ctrl-Z guard only touches the tty from the foreground process group"
+grep -q 'ps -o tpgid= -p \$\$' "$WATCH" && grep -q 'ps -o pgid= -p \$\$' "$WATCH" \
+    && green "foreground check compares tpgid with pgid" || red "no tpgid/pgid comparison"
+grep -Eq 'if \[ -t 0 \] && \[ -r /dev/tty \] && watcher_in_tty_foreground; then' "$WATCH" \
+    && green "stty/reader block is gated on the foreground check" || red "stty block not gated"
+# Behavioural: extract the function and check it is false for a background job and
+# never errors when ps has no tty (no controlling terminal => tpgid -1 != pgid).
+fn="$(sed -n '/^watcher_in_tty_foreground() {/,/^}/p' "$WATCH")"
+[ -n "$fn" ] || red "function not found"
+if setsid bash -c "$fn"$'\n''watcher_in_tty_foreground' </dev/null; then red "reported foreground with no controlling tty"; else green "no controlling tty => not foreground"; fi
