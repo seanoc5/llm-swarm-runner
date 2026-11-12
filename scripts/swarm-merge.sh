@@ -318,23 +318,30 @@ housekeep_or_die() {
 
 # --- issue -> PR resolution -------------------------------------------------
 #
-# Union of closing-keyword PRs and open PRs on fix/issue-N or fix/issue-N-*
-# branches (#906); more than one distinct PR refuses and lists them. Original note: fall
-# back to the single OPEN PR on the worker's own fix/issue-N branch: a worker
-# that split its work writes "steps 1-2 of #N" rather than "Closes #N", so
-# GitHub records no closing link and the issue path used to refuse a PR that
-# plainly exists (fand-etl #1133 / PR #1138, 2026-10-06). More than one open
-# PR on that branch is ambiguous, so it refuses and asks for the PR number.
+# Union of two sources (#906): PRs GitHub links to the issue via a closing
+# keyword, and open PRs on fix/issue-N or a suffixed fix/issue-N-* branch.
+# A worker that split its work writes "steps 1-2 of #N" rather than "Closes #N",
+# so GitHub records no closing link; the branch source catches that PR
+# (fand-etl #1133 / PR #1138, 2026-10-06). Exactly one distinct PR is used;
+# more than one refuses and lists them, so the caller passes the PR number.
+# The branch source reads at most BRANCH_PR_LIMIT open PRs and warns on stderr
+# when the list is full, since a PR past the limit could be missed.
 # Sets PR_NUM (empty when nothing is found) and PR_VIA (how it was found).
 resolve_pr_for_issue() {
-  local closing_prs branch_prs all count
+  local closing_prs branch_prs all count open_count
+  local BRANCH_PR_LIMIT=200
   PR_VIA=""
   closing_prs=$(gh issue view "$ISSUE" --json closedByPullRequestsReferences \
                   -q '.closedByPullRequestsReferences[].number' 2>/dev/null || echo "")
   # Open PRs on fix/issue-N or a suffixed fix/issue-N-* branch (#906).
-  branch_prs=$(gh pr list --state open --limit 200 --json number,headRefName \
-                 --jq ".[] | select(.headRefName | test(\"^fix/issue-$ISSUE(-|\$)\")) | .number" \
+  # One call: a "COUNT n" line (open PRs returned) then each matching number.
+  branch_prs=$(gh pr list --state open --limit "$BRANCH_PR_LIMIT" --json number,headRefName \
+                 --jq "(length | \"COUNT \\(.)\"), (.[] | select(.headRefName | test(\"^fix/issue-$ISSUE(-|\$)\")) | .number)" \
                  2>/dev/null || echo "")
+  open_count=$(sed -n 's/^COUNT //p' <<<"$branch_prs")
+  if [ "${open_count:-0}" -ge "$BRANCH_PR_LIMIT" ] 2>/dev/null; then
+    echo "WARN: open-PR list hit the $BRANCH_PR_LIMIT limit; a PR on fix/issue-$ISSUE* may be missed. Pass the PR number if unsure." >&2
+  fi
   all=$(printf '%s\n%s\n' "$closing_prs" "$branch_prs" | grep '^[0-9][0-9]*$' | sort -un || true)
   count=$(printf '%s\n' "$all" | grep -c '^[0-9][0-9]*$' || true)
   if [ "$count" = 1 ]; then
