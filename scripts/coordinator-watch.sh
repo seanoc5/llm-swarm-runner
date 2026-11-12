@@ -2711,6 +2711,8 @@ PROJECT_DIR="$(realpath "${1:-$PWD}")"
 # Self-locate so defaults follow the script wherever it lives. LLM_START and
 # SWEEP env overrides still win for non-standard installs.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_ci-fallback.sh
+. "$SCRIPT_DIR/_ci-fallback.sh"   # CI_ROLLUP_DROP_LIVENESS_JQ: swarm/worker is not CI (#536)
 LLM_SWARM_DIR="${LLM_SWARM_DIR:-$(dirname "$SCRIPT_DIR")}"
 
 # Apply <project>/.swarm/.env then sandbox .env.example before reading
@@ -4768,7 +4770,7 @@ pr_open_details_load() {
         PR_MERGE_CACHE[$n]="$m"$'\t'"$h"$'\t'"$b"
     done < <(cd "$PROJECT_DIR" && gh pr list --state open --limit 200 \
             --json number,body,statusCheckRollup,mergeable,headRefOid,baseRefName \
-            --jq 'def ci: (.statusCheckRollup // []) as $all
+            --jq "$CI_ROLLUP_DROP_LIVENESS_JQ"'def ci: (.statusCheckRollup // [] | ci_real) as $all
                     # Collapse to the newest run per check (workflow + job
                     # name, falling back to legacy status-context "context")
                     # first — a rerun or a concurrency-superseded run leaves
@@ -5775,9 +5777,15 @@ pr_status_sweep_pass() {
             pstate="$(worker_pane_state "$win")"
             if [ "$pstate" = "absent" ]; then
                 state=failure; desc="no worker attached"; key="$desc"
+            elif [ "$pstate" != "cli" ] && [ -f "$wt/.swarm/tasks/.idle-parked" ]; then
+                # Bare shell, but it is worker-listener's run_idle_shell prompt (it
+                # writes this marker while parked and removes it on exit): a deliberate
+                # park waiting for a brief, not a crash.
+                state=pending; desc="parked: idle shell, waiting for a brief"; key="$desc"
             elif [ "$pstate" != "cli" ]; then
-                # Window exists but no CLI in the foreground (crashed or exited, bare shell
-                # left behind): a draft PR with no live worker is a failure, not "idle".
+                # Window exists but no CLI in the foreground and no idle-shell marker
+                # (crashed or exited, bare shell left behind): a draft PR with no live
+                # worker is a failure, not "idle".
                 state=failure; desc="worker exited: no CLI in window"; key="$desc"
             elif [ "$pstate" = "cli" ] && worker_pane_busy "$win"; then
                 state=pending; desc="working: iss-$issue, busy as of $hhmm"; key="working: iss-$issue"
@@ -5806,8 +5814,8 @@ pr_status_sweep_pass() {
         PR_STATUS_LAST[$pr]="$sha|$state|$key"
         log_event pr.status.post "pr=$pr sha=${sha:0:7} state=$state desc=\"$desc\""
     done < <(cd "$PROJECT_DIR" && gh pr list --state open --limit 200 \
-        --json number,headRefName,headRefOid,isDraft,body \
-        --jq '.[] | "\(.number)\t\(.headRefName)\t\(.headRefOid // "")\t\(.isDraft)\t\(if ((.body // "") | test("(?m)^> ⛔ \\*\\*COORDINATOR HOLD\\*\\*")) then "hold" else "-" end)"' 2>/dev/null || true)
+        --json number,headRefName,headRefOid,isDraft,body,comments \
+        --jq '.[] | "\(.number)\t\(.headRefName)\t\(.headRefOid // "")\t\(.isDraft)\t\(if (((.body // "") | test("(?m)^> ⛔ \\*\\*COORDINATOR HOLD\\*\\*")) or (('"$PR_COMMENT_HOLD_JQ"') == "held")) then "hold" else "-" end)"' 2>/dev/null || true)
 }
 
 # stranded_brief_queue_lines <worktree-dir>

@@ -19,8 +19,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCH="$SCRIPT_DIR/../scripts/coordinator-watch.sh"
 [ -f "$WATCH" ] || red "coordinator-watch.sh not found: $WATCH"
 
-FILTER="$(sed -n "/--jq 'def ci:/,/\.\[\] | \"\\\\(\.number)/p" "$WATCH" \
-    | sed "1s/^ *--jq '//; \$s/' 2>\/dev\/null)\$//")"
+# shellcheck source=../scripts/_ci-fallback.sh
+. "$SCRIPT_DIR/../scripts/_ci-fallback.sh"
+# The watcher passes the shared ci_real def (CI_ROLLUP_DROP_LIVENESS_JQ, #536)
+# glued in front of its own filter; rebuild the same program here.
+FILTER="$(sed -n "/--jq \"\$CI_ROLLUP_DROP_LIVENESS_JQ\"'def ci:/,/\.\[\] | \"\\\\(\.number)/p" "$WATCH" \
+    | sed "1s/^ *--jq \"\$CI_ROLLUP_DROP_LIVENESS_JQ\"'//; \$s/' 2>\/dev\/null)\$//")"
+[ -z "$FILTER" ] || FILTER="$CI_ROLLUP_DROP_LIVENESS_JQ$FILTER"
 [ -n "$FILTER" ] || red "could not extract the ci jq filter from $WATCH"
 
 run_case() {
@@ -75,3 +80,23 @@ run_case "in-progress check" '[{
 run_case "no checks" '[{"number": 1462, "body": "", "statusCheckRollup": []}]' "none"
 
 green "all pr_ci_state rollup-collapse cases passed"
+
+# issue #536: the swarm/worker liveness commit status (a StatusContext) is not CI.
+run_case "green CI + pending swarm/worker status" '[{
+  "number": 1, "body": "",
+  "statusCheckRollup": [
+    {"__typename":"CheckRun","workflowName":"CI","name":"Fast","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-10-19T23:25:00Z","completedAt":"2026-10-19T23:30:00Z"},
+    {"__typename":"StatusContext","context":"swarm/worker","state":"PENDING","startedAt":"2026-10-19T23:31:00Z"}
+  ]
+}]' "pass"
+run_case "green CI + failed swarm/worker status" '[{
+  "number": 1, "body": "",
+  "statusCheckRollup": [
+    {"__typename":"CheckRun","workflowName":"CI","name":"Fast","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-10-19T23:25:00Z","completedAt":"2026-10-19T23:30:00Z"},
+    {"__typename":"StatusContext","context":"swarm/worker","state":"FAILURE","startedAt":"2026-10-19T23:31:00Z"}
+  ]
+}]' "pass"
+run_case "only the swarm/worker status -> none (no CI)" '[{
+  "number": 1, "body": "",
+  "statusCheckRollup": [{"__typename":"StatusContext","context":"swarm/worker","state":"PENDING"}]
+}]' "none"

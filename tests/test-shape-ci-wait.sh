@@ -885,5 +885,23 @@ out="$(GH_RUNLIST_JSON='[{"status":"completed","conclusion":"success","workflowN
     "$CI_WAIT" 42 5 2>&1)" || rc=$?
 check "exits 0" '[ "$rc" -eq 0 ]'
 
+heading "Test 25: swarm/worker liveness status is not CI (issue #536) — real jq over a gh pr checks --json payload"
+RUNOK='[{"status":"completed","conclusion":"success","workflowName":"CI","createdAt":"2026-11-10T10:00:00Z"}]'
+rc=0
+out="$(GH_RUNLIST_JSON="$RUNOK" GH_CHECKS_RC=8 \
+    GH_CHECKS_OUT='[{"name":"lint","bucket":"pass","link":"u"},{"name":"swarm/worker","bucket":"pending","link":""}]' \
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
+check "green CI + pending liveness status (gh exits 8) → exit 0, not a timeout" '[ "$rc" -eq 0 ]'
+rc=0
+out="$(GH_RUNLIST_JSON="$RUNOK" GH_CHECKS_RC=1 \
+    GH_CHECKS_OUT='[{"name":"lint","bucket":"pass","link":"u"},{"name":"swarm/worker","bucket":"fail","link":""}]' \
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
+check "green CI + failed liveness status (gh exits 1) → exit 0, not red" '[ "$rc" -eq 0 ]'
+rc=0
+out="$(GH_RUNLIST_JSON="$RUNOK" GH_CHECKS_RC=1 \
+    GH_CHECKS_OUT='[{"name":"lint","bucket":"fail","link":"u"},{"name":"swarm/worker","bucket":"pending","link":""}]' \
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
+check "a genuinely failing check next to the liveness status is still red → exit 1" '[ "$rc" -eq 1 ]'
+
 heading "Results: $PASS checks passed"
 green "All checks passed."

@@ -433,8 +433,51 @@ ci_rollup_cancelled_only() {
     local pr="$1"; shift
     local json
     json="$(gh pr view "$pr" "$@" --json statusCheckRollup 2>/dev/null)" || return 1
-    jq -e '[.statusCheckRollup[]? | (.conclusion // .state // "")] as $c
+    jq -e "$CI_ROLLUP_DROP_LIVENESS_JQ"'[(.statusCheckRollup // [] | ci_real)[] | (.conclusion // .state // "")] as $c
         | ($c | any(test("^(CANCELLED|TIMED_OUT|STARTUP_FAILURE)$")))
           and ($c | any(test("^(FAILURE|ERROR|ACTION_REQUIRED|STALE)$")) | not)' \
         <<<"$json" >/dev/null 2>&1
+}
+
+# ─── issue #536/#919: the swarm/worker liveness status is not CI ─────────────
+# coordinator-watch.sh posts a `swarm/worker` commit status on every worker
+# PR's head (busy/idle/held = pending, dead = failure). It reports whether a
+# worker is alive, never whether the code passes, so every reader of CI state
+# must drop it: a pending or failed liveness status must never read as CI
+# pending or red. This is the one place that knows the context name; each
+# reader (pr-ready.sh, ci-wait.sh and so swarm-merge.sh's CI gate, ready-sweep.sh,
+# coordinator-watch.sh's pr_ci_state) goes through one of the three forms below.
+CI_LIVENESS_CONTEXT="swarm/worker"
+
+# jq defs for statusCheckRollup readers (entries are CheckRun .name or
+# StatusContext .context): `$CI_ROLLUP_DROP_LIVENESS_JQ ... | ci_real`.
+CI_ROLLUP_DROP_LIVENESS_JQ='def ci_real: map(select((.context // .name // "") != "swarm/worker"));'
+
+# jq filter over a `gh pr checks --json name,...` array.
+CI_CHECKS_DROP_LIVENESS_JQ='map(select((.name // "") != "swarm/worker"))'
+
+#   ci_pr_checks <pr> [gh-repo-args...]
+#       Drop-in for `CHECKS_OUT="$(gh pr checks ...)"; CHECKS_RC=$?`. Sets
+#       CHECKS_OUT / CHECKS_RC the way gh would have for the same checks
+#       minus the liveness context: tab-separated rows
+#       name<TAB>bucket<TAB><TAB>link, rc 1 if any row is `fail`, else 8 if
+#       any is `pending`, else 0 (a `cancel` row stays rc 0 so the #793
+#       bad-row check still sees it). A payload that was only the liveness
+#       context reads as "no checks reported" (rc 1), the CI-less case. Output that is not a
+#       JSON array (a gh error, the token-permission message, "no checks
+#       reported") passes through untouched with gh's own exit code.
+ci_pr_checks() {
+    local pr="$1"; shift
+    local raw rc=0 kept
+    raw="$(gh pr checks "$pr" "$@" --json name,bucket,link 2>&1)" || rc=$?
+    CHECKS_OUT="$raw"; CHECKS_RC=$rc
+    jq -e 'type == "array"' <<<"$raw" >/dev/null 2>&1 || return 0
+    kept="$(jq -c "$CI_CHECKS_DROP_LIVENESS_JQ" <<<"$raw")"
+    if [ "$(jq 'length' <<<"$kept")" = "0" ]; then
+        CHECKS_OUT="no checks reported (only the $CI_LIVENESS_CONTEXT liveness status is on this commit)"
+        CHECKS_RC=1
+        return 0
+    fi
+    CHECKS_OUT="$(jq -r '.[] | [.name, .bucket, "", (.link // "")] | @tsv' <<<"$kept")"
+    CHECKS_RC="$(jq -r 'if any(.[]; .bucket == "fail") then 1 elif any(.[]; .bucket == "pending") then 8 else 0 end' <<<"$kept")"
 }

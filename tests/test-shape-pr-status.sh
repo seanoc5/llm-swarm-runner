@@ -42,11 +42,21 @@ worker_pane_state() {
 }
 worker_pane_busy() { grep -qx "$1" "$T/busy"; }
 
-# gh stub: `pr list` prints $T/prs (already tsv); `api` logs args.
+# The real comment-hold filter (issue #757), extracted verbatim.
+eval "$(sed -n "/^PR_COMMENT_HOLD_JQ='/,/(\.\[-1\] \/\/ \"\")'\$/p" "$COORD_WATCH")"
+[ -n "${PR_COMMENT_HOLD_JQ:-}" ] || red "could not extract PR_COMMENT_HOLD_JQ"
+
+# gh stub: `pr list` prints $T/prs (already tsv), or, when $T/prs.json
+# exists, runs the REAL --jq filter the sweep passes over that fixture;
+# `api` logs args.
 GH_API_RC=0
 gh() {
     case "$1" in
-        pr) cat "$T/prs" ;;
+        pr) if [ -f "$T/prs.json" ]; then
+                local a prev="" expr=""
+                for a in "$@"; do [ "$prev" = "--jq" ] && expr="$a"; prev="$a"; done
+                jq -r "$expr" "$T/prs.json"
+            else cat "$T/prs"; fi ;;
         api) shift; echo "$*" >> "$T/api.log"; return "$GH_API_RC" ;;
     esac
 }
@@ -61,7 +71,8 @@ tab() { local IFS=$'\t'; printf '%s\n' "$*"; }
   tab 9 operator/own-branch sha9 true -
   tab 8 fix/issue-8 sha8 true -; } > "$T/prs"   # 8: no own worktree
 printf 'iss-1\niss-2\niss-3\n' > "$T/windows"   # 4 has no window
-printf 'iss-6\n' > "$T/shells"   # 6: window exists, CLI gone (bare shell)
+printf 'iss-6\niss-7\n' > "$T/shells"   # 6: window exists, CLI gone (bare shell); 7: same but run_idle_shell's park
+git init -q -b fix/issue-7 "$WORKSPACE/wt-issue-7"; mkdir -p "$WORKSPACE/wt-issue-7/.swarm/tasks"   # 7 is exercised in the fixture-driven phase below
 printf 'iss-1\n' > "$T/busy"
 
 pr_status_sweep_pass
@@ -104,3 +115,35 @@ green "SWARM_PR_STATUS=0 disables"
 # Description cap.
 long="$(pr_status_desc "$(printf "x%.0s" $(seq 200))")"; [ "${#long}" -le 140 ] || red "desc over 140"
 green "description clamped to 140 chars"
+
+# --- Phase 2: real hold jq over fixture JSON, and park vs crash (issue #536) ---
+SWARM_PR_STATUS=1; GH_API_RC=0; PR_STATUS_LAST=(); PR_STATUS_BACKOFF_UNTIL=0; : > "$T/api.log"
+printf 'iss-1\niss-2\niss-3\niss-7\n' > "$T/windows"; printf 'iss-6\niss-7\n' > "$T/shells"; : > "$T/busy"
+cat > "$T/prs.json" <<'JSON'
+[
+ {"number":1,"headRefName":"fix/issue-1","headRefOid":"sha1","isDraft":true,"body":"x","comments":[
+   {"body":"held\n<!-- SWARM_COORDINATOR_HOLD -->"}]},
+ {"number":2,"headRefName":"fix/issue-2","headRefOid":"sha2","isDraft":true,"body":"x","comments":[
+   {"body":"held\n<!-- SWARM_COORDINATOR_HOLD -->"},{"body":"<!-- SWARM_COORDINATOR_HOLD_LIFTED -->"}]},
+ {"number":3,"headRefName":"fix/issue-3","headRefOid":"sha3","isDraft":true,"body":"> ⛔ **COORDINATOR HOLD** banner","comments":[]},
+ {"number":6,"headRefName":"fix/issue-6","headRefOid":"sha6","isDraft":true,"body":"x","comments":[
+   {"body":"review quotes it <!-- SWARM_COORDINATOR_HOLD --> SWARM_SELF_REVIEW: x"}]},
+ {"number":7,"headRefName":"fix/issue-7","headRefOid":"sha7","isDraft":true,"body":"x","comments":[]}
+]
+JSON
+pr_status_sweep_pass
+has 'statuses/sha1 -f state=pending .*description=held by coordinator'; green "SWARM_COORDINATOR_HOLD comment (no body banner) -> held"
+has 'statuses/sha2 -f state=pending .*description=idle: waiting on review/input'; green "hold lifted by a later comment -> not held"
+has 'statuses/sha3 -f state=pending .*description=held by coordinator'; green "body banner still holds"
+has 'statuses/sha6 -f state=failure .*description=worker exited: no CLI in window'; green "bare shell, no idle-shell marker -> still a crash (failure)"
+has 'statuses/sha7 -f state=failure .*description=worker exited: no CLI in window'; green "pane 7 before its marker exists -> failure"
+printf '123\n' > "$WORKSPACE/wt-issue-7/.swarm/tasks/.idle-parked"
+pr_status_sweep_pass
+has 'statuses/sha7 -f state=pending .*description=parked: idle shell, waiting for a brief'; green "bare shell with run_idle_shell's marker -> parked (pending), not failure"
+
+# The producer side: run_idle_shell writes the marker on entry and removes it when the shell exits.
+LISTENER="$SCRIPT_DIR/../scripts/worker-listener.sh"
+grep -q '^IDLE_PARKED_MARKER="\$QUEUE_ROOT/.idle-parked"' "$LISTENER" || red "listener lost IDLE_PARKED_MARKER (path must match the watcher's .swarm/tasks/.idle-parked)"
+sed -n '/^run_idle_shell() {/,/^}/p' "$LISTENER" | grep -q '> "\$IDLE_PARKED_MARKER"' || red "run_idle_shell does not write the park marker"
+sed -n '/^run_idle_shell() {/,/^}/p' "$LISTENER" | grep -q 'rm -f .*"\$IDLE_PARKED_MARKER"' || red "run_idle_shell does not remove the park marker on exit"
+green "run_idle_shell writes the park marker on entry and removes it on exit"

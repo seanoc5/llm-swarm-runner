@@ -404,6 +404,21 @@ grep -qi 'REFUSED' "$TEST_DIR/out.log" || red "expected a REFUSED message in out
 green "pending CI (gh pr checks exit 8) refuses to ready the PR"
 
 # ============================================================================
+heading "Test 12b: green CI + pending/failed swarm/worker liveness status — readies (issue #536)"
+# ============================================================================
+for live in pending fail; do
+    printf '<!-- BLIND_MERGE_RISK: low -->\nsome change\n' > "$BODY_FILE"
+    make_fake_review 0
+    [ "$live" = pending ] && GH_CHECKS_RC=8 || GH_CHECKS_RC=1
+    GH_CHECKS_STDOUT="[{\"name\":\"lint\",\"bucket\":\"pass\",\"link\":\"u\"},{\"name\":\"swarm/worker\",\"bucket\":\"$live\",\"link\":\"\"}]"
+    rc=0; run_pr_ready || rc=$?
+    GH_CHECKS_RC=0; GH_CHECKS_STDOUT=""
+    [ "$rc" -eq 0 ] || red "liveness status $live blocked readying (exit $rc): $(cat "$TEST_DIR/out.log")"
+    gh_ready_called || red "gh pr ready should run when only the liveness status is $live"
+    green "green CI plus a $live swarm/worker status still readies"
+done
+
+# ============================================================================
 heading "Test 13: CI checks failing (gh pr checks exit 1, real failure) — refuses, gh pr ready NEVER runs"
 # ============================================================================
 printf '<!-- BLIND_MERGE_RISK: low -->\nsome change\n' > "$BODY_FILE"

@@ -304,8 +304,7 @@ while true; do
 
     if [ "$FALLBACK" != "1" ]; then
         set +e
-        CHECKS_OUT="$(gh pr checks "$PR" "${REPO_ARGS[@]}" 2>&1)"
-        CHECKS_RC=$?
+        ci_pr_checks "$PR" "${REPO_ARGS[@]}"   # drops the swarm/worker liveness status (#536)
         set -e
 
         if ci_fallback_is_token_error "$CHECKS_OUT"; then

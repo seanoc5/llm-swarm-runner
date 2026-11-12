@@ -32,6 +32,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_ci-fallback.sh
+. "$SCRIPT_DIR/_ci-fallback.sh"
 PR_READY="${PR_READY_SCRIPT:-$SCRIPT_DIR/pr-ready.sh}"
 
 DRY_RUN=0
@@ -84,9 +86,10 @@ jq -r '.[] | (.body // "" | capture("(?m)^<!-- SWARM_DRAFT_REASON: ci-cancelled 
 # read-only: coordinator-watch.sh turns each line into one deduped inbox note
 # per (PR, sha); nothing here or there readies the draft. The coordinator decides.
 # Line: "#<N> parked-green: banner-less draft, green CI (risk=<r>, issue=<K>, sha=<S>)"
-jq -r '.[]
+jq -r "$CI_ROLLUP_DROP_LIVENESS_JQ"'.[]
   | select((.body // "") | (test("<!-- SWARM_DRAFT_REASON:") or test("(?m)^> ⛔ \\*\\*COORDINATOR HOLD\\*\\*")) | not)
   | (.statusCheckRollup // []
+     | ci_real  # the swarm/worker liveness status is not CI (#536)
      | group_by((.workflowName // "") + "\u0000" + (.name // .context // ""))
      | map(max_by(.completedAt // .startedAt // .createdAt // ""))) as $r
   | select(($r | length) > 0 and all($r[]; ((.status // "COMPLETED") == "COMPLETED")
