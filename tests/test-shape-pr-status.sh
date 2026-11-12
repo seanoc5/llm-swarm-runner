@@ -57,7 +57,7 @@ gh() {
                 for a in "$@"; do [ "$prev" = "--jq" ] && expr="$a"; prev="$a"; done
                 jq -r "$expr" "$T/prs.json"
             else cat "$T/prs"; fi ;;
-        api) shift; echo "$*" >> "$T/api.log"; return "$GH_API_RC" ;;
+        api) shift; echo "$*" >> "$T/api.log"; [ -z "${GH_API_ERR:-}" ] || echo "$GH_API_ERR" >&2; return "$GH_API_RC" ;;
     esac
 }
 
@@ -99,12 +99,21 @@ pr_status_sweep_pass
 green "new push (new SHA) reposts"
 
 # Fail open: API error logs, backs off, does not abort.
-GH_API_RC=1; PR_STATUS_LAST=()
+GH_API_RC=1; GH_API_ERR="gh: API rate limit exceeded (HTTP 403)"; PR_STATUS_LAST=()
 tab 2 fix/issue-2 sha2 true - > "$T/prs"
 pr_status_sweep_pass || red "api error must not fail the pass"
 grep -q 'reason=api_error' "$EVENTS_LOG" || red "no api_error event"
 [ "$PR_STATUS_BACKOFF_UNTIL" -gt "$(date +%s)" ] || red "no backoff set"
-green "api error fails open with backoff"
+green "auth/rate-limit api error fails open with backoff"
+
+# A per-PR error (head moved: 422) skips only that PR; the sweep goes on.
+GH_API_ERR="gh: Validation Failed (HTTP 422)"; PR_STATUS_LAST=(); PR_STATUS_BACKOFF_UNTIL=0; : > "$T/api.log"
+{ tab 2 fix/issue-2 sha2 true -; tab 1 fix/issue-1 sha1 true -; } > "$T/prs"
+pr_status_sweep_pass || red "per-PR error must not fail the pass"
+[ "$PR_STATUS_BACKOFF_UNTIL" -le "$(date +%s)" ] || red "a per-PR 422 backed off the whole sweep"
+[ "$(wc -l < "$T/api.log")" = 2 ] || red "PR after the failing one was not attempted"
+GH_API_ERR=""
+green "per-PR api error skips that PR only, no sweep backoff"
 
 # Gate off.
 GH_API_RC=0; PR_STATUS_BACKOFF_UNTIL=0; SWARM_PR_STATUS=0; n=$(wc -l < "$T/api.log")

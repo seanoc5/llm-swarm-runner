@@ -463,15 +463,34 @@ CI_CHECKS_DROP_LIVENESS_JQ='map(select((.name // "") != "swarm/worker"))'
 #       name<TAB>bucket<TAB><TAB>link, rc 1 if any row is `fail`, else 8 if
 #       any is `pending`, else 0 (a `cancel` row stays rc 0 so the #793
 #       bad-row check still sees it). A payload that was only the liveness
-#       context reads as "no checks reported" (rc 1), the CI-less case. Output that is not a
+#       context reads as "no checks reported" (rc 1), the CI-less case. Only gh's
+#       stdout is parsed (stderr warnings are kept apart). Output that is not a
 #       JSON array (a gh error, the token-permission message, "no checks
-#       reported") passes through untouched with gh's own exit code.
+#       reported") passes through with gh's own non-zero exit code; if gh exited 0
+#       with a non-array, or rejected --json ("unknown flag", an old gh), rc is 2
+#       (unreadable, never green and never a CI failure).
 ci_pr_checks() {
     local pr="$1"; shift
-    local raw rc=0 kept
-    raw="$(gh pr checks "$pr" "$@" --json name,bucket,link 2>&1)" || rc=$?
+    local raw rc=0 kept errf err
+    # stdout only: a gh warning on stderr next to the JSON must not corrupt it.
+    errf="$(mktemp)"
+    raw="$(gh pr checks "$pr" "$@" --json name,bucket,link 2>"$errf")" || rc=$?
+    err="$(cat "$errf" 2>/dev/null)"; rm -f "$errf"
     CHECKS_OUT="$raw"; CHECKS_RC=$rc
-    jq -e 'type == "array"' <<<"$raw" >/dev/null 2>&1 || return 0
+    if ! jq -e 'type == "array"' <<<"$raw" >/dev/null 2>&1; then
+        # Not a JSON array: a gh error, token-permission message or "no checks
+        # reported". Keep gh's own non-zero rc; never let it read green. An old gh
+        # that rejects --json ("unknown flag") is unreadable, not red.
+        [ -n "$raw" ] || CHECKS_OUT="$err"
+        if [ "$rc" -eq 0 ]; then
+            CHECKS_RC=2
+            CHECKS_OUT="unreadable gh pr checks output: ${raw:-$err}"
+        elif grep -qi 'unknown flag' <<<"$raw$err"; then
+            CHECKS_RC=2
+            CHECKS_OUT="unreadable: this gh does not support pr checks --json (${err:-$raw})"
+        fi
+        return 0
+    fi
     kept="$(jq -c "$CI_CHECKS_DROP_LIVENESS_JQ" <<<"$raw")"
     if [ "$(jq 'length' <<<"$kept")" = "0" ]; then
         CHECKS_OUT="no checks reported (only the $CI_LIVENESS_CONTEXT liveness status is on this commit)"

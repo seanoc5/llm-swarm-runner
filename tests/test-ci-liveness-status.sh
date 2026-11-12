@@ -15,10 +15,11 @@ SCRIPTS="$SCRIPT_DIR/../scripts"
 # shellcheck source=../scripts/_ci-fallback.sh
 . "$SCRIPTS/_ci-fallback.sh"
 
-GH_JSON=""; GH_RC=0
+GH_JSON=""; GH_RC=0; GH_ERR=""
 gh() {
     case "$1 $2" in
-        "pr checks") printf '%s\n' "$GH_JSON"; return "$GH_RC" ;;
+        "pr checks") [ -z "$GH_ERR" ] || printf '%s\n' "$GH_ERR" >&2
+                     [ -z "$GH_JSON" ] || printf '%s\n' "$GH_JSON"; return "$GH_RC" ;;
         "pr view")   printf '%s\n' "$GH_JSON"; return 0 ;;
         *) return 1 ;;
     esac
@@ -61,6 +62,23 @@ grep -q "no checks reported on the 'main'" <<<"$CHECKS_OUT" || red "non-JSON out
 run_checks "GraphQL: Resource not accessible by personal access token" 1
 ci_fallback_is_token_error "$CHECKS_OUT" || red "token-permission error no longer recognisable"
 green "gh errors (token permission, no checks) pass through untouched"
+
+# #919 merge gate: a gh stderr warning next to a JSON array holding a failing
+# check must read red (rc 1), never green; gh --json itself exits 0 here.
+GH_ERR="warning: a new gh release is available"
+run_checks "[$LINT_PASS,{\"name\":\"unit\",\"bucket\":\"fail\",\"link\":\"u2\"}]" 0
+expect "stderr warning next to a failing check still reads red" 1
+run_checks "[$LINT_PASS,{\"name\":\"unit\",\"bucket\":\"pending\",\"link\":\"u2\"}]" 0
+expect "stderr warning next to a pending check still reads pending" 8
+# Non-array stdout with gh rc 0 is unreadable: non-zero, never green.
+run_checks "" 0
+[ "$CHECKS_RC" != 0 ] || red "empty gh output with rc 0 read green"
+green "gh rc 0 with no JSON array is unreadable, not green"
+# An older gh that rejects --json: unreadable (rc 2), not red (rc 1).
+GH_ERR="unknown flag: --json"
+run_checks "" 1
+expect "gh without --json reads unreadable (rc 2), not red" 2
+GH_ERR=""
 
 # statusCheckRollup readers: CheckRun (.name) and StatusContext (.context).
 ROLLUP='{"statusCheckRollup":[

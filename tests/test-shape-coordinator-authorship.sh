@@ -190,6 +190,8 @@ case "$1 $2" in
             echo "no checks reported on the 'fix/issue-501' branch" >&2
             exit 1
         fi
+        case "${GH_CHECKS_RC:-0}" in 8) B=pending;; 0) B=pass;; *) B=fail;; esac
+        printf '[{"name":"build","bucket":"%s","link":"u"}]\n' "$B"
         exit "${GH_CHECKS_RC:-0}" ;;
     "api repos/{owner}/{repo}/actions/workflows")
         echo "${GH_WORKFLOW_COUNT:-1}"

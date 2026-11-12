@@ -5743,7 +5743,8 @@ PR_STATUS_BACKOFF_UNTIL=0          # issue #536: epoch; skip the pass until then
 # Dedupe key is (sha, state, description WITHOUT the "as of HH:MM" time) so a
 # worker that stays busy doesn't repost every cycle; a new push changes the
 # SHA and reposts. Fails open: an API error logs pr.status.skip
-# reason=api_error, backs off for 4x the interval, and never aborts the cycle.
+# reason=api_error, backs off for 4x the interval only on an auth or
+# rate-limit error (any other error skips just that PR), and never aborts the cycle.
 pr_status_sweep_pass() {
     [ "${SWARM_PR_STATUS:-1}" = "1" ] || return 0
     command -v gh >/dev/null 2>&1 || return 0
@@ -5751,7 +5752,7 @@ pr_status_sweep_pass() {
     now=$(date +%s)
     [ "$now" -ge "$PR_STATUS_BACKOFF_UNTIL" ] || return 0
 
-    local pr branch sha draft hold issue wt wt_branch win state desc key hhmm rc
+    local pr branch sha draft hold issue wt wt_branch win state desc key hhmm rc apierr
     hhmm="$(date +%H:%M)"
     while IFS=$'\t' read -r pr branch sha draft hold; do
         [ -n "$pr" ] || continue
@@ -5804,12 +5805,19 @@ pr_status_sweep_pass() {
             continue
         fi
         rc=0
-        (cd "$PROJECT_DIR" && gh api "repos/{owner}/{repo}/statuses/$sha" \
-            -f state="$state" -f context="swarm/worker" -f description="$desc") >/dev/null 2>&1 || rc=$?
+        apierr="$(cd "$PROJECT_DIR" && gh api "repos/{owner}/{repo}/statuses/$sha" \
+            -f state="$state" -f context="swarm/worker" -f description="$desc" 2>&1 >/dev/null)" || rc=$?
         if [ "$rc" -ne 0 ]; then
-            log_event pr.status.skip "pr=$pr reason=api_error rc=$rc"
-            PR_STATUS_BACKOFF_UNTIL=$(( now + 4 * WATCH_PR_STATUS_SWEEP_SECS ))
-            return 0
+            # Back off the whole sweep only on auth / rate-limit errors (every PR
+            # would fail the same way). Anything else (a head that moved between
+            # `gh pr list` and this post, a 422) is per-PR: skip just this one.
+            if grep -qiE 'rate limit|abuse|secondary|HTTP 40[13]|bad credentials|requires authentication|gh auth login|token' <<<"$apierr"; then
+                log_event pr.status.skip "pr=$pr reason=api_error rc=$rc backoff=1"
+                PR_STATUS_BACKOFF_UNTIL=$(( now + 4 * WATCH_PR_STATUS_SWEEP_SECS ))
+                return 0
+            fi
+            log_event pr.status.skip "pr=$pr reason=api_error rc=$rc backoff=0"
+            continue
         fi
         PR_STATUS_LAST[$pr]="$sha|$state|$key"
         log_event pr.status.post "pr=$pr sha=${sha:0:7} state=$state desc=\"$desc\""

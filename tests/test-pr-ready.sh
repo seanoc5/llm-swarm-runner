@@ -122,7 +122,18 @@ if [ "\$1" = "pr" ] && [ "\$2" = "checks" ]; then
     touch "$TEST_DIR/hold-late"
     [ -z "\${GH_HOLD_LATE_BODY:-}" ] || printf '%s\n' "\$GH_HOLD_LATE_BODY" > "$BODY_FILE"
     [ -n "\${GH_CHECKS_STDERR:-}" ] && echo "\$GH_CHECKS_STDERR" >&2
-    [ -n "\${GH_CHECKS_STDOUT:-}" ] && printf '%b\n' "\$GH_CHECKS_STDOUT"
+    # --json callers (ci_pr_checks) need a JSON array on stdout: default to one
+    # row whose bucket matches GH_CHECKS_RC unless a fixture or a stderr error is set.
+    if [ -n "\${GH_CHECKS_STDOUT:-}" ]; then
+        case "\$GH_CHECKS_STDOUT" in
+            "["*) printf '%b\n' "\$GH_CHECKS_STDOUT" ;;
+            # legacy name<TAB>bucket<TAB>elapsed<TAB>link rows -> the JSON gh --json prints
+            *) printf '%b\n' "\$GH_CHECKS_STDOUT" | jq -Rn '[inputs | split("\t") | {name: .[0], bucket: .[1], link: (.[3] // "")}]' ;;
+        esac
+    elif [ -z "\${GH_CHECKS_STDERR:-}" ]; then
+        case "\${GH_CHECKS_RC:-0}" in 8) B=pending;; 0) B=pass;; *) B=fail;; esac
+        printf '[{"name":"build","bucket":"%s","link":"u"}]\n' "\$B"
+    fi
     exit "\${GH_CHECKS_RC:-0}"
 fi
 if [ "\$1" = "pr" ] && [ "\$2" = "ready" ]; then
@@ -439,7 +450,7 @@ heading "Test 13b: gh pr checks exits 0 but prints a fail row (cancelled-only ru
 printf '<!-- BLIND_MERGE_RISK: low -->\nsome change\n' > "$BODY_FILE"
 make_fake_review 0
 GH_CHECKS_RC=0
-GH_CHECKS_STDOUT='build\tfail\t24h0m0s\thttps://example/runs/1'
+GH_CHECKS_STDOUT='build\tcancel\t24h0m0s\thttps://example/runs/1'
 GH_ROLLUP_JSON='{"statusCheckRollup":[{"conclusion":"CANCELLED","status":"COMPLETED"}]}'
 rc=0; run_pr_ready || rc=$?
 [ "$rc" -eq 4 ] || red "expected exit 4 for exit-0 + cancelled row, got $rc: $(cat "$TEST_DIR/out.log")"
