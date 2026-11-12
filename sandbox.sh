@@ -122,8 +122,6 @@ MOUNTS=(
     --mount "type=tmpfs,destination=/home/sandbox/.claude/chrome,tmpfs-mode=1777"
     -v "$CLAUDE_CONFIG_COPY:/home/sandbox/.claude.json:rw"
     -v "$HOME/.codex:/home/sandbox/.codex:rw"
-    -v "$HOME/.ssh:$HOME/.ssh:ro"
-    -v "$HOME/.ssh:/home/sandbox/.ssh:ro"
     -v "$HOME/.gitconfig:/home/sandbox/.gitconfig:ro"
     -v "$HOME/.config/gh:/home/sandbox/.config/gh:ro"
     -v "$HOME/.bash_history_sandbox:/home/sandbox/.bash_history:rw"
@@ -131,11 +129,35 @@ MOUNTS=(
     -v "$HOME/.npm:/home/sandbox/.npm:rw"
 )
 
+# SSH identity (#638). By default a worker gets NO ssh: the operator's key
+# logs in to other hosts (live kdeyoga on minti9), so any stray `ssh host`
+# inside a container had operator rights there. Git over GitHub goes over
+# HTTPS with GH_TOKEN instead (see the SSH block further down).
+# SANDBOX_SSH=1 restores the old behaviour: ~/.ssh mounted read-only (at the
+# host path and at /home/sandbox/.ssh) plus agent forwarding.
+# This is protection against accidents, not a security boundary: the Docker
+# socket mount can still reach host files.
+SANDBOX_SSH="${SANDBOX_SSH:-0}"
+if [ "$SANDBOX_SSH" = "1" ]; then
+    MOUNTS+=(
+        -v "$HOME/.ssh:$HOME/.ssh:ro"
+        -v "$HOME/.ssh:/home/sandbox/.ssh:ro"
+    )
+fi
+
+# Extra git config for this container only, delivered via GIT_CONFIG_COUNT
+# env vars (the mounted ~/.gitconfig is read-only). Entries are collected in
+# these parallel arrays and emitted once, after the caller's own
+# GIT_CONFIG_* entries, by the "SSH Agent Forwarding" block below.
+SANDBOX_GIT_CFG_KEYS=()
+SANDBOX_GIT_CFG_VALS=()
+
 # Global hooks registered in ~/.claude/settings.json (which the container
 # sees via the mount above) are written with the HOST's absolute home, e.g.
 # /home/sean/.claude/hooks/x.sh, but the container's home is /home/sandbox,
 # so the command died with "not found" after every turn (#837). Bind the
-# hooks dir read-only at the host path too (same trick as ~/.ssh above).
+# hooks dir read-only at the host path too (same trick as the opt-in ~/.ssh
+# mount above, SANDBOX_SSH=1).
 # Skipped when absent, or when the host home is the container home (the
 # rw mount already covers it).
 if [ -d "$HOME/.claude/hooks" ] && [ "$HOME" != "/home/sandbox" ]; then
@@ -266,16 +288,10 @@ if command -v git &>/dev/null && git -C "$PROJECT_DIR" rev-parse --git-dir &>/de
             # caller's own entries instead, forwarding each by reference
             # (`-e NAME`, no value) exactly like the WORKER_ENV_OPTS pattern,
             # so docker reads the value from this process's own environment.
-            _caller_git_config_count="${GIT_CONFIG_COUNT:-0}"
-            for ((_gcc_i = 0; _gcc_i < _caller_git_config_count; _gcc_i++)); do
-                GIT_WORKTREE_ENV_OPTS+=(-e "GIT_CONFIG_KEY_$_gcc_i" -e "GIT_CONFIG_VALUE_$_gcc_i")
-            done
-            GIT_WORKTREE_ENV_OPTS+=(
-                -e "GIT_CONFIG_COUNT=$((_caller_git_config_count + 1))"
-                -e "GIT_CONFIG_KEY_${_caller_git_config_count}=gc.auto"
-                -e "GIT_CONFIG_VALUE_${_caller_git_config_count}=0"
-            )
-            unset _caller_git_config_count _gcc_i
+            # (#638: the entry is queued in SANDBOX_GIT_CFG_* and emitted,
+            # with any other sandbox-added entries, by the SSH block below.)
+            SANDBOX_GIT_CFG_KEYS+=("gc.auto")
+            SANDBOX_GIT_CFG_VALS+=("0")
             MOUNTS+=("-v" "$_git_real/worktrees:$_git_real/worktrees:ro")
             for _wt_admin in "$_git_real"/worktrees/*/; do
                 [ -d "$_wt_admin" ] || continue
@@ -767,10 +783,51 @@ elif command -v gh &>/dev/null; then
     unset _gh_token
 fi
 
-# SSH Agent Forwarding
+# SSH Agent Forwarding (#638: only with SANDBOX_SSH=1, see the mounts block)
 SSH_OPTS=()
-if [ -n "${SSH_AUTH_SOCK:-}" ]; then
-    SSH_OPTS=(-v "$SSH_AUTH_SOCK:/tmp/ssh-agent.sock" -e SSH_AUTH_SOCK=/tmp/ssh-agent.sock)
+if [ "$SANDBOX_SSH" = "1" ]; then
+    if [ -n "${SSH_AUTH_SOCK:-}" ]; then
+        SSH_OPTS=(-v "$SSH_AUTH_SOCK:/tmp/ssh-agent.sock" -e SSH_AUTH_SOCK=/tmp/ssh-agent.sock)
+    fi
+else
+    # No ssh in the worker, so existing SSH remotes (git@github.com:...) must
+    # go over HTTPS, authenticated by GH_TOKEN through the gh credential
+    # helper the mounted ~/.gitconfig already configures for github.com. The
+    # host's .git/config is untouched; only this container sees the rewrite.
+    # insteadOf is multi-valued, so the two forms are two entries on one key.
+    SANDBOX_GIT_CFG_KEYS+=("url.https://github.com/.insteadOf" "url.https://github.com/.insteadOf")
+    SANDBOX_GIT_CFG_VALS+=("git@github.com:" "ssh://git@github.com/")
+    # The host gitconfig signs commits with the SSH key (gpg.format=ssh),
+    # which is not available here; without this every worker commit fails.
+    # Consequence: worker commits are unsigned unless SANDBOX_SSH=1.
+    SANDBOX_GIT_CFG_KEYS+=("commit.gpgsign" "tag.gpgsign")
+    SANDBOX_GIT_CFG_VALS+=("false" "false")
+    # Don't rely on the host gitconfig having a credential helper: add the gh
+    # helper here too (multi-valued, so a duplicate of the host's is harmless).
+    SANDBOX_GIT_CFG_KEYS+=("credential.https://github.com.helper")
+    SANDBOX_GIT_CFG_VALS+=("!gh auth git-credential")
+    # SSH_AUTH_SOCK is not forwarded (docker does not inherit host env), so
+    # it is unset in the container.
+fi
+
+# Emit queued git config (gc.auto, insteadOf, gpgsign). GIT_CONFIG_COUNT=N
+# here would CLOBBER a caller's own GIT_CONFIG_COUNT/KEY_n/VALUE_n (git reads
+# indices 0..count-1), so forward the caller's entries by reference
+# (`-e NAME`, no value) and append ours after them.
+GIT_CONFIG_OPTS=()
+if [ "${#SANDBOX_GIT_CFG_KEYS[@]}" -gt 0 ]; then
+    _caller_git_config_count="${GIT_CONFIG_COUNT:-0}"
+    for ((_gcc_i = 0; _gcc_i < _caller_git_config_count; _gcc_i++)); do
+        GIT_CONFIG_OPTS+=(-e "GIT_CONFIG_KEY_$_gcc_i" -e "GIT_CONFIG_VALUE_$_gcc_i")
+    done
+    GIT_CONFIG_OPTS+=(-e "GIT_CONFIG_COUNT=$((_caller_git_config_count + ${#SANDBOX_GIT_CFG_KEYS[@]}))")
+    for ((_gcc_j = 0; _gcc_j < ${#SANDBOX_GIT_CFG_KEYS[@]}; _gcc_j++)); do
+        GIT_CONFIG_OPTS+=(
+            -e "GIT_CONFIG_KEY_$((_caller_git_config_count + _gcc_j))=${SANDBOX_GIT_CFG_KEYS[_gcc_j]}"
+            -e "GIT_CONFIG_VALUE_$((_caller_git_config_count + _gcc_j))=${SANDBOX_GIT_CFG_VALS[_gcc_j]}"
+        )
+    done
+    unset _caller_git_config_count _gcc_i _gcc_j
 fi
 
 # TTY handling
@@ -894,7 +951,7 @@ fi
 # credentials really did push it, so `git log --format='%an|%cn'` reads as
 # "agent wrote it, human shipped it" — which is what happened. It also
 # keeps commit signing intact (the signature covers the committer, whose
-# key is the one mounted at ~/.ssh).
+# key is the one mounted at ~/.ssh, which exists only with SANDBOX_SSH=1).
 #
 # Name/email are generic on purpose — they mark the swarm, not one vendor's
 # model, so the label stays true when the CLI behind a worker changes.
@@ -973,6 +1030,7 @@ exec docker run "${INTERACTIVE_FLAGS[@]}" --rm --init \
     "${GRADLE_LIMIT_OPTS[@]}" \
     "${SANDBOX_DOCS_ENV_OPTS[@]}" \
     "${GIT_WORKTREE_ENV_OPTS[@]}" \
+    "${GIT_CONFIG_OPTS[@]}" \
     "${MOUNTS[@]}" \
     -e "TERM=$TERM" \
     -e "COLORTERM=${COLORTERM:-}" \

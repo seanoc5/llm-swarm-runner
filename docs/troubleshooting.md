@@ -200,7 +200,10 @@ ss -tlnp | grep <port>
 > **Tip:** for general git skills relevant to swarm work — resolving merge conflicts in worker PRs, recovery recipes, when to merge vs. rebase — see [`VCS/git-github.md`](./VCS/git-github.md). The entries below are about plumbing failures (signing, mounts, auth); the VCS doc is about *using* git well.
 
 ### `git commit` fails with signing error
-Verify `~/.ssh/id_rsa.pub` (or whatever `user.signingkey` points to) exists on the host. The path must be the literal value in `.gitconfig` — the container mounts `~/.ssh` at that exact path.
+Since #638 the container has no `~/.ssh` by default and `sandbox.sh` sets `commit.gpgsign=false` / `tag.gpgsign=false`, so worker commits are unsigned and should not hit this error. If you want signed commits, launch with `SANDBOX_SSH=1` (per project: put it in `<project>/.swarm/.env`); that mounts `~/.ssh` at the host path and at `/home/sandbox/.ssh`, drops the signing override, and then the key `user.signingkey` points to (e.g. `~/.ssh/id_rsa.pub`) must exist on the host at the literal path in `.gitconfig`.
+
+### `git push` asks for a password or says "Permission denied (publickey)"
+Default workers have no SSH: `git@github.com:` and `ssh://git@github.com/` remotes are rewritten to HTTPS and authenticate with `GH_TOKEN` through the `gh` credential helper. A rejection means the token lacks access (a fine-grained PAT scoped to other repos, or no `workflow` scope for a workflow-file push). Check the token with `scripts/gh-token-probe.sh`, or set `SANDBOX_SSH=1` to push with the SSH key instead.
 
 ### Worktree mounts but `git status` errors
 

@@ -632,17 +632,17 @@ fi
 # 1b. HTTPS origin with an embedded token (issue #576). A PAT without
 #     workflow/Workflows-write permission is refused on any push touching
 #     .github/workflows/*. Warn the operator now and tell the worker (via the
-#     brief) about the SSH fallback. Only the derived SSH URL is printed; the
-#     token never is.
+#     brief) what works now (#638: workers have no SSH, so a git@github.com:
+#     retry is rewritten to HTTPS and hits the same refusal). The token is
+#     never printed.
 PUSH_NOTE=""
 ORIGIN_URL="$(git remote get-url origin 2>/dev/null || true)"
 case "$ORIGIN_URL" in
     https://*@github.com/*)
-        SSH_URL="git@github.com:$(printf '%s' "$ORIGIN_URL" | sed -E 's#^https://[^/]*@github\.com/##')"
-        echo "WARN: origin is HTTPS with an embedded token; pushes that change .github/workflows/* are refused unless the token has Workflows write (see docs/gh-token-scoping.md). Worker fallback: git push $SSH_URL HEAD" >&2
+        echo "WARN: origin is HTTPS with an embedded token; pushes that change .github/workflows/* are refused unless the token has the workflow scope / Workflows write (see docs/gh-token-scoping.md). Workers have no SSH by default; the alternative is SANDBOX_SSH=1 for this project." >&2
         PUSH_NOTE="## Push note
 
-This project's origin is HTTPS with an embedded token. A push that creates or updates .github/workflows/* may be refused (\"refusing to allow a Personal Access Token to create or update workflow\"). If so, push over SSH instead: \`git push $SSH_URL HEAD\`, then continue normally. Do not park as blocked for this alone.
+This project's origin is HTTPS with an embedded token. A push that creates or updates .github/workflows/* may be refused (\"refusing to allow a Personal Access Token to create or update workflow\"). Do not retry with a git@github.com: remote: workers have no SSH by default and that URL is rewritten to HTTPS, so it fails the same way. Workflow-file pushes need a token with the workflow scope (the host gh token has it; this project's embedded token may not). If the push is still refused, write an outbox decision-needed message naming the workflow file, or ask the operator to set SANDBOX_SSH=1 in this project's .swarm/.env (restores the SSH key and signed commits).
 "
         ;;
 esac
@@ -933,7 +933,7 @@ else
         WORKER_CHECK WORKER_CHECK_CMD WORKER_CHECK_TIMEOUT WORKER_CHECK_RETRY
         SWARM_EVAL_LOG EXTRA_MOUNTS
         SANDBOX_DEP_CACHE SANDBOX_CPUS SANDBOX_GRADLE_LIMITS SANDBOX_GRADLE_WORKERS_MAX
-        SANDBOX_KOTLIN_DAEMON_XMX SANDBOX_ALLOW_BACKGROUND_TASKS
+        SANDBOX_KOTLIN_DAEMON_XMX SANDBOX_ALLOW_BACKGROUND_TASKS SANDBOX_SSH
     )
     window_cmd="WORKER_CONTAINER_NAME=$(printf '%q' "$CONTAINER")"
     for spec in "${PASS_VARS[@]}"; do
