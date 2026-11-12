@@ -355,6 +355,34 @@ else
     skip "SANDBOX_DEP_PROXY_URL" "/var/run/docker.sock not present"
 fi
 
+# SANDBOX_MEM_LIMIT / SANDBOX_BUILD_CACHE set in a project .swarm/.env must
+# reach worker windows via provision-worker.sh PASS_VARS (#577).
+for _v in SANDBOX_MEM_LIMIT SANDBOX_BUILD_CACHE; do
+    if sed -n '/^    PASS_VARS=(/,/^    )/p' "$REPO_ROOT/scripts/provision-worker.sh" | grep -qw "$_v"; then
+        pass "$_v is in provision-worker.sh PASS_VARS" ""
+    else
+        fail "$_v is in provision-worker.sh PASS_VARS" ""
+    fi
+done
+
+# SANDBOX_BUILD_CACHE (#577): unset -> nothing; set -> rw mount + init script.
+if [ -S /var/run/docker.sock ]; then
+    _bc="$(mktemp -d -p "$REPO_ROOT")"
+    output=$(env -u SANDBOX_BUILD_CACHE "$REPO_ROOT/sandbox.sh" /tmp \
+        "test -e /home/sandbox/.gradle/init.d/build-cache.init.gradle.kts && echo MOUNTED || echo ABSENT" 2>&1)
+    [[ "$output" == *"ABSENT"* ]] \
+        && pass "SANDBOX_BUILD_CACHE unset -> no build-cache init script" "$output" \
+        || fail "SANDBOX_BUILD_CACHE unset -> no build-cache init script" "$output"
+    output=$(SANDBOX_BUILD_CACHE="$_bc" "$REPO_ROOT/sandbox.sh" /tmp \
+        "test -f /home/sandbox/.gradle/init.d/build-cache.init.gradle.kts && touch '$_bc/probe' && echo RW-OK" 2>&1)
+    [[ "$output" == *"RW-OK"* && -e "$_bc/probe" ]] \
+        && pass "SANDBOX_BUILD_CACHE set -> writable mount + init script" "$output" \
+        || fail "SANDBOX_BUILD_CACHE set -> writable mount + init script" "$output"
+    rm -rf "$_bc"
+else
+    skip "SANDBOX_BUILD_CACHE" "/var/run/docker.sock not present"
+fi
+
 # SANDBOX_DEP_CACHE + SANDBOX_DEP_PROXY_URL together: the two knobs mount at
 # disjoint paths (SANDBOX_DEP_CACHE at <dir>/gradle, same absolute path on
 # both sides of the mount — nothing under /home/sandbox/.gradle; this knob's

@@ -659,6 +659,27 @@ if [ -n "${SANDBOX_DEP_PROXY_URL:-}" ]; then
     DEP_PROXY_OPTS=(-e "SANDBOX_DEP_PROXY_URL=$SANDBOX_DEP_PROXY_URL")
 fi
 
+# Shared Gradle build cache (#577). SANDBOX_DEP_CACHE shares downloaded
+# dependencies; this shares compiled task outputs (compileKotlin etc.), so a
+# new worktree's container doesn't recompile unchanged sources from scratch.
+# SANDBOX_BUILD_CACHE=<dir> is bind-mounted read-write at the same path and
+# an init.d script points Gradle's local build cache at it. Gradle writes
+# entries via temp-file + rename, so concurrent containers are safe. The
+# container runs as the host UID (--user above), so <dir> must be writable
+# by that user; otherwise we warn and skip. Unset (default): no mount, no
+# env var, no init script.
+BUILD_CACHE_OPTS=()
+if [ -n "${SANDBOX_BUILD_CACHE:-}" ]; then
+    if mkdir -p "$SANDBOX_BUILD_CACHE" 2>/dev/null && [ -w "$SANDBOX_BUILD_CACHE" ]; then
+        MOUNTS+=(-v "$SANDBOX_BUILD_CACHE:$SANDBOX_BUILD_CACHE")
+        MOUNTS+=(-v "$SCRIPT_DIR/scripts/gradle-init/build-cache.init.gradle.kts:/home/sandbox/.gradle/init.d/build-cache.init.gradle.kts:ro")
+        BUILD_CACHE_OPTS=(-e "SANDBOX_BUILD_CACHE=$SANDBOX_BUILD_CACHE")
+    else
+        echo "WARNING: SANDBOX_BUILD_CACHE='$SANDBOX_BUILD_CACHE' is not a" \
+             "writable directory for uid $(id -u) — skipping shared build cache." >&2
+    fi
+fi
+
 # Build-output tmpfs (2026-10-02). Gradle's build/ is pure churn: class
 # files, test results, boot jars, all rebuilt on demand. Ten workers writing
 # it at once saturated the host's single NVMe (96% util, 4 s write waits,
@@ -1026,6 +1047,7 @@ exec docker run "${INTERACTIVE_FLAGS[@]}" --rm --init \
     "${WORKER_ENV_OPTS[@]}" \
     "${GIT_IDENTITY_OPTS[@]}" \
     "${DEP_CACHE_OPTS[@]}" \
+    "${BUILD_CACHE_OPTS[@]}" \
     "${DEP_PROXY_OPTS[@]}" \
     "${GRADLE_LIMIT_OPTS[@]}" \
     "${SANDBOX_DOCS_ENV_OPTS[@]}" \
