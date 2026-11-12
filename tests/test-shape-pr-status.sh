@@ -144,6 +144,7 @@ has 'statuses/sha7 -f state=pending .*description=parked: idle shell, waiting fo
 # The producer side: run_idle_shell writes the marker on entry and removes it when the shell exits.
 LISTENER="$SCRIPT_DIR/../scripts/worker-listener.sh"
 grep -q '^IDLE_PARKED_MARKER="\$QUEUE_ROOT/.idle-parked"' "$LISTENER" || red "listener lost IDLE_PARKED_MARKER (path must match the watcher's .swarm/tasks/.idle-parked)"
-sed -n '/^run_idle_shell() {/,/^}/p' "$LISTENER" | grep -q '> "\$IDLE_PARKED_MARKER"' || red "run_idle_shell does not write the park marker"
-sed -n '/^run_idle_shell() {/,/^}/p' "$LISTENER" | grep -q 'rm -f .*"\$IDLE_PARKED_MARKER"' || red "run_idle_shell does not remove the park marker on exit"
+# (whole-file greps: a sed range over run_idle_shell stops at the heredoc's own column-0 braces)
+grep -q 'date +%s > "\$IDLE_PARKED_MARKER"' "$LISTENER" || red "run_idle_shell does not write the park marker"
+grep -q 'rm -f "\$rcfile" "\$IDLE_SHELL_PIDFILE" "\$IDLE_PARKED_MARKER"' "$LISTENER" || red "run_idle_shell does not remove the park marker on exit"
 green "run_idle_shell writes the park marker on entry and removes it on exit"
