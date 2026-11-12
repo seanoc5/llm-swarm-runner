@@ -50,7 +50,7 @@ watch_pause_read() {
             # and the rename. If what we claimed is still live, put it back
             # (-n: never over a newer one) and treat the pause as in force.
             local claimed
-            claimed="$(sed -n 's/^until=//p' "$f.expired.$$" 2>/dev/null | head -n 1)"
+            claimed="$(sed -n '/^until=/{s///p;q}' "$f.expired.$$" 2>/dev/null)"
             if [[ "$claimed" =~ ^[0-9]+$ ]] && [ "$claimed" -gt "$(date +%s)" ]; then
                 mv -n "$f.expired.$$" "$f" 2>/dev/null || true
                 rm -f "$f.expired.$$"
