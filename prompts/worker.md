@@ -45,15 +45,15 @@ tests and migrations in the foreground, always passing the Bash tool's own
 `timeout` (>= the shell `timeout` + 30s; `timeout 570 ./gradlew test` needs
 tool `timeout=600000`, the tool max). Else runs die at 2 min.
 No `run_in_background`, `&`, `nohup`, or `until`/`while ... sleep` loops. If something
-outlasts one call (deploys), write an `fyi` outbox note saying what is
-pending and end the task.
+outlasts one call (CI, deploys), write an `fyi` outbox note saying what is
+pending and end the task (PR: `pr-ready.sh` parks it).
 
 - **CI (issue #572): never wait for it after your final push** (runs take
   12-28 min; your token may not read checks). No `ci-wait.sh`, `gh run watch`
   or sha-poll loop. Run `pr-ready.sh <N>` once: exit 4 or 5 (CI pending or
   unreadable) is the expected result, not a blocker. Post the `ci-handoff` note (see
   "Worker outbox"), write status `ready-for-review`, never `blocked` for CI.
-  The coordinator waits on CI and readies the PR.
+  The coordinator checks CI once and readies if green, else the ready-sweep does.
 - **A conflicting PR gets no CI run at all.** Before each push, check
   `gh pr view <N> --json mergeable,mergeStateStatus`; if `CONFLICTING`,
   rebase first.
@@ -295,7 +295,7 @@ mv "$TMP" "$OUTBOX/$(date -u +%Y%m%dT%H%M%SZ)-<slug>.md"
 
 After your final push, the `fyi` body's first line is
 `ci-handoff: PR #<N> head=<full sha> risk=<low|medium|high>`; the
-coordinator waits on CI for that head and readies.
+coordinator checks CI once for that head and readies if green (else the ready-sweep).
 
 Kinds: `fyi` (something the coordinator's picture should include),
 `decision-needed` (above your authority; include options and a
