@@ -27,11 +27,12 @@ extract_fn() { sed -n "/^${2}() {/,/^}/p" "$1"; }
 for spec in "$LLM_START:log_event" "$LLM_START:reprompt_last_pane_line" "$LLM_START:reprompt_confirm_submitted" \
             "$LLM_START:reprompt_composer_dirty" "$LLM_START:reprompt_retry_safe" "$LLM_START:reprompt_inject" \
             "$WATCH:coordinator_pane_state" "$WATCH:coordinator_pane_busy" "$WATCH:coordinator_pane_busy_visible" \
-            "$WATCH:compact_confirm_submitted" "$WATCH:compact_last_pane_line"; do
+            "$WATCH:compact_confirm_submitted" "$ROOT/scripts/_pane-composer.sh:compact_last_pane_line"; do
     body="$(extract_fn "${spec%%:*}" "${spec##*:}")"
     [ -n "$body" ] || red "could not extract ${spec##*:} from ${spec%%:*}"
     eval "$body"
 done
+. "$ROOT/scripts/_pane-composer.sh"   # chrome/footer patterns
 EVENTS_LOG="$TEST_DIR/events.log"; : > "$EVENTS_LOG"
 COORD_BUSY_PATTERN='\(esc to interrupt\)|Press Ctrl-C again to .xit|· ↓ [0-9.,]+k? tokens|Press up to edit queued messages|Compacting conversation'
 AUTO_COMPACT_BUSY_PATTERN="$COORD_BUSY_PATTERN"

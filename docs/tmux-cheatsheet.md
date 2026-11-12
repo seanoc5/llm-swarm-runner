@@ -89,12 +89,7 @@ For bulk worker cleanup, use [`scripts/kill-finished-workers.sh`](../scripts/kil
 
 ## 7. Send a command into a window from outside
 
-Useful for waking the coordinator without attaching:
-
-```bash
-# Type a command + press Enter into a specific window's pane
-tmux send-keys -t llm-fand-app:coordinator "claude --resume <id>" Enter
-```
+Typing into a pane from outside is not recommended; emergencies only. See [`tmux-as-channel.md`](./tmux-as-channel.md) §4d (`scripts/swarm-nudge.sh`).
 
 `Enter` (or `C-m`) is what actually runs the command. Without it, the text just sits at the prompt.
 
@@ -183,7 +178,7 @@ The coordinator pane mixes your conversation with doorbell lines, hook messages,
 | All 5 workers finished; want to clean up                                        | `kill-finished-workers.sh --dry-run` then `kill-finished-workers.sh`                                                |
 | Forgot to detach before closing terminal — session still running?               | `tmux ls` (it survived; just `tmux attach`)                                                                        |
 | Need to nuke EVERYTHING and start over                                          | `tmux kill-session -t llm-<project>` (or `tmux kill-server` for all sessions on the host)                          |
-| Want a separate "control" terminal that drives the coordinator from outside    | `tmux send-keys -t llm-<project>:coordinator "<your prompt>" Enter`                                                |
+| Type into a pane from outside (emergencies only)                               | `scripts/swarm-nudge.sh <project-dir> coordinator "<text>"` — see `tmux-as-channel.md` §4d |
 | Need a shell inside a worker container without disturbing claude               | `Ctrl-z` in any `iss-*` window — splits a sibling bash pane that `docker exec`s into the same container, claude in the original pane is untouched ([details](./advanced-usage.md#worker-escape-hatch-ctrl-z-opens-a-sibling-bash-pane)) |
 
 ## Customizing tmux for this workflow

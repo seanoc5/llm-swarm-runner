@@ -50,7 +50,7 @@ trap cleanup EXIT
 . "$(dirname "${BASH_SOURCE[0]}")/../scripts/_coord-layout.sh"   # coord_pane_is_viewer (#785)
 extract_fn() {
     local fn="$1"
-    sed -n "/^${fn}() {/,/^}/p" "$WATCH"
+    sed -n "/^${fn}() {/,/^}/p" "$WATCH" "$(dirname "${BASH_SOURCE[0]}")/../scripts/_pane-composer.sh"
 }
 for fn in mtime_epoch coordinator_pane_state coordinator_pane_busy coordinator_pane_busy_visible probe_ctx_used probe_ctx_window \
           coordinator_compact_effective_threshold maybe_auto_compact \
@@ -102,7 +102,7 @@ COMPACT_REPLAY_PATTERN='Not enough messages to compact\.'
 # it's left unset.
 COMPACT_COMPOSER_CHROME_PATTERN='^※ recap:|^[[:space:]]*(✻|✶)[[:space:]]*(Considering…|Sautéed for|Cooked for|Baked for|Simmered for|Brewed for|Crunched for)?|/clear to save [0-9.]+k tokens'
 # 2026-10-27 — read straight from coordinator-watch.sh so the two never drift.
-eval "$(grep '^COMPACT_FOOTER_PATTERN=' "$WATCH")"
+eval "$(grep '^COMPACT_FOOTER_PATTERN=' "$(dirname "${BASH_SOURCE[0]}")/../scripts/_pane-composer.sh")"
 # issue #292 — lowered from the shipped default (5) so the fixtures below,
 # whose fake "compaction" sleeps only ~2s, still count as long enough to
 # trust a detected replay; Test 19 below overrides this back up locally to
@@ -513,6 +513,7 @@ heading "Test 11: shipped AUTO_COMPACT_BUSY_PATTERN default matches 2.1.x busy c
 # (not a hand-copied guess) so it fails if the default ever regresses again.
 default_pattern="$(
     unset AUTO_COMPACT_BUSY_PATTERN
+    eval "$(grep -m1 '^PANE_BUSY_PATTERN_DEFAULT=' "$(dirname "${BASH_SOURCE[0]}")/../scripts/_pane-composer.sh")"
     eval "$(grep -m1 '^AUTO_COMPACT_BUSY_PATTERN=' "$WATCH")"
     printf '%s' "$AUTO_COMPACT_BUSY_PATTERN"
 )"
