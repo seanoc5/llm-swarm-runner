@@ -28,7 +28,7 @@ chmod +x "$T/stub/"*
 out="$(PATH="$T/stub:$PATH" "$ROOT/scripts/batch-run.sh" /bin/echo hi)"
 [ "$out" = "hi" ] && ok "command output preserved through systemd-run" || bad "wrapped: got '$out'"
 grep -q -- '--user --scope --slice=batch.slice' "$T/calls" && ok "uses user scope in batch.slice" || bad "no batch.slice call"
-grep -q 'set-property batch.slice CPUWeight=20 IOWeight=20' "$T/calls" && ok "sets slice weights" || bad "no set-property"
+grep -q 'set-property --runtime batch.slice CPUWeight=20 IOWeight=20' "$T/calls" && ok "sets slice weights" || bad "no set-property"
 
 # 3. systemd-run failing (no user manager) -> fallback.
 printf '#!/bin/sh\nexit 1\n' > "$T/stub/systemd-run"

@@ -22,8 +22,8 @@ set -uo pipefail
 if command -v systemd-run >/dev/null 2>&1 &&
    systemd-run --user --scope --slice=batch.slice --quiet -- true >/dev/null 2>&1; then
     w="${BATCH_SLICE_WEIGHT:-20}"
-    # Idempotent, best-effort: creates/updates the user-level slice. No root.
-    systemctl --user set-property batch.slice "CPUWeight=$w" "IOWeight=$w" >/dev/null 2>&1 || true
+    # Idempotent, best-effort, non-persistent (--runtime): no leftover drop-in once the knob is off. No root.
+    systemctl --user set-property --runtime batch.slice "CPUWeight=$w" "IOWeight=$w" >/dev/null 2>&1 || true
     exec systemd-run --user --scope --slice=batch.slice --quiet -- "$@"
 fi
 exec "$@"
