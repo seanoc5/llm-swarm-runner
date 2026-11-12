@@ -465,6 +465,20 @@
 #                           slower cadence than the local-only sweep above —
 #                           comparable to WATCH_ACTIVITY_POLL_SECS. Set to 0
 #                           to disable. See pending_brief_marker_sweep_pass.
+#   SWARM_PR_STATUS=1 / WATCH_PR_STATUS_SWEEP_SECS=60
+#                           (issue #536) On this timer, post a `swarm/worker`
+#                           commit status on the head SHA of every open PR whose
+#                           branch is an own worker worktree's branch: pending
+#                           "working: iss-N, busy as of HH:MM" / "idle: waiting
+#                           on review/input" / "held by coordinator" (COORDINATOR
+#                           HOLD banner), failure "no worker attached" (draft, no
+#                           iss-N window), success "ready" (not draft). Reposts
+#                           only when (sha, state, description) changes (the
+#                           "as of" time is not part of the comparison). Needs a
+#                           token with statuses:write; an API error logs
+#                           pr.status.skip reason=api_error and backs off 4x the
+#                           interval. SWARM_PR_STATUS=0 or SECS=0 disables. See
+#                           pr_status_sweep_pass.
 #   WATCH_STRANDED_BRIEF_SWEEP_SECS=60
 #                           (issue #448) Generalizes llm-start.sh's
 #                           warn_stranded_worktree_briefs (issue #376) from a
@@ -2064,6 +2078,7 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     ACTIVITY_POLL_OVERLAP_SECS 30  cursor overlap tolerating gh search-index lag; dedup maps prevent re-announcing
     WATCH_WORKTREE_SWEEP_SECS 60  periodic detection of a worktree removed outside every blessed reap path (0=off); see header comment (issue #439)
     WATCH_PENDING_BRIEF_SWEEP_SECS 300  periodic backstop posting SWARM_PENDING_BRIEF when a queued brief predates its PR (0=off); see header comment (issue #439)
+    WATCH_PR_STATUS_SWEEP_SECS 60  periodic swarm/worker commit status on each worker PR; gated by SWARM_PR_STATUS=1 (0=off); see header comment (issue #536)
     WATCH_STRANDED_BRIEF_SWEEP_SECS 60  periodic detection of a queued/claimed brief with no live iss-N window to drain it (0=off); see header comment (issue #448)
     WATCH_SIBLING_SWEEP_SECS 300  warn (coord-inbox watcher_dead) about sibling projects whose watcher died while they had recent workers (0=off); see header comment (issue #756)
     COORD_WAKE_LOCK_TIMEOUT_SECS 60  max wait to flock COORD_WAKE_LOCK before a wake gives up (see that lock's header comment)
@@ -2337,6 +2352,9 @@ EVENTS LOG
                            already "queued" (pr, dir, reason=posted) — the backstop for a
                            brief queued before its PR existed, so requeue.sh's own marker
                            post never fired
+      pr.status.post       (issue #536) pr_status_sweep_pass posted the swarm/worker commit status
+                           (pr, sha, state=pending|failure|success, desc)
+      pr.status.skip       (issue #536) no post this cycle (pr, reason=unchanged|no_sha|api_error)
       watch.check_on_done  check-on-done result (issue, task_id, result=running|pass|fail|skipped)
       watch.reconcile      (issue #451, superseded issue #314's watch.outcome.synth
                            — see WATCH_SYNTH_OUTCOME's removal note below) a
@@ -2773,6 +2791,9 @@ ACTIVITY_WAKE_PROMPT="${ACTIVITY_WAKE_PROMPT:-}"
 # issue #439 — see header comment for both.
 WATCH_WORKTREE_SWEEP_SECS="${WATCH_WORKTREE_SWEEP_SECS:-60}"
 WATCH_PENDING_BRIEF_SWEEP_SECS="${WATCH_PENDING_BRIEF_SWEEP_SECS:-300}"
+# issue #536 — see header comment.
+SWARM_PR_STATUS="${SWARM_PR_STATUS:-1}"
+WATCH_PR_STATUS_SWEEP_SECS="${WATCH_PR_STATUS_SWEEP_SECS:-60}"
 # issue #448 — see header comment.
 WATCH_STRANDED_BRIEF_SWEEP_SECS="${WATCH_STRANDED_BRIEF_SWEEP_SECS:-60}"
 # issue #756 — sibling-swarm dead-watcher sweep; see header comment.
@@ -3104,6 +3125,10 @@ if ! [[ "$ACTIVITY_POLL_OVERLAP_SECS" =~ ^[0-9]+$ ]]; then
 fi
 if ! [[ "$WATCH_WORKTREE_SWEEP_SECS" =~ ^[0-9]+$ ]]; then
     echo "ERROR: WATCH_WORKTREE_SWEEP_SECS must be a non-negative integer (got: $WATCH_WORKTREE_SWEEP_SECS)" >&2
+    exit 1
+fi
+if ! [[ "$WATCH_PR_STATUS_SWEEP_SECS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: WATCH_PR_STATUS_SWEEP_SECS must be a non-negative integer (got: $WATCH_PR_STATUS_SWEEP_SECS)" >&2
     exit 1
 fi
 if ! [[ "$WATCH_PENDING_BRIEF_SWEEP_SECS" =~ ^[0-9]+$ ]]; then
@@ -5699,6 +5724,87 @@ pending_brief_marker_sweep_pass() {
     done
 }
 
+# pr_status_desc <state> <text>  — clamp to GitHub's 140-char description cap.
+pr_status_desc() { printf '%.140s' "$1"; }
+
+declare -gA PR_STATUS_LAST=()      # issue #536: pr -> "<sha>|<state>|<stable description key>"
+PR_STATUS_BACKOFF_UNTIL=0          # issue #536: epoch; skip the pass until then after an API error
+
+# pr_status_sweep_pass
+#
+# issue #536: posts a `swarm/worker` commit status on the head SHA of every
+# open PR whose head branch is an own worktree's branch, so a draft PR shows
+# whether its worker is busy, idle, dead or held. Reuses worker_pane_state /
+# worker_pane_busy (no new pane parser). Precedence: hold banner, then
+# non-draft (success), then window liveness (draft with no window = failure).
+# Dedupe key is (sha, state, description WITHOUT the "as of HH:MM" time) so a
+# worker that stays busy doesn't repost every cycle; a new push changes the
+# SHA and reposts. Fails open: an API error logs pr.status.skip
+# reason=api_error, backs off for 4x the interval, and never aborts the cycle.
+pr_status_sweep_pass() {
+    [ "${SWARM_PR_STATUS:-1}" = "1" ] || return 0
+    command -v gh >/dev/null 2>&1 || return 0
+    local now
+    now=$(date +%s)
+    [ "$now" -ge "$PR_STATUS_BACKOFF_UNTIL" ] || return 0
+
+    local pr branch sha draft hold issue wt wt_branch win state desc key hhmm rc
+    hhmm="$(date +%H:%M)"
+    while IFS=$'\t' read -r pr branch sha draft hold; do
+        [ -n "$pr" ] || continue
+        # Only own-worker PRs: branch ends in issue-N AND that issue's own
+        # worktree currently has this branch checked out.
+        issue="$(printf '%s' "$branch" | sed -nE 's%.*issue-([0-9]+)$%\1%p')"
+        [ -n "$issue" ] || continue
+        wt="$(own_wt_dir_for_issue "$issue")" || continue
+        wt_branch="$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null)" || continue
+        [ "$wt_branch" = "$branch" ] || continue
+        if [ -z "$sha" ]; then
+            log_event pr.status.skip "pr=$pr reason=no_sha"
+            continue
+        fi
+
+        win="iss-$issue"
+        if [ "$hold" = "hold" ]; then
+            state=pending; desc="held by coordinator"; key="$desc"
+        elif [ "$draft" != "true" ]; then
+            state=success; desc="ready"; key="$desc"
+        else
+            local pstate
+            pstate="$(worker_pane_state "$win")"
+            if [ "$pstate" = "absent" ]; then
+                state=failure; desc="no worker attached"; key="$desc"
+            elif [ "$pstate" = "cli" ] && worker_pane_busy "$win"; then
+                state=pending; desc="working: iss-$issue, busy as of $hhmm"; key="working: iss-$issue"
+            else
+                state=pending; desc="idle: waiting on review/input"; key="$desc"
+            fi
+        fi
+        desc="$(pr_status_desc "$desc")"
+
+        if [ "${PR_STATUS_LAST[$pr]:-}" = "$sha|$state|$key" ]; then
+            log_event pr.status.skip "pr=$pr reason=unchanged"
+            continue
+        fi
+        if [ "$DRY_RUN" = "1" ]; then
+            echo "[DRY] would post swarm/worker=$state on PR #$pr: $desc"
+            continue
+        fi
+        rc=0
+        (cd "$PROJECT_DIR" && gh api "repos/{owner}/{repo}/statuses/$sha" \
+            -f state="$state" -f context="swarm/worker" -f description="$desc") >/dev/null 2>&1 || rc=$?
+        if [ "$rc" -ne 0 ]; then
+            log_event pr.status.skip "pr=$pr reason=api_error rc=$rc"
+            PR_STATUS_BACKOFF_UNTIL=$(( now + 4 * WATCH_PR_STATUS_SWEEP_SECS ))
+            return 0
+        fi
+        PR_STATUS_LAST[$pr]="$sha|$state|$key"
+        log_event pr.status.post "pr=$pr sha=${sha:0:7} state=$state desc=\"$desc\""
+    done < <(cd "$PROJECT_DIR" && gh pr list --state open --limit 200 \
+        --json number,headRefName,headRefOid,isDraft,body \
+        --jq '.[] | "\(.number)\t\(.headRefName)\t\(.headRefOid // "")\t\(.isDraft)\t\(if ((.body // "") | test("(?m)^> ⛔ \\*\\*COORDINATOR HOLD\\*\\*")) then "hold" else "-" end)"' 2>/dev/null || true)
+}
+
 # stranded_brief_queue_lines <worktree-dir>
 #
 # issue #448: one "queue<TAB>age_minutes<TAB>path" line per real (non-tmp)
@@ -7050,7 +7156,7 @@ coord_pending_approval_age() {
 # run_auto_compact_poll_loop, started as its own background process right
 # after this function.
 run_watch_timer_loop() {
-    local last_pr_poll=0 last_orphan_sweep=0 last_ready_sweep=0 last_bg_violation_sweep=0 last_timeout_retry_sweep=0 last_activity_poll=0 last_coord_wake_retry=0 last_coord_wake_busy_retry=0 last_worktree_sweep=0 last_pending_brief_sweep=0 last_stranded_brief_sweep=0 last_sibling_sweep=0 last_window_flags_sweep=0 last_sideline_sweep=0 now
+    local last_pr_poll=0 last_orphan_sweep=0 last_ready_sweep=0 last_bg_violation_sweep=0 last_timeout_retry_sweep=0 last_activity_poll=0 last_coord_wake_retry=0 last_coord_wake_busy_retry=0 last_worktree_sweep=0 last_pending_brief_sweep=0 last_pr_status_sweep=0 last_stranded_brief_sweep=0 last_sibling_sweep=0 last_window_flags_sweep=0 last_sideline_sweep=0 now
     # issue #756: first sibling scan one interval after start, not on tick one, so
     # it never delays the first deferred-wake retry or the startup passes.
     last_sibling_sweep=$(date +%s)
@@ -7138,6 +7244,13 @@ run_watch_timer_loop() {
             if [ $((now - last_pending_brief_sweep)) -ge "$WATCH_PENDING_BRIEF_SWEEP_SECS" ]; then
                 pending_brief_marker_sweep_pass || true
                 last_pending_brief_sweep=$now
+            fi
+        fi
+        if [ "$WATCH_PR_STATUS_SWEEP_SECS" -gt 0 ]; then
+            now=$(date +%s)
+            if [ $((now - last_pr_status_sweep)) -ge "$WATCH_PR_STATUS_SWEEP_SECS" ]; then
+                pr_status_sweep_pass || true
+                last_pr_status_sweep=$now
             fi
         fi
         if [ "$WATCH_STRANDED_BRIEF_SWEEP_SECS" -gt 0 ]; then
@@ -12477,10 +12590,10 @@ run_poll() {
 # restarts. (COORD_WAKE_RETRY_SECS, issue #422's older dirty-draft retry,
 # has this identical gap and predates this fix — out of scope here, but
 # worth folding in alongside this one if it's ever revisited.)
-if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ] || [ "$WATCH_ORPHAN_SWEEP_SECS" -gt 0 ] || [ "$WATCH_READY_SWEEP_SECS" -gt 0 ] || [ "$WATCH_BG_VIOLATION_SWEEP_SECS" -gt 0 ] || [ "$WATCH_TIMEOUT_RETRY_SWEEP_SECS" -gt 0 ] || [ "$WATCH_ACTIVITY_POLL_SECS" -gt 0 ] || [ "$WATCH_WORKTREE_SWEEP_SECS" -gt 0 ] || [ "$WATCH_PENDING_BRIEF_SWEEP_SECS" -gt 0 ] || [ "$WATCH_STRANDED_BRIEF_SWEEP_SECS" -gt 0 ] || [ "$WATCH_SIBLING_SWEEP_SECS" -gt 0 ] || [ "$COORD_WAKE_HOLD_RETRY_SECS" -gt 0 ] || [ "$WATCH_SIDELINE_SWEEP_SECS" -gt 0 ] || { [ "$WATCH_WINDOW_FLAGS" = "1" ] && [ "$WATCH_WINDOW_FLAGS_SWEEP_SECS" -gt 0 ]; }; then
+if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ] || [ "$WATCH_ORPHAN_SWEEP_SECS" -gt 0 ] || [ "$WATCH_READY_SWEEP_SECS" -gt 0 ] || [ "$WATCH_BG_VIOLATION_SWEEP_SECS" -gt 0 ] || [ "$WATCH_TIMEOUT_RETRY_SWEEP_SECS" -gt 0 ] || [ "$WATCH_ACTIVITY_POLL_SECS" -gt 0 ] || [ "$WATCH_WORKTREE_SWEEP_SECS" -gt 0 ] || [ "$WATCH_PENDING_BRIEF_SWEEP_SECS" -gt 0 ] || [ "$WATCH_PR_STATUS_SWEEP_SECS" -gt 0 ] || [ "$WATCH_STRANDED_BRIEF_SWEEP_SECS" -gt 0 ] || [ "$WATCH_SIBLING_SWEEP_SECS" -gt 0 ] || [ "$COORD_WAKE_HOLD_RETRY_SECS" -gt 0 ] || [ "$WATCH_SIDELINE_SWEEP_SECS" -gt 0 ] || { [ "$WATCH_WINDOW_FLAGS" = "1" ] && [ "$WATCH_WINDOW_FLAGS_SWEEP_SECS" -gt 0 ]; }; then
     run_watch_timer_loop &
     WATCH_TIMER_PID=$!
-    log_event watch.timer.start "pr_poll_secs=$WATCH_PR_POLL_SECS check_on_done=$WATCH_CHECK_ON_DONE orphan_sweep_secs=$WATCH_ORPHAN_SWEEP_SECS ready_sweep_secs=$WATCH_READY_SWEEP_SECS bg_violation_sweep_secs=$WATCH_BG_VIOLATION_SWEEP_SECS timeout_retry_sweep_secs=$WATCH_TIMEOUT_RETRY_SWEEP_SECS activity_poll_secs=$WATCH_ACTIVITY_POLL_SECS worktree_sweep_secs=$WATCH_WORKTREE_SWEEP_SECS pending_brief_sweep_secs=$WATCH_PENDING_BRIEF_SWEEP_SECS stranded_brief_sweep_secs=$WATCH_STRANDED_BRIEF_SWEEP_SECS sibling_sweep_secs=$WATCH_SIBLING_SWEEP_SECS window_flags_sweep_secs=$([ "$WATCH_WINDOW_FLAGS" = "1" ] && echo "$WATCH_WINDOW_FLAGS_SWEEP_SECS" || echo 0) sideline_secs=$WATCH_SIDELINE_SECS sideline_sweep_secs=$WATCH_SIDELINE_SWEEP_SECS"
+    log_event watch.timer.start "pr_poll_secs=$WATCH_PR_POLL_SECS check_on_done=$WATCH_CHECK_ON_DONE orphan_sweep_secs=$WATCH_ORPHAN_SWEEP_SECS ready_sweep_secs=$WATCH_READY_SWEEP_SECS bg_violation_sweep_secs=$WATCH_BG_VIOLATION_SWEEP_SECS timeout_retry_sweep_secs=$WATCH_TIMEOUT_RETRY_SWEEP_SECS activity_poll_secs=$WATCH_ACTIVITY_POLL_SECS worktree_sweep_secs=$WATCH_WORKTREE_SWEEP_SECS pending_brief_sweep_secs=$WATCH_PENDING_BRIEF_SWEEP_SECS pr_status_sweep_secs=$WATCH_PR_STATUS_SWEEP_SECS stranded_brief_sweep_secs=$WATCH_STRANDED_BRIEF_SWEEP_SECS sibling_sweep_secs=$WATCH_SIBLING_SWEEP_SECS window_flags_sweep_secs=$([ "$WATCH_WINDOW_FLAGS" = "1" ] && echo "$WATCH_WINDOW_FLAGS_SWEEP_SECS" || echo 0) sideline_secs=$WATCH_SIDELINE_SECS sideline_sweep_secs=$WATCH_SIDELINE_SWEEP_SECS"
 fi
 if [ "$WORKER_AUTO_COMPACT" = "1" ] || [ "$WORKER_AUTO_DELIVER" = "1" ]; then
     run_worker_compact_loop &

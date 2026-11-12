@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+#
+# test-shape-pr-status.sh — Non-LLM shape test for issue #536's
+# pr_status_sweep_pass: posts a `swarm/worker` commit status per worker PR.
+# Extracts the pass (and own_wt_dir_for_issue/is_own_worktree_dir) verbatim
+# from coordinator-watch.sh, stubs `gh`, and stubs the pane helpers.
+set -euo pipefail
+
+green() { printf '\033[32m✓ %s\033[0m\n' "$*"; }
+red()   { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COORD_WATCH="$SCRIPT_DIR/../scripts/coordinator-watch.sh"
+T=$(mktemp -d -t shape-pr-status-XXXXXX)
+trap 'rm -rf "$T"' EXIT
+
+extract_fn() { sed -n "/^${1}() {/,/^}/p" "$COORD_WATCH"; }
+for fn in is_own_worktree_dir own_wt_dir_for_issue pr_status_desc pr_status_sweep_pass; do
+    body="$(extract_fn "$fn")"
+    [ -n "$body" ] || red "could not extract $fn"
+    eval "$body"
+done
+declare -gA PR_STATUS_LAST=()
+PR_STATUS_BACKOFF_UNTIL=0
+
+# Fixture: own worktrees on branches fix/issue-N (PROJECT_DIR is not a git
+# repo, so is_own_worktree_dir fails open).
+WORKSPACE="$T/ws"; PROJECT_DIR="$T/proj"; mkdir -p "$WORKSPACE" "$PROJECT_DIR"
+for n in 1 2 3 4 5; do
+    git init -q -b "fix/issue-$n" "$WORKSPACE/wt-issue-$n"
+done
+EVENTS_LOG="$T/events.log"; : > "$EVENTS_LOG"
+log_event() { printf '%s %s\n' "$1" "$2" >> "$EVENTS_LOG"; }
+DRY_RUN=0; SWARM_PR_STATUS=1; WATCH_PR_STATUS_SWEEP_SECS=60
+SESSION_NAME=s
+
+# Stub pane helpers: windows listed in $T/windows; "busy" ones in $T/busy.
+worker_pane_state() { grep -qx "$1" "$T/windows" && echo cli || echo absent; }
+worker_pane_busy() { grep -qx "$1" "$T/busy"; }
+
+# gh stub: `pr list` prints $T/prs (already tsv); `api` logs args.
+GH_API_RC=0
+gh() {
+    case "$1" in
+        pr) cat "$T/prs" ;;
+        api) shift; echo "$*" >> "$T/api.log"; return "$GH_API_RC" ;;
+    esac
+}
+
+tab() { local IFS=$'\t'; printf '%s\n' "$*"; }
+{ tab 1 fix/issue-1 sha1 true -
+  tab 2 fix/issue-2 sha2 true -
+  tab 3 fix/issue-3 sha3 true hold
+  tab 4 fix/issue-4 sha4 true -
+  tab 5 fix/issue-5 sha5 false -
+  tab 9 operator/own-branch sha9 true -
+  tab 8 fix/issue-8 sha8 true -; } > "$T/prs"   # 8: no own worktree
+printf 'iss-1\niss-2\niss-3\n' > "$T/windows"   # 4 has no window
+printf 'iss-1\n' > "$T/busy"
+
+pr_status_sweep_pass
+api() { grep -c "$1" "$T/api.log" || true; }
+has() { grep -q -- "$1" "$T/api.log" || red "missing: $1"; }
+has 'statuses/sha1 -f state=pending .*description=working: iss-1, busy as of [0-9][0-9]:[0-9][0-9]'; green "busy -> pending working"
+has 'statuses/sha2 -f state=pending .*description=idle: waiting on review/input'; green "idle -> pending idle"
+has 'statuses/sha3 -f state=pending .*description=held by coordinator'; green "hold banner -> pending held"
+has 'statuses/sha4 -f state=failure .*description=no worker attached'; green "no window -> failure"
+has 'statuses/sha5 -f state=success .*description=ready'; green "ready PR -> success"
+has 'context=swarm/worker' ; green "context swarm/worker"
+[ "$(wc -l < "$T/api.log")" = 5 ] || red "expected 5 posts (operator PR and foreign-issue PR skipped), got $(wc -l < "$T/api.log")"
+green "operator's own and foreign PRs untouched"
+
+pr_status_sweep_pass
+[ "$(wc -l < "$T/api.log")" = 5 ] || red "unchanged second cycle made an API call"
+grep -q 'reason=unchanged' "$EVENTS_LOG" || red "no unchanged skip event"
+green "unchanged second cycle: no API call"
+
+tab 1 fix/issue-1 sha1b true - > "$T/prs"
+pr_status_sweep_pass
+[ "$(wc -l < "$T/api.log")" = 6 ] || red "new SHA should repost"
+green "new push (new SHA) reposts"
+
+# Fail open: API error logs, backs off, does not abort.
+GH_API_RC=1; PR_STATUS_LAST=()
+tab 2 fix/issue-2 sha2 true - > "$T/prs"
+pr_status_sweep_pass || red "api error must not fail the pass"
+grep -q 'reason=api_error' "$EVENTS_LOG" || red "no api_error event"
+[ "$PR_STATUS_BACKOFF_UNTIL" -gt "$(date +%s)" ] || red "no backoff set"
+green "api error fails open with backoff"
+
+# Gate off.
+GH_API_RC=0; PR_STATUS_BACKOFF_UNTIL=0; SWARM_PR_STATUS=0; n=$(wc -l < "$T/api.log")
+pr_status_sweep_pass
+[ "$(wc -l < "$T/api.log")" = "$n" ] || red "SWARM_PR_STATUS=0 still posted"
+green "SWARM_PR_STATUS=0 disables"
+
+# Description cap.
+long="$(pr_status_desc "$(printf "x%.0s" $(seq 200))")"; [ "${#long}" -le 140 ] || red "desc over 140"
+green "description clamped to 140 chars"
