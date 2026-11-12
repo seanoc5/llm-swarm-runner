@@ -44,7 +44,7 @@
 #                earlier", "in the previous digest") and fewer than
 #                --gloss N (default 12) other words on the line to
 #                explain it, or (b) a short label the reply never defines: a letter+digit
-#                such as h1/n1/M3, a range such as "A-D", "option B", "your d)". A label is
+#                such as "your A2", "see B1", "per A3" or a bare "B3" opening a line (not a mid-sentence H2, p95, G1), a range such as "A-D", "option B", "your d)". A label is
 #                defined when a line starts with it ("- **A1**", "B)", "A.") or it is
 #                followed on its own line by ":", "(" or a dash. Naive on purpose: it cannot
 #                see a coined phrase ("the keyboard overlay") or a bare "On #1378:" opener.
@@ -202,7 +202,10 @@ carryover_hits() {
     function skip_label(t) { return t ~ /^(q[1-4]|s3|v[0-9]+|x[0-9]+|p[0-3]|i18n|l10n)$/ }
     BEGIN {
         phrase = "§ ?[0-9]|from earlier|carried over|carry-over|carryover|as noted|noted (earlier|above|before)|as (discussed|mentioned)|(mentioned|discussed|described|listed) (earlier|before|previously)|(from|in) (an |the )?(earlier|previous|prior|last) (digest|report|reply|wake|session)"
-        lab = "(^|[^A-Za-z0-9_#/.-])[A-Za-z][0-9]{1,2}([^A-Za-z0-9_]|$)"
+        # A label is a letter+digits (A12, B3) and only counts with a reference cue: after "your" /
+        # "see" / "per", or bare at the start of a line. Mid-sentence "H2 database", "p95", "G1 GC" are not labels.
+        lab = "(^|[^A-Za-z0-9_#/.-])(your|see|per) [A-Za-z][0-9]{1,2}([^A-Za-z0-9_]|$)"
+        lead = "^[A-Za-z][0-9]{1,2}($|[,;)]| (below|above|earlier|please|again|too|and|plus|is|was|still)([^A-Za-z]|$))"
     }
     $0 ~ fence { inf = !inf; next }
     inf { next }
@@ -233,11 +236,21 @@ carryover_hits() {
             }
             if (match(l, phrase)) { bad = 1; why = "phrase: " substr(l, RSTART, RLENGTH); others = nwords(substr(l, 1, RSTART - 1) " " substr(l, RSTART + RLENGTH)) }
             else others = nwords(c) - 1
-            t = c
+            t = l
             while (!bad && match(t, lab)) {
-                d = substr(t, RSTART, RLENGTH); gsub(/[^A-Za-z0-9]/, "", d)
+                d = substr(t, RSTART, RLENGTH); sub(/^.*(your|see|per) /, "", d); gsub(/[^A-Za-z0-9]/, "", d)
                 if (!skip_label(tolower(d)) && !(tolower(d) in def)) { bad = 1; why = "label: " d }
                 t = substr(t, RSTART + RLENGTH - 1)
+            }
+            # a same-letter range of list labels ("M1-M3") is a reference too
+            if (!bad && match(l, /(^|[^a-z0-9_#\/.-])[a-z][0-9]{1,2}(–|-)[a-z][0-9]{1,2}([^a-z0-9_]|$)/)) {
+                t = substr(l, RSTART, RLENGTH); gsub(/^[^a-z]+|[^a-z0-9]+$/, "", t); d = substr(t, 1, 1)
+                if (d == substr(t, index(t, "-") + 1, 1) && !(d in def) && !(substr(t, 1, index(t, "-") - 1) in def)) { bad = 1; why = "label-range: " t }
+            }
+            s = c; sub(/^[ \t>|*#-]+/, "", s); gsub(/\*\*/, "", s)
+            if (!bad && match(s, lead)) {
+                d = s; sub(/[^A-Za-z0-9].*$/, "", d)
+                if (!skip_label(tolower(d)) && !(tolower(d) in def)) { bad = 1; why = "label: " d }
             }
             t = c
             if (!bad && match(t, /(^|[^A-Za-z0-9])[A-H](–|-)[A-H]([^A-Za-z0-9]|$)/)) {
