@@ -328,6 +328,7 @@ SANDBOX_BUILD_CACHE=/opt/swarm-cache/gradle-build-cache
 
 - **UID:** containers run as the host user (`--user $(id -u):$(id -g)`), so the directory must be writable by that user. If it isn't, `sandbox.sh` warns and skips the mount.
 - **Concurrency:** Gradle's local directory cache writes each entry to a temp file and renames it into place, and entries are keyed by input hash, so concurrent writers from several containers are safe (two workers producing the same entry just overwrite it with identical bytes). Unlike the read-only dependency cache above, the directory is meant to be written live.
+- **Trust:** the directory is writable by every worker that mounts it, and Gradle reuses any entry whose key matches, so one misbehaving worker can plant output other workers build with. Give each project its own path (never share one across projects) and treat it as shared trust.
 - **Not `~/.gradle`:** use a dedicated path. Gradle prunes entries unused for 7 days on its own.
 - **Wrapper distributions:** already covered by the `gradle-dists` seed under `SANDBOX_DEP_CACHE`.
 
