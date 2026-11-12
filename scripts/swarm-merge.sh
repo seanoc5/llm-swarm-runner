@@ -312,7 +312,8 @@ housekeep_or_die() {
 
 # --- issue -> PR resolution -------------------------------------------------
 #
-# Closing-keyword link first (the pre-#324 behavior). When there is none, fall
+# Union of closing-keyword PRs and open PRs on fix/issue-N or fix/issue-N-*
+# branches (#906); more than one distinct PR refuses and lists them. Original note: fall
 # back to the single OPEN PR on the worker's own fix/issue-N branch: a worker
 # that split its work writes "steps 1-2 of #N" rather than "Closes #N", so
 # GitHub records no closing link and the issue path used to refuse a PR that
@@ -320,25 +321,29 @@ housekeep_or_die() {
 # PR on that branch is ambiguous, so it refuses and asks for the PR number.
 # Sets PR_NUM (empty when nothing is found) and PR_VIA (how it was found).
 resolve_pr_for_issue() {
-  local branch_prs count
+  local closing_prs branch_prs all count
   PR_VIA=""
-  PR_NUM=$(gh issue view "$ISSUE" --json closedByPullRequestsReferences \
-             -q '.closedByPullRequestsReferences[0].number' 2>/dev/null || echo "")
-  [ "$PR_NUM" = "null" ] && PR_NUM=""
-  if [ -n "$PR_NUM" ]; then
-    PR_VIA="closing keyword"
-    return 0
-  fi
-  branch_prs=$(gh pr list --head "fix/issue-$ISSUE" --state open --json number \
-                 -q '.[].number' 2>/dev/null || echo "")
-  count=$(printf '%s\n' "$branch_prs" | grep -c '^[0-9][0-9]*$' || true)
+  closing_prs=$(gh issue view "$ISSUE" --json closedByPullRequestsReferences \
+                  -q '.closedByPullRequestsReferences[].number' 2>/dev/null || echo "")
+  # Open PRs on fix/issue-N or a suffixed fix/issue-N-* branch (#906).
+  branch_prs=$(gh pr list --state open --limit 200 --json number,headRefName \
+                 --jq ".[] | select(.headRefName | test(\"^fix/issue-$ISSUE(-|\$)\")) | .number" \
+                 2>/dev/null || echo "")
+  all=$(printf '%s\n%s\n' "$closing_prs" "$branch_prs" | grep '^[0-9][0-9]*$' | sort -un || true)
+  count=$(printf '%s\n' "$all" | grep -c '^[0-9][0-9]*$' || true)
   if [ "$count" = 1 ]; then
-    PR_NUM="$branch_prs"
-    PR_VIA="open PR on branch fix/issue-$ISSUE"
+    PR_NUM="$all"
+    if grep -qx "$PR_NUM" <<<"$closing_prs"; then
+      PR_VIA="closing keyword"
+    else
+      PR_VIA="open PR on branch fix/issue-$ISSUE"
+    fi
   elif [ "$count" -gt 1 ]; then
-    echo "ERROR: issue #$ISSUE has no closing-keyword PR and $count open PRs on" >&2
-    echo "       branch fix/issue-$ISSUE ($(echo "$branch_prs" | tr '\n' ' ')). Pass the PR number." >&2
+    echo "ERROR: issue #$ISSUE maps to $count PRs ($(echo "$all" | sed 's/^/#/' | tr '\n' ' ')) via closing" >&2
+    echo "       keywords and open fix/issue-$ISSUE* branches. Pass the PR number." >&2
     exit 1
+  else
+    PR_NUM=""
   fi
 }
 
