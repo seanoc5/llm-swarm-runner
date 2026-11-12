@@ -131,7 +131,7 @@ declare -A RENAMED=(
 missing=""
 while IFS= read -r h; do
     want="${RENAMED[$h]:-$h}"
-    cat "$ROOT"/prompts/coordinator-{shared,work,chat}.md | grep -qxF -e "## $want" -e "### $want" || missing+="[$h] "
+    cat "$ROOT"/prompts/coordinator-{shared,work,chat}.md | grep -xF -e "## $want" -e "### $want" >/dev/null || missing+="[$h] "
 done < <(awk '/^```/ {f = !f} !f && /^#{2,3} / {sub(/^#+ /, ""); print}' "$ROOT/prompts/coordinator.md")
 check "every coordinator.md section has a home in the split prompts" "" "$missing"
 
@@ -383,7 +383,7 @@ W="$T/wproj"; mkdir -p "$W/.swarm"; rm -f "$T/work-sys.md"
 (cd "$W" && env -u COORD_WORK_RUN_CMD -u COORD_WORK_PROMPT_FILE LLM_SWARM_DIR="$ROOT" "$ROOT/scripts/coord-work-run.sh" "$W" "Run once." >/dev/null 2>&1) || true
 [ -s "$T/work-sys.md" ] && got=captured || got=missing
 check "the wrapper handed claude a system prompt file" "captured" "$got"
-RULE='Never `tmux send-keys` into another agent'
+RULE='To reach a worker, queue a brief'
 grep -qF "$RULE" "$ROOT/prompts/coordinator-shared.md" && ! grep -qF "$RULE" "$ROOT/prompts/coordinator-work.md" && got=shared-only || got=not-shared-only
 check "fixture rule exists only in coordinator-shared.md" "shared-only" "$got"
 grep -qF "$RULE" "$T/work-sys.md" && got=yes || got=no
