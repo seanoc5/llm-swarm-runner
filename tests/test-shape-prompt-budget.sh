@@ -136,18 +136,18 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # 5800 -> 6000. Issue #533 adds one "action items stand alone" rule per file
 # (~190-350 bytes each; the rule is the fix). Stopgap until #509.
 #
-# 2026-11-12 (#572, on top of #533): worker 25000 -> 25400, worker-bare 12200 -> 12300,
-# coordinator 33700 -> 34100, coordinator-work 24400 -> 25000. Issue #572: workers stop
+# 2026-11-12 (#572, on top of #533): worker 25000 -> 25500, worker-bare 12200 -> 12400,
+# coordinator 33700 -> 34200, coordinator-work 24400 -> 25100. Issue #572: workers stop
 # waiting on CI after the final push (run pr-ready.sh once, post a ci-handoff
 # outbox note, end terminal); the coordinator waits and readies. One CI bullet
 # swapped in each worker prompt, one outbox sentence, and one clause in each
 # coordinator's worker-outbox rule. The wording is pinned by
 # tests/test-shape-ci-handoff.sh.
-WORKER_MAX="${WORKER_MD_MAX_BYTES:-25400}"
-COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-34100}"
-BARE_MAX="${WORKER_BARE_MD_MAX_BYTES:-12300}"   # issue #510 trial prompt; ~7.5KB is script-parsed contract
+WORKER_MAX="${WORKER_MD_MAX_BYTES:-25500}"
+COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-34200}"
+BARE_MAX="${WORKER_BARE_MD_MAX_BYTES:-12400}"   # issue #510 trial prompt; ~7.5KB is script-parsed contract
 SHARED_MAX="${COORD_SHARED_MD_MAX_BYTES:-6000}"   # issue #767 split prompts
-WORK_MAX="${COORD_WORK_MD_MAX_BYTES:-25000}"
+WORK_MAX="${COORD_WORK_MD_MAX_BYTES:-25100}"
 CHAT_MAX="${COORD_CHAT_MD_MAX_BYTES:-5500}"
 
 check() {

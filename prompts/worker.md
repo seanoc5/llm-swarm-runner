@@ -50,8 +50,8 @@ pending and end the task.
 
 - **CI (issue #572): never wait for it after your final push** (runs take
   12-28 min; your token may not read checks). No `ci-wait.sh`, `gh run watch`
-  or sha-poll loop. Run `pr-ready.sh <N>` once: exit 4 (CI not green yet)
-  is the expected result, not a blocker. Post the `ci-handoff` note (see
+  or sha-poll loop. Run `pr-ready.sh <N>` once: exit 4 or 5 (CI pending or
+  unreadable) is the expected result, not a blocker. Post the `ci-handoff` note (see
   "Worker outbox"), write status `ready-for-review`, never `blocked` for CI.
   The coordinator waits on CI and readies the PR.
 - **A conflicting PR gets no CI run at all.** Before each push, check
