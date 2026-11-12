@@ -11,8 +11,10 @@ plus a sample of replies that drew no recorded complaint. Re-run with
 
 Outside code fences, code spans and URLs, a line is flagged when it holds a
 backward reference (a section pointer like "§4", a phrase like "from earlier",
-"carried over", "as noted"; or a short label the reply never defines: `h1`,
-`M3`, "A–D", "option B", "your d)") and there is too little explanation: fewer
+"carried over", "as noted"; or a short label the reply never defines, used as a
+reference: "your A2", "see B1", "per A3", a bare "B3" opening a line, "M1-M3",
+"A–D", "option B", "your d)". A mid-sentence H2, p95, G1 or M1 is a tech name, not
+a label) and there is too little explanation: fewer
 than 12 other words on the line, counting the list a trailing colon introduces
 ("Needs you (carried over):" followed by restated items passes; the same line
 with nothing under it fails). A label counts as defined when a line starts with
@@ -39,13 +41,13 @@ Fixture: `tests/fixtures/reply-lint/carryover-incidents.tsv`.
 
 ## False positives: civicstrata coordinator replies
 
-Sample: all 2,136 assistant text replies in the 198 local civicstrata coordinator
+Sample: all 2,239 assistant text replies in the 198 local civicstrata coordinator
 sessions (2026-08-08 to 2026-11-12), leaving out the three days the research doc
-records a complaint (2026-08-29, 09-22, 10-15). "No complaint recorded" is not
+records a complaint (2026-10-15 only in the round-3 re-run; the original run also left out 08-29 and 09-22). "No complaint recorded" is not
 "was good", so this is a flag-rate check, not a precision proof.
 
-- **24 of 2,136 flagged (1.1%); 22 of 924 replies of 60+ words (2.4%).** At the
-  Stop hook that is about one extra block per 40 long replies.
+- **Round 3 (labels need a reference cue): 12 of 2,239 flagged (0.5%); 11 of 960 replies of 60+ words (1.1%).** The previous rule gave 24 (1.1%; 22 of 960, 2.3%) on the same sample. At the
+  Stop hook that is about one extra block per 90 long replies. The numbers below this line are the earlier 24-hit reading (2,136 replies).
 - By my reading of each flagged line (not Sean's judgment): about 20 point at an
   item or label the same reply never defines ("waits on your B1/B2", "from my
   last reply", "follow-ups A–D"), so they are the failure the rule targets; about
