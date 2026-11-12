@@ -30,7 +30,7 @@ tp=0; fn=0; fp_fix=0; rows=0
 while IFS=$'\t' read -r row date proj expect text; do
     case "$row" in ''|'#'*) continue ;; esac
     rows=$((rows + 1))
-    hit="$(printf '%s\n' "$text" | "$LINT" --only carryover,backref | head -1)"
+    out="$(printf '%s\n' "$text" | "$LINT" --only carryover,backref)"; hit="${out%%$'\n'*}"
     if [ "$expect" = flag ]; then [ -n "$hit" ] && tp=$((tp + 1)) || echo "MISSED (expected flag) row $row: $text"
     else [ -n "$hit" ] && fp_fix=$((fp_fix + 1)) || fn=$((fn + 1)); fi
 done < "$FX"
@@ -42,7 +42,7 @@ while IFS= read -r row; do
     d="$(jq -r '.t[:10]' <<<"$row")"; [[ "$SKIP" == *",$d,"* ]] && continue
     x="$(jq -r .x <<<"$row")"; w="$(wc -w <<<"$x")"
     total=$((total + 1)); [ "$w" -ge "$MINW" ] && big=$((big + 1))
-    h="$(printf '%s\n' "$x" | "$LINT" --only carryover | head -1)"
+    out="$(printf '%s\n' "$x" | "$LINT" --only carryover)"; h="${out%%$'\n'*}"
     if [ -n "$h" ]; then
         flagged=$((flagged + 1)); [ "$w" -ge "$MINW" ] && bigflagged=$((bigflagged + 1))
         printf 'FLAG %s %s\n' "$d" "${h:0:200}"
