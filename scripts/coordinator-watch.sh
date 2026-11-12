@@ -2322,6 +2322,8 @@ EVENTS LOG
                            followed by coord.inbox.write/coord.wake* with trigger=idle_capacity
       capacity.idle_check  the idle-capacity gh query found nothing to wake for
                            (reason=nothing_dispatchable|available_issues_failed)
+      dispatch.idle_none   (issue #901) an idle_capacity wake was consumed and no worker window
+                           appeared (reason=none_started|note_unprocessed; night_ok=N is logged beside it)
       watch.worktree_vanished  (issue #439) a tracked worktree disappeared with no
                            reap.worktree event logged for it since it was last
                            confirmed present (issue, dir, reason=no_reap_event) — the
@@ -3607,6 +3609,7 @@ HOST_STATE_DIR="${HOST_STATE_DIR:-${TMPDIR:-/tmp}/llm-swarm-host-$(id -u)}"
 DISPATCH_PAUSE_FILE="$HOST_STATE_DIR/dispatch-paused"
 IDLE_CAPACITY_WAKE_FILE="$PROJECT_DIR/.swarm/idle-capacity-wake.last"
 IDLE_CAPACITY_SET_FILE="$PROJECT_DIR/.swarm/idle-capacity-set.last"
+IDLE_CAPACITY_OUTCOME_FILE="$PROJECT_DIR/.swarm/idle-capacity-outcome.pending"
 DISPATCH_PAUSE_SEEN_FILE="$PROJECT_DIR/.swarm/dispatch-pause-seen"
 # issue #803: provision-worker.sh writes "<epoch> <max_load> <issue>" here when it refuses for host_load.
 HOST_LOAD_REFUSED_FILE="$PROJECT_DIR/.swarm/host-load-refused"
@@ -11997,6 +12000,44 @@ host_load_wake_pass() {
     coord_ring_doorbell host_load_cleared "slots=$slots"
 }
 
+# idle_capacity_outcome_pass (issue #901, ADR 0008 F4/D7)
+#
+# Measures what an idle_capacity wake achieved. The wake pass leaves a snapshot
+# (wake time, slots/ready/night_ok, the iss-* windows open then) in
+# IDLE_CAPACITY_OUTCOME_FILE. Once the coordinator has consumed the note and is
+# idle again, a window not in the snapshot means a worker started (silent);
+# none logs `dispatch.idle_none reason=<none_started|note_unprocessed>` so "36
+# wakes, no work, cause not established" becomes a countable event. The reason
+# states only what was observed; night_ok is logged as its own field. Count
+# night_ok=0 events to estimate the Night-queue misread, but note that a wake with
+# nothing dispatchable also lands there (cause not detected here).
+idle_capacity_outcome_pass() {
+    [ -s "$IDLE_CAPACITY_OUTCOME_FILE" ] || return 0
+    local ts slots ready night_ok now names w before nl reason="" started=0
+    read -r ts slots ready night_ok < "$IDLE_CAPACITY_OUTCOME_FILE"
+    [[ "$ts" =~ ^[0-9]+$ ]] || { rm -f "$IDLE_CAPACITY_OUTCOME_FILE"; return 0; }
+    now=$(date +%s)
+    if compgen -G "$COORD_INBOX_DIR/*-idle_capacity-*.md" >/dev/null; then
+        # Note still unread: only report once it has outlived a full wake interval.
+        [ $((now - ts)) -ge "${WATCH_IDLE_CAPACITY_WAKE_SECS:-2700}" ] && reason=note_unprocessed
+        [ -n "$reason" ] || return 0
+    else
+        coord_wake_pane_busy && return 0
+        # Split mode: the pane is only a viewer; the headless work run is the turn.
+        coord_split_active && coord_split_run_busy && return 0
+        names="$(tmux list-windows -t "$SESSION_NAME" -F '#{window_name}' 2>/dev/null)" || return 0
+        nl=$'\n'
+        before="$(tail -n +2 "$IDLE_CAPACITY_OUTCOME_FILE")"
+        while IFS= read -r w; do
+            case "$w" in iss-*) case "$nl$before$nl" in *"$nl$w$nl"*) ;; *) started=1;; esac;; esac
+        done <<< "$names"
+        if [ "$started" = 1 ]; then rm -f "$IDLE_CAPACITY_OUTCOME_FILE"; return 0; fi
+        reason=none_started
+    fi
+    log_event dispatch.idle_none "reason=$reason slots=${slots:-?} ready=${ready:-?} night_ok=${night_ok:-?} wake_age=$((now - ts))s"
+    rm -f "$IDLE_CAPACITY_OUTCOME_FILE"
+}
+
 # idle_capacity_wake_pass
 #
 # At most one idle_capacity note per WATCH_IDLE_CAPACITY_WAKE_SECS (clock
@@ -12011,6 +12052,7 @@ host_load_wake_pass() {
 LAST_IDLE_CAPACITY_CHECK=0
 idle_capacity_wake_pass() {
     [ "$WATCH_IDLE_CAPACITY_WAKE_SECS" -gt 0 ] || return 0
+    idle_capacity_outcome_pass || true
     [ -e "$SWARM_PARKED_FILE" ] && return 0
     dispatch_pause_active && return 0
 
@@ -12054,9 +12096,10 @@ idle_capacity_wake_pass() {
     printf '%s\n' "$now" > "$IDLE_CAPACITY_WAKE_FILE" 2>/dev/null || true
     if [ "$DRY_RUN" = "1" ]; then
         echo "[DRY] would write coord-inbox entry: trigger=idle_capacity slots=$slots ready=$ready"
-    elif coord_inbox_write idle_capacity "Idle capacity: $slots worker slot(s) free and $ready open issue(s) pass available-issues.sh with no worktree here ($night_ok of them labelled night-ok). Dispatch ready / night-ok work now (act, then report); if none of it is really dispatchable (epics, open PRs), say so in one line."; then
+    elif coord_inbox_write idle_capacity "Idle capacity: $slots worker slot(s) free and $ready open issue(s) pass available-issues.sh with no worktree here ($night_ok of them labelled night-ok). Dispatch AVAILABLE work without asking (\`night-ok\` first); \`night_ok=0\` is not \"nothing to do\". Act, then report; if none of it is really dispatchable (epics, open PRs), say so in one line."; then
         log_event coord.inbox.write "trigger=idle_capacity slots=$slots ready=$ready"
         printf '%s %s\n' "$set_hash" "$now" > "$IDLE_CAPACITY_SET_FILE" 2>/dev/null || true
+        { printf '%s %s %s %s\n' "$now" "$slots" "$ready" "$night_ok"; tmux list-windows -t "$SESSION_NAME" -F '#{window_name}' 2>/dev/null | grep '^iss-' || true; } > "$IDLE_CAPACITY_OUTCOME_FILE" 2>/dev/null || true
     else
         echo "[$(date +%T)] WARN: failed to write coord-inbox idle_capacity entry" >&2
         return 0

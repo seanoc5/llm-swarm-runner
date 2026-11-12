@@ -35,11 +35,12 @@ WATCH_IDLE_CAPACITY_WAKE_SECS=2700
 WATCH_IDLE_CAPACITY_CHECK_SECS=0
 WATCH_IDLE_CAPACITY_REPEAT_SECS=21600
 IDLE_CAPACITY_SET_FILE="$PROJECT_DIR/.swarm/idle-capacity-set.last"
+IDLE_CAPACITY_OUTCOME_FILE="$PROJECT_DIR/.swarm/idle-capacity-outcome.pending"
 CI_FAILING_RING_DIR="$PROJECT_DIR/.swarm/ci-failing-ring-pending"
 WATCH_STALE_WAIT_CHECK=1; declare -A STALE_WAIT_NOTED=() CI_FAILING_NOTED=()
 
-eval "$(sed -n '/^coord_inbox_write() {/,/^}/p; /^coord_ring_doorbell() {/,/^}/p; /^dispatch_pause_active() {/,/^}/p; /^capacity_free_slots() {/,/^}/p; /^dispatchable_issue_counts() {/,/^}/p; /^dispatch_pause_wake_pass() {/,/^}/p; /^host_load_wake_pass() {/,/^}/p; /^idle_capacity_wake_pass() {/,/^}/p; /^ci_failing_ring_pass() {/,/^}/p; /^ready_sweep_pass() {/,/^}/p; /^coord_pending_approval_age() {/,/^}/p' "$WATCH")"
-for fn in coord_ring_doorbell dispatch_pause_wake_pass host_load_wake_pass idle_capacity_wake_pass ci_failing_ring_pass ready_sweep_pass coord_pending_approval_age; do
+eval "$(sed -n '/^coord_inbox_write() {/,/^}/p; /^coord_ring_doorbell() {/,/^}/p; /^dispatch_pause_active() {/,/^}/p; /^capacity_free_slots() {/,/^}/p; /^dispatchable_issue_counts() {/,/^}/p; /^dispatch_pause_wake_pass() {/,/^}/p; /^host_load_wake_pass() {/,/^}/p; /^idle_capacity_outcome_pass() {/,/^}/p; /^idle_capacity_wake_pass() {/,/^}/p; /^ci_failing_ring_pass() {/,/^}/p; /^ready_sweep_pass() {/,/^}/p; /^coord_pending_approval_age() {/,/^}/p' "$WATCH")"
+for fn in coord_ring_doorbell dispatch_pause_wake_pass host_load_wake_pass idle_capacity_outcome_pass idle_capacity_wake_pass ci_failing_ring_pass ready_sweep_pass coord_pending_approval_age; do
     declare -F "$fn" >/dev/null || red "could not extract $fn from coordinator-watch.sh"
 done
 LAST_IDLE_CAPACITY_CHECK=0
@@ -54,6 +55,9 @@ tmux() { [ "$1" = list-windows ] || return 1; printf '%s\n' "$WINDOWS"; }
 HOLD=""; BUSY=0; APPROVAL_AGE=""
 coord_wake_hold_reason() { printf '%s' "$HOLD"; }
 coord_wake_pane_busy() { [ "$BUSY" = 1 ]; }
+SPLIT=0; RUNBUSY=0
+coord_split_active() { [ "$SPLIT" = 1 ]; }
+coord_split_run_busy() { [ "$RUNBUSY" = 1 ]; }
 wake_debounced() { return 1; }
 coord_wake_hold_mark_pending() { echo "held $1" >> "$EV"; }
 coord_wake_set_pending() { :; }
@@ -77,7 +81,7 @@ echo '[{"number":10,"labels":[{"name":"night-ok"}]},{"number":11,"labels":[{"nam
 
 notes() { find "$COORD_INBOX_DIR" -maxdepth 1 -name "*-$1-*.md" 2>/dev/null | wc -l | tr -d ' '; }
 rings() { [ -f "$RANG" ] && wc -l < "$RANG" | tr -d ' ' || echo 0; }
-reset() { rm -rf "$CI_FAILING_RING_DIR" "$COORD_INBOX_DIR" "$RANG" "$IDLE_CAPACITY_WAKE_FILE" "$IDLE_CAPACITY_SET_FILE" "$DISPATCH_PAUSE_SEEN_FILE" "$HOST_LOAD_REFUSED_FILE"; : > "$EV"; LAST_IDLE_CAPACITY_CHECK=0; HOLD=""; BUSY=0; APPROVAL_AGE=""; }
+reset() { rm -rf "$CI_FAILING_RING_DIR" "$COORD_INBOX_DIR" "$RANG" "$IDLE_CAPACITY_WAKE_FILE" "$IDLE_CAPACITY_SET_FILE" "$IDLE_CAPACITY_OUTCOME_FILE" "$DISPATCH_PAUSE_SEEN_FILE" "$HOST_LOAD_REFUSED_FILE"; : > "$EV"; LAST_IDLE_CAPACITY_CHECK=0; HOLD=""; BUSY=0; APPROVAL_AGE=""; }
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 check "free slots = min(MAX_WORKERS - iss windows, MAX_TMUX_WINDOWS - windows)" "2" "$(capacity_free_slots)"
@@ -468,5 +472,49 @@ ci_failing_ring_pass; ci_failing_ring_pass
 check "after CI_FAILING_RING_MAX_TRIES (3) failures the note is dropped" "no" "$got"
 grep -q "coord.wake.giveup trigger=ci_failing note=41-feedbeef" "$EV" && got=yes || got=no
 check "giveup is logged" "yes" "$got"
+
+# ── issue #901: wake text and prompts share one rule; idle wakes that start nothing are logged ──
+RULE='dispatch AVAILABLE work without asking (`night-ok` first); `night_ok=0` is not "nothing to do"'
+printf '#!/bin/sh\necho "$1" >> "%s"\n' "$RANG" > "$LLM_START"; chmod +x "$LLM_START"
+WATCH_IDLE_CAPACITY_WAKE_SECS=2700; WATCH_IDLE_CAPACITY_CHECK_SECS=0
+echo '[{"number":10,"labels":[{"name":"night-ok"}]},{"number":11,"labels":[{"name":"night-ok"}]},{"number":12,"labels":[]}]' > "$AVAILABLE_JSON"
+for f in prompts/coordinator.md prompts/coordinator-work.md; do
+    grep -qF -- "$RULE" "$ROOT/$f" && got=yes || got=no
+    check "$f states the shared dispatch rule" "yes" "$got"
+done
+reset
+idle_capacity_wake_pass || true
+grep -qiF -- "${RULE/#d/D}" "$COORD_INBOX_DIR"/*-idle_capacity-*.md && got=yes || got=no
+check "idle_capacity wake text uses the same rule wording" "yes" "$got"
+check "wake leaves an outcome snapshot" "yes" "$([ -s "$IDLE_CAPACITY_OUTCOME_FILE" ] && echo yes || echo no)"
+idle_capacity_outcome_pass
+check "note unread, young: nothing logged yet" "0" "$(grep -c dispatch.idle_none "$EV" || true)"
+mv "$COORD_INBOX_DIR"/*-idle_capacity-*.md "$T/"
+BUSY=1; idle_capacity_outcome_pass
+check "coordinator still mid-turn: nothing logged" "0" "$(grep -c dispatch.idle_none "$EV" || true)"
+SPLIT=1; RUNBUSY=1; idle_capacity_outcome_pass
+check "split mode, work run still going: nothing logged" "0" "$(grep -c dispatch.idle_none "$EV" || true)"
+RUNBUSY=0; SPLIT=0
+BUSY=0; idle_capacity_outcome_pass
+grep -q "dispatch.idle_none reason=none_started slots=2 ready=2 night_ok=1" "$EV" && got=yes || got=no
+check "turn consumed note, no worker started: dispatch.idle_none logged" "yes" "$got"
+check "snapshot cleared after logging" "no" "$([ -e "$IDLE_CAPACITY_OUTCOME_FILE" ] && echo yes || echo no)"
+
+reset
+echo '[{"number":12,"labels":[]}]' > "$AVAILABLE_JSON"
+idle_capacity_wake_pass || true; mv "$COORD_INBOX_DIR"/*-idle_capacity-*.md "$T/"
+idle_capacity_outcome_pass
+grep -q "dispatch.idle_none reason=none_started slots=[0-9]* ready=[0-9]* night_ok=0" "$EV" && got=yes || got=no
+check "night_ok=0 and nothing started: reason=none_started with night_ok=0 field" "yes" "$got"
+
+reset
+echo '[{"number":10,"labels":[{"name":"night-ok"}]}]' > "$AVAILABLE_JSON"
+idle_capacity_wake_pass || true; mv "$COORD_INBOX_DIR"/*-idle_capacity-*.md "$T/"
+SAVED_WINDOWS="$WINDOWS"; WINDOWS="$WINDOWS
+iss-10"
+idle_capacity_outcome_pass
+check "a new iss window appeared: no dispatch.idle_none" "0" "$(grep -c dispatch.idle_none "$EV" || true)"
+check "snapshot cleared when a worker started" "no" "$([ -e "$IDLE_CAPACITY_OUTCOME_FILE" ] && echo yes || echo no)"
+WINDOWS="$SAVED_WINDOWS"
 
 green "all capacity-wake checks passed"
