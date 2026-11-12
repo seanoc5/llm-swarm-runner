@@ -63,3 +63,10 @@ green "busy pane refuses"
 [ "$(rc "$NUDGE" "$PROJ" nowin x)" = 2 ] || red "unknown window should exit 2"
 [ "$(rc "$NUDGE" "$PROJ")" = 2 ] || red "usage error should exit 2"
 green "bad target and usage exit 2"
+
+# 6. shared busy default is the exact pattern the watcher shipped (#585 review:
+# a lost backslash once turned the literal "(esc to interrupt)" into a group)
+. "$SCRIPT_DIR/../scripts/_pane-composer.sh"
+case "$PANE_BUSY_PATTERN_DEFAULT" in '\(esc to interrupt\)|'*) green "busy default keeps the escaped literal" ;; *) red "busy default lost its backslashes" ;; esac
+printf '%s' "esc to interrupt" | LC_ALL=C grep -E "$PANE_BUSY_PATTERN_DEFAULT" >/dev/null && red "bare text without parens must not match"
+green "bare 'esc to interrupt' (no parens) is not busy"

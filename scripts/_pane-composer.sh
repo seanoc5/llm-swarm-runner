@@ -8,7 +8,7 @@
 # Default busy-pane pattern (spinner hint, exit-confirm, token ticker, queued-
 # input hint, compaction). coordinator-watch.sh's AUTO_COMPACT_BUSY_PATTERN and
 # WORKER_COMPACT_BUSY_PATTERN default to it; pass it to coord_pane_busy_visible.
-PANE_BUSY_PATTERN_DEFAULT='(esc to interrupt)|Press Ctrl-C again to .xit|· ↓ [0-9.,]+k? tokens|Press up to edit queued messages|Compacting conversation'
+PANE_BUSY_PATTERN_DEFAULT='\(esc to interrupt\)|Press Ctrl-C again to .xit|· ↓ [0-9.,]+k? tokens|Press up to edit queued messages|Compacting conversation'
 
 # Chrome patterns (moved verbatim from coordinator-watch.sh; the header
 # comments there still describe the incidents behind them).
