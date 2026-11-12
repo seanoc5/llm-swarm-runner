@@ -236,6 +236,10 @@ decision made. "Nothing needs your action" when true.>
 
 Draft PR: Action leads "⏳ still draft, waiting on <CI|pr-ready>".
 
+A check you cannot run here (missing browser libs, a 403 on check runs): leave
+the PR draft, open Bottom line with "unverified: <check>", and make Next the
+coordinator running it on the host. Never hand off "run it locally, then merge".
+
 - No move and no surprise: just **Bottom line** + **Next** + **Action**.
 - Always give the full `https://` URL at least once; a bare `#N` isn't
   clickable.
@@ -243,7 +247,10 @@ Draft PR: Action leads "⏳ still draft, waiting on <CI|pr-ready>".
 - A no-PR terminal (`blocked`, `done-no-pr`) has no page behind it, so the
   bottom line may be a short paragraph: files touched, tests run, why no PR.
 
-Mid-task pane replies: put the answer in the first sentence. Never assert the
+Mid-task pane replies: put the answer in the first sentence; for "what is
+holding this PR?" that is one line naming the failing test or check, mechanics
+after. Re-run `gh pr view <N>` first: a `COORDINATOR HOLD` banner or newer
+comment supersedes your earlier handoff, so lead with it. Never assert the
 operator's tmux/session state or that an artifact exists without checking;
 phrase it conditionally instead.
 
