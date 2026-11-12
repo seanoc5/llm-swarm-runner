@@ -91,7 +91,7 @@ For a consolidated treatment of tmux as an inter-agent channel — what works to
 Generalized launcher: `sandbox.sh <project-dir> <agent> [extra-args]`
 
 - `<agent>` ∈ `{claude, gemini, codex, listener, bash}` (default `bash`).
-- Mounts: project dir (rw), `~/.claude` (rw), a per-container copy of `~/.claude.json` (rw — see below), `~/.codex` (rw), `~/.ssh` (ro, only with `SANDBOX_SSH=1` — #638), `~/.gitconfig` (ro), `~/.config/gh` (ro), `~/.npm-global` (rw), `~/.npm` (rw), and the script's own dir (ro, so worker-listener.sh is reachable).
+- Mounts: project dir (rw), `~/.claude` (rw), a per-container copy of `~/.claude.json` (rw — see below), `~/.codex` (rw), `~/.ssh` (ro, only with `SANDBOX_SSH=1` — #638), `~/.gitconfig` (ro), `~/.config/gh` (ro), `~/.npm-global` (ro — the workers' Claude Code install, #742), `~/.npm` (rw), and the script's own dir (ro, so worker-listener.sh is reachable).
 - **`~/.claude.json` isolation (#286):** rather than bind-mounting the host's `~/.claude.json` directly (which pinned an inode that the CLI's write-temp-then-rename rewrites and sibling containers' rewrites could orphan or tear), `sandbox.sh` seeds a private copy per container under `~/.claude-sandbox-configs/` — keyed by `WORKER_CONTAINER_NAME` when set, else by `PROJECT_DIR` — and reuses it across relaunches. `SANDBOX_REFRESH_CLAUDE_CONFIG=1` forces a reseed from the host file.
 - Auto-mounts the **git common dir** when invoked on a worktree whose `.git` file points outside the project dir.
 - **Docker-out-of-Docker (DooD):** mounts `/var/run/docker.sock` so Testcontainers / `docker` CLI work inside the sandbox; `--group-add` gives the sandbox user write perms on the socket.
@@ -686,7 +686,7 @@ The `Dockerfile` pins all upstream-version-sensitive tools via `ARG`-driven vers
 | ARG | Default | Notes |
 |---|---|---|
 | `NODE_MAJOR` | `22` | Major only — NodeSource ships stable patches inside a major. |
-| `CLAUDE_CODE_VERSION` | `2.1.126` | Bump after testing — claude-code minor releases occasionally rename CLI flags. |
+| `CLAUDE_CODE_VERSION` | `latest` | Fallback only (#742): workers run the host's `~/.npm-global` copy, mounted read-only and updated by `scripts/update-worker-claude.sh`. The image copy runs only when that directory is empty. |
 | `GEMINI_CLI_VERSION` | `0.62.0` | Bump cautiously — gemini-cli's tool-call protocol has changed across versions. |
 | `OPENAI_CODEX_VERSION` | `0.128.0` | Less load-bearing — we don't currently script against it. |
 | `PROMPTFOO_VERSION` | `0.121.9` | Same. |
@@ -704,7 +704,8 @@ npm view @anthropic-ai/claude-code version
 curl -s https://api.github.com/repos/astral-sh/uv/releases/latest | jq -r .tag_name
 
 # Bump the ARG in Dockerfile, OR override at build time:
-docker build --build-arg CLAUDE_CODE_VERSION=2.2.0 -t llm-swarm-runner:latest .
+docker build --build-arg GEMINI_CLI_VERSION=0.63.0 -t llm-swarm-runner:latest .
+# The Claude Code that workers run is not bumped here: scripts/update-worker-claude.sh
 
 # Test the e2e suite to confirm nothing regressed:
 ./tests/test-e2e-swarm.sh
