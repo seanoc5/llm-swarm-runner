@@ -218,6 +218,28 @@ EOF
     chmod +x "$FAKE_REVIEW"
 }
 
+
+# issue #731: stand-in for risk-floor.sh (the real script is covered by
+# test-risk-floor.sh). FAKE_FLOOR_RC: 0 = rating fine, 10 = "bumped" (also
+# rewrites the PR body's marker to medium, as the real --apply does), other =
+# script failure. Default 0 so older tests see no floor effect.
+FAKE_FLOOR="$TEST_DIR/fake-risk-floor.sh"
+FAKE_FLOOR_LOG="$TEST_DIR/fake-floor.log"
+FAKE_FLOOR_RC_FILE="$TEST_DIR/fake-floor-rc"
+make_fake_floor() {
+    echo "$1" > "$FAKE_FLOOR_RC_FILE"
+    cat > "$FAKE_FLOOR" <<FEOF
+#!/usr/bin/env bash
+echo "\$*" >> "$FAKE_FLOOR_LOG"
+rc="\$(cat "$FAKE_FLOOR_RC_FILE")"
+echo "floor: medium"
+echo "rule: migrations — touches a database migration (db/migration/V9__x.sql)"
+[ "\$rc" != 10 ] || sed -i 's/BLIND_MERGE_RISK: low/BLIND_MERGE_RISK: medium/' "$BODY_FILE"
+exit "\$rc"
+FEOF
+    chmod +x "$FAKE_FLOOR"
+}
+make_fake_floor 0
 # The real "ready" call is logged as `pr ready 42`; the hold's re-draft is
 # `pr ready --undo 42` and must not count (issue #616).
 gh_ready_called() { grep -q '^pr ready 42$' "$GH_LOG"; }
@@ -226,9 +248,9 @@ gh_undo_called() { grep -q '^pr ready --undo 42$' "$GH_LOG"; }
 run_pr_ready() {
     : > "$GH_LOG"
     rm -f "$EDITED_BODY" "$TEST_DIR/hold-late"
-    : > "$FAKE_REVIEW_LOG"
+    : > "$FAKE_REVIEW_LOG"; : > "$FAKE_FLOOR_LOG"
     rc=0
-    PATH="$SHIM_DIR:$PATH" SELF_REVIEW_SCRIPT="$FAKE_REVIEW" WORKER_SELF_REVIEW="${WORKER_SELF_REVIEW:-1}" \
+    PATH="$SHIM_DIR:$PATH" SELF_REVIEW_SCRIPT="$FAKE_REVIEW" RISK_FLOOR_SCRIPT="$FAKE_FLOOR" WORKER_SELF_REVIEW="${WORKER_SELF_REVIEW:-1}" \
         WORKER_SELF_REVIEW_MAX_ROUNDS="${WORKER_SELF_REVIEW_MAX_ROUNDS:-3}" \
         GH_ROUNDS_DONE="${GH_ROUNDS_DONE:-0}" GH_LATEST_VERDICT="${GH_LATEST_VERDICT:-}" \
         GH_COMMENTS_JSON="${GH_COMMENTS_JSON:-}" \
@@ -1242,5 +1264,99 @@ MIGRATION_CHECK_SCRIPT=""
 [ "$rc" -eq 0 ] || red "expected exit 0, got $rc: $(cat "$TEST_DIR/out.log")"
 grep -q 'migration check: WARN: PR #9 lists' "$TEST_DIR/out.log" || red "check's stderr warning was dropped: $(cat "$TEST_DIR/out.log")"
 green "stderr warning surfaced"
+
+# ============================================================================
+# issue #731: risk floor (Tests 44-47) and the optional 🟢 review (Tests 48-52)
+# ============================================================================
+heading "Test 44: 🟢 whose diff is above the floor is bumped and takes the 🟡 review path"
+printf '<!-- BLIND_MERGE_RISK: low -->\nadds a migration\n' > "$BODY_FILE"
+make_fake_review 0; make_fake_floor 10
+rc=0; run_pr_ready || rc=$?
+[ "$rc" -eq 0 ] || red "expected exit 0, got $rc: $(cat "$TEST_DIR/out.log")"
+grep -q -- '--apply 42' "$FAKE_FLOOR_LOG" || red "risk-floor.sh --apply not called: $(cat "$FAKE_FLOOR_LOG")"
+grep -q 'rating bumped' "$TEST_DIR/out.log" || red "bump not announced: $(cat "$TEST_DIR/out.log")"
+grep -q 'migrations' "$TEST_DIR/out.log" || red "rule that fired not shown: $(cat "$TEST_DIR/out.log")"
+grep -q -- '--post --force --actor worker' "$FAKE_REVIEW_LOG" || red "bumped PR must go through self-review, log: $(cat "$FAKE_REVIEW_LOG")"
+grep -q -- '--model' "$FAKE_REVIEW_LOG" && red "a bumped 🟡 review must not use the green-review model: $(cat "$FAKE_REVIEW_LOG")"
+gh_ready_called || red "expected gh pr ready after the review passed"
+green "bump → marker now medium → self-review runs → readies"
+
+heading "Test 45: a bumped PR whose review says BLOCK is still refused"
+printf '<!-- BLIND_MERGE_RISK: low -->\nadds a migration\n' > "$BODY_FILE"
+make_fake_review 2; make_fake_floor 10
+rc=0; run_pr_ready || rc=$?
+[ "$rc" -eq 2 ] || red "expected exit 2 (BLOCK), got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called && red "gh pr ready must not run after BLOCK"
+green "bumped PR + BLOCK → refused"
+
+heading "Test 46: risk-floor.sh failing → 🟢 treated as 🟡 for this run (fails toward review)"
+printf '<!-- BLIND_MERGE_RISK: low -->\nsmall\n' > "$BODY_FILE"
+make_fake_review 0; make_fake_floor 1
+rc=0; run_pr_ready || rc=$?
+[ "$rc" -eq 0 ] || red "expected exit 0, got $rc: $(cat "$TEST_DIR/out.log")"
+grep -q 'risk-floor.sh failed' "$TEST_DIR/out.log" || red "failure not surfaced: $(cat "$TEST_DIR/out.log")"
+grep -q -- '--post --force --actor worker' "$FAKE_REVIEW_LOG" || red "floor failure must trigger review, log: $(cat "$FAKE_REVIEW_LOG")"
+green "floor failure → review runs"
+
+heading "Test 47: floor satisfied (🟢 stays 🟢) and RISK_FLOOR=0 skips the check entirely"
+printf '<!-- BLIND_MERGE_RISK: low -->\nsmall\n' > "$BODY_FILE"
+make_fake_review 0; make_fake_floor 0
+rc=0; run_pr_ready || rc=$?
+[ "$rc" -eq 0 ] || red "expected exit 0, got $rc"
+grep -q -- '--apply 42' "$FAKE_FLOOR_LOG" || red "floor should have been consulted"
+[ ! -s "$FAKE_REVIEW_LOG" ] || red "no review expected for an unbumped 🟢, log: $(cat "$FAKE_REVIEW_LOG")"
+rc=0; RISK_FLOOR=0 run_pr_ready || rc=$?
+[ "$rc" -eq 0 ] || red "expected exit 0 with RISK_FLOOR=0, got $rc"
+[ ! -s "$FAKE_FLOOR_LOG" ] || red "RISK_FLOOR=0 must not call risk-floor.sh, log: $(cat "$FAKE_FLOOR_LOG")"
+green "floor consulted by default; RISK_FLOOR=0 skips it"
+
+heading "Test 48: GREEN_REVIEW unset / 0 — no review call for 🟢 (behaviour as before)"
+printf '<!-- BLIND_MERGE_RISK: low -->\nsmall\n' > "$BODY_FILE"
+make_fake_review 2; make_fake_floor 0
+rc=0; run_pr_ready || rc=$?
+[ "$rc" -eq 0 ] || red "unset: expected exit 0, got $rc: $(cat "$TEST_DIR/out.log")"
+[ ! -s "$FAKE_REVIEW_LOG" ] || red "unset: review must not run, log: $(cat "$FAKE_REVIEW_LOG")"
+rc=0; GREEN_REVIEW=0 run_pr_ready || rc=$?
+[ "$rc" -eq 0 ] || red "GREEN_REVIEW=0: expected exit 0, got $rc"
+[ ! -s "$FAKE_REVIEW_LOG" ] || red "GREEN_REVIEW=0: review must not run, log: $(cat "$FAKE_REVIEW_LOG")"
+gh_ready_called || red "expected gh pr ready"
+green "GREEN_REVIEW off → zero review calls, even with a reviewer that would BLOCK"
+
+heading "Test 49: GREEN_REVIEW=1 runs the review on a 🟢 PR with the haiku model by default"
+make_fake_review 0
+rc=0; GREEN_REVIEW=1 run_pr_ready || rc=$?
+[ "$rc" -eq 0 ] || red "expected exit 0, got $rc: $(cat "$TEST_DIR/out.log")"
+grep -q -- '42 --post --force --actor worker --model haiku' "$FAKE_REVIEW_LOG" || red "expected review with --model haiku, log: $(cat "$FAKE_REVIEW_LOG")"
+gh_ready_called || red "expected gh pr ready after APPROVE"
+rc=0; GREEN_REVIEW=1 GREEN_REVIEW_MODEL=claude-haiku-5-5 run_pr_ready || rc=$?
+grep -q -- '--model claude-haiku-5-5' "$FAKE_REVIEW_LOG" || red "GREEN_REVIEW_MODEL not honoured, log: $(cat "$FAKE_REVIEW_LOG")"
+green "GREEN_REVIEW=1 → review with --model \${GREEN_REVIEW_MODEL:-haiku}"
+
+heading "Test 50: GREEN_REVIEW=1 — BLOCK refuses to ready; caveats do not"
+make_fake_review 2
+rc=0; GREEN_REVIEW=1 run_pr_ready || rc=$?
+[ "$rc" -eq 2 ] || red "expected exit 2 on BLOCK, got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called && red "gh pr ready must not run after a green-review BLOCK"
+make_fake_review 3
+rc=0; GREEN_REVIEW=1 run_pr_ready || rc=$?
+[ "$rc" -eq 0 ] || red "expected exit 0 on APPROVE_WITH_CAVEATS, got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called || red "caveats must not block readying"
+green "BLOCK refuses, caveats proceed"
+
+heading "Test 51: GREEN_REVIEW=1 still honours WORKER_SELF_REVIEW=0"
+make_fake_review 2
+rc=0; GREEN_REVIEW=1 WORKER_SELF_REVIEW=0 run_pr_ready || rc=$?
+[ "$rc" -eq 0 ] || red "expected exit 0, got $rc"
+[ ! -s "$FAKE_REVIEW_LOG" ] || red "kill switch must win, log: $(cat "$FAKE_REVIEW_LOG")"
+green "kill switch wins over GREEN_REVIEW"
+
+heading "Test 52: GREEN_REVIEW=1 does not touch a 🟡 PR's model"
+printf '<!-- BLIND_MERGE_RISK: medium -->\nsource change\n' > "$BODY_FILE"
+make_fake_review 0
+rc=0; GREEN_REVIEW=1 run_pr_ready || rc=$?
+[ "$rc" -eq 0 ] || red "expected exit 0, got $rc"
+grep -q -- '--model' "$FAKE_REVIEW_LOG" && red "🟡 must keep the default model, log: $(cat "$FAKE_REVIEW_LOG")"
+[ ! -s "$FAKE_FLOOR_LOG" ] || red "floor is only consulted for 🟢, log: $(cat "$FAKE_FLOOR_LOG")"
+green "🟡 unaffected"
 
 green "ALL TESTS PASSED"

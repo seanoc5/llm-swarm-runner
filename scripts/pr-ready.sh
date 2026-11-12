@@ -24,6 +24,12 @@
 #                         every other gate (BLOCK, CI-green, hold) still
 #                         applies.
 #
+# issue #731: for a 🟢 PR it first runs risk-floor.sh --apply — a diff above 🟢
+# (migration, build/CI/auth config, large, disabled tests) gets the marker bumped
+# and then takes the 🟡 path below; RISK_FLOOR=0 skips it. GREEN_REVIEW=1 sends a
+# still-🟢 PR through the same review with GREEN_REVIEW_MODEL (default haiku).
+# See docs/risk-floor.md.
+#
 # Reads the PR body's `<!-- BLIND_MERGE_RISK: low|medium|high -->` marker
 # (prompts/worker.md § "PR risk assessment") to decide whether self-review
 # applies at all, mirroring that doc's own rubric exactly:
@@ -182,6 +188,7 @@ LLM_SWARM_DIR="${LLM_SWARM_DIR:-$(dirname "$SCRIPT_DIR")}"
 # which shells out to `claude -p` and can't be exercised in CI/tests).
 SELF_REVIEW="${SELF_REVIEW_SCRIPT:-$SCRIPT_DIR/self-review-pr.sh}"
 MIGRATION_CHECK="${MIGRATION_CHECK_SCRIPT:-$SCRIPT_DIR/migration-collision-check.sh}"
+RISK_FLOOR_SCRIPT="${RISK_FLOOR_SCRIPT:-$SCRIPT_DIR/risk-floor.sh}"
 
 USAGE="usage: pr-ready.sh [-y|--one-more-round] <PR#>"
 ONE_MORE_ROUND=0
@@ -395,6 +402,43 @@ if [ "$OPEN_PR_CLASH_RC" = 6 ]; then
     printf '%s\n' "$OPEN_PR_CLASH_OUT" | sed 's/^/          /' >&2
 fi
 
+# issue #731: a 🟢 rating must match the diff. risk-floor.sh --apply prints the
+# lowest colour the diff allows; when the body's marker is below it, it bumps
+# the marker and comments with the rule that fired, and the PR then takes the
+# 🟡 path below (self-review). Fails toward review: if the floor can't be
+# computed, a 🟢 PR is treated as 🟡 for this run (marker untouched). Kill
+# switch RISK_FLOOR=0 (documented in .env.example).
+if [ "$RISK" = "low" ] && [ "${RISK_FLOOR:-1}" != "0" ]; then
+    FLOOR_RC=0
+    FLOOR_OUT="$("$RISK_FLOOR_SCRIPT" --apply "$PR" 2>&1)" || FLOOR_RC=$?
+    case "$FLOOR_RC" in
+        0) : ;;
+        10)
+            echo "pr-ready: risk-floor: PR #$PR's diff is above 🟢 — rating bumped:"
+            sed 's/^/          /' <<<"$FLOOR_OUT"
+            if fresh="$(gh pr view "$PR" --json body --jq .body 2>/dev/null)"; then BODY="$fresh"; fi
+            RISK="$(grep -oE '<!-- BLIND_MERGE_RISK: (low|medium|high) -->' <<<"$BODY" \
+                | sed -n 1p | sed -E 's/.*: (low|medium|high) -->/\1/' || true)"
+            [ -n "$RISK" ] || RISK=medium
+            ;;
+        *)
+            echo "pr-ready: WARN: risk-floor.sh failed (exit $FLOOR_RC) — treating PR #$PR as medium for this run (fail toward review):" >&2
+            sed 's/^/          /' <<<"$FLOOR_OUT" >&2
+            RISK=medium
+            ;;
+    esac
+fi
+
+# issue #731: GREEN_REVIEW=1 sends a (still) 🟢 PR through the same review
+# path as 🟡, with GREEN_REVIEW_MODEL (default haiku). Off by default: with
+# GREEN_REVIEW unset or 0 nothing below differs from before.
+REVIEW_KIND="$RISK"
+REVIEW_MODEL_ARGS=()
+if [ "$RISK" = "low" ] && [ "${GREEN_REVIEW:-0}" = "1" ]; then
+    REVIEW_KIND=green
+    REVIEW_MODEL_ARGS=(--model "${GREEN_REVIEW_MODEL:-haiku}")
+fi
+
 SKIP_REVIEW=0
 if [[ "$OLD_REASON" == ci-* ]] && [ -n "$OLD_REASON_SHA" ] && [ "$OLD_REASON_SHA" = "$(head_sha)" ]; then
     SKIP_REVIEW=1
@@ -403,11 +447,11 @@ fi
 if [ "$SKIP_REVIEW" = "1" ]; then
     echo "pr-ready: self-review already passed on ${OLD_REASON_SHA:0:7} (last refusal was $OLD_REASON on this same commit) — going straight to the CI gate"
 else
-case "$RISK" in
+case "$REVIEW_KIND" in
     low)
         echo "pr-ready: risk=low — self-review not required (worker.md rubric); readying"
         ;;
-    medium|high|"")
+    medium|high|green|"")
         if [ -z "$RISK" ]; then
             echo "pr-ready: WARN: no BLIND_MERGE_RISK marker found on PR #$PR's body — treating as medium (fail toward requiring review)" >&2
             RISK="medium"
@@ -481,7 +525,7 @@ case "$RISK" in
                     refuse review-block 2
                 fi
             else
-            echo "pr-ready: risk=$RISK — running self-review (round $((ROUNDS_DONE + 1))/$MAX_ROUNDS: $SELF_REVIEW $PR --post --force --actor worker)..."
+            echo "pr-ready: risk=$RISK — running self-review (round $((ROUNDS_DONE + 1))/$MAX_ROUNDS: $SELF_REVIEW $PR --post --force --actor worker ${REVIEW_MODEL_ARGS[*]:-})..."
             rc=0
             # --force is required, not optional (self-review's own
             # self-review finding on this script's first version):
@@ -496,7 +540,7 @@ case "$RISK" in
             # own default (issue #601) — passed explicitly here so this,
             # the one call site that actually represents the worker's own
             # round, never silently drifts if that default ever changes.
-            "$SELF_REVIEW" "$PR" --post --force --actor worker || rc=$?
+            "$SELF_REVIEW" "$PR" --post --force --actor worker ${REVIEW_MODEL_ARGS[@]+"${REVIEW_MODEL_ARGS[@]}"} || rc=$?
             case "$rc" in
                 0|3)
                     : # APPROVE / APPROVE_WITH_CAVEATS — proceed

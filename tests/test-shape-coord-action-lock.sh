@@ -18,6 +18,8 @@ red()     { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 heading() { printf '\n\033[1;34m=== %s ===\033[0m\n' "$*"; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# issue #731: this test is about other gates — stub the risk floor (Gate 1b) to "rating is fine".
+export RISK_FLOOR_SCRIPT="$SCRIPT_DIR/fixtures/risk-floor-ok.sh"
 ROOT="$SCRIPT_DIR/.."
 TEST_DIR=$(mktemp -d -t shape-coord-action-lock-XXXXXX)
 trap '[ "${KEEP:-0}" = 1 ] || rm -rf "$TEST_DIR"' EXIT

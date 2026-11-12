@@ -45,6 +45,8 @@ yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
 heading(){ printf '\n\033[1;34m=== %s ===\033[0m\n' "$*"; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# issue #731: this test is about other gates — stub the risk floor (Gate 1b) to "rating is fine".
+export RISK_FLOOR_SCRIPT="$SCRIPT_DIR/fixtures/risk-floor-ok.sh"
 AUTH="$SCRIPT_DIR/../scripts/check-coordinator-authorship.sh"
 MERGE="$SCRIPT_DIR/../scripts/swarm-merge.sh"
 for s in "$AUTH" "$MERGE"; do
@@ -322,6 +324,32 @@ echo "$OUT" | grep -qi "gate 2" || red "refusal must name Gate 2"
 grep -q "pr merge" "$GH_LOG" && red "gh pr merge was called despite failing CI"
 green "--auto-low refuses on failing CI (Gate 2), gh pr merge never called"
 
+
+# ============================================================================
+heading "Test 7b: --auto-low Gate 1b (risk floor, issue #731) — a 🟢 below the diff's floor is refused, fail-closed"
+# ============================================================================
+FLOOR_BUMP="$TEST_DIR/floor-bump.sh"
+printf '#!/usr/bin/env bash\necho "floor: medium"\necho "rule: migrations — touches a database migration (db/migration/V9__x.sql)"\nexit 10\n' > "$FLOOR_BUMP"
+FLOOR_BROKEN="$TEST_DIR/floor-broken.sh"
+printf '#!/usr/bin/env bash\necho "ERROR: boom" >&2\nexit 1\n' > "$FLOOR_BROKEN"
+chmod +x "$FLOOR_BUMP" "$FLOOR_BROKEN"
+: > "$GH_LOG"
+if OUT=$(RISK_FLOOR_SCRIPT="$FLOOR_BUMP" "$MERGE" 501 --auto-low 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -ne 0 ] || red "swarm-merge --auto-low should refuse a bumped PR"
+echo "$OUT" | grep -qi "gate 1b" || red "refusal must name Gate 1b: $OUT"
+echo "$OUT" | grep -q "rule: migrations" || red "refusal must show the rule that fired: $OUT"
+grep -q "pr merge" "$GH_LOG" && red "gh pr merge was called despite the risk-floor refusal"
+: > "$GH_LOG"
+if OUT=$(RISK_FLOOR_SCRIPT="$FLOOR_BROKEN" "$MERGE" 501 --auto-low 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -ne 0 ] || red "a failing risk-floor.sh must fail closed"
+echo "$OUT" | grep -qi "gate 1b" || red "fail-closed refusal must name Gate 1b: $OUT"
+grep -q "pr merge" "$GH_LOG" && red "gh pr merge was called after risk-floor.sh errored"
+: > "$GH_LOG"
+# CI forced red so the run still ends in a refusal (at Gate 2) instead of merging PR 501 for later tests
+if OUT=$(GH_CHECKS_RC=1 RISK_FLOOR=0 RISK_FLOOR_SCRIPT="$FLOOR_BUMP" "$MERGE" 501 --auto-low 2>&1); then RC=0; else RC=$?; fi
+echo "$OUT" | grep -qi "gate 2" || red "with the floor off the run should reach Gate 2: $OUT"
+echo "$OUT" | grep -qi "gate 1b" && red "RISK_FLOOR=0 must skip Gate 1b: $OUT"
+green "Gate 1b refuses a bump and a script failure; RISK_FLOOR=0 skips it"
 # ============================================================================
 heading "Test 8: swarm-merge.sh --auto-low refuses while CI is still pending (real wait, not a snapshot)"
 # ============================================================================
