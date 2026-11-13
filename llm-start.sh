@@ -1222,7 +1222,22 @@ elif { [ "$COORD_CMD" = "claude" ] || [ "$COORD_CMD" = "agy" ]; } && [ "${COORDI
         TMP_PROMPT=$(mktemp)
         printf '%s\n' "$INITIAL_PROMPT" > "$TMP_PROMPT"
         REPROMPT_RC=0
-        reprompt_inject "$SESSION_NAME:coordinator.0" "$TMP_PROMPT" || REPROMPT_RC=$?
+        # issue #421 (ADR 0005 Option 1): a claude coordinator is woken by a
+        # harness-native SendMessage doorbell first — nothing is pasted, so an
+        # operator's unsubmitted draft is untouched. Any failure (no coordinator
+        # session of that name, e.g. one launched before this shipped; courier
+        # error/timeout) logs coord.wake.doorbell_failed and falls through to the
+        # guarded paste below, which stays the only path for agy/gemini/codex
+        # (ADR S5) and COORD_DOORBELL=0.
+        DOORBELL_DONE=0
+        if [ "$COORD_CMD" = "claude" ] && [ "${COORD_DOORBELL:-1}" != "0" ]; then
+            if EVENTS_LOG="$EVENTS_LOG" "$LLM_SWARM_DIR/scripts/coord-doorbell.sh" "$PWD" "$TMP_PROMPT"; then
+                DOORBELL_DONE=1
+            else
+                log_event coord.wake.fallback "from=doorbell to=send-keys"
+            fi
+        fi
+        [ "$DOORBELL_DONE" = "1" ] || reprompt_inject "$SESSION_NAME:coordinator.0" "$TMP_PROMPT" || REPROMPT_RC=$?
         rm -f "$TMP_PROMPT"
         [ "$REPROMPT_RC" = "2" ] && REPROMPT_DEFERRED=1
     else

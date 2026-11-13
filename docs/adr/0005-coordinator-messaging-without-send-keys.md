@@ -1,11 +1,9 @@
 # ADR 0005 — Coordinator wake & messaging without tmux `send-keys`
 
-- **Status:** Proposed — spikes S1/S2/S4/S5 run live from inside a real
-  worker sandbox during this ADR's authoring (2026-09-11); S2's cross-session
-  case and S3 rest on the tool's documented contract rather than a live
-  two-session trial (see "Spike results" for why, and what's left before
-  Option 1 ships). Becomes Accepted once the residual S2/S3 trial (see
-  "Residual spike work") is run.
+- **Status:** Accepted (2026-11-13) — the residual cross-session trial (S2/S3)
+  and the session-naming convention (S1) are done; see "Residual spike
+  results (2026-11-13, issue #421)". Option 1 ships in #421. Spikes S1/S2/S4/S5
+  were first run live from inside a real worker sandbox (2026-09-11).
 - **Date:** 2026-09-11.
 - **Deciders:** llm-swarm-runner maintainers.
 - **Issue:** [#367](https://github.com/seanoc5/llm-swarm-runner/issues/367)
@@ -330,6 +328,9 @@ of proportion for this spike.
 
 ## Residual spike work (before Option 1 implementation)
 
+*Items 1 and 2 were completed 2026-11-13 under #421 (see above). Item 3
+(`/loop` restructuring) remains open and gates Option 2 only.*
+
 1. **Live two-session cross-session trial** (S2/S3 gap): spin up a
    disposable second `claude` session on the coordinator's host, confirm a
    worker container's `ListAgents` surfaces it distinctly from the 500+
@@ -345,6 +346,45 @@ of proportion for this spike.
    committing to Option 2, confirm `ScheduleWakeup`/`/loop` dynamic-mode
    re-entry composes with an operator interactively driving the same
    coordinator lineage mid-loop, and survives `--resume`.
+
+## Residual spike results (2026-11-13, issue #421)
+
+Run live from a worker sandbox (`claude 2.1.323`): a disposable second
+interactive `claude -n spike421-target` in its own tmux socket, messaged from
+this session with `SendMessage`. Evidence is the target's pane and an
+append-only log file it wrote on each message.
+
+| Case | Observed |
+|---|---|
+| Discovery | `ListAgents` showed the live target as one row (`spike421-target [ref] · interactive · idle · tmux …`). It lists only **live** sessions, not the 512 historical rows S1 saw, so one deterministic name is enough. |
+| Idle target | The message started a turn by itself (`› Message from @<sender>` in the pane) and the target acted on it. This closes the origination gap #453's Q4 left open: a cross-session message **can** wake a fully idle session. |
+| Operator draft | Draft text typed (no Enter) into the target's composer stayed byte-identical in the composer through the delivery and the whole turn the message triggered; the message was still delivered and acted on. This is the #366B hazard, removed by construction. |
+| Busy target | Two messages sent during a 30s tool call both arrived in the target's next tool round, in send order (A then B), neither lost. |
+| Target gone | After killing the target, `SendMessage` returned `success:false` ("No agent named … is reachable") immediately. Visible failure, nothing queued, nothing silently dropped. |
+| Headless courier | `claude -p --model haiku --tools SendMessage` (prompt on stdin: `--tools` is variadic and swallows a positional prompt) delivered to a named session in 5.8s for $0.014, as a `<cross-session-message>`. |
+
+Caveats kept: `success:true` means the message reached the session's inbox, not
+that its Claude read it; a receiver in a different permission mode holds
+messages for approval, so the courier runs `--dangerously-skip-permissions` to
+match the coordinator. Only same-machine, same-account sessions were tested.
+Not re-tested: delivery across `claude --resume`.
+
+**Naming convention (S1 gap):** the coordinator is launched with
+`claude --name swarm-<project basename>` (`scripts/_coord-name.sh`,
+`coordinator-claude.sh`); senders address that name.
+
+**Courier choice (Constraints: "pick and document one"):** a minimal headless
+courier, `scripts/coord-doorbell.sh`, called from `llm-start.sh`'s live-REPL
+branch. Every watcher wake path already funnels through that branch, so all of
+them inherit the doorbell without touching the watcher's call sites. The
+finishing worker's own SendMessage was rejected: the watcher also wakes for
+non-worker triggers (stalls, capacity, held wakes), and workers would need the
+coordinator name plumbed into every brief. The courier's success is decided by
+the script from the stream-json transcript (right target, exact text,
+`success:true`), never from the model's prose. Any failure logs
+`coord.wake.doorbell_failed` + `coord.wake.fallback` and runs the guarded
+paste, which stays the only path for gemini/codex/agy (S5) and
+`COORD_DOORBELL=0`.
 
 ## Addendum (2026-09-25) — `Stop`/`UserPromptSubmit` hooks as a surfacing layer
 
