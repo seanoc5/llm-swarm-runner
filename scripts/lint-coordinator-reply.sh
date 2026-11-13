@@ -55,7 +55,7 @@ set -uo pipefail
 PROJECT=""; FILE=""; ONLY=""
 while [ $# -gt 0 ]; do
     case "$1" in
-        -h|--help) sed -n '3,50p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '3,52p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         --project) [ $# -ge 2 ] || { echo "--project needs a value" >&2; exit 2; }; PROJECT="$2"; shift 2 ;;
         --only) [ $# -ge 2 ] || { echo "--only needs a value" >&2; exit 2; }; ONLY=",$2,"; shift 2 ;;
         --only=*) ONLY=",${1#*=},"; shift ;;

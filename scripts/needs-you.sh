@@ -44,7 +44,7 @@ SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LINT="$SELF_DIR/lint-coordinator-reply.sh"
 
 die() { echo "needs-you.sh: $*" >&2; exit 2; }
-usage() { sed -n '3,46p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '3,40p' "$0" | sed 's/^# \{0,1\}//'; }
 
 cmd="${1:-}"
 [ -n "$cmd" ] || { usage >&2; exit 2; }
