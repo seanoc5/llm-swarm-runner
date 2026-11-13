@@ -2407,6 +2407,11 @@ EVENTS LOG
                            default) at/over the (flat-fallback) threshold, but the coordinator's
                            window size couldn't be confirmed at all — refused rather than trust that
                            fallback blindly (trigger=poll|wake); see header comment
+      coord.recycle        (issue #717) /clear typed into the idle coordinator pane, startup checklist re-run
+                           (trigger=after_compact|age, age=secs); COORD_RECYCLE=1 only
+      coord.recycle.skip   a due recycle was held back (reason=not_cli|pane_busy|human_present|
+                           composer_dirty|pending_approval|locked|clear_not_submitted, trigger=...)
+      coord.recycle.checklist_failed  /clear landed but the checklist injection exited nonzero (rc, trigger)
       worker.compact        /compact injected into an iss-* window (issue, used, threshold, wrapup)
       worker.compact.skip   worker auto-compact skipped this window this cycle (issue,
                            reason=pane_busy|no_ctx_parsed|task_done|backoff|...; reason=task_done
@@ -2862,6 +2867,13 @@ AUTO_COMPACT_THRESHOLD_CAP_TOKENS="${AUTO_COMPACT_THRESHOLD_CAP_TOKENS:-250000}"
 # interval and cooldown from WATCH_PR_POLL_SECS/its gate, on purpose.
 AUTO_COMPACT_TICK_SECS="${AUTO_COMPACT_TICK_SECS:-60}"
 AUTO_COMPACT_COOLDOWN_SECS="${AUTO_COMPACT_COOLDOWN_SECS:-900}"
+# issue #717 (A2) — recycle a long coordinator session; see "Coordinator
+# session recycling" above run_coord_recycle_loop. Off by default.
+COORD_RECYCLE="${COORD_RECYCLE:-0}"
+COORD_RECYCLE_HOURS="${COORD_RECYCLE_HOURS:-12}"
+COORD_RECYCLE_MIN_GAP_SECS="${COORD_RECYCLE_MIN_GAP_SECS:-3600}"
+COORD_RECYCLE_TICK_SECS="${COORD_RECYCLE_TICK_SECS:-300}"
+COORD_RECYCLE_PROMPT="${COORD_RECYCLE_PROMPT:-Execute the Initial Startup Checklist.}"
 # Matches coordinator-claude.sh's own STATUSLINE_PROBE default for its
 # claude invocation — a project+role-scoped path, NOT the statusline
 # script's generic per-UID default. Using the generic default here would
@@ -3190,6 +3202,7 @@ mkdir -p "$(dirname "$EVENTS_LOG")" 2>/dev/null || true
 # path in run_auto_compact_poll_loop's own background process) — this lock
 # serializes them. See maybe_auto_compact's header comment for why.
 AUTO_COMPACT_LOCK="$PROJECT_DIR/.swarm/coord-compact.lock"
+COORD_RECYCLE_STATE="$PROJECT_DIR/.swarm/coord-recycle-at"   # epoch of the last recycle (issue #717)
 # issue #392: same problem, one level up. Before this feature, every
 # NON_INTERACTIVE=1 "$LLM_START" wake call (on_outcome, on_message) ran
 # from the single main watcher process, so llm-start.sh's reprompt_inject —
@@ -3702,6 +3715,9 @@ format_event_line() {
         coord.compact.replayed)             glyph="·"; color=$'\033[2m'  ;;
         coord.compact.ineffective)          glyph="⚠"; color=$'\033[31m' ;;
         coord.compact.verify_skip)            glyph="·"; color=$'\033[2m'  ;;
+        coord.recycle)                        glyph="♻"; color=$'\033[36m' ;;
+        coord.recycle.skip)                   glyph="·"; color=$'\033[2m'  ;;
+        coord.recycle.checklist_failed)       glyph="⚠"; color=$'\033[33m' ;;
         worker.compact)                 glyph="◈"; color=$'\033[36m' ;;
         worker.compact.skip)             glyph="·"; color=$'\033[2m'  ;;
         worker.compact.timeout)           glyph="⚠"; color=$'\033[33m' ;;
@@ -3902,6 +3918,7 @@ fi
 WATCH_TIMER_PID=""
 WORKER_COMPACT_TIMER_PID=""
 AUTO_COMPACT_POLL_TIMER_PID=""
+COORD_RECYCLE_TIMER_PID=""
 STALE_CHECK_PID=""
 STALL_WAKE_TIMER_PID=""
 CAPACITY_WAKE_TIMER_PID=""
@@ -3911,6 +3928,7 @@ cleanup_on_exit() {
     [ -n "${WATCH_TIMER_PID:-}" ] && kill "$WATCH_TIMER_PID" 2>/dev/null || true
     [ -n "${WORKER_COMPACT_TIMER_PID:-}" ] && kill "$WORKER_COMPACT_TIMER_PID" 2>/dev/null || true
     [ -n "${AUTO_COMPACT_POLL_TIMER_PID:-}" ] && kill "$AUTO_COMPACT_POLL_TIMER_PID" 2>/dev/null || true
+    [ -n "${COORD_RECYCLE_TIMER_PID:-}" ] && kill "$COORD_RECYCLE_TIMER_PID" 2>/dev/null || true
     [ -n "${STALE_CHECK_PID:-}" ] && kill "$STALE_CHECK_PID" 2>/dev/null || true
     [ -n "${STALL_WAKE_TIMER_PID:-}" ] && kill "$STALL_WAKE_TIMER_PID" 2>/dev/null || true
     [ -n "${CAPACITY_WAKE_TIMER_PID:-}" ] && kill "$CAPACITY_WAKE_TIMER_PID" 2>/dev/null || true
@@ -8132,6 +8150,170 @@ auto_compact_poll_pass() {
         && tail -n "$((after - before))" "$EVENTS_LOG" 2>/dev/null | grep 'coord.compact  .*trigger=poll' >/dev/null; then
         LAST_AUTO_COMPACT_POLL_TRIGGER=$now
     fi
+}
+
+
+# --- Coordinator session recycling (issue #717, part A2) --------------------
+#
+# A coordinator that lives for days pays for its whole conversation on every
+# wake (corpusminder, Nov 1-4: one session, 8 compactions, wake turns ~73% of
+# tokens), and its picture drifts from reality. COORD_RECYCLE=1 rebuilds that
+# picture from queries: when the session is "old", the watcher types /clear
+# into the idle coordinator pane, then re-runs the startup checklist through
+# llm-start.sh's normal injection path (the same one every wake uses).
+# Durable state survives: .swarm/needs-you.md, the inbox, GitHub.
+#
+# Triggers (either; checked every COORD_RECYCLE_TICK_SECS):
+#   after_compact  a coord.compact.done event newer than the last recycle
+#                  (the compaction summary is lossy; start clean instead)
+#   age            the coordinator process is older than COORD_RECYCLE_HOURS
+#                  AND no recycle happened within that many hours
+# Gates (any one skips this tick, logged as coord.recycle.skip reason=...):
+#   min_gap        last recycle < COORD_RECYCLE_MIN_GAP_SECS ago
+#   pane_busy / not_cli / composer_dirty
+#   human_present  operator typed within COORD_HUMAN_IDLE_SECS
+#   pending_approval  the last coordinator turn is an unanswered
+#                  "Pending your approval:" question; /clear would drop it
+# Off by default; never runs in split mode (nothing types into that pane).
+
+# coord_recycle_last_epoch: epoch of the last recycle, 0 when none.
+coord_recycle_last_epoch() {
+    local v=0
+    read -r v _ 2>/dev/null < "$COORD_RECYCLE_STATE" || v=0
+    [[ "$v" =~ ^[0-9]+$ ]] || v=0
+    printf '%s\n' "$v"
+}
+
+# coord_proc_age_secs: seconds the coordinator's CLI process has been alive
+# (children of the pane's shell), empty when it can't be read. /clear does not
+# restart that process, so coord_recycle_pass also looks at the marker file.
+coord_proc_age_secs() {
+    local pane_pid age
+    pane_pid="$(tmux display-message -p -t "$SESSION_NAME:coordinator.0" '#{pane_pid}' 2>/dev/null)" || return 1
+    [[ "$pane_pid" =~ ^[0-9]+$ ]] || return 1
+    age="$(ps -o etimes= --ppid "$pane_pid" 2>/dev/null | sed -n 1p | tr -d '[:space:]')"
+    [[ "$age" =~ ^[0-9]+$ ]] || age="$(ps -o etimes= -p "$pane_pid" 2>/dev/null | tr -d '[:space:]')"
+    [[ "$age" =~ ^[0-9]+$ ]] || return 1
+    printf '%s\n' "$age"
+}
+
+# coord_recycle_compact_since <epoch>: true when events.log holds a
+# coord.compact.done line stamped after <epoch>.
+coord_recycle_compact_since() {
+    local since="$1" ts epoch
+    while read -r ts _; do
+        epoch=$(date -d "$ts" +%s 2>/dev/null) || continue
+        [ "$epoch" -gt "$since" ] && return 0
+    done < <(grep -E '^[^ ]+  coord\.compact\.done ' "$EVENTS_LOG" 2>/dev/null | tail -n 5)
+    return 1
+}
+
+# coord_recycle_pass: one check; recycles at most once. Returns 0 always.
+coord_recycle_pass() {
+    [ "$COORD_RECYCLE" = "1" ] || return 0
+    coord_split_active && return 0
+
+    local now last reason="" age
+    now=$(date +%s)
+    last=$(coord_recycle_last_epoch)
+    if [ "$last" -gt 0 ] && [ $((now - last)) -lt "$COORD_RECYCLE_MIN_GAP_SECS" ]; then
+        return 0   # quiet: this is the common case, not worth a log line per tick
+    fi
+
+    # Compactions only count when they happened in THIS coordinator process
+    # (or after the last recycle): with no marker file, an old
+    # coord.compact.done from a previous process would recycle at once.
+    local base="$last"
+    age=$(coord_proc_age_secs) || age=""
+    if [ -n "$age" ] && [ $((now - age)) -gt "$base" ]; then base=$((now - age)); fi
+    if [ -n "$age" ] && coord_recycle_compact_since "$base"; then
+        reason="after_compact"
+    else
+        if [ -n "$age" ] && [ "$age" -ge $((COORD_RECYCLE_HOURS * 3600)) ] \
+            && { [ "$last" -eq 0 ] || [ $((now - last)) -ge $((COORD_RECYCLE_HOURS * 3600)) ]; }; then
+            reason="age"
+        fi
+    fi
+    [ -n "$reason" ] || return 0
+
+    local state
+    state="$(coordinator_pane_state)" || state="absent"
+    [ "$state" = "cli" ] || { log_event coord.recycle.skip "reason=not_cli trigger=$reason"; return 0; }
+    if coordinator_pane_busy; then
+        log_event coord.recycle.skip "reason=pane_busy trigger=$reason"; return 0
+    fi
+    if coord_human_present; then
+        log_event coord.recycle.skip "reason=human_present trigger=$reason"; return 0
+    fi
+    if ! compact_composer_clear "$SESSION_NAME:coordinator.0"; then
+        log_event coord.recycle.skip "reason=composer_dirty trigger=$reason"; return 0
+    fi
+    if coord_pending_approval_age >/dev/null; then
+        log_event coord.recycle.skip "reason=pending_approval trigger=$reason"; return 0
+    fi
+
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "[DRY] would recycle the coordinator session (trigger=$reason): /clear, then the startup checklist"
+        return 0
+    fi
+
+    local target="$SESSION_NAME:coordinator.0" clear_rc=0
+    (
+        flock -n 9 || { log_event coord.recycle.skip "reason=locked trigger=$reason"; exit 3; }
+        # Take the wake lock too (every llm-start.sh injection holds it while
+        # typing into this pane), then re-check the gates under it: a wake
+        # that landed since the checks above has started a turn that /clear
+        # would erase.
+        exec 8>"$COORD_WAKE_LOCK"
+        flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 8 || { log_event coord.recycle.skip "reason=locked trigger=$reason"; exit 3; }
+        if coordinator_pane_busy || ! compact_composer_clear "$target"; then
+            log_event coord.recycle.skip "reason=pane_busy trigger=$reason"; exit 6
+        fi
+        # Same paste, settle, Enter, confirm sequence as /compact (issue #290):
+        # an immediate Enter is eaten by the slash-command menu.
+        local tmp
+        tmp=$(mktemp) || exit 4
+        printf '/clear' > "$tmp"
+        tmux load-buffer -b llm-coord-recycle "$tmp" 2>/dev/null || true
+        tmux paste-buffer -b llm-coord-recycle -t "$target" -d 2>/dev/null || true
+        rm -f "$tmp"
+        sleep "$COMPACT_SUBMIT_SETTLE_SECS"
+        tmux send-keys -t "$target" Enter 2>/dev/null || true
+        sleep "$COMPACT_SUBMIT_SETTLE_SECS"
+        if ! compact_confirm_submitted "$target" "$AUTO_COMPACT_BUSY_PATTERN" "/clear"; then
+            tmux send-keys -t "$target" Enter 2>/dev/null || true
+            sleep "$COMPACT_SUBMIT_SETTLE_SECS"
+        fi
+        # /clear is instant; a composer still holding the text means it was
+        # not taken, and the checklist must not land on the old conversation.
+        compact_confirm_submitted "$target" "$AUTO_COMPACT_BUSY_PATTERN" "/clear" || exit 5
+    ) 9>"$AUTO_COMPACT_LOCK" || clear_rc=$?
+    if [ "$clear_rc" != "0" ]; then
+        # Only rc 5 means /clear was actually typed (and then not taken):
+        # that is the one case with our own text to retract. Every other rc
+        # backed off before typing anything (a skip is already logged), and
+        # Escape+Backspace there would erase an operator's draft.
+        if [ "$clear_rc" = "5" ]; then
+            log_event coord.recycle.skip "reason=clear_not_submitted trigger=$reason"
+            compact_retract_queued "$target" coord.recycle "trigger=$reason" "$AUTO_COMPACT_BUSY_PATTERN" || true
+        fi
+        return 0
+    fi
+
+    printf '%s\n' "$now" > "$COORD_RECYCLE_STATE" 2>/dev/null || true
+    log_event coord.recycle "trigger=$reason age=${age:-na}"
+    echo "[$(date +%T)] coordinator session recycled ($reason) — re-running the startup checklist"
+    local rc=0
+    ( flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 9 && cd "$PROJECT_DIR" && NON_INTERACTIVE=1 "$LLM_START" "$COORD_RECYCLE_PROMPT" ) 9>"$COORD_WAKE_LOCK" || rc=$?
+    [ "$rc" = "0" ] || log_event coord.recycle.checklist_failed "rc=$rc trigger=$reason"
+    return 0
+}
+
+run_coord_recycle_loop() {
+    while true; do
+        sleep "$COORD_RECYCLE_TICK_SECS"
+        coord_recycle_pass || true
+    done
 }
 
 # --- Worker auto-compact (issue #226) ---------------------------------------
@@ -12625,6 +12807,13 @@ if [ "$AUTO_COMPACT" = "1" ] && [ "$AUTO_COMPACT_TICK_SECS" -gt 0 ] && ! coord_s
     run_auto_compact_poll_loop &
     AUTO_COMPACT_POLL_TIMER_PID=$!
     log_event watch.timer.start "auto_compact_tick_secs=$AUTO_COMPACT_TICK_SECS auto_compact_cooldown_secs=$AUTO_COMPACT_COOLDOWN_SECS"
+fi
+# issue #717 (A2) — opt-in; a swarm that never sets COORD_RECYCLE=1 gets no
+# new process and no behavior change.
+if [ "$COORD_RECYCLE" = "1" ] && [ "$COORD_RECYCLE_TICK_SECS" -gt 0 ] && ! coord_split_active; then
+    run_coord_recycle_loop &
+    COORD_RECYCLE_TIMER_PID=$!
+    log_event watch.timer.start "coord_recycle_tick_secs=$COORD_RECYCLE_TICK_SECS coord_recycle_hours=$COORD_RECYCLE_HOURS"
 fi
 # issue #765: split mode rechecks the inbox on a timer (batch window, items an
 # event path did not start a run for). The loop always runs (#767): the mode is

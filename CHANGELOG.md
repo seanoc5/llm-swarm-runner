@@ -9,6 +9,10 @@ style when they are written.
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in coordinator session recycling (`COORD_RECYCLE=1`). After a watcher-injected compaction, or when the coordinator process is older than `COORD_RECYCLE_HOURS` (12), the watcher types `/clear` into the idle coordinator pane and re-runs the startup checklist, so a long session rebuilds its picture from queries and stops paying for its whole history on every wake. Held back while the pane is busy, a draft is unsent, the operator is typing, or a "Pending your approval" question is open. See `docs/coordinator-recycle.md`. Part A2 of #717.
+
 ### Changed
 
 - Workers no longer get the operator's SSH identity. `sandbox.sh` stopped mounting `~/.ssh` and forwarding `SSH_AUTH_SOCK` by default, because that key logs in to live hosts (kdeyoga) with no password, so a stray `ssh` in a worker had operator rights there. Inside the container, `git@github.com:` and `ssh://git@github.com/` remotes are rewritten to HTTPS (env-based git config, host `.git/config` untouched) and authenticate with `GH_TOKEN`. Commit and tag signing is disabled in the container because the signing key is the SSH key, so worker commits are now unsigned. `SANDBOX_SSH=1` restores the old mounts, agent and signing. (#638)
