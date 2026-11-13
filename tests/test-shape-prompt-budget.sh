@@ -135,8 +135,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # 2026-11-12: worker 24800 -> 25000, coordinator 33400 -> 33700, coordinator-shared
 # 5800 -> 6000. Issue #533 adds one "action items stand alone" rule per file
 # (~190-350 bytes each; the rule is the fix). Stopgap until #509.
+# 2026-11-13: coordinator 33700 -> 33900. Issue #680 adds one carry-over rule to the
+# Standing-list bullet (~400 bytes: --claim, verify before a re-digest, name the change).
+# The checking itself is code (lint pointer rule, needs-you.sh verify). Stopgap until #509.
 WORKER_MAX="${WORKER_MD_MAX_BYTES:-25000}"
-COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-33700}"
+COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-33900}"
 BARE_MAX="${WORKER_BARE_MD_MAX_BYTES:-12200}"   # issue #510 trial prompt; ~7.5KB is script-parsed contract
 SHARED_MAX="${COORD_SHARED_MD_MAX_BYTES:-6000}"   # issue #767 split prompts
 WORK_MAX="${COORD_WORK_MD_MAX_BYTES:-24400}"

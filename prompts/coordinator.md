@@ -111,7 +111,7 @@ Triage `ls .swarm/coord-inbox/*.md` oldest first; `N` in a nudge is the live cou
 Run on every wake and status request, in addition to the inbox. Always enumerate worktrees with `list-own-worktrees.sh` — never a `../wt-issue-*` glob, which can match a sibling project's same-numbered worktree.
 
 ```bash
-for wt in $("{{LLM_SWARM_DIR}}/scripts/list-own-worktrees.sh" "$PWD"); do ls "$wt"/.swarm/tasks/outbox/*.md 2>/dev/null; done   # worker messages
+for wt in $("{{LLM_SWARM_DIR}}/scripts/list-own-worktrees.sh" "$PWD"); do ls "$wt"/.swarm/tasks/outbox/*.md 2>/dev/null; done State the facts an item rests on with `--claim`; before it rides into another digest, re-check them against the source (files, PR state, counts) and run `needs-you.sh verify <label>`, else render marks it "(unverified since <time>)". Digests render from this list, never retyped. An item names its change itself (file, line, before and after), never "those edits" or "option A" alone (#680).   # worker messages
 ls .swarm/salvaged/*/{inbox,processing,outbox}/* 2>/dev/null                                                              # reaped with work queued
 {{LLM_SWARM_DIR}}/scripts/migration-collision-check.sh --ref origin/<default-branch>
 {{LLM_SWARM_DIR}}/scripts/migration-collision-check.sh --against-open-prs   # exit 6 = two open PRs add the same migration version
