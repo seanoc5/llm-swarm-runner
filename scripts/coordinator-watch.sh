@@ -5746,19 +5746,17 @@ PR_STATUS_BACKOFF_UNTIL=0          # issue #536: epoch; skip the pass until then
 # reason=api_error, backs off for 4x the interval only on an auth or
 # rate-limit error (any other error skips just that PR), and never aborts the cycle.
 idle_park_marker_live() {
-    # True only if run_idle_shell's park marker exists AND the idle shell pid it
-    # records in .idle-shell-pid is still alive (#925).
-    local wt="$1" spid
-    [ -f "$wt/.swarm/tasks/.idle-parked" ] || return 1
-    spid="$(cat "$wt/.swarm/tasks/.idle-shell-pid" 2>/dev/null)"
-    if [ -z "$spid" ]; then
-        # run_idle_shell writes the marker just before the new shell writes its pid:
-        # a marker under 10s old with no pid yet is a park starting, not a crash.
-        local born; born="$(cat "$wt/.swarm/tasks/.idle-parked" 2>/dev/null)"
-        [[ "$born" =~ ^[0-9]+$ ]] && [ $(( $(date +%s) - born )) -lt 10 ]
-        return
-    fi
-    [[ "$spid" =~ ^[0-9]+$ ]] && kill -0 "$spid" 2>/dev/null
+    # True only if run_idle_shell's park marker exists AND was touched within
+    # IDLE_PARK_HEARTBEAT_MAX seconds (#925). The idle shell lives in the
+    # worker's Docker container (own PID namespace), so a pid read from a file
+    # means nothing to `kill -0` on the host; the listener's poll loop instead
+    # touches the marker every ~2s, and the file mtime crosses the container
+    # boundary through the shared worktree mount. No heartbeat = listener gone.
+    local wt="$1" m="$1/.swarm/tasks/.idle-parked" mt
+    [ -f "$m" ] || return 1
+    mt="$(stat -c %Y "$m" 2>/dev/null || stat -f %m "$m" 2>/dev/null)" || return 1
+    [[ "$mt" =~ ^[0-9]+$ ]] || return 1
+    [ $(( $(date +%s) - mt )) -le "${IDLE_PARK_HEARTBEAT_MAX:-30}" ]
 }
 
 pr_status_sweep_pass() {
