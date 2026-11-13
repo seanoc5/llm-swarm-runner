@@ -2069,6 +2069,7 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     WATCH_CONFLICT_BRIEF 1       an open PR (draft or ready; coordinator-held drafts excluded) that turns CONFLICTING gets swarm-merge.sh's resolve-conflicts brief, once per head commit (0=off; issue #656)
     WATCH_READY_SWEEP_SECS 300   periodic ready-sweep.sh: re-run pr-ready.sh on drafts refused only for CI pending/unreadable (0=off; issue #602)
     WATCH_STALE_WAIT_CHECK 1     ready-sweep also flags drafts whose **Next:** line waits on an already-merged #N; one coord-inbox note each (0=off; issue #635)
+    WATCH_STALE_CHECKOUT_SECS 3600  warn (coord-inbox note) when the runner checkout this watcher executes from is behind origin/<default>; local ref only, no fetch (0=off; issue #641)
     WATCH_BG_VIOLATION_SWEEP_SECS 60  periodic sweep for backgrounded-shell UI markers on iss-* panes + the coordinator pane (0=off); see header comment
     WATCH_BG_VIOLATION_PATTERN    (auto)  grep -E pattern for the sweep above
     WATCH_TIMEOUT_RETRY_SWEEP_SECS 60  periodic sweep for a worker stuck retrying a command that always hits its timeout (0=off); see header comment (issue #467)
@@ -2762,6 +2763,8 @@ WATCH_READY_SWEEP_SECS="${WATCH_READY_SWEEP_SECS:-300}"
 READY_SWEEP="${READY_SWEEP:-$LLM_SWARM_DIR/scripts/ready-sweep.sh}"
 # issue #635: ready-sweep.sh also reports drafts waiting on an already-merged PR.
 WATCH_STALE_WAIT_CHECK="${WATCH_STALE_WAIT_CHECK:-1}"
+# issue #641: warn when the checkout this watcher runs from is behind origin/<default>.
+WATCH_STALE_CHECKOUT_SECS="${WATCH_STALE_CHECKOUT_SECS:-3600}"
 # issue #298 — fallback detection for the foreground-only rule; see header comment.
 WATCH_BG_VIOLATION_SWEEP_SECS="${WATCH_BG_VIOLATION_SWEEP_SECS:-60}"
 WATCH_BG_VIOLATION_PATTERN="${WATCH_BG_VIOLATION_PATTERN:-Running in the background|[0-9]+ shells? still running}"
@@ -2838,6 +2841,8 @@ WATCH_TIMER_TICK_SECS="${WATCH_TIMER_TICK_SECS:-2}"
 . "$SCRIPT_DIR/_coord-layout.sh"
 # shellcheck source=_conflict-brief.sh
 . "$SCRIPT_DIR/_conflict-brief.sh"
+# shellcheck source=_checkout-staleness.sh
+. "$SCRIPT_DIR/_checkout-staleness.sh"
 WATCHER_QUIET="${WATCHER_QUIET:-0}"
 # issue #296 — see this file's WATCHER_STALE_CHECK header comment.
 WATCHER_STALE_CHECK="${WATCHER_STALE_CHECK:-1}"
@@ -3100,6 +3105,10 @@ fi
 if ! [[ "$WATCH_ORPHAN_SWEEP_SECS" =~ ^[0-9]+$ ]]; then
     echo "ERROR: WATCH_ORPHAN_SWEEP_SECS must be a non-negative integer (got: $WATCH_ORPHAN_SWEEP_SECS)" >&2
     exit 1
+fi
+if ! [[ "$WATCH_STALE_CHECKOUT_SECS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: WATCH_STALE_CHECKOUT_SECS must be a non-negative integer (got: $WATCH_STALE_CHECKOUT_SECS)" >&2
+    exit 2
 fi
 if ! [[ "$WATCH_READY_SWEEP_SECS" =~ ^[0-9]+$ ]]; then
     echo "ERROR: WATCH_READY_SWEEP_SECS must be a non-negative integer (got: $WATCH_READY_SWEEP_SECS)" >&2
@@ -5064,6 +5073,38 @@ orphan_sweep_pass() {
     if [ "$reaped" != "0" ] || [ "$DRY_RUN" = "1" ]; then
         log_event watch.orphan_sweep "mode=pr-finalized dry_run=$DRY_RUN reaped=$reaped"
     fi
+}
+
+# stale_checkout_pass
+#
+# issue #641: this watcher executes scripts/ from $LLM_SWARM_DIR. If that
+# checkout falls behind origin/<default> nothing says so, and the swarm keeps
+# running pre-fix logic after a fix merged. Reads only the already-fetched
+# remote-tracking ref (no network); silent when there is no origin or the
+# checkout is not on the default branch. Notes once when first behind, again
+# only when the gap doubles, and re-arms when the checkout catches up.
+STALE_CHECKOUT_LAST_NOTED=0
+stale_checkout_pass() {
+    local n
+    n="$(checkout_behind_count "$LLM_SWARM_DIR")"
+    if [ -z "$n" ] || [ "$n" -eq 0 ]; then
+        STALE_CHECKOUT_LAST_NOTED=0
+        return 0
+    fi
+    if [ "$STALE_CHECKOUT_LAST_NOTED" -gt 0 ] && [ "$n" -lt $((STALE_CHECKOUT_LAST_NOTED * 2)) ]; then
+        return 0
+    fi
+    echo "[$(date +%T)] WARN: runner checkout $LLM_SWARM_DIR is $n commit(s) behind origin; running pre-fix scripts"
+    log_event watch.stale_checkout "behind=$n dir=$LLM_SWARM_DIR"
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "[DRY] would write coord-inbox stale-checkout note ($n behind)"
+    elif coord_inbox_write stale_checkout "The runner checkout $LLM_SWARM_DIR is $n commit(s) behind origin (last fetched state), so this swarm is still running old script logic. Fix: git -C $LLM_SWARM_DIR pull --ff-only (needs a clean checkout on the default branch), then restart the watcher. Checked from the local remote ref only; fetch first if it looks too small."; then
+        log_event coord.inbox.write "trigger=stale_checkout behind=$n"
+    else
+        echo "[$(date +%T)] WARN: failed to write coord-inbox stale-checkout note" >&2
+        return 0
+    fi
+    STALE_CHECKOUT_LAST_NOTED=$n
 }
 
 # ready_sweep_pass
@@ -7177,7 +7218,7 @@ coord_pending_approval_age() {
 # run_auto_compact_poll_loop, started as its own background process right
 # after this function.
 run_watch_timer_loop() {
-    local last_pr_poll=0 last_orphan_sweep=0 last_ready_sweep=0 last_bg_violation_sweep=0 last_timeout_retry_sweep=0 last_activity_poll=0 last_coord_wake_retry=0 last_coord_wake_busy_retry=0 last_worktree_sweep=0 last_pending_brief_sweep=0 last_pr_status_sweep=0 last_stranded_brief_sweep=0 last_sibling_sweep=0 last_window_flags_sweep=0 last_sideline_sweep=0 now
+    local last_pr_poll=0 last_orphan_sweep=0 last_ready_sweep=0 last_bg_violation_sweep=0 last_timeout_retry_sweep=0 last_activity_poll=0 last_coord_wake_retry=0 last_coord_wake_busy_retry=0 last_worktree_sweep=0 last_pending_brief_sweep=0 last_pr_status_sweep=0 last_stranded_brief_sweep=0 last_sibling_sweep=0 last_window_flags_sweep=0 last_sideline_sweep=0 last_stale_checkout=0 now
     # issue #756: first sibling scan one interval after start, not on tick one, so
     # it never delays the first deferred-wake retry or the startup passes.
     last_sibling_sweep=$(date +%s)
@@ -7230,6 +7271,13 @@ run_watch_timer_loop() {
             if [ $((now - last_ready_sweep)) -ge "$WATCH_READY_SWEEP_SECS" ]; then
                 ready_sweep_pass || true
                 last_ready_sweep=$now
+            fi
+        fi
+        if [ "$WATCH_STALE_CHECKOUT_SECS" -gt 0 ]; then
+            now=$(date +%s)
+            if [ $((now - last_stale_checkout)) -ge "$WATCH_STALE_CHECKOUT_SECS" ]; then
+                stale_checkout_pass || true
+                last_stale_checkout=$now
             fi
         fi
         if [ "$WATCH_BG_VIOLATION_SWEEP_SECS" -gt 0 ]; then
@@ -12611,7 +12659,7 @@ run_poll() {
 # restarts. (COORD_WAKE_RETRY_SECS, issue #422's older dirty-draft retry,
 # has this identical gap and predates this fix — out of scope here, but
 # worth folding in alongside this one if it's ever revisited.)
-if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ] || [ "$WATCH_ORPHAN_SWEEP_SECS" -gt 0 ] || [ "$WATCH_READY_SWEEP_SECS" -gt 0 ] || [ "$WATCH_BG_VIOLATION_SWEEP_SECS" -gt 0 ] || [ "$WATCH_TIMEOUT_RETRY_SWEEP_SECS" -gt 0 ] || [ "$WATCH_ACTIVITY_POLL_SECS" -gt 0 ] || [ "$WATCH_WORKTREE_SWEEP_SECS" -gt 0 ] || [ "$WATCH_PENDING_BRIEF_SWEEP_SECS" -gt 0 ] || [ "$WATCH_PR_STATUS_SWEEP_SECS" -gt 0 ] || [ "$WATCH_STRANDED_BRIEF_SWEEP_SECS" -gt 0 ] || [ "$WATCH_SIBLING_SWEEP_SECS" -gt 0 ] || [ "$COORD_WAKE_HOLD_RETRY_SECS" -gt 0 ] || [ "$WATCH_SIDELINE_SWEEP_SECS" -gt 0 ] || { [ "$WATCH_WINDOW_FLAGS" = "1" ] && [ "$WATCH_WINDOW_FLAGS_SWEEP_SECS" -gt 0 ]; }; then
+if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ] || [ "$WATCH_ORPHAN_SWEEP_SECS" -gt 0 ] || [ "$WATCH_READY_SWEEP_SECS" -gt 0 ] || [ "$WATCH_STALE_CHECKOUT_SECS" -gt 0 ] || [ "$WATCH_BG_VIOLATION_SWEEP_SECS" -gt 0 ] || [ "$WATCH_TIMEOUT_RETRY_SWEEP_SECS" -gt 0 ] || [ "$WATCH_ACTIVITY_POLL_SECS" -gt 0 ] || [ "$WATCH_WORKTREE_SWEEP_SECS" -gt 0 ] || [ "$WATCH_PENDING_BRIEF_SWEEP_SECS" -gt 0 ] || [ "$WATCH_PR_STATUS_SWEEP_SECS" -gt 0 ] || [ "$WATCH_STRANDED_BRIEF_SWEEP_SECS" -gt 0 ] || [ "$WATCH_SIBLING_SWEEP_SECS" -gt 0 ] || [ "$COORD_WAKE_HOLD_RETRY_SECS" -gt 0 ] || [ "$WATCH_SIDELINE_SWEEP_SECS" -gt 0 ] || { [ "$WATCH_WINDOW_FLAGS" = "1" ] && [ "$WATCH_WINDOW_FLAGS_SWEEP_SECS" -gt 0 ]; }; then
     run_watch_timer_loop &
     WATCH_TIMER_PID=$!
     log_event watch.timer.start "pr_poll_secs=$WATCH_PR_POLL_SECS check_on_done=$WATCH_CHECK_ON_DONE orphan_sweep_secs=$WATCH_ORPHAN_SWEEP_SECS ready_sweep_secs=$WATCH_READY_SWEEP_SECS bg_violation_sweep_secs=$WATCH_BG_VIOLATION_SWEEP_SECS timeout_retry_sweep_secs=$WATCH_TIMEOUT_RETRY_SWEEP_SECS activity_poll_secs=$WATCH_ACTIVITY_POLL_SECS worktree_sweep_secs=$WATCH_WORKTREE_SWEEP_SECS pending_brief_sweep_secs=$WATCH_PENDING_BRIEF_SWEEP_SECS pr_status_sweep_secs=$WATCH_PR_STATUS_SWEEP_SECS stranded_brief_sweep_secs=$WATCH_STRANDED_BRIEF_SWEEP_SECS sibling_sweep_secs=$WATCH_SIBLING_SWEEP_SECS window_flags_sweep_secs=$([ "$WATCH_WINDOW_FLAGS" = "1" ] && echo "$WATCH_WINDOW_FLAGS_SWEEP_SECS" || echo 0) sideline_secs=$WATCH_SIDELINE_SECS sideline_sweep_secs=$WATCH_SIDELINE_SWEEP_SECS"

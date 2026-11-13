@@ -1309,6 +1309,19 @@ fi
 echo "[6/6] running local-branch sweep…"
 run_sweep
 
+# issue #641: a merge makes the project checkout stale by one commit; nothing
+# else fast-forwards it, so workers/watchers would keep running pre-fix scripts.
+# Best effort: never changes the exit status, warns when it cannot update.
+if [ "$HOUSEKEEP_ONLY" != 1 ] && [ -n "$PR_NUM" ] && [ -f "$SCRIPT_DIR/_checkout-staleness.sh" ]; then
+  # shellcheck source=_checkout-staleness.sh
+  . "$SCRIPT_DIR/_checkout-staleness.sh"
+  if FF_MSG="$(checkout_ff_to_origin "$MAIN_WT")"; then
+    echo "[ff] $FF_MSG"
+  else
+    echo "[ff] $(c_amber "⚠ $FF_MSG")"
+  fi
+fi
+
 echo
 if [ "$HOUSEKEEP_ONLY" = 1 ]; then
   if [ -n "$PR_NUM" ]; then
