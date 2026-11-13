@@ -9447,7 +9447,9 @@ maybe_worker_deliver_brief() {
             # issue #941: a finished session that ignored /quit once is not going
             # to honor it on retry; with a clean worktree, restart it now instead
             # of waiting out WORKER_DELIVER_MAX_FAILURES timeouts plus backoff.
-            if [ "${WORKER_DELIVER_FAIL_COUNT[$issue]:-0}" -ge "$WORKER_DELIVER_HARD_RESTART_AFTER" ]; then
+            # Re-check the brief is still queued: a late /quit may have just let the
+            # listener claim it, and killing that fresh session would be wrong.
+            if worker_pending_brief "$wt_dir" && [ "${WORKER_DELIVER_FAIL_COUNT[$issue]:-0}" -ge "$WORKER_DELIVER_HARD_RESTART_AFTER" ]; then
                 worker_deliver_hard_restart "$issue" "$wt_dir" "$brief_before" && return 0
             fi
             # Self-review finding (issue #437): if this /quit's effect lands
