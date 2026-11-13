@@ -41,7 +41,7 @@ declare -A TOOL_ONLY=()
 # knobs (CI_WAIT_*, PR_SCREEN_*, SELF_REVIEW_SCRIPT, ...), never set via a
 # project's .swarm/.env. A NEW script reading a defaulted key lands here only
 # by a deliberate edit; otherwise the scan fails and asks for a loader.
-for _t in _compose-down-for-worktree _window-flags available-issues ci-wait daily-changelog \
+for _t in batch-run _compose-down-for-worktree _window-flags available-issues ci-wait daily-changelog \
           demo-driver demo-record-setup gh-token-probe lint-pr-screen nightly-full-tests \
           pr-ready ready-sweep self-review-pr setup statusline-with-context \
           swarm-idle-report task-done build-image check-stuck-workers demo-segments-pick \
