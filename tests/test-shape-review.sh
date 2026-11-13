@@ -40,6 +40,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Hermetic cwd (#930): the review script resolves REPO_ROOT from cwd and, for an
+# unknown head SHA, fetches from origin. Run everything in a throwaway repo with
+# no remote so the fake SHAs below never reach the real checkout or GitHub.
+HERMETIC="$TEST_DIR/hermetic-repo"
+git init -q "$HERMETIC"
+git -C "$HERMETIC" config user.email t@t; git -C "$HERMETIC" config user.name t
+git -C "$HERMETIC" commit -q --allow-empty -m init
+cd "$HERMETIC"
+
 # ─────────────────────── Stub gh + claude + tmux ───────────────────────────
 
 export GH_LOG="$TEST_DIR/gh.log"
@@ -88,6 +97,7 @@ cat > "$TEST_DIR/bin/claude" <<'EOF'
 cat > /dev/null   # consume the payload from stdin
 echo "$* | cwd=$PWD" >> "${CLAUDE_ARGS_LOG:-/dev/null}"
 echo "key=${ANTHROPIC_API_KEY:-unset}" > "${CLAUDE_ENV_LOG:-/dev/null}"
+prev=""; for a in "$@"; do [ "$prev" = "--add-dir" ] && cat "$a/f.txt" >> "${CLAUDE_FILE_LOG:-/dev/null}" 2>/dev/null; prev="$a"; done
 cat "$CLAUDE_STUB_OUTPUT"
 exit "${CLAUDE_STUB_EXIT:-0}"
 EOF
@@ -411,7 +421,7 @@ sed -n '/^pr comment/,$p' "$GH_LOG" | grep -q 'data/big.csv — [0-9]* bytes' ||
 # cwd must not make bash expand the glob
 touch "$TEST_DIR/top.csv"
 if cd "$TEST_DIR" && SELF_REVIEW_MAX_FILE_BYTES=0 SELF_REVIEW_EXCLUDE='*.csv,x/y' WORKER_CMD=codex "$REVIEW" 42 >"$TEST_DIR/o.out" 2>&1; then RC=0; else RC=$?; fi
-cd "$SCRIPT_DIR"
+cd "$HERMETIC"
 [ "$RC" -eq 0 ] || red "glob exclusion run failed ($RC)"
 grep -q "matches SELF_REVIEW_EXCLUDE '\*.csv'" "$TEST_DIR/o.out" || red "glob exclusion not reported"
 grep -q 'lockline' "$CODEX_PAYLOAD_LOG" || red "non-matching file must stay"
@@ -482,6 +492,60 @@ grep -q 'line600' "$CODEX_PAYLOAD_LOG" || red "last file missing from prompt"
 unset GH_DIFF_FILE
 green "excluded=N only when files were left out; code stays in; many-file diff OK"
 
+
+# ============================================================================
+heading "Test H: reviewer reads the PR head, not a stale caller checkout (#930)"
+# ============================================================================
+STALE="$TEST_DIR/stale-repo"
+git init -q "$STALE"
+git -C "$STALE" config user.email t@t; git -C "$STALE" config user.name t
+echo "old content" > "$STALE/f.txt"; git -C "$STALE" add f.txt; git -C "$STALE" commit -q -m old
+echo "head content" > "$STALE/f.txt"; git -C "$STALE" commit -q -am head
+HEAD_REAL="$(git -C "$STALE" rev-parse HEAD)"
+git -C "$STALE" checkout -q --detach HEAD~1          # caller's checkout lags the PR head
+export CLAUDE_FILE_LOG="$TEST_DIR/claude.files"; : > "$CLAUDE_FILE_LOG"
+printf 'APPROVE\n' > "$CLAUDE_STUB_OUTPUT"
+( cd "$STALE" && GH_HEAD="$HEAD_REAL" "$REVIEW" 42 --rerun >/dev/null 2>&1 )
+grep -q "head content" "$CLAUDE_FILE_LOG" || red "reviewer must see the PR head's file, saw: $(cat "$CLAUDE_FILE_LOG")"
+grep -q "old content" "$CLAUDE_FILE_LOG" && red "reviewer saw the stale checkout's file"
+[ "$(git -C "$STALE" worktree list | wc -l)" -eq 1 ] || red "temporary head worktree was not cleaned up"
+[ "$(cat "$STALE/f.txt")" = "old content" ] || red "caller's checkout was modified"
+green "stale checkout still reviews against the PR head; temp worktree removed"
+
+# ============================================================================
+heading "Test I: head-fetch fallback is non-interactive, bounded, and non-fatal (#930)"
+# ============================================================================
+FETCHREPO="$TEST_DIR/fetch-repo"
+git init -q "$FETCHREPO"
+git -C "$FETCHREPO" config user.email t@t; git -C "$FETCHREPO" config user.name t
+git -C "$FETCHREPO" commit -q --allow-empty -m init
+git -C "$FETCHREPO" remote add origin "$TEST_DIR/no-such-remote"
+printf 'APPROVE\n' > "$CLAUDE_STUB_OUTPUT"
+UNKNOWN_SHA="1111111111111111111111111111111111111111"
+
+# (a) SHA not local -> fetch attempted -> fast failure -> warning, review still completes
+if ( cd "$FETCHREPO" && GH_HEAD="$UNKNOWN_SHA" "$REVIEW" 42 --rerun >"$TEST_DIR/i.out" 2>"$TEST_DIR/i.err" ); then RC=0; else RC=$?; fi
+[ "$RC" -eq 0 ] || red "failed fetch must not abort the review, got $RC: $(cat "$TEST_DIR/i.err")"
+grep -q 'could not fetch PR #42 head 1111111' "$TEST_DIR/i.err" || red "failed fetch must warn in one line, got: $(cat "$TEST_DIR/i.err")"
+
+# (b) fetch that hangs is cut off by the timeout, runs with prompts disabled
+REAL_GIT="$(command -v git)"
+mkdir -p "$TEST_DIR/slowgit"
+cat > "$TEST_DIR/slowgit/git" <<EOF
+#!/usr/bin/env bash
+case " \$* " in
+    *" fetch "*) echo "prompt=\${GIT_TERMINAL_PROMPT:-unset}" > "$TEST_DIR/fetch.env"; sleep 30 ;;
+esac
+exec "$REAL_GIT" "\$@"
+EOF
+chmod +x "$TEST_DIR/slowgit/git"
+START=$SECONDS
+if ( cd "$FETCHREPO" && PATH="$TEST_DIR/slowgit:$PATH" SELF_REVIEW_FETCH_TIMEOUT=1 GH_HEAD="$UNKNOWN_SHA" "$REVIEW" 42 --rerun >"$TEST_DIR/i.out" 2>"$TEST_DIR/i.err" ); then RC=0; else RC=$?; fi
+[ "$RC" -eq 0 ] || red "hung fetch must not abort the review, got $RC: $(cat "$TEST_DIR/i.err")"
+[ $((SECONDS - START)) -lt 20 ] || red "hung fetch was not cut off by SELF_REVIEW_FETCH_TIMEOUT"
+grep -q 'could not fetch PR #42 head' "$TEST_DIR/i.err" || red "timed-out fetch must warn"
+grep -q 'prompt=0' "$TEST_DIR/fetch.env" || red "fetch must run with GIT_TERMINAL_PROMPT=0, got: $(cat "$TEST_DIR/fetch.env" 2>/dev/null)"
+green "fetch failure and hang both degrade to a warning; fetch is non-interactive"
 # ============================================================================
 heading "All self-review machinery shape tests passed"
 green "verdict parsing, exit codes, --post idempotency, kill switch, merge gate"
