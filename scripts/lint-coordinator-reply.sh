@@ -36,7 +36,22 @@
 #                offline or failing gh stays silent. Say "the fix PR for #N merges"
 #                or "#N closes".
 #
-# Usage: lint-coordinator-reply.sh [--project DIR] [--only RULE[,RULE]] [file]
+#   carryover    a bare backward reference with no gloss on the same line (issue #646;
+#                research #645 found 12 dated misses of "I carried an item instead of
+#                restating it"). Outside code fences, code spans and URLs, a line is
+#                flagged when it has (a) a section pointer ("§4") or a carry-over
+#                phrase ("from earlier", "carried over", "as noted", "mentioned
+#                earlier", "in the previous digest") and fewer than
+#                --gloss N (default 12) other words on the line to
+#                explain it, or (b) a short label the reply never defines: a letter+digit
+#                such as "your A2", "see B1", "per A3" or a bare "B3" opening a line (not a mid-sentence H2, p95, G1), a range such as "A-D", "option B", "your d)". A label is
+#                defined when a line starts with it ("- **A1**", "B)", "A.") or it is
+#                followed on its own line by ":", "(" or a dash. Naive on purpose: it cannot
+#                see a coined phrase ("the keyboard overlay") or a bare "On #1378:" opener.
+#                Fix: restate the item (what it is, options, recommendation) on this screen.
+#
+# Usage: lint-coordinator-reply.sh [--project DIR] [--only RULE[,RULE]] [--gloss N] [--why] [file]
+# --gloss N sets the carryover threshold; --why prints the matched reference for each carryover hit to stderr.
 # --only keeps just the named rules (and skips the slow gh/worktree passes when
 # their rule is not named); the Stop hook uses --only bare-list.
 # Exit 0 clean, 3 hits (printed to stdout), 2 usage error. Naive on purpose:
@@ -44,13 +59,15 @@
 # Fixtures: tests/fixtures/reply-lint/.
 set -uo pipefail
 
-PROJECT=""; FILE=""; ONLY=""
+PROJECT=""; FILE=""; ONLY=""; GLOSS=12; WHY=""
 while [ $# -gt 0 ]; do
     case "$1" in
-        -h|--help) sed -n '3,52p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '3,59p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         --project) [ $# -ge 2 ] || { echo "--project needs a value" >&2; exit 2; }; PROJECT="$2"; shift 2 ;;
         --only) [ $# -ge 2 ] || { echo "--only needs a value" >&2; exit 2; }; ONLY=",$2,"; shift 2 ;;
         --only=*) ONLY=",${1#*=},"; shift ;;
+        --gloss) [ $# -ge 2 ] && [[ "$2" =~ ^[0-9]+$ ]] || { echo "--gloss needs a number" >&2; exit 2; }; GLOSS="$2"; shift 2 ;;
+        --why) WHY=1; shift ;;
         --project=*) PROJECT="${1#*=}"; shift ;;
         -*) echo "unknown option $1" >&2; exit 2 ;;
         *) [ -z "$FILE" ] || exit 2; FILE="$1"; shift ;;
@@ -177,11 +194,84 @@ issue_merged_hits() {
     done < <(printf '%s\n' "$text" | awk -v fence="$FENCE_RE" '$0 ~ fence { f = !f; next } !f')
 }
 
+# carryover (issue #646): see the rule text in the header. Fenced lines are skipped; code
+# spans and URLs are blanked before matching so a command or link never reads as a label.
+carryover_hits() {
+    printf '%s\n' "$text" | awk -v fence="$FENCE_RE" -v gloss="$GLOSS" -v dbg="$WHY" '
+    function nwords(s,   a) { return split(s, a, /[ \t]+/) - (s ~ /^[ \t]/) - (s ~ /[ \t]$/) }
+    function skip_label(t) { return t ~ /^(q[1-4]|s3|v[0-9]+|x[0-9]+|p[0-3]|i18n|l10n)$/ }
+    BEGIN {
+        phrase = "§ ?[0-9]|from earlier|carried over|carry-over|carryover|as noted|noted (earlier|above|before)|as (discussed|mentioned)|(mentioned|discussed|described|listed) (earlier|before|previously)|(from|in) (an |the )?(earlier|previous|prior|last) (digest|report|reply|wake|session)"
+        # A label is a letter+digits (A12, B3) and only counts with a reference cue: after "your" /
+        # "see" / "per", or bare at the start of a line. Mid-sentence "H2 database", "p95", "G1 GC" are not labels.
+        lab = "(^|[^A-Za-z0-9_#/.-])(your|see|per) [A-Za-z][0-9]{1,2}([^A-Za-z0-9_]|$)"
+        lead = "^[A-Za-z][0-9]{1,2}($|[,;)]| (below|above|earlier|please|again|too|and|plus|is|was|still)([^A-Za-z]|$))"
+    }
+    $0 ~ fence { inf = !inf; next }
+    inf { next }
+    {
+        raw = $0; c = $0
+        gsub(/`[^`]*`/, " ", c); gsub(/https?:\/\/[^ )>\]]*/, " ", c)
+        n++; R[n] = raw; C[n] = c
+        # definitions: a line that starts with the label, or an inline "X:" / "X (" / "X —"
+        s = c; sub(/^[ \t>|*#-]+/, "", s); gsub(/\*\*/, "", s)
+        if (match(s, /^[A-Za-z][0-9]{0,2}([)\].:|]|[ ]*[—–=-]|$)/) || raw ~ /^[ \t>-]*\*\*[A-Za-z][0-9]{0,2}([ *:.)]|$)/) {
+            d = s; sub(/[^A-Za-z0-9].*$/, "", d); def[tolower(d)] = 1
+        }
+        t = c
+        while (match(t, /(^|[^A-Za-z0-9_])[A-Za-z][0-9]{0,2}[ ]?(:|\(|[—–=]|--| - )/)) {
+            d = substr(t, RSTART, RLENGTH); gsub(/^[^A-Za-z]+|[^A-Za-z0-9].*$/, "", d); def[tolower(d)] = 1
+            t = substr(t, RSTART + RLENGTH)
+        }
+    }
+    END {
+        for (i = 1; i <= n; i++) {
+            c = C[i]; l = tolower(c); bad = 0; why = ""; others = 0
+            # explanation available: the other words on this line, plus the block it introduces
+            # when it ends in a colon ("Needs you (carried over):" then the restated items)
+            ctx = 0
+            if (c ~ /:(\*\*)?[ \t]*$/) {
+                for (j = i + 1; j <= n && C[j] ~ /^[ \t]*$/; j++) ;
+                for (; j <= n && C[j] !~ /^[ \t]*$/ && ctx < 200; j++) ctx += nwords(C[j])
+            }
+            if (match(l, phrase)) { bad = 1; why = "phrase: " substr(l, RSTART, RLENGTH); others = nwords(substr(l, 1, RSTART - 1) " " substr(l, RSTART + RLENGTH)) }
+            else others = nwords(c) - 1
+            t = l
+            while (!bad && match(t, lab)) {
+                d = substr(t, RSTART, RLENGTH); sub(/^.*(your|see|per) /, "", d); gsub(/[^A-Za-z0-9]/, "", d)
+                if (!skip_label(tolower(d)) && !(tolower(d) in def)) { bad = 1; why = "label: " d }
+                t = substr(t, RSTART + RLENGTH - 1)
+            }
+            # a same-letter range of list labels ("M1-M3") is a reference too
+            if (!bad && match(l, /(^|[^a-z0-9_#\/.-])[a-z][0-9]{1,2}(–|-)[a-z][0-9]{1,2}([^a-z0-9_]|$)/)) {
+                t = substr(l, RSTART, RLENGTH); gsub(/^[^a-z]+|[^a-z0-9]+$/, "", t); d = substr(t, 1, 1)
+                if (d == substr(t, index(t, "-") + 1, 1) && !(d in def) && !(substr(t, 1, index(t, "-") - 1) in def)) { bad = 1; why = "label-range: " t }
+            }
+            s = c; sub(/^[ \t>|*#-]+/, "", s); gsub(/\*\*/, "", s)
+            if (!bad && match(s, lead)) {
+                d = s; sub(/[^A-Za-z0-9].*$/, "", d)
+                if (!skip_label(tolower(d)) && !(tolower(d) in def)) { bad = 1; why = "label: " d }
+            }
+            t = c
+            if (!bad && match(t, /(^|[^A-Za-z0-9])[A-H](–|-)[A-H]([^A-Za-z0-9]|$)/)) {
+                d = substr(t, RSTART, RLENGTH); gsub(/^[^A-H]+/, "", d); d = tolower(substr(d, 1, 1))
+                if (!(d in def)) { bad = 1; why = "range: " d }
+            }
+            if (!bad && (match(t, /(option|item|choice|pick|follow-ups?|your) [A-H]([^A-Za-z0-9]|$)/) || match(t, /[(,;:—-] ?[A-H] recommended/) || match(t, /your [a-z]\)/))) {
+                d = substr(t, RSTART, RLENGTH); gsub(/ recommended/, "", d); gsub(/[^A-Za-z]*$/, "", d); gsub(/^.* /, "", d); d = tolower(d)
+                if (!(d in def)) { bad = 1; why = "ref: " d }
+            }
+            if (bad && others + ctx < gloss) { print "carryover: " R[i]; if (dbg) print "  why " why " (" others "+" ctx " words)" > "/dev/stderr" }
+        }
+    }'
+}
+
 want() { [ -z "$ONLY" ] || [[ "$ONLY" == *",$1,"* ]]; }
-stale=""; issue=""
+stale=""; issue=""; carry=""
 want stale-window && stale="$(stale_window_hits)"
 want issue-merged && issue="$(issue_merged_hits)"
-all="$(printf '%s\n%s\n%s\n' "$hits" "$stale" "$issue" | sed '/^$/d')"
+want carryover && carry="$(carryover_hits)"
+all="$(printf '%s\n%s\n%s\n%s\n' "$hits" "$stale" "$issue" "$carry" | sed '/^$/d')"
 if [ -n "$ONLY" ]; then
     all="$(printf '%s\n' "$all" | awk -v only="$ONLY" '{ split($0, p, ":"); if (index(only, "," p[1] ",")) print }')"
 fi
