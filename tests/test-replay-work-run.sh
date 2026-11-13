@@ -50,6 +50,8 @@ echo "gh=$(command -v gh)" > "$PWD/probe.txt"
 echo "token=${GH_TOKEN:-unset}${GITHUB_TOKEN:-}" >> "$PWD/probe.txt"
 echo "state=$(gh pr view 7 --json state -q .state)" >> "$PWD/probe.txt"
 echo "open=$(gh pr list --state open --json number -q length)" >> "$PWD/probe.txt"
+echo "checks_json=$(gh pr checks 7 --json name,bucket,link | jq -c "map(.bucket)")" >> "$PWD/probe.txt"
+echo "ci_pr_checks_rc=$(. "$LLM_SWARM_DIR/scripts/_ci-fallback.sh"; ci_pr_checks 7; echo "$CHECKS_RC")" >> "$PWD/probe.txt"
 gh pr comment 7 --body "hello"
 gh pr merge 7 --squash
 gh issue create --title t --body b > /dev/null
@@ -78,6 +80,8 @@ check "gh resolves to the stub" "$T/out/bin/gh" "$(sed -n 's/^gh=//p' "$P/probe.
 check "no GitHub token reaches the run" "token=unset" "$(sed -n 's/^token=//p;' "$P/probe.txt" | sed 's/^/token=/')"
 check "pr view served from fixture" "state=OPEN" "$(grep '^state=' "$P/probe.txt")"
 check "pr list served from fixture" "open=1" "$(grep '^open=' "$P/probe.txt")"
+check "pr checks --json is a JSON array of buckets" 'checks_json=["pass"]' "$(grep '^checks_json=' "$P/probe.txt")"
+check "green fixture reads green through ci_pr_checks (rc 0, not unreadable 2)" "ci_pr_checks_rc=0" "$(grep '^ci_pr_checks_rc=' "$P/probe.txt")"
 A="$T/out/actions.tsv"
 check "pr comment recorded" "1" "$(grep -c $'\tgh\tpr comment 7' "$A")"
 check "pr merge recorded" "1" "$(grep -c $'\tgh\tpr merge 7' "$A")"

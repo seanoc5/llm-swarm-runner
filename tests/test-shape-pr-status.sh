@@ -15,7 +15,7 @@ T=$(mktemp -d -t shape-pr-status-XXXXXX)
 trap 'rm -rf "$T"' EXIT
 
 extract_fn() { sed -n "/^${1}() {/,/^}/p" "$COORD_WATCH"; }
-for fn in is_own_worktree_dir own_wt_dir_for_issue pr_status_desc pr_status_sweep_pass; do
+for fn in is_own_worktree_dir own_wt_dir_for_issue pr_status_desc idle_park_marker_live pr_status_sweep_pass; do
     body="$(extract_fn "$fn")"
     [ -n "$body" ] || red "could not extract $fn"
     eval "$body"
@@ -147,8 +147,19 @@ has 'statuses/sha3 -f state=pending .*description=held by coordinator'; green "b
 has 'statuses/sha6 -f state=failure .*description=worker exited: no CLI in window'; green "bare shell, no idle-shell marker -> still a crash (failure)"
 has 'statuses/sha7 -f state=failure .*description=worker exited: no CLI in window'; green "pane 7 before its marker exists -> failure"
 printf '123\n' > "$WORKSPACE/wt-issue-7/.swarm/tasks/.idle-parked"
+PR_STATUS_LAST=(); : > "$T/api.log"
+pr_status_sweep_pass
+has 'statuses/sha7 -f state=failure .*description=worker exited: no CLI in window'; green "marker with no idle-shell pid file -> failure (stale marker, #925)"
+printf '%s\n' "$$" > "$WORKSPACE/wt-issue-7/.swarm/tasks/.idle-shell-pid"
+PR_STATUS_LAST=()
 pr_status_sweep_pass
 has 'statuses/sha7 -f state=pending .*description=parked: idle shell, waiting for a brief'; green "bare shell with run_idle_shell's marker -> parked (pending), not failure"
+# a leftover marker whose idle shell died (listener killed before its rm ran) is a crash
+sleep 0 & dead=$!; wait "$dead"
+printf '%s\n' "$dead" > "$WORKSPACE/wt-issue-7/.swarm/tasks/.idle-shell-pid"
+PR_STATUS_LAST=(); : > "$T/api.log"
+pr_status_sweep_pass
+has 'statuses/sha7 -f state=failure .*description=worker exited: no CLI in window'; green "stale marker (idle shell pid dead) -> failure, not parked (#925)"
 
 # The producer side: run_idle_shell writes the marker on entry and removes it when the shell exits.
 LISTENER="$SCRIPT_DIR/../scripts/worker-listener.sh"

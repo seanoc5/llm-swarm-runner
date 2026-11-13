@@ -5745,6 +5745,15 @@ PR_STATUS_BACKOFF_UNTIL=0          # issue #536: epoch; skip the pass until then
 # SHA and reposts. Fails open: an API error logs pr.status.skip
 # reason=api_error, backs off for 4x the interval only on an auth or
 # rate-limit error (any other error skips just that PR), and never aborts the cycle.
+idle_park_marker_live() {
+    # True only if run_idle_shell's park marker exists AND the idle shell pid it
+    # records in .idle-shell-pid is still alive (#925).
+    local wt="$1" spid
+    [ -f "$wt/.swarm/tasks/.idle-parked" ] || return 1
+    spid="$(cat "$wt/.swarm/tasks/.idle-shell-pid" 2>/dev/null)"
+    [[ "$spid" =~ ^[0-9]+$ ]] && kill -0 "$spid" 2>/dev/null
+}
+
 pr_status_sweep_pass() {
     [ "${SWARM_PR_STATUS:-1}" = "1" ] || return 0
     command -v gh >/dev/null 2>&1 || return 0
@@ -5778,10 +5787,11 @@ pr_status_sweep_pass() {
             pstate="$(worker_pane_state "$win")"
             if [ "$pstate" = "absent" ]; then
                 state=failure; desc="no worker attached"; key="$desc"
-            elif [ "$pstate" != "cli" ] && [ -f "$wt/.swarm/tasks/.idle-parked" ]; then
+            elif [ "$pstate" != "cli" ] && idle_park_marker_live "$wt"; then
                 # Bare shell, but it is worker-listener's run_idle_shell prompt (it
                 # writes this marker while parked and removes it on exit): a deliberate
-                # park waiting for a brief, not a crash.
+                # park waiting for a brief, not a crash. A marker whose idle shell is
+                # dead (cleanup skipped by a kill) is stale and falls through (#925).
                 state=pending; desc="parked: idle shell, waiting for a brief"; key="$desc"
             elif [ "$pstate" != "cli" ]; then
                 # Window exists but no CLI in the foreground and no idle-shell marker
