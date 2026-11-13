@@ -312,8 +312,15 @@ cleanup_review() {
 }
 trap cleanup_review EXIT
 if [ -n "$HEAD_SHA" ]; then
-    git -C "$REPO_ROOT" cat-file -e "$HEAD_SHA^{commit}" 2>/dev/null ||
-        git -C "$REPO_ROOT" fetch --quiet origin "pull/$PR/head" >/dev/null 2>&1 || true
+    if ! git -C "$REPO_ROOT" cat-file -e "$HEAD_SHA^{commit}" 2>/dev/null; then
+        # Unattended: never prompt for credentials, and bound the wait so a
+        # slow network cannot hang the review. Failure falls through to the
+        # existing worktree-add fallback below, which warns again if it fails.
+        if ! GIT_TERMINAL_PROMPT=0 timeout "${SELF_REVIEW_FETCH_TIMEOUT:-60}" \
+            git -C "$REPO_ROOT" fetch --quiet origin "pull/$PR/head" >/dev/null 2>&1; then
+            echo "self-review: WARNING — could not fetch PR #$PR head ${HEAD_SHA:0:7} from origin (failed or timed out after ${SELF_REVIEW_FETCH_TIMEOUT:-60}s); using local objects only" >&2
+        fi
+    fi
     _wt="$(mktemp -d -t swarm-review-head-XXXXXX)"
     if git -C "$REPO_ROOT" worktree add --quiet --detach "$_wt" "$HEAD_SHA" >/dev/null 2>&1; then
         HEAD_WT="$_wt"
