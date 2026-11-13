@@ -30,6 +30,7 @@ for f in coordinator.md coordinator-work.md; do
     grep -q 'never wait' "$P/$f" || red "$f ci-handoff lost never-wait"
     grep -qE 'ci-wait(\.sh)? N' "$P/$f" && red "$f ci-handoff still runs ci-wait.sh"
     grep -q 'pr-ready\.sh N' "$P/$f" || red "$f ci-handoff does not run pr-ready.sh"
+    grep -q 'BLOCK or review failure' "$P/$f" || red "$f lost the pr-ready exit-2 BLOCK-or-review-failure clause"
     grep -q 'Never ready on remembered CI' "$P/$f" || red "$f lost the #473 never-remembered-CI rule"
     green "$f: coordinator checks CI once and readies with pr-ready.sh"
 done
