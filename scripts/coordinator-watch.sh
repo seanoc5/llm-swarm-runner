@@ -8123,7 +8123,7 @@ coord_recycle_pass() {
         return 0
     fi
 
-    local target="$SESSION_NAME:coordinator.0" cleared=0
+    local target="$SESSION_NAME:coordinator.0" clear_rc=0
     (
         flock -n 9 || { log_event coord.recycle.skip "reason=locked trigger=$reason"; exit 3; }
         # Take the wake lock too (every llm-start.sh injection holds it while
@@ -8153,10 +8153,16 @@ coord_recycle_pass() {
         # /clear is instant; a composer still holding the text means it was
         # not taken, and the checklist must not land on the old conversation.
         compact_confirm_submitted "$target" "$AUTO_COMPACT_BUSY_PATTERN" "/clear" || exit 5
-    ) 9>"$AUTO_COMPACT_LOCK" && cleared=1
-    if [ "$cleared" != "1" ]; then
-        log_event coord.recycle.skip "reason=clear_not_submitted trigger=$reason"
-        compact_retract_queued "$target" coord.recycle "trigger=$reason" "$AUTO_COMPACT_BUSY_PATTERN" || true
+    ) 9>"$AUTO_COMPACT_LOCK" || clear_rc=$?
+    if [ "$clear_rc" != "0" ]; then
+        # Only rc 5 means /clear was actually typed (and then not taken):
+        # that is the one case with our own text to retract. Every other rc
+        # backed off before typing anything (a skip is already logged), and
+        # Escape+Backspace there would erase an operator's draft.
+        if [ "$clear_rc" = "5" ]; then
+            log_event coord.recycle.skip "reason=clear_not_submitted trigger=$reason"
+            compact_retract_queued "$target" coord.recycle "trigger=$reason" "$AUTO_COMPACT_BUSY_PATTERN" || true
+        fi
         return 0
     fi
 

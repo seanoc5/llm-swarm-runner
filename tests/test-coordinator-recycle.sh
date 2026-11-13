@@ -41,12 +41,12 @@ coord_human_present() { return "$G_HUMAN"; }
 coord_pending_approval_age() { return "$G_APPROVAL"; }
 compact_composer_clear() { return "$G_DIRTY"; }     # rc 0 = empty
 compact_confirm_submitted() { return "$G_CONFIRM"; }
-compact_retract_queued() { return 0; }
+compact_retract_queued() { echo retract >> "$T/retract.log"; return 0; }
 coord_proc_age_secs() { echo "$G_AGE"; }
 tmux() { printf '%s\n' "$*" >> "$T/tmux.log"; }
 
 reset() {
-    : > "$EVENTS_LOG"; : > "$T/prompts"; : > "$T/tmux.log"; rm -f "$COORD_RECYCLE_STATE"
+    : > "$T/retract.log"; : > "$EVENTS_LOG"; : > "$T/prompts"; : > "$T/tmux.log"; rm -f "$COORD_RECYCLE_STATE"
     G_STATE=cli G_BUSY=1 G_HUMAN=1 G_APPROVAL=1 G_DIRTY=0 G_AGE=50000 G_CONFIRM=0
 }
 expect() { # desc, grep-pattern-in-events (or '-' for none), expected prompt count
@@ -94,6 +94,19 @@ reset; G_STATE=shell; coord_recycle_pass; expect "no live CLI waits"        'ski
 reset; G_CONFIRM=1; coord_recycle_pass
 expect "/clear not taken: checklist not sent, no state written" 'skip .*reason=clear_not_submitted' 0
 [ ! -e "$COORD_RECYCLE_STATE" ] || red "state written despite failed /clear"
+[ -s "$T/retract.log" ] || red "typed /clear that was not taken, but no retract"
+
+reset; exec 7>"$AUTO_COMPACT_LOCK"; flock -n 7; coord_recycle_pass; exec 7>&-
+expect "compaction lock held: backs off, types nothing, retracts nothing" 'skip .*reason=locked' 0
+[ ! -s "$T/retract.log" ] || red "retract ran although nothing was typed (lock held)"
+[ ! -s "$T/tmux.log" ] || red "keys sent although the lock was held"
+
+reset; G_BUSY=1; coordinator_pane_busy() { [ "${N_BUSY:-0}" -ge 1 ] && return 0; N_BUSY=1; return 1; }; N_BUSY=0
+coord_recycle_pass
+expect "pane turns busy between the gate and the lock: backs off, no retract" 'skip .*reason=pane_busy' 0
+[ ! -s "$T/retract.log" ] || red "retract ran although nothing was typed (busy)"
+[ ! -s "$T/tmux.log" ] || red "keys sent into a busy pane"
+coordinator_pane_busy() { return "$G_BUSY"; }
 
 reset; DRY_RUN=1; coord_recycle_pass; DRY_RUN=0
 [ ! -s "$T/tmux.log" ] || red "dry run touched tmux"
