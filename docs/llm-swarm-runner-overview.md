@@ -547,6 +547,8 @@ The listener checks v2 inbox first, falls back to v1. Both can be in use simulta
 | `WORKER_CHECK_CMD`    | (none)           | Listener-wide default check command (e.g. the project test suite). Brief marker / `.swarm/check.sh` take precedence. |
 | `WORKER_CHECK_TIMEOUT`| `600`            | Seconds before the check is killed (`timeout`; exit 124 recorded as a failure).             |
 | `WORKER_CHECK_RETRY`  | `1`              | Retry-once on check failure with the failure output injected into the prompt. `0` disables. |
+| `WORKER_CHECK_HEARTBEAT` | `30`          | Seconds between "check still running" lines (with the log's last line) while a check runs. `0` disables. A session that changed nothing (clean tree, HEAD unchanged since task start) skips the check entirely: outcome `check_exit` is the string `"skipped_no_change"` (#494). |
+| `WORKER_PR_READY_CHECK_CMD` | (none)     | Optional full check `scripts/pr-ready.sh` runs once before self-review and the CI gate; non-zero or timeout refuses with exit 6 and a `check-failing` draft banner. Runs in the caller's cwd only when its `git rev-parse HEAD` equals the PR head SHA; from any other checkout (e.g. the coordinator's) it is skipped with a stderr line, not refused. Lets a project keep `WORKER_CHECK_CMD` fast. Timeout: `WORKER_PR_READY_CHECK_TIMEOUT` (default `1800`s). (#494) |
 | `SWARM_EVAL_LOG`      | `.swarm/eval-log.jsonl` | Where the listener appends one JSONL eval row per completed v2 task. Point outside the worktree to survive reaping / pool across workers. |
 
 This decouples the coordinator from the workers: the coordinator just drops a markdown file into the worktree and the worker picks it up asynchronously.
