@@ -370,7 +370,7 @@ match the coordinator. Only same-machine, same-account sessions were tested.
 Not re-tested: delivery across `claude --resume`.
 
 **Naming convention (S1 gap):** the coordinator is launched with
-`claude --name swarm-<project basename>` (`scripts/_coord-name.sh`,
+`claude --name swarm-<project basename>-<8-hex hash of the physical project path>` (`scripts/_coord-name.sh`,
 `coordinator-claude.sh`); senders address that name.
 
 **Courier choice (Constraints: "pick and document one"):** a minimal headless

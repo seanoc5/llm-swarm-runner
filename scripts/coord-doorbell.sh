@@ -15,8 +15,8 @@
 # results").
 #
 # Success is decided by this script, never by the courier's own prose: the
-# stream-json transcript must contain a SendMessage tool_use to the right
-# session whose text equals the expected message, AND a tool_result with
+# stream-json transcript must contain EXACTLY ONE SendMessage tool_use, to the right
+# session, text equal to the expected message, AND the tool_result carrying that call's tool_use_id with
 # success:true. Anything else (courier crash or timeout, no live coordinator
 # of that name, paraphrased text, success:false) exits 1 with the reason on
 # stderr and a coord.wake.doorbell_failed event, so llm-start.sh can fall
@@ -92,17 +92,27 @@ rc=$?
 [ "$rc" = 124 ] && fail "courier timed out after ${TIMEOUT_SECS}s"
 # rc != 0 may still carry a usable transcript; the checks below decide.
 
-SENT="$(jq -rs --arg to "$TARGET" --arg exp "$EXPECTED" '
+# Exactly one SendMessage call in the whole transcript, to the expected
+# recipient with the expected text. Zero calls, two calls (even if one is
+# right), or a call to anyone else is a failure: the caller falls back to the
+# paste. Prints that call's tool_use id on success.
+SEND_ID="$(jq -rs --arg to "$TARGET" --arg exp "$EXPECTED" '
     [ .[] | select(.type == "assistant") | .message.content[]?
-      | select(.type == "tool_use" and .name == "SendMessage"
-               and .input.to == $to and ((.input.message // "") | rtrimstr("\n")) == $exp) ]
-    | if length > 0 then "ok" else "" end' "$OUT" 2>/dev/null)"
-[ "$SENT" = "ok" ] || fail "courier did not send the expected message to $TARGET (courier rc=$rc: $(head -c 200 "$WORK/courier.err" | tr '\n' ' '))"
+      | select(.type == "tool_use" and .name == "SendMessage") ]
+    | if length == 1
+         and (.[0].input.to == $to)
+         and (((.[0].input.message // "") | rtrimstr("\n")) == $exp)
+         and ((.[0].id // "") != "")
+      then .[0].id else "" end' "$OUT" 2>/dev/null)"
+[ -n "$SEND_ID" ] || fail "courier did not make exactly one SendMessage call with the expected message to $TARGET (courier rc=$rc: $(head -c 200 "$WORK/courier.err" | tr '\n' ' '))"
 
-RESULT="$(jq -rs '
+# The tool_result that answers THAT call (matching tool_use_id), not the first
+# result in the transcript.
+RESULT="$(jq -rs --arg id "$SEND_ID" '
     [ .[] | select(.type == "user") | .message.content[]?
-      | select(.type == "tool_result") | .content
-      | if type == "array" then map(.text // "") | join("") else . end ] | first // ""' "$OUT" 2>/dev/null)"
+      | select(.type == "tool_result" and .tool_use_id == $id) | .content
+      | if type == "array" then map(.text // "") | join("") else . end ]
+    | if length == 1 then .[0] else "" end' "$OUT" 2>/dev/null)"
 if [ "$(printf '%s' "$RESULT" | jq -r '.success // false' 2>/dev/null)" != "true" ]; then
     fail "SendMessage reported not delivered: $(printf '%s' "$RESULT" | jq -r '(.message // .) | .[0:160]' 2>/dev/null)"
 fi
