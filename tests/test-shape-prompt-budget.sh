@@ -139,7 +139,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # 2026-11-12 (#572, on top of #533): worker 25000 -> 25500, worker-bare 12200 -> 12400,
 # coordinator 33700 -> 34200, coordinator-work 24400 -> 25100. Issue #572: workers stop
 # waiting on CI after the final push (run pr-ready.sh once, post a ci-handoff
-# outbox note, end terminal); the coordinator waits and readies. One CI bullet
+# outbox note, end terminal); the coordinator checks once, never waits, and readies. One CI bullet
 # swapped in each worker prompt, one outbox sentence, and one clause in each
 # coordinator's worker-outbox rule. The wording is pinned by
 # tests/test-shape-ci-handoff.sh.
