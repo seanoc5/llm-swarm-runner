@@ -5745,6 +5745,20 @@ PR_STATUS_BACKOFF_UNTIL=0          # issue #536: epoch; skip the pass until then
 # SHA and reposts. Fails open: an API error logs pr.status.skip
 # reason=api_error, backs off for 4x the interval only on an auth or
 # rate-limit error (any other error skips just that PR), and never aborts the cycle.
+idle_park_marker_live() {
+    # True only if run_idle_shell's park marker exists AND was touched within
+    # IDLE_PARK_HEARTBEAT_MAX seconds (#925). The idle shell lives in the
+    # worker's Docker container (own PID namespace), so a pid read from a file
+    # means nothing to `kill -0` on the host; the listener's poll loop instead
+    # touches the marker every ~2s, and the file mtime crosses the container
+    # boundary through the shared worktree mount. No heartbeat = listener gone.
+    local wt="$1" m="$1/.swarm/tasks/.idle-parked" mt
+    [ -f "$m" ] || return 1
+    mt="$(stat -c %Y "$m" 2>/dev/null || stat -f %m "$m" 2>/dev/null)" || return 1
+    [[ "$mt" =~ ^[0-9]+$ ]] || return 1
+    [ $(( $(date +%s) - mt )) -le "${IDLE_PARK_HEARTBEAT_MAX:-30}" ]
+}
+
 pr_status_sweep_pass() {
     [ "${SWARM_PR_STATUS:-1}" = "1" ] || return 0
     command -v gh >/dev/null 2>&1 || return 0
@@ -5778,10 +5792,11 @@ pr_status_sweep_pass() {
             pstate="$(worker_pane_state "$win")"
             if [ "$pstate" = "absent" ]; then
                 state=failure; desc="no worker attached"; key="$desc"
-            elif [ "$pstate" != "cli" ] && [ -f "$wt/.swarm/tasks/.idle-parked" ]; then
+            elif [ "$pstate" != "cli" ] && idle_park_marker_live "$wt"; then
                 # Bare shell, but it is worker-listener's run_idle_shell prompt (it
                 # writes this marker while parked and removes it on exit): a deliberate
-                # park waiting for a brief, not a crash.
+                # park waiting for a brief, not a crash. A marker whose idle shell is
+                # dead (cleanup skipped by a kill) is stale and falls through (#925).
                 state=pending; desc="parked: idle shell, waiting for a brief"; key="$desc"
             elif [ "$pstate" != "cli" ]; then
                 # Window exists but no CLI in the foreground and no idle-shell marker

@@ -15,7 +15,7 @@ T=$(mktemp -d -t shape-pr-status-XXXXXX)
 trap 'rm -rf "$T"' EXIT
 
 extract_fn() { sed -n "/^${1}() {/,/^}/p" "$COORD_WATCH"; }
-for fn in is_own_worktree_dir own_wt_dir_for_issue pr_status_desc pr_status_sweep_pass; do
+for fn in is_own_worktree_dir own_wt_dir_for_issue pr_status_desc idle_park_marker_live pr_status_sweep_pass; do
     body="$(extract_fn "$fn")"
     [ -n "$body" ] || red "could not extract $fn"
     eval "$body"
@@ -146,9 +146,26 @@ has 'statuses/sha2 -f state=pending .*description=idle: waiting on review/input'
 has 'statuses/sha3 -f state=pending .*description=held by coordinator'; green "body banner still holds"
 has 'statuses/sha6 -f state=failure .*description=worker exited: no CLI in window'; green "bare shell, no idle-shell marker -> still a crash (failure)"
 has 'statuses/sha7 -f state=failure .*description=worker exited: no CLI in window'; green "pane 7 before its marker exists -> failure"
-printf '123\n' > "$WORKSPACE/wt-issue-7/.swarm/tasks/.idle-parked"
+M="$WORKSPACE/wt-issue-7/.swarm/tasks/.idle-parked"; PIDF="$WORKSPACE/wt-issue-7/.swarm/tasks/.idle-shell-pid"
+# #925: the idle shell runs in the worker's container (own PID namespace), so the watcher must judge a park
+# by the marker's heartbeat (mtime), never by a pid it cannot see. Pid files below are deliberately misleading.
+date +%s > "$M"
+PR_STATUS_LAST=(); : > "$T/api.log"
 pr_status_sweep_pass
-has 'statuses/sha7 -f state=pending .*description=parked: idle shell, waiting for a brief'; green "bare shell with run_idle_shell's marker -> parked (pending), not failure"
+has 'statuses/sha7 -f state=pending .*description=parked: idle shell'; green "fresh heartbeat, no pid file -> parked"
+printf '%s\n' "999999" > "$PIDF"   # a container pid: names nothing (or something unrelated) on the host
+PR_STATUS_LAST=(); : > "$T/api.log"
+pr_status_sweep_pass
+has 'statuses/sha7 -f state=pending .*description=parked: idle shell, waiting for a brief'; green "fresh heartbeat + unresolvable pid -> parked (a pid check would call this a crash)"
+touch -d '5 minutes ago' "$M"
+printf '%s\n' "$$" > "$PIDF"       # a live HOST pid must not rescue a dead heartbeat
+PR_STATUS_LAST=(); : > "$T/api.log"
+pr_status_sweep_pass
+has 'statuses/sha7 -f state=failure .*description=worker exited: no CLI in window'; green "stale heartbeat + live host pid -> failure (a pid check would call this parked)"
+touch "$M"
+PR_STATUS_LAST=()
+pr_status_sweep_pass
+has 'statuses/sha7 -f state=pending .*description=parked: idle shell'; green "heartbeat resumes -> parked again"
 
 # The producer side: run_idle_shell writes the marker on entry and removes it when the shell exits.
 LISTENER="$SCRIPT_DIR/../scripts/worker-listener.sh"
@@ -157,3 +174,5 @@ grep -q '^IDLE_PARKED_MARKER="\$QUEUE_ROOT/.idle-parked"' "$LISTENER" || red "li
 grep -q 'date +%s > "\$IDLE_PARKED_MARKER"' "$LISTENER" || red "run_idle_shell does not write the park marker"
 grep -q 'rm -f "\$rcfile" "\$IDLE_SHELL_PIDFILE" "\$IDLE_PARKED_MARKER"' "$LISTENER" || red "run_idle_shell does not remove the park marker on exit"
 green "run_idle_shell writes the park marker on entry and removes it on exit"
+grep -c 'touch -c "\$IDLE_PARKED_MARKER"' "$LISTENER" | grep -qx 2 || red "poll_for_brief lost its park-marker heartbeat (both loops must touch it, #925)"
+green "poll_for_brief heartbeats the park marker in both loops"

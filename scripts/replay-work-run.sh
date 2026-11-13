@@ -170,6 +170,15 @@ case "$group $verb" in
         sel "$tmp" "${@:3}"; rm -f "$tmp" ;;
     "pr checks")
         n="$3"; f="$F/pr-$n.json"; [ -f "$f" ] || nofix "$@"
+        want_json=0; for a in "$@"; do [ "$a" = "--json" ] && want_json=1; done
+        if [ "$want_json" = 1 ]; then
+            # real gh: a JSON array of {name,bucket,link}; rc 1 on a fail, 8 on pending, 0 otherwise (a cancel-only set exits 0, #793)
+            arr="$(jq -c '[.statusCheckRollup[]? | (.conclusion // .state // "") as $c | {name: (.name // .context), bucket: (if ($c | IN("SUCCESS","NEUTRAL")) then "pass" elif ($c | IN("FAILURE","ERROR","ACTION_REQUIRED","STALE")) then "fail" elif ($c | IN("CANCELLED","TIMED_OUT","STARTUP_FAILURE")) then "cancel" elif $c == "SKIPPED" then "skipping" else "pending" end), link: (.detailsUrl // .targetUrl // "")}]' "$f")"
+            printf '%s\n' "$arr"
+            if jq -e 'any(.[]; .bucket == "fail")' <<<"$arr" >/dev/null; then exit 1
+            elif jq -e 'any(.[]; .bucket == "pending")' <<<"$arr" >/dev/null; then exit 8; fi
+            exit 0
+        fi
         jq -r '.statusCheckRollup[]? | [(.name // .context), (if (.conclusion // .state) == "SUCCESS" then "pass" elif (.conclusion // .state) == "FAILURE" then "fail" elif (.status // "") == "COMPLETED" then "pass" else "pending" end), "0", (.detailsUrl // .targetUrl // "")] | @tsv' "$f"
         jq -e '[.statusCheckRollup[]? | (.conclusion // .state // "")] | all(. == "SUCCESS" or . == "NEUTRAL" or . == "SKIPPED")' "$f" >/dev/null && exit 0 || exit 1 ;;
     "pr diff") echo "gh: replay has no diff fixture (PR diffs are not captured)" >&2; exit 1 ;;
