@@ -43,7 +43,7 @@ trap cleanup EXIT
 
 extract_fn() {
     local fn="$1"
-    sed -n "/^${fn}() {/,/^}/p" "$WATCH"
+    sed -n "/^${fn}() {/,/^}/p" "$WATCH" "$(dirname "${BASH_SOURCE[0]}")/../scripts/_pane-composer.sh"
 }
 for fn in worker_pane_state worker_pane_busy worker_pane_composer_text worker_deliver_busy_stall_clear worker_deliver_record_busy_stall worker_pane_ctx_used worker_pending_brief_path worker_pending_brief \
           worker_current_task_terminal mtime_epoch ctime_epoch compact_last_pane_line compact_composer_marker_line compact_composer_clear \
@@ -89,7 +89,7 @@ COMPACT_SUBMIT_SETTLE_SECS=0
 COMPACT_COMPOSER_CHROME_PATTERN='^※ recap:|^[[:space:]]*(✻|✶)[[:space:]]*(Considering…|Sautéed for|Cooked for|Baked for|Simmered for|Brewed for|Crunched for)?|/clear to save [0-9.]+k tokens'
 # 2026-10-27 — read straight from coordinator-watch.sh so the two never drift;
 # left unset, the empty alternative would make the filter drop every line.
-eval "$(grep '^COMPACT_FOOTER_PATTERN=' "$WATCH")"
+eval "$(grep '^COMPACT_FOOTER_PATTERN=' "$(dirname "${BASH_SOURCE[0]}")/../scripts/_pane-composer.sh")"
 declare -A WORKER_DELIVER_LAST_FAIL=()
 declare -A WORKER_DELIVER_FAIL_COUNT=()
 declare -A WORKER_DELIVER_GAVE_UP=()

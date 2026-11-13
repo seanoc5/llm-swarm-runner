@@ -9,7 +9,7 @@ This doc consolidates a question that comes up periodically: *can tmux itself be
 **Read via tmux is fine. Write via tmux is duct tape.**
 
 - `capture-pane` (read scrollback) is appropriate for observability — health classification, post-mortem debugging, surfacing context to the operator. The project uses it this way in `scripts/check-stuck-workers.sh`.
-- `send-keys` (write keystrokes) is appropriate from a *human* into the coordinator. Anything else — coordinator → worker, worker → coordinator, agent → agent across swarms — is a footgun: it races with the receiver's current tool call, has no acknowledgement, and silently corrupts state when keystrokes land in the wrong buffer. **Don't add `send-keys`-based "channels" to prompts or scripts.** If you need to ask another agent to do something, write it to the file bus or `gh issue comment`.
+- `send-keys` (write keystrokes) is a last resort for a *human* (§4d, `scripts/swarm-nudge.sh`; not recommended). Anything else — coordinator → worker, worker → coordinator, agent → agent across swarms — is a footgun: it races with the receiver's current tool call, has no acknowledgement, and silently corrupts state when keystrokes land in the wrong buffer. **Don't add `send-keys`-based "channels" to prompts or scripts.** If you need to ask another agent to do something, write it to the file bus or `gh issue comment`.
 
 ---
 
@@ -26,14 +26,8 @@ tmux -L swarm-<basename> capture-pane -t llm-<basename>:iss-42 -p -S -50000
 
 **`capture-pane` good; `send-keys` from the coordinator into a worker bad.** Reading scrollback is observation. Injecting keystrokes into a running worker REPL is a race against whatever tool call the worker is currently in — see §4c for why this is a footgun even though the permissions allow it. If a worker needs a recovery hint, write it to that worker's `.swarm/tasks/inbox/`; the listener will deliver it cleanly between tasks.
 
-### b. Operator drives coordinator from outside (the blessed *human* `send-keys` flow)
-From any host shell:
-
-```bash
-tmux -L swarm-<basename> send-keys -t llm-<basename>:coordinator "<your prompt>" Enter
-```
-
-This is documented in [`tmux-cheatsheet.md`](./tmux-cheatsheet.md) as the "control terminal" pattern. It's a **human → coordinator** channel — the human is the only actor outside the agent loop who has enough situational awareness to know whether the coordinator is at a prompt or mid-tool-call, and to retry if their keystrokes get eaten. Any *agent-driven* use of `send-keys` (agent → agent, script → agent that's running an LLM on the model's own initiative) lacks that situational awareness and is duct tape — see §4c.
+### b. Operator drives coordinator from outside (human only, emergencies)
+A human can type into the coordinator pane from a host shell, but this is not recommended and has one documented home: §4d, via `scripts/swarm-nudge.sh`, which refuses a busy pane or a non-empty composer. Any agent-driven keystroke injection lacks that situational awareness and is duct tape — see §4c.
 
 ### c. Host-side scripted `send-keys` (engineered, idle-gated — not agent-driven)
 
@@ -185,6 +179,15 @@ The permissions allow it. The substrate doesn't stop you. The default `prompts/c
 
 If your prompt or script is reaching for `tmux send-keys -t llm-...:iss-N`, replace it with a file-bus write to that worker's inbox. There is no scenario in which the `send-keys` version is the right call.
 
+### d. Human typing into a pane: `scripts/swarm-nudge.sh` (**not recommended; emergencies only**)
+The single documented place for human `send-keys` use. Run it from a host shell, never from an agent or the watcher:
+
+```bash
+scripts/swarm-nudge.sh [--force] <project-dir> <window> "text"   # e.g. . coordinator "continue"
+```
+
+It refuses (exit 3) when the pane looks busy or the composer holds text, reusing the watcher's own checks (`coord_pane_busy_visible`, `compact_composer_clear` from `scripts/_pane-composer.sh`). `--force` overrides; every send is logged to the swarm's `.swarm/events.log` (`nudge.sent`, or `nudge.forced` with the overridden reason). The file bus (`requeue.sh`, worker outbox) is still the right channel.
+
 ---
 
 ## 5. Summary table
@@ -193,7 +196,7 @@ If your prompt or script is reaching for `tmux send-keys -t llm-...:iss-N`, repl
 |---------------------------------------------|------------|-----------------------------------------------------------|
 | Coordinator reads worker scrollback         | Yes        | `overview.md` §Tmux as substrate; `check-stuck-workers.sh` |
 | Coordinator attributes pane text to a person| **Verify first** | Plain capture can't tell UI chrome from typed input — check the session transcript before believing it (§1d, `scripts/capture-worker.sh --verify`) |
-| Operator `send-keys` to coordinator         | Yes        | `tmux-cheatsheet.md`; §1b                                  |
+| Human types into a pane (not recommended)    | Emergencies  | `swarm-nudge.sh`; §4d                                     |
 | Host script `send-keys` (wake re-prompt, `/compact` injection, parked-session `/quit`) | Yes, idle-gated | `llm-start.sh`, `coordinator-watch.sh` (`AUTO_COMPACT`/`WORKER_AUTO_COMPACT`/`WORKER_AUTO_DELIVER`); §1c |
 | Coordinator (LLM) `send-keys` to worker     | **Discouraged** | Permitted by substrate; treat as footgun, use file bus instead (§4c) |
 | Worker reads/writes any tmux                | **Blocked** | `sandbox.sh` (no socket mount); `security.md`             |

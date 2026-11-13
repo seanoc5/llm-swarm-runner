@@ -56,7 +56,7 @@ trap cleanup EXIT
 
 extract_fn() {
     local fn="$1"
-    sed -n "/^${fn}() {/,/^}/p" "$WATCH"
+    sed -n "/^${fn}() {/,/^}/p" "$WATCH" "$(dirname "${BASH_SOURCE[0]}")/../scripts/_pane-composer.sh"
 }
 for fn in worker_pane_state worker_pane_busy worker_pane_ctx_used worker_pane_ctx_window \
           worker_compact_effective_threshold worker_has_open_pr \
@@ -113,7 +113,7 @@ COMPACT_REPLAY_PATTERN='Not enough messages to compact\.'
 COMPACT_COMPOSER_CHROME_PATTERN='^※ recap:|^[[:space:]]*(✻|✶)[[:space:]]*(Considering…|Sautéed for|Cooked for|Baked for|Simmered for|Brewed for|Crunched for)?|/clear to save [0-9.]+k tokens'
 # 2026-10-27 — read straight from coordinator-watch.sh so the two never drift;
 # left unset, the empty alternative would make the filter drop every line.
-eval "$(grep '^COMPACT_FOOTER_PATTERN=' "$WATCH")"
+eval "$(grep '^COMPACT_FOOTER_PATTERN=' "$(dirname "${BASH_SOURCE[0]}")/../scripts/_pane-composer.sh")"
 # issue #292 — lowered from the shipped default (5) so the fixtures below,
 # whose fake "compaction" sleeps only ~2s, still count as long enough to
 # trust a detected replay; Test 21 below overrides this back up locally to
@@ -669,6 +669,7 @@ heading "Test 13: shipped WORKER_COMPACT_BUSY_PATTERN default matches 2.1.x busy
 # (not a hand-copied guess) so it fails if the default ever regresses again.
 default_pattern="$(
     unset WORKER_COMPACT_BUSY_PATTERN
+    eval "$(grep -m1 '^PANE_BUSY_PATTERN_DEFAULT=' "$(dirname "${BASH_SOURCE[0]}")/../scripts/_pane-composer.sh")"
     eval "$(grep -m1 '^WORKER_COMPACT_BUSY_PATTERN=' "$WATCH")"
     printf '%s' "$WORKER_COMPACT_BUSY_PATTERN"
 )"
