@@ -8,8 +8,16 @@
 #                screen: "command above", "from my last message", "as before",
 #                "see earlier", "in my previous", "details in .swarm/needs-you.md".
 #   no-command   a Needs-you item (a "- **A1**" bullet and its continuation
-#                lines) says run/start/copy/click/type/paste/execute/open but
-#                carries no fenced block, `code span` or https URL.
+#                lines) says run/start/copy/click/type/paste/execute/open/edit/apply but
+#                carries no fenced block, `code span`, https URL, file path with an
+#                extension, file:line or quoted phrase. A "Pending your approval:" line
+#                and its continuation lines count as an item too (issue #680); a "yes/no"
+#                ask or Pending line needs no command for run/start/open, but copy/click/type/paste/execute/edit/apply
+#                must still show the change, and no item may point. "your" is not "you".
+#   pointer      an item names its change without stating it (issue #680): "make those
+#                three edits yourself", "apply the fix above", "merge it", "option A" with
+#                no option text after it, and no payload (same list as no-command) in the
+#                item. The fix is the change itself: file, line, before and after.
 #   two-endings  the reply has two closing lines: "Nothing to do" /
 #                "Nothing needed ..." together with "Do now:", or two of "Do now:" /
 #                "Pending your approval:" / nothing-lines (#801 fixture).
@@ -65,20 +73,31 @@ fi
 
 FENCE_RE='^[[:space:]]*(```|~~~)'   # one fence definition for the main pass and issue_merged_hits
 hits="$(printf '%s\n' "$text" | awk -v fence="$FENCE_RE" '
-function flush_item(   hit) {
-    if (item != "" && tolower(item) ~ verbs && item !~ cmd) {
-        hits[++n] = "no-command: " first
+function flush_item(   hit, li) {
+    li = tolower(item)
+    if (item != "") {
+        if (li ~ pointer && item !~ cmd_ptr) hits[++n] = "pointer: " first
+        else if (item !~ cmd && (li ~ verbs_hard || (!ispend && li !~ /yes\/no/ && li ~ verbs))) hits[++n] = "no-command: " first
     }
     item = ""; first = ""
 }
 BEGIN {
     back = "(command|commands|step|steps|link|url|snippet|block)s? above|from my (last|previous|earlier) (message|reply)|as (before|above)|see (earlier|above|my (last|previous))|in my (previous|last|earlier)|details in [`]?\\.swarm/needs-you\\.md"
-    verbs = "(^|[^a-z])(run|start|copy|click|type|paste|execute|open)([^a-z]|$)"
-    cmd = "```|`[^`]+`|https://"
+    verbs = "(^|[^a-z])(run|start|copy|click|type|paste|execute|open|edit|apply)([^a-z]|$)"
+    verbs_hard = "(^|[^a-z])(copy|click|type|paste|execute|edit|apply)([^a-z]|$)"   # no yes/no or Pending exemption: only run/start/open are exempt (the change itself must be on screen)
+    # An action item names its change: a command, a fence, a URL, a path with an
+    # extension (".github/workflows/ci.yml"), file:line, or a quoted phrase to type.
+    cmd = "```|`[^`]+`|https://|[A-Za-z0-9_./-]+\\.(ya?ml|kts?|sh|md|json|sql|java|py|html|toml|properties|xml|gradle|env|txt)([^A-Za-z]|$)|[A-Za-z0-9_-]*[./][A-Za-z0-9_./-]*:[0-9]+|\"[^\"]{5,}\""
+    # A pointer needs a payload that is not a bare URL: every item carries its PR link (issue #680).
+    cmd_ptr = "```|`[^`]+`|[A-Za-z0-9_./-]+\\.(ya?ml|kts?|sh|md|json|sql|java|py|html|toml|properties|xml|gradle|env|txt)([^A-Za-z]|$)|[A-Za-z0-9_-]*[./][A-Za-z0-9_./-]*:[0-9]+|\"[^\"]{5,}\""
+    # Pointer phrases: the item names a change without stating it (issue #680):
+    # "make those three edits yourself", "apply the fix above", "merge it",
+    # "option A" with no option text after it.
+    pointer = "(those|these|them) ((one|two|three|four|five|six|[0-9]+|few|same|small|tiny|one-line|single|following) ){0,2}(edits?|changes?|fixes|patch(es)?|tweaks?)([^a-z]|$)|(the|those|these) (one|two|three|four|five|six|[0-9]+) (edits?|changes?|fix(es)?|patch(es)?|tweaks?|lines?|steps?)([^a-z]|$)|(the|that|this) (fix|edits?|changes?|patch|tweak|usual) (above|from before|from earlier|we discussed|i described|i mentioned)|(^|[^a-z])you(.ll)? ((just|then|can|should|must|need to|will|may|could|please|now|first|also|still) ){0,2}(merge|approve|apply|run|make|do) (it|that|this|those|these|them|the above)([^a-z]|$)|(do|make) (the|those|these) (edits?|changes?)|option [a-z][0-9]*( or | and | recommended| \\(|[.;)]|$)"
     nothing = "^[[:space:]]*(nothing to do|nothing needed|nothing is needed|nothing needed from you)"
     dono = "^[[:space:]]*(\\*\\*)?do now(\\*\\*)?:"
     pend = "^[[:space:]]*(\\*\\*)?pending your approval(\\*\\*)?:"
-    bl = 0
+    bl = 0; ispend = 0
     infence = 0; item = ""; first = ""; n = 0; nn = 0; nd = 0; np = 0
 }
 {
@@ -91,8 +110,8 @@ BEGIN {
     if (infence) { if (item != "") item = item "\n" line; next }
     if (l ~ back) hits[++n] = "backref: " line
     if (line ~ /^[[:space:]]*[0-9]+[.)][[:space:]]/ && !bl++) hits[++n] = "bare-list: " line
-    if (line ~ /^[[:space:]]*-[[:space:]]+\*\*[A-Za-z][0-9]+\*\*/) {
-        flush_item(); item = line; first = line
+    if (line ~ /^[[:space:]]*-[[:space:]]+\*\*[A-Za-z][0-9]+\*\*/ || l ~ pend) {
+        flush_item(); item = line; first = line; ispend = (l ~ pend)
     } else if (item != "") {
         if (line ~ /^[[:space:]]*$/ || line ~ /^(#|\*\*)/ ) flush_item()
         else item = item "\n" line

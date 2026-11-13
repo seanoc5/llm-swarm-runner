@@ -1,0 +1,4 @@
+Wake 11:02: 1 outcome triaged.
+**A. Needs you:**
+- **A1** Unblock fand-app#1810 (adopt the shared UI library): make those three edits yourself, since workers cannot touch workflow files. Default if silent: #1810 stays blocked.
+Pending your approval: the three edits (yes/no)

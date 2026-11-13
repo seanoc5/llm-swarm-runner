@@ -33,6 +33,42 @@ printf 'Pending your approval: merge PR 4 (yes/no)\nDo now: say yes\n' > "$T/two
 check "Pending your approval + Do now: two-endings" "two-endings" "$(rules "$T/two")"
 printf -- '- **A1** Click the Approve button\n  https://github.com/o/r/pull/4 (Files changed > Review)\n' > "$T/url"
 check "a click item with an https URL is clean" "" "$(rules "$T/url")"
+# issue #680: an approval item must state its change, not point at it
+check "#680 incident (\"make those three edits yourself\"): pointer" "pointer" "$(rules "$FX/incident-pointer-edits.txt")"
+check "#680 version naming ci.yml, the line and the change: clean" "" "$(rules "$FX/clean-pointer-edits-named.txt")"
+check "#680 \"option A or option B\" with no option text: pointer" "pointer" "$(rules "$FX/incident-pointer-option.txt")"
+printf -- "- **A1** Pick option A: rescope the export to CSV only (default if silent)\n" > "$T/optok"
+check "#680 \"option A: <text>\" carries its text: clean" "" "$(rules "$T/optok")"
+printf "Pending your approval: apply the fix above (yes/no)\n" > "$T/pend"
+check "#680 a Pending-approval line is linted as an item: pointer" "pointer" "$(rules "$T/pend")"
+printf -- "- **A1** Edit the workflow so checkout fetches submodules (yes/no)\n" > "$T/edit"
+check "#680 an edit verb with no file, line or command: no-command" "no-command" "$(rules "$T/edit")"
+printf -- "- **A1** Edit scripts/needs-you.sh:44 to drop the retry (yes/no)\n" > "$T/editok"
+check "#680 file:line payload clears an edit item" "" "$(rules "$T/editok")"
+printf -- '- **A1** Make those three edits yourself (checked 17:34), then say go.\n' > "$T/clock"
+check "#680 a clock time (17:34) is not a file:line payload: pointer" "pointer" "$(rules "$T/clock")"
+printf -- '- **A1** Make those three edits yourself https://github.com/o/r/pull/1810\n' > "$T/url"
+check "#680 a bare PR URL is not a pointer payload: pointer" "pointer" "$(rules "$T/url")"
+printf -- '- **A1** Make those three edits yourself: `sed -i s/a/b/ x` https://github.com/o/r/pull/1810\n' > "$T/url-span"
+check "#680 same phrase with the edits in a code span: clean" "" "$(rules "$T/url-span")"
+printf -- '- **A3** #2148: when searches start defaulting to forum-visible, should saved searches stay private? (yes/no)\n' > "$T/yn"
+check "#680 a yes/no decision using the word 'start' needs no command: clean" "" "$(rules "$T/yn")"
+printf 'Pending your approval: the one-line nightly config edit (yes/no)\n' > "$T/pe"
+check "#680 a Pending edit with no file or change: no-command" "no-command" "$(rules "$T/pe")"
+printf 'Pending your approval: merge this PR, #2311 (yes/no)\n' > "$T/pm"
+check "#680 'your' in a Pending line is not 'you ... merge this': clean" "" "$(rules "$T/pm")"
+printf 'Pending your approval: make this the default (yes/no)\n' > "$T/pd"
+check "#680 Pending 'make this the default' (your != you): clean" "" "$(rules "$T/pd")"
+printf -- '- **A1** Click Approve on the PR (yes/no)\n' > "$T/ck"
+check "#680 click + yes/no with no URL is not exempt: no-command" "no-command" "$(rules "$T/ck")"
+printf -- '- **A1** If you say yes, I will merge it (https://github.com/o/r/pull/1810)\n' > "$T/y1"
+check "#680 'if you say yes, I will merge it' (you is not the actor): clean" "" "$(rules "$T/y1")"
+printf -- '- **A1** Do you want me to run it now? https://github.com/o/r/pull/1810\n' > "$T/y2"
+check "#680 'do you want me to run it now?' (you is not the actor): clean" "" "$(rules "$T/y2")"
+printf -- '- **A1** Then you merge it https://github.com/o/r/pull/1810\n' > "$T/y3"
+check "#680 'you merge it' (you is the actor, no payload): pointer" "pointer" "$(rules "$T/y3")"
+printf -- '- **A1** You run them https://github.com/o/r/pull/1810\n' > "$T/y4"
+check "#680 'you run them' (you is the actor, no payload): pointer" "pointer" "$(rules "$T/y4")"
 
 # ── issue-merged (issue #716): gh stubbed; #1910 is an issue, #1913 and #1909 are PRs ──
 mkdir -p "$T/ghbin"
@@ -104,6 +140,28 @@ check "fenced --do: opening fence starts its own line" "1" "$(grep -c '^```$' <<
 check "fenced --do: Do now shows the command, not a bare fence" "Do now: A1 — ./load.sh kdeyoga" "$(grep '^Do now:' <<<"$out")"
 check "fenced --do: render passes the reply lint" "" "$("$LINT" <<<"$out" | cut -d: -f1 | paste -sd, -)"
 check "empty list renders 'Nothing to do.'" "Nothing to do." "$("$NY" render --project "$P" | tail -1)"
+
+# ── verification stamp (issue #680): claim, verified, verify, unverified-since ──
+export TZ=UTC   # render shows local time; pin it so the "01-01" checks hold anywhere
+V="$T/vproj"; mkdir -p "$V/.swarm"
+"$NY" add --project "$V" --title "Unblock fand-app 1810" --claim "only ci.yml builds with Gradle" --do 'Edit `.github/workflows/ci.yml` line 31: add `submodules: true`' >/dev/null
+out="$("$NY" render --project "$V")"
+case "$out" in *"Claim: only ci.yml builds with Gradle — verified "*) got=yes ;; *) got=no ;; esac
+check "a fresh item renders its claim with a verified time" "yes" "$got"
+check "a fresh item is not marked unverified" "0" "$(grep -c unverified <<<"$out" || true)"
+check "the rendered item passes the reply lint" "" "$("$LINT" <<<"$out" | cut -d: -f1 | paste -sd, -)"
+# age the stamp: render flags it
+jq -c '.verified = "2026-01-01T00:00:00Z"' "$V/.swarm/needs-you.jsonl" > "$T/v.jsonl" && mv "$T/v.jsonl" "$V/.swarm/needs-you.jsonl"
+case "$("$NY" render --project "$V")" in *"Claim: only ci.yml builds with Gradle — (unverified since 01-01 "*) got=yes ;; *) got=no ;; esac
+check "an old stamp renders (unverified since <time>)" "yes" "$got"
+"$NY" verify A1 --claim "only ci.yml builds with Gradle; the other 2 workflows only ls the migrations dir" --project "$V"
+case "$("$NY" render --project "$V")" in *"the other 2 workflows"*"— verified "*) got=yes ;; *) got=no ;; esac
+check "verify restamps the item and can correct the claim" "yes" "$got"
+set +e; "$NY" verify A9 --project "$V" >/dev/null 2>&1; ec=$?; set -e
+check "verify on an unknown label fails" "2" "$ec"
+printf '{"label":"A1","kind":"todo","title":"old item","do":"run `x`","risk":"","rec":"","default":"","url":"","added":"2026-01-01T00:00:00Z","done":false}\n' > "$V/.swarm/needs-you.jsonl"
+case "$("$NY" render --project "$V")" in *"(unverified since 01-01 "*) got=yes ;; *) got=no ;; esac
+check "a pre-#680 item with no stamp falls back to its added time" "yes" "$got"
 
 # ── Stop hook ────────────────────────────────────────────────────────────────
 H="$T/hproj"; mkdir -p "$H/.swarm/coord-inbox"

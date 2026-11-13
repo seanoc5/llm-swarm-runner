@@ -11,6 +11,8 @@ style when they are written.
 
 ### Changed
 
+- Coordinator approval items must now state their change, and carry-over items show whether anyone re-checked them. On 2026-11-01 the fand-app coordinator carried "make those three edits yourself" through about ten replies; none said what the edits were, and the claim (three workflow files need a change) was wrong, as only `ci.yml` needs it. `lint-coordinator-reply.sh` gains a `pointer` rule ("those three edits", "the fix above", a bare "option A", "you run it"), applies to "Pending your approval" lines as well as `- **A1**` items, and accepts a file path, `file:line` or quoted phrase as the item's payload. `needs-you.sh` gains `--claim` (the facts the item rests on) and `verify <label>`; `render` prints "verified <time>" or "(unverified since <time>)" after `NEEDS_YOU_STALE_HOURS` (default 6). The 2026-10-30..11-12 audit of the fand-app, fand-etl and corpusminder coordinators is in `docs/research/issue-680-approval-item-audit.md`. (#680)
+
 - Workers no longer get the operator's SSH identity. `sandbox.sh` stopped mounting `~/.ssh` and forwarding `SSH_AUTH_SOCK` by default, because that key logs in to live hosts (kdeyoga) with no password, so a stray `ssh` in a worker had operator rights there. Inside the container, `git@github.com:` and `ssh://git@github.com/` remotes are rewritten to HTTPS (env-based git config, host `.git/config` untouched) and authenticate with `GH_TOKEN`. Commit and tag signing is disabled in the container because the signing key is the SSH key, so worker commits are now unsigned. `SANDBOX_SSH=1` restores the old mounts, agent and signing. (#638)
 
 ### Fixed

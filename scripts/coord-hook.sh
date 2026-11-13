@@ -170,7 +170,7 @@ reply_lint_message() {
     fi
     : > "$blocked_file" 2>/dev/null || true
     log_event "coord.reply_lint.hit rules=$rules"
-    printf 'Reply lint failed (%s). Fix before ending your turn: every operator action must carry its full command (fenced) or https URL plus click path in this reply; never point at an earlier message, "above" or .swarm/needs-you.md; end with exactly one closing line. Reprint with: scripts/needs-you.sh render. An issue never merges: write \"the fix PR for #N merges\" or \"#N closes\". Never use a bare \"1.\" list (the terminal renumbers it from 1): label every list A1, B1... Offending lines: %s' \
+    printf 'Reply lint failed (%s). Fix before ending your turn: every operator action must carry its full command (fenced) or https URL plus click path in this reply; name the change itself (file, line, before and after), never "those edits" or "the fix"; never point at an earlier message, "above" or .swarm/needs-you.md; end with exactly one closing line. Reprint with: scripts/needs-you.sh render. An issue never merges: write \"the fix PR for #N merges\" or \"#N closes\". Never use a bare \"1.\" list (the terminal renumbers it from 1): label every list A1, B1... Offending lines: %s' \
         "$rules" "$(printf '%s' "$hits" | sed -n 1,3p | tr '\n' '|')"
 }
 
