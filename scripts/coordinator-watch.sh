@@ -5978,7 +5978,7 @@ runner_health_sweep_pass() {
     out="$("$CI_RUNNER_HEALTH" $repos 2>&1)" && ec=0 || ec=$?
     if [ "$ec" = "2" ]; then
         if [ -z "${RUNNER_HEALTH_LOGGED[error]:-}" ]; then
-            log_event watch.runner_health_error "repos=\"$repos\" msg=\"$(printf '%s' "$out" | head -n1)\""
+            log_event watch.runner_health_error "repos=\"$repos\" msg=\"$(sed -n 1p <<< "$out")\""
             RUNNER_HEALTH_LOGGED[error]=1
         fi
         return 0   # no verdict: keep the other dedup entries as they were

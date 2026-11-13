@@ -35,6 +35,9 @@ set -uo pipefail
 case "${1:-}" in -h|--help) sed -n "2,32p" "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
 command -v jq >/dev/null || { echo "ci-runner-health: jq required" >&2; exit 2; }
 command -v gh >/dev/null || { echo "ci-runner-health: gh required" >&2; exit 2; }
+# Reload project-only knobs (CI_HEALTH_*) from <project>/.swarm/.env; caller-set variables still win.
+# shellcheck source=_load-env.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_load-env.sh" "$PWD"
 
 QUEUE_MINS="${CI_HEALTH_QUEUE_MINS:-10}"
 [[ "$QUEUE_MINS" =~ ^[0-9]+$ ]] || { echo "ci-runner-health: CI_HEALTH_QUEUE_MINS must be an integer (got $QUEUE_MINS)" >&2; exit 2; }
@@ -126,7 +129,7 @@ report_repo() {
     local repo="$1" since ids
     since="$(date -u -d "@$((NOW - DAYS * 86400))" +%Y-%m-%dT%H:%M:%SZ)"
     ids="$(gh_json "repos/$repo/actions/runs?created=%3E%3D$since&per_page=100" '.workflow_runs[].id')" || return 0
-    ids="$(printf "%s\n" "$ids" | sed "/^$/d" | head -n "$REPORT_RUNS")"
+    ids="$(printf "%s\n" "$ids" | sed "/^$/d" | sed -n "1,${REPORT_RUNS}p")"
     # shellcheck disable=SC2086
     jobs_of_runs "$repo" $ids | jq -s -r --arg repo "$repo" '
         [.[] | select(.started_at != null)
