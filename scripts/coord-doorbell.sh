@@ -44,6 +44,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="${1:?usage: coord-doorbell.sh <project-dir> <prompt-file>}"
 PROMPT_FILE="${2:?usage: coord-doorbell.sh <project-dir> <prompt-file>}"
 
+# #660: .swarm/.env defaults are no longer left in the tmux server env, so
+# reload them for this project. Caller-set variables still win.
+# shellcheck source=_load-env.sh
+. "$SCRIPT_DIR/_load-env.sh" "$PROJECT_DIR"
+
 CLAUDE_BIN="${COORD_DOORBELL_CLAUDE:-claude}"
 MODEL="${COORD_DOORBELL_MODEL:-haiku}"
 TIMEOUT_SECS="${COORD_DOORBELL_TIMEOUT_SECS:-30}"
