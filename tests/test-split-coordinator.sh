@@ -131,7 +131,8 @@ declare -A RENAMED=(
 missing=""
 while IFS= read -r h; do
     want="${RENAMED[$h]:-$h}"
-    cat "$ROOT"/prompts/coordinator-{shared,work,chat}.md | grep -qxF -e "## $want" -e "### $want" || missing+="[$h] "
+    # no pipe: grep -q exits on first match, and under pipefail a SIGPIPE to cat reads as a miss
+    grep -qxF -e "## $want" -e "### $want" "$ROOT"/prompts/coordinator-{shared,work,chat}.md || missing+="[$h] "
 done < <(awk '/^```/ {f = !f} !f && /^#{2,3} / {sub(/^#+ /, ""); print}' "$ROOT/prompts/coordinator.md")
 check "every coordinator.md section has a home in the split prompts" "" "$missing"
 

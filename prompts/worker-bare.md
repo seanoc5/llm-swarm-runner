@@ -81,6 +81,12 @@ follow). The operator reads panes bottom-up.
 
 Draft PR: Action leads "⏳ still draft, waiting on <CI|pr-ready>".
 
+A check you cannot run here: leave the PR draft, open Bottom line with
+"unverified: <check>", and make Next the coordinator running it on the host.
+Asked "what is holding this PR?", first re-run `gh pr view <N>` (a
+`COORDINATOR HOLD` banner supersedes your handoff), then answer in one line
+naming the failing test or check; mechanics after.
+
 No move and no surprise: just **Bottom line** + **Next** + **Action**. A no-PR
 terminal (`blocked`, `done-no-pr`) has no page behind it, so the bottom
 line may be a short paragraph: files touched, tests run, why no PR.
