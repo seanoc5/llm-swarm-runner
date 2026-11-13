@@ -5751,6 +5751,13 @@ idle_park_marker_live() {
     local wt="$1" spid
     [ -f "$wt/.swarm/tasks/.idle-parked" ] || return 1
     spid="$(cat "$wt/.swarm/tasks/.idle-shell-pid" 2>/dev/null)"
+    if [ -z "$spid" ]; then
+        # run_idle_shell writes the marker just before the new shell writes its pid:
+        # a marker under 10s old with no pid yet is a park starting, not a crash.
+        local born; born="$(cat "$wt/.swarm/tasks/.idle-parked" 2>/dev/null)"
+        [[ "$born" =~ ^[0-9]+$ ]] && [ $(( $(date +%s) - born )) -lt 10 ]
+        return
+    fi
     [[ "$spid" =~ ^[0-9]+$ ]] && kill -0 "$spid" 2>/dev/null
 }
 

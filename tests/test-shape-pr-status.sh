@@ -146,6 +146,10 @@ has 'statuses/sha2 -f state=pending .*description=idle: waiting on review/input'
 has 'statuses/sha3 -f state=pending .*description=held by coordinator'; green "body banner still holds"
 has 'statuses/sha6 -f state=failure .*description=worker exited: no CLI in window'; green "bare shell, no idle-shell marker -> still a crash (failure)"
 has 'statuses/sha7 -f state=failure .*description=worker exited: no CLI in window'; green "pane 7 before its marker exists -> failure"
+date +%s > "$WORKSPACE/wt-issue-7/.swarm/tasks/.idle-parked"
+PR_STATUS_LAST=(); : > "$T/api.log"
+pr_status_sweep_pass
+has 'statuses/sha7 -f state=pending .*description=parked: idle shell'; green "fresh marker, pid not written yet -> parked (startup gap)"
 printf '123\n' > "$WORKSPACE/wt-issue-7/.swarm/tasks/.idle-parked"
 PR_STATUS_LAST=(); : > "$T/api.log"
 pr_status_sweep_pass
