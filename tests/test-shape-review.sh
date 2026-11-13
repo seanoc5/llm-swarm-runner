@@ -88,6 +88,7 @@ cat > "$TEST_DIR/bin/claude" <<'EOF'
 cat > /dev/null   # consume the payload from stdin
 echo "$* | cwd=$PWD" >> "${CLAUDE_ARGS_LOG:-/dev/null}"
 echo "key=${ANTHROPIC_API_KEY:-unset}" > "${CLAUDE_ENV_LOG:-/dev/null}"
+prev=""; for a in "$@"; do [ "$prev" = "--add-dir" ] && cat "$a/f.txt" >> "${CLAUDE_FILE_LOG:-/dev/null}" 2>/dev/null; prev="$a"; done
 cat "$CLAUDE_STUB_OUTPUT"
 exit "${CLAUDE_STUB_EXIT:-0}"
 EOF
@@ -482,6 +483,25 @@ grep -q 'line600' "$CODEX_PAYLOAD_LOG" || red "last file missing from prompt"
 unset GH_DIFF_FILE
 green "excluded=N only when files were left out; code stays in; many-file diff OK"
 
+
+# ============================================================================
+heading "Test H: reviewer reads the PR head, not a stale caller checkout (#930)"
+# ============================================================================
+STALE="$TEST_DIR/stale-repo"
+git init -q "$STALE"
+git -C "$STALE" config user.email t@t; git -C "$STALE" config user.name t
+echo "old content" > "$STALE/f.txt"; git -C "$STALE" add f.txt; git -C "$STALE" commit -q -m old
+echo "head content" > "$STALE/f.txt"; git -C "$STALE" commit -q -am head
+HEAD_REAL="$(git -C "$STALE" rev-parse HEAD)"
+git -C "$STALE" checkout -q --detach HEAD~1          # caller's checkout lags the PR head
+export CLAUDE_FILE_LOG="$TEST_DIR/claude.files"; : > "$CLAUDE_FILE_LOG"
+printf 'APPROVE\n' > "$CLAUDE_STUB_OUTPUT"
+( cd "$STALE" && GH_HEAD="$HEAD_REAL" "$REVIEW" 42 --rerun >/dev/null 2>&1 )
+grep -q "head content" "$CLAUDE_FILE_LOG" || red "reviewer must see the PR head's file, saw: $(cat "$CLAUDE_FILE_LOG")"
+grep -q "old content" "$CLAUDE_FILE_LOG" && red "reviewer saw the stale checkout's file"
+[ "$(git -C "$STALE" worktree list | wc -l)" -eq 1 ] || red "temporary head worktree was not cleaned up"
+[ "$(cat "$STALE/f.txt")" = "old content" ] || red "caller's checkout was modified"
+green "stale checkout still reviews against the PR head; temp worktree removed"
 # ============================================================================
 heading "All self-review machinery shape tests passed"
 green "verdict parsing, exit codes, --post idempotency, kill switch, merge gate"

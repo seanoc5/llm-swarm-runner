@@ -292,11 +292,48 @@ fi
 BODY="$(gh pr view "$PR" --json title,body --jq '"\(.title)\n\n\(.body)"')" \
     || { echo "ERROR: gh pr view $PR failed" >&2; exit 1; }
 
+# --- check out the PR head for the reviewer (issue #930) ----------------------
+# The reviewer verifies claims by reading files. Those must be the PR head, not
+# whatever the caller's cwd has checked out (a coordinator's main checkout can
+# lag origin by many commits and produced false "doesn't exist" caveats). So
+# materialise HEAD_SHA in a throwaway detached worktree and point the reviewer
+# at it. If that fails, fall back to the caller's checkout but say so in the
+# prompt, so the reviewer treats on-disk files as possibly stale.
+HEAD_WT=""
+HEAD_NOTE=""
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+cleanup_review() {
+    [ -z "${REVIEW_FILE:-}" ] || rm -f "$REVIEW_FILE"
+    [ -z "${SCRATCH:-}" ] || rm -rf "$SCRATCH"
+    if [ -n "$HEAD_WT" ]; then
+        git -C "$REPO_ROOT" worktree remove --force "$HEAD_WT" >/dev/null 2>&1 || rm -rf "$HEAD_WT"
+        git -C "$REPO_ROOT" worktree prune >/dev/null 2>&1 || true
+    fi
+}
+trap cleanup_review EXIT
+if [ -n "$HEAD_SHA" ]; then
+    git -C "$REPO_ROOT" cat-file -e "$HEAD_SHA^{commit}" 2>/dev/null ||
+        git -C "$REPO_ROOT" fetch --quiet origin "pull/$PR/head" >/dev/null 2>&1 || true
+    _wt="$(mktemp -d -t swarm-review-head-XXXXXX)"
+    if git -C "$REPO_ROOT" worktree add --quiet --detach "$_wt" "$HEAD_SHA" >/dev/null 2>&1; then
+        HEAD_WT="$_wt"
+        HEAD_NOTE="Repository files: a checkout of PR #$PR at head $HEAD_SHA is at $HEAD_WT. Read files there. Do not read any other checkout of this repository: it may not be at the PR head."
+    else
+        rm -rf "$_wt"
+        echo "self-review: WARNING — could not check out PR head ${HEAD_SHA:0:7}; reviewing against $REPO_ROOT, which may not be at the PR head" >&2
+        HEAD_NOTE="Repository files: the PR head ${HEAD_SHA:-<unknown>} could NOT be checked out. Files under $REPO_ROOT may be stale and may not match the PR. Rely on the diff, and say so in the review for any claim you could not verify at the head."
+    fi
+else
+    echo "self-review: WARNING — PR head unreadable; reviewing against $REPO_ROOT, which may not be at the PR head" >&2
+    HEAD_NOTE="Repository files: the PR head could NOT be determined. Files under $REPO_ROOT may be stale; rely on the diff and say so for any claim you could not verify."
+fi
+
 # --- run the fresh-context review ------------------------------------------
 MODEL_OPTS=()
 [ -n "$MODEL" ] && MODEL_OPTS=(--model "$MODEL")
 review_payload() {
     printf '%s\n\n--- PR ---\n%s\n\n' "$(cat "$SKILL")" "$BODY"
+    [ -z "$HEAD_NOTE" ] || printf -- '--- CHECKOUT ---\n%s\n\n' "$HEAD_NOTE"
     [ -z "$EXCLUDED_NOTE" ] || printf -- '--- NOT REVIEWED ---\n%s\nState in your review that these files were not examined.\n\n' "$EXCLUDED_NOTE"
     printf -- '--- DIFF ---\n%s\n' "$DIFF"
 }
@@ -310,8 +347,7 @@ if [ "$REVIEW_CMD" = "codex" ]; then
     # Capture only the final answer: progress/tool output must not be parsed
     # as a verdict. A review has no reason to write to the project checkout.
     REVIEW_FILE="$(mktemp -t swarm-review-XXXXXX)"
-    trap 'rm -f "$REVIEW_FILE"' EXIT
-    if ! review_payload | codex exec "${MODEL_OPTS[@]}" --sandbox read-only \
+    if ! review_payload | codex exec "${MODEL_OPTS[@]}" ${HEAD_WT:+-C "$HEAD_WT"} --sandbox read-only \
             -c 'approval_policy="never"' --output-last-message "$REVIEW_FILE" - >&2; then
         echo "ERROR: codex exec review invocation failed" >&2
         exit 1
@@ -333,13 +369,11 @@ else
     # land in a worktree; the repo is readable via --add-dir. GH_REPO keeps
     # `gh pr diff` working from there.
     SCRATCH="$(mktemp -d -t swarm-review-scratch-XXXXXX)"
-    trap 'rm -rf "$SCRATCH"' EXIT
-    REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
     : "${GH_REPO:=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)}"
     [ -z "$GH_REPO" ] || export GH_REPO
     READONLY_OPTS=(--tools "Read,Grep,Glob,Bash"
         --allowedTools "Read" "Grep" "Glob" "Bash(gh pr diff:*)" "Bash(git log:*)" "Bash(git show:*)"
-        --permission-mode dontAsk --add-dir "$REPO_ROOT")
+        --permission-mode dontAsk --add-dir "${HEAD_WT:-$REPO_ROOT}")
     if REVIEW="$(review_payload \
             | (cd "$SCRATCH" && "${CLAUDE_ENV[@]}" claude -p "${MODEL_OPTS[@]}" --no-chrome "${READONLY_OPTS[@]}"))"; then
         :
