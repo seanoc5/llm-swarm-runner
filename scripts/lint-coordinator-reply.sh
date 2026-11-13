@@ -87,7 +87,7 @@ BEGIN {
     verbs_edit = "(^|[^a-z])(edit|apply)([^a-z]|$)"   # no yes/no or Pending exemption: the change itself must be on screen
     # An action item names its change: a command, a fence, a URL, a path with an
     # extension (".github/workflows/ci.yml"), file:line, or a quoted phrase to type.
-    cmd = "```|`[^`]+`|https://|[A-Za-z0-9_./-]+\\.(ya?ml|kts?|sh|md|json|sql|java|py|html|toml|properties|xml|gradle|env|txt)([^A-Za-z]|$)|[A-Za-z0-9_./-]+:[0-9]+|\"[^\"]{5,}\""
+    cmd = "```|`[^`]+`|https://|[A-Za-z0-9_./-]+\\.(ya?ml|kts?|sh|md|json|sql|java|py|html|toml|properties|xml|gradle|env|txt)([^A-Za-z]|$)|[A-Za-z0-9_-]*[./][A-Za-z0-9_./-]*:[0-9]+|\"[^\"]{5,}\""
     # Pointer phrases: the item names a change without stating it (issue #680):
     # "make those three edits yourself", "apply the fix above", "merge it",
     # "option A" with no option text after it.

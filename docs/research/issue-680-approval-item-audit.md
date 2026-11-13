@@ -14,7 +14,7 @@ Audit date 2026-11-13. Window: coordinator replies from 2026-10-30 to
   between 2026-11-01 17:10 and 18:30 UTC. None of them named a file or a line.
 - The lint that existed on master (back-references plus run/click items with no
   command) did not flag it. The new `pointer` rule does.
-- Across the three swarms, 5.3% to 8.4% of item appearances now trip the lint
+- Across the three swarms, 5.3% to 8.6% of item appearances now trip the lint
   (6.2% to 6.9% before). Carried-over items (shown in 3+ replies) are 11% to 18%
   of distinct items, and only 1 to 7 per swarm said anything about being
   re-checked.
@@ -38,9 +38,9 @@ more replies of one session.
 | Sessions / replies with items | 12 / 510 | 7 / 803 | 10 / 788 |
 | Item appearances / distinct items | 1246 / 572 | 2305 / 1284 | 2112 / 1230 |
 | Old lint hits (master) | 78 (6.3%) | 142 (6.2%) | 145 (6.9%) |
-| New lint hits (this PR) | 105 (8.4%) | 127 (5.5%) | 111 (5.3%) |
-| ...of which `pointer` / `no-command` / `backref` | 37 / 45 / 25 | 22 / 81 / 25 | 19 / 59 / 37 |
-| Hits only the new lint catches | 41 | 23 | 18 |
+| New lint hits (this PR) | 107 (8.6%) | 135 (5.9%) | 112 (5.3%) |
+| ...of which `pointer` / `no-command` / `backref` | 37 / 47 / 25 | 23 / 88 / 25 | 19 / 60 / 37 |
+| Hits only the new lint catches | 41 | 24 | 18 |
 | Action-verb items with no command, path, URL or #N (broad scan) | 54 of 749 (7.2%) | 192 of 1163 (16.5%) | 150 of 1433 (10.5%) |
 | Carried in 3+ replies (distinct items) | 100 (17.5%) | 164 (12.8%) | 135 (11.0%) |
 | ...identical text in 3+ replies | 82 | 115 | 81 |
@@ -49,9 +49,9 @@ more replies of one session.
 
 Reading the numbers:
 
-- **Pattern 1 (no concrete action).** `pointer` is the new catch: 37, 22 and 19
+- **Pattern 1 (no concrete action).** `pointer` is the new catch: 37, 23 and 19
   appearances. In fand-app it fires on the exact incident. `no-command` is noisy:
-  by a text check, 37 of 45 (fand-app), 39 of 81 (fand-etl) and 30 of 59
+  by a text check, 38 of 47 (fand-app), 41 of 88 (fand-etl) and 31 of 60
   (corpusminder) of those hits are decision-shaped items ("recommend yes",
   "(yes/no)", "Default if silent") where the verb (start, open, run) is
   incidental. That noise was already in the master rule; this PR exempts

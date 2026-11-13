@@ -45,6 +45,8 @@ printf -- "- **A1** Edit the workflow so checkout fetches submodules (yes/no)\n"
 check "#680 an edit verb with no file, line or command: no-command" "no-command" "$(rules "$T/edit")"
 printf -- "- **A1** Edit scripts/needs-you.sh:44 to drop the retry (yes/no)\n" > "$T/editok"
 check "#680 file:line payload clears an edit item" "" "$(rules "$T/editok")"
+printf -- '- **A1** Make those three edits yourself (checked 17:34), then say go.\n' > "$T/clock"
+check "#680 a clock time (17:34) is not a file:line payload: pointer" "pointer" "$(rules "$T/clock")"
 printf -- '- **A3** #2148: when searches start defaulting to forum-visible, should saved searches stay private? (yes/no)\n' > "$T/yn"
 check "#680 a yes/no decision using the word 'start' needs no command: clean" "" "$(rules "$T/yn")"
 printf 'Pending your approval: the one-line nightly config edit (yes/no)\n' > "$T/pe"
@@ -122,6 +124,7 @@ check "fenced --do: render passes the reply lint" "" "$("$LINT" <<<"$out" | cut 
 check "empty list renders 'Nothing to do.'" "Nothing to do." "$("$NY" render --project "$P" | tail -1)"
 
 # ── verification stamp (issue #680): claim, verified, verify, unverified-since ──
+export TZ=UTC   # render shows local time; pin it so the "01-01" checks hold anywhere
 V="$T/vproj"; mkdir -p "$V/.swarm"
 "$NY" add --project "$V" --title "Unblock fand-app 1810" --claim "only ci.yml builds with Gradle" --do 'Edit `.github/workflows/ci.yml` line 31: add `submodules: true`' >/dev/null
 out="$("$NY" render --project "$V")"
