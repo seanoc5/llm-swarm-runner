@@ -46,13 +46,17 @@ tests and migrations in the foreground, always passing the Bash tool's own
 tool `timeout=600000`, the tool max). Else runs die at 2 min.
 No `run_in_background`, `&`, `nohup`, or `until`/`while ... sleep` loops. If something
 outlasts one call (CI, deploys), write an `fyi` outbox note saying what is
-pending and end the task (for a PR, `pr-ready.sh` parks it for the ready-sweep).
+pending and end the task (PR: `pr-ready.sh` parks it).
 
-- **CI:** never `gh run watch` or a sha-poll loop. Use `ci-wait.sh <PR#>` (exit 0 green, 1 red,
-  2 timeout, 3 conflicting) or single `gh pr checks` calls.
-- **A conflicting PR gets no CI run at all.** Before waiting on CI, check
+- **CI (issue #572): never wait for it after your final push** (runs take
+  12-28 min; your token may not read checks). No `ci-wait.sh`, `gh run watch`
+  or sha-poll loop. Run `pr-ready.sh <N>` once: exit 4 or 5 (CI pending or
+  unreadable) is the expected result, not a blocker. Post the `ci-handoff` note (see
+  "Worker outbox"), write status `ready-for-review`, never `blocked` for CI.
+  The coordinator checks CI once and readies if green, else the ready-sweep does.
+- **A conflicting PR gets no CI run at all.** Before each push, check
   `gh pr view <N> --json mergeable,mergeStateStatus`; if `CONFLICTING`,
-  rebase and push first.
+  rebase first.
 - **Process searches:** never `pgrep -f` or `ps | grep` (they match their own
   argv, even for a path). Use `pgrep -x <name>` or a PID captured at launch.
 - **Parallelism is not your call.** Need a long-lived process (dev server)?
@@ -289,6 +293,10 @@ EOF
 mv "$TMP" "$OUTBOX/$(date -u +%Y%m%dT%H%M%SZ)-<slug>.md"
 ```
 
+After your final push, the `fyi` body's first line is
+`ci-handoff: PR #<N> head=<full sha> risk=<low|medium|high>`; the
+coordinator checks CI once for that head and readies if green (else the ready-sweep).
+
 Kinds: `fyi` (something the coordinator's picture should include),
 `decision-needed` (above your authority; include options and a
 recommendation; if you stop, also write status `blocked`), `brief-draft`
@@ -353,7 +361,8 @@ nothing pending, no self-review `BLOCK`, not given up on an error).
 4. `pr-ready.sh <N>`, not bare `gh pr ready`. For 🟡/🔴 it runs and posts the
    self-review first (round-capped — see "Self-review before merge" below),
    and refuses to ready on `BLOCK`, an unparseable verdict (exit 2), or CI
-   not confirmed green (exit 4). If the PR body carries a coordinator
+   not confirmed green (exit 4: expected right after a push; the PR stays
+   draft for the coordinator, see § CI). If the PR body carries a coordinator
    `COORDINATOR HOLD` banner (draft-as-hold), it still posts the
    self-review but leaves the PR in draft (exit 3) — only the coordinator
    lifts the hold. Keep that banner through body rewrites.
