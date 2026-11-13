@@ -8086,10 +8086,15 @@ coord_recycle_pass() {
         return 0   # quiet: this is the common case, not worth a log line per tick
     fi
 
-    if coord_recycle_compact_since "$last"; then
+    # Compactions only count when they happened in THIS coordinator process
+    # (or after the last recycle): with no marker file, an old
+    # coord.compact.done from a previous process would recycle at once.
+    local base="$last"
+    age=$(coord_proc_age_secs) || age=""
+    if [ -n "$age" ] && [ $((now - age)) -gt "$base" ]; then base=$((now - age)); fi
+    if [ -n "$age" ] && coord_recycle_compact_since "$base"; then
         reason="after_compact"
     else
-        age=$(coord_proc_age_secs) || age=""
         if [ -n "$age" ] && [ "$age" -ge $((COORD_RECYCLE_HOURS * 3600)) ] \
             && { [ "$last" -eq 0 ] || [ $((now - last)) -ge $((COORD_RECYCLE_HOURS * 3600)) ]; }; then
             reason="age"
@@ -8121,6 +8126,15 @@ coord_recycle_pass() {
     local target="$SESSION_NAME:coordinator.0" cleared=0
     (
         flock -n 9 || { log_event coord.recycle.skip "reason=locked trigger=$reason"; exit 3; }
+        # Take the wake lock too (every llm-start.sh injection holds it while
+        # typing into this pane), then re-check the gates under it: a wake
+        # that landed since the checks above has started a turn that /clear
+        # would erase.
+        exec 8>"$COORD_WAKE_LOCK"
+        flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 8 || { log_event coord.recycle.skip "reason=locked trigger=$reason"; exit 3; }
+        if coordinator_pane_busy || ! compact_composer_clear "$target"; then
+            log_event coord.recycle.skip "reason=pane_busy trigger=$reason"; exit 6
+        fi
         # Same paste, settle, Enter, confirm sequence as /compact (issue #290):
         # an immediate Enter is eaten by the slash-command menu.
         local tmp

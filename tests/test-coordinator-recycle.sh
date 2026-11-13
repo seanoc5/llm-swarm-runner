@@ -82,6 +82,10 @@ echo $(( $(date +%s) - 100000 )) > "$COORD_RECYCLE_STATE"
 coord_recycle_pass
 expect "compaction older than last recycle: nothing" - 0
 
+reset; G_AGE=60; printf '%s  coord.compact.done  waited=40s trigger=poll\n' "$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ)" > "$EVENTS_LOG"
+coord_recycle_pass
+expect "no marker, compaction from before this process started: nothing" - 0
+
 reset; G_BUSY=0; coord_recycle_pass;      expect "busy pane waits"          'skip .*reason=pane_busy' 0
 reset; G_HUMAN=0; coord_recycle_pass;     expect "operator present waits"   'skip .*reason=human_present' 0
 reset; G_APPROVAL=0; coord_recycle_pass;  expect "open approval waits"      'skip .*reason=pending_approval' 0
