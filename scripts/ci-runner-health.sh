@@ -23,7 +23,7 @@
 # Env:
 #   CI_HEALTH_QUEUE_MINS=10     queued-job age (minutes) that counts as waiting too long
 #   CI_HEALTH_REPOS=            default repo list (space separated)
-#   CI_HEALTH_REPORT_RUNS=100   --report looks at at most this many newest runs per repo
+#   CI_HEALTH_REPORT_RUNS=100   --report looks at at most this many newest runs per repo (one API page: max 100)
 #   CI_HEALTH_GH_TOKEN=         token for gh (listing runners needs repo admin; a worker-scoped token gets HTTP 403)
 #   CI_HEALTH_NOW=              epoch override (tests)
 #
@@ -87,6 +87,10 @@ check_repo() {
     local repo="$1" runners ids jobs idl maxq offline online_busy_all total nm unit slug
     runners="$(gh_json "repos/$repo/actions/runners?per_page=100" '.runners[] | {name, status, busy}')" || return 0
     runners="$(printf '%s\n' "$runners" | jq -c . 2>/dev/null)"
+    offline="$(printf '%s\n' "$runners" | jq -r 'select(.status=="offline") | .name')"
+    online_busy_all="$(printf '%s\n' "$runners" | jq -s 'length > 0 and all(.[]; .status=="online" and .busy)')"
+    # Healthy (someone is online and idle): no finding is possible, so skip the per-run job fetches.
+    [ -n "$offline" ] || [ "$online_busy_all" = "true" ] || return 0
     ids="$(gh_json "repos/$repo/actions/runs?status=queued&per_page=50" '.workflow_runs[].id')" || return 0
     ids="$ids $(gh_json "repos/$repo/actions/runs?status=in_progress&per_page=50" '.workflow_runs[].id')" || return 0
     # shellcheck disable=SC2086
@@ -95,9 +99,7 @@ check_repo() {
     # Age in whole minutes of the oldest queued job; 0 when none.
     maxq="$(printf '%s\n' "$jobs" | jq -s --argjson now "$NOW" \
         '[.[] | select(.status=="queued") | (($now - (.created_at | fromdateiso8601)) / 60 | floor)] | max // 0')"
-    offline="$(printf '%s\n' "$runners" | jq -r 'select(.status=="offline") | .name')"
     total="$(printf '%s\n' "$runners" | jq -s 'length')"
-    online_busy_all="$(printf '%s\n' "$runners" | jq -s 'length > 0 and all(.[]; .status=="online" and .busy)')"
     slug="${repo/\//-}"
     if [ -n "$offline" ]; then
         while IFS= read -r nm; do
