@@ -37,6 +37,13 @@ the transcripts as they stood then (1260 / 2340 / 2164 appearances); the old-lin
 row, the carry rows, the broad scan and the decision-shaped counts are from the
 first run.
 
+Fix round 3 (2026-11-13): a bare https URL no longer counts as a payload for the
+`pointer` rule, because every item carries its PR link. Re-ran only that rule over
+the same transcripts, old rule versus new: fand-app unchanged, fand-etl +1 (an item
+reading "PR #2350, <url>" with no stated change) and corpusminder +1 (an item
+saying "only you merge it" with no stated change). The three table rows below carry the
++1s; nothing else moved.
+
 ## Results
 
 | | fand-app | fand-etl | corpusminder |
@@ -44,9 +51,9 @@ first run.
 | Sessions / replies with items | 12 / 510 | 7 / 803 | 10 / 788 |
 | Item appearances / distinct items | 1246 / 572 | 2305 / 1284 | 2112 / 1230 |
 | Old lint hits (master) | 78 (6.3%) | 142 (6.2%) | 145 (6.9%) |
-| New lint hits (this PR) | 106 (8.4%) | 140 (6.0%) | 113 (5.2%) |
-| ...of which `pointer` / `no-command` / `backref` | 36 / 47 / 25 | 23 / 93 / 26 | 18 / 63 / 37 |
-| Hits only the new lint catches | 40 | 28 | 18 |
+| New lint hits (this PR) | 106 (8.4%) | 141 (6.1%) | 114 (5.4%) |
+| ...of which `pointer` / `no-command` / `backref` | 36 / 47 / 25 | 24 / 93 / 26 | 19 / 63 / 37 |
+| Hits only the new lint catches | 40 | 29 | 19 |
 | Action-verb items with no command, path, URL or #N (broad scan) | 54 of 749 (7.2%) | 192 of 1163 (16.5%) | 150 of 1433 (10.5%) |
 | Carried in 3+ replies (distinct items) | 100 (17.5%) | 164 (12.8%) | 135 (11.0%) |
 | ...identical text in 3+ replies | 82 | 115 | 81 |

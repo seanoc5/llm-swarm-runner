@@ -76,7 +76,7 @@ hits="$(printf '%s\n' "$text" | awk -v fence="$FENCE_RE" '
 function flush_item(   hit, li) {
     li = tolower(item)
     if (item != "") {
-        if (li ~ pointer && item !~ cmd) hits[++n] = "pointer: " first
+        if (li ~ pointer && item !~ cmd_ptr) hits[++n] = "pointer: " first
         else if (item !~ cmd && (li ~ verbs_hard || (!ispend && li !~ /yes\/no/ && li ~ verbs))) hits[++n] = "no-command: " first
     }
     item = ""; first = ""
@@ -88,6 +88,8 @@ BEGIN {
     # An action item names its change: a command, a fence, a URL, a path with an
     # extension (".github/workflows/ci.yml"), file:line, or a quoted phrase to type.
     cmd = "```|`[^`]+`|https://|[A-Za-z0-9_./-]+\\.(ya?ml|kts?|sh|md|json|sql|java|py|html|toml|properties|xml|gradle|env|txt)([^A-Za-z]|$)|[A-Za-z0-9_-]*[./][A-Za-z0-9_./-]*:[0-9]+|\"[^\"]{5,}\""
+    # A pointer needs a payload that is not a bare URL: every item carries its PR link (issue #680).
+    cmd_ptr = "```|`[^`]+`|[A-Za-z0-9_./-]+\\.(ya?ml|kts?|sh|md|json|sql|java|py|html|toml|properties|xml|gradle|env|txt)([^A-Za-z]|$)|[A-Za-z0-9_-]*[./][A-Za-z0-9_./-]*:[0-9]+|\"[^\"]{5,}\""
     # Pointer phrases: the item names a change without stating it (issue #680):
     # "make those three edits yourself", "apply the fix above", "merge it",
     # "option A" with no option text after it.
