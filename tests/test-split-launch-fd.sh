@@ -25,6 +25,8 @@ for fn in coord_split_tick coord_split_clear_inflight coord_split_launch_infligh
     eval "$body"
 done
 
+# issue #457: coord_split_tick consults the pause sentinel under $PROJECT_DIR/.swarm
+. "$ROOT/scripts/_watch-pause.sh"; PROJECT_DIR="$T"
 export COORD_WORK_RUN_DIR="$T/work-run" COORD_INBOX_DIR="$T/inbox" DRY_RUN=0
 COORD_SPLIT_LOCK_FD=""; COORD_SPLIT_RUN_PID=""; COORD_SPLIT_LAUNCH_LOCK_SECS=5
 mkdir -p "$COORD_WORK_RUN_DIR" "$COORD_INBOX_DIR"

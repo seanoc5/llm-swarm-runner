@@ -164,6 +164,8 @@ check "doorbell and arm request share one block" "both" "$got"
 
 # ── the watcher ─────────────────────────────────────────────────────────────
 eval "$(sed -n '/^mtime_epoch() {/,/^}/p; /^coord_inbox_waiter_armed() {/,/^}/p; /^coord_wake_waiter_hold() {/,/^}/p; /^coord_wake_hold_reason() {/,/^}/p; /^coord_typed_batching() {/,/^}/p; /^coord_last_ring() {/,/^}/p; /^coord_batch_window_open() {/,/^}/p' "$WATCH")"
+# issue #457: coord_wake_hold_reason now consults the pause sentinel under $PROJECT_DIR/.swarm
+. "$ROOT/scripts/_watch-pause.sh"; PROJECT_DIR="$P"
 COORD_QUIET_WAKES=1 COORD_INBOX_BATCH_SECS=0 COORD_WAKE_PENDING_FILE="$S/pending.prompt"
 COORD_INBOX_DIR="$S/coord-inbox"; COORD_HOOK_RANG_FILE="$S/coord-hook-rang"; COORD_TYPED_RING_FILE="$S/coord-typed-ring"
 declare -F mtime_epoch >/dev/null || mtime_epoch() { stat -c %Y "$1"; }

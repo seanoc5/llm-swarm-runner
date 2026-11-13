@@ -2170,6 +2170,8 @@ DEFAULT WAKE_PROMPT (top-up mode)
 EVENTS LOG
     Appends to <project>/.swarm/events.log:
       watch.start          boot banner with backend + caps
+      coord.pause          watch-pause.sh started a pause (mode, until, reason)
+      coord.resume         a pause ended (reason=manual or expired)
       worker.finish        outcome JSON detected (issue, ok|err) — fired only
                            for worktrees registered with this PROJECT_DIR
       worker.finish.skip   outcome JSON detected for a foreign worktree
@@ -2833,6 +2835,8 @@ WATCH_TIMER_TICK_SECS="${WATCH_TIMER_TICK_SECS:-2}"
 . "$SCRIPT_DIR/_window-flags.sh"
 # shellcheck source=scripts/_coord-inbox-batch.sh
 . "$SCRIPT_DIR/_coord-inbox-batch.sh"
+# shellcheck source=scripts/_watch-pause.sh
+. "$SCRIPT_DIR/_watch-pause.sh"
 # shellcheck source=scripts/_coord-split.sh
 . "$SCRIPT_DIR/_coord-split.sh"
 . "$SCRIPT_DIR/_coord-layout.sh"
@@ -3762,6 +3766,8 @@ format_event_line() {
         watch.check_on_done.error)  glyph="✗"; color=$'\033[31m' ;;
         watch.reconcile)             glyph="?"; color=$'\033[33m' ;;
         watch.start|watch.timer.start) glyph="▶"; color=$'\033[36m' ;;
+        coord.pause)                      glyph="⏸"; color=$'\033[33m' ;;
+        coord.resume)                     glyph="▶"; color=$'\033[32m' ;;
         watch.exit)                     glyph="■"; color=$'\033[2m'  ;;
         sweep.run|sweep.dry)             glyph="↻"; color=$'\033[36m' ;;
         sweep.error)                      glyph="✗"; color=$'\033[31m' ;;
@@ -3884,6 +3890,44 @@ if [ "$WATCHER_QUIET" != "1" ]; then
     WATCHER_ECHO_PID=$!
 fi
 
+# issue #457: Ctrl-Z in this pane never suspended the watcher — it only echoed
+# ^Z. The watcher is the pane's own process (llm-start.sh spawns it directly),
+# so its process group is orphaned and the kernel discards SIGTSTP sent to it.
+# Making the key work would mean running the watcher as a job in an
+# interactive shell, which breaks the pane_start_command scan that respawn and
+# the stale check rely on. So instead: stop the tty turning ^Z into a signal,
+# read it as a plain byte, and say what to do. A watcher that is really
+# suspended would also be invisible and would never resume by itself; the
+# declared, self-expiring pause (watch-pause.sh) has neither problem.
+WATCHER_CTRLZ_PID=""
+WATCHER_STTY_SAVED=""
+# Only in the terminal's foreground process group: a watcher started by hand as
+# `coordinator-watch.sh &` still has a tty on stdin, but stty (SIGTTOU) and the
+# /dev/tty read (SIGTTIN) from a background group would freeze it before its
+# first tick.
+watcher_in_tty_foreground() {
+    local tp pg
+    tp="$(ps -o tpgid= -p $$ 2>/dev/null | tr -d ' ')"
+    pg="$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')"
+    [ -n "$tp" ] && [ "$tp" = "$pg" ]
+}
+if [ -t 0 ] && [ -r /dev/tty ] && watcher_in_tty_foreground; then
+    # Saved so the EXIT trap can hand the terminal back: a watcher started by
+    # hand would otherwise leave the shell without Ctrl-Z (and, if the reader
+    # below is killed mid-read -s, without echo).
+    WATCHER_STTY_SAVED="$(stty -g 2>/dev/null)" || WATCHER_STTY_SAVED=""
+    stty susp undef 2>/dev/null || true
+    (
+        while IFS= read -rsn1 _ch < /dev/tty 2>/dev/null; do
+            if [ "$_ch" = $'\x1a' ]; then
+                printf '[watch] %s  Ctrl-Z does not suspend this watcher. To pause it: %s/watch-pause.sh 30m --reason "why" (resumes by itself; --resume ends it early, --status shows the time left)\n' \
+                    "$(date +%T)" "$SCRIPT_DIR"
+            fi
+        done
+    ) &
+    WATCHER_CTRLZ_PID=$!
+fi
+
 # Single shared trap for the pane-echo pipeline, the background timer loop
 # (issue #119, started later), the worker-compact loop (issue #226, its own
 # separate process — see run_worker_compact_loop's header comment for why
@@ -3908,6 +3952,9 @@ CAPACITY_WAKE_TIMER_PID=""
 POLL_SLEEP_PID=""
 seen_file=""
 cleanup_on_exit() {
+    [ -n "${WATCHER_CTRLZ_PID:-}" ] && kill "$WATCHER_CTRLZ_PID" 2>/dev/null || true   # issue #457
+    # issue #457: undo `stty susp undef` (and any echo-off left by the killed reader).
+    [ -n "${WATCHER_STTY_SAVED:-}" ] && { stty "$WATCHER_STTY_SAVED" 2>/dev/null || true; }
     [ -n "${WATCH_TIMER_PID:-}" ] && kill "$WATCH_TIMER_PID" 2>/dev/null || true
     [ -n "${WORKER_COMPACT_TIMER_PID:-}" ] && kill "$WORKER_COMPACT_TIMER_PID" 2>/dev/null || true
     [ -n "${AUTO_COMPACT_POLL_TIMER_PID:-}" ] && kill "$AUTO_COMPACT_POLL_TIMER_PID" 2>/dev/null || true
@@ -7185,6 +7232,9 @@ run_watch_timer_loop() {
     # end-of-tick marker, so keep window sweeps and pr_poll_pass BEFORE ready_sweep_pass.
     while true; do
         sleep "$WATCH_TIMER_TICK_SECS"
+        # issue #457: a full pause stops every sweep here (reaps, PR polls, hold
+        # retries); the main poll loop still records outcomes into coord-inbox/.
+        watch_pause_full "$PROJECT_DIR/.swarm" && continue
         [ "$WATCH_CHECK_ON_DONE" = "1" ] && { status_poll_pass || true; }
         if [ "$WATCH_WINDOW_FLAGS" = "1" ] && [ "$WATCH_WINDOW_FLAGS_SWEEP_SECS" -gt 0 ]; then
             now=$(date +%s)
@@ -7316,6 +7366,7 @@ run_watch_timer_loop() {
 run_auto_compact_poll_loop() {
     while true; do
         sleep "$AUTO_COMPACT_TICK_SECS"
+        watch_pause_full "$PROJECT_DIR/.swarm" && continue   # issue #457
         auto_compact_poll_pass || true
     done
 }
@@ -7346,6 +7397,7 @@ run_stall_wake_loop() {
 run_worker_compact_loop() {
     while true; do
         sleep "$WORKER_COMPACT_SCAN_SECS"
+        watch_pause_full "$PROJECT_DIR/.swarm" && continue   # issue #457
         worker_compact_pass || true
     done
 }
@@ -10515,6 +10567,9 @@ coord_wake_waiter_hold() {
 # clear to ring. Reason vocabulary, and each one's retry policy in
 # coord_wake_hold_retry_pass:
 #
+#   paused         the operator ran watch-pause.sh (#457). No ceiling: it ends
+#                  at its own expiry, when the held wake is delivered with the
+#                  live item count.
 #   human_present  the operator typed into the coordinator (or a worker)
 #                  session inside its idle window. NO CEILING — a present
 #                  human is never forced over; the doorbell waits for them
@@ -10536,6 +10591,11 @@ coord_wake_waiter_hold() {
 # Order matters: the reason reported is the one a human reading the log most
 # needs to see, so human presence outranks a busy pane outranks the clock.
 coord_wake_hold_reason() {
+    # issue #457: an operator-declared pause outranks everything, the waiter
+    # included (coord-inbox-wait.sh checks the same sentinel before it rings).
+    # Self-clearing: watch_pause_read drops the sentinel once it expires, so no
+    # ceiling applies (see coord_wake_hold_retry_pass).
+    watch_pause_active "$PROJECT_DIR/.swarm" && { printf 'paused\n'; return 0; }
     # (COORD_INBOX_WAITER) The coordinator's background waiter rings this
     # doorbell itself, without typing. The retry passes pass skip_waiter
     # once the wake outlives COORD_INBOX_WAITER_GRACE_SECS.
@@ -10678,8 +10738,20 @@ coord_wake_hold_retry_pass() {
     # the pane was busy, say). The recorded reason only decides the ceiling.
     local reason_now
     reason_now="$(coord_wake_hold_reason)"
+    # issue #457: held-wake age counts from when the wake was held OR when the
+    # last pause ended, whichever is later, so paused time never counts toward
+    # a ceiling or the waiter grace and resume behaves like a fresh hold.
+    # (The coord_wake_hold_reason call above stamps an expired pause;
+    # watch-pause.sh --resume stamps a manual one.)
+    local ended ceil_age="$age" base_since="$since"
+    read -r ended 2>/dev/null < "$PROJECT_DIR/.swarm/watch-paused-ended" || ended=""
+    if [[ "$ended" =~ ^[0-9]+$ ]] && [ "$ended" -gt "$since" ]; then
+        base_since="$ended"
+        ceil_age=$((now - ended))
+        [ "$ceil_age" -ge 0 ] || ceil_age=0
+    fi
     if [ "$reason_now" = "waiter_armed" ]; then
-        coord_wake_waiter_hold "$since" && return 0
+        coord_wake_waiter_hold "$base_since" && return 0
         reason_now="$(coord_wake_hold_reason skip_waiter)"
     fi
 
@@ -10693,6 +10765,10 @@ coord_wake_hold_retry_pass() {
         if [ "$reason_now" = "human_present" ]; then
             return 0
         fi
+        # issue #457: a declared pause always waits for its own expiry.
+        if [ "$reason_now" = "paused" ]; then
+            return 0
+        fi
         # Every other reason is self-clearing (debounce) or ceilinged.
         if [ "$reason_now" = "debounce" ] || [ "$reason_now" = "batch_window" ]; then
             return 0
@@ -10703,11 +10779,11 @@ coord_wake_hold_retry_pass() {
         if [ "$reason_now" = "pane_busy" ] && [ "$(coord_hook_state 2>/dev/null)" = "busy" ]; then
             return 0
         fi
-        if [ "$COORD_WAKE_BUSY_CEILING_SECS" -eq 0 ] || [ "$age" -lt "$COORD_WAKE_BUSY_CEILING_SECS" ]; then
+        if [ "$COORD_WAKE_BUSY_CEILING_SECS" -eq 0 ] || [ "$ceil_age" -lt "$COORD_WAKE_BUSY_CEILING_SECS" ]; then
             return 0
         fi
         echo "[$(date +%T)] coordinator wake held for ${reason_now} hit its ${COORD_WAKE_BUSY_CEILING_SECS}s ceiling — delivering anyway"
-        log_event coord.wake.defer_ceiling "age=${age}s reason=$reason_now"
+        log_event coord.wake.defer_ceiling "age=${ceil_age}s reason=$reason_now"
     fi
 
     local nudge
@@ -11806,6 +11882,9 @@ coord_split_run_busy() {
 coord_split_tick() {
     local trigger="${1:-tick}" rc=0
     coord_split_active || return 0
+    # issue #457: a pause withholds the work run too. run_split_loop rechecks
+    # the inbox every tick, so the run starts after the pause ends.
+    watch_pause_active "$PROJECT_DIR/.swarm" && return 0
     [ -d "$COORD_INBOX_DIR" ] || return 0
     # Unlocked, read-only pre-check: an idle tick takes no lock and writes nothing.
     coord_split_decide "$trigger" || return 0
