@@ -13,11 +13,13 @@
 #
 # Check output: JSON lines in the docs/checks.md format (+ extra fields
 # repo, runner, queued_mins), nothing when healthy.
-#   runner-offline-with-queue (error)  a runner is offline and a self-hosted job
-#                                      has been queued > CI_HEALTH_QUEUE_MINS
-#   queue-long (warn)                  a job queued > CI_HEALTH_QUEUE_MINS while every
-#                                      runner is online and busy: needs more capacity
-#   runner-offline (warn)              a runner is offline, nothing waiting too long
+#   runner-offline-with-queue (error)  a runner is offline and a self-hosted job it could
+#                                      take (job labels all on the runner) has been queued
+#                                      > CI_HEALTH_QUEUE_MINS with NO online runner able to
+#                                      take it, idle or busy
+#   queue-long (warn)                  such a job waits while the online runners that fit it
+#                                      are all busy: needs more capacity, not a restart
+#   runner-offline (warn)              a runner is offline, no job only it could take waits too long
 # Exit 0 healthy, 1 findings, 2 usage error or a gh/jq failure.
 #
 # Env:
@@ -27,12 +29,14 @@
 #   CI_HEALTH_GH_TOKEN=         token for gh (listing runners needs repo admin; a worker-scoped token gets HTTP 403)
 #   CI_HEALTH_NOW=              epoch override (tests)
 #
+# Queue age counts from the job's created_at, which is when it became ready (a job blocked
+# on `needs:` is not in the jobs API until its dependencies finish).
 # Only jobs labelled self-hosted count: a hosted-runner job never waits on
 # our runners. Runners are matched per repo (a personal account cannot share
 # runners across repos).
 set -uo pipefail
 
-case "${1:-}" in -h|--help) sed -n "2,32p" "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
+case "${1:-}" in -h|--help) sed -n "2,36p" "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
 command -v jq >/dev/null || { echo "ci-runner-health: jq required" >&2; exit 2; }
 command -v gh >/dev/null || { echo "ci-runner-health: gh required" >&2; exit 2; }
 # Reload project-only knobs (CI_HEALTH_*) from <project>/.swarm/.env; caller-set variables still win.
@@ -76,7 +80,7 @@ jobs_of_runs() {
     local repo="$1" id out; shift
     for id in "$@"; do
         out="$(gh_json "repos/$repo/actions/runs/$id/jobs?per_page=100" \
-            '.jobs[] | select(.labels | index("self-hosted")) | {id, status, created_at, started_at, runner_name}' )" || continue
+            '.jobs[] | select(.labels | index("self-hosted")) | {id, status, created_at, started_at, runner_name, labels}' )" || continue
         [ -n "$out" ] && printf '%s\n' "$out" | jq -c .
     done
 }
@@ -87,8 +91,8 @@ emit() { # <check> <severity> <match> <message> <repo> <runner> <queued_mins>
 }
 
 check_repo() {
-    local repo="$1" runners ids jobs idl maxq offline online_busy_all total nm unit slug
-    runners="$(gh_json "repos/$repo/actions/runners?per_page=100" '.runners[] | {name, status, busy}')" || return 0
+    local repo="$1" runners ids jobs idl offline online_busy_all slug ev kind nm mins n unit
+    runners="$(gh_json "repos/$repo/actions/runners?per_page=100" '.runners[] | {name, status, busy, labels: [.labels[].name]}')" || return 0
     runners="$(printf '%s\n' "$runners" | jq -c . 2>/dev/null)"
     offline="$(printf '%s\n' "$runners" | jq -r 'select(.status=="offline") | .name')"
     online_busy_all="$(printf '%s\n' "$runners" | jq -s 'length > 0 and all(.[]; .status=="online" and .busy)')"
@@ -99,30 +103,51 @@ check_repo() {
     # shellcheck disable=SC2086
     mapfile -t idl < <(printf "%s\n" $ids | sed "/^$/d" | sort -un)
     jobs="$(jobs_of_runs "$repo" "${idl[@]}")"
-    # Age in whole minutes of the oldest queued job; 0 when none.
-    maxq="$(printf '%s\n' "$jobs" | jq -s --argjson now "$NOW" \
-        '[.[] | select(.status=="queued") | (($now - (.created_at | fromdateiso8601)) / 60 | floor)] | max // 0')"
-    total="$(printf '%s\n' "$runners" | jq -s 'length')"
     slug="${repo/\//-}"
-    if [ -n "$offline" ]; then
-        while IFS= read -r nm; do
-            [ -n "$nm" ] || continue
-            unit="actions.runner.$slug.$nm.service"
-            if [ "$maxq" -gt "$QUEUE_MINS" ]; then
-                emit runner-offline-with-queue error "$repo $nm" \
-                    "runner $nm is offline and a job for $repo has been queued for $maxq min (> $QUEUE_MINS); restart it: sudo systemctl restart $unit" \
-                    "$repo" "$nm" "$maxq"
-            else
-                emit runner-offline warn "$repo $nm" \
-                    "runner $nm is offline with no job waiting too long; restart it: sudo systemctl restart $unit" \
-                    "$repo" "$nm" "$maxq"
-            fi
-        done <<< "$offline"
-    elif [ "$maxq" -gt "$QUEUE_MINS" ] && [ "$online_busy_all" = "true" ]; then
-        emit queue-long warn "$repo" \
-            "a job for $repo has been queued for $maxq min (> $QUEUE_MINS) while all $total runner(s) are online and busy; more runner capacity is needed" \
-            "$repo" "" "$maxq"
-    fi
+    # Match each queued job to runners by labels (a runner can take a job when it
+    # carries every label the job asks for). A job's age runs from its created_at,
+    # which is when it became ready: a job blocked on `needs:` does not exist in
+    # the jobs API until its dependencies finish (see PR #940 for the evidence).
+    #   urgent   waiting too long, no online runner fits it, an offline runner does
+    #   capacity waiting too long, online runners fit it but all are busy
+    #   offline  an offline runner, with the age of the oldest queued job it could take
+    # A waiting job that an idle online runner fits yields nothing (no restart helps).
+    ev="$(jq -nc --argjson now "$NOW" --argjson q "$QUEUE_MINS" \
+        --argjson runners "$(printf '%s\n' "$runners" | jq -s .)" --argjson jobs "$(printf '%s\n' "$jobs" | jq -s .)" '
+        def lc: map(ascii_downcase);
+        def fits($j; $r): (($j.labels | lc) - ($r.labels | lc)) == [];
+        [ $jobs[] | select(.status == "queued")
+          | .age = ((($now - (.created_at | fromdateiso8601)) / 60) | floor) ] as $queued
+        | [ $queued[] | select(.age > $q) | . as $j
+            | [ $runners[] | select(.status == "online" and fits($j; .)) ] as $on
+            | [ $runners[] | select(.status == "offline" and fits($j; .)) | .name ] as $off
+            | if ($on | any(.busy | not)) then empty
+              elif ($on | length) > 0 then {kind: "capacity", age: .age, n: ($on | length)}
+              elif ($off | length) > 0 then {kind: "urgent", age: .age, off: $off}
+              else empty end ] as $w
+        | ( $w | map(select(.kind == "capacity")) | if length > 0 then {kind: "capacity", mins: (map(.age) | max), n: (map(.n) | max)} else empty end ),
+          ( $runners[] | select(.status == "offline") | .name as $nm | . as $r
+            | ( [ $w[] | select(.kind == "urgent" and (.off | index($nm))) | .age ] ) as $u
+            | ( [ $queued[] | select(fits(.; $r)) | .age ] | max // 0 ) as $any
+            | if ($u | length) > 0 then {kind: "urgent", runner: $nm, mins: ($u | max)}
+              else {kind: "offline", runner: $nm, mins: $any} end )')" || { echo "ci-runner-health: jq failed for $repo" > "$FAIL_FILE"; return 0; }
+    while IFS= read -r e; do
+        [ -n "$e" ] || continue
+        kind="$(jq -r .kind <<< "$e")"; nm="$(jq -r '.runner // ""' <<< "$e")"; mins="$(jq -r .mins <<< "$e")"
+        unit="actions.runner.$slug.$nm.service"
+        case "$kind" in
+            urgent) emit runner-offline-with-queue error "$repo $nm" \
+                "runner $nm is offline, no online runner can take the job waiting in $repo, and that job has been queued for $mins min (> $QUEUE_MINS); restart it: sudo systemctl restart $unit" \
+                "$repo" "$nm" "$mins" ;;
+            offline) emit runner-offline warn "$repo $nm" \
+                "runner $nm is offline but no job it alone could take has waited too long; restart it if it should be in service: sudo systemctl restart $unit" \
+                "$repo" "$nm" "$mins" ;;
+            capacity) n="$(jq -r .n <<< "$e")"
+                emit queue-long warn "$repo" \
+                "a job for $repo has been queued for $mins min (> $QUEUE_MINS) while its $n matching online runner(s) are all busy; more runner capacity is needed" \
+                "$repo" "" "$mins" ;;
+        esac
+    done <<< "$ev"
 }
 
 report_repo() {

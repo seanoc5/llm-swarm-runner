@@ -32,9 +32,13 @@ iso() { date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ; }
 ep() { printf '%s' "$1" | tr '/?&=%<>' '_______'; }
 R=o/repo
 
-runners() { # name:status:busy …
-    local s="" x
-    for x in "$@"; do IFS=: read -r n st b <<< "$x"; s+="{\"name\":\"$n\",\"status\":\"$st\",\"busy\":$b},"; done
+runners() { # name:status:busy[:label,label] …  (labels default self-hosted,linux)
+    local s="" x lj
+    for x in "$@"; do
+        IFS=: read -r n st b lb <<< "$x"
+        lj="$(jq -nc --arg l "${lb:-self-hosted,linux}" '($l | split(","))')"
+        s+="{\"name\":\"$n\",\"status\":\"$st\",\"busy\":$b,\"labels\":$(jq -c 'map({name:.})' <<< "$lj")},"
+    done
     echo "{\"runners\":[${s%,}]}" > "$T/api/$(ep "repos/$R/actions/runners?per_page=100")"
 }
 queue() { # run ids for queued / in_progress
@@ -94,6 +98,35 @@ check "a hosted-runner job does not count as waiting" runner-offline "$(jq -r .c
 jobs_of 10 "$(job queued $((NOW-1200)) null)"
 set +e; out="$(CI_HEALTH_QUEUE_MINS=30 "$CHK" "$R")"; set -e
 check "CI_HEALTH_QUEUE_MINS=30 raises the bar" runner-offline "$(jq -r .check <<< "$out")"
+
+# 6b. retired-but-registered runner (#940 review): a stale offline runner plus a
+# normal busy queue must NOT page "restart <stale runner>"; busy online runners
+# that fit the job make it a capacity note.
+checks_of() { jq -r '.check + ":" + .severity' <<< "$1" | sort | paste -sd, -; }
+runners "old:offline:false" "r1:online:true" "r2:online:true"; queue '{"id":10}' ''
+jobs_of 10 "$(job queued $((NOW-900)) null)"
+set +e; out="$("$CHK" "$R")"; rc=$?; set -e
+check "stale offline + busy queue: no urgent alert" "1|queue-long:warn,runner-offline:warn" "$rc|$(checks_of "$out")"
+case "$out" in *'"check":"runner-offline-with-queue"'*) got=urgent ;; *) got=none ;; esac
+check "…runner-offline-with-queue absent" none "$got"
+
+# 6c. an idle online runner fits the job: restarting the offline one is moot.
+runners "old:offline:false" "r1:online:false"; queue '{"id":10}' ''
+jobs_of 10 "$(job queued $((NOW-1200)) null)"
+set +e; out="$("$CHK" "$R")"; set -e
+check "offline + idle matching online runner: warn only" "runner-offline:warn" "$(checks_of "$out")"
+
+# 6d. the only online runners lack the job's labels: the offline runner is the one that fits, so urgent.
+runners "old:offline:false" "gpu1:online:true:self-hosted,gpu"; queue '{"id":10}' ''
+jobs_of 10 "$(job queued $((NOW-1200)) null)"
+set +e; out="$("$CHK" "$R")"; set -e
+check "offline fits, online runner has other labels: urgent" "runner-offline-with-queue:error" "$(checks_of "$out")"
+
+# 6e. the offline runner lacks the job's labels: not the culprit, no urgent alert.
+runners "gpu-old:offline:false:self-hosted,gpu" "r1:online:true"; queue '{"id":10}' ''
+jobs_of 10 "$(job queued $((NOW-1200)) null)"
+set +e; out="$("$CHK" "$R")"; set -e
+check "offline runner cannot take the job: no urgent" "queue-long:warn,runner-offline:warn" "$(checks_of "$out")"
 
 # 7. gh failure: exit 2, no verdict.
 rm -f "$T/api/$(ep "repos/$R/actions/runners?per_page=100")"
