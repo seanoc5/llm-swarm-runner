@@ -591,9 +591,9 @@ hold_gate
 # assumed from earlier in its own session (fand-etl PR #1063: readied with
 # `lint-and-test` failing while the PR body claimed CI was green).
 echo "pr-ready: confirming CI status for PR #$PR before readying..."
+# The swarm/worker liveness status is not CI (ci_pr_checks drops it, #536).
 set +e
-CHECKS_OUT="$(gh pr checks "$PR" 2>&1)"
-CHECKS_RC=$?
+ci_pr_checks "$PR"
 set -e
 case "$CHECKS_RC" in
     0)

@@ -32,6 +32,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_ci-fallback.sh
+. "$SCRIPT_DIR/_ci-fallback.sh"
 PR_READY="${PR_READY_SCRIPT:-$SCRIPT_DIR/pr-ready.sh}"
 
 DRY_RUN=0
@@ -59,7 +61,9 @@ while read -r pr sha action; do
     if [ "$action" = "check" ]; then
         # exit 1 = a check failed, but a token that cannot read Checks also
         # exits 1; require an actual `fail` row (tab-separated off a TTY).
-        rc=0; out="$(gh pr checks "$pr" 2>&1)" || rc=$?
+        # ci_pr_checks drops the swarm/worker liveness status (a dead worker's
+        # failure is not red CI, #536) and sets CHECKS_OUT / CHECKS_RC.
+        ci_pr_checks "$pr"; rc="$CHECKS_RC"; out="$CHECKS_OUT"
         if ! { [ "$rc" = "1" ] && grep -Eq '[[:space:]]fail[[:space:]]' <<<"$out"; }; then
             # issue #739: say the head was not (verifiably) red, so the watcher keeps its
             # one-note-per-sha key across a failed read or a CI re-run instead of pruning it.
@@ -84,9 +88,10 @@ jq -r '.[] | (.body // "" | capture("(?m)^<!-- SWARM_DRAFT_REASON: ci-cancelled 
 # read-only: coordinator-watch.sh turns each line into one deduped inbox note
 # per (PR, sha); nothing here or there readies the draft. The coordinator decides.
 # Line: "#<N> parked-green: banner-less draft, green CI (risk=<r>, issue=<K>, sha=<S>)"
-jq -r '.[]
+jq -r "$CI_ROLLUP_DROP_LIVENESS_JQ"'.[]
   | select((.body // "") | (test("<!-- SWARM_DRAFT_REASON:") or test("(?m)^> ⛔ \\*\\*COORDINATOR HOLD\\*\\*")) | not)
   | (.statusCheckRollup // []
+     | ci_real  # the swarm/worker liveness status is not CI (#536)
      | group_by((.workflowName // "") + "\u0000" + (.name // .context // ""))
      | map(max_by(.completedAt // .startedAt // .createdAt // ""))) as $r
   | select(($r | length) > 0 and all($r[]; ((.status // "COMPLETED") == "COMPLETED")

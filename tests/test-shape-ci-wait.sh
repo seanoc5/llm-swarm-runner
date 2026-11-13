@@ -106,7 +106,18 @@ case "$1 $2" in
         if [ -f "${GH_CHECKS_CALL_COUNT_FILE:-/dev/null}" ]; then cn="$(cat "$GH_CHECKS_CALL_COUNT_FILE")"; fi
         cn=$((cn + 1))
         [ -n "${GH_CHECKS_CALL_COUNT_FILE:-}" ] && echo "$cn" > "$GH_CHECKS_CALL_COUNT_FILE"
-        if [ -n "${GH_CHECKS_OUT:-}" ]; then printf '%b\n' "$GH_CHECKS_OUT"; fi
+        if [ -n "${GH_CHECKS_OUT:-}" ]; then
+            # Real `gh pr checks --json` prints a JSON array; fixtures keep the
+            # legacy name<TAB>bucket<TAB>elapsed<TAB>link rows, converted here.
+            if [[ "$*" == *"--json"* ]] && [[ "$GH_CHECKS_OUT" != "["* ]]; then
+                printf '%b\n' "$GH_CHECKS_OUT" | jq -Rn '[inputs | split("\t") | {name: .[0], bucket: .[1], link: (.[3] // "")}]'
+            else printf '%b\n' "$GH_CHECKS_OUT"; fi
+        fi
+        if [ -z "${GH_CHECKS_OUT:-}" ] && [ "${GH_CHECKS_PERM_ERROR:-0}" != "1" ] && [ "${GH_CHECKS_NO_CHECKS:-0}" != "1" ] \
+            && [ "$cn" -gt "${GH_CHECKS_NO_CHECKS_UNTIL:-0}" ] && [[ "$*" == *"--json"* ]]; then
+            case "${GH_CHECKS_RC:-0}" in 8) B=pending;; 0) B=pass;; *) B=fail;; esac
+            printf '[{"name":"build","bucket":"%s","link":"u"}]\n' "$B"
+        fi
         if [ "${GH_CHECKS_PERM_ERROR:-0}" = "1" ]; then
             echo "GraphQL: Resource not accessible by personal access token (node.statusCheckRollup.contexts.nodes)" >&2
             exit 1
@@ -254,7 +265,7 @@ check "exits 1 on failing checks" '[ "$rc" -eq 1 ]'
 heading "Test 3b: gh pr checks exits 0 but prints a fail row (cancelled-only run) → exit 1 (issue #793)"
 rc=0
 out="$(GH_VIEW_MERGEABLE=MERGEABLE GH_VIEW_STATE=CLEAN GH_CHECKS_RC=0 \
-    GH_CHECKS_OUT='build\tfail\t24h0m0s\thttps://example/runs/1' \
+    GH_CHECKS_OUT='build\tcancel\t24h0m0s\thttps://example/runs/1' \
     GH_RUNLIST_JSON='[{"status":"completed","conclusion":"success"}]' \
     "$CI_WAIT" 42 5 2>&1)" || rc=$?
 check "exits 1, never green, on an exit-0 fail row" '[ "$rc" -eq 1 ]'
@@ -884,6 +895,24 @@ out="$(GH_RUNLIST_JSON='[{"status":"completed","conclusion":"success","workflowN
     GH_VIEW_ISDRAFT=false GH_CHECKS_OUT='Fast\tpass\t1m\turl\ndb\tskipping\t0\turl' \
     "$CI_WAIT" 42 5 2>&1)" || rc=$?
 check "exits 0" '[ "$rc" -eq 0 ]'
+
+heading "Test 25: swarm/worker liveness status is not CI (issue #536) — real jq over a gh pr checks --json payload"
+RUNOK='[{"status":"completed","conclusion":"success","workflowName":"CI","createdAt":"2026-11-10T10:00:00Z"}]'
+rc=0
+out="$(GH_RUNLIST_JSON="$RUNOK" GH_CHECKS_RC=8 \
+    GH_CHECKS_OUT='[{"name":"lint","bucket":"pass","link":"u"},{"name":"swarm/worker","bucket":"pending","link":""}]' \
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
+check "green CI + pending liveness status (gh exits 8) → exit 0, not a timeout" '[ "$rc" -eq 0 ]'
+rc=0
+out="$(GH_RUNLIST_JSON="$RUNOK" GH_CHECKS_RC=1 \
+    GH_CHECKS_OUT='[{"name":"lint","bucket":"pass","link":"u"},{"name":"swarm/worker","bucket":"fail","link":""}]' \
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
+check "green CI + failed liveness status (gh exits 1) → exit 0, not red" '[ "$rc" -eq 0 ]'
+rc=0
+out="$(GH_RUNLIST_JSON="$RUNOK" GH_CHECKS_RC=1 \
+    GH_CHECKS_OUT='[{"name":"lint","bucket":"fail","link":"u"},{"name":"swarm/worker","bucket":"pending","link":""}]' \
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
+check "a genuinely failing check next to the liveness status is still red → exit 1" '[ "$rc" -eq 1 ]'
 
 heading "Results: $PASS checks passed"
 green "All checks passed."

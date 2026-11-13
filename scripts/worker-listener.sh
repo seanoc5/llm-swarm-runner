@@ -213,6 +213,12 @@ IDLE_SENTINEL="$QUEUE_ROOT/.brief-pending"
 # PID-sourcing comment on run_idle_shell's `bash --rcfile` call.
 IDLE_SHELL_PIDFILE="$QUEUE_ROOT/.idle-shell-pid"
 
+# issue #536: marker that this pane's bare shell is run_idle_shell's
+# deliberate park (listener alive, waiting for a brief), not a crashed CLI.
+# coordinator-watch.sh's swarm/worker status reads it to tell "idle" from
+# "worker exited"; it exists exactly while the idle shell runs.
+IDLE_PARKED_MARKER="$QUEUE_ROOT/.idle-parked"
+
 # Sentinel touched by the idle shell's `close-worker` command to tell the
 # listener the operator wants this listener ended and the window closed.
 # Needed because a plain `exit` from the idle shell deliberately respawns it
@@ -1364,6 +1370,7 @@ close_window_and_exit() {
 
 run_idle_shell() {
     rm -f "$IDLE_SENTINEL" "$IDLE_SHELL_PIDFILE"
+    date +%s > "$IDLE_PARKED_MARKER" 2>/dev/null || true
 
     poll_for_brief &
     local poll_pid=$!
@@ -1456,7 +1463,7 @@ EOF
     bash --rcfile "$rcfile" -i
     local lifetime=$((SECONDS - spawned))
 
-    rm -f "$rcfile" "$IDLE_SHELL_PIDFILE"
+    rm -f "$rcfile" "$IDLE_SHELL_PIDFILE" "$IDLE_PARKED_MARKER"
     kill "$poll_pid" 2>/dev/null
     wait "$poll_pid" 2>/dev/null
 

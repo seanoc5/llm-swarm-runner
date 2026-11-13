@@ -161,6 +161,19 @@ grep -qx '#51 ci-failing: needs a fix push (sha=feed5678)' "$TEST_DIR/out.log" |
 [ ! -s "$READY_LOG" ] || red "dry run must not call pr-ready"
 green "moved head: red notes with live sha; pending, green, unreadable, unexpected report ci-failing-unconfirmed (no note); no pr-ready"
 
+heading "Test 8b (issue #536): a failed swarm/worker liveness status on a moved head is not red CI (real jq over gh pr checks --json)"
+printf '1\n[{"name":"lint","bucket":"pass","link":"u"},{"name":"swarm/worker","bucket":"fail","link":""}]\n' > "$TEST_DIR/checks.56"  # only the dead-worker status failed
+printf '1\n[{"name":"lint","bucket":"fail","link":"u"},{"name":"swarm/worker","bucket":"fail","link":""}]\n' > "$TEST_DIR/checks.57"  # lint really failed too
+cat > "$FIXTURE" <<'JSON'
+[{"number": 56, "headRefOid": "feed5678", "body": "<!-- SWARM_DRAFT_REASON: ci-failing sha=0ddba11 -->\nbody"},
+ {"number": 57, "headRefOid": "feed5678", "body": "<!-- SWARM_DRAFT_REASON: ci-failing sha=0ddba11 -->\nbody"}]
+JSON
+run_sweep || red "expected exit 0: $(cat "$TEST_DIR/out.log")"
+want='#56 ci-failing-unconfirmed: live head not verifiably red (sha=feed5678)
+#57 ci-failing: needs a fix push (sha=feed5678)'
+[ "$(cat "$TEST_DIR/out.log")" = "$want" ] || red "liveness failure misread: $(cat "$TEST_DIR/out.log")"
+green "dead worker's failure status is not red CI; a real lint failure beside it still is"
+
 heading "Test 9 (issue #757): banner-less green drafts are reported; held, banner, red, pending and empty-CI drafts are not"
 G='[{"name":"unit","status":"COMPLETED","conclusion":"SUCCESS"},{"name":"lint","status":"COMPLETED","conclusion":"SKIPPED"}]'
 cat > "$FIXTURE" <<JSON
