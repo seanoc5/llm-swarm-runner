@@ -27,7 +27,7 @@
 #
 # Env:
 #   COORD_DOORBELL_MODEL          courier model (default: haiku)
-#   COORD_DOORBELL_TIMEOUT_SECS   hard cap on the courier call (default: 90)
+#   COORD_DOORBELL_TIMEOUT_SECS   hard cap on the courier call (default: 30; keep well under the watcher's 60s COORD_WAKE_LOCK_TIMEOUT_SECS, since each wake holds that lock)
 #   COORD_DOORBELL_CLAUDE         claude binary (default: claude; tests stub it)
 #   EVENTS_LOG                    event log path (llm-start.sh sets it)
 #
@@ -46,7 +46,7 @@ PROMPT_FILE="${2:?usage: coord-doorbell.sh <project-dir> <prompt-file>}"
 
 CLAUDE_BIN="${COORD_DOORBELL_CLAUDE:-claude}"
 MODEL="${COORD_DOORBELL_MODEL:-haiku}"
-TIMEOUT_SECS="${COORD_DOORBELL_TIMEOUT_SECS:-90}"
+TIMEOUT_SECS="${COORD_DOORBELL_TIMEOUT_SECS:-30}"
 EVENTS_LOG="${EVENTS_LOG:-$PROJECT_DIR/.swarm/events.log}"
 
 log_event() {
