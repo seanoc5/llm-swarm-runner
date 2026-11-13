@@ -138,6 +138,31 @@ else
     bad "10. default: gh credential helper set" "$(printf '%s\n' "$ARGV" | grep GIT_CONFIG | tr '\n' ' ')"
 fi
 
+# #918: a host gitconfig with an https->ssh insteadOf must not reach the
+# container; a filtered copy (insteadOf/pushInsteadOf stripped, rest kept) is
+# mounted instead. SANDBOX_SSH=1 mounts the raw file.
+PROJECT="$TMP/project"
+printf '[user]\n\tname = Host Human\n[url "git@github.com:"]\n\tinsteadOf = https://github.com/\n[url "ssh://x/"]\n\tpushInsteadOf = https://x/\n[core]\n\teditor = vi\n' > "$FAKE_HOME/.gitconfig"
+ARGV="$(run_sandbox)"
+FILTERED="$FAKE_HOME/.claude-sandbox-configs/gitconfig.filtered"
+if argv_has "$ARGV" "$FILTERED:/home/sandbox/.gitconfig:ro" && [ -f "$FILTERED" ] \
+   && ! grep -qi 'insteadof' "$FILTERED" && grep -q 'Host Human' "$FILTERED" && grep -q 'editor = vi' "$FILTERED"; then
+    ok "11. default: mounted gitconfig has insteadOf/pushInsteadOf stripped, other settings kept"
+else
+    bad "11. default: filtered gitconfig mounted" "$(cat "$FILTERED" 2>/dev/null | tr '\n' ' ')"
+fi
+if grep -q 'insteadOf' "$FAKE_HOME/.gitconfig"; then
+    ok "12. host ~/.gitconfig itself is untouched"
+else
+    bad "12. host ~/.gitconfig itself is untouched"
+fi
+ARGV="$(run_sandbox SANDBOX_SSH=1)"
+if argv_has "$ARGV" "$FAKE_HOME/.gitconfig:/home/sandbox/.gitconfig:ro"; then
+    ok "13. SANDBOX_SSH=1 mounts the raw ~/.gitconfig"
+else
+    bad "13. SANDBOX_SSH=1 mounts the raw ~/.gitconfig"
+fi
+
 echo ""
 echo "Passed: $PASS  Failed: $FAIL"
 [ "$FAIL" -eq 0 ]
