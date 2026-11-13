@@ -614,7 +614,7 @@ case "$CHECKS_RC" in
         ;;
     8)
         echo "pr-ready: REFUSED — PR #$PR's CI checks are still pending (gh pr checks exit 8)." >&2
-        echo "          Expected right after a push: don't wait. Post the ci-handoff note and end the task; the coordinator re-runs pr-ready.sh once CI settles." >&2
+        echo "          Expected right after a push. Workers: post the ci-handoff fyi and end; the coordinator readies once CI is green." >&2
         refuse ci-pending 4
         ;;
     1)
@@ -641,7 +641,7 @@ case "$CHECKS_RC" in
                         ;;
                     pending)
                         echo "pr-ready: REFUSED — PR #$PR's CI checks are still pending (via Actions-runs fallback)." >&2
-                        echo "          Expected right after a push: don't wait. Post the ci-handoff note and end the task; the coordinator re-runs pr-ready.sh once CI settles." >&2
+                        echo "          Expected right after a push. Workers: post the ci-handoff fyi and end; the coordinator readies once CI is green." >&2
                         refuse ci-pending 4
                         ;;
                     *)
@@ -698,7 +698,7 @@ case "$CHECKS_RC" in
                     echo "pr-ready: WARN: PR #$PR's changed files are excluded by every pull_request/push workflow's path filter ($CI_FALLBACK_RELEVANT_DETAIL) — no check will ever register. Proceeding." >&2
                 else
                     echo "pr-ready: REFUSED — PR #$PR reports 'no checks reported' but this repo has CI configured for these files — this commit's run likely hasn't registered yet." >&2
-                    echo "          Expected right after a push: don't wait. Post the ci-handoff note and end the task; the coordinator re-runs pr-ready.sh once CI settles." >&2
+                    echo "          Expected right after a push. Workers: post the ci-handoff fyi and end; the coordinator readies once CI is green." >&2
                     refuse ci-pending 4
                 fi
             fi
