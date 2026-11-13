@@ -2141,6 +2141,7 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     WORKER_DELIVER_END_TIMEOUT_SECS         15      max wait for the session to actually end after /quit
     WORKER_DELIVER_BACKOFF_SECS             600     cooldown for a window after a failed delivery attempt
     WORKER_DELIVER_MAX_FAILURES             3       consecutive failures before giving up on a window entirely
+    WORKER_DELIVER_HARD_RESTART_AFTER       1       failed /quit attempts before hard-restarting a clean finished worker (#941)
     WORKER_DELIVER_COMPOSER_STALL_THRESHOLD 20      (issue #436) composer_not_clear skips racked up against the same pending brief (not reset by an interleaved skip for a different reason) before a loud, once-only escalation; see header comment
     WORKER_DELIVER_SHELL_STALL_THRESHOLD    20      (issue #559) same shape as composer_not_clear's threshold above, for a window parked "shell" instead of "cli"; see header comment
     WORKER_DELIVER_TERMINAL_STALL_THRESHOLD 20      (issue #601) same shape again, for reason=task_not_terminal — a worker_current_task_terminal() refusal that never self-heals or escalates on its own otherwise; see header comment
@@ -2930,6 +2931,8 @@ WORKER_DELIVER_POLL_SECS="${WORKER_DELIVER_POLL_SECS:-2}"
 WORKER_DELIVER_END_TIMEOUT_SECS="${WORKER_DELIVER_END_TIMEOUT_SECS:-15}"
 WORKER_DELIVER_BACKOFF_SECS="${WORKER_DELIVER_BACKOFF_SECS:-600}"
 WORKER_DELIVER_MAX_FAILURES="${WORKER_DELIVER_MAX_FAILURES:-3}"
+# issue #941: failed /quit attempts before hard-restarting a clean, finished worker.
+WORKER_DELIVER_HARD_RESTART_AFTER="${WORKER_DELIVER_HARD_RESTART_AFTER:-1}"
 # issue #436 — see this file's WORKER_DELIVER_COMPOSER_STALL_THRESHOLD header
 # comment above (near COMPACT_COMPOSER_CHROME_PATTERN's) for the gap this
 # closes: reason=composer_not_clear skips never touch WORKER_DELIVER_
@@ -4122,7 +4125,16 @@ is_own_worktree_dir() {
     wt_list="$(git -C "$PROJECT_DIR" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2}')" || return 0
     [ -z "$wt_list" ] && return 0
 
-    grep -Fxq "$dir" <<< "$wt_list"
+    # issue #941: compare resolved paths. A WORKSPACE reached through a symlink
+    # (/opt/work/x-worktrees -> /mnt/wd1t/worktrees/...) never string-matches
+    # git's resolved list, so every listener event was skipped as foreign_worktree.
+    grep -Fxq "$dir" <<< "$wt_list" && return 0
+    local rdir rline
+    rdir="$(realpath -m -- "$dir" 2>/dev/null)" || return 1
+    while IFS= read -r rline; do
+        [ "$(realpath -m -- "$rline" 2>/dev/null)" = "$rdir" ] && return 0
+    done <<< "$wt_list"
+    return 1
 }
 
 # is_our_worktree <outcome-path>
@@ -9077,7 +9089,7 @@ worker_deliver_hard_restart() {
         return 1
     fi
 
-    echo "[$(date +%T)] worker iss-$issue ignored /quit $WORKER_DELIVER_MAX_FAILURES times and its worktree is clean — hard-restarting it so the queued brief ($brief) is claimed..."
+    echo "[$(date +%T)] worker iss-$issue ignored /quit ${WORKER_DELIVER_FAIL_COUNT[$issue]:-$WORKER_DELIVER_MAX_FAILURES} time(s) and its worktree is clean — hard-restarting it so the queued brief ($brief) is claimed..."
     if [ "$DRY_RUN" = "1" ]; then
         echo "[DRY] would kill window iss-$issue + container, then provision-worker.sh --wake $issue"
         return 0
@@ -9432,6 +9444,12 @@ maybe_worker_deliver_brief() {
                 compact_retract_queued "$target" worker.deliver "issue=$issue" "$WORKER_COMPACT_BUSY_PATTERN" || true
             fi
             worker_deliver_record_failure "$issue"
+            # issue #941: a finished session that ignored /quit once is not going
+            # to honor it on retry; with a clean worktree, restart it now instead
+            # of waiting out WORKER_DELIVER_MAX_FAILURES timeouts plus backoff.
+            if [ "${WORKER_DELIVER_FAIL_COUNT[$issue]:-0}" -ge "$WORKER_DELIVER_HARD_RESTART_AFTER" ]; then
+                worker_deliver_hard_restart "$issue" "$wt_dir" "$brief_before" && return 0
+            fi
             # Self-review finding (issue #437): if this /quit's effect lands
             # LATE — just past this timeout, e.g. a slow-to-render CLI
             # finally processing it a beat after we gave up waiting — a
