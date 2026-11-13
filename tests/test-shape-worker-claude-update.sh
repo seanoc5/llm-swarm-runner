@@ -26,3 +26,29 @@ green "update-worker-claude.sh present and parses"
 grep -q '^ARG CLAUDE_CODE_VERSION=latest$' "$ROOT/Dockerfile" \
     || red "Dockerfile CLAUDE_CODE_VERSION is no longer the 'latest' fallback; update its header and docs/model-switch-recipe.md together"
 green "Dockerfile: claude-code fallback is the latest ARG"
+
+# Behavior: against an empty prefix (new host) the script must reach the
+# install step instead of dying silently when package.json is missing.
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+mkdir -p "$TMP/bin" "$TMP/home"
+cat > "$TMP/bin/docker" <<'FAKE'
+#!/usr/bin/env bash
+# fake docker: `image inspect` succeeds; `run ... npm install -g PKG@T` logs
+# the call and writes the package.json the real install would create.
+if [ "$1" = image ]; then exit 0; fi
+echo "$*" >> "$FAKE_DOCKER_LOG"
+d="$HOME/.npm-global/lib/node_modules/@anthropic-ai/claude-code"
+mkdir -p "$d"
+printf '{\n  "version": "9.9.9"\n}\n' > "$d/package.json"
+FAKE
+chmod +x "$TMP/bin/docker"
+rc=0
+out="$(HOME="$TMP/home" PATH="$TMP/bin:$PATH" FAKE_DOCKER_LOG="$TMP/docker.log" \
+    "$ROOT/scripts/update-worker-claude.sh" 2>&1)" || rc=$?
+[ "$rc" = 0 ] || red "update script exited $rc on an empty prefix: $out"
+grep -q 'npm install -g @anthropic-ai/claude-code@latest' "$TMP/docker.log" \
+    || red "update script never reached the npm install step on an empty prefix"
+grep -qF 'no worker Claude Code installed yet' <<<"$out" \
+    || red "update script did not log the empty-prefix case: $out"
+grep -qF ' -> 9.9.9 ' <<<"$out" || red "update script did not report the new version: $out"
+green "update-worker-claude.sh: empty prefix reaches install and reports the version"

@@ -30,10 +30,13 @@ docker image inspect "$IMAGE" >/dev/null 2>&1 \
 mkdir -p "$PREFIX_DIR"
 
 installed() {
-    sed -n '/^ *"version": *"/{s/^ *"version": *"\([^"]*\)".*/\1/p;q}' "$PREFIX_DIR/lib/node_modules/$PKG/package.json" 2>/dev/null
+    # Missing package.json (new host, empty prefix) is normal: print nothing, return 0
+    # so set -e does not kill the script before the install that fills it.
+    sed -n '/^ *"version": *"/{s/^ *"version": *"\([^"]*\)".*/\1/p;q}' "$PREFIX_DIR/lib/node_modules/$PKG/package.json" 2>/dev/null || true
 }
 
 before="$(installed)"
+[ -n "$before" ] || echo "update-worker-claude: no worker Claude Code installed yet"
 docker run --rm --user "$(id -u):$(id -g)" \
     -v "$PREFIX_DIR:/home/sandbox/.npm-global:rw" \
     -e NPM_CONFIG_PREFIX=/home/sandbox/.npm-global \
