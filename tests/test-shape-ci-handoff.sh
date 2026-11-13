@@ -33,3 +33,15 @@ for f in coordinator.md coordinator-work.md; do
     grep -q 'Never ready on remembered CI' "$P/$f" || red "$f lost the #473 never-remembered-CI rule"
     green "$f: coordinator checks CI once and readies with pr-ready.sh"
 done
+
+# Issue #945: the conflict brief and pr-ready.sh must not tell workers to wait
+# on CI (ci-wait.sh ... until green); the old wording must not come back.
+for f in scripts/_conflict-brief.sh scripts/pr-ready.sh; do
+    if grep -nE 'ci-wait\.sh.*until[^.]*green' "$ROOT/$f" >/dev/null; then
+        red "$f tells workers to ci-wait.sh until green"
+    fi
+    green "$f: no 'ci-wait.sh ... until green' instruction"
+done
+grep -qF 'Workers: post the ci-handoff fyi and end' "$ROOT/scripts/pr-ready.sh" \
+    || red "pr-ready.sh CI-pending message is not addressed to workers"
+green "pr-ready.sh: CI-pending message addressed to workers"
