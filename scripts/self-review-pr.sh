@@ -81,6 +81,15 @@
 #             instead of an exhausted/unrelated API key a project .envrc
 #             exported (issue #673).
 #
+#   Later rounds (issue #611): when the PR already has owner/member/
+#             collaborator-authored SWARM_SELF_REVIEW comments, the prompt also
+#             carries the last SELF_REVIEW_PRIOR_ROUNDS (default 4) of them
+#             (each cut to SELF_REVIEW_PRIOR_ROUND_BYTES, default 4000) and the
+#             diff from the last reviewed head to the current head, plus
+#             prompts/skill-self-review-followup.md: BLOCK only for an
+#             unresolved prior BLOCK or a new BLOCK in the new commits.
+#             SELF_REVIEW_CONVERGE=0 disables this; SELF_REVIEW_SINCE_MAX_BYTES
+#             (default 200000) caps the since-last-review diff.
 # Exit codes (gate-friendly — swarm-merge.sh consumes the marker comment):
 #   0  APPROVE
 #   3  APPROVE_WITH_CAVEATS
@@ -116,7 +125,7 @@ while [ $# -gt 0 ]; do
         --caveats-nonblocking) shift; NONBLOCKING_FOLLOWUP="${1:-}"
             [[ "$NONBLOCKING_FOLLOWUP" =~ ^[0-9]+$ ]] \
                 || { echo "ERROR: --caveats-nonblocking needs a follow-up issue number" >&2; exit 1; } ;;
-        -h|--help) sed -n '2,85p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,95p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         -*) echo "ERROR: unknown flag '$1'" >&2; exit 1 ;;
         *)  [ -z "$PR" ] || { echo "ERROR: multiple PR numbers" >&2; exit 1; }
             PR="$1" ;;
@@ -292,11 +301,61 @@ fi
 BODY="$(gh pr view "$PR" --json title,body --jq '"\(.title)\n\n\(.body)"')" \
     || { echo "ERROR: gh pr view $PR failed" >&2; exit 1; }
 
+# --- earlier rounds (issue #611: converging review) -------------------------
+# Later rounds get the findings of earlier rounds plus the diff since the last
+# reviewed head, and are told to BLOCK only on an unresolved prior BLOCK or a
+# new BLOCK-level problem in the new commits (prompts/skill-self-review-followup.md).
+# Only owner/member/collaborator-authored markers count, same as the gates.
+# SELF_REVIEW_CONVERGE=0 turns this off (every round is then a from-scratch review).
+FOLLOWUP_SKILL="${LLM_SWARM_DIR:-$SCRIPT_DIR/..}/prompts/skill-self-review-followup.md"
+PRIOR_ROUNDS=""        # text of earlier rounds (newest last); empty = first round
+SINCE_DIFF=""          # diff between the last reviewed head and HEAD_SHA
+SINCE_NOTE=""          # why SINCE_DIFF is empty, when it is
+PRIOR_MAX_ROUNDS="${SELF_REVIEW_PRIOR_ROUNDS:-4}"
+PRIOR_MAX_BYTES="${SELF_REVIEW_PRIOR_ROUND_BYTES:-4000}"
+SINCE_MAX_BYTES="${SELF_REVIEW_SINCE_MAX_BYTES:-200000}"
+if [ "${SELF_REVIEW_CONVERGE:-1}" != "0" ] && [ -r "$FOLLOWUP_SKILL" ]; then
+    PRIOR_JSON="$(gh pr view "$PR" --json comments 2>/dev/null | jq -c --argjson n "$PRIOR_MAX_ROUNDS" --argjson cap "$PRIOR_MAX_BYTES" '
+        [.comments[]? | select(.authorAssociation as $x | ["OWNER","MEMBER","COLLABORATOR"] | index($x))
+         | (.body // "") | select(test("SWARM_SELF_REVIEW: [A-Z_]+ actor="))
+         | {head: (capture("head=(?<h>[0-9a-f]+)").h // ""),
+            marker: (capture("SWARM_SELF_REVIEW: (?<v>[A-Z_]+) actor=(?<a>[A-Za-z0-9_-]+)") | "\(.v) actor=\(.a)"),
+            text: (sub("^<!--[^\n]*-->\n"; "") | split("<sub>")[0] | .[0:$cap])}]
+        | .[-$n:]' 2>/dev/null || true)"
+    if [ -n "$PRIOR_JSON" ] && [ "$(jq 'length' <<<"$PRIOR_JSON" 2>/dev/null || echo 0)" -gt 0 ]; then
+        PRIOR_ROUNDS="$(jq -r 'to_entries[] | "### Round \(.key + 1): \(.value.marker) on head \(.value.head[0:7])\n\(.value.text)\n"' <<<"$PRIOR_JSON")"
+        # Latest earlier round on a head other than the current one.
+        LAST_REVIEWED="$(jq -r --arg h "${HEAD_SHA:-}" '[.[] | select(.head != "" and .head != $h) | .head] | last // ""' <<<"$PRIOR_JSON")"
+        if [ -z "$LAST_REVIEWED" ] || [ -z "$HEAD_SHA" ]; then
+            SINCE_NOTE="no earlier round reviewed a different head, so there is no 'since last review' diff"
+        elif SINCE_DIFF="$(gh api "repos/{owner}/{repo}/compare/${LAST_REVIEWED}...${HEAD_SHA}" -H 'Accept: application/vnd.github.diff' 2>/dev/null)" && [ -n "$SINCE_DIFF" ]; then
+            if [ "${#SINCE_DIFF}" -gt "$SINCE_MAX_BYTES" ]; then
+                SINCE_DIFF="${SINCE_DIFF:0:$SINCE_MAX_BYTES}"$'\n'"[since-last-review diff cut at ${SINCE_MAX_BYTES} bytes; the full diff below is complete]"
+            fi
+        else
+            SINCE_DIFF=""
+            SINCE_NOTE="could not fetch the diff from ${LAST_REVIEWED:0:7} to ${HEAD_SHA:0:7} (force-push or API error); judge the prior findings against the full diff"
+        fi
+    fi
+fi
+
 # --- run the fresh-context review ------------------------------------------
 MODEL_OPTS=()
 [ -n "$MODEL" ] && MODEL_OPTS=(--model "$MODEL")
 review_payload() {
-    printf '%s\n\n--- PR ---\n%s\n\n' "$(cat "$SKILL")" "$BODY"
+    printf '%s\n\n' "$(cat "$SKILL")"
+    if [ -n "$PRIOR_ROUNDS" ]; then
+        printf '%s\n\n' "$(cat "$FOLLOWUP_SKILL")"
+    fi
+    printf -- '--- PR ---\n%s\n\n' "$BODY"
+    if [ -n "$PRIOR_ROUNDS" ]; then
+        printf -- '--- PRIOR ROUNDS ---\n%s\n' "$PRIOR_ROUNDS"
+        if [ -n "$SINCE_DIFF" ]; then
+            printf -- '--- CHANGES SINCE LAST REVIEW ---\n%s\n\n' "$SINCE_DIFF"
+        else
+            printf -- '--- CHANGES SINCE LAST REVIEW ---\n(not available: %s)\n\n' "$SINCE_NOTE"
+        fi
+    fi
     [ -z "$EXCLUDED_NOTE" ] || printf -- '--- NOT REVIEWED ---\n%s\nState in your review that these files were not examined.\n\n' "$EXCLUDED_NOTE"
     printf -- '--- DIFF ---\n%s\n' "$DIFF"
 }
