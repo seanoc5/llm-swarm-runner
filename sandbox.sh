@@ -122,10 +122,12 @@ if [ "${SANDBOX_SSH:-0}" != "1" ] && [ -f "$HOME/.gitconfig" ] && command -v git
     mkdir -p "$_gc_dir"
     if _gc_tmp="$(mktemp "$_gc_dir/.gitconfig.XXXXXX")" && cp "$HOME/.gitconfig" "$_gc_tmp"; then
         while IFS= read -r _gc_key; do
-            [ -n "$_gc_key" ] && git config --file "$_gc_tmp" --unset-all "$_gc_key"
+            [ -n "$_gc_key" ] && { git config --file "$_gc_tmp" --unset-all "$_gc_key" || true; }
         done < <(git config --file "$_gc_tmp" --name-only --get-regexp '^url\..*\.(insteadof|pushinsteadof)$' 2>/dev/null | sort -u)
         if chmod 644 "$_gc_tmp" && mv -f "$_gc_tmp" "$_gc_dir/gitconfig.filtered"; then
             GITCONFIG_MOUNT_SRC="$_gc_dir/gitconfig.filtered"
+        else
+            echo "WARNING: could not write filtered gitconfig; mounting raw ~/.gitconfig (#918: insteadOf rules may break git push)" >&2
         fi
     fi
     [ -n "${_gc_tmp:-}" ] && rm -f "$_gc_tmp"
