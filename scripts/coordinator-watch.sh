@@ -9109,6 +9109,17 @@ worker_deliver_hard_restart() {
         fi
         return 1
     fi
+    # issue #941 race: a slow /quit (the #437 case) can land after the caller's
+    # own pending-brief check but before here (the git checks and marker write
+    # above take time), letting the session claim the brief. Killing now would
+    # destroy that fresh session and strand the brief in processing/. Re-check
+    # as late as possible; if it was claimed, undo the marker and decline (rc 1,
+    # so the caller records the late claim instead of treating it as handled).
+    if ! worker_pending_brief "$wt_dir"; then
+        rm -f "$wt_dir/.swarm/sidelined" 2>/dev/null || true
+        log_event worker.deliver.hard_restart_skip "issue=$issue brief=$brief reason=claimed_before_kill"
+        return 1
+    fi
     tmux kill-window -t "$SESSION_NAME:iss-$issue" 2>/dev/null || true
     docker stop -t 10 "swarm-${SESSION_NAME}-iss-${issue}" >/dev/null 2>&1 || true
 
@@ -9447,9 +9458,9 @@ maybe_worker_deliver_brief() {
             # issue #941: a finished session that ignored /quit once is not going
             # to honor it on retry; with a clean worktree, restart it now instead
             # of waiting out WORKER_DELIVER_MAX_FAILURES timeouts plus backoff.
-            # Re-check the brief is still queued: a late /quit may have just let the
-            # listener claim it, and killing that fresh session would be wrong.
-            if worker_pending_brief "$wt_dir" && [ "${WORKER_DELIVER_FAIL_COUNT[$issue]:-0}" -ge "$WORKER_DELIVER_HARD_RESTART_AFTER" ]; then
+            # The brief-still-queued re-check lives inside worker_deliver_hard_restart,
+            # right before the kill (a late /quit may let the listener claim it).
+            if [ "${WORKER_DELIVER_FAIL_COUNT[$issue]:-0}" -ge "$WORKER_DELIVER_HARD_RESTART_AFTER" ]; then
                 worker_deliver_hard_restart "$issue" "$wt_dir" "$brief_before" && return 0
             fi
             # Self-review finding (issue #437): if this /quit's effect lands
