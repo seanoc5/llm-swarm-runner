@@ -125,7 +125,10 @@ MOUNTS=(
     -v "$HOME/.gitconfig:/home/sandbox/.gitconfig:ro"
     -v "$HOME/.config/gh:/home/sandbox/.config/gh:ro"
     -v "$HOME/.bash_history_sandbox:/home/sandbox/.bash_history:rw"
-    -v "$HOME/.npm-global:/home/sandbox/.npm-global:rw"
+    # Worker Claude Code install (#742). Read-only: the only writer is
+    # scripts/update-worker-claude.sh on the host, so workers cannot update
+    # (or race each other updating) a binary other workers are running.
+    -v "$HOME/.npm-global:/home/sandbox/.npm-global:ro"
     -v "$HOME/.npm:/home/sandbox/.npm:rw"
 )
 
@@ -1035,6 +1038,7 @@ exec docker run "${INTERACTIVE_FLAGS[@]}" --rm --init \
     -e "TERM=$TERM" \
     -e "COLORTERM=${COLORTERM:-}" \
     -e "BROWSER=echo" \
+    -e "DISABLE_AUTOUPDATER=1" \
     -e "LANG=C.utf8" \
     -e "LC_ALL=C.utf8" \
     "${FOREGROUND_ONLY_ENV_OPTS[@]}" \
