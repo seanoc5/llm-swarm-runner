@@ -14,7 +14,7 @@ Audit date 2026-11-13. Window: coordinator replies from 2026-10-30 to
   between 2026-11-01 17:10 and 18:30 UTC. None of them named a file or a line.
 - The lint that existed on master (back-references plus run/click items with no
   command) did not flag it. The new `pointer` rule does.
-- Across the three swarms, 5.3% to 8.6% of item appearances now trip the lint
+- Across the three swarms, 5.2% to 8.4% of item appearances now trip the lint
   (6.2% to 6.9% before). Carried-over items (shown in 3+ replies) are 11% to 18%
   of distinct items, and only 1 to 7 per swarm said anything about being
   re-checked.
@@ -31,6 +31,12 @@ item appearance was run through the master lint and through the new lint
 normalized characters) pair. "Carried" is a distinct item that appears in 3 or
 more replies of one session.
 
+Re-run 2026-11-13 after fix round 2 (word boundary on the "you" pointer, narrower
+yes/no exemption): the new-lint rows (hits, split, only-new) were recomputed on
+the transcripts as they stood then (1260 / 2340 / 2164 appearances); the old-lint
+row, the carry rows, the broad scan and the decision-shaped counts are from the
+first run.
+
 ## Results
 
 | | fand-app | fand-etl | corpusminder |
@@ -38,9 +44,9 @@ more replies of one session.
 | Sessions / replies with items | 12 / 510 | 7 / 803 | 10 / 788 |
 | Item appearances / distinct items | 1246 / 572 | 2305 / 1284 | 2112 / 1230 |
 | Old lint hits (master) | 78 (6.3%) | 142 (6.2%) | 145 (6.9%) |
-| New lint hits (this PR) | 107 (8.6%) | 135 (5.9%) | 112 (5.3%) |
-| ...of which `pointer` / `no-command` / `backref` | 37 / 47 / 25 | 23 / 88 / 25 | 19 / 60 / 37 |
-| Hits only the new lint catches | 41 | 24 | 18 |
+| New lint hits (this PR) | 106 (8.4%) | 140 (6.0%) | 113 (5.2%) |
+| ...of which `pointer` / `no-command` / `backref` | 36 / 47 / 25 | 23 / 93 / 26 | 18 / 63 / 37 |
+| Hits only the new lint catches | 40 | 28 | 18 |
 | Action-verb items with no command, path, URL or #N (broad scan) | 54 of 749 (7.2%) | 192 of 1163 (16.5%) | 150 of 1433 (10.5%) |
 | Carried in 3+ replies (distinct items) | 100 (17.5%) | 164 (12.8%) | 135 (11.0%) |
 | ...identical text in 3+ replies | 82 | 115 | 81 |
@@ -55,8 +61,8 @@ Reading the numbers:
   (corpusminder) of those hits are decision-shaped items ("recommend yes",
   "(yes/no)", "Default if silent") where the verb (start, open, run) is
   incidental. That noise was already in the master rule; this PR exempts
-  yes/no items from the run/start/open verbs but keeps `edit` and `apply`
-  strict. Tuning the rest is a follow-up.
+  yes/no and Pending items from the run/start/open verbs only; copy, click, type, paste, execute, edit and apply
+  stay strict. Tuning the rest is a follow-up.
 - **New hit rate is lower than old for fand-etl and corpusminder** because the
   payload test is wider now: a file path with an extension, `file:line` or a
   quoted phrase also counts as the item's payload.

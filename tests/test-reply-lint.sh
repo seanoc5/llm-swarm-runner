@@ -51,6 +51,12 @@ printf -- '- **A3** #2148: when searches start defaulting to forum-visible, shou
 check "#680 a yes/no decision using the word 'start' needs no command: clean" "" "$(rules "$T/yn")"
 printf 'Pending your approval: the one-line nightly config edit (yes/no)\n' > "$T/pe"
 check "#680 a Pending edit with no file or change: no-command" "no-command" "$(rules "$T/pe")"
+printf 'Pending your approval: merge this PR, #2311 (yes/no)\n' > "$T/pm"
+check "#680 'your' in a Pending line is not 'you ... merge this': clean" "" "$(rules "$T/pm")"
+printf 'Pending your approval: make this the default (yes/no)\n' > "$T/pd"
+check "#680 Pending 'make this the default' (your != you): clean" "" "$(rules "$T/pd")"
+printf -- '- **A1** Click Approve on the PR (yes/no)\n' > "$T/ck"
+check "#680 click + yes/no with no URL is not exempt: no-command" "no-command" "$(rules "$T/ck")"
 
 # ── issue-merged (issue #716): gh stubbed; #1910 is an issue, #1913 and #1909 are PRs ──
 mkdir -p "$T/ghbin"
