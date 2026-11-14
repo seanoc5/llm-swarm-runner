@@ -133,7 +133,8 @@ reset; coord_recycle_pass
 expect "injector exits 3: one attempt, no retries" 'watch\.recycle_inject_failed .*rc=3 tries=1' 1
 [ "$(grep -c 'coord\.recycle\.checklist_failed' "$EVENTS_LOG")" = 1 ] || red "exit 3 was retried"
 grep -q 'input box already holds text' "$T/inbox-recycle_failed.md" || red "exit-3 note missing input-box wording"
-grep -q 'session is empty' "$T/inbox-recycle_failed.md" && red "exit-3 note wrongly says the session is empty"
+grep -q 'session is empty' "$T/inbox-recycle_failed.md" && red "exit-3 note uses the empty-session wording"
+grep -q 'not empty' "$T/inbox-recycle_failed.md" && red "exit-3 note wrongly claims the session is not empty"
 printf '%s\n' "$good_start" > "$LLM_START"
 
 grep -q '^run_coord_recycle_loop() {' "$WATCH" || red "loop function missing"

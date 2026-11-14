@@ -8467,7 +8467,7 @@ coord_recycle_pass() {
         log_event watch.recycle_inject_failed "rc=$rc tries=$try trigger=$reason"
         local note
         if [ "$rc" = "3" ]; then
-            note="The watcher recycled this coordinator session (/clear, trigger=$reason) but the startup checklist was NOT submitted: the input box already holds text (the checklist or an unsent draft is waiting there). The session is not empty. Fix: look at the input box, press Enter to send it or clear it, then run the Initial Startup Checklist if context is missing."
+            note="The watcher recycled this coordinator session (/clear, trigger=$reason) but the startup checklist was NOT submitted: the start script reported the input box already holds text (the checklist or an unsent draft may be waiting there; it can also mean the target was a read-only pane). The session was cleared, so its context is gone. Fix: check the input box, send or clear any waiting text, then run the Initial Startup Checklist now to rebuild context."
         else
             note="The watcher recycled this coordinator session (/clear, trigger=$reason) but could not inject the startup checklist after $try attempt(s) (last rc=$rc). The session is empty. Fix: run the Initial Startup Checklist now to rebuild context."
         fi
