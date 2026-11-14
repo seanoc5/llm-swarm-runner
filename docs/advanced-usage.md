@@ -311,6 +311,27 @@ SANDBOX_MEM_LIMIT=24g
 
 Some full-suite JVM runs need even more headroom — 40g is not unusual on a beefy host. The symptom of hitting the cap is exit code 137 in the worker log (the cgroup OOM-killed the process inside its own container). See [troubleshooting.md's OOM entry](troubleshooting.md#oom-kills-host-or-container) for how to confirm this is what happened.
 
+**Raising it per project.** `provision-worker.sh` forwards `SANDBOX_MEM_LIMIT` (and `SANDBOX_BUILD_CACHE`, below) from `<project>/.swarm/.env` into the worker window, so the setting survives a tmux session restart with no `tmux set-environment` workaround ([#577](https://github.com/seanoc5/llm-swarm-runner/issues/577); before the fix every worker silently came up at 8g). Confirm with `docker inspect --format '{{.HostConfig.Memory}}' <container>`.
+
+**Interaction with `HOST_MAX_WORKERS`.** `HOST_MAX_WORKERS` counts containers, not bytes, and a project's `SANDBOX_MEM_LIMIT` is invisible to it. The worst-case commitment is `HOST_MAX_WORKERS x SANDBOX_MEM_LIMIT` (8 x 12g = 96 GB). Size the pair together against host RAM, and note the cap is a ceiling, not a reservation: the other admission check, `HOST_MIN_MEM_AVAIL_MB`, refuses spawns while `MemAvailable` is low, and that is what actually protects the host when limits are raised.
+
+### Shared Gradle build cache (`SANDBOX_BUILD_CACHE`)
+
+`SANDBOX_DEP_CACHE` shares *downloaded dependencies*; `SANDBOX_BUILD_CACHE` shares *compiled task outputs* (`compileKotlin` and friends), so a new worktree's container doesn't rebuild unchanged sources from scratch ([#577](https://github.com/seanoc5/llm-swarm-runner/issues/577)). Opt-in, per project:
+
+```bash
+# /opt/work/myproject/.swarm/.env
+SANDBOX_BUILD_CACHE=/opt/swarm-cache/gradle-build-cache
+```
+
+`sandbox.sh` creates the directory if needed, mounts it **read-write** at the same path, and mounts `scripts/gradle-init/build-cache.init.gradle.kts` into `GRADLE_USER_HOME/init.d/`; that script enables Gradle's build cache and points the local cache at the directory.
+
+- **UID:** containers run as the host user (`--user $(id -u):$(id -g)`), so the directory must be writable by that user. If it isn't, `sandbox.sh` warns and skips the mount.
+- **Concurrency:** Gradle's local directory cache writes each entry to a temp file and renames it into place, and entries are keyed by input hash, so concurrent writers from several containers are safe (two workers producing the same entry just overwrite it with identical bytes). Unlike the read-only dependency cache above, the directory is meant to be written live.
+- **Trust:** the directory is writable by every worker that mounts it, and Gradle reuses any entry whose key matches, so one misbehaving worker can plant output other workers build with. Give each project its own path (never share one across projects) and treat it as shared trust.
+- **Not `~/.gradle`:** use a dedicated path. Gradle prunes entries unused for 7 days on its own.
+- **Wrapper distributions:** already covered by the `gradle-dists` seed under `SANDBOX_DEP_CACHE`.
+
 ### Per-container claude config isolation (`SANDBOX_REFRESH_CLAUDE_CONFIG`)
 
 `~/.claude.json` is not bind-mounted straight from the host into every container. The `claude` CLI rewrites it via write-temp-then-rename, and a file-level bind mount pins the inode present at container start — so a host-side rewrite (or, worse, a sibling *worker's* rewrite when every container shared the same mount) could orphan an already-running container's view of it, producing a torn read (`claude` failing to start with an "invalid JSON" error) or a container silently inheriting a sibling's regenerated, account-less config ([#286](https://github.com/seanoc5/llm-swarm-runner/issues/286)).
