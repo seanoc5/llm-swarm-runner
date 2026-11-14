@@ -350,6 +350,37 @@ fi
 # new BLOCK-level problem in the new commits (prompts/skill-self-review-followup.md).
 # Only owner/member/collaborator-authored markers count, same as the gates.
 # SELF_REVIEW_CONVERGE=0 turns this off (every round is then a from-scratch review).
+# since_delta (issue #920): the PR's OWN changes since the last reviewed head.
+# A raw LAST_REVIEWED...HEAD_SHA diff after a rebase also contains every commit
+# that landed on the base branch meanwhile, and the reviewer may BLOCK on those.
+# `git range-diff` compares the two PR commit series, each relative to its own
+# merge-base, so a pure rebase yields all-"=" pairs (empty delta) and a changed
+# commit shows only the diff of its patches. Returns 1 (caller falls back to the
+# GitHub compare API) when the base or either head is not available locally.
+since_delta() {
+    local base_ref base_tip old_mb new_mb out
+    base_ref="$(gh pr view "$PR" --json baseRefName --jq .baseRefName 2>/dev/null || true)"
+    [ -n "$base_ref" ] || return 1
+    base_tip=""
+    for r in "refs/remotes/origin/$base_ref" "refs/heads/$base_ref"; do
+        git -C "$REPO_ROOT" rev-parse --verify --quiet "$r^{commit}" >/dev/null 2>&1 && { base_tip="$r"; break; }
+    done
+    [ -n "$base_tip" ] || return 1
+    git -C "$REPO_ROOT" cat-file -e "$LAST_REVIEWED^{commit}" 2>/dev/null || return 1
+    git -C "$REPO_ROOT" cat-file -e "$HEAD_SHA^{commit}" 2>/dev/null || return 1
+    old_mb="$(git -C "$REPO_ROOT" merge-base "$LAST_REVIEWED" "$base_tip" 2>/dev/null)" || return 1
+    new_mb="$(git -C "$REPO_ROOT" merge-base "$HEAD_SHA" "$base_tip" 2>/dev/null)" || return 1
+    out="$(git -C "$REPO_ROOT" range-diff --no-color "$old_mb..$LAST_REVIEWED" "$new_mb..$HEAD_SHA" 2>/dev/null)" || return 1
+    # Every pair unchanged ("=") means the PR's own patches are identical.
+    if ! grep -qvE '^ *[0-9-]+: +[0-9a-f-]+ = [0-9-]+: +[0-9a-f-]+ ' <<<"$out"; then
+        SINCE_DIFF=""
+        SINCE_NOTE="the PR's own changes are identical to the last reviewed head ${LAST_REVIEWED:0:7} (rebase only); nothing new to review since then"
+    else
+        SINCE_DIFF="PR commits compared with git range-diff against the last reviewed head ${LAST_REVIEWED:0:7}, each series relative to its own merge-base ('=' unchanged, '!' changed with the diff of the two patches, '>' new, '<' dropped). Default-branch commits are not included."$'\n\n'"$out"
+    fi
+    return 0
+}
+
 FOLLOWUP_SKILL="${LLM_SWARM_DIR:-$SCRIPT_DIR/..}/prompts/skill-self-review-followup.md"
 PRIOR_ROUNDS=""        # text of earlier rounds (newest last); empty = first round
 SINCE_DIFF=""          # diff between the last reviewed head and HEAD_SHA
@@ -371,6 +402,8 @@ if [ "${SELF_REVIEW_CONVERGE:-1}" != "0" ] && [ -r "$FOLLOWUP_SKILL" ]; then
         LAST_REVIEWED="$(jq -r --arg h "${HEAD_SHA:-}" '[.[] | select(.head != "" and .head != $h) | .head] | last // ""' <<<"$PRIOR_JSON")"
         if [ -z "$LAST_REVIEWED" ] || [ -z "$HEAD_SHA" ]; then
             SINCE_NOTE="no earlier round reviewed a different head, so there is no 'since last review' diff"
+        elif since_delta; then
+            :  # SINCE_DIFF / SINCE_NOTE set by since_delta (issue #920)
         elif SINCE_DIFF="$(gh api "repos/{owner}/{repo}/compare/${LAST_REVIEWED}...${HEAD_SHA}" -H 'Accept: application/vnd.github.diff' 2>/dev/null)" && [ -n "$SINCE_DIFF" ]; then
             if [ "${#SINCE_DIFF}" -gt "$SINCE_MAX_BYTES" ]; then
                 SINCE_DIFF="${SINCE_DIFF:0:$SINCE_MAX_BYTES}"$'\n'"[since-last-review diff cut at ${SINCE_MAX_BYTES} bytes; the full diff below is complete]"

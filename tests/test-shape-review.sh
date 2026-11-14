@@ -72,6 +72,7 @@ case "${1:-} ${2:-}" in
     "pr view")
         case "$*" in
             *"--json headRefOid --jq"*) echo "${GH_HEAD:-}"; exit 0 ;;
+            *"--json baseRefName"*) echo "${GH_BASE:-}"; exit 0 ;;
             *"--json comments") cat "$GH_PR_JSON_FILE" 2>/dev/null; exit 0 ;;
             *comments,headRefOid*) cat "$GH_PR_JSON_FILE" 2>/dev/null; exit 0 ;;
             *comments*)          cat "$GH_COMMENTS_FILE" 2>/dev/null; exit 0 ;;
@@ -593,6 +594,41 @@ grep -q 'PRIORFINDING_XYZ' "$CODEX_PAYLOAD_LOG" && red "a non-collaborator's mar
 jq -n -c --arg b "$R1" '{headRefOid:"b2e2222",comments:[{body:$b,authorAssociation:"OWNER"}]}' > "$GH_PR_JSON_FILE"
 SELF_REVIEW_CONVERGE=0 WORKER_CMD=codex "$REVIEW" 42 >"$TEST_DIR/o.out" 2>&1 || red "converge=0 run failed"
 grep -q 'PRIORFINDING_XYZ' "$CODEX_PAYLOAD_LOG" && red "SELF_REVIEW_CONVERGE=0 must not replay prior rounds"
+
+# (e) issue #920: a rebase onto a moved base with no PR change gives an EMPTY delta;
+# a real PR change after a rebase shows only the PR's own change, never base commits.
+RB="$TEST_DIR/rebase-repo"
+git init -q -b master "$RB"
+git -C "$RB" config user.email t@t; git -C "$RB" config user.name t
+echo base > "$RB/base.txt"; git -C "$RB" add .; git -C "$RB" commit -q -m m0
+git -C "$RB" checkout -q -b pr
+echo one > "$RB/fix.kt"; git -C "$RB" add .; git -C "$RB" commit -q -m "pr change"
+OLD_HEAD="$(git -C "$RB" rev-parse HEAD)"
+git -C "$RB" checkout -q master
+echo UNRELATED_MASTER_LINE > "$RB/other.txt"; git -C "$RB" add .; git -C "$RB" commit -q -m "unrelated master commit"
+git -C "$RB" checkout -q pr; git -C "$RB" rebase -q master
+REBASED_HEAD="$(git -C "$RB" rev-parse HEAD)"
+[ "$OLD_HEAD" != "$REBASED_HEAD" ] || red "fixture: rebase did not change the head"
+R1b="<!-- SWARM_SELF_REVIEW: BLOCK actor=worker head=$OLD_HEAD -->
+BLOCK: PRIORFINDING_XYZ"
+jq -n -c --arg b "$R1b" --arg h "$REBASED_HEAD" '{headRefOid:$h,comments:[{body:$b,authorAssociation:"OWNER"}]}' > "$GH_PR_JSON_FILE"
+export GH_BASE=master GH_HEAD="$REBASED_HEAD"
+( cd "$RB" && WORKER_CMD=codex "$REVIEW" 42 >"$TEST_DIR/o.out" 2>&1 ) || red "rebase-only round failed: $(cat "$TEST_DIR/o.out")"
+sed -n '/--- CHANGES SINCE LAST REVIEW ---/,/--- DIFF ---/p' "$CODEX_PAYLOAD_LOG" > "$TEST_DIR/since.txt"
+grep -q 'rebase only' "$TEST_DIR/since.txt" || red "rebase with no PR change must report an empty delta: $(cat "$TEST_DIR/since.txt")"
+grep -q 'UNRELATED_MASTER_LINE\|other.txt' "$TEST_DIR/since.txt" && red "base-branch commit leaked into the delta"
+grep -q 'SINCE_MARKER_LINE' "$TEST_DIR/since.txt" && red "rebase-only round must not fall back to the raw compare"
+
+# real PR change on top of the rebase: delta shows it, still no base commits
+echo two >> "$RB/fix.kt"; git -C "$RB" commit -q -am "pr change 2"
+NEW_HEAD="$(git -C "$RB" rev-parse HEAD)"
+jq -n -c --arg b "$R1b" --arg h "$NEW_HEAD" '{headRefOid:$h,comments:[{body:$b,authorAssociation:"OWNER"}]}' > "$GH_PR_JSON_FILE"
+export GH_HEAD="$NEW_HEAD"
+( cd "$RB" && WORKER_CMD=codex "$REVIEW" 42 >"$TEST_DIR/o.out" 2>&1 ) || red "changed round failed"
+sed -n '/--- CHANGES SINCE LAST REVIEW ---/,/--- DIFF ---/p' "$CODEX_PAYLOAD_LOG" > "$TEST_DIR/since.txt"
+grep -q 'pr change 2' "$TEST_DIR/since.txt" || red "delta must show the new PR commit: $(cat "$TEST_DIR/since.txt")"
+grep -q 'UNRELATED_MASTER_LINE\|other.txt' "$TEST_DIR/since.txt" && red "base-branch commit leaked into the delta"
+unset GH_BASE
 unset GH_HEAD
 green "prompt assembly: first round clean; round 2 has prior findings, since-diff, instructions; failure and trust paths covered"
 
