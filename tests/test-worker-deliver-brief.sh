@@ -23,6 +23,20 @@ red()     { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 yellow()  { printf '\033[33m%s\033[0m\n' "$*"; }
 heading() { printf '\n\033[1;34m=== %s ===\033[0m\n' "$*"; }
 
+# git shim (issue #941, test 16h): defined up front so every `git` call below
+# resolves to a function defined before its first use (shellcheck SC2218). It
+# is a pass-through unless GIT_SHIM_CLAIM_BRIEF names a brief file, in which
+# case it moves that brief into processing/ right after a `git -C <dir> rev-list`,
+# i.e. inside the early-restart race window.
+GIT_SHIM_CLAIM_BRIEF=""
+git() {
+    command git "$@"; local grc=$?
+    if [ -n "$GIT_SHIM_CLAIM_BRIEF" ] && [ "${1:-}" = "-C" ] && [ "${3:-}" = "rev-list" ] && [ -f "$GIT_SHIM_CLAIM_BRIEF" ]; then
+        mv "$GIT_SHIM_CLAIM_BRIEF" "$PROCESSING_DIR/"
+    fi
+    return $grc
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCH="$SCRIPT_DIR/../scripts/coordinator-watch.sh"
 [ -x "$WATCH" ] || red "coordinator-watch.sh not executable: $WATCH"
@@ -70,6 +84,7 @@ WORKER_DELIVER_POLL_SECS=1
 WORKER_DELIVER_END_TIMEOUT_SECS=10
 WORKER_DELIVER_BACKOFF_SECS=600
 WORKER_DELIVER_MAX_FAILURES=3
+WORKER_DELIVER_HARD_RESTART_AFTER=99   # issue #941: keep these tests on the /quit-only path
 WORKER_DELIVER_COMPOSER_STALL_THRESHOLD=20
 WORKER_DELIVER_SHELL_STALL_THRESHOLD=20
 WORKER_DELIVER_TERMINAL_STALL_THRESHOLD=20
@@ -1531,6 +1546,52 @@ WORKER_DELIVER_HARD_RESTART=0
 : > "$EVENTS_LOG"; : > "$PROVISION_LOG"
 rc=0; worker_deliver_hard_restart 42 "$WT_DIR" "other-brief.md" || rc=$?
 check "WORKER_DELIVER_HARD_RESTART=0 -> declined (rc1), no provision call" "1:0" "$rc:$(wc -l < "$PROVISION_LOG" | tr -d '[:space:]')"
+
+# 16g/16h: the EARLY hard-restart path (issue #941) — HARD_RESTART_AFTER=1 fires
+# right after the first /quit timeout, so a late /quit can land in the gap
+# between the caller and the kill. The re-check lives inside the function.
+WORKER_DELIVER_HARD_RESTART=1
+WORKER_DELIVER_HARD_RESTART_AFTER=1
+WORKER_DELIVER_END_TIMEOUT_SECS=3
+WORKER_DELIVER_GAVE_UP[42]=0
+DRY_RUN=0
+reset941() {
+    rm -rf "$WT_DIR/.swarm/sidelined" "$COORD_INBOX_DIR"; mkdir -p "$COORD_INBOX_DIR"
+    rm -f "$PROCESSING_DIR"/*.md "$INBOX_DIR"/*.md
+    unset 'WORKER_DELIVER_HARD_RESTART_SKIP_BRIEF[42]' 'WORKER_DELIVER_GAVE_UP_STALL_BRIEF[42]'
+    WORKER_DELIVER_GAVE_UP[42]=0; WORKER_DELIVER_FAIL_COUNT[42]=0; WORKER_DELIVER_LAST_FAIL[42]=0
+    WORKER_DELIVER_PENDING_SEEN[42]=""; unset 'WORKER_DELIVER_TIMED_OUT_BRIEF[42]'
+    tmux kill-window -t "$SESSION_NAME:$WIN" 2>/dev/null || true
+    tmux new-window -d -t "$SESSION_NAME" -n "$WIN" "echo 'sonnet · wt-issue-42 · ctx: 20k/1M (2%)'; printf '\xe2\x9d\xaf \n'; sleep 300"
+    check_eventually "941: idle pane -> cli" "cli" "worker_pane_state '$WIN'"
+    set_current_task "t941" "ready-for-review"
+    BRIEF941="$INBOX_DIR/20261113-000000-42.md"
+    echo "brief behind a session that ignores /quit" > "$BRIEF941"
+    : > "$EVENTS_LOG"; : > "$PROVISION_LOG"
+}
+
+# 16g: brief still queued at kill time -> early restart proceeds after ONE timeout.
+reset941
+maybe_worker_deliver_brief "$WIN"
+check "early restart (AFTER=1): provision --wake called after the first timeout" "--wake 42 $PROJECT_DIR" "$(cat "$PROVISION_LOG")"
+check "early restart: window killed" "absent" "$(worker_pane_state "$WIN")"
+check "early restart: brief left in inbox/ for the woken listener" "1" "$(find "$INBOX_DIR" -maxdepth 1 -name '*.md' | wc -l | tr -d '[:space:]')"
+
+# 16h: brief claimed (moved to processing/) after the git checks, just before the
+# kill -> abort: no kill, no wake, marker removed. The git shim moves the brief
+# right after the clean-check's rev-list, i.e. inside the race window.
+reset941
+GIT_SHIM_CLAIM_BRIEF="$BRIEF941"
+maybe_worker_deliver_brief "$WIN"
+GIT_SHIM_CLAIM_BRIEF=""
+check "claimed before kill: window NOT killed" "cli" "$(worker_pane_state "$WIN")"
+check "claimed before kill: no provision --wake call" "0" "$(wc -l < "$PROVISION_LOG" | tr -d '[:space:]')"
+check "claimed before kill: sideline marker removed" "absent" "$([ -e "$WT_DIR/.swarm/sidelined" ] && echo present || echo absent)"
+if grep -qF 'reason=claimed_before_kill' "$EVENTS_LOG"; then got=logged; else got=missing; fi
+check "claimed before kill: skip logged with reason=claimed_before_kill" "logged" "$got"
+check "claimed before kill: no hard_restart event" "0" "$(grep -cF 'worker.deliver.hard_restart ' "$EVENTS_LOG")"
+WORKER_DELIVER_HARD_RESTART_AFTER=99
+WORKER_DELIVER_END_TIMEOUT_SECS=10
 
 rm -f "$INBOX_DIR"/*.md "$PROCESSING_DIR"/*.md "$STATUS_DIR"/*.json "$WT_DIR/.swarm/sidelined"
 DRY_RUN=1
