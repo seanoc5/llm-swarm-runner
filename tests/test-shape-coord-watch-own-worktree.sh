@@ -116,5 +116,16 @@ if OUT="$(own_wt_dir_for_issue 999)"; then
 fi
 green "own_wt_dir_for_issue() refuses to resolve the colliding foreign issue 999"
 
+# ============================================================================
+heading "Test 5: a symlinked path to a registered worktree is still ours (issue #941)"
+# ============================================================================
+ln -s "$TEST_DIR/main" "$TEST_DIR/link"
+is_own_worktree_dir "$TEST_DIR/link/wt-issue-1" \
+    || red "symlinked path to proj's wt-issue-1 was rejected as foreign"
+if is_own_worktree_dir "$TEST_DIR/link/wt-issue-999"; then
+    red "symlinked path to other's wt-issue-999 was accepted"
+fi
+green "symlinked worktree paths resolve before comparison"
+
 echo
 green "All coordinator-watch.sh own-worktree-verification tests passed (issue #357)."
