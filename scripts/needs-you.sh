@@ -3,8 +3,9 @@
 # needs-you.sh — the standing Needs-you list as structured items (issue #798).
 #
 #   needs-you.sh add --title T --background B --do D [--kind decision|todo]
-#                    [--risk R] [--rec TEXT] [--default TEXT] [--url U] [--project DIR]
+#                    [--risk R] [--rec TEXT] [--default TEXT] [--url U] [--claim TEXT] [--project DIR]
 #   needs-you.sh done <label> [--project DIR]
+#   needs-you.sh verify <label> [--claim TEXT] [--project DIR]
 #   needs-you.sh render [--json] [--write] [--project DIR]
 #   needs-you.sh check [--project DIR]
 #
@@ -27,6 +28,13 @@
 # .swarm/needs-you.md (the file coord-hook.sh diffs). `render --json` prints the
 # open items as JSON.
 #
+# Carry-over (issue #680): an item rests on facts (file counts, PR state, numbers).
+# --claim TEXT states them; `add` stamps "verified" now. Before an item rides into
+# another digest, re-check the claim against the source and run `verify <label>`
+# (optionally with the corrected --claim). `render` shows "verified MM-DD HH:MM", or
+# "(unverified since MM-DD HH:MM)" once the stamp is older than NEEDS_YOU_STALE_HOURS
+# (default 6), so a repeated item can never look settled without a check behind it.
+#
 # render ends with exactly one closing line: "Do now: <label> ..." when items
 # are open, "Nothing to do." when none are. Placeholder values ("none", "nothing",
 # "n/a") for --risk/--rec/--default are dropped: an empty field is left out.
@@ -44,14 +52,14 @@ SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LINT="$SELF_DIR/lint-coordinator-reply.sh"
 
 die() { echo "needs-you.sh: $*" >&2; exit 2; }
-usage() { sed -n '3,44p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '3,48p' "$0" | sed 's/^# \{0,1\}//'; }
 
 cmd="${1:-}"
 [ -n "$cmd" ] || { usage >&2; exit 2; }
 case "$cmd" in -h|--help) usage; exit 0 ;; esac
 shift
 
-title=""; background=""; do_=""; kind="todo"; risk=""; rec=""; deflt=""; url=""; project="${CLAUDE_PROJECT_DIR:-$PWD}"
+title=""; background=""; do_=""; kind="todo"; risk=""; rec=""; deflt=""; url=""; claim=""; project="${CLAUDE_PROJECT_DIR:-$PWD}"
 json=0; write=0; label=""
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -63,6 +71,7 @@ while [ $# -gt 0 ]; do
         --rec)     rec="${2-}"; shift 2 ;;
         --default) deflt="${2-}"; shift 2 ;;
         --url)     url="${2-}"; shift 2 ;;
+        --claim)   claim="${2-}"; shift 2 ;;
         --project) project="${2-}"; shift 2 ;;
         --json)    json=1; shift ;;
         --write)   write=1; shift ;;
@@ -93,13 +102,19 @@ render_md() {
     n="$(jq 'length' <<<"$items")"
     printf '## Needs you (%s open)\n' "$n"
     printf 'Updated: %s\n' "$(date +%H:%M)"
-    jq -r '.[] |
+    local stale_h="${NEEDS_YOU_STALE_HOURS:-6}"
+    case "$stale_h" in ''|*[!0-9]*) stale_h=6 ;; esac
+    jq -r --argjson sh "$stale_h" '.[] |
         "- **\(.label)** \(.title)"
         + (if .risk != "" then " (risk: \(.risk))" else "" end)
         + (if .rec != "" then " — \(.rec)" else "" end)
         + (if (.background // "") != "" then "\n  What this is: \(.background)" else "" end)
         + (if (.do | contains("\n")) then "\n  Do:\n\(.do)" else "\n  Do: \(.do)" end)
         + (if .url != "" then "\n  \(.url)" else "" end)
+        + ((.verified // .added) as $v
+           | ($v | fromdateiso8601) as $t
+           | (if (now - $t) > ($sh * 3600) then "(unverified since \($t | localtime | strftime("%m-%d %H:%M")))" else "verified \($t | localtime | strftime("%m-%d %H:%M"))" end) as $vs
+           | "\n  " + (if (.claim // "") != "" then "Claim: \(.claim) — " else "" end) + $vs)
         + (if .default != "" then "\n  Default if silent: \(.default)" else "" end)' <<<"$items"
     if [ "$n" -gt 0 ]; then
         printf '\nDo now: %s\n' "$(jq -r '.[0] | "\(.label) — \([.do | split("\n")[] | select((test("^[[:space:]]*```") or test("^[[:space:]]*$")) | not)] | first // .do)"' <<<"$items")"
@@ -199,9 +214,9 @@ case "$cmd" in
         fi
         new="A$((max + 1))"
         jq -cn --arg label "$new" --arg title "$title" --arg bg "$background" --arg act "$do_" --arg kind "$kind" \
-            --arg risk "$risk" --arg rec "$rec" --arg default "$deflt" --arg url "$url" \
+            --arg risk "$risk" --arg rec "$rec" --arg default "$deflt" --arg url "$url" --arg claim "$claim" \
             --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            '{label: $label, kind: $kind, title: $title, background: $bg, do: $act, risk: $risk, rec: $rec, default: $default, url: $url, added: $at, done: false}' >> "$store"
+            '{label: $label, kind: $kind, title: $title, background: $bg, do: $act, risk: $risk, rec: $rec, default: $default, url: $url, claim: $claim, added: $at, verified: $at, done: false}' >> "$store"
         if [ "$backend" = corpusminder ]; then
             errf="$(mktemp -p "$swarm" .tmp.needs-you-cm.XXXXXX)"
             if cmid="$(cm_file "$new" 2>"$errf")" && [ -n "$cmid" ]; then
@@ -215,6 +230,16 @@ case "$cmd" in
         fi
         write_md
         echo "$new"
+        ;;
+    verify)
+        [ -n "$label" ] || die "verify needs a label (e.g. A1)"
+        [ -s "$store" ] && jq -se --arg l "$label" 'any(.[]; .label == $l and .done != true)' "$store" >/dev/null \
+            || die "no open item $label"
+        tmp="$(mktemp -p "$swarm" .tmp.needs-you-store.XXXXXX)"
+        jq -c --arg l "$label" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg claim "$claim" \
+            'if .label == $l then .verified = $at | (if $claim != "" then .claim = $claim else . end) else . end' "$store" > "$tmp" && mv -f "$tmp" "$store" \
+            || { rm -f "$tmp"; die "could not update $store"; }
+        write_md
         ;;
     done)
         [ -n "$label" ] || die "done needs a label (e.g. A1)"
