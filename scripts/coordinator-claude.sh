@@ -18,6 +18,10 @@
 #   COORDINATOR_ALLOW_BACKGROUND_TASKS=1
 #                              Opt out of the foreground-only backstop below.
 #                              Defaults to 0 (deny).
+#   SWARM_BATCH_SLICE=1        Re-exec under scripts/batch-run.sh so the REPL and
+#                              every child it forks (gradle, npm, docker CLI)
+#                              run in the user-level batch.slice (issue #491).
+#                              Default 0 until measured.
 #   STATUSLINE_PROBE           Path scripts/statusline-with-context.sh (if
 #                              installed as this session's statusLine) dumps
 #                              its raw stdin JSON to. Defaulted below to a
@@ -37,6 +41,14 @@ set -euo pipefail
 # project this pane is in. Caller-set variables still win.
 # shellcheck source=_load-env.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_load-env.sh" "$PWD"
+
+# Issue #491: opt-in low-weight slice. The guard var stops a second wrap after
+# the re-exec; batch-run.sh falls back to a plain exec where systemd --user is
+# unavailable.
+if [ "${SWARM_BATCH_SLICE:-0}" = "1" ] && [ -z "${_SWARM_BATCH_WRAPPED:-}" ]; then
+    export _SWARM_BATCH_WRAPPED=1
+    exec "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/batch-run.sh" "${BASH_SOURCE[0]}" "$@"
+fi
 
 SYSTEM_PROMPT_FILE="${1:?coordinator-claude.sh: missing system-prompt file (arg 1)}"
 INITIAL_PROMPT_FILE="${2:?coordinator-claude.sh: missing initial-prompt file (arg 2)}"
