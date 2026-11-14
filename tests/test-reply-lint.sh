@@ -158,6 +158,11 @@ printf '# Needs you\n- **A1** HOLD: nothing to do\n' > "$G/.swarm/needs-you.md"
 check "check: a hand-edited list is flagged" "3" "$("$NY" check --project "$G" >/dev/null 2>&1; echo $?)"
 HW="$T/hwproj"; mkdir -p "$HW/.swarm"; printf '# Needs you\n- **A1** stub\n' > "$HW/.swarm/needs-you.md"
 check "check: a md with no store is flagged" "3" "$("$NY" check --project "$HW" >/dev/null 2>&1; echo $?)"
+check "render --write clears a stale hand-written list (no store)" "0" "$("$NY" render --write --project "$HW" >/dev/null 2>&1; "$NY" check --project "$HW" >/dev/null 2>&1; echo $?)"
+check "...and leaves an empty list" "Nothing to do." "$(tail -1 "$HW/.swarm/needs-you.md")"
+OLD="$T/oldproj"; mkdir -p "$OLD"; "$NY" add --background "$BG" --project "$OLD" --title "Old layout item" --do 'Say `go`' >/dev/null
+sed -i '/What this is:/d' "$OLD/.swarm/needs-you.md"
+check "check: an older-layout list (same labels) is not flagged" "0" "$("$NY" check --project "$OLD" >/dev/null 2>&1; echo $?)"
 check "check: no md at all is fine" "0" "$("$NY" check --project "$T/none" >/dev/null 2>&1; echo $?)"
 
 # ── Stop hook ────────────────────────────────────────────────────────────────
@@ -234,6 +239,12 @@ check "...and is counted in events.log" "1" "$(grep -c 'coord.needs_you.handwrit
 check "...but never blocks the continuation (no loop)" "" "$(wstop true)"
 rm -f "$W/.swarm/needs-you.md"
 check "no needs-you.md: no block" "" "$(wstop false)"
+printf '# Needs you\n- **A1** stub\n' > "$W/.swarm/needs-you.md"
+"$ROOT/scripts/needs-you.sh" render --write --project "$W" >/dev/null
+check "guard clears after render --write" "" "$(wstop false)"
+case "$(jq -r .reason <<<"$out")" in *"render --write"*) got=yes ;; *) got=no ;; esac
+check "rebuild message names render --write" "yes" "$got"
+rm -f "$W/.swarm/needs-you.md"
 LS="$T/llmswarm"; mkdir -p "$LS/prompts" "$LS/scripts"; echo one > "$LS/prompts/coordinator.md"
 cp "$ROOT/scripts/"{coord-hook.sh,needs-you.sh,_coord-split.sh,_coord-inbox-batch.sh,_watch-pause.sh,_window-flags.sh,lint-coordinator-reply.sh,watcher-check.sh,_load-env.sh} "$LS/scripts/" 2>/dev/null || true
 . "$ROOT/scripts/_coord-split.sh"; coord_prompt_hash "$LS" > "$W/.swarm/coord-prompt.sha"

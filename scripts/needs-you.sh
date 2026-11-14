@@ -5,7 +5,7 @@
 #   needs-you.sh add --title T --background B --do D [--kind decision|todo]
 #                    [--risk R] [--rec TEXT] [--default TEXT] [--url U] [--project DIR]
 #   needs-you.sh done <label> [--project DIR]
-#   needs-you.sh render [--json] [--project DIR]
+#   needs-you.sh render [--json] [--write] [--project DIR]
 #   needs-you.sh check [--project DIR]
 #
 # --background (issue #964) is the cold-reader paragraph: what the thing is, why
@@ -52,7 +52,7 @@ case "$cmd" in -h|--help) usage; exit 0 ;; esac
 shift
 
 title=""; background=""; do_=""; kind="todo"; risk=""; rec=""; deflt=""; url=""; project="${CLAUDE_PROJECT_DIR:-$PWD}"
-json=0; label=""
+json=0; write=0; label=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --title)   title="${2-}"; shift 2 ;;
@@ -65,6 +65,7 @@ while [ $# -gt 0 ]; do
         --url)     url="${2-}"; shift 2 ;;
         --project) project="${2-}"; shift 2 ;;
         --json)    json=1; shift ;;
+        --write)   write=1; shift ;;
         -*)        die "unknown flag $1" ;;
         *)         [ -z "$label" ] || die "unexpected argument $1"; label="$1"; shift ;;
     esac
@@ -236,12 +237,21 @@ case "$cmd" in
         # A hand-written list: a needs-you.md with no store, or one whose body
         # differs from what the store renders (the Updated: time is ignored).
         [ -f "$md" ] || exit 0
-        [ -e "$store" ] || { echo "needs-you.md exists but needs-you.jsonl does not: the list was hand-written" >&2; exit 3; }
+        # A missing store counts as an empty list, so `render --write` clears a stale file.
         if diff <(grep -v '^Updated:' "$md") <(render_md | grep -v '^Updated:') >/dev/null; then exit 0; fi
-        echo "needs-you.md does not match needs-you.jsonl: the list was edited by hand" >&2
+        # Older needs-you.sh layout: same header and same open labels as the store
+        # means a render wrote it, not a hand (it is rewritten at the next add/done).
+        if [ -e "$store" ] && head -n1 "$md" | grep -Eq '^## Needs you \([0-9]+ open\)$' \
+            && [ "$(grep -oE '^- \*\*[A-Za-z][0-9]+\*\*' "$md" | tr -d '* -' | sort | paste -sd,)" = "$(open_items | jq -r '[.[].label] | sort | join(",")')" ]; then
+            exit 0
+        fi
+        echo "needs-you.md does not match needs-you.jsonl (or no list exists): it was written by hand" >&2
         exit 3
         ;;
     render)
+        # --write rewrites .swarm/needs-you.md from the store (an empty list when
+        # nothing is open): the supported way to clear a stale hand-written file.
+        if [ "$write" = 1 ]; then write_md; fi
         if [ "$json" = 1 ]; then
             open_items
         else
