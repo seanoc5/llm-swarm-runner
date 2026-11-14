@@ -1279,6 +1279,8 @@ print_completion_block() {
 poll_for_brief() {
     while true; do
         sleep 2
+        # Heartbeat (#925): coordinator-watch.sh reads this marker's mtime from the host, where this container's PIDs mean nothing.
+        touch -c "$IDLE_PARKED_MARKER" 2>/dev/null
         [ -d "$INBOX" ] && [ -d "$PWD" ] || return 0
         local next
         next=$(find "$INBOX" -maxdepth 1 -type f -not -name '.tmp.*' 2>/dev/null | sed -n 1p)
@@ -1305,6 +1307,7 @@ poll_for_brief() {
     done
 
     while kill -0 "$shell_pid" 2>/dev/null; do
+        touch -c "$IDLE_PARKED_MARKER" 2>/dev/null  # heartbeat (#925)
         if [ -z "$(pgrep -P "$shell_pid" 2>/dev/null)" ]; then
             kill -HUP "$shell_pid" 2>/dev/null
             return 0
@@ -1463,9 +1466,10 @@ EOF
     bash --rcfile "$rcfile" -i
     local lifetime=$((SECONDS - spawned))
 
-    rm -f "$rcfile" "$IDLE_SHELL_PIDFILE" "$IDLE_PARKED_MARKER"
+    # poll_for_brief first: it heartbeats the marker, so killing it after the rm could resurrect it.
     kill "$poll_pid" 2>/dev/null
     wait "$poll_pid" 2>/dev/null
+    rm -f "$rcfile" "$IDLE_SHELL_PIDFILE" "$IDLE_PARKED_MARKER"
 
     # `close-worker` or the double-Ctrl-C trap ran in the idle shell: end
     # the listener process and explicitly close the whole tmux window
