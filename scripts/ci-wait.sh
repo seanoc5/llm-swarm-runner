@@ -350,6 +350,25 @@ while true; do
                 # reached a terminal state, however late a conditional one
                 # registers.
                 if ci_fallback_run_state "$SHA" "${REPO_ARGS[@]}"; then
+                    # issue #946: a repo with NO Actions workflows can never
+                    # produce a run, so a "pending" run-level reading (an
+                    # empty run list, or a phantom queued run from a GitHub
+                    # App's check suite such as `claude`, oconeco-site #246)
+                    # is not a late job still registering — it will stay
+                    # pending forever. The green checks then come from
+                    # external apps (e.g. Cloudflare Pages), which is all the
+                    # CI this repo has. Only "pending" is overridden; a
+                    # run-level "fail" still fails.
+                    if [ "$CI_FALLBACK_STATE" = "pending" ]; then
+                        if [ -z "$WORKFLOW_COUNT" ]; then
+                            WORKFLOW_COUNT="$(gh api "$API_REPO_PATH/actions/workflows" --jq '.total_count' 2>/dev/null || true)"
+                            [ -n "$WORKFLOW_COUNT" ] || WORKFLOW_COUNT="unknown"
+                        fi
+                        if [ "$WORKFLOW_COUNT" = "0" ]; then
+                            echo "ci-wait: PR #$PR: run-level cross-check is pending, but the repo has 0 Actions workflows, so no run can ever complete — trusting the green gh pr checks (external-app checks only)." >&2
+                            CI_FALLBACK_STATE="pass"
+                        fi
+                    fi
                     case "$CI_FALLBACK_STATE" in
                         pass)
                             PASS_NOW=1; PASS_MSG="PR #$PR checks green."
