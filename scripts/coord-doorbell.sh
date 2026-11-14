@@ -87,6 +87,7 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 OUT="$WORK/courier.jsonl"
+CLEAN="$WORK/clean.jsonl"
 # Prompt on stdin: --tools is variadic and would swallow a positional prompt.
 ( cd "$WORK" && printf '%s' "$COURIER_PROMPT" | timeout "$TIMEOUT_SECS" "$CLAUDE_BIN" -p \
     --model "$MODEL" --dangerously-skip-permissions --no-session-persistence \
@@ -96,6 +97,9 @@ rc=$?
 # courier that delivered and then hung must not get a duplicate fallback paste
 # in the operator's draft. The checks below decide; a timeout only changes the
 # failure wording.
+# A kill mid-write can leave a truncated last line, which would make `jq -s`
+# reject the whole file; keep only the lines that parse.
+jq -cR 'fromjson? // empty' "$OUT" > "$CLEAN" 2>/dev/null
 TIMED_OUT=""
 [ "$rc" = 124 ] && TIMED_OUT="courier timed out after ${TIMEOUT_SECS}s; "
 
@@ -110,7 +114,7 @@ SEND_ID="$(jq -rs --arg to "$TARGET" --arg exp "$EXPECTED" '
          and (.[0].input.to == $to)
          and (((.[0].input.message // "") | rtrimstr("\n")) == $exp)
          and ((.[0].id // "") != "")
-      then .[0].id else "" end' "$OUT" 2>/dev/null)"
+      then .[0].id else "" end' "$CLEAN" 2>/dev/null)"
 [ -n "$SEND_ID" ] || fail "${TIMED_OUT}courier did not make exactly one SendMessage call with the expected message to $TARGET (courier rc=$rc: $(head -c 200 "$WORK/courier.err" | tr '\n' ' '))"
 
 # The tool_result that answers THAT call (matching tool_use_id), not the first
@@ -119,9 +123,9 @@ RESULT="$(jq -rs --arg id "$SEND_ID" '
     [ .[] | select(.type == "user") | .message.content[]?
       | select(.type == "tool_result" and .tool_use_id == $id) | .content
       | if type == "array" then map(.text // "") | join("") else . end ]
-    | if length == 1 then .[0] else "" end' "$OUT" 2>/dev/null)"
+    | if length == 1 then .[0] else "" end' "$CLEAN" 2>/dev/null)"
 if [ "$(printf '%s' "$RESULT" | jq -r '.success // false' 2>/dev/null)" != "true" ]; then
-    fail "${TIMED_OUT}SendMessage reported not delivered:$(printf '%s' "$RESULT" | jq -r '(.message // .) | .[0:160]' 2>/dev/null)"
+    fail "${TIMED_OUT}SendMessage reported not delivered: $(printf '%s' "$RESULT" | jq -r '(.message // .) | .[0:160]' 2>/dev/null)"
 fi
 
 log_event coord.wake.doorbell "target=$TARGET via=sendmessage${TIMED_OUT:+ courier_timeout=1}"
