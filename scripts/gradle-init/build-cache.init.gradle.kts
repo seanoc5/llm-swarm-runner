@@ -10,6 +10,10 @@
 // relocatable (they hash inputs, not absolute paths), so different
 // worktrees share entries.
 //
+// Project settings win (#914): this runs after settings.gradle(.kts), so it
+// only sets the local directory when the project left it unset and did not
+// disable the local cache. It still turns caching on via startParameter.
+//
 // Skipped silently when the directory is missing or not writable (e.g.
 // owned by another UID), so the build behaves as if this script were absent.
 
@@ -28,8 +32,12 @@ if (buildCacheDir != null) {
     gradle.settingsEvaluated {
         buildCache {
             local {
-                isEnabled = true
-                directory = buildCacheDir
+                // Respect the project: a settings script that already set a
+                // local directory (or disabled the local cache) wins. An unset
+                // directory reads back as null; only then do we fill it in.
+                if (directory == null && isEnabled) {
+                    directory = buildCacheDir
+                }
             }
         }
     }

@@ -383,6 +383,13 @@ else
     skip "SANDBOX_BUILD_CACHE" "/var/run/docker.sock not present"
 fi
 
+# #914: the init script must not clobber a project's own local build-cache settings.
+if grep -q "directory == null && isEnabled" "$REPO_ROOT/scripts/gradle-init/build-cache.init.gradle.kts"; then
+    pass "build-cache init script only sets directory when project left it unset" ""
+else
+    fail "build-cache init script only sets directory when project left it unset" "guard missing"
+fi
+
 # SANDBOX_DEP_CACHE + SANDBOX_DEP_PROXY_URL together: the two knobs mount at
 # disjoint paths (SANDBOX_DEP_CACHE at <dir>/gradle, same absolute path on
 # both sides of the mount — nothing under /home/sandbox/.gradle; this knob's

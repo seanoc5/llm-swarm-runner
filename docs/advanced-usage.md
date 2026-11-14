@@ -326,6 +326,8 @@ SANDBOX_BUILD_CACHE=/opt/swarm-cache/gradle-build-cache
 
 `sandbox.sh` creates the directory if needed, mounts it **read-write** at the same path, and mounts `scripts/gradle-init/build-cache.init.gradle.kts` into `GRADLE_USER_HOME/init.d/`; that script enables Gradle's build cache and points the local cache at the directory.
 
+**Project settings win.** The init script runs after the project's own `settings.gradle(.kts)`, so it only sets the local cache directory when the project left it unset and did not disable the local cache (`buildCache { local { isEnabled = false } }`). A project that configures `buildCache.local.directory` keeps its own directory and gets no sharing. Remote caches are untouched. The script still switches build caching on for the build (as if `--build-cache` were passed) even when the project sets its own directory ([#914](https://github.com/seanoc5/llm-swarm-runner/issues/914)).
+
 - **UID:** containers run as the host user (`--user $(id -u):$(id -g)`), so the directory must be writable by that user. If it isn't, `sandbox.sh` warns and skips the mount.
 - **Concurrency:** Gradle's local directory cache writes each entry to a temp file and renames it into place, and entries are keyed by input hash, so concurrent writers from several containers are safe (two workers producing the same entry just overwrite it with identical bytes). Unlike the read-only dependency cache above, the directory is meant to be written live.
 - **Trust:** the directory is writable by every worker that mounts it, and Gradle reuses any entry whose key matches, so one misbehaving worker can plant output other workers build with. Give each project its own path (never share one across projects) and treat it as shared trust.
