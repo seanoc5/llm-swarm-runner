@@ -68,7 +68,7 @@ saying "only you merge it" with no stated change). The three table rows below ca
 
 Reading the numbers:
 
-- **Pattern 1 (no concrete action).** `pointer` is the new catch: 37, 23 and 19
+- **Pattern 1 (no concrete action).** `pointer` is the new catch: 36, 24 and 19
   appearances. In fand-app it fires on the exact incident. `no-command` is noisy:
   by a text check, 38 of 47 (fand-app), 41 of 88 (fand-etl) and 31 of 60
   (corpusminder) of those hits are decision-shaped items ("recommend yes",

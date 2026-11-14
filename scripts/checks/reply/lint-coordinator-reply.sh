@@ -13,7 +13,7 @@ while IFS= read -r hit; do
     case "$id" in
         backref) msg="action points at text that is not on the screen; repeat it inline" ;;
         no-command) msg="action item says run/click/type but carries no command, code span or URL" ;;
-        pointer) msg="item names its change without stating it (\"those edits\", \"the fix\", \"option A\"); write the file, line and before/after, or the command" ;;
+        pointer) msg="item tells the operator to act \"yourself\" / \"on your end\" with no code span or file path; name the change (file, line, before/after) or the command" ;;
         two-endings) msg="reply has more than one closing line; end with exactly one" ;;
         stale-window) msg="sends the operator to a worker window that does not exist (on hold); use the coordinator" ;;
         issue-merged) msg="an issue cannot merge; say \"the fix PR for #N merges\" or \"#N closes\"" ;;
