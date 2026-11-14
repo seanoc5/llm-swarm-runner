@@ -138,6 +138,54 @@ else
     bad "10. default: gh credential helper set" "$(printf '%s\n' "$ARGV" | grep GIT_CONFIG | tr '\n' ' ')"
 fi
 
+# #918: a host gitconfig with an https->ssh insteadOf must not reach the
+# container; a filtered copy (insteadOf/pushInsteadOf stripped, rest kept) is
+# mounted instead. SANDBOX_SSH=1 mounts the raw file.
+PROJECT="$TMP/project"
+printf '[user]\n\tname = Host Human\n[url "git@github.com:"]\n\tinsteadOf = https://github.com/\n[url "ssh://x/"]\n\tpushInsteadOf = https://x/\n[url "https://mirror.example/"]\n\tinsteadOf = https://upstream.example/\n[core]\n\teditor = vi\n' > "$FAKE_HOME/.gitconfig"
+chmod 600 "$FAKE_HOME/.gitconfig"
+ARGV="$(run_sandbox)"
+FILTERED="$FAKE_HOME/.claude-sandbox-configs/gitconfig.filtered"
+if argv_has "$ARGV" "$FILTERED:/home/sandbox/.gitconfig:ro" && [ -f "$FILTERED" ] \
+   && ! grep -qi 'git@github.com:\|ssh://x/' "$FILTERED" && grep -q 'Host Human' "$FILTERED" && grep -q 'editor = vi' "$FILTERED"; then
+    ok "11. default: mounted gitconfig has insteadOf/pushInsteadOf stripped, other settings kept"
+else
+    bad "11. default: filtered gitconfig mounted" "$(cat "$FILTERED" 2>/dev/null | tr '\n' ' ')"
+fi
+# https->https rewrites don't break push: they must survive the filter.
+if grep -q 'https://upstream.example/' "$FILTERED" && ! grep -q 'git@github.com:\|ssh://x/' "$FILTERED"; then
+    ok "11b. filter strips only ssh-target rewrites; https->https rule kept"
+else
+    bad "11b. filter is narrow" "$(tr '\n' ' ' < "$FILTERED")"
+fi
+# A 600 host file must not become more readable in the copy.
+if [ "$(stat -c %a "$FILTERED")" = "600" ]; then
+    ok "11c. filtered copy keeps the source mode (600), not world-readable"
+else
+    bad "11c. filtered copy mode" "$(stat -c %a "$FILTERED")"
+fi
+if grep -q 'insteadOf' "$FAKE_HOME/.gitconfig"; then
+    ok "12. host ~/.gitconfig itself is untouched"
+else
+    bad "12. host ~/.gitconfig itself is untouched"
+fi
+# Copy failure: warn once, fall back to the raw file (spawn must not abort).
+printf '#!/bin/bash\ncase "$*" in *"/.gitconfig "*) exit 1;; esac\nexec /bin/cp "$@"\n' > "$STUB/cp"; chmod +x "$STUB/cp"
+WARN="$(env -i PATH="$STUB:/usr/bin:/bin" HOME="$FAKE_HOME" TERM=dumb ARGV_FILE="$TMP/argv2.txt" \
+    bash "$SANDBOX" "$PROJECT" bash true 2>&1 >/dev/null </dev/null | grep -c 'WARNING: could not')"
+if [ "$WARN" -ge 1 ] && grep -qxF "$FAKE_HOME/.gitconfig:/home/sandbox/.gitconfig:ro" "$TMP/argv2.txt"; then
+    ok "13a. filter failure warns and mounts the raw ~/.gitconfig"
+else
+    bad "13a. filter failure warns and falls back" "warnings=$WARN"
+fi
+rm -f "$STUB/cp"
+ARGV="$(run_sandbox SANDBOX_SSH=1)"
+if argv_has "$ARGV" "$FAKE_HOME/.gitconfig:/home/sandbox/.gitconfig:ro"; then
+    ok "13. SANDBOX_SSH=1 mounts the raw ~/.gitconfig"
+else
+    bad "13. SANDBOX_SSH=1 mounts the raw ~/.gitconfig"
+fi
+
 echo ""
 echo "Passed: $PASS  Failed: $FAIL"
 [ "$FAIL" -eq 0 ]

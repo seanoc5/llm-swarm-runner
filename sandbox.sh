@@ -109,6 +109,37 @@ if [ "$_claude_cfg_needs_seed" = "1" ]; then
 fi
 unset _claude_cfg_key _claude_cfg_needs_seed
 
+# Global gitconfig for the container (#918). The host ~/.gitconfig may carry
+# url.*.insteadOf / pushInsteadOf rules (e.g. https -> git@github.com:) that
+# fight the HTTPS rewrite below: origin resolves to ssh, the container has no
+# key or known_hosts, and push dies with "Host key verification failed".
+# Unless SANDBOX_SSH=1 (ssh works then), mount a copy with the
+# insteadOf/pushInsteadOf rules that rewrite to ssh stripped. Rewritten each spawn via tmp+mv
+# (running containers keep their old inode); `exec docker` below prevents a trap.
+GITCONFIG_MOUNT_SRC="$HOME/.gitconfig"
+if [ "${SANDBOX_SSH:-0}" != "1" ] && [ -f "$HOME/.gitconfig" ] && command -v git &>/dev/null; then
+    _gc_dir="$HOME/.claude-sandbox-configs"
+    # cp -p keeps the source mode: a 600 gitconfig (tokens, extraheader) must
+    # not become world-readable in the copy.
+    if mkdir -p "$_gc_dir" && _gc_tmp="$(mktemp "$_gc_dir/.gitconfig.XXXXXX")" && cp -p "$HOME/.gitconfig" "$_gc_tmp"; then
+        # Strip only rules that rewrite TO ssh: the subsection (url.<base>.) is
+        # the rewrite target, so match base = ssh://... or scp-style user@host:.
+        # https->https rewrites and other settings stay.
+        while IFS= read -r _gc_key; do
+            [ -n "$_gc_key" ] && { git config --file "$_gc_tmp" --unset-all "$_gc_key" || true; }
+        done < <(git config --file "$_gc_tmp" --name-only --get-regexp '^url\.(ssh://.*|[^/:@]+@[^/]*:.*)\.(insteadof|pushinsteadof)$' 2>/dev/null | sort -u)
+        if mv -f "$_gc_tmp" "$_gc_dir/gitconfig.filtered"; then
+            GITCONFIG_MOUNT_SRC="$_gc_dir/gitconfig.filtered"
+        else
+            echo "WARNING: could not write filtered gitconfig; mounting raw ~/.gitconfig (#918: insteadOf rules may break git push)" >&2
+        fi
+    else
+        echo "WARNING: could not copy ~/.gitconfig for filtering; mounting raw ~/.gitconfig (#918: insteadOf rules may break git push)" >&2
+    fi
+    [ -n "${_gc_tmp:-}" ] && rm -f "$_gc_tmp"
+    unset _gc_dir _gc_tmp _gc_key
+fi
+
 # --- Mount strategy ---
 # Maps host configs into the container's standard home (/home/sandbox)
 GIT_WORKTREE_ENV_OPTS=()
@@ -122,7 +153,7 @@ MOUNTS=(
     --mount "type=tmpfs,destination=/home/sandbox/.claude/chrome,tmpfs-mode=1777"
     -v "$CLAUDE_CONFIG_COPY:/home/sandbox/.claude.json:rw"
     -v "$HOME/.codex:/home/sandbox/.codex:rw"
-    -v "$HOME/.gitconfig:/home/sandbox/.gitconfig:ro"
+    -v "$GITCONFIG_MOUNT_SRC:/home/sandbox/.gitconfig:ro"
     -v "$HOME/.config/gh:/home/sandbox/.config/gh:ro"
     -v "$HOME/.bash_history_sandbox:/home/sandbox/.bash_history:rw"
     -v "$HOME/.npm-global:/home/sandbox/.npm-global:rw"
