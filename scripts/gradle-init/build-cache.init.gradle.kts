@@ -10,6 +10,11 @@
 // relocatable (they hash inputs, not absolute paths), so different
 // worktrees share entries.
 //
+// Project settings win (#914): this runs after settings.gradle(.kts), so it
+// only sets the local directory when the project left it unset and did not
+// disable the local cache. It turns build caching on only when org.gradle.caching is unset
+// and the project configures no remote build cache.
+//
 // Skipped silently when the directory is missing or not writable (e.g.
 // owned by another UID), so the build behaves as if this script were absent.
 
@@ -21,15 +26,28 @@ val buildCacheDir: File? = System.getenv("SANDBOX_BUILD_CACHE")
     ?.takeIf { it.isDirectory && it.canWrite() }
 
 if (buildCacheDir != null) {
-    // Workers invoke ./gradlew directly, so there is no flag to inject;
-    // enable caching here rather than requiring org.gradle.caching=true in
-    // every project.
-    gradle.startParameter.isBuildCacheEnabled = true
     gradle.settingsEvaluated {
+        // Workers invoke ./gradlew directly, so there is no flag to inject.
+        // Turn caching on only when nobody has decided: a project or user
+        // that set org.gradle.caching (true or false, via gradle.properties,
+        // -P or -D) keeps its choice, so =false stays off. A project that
+        // configures a remote build cache (buildCache { remote { ... } }) is
+        // also left alone: turning caching on would start using that remote
+        // cache, which is the project's call to make (#914).
+        val cachingDecided = providers.gradleProperty("org.gradle.caching").isPresent ||
+            System.getProperty("org.gradle.caching") != null
+        val remoteConfigured = buildCache.remote != null
+        if (!cachingDecided && !remoteConfigured) {
+            gradle.startParameter.isBuildCacheEnabled = true
+        }
         buildCache {
             local {
-                isEnabled = true
-                directory = buildCacheDir
+                // Respect the project: a settings script that already set a
+                // local directory (or disabled the local cache) wins. An unset
+                // directory reads back as null; only then do we fill it in.
+                if (directory == null && isEnabled) {
+                    directory = buildCacheDir
+                }
             }
         }
     }
