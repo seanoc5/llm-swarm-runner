@@ -85,7 +85,11 @@ rm -f "$INITIAL_PROMPT_FILE"
 # The path goes on argv, never the content (as for workers, #415): the
 # ~26 KB rendered prompt with its 267 newlines in argv broke btop's process
 # view and matched any `pgrep -f` on its keywords.
+# (issue #421) swarm-<basename>: the address coord-doorbell.sh sends the
+# SendMessage wake to; see _coord-name.sh.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_coord-name.sh"
 ARGS=(--model "$MODEL"
+      --name "$(coord_session_name "$PWD")"
       --append-system-prompt-file "$SYSTEM_PROMPT_FILE"
       --dangerously-skip-permissions)
 [ "${COORDINATOR_HEADLESS:-0}" = "1" ] && ARGS+=(-p)

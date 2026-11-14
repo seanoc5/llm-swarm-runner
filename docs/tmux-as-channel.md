@@ -205,3 +205,12 @@ It refuses (exit 3) when the pane looks busy or the composer holds text, reusing
 | Cross-swarm via files / `gh`                | Yes        | Use this instead of §4b                                   |
 
 When in doubt, use the file bus or `gh`. Reach for tmux only when the agent fundamentally needs to read a terminal or inject a keystroke into one — that's what tmux is good at, and not what files are good at.
+
+## Coordinator wake doorbell (issue #421, ADR 0005 Option 1)
+
+For a claude coordinator, the watcher's wake is a harness `SendMessage` (via
+`scripts/coord-doorbell.sh`, session name `swarm-<project>`), not a paste into
+the composer. If it cannot deliver, `coord.wake.doorbell_failed` and
+`coord.wake.fallback` appear in `.swarm/events.log` and the guarded paste runs.
+gemini/codex/agy coordinators and `COORD_DOORBELL=0` always use the guarded
+paste. `/compact` injection and worker brief delivery are unchanged.

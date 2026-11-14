@@ -624,6 +624,7 @@ E2E_EVENTS_LOG="$E2E_PROJECT/.swarm/events.log"
 run_llm_start() {
     (cd "$E2E_PROJECT" && PATH="$E2E_DIR/bin:$PATH" \
         LLM_SWARM_DIR="$ROOT" NON_INTERACTIVE=1 WATCH=0 STATUS=0 \
+        COORD_DOORBELL="${COORD_DOORBELL:-0}" \
         "$LLM_START" "$@")
 }
 
@@ -675,6 +676,32 @@ e2e_check_eventually "explicit re-run: prompt text reaches the live pane" "yes" 
     "GOT: a follow-up for the live coordinator"
 if printf '%s' "$OUT3" | grep -qF 'Sending prompt into the running session'; then got=present; else got=absent; fi
 check "explicit re-run against a live coordinator: still reprompts (unchanged, issue #295)" "present" "$got"
+
+heading "Test 6: SendMessage doorbell first, guarded paste as fallback (issue #421)"
+# Test 5 pins COORD_DOORBELL=0 (guarded paste). Here the doorbell is on and
+# its courier is a stub: one that cannot deliver (must fall back to the
+# paste, visibly logged), then one that delivers (nothing may be pasted).
+printf '#!/usr/bin/env bash\ncat >/dev/null\nexit 1\n' > "$E2E_DIR/courier-fail"
+cat > "$E2E_DIR/courier-ok" <<'STUB'
+#!/usr/bin/env bash
+msg="$(cat | sed -n '/<<<WAKE_BEGIN>>>/,/<<<WAKE_END>>>/p' | sed '1d;$d')"
+jq -cn --arg m "$msg" '{type:"assistant",message:{content:[{type:"tool_use",id:"tu1",name:"SendMessage",input:{to:"'"$COURIER_EXPECT_TO"'",message:$m}}]}}'
+echo '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":[{"type":"text","text":"{\"success\":true}"}]}]}}'
+STUB
+chmod +x "$E2E_DIR/courier-fail" "$E2E_DIR/courier-ok"
+
+: > "$E2E_EVENTS_LOG"
+COORD_DOORBELL=1 COORD_DOORBELL_CLAUDE="$E2E_DIR/courier-fail" run_llm_start "doorbell-fallback wake" >/dev/null
+e2e_check_eventually "doorbell fails: guarded paste still delivers the wake" "yes" "GOT: doorbell-fallback wake"
+if grep -q 'coord.wake.doorbell_failed' "$E2E_EVENTS_LOG" && grep -q 'coord.wake.fallback' "$E2E_EVENTS_LOG"; then got=logged; else got=missing; fi
+check "doorbell fails: doorbell_failed and fallback events logged" "logged" "$got"
+
+: > "$E2E_EVENTS_LOG"
+COORD_DOORBELL=1 COORD_DOORBELL_CLAUDE="$E2E_DIR/courier-ok" \
+    COURIER_EXPECT_TO="$(. "$SCRIPT_DIR/../scripts/_coord-name.sh"; coord_session_name "$E2E_PROJECT")" run_llm_start "doorbell-delivered wake" >/dev/null
+check "doorbell delivers: nothing pasted into the composer" "no" "$(e2e_pane_contains 'doorbell-delivered wake')"
+if grep -q 'coord.wake.doorbell ' "$E2E_EVENTS_LOG" && ! grep -q 'coord.wake.fallback' "$E2E_EVENTS_LOG"; then got=logged; else got=missing; fi
+check "doorbell delivers: coord.wake.doorbell logged, no fallback" "logged" "$got"
 
 command tmux -L "$E2E_SOCKET" kill-server 2>/dev/null || true
 
