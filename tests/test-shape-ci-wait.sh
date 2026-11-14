@@ -914,5 +914,38 @@ out="$(GH_RUNLIST_JSON="$RUNOK" GH_CHECKS_RC=1 \
     "$CI_WAIT" 42 5 2>&1)" || rc=$?
 check "a genuinely failing check next to the liveness status is still red → exit 1" '[ "$rc" -eq 1 ]'
 
+heading "Test 26: green external-app checks, repo has 0 workflows, phantom queued/empty run list → exit 0 (issue #946, oconeco-site #246)"
+APPGREEN='[{"name":"Cloudflare Pages","bucket":"pass","link":"u"}]'
+rc=0
+out="$(GH_WORKFLOW_COUNT=0 GH_CHECKS_OUT="$APPGREEN" \
+    GH_RUNLIST_JSON='[{"status":"queued","conclusion":"","workflowName":"claude","createdAt":"2026-11-13T10:00:00Z"}]' \
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
+check "phantom queued 'claude' run with 0 workflows → exit 0, not a timeout" '[ "$rc" -eq 0 ]'
+rc=0
+out="$(GH_WORKFLOW_COUNT=0 GH_CHECKS_OUT="$APPGREEN" GH_RUNLIST_JSON='[]' \
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
+check "empty run list with 0 workflows → exit 0, not a timeout" '[ "$rc" -eq 0 ]'
+rc=0
+out="$(GH_WORKFLOW_COUNT=1 GH_CHECKS_OUT="$APPGREEN" \
+    GH_RUNLIST_JSON='[{"status":"queued","conclusion":"","workflowName":"CI","createdAt":"2026-11-13T10:00:00Z"}]' \
+    CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 2 2>&1)" || rc=$?
+check "same queued run but the repo HAS workflows → still pending, times out (exit 2)" '[ "$rc" -eq 2 ]'
+rc=0
+out="$(GH_WORKFLOW_COUNT=0 GH_CHECKS_OUT="$APPGREEN" \
+    GH_RUNLIST_JSON='[{"status":"completed","conclusion":"failure","workflowName":"x","createdAt":"2026-11-13T10:00:00Z"}]' \
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
+check "0 workflows never masks a real run-level failure → exit 1" '[ "$rc" -eq 1 ]'
+
+rc=0
+out="$(GH_WORKFLOW_COUNT=0 GH_CHECKS_OUT="$APPGREEN" GH_RUNLIST_JSON='[]' \
+    GH_PR_FILES_JSON='["README.md",".github/workflows/ci.yml"]' \
+    CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 2 2>&1)" || rc=$?
+check "0 workflows on default branch but the PR adds .github/workflows/ci.yml → still pending, times out (exit 2)" '[ "$rc" -eq 2 ]'
+rc=0
+out="$(GH_WORKFLOW_COUNT=0 GH_CHECKS_OUT="$APPGREEN" GH_RUNLIST_JSON='[]' \
+    GH_PR_FILES_JSON='["README.md","src/a.py"]' \
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
+check "0 workflows and the PR touches no workflow file → still exit 0" '[ "$rc" -eq 0 ]'
+
 heading "Results: $PASS checks passed"
 green "All checks passed."
