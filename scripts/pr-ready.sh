@@ -149,10 +149,10 @@
 #   3  held — a COORDINATOR HOLD banner is on the PR body, or an unlifted
 #      hold comment is on the PR (issue #616); self-review ran (and posted)
 #      as usual, but gh pr ready was deliberately skipped
-#   4  refused — CI checks on the head commit are not confirmed green
-#      (pending, failing, or an unexpected `gh pr checks` error; also a
-#      confirmed red or still-pending result read via the Actions-runs
-#      fallback)
+#   4  refused — CI checks on the head commit are not confirmed green and
+#      nothing is known to be wrong: pending, or an unexpected `gh pr checks`
+#      error (also a still-pending result read via the Actions-runs fallback).
+#      Expected right after a push; workers hand off.
 #   5  refused — can't read CI status at all: the token lacks Checks
 #      permission AND the Actions-runs fallback itself couldn't be read
 #      either (`gh pr view` for the head SHA, or `gh run list`, failed).
@@ -165,6 +165,9 @@
 #      that checkout's HEAD equals the PR head SHA; otherwise it is skipped
 #      with one stderr line (never a refusal), so a coordinator running this
 #      from its own checkout doesn't test unrelated code.
+#   7  refused — CI on the head commit FAILED or was CANCELLED (also via the
+#      Actions-runs fallback). Split from exit 4 (issue #948) so a worker
+#      can tell a red PR from a merely pending one: fix and push, don't hand off.
 #   1  usage / gh error resolving the PR body
 #
 # issue #602: every refusal (exits 2, 4 and 5) also writes a marked
@@ -666,11 +669,11 @@ case "$CHECKS_RC" in
                 echo "pr-ready: REFUSED — PR #$PR's CI run was cancelled or timed out, not failed (gh pr checks exited 0 but shows a fail row):" >&2
                 echo "$CHECKS_OUT" >&2
                 echo "          Re-run it with 'gh run rerun <run-id>' (find the id via 'gh run list --branch <branch>'), then re-run pr-ready.sh." >&2
-                refuse ci-cancelled 4
+                refuse ci-cancelled 7
             fi
             echo "pr-ready: REFUSED — PR #$PR has failing CI checks (gh pr checks exited 0 but shows a fail row):" >&2
             echo "$CHECKS_OUT" >&2
-            refuse ci-failing 4
+            refuse ci-failing 7
         fi
         echo "pr-ready: CI checks green on PR #$PR."
         ;;
@@ -699,7 +702,7 @@ case "$CHECKS_RC" in
                     fail)
                         echo "pr-ready: REFUSED — PR #$PR has failing CI checks (via Actions-runs fallback):" >&2
                         echo "$CI_FALLBACK_DETAIL" >&2
-                        refuse ci-failing 4
+                        refuse ci-failing 7
                         ;;
                     pending)
                         echo "pr-ready: REFUSED — PR #$PR's CI checks are still pending (via Actions-runs fallback)." >&2
@@ -767,7 +770,7 @@ case "$CHECKS_RC" in
         else
             echo "pr-ready: REFUSED — PR #$PR has failing CI checks:" >&2
             echo "$CHECKS_OUT" >&2
-            refuse ci-failing 4
+            refuse ci-failing 7
         fi
         ;;
     *)

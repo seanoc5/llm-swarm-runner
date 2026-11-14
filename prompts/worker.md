@@ -51,7 +51,7 @@ pending and end the task (PR: `pr-ready.sh` parks it).
 - **CI (issue #572): never wait for it after your final push** (runs take
   12-28 min; your token may not read checks). No `ci-wait.sh`, `gh run watch`
   or sha-poll loop. Run `pr-ready.sh <N>` once: exit 4 or 5 (CI pending or
-  unreadable) is the expected result, not a blocker. Post the `ci-handoff` note (see
+  unreadable) is expected, not a blocker; exit 7 (CI failed/cancelled) is not: fix, push. Post the `ci-handoff` note (see
   "Worker outbox"), write status `ready-for-review`, never `blocked` for CI.
   The coordinator checks CI once and readies if green, else the ready-sweep does.
 - **A conflicting PR gets no CI run at all.** Before each push, check
@@ -368,7 +368,7 @@ nothing pending, no self-review `BLOCK`, not given up on an error).
 4. `pr-ready.sh <N>`, not bare `gh pr ready`. For 🟡/🔴 it runs and posts the
    self-review first (round-capped — see "Self-review before merge" below),
    and refuses to ready on `BLOCK`, an unparseable verdict (exit 2), or CI
-   not confirmed green (exit 4: expected right after a push; the PR stays
+   not confirmed green (exit 4: expected after a push; 7: CI red; the PR stays
    draft for the coordinator, see § CI). If the PR body carries a coordinator
    `COORDINATOR HOLD` banner (draft-as-hold), it still posts the
    self-review but leaves the PR in draft (exit 3) — only the coordinator

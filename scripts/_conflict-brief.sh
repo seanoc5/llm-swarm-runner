@@ -41,7 +41,7 @@ $found_by: it conflicts with \`origin/$base\` ($detail).
    and what this branch changed (plain words, one line each), what you
    kept, and why. Five to ten lines total. End it with "— drafted by claude".
 5. Don't wait on CI. Run \`pr-ready.sh $pr\` once (exit 4 or 5, CI pending
-   or unreadable, is expected), then post the \`ci-handoff:\` fyi to your
+   or unreadable, is expected; exit 7 = CI failed or cancelled, fix and push), then post the \`ci-handoff:\` fyi to your
    outbox and end the task. Don't merge — the operator re-runs
    \`swarm-merge.sh $pr\`.
 EOF
