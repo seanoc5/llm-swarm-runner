@@ -41,24 +41,38 @@ Fixture: `tests/fixtures/reply-lint/carryover-incidents.tsv`.
 
 ## False positives: civicstrata coordinator replies
 
-Sample: all 2,239 assistant text replies in the 198 local civicstrata coordinator
-sessions (2026-08-08 to 2026-11-12), leaving out the three days the research doc
-records a complaint (2026-10-15 only in the round-3 re-run; the original run also left out 08-29 and 09-22). "No complaint recorded" is not
-"was good", so this is a flag-rate check, not a precision proof.
+Sample (rerun 2026-11-14 on master, final rule): all 2,327 assistant text replies
+in the 198 local civicstrata coordinator sessions, dated 2026-08-01 to 2026-11-14,
+leaving out 2026-10-15 (the one civicstrata complaint day the rule was tuned
+against). Command: `scripts/eval-carryover-lint.sh --transcripts
+~/.claude/projects/-opt-work-springboot-civicstrata --skip-dates 2026-10-15`.
+The transcripts keep growing, so a later rerun will give different counts; the
+numbers below are for that rerun only. "No complaint recorded" is not "was
+good", so this is a flag-rate check, not a precision proof.
 
-- **Round 3 (labels need a reference cue): 12 of 2,239 flagged (0.5%); 11 of 960 replies of 60+ words (1.1%).** The previous rule gave 24 (1.1%; 22 of 960, 2.3%) on the same sample. At the
-  Stop hook that is about one extra block per 90 long replies. The numbers below this line are the earlier 24-hit reading (2,136 replies).
-- By my reading of each flagged line (not Sean's judgment): about 20 point at an
-  item or label the same reply never defines ("waits on your B1/B2", "from my
-  last reply", "follow-ups A–D"), so they are the failure the rule targets; about
-  4 look self-explanatory (a heading that defines "option A" in parentheses,
-  "D1, the docs link (PR #622)") and are false positives (0.2%).
+- **19 of 2,327 flagged (0.8%); 18 of 1,000 replies of 60+ words (1.8%).** At the
+  Stop hook that is about one extra block per 55 long replies. Six of the 19 are
+  the same C1/C2 digest line repeated across six wake-digest replies on 2026-11-13.
+- By my reading of each flagged line (not Sean's judgment): **8 real, 11 false
+  positive, so 42% precision (8 of 19).** The 8 real ones point at an item the
+  reply never defines ("waits on your B1/B2", "your K1/K2 reply", "per your
+  D1/D2", "Follow-ups A-D are waiting on ...", "your question 1: is option A
+  county-only?", "per C1" in a PR line). The 11 false positives carry their own
+  gloss: a heading that defines the option in parentheses ("option A, merge
+  anyway"), "D1, the docs link (PR #622)", "A4, after the restart: run the FEMA
+  import", and the six repeated "C1, covering the number, is my recommendation"
+  lines (the label is defined by the heading line just above). Without the six
+  repeats it is 8 real of 13 distinct hits (62%).
+- This replaces an earlier reading of "about 20 real, about 4 false positive". That
+  came from the replaced 24-hit rule on 2,136 replies that left out different days
+  (2026-08-29, 09-22 and 10-15); it described the old rule, not the merged one.
 - First version, before the gloss and colon-block allowances: 211 of 2,134 flagged
   (9.9%), mostly "A1 ..." lines that carried their own explanation. The 12-word
   threshold and the colon-block allowance were set by reading that sample, so the
-  1.1% is not held-out either.
+  rates above are not held-out either.
 - The data is civicstrata only; no other project's transcripts were checked. The
-  transcripts were read locally and none of their text is committed.
+  transcripts were read locally and none of their text is committed beyond the
+  short flagged-line fragments above.
 
 ## Known gaps
 
