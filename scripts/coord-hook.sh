@@ -56,6 +56,15 @@
 #      (still failing after the nudge; stop_hook_active, so no second block).
 #      COORD_REPLY_LINT=0 turns it off. Runs in split mode too.
 #
+#   6. Hand-written Needs-you list and stale prompt (issue #964). On Stop (once
+#      per reply chain) and, in split mode, on UserPromptSubmit: if
+#      .swarm/needs-you.md was not produced by needs-you.sh (needs-you.sh check
+#      exits 3: no .jsonl, or a body that differs), the coordinator is told to
+#      rebuild it with `needs-you.sh add` (events.log: coord.needs_you.handwritten);
+#      if prompts/coordinator*.md changed since the session started
+#      (.swarm/coord-prompt.sha, written by coordinator-claude.sh), it is told
+#      once per change to re-read its prompt (coord.prompt.stale).
+#
 # Fails open: any error leaves the hook silent (exit 0, no output), which
 # Claude Code treats as "no opinion" — the watcher then falls back to its
 # screen-based checks because the state file goes stale.
@@ -176,6 +185,31 @@ reply_lint_message() {
         "$rules" "$(printf '%s' "$hits" | sed -n 1,3p | tr '\n' '|')"
 }
 
+# coord_notices: prints the hand-written-list and stale-prompt notices (nothing
+# when both are fine); logs each. The prompt notice repeats only when the prompt
+# changes again. COORD_REPLY_LINT=0 turns both off.
+coord_notices() {
+    [ "${COORD_REPLY_LINT:-1}" = "0" ] && return 0
+    local here ny cur started nudged out=""
+    here="$(cd "$(dirname "$0")" && pwd)"
+    ny="$("$here/needs-you.sh" check --project "$project" 2>&1 >/dev/null)"; rc=$?
+    if [ "$rc" = "3" ]; then
+        log_event "coord.needs_you.handwritten"
+        out="${ny}. The operator treats .swarm/needs-you.md as the one cold-reader file: never write it by hand. Rebuild every open item with scripts/needs-you.sh add (--title, --background in plain words: what it is, why it is open, what each option changes; --do), close finished ones with done, and print scripts/needs-you.sh render."
+    fi
+    started="$(cat "$swarm/coord-prompt.sha" 2>/dev/null || true)"
+    if [ -n "$started" ]; then
+        cur="$(coord_prompt_hash "$here/..")"
+        nudged="$(cat "$swarm/coord-prompt.nudged" 2>/dev/null || true)"
+        if [ -n "$cur" ] && [ "$cur" != "$started" ] && [ "$cur" != "$nudged" ]; then
+            printf '%s\n' "$cur" > "$swarm/coord-prompt.nudged" 2>/dev/null || true
+            log_event "coord.prompt.stale"
+            out="${out:+$out }Coordinator prompt changed since your session started: re-read prompts/coordinator.md (or coordinator-work.md / coordinator-shared.md), especially \"Standing list\", before your next Needs-you change."
+        fi
+    fi
+    printf '%s' "$out"
+}
+
 case "$event" in
     UserPromptSubmit)
         [ "$hook_state" = "1" ] && write_state busy
@@ -184,6 +218,8 @@ case "$event" in
             # operator's next message is where a changed Needs-you list reaches it.
             clear_window_flag coordinator "📥" "operator_prompt"
             note="$(coord_needs_you_note "$swarm")"
+            notices="$(coord_notices)"
+            [ -z "$notices" ] || note="$notices${note:+ $note}"
             dead="$(watcher_dead_warning 0)"   # issue #779: a dead watcher must not stay silent in split mode
             [ -z "$dead" ] || note="$dead${note:+ $note}"
             [ -z "$note" ] || jq -n --arg c "$note" '{hookSpecificOutput: {hookEventName: "UserPromptSubmit", additionalContext: $c}}'
@@ -193,6 +229,10 @@ case "$event" in
     Stop)
         active="$(printf '%s' "$input" | jq -r '.stop_hook_active // false' 2>/dev/null || echo false)"
         lint="$(reply_lint_message)"
+        if [ "$active" != "true" ]; then
+            notices="$(coord_notices)"
+            [ -z "$notices" ] || lint="${lint:+$lint }$notices"
+        fi
         # Split mode never rings: nothing is typed into or blocked on this session
         # (only the reply lint can block it). The same holds for a resident
         # coordinator with COORD_HOOK_STATE=0: lint only, no state, no doorbell.

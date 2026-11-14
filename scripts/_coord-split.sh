@@ -82,3 +82,11 @@ coord_needs_you_note() {
     [ "$had_seen" = 1 ] || [ "$total" -gt 0 ] || return 0
     printf 'Needs-you changed since your last message: %s new item(s), %s on the list now (see .swarm/needs-you.md).\n' "$new" "$total"
 }
+
+# coord_prompt_hash <llm-swarm-dir>: short hash of the coordinator prompt sources
+# (prompts/coordinator*.md). coordinator-claude.sh records it at session start
+# (.swarm/coord-prompt.sha); coord-hook.sh compares it to the current one so a
+# long-running session is told when its prompt changed underneath it (issue #964).
+coord_prompt_hash() {
+    cat "$1"/prompts/coordinator*.md 2>/dev/null | sha256sum | cut -c1-16
+}

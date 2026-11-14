@@ -116,6 +116,12 @@ ARGS=(--model "$MODEL"
 # removes it again.
 # shellcheck source=_coord-split.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_coord-split.sh"
+# (issue #964) Remember which prompt text this session started on; coord-hook.sh
+# nudges the session once if prompts/coordinator*.md changes afterwards.
+if [ -d "$PWD/.swarm" ]; then
+    coord_prompt_hash "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" > "$PWD/.swarm/coord-prompt.sha" 2>/dev/null || true
+    rm -f "$PWD/.swarm/coord-prompt.nudged"
+fi
 if [ "${COORD_HOOK_STATE:-0}" = "1" ] || [ "$(coord_mode "$PWD")" = "split" ] || [ "${COORD_REPLY_LINT:-1}" != "0" ]; then
     export COORD_HOOK_STATE
     [ "${COORD_INBOX_WAITER:-0}" = "1" ] && export COORD_INBOX_WAITER

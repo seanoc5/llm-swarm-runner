@@ -9,7 +9,7 @@ before and never contacts corpusminder.
    `CMINDER_FORUM_ID=<the app's forum id>`. `CMINDER_URL` and `CMINDER_API_KEY`
    can sit in the host `.env` (gitignored).
 2. `needs-you.sh add` then also POSTs `/api/items` (kind DECISION or TODO, the
-   command or URL in `fields.do`, `targetUrl` = the issue or PR); `done` calls
+   command or URL in `fields.do`, the plain-language paragraph in `fields.background` and the item description, `targetUrl` = the issue or PR); `done` calls
    `/api/items/{id}/complete`. The corpusminder id is kept as `cm_id` in
    `.swarm/needs-you.jsonl`. `.swarm/needs-you.md` is written either way, and a
    corpusminder outage only prints a warning.

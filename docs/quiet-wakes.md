@@ -25,7 +25,12 @@ watcher types a plain doorbell per item, with no suffix):
    and the coordinator opens its reply with that line.
 3. **Quiet replies.** `.swarm/needs-you.md` holds the standing Needs-you list,
    kept by `scripts/needs-you.sh add|done|render` (issue #798): `add` refuses an
-   item whose `--do` has no command or https URL. A wake that leaves the list
+   item whose `--do` has no command or https URL or whose `--background` (a
+   plain-language paragraph) is missing, too short or leans on undefined codes
+   (issue #964; `render` leads each item with it as "What this is:"). The Stop
+   hook blocks once when the file was hand-written (`needs-you.sh check`) and
+   once per change to `prompts/coordinator*.md` tells a running session to re-read
+   its prompt. A wake that leaves the list
    unchanged gets one `Handled ...` line plus the `render` output pasted
    verbatim, so every open action shows its full command. Only a list of pure
    yes/no or pick-one decisions may shrink to "Your list unchanged (2 items)"
