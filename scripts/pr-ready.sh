@@ -95,8 +95,10 @@
 # checks` snapshot, taken here rather than trusted from anything the worker
 # says earlier in its own transcript. The same fand-etl PR #1063 was marked
 # ready with `lint-and-test` failing (4 ruff errors) while the PR body
-# claimed "CI is green". Pending checks or failures refuse readying (exit
-# 4); no checks configured at all is a pass-with-warning, consistent with
+# claimed "CI is green". Pending checks refuse readying (exit
+# 4; exit 5 if CI status can't be read at all); failing or cancelled checks
+# refuse it with exit 7 (issue #948); no checks configured at all is a
+# pass-with-warning, consistent with
 # ci-wait.sh's own exit 5 and swarm-merge.sh's Gate 2.
 #
 # issue #639: "no checks reported" with workflows configured is ALSO a
