@@ -29,6 +29,7 @@ AUTO_COMPACT_BUSY_PATTERN='esc to interrupt'
 SESSION_NAME=t PROJECT_DIR="$T" DRY_RUN=0
 COORD_RECYCLE=1 COORD_RECYCLE_HOURS=12 COORD_RECYCLE_MIN_GAP_SECS=3600
 COORD_RECYCLE_PROMPT="Execute the Initial Startup Checklist."
+COORD_RECYCLE_INJECT_TRIES=3 COORD_RECYCLE_INJECT_RETRY_SECS=0
 LLM_START="$T/llm-start-stub"
 printf '#!/usr/bin/env bash\necho "$1" >> "%s/prompts"\n' "$T" > "$LLM_START"; chmod +x "$LLM_START"
 
@@ -43,10 +44,11 @@ compact_composer_clear() { return "$G_DIRTY"; }     # rc 0 = empty
 compact_confirm_submitted() { return "$G_CONFIRM"; }
 compact_retract_queued() { echo retract >> "$T/retract.log"; return 0; }
 coord_proc_age_secs() { echo "$G_AGE"; }
+coord_inbox_write() { printf '%s\n' "$2" > "$T/inbox-$1.md"; }
 tmux() { printf '%s\n' "$*" >> "$T/tmux.log"; }
 
 reset() {
-    : > "$T/retract.log"; : > "$EVENTS_LOG"; : > "$T/prompts"; : > "$T/tmux.log"; rm -f "$COORD_RECYCLE_STATE"
+    : > "$T/retract.log"; : > "$EVENTS_LOG"; : > "$T/prompts"; : > "$T/tmux.log"; rm -f "$COORD_RECYCLE_STATE" "$T"/inbox-*.md
     G_STATE=cli G_BUSY=1 G_HUMAN=1 G_APPROVAL=1 G_DIRTY=0 G_AGE=50000 G_CONFIRM=0
 }
 expect() { # desc, grep-pattern-in-events (or '-' for none), expected prompt count
@@ -111,6 +113,20 @@ coordinator_pane_busy() { return "$G_BUSY"; }
 reset; DRY_RUN=1; coord_recycle_pass; DRY_RUN=0
 [ ! -s "$T/tmux.log" ] || red "dry run touched tmux"
 expect "dry run: no keystrokes, no prompt" - 0
+
+# Issue #934: failing injector -> bounded retries, event, recycle_failed inbox item.
+good_start="$(cat "$LLM_START")"
+printf '#!/usr/bin/env bash\necho "$1" >> "%s/prompts"\nexit 7\n' "$T" > "$LLM_START"
+reset; coord_recycle_pass
+expect "injector always fails: retried 3 times" 'watch\.recycle_inject_failed .*rc=7 tries=3' 3
+[ "$(grep -c 'coord\.recycle\.checklist_failed' "$EVENTS_LOG")" = 3 ] || red "expected 3 per-attempt failures"
+[ -s "$T/inbox-recycle_failed.md" ] || red "no recycle_failed inbox item after forced injection failure"
+printf '#!/usr/bin/env bash\necho "$1" >> "%s/prompts"\n[ "$(grep -c . "%s/prompts")" -ge 2 ]\n' "$T" "$T" > "$LLM_START"
+reset; coord_recycle_pass
+expect "injector fails once then succeeds: 2 tries, no flag" 'checklist_failed .*try=1/3' 2
+grep -q recycle_inject_failed "$EVENTS_LOG" && red "flagged despite eventual success"
+[ ! -e "$T/inbox-recycle_failed.md" ] || red "inbox item written despite eventual success"
+printf '%s\n' "$good_start" > "$LLM_START"
 
 grep -q '^run_coord_recycle_loop() {' "$WATCH" || red "loop function missing"
 green "all coordinator-recycle tests passed"

@@ -2432,7 +2432,8 @@ EVENTS LOG
                            (trigger=after_compact|age, age=secs); COORD_RECYCLE=1 only
       coord.recycle.skip   a due recycle was held back (reason=not_cli|pane_busy|human_present|
                            composer_dirty|pending_approval|locked|clear_not_submitted, trigger=...)
-      coord.recycle.checklist_failed  /clear landed but the checklist injection exited nonzero (rc, trigger)
+      coord.recycle.checklist_failed  /clear landed but a checklist injection attempt exited nonzero (rc, trigger, try=n/N)
+      watch.recycle_inject_failed  (issue #934) every bounded retry failed; a recycle_failed coord-inbox note was written (rc, tries, trigger)
       worker.compact        /compact injected into an iss-* window (issue, used, threshold, wrapup)
       worker.compact.skip   worker auto-compact skipped this window this cycle (issue,
                            reason=pane_busy|no_ctx_parsed|task_done|backoff|...; reason=task_done
@@ -2906,6 +2907,8 @@ COORD_RECYCLE_HOURS="${COORD_RECYCLE_HOURS:-12}"
 COORD_RECYCLE_MIN_GAP_SECS="${COORD_RECYCLE_MIN_GAP_SECS:-3600}"
 COORD_RECYCLE_TICK_SECS="${COORD_RECYCLE_TICK_SECS:-300}"
 COORD_RECYCLE_PROMPT="${COORD_RECYCLE_PROMPT:-Execute the Initial Startup Checklist.}"
+COORD_RECYCLE_INJECT_TRIES="${COORD_RECYCLE_INJECT_TRIES:-3}"            # issue #934
+COORD_RECYCLE_INJECT_RETRY_SECS="${COORD_RECYCLE_INJECT_RETRY_SECS:-5}"
 # Matches coordinator-claude.sh's own STATUSLINE_PROBE default for its
 # claude invocation — a project+role-scoped path, NOT the statusline
 # script's generic per-UID default. Using the generic default here would
@@ -3758,6 +3761,7 @@ format_event_line() {
         coord.recycle)                        glyph="♻"; color=$'\033[36m' ;;
         coord.recycle.skip)                   glyph="·"; color=$'\033[2m'  ;;
         coord.recycle.checklist_failed)       glyph="⚠"; color=$'\033[33m' ;;
+        watch.recycle_inject_failed)          glyph="⚠"; color=$'\033[33m' ;;
         worker.compact)                 glyph="◈"; color=$'\033[36m' ;;
         worker.compact.skip)             glyph="·"; color=$'\033[2m'  ;;
         worker.compact.timeout)           glyph="⚠"; color=$'\033[33m' ;;
@@ -8441,9 +8445,24 @@ coord_recycle_pass() {
     printf '%s\n' "$now" > "$COORD_RECYCLE_STATE" 2>/dev/null || true
     log_event coord.recycle "trigger=$reason age=${age:-na}"
     echo "[$(date +%T)] coordinator session recycled ($reason) — re-running the startup checklist"
-    local rc=0
-    ( flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 9 && cd "$PROJECT_DIR" && NON_INTERACTIVE=1 "$LLM_START" "$COORD_RECYCLE_PROMPT" ) 9>"$COORD_WAKE_LOCK" || rc=$?
-    [ "$rc" = "0" ] || log_event coord.recycle.checklist_failed "rc=$rc trigger=$reason"
+    # Issue #934: /clear already landed, so a failed injection leaves an empty
+    # session. Retry a bounded number of times; if it still fails, flag it in
+    # the inbox so the next wake rebuilds context instead of idling silently.
+    local rc=0 try=1 tries="$COORD_RECYCLE_INJECT_TRIES"
+    case "$tries" in ''|*[!0-9]*|0) tries=1 ;; esac
+    while :; do
+        rc=0
+        ( flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 9 && cd "$PROJECT_DIR" && NON_INTERACTIVE=1 "$LLM_START" "$COORD_RECYCLE_PROMPT" ) 9>"$COORD_WAKE_LOCK" || rc=$?
+        [ "$rc" = "0" ] && break
+        log_event coord.recycle.checklist_failed "rc=$rc trigger=$reason try=$try/$tries"
+        [ "$try" -ge "$tries" ] && break
+        try=$((try + 1))
+        sleep "$COORD_RECYCLE_INJECT_RETRY_SECS"
+    done
+    if [ "$rc" != "0" ]; then
+        log_event watch.recycle_inject_failed "rc=$rc tries=$try trigger=$reason"
+        coord_inbox_write recycle_failed "The watcher recycled this coordinator session (/clear, trigger=$reason) but could not inject the startup checklist after $try attempt(s) (last rc=$rc). The session is empty. Fix: run the Initial Startup Checklist now to rebuild context." || true
+    fi
     return 0
 }
 
