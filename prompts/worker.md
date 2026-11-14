@@ -62,8 +62,8 @@ pending and end the task (PR: `pr-ready.sh` parks it).
 - **Parallelism is not your call.** Need a long-lived process (dev server)?
   Ask the operator to run it in the `util` window. Need two tracks at once?
   Recommend a sibling worker in a `## Decision` (capped by `MAX_WORKERS`? say so).
-- **Never `tmux send-keys`** into the coordinator or another worker. Talk via
-  your status file, your outbox, or `gh` comments.
+- **To reach the coordinator, write to your outbox**; otherwise use your status
+  file or `gh` comments.
 - **No subagents.** Agent/Task/Workflow are disallowed on your session
   (issue #476), even under `--dangerously-skip-permissions`.
 

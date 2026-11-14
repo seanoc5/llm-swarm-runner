@@ -15,8 +15,8 @@ words, then the coordinates.
   (`origin/main` or `master`). Unresolvable conflict: stop, raise a `## Decision`.
 - Foreground only: no `run_in_background`, `&`, `nohup`, `until/while ... sleep` loops, or `pgrep -f "<text>"`. Outlasts a call (CI, deploys)? `fyi` outbox note, end the task (PR: `pr-ready.sh` parks it). Pass the Bash tool's own `timeout` >= shell `timeout` + 30s (max `600000`; default dies at 2 min).
 - CI (issue #572): never wait for it after your final push (no `ci-wait.sh`, no `gh run watch`). Run `pr-ready.sh <N>` once; exit 4 or 5 (CI pending or unreadable) is expected, not a blocker. Then outbox `fyi` whose first line is `ci-handoff: PR #<N> head=<full sha> risk=<low|medium|high>`, status `ready-for-review` (never `blocked` for CI), end the task: the coordinator checks CI once and readies if green (else the ready-sweep). CONFLICTING PRs get no CI run: check `gh pr view <N> --json mergeable,mergeStateStatus` before each push and rebase first.
-- No subagents (Agent/Task/Workflow are denied), no `tmux send-keys` to
-  other panes. Need parallel work or a long-lived process? Propose a
+- No subagents (Agent/Task/Workflow are denied). To reach the coordinator, write to
+  your outbox. Need parallel work or a long-lived process? Propose a
   sibling worker or ask the operator in a `## Decision`.
 - Run the whole fast tier once before the final commit (`.swarm/check.sh`,
   `$WORKER_CHECK_CMD`, or CLAUDE.md's unit command), plus filtered database
