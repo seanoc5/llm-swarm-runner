@@ -85,10 +85,18 @@ jobs_of 10 "$(job queued $((NOW-900)) null)"
 set +e; out="$("$CHK" "$R")"; rc=$?; set -e
 check "all busy + 15 min queue: warn queue-long" "1|queue-long|warn" "$rc|$(jq -r .check <<< "$out")|$(jq -r .severity <<< "$out")"
 
-# 5. an idle online runner and a queued job: no verdict from this check (label mismatch is out of scope).
+# 5. an idle online runner carrying every runner's labels: silent (no job fetch needed).
 runners "r1:online:true" "r2:online:false"
 set +e; out="$("$CHK" "$R")"; rc=$?; set -e
 check "an idle runner exists: silent" "0|" "$rc|$out"
+
+# 5b. (#943) the only idle runner has other labels (gpu), the matching runner is busy, and a job has queued
+# past the threshold: the early exit must not hide the queue-long capacity warning.
+checks_of() { jq -r '.check + ":" + .severity' <<< "$1" | sort | paste -sd, -; }
+runners "r1:online:true" "gpu1:online:false:self-hosted,gpu"; queue '{"id":10}' ''
+jobs_of 10 "$(job queued $((NOW-900)) null)"
+set +e; out="$("$CHK" "$R")"; rc=$?; set -e
+check "busy matching + idle non-matching runner: queue-long warn" "1|queue-long:warn" "$rc|$(checks_of "$out")"
 
 # 6. hosted-runner job is ignored; threshold env honored.
 runners "r1:offline:false"; queue '{"id":10}' ''
@@ -102,7 +110,6 @@ check "CI_HEALTH_QUEUE_MINS=30 raises the bar" runner-offline "$(jq -r .check <<
 # 6b. retired-but-registered runner (#940 review): a stale offline runner plus a
 # normal busy queue must NOT page "restart <stale runner>"; busy online runners
 # that fit the job make it a capacity note.
-checks_of() { jq -r '.check + ":" + .severity' <<< "$1" | sort | paste -sd, -; }
 runners "old:offline:false" "r1:online:true" "r2:online:true"; queue '{"id":10}' ''
 jobs_of 10 "$(job queued $((NOW-900)) null)"
 set +e; out="$("$CHK" "$R")"; rc=$?; set -e

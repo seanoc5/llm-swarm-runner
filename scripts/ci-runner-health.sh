@@ -91,13 +91,16 @@ emit() { # <check> <severity> <match> <message> <repo> <runner> <queued_mins>
 }
 
 check_repo() {
-    local repo="$1" runners ids jobs idl offline online_busy_all slug ev kind nm mins n unit
+    local repo="$1" runners ids jobs idl offline covered slug ev kind nm mins n unit
     runners="$(gh_json "repos/$repo/actions/runners?per_page=100" '.runners[] | {name, status, busy, labels: [.labels[].name]}')" || return 0
     runners="$(printf '%s\n' "$runners" | jq -c . 2>/dev/null)"
     offline="$(printf '%s\n' "$runners" | jq -r 'select(.status=="offline") | .name')"
-    online_busy_all="$(printf '%s\n' "$runners" | jq -s 'length > 0 and all(.[]; .status=="online" and .busy)')"
-    # Healthy (someone is online and idle): no finding is possible, so skip the per-run job fetches.
-    [ -n "$offline" ] || [ "$online_busy_all" = "true" ] || return 0
+    # Skip the per-run job fetches only when no finding is possible: nothing offline and an idle online
+    # runner carries every label any runner has, so it fits any job a runner could take (an idle runner
+    # with other labels, e.g. one gpu runner, proves nothing about a queued job that needs other labels).
+    covered="$(printf '%s\n' "$runners" | jq -s '(map(.labels | map(ascii_downcase)) | add // [] | unique) as $all
+        | length == 0 or any(.[]; .status=="online" and (.busy | not) and ($all - (.labels | map(ascii_downcase))) == [])')"
+    [ -n "$offline" ] || [ "$covered" != "true" ] || return 0
     ids="$(gh_json "repos/$repo/actions/runs?status=queued&per_page=50" '.workflow_runs[].id')" || return 0
     ids="$ids $(gh_json "repos/$repo/actions/runs?status=in_progress&per_page=50" '.workflow_runs[].id')" || return 0
     # shellcheck disable=SC2086
