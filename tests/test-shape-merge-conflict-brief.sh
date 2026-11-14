@@ -91,6 +91,9 @@ grep -q "origin/master" "$BRIEF" || red "brief should name the base branch:\n$(c
 grep -q "## Conflict notes" "$BRIEF" || red "brief should ask for conflict notes:\n$(cat "$BRIEF")"
 echo "$OUT" | grep -q "Re-run once it has pushed and CI is green: swarm-merge.sh 101$" \
     || red "expected a plain re-run hint, got:\n$OUT"
+grep -q 'ci-wait' "$BRIEF" && red "brief must not tell the worker to run ci-wait.sh:\n$(cat "$BRIEF")"
+grep -q 'pr-ready.sh 101' "$BRIEF" || red "brief step 5 should run pr-ready.sh once:\n$(cat "$BRIEF")"
+grep -q 'ci-handoff:' "$BRIEF" || red "brief step 5 should post the ci-handoff fyi:\n$(cat "$BRIEF")"
 green "brief queued, exit 3, no merge attempted"
 
 # ============================================================================
