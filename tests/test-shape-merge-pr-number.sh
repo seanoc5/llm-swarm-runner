@@ -385,6 +385,23 @@ GOT=$(echo '[{"number":1,"headRefName":"fix/issue-118"},{"number":2,"headRefName
 green "branch filter matches the exact and suffixed branch, rejects fix/issue-1180 and fix/issue-11"
 
 # ============================================================================
+heading "Test 6e (#908): open-PR list that returns exactly the limit warns on stderr"
+# ============================================================================
+cat > "$TEST_DIR/bin/gh" <<'EOS'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+    "api repos/{owner}/{repo}/issues/603") echo "false"; exit 0 ;;
+    "issue view") exit 0 ;;
+    "pr list") printf 'COUNT 200\n630\n'; exit 0 ;;
+esac
+exit 0
+EOS
+chmod +x "$TEST_DIR/bin/gh"
+OUT=$(timeout 5 "$MERGE" 603 --no-kill 2>&1 || true)
+echo "$OUT" | grep -q "open-PR list hit the 200 limit" || red "expected the limit warning, got:\n$OUT"
+green "a full open-PR list warns that a branch PR may be missed"
+
+# ============================================================================
 heading "Test 7: PR names the issue with a closing keyword (plus one more) — report says GitHub closes both"
 # ============================================================================
 cat > "$TEST_DIR/bin/gh" <<'EOF'
