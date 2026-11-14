@@ -138,7 +138,7 @@ jargon_hit() {
     # Well-known pairs are plain words, not internal labels.
     text="$(printf '%s' "$1" | sed -E 's#\b(CI/CD|UI/UX|TCP/IP|I/O|HTTP/HTTPS|SQL/NoSQL|TLS/SSL|CPU/GPU|PR/MR)\b##g')"
     for re in '\bHOLD[[:space:]]*\((yours|mine|ours)[^)]*\)' '\b[A-Z][0-9]{1,2}-[a-z0-9]\b' '\b[A-Z]{2,}(/[A-Z]{2,})+\b' '\b([Oo]ption|[Oo]ptions|[Cc]hoice)[[:space:]]+[A-Z][0-9]{0,2}\b' '\b[A-Z][0-9]{1,2}[[:space:]]*(/|vs\.?|or)[[:space:]]*[A-Z][0-9]{1,2}\b'; do
-        m="$(printf '%s' "$text" | grep -oE -- "$re" | head -1 || true)"
+        m="$(grep -oE -- "$re" <<<"$text" | sed -n 1p || true)"
         [ -z "$m" ] || { printf '%s' "$m"; return 0; }
     done
     return 1
@@ -241,7 +241,8 @@ case "$cmd" in
         if diff <(grep -v '^Updated:' "$md") <(render_md | grep -v '^Updated:') >/dev/null; then exit 0; fi
         # Older needs-you.sh layout: same header and same open labels as the store
         # means a render wrote it, not a hand (it is rewritten at the next add/done).
-        if [ -e "$store" ] && head -n1 "$md" | grep -Eq '^## Needs you \([0-9]+ open\)$' \
+        IFS= read -r first_line < "$md" || true
+        if [ -e "$store" ] && [[ $first_line =~ ^'## Needs you ('[0-9]+' open)'$ ]] \
             && [ "$(grep -oE '^- \*\*[A-Za-z][0-9]+\*\*' "$md" | tr -d '* -' | sort | paste -sd,)" = "$(open_items | jq -r '[.[].label] | sort | join(",")')" ]; then
             exit 0
         fi
