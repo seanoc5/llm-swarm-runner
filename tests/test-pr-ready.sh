@@ -441,7 +441,7 @@ GH_CHECKS_STDERR="lint-and-test  fail  4m12s"
 rc=0; run_pr_ready || rc=$?
 GH_CHECKS_RC=0
 GH_CHECKS_STDERR=""
-[ "$rc" -eq 4 ] || red "expected exit 4 for failing CI, got $rc: $(cat "$TEST_DIR/out.log")"
+[ "$rc" -eq 7 ] || red "expected exit 7 for failing CI, got $rc: $(cat "$TEST_DIR/out.log")"
 gh_ready_called && red "expected gh pr ready NOT to run with failing CI checks"
 grep -qi 'REFUSED' "$TEST_DIR/out.log" || red "expected a REFUSED message in output: $(cat "$TEST_DIR/out.log")"
 green "failing CI checks refuse to ready the PR (the fand-etl PR #1063 bug this issue closes)"
@@ -455,7 +455,7 @@ GH_CHECKS_RC=0
 GH_CHECKS_STDOUT='build\tcancel\t24h0m0s\thttps://example/runs/1'
 GH_ROLLUP_JSON='{"statusCheckRollup":[{"conclusion":"CANCELLED","status":"COMPLETED"}]}'
 rc=0; run_pr_ready || rc=$?
-[ "$rc" -eq 4 ] || red "expected exit 4 for exit-0 + cancelled row, got $rc: $(cat "$TEST_DIR/out.log")"
+[ "$rc" -eq 7 ] || red "expected exit 7 for exit-0 + cancelled row, got $rc: $(cat "$TEST_DIR/out.log")"
 gh_ready_called && red "expected gh pr ready NOT to run for a cancelled-only run"
 grep -q 'gh run rerun' "$TEST_DIR/out.log" || red "expected the re-run hint: $(cat "$TEST_DIR/out.log")"
 grep -q 'SWARM_DRAFT_REASON: ci-cancelled' "$EDITED_BODY" || red "expected a ci-cancelled banner: $(cat "$EDITED_BODY" 2>/dev/null)"
@@ -464,7 +464,7 @@ green "exit-0 + fail row with a CANCELLED-only rollup refuses as ci-cancelled"
 printf '<!-- BLIND_MERGE_RISK: low -->\nsome change\n' > "$BODY_FILE"
 GH_ROLLUP_JSON='{"statusCheckRollup":[{"conclusion":"FAILURE","status":"COMPLETED"},{"conclusion":"CANCELLED","status":"COMPLETED"}]}'
 rc=0; run_pr_ready || rc=$?
-[ "$rc" -eq 4 ] || red "expected exit 4 for exit-0 + real failure row, got $rc"
+[ "$rc" -eq 7 ] || red "expected exit 7 for exit-0 + real failure row, got $rc"
 gh_ready_called && red "expected gh pr ready NOT to run"
 grep -q 'SWARM_DRAFT_REASON: ci-failing' "$EDITED_BODY" || red "expected ci-failing banner for a real failure: $(cat "$EDITED_BODY")"
 green "exit-0 + fail row with a genuine FAILURE refuses as ci-failing"
@@ -976,7 +976,7 @@ grep -qi 'via Actions-runs fallback' "$TEST_DIR/out.log" || red "expected the ou
 green "a token-permission error on gh pr checks falls back to Actions runs and readies on green"
 
 # ============================================================================
-heading "Test 21: token error, Actions-runs fallback sees a failing run — refuses (exit 4), gh pr ready NEVER runs"
+heading "Test 21: token error, Actions-runs fallback sees a failing run — refuses (exit 7), gh pr ready NEVER runs"
 # ============================================================================
 printf '<!-- BLIND_MERGE_RISK: low -->\nsome change\n' > "$BODY_FILE"
 make_fake_review 0
@@ -987,10 +987,10 @@ rc=0; run_pr_ready || rc=$?
 GH_CHECKS_RC=0
 GH_CHECKS_STDERR=""
 GH_RUNLIST_JSON="[]"
-[ "$rc" -eq 4 ] || red "expected exit 4 when the fallback sees a failing run, got $rc: $(cat "$TEST_DIR/out.log")"
+[ "$rc" -eq 7 ] || red "expected exit 7 when the fallback sees a failing run, got $rc: $(cat "$TEST_DIR/out.log")"
 gh_ready_called && red "expected gh pr ready NOT to run when the fallback sees a failing run"
 grep -qi 'failing CI checks (via Actions-runs fallback)' "$TEST_DIR/out.log" || red "expected a fallback-specific failing-CI message: $(cat "$TEST_DIR/out.log")"
-green "token error + a failing run via the fallback refuses to ready, same exit as a confirmed red (4)"
+green "token error + a failing run via the fallback refuses to ready, same exit as a confirmed red (7)"
 
 # ============================================================================
 heading "Test 22: token error, Actions-runs fallback itself can't decide — refuses with a DISTINCT exit (5), not 'failing CI checks'"

@@ -38,11 +38,29 @@ done
 # Issue #945: the conflict brief and pr-ready.sh must not tell workers to wait
 # on CI (ci-wait.sh ... until green); the old wording must not come back.
 for f in scripts/_conflict-brief.sh scripts/pr-ready.sh; do
+    # Issue #948: the pre-#947 pr-ready.sh wording ("Run 'scripts/ci-wait.sh $PR' to wait ...")
+    # slipped past the until-green regex; assert it is gone too.
+    if grep -qF "ci-wait.sh \$PR' to wait" "$ROOT/$f"; then
+        red "$f still tells workers to run ci-wait.sh \$PR to wait"
+    fi
     if grep -nE 'ci-wait\.sh.*until[^.]*green' "$ROOT/$f" >/dev/null; then
         red "$f tells workers to ci-wait.sh until green"
     fi
     green "$f: no 'ci-wait.sh ... until green' instruction"
 done
-grep -qF 'Workers: post the ci-handoff fyi and end' "$ROOT/scripts/pr-ready.sh" \
-    || red "pr-ready.sh CI-pending message is not addressed to workers"
-green "pr-ready.sh: CI-pending message addressed to workers"
+# Every CI-pending refusal (checks pending, fallback pending, no-checks-yet) must
+# carry the worker line, not just one of them.
+n=$(grep -cF 'Workers: post the ci-handoff fyi and end' "$ROOT/scripts/pr-ready.sh" || true)
+n_pending=$(grep -c 'refuse ci-pending 4' "$ROOT/scripts/pr-ready.sh" || true)
+[ "$n" -ge 3 ] && [ "$n" -eq "$n_pending" ] \
+    || red "pr-ready.sh: $n 'Workers:' lines for $n_pending ci-pending refusals (want all, >=3)"
+green "pr-ready.sh: all $n CI-pending messages addressed to workers"
+
+# Issue #948: exit 4 means pending/unreadable only; failing or cancelled CI is exit 7.
+grep -qE 'refuse ci-(failing|cancelled) 4' "$ROOT/scripts/pr-ready.sh" \
+    && red "pr-ready.sh gives failing/cancelled CI the pending exit code (4)"
+for f in worker.md worker-bare.md; do
+    grep -q 'exit 7' "$P/$f" || red "$f does not say exit 7 (CI failed/cancelled) is not a handoff"
+done
+grep -q 'exit 7' "$ROOT/scripts/_conflict-brief.sh" || red "conflict brief lacks exit 7"
+green "exit 7 (failed/cancelled CI) split from exit 4 and named in worker prompts + conflict brief"
