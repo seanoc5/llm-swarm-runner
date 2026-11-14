@@ -365,8 +365,21 @@ while true; do
                             [ -n "$WORKFLOW_COUNT" ] || WORKFLOW_COUNT="unknown"
                         fi
                         if [ "$WORKFLOW_COUNT" = "0" ]; then
-                            echo "ci-wait: PR #$PR: run-level cross-check is pending, but the repo has 0 Actions workflows, so no run can ever complete — trusting the green gh pr checks (external-app checks only)." >&2
-                            CI_FALLBACK_STATE="pass"
+                            # The count is read from the DEFAULT branch. A PR
+                            # that adds the repo's first workflow (or touches
+                            # any under .github/workflows/) will start its own
+                            # Actions run, so "pending" is real there. Fail
+                            # closed: an unreadable file list stays pending.
+                            if PR_WF_FILES="$(gh api --paginate "$API_REPO_PATH/pulls/$PR/files" --jq '.[] | .filename, (.previous_filename // empty)' 2>/dev/null)"; then
+                                if printf '%s\n' "$PR_WF_FILES" | grep -q '^\.github/workflows/'; then
+                                    echo "ci-wait: PR #$PR: 0 workflows on the default branch, but this PR touches .github/workflows/ — its own run may still be registering; staying pending." >&2
+                                else
+                                    echo "ci-wait: PR #$PR: run-level cross-check is pending, but the repo has 0 Actions workflows, so no run can ever complete — trusting the green gh pr checks (external-app checks only)." >&2
+                                    CI_FALLBACK_STATE="pass"
+                                fi
+                            else
+                                echo "ci-wait: PR #$PR: could not read the PR's file list; staying pending (fail closed)." >&2
+                            fi
                         fi
                     fi
                     case "$CI_FALLBACK_STATE" in

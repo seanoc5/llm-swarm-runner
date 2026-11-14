@@ -936,5 +936,16 @@ out="$(GH_WORKFLOW_COUNT=0 GH_CHECKS_OUT="$APPGREEN" \
     "$CI_WAIT" 42 5 2>&1)" || rc=$?
 check "0 workflows never masks a real run-level failure → exit 1" '[ "$rc" -eq 1 ]'
 
+rc=0
+out="$(GH_WORKFLOW_COUNT=0 GH_CHECKS_OUT="$APPGREEN" GH_RUNLIST_JSON='[]' \
+    GH_PR_FILES_JSON='["README.md",".github/workflows/ci.yml"]' \
+    CI_WAIT_POLL_SECONDS=1 "$CI_WAIT" 42 2 2>&1)" || rc=$?
+check "0 workflows on default branch but the PR adds .github/workflows/ci.yml → still pending, times out (exit 2)" '[ "$rc" -eq 2 ]'
+rc=0
+out="$(GH_WORKFLOW_COUNT=0 GH_CHECKS_OUT="$APPGREEN" GH_RUNLIST_JSON='[]' \
+    GH_PR_FILES_JSON='["README.md","src/a.py"]' \
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
+check "0 workflows and the PR touches no workflow file → still exit 0" '[ "$rc" -eq 0 ]'
+
 heading "Results: $PASS checks passed"
 green "All checks passed."
