@@ -200,6 +200,8 @@ tmux() {
 }
 BUSY=0
 worker_pane_busy() { [ "$BUSY" = 1 ]; }
+TRUST=0
+worker_pane_trust_dialog() { [ "$TRUST" = 1 ]; }
 
 cat > "$TEST_DIR/sideline-stub" <<STUB
 #!/usr/bin/env bash
@@ -250,6 +252,18 @@ grep -q -- "--reason waiting$" "$TEST_DIR/sideline-stub.log" || red "expected wa
 grep -q "requeue.sh 5" "$(find "$COORD_INBOX_DIR" -maxdepth 1 -name '*.md' | head -1)" || red "note should say how to resume"
 rm -f "$WT/.swarm/tasks/outbox/m.md" "$WT/.swarm/tasks/processing/t2.md" "$COORD_INBOX_DIR"/*.md
 green "mid-task with a decision-needed message -> waiting, coordinator note says how to resume"
+
+# issue #950: a pane parked on the trust dialog is reported by name, not stalled.
+rm -f "$WT/.swarm/sidelined" "$TEST_DIR/sideline-stub.log"
+echo t > "$WT/.swarm/tasks/processing/t3.md"
+TRUST=1
+sideline_idle_pass
+grep -q -- "--reason trust_dialog$" "$TEST_DIR/sideline-stub.log" || red "expected trust_dialog: $(cat "$TEST_DIR/sideline-stub.log")"
+grep -q "watch.sideline .*issue=5 reason=trust_dialog" "$EVENTS_LOG" || red "watch.sideline reason=trust_dialog not logged"
+[ "$(inbox_notes)" -eq 1 ] || red "a trust-dialog sideline must write one coordinator note"
+grep -qi "trust this folder" "$(find "$COORD_INBOX_DIR" -maxdepth 1 -name '*.md' | head -1)" || red "note must name the trust dialog"
+TRUST=0; rm -f "$WT/.swarm/tasks/processing/t3.md" "$COORD_INBOX_DIR"/*.md   # marker stays, as after the waiting case
+green "pane on the trust dialog -> reason=trust_dialog, coordinator note names the dialog (#950)"
 
 # Wake pass: marker present, window gone.
 LIVE=0; : > "$EVENTS_LOG"

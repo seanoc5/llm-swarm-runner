@@ -6238,6 +6238,7 @@ worker_inbox_brief() {
 }
 
 # sideline_reason <worktree-dir>: finished | stalled | waiting
+# (sideline_idle_pass adds trust_dialog, issue #950, from the pane itself)
 sideline_reason() {
     local wt_dir="$1" f
     compgen -G "$wt_dir/.swarm/tasks/processing/*.md" >/dev/null || { echo finished; return; }
@@ -6254,6 +6255,7 @@ sidelined_worker_body() {
     local issue="$1" reason="$2" wt_dir="$3" idle_min="$4" what
     case "$reason" in
         waiting) what="it was waiting on a decision (unprocessed decision-needed message in its outbox/)" ;;
+        trust_dialog) what="its Claude session was parked on the \"trust this folder\" dialog (\"Quick safety check: Is this a project you created or one you trust?\"), which nothing answers, so the brief never started (issue #950). sandbox.sh pre-accepts trust for the worktree path and its symlink-resolved path on every launch, so a repeat means the per-container config lacks it: check ~/.claude-sandbox-configs/swarm-*-iss-$issue.claude.json for a projects entry with hasTrustDialogAccepted" ;;
         *)       what="it stopped mid-task with no output (its claimed brief is now in .swarm/tasks/sidelined/)" ;;
     esac
     printf 'Worker for issue #%s was sidelined after %s idle minutes: %s. Its window and container are stopped to free the slot; worktree, branch and PR are kept (%s).\n\nNothing brings it back except a new brief. To resume, answer or redirect it with `requeue.sh %s <brief-file>` from the project dir; the watcher wakes it when a slot is free (provision-worker.sh --wake). If the work is moot, archive the files under %s/.swarm/tasks/sidelined/ and say why.\n' \
@@ -6287,7 +6289,13 @@ sideline_idle_pass() {
         [ "$idle" -ge "$WATCH_SIDELINE_SECS" ] || continue
         worker_pane_busy "$win" && continue
 
-        reason="$(sideline_reason "$wt_dir")"
+        # issue #950: a pane parked on the trust dialog is not a stalled
+        # worker; name it so the coordinator doesn't just requeue into it.
+        if worker_pane_trust_dialog "$win"; then
+            reason=trust_dialog
+        else
+            reason="$(sideline_reason "$wt_dir")"
+        fi
         if [ "$DRY_RUN" = "1" ]; then
             echo "[DRY] would sideline issue #$issue (reason=$reason idle=${idle}s)"
             continue
@@ -8504,6 +8512,20 @@ worker_pane_busy() {
     content="$(tmux capture-pane -e -t "$SESSION_NAME:$win.0" -p 2>/dev/null)" || return 1
     clean="$(printf '%s\n' "$content" | LC_ALL=C sed -E '/^(\x1b\[[0-9;?]*[A-Za-z])*[[:space:]]*❯/ s/\x1b\[((0|1|3|4|5|7|9|22|23|24|27|29|3[0-79]|4[0-79]|9[0-7]|10[0-7]);)*2(;[0-9;]*)?m([^\x1b]|\x1b\[[349][0-9;]*m)*//g' | LC_ALL=C sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g; s/\x1b[()][AB012]//g; s/\r/\n/g')"
     printf '%s\n' "$clean" | LC_ALL=C grep -qE "$WORKER_COMPACT_BUSY_PATTERN"
+}
+
+# worker_pane_trust_dialog <window>
+#
+# (issue #950) Returns 0 when the window's pane is parked on Claude Code's
+# workspace-trust dialog ("Quick safety check: Is this a project you created
+# or one you trust?"). Nothing answers it, so the pane just sits there, and
+# the idle sweep used to report that as a generic stall. ANSI-stripped, local
+# capture-pane only.
+worker_pane_trust_dialog() {
+    local win="$1"
+    tmux capture-pane -t "$SESSION_NAME:$win.0" -p 2>/dev/null \
+        | LC_ALL=C sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\xc2\xa0/ /g' \
+        | LC_ALL=C grep -qE 'Quick safety check|Yes, I trust this folder|Do you trust the files in this folder'
 }
 
 # worker_pane_composer_text <window>
