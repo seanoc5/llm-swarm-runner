@@ -82,8 +82,19 @@ push_commits 2; git -C "$T/seed" fetch -q origin
 echo x >> "$T/run/f"
 rc=0; msg="$(checkout_ff_to_origin "$T/run")" || rc=$?
 eq "dirty runner: warning only (rc 1)" "$rc" "1"
+case "$msg" in *"uncommitted changes"*) ok "dirty runner: message names uncommitted changes";; *) bad "dirty runner message: $msg";; esac
 git -C "$T/run" checkout -q -- f; git -C "$T/run" reset -q --hard origin/master  # drop the earlier diverged commit
 rc=0; msg="$(checkout_ff_to_origin "$T/run")" || rc=$?
 eq "clean runner: fast-forwarded" "$rc" "0"
+
+# Fix round: run from a linked worktree, RUNNER_DIR is the main checkout, not the worktree.
+grep -q 'runner_checkout_dir "\$SCRIPT_DIR"' "$ROOT/scripts/swarm-merge.sh" && ok "swarm-merge resolves runner via runner_checkout_dir" || bad "swarm-merge not using runner_checkout_dir"
+mkdir -p "$T/run/scripts"
+git -C "$T/run" worktree add -q -b wt-test "$T/wt" 2>/dev/null
+mkdir -p "$T/wt/scripts"
+eq "main checkout: runner dir is itself" "$(runner_checkout_dir "$T/run/scripts")" "$(cd "$T/run" && pwd)"
+eq "linked worktree: runner dir is main checkout" "$(runner_checkout_dir "$T/wt/scripts")" "$(cd "$T/run" && pwd)"
+mkdir -p "$T/plain/scripts"
+eq "not a git repo: falls back to script_dir/.." "$(runner_checkout_dir "$T/plain/scripts")" "$T/plain"
 
 exit "$fail"

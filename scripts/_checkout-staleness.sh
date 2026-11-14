@@ -81,3 +81,17 @@ checkout_same_dir() {
     b="$(cd "$2" 2>/dev/null && pwd -P)" || return 1
     [ "$a" = "$b" ]
 }
+
+# runner_checkout_dir <script_dir>: the shared runner checkout that owns this
+# script. From a linked worktree (wt-issue-N) "<script_dir>/.." is the worktree,
+# so resolve the repo's main worktree via the git common dir instead; fall back
+# to "<script_dir>/.." when that is not a normal .git directory.
+runner_checkout_dir() {
+    local sd="$1" common
+    if common="$(git -C "$sd" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
+        && [ "$(basename "$common")" = ".git" ]; then
+        dirname "$common"
+    else
+        (cd "$sd/.." && pwd)
+    fi
+}
