@@ -371,7 +371,7 @@ while true; do
                             # Actions run, so "pending" is real there. Fail
                             # closed: an unreadable file list stays pending.
                             if PR_WF_FILES="$(gh api --paginate "$API_REPO_PATH/pulls/$PR/files" --jq '.[] | .filename, (.previous_filename // empty)' 2>/dev/null)"; then
-                                if printf '%s\n' "$PR_WF_FILES" | grep -q '^\.github/workflows/'; then
+                                if grep -q '^\.github/workflows/' <<<"$PR_WF_FILES"; then
                                     echo "ci-wait: PR #$PR: 0 workflows on the default branch, but this PR touches .github/workflows/ — its own run may still be registering; staying pending." >&2
                                 else
                                     echo "ci-wait: PR #$PR: run-level cross-check is pending, but the repo has 0 Actions workflows, so no run can ever complete — trusting the green gh pr checks (external-app checks only)." >&2
