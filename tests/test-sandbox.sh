@@ -390,13 +390,14 @@ else
     fail "build-cache init script only sets directory when project left it unset" "guard missing"
 fi
 
-# #914: caching is switched on only when org.gradle.caching is unset.
+# #914: caching is switched on only when org.gradle.caching is unset and no remote cache is configured.
 if grep -q 'gradleProperty("org.gradle.caching").isPresent' "$REPO_ROOT/scripts/gradle-init/build-cache.init.gradle.kts" \
-    && grep -q "if (!cachingDecided)" "$REPO_ROOT/scripts/gradle-init/build-cache.init.gradle.kts" \
-    && grep -B1 'isBuildCacheEnabled = true' "$REPO_ROOT/scripts/gradle-init/build-cache.init.gradle.kts" | grep -q 'if (!cachingDecided)'; then
-    pass "build-cache init script enables caching only when org.gradle.caching is unset" ""
+    && grep -q 'buildCache.remote != null' "$REPO_ROOT/scripts/gradle-init/build-cache.init.gradle.kts" \
+    && grep -q 'if (!cachingDecided && !remoteConfigured)' "$REPO_ROOT/scripts/gradle-init/build-cache.init.gradle.kts" \
+    && grep -B1 'isBuildCacheEnabled = true' "$REPO_ROOT/scripts/gradle-init/build-cache.init.gradle.kts" | grep -q 'if (!cachingDecided && !remoteConfigured)'; then
+    pass "build-cache init script enables caching only when org.gradle.caching is unset and no remote cache" ""
 else
-    fail "build-cache init script enables caching only when org.gradle.caching is unset" "guard missing or unconditional enable"
+    fail "build-cache init script enables caching only when org.gradle.caching is unset and no remote cache" "guard missing or unconditional enable"
 fi
 
 # SANDBOX_DEP_CACHE + SANDBOX_DEP_PROXY_URL together: the two knobs mount at

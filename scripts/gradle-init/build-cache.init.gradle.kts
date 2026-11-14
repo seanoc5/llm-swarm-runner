@@ -12,7 +12,8 @@
 //
 // Project settings win (#914): this runs after settings.gradle(.kts), so it
 // only sets the local directory when the project left it unset and did not
-// disable the local cache. It turns build caching on only when org.gradle.caching is unset.
+// disable the local cache. It turns build caching on only when org.gradle.caching is unset
+// and the project configures no remote build cache.
 //
 // Skipped silently when the directory is missing or not writable (e.g.
 // owned by another UID), so the build behaves as if this script were absent.
@@ -29,11 +30,14 @@ if (buildCacheDir != null) {
         // Workers invoke ./gradlew directly, so there is no flag to inject.
         // Turn caching on only when nobody has decided: a project or user
         // that set org.gradle.caching (true or false, via gradle.properties,
-        // -P or -D) keeps its choice, so =false stays off and a remote cache
-        // is never activated behind its back (#914).
+        // -P or -D) keeps its choice, so =false stays off. A project that
+        // configures a remote build cache (buildCache { remote { ... } }) is
+        // also left alone: turning caching on would start using that remote
+        // cache, which is the project's call to make (#914).
         val cachingDecided = providers.gradleProperty("org.gradle.caching").isPresent ||
             System.getProperty("org.gradle.caching") != null
-        if (!cachingDecided) {
+        val remoteConfigured = buildCache.remote != null
+        if (!cachingDecided && !remoteConfigured) {
             gradle.startParameter.isBuildCacheEnabled = true
         }
         buildCache {
