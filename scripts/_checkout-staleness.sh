@@ -72,3 +72,12 @@ checkout_ff_to_origin() {
     echo "checkout $dir cannot fast-forward to origin/$def (diverged local commits?) — not updated"
     return 1
 }
+
+# checkout_same_dir <a> <b>: true when both name the same directory (symlinks
+# resolved), so a runner-project merge doesn't fast-forward the checkout twice.
+checkout_same_dir() {
+    local a b
+    a="$(cd "$1" 2>/dev/null && pwd -P)" || return 1
+    b="$(cd "$2" 2>/dev/null && pwd -P)" || return 1
+    [ "$a" = "$b" ]
+}

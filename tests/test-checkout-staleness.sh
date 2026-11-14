@@ -70,4 +70,20 @@ eq "diverged: ff refused" "$rc" "1"
 grep -q 'stale_checkout_pass || true' "$ROOT/scripts/coordinator-watch.sh" && ok "watcher timer loop runs the pass" || bad "watcher does not run the pass"
 grep -q 'checkout_ff_to_origin "\$MAIN_WT"' "$ROOT/scripts/swarm-merge.sh" && ok "swarm-merge fast-forwards after merge" || bad "swarm-merge missing ff step"
 
+# Issue #949: runner checkout is also fast-forwarded after a merge elsewhere.
+grep -q 'checkout_ff_to_origin "\$RUNNER_DIR"' "$ROOT/scripts/swarm-merge.sh" && ok "swarm-merge fast-forwards the runner checkout" || bad "swarm-merge missing runner ff step"
+grep -q 'checkout_same_dir "\$MAIN_WT" "\$RUNNER_DIR"' "$ROOT/scripts/swarm-merge.sh" && ok "runner-project merge skips second ff" || bad "swarm-merge missing same-dir guard"
+checkout_same_dir "$T/run" "$T/run/." && ok "same dir detected via different spelling" || bad "same dir not detected"
+ln -s "$T/run" "$T/runlink"
+checkout_same_dir "$T/run" "$T/runlink" && ok "symlinked path counts as same dir" || bad "symlink not resolved"
+checkout_same_dir "$T/run" "$T/seed" && bad "different dirs reported same" || ok "different dirs differ"
+# Non-runner project merge: runner (clean, default branch) fast-forwards; dirty/other-branch only warn.
+push_commits 2; git -C "$T/seed" fetch -q origin
+echo x >> "$T/run/f"
+rc=0; msg="$(checkout_ff_to_origin "$T/run")" || rc=$?
+eq "dirty runner: warning only (rc 1)" "$rc" "1"
+git -C "$T/run" checkout -q -- f; git -C "$T/run" reset -q --hard origin/master  # drop the earlier diverged commit
+rc=0; msg="$(checkout_ff_to_origin "$T/run")" || rc=$?
+eq "clean runner: fast-forwarded" "$rc" "0"
+
 exit "$fail"
