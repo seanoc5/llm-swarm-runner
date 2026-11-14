@@ -23,6 +23,20 @@ red()     { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 yellow()  { printf '\033[33m%s\033[0m\n' "$*"; }
 heading() { printf '\n\033[1;34m=== %s ===\033[0m\n' "$*"; }
 
+# git shim (issue #941, test 16h): defined up front so every `git` call below
+# resolves to a function defined before its first use (shellcheck SC2218). It
+# is a pass-through unless GIT_SHIM_CLAIM_BRIEF names a brief file, in which
+# case it moves that brief into processing/ right after a `git -C <dir> rev-list`,
+# i.e. inside the early-restart race window.
+GIT_SHIM_CLAIM_BRIEF=""
+git() {
+    command git "$@"; local grc=$?
+    if [ -n "$GIT_SHIM_CLAIM_BRIEF" ] && [ "${1:-}" = "-C" ] && [ "${3:-}" = "rev-list" ] && [ -f "$GIT_SHIM_CLAIM_BRIEF" ]; then
+        mv "$GIT_SHIM_CLAIM_BRIEF" "$PROCESSING_DIR/"
+    fi
+    return $grc
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCH="$SCRIPT_DIR/../scripts/coordinator-watch.sh"
 [ -x "$WATCH" ] || red "coordinator-watch.sh not executable: $WATCH"
@@ -1567,15 +1581,9 @@ check "early restart: brief left in inbox/ for the woken listener" "1" "$(find "
 # kill -> abort: no kill, no wake, marker removed. The git shim moves the brief
 # right after the clean-check's rev-list, i.e. inside the race window.
 reset941
-git() {
-    command git "$@"; local grc=$?
-    if [ "${1:-}" = "-C" ] && [ "${3:-}" = "rev-list" ] && [ -f "$BRIEF941" ]; then
-        mv "$BRIEF941" "$PROCESSING_DIR/"
-    fi
-    return $grc
-}
+GIT_SHIM_CLAIM_BRIEF="$BRIEF941"
 maybe_worker_deliver_brief "$WIN"
-unset -f git
+GIT_SHIM_CLAIM_BRIEF=""
 check "claimed before kill: window NOT killed" "cli" "$(worker_pane_state "$WIN")"
 check "claimed before kill: no provision --wake call" "0" "$(wc -l < "$PROVISION_LOG" | tr -d '[:space:]')"
 check "claimed before kill: sideline marker removed" "absent" "$([ -e "$WT_DIR/.swarm/sidelined" ] && echo present || echo absent)"
