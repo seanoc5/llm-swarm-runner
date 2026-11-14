@@ -126,6 +126,14 @@ reset; coord_recycle_pass
 expect "injector fails once then succeeds: 2 tries, no flag" 'checklist_failed .*try=1/3' 2
 grep -q recycle_inject_failed "$EVENTS_LOG" && red "flagged despite eventual success"
 [ ! -e "$T/inbox-recycle_failed.md" ] || red "inbox item written despite eventual success"
+
+# Issue #955: llm-start.sh exit 3 (input box holds text) -> no retries, distinct note.
+printf '#!/usr/bin/env bash\necho "$1" >> "%s/prompts"\nexit 3\n' "$T" > "$LLM_START"
+reset; coord_recycle_pass
+expect "injector exits 3: one attempt, no retries" 'watch\.recycle_inject_failed .*rc=3 tries=1' 1
+[ "$(grep -c 'coord\.recycle\.checklist_failed' "$EVENTS_LOG")" = 1 ] || red "exit 3 was retried"
+grep -q 'input box already holds text' "$T/inbox-recycle_failed.md" || red "exit-3 note missing input-box wording"
+grep -q 'session is empty' "$T/inbox-recycle_failed.md" && red "exit-3 note wrongly says the session is empty"
 printf '%s\n' "$good_start" > "$LLM_START"
 
 grep -q '^run_coord_recycle_loop() {' "$WATCH" || red "loop function missing"
