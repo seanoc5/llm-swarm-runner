@@ -148,9 +148,11 @@ check "add refuses a --background under 12 words" "2" "$(gadd --title "Rebase th
 check "add refuses slash-joined acronyms (the 2026-11-14 stub)" "2" "$(gadd --title "SI/SR check re-base" --background "$BG")"
 check "add refuses 'HOLD (yours, date)'" "2" "$(gadd --title "HOLD (yours, 2026-11-13) on the rebase" --background "$BG")"
 check "add refuses option codes in the background" "2" "$(gadd --title "Pick a rebase approach" --background "Two ways to rebase the check were offered earlier today; B3 rewrites the history while A4-a keeps every commit, and nothing merges until one is chosen.")"
+check "add accepts CI/CD (a well-known pair)" "0" "$(gadd --title "Fix the CI/CD cache" --background "$BG")"
+check "add refuses a capitalised 'Option B'" "2" "$(gadd --title "Pick Option B for the rebase" --background "$BG")"
 check "add accepts PR numbers and plain words" "0" "$(gadd --title "Rebase the check on PR #2387" --background "$BG")"
 out="$("$NY" render --project "$G")"
-check "render leads with 'What this is:'" "1" "$(grep -c '^  What this is: Loads the county' <<<"$out")"
+check "render leads each of the 2 items with 'What this is:'" "2" "$(grep -c '^  What this is: Loads the county' <<<"$out")"
 check "check: a list written by add is clean" "0" "$("$NY" check --project "$G" >/dev/null 2>&1; echo $?)"
 printf '# Needs you\n- **A1** HOLD: nothing to do\n' > "$G/.swarm/needs-you.md"
 check "check: a hand-edited list is flagged" "3" "$("$NY" check --project "$G" >/dev/null 2>&1; echo $?)"
@@ -217,7 +219,6 @@ out="$(stop "$FX/incident-start-load.txt" false)"
 case "$(jq -r .reason <<<"$out")" in "Inbox: 1 item(s)"*"Reply lint failed"*) got=both ;; *) got="$(jq -r .reason <<<"$out")" ;; esac
 check "doorbell and lint ride one block" "both" "$got"
 
-echo "all reply-lint checks passed"
 
 # ── Stop hook: hand-written list and stale prompt (issue #964) ───────────────
 W="$T/wproj"; mkdir -p "$W/.swarm"; printf '# Needs you\n- **A1** stub\n' > "$W/.swarm/needs-you.md"
@@ -242,4 +243,4 @@ echo two > "$LS/prompts/coordinator.md"
 case "$(lstop | jq -r .reason)" in *"Coordinator prompt changed"*"Standing list"*) got=yes ;; *) got=no ;; esac
 check "changed prompt: one nudge naming the Standing list" "yes" "$got"
 check "...and it does not repeat for the same change" "" "$(lstop)"
-
+echo "all reply-lint checks passed"

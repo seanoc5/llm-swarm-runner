@@ -133,9 +133,11 @@ is_placeholder() {
 # no "HOLD (yours, date)" stubs, no slash-joined acronyms (SI/SR). PR/issue numbers
 # (#2387) and single tech names (H2, p95) pass.
 jargon_hit() {
-    local m
-    for re in '\bHOLD[[:space:]]*\((yours|mine|ours)[^)]*\)' '\b[A-Z][0-9]{1,2}-[a-z0-9]\b' '\b[A-Z]{2,}(/[A-Z]{2,})+\b' '\b(option|options|choice)[[:space:]]+[A-Z][0-9]{0,2}\b' '\b[A-Z][0-9]{1,2}[[:space:]]*(/|vs\.?|or)[[:space:]]*[A-Z][0-9]{1,2}\b'; do
-        m="$(printf '%s' "$1" | grep -oE -- "$re" | head -1 || true)"
+    local m text
+    # Well-known pairs are plain words, not internal labels.
+    text="$(printf '%s' "$1" | sed -E 's#\b(CI/CD|UI/UX|TCP/IP|I/O|HTTP/HTTPS|SQL/NoSQL|TLS/SSL|CPU/GPU|PR/MR)\b##g')"
+    for re in '\bHOLD[[:space:]]*\((yours|mine|ours)[^)]*\)' '\b[A-Z][0-9]{1,2}-[a-z0-9]\b' '\b[A-Z]{2,}(/[A-Z]{2,})+\b' '\b([Oo]ption|[Oo]ptions|[Cc]hoice)[[:space:]]+[A-Z][0-9]{0,2}\b' '\b[A-Z][0-9]{1,2}[[:space:]]*(/|vs\.?|or)[[:space:]]*[A-Z][0-9]{1,2}\b'; do
+        m="$(printf '%s' "$text" | grep -oE -- "$re" | head -1 || true)"
         [ -z "$m" ] || { printf '%s' "$m"; return 0; }
     done
     return 1
