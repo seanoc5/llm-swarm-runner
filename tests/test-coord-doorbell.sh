@@ -112,6 +112,29 @@ printf '#!/usr/bin/env bash\ncat >/dev/null\nsleep 30\n' > "$T/slow"; chmod +x "
 check "courier timeout: exit 1" 1 "$(run slow 2)"
 check "courier timeout: reason says timed out" 1 "$(grep -c 'timed out' "$EV")"
 
+# #936: a courier that delivered and then hung must count as delivered (the
+# fallback paste would be a duplicate wake in the operator's draft).
+make_stub hang_after_ok "emit_use tu1 $(q "$TARGET") $(q "$EXPECTED_MSG")" "emit_result tu1 '$OKRES'" "sleep 30"
+check "timeout after delivery: exit 0 (no duplicate fallback)" 0 "$(run hang_after_ok 2)"
+check "timeout after delivery: delivery logged, no failure logged" "1 0" "$(printf '%s %s' "$(grep -c 'coord.wake.doorbell target' "$EV")" "$(grep -c doorbell_failed "$EV")")"
+make_stub hang_mid_line "emit_use tu1 $(q "$TARGET") $(q "$EXPECTED_MSG")" "emit_result tu1 '$OKRES'" "printf '{\"type\":\"assistant\",\"mess'" "sleep 30"
+check "timeout mid-write (truncated last line) after delivery: exit 0" 0 "$(run hang_mid_line 2)"
+make_stub hang_after_use "emit_use tu1 $(q "$TARGET") $(q "$EXPECTED_MSG")" "sleep 30"
+check "timeout with call but no result: exit 1" 1 "$(run hang_after_use 2)"
+check "timeout with call but no result: reason says timed out" 1 "$(grep -c 'timed out' "$EV")"
+
+# #936: a long, multi-line wake must be copied exactly by the courier. An exact
+# copy is delivered; a truncated copy (what a long text risks) falls back.
+LONG_PROMPT="$T/long-prompt.txt"
+for i in $(seq 1 120); do printf 'Outcome %03d landed for iss-%03d; sweep, merge and report. "quoted" $x `y`\n' "$i" "$i"; done > "$LONG_PROMPT"
+LONG_MSG="[swarm wake doorbell, no reply needed] $(cat "$LONG_PROMPT")"
+run_long() { : > "$EV"; COORD_DOORBELL_CLAUDE="$T/$1" EVENTS_LOG="$EV" COORD_DOORBELL_TIMEOUT_SECS=20 "$DOORBELL" "$PROJ" "$LONG_PROMPT" 2>/dev/null; echo $?; }
+check "long wake (>6KB, multi-line, quotes): sanity size" 1 "$([ ${#LONG_MSG} -gt 6000 ] && echo 1 || echo 0)"
+make_stub long_ok "emit_use tu1 $(q "$TARGET") $(q "$LONG_MSG")" "emit_result tu1 '$OKRES'"
+check "long wake copied exactly: exit 0" 0 "$(run_long long_ok)"
+make_stub long_trunc "emit_use tu1 $(q "$TARGET") $(q "${LONG_MSG:0:4000}")" "emit_result tu1 '$OKRES'"
+check "long wake truncated by courier: exit 1 (falls back to paste)" 1 "$(run_long long_trunc)"
+
 : > "$EV"
 check "missing claude binary: exit 1" 1 "$(COORD_DOORBELL_CLAUDE=/nonexistent/claude EVENTS_LOG="$EV" "$DOORBELL" "$PROJ" "$PROMPT" >/dev/null 2>&1; echo $?)"
 

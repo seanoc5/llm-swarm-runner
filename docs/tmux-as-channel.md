@@ -209,7 +209,7 @@ When in doubt, use the file bus or `gh`. Reach for tmux only when the agent fund
 ## Coordinator wake doorbell (issue #421, ADR 0005 Option 1)
 
 For a claude coordinator, the watcher's wake is a harness `SendMessage` (via
-`scripts/coord-doorbell.sh`, session name `swarm-<project>`), not a paste into
+`scripts/coord-doorbell.sh`, session name `swarm-<basename>-<8-hex path hash>`, see `scripts/_coord-name.sh`), not a paste into
 the composer. If it cannot deliver, `coord.wake.doorbell_failed` and
 `coord.wake.fallback` appear in `.swarm/events.log` and the guarded paste runs.
 gemini/codex/agy coordinators and `COORD_DOORBELL=0` always use the guarded

@@ -18,7 +18,10 @@
 # stream-json transcript must contain EXACTLY ONE SendMessage tool_use, to the right
 # session, text equal to the expected message, AND the tool_result carrying that call's tool_use_id with
 # success:true. Anything else (courier crash or timeout, no live coordinator
-# of that name, paraphrased text, success:false) exits 1 with the reason on
+# of that name, paraphrased text, success:false) exits 1. A courier timeout is
+# not itself a failure: the partial transcript is still read, so a courier that
+# delivered and then hung counts as delivered (no duplicate fallback paste).
+# Exits 1 with the reason on
 # stderr and a coord.wake.doorbell_failed event, so llm-start.sh can fall
 # back to the guarded send-keys paste. A dropped doorbell is only latency:
 # the file bus (inbox/outbox/done) is untouched.
@@ -84,13 +87,21 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 OUT="$WORK/courier.jsonl"
+CLEAN="$WORK/clean.jsonl"
 # Prompt on stdin: --tools is variadic and would swallow a positional prompt.
 ( cd "$WORK" && printf '%s' "$COURIER_PROMPT" | timeout "$TIMEOUT_SECS" "$CLAUDE_BIN" -p \
     --model "$MODEL" --dangerously-skip-permissions --no-session-persistence \
     --output-format stream-json --verbose --tools SendMessage ) > "$OUT" 2> "$WORK/courier.err"
 rc=$?
-[ "$rc" = 124 ] && fail "courier timed out after ${TIMEOUT_SECS}s"
-# rc != 0 may still carry a usable transcript; the checks below decide.
+# rc != 0 (including a 124 timeout) may still carry a usable transcript: a
+# courier that delivered and then hung must not get a duplicate fallback paste
+# in the operator's draft. The checks below decide; a timeout only changes the
+# failure wording.
+# A kill mid-write can leave a truncated last line, which would make `jq -s`
+# reject the whole file; keep only the lines that parse.
+jq -cR 'fromjson? // empty' "$OUT" > "$CLEAN" 2>/dev/null
+TIMED_OUT=""
+[ "$rc" = 124 ] && TIMED_OUT="courier timed out after ${TIMEOUT_SECS}s; "
 
 # Exactly one SendMessage call in the whole transcript, to the expected
 # recipient with the expected text. Zero calls, two calls (even if one is
@@ -103,8 +114,8 @@ SEND_ID="$(jq -rs --arg to "$TARGET" --arg exp "$EXPECTED" '
          and (.[0].input.to == $to)
          and (((.[0].input.message // "") | rtrimstr("\n")) == $exp)
          and ((.[0].id // "") != "")
-      then .[0].id else "" end' "$OUT" 2>/dev/null)"
-[ -n "$SEND_ID" ] || fail "courier did not make exactly one SendMessage call with the expected message to $TARGET (courier rc=$rc: $(head -c 200 "$WORK/courier.err" | tr '\n' ' '))"
+      then .[0].id else "" end' "$CLEAN" 2>/dev/null)"
+[ -n "$SEND_ID" ] || fail "${TIMED_OUT}courier did not make exactly one SendMessage call with the expected message to $TARGET (courier rc=$rc: $(head -c 200 "$WORK/courier.err" | tr '\n' ' '))"
 
 # The tool_result that answers THAT call (matching tool_use_id), not the first
 # result in the transcript.
@@ -112,10 +123,10 @@ RESULT="$(jq -rs --arg id "$SEND_ID" '
     [ .[] | select(.type == "user") | .message.content[]?
       | select(.type == "tool_result" and .tool_use_id == $id) | .content
       | if type == "array" then map(.text // "") | join("") else . end ]
-    | if length == 1 then .[0] else "" end' "$OUT" 2>/dev/null)"
+    | if length == 1 then .[0] else "" end' "$CLEAN" 2>/dev/null)"
 if [ "$(printf '%s' "$RESULT" | jq -r '.success // false' 2>/dev/null)" != "true" ]; then
-    fail "SendMessage reported not delivered: $(printf '%s' "$RESULT" | jq -r '(.message // .) | .[0:160]' 2>/dev/null)"
+    fail "${TIMED_OUT}SendMessage reported not delivered: $(printf '%s' "$RESULT" | jq -r '(.message // .) | .[0:160]' 2>/dev/null)"
 fi
 
-log_event coord.wake.doorbell "target=$TARGET via=sendmessage"
+log_event coord.wake.doorbell "target=$TARGET via=sendmessage${TIMED_OUT:+ courier_timeout=1}"
 exit 0
