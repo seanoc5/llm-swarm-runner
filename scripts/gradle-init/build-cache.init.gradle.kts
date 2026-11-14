@@ -12,7 +12,7 @@
 //
 // Project settings win (#914): this runs after settings.gradle(.kts), so it
 // only sets the local directory when the project left it unset and did not
-// disable the local cache. It still turns caching on via startParameter.
+// disable the local cache. It turns build caching on only when org.gradle.caching is unset.
 //
 // Skipped silently when the directory is missing or not writable (e.g.
 // owned by another UID), so the build behaves as if this script were absent.
@@ -25,11 +25,17 @@ val buildCacheDir: File? = System.getenv("SANDBOX_BUILD_CACHE")
     ?.takeIf { it.isDirectory && it.canWrite() }
 
 if (buildCacheDir != null) {
-    // Workers invoke ./gradlew directly, so there is no flag to inject;
-    // enable caching here rather than requiring org.gradle.caching=true in
-    // every project.
-    gradle.startParameter.isBuildCacheEnabled = true
     gradle.settingsEvaluated {
+        // Workers invoke ./gradlew directly, so there is no flag to inject.
+        // Turn caching on only when nobody has decided: a project or user
+        // that set org.gradle.caching (true or false, via gradle.properties,
+        // -P or -D) keeps its choice, so =false stays off and a remote cache
+        // is never activated behind its back (#914).
+        val cachingDecided = providers.gradleProperty("org.gradle.caching").isPresent ||
+            System.getProperty("org.gradle.caching") != null
+        if (!cachingDecided) {
+            gradle.startParameter.isBuildCacheEnabled = true
+        }
         buildCache {
             local {
                 // Respect the project: a settings script that already set a
