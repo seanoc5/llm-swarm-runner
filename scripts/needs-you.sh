@@ -154,7 +154,7 @@ case "$cmd" in
         printf '%s' "$do_" | grep -E '`[^`]+`|```|https://' >/dev/null \
             || die "--do has no command or https URL. Put the command in backticks, or give the URL and the click path. Refusing: $do_"
         if hits="$("$LINT" --project "$project" <<<"$title $do_ $rec" || true)" && [ -n "$hits" ]; then
-            die "item points elsewhere instead of carrying its action (${hits%%:*}); put the full command in --do. Refusing."
+            die "item points elsewhere instead of carrying its action (${hits%%:*}); restate the item in plain words (what it is, the options, your recommendation) instead of pointing at its label. Refusing."
         fi
         # An empty field is left out, not stored as "none" (issue #801).
         ! is_placeholder "$risk" || risk=""

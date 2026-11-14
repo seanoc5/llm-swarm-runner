@@ -1,0 +1,20 @@
+# Known-bad carry-over strings from docs/research/issue-645-reporting-rules.md section 2 (issue #646).
+# Columns (TAB-separated): row, date, project, expect, text.
+#   expect=flag  the carryover rule is meant to catch it
+#   expect=miss  no rule here can: the failure is a coined phrase, a missing opener, or the research
+#                doc records only a description of the reply (rows 1-2), not its text
+# Text is the reply fragment the research doc quotes; where it quotes none, the doc's own description.
+# Rows 7 (command above) is the existing backref rule, kept here so the whole 13 are scored together.
+1	2026-08-29	civicstrata	miss	PR-status report written in internal shorthand: jargon-heavy, hot-reader oriented (no verbatim text recorded)
+2	2026-09-22	civicstrata	miss	Two findings: the X gap, and the Y caveat.
+3	2026-09-23	fand-app	flag	Forest dual-write ruling (carry-over, A recommended)
+4	2026-10-03	fand-app	miss	On #1378: the 'no' is deliberate; see below.
+5	2026-10-04	corpusminder-spring	flag	Pending: your d) and the 12 drafts.
+6	2026-10-06	corpusminder-spring	miss	Resync: widen, retype or wait.
+7	2026-10-06	llm-swarm-runner	flag	Run the command above.
+8	2026-10-11	corpusminder-spring	miss	`i) go`: browser-check #1215 and #1212
+9	2026-10-15	SAMlytics	flag	Needs you: n1 below, plus h1 and h2 from earlier
+10	2026-10-15	civicstrata	flag	Pending your approval: follow-ups A–D from earlier
+11	2026-10-16	corpusminder-spring	flag	Run the sudo/pg_hba fix from my M1-M3 report.
+12	2026-10-16	SAMlytics	miss	Open: the `?` keyboard-shortcuts overlay, plus a menu item.
+13	2026-10-16	SAMlytics	flag	Tailwind plan, carve order in §4: review it
