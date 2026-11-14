@@ -170,7 +170,7 @@
 #      can tell a red PR from a merely pending one: fix and push, don't hand off.
 #   1  usage / gh error resolving the PR body
 #
-# issue #602: every refusal (exits 2, 4 and 5) also writes a marked
+# issue #602: every refusal (exits 2, 4, 5 and 7) also writes a marked
 # "⏳ Still a draft" banner at the top of the PR body: the reason, the
 # head SHA and the time. Before that, the reason lived only in the
 # worker's transcript, and the worker usually exited right after. A
