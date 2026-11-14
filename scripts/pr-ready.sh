@@ -158,6 +158,13 @@
 #      either (`gh pr view` for the head SHA, or `gh run list`, failed).
 #      Distinct from exit 4 on purpose — this means "unknown", not
 #      "confirmed failing" (issue #560).
+#   6  refused — WORKER_PR_READY_CHECK_CMD (issue #494; optional, unset =
+#      skipped) exited non-zero or timed out
+#      (WORKER_PR_READY_CHECK_TIMEOUT, default 1800s). Runs once, before
+#      self-review and the CI gate, in the caller's cwd — and only when
+#      that checkout's HEAD equals the PR head SHA; otherwise it is skipped
+#      with one stderr line (never a refusal), so a coordinator running this
+#      from its own checkout doesn't test unrelated code.
 #   1  usage / gh error resolving the PR body
 #
 # issue #602: every refusal (exits 2, 4 and 5) also writes a marked
@@ -362,6 +369,8 @@ refuse() {
                           next="coordinator (watcher, automatic) — re-runs pr-ready.sh $PR — waiting on CI status becoming readable" ;;
             ci-cancelled) text="CI run was cancelled or timed out on ${sha:0:7} at $ts (no check ever ran to a result)."
                           next="coordinator — 'gh run rerun <run-id>', then re-run pr-ready.sh $PR — waiting on the re-run finishing" ;;
+            check-failing) text="the project's pre-ready check (WORKER_PR_READY_CHECK_CMD) failed on ${sha:0:7} at $ts."
+                          next="$who — fix the failure, push, re-run pr-ready.sh $PR — waiting on nothing" ;;
             ci-failing)   text="CI failed on ${sha:0:7} at $ts."
                           next="$who — push a CI fix, re-run pr-ready.sh $PR — waiting on nothing" ;;
         esac
@@ -437,6 +446,59 @@ REVIEW_MODEL_ARGS=()
 if [ "$RISK" = "low" ] && [ "${GREEN_REVIEW:-0}" = "1" ]; then
     REVIEW_KIND=green
     REVIEW_MODEL_ARGS=(--model "${GREEN_REVIEW_MODEL:-haiku}")
+fi
+
+# issue #494: optional full check, once, right before readying. Projects keep
+# the per-session check (WORKER_CHECK_CMD) fast and put the slow suite here.
+# Unset/empty = no change in behaviour. Runs in the caller's cwd, but only when
+# that checkout's HEAD is the PR head: the coordinator also runs this script
+# from its own checkout (coordinator-watch.sh parked_green / ci_failing notes),
+# where the check would test unrelated code and give a false pass or fail. On a
+# mismatch it is skipped with a stderr line, never refused. A last-refusal
+# banner of ci-* on this same commit means this script already got past this
+# gate on it (the check runs before self-review and the CI gate), so a
+# ready-sweep retry doesn't re-run a slow suite.
+# CORRECTION: that inference was unsound (the banner may come from a run that
+# skipped the check), so the skip now needs an explicit pass record instead:
+# `.git/.../swarm-ready-check-pass` holding `pass sha=<full head sha>`, written
+# only after the check ran and exited 0.
+READY_CHECK_CMD="${WORKER_PR_READY_CHECK_CMD:-}"
+if [ -n "$READY_CHECK_CMD" ]; then
+    READY_CHECK_PR_HEAD="$(head_sha)"
+    READY_CHECK_CWD_HEAD="$(git rev-parse HEAD 2>/dev/null || true)"
+    # Pass record keyed by full head SHA, inside the checkout's git dir (never
+    # tracked, gone with the worktree). A ci-* refusal banner is NOT proof the
+    # check ran: it can come from a run that skipped the check (cwd not at the
+    # PR head) or before the knob was set.
+    READY_CHECK_PASS_FILE="$(git rev-parse --git-path swarm-ready-check-pass 2>/dev/null || echo /nonexistent/swarm-ready-check-pass)"
+    if [ -z "$READY_CHECK_PR_HEAD" ] || [ "$READY_CHECK_CWD_HEAD" != "$READY_CHECK_PR_HEAD" ]; then
+        READY_CHECK_PR_SHORT="${READY_CHECK_PR_HEAD:0:7}"
+        echo "pr-ready: pre-ready check skipped: cwd is not at PR head ${READY_CHECK_PR_SHORT:-(unknown)}" >&2
+    elif [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+        # Uncommitted edits would be checked (and a pass recorded) as if they were the pushed head.
+        echo "pr-ready: pre-ready check skipped: working tree has uncommitted changes (checked code would not be PR head ${READY_CHECK_PR_HEAD:0:7})" >&2
+    elif [ -f "$READY_CHECK_PASS_FILE" ] && [ "$(cat "$READY_CHECK_PASS_FILE" 2>/dev/null)" = "pass sha=$READY_CHECK_PR_HEAD" ]; then
+        echo "pr-ready: ready check already passed on ${READY_CHECK_PR_HEAD:0:7} (pass record found) — not re-running"
+    else
+        READY_CHECK_TIMEOUT="${WORKER_PR_READY_CHECK_TIMEOUT:-1800}"
+        READY_CHECK_LOG="$(mktemp)"
+        echo "pr-ready: running WORKER_PR_READY_CHECK_CMD (started $(date +%T), timeout ${READY_CHECK_TIMEOUT}s): $READY_CHECK_CMD"
+        set +e
+        timeout -k 10 "$READY_CHECK_TIMEOUT" bash -c "$READY_CHECK_CMD" >"$READY_CHECK_LOG" 2>&1
+        READY_CHECK_RC=$?
+        set -e
+        if [ "$READY_CHECK_RC" -ne 0 ]; then
+            echo "pr-ready: REFUSED — WORKER_PR_READY_CHECK_CMD exited $READY_CHECK_RC (124 = timed out after ${READY_CHECK_TIMEOUT}s). Output tail:" >&2
+            tail -n 20 "$READY_CHECK_LOG" | sed 's/^/    /' >&2
+            rm -f "$READY_CHECK_LOG"
+            refuse check-failing 6
+        fi
+        rm -f "$READY_CHECK_LOG"
+        # Explicit pass record, written only here (the check ran and exited 0).
+        mkdir -p "$(dirname "$READY_CHECK_PASS_FILE")" 2>/dev/null || true
+        printf 'pass sha=%s\n' "$READY_CHECK_PR_HEAD" > "$READY_CHECK_PASS_FILE" 2>/dev/null || true
+        echo "pr-ready: ready check PASS (exit 0)."
+    fi
 fi
 
 SKIP_REVIEW=0

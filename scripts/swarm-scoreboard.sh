@@ -228,8 +228,8 @@ AGG=$(cat "${LOGS[@]}" | jq -s '
         first_try_pass_rate:
             ((map(select(passed and (.retried | not))) | length) / length),
         retries: (map(select(.retried)) | length),
-        checked: (map(select(.check_exit != null)) | length),
-        unchecked: (map(select(.check_exit == null)) | length),
+        checked: (map(select((.check_exit | type) == "number")) | length),
+        unchecked: (map(select((.check_exit | type) != "number")) | length),
         avg_duration_s: ((map(.duration_seconds) | add / length) * 10 | round / 10)
       })
     | sort_by(-.first_try_pass_rate, -.tasks)')
