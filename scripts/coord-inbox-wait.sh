@@ -58,6 +58,8 @@ if [[ "$heartbeat" =~ ^[0-9]+$ ]]; then heartbeat=$((10#$heartbeat)); else heart
 busy_max="${COORD_HOOK_BUSY_MAX_SECS:-3600}"
 # shellcheck source=scripts/_coord-inbox-batch.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_coord-inbox-batch.sh"
+# shellcheck source=scripts/_watch-pause.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_watch-pause.sh"
 # Must match coord-hook.sh and coordinator-watch.sh.
 template="${COORD_INBOX_NUDGE_TEMPLATE:-Inbox: %N item(s) in .swarm/coord-inbox/ — read and triage them (see prompts/coordinator.md \"Inbox\").}"
 
@@ -106,7 +108,7 @@ while :; do
     count="$CIB_TOTAL"
     wake_count=$((CIB_URGENT + CIB_BATCHED))
     now="$(date +%s)"
-    if [ "$count" -gt 0 ] && [ "$wake_count" -gt 0 ] && coord_should_ring "$last_rang" "$now"; then
+    if [ "$count" -gt 0 ] && [ "$wake_count" -gt 0 ] && ! watch_pause_active "$swarm" && coord_should_ring "$last_rang" "$now"; then
         read -r s e 2>/dev/null < "$state_file" || s=""
         if ! { [ "$s" = busy ] && [[ "$e" =~ ^[0-9]+$ ]] && [ $((now - e)) -le "$busy_max" ]; }; then
             woke="$(coord_woke_for "$inbox" "$last_rang")"

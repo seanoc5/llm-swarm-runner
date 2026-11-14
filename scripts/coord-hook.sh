@@ -87,6 +87,8 @@ template="${COORD_INBOX_NUDGE_TEMPLATE:-Inbox: %N item(s) in .swarm/coord-inbox/
 now="$(date +%s)"
 # shellcheck source=scripts/_coord-inbox-batch.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_coord-inbox-batch.sh"
+# shellcheck source=scripts/_watch-pause.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_watch-pause.sh"
 # shellcheck source=scripts/_window-flags.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_window-flags.sh"
 SESSION_NAME="${SESSION_NAME:-llm-$(basename "$project")}"
@@ -211,6 +213,7 @@ case "$event" in
         [ "$active" != "true" ] && dead="$(watcher_dead_warning)"
         woke="$(coord_woke_for "$inbox" "$last_rang")"
         if [ "$active" != "true" ] && [ "$count" -gt 0 ] && [ $((CIB_URGENT + CIB_BATCHED)) -gt 0 ] \
+                && ! watch_pause_active "$swarm" \
                 && coord_should_ring "$last_rang" "$now"; then
             printf '%s %s\n' "$now" "$count" > "$rang_file" 2>/dev/null || true
             # Same debounce clock the watcher stamps when it rings.

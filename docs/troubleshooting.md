@@ -42,6 +42,7 @@ Common issues and their resolutions. If you hit something not covered here, plea
 - [Coordinator & Workers](#coordinator--workers)
   - [Coordinator pane shows old/stale output](#coordinator-pane-shows-oldstale-output)
   - [Watcher pane misbehaving after a long-lived session](#watcher-pane-misbehaving-after-a-long-lived-session-issue-296)
+  - [Pausing a swarm (deploy window, finalizing work)](#pausing-a-swarm-issue-457)
   - [Worker isn't picking up briefs](#worker-isnt-picking-up-briefs)
   - [Tasks stuck in `processing/`](#tasks-stuck-in-processing)
   - [Ctrl-Z accidentally suspended claude inside a worker](#ctrl-z-accidentally-suspended-claude-inside-a-worker)
@@ -275,6 +276,29 @@ Before issue #405, nothing auto-restarted the daemon afterward — a dead watche
 **Is my watcher even running?** (issue #756) `$LLM_SWARM_DIR/scripts/watcher-check.sh /opt/work/myproject` prints nothing when it is, and a `WARN` with the restart command (exit 3) when it died. `--status` always prints one line. The pid in `.swarm/coordinator-watch.state` is the signal; the file is written once at startup, so its age says when the watcher started, not whether it lives. To stop a watcher on purpose without nagging, Ctrl-C or `kill` it (it leaves `.swarm/watcher-stopped`) or run `watcher-check.sh --pause <dir>` first; either silences the WARN for `WATCHER_PAUSE_MAX_SECS` (3 days) and starting the watcher clears it. A crash, `kill -9` or a killed tmux pane leaves no marker and does warn.
 
 Separately, `AUTO_COMPACT_REQUIRE_WINDOW`/`WORKER_COMPACT_REQUIRE_WINDOW` (default on) refuse to inject `/compact` whenever the pane's actual context-window size can't be confirmed at all (a probe/statusline schema mismatch), rather than silently trusting a flat token threshold that could be a much lower percentage of the real window than intended — see `coordinator-watch.sh`'s own header comment for the full rationale, including why this deliberately does *not* second-guess a threshold that already scaled correctly against a known window size (an earlier design that did was rejected in code review for fighting `AUTO_COMPACT_PCT`'s own intentional scaling on large context windows).
+
+### Pausing a swarm (issue #457)
+
+You want the coordinator left alone for a while (finalizing work, a deploy). Use the declared pause; the obvious gestures do not work.
+
+```bash
+$LLM_SWARM_DIR/scripts/watch-pause.sh 45m --reason "deploy"   # quiet pause, ends by itself in 45 minutes
+$LLM_SWARM_DIR/scripts/watch-pause.sh --status                # PAUSED (quiet) until 14:05 (38m02s left) — deploy
+$LLM_SWARM_DIR/scripts/watch-pause.sh --resume                # end it early
+```
+
+Run it from the project directory, or pass `--project DIR`. The duration takes `90`, `90s`, `30m` or `2h` and defaults to 60 minutes. A repeat call replaces the earlier pause. The pause is a file, `<project>/.swarm/watch-paused`, read fresh by the watcher, the Stop hook and the inbox waiter, so starting and ending it needs no restart.
+
+- **Quiet (default)**: the watcher keeps polling and keeps writing `coord-inbox/` notes, but nothing rings the coordinator. Held wakes show as `coord.wake.defer reason=paused` in the pane and `events.log`. When the pause ends, the next hold-retry tick delivers one nudge with the true item count; no completion is lost. `COORD_MODE=split` swarms start no work run during the pause.
+- **`--full`**: also stops the timer sweeps (PR polling, reaps, compaction, worker delivery). Outcomes are still recorded in the inbox. Use it when nothing should be touched at all.
+- The pane shows `coord.pause` and `coord.resume` lines; `coord.resume reason=expired` means it ran out on its own.
+
+What does not work, and why:
+
+- **Ctrl-Z in the watcher pane** only used to echo `^Z`. The watcher is the pane's own process, so its process group is orphaned, and the kernel discards `SIGTSTP` for an orphaned group. The watcher now turns the key into a plain byte and prints a hint pointing here. Running the watcher as a job inside an interactive shell was not done: the respawn guard and stale check identify the watcher by the pane's start command, and a shell pane would hide a dead watcher.
+- **`kill -STOP <watcher pid>`** is not a pause. In a scratch tmux pane running the watcher's own shape, the call returned 0 and the pane process stayed in state `S` and kept running, while the same signal stopped an ordinary child of an interactive shell. Why it is ignored there is not established (checked only inside a Docker container on kernel 6.8, not on bare metal). Even where it works it would stop one process: the watcher's timer loops, echo pipeline and doorbell subshells are separate processes, and nothing would resume it. A stopped watcher also looks alive in the pane.
+- **Restarting the watcher** loses completions: its startup baseline treats everything already in `done/` as old, so anything that finished while it was down never wakes the coordinator. Edits to `.swarm/.env` are read once at startup, so they cannot pause it either.
+- **`flock .swarm/coord-wake.lock sleep 3600`** works but stalls the main loop about a minute per wake attempt. Use `watch-pause.sh` instead.
 
 ### Worker isn't picking up briefs
 
