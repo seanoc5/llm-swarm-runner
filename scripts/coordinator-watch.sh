@@ -8455,13 +8455,23 @@ coord_recycle_pass() {
         ( flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 9 && cd "$PROJECT_DIR" && NON_INTERACTIVE=1 "$LLM_START" "$COORD_RECYCLE_PROMPT" ) 9>"$COORD_WAKE_LOCK" || rc=$?
         [ "$rc" = "0" ] && break
         log_event coord.recycle.checklist_failed "rc=$rc trigger=$reason try=$try/$tries"
+        # llm-start.sh exit 3 = the input box already holds text (an unsent draft
+        # or the checklist that did not submit). Retrying only re-collides with
+        # it, so stop instead of burning the remaining attempts.
+        [ "$rc" = "3" ] && break
         [ "$try" -ge "$tries" ] && break
         try=$((try + 1))
         sleep "$COORD_RECYCLE_INJECT_RETRY_SECS"
     done
     if [ "$rc" != "0" ]; then
         log_event watch.recycle_inject_failed "rc=$rc tries=$try trigger=$reason"
-        coord_inbox_write recycle_failed "The watcher recycled this coordinator session (/clear, trigger=$reason) but could not inject the startup checklist after $try attempt(s) (last rc=$rc). The session is empty. Fix: run the Initial Startup Checklist now to rebuild context." || true
+        local note
+        if [ "$rc" = "3" ]; then
+            note="The watcher recycled this coordinator session (/clear, trigger=$reason) but the startup checklist was NOT submitted: the start script reported the input box already holds text (the checklist or an unsent draft may be waiting there; it can also mean the target was a read-only pane). The session was cleared, so its context is gone. Fix: check the input box, send or clear any waiting text, then run the Initial Startup Checklist now to rebuild context."
+        else
+            note="The watcher recycled this coordinator session (/clear, trigger=$reason) but could not inject the startup checklist after $try attempt(s) (last rc=$rc). The session is empty. Fix: run the Initial Startup Checklist now to rebuild context."
+        fi
+        coord_inbox_write recycle_failed "$note" || true
     fi
     return 0
 }
