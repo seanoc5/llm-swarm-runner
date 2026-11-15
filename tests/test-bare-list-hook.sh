@@ -49,4 +49,12 @@ printf '%s\n' '{"type":"user","message":{"content":"hi"}}' \
 check "transcript fallback blocks a bare list before a tool call (text, tool, text)" "2" "$(hook "$(jq -cn --arg p "$T/t3.jsonl" '{transcript_path:$p}')" | cut -d'|' -f1)"
 check "hook through a symlink still finds the lint" "2" "$(ln -s "$HOOK" "$T/link.sh"; printf '%s' "$(j $'1. a')" | "$T/link.sh" >/dev/null 2>&1; echo $?)"
 check "garbage stdin: allowed" "0" "$(printf 'not json' | "$HOOK" >/dev/null 2>&1; echo $?)"
+# count-bare-list-replies.sh: counts bare replies, honors fences and the date window.
+COUNT="$ROOT/scripts/count-bare-list-replies.sh"
+printf '%s\n' \
+    '{"type":"assistant","timestamp":"2026-11-01T00:00:00Z","message":{"content":[{"type":"text","text":"x\n1. a\n2. b"}]}}' \
+    '{"type":"assistant","timestamp":"2026-11-01T00:00:00Z","message":{"content":[{"type":"text","text":"ok\n```\n1. a\n```"}]}}' \
+    '{"type":"assistant","timestamp":"2026-10-01T00:00:00Z","message":{"content":[{"type":"text","text":"1. old"}]}}' > "$T/c.jsonl"
+check "count: all dates" "replies=3 bare=2 pct=66.7" "$("$COUNT" "$T")"
+check "count: --since window" "replies=2 bare=1 pct=50.0" "$("$COUNT" --since 2026-11-01 "$T")"
 echo "all passed"
