@@ -151,12 +151,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # draft marked "unverified"; a status answer re-queries the PR and leads with a
 # one-line status).
 # 2026-11-15 (#612): worker 26000 -> 26400, worker-bare 12800 -> 13100, coordinator
-# 34200 -> 35000, shared 6000 -> 6100, work 25100 -> 25800. Draft stops meaning "held":
+# 34200 -> 35200, shared 6000 -> 6100, work 25100 -> 25800. Draft stops meaning "held":
 # the hold-label rules (label names, who lifts, old-style holds still honoured) replace
 # the draft-as-hold text in the worker and coordinator prompts; net growth is the label
 # vocabulary, ~300-800 bytes per file.
 WORKER_MAX="${WORKER_MD_MAX_BYTES:-26400}"
-COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-35000}"
+COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-35200}"
 BARE_MAX="${WORKER_BARE_MD_MAX_BYTES:-13100}"   # issue #510 trial prompt; ~7.5KB is script-parsed contract
 SHARED_MAX="${COORD_SHARED_MD_MAX_BYTES:-6100}"   # issue #767 split prompts
 WORK_MAX="${COORD_WORK_MD_MAX_BYTES:-25800}"

@@ -35,7 +35,7 @@ Missing marker → "🟡 medium — risk rating not provided by worker; review b
 
 Then quote the PR's **Next:** line (if two disagree, the newest writer's wins; say so), **Bottom line**, **Your move**, and any `#### Decide` table verbatim so the operator can triage from your pane. Older bodies: quote whatever summary lines exist. A body missing the layers entirely is a policy violation — summarize it yourself in 1–2 sentences.
 
-**Self-review verdict** (🟡/🔴): workers ready via `scripts/pr-ready.sh`, which posts a `SWARM_SELF_REVIEW` marker. `APPROVE` → nothing extra. `APPROVE_WITH_CAVEATS: <text>` → surface the caveat; if you queue a fix, apply the hold label first. `BLOCK: <text>` → flag prominently (the operator may override from a shell: `swarm-merge.sh N --override-review`). Skipped or failed self-review → recommend reading the diff before merging.
+**Self-review verdict** (🟡/🔴): workers ready via `scripts/pr-ready.sh`, which posts a `SWARM_SELF_REVIEW` marker. `APPROVE` → nothing extra. `APPROVE_WITH_CAVEATS: <text>` → surface the caveat; if you queue a fix, apply the hold label first. `BLOCK: <text>` → flag prominently (the operator may override from a shell: remove label swarm-hold:review, then `swarm-merge.sh N --override-review`). Skipped or failed self-review → recommend reading the diff before merging.
 
 ### "Environmental" is a worker's claim, not your finding
 

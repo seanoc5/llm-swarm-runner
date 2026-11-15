@@ -233,7 +233,7 @@ Missing marker → "🟡 medium — risk rating not provided by worker; review b
 
 Then quote the PR's **Next:** line (if two disagree, the newest writer's wins; say so), **Bottom line**, **Your move**, and any `#### Decide` table verbatim so the operator can triage from your pane. Older bodies: quote whatever summary lines exist. A body missing the layers entirely is a policy violation — summarize it yourself in 1–2 sentences.
 
-**Self-review verdict** (🟡/🔴): workers ready via `scripts/pr-ready.sh`, which posts a `SWARM_SELF_REVIEW` marker. `APPROVE` → nothing extra. `APPROVE_WITH_CAVEATS: <text>` → surface the caveat; if you queue a fix, apply the hold label first. `BLOCK: <text>` → flag prominently (the operator may override from a shell: `swarm-merge.sh N --override-review`). Skipped or failed self-review → recommend reading the diff before merging.
+**Self-review verdict** (🟡/🔴): workers ready via `scripts/pr-ready.sh`, which posts a `SWARM_SELF_REVIEW` marker. `APPROVE` → nothing extra. `APPROVE_WITH_CAVEATS: <text>` → surface the caveat; if you queue a fix, apply the hold label first. `BLOCK: <text>` → flag prominently (the operator may override from a shell: remove label swarm-hold:review, then `swarm-merge.sh N --override-review`). Skipped or failed self-review → recommend reading the diff before merging.
 
 ### "Environmental" is a worker's claim, not your finding
 
@@ -269,7 +269,7 @@ Opt-in via `SWARM_AUTOMERGE_LOW=1` (default off; shell env > `<project>/.swarm/.
 
 Merge only via `scripts/swarm-merge.sh <N> --auto-low`, which re-enforces gates 0–5 and 7 — never raw `gh pr merge --auto`. **Give the Bash call an explicit timeout covering `CI_WAIT_TIMEOUT_SECONDS`** (default 570s; tool max 600000ms); the CI wait runs inside it, and the default tool timeout kills it into a silent non-merge. `--auto-low` refuses `--override-review` and `--override-migration-gate`; overrides belong to a human running plain `swarm-merge.sh <N>`. Report `Auto-merged PR #555 (SWARM_AUTOMERGE_LOW=1, all gates passed).` or name the failed gate (`Not auto-merged: Gate 0 (authorship) refused — PR carries a coordinator-authored commit, routing to operator.`). Exit 3 means the PR conflicts and a resolve-conflicts brief went to its worker; re-run the same command once the worker has pushed and CI is green.
 
-**Self-review as machinery:** `scripts/self-review-pr.sh <N> --post` runs a fresh-context review and posts `<!-- SWARM_SELF_REVIEW: <verdict> -->` (exit 0 APPROVE / 3 CAVEATS / 2 BLOCK / 4 skipped). `swarm-merge.sh` refuses a latest-BLOCK PR without `--override-review`, and collision/out-of-order without `--override-migration-gate` (or `MIGRATION_GATE=0`).
+**Self-review as machinery:** `scripts/self-review-pr.sh <N> --post` runs a fresh-context review and posts `<!-- SWARM_SELF_REVIEW: <verdict> -->` (exit 0 APPROVE / 3 CAVEATS / 2 BLOCK / 4 skipped). `swarm-merge.sh` refuses a latest-BLOCK PR without `--override-review` (a BLOCK also carries label swarm-hold:review, removed first), and collision/out-of-order without `--override-migration-gate` (or `MIGRATION_GATE=0`).
 
 ### Auto-merge medium-risk PRs
 
