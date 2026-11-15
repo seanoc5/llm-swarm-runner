@@ -29,8 +29,8 @@ while IFS= read -r -d '' f; do
         text="$(printf '%s' "$b64" | base64 -d)"
         total=$((total + 1))
         # Cheap pre-filter; the lint decides (it skips fenced code).
-        printf '%s\n' "$text" | grep -qE '^[[:space:]]*[0-9]+[.)][[:space:]]' || continue
-        [ -n "$(printf '%s\n' "$text" | "$lint" --only bare-list 2>/dev/null)" ] && bare=$((bare + 1))
+        grep -qE '^[[:space:]]*[0-9]+[.)][[:space:]]' <<<"$text" || continue
+        [ -n "$("$lint" --only bare-list <<<"$text" 2>/dev/null)" ] && bare=$((bare + 1))
     done < <(jq -r --arg s "$since" --arg u "$until" '
         select(.type=="assistant") | select((.timestamp // "")[0:10] as $d | $d >= $s and $d <= $u)
         | [.message.content[]? | select(.type=="text") | .text] | join("\n") | select(length>0) | @base64' "$f" 2>/dev/null)
