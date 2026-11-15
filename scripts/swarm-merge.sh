@@ -1327,6 +1327,17 @@ if [ "$HOUSEKEEP_ONLY" != 1 ] && [ -n "$PR_NUM" ] && [ -f "$SCRIPT_DIR/_checkout
   else
     echo "[ff] $(c_amber "⚠ $FF_MSG")"
   fi
+  # issue #949: every swarm's workers and watchers execute from the runner
+  # checkout, so a merge in any other project must refresh it too. Skipped when
+  # the merged project *is* the runner (already done above).
+  RUNNER_DIR="${LLM_SWARM_HOME:-$(runner_checkout_dir "$SCRIPT_DIR")}"
+  if [ -d "$RUNNER_DIR" ] && ! checkout_same_dir "$MAIN_WT" "$RUNNER_DIR"; then
+    if FF_MSG="$(checkout_ff_to_origin "$RUNNER_DIR")"; then
+      echo "[ff] runner: $FF_MSG"
+    else
+      echo "[ff] $(c_amber "⚠ runner: $FF_MSG")"
+    fi
+  fi
 fi
 
 echo
