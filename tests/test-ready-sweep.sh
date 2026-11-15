@@ -38,8 +38,11 @@ if [ "\$1 \$2" = "pr checks" ]; then
     tail -n +2 "\$f"; exit "\$(head -n1 "\$f")"
 fi
 [ "\${GH_LIST_FAILS:-0}" = "1" ] && exit 1
-printf '%s\n' "\$*" | grep -q -- '--draft' || { echo "expected --draft" >&2; exit 1; }
-cat "$FIXTURE"
+# issue #612: the sweep lists ALL open PRs (a refused PR is now un-drafted and
+# labelled), not only drafts. Fixtures that omit isDraft are drafts.
+printf '%s\n' "\$*" | grep -q -- '--draft' && { echo "unexpected --draft (issue #612: sweep reads all open PRs)" >&2; exit 1; }
+printf '%s\n' "\$*" | grep -q -- 'isDraft,labels' || { echo "expected isDraft,labels in --json" >&2; exit 1; }
+jq 'map(if has("isDraft") then . else . + {isDraft: true} end)' "$FIXTURE"
 EOF
 chmod +x "$TEST_DIR/shims/gh"
 
@@ -213,5 +216,50 @@ run_sweep || red "expected exit 0: $(cat "$TEST_DIR/out.log")"
 run_sweep --dry-run || red "dry run failed"
 [ "$(cat "$TEST_DIR/out.log")" = "$want" ] || red "dry run lost ci-cancelled lines"
 green "cancelled drafts reported with re-run hint (moved head silent), never retried"
+
+
+# ============================================================================
+# issue #612: a refused PR is un-drafted and carries swarm-hold:ci, so the
+# sweep must retry it by banner whatever its draft state, and the draft-only
+# checks (parked-green) must not claim a ready PR or a labelled one.
+# ============================================================================
+heading "Test 10 (issue #612): a NON-draft PR labelled swarm-hold:ci with a ci-pending banner is retried; drafts parked the old way still are"
+cat > "$FIXTURE" <<'JSON'
+[{"number": 11, "isDraft": false, "labels": [{"name": "swarm-hold:ci"}], "body": "<!-- SWARM_DRAFT_REASON: ci-pending sha=abc -->\nbody"},
+ {"number": 12, "isDraft": true, "labels": [], "body": "<!-- SWARM_DRAFT_REASON: ci-unknown sha=abc -->\nbody"},
+ {"number": 13, "isDraft": false, "labels": [{"name": "swarm-hold:ci"}], "body": "<!-- SWARM_DRAFT_REASON: ci-failing sha=abc -->\nbody"},
+ {"number": 14, "isDraft": false, "labels": [{"name": "swarm-hold:review"}], "body": "<!-- SWARM_DRAFT_REASON: review-block sha=abc -->\nbody"}]
+JSON
+run_sweep || red "expected exit 0: $(cat "$TEST_DIR/out.log")"
+[ "$(sort "$READY_LOG" | tr '\n' ' ')" = "11 12 " ] || red "expected pr-ready on 11 (labelled, ready) and 12 (old-style draft): $(tr '\n' ' ' < "$READY_LOG")"
+grep -qx '#13 ci-failing: needs a fix push (sha=abc)' "$TEST_DIR/out.log" || red "expected ci-failing report for the labelled PR #13: $(cat "$TEST_DIR/out.log")"
+green "banner-driven retries and reports cover labelled non-drafts and old-style drafts alike"
+
+heading "Test 11 (issue #612): parked-green is for banner-less DRAFTS only — a ready PR and a labelled draft are not reported"
+G='[{"name":"unit","status":"COMPLETED","conclusion":"SUCCESS"}]'
+cat > "$FIXTURE" <<JSON
+[{"number": 71, "isDraft": true,  "labels": [], "headRefOid": "a71", "headRefName": "fix/issue-71", "body": "body", "statusCheckRollup": $G},
+ {"number": 72, "isDraft": false, "labels": [], "headRefOid": "a72", "headRefName": "fix/issue-72", "body": "body", "statusCheckRollup": $G},
+ {"number": 73, "isDraft": true,  "labels": [{"name": "swarm-hold:coordinator"}], "headRefOid": "a73", "headRefName": "fix/issue-73", "body": "body", "statusCheckRollup": $G}]
+JSON
+run_sweep || red "expected exit 0: $(cat "$TEST_DIR/out.log")"
+[ "$(cat "$TEST_DIR/out.log")" = "#71 parked-green: banner-less draft, green CI (risk=unknown, issue=71, sha=a71)" ] \
+    || red "expected only draft #71: $(cat "$TEST_DIR/out.log")"
+green "ready and label-held PRs are not parked-green"
+
+heading "Test 12 (issue #612): stale-wait covers drafts and label-held PRs, not an ordinary ready PR"
+cat > "$FIXTURE" <<'JSON'
+[{"number": 81, "isDraft": false, "labels": [{"name": "swarm-hold:coordinator"}], "body": "> **Next:** coordinator — send brief — waiting on #1461 merges"},
+ {"number": 82, "isDraft": false, "labels": [], "body": "**Next:** worker iss-9 — rebase — waiting on #1461 merges"},
+ {"number": 83, "isDraft": true, "labels": [], "body": "**Next:** worker iss-9 — rebase — waiting on #1461 merges"}]
+JSON
+cat > "$STATES" <<'JSON'
+{"1461": {"state": "MERGED", "mergedAt": "2026-10-15T06:52:00Z"}}
+JSON
+run_sweep || red "expected exit 0: $(cat "$TEST_DIR/out.log")"
+want='#81 stale-wait: waiting on #1461, which merged at 2026-10-15T06:52:00Z
+#83 stale-wait: waiting on #1461, which merged at 2026-10-15T06:52:00Z'
+[ "$(cat "$TEST_DIR/out.log")" = "$want" ] || red "unexpected stale-wait output: $(cat "$TEST_DIR/out.log")"
+green "stale waits reported for drafts and label-held PRs only"
 
 green "ALL TESTS PASSED"

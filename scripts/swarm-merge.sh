@@ -81,10 +81,18 @@
 #                         `master`). Never auto-merges feature-to-feature.
 #   Gate 5 (draft)        `isDraft` is false.
 #
+# issue #612, every merge (plain and --auto-*, checked before any gate): refuse
+# a PR carrying a `swarm-hold*` label (swarm-hold:ci / :review / :coordinator /
+# :operator, see scripts/_hold-label.sh), and re-check it under the action lock.
+# No override flag; lift the hold by removing the label. The Gate 5 draft check
+# and the Gate 8 banner check below stay, so PRs held the old way (draft +
+# banner, no label) are still refused.
+#
 # --auto-medium is the same unattended path for a 🟡 PR, for projects that
 # set SWARM_AUTOMERGE_MEDIUM=1 (refused outright otherwise). It runs every
 # --auto-low gate above, with Gate 1 expecting the exact medium marker, plus:
-#   Gate 8 (hold)         no `> ⛔ **COORDINATOR HOLD**` banner in the body.
+#   Gate 8 (hold)         no `> ⛔ **COORDINATOR HOLD**` banner in the body (the
+#                         hold LABEL is refused earlier, for every merge, #612).
 #   Gate 9 (independent APPROVE on head) the latest SWARM_SELF_REVIEW marker
 #                         with actor=coordinator or actor=operator says bare
 #                         APPROVE and its head=<sha> is the PR's current head
@@ -551,6 +559,8 @@ retarget_stacked_children() {
 # worker to send it to. Never returns.
 # shellcheck source=_conflict-brief.sh
 . "$SCRIPT_DIR/_conflict-brief.sh"
+# shellcheck source=_hold-label.sh
+. "$SCRIPT_DIR/_hold-label.sh"
 send_conflict_brief_or_die() {
   local detail="$1" wt base out rc=0
   echo "       PR #$PR_NUM has merge conflicts ($detail)."
@@ -634,7 +644,7 @@ fi
 
 if [ "$HOUSEKEEP_ONLY" = 0 ]; then
   # Inspect PR state.
-  PR_JSON=$(gh pr view "$PR_NUM" --json state,mergeable,mergeStateStatus,headRefName,title,closingIssuesReferences,body,isDraft,reviewDecision,baseRefName,headRefOid)
+  PR_JSON=$(gh pr view "$PR_NUM" --json state,mergeable,mergeStateStatus,headRefName,title,closingIssuesReferences,body,isDraft,labels,reviewDecision,baseRefName,headRefOid)
   PR_STATE=$(echo "$PR_JSON" | jq -r .state)
   PR_MERGEABLE=$(echo "$PR_JSON" | jq -r .mergeable)
   PR_MERGE_STATE_STATUS=$(echo "$PR_JSON" | jq -r '.mergeStateStatus // ""')
@@ -690,6 +700,19 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
 
   case "$PR_STATE" in
     OPEN)
+      # issue #612: the swarm-hold* label lock (CI, review BLOCK, coordinator or
+      # operator hold; see _hold-label.sh). Checked first, for plain and every
+      # --auto-* merge, because a held PR must not even trigger a conflict brief.
+      # No override flag: lift the hold (remove the label) instead. A raw
+      # `gh pr merge` or the web UI ignore this lock (accepted gap).
+      PR_HOLD_LABELS="$(jq -r '[.labels[]?.name | select(test("^swarm-hold(:.*)?$"))] | join(", ")' <<<"$PR_JSON" 2>/dev/null || true)"
+      if [ -n "$PR_HOLD_LABELS" ]; then
+        log_event merge.gate "pr=$PR_NUM gate=hold-label result=refused labels=\"$PR_HOLD_LABELS\" action=refuse"
+        echo "ERROR: PR #$PR_NUM carries a hold label ($PR_HOLD_LABELS) — refusing to merge." >&2
+        echo "       A hold means pr-ready.sh, the coordinator or the operator said not to merge yet; the PR body banner says why." >&2
+        echo "       To lift it: gh pr edit $PR_NUM --remove-label \"${PR_HOLD_LABELS%%,*}\"  (then re-run this merge)." >&2
+        exit 1
+      fi
       if [ "$PR_MERGEABLE" = "CONFLICTING" ]; then
         send_conflict_brief_or_die "mergeable=CONFLICTING"
       fi
@@ -1125,6 +1148,10 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
       GATE_SHA="${CI_VERIFIED_SHA:-${REVIEWED_SHA:-$INITIAL_HEAD}}"
       LOCK_JSON="" ; LOCK_RC=0
       LOCK_JSON=$(gh pr view "$PR_NUM" --json state,headRefOid 2>/dev/null) || LOCK_RC=$?
+      # issue #612: labels are read separately so the head/state re-read above keeps
+      # its exact shape. A failed read here is not a refusal: the label check at
+      # the top of the OPEN branch already passed on this run.
+      LOCK_LABELS_JSON=$(gh pr view "$PR_NUM" --json labels 2>/dev/null || true)
       LOCK_STATE=$(jq -r '.state // ""' <<<"$LOCK_JSON" 2>/dev/null || true)
       LOCK_HEAD=$(jq -r '.headRefOid // ""' <<<"$LOCK_JSON" 2>/dev/null || true)
       MERGED_BY_OTHER=0
@@ -1153,6 +1180,11 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
       elif [ "$LOCK_RC" = 0 ] && [ -n "$LOCK_STATE" ] && [ "$LOCK_STATE" != "OPEN" ]; then
         echo "ERROR: PR #$PR_NUM is $LOCK_STATE at merge time (re-read under the action lock) — nothing merged." >&2
         log_event merge.gate "pr=$PR_NUM gate=action-lock result=state-$LOCK_STATE action=refuse"
+        exit 1
+      elif [ "$LOCK_RC" = 0 ] && jq -e "$HOLD_LABEL_JQ_PRED" <<<"$LOCK_LABELS_JSON" >/dev/null 2>&1; then
+        # issue #612: a hold landed while the gates (CI wait, review) ran.
+        echo "ERROR: PR #$PR_NUM was put on hold (swarm-hold* label) while the gates ran — nothing merged." >&2
+        log_event merge.gate "pr=$PR_NUM gate=hold-label result=hold-at-lock action=refuse"
         exit 1
       elif [ "$LOCK_RC" = 0 ] && [ -n "$LOCK_HEAD" ] && [ -n "$GATE_SHA" ] && [ "$LOCK_HEAD" != "$GATE_SHA" ]; then
         echo "ERROR: PR #$PR_NUM's head moved between the gates and the merge (gated $GATE_SHA, now $LOCK_HEAD) — refusing. Re-run the gates on the new head." >&2

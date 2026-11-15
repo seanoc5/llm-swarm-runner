@@ -234,7 +234,7 @@ decision made. "Nothing needs your action" when true.>
 **Action:** <full https:// PR/issue URL> — <🟢/🟡/🔴>. <self-review verdict or skip reason>
 ```
 
-Draft PR: Action leads "⏳ still draft, waiting on <CI|pr-ready>".
+Draft or held PR: Action leads "⏳ draft/held, waiting on <CI|pr-ready>".
 
 A check you cannot run here (missing browser libs, a 403 on check runs): leave
 the PR draft, open Bottom line with "unverified: <check>", and make Next the
@@ -362,17 +362,22 @@ nothing pending, no self-review `BLOCK`, not given up on an error).
 
 ### Draft first, ready only once the body is final
 
-1. `gh pr create --draft` with a placeholder body.
+1. `gh pr create --draft` with a placeholder body. Draft means only "I am
+   still writing".
 2. Write the final body (risk marker + skeleton below).
 3. `lint-pr-screen.sh <N>` until it exits 0 (exit 3 names the failed rule).
 4. `pr-ready.sh <N>`, not bare `gh pr ready`. For 🟡/🔴 it runs and posts the
-   self-review first (round-capped — see "Self-review before merge" below),
-   and refuses to ready on `BLOCK`, an unparseable verdict (exit 2), or CI
-   not confirmed green (exit 4: expected after a push; 7: CI red; the PR stays
-   draft for the coordinator, see § CI). If the PR body carries a coordinator
-   `COORDINATOR HOLD` banner (draft-as-hold), it still posts the
-   self-review but leaves the PR in draft (exit 3) — only the coordinator
-   lifts the hold. Keep that banner through body rewrites.
+   self-review first (round-capped — see "Self-review before merge" below).
+   It refuses on `BLOCK` or an unparseable verdict (exit 2), or CI not
+   confirmed green (exit 4: expected after a push; 7: CI red; see § CI). A
+   refusal un-drafts the PR but locks it: it writes a `⏳ Held` banner and
+   applies label `swarm-hold:review` or `swarm-hold:ci`, and every merge
+   script refuses a PR with any `swarm-hold*` label. A later `pr-ready.sh`
+   that readies the PR removes its own label. If the body carries a
+   `COORDINATOR HOLD` banner or the PR has label `swarm-hold:coordinator` /
+   `swarm-hold:operator`, it posts the self-review but readies nothing
+   (exit 3) — only the coordinator lifts that hold. Keep the banner through
+   body rewrites, and never remove a `swarm-hold*` label yourself.
 
 A ready PR with a placeholder body reads as a policy violation.
 

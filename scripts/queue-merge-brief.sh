@@ -22,7 +22,7 @@
 # With --expect-head the sha must already be the PR's head, else nothing is
 # queued.
 #
-# Refuses (exit 2, nothing queued) when: the PR is not OPEN or is a draft; its
+# Refuses (exit 2, nothing queued) when: the PR is not OPEN or is a draft or carries a swarm-hold* label (#612); its
 # body lacks <!-- BLIND_MERGE_RISK: <rating> --> for the rating typed; no
 # worktree of this project owns the PR's branch. Exit 1: usage / gh error.
 # Exit 5 or 7 are requeue.sh's (identical brief already pending / lock timeout).
@@ -100,11 +100,16 @@ case "$RATING" in low|medium|high) ;; *) echo "queue-merge-brief: --rating must 
 PROJECT="$(cd "$PROJECT" && pwd)"
 command -v gh >/dev/null 2>&1 || { echo "queue-merge-brief: gh required" >&2; exit 1; }
 
-INFO="$(cd "$PROJECT" && gh pr view "$PR" --json state,isDraft,headRefName,headRefOid,body,title)" \
+INFO="$(cd "$PROJECT" && gh pr view "$PR" --json state,isDraft,headRefName,headRefOid,body,title,labels)" \
     || { echo "queue-merge-brief: gh pr view $PR failed" >&2; exit 1; }
 jqv() { printf '%s' "$INFO" | jq -r "$1"; }
 [ "$(jqv .state)" = "OPEN" ] || refuse "PR #$PR is $(jqv .state), not OPEN."
 [ "$(jqv .isDraft)" = "false" ] || refuse "PR #$PR is a draft."
+# issue #612: a swarm-hold* label (CI, review BLOCK, coordinator or operator hold)
+# is the merge lock; queueing an approval for a held PR would only be refused
+# later by worker-merge.sh, after waking a worker for nothing.
+HOLDS="$(jqv '[.labels[]?.name | select(test("^swarm-hold(:.*)?$"))] | join(", ")')"
+[ -z "$HOLDS" ] || refuse "PR #$PR carries a hold label ($HOLDS); lift the hold first (the coordinator or operator removes the label)."
 jqv .body | grep -F "<!-- BLIND_MERGE_RISK: $RATING -->" >/dev/null \
     || refuse "PR #$PR is not rated $RATING (<!-- BLIND_MERGE_RISK: $RATING --> missing). Re-read the rating and ask the operator again."
 HEAD="$(jqv .headRefOid)"

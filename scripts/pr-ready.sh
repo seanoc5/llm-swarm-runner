@@ -119,6 +119,20 @@
 # still gets its self-review posted (same rubric as above) but is never
 # un-drafted here — only the coordinator lifts the hold.
 #
+# issue #612: DRAFT NO LONGER MEANS "HELD". Draft means only "the worker is
+# still writing"; the merge lock is a `swarm-hold*` label (scripts/_hold-label.sh)
+# that every merge path we own refuses. This script:
+#   - on a refusal: writes the banner, applies swarm-hold:ci (CI, pre-ready
+#     check) or swarm-hold:review (BLOCK), and un-drafts the PR. If the label
+#     can't be applied the PR stays a draft, so it is never ready AND unlocked.
+#   - on success: `gh pr ready`, then removes the two labels it owns.
+#   - on a hold (banner, hold comment, or a coordinator/operator/bare label):
+#     exit 3, and makes sure swarm-hold:coordinator is on the PR. A held PR
+#     that is not a draft is no longer drafted again.
+# PRs held the old way (draft + banner, no label) keep working: the banner
+# still holds here, and this script upgrades them to the label on first sight.
+# Raw `gh pr merge` and the web UI ignore labels (accepted gap, issue #612).
+#
 # issue #616: the banner alone is not enough. A worker's body rewrite drops
 # it, and a hold can land while this script is mid-run (self-review and the
 # CI snapshot take minutes) — seen on fand-etl and corpusminder-spring more
@@ -148,7 +162,7 @@
 #   2  refused — self-review returned BLOCK, or self-review-pr.sh exited 1
 #      (infra failure or an unparseable verdict, indistinguishable from the
 #      exit code alone — issue #446, treated as blocking either way)
-#   3  held — a COORDINATOR HOLD banner is on the PR body, or an unlifted
+#   3  held — a COORDINATOR HOLD banner is on the PR body, a hold-label, or an unlifted
 #      hold comment is on the PR (issue #616); self-review ran (and posted)
 #      as usual, but gh pr ready was deliberately skipped
 #   4  refused — CI checks on the head commit are not confirmed green and
@@ -173,7 +187,7 @@
 #   1  usage / gh error resolving the PR body
 #
 # issue #602: every refusal (exits 2, 4, 5 and 7) also writes a marked
-# "⏳ Still a draft" banner at the top of the PR body: the reason, the
+# "⏳ Held (label …)" banner at the top of the PR body: the reason, the
 # head SHA and the time. Before that, the reason lived only in the
 # worker's transcript, and the worker usually exited right after. A
 # success strips the banner before `gh pr ready`. Exit 3 writes nothing,
@@ -196,6 +210,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LLM_SWARM_DIR="${LLM_SWARM_DIR:-$(dirname "$SCRIPT_DIR")}"
 # shellcheck source=_ci-fallback.sh
 . "$SCRIPT_DIR/_ci-fallback.sh"
+# shellcheck source=_hold-label.sh
+. "$SCRIPT_DIR/_hold-label.sh"
 # Overridable for testing (a stub in place of the real self-review-pr.sh,
 # which shells out to `claude -p` and can't be exercised in CI/tests).
 SELF_REVIEW="${SELF_REVIEW_SCRIPT:-$SCRIPT_DIR/self-review-pr.sh}"
@@ -276,6 +292,13 @@ classify_hold() {
     state="$(gh pr view "$PR" --json comments --jq "$HOLD_COMMENT_JQ" 2>/dev/null || true)"
     if [ "$state" = "held" ]; then
         HELD=1; HOLD_SOURCE=comment
+        return 0
+    fi
+    # issue #612: a hold label this script does not own (coordinator, operator,
+    # bare swarm-hold) is a hold too. swarm-hold:ci / :review are ours, written
+    # by refuse() below, and must not hold the retry that clears them.
+    if hold_label_manual_present "$PR"; then
+        HELD=1; HOLD_SOURCE=label
     fi
 }
 
@@ -304,10 +327,13 @@ enforce_hold() {
         write_body "$BODY"
         HOLD_SOURCE=banner
     fi
-    if [ "$(gh pr view "$PR" --json isDraft --jq .isDraft 2>/dev/null || true)" = "false" ]; then
-        echo "pr-ready: held PR #$PR is not a draft — drafting it again."
-        gh pr ready --undo "$PR" >/dev/null 2>&1 \
-            || echo "pr-ready: WARN: couldn't re-draft held PR #$PR" >&2
+    # issue #612: the label is the merge lock now, not draft. A banner or
+    # comment hold with no hold label gets swarm-hold:coordinator (this also
+    # upgrades a PR held the old way, as a draft, to the label lock). A held
+    # PR that is no longer a draft is NOT drafted again: draft means only
+    # "worker still writing".
+    if [ "$HOLD_SOURCE" != "label" ]; then
+        hold_label_add "$PR" "$HOLD_LABEL_COORDINATOR" || true
     fi
 }
 
@@ -317,7 +343,7 @@ hold_gate() {
     refresh_hold
     [ "$HELD" = "1" ] || return 0
     enforce_hold
-    echo "pr-ready: PR #$PR carries a COORDINATOR HOLD ($HOLD_SOURCE) — staying draft."
+    echo "pr-ready: PR #$PR carries a COORDINATOR HOLD ($HOLD_SOURCE) — not readying, the hold label stays on."
     echo "          Self-review above is posted, but only the coordinator lifts the hold and readies this PR."
     exit 3
 }
@@ -352,7 +378,12 @@ write_body() {
 enforce_hold
 
 refuse() {
-    local reason="$1" code="$2" sha ts text who next
+    local reason="$1" code="$2" sha ts text who next lbl other_lbl
+    # issue #612: one auto label per refusal kind (see _hold-label.sh).
+    case "$reason" in
+        review-block) lbl="$HOLD_LABEL_REVIEW"; other_lbl="$HOLD_LABEL_CI" ;;
+        *)            lbl="$HOLD_LABEL_CI";     other_lbl="$HOLD_LABEL_REVIEW" ;;
+    esac
     # issue #616: self-review may have run for minutes; a hold placed since
     # must not be overwritten by a body built from the start-of-script copy.
     refresh_hold
@@ -380,8 +411,25 @@ refuse() {
                           next="$who — push a CI fix, re-run pr-ready.sh $PR — waiting on nothing" ;;
         esac
         [ "$HELD" = "1" ] && next="coordinator — whatever the ⛔ COORDINATOR HOLD banner's Next line says (a held PR is the coordinator's) — waiting on that banner's trigger"
-        write_body "$(printf '<!-- SWARM_DRAFT_REASON: %s sha=%s -->\n> ⏳ **Still a draft:** %s\n> **Next:** %s\n%s\n%s' \
-            "$reason" "$sha" "$text" "$next" "$DRAFT_REASON_CLOSE" "$(body_without_reason)")"
+        write_body "$(printf '<!-- SWARM_DRAFT_REASON: %s sha=%s -->\n> ⏳ **Held (label %s):** %s\n> **Next:** %s\n%s\n%s' \
+            "$reason" "$sha" "$lbl" "$text" "$next" "$DRAFT_REASON_CLOSE" "$(body_without_reason)")"
+    fi
+    # issue #612: the label is the merge lock; draft now means only "worker
+    # still writing", so a refused PR is un-drafted once the label is on. If the
+    # label can't be applied the PR stays a draft (the old lock) rather than
+    # becoming a ready PR with no lock at all. A held PR already carries its
+    # own coordinator/operator label (enforce_hold above), so it gets no
+    # second one.
+    if [ "$HELD" != "1" ]; then
+        if hold_label_add "$PR" "$lbl"; then
+            hold_label_remove "$PR" "$other_lbl" || true
+            if [ "$(gh pr view "$PR" --json isDraft --jq .isDraft 2>/dev/null || true)" = "true" ]; then
+                gh pr ready "$PR" >/dev/null 2>&1 \
+                    || echo "pr-ready: WARN: couldn't un-draft PR #$PR after labelling it $lbl" >&2
+            fi
+        else
+            echo "pr-ready: WARN: couldn't apply $lbl to PR #$PR — leaving it a draft so it stays locked" >&2
+        fi
     fi
     exit "$code"
 }
@@ -794,3 +842,15 @@ fi
 
 echo "pr-ready: gh pr ready $PR"
 gh pr ready "$PR"
+
+# issue #612: lift the labels this script owns. Ordered AFTER `gh pr ready`
+# on purpose: if anything fails between the two the PR is ready but still
+# locked, never unlocked but still a draft. A coordinator/operator label would
+# have exited 3 above, so only swarm-hold:ci / :review can be on the PR here.
+LABEL_RC=0
+hold_label_remove "$PR" "$HOLD_LABEL_CI" || LABEL_RC=1
+hold_label_remove "$PR" "$HOLD_LABEL_REVIEW" || LABEL_RC=1
+if [ "$LABEL_RC" != 0 ]; then
+    echo "pr-ready: PR #$PR is ready but a swarm-hold label could not be removed — it stays locked until someone runs: gh pr edit $PR --remove-label $HOLD_LABEL_CI --remove-label $HOLD_LABEL_REVIEW" >&2
+    exit 1
+fi

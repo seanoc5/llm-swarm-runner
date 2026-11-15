@@ -71,8 +71,21 @@ esac
 
 # Screen = everything before the first <details> (or before the trailing
 # metadata footer if there is no appendix), minus the risk HTML comment.
+#
+# issue #612: tool-written hold banners are not the worker's screen. A refused
+# PR is now un-drafted and carries its banner for as long as the hold lasts
+# (before, only a draft did), so lint would otherwise charge the banner's
+# lines against the 25-line budget and flag identifiers inside it. Dropped:
+# the pr-ready.sh SWARM_DRAFT_REASON block and the coordinator's leading
+# "> ⛔ **COORDINATOR HOLD**" blockquote (banner line plus the "> " lines under it).
 SCREEN=$(printf '%s\n' "$BODY" \
-    | awk '/<details/{d=1} /^<sub>/{d=1} !d{print}' \
+    | awk '
+        /^<!-- SWARM_DRAFT_REASON:/ { r=1 }
+        r { if ($0 ~ /^<!-- \/SWARM_DRAFT_REASON -->/) r=0; next }
+        /^> ⛔ \*\*COORDINATOR HOLD\*\*/ { h=1; next }
+        h && /^>/ { next }
+        { h=0 }
+        /<details/{d=1} /^<sub>/{d=1} !d{print}' \
     | grep -v '<!-- BLIND_MERGE_RISK:' || true)
 
 FINDINGS=0

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# ready-sweep.sh — re-run pr-ready.sh on drafts that were refused only
+# ready-sweep.sh — re-run pr-ready.sh on parked PRs (a draft, or a PR labelled
+# swarm-hold:ci since #612) that were refused only
 # because CI wasn't readable or finished yet (issue #602).
 #
 # pr-ready.sh writes a `<!-- SWARM_DRAFT_REASON: <reason> sha=<sha> -->`
@@ -25,7 +26,8 @@
 # issue #757: also reports banner-less green drafts ("parked-green" lines; see below).
 #
 # Usage: ready-sweep.sh [--dry-run]
-# Output: one line per candidate: "#<N> <reason>: readied|still draft (exit <rc>)",
+# Output: one line per candidate: "#<N> <reason>: readied|still draft (exit <rc>)"
+#   ("still draft" is historic wording, kept because parsers match it: it means "not readied"),
 #   plus "#<P> stale-wait: waiting on #<N>, which merged at <ts>" per stale wait.
 # Exit: 0 (per-PR refusals are normal); 1 if `gh pr list` itself fails.
 
@@ -34,12 +36,20 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=_ci-fallback.sh
 . "$SCRIPT_DIR/_ci-fallback.sh"
+# shellcheck source=_hold-label.sh
+. "$SCRIPT_DIR/_hold-label.sh"
 PR_READY="${PR_READY_SCRIPT:-$SCRIPT_DIR/pr-ready.sh}"
 
 DRY_RUN=0
 [ "${1:-}" = "--dry-run" ] && DRY_RUN=1
 
-DRAFTS="$(gh pr list --state open --draft --limit 100 --json number,body,headRefOid,headRefName,statusCheckRollup)" \
+# issue #612: draft now means only "worker still writing"; a PR pr-ready.sh
+# refused is un-drafted and carries a swarm-hold:* label plus its banner. So the
+# sweep reads ALL open PRs (named DRAFTS for the old reason: it is still the
+# set of parked PRs) and each check below picks drafts, labelled PRs or both:
+# the banner-driven checks (retry, ci-failing, ci-cancelled) fit either state,
+# which also keeps PRs parked as drafts before #612 working.
+DRAFTS="$(gh pr list --state open --limit 100 --json number,body,headRefOid,headRefName,statusCheckRollup,isDraft,labels)" \
     || { echo "ready-sweep: ERROR: gh pr list failed" >&2; exit 1; }
 CANDIDATES="$(jq -r '.[] | (.body // "" | capture("(?m)^<!-- SWARM_DRAFT_REASON: (?<r>ci-pending|ci-unknown) sha=").r) as $r | "\(.number) \($r)"' <<<"$DRAFTS")"
 
@@ -89,6 +99,8 @@ jq -r '.[] | (.body // "" | capture("(?m)^<!-- SWARM_DRAFT_REASON: ci-cancelled 
 # per (PR, sha); nothing here or there readies the draft. The coordinator decides.
 # Line: "#<N> parked-green: banner-less draft, green CI (risk=<r>, issue=<K>, sha=<S>)"
 jq -r "$CI_ROLLUP_DROP_LIVENESS_JQ"'.[]
+  | select(.isDraft == true)
+  | select(('"$HOLD_LABEL_JQ_PRED"') | not)
   | select((.body // "") | (test("<!-- SWARM_DRAFT_REASON:") or test("(?m)^> ⛔ \\*\\*COORDINATOR HOLD\\*\\*")) | not)
   | (.statusCheckRollup // []
      | ci_real  # the swarm/worker liveness status is not CI (#536)
@@ -116,7 +128,7 @@ done <<<"$CANDIDATES"
 [ "${WATCH_STALE_WAIT_CHECK:-1}" = "0" ] && exit 0
 
 # "<pr> <trigger>" for each Next line naming a same-repo merge trigger.
-WAITS="$(jq -r '.[] | .number as $p | (.body // "") | [scan("(?m)^(?:> ?)?\\*\\*Next:\\*\\*[^\\n]*waiting on #(?<n>[0-9]+)(?: to)? merg")[0]] | unique[] | "\($p) \(.)"' <<<"$DRAFTS")"
+WAITS="$(jq -r '.[] | select(.isDraft == true or ('"$HOLD_LABEL_JQ_PRED"')) | .number as $p | (.body // "") | [scan("(?m)^(?:> ?)?\\*\\*Next:\\*\\*[^\\n]*waiting on #(?<n>[0-9]+)(?: to)? merg")[0]] | unique[] | "\($p) \(.)"' <<<"$DRAFTS")"
 while read -r pr trig; do
     [ -n "$pr" ] || continue
     # A failed lookup is silent: the next sweep retries it.
