@@ -1149,9 +1149,10 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
       LOCK_JSON="" ; LOCK_RC=0
       LOCK_JSON=$(gh pr view "$PR_NUM" --json state,headRefOid 2>/dev/null) || LOCK_RC=$?
       # issue #612: labels are read separately so the head/state re-read above keeps
-      # its exact shape. A failed read here is not a refusal: the label check at
-      # the top of the OPEN branch already passed on this run.
+      # its exact shape. Fails closed like the head read: an unreadable label
+      # list cannot confirm the hold lock, so it refuses (below).
       LOCK_LABELS_JSON=$(gh pr view "$PR_NUM" --json labels 2>/dev/null || true)
+      LOCK_LABELS_OK=0; jq -e '.labels | type == "array"' <<<"$LOCK_LABELS_JSON" >/dev/null 2>&1 && LOCK_LABELS_OK=1
       LOCK_STATE=$(jq -r '.state // ""' <<<"$LOCK_JSON" 2>/dev/null || true)
       LOCK_HEAD=$(jq -r '.headRefOid // ""' <<<"$LOCK_JSON" 2>/dev/null || true)
       MERGED_BY_OTHER=0
@@ -1185,6 +1186,10 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
         # issue #612: a hold landed while the gates (CI wait, review) ran.
         echo "ERROR: PR #$PR_NUM was put on hold (swarm-hold* label) while the gates ran — nothing merged." >&2
         log_event merge.gate "pr=$PR_NUM gate=hold-label result=hold-at-lock action=refuse"
+        exit 1
+      elif [ "$LOCK_RC" = 0 ] && [ "$LOCK_LABELS_OK" != 1 ]; then
+        echo "ERROR: could not re-read PR #$PR_NUM's labels under the action lock, so the hold lock can't be confirmed — nothing merged." >&2
+        log_event merge.gate "pr=$PR_NUM gate=hold-label result=unreadable action=refuse"
         exit 1
       elif [ "$LOCK_RC" = 0 ] && [ -n "$LOCK_HEAD" ] && [ -n "$GATE_SHA" ] && [ "$LOCK_HEAD" != "$GATE_SHA" ]; then
         echo "ERROR: PR #$PR_NUM's head moved between the gates and the merge (gated $GATE_SHA, now $LOCK_HEAD) — refusing. Re-run the gates on the new head." >&2

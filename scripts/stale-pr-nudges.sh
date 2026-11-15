@@ -4,7 +4,8 @@
 # "re-entry" refresh comment.
 #
 # A PR qualifies when ALL hold:
-#   - open, not a draft
+#   - open, not a draft, no swarm-hold* label (a held PR is waiting on a named
+#     actor, not forgotten; #612)
 #   - body carries the swarm BLIND_MERGE_RISK marker (i.e. it's a swarm PR)
 #   - no activity (updatedAt) for STALE_PR_NUDGE_HOURS hours
 #   - the last nudge comment (marker SWARM_STALE_NUDGE) is NOT the most
@@ -41,10 +42,11 @@ NOW="$(date -u +%s)"
 CUTOFF=$((NOW - THRESH_HOURS * 3600))
 
 CANDIDATES="$(gh pr list --state open --limit 50 \
-    --json number,title,isDraft,updatedAt,body |
+    --json number,title,isDraft,updatedAt,body,labels |
     jq -c --argjson cutoff "$CUTOFF" '
         .[]
         | select(.isDraft | not)
+        | select(any((.labels // [])[]; (.name // "") | test("^swarm-hold(:.*)?$")) | not)
         | select(.body | test("BLIND_MERGE_RISK"))
         | select((.updatedAt | fromdateiso8601) < $cutoff)
         | {number, title, updatedAt}')"

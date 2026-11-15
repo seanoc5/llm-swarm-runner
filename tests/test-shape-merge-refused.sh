@@ -94,6 +94,7 @@ case "${1:-} ${2:-}" in
     "pr merge") exit 1 ;;   # always refuses — that's what this test exercises
     "pr view")
         case "$*" in
+            *"--json labels") echo '{"labels":[]}'; exit 0 ;;   # issue #612: hold-label re-read under the lock
             *comments*)      echo '{"comments":[]}'; exit 0 ;;
             *headRefName*)   echo '{"state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefName":"fix/issue-77","title":"fake"}'; exit 0 ;;
             # swarm-merge.sh's post-merge re-query (issue #492).
@@ -118,6 +119,7 @@ case "${1:-} ${2:-}" in
     "pr merge") exit 1 ;;
     "pr view")
         case "$*" in
+            *"--json labels") echo '{"labels":[]}'; exit 0 ;;   # issue #612: hold-label re-read under the lock
             *comments*)      echo '{"comments":[]}'; exit 0 ;;
             *headRefName*)   echo '{"state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"DIRTY","headRefName":"fix/issue-77","title":"fake"}'; exit 0 ;;
         esac
@@ -198,6 +200,7 @@ case "${1:-} ${2:-}" in
     "pr merge") exit 1 ;;
     "pr view")
         case "$*" in
+            *"--json labels") echo '{"labels":[]}'; exit 0 ;;   # issue #612: hold-label re-read under the lock
             *comments*)      echo '{"comments":[]}'; exit 0 ;;
             *headRefName*)   echo '{"state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefName":"fix/issue-77","title":"fake"}'; exit 0 ;;
             # The post-merge re-query itself fails outright — simulates a

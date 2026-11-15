@@ -47,6 +47,7 @@ case "\${1:-} \${2:-}" in
     # issue #612: hold labels. state/hold-label = on the PR from the start;
     # state/late-label = appears only on the labels-only re-read under the lock.
     labels="[]"; [ -e "\$S/hold-label" ] && labels='[{"name":"swarm-hold:ci"}]'
+    if [ "\$*" = "pr view 600 --json labels" ] && [ -e "\$S/fail-labels" ]; then exit 1; fi
     if [ "\$*" = "pr view 600 --json labels" ] && [ -e "\$S/late-label" ]; then labels='[{"name":"swarm-hold:coordinator"}]'; fi
     printf '{"state":"%s","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefName":"fix/issue-600","title":"t","closingIssuesReferences":[],"body":"%s","isDraft":false,"reviewDecision":"","baseRefName":"master","headRefOid":"%s","labels":%s}\n' "\$st" "\$body" "\$head" "\$labels"
     exit 0 ;;
@@ -332,3 +333,8 @@ reset
 ( cd "$REPO" && timeout 30 "$MERGE" 600 --no-kill >"$TEST_DIR/k4.log" 2>&1 ) || red "K4: unlabelled PR must still merge: $(cat "$TEST_DIR/k4.log")"
 [ "$(merges)" = 1 ] || red "K4: expected 1 merge, got $(merges)"
 green "K4: no label, no refusal"
+reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/fail-labels"
+rc=0; ( cd "$REPO" && timeout 30 "$MERGE" 600 --no-kill >"$TEST_DIR/k5.log" 2>&1 ) || rc=$?
+[ "$rc" = 1 ] && [ "$(merges)" = 0 ] || red "K5: unreadable labels under the lock must fail closed (rc $rc): $(cat "$TEST_DIR/k5.log")"
+grep -q "could not re-read" "$TEST_DIR/k5.log" || red "K5: no unreadable-labels message: $(cat "$TEST_DIR/k5.log")"
+green "K5: unreadable label re-read under the lock fails closed"
