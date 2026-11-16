@@ -61,6 +61,19 @@ check "a short episode clears silently" "0" "$(grep -c blocked "$EV" || true)"
 coord_composer_blocked_clear
 check "clear with no episode is a no-op" "0" "$(grep -c blocked "$EV" || true)"
 
+# Orphaned marker: alerted episode, pending file gone. The retry pass's early
+# return (no pending wake) must close the item; so must the timer-loop sweep.
+COORD_WAKE_PENDING_FILE="$T/no-such-pending"
+eval "$(sed -n '/^coord_wake_retry_pass() {/,/^}/p' "$WATCH")"
+declare -F coord_wake_retry_pass >/dev/null || red "could not extract coord_wake_retry_pass"
+: > "$EV"
+coord_composer_blocked_note_dirty >/dev/null; backdate 1000; coord_composer_blocked_note_dirty >/dev/null
+check "orphan: item open before the retry pass" "1" "$(open_count)"
+coord_wake_retry_pass
+check "orphan: retry pass with no pending file closes the item" "0" "$(open_count)"
+[ ! -e "$COORD_WAKE_BLOCKED_FILE" ] && green "orphan: marker removed" || red "orphan marker left behind"
+grep -q "state=clear" "$EV" && green "orphan: state=clear event emitted" || red "no state=clear for orphan"
+
 COMPOSER_DIRTY_ALERT_SECS=0
 coord_composer_blocked_note_dirty >/dev/null
 [ ! -e "$COORD_WAKE_BLOCKED_FILE" ] && green "COMPOSER_DIRTY_ALERT_SECS=0 disables the alert" || red "disabled alert still stamped"

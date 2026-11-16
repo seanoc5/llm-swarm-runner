@@ -7450,6 +7450,8 @@ run_watch_timer_loop() {
     # it never delays the first deferred-wake retry or the startup passes.
     last_sibling_sweep=$(date +%s)
     last_runner_health_sweep=$(date +%s)
+    # (issue #973) Startup: a marker left by a previous watcher with no pending wake.
+    [ -e "$COORD_WAKE_PENDING_FILE" ] || coord_composer_blocked_clear
     # Tick order matters: tests/test-shape-window-flags.sh treats ready_sweep_pass as the
     # end-of-tick marker, so keep window sweeps and pr_poll_pass BEFORE ready_sweep_pass.
     while true; do
@@ -7457,6 +7459,9 @@ run_watch_timer_loop() {
         # issue #457: a full pause stops every sweep here (reaps, PR polls, hold
         # retries); the main poll loop still records outcomes into coord-inbox/.
         watch_pause_full "$PROJECT_DIR/.swarm" && continue
+        # (issue #973) Orphaned blocked marker (no pending wake, e.g. split mode or a
+        # hand-deleted pending file): close the alert. Two -e tests when idle.
+        [ -e "$COORD_WAKE_PENDING_FILE" ] || coord_composer_blocked_clear
         [ "$WATCH_CHECK_ON_DONE" = "1" ] && { status_poll_pass || true; }
         if [ "$WATCH_WINDOW_FLAGS" = "1" ] && [ "$WATCH_WINDOW_FLAGS_SWEEP_SECS" -gt 0 ]; then
             now=$(date +%s)
@@ -11366,7 +11371,12 @@ coord_wake_retry_interval() {
 # header comment for the same two guards on that pass, and
 # coord_wake_already_submitted's own header comment for the full incident.
 coord_wake_retry_pass() {
-    [ -e "$COORD_WAKE_PENDING_FILE" ] || return 0
+    if [ ! -e "$COORD_WAKE_PENDING_FILE" ]; then
+        # (issue #973) No pending wake means nothing is held: a leftover blocked
+        # marker (pending hand-deleted) must not keep its alert open.
+        coord_composer_blocked_clear
+        return 0
+    fi
 
     local pending_prompt
     pending_prompt="$(cat "$COORD_WAKE_PENDING_FILE" 2>/dev/null)" || return 0
