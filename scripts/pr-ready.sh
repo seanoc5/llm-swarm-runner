@@ -519,7 +519,9 @@ if [ -n "$LINTS" ]; then
     LINT_PR_HEAD="$(head_sha)"
     LINT_CWD_HEAD="$(git rev-parse HEAD 2>/dev/null || true)"
     if [ -z "$LINT_ROOT" ] || [ -z "$LINT_PR_HEAD" ] || [ "$LINT_CWD_HEAD" != "$LINT_PR_HEAD" ]; then
-        : # not a checkout of the PR head: nothing to lint (silent, like a missing lint)
+        echo "pr-ready: repo lints skipped: cwd is not at PR head ${LINT_PR_HEAD:0:7} (push first, or run them from the worker checkout)" >&2
+    elif [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+        echo "pr-ready: repo lints skipped: working tree has uncommitted changes (they would be linted instead of PR head ${LINT_PR_HEAD:0:7})" >&2
     else
         for lint in $LINTS; do
             [ -f "$LINT_ROOT/$lint" ] || continue

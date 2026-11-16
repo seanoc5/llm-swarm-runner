@@ -1632,7 +1632,16 @@ export GH_SHA=cafef00dcafef00dcafef00dcafef00dcafef00d
 rc=0; run_pr_ready || rc=$?
 unset PR_READY_CWD GH_SHA
 [ "$rc" -eq 0 ] || red "expected exit 0 when cwd is not the PR head, got $rc: $(cat "$TEST_DIR/out.log")"
-grep -q 'repo lint' "$TEST_DIR/out.log" && red "lint must not run from a checkout that is not the PR head"
+grep -q 'repo lint .* passed' "$TEST_DIR/out.log" && red "lint must not run from a checkout that is not the PR head"
 green "opt-out and head-mismatch both skip the lint"
+heading "Test 65 (issue #976): dirty working tree — lint skipped with a stderr line, not refused"
+printf 'x\n' > "$LINT_REPO/untracked.txt"
+export PR_READY_CWD="$LINT_REPO" GH_SHA="$(git -C "$LINT_REPO" rev-parse HEAD)"
+rc=0; run_pr_ready || rc=$?
+unset PR_READY_CWD GH_SHA
+[ "$rc" -eq 0 ] || red "expected exit 0 (skip), got $rc: $(cat "$TEST_DIR/out.log")"
+grep -q 'repo lints skipped: working tree has uncommitted changes' "$TEST_DIR/out.log" || red "expected the skip line: $(cat "$TEST_DIR/out.log")"
+green "dirty tree skips the lint with a visible line"
+
 
 green "ALL TESTS PASSED"
