@@ -273,6 +273,9 @@ check "watcher writer: the same writer follows the file back to split, no restar
 clear_window_flag coordinator "📥" test
 
 # ── needs-you hook ───────────────────────────────────────────────────────────
+# These fixtures hand-write needs-you.md; the hand-written-list guard (issue #964,
+# part of the reply lint) is covered in test-reply-lint.sh.
+export COORD_REPLY_LINT=0
 heading "UserPromptSubmit hook"
 hook() {   # <event> [stdin-json]; mode from the file (HM, default split); the env says the opposite
     setmode "$P" "${HM:-split}"
@@ -341,6 +344,7 @@ check "resident, hook state off: silent no-op" "|none|none" "$out|$([ -e "$P/.sw
 out="$(HM=resident HS=1 hook UserPromptSubmit)"
 check "resident, hook state on: no needs-you line, state is busy" "|busy|none" "$out|$(cut -d' ' -f1 "$P/.swarm/coordinator-state")|$([ -e "$P/.swarm/needs-you.seen" ] && echo some || echo none)"
 rm -f "$P/.swarm/coord-inbox"/*.md "$P/.swarm"/needs-you.* "$P/.swarm/coordinator-state"
+unset COORD_REPLY_LINT
 
 # ── coordinator-claude.sh wiring ─────────────────────────────────────────────
 heading "coordinator-claude.sh"
@@ -363,7 +367,7 @@ check "split, hook state 1: all three" "Notification,Stop,UserPromptSubmit" "$(h
 settings="$(grep -A1 -x -- '--settings' "$T/argv" | tail -1)"
 cmd="$(jq -r '.hooks.UserPromptSubmit[0].hooks[0].command' <<<"$settings")"
 printf '%s\n' '- **A1** 🟡 PR #1' > "$P/.swarm/needs-you.md"
-ctx="$(printf '{}' | env -u COORD_MODE CLAUDE_PROJECT_DIR="$P" bash -c "$cmd" | jq -r .hookSpecificOutput.additionalContext)"
+ctx="$(printf '{}' | env -u COORD_MODE COORD_REPLY_LINT=0 CLAUDE_PROJECT_DIR="$P" bash -c "$cmd" | jq -r .hookSpecificOutput.additionalContext)"
 check "the installed command runs the hook, which reads the mode from the file" "Needs-you changed since your last message: 1 new item(s), 1 on the list now (see .swarm/needs-you.md)." "$ctx"
 rm -f "$P/.swarm"/needs-you.*
 setmode "$P" unset

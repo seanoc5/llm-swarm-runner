@@ -2,10 +2,18 @@
 #
 # needs-you.sh — the standing Needs-you list as structured items (issue #798).
 #
-#   needs-you.sh add --title T --do D [--kind decision|todo] [--risk R]
-#                    [--rec TEXT] [--default TEXT] [--url U] [--project DIR]
+#   needs-you.sh add --title T --background B --do D [--kind decision|todo]
+#                    [--risk R] [--rec TEXT] [--default TEXT] [--url U] [--project DIR]
 #   needs-you.sh done <label> [--project DIR]
-#   needs-you.sh render [--json] [--project DIR]
+#   needs-you.sh render [--json] [--write] [--project DIR]
+#   needs-you.sh check [--project DIR]
+#
+# --background (issue #964) is the cold-reader paragraph: what the thing is, why
+# it is open, what each option changes (>= 12 words). `add` refuses one that
+# leans on undefined internal labels: "HOLD (yours, date)", option codes like
+# B3 / A4-a, slash-joined acronyms like SI/SR. `render` leads each item with it
+# as "What this is:". `check` exits 3 when .swarm/needs-you.md was not written
+# from .swarm/needs-you.jsonl (a hand-written list); coord-hook.sh runs it.
 #
 # Every item must carry --do: the exact thing the operator does, as a `command`
 # (backticks or a fenced block) or an https URL (with the click path). `add`
@@ -36,18 +44,19 @@ SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LINT="$SELF_DIR/lint-coordinator-reply.sh"
 
 die() { echo "needs-you.sh: $*" >&2; exit 2; }
-usage() { sed -n '3,36p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '3,44p' "$0" | sed 's/^# \{0,1\}//'; }
 
 cmd="${1:-}"
 [ -n "$cmd" ] || { usage >&2; exit 2; }
 case "$cmd" in -h|--help) usage; exit 0 ;; esac
 shift
 
-title=""; do_=""; kind="todo"; risk=""; rec=""; deflt=""; url=""; project="${CLAUDE_PROJECT_DIR:-$PWD}"
-json=0; label=""
+title=""; background=""; do_=""; kind="todo"; risk=""; rec=""; deflt=""; url=""; project="${CLAUDE_PROJECT_DIR:-$PWD}"
+json=0; write=0; label=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --title)   title="${2-}"; shift 2 ;;
+        --background) background="${2-}"; shift 2 ;;
         --do)      do_="${2-}"; shift 2 ;;
         --kind)    kind="${2-}"; shift 2 ;;
         --risk)    risk="${2-}"; shift 2 ;;
@@ -56,6 +65,7 @@ while [ $# -gt 0 ]; do
         --url)     url="${2-}"; shift 2 ;;
         --project) project="${2-}"; shift 2 ;;
         --json)    json=1; shift ;;
+        --write)   write=1; shift ;;
         -*)        die "unknown flag $1" ;;
         *)         [ -z "$label" ] || die "unexpected argument $1"; label="$1"; shift ;;
     esac
@@ -87,6 +97,7 @@ render_md() {
         "- **\(.label)** \(.title)"
         + (if .risk != "" then " (risk: \(.risk))" else "" end)
         + (if .rec != "" then " — \(.rec)" else "" end)
+        + (if (.background // "") != "" then "\n  What this is: \(.background)" else "" end)
         + (if (.do | contains("\n")) then "\n  Do:\n\(.do)" else "\n  Do: \(.do)" end)
         + (if .url != "" then "\n  \(.url)" else "" end)
         + (if .default != "" then "\n  Default if silent: \(.default)" else "" end)' <<<"$items"
@@ -118,6 +129,21 @@ is_placeholder() {
     return 1
 }
 
+# jargon_hit <text>: prints the first undefined-internal-label match and returns
+# 0; returns 1 when clean (issue #964). Deterministic: no option codes (B3, A4-a),
+# no "HOLD (yours, date)" stubs, no slash-joined acronyms (SI/SR). PR/issue numbers
+# (#2387) and single tech names (H2, p95) pass.
+jargon_hit() {
+    local m text
+    # Well-known pairs are plain words, not internal labels.
+    text="$(printf '%s' "$1" | sed -E 's#\b(CI/CD|UI/UX|TCP/IP|I/O|HTTP/HTTPS|SQL/NoSQL|TLS/SSL|CPU/GPU|PR/MR)\b##g')"
+    for re in '\bHOLD[[:space:]]*\((yours|mine|ours)[^)]*\)' '\b[A-Z][0-9]{1,2}-[a-z0-9]\b' '\b[A-Z]{2,}(/[A-Z]{2,})+\b' '\b([Oo]ption|[Oo]ptions|[Cc]hoice)[[:space:]]+[A-Z][0-9]{0,2}\b' '\b[A-Z][0-9]{1,2}[[:space:]]*(/|vs\.?|or)[[:space:]]*[A-Z][0-9]{1,2}\b'; do
+        m="$(grep -oE -- "$re" <<<"$text" | sed -n 1p || true)"
+        [ -z "$m" ] || { printf '%s' "$m"; return 0; }
+    done
+    return 1
+}
+
 # cm_file <label>: files the item; prints the corpusminder item id (or nothing).
 cm_file() {
     local item repo_url repo issue body resp
@@ -129,9 +155,9 @@ cm_file() {
         --arg forum "${CMINDER_FORUM_ID:-}" --arg lbl "$1" '
         {kind: (if .kind == "decision" then "DECISION" else "TODO" end),
          label: .title,
-         description: (.rec),
+         description: (if (.background // "") != "" then .background else .rec end),
          targetUrl: (if .url != "" then .url else null end),
-         fields: ({swarm: $swarm, repo: $repo, issue: $issue, item: $lbl, problem: .title, recommendation: .rec,
+         fields: ({swarm: $swarm, repo: $repo, issue: $issue, item: $lbl, problem: .title, background: (.background // ""), recommendation: .rec,
                    blast_radius: .risk, do: .do, default_if_silent: .default}
                   | with_entries(select(.value != "")))}
         + (if $forum != "" then {forumId: ($forum | tonumber)} else {} end)
@@ -149,11 +175,17 @@ write_md() {
 case "$cmd" in
     add)
         [ -n "$title" ] || die "add needs --title"
+        [ -n "$background" ] || die "add needs --background: a plain-language paragraph for a cold reader (what this is, why it is open, what each option changes). A title alone is a stub; refusing."
         [ -n "$do_" ] || die "add needs --do: the exact command (in backticks or a fenced block) or an https URL plus click path. An item without one is a stub; refusing."
         case "$kind" in decision|todo) ;; *) die "--kind is decision or todo" ;; esac
         printf '%s' "$do_" | grep -E '`[^`]+`|```|https://' >/dev/null \
             || die "--do has no command or https URL. Put the command in backticks, or give the URL and the click path. Refusing: $do_"
-        if hits="$("$LINT" --project "$project" <<<"$title $do_ $rec" || true)" && [ -n "$hits" ]; then
+        [ "$(printf '%s' "$background" | wc -w)" -ge 12 ] \
+            || die "--background is under 12 words. Say what the thing is, why it is open and what each option changes, in plain words. Refusing: $background"
+        if hit="$(jargon_hit "$title $background")"; then
+            die "title/background lean on an undefined internal label ($hit). Say what it is in plain words (what the check or hold is, which PR raised it, what each option changes) instead of a code. Refusing."
+        fi
+        if hits="$("$LINT" --project "$project" < <(printf '%s\n%s\n' "$title $do_ $rec" "$background") || true)" && [ -n "$hits" ]; then
             die "item points elsewhere instead of carrying its action (${hits%%:*}); restate the item in plain words (what it is, the options, your recommendation) instead of pointing at its label. Refusing."
         fi
         # An empty field is left out, not stored as "none" (issue #801).
@@ -166,10 +198,10 @@ case "$cmd" in
             max="$(jq -s '[.[].label | sub("^[A-Za-z]"; "") | tonumber] | max // 0' "$store")"
         fi
         new="A$((max + 1))"
-        jq -cn --arg label "$new" --arg title "$title" --arg act "$do_" --arg kind "$kind" \
+        jq -cn --arg label "$new" --arg title "$title" --arg bg "$background" --arg act "$do_" --arg kind "$kind" \
             --arg risk "$risk" --arg rec "$rec" --arg default "$deflt" --arg url "$url" \
             --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            '{label: $label, kind: $kind, title: $title, do: $act, risk: $risk, rec: $rec, default: $default, url: $url, added: $at, done: false}' >> "$store"
+            '{label: $label, kind: $kind, title: $title, background: $bg, do: $act, risk: $risk, rec: $rec, default: $default, url: $url, added: $at, done: false}' >> "$store"
         if [ "$backend" = corpusminder ]; then
             errf="$(mktemp -p "$swarm" .tmp.needs-you-cm.XXXXXX)"
             if cmid="$(cm_file "$new" 2>"$errf")" && [ -n "$cmid" ]; then
@@ -201,7 +233,26 @@ case "$cmd" in
             fi
         fi
         ;;
+    check)
+        # A hand-written list: a needs-you.md with no store, or one whose body
+        # differs from what the store renders (the Updated: time is ignored).
+        [ -f "$md" ] || exit 0
+        # A missing store counts as an empty list, so `render --write` clears a stale file.
+        if diff <(grep -v '^Updated:' "$md") <(render_md | grep -v '^Updated:') >/dev/null; then exit 0; fi
+        # Older needs-you.sh layout: same header and same open labels as the store
+        # means a render wrote it, not a hand (it is rewritten at the next add/done).
+        IFS= read -r first_line < "$md" || true
+        if [ -e "$store" ] && [[ $first_line =~ ^'## Needs you ('[0-9]+' open)'$ ]] \
+            && [ "$(grep -oE '^- \*\*[A-Za-z][0-9]+\*\*' "$md" | tr -d '* -' | sort | paste -sd,)" = "$(open_items | jq -r '[.[].label] | sort | join(",")')" ]; then
+            exit 0
+        fi
+        echo "needs-you.md does not match needs-you.jsonl (or no list exists): it was written by hand" >&2
+        exit 3
+        ;;
     render)
+        # --write rewrites .swarm/needs-you.md from the store (an empty list when
+        # nothing is open): the supported way to clear a stale hand-written file.
+        if [ "$write" = 1 ]; then write_md; fi
         if [ "$json" = 1 ]; then
             open_items
         else

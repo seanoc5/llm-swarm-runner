@@ -12,6 +12,7 @@ check() { [ "$2" = "$3" ] && green "$1" || red "$1 (expected [$2] got [$3])"; }
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LINT="$ROOT/scripts/lint-coordinator-reply.sh"
 NY="$ROOT/scripts/needs-you.sh"
+BG="Loads the county boundary shapefile into the development database so the map pages have data; it is open because last night's load job skipped it."
 HOOK="$ROOT/scripts/coord-hook.sh"
 FX="$ROOT/tests/fixtures/reply-lint"
 T="$(mktemp -d -t reply-lint-XXXXXX)"
@@ -101,23 +102,23 @@ check "13-row incident fixture: flagged rows are exactly the expect=flag rows" "
 
 # ── needs-you.sh ─────────────────────────────────────────────────────────────
 P="$T/proj"; mkdir -p "$P/.swarm"
-set +e; "$NY" add --project "$P" --title "Start load" --do "Start it in 1:util" >/dev/null 2>&1; ec=$?; set -e
+set +e; "$NY" add --background "$BG" --project "$P" --title "Start load" --do "Start it in 1:util" >/dev/null 2>&1; ec=$?; set -e
 check "add refuses a --do with no command or URL" "2" "$ec"
-set +e; "$NY" add --project "$P" --title "Start load" --do 'run the command above `x`' >/dev/null 2>&1; ec=$?
-"$NY" add --project "$P" --title "Start load" >/dev/null 2>&1; ec2=$?; set -e
+set +e; "$NY" add --background "$BG" --project "$P" --title "Start load" --do 'run the command above `x`' >/dev/null 2>&1; ec=$?
+"$NY" add --background "$BG" --project "$P" --title "Start load" >/dev/null 2>&1; ec2=$?; set -e
 check "add refuses a back-reference and a missing --do" "2 2" "$ec $ec2"
-set +e; "$NY" add --project "$P" --title "Review plan" --do 'run `./review.sh` for the plan in §4' >/dev/null 2>&1; ec=$?
-mkdir -p "$T/cproj/.swarm"; "$NY" add --project "$T/cproj" --title "Review the Tailwind carve plan" --rec "yes: the carve order keeps the layout stable and touches only templates, so rollback is one revert" --do 'run `./review.sh tailwind`' >/dev/null 2>&1; ec2=$?; set -e
+set +e; "$NY" add --background "$BG" --project "$P" --title "Review plan" --do 'run `./review.sh` for the plan in §4' >/dev/null 2>&1; ec=$?
+mkdir -p "$T/cproj/.swarm"; "$NY" add --background "$BG" --project "$T/cproj" --title "Review the Tailwind carve plan" --rec "yes: the carve order keeps the layout stable and touches only templates, so rollback is one revert" --do 'run `./review.sh tailwind`' >/dev/null 2>&1; ec2=$?; set -e
 check "add refuses a bare section pointer (carryover) and accepts a self-contained item" "2 0" "$ec $ec2"
-set +e; "$NY" add --project "$T/bproj" --title "Start load" --do "$(printf 'run the command below
+set +e; "$NY" add --background "$BG" --project "$T/bproj" --title "Start load" --do "$(printf 'run the command below
 ```
 ./load.sh
 ```')" >/dev/null 2>&1; ec=$?; set -e
 check "add accepts 'the command below' followed by a fence" "0" "$ec"
 rm -rf "$T/bproj"
 check "refused items leave no store" "none" "$([ -e "$P/.swarm/needs-you.jsonl" ] && echo some || echo none)"
-check "add prints the label" "A1" "$("$NY" add --project "$P" --title "Load kdeyoga data" --risk "writes dev DB" --rec "yes, high confidence" --do 'In 1:util run `./load-tiger.sh kdeyoga`')"
-"$NY" add --project "$P" --title "PR 689" --kind decision --do 'Say `merge PR 689`' --url https://github.com/o/r/pull/689 >/dev/null
+check "add prints the label" "A1" "$("$NY" add --background "$BG" --project "$P" --title "Load kdeyoga data" --risk "writes dev DB" --rec "yes, high confidence" --do 'In 1:util run `./load-tiger.sh kdeyoga`')"
+"$NY" add --background "$BG" --project "$P" --title "PR 689" --kind decision --do 'Say `merge PR 689`' --url https://github.com/o/r/pull/689 >/dev/null
 out="$("$NY" render --project "$P")"
 case "$out" in *'./load-tiger.sh kdeyoga'*'merge PR 689'*) got=yes ;; *) got=no ;; esac
 check "render prints every do in full" "yes" "$got"
@@ -128,16 +129,41 @@ check "needs-you.md (the file the hook diffs) holds the items" "yes" "$got"
 check "render --json lists open items" "A1,A2" "$("$NY" render --json --project "$P" | jq -r 'map(.label) | join(",")')"
 "$NY" done A1 --project "$P"
 check "done closes one" "A2" "$("$NY" render --json --project "$P" | jq -r 'map(.label) | join(",")')"
-check "labels are never reused" "A3" "$("$NY" add --project "$P" --title t --do 'run `x`')"
+check "labels are never reused" "A3" "$("$NY" add --background "$BG" --project "$P" --title t --do 'run `x`')"
 "$NY" done A2 --project "$P"; "$NY" done A3 --project "$P"
 # a fenced --do: the fence must open on its own line and Do now: must show the command
 F="$T/fproj"; mkdir -p "$F/.swarm"
-"$NY" add --project "$F" --title "Load data" --do "$(printf '```\n./load.sh kdeyoga\n```')" >/dev/null
+"$NY" add --background "$BG" --project "$F" --title "Load data" --do "$(printf '```\n./load.sh kdeyoga\n```')" >/dev/null
 out="$("$NY" render --project "$F")"
 check "fenced --do: opening fence starts its own line" "1" "$(grep -c '^```$' <<<"$out" | awk '{print ($1 == 2) ? 1 : 0}')"
 check "fenced --do: Do now shows the command, not a bare fence" "Do now: A1 — ./load.sh kdeyoga" "$(grep '^Do now:' <<<"$out")"
 check "fenced --do: render passes the reply lint" "" "$("$LINT" <<<"$out" | cut -d: -f1 | paste -sd, -)"
 check "empty list renders 'Nothing to do.'" "Nothing to do." "$("$NY" render --project "$P" | tail -1)"
+
+# ── needs-you.sh: cold-reader background and hand-written guard (issue #964) ──
+G="$T/gproj"; mkdir -p "$G/.swarm"
+gadd() { "$NY" add --project "$G" --do 'Say `merge PR 9`' "$@" >/dev/null 2>&1; echo $?; }
+check "add refuses an item with no --background" "2" "$(gadd --title "Rebase the check")"
+check "add refuses a --background under 12 words" "2" "$(gadd --title "Rebase the check" --background "Check needs a rebase")"
+check "add refuses slash-joined acronyms (the 2026-11-14 stub)" "2" "$(gadd --title "SI/SR check re-base" --background "$BG")"
+check "add refuses 'HOLD (yours, date)'" "2" "$(gadd --title "HOLD (yours, 2026-11-13) on the rebase" --background "$BG")"
+check "add refuses option codes in the background" "2" "$(gadd --title "Pick a rebase approach" --background "Two ways to rebase the check were offered earlier today; B3 rewrites the history while A4-a keeps every commit, and nothing merges until one is chosen.")"
+check "add accepts CI/CD (a well-known pair)" "0" "$(gadd --title "Fix the CI/CD cache" --background "$BG")"
+check "add refuses a capitalised 'Option B'" "2" "$(gadd --title "Pick Option B for the rebase" --background "$BG")"
+check "add accepts PR numbers and plain words" "0" "$(gadd --title "Rebase the check on PR #2387" --background "$BG")"
+out="$("$NY" render --project "$G")"
+check "render leads each of the 2 items with 'What this is:'" "2" "$(grep -c '^  What this is: Loads the county' <<<"$out")"
+check "check: a list written by add is clean" "0" "$("$NY" check --project "$G" >/dev/null 2>&1; echo $?)"
+printf '# Needs you\n- **A1** HOLD: nothing to do\n' > "$G/.swarm/needs-you.md"
+check "check: a hand-edited list is flagged" "3" "$("$NY" check --project "$G" >/dev/null 2>&1; echo $?)"
+HW="$T/hwproj"; mkdir -p "$HW/.swarm"; printf '# Needs you\n- **A1** stub\n' > "$HW/.swarm/needs-you.md"
+check "check: a md with no store is flagged" "3" "$("$NY" check --project "$HW" >/dev/null 2>&1; echo $?)"
+check "render --write clears a stale hand-written list (no store)" "0" "$("$NY" render --write --project "$HW" >/dev/null 2>&1; "$NY" check --project "$HW" >/dev/null 2>&1; echo $?)"
+check "...and leaves an empty list" "Nothing to do." "$(tail -1 "$HW/.swarm/needs-you.md")"
+OLD="$T/oldproj"; mkdir -p "$OLD"; "$NY" add --background "$BG" --project "$OLD" --title "Old layout item" --do 'Say `go`' >/dev/null
+sed -i '/What this is:/d' "$OLD/.swarm/needs-you.md"
+check "check: an older-layout list (same labels) is not flagged" "0" "$("$NY" check --project "$OLD" >/dev/null 2>&1; echo $?)"
+check "check: no md at all is fine" "0" "$("$NY" check --project "$T/none" >/dev/null 2>&1; echo $?)"
 
 # ── Stop hook ────────────────────────────────────────────────────────────────
 H="$T/hproj"; mkdir -p "$H/.swarm/coord-inbox"
@@ -198,4 +224,34 @@ out="$(stop "$FX/incident-start-load.txt" false)"
 case "$(jq -r .reason <<<"$out")" in "Inbox: 1 item(s)"*"Reply lint failed"*) got=both ;; *) got="$(jq -r .reason <<<"$out")" ;; esac
 check "doorbell and lint ride one block" "both" "$got"
 
+
+# ── Stop hook: hand-written list and stale prompt (issue #964) ───────────────
+W="$T/wproj"; mkdir -p "$W/.swarm"; printf '# Needs you\n- **A1** stub\n' > "$W/.swarm/needs-you.md"
+wstop() {   # <stop_hook_active>
+    jq -n --rawfile m "$FX/clean-render.txt" --argjson a "$1" '{last_assistant_message: $m, stop_hook_active: $a}' \
+        | CLAUDE_PROJECT_DIR="$W" COORD_HOOK_STATE=0 "$HOOK" Stop
+}
+out="$(wstop false)"
+check "hand-written needs-you.md blocks the stop" "block" "$(jq -r .decision <<<"$out")"
+case "$(jq -r .reason <<<"$out")" in *"needs-you.sh add"*"--background"*) got=yes ;; *) got=no ;; esac
+check "...and the reason says how to rebuild it" "yes" "$got"
+check "...and is counted in events.log" "1" "$(grep -c 'coord.needs_you.handwritten' "$W/.swarm/events.log")"
+check "...but never blocks the continuation (no loop)" "" "$(wstop true)"
+rm -f "$W/.swarm/needs-you.md"
+check "no needs-you.md: no block" "" "$(wstop false)"
+printf '# Needs you\n- **A1** stub\n' > "$W/.swarm/needs-you.md"
+"$ROOT/scripts/needs-you.sh" render --write --project "$W" >/dev/null
+check "guard clears after render --write" "" "$(wstop false)"
+case "$(jq -r .reason <<<"$out")" in *"render --write"*) got=yes ;; *) got=no ;; esac
+check "rebuild message names render --write" "yes" "$got"
+rm -f "$W/.swarm/needs-you.md"
+LS="$T/llmswarm"; mkdir -p "$LS/prompts" "$LS/scripts"; echo one > "$LS/prompts/coordinator.md"
+cp "$ROOT/scripts/"{coord-hook.sh,needs-you.sh,_coord-split.sh,_coord-inbox-batch.sh,_watch-pause.sh,_window-flags.sh,lint-coordinator-reply.sh,watcher-check.sh,_load-env.sh} "$LS/scripts/" 2>/dev/null || true
+. "$ROOT/scripts/_coord-split.sh"; coord_prompt_hash "$LS" > "$W/.swarm/coord-prompt.sha"
+lstop() { jq -n '{last_assistant_message: "ok", stop_hook_active: false}' | CLAUDE_PROJECT_DIR="$W" COORD_HOOK_STATE=0 "$LS/scripts/coord-hook.sh" Stop; }
+check "unchanged prompt: no nudge" "" "$(lstop)"
+echo two > "$LS/prompts/coordinator.md"
+case "$(lstop | jq -r .reason)" in *"Coordinator prompt changed"*"Standing list"*) got=yes ;; *) got=no ;; esac
+check "changed prompt: one nudge naming the Standing list" "yes" "$got"
+check "...and it does not repeat for the same change" "" "$(lstop)"
 echo "all reply-lint checks passed"
