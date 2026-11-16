@@ -11273,7 +11273,7 @@ coord_composer_blocked_note_dirty() {
         return 0
     fi
     grep -q '^alerted=' "$COORD_WAKE_BLOCKED_FILE" 2>/dev/null && return 0
-    since="$(sed -n 's/^since=//p' "$COORD_WAKE_BLOCKED_FILE" 2>/dev/null | head -n 1)"
+    since="$(sed -n 's/^since=//p;T;q' "$COORD_WAKE_BLOCKED_FILE" 2>/dev/null)"
     [[ "$since" =~ ^[0-9]+$ ]] || since="$now"
     held=$((now - since))
     [ "$held" -ge "$COMPOSER_DIRTY_ALERT_SECS" ] || return 0
@@ -11306,9 +11306,9 @@ coord_composer_blocked_note_dirty() {
 coord_composer_blocked_clear() {
     [ -e "$COORD_WAKE_BLOCKED_FILE" ] || return 0
     local since alerted label now
-    since="$(sed -n 's/^since=//p' "$COORD_WAKE_BLOCKED_FILE" 2>/dev/null | head -n 1)"
-    alerted="$(sed -n 's/^alerted=//p' "$COORD_WAKE_BLOCKED_FILE" 2>/dev/null | head -n 1)"
-    label="$(sed -n 's/^label=//p' "$COORD_WAKE_BLOCKED_FILE" 2>/dev/null | head -n 1)"
+    since="$(sed -n 's/^since=//p;T;q' "$COORD_WAKE_BLOCKED_FILE" 2>/dev/null)"
+    alerted="$(sed -n 's/^alerted=//p;T;q' "$COORD_WAKE_BLOCKED_FILE" 2>/dev/null)"
+    label="$(sed -n 's/^label=//p;T;q' "$COORD_WAKE_BLOCKED_FILE" 2>/dev/null)"
     rm -f "$COORD_WAKE_BLOCKED_FILE"
     [ -n "$alerted" ] || return 0
     now=$(date +%s)
