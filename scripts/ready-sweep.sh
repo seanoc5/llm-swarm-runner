@@ -53,6 +53,31 @@ DRAFTS="$(gh pr list --state open --limit 100 --json number,body,headRefOid,head
     || { echo "ready-sweep: ERROR: gh pr list failed" >&2; exit 1; }
 CANDIDATES="$(jq -r '.[] | (.body // "" | capture("(?m)^<!-- SWARM_DRAFT_REASON: (?<r>ci-pending|ci-unknown) sha=").r) as $r | "\(.number) \($r)"' <<<"$DRAFTS")"
 
+# issue #984: a PR left carrying ONLY swarm-hold:ci with no banner and CI green
+# on the live head. Typical path: a fix push re-added the label (CI pending),
+# the CI-green retry hit pr-ready.sh's exit 3 because a coordinator hold was on,
+# and the hold-lift (comment, banner, label removal) never re-ran pr-ready.sh,
+# so swarm-merge.sh refused until someone removed the label by hand. Retry it.
+# Guards: the label set is exactly {swarm-hold:ci} (any coordinator / operator /
+# review / bare hold label means someone else owns the PR), no COORDINATOR HOLD
+# banner and no SWARM_DRAFT_REASON banner (those have their own paths above), and
+# every newest-per-check run is SUCCESS/NEUTRAL/SKIPPED with at least one check,
+# so the label is never touched while CI is pending or red. pr-ready.sh stays the
+# only thing that removes it (it re-checks CI and the hold itself).
+CI_HOLD_GREEN="$(jq -r "$CI_ROLLUP_DROP_LIVENESS_JQ"'.[]
+  | select([(.labels // [])[] | (.name // "") | select(test("^swarm-hold(:.*)?$"))] == ["swarm-hold:ci"])
+  | select((.body // "") | (test("<!-- SWARM_DRAFT_REASON:") or test("(?m)^> ⛔ \\*\\*COORDINATOR HOLD\\*\\*")) | not)
+  | (.statusCheckRollup // []
+     | ci_real
+     | group_by((.workflowName // "") + "\u0000" + (.name // .context // ""))
+     | map(max_by(.completedAt // .startedAt // .createdAt // ""))) as $r
+  | select(($r | length) > 0 and all($r[]; ((.status // "COMPLETED") == "COMPLETED")
+        and (((.conclusion // .state // "") | test("^(SUCCESS|NEUTRAL|SKIPPED)$")))))
+  | "\(.number) ci-hold-green"' <<<"$DRAFTS")"
+if [ -n "$CI_HOLD_GREEN" ]; then
+    CANDIDATES="$(printf '%s\n%s' "$CANDIDATES" "$CI_HOLD_GREEN" | sed '/^$/d')"
+fi
+
 # issue #729: a parked PR whose CI went red has no live owner (its worker ended
 # after writing an fyi note), so report it; coordinator-watch.sh turns the line
 # into one inbox note per (PR, sha). The banner proves only ITS OWN sha failed:

@@ -262,4 +262,25 @@ want='#81 stale-wait: waiting on #1461, which merged at 2026-10-15T06:52:00Z
 [ "$(cat "$TEST_DIR/out.log")" = "$want" ] || red "unexpected stale-wait output: $(cat "$TEST_DIR/out.log")"
 green "stale waits reported for drafts and label-held PRs only"
 
+heading "Test 13 (issue #984): a lone swarm-hold:ci with green CI and no banner is retried; anything else is left alone"
+G='[{"name":"unit","status":"COMPLETED","conclusion":"SUCCESS"}]'
+P='[{"name":"unit","status":"IN_PROGRESS","conclusion":""}]'
+R='[{"name":"unit","status":"COMPLETED","conclusion":"FAILURE"}]'
+CI='[{"name":"swarm-hold:ci"}]'
+cat > "$FIXTURE" <<JSON
+[{"number": 11, "isDraft": false, "labels": $CI, "body": "body", "statusCheckRollup": $G},
+ {"number": 91, "isDraft": false, "labels": $CI, "body": "body", "statusCheckRollup": $P},
+ {"number": 92, "isDraft": false, "labels": $CI, "body": "body", "statusCheckRollup": $R},
+ {"number": 93, "isDraft": false, "labels": [{"name":"swarm-hold:ci"},{"name":"swarm-hold:coordinator"}], "body": "body", "statusCheckRollup": $G},
+ {"number": 94, "isDraft": false, "labels": $CI, "body": "> ⛔ **COORDINATOR HOLD** — x\nbody", "statusCheckRollup": $G},
+ {"number": 95, "isDraft": false, "labels": [{"name":"swarm-hold:review"}], "body": "body", "statusCheckRollup": $G},
+ {"number": 96, "isDraft": false, "labels": $CI, "body": "body", "statusCheckRollup": []},
+ {"number": 97, "isDraft": false, "labels": [], "body": "body", "statusCheckRollup": $G}]
+JSON
+echo '{}' > "$STATES"
+run_sweep || red "expected exit 0: $(cat "$TEST_DIR/out.log")"
+[ "$(tr '\n' ' ' < "$READY_LOG")" = "11 " ] || red "expected pr-ready on 11 only, got: $(tr '\n' ' ' < "$READY_LOG")"
+grep -qx '#11 ci-hold-green: readied' "$TEST_DIR/out.log" || red "expected readied line: $(cat "$TEST_DIR/out.log")"
+green "pending, red, no-check, coordinator-held, bannered, review-held and unlabelled PRs keep their labels untouched"
+
 green "ALL TESTS PASSED"
