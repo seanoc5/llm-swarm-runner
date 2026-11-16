@@ -2108,6 +2108,8 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     COORD_WORK_RUN_MAX_RETRIES 3  split mode: consecutive failed runs retried before giving up (a new inbox item still starts a run)
     COORD_WAKE_RETRY_SECS 15      retry interval for a wake llm-start.sh deferred (composer held an unsubmitted human draft, issue #422); 0=off
     COORD_WAKE_DEFER_WARN_SECS 300  loud WARN threshold for a wake still deferred this long (issue #422); retries never stop on their own
+    COMPOSER_DIRTY_ALERT_SECS 900   a dirty composer holding wakes this long files a needs-you item + coord.wake.blocked event (issue #973); 0=off
+    COMPOSER_DIRTY_BACKOFF_SECS 120 retry interval once that alert has fired (issue #973); 0=keep COORD_WAKE_RETRY_SECS
     COORD_WAKE_BUSY_RETRY_SECS 30  retry interval for a wake deferred because the coordinator pane was mid-turn (issue #430); 0=off (pastes immediately, pre-#430 behavior)
     COORD_WAKE_BUSY_CEILING_SECS 900  deliver a busy-deferred wake anyway after this long (issue #430, 15min); 0=no ceiling; never applies to a human_present hold
     COORD_HUMAN_IDLE_SECS 600     hold every doorbell while the operator has typed into the COORDINATOR session this recently (issue #459); 0=off
@@ -2270,7 +2272,11 @@ EVENTS LOG
                            (issue #422) a wake has been deferred ≥COORD_WAKE_DEFER_WARN_SECS
                            with every retry still reading the composer dirty — loud WARN,
                            not a give-up (retries continue); see that var's header comment
-      sweep.run            sweep-swarm-outcomes.sh fired (when POST_OUTCOMES=1)
+      coord.wake.blocked   (issue #973) a dirty composer has held wakes ≥COMPOSER_DIRTY_ALERT_SECS:
+                           state=start (blocked=Ns, needs-you item filed) and, when the
+                           pending wake finally clears, state=clear (blocked=total Ns, item
+                           closed); sum the pairs for blocked-hours
+      sweep.run           sweep-swarm-outcomes.sh fired (when POST_OUTCOMES=1)
       watch.autoclose      kill-finished-workers.sh reaped ≥1 window (trigger=outcome|pr_poll,
                            killed=N); passes that reap nothing are not logged
       reap.window          per-target kill record written by kill-finished-workers.sh
@@ -3368,6 +3374,33 @@ if ! [[ "$COORD_WAKE_DEFER_WARN_SECS" =~ ^[0-9]+$ ]]; then
     exit 1
 fi
 
+# COMPOSER_DIRTY_ALERT_SECS (issue #973): the WARN above only reaches the
+# watcher pane, which nobody reads — fand-etl sat 14h behind an unsent draft
+# with 4,685 retries and no one told. Once a dirty composer has held wakes
+# this long, coord_composer_blocked_note_dirty emits one coord.wake.blocked
+# state=start event and files a needs-you item naming the project and the
+# hold time; whatever finally clears the pending wake (delivery, the
+# operator submitting it, an empty inbox) emits state=clear and closes the
+# item. 0 disables. Skipping a dirty composer stays right (typing over the
+# operator's text is worse); this only makes the skip visible.
+COMPOSER_DIRTY_ALERT_SECS="${COMPOSER_DIRTY_ALERT_SECS:-900}"
+if ! [[ "$COMPOSER_DIRTY_ALERT_SECS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: COMPOSER_DIRTY_ALERT_SECS must be a non-negative integer (got: $COMPOSER_DIRTY_ALERT_SECS)" >&2
+    exit 1
+fi
+# COMPOSER_DIRTY_BACKOFF_SECS (issue #973): once that alert has fired, the
+# dirty-composer retry runs this often instead of every COORD_WAKE_RETRY_SECS
+# (a stuck draft was retried every ~10-15s for 14h). Only ever slows the
+# retry; 0 keeps the normal cadence.
+COMPOSER_DIRTY_BACKOFF_SECS="${COMPOSER_DIRTY_BACKOFF_SECS:-120}"
+if ! [[ "$COMPOSER_DIRTY_BACKOFF_SECS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: COMPOSER_DIRTY_BACKOFF_SECS must be a non-negative integer (got: $COMPOSER_DIRTY_BACKOFF_SECS)" >&2
+    exit 1
+fi
+# Episode state: line 1 "since=<epoch of the first dirty-composer retry>",
+# then "alerted=<epoch>" and "label=<needs-you label>" once the alert fired.
+COORD_WAKE_BLOCKED_FILE="$PROJECT_DIR/.swarm/coord-wake-blocked"
+
 # --- issue #430: coordinator inbox + busy-pane doorbell deferral ----------
 #
 # COORD_INBOX_DIR mirrors the worker outbox pattern (mktemp+mv, processed/
@@ -3745,6 +3778,7 @@ format_event_line() {
         coord.wake.retry)             glyph="↻"; color=$'\033[36m' ;;
         coord.wake.deferred_delivered) glyph="→"; color=$'\033[32m' ;;
         coord.wake.deferred_stale)    glyph="⚠"; color=$'\033[31m' ;;
+        coord.wake.blocked)           glyph="⚠"; color=$'\033[31m' ;;
         coord.inbox.write)             glyph="✉"; color=$'\033[36m' ;;
         coord.compact)                 glyph="◈"; color=$'\033[36m' ;;
         coord.compact.skip)             glyph="·"; color=$'\033[2m'  ;;
@@ -7434,7 +7468,7 @@ run_watch_timer_loop() {
         fi
         if [ "$COORD_WAKE_RETRY_SECS" -gt 0 ] && ! coord_split_active; then
             now=$(date +%s)
-            if [ $((now - last_coord_wake_retry)) -ge "$COORD_WAKE_RETRY_SECS" ]; then
+            if [ $((now - last_coord_wake_retry)) -ge "$(coord_wake_retry_interval)" ]; then
                 coord_wake_retry_pass || true
                 last_coord_wake_retry=$now
             fi
@@ -11214,6 +11248,84 @@ coord_wake_set_pending() {
 # landed (rc 0 from the retry's own llm-start.sh call).
 coord_wake_clear_pending() {
     ( flock -w "$COORD_WAKE_LOCK_TIMEOUT_SECS" 9 && rm -f "$COORD_WAKE_PENDING_FILE" "$COORD_WAKE_PENDING_WARNED_FILE" ) 9>"$COORD_WAKE_LOCK" || true
+    # (issue #973) Pending gone means nothing is held behind the composer.
+    coord_composer_blocked_clear
+}
+
+# coord_composer_blocked_note_dirty
+#
+# (issue #973) Called by coord_wake_retry_pass each time the retry finds the
+# composer still dirty (llm-start.sh rc 3). Stamps the start of the episode on
+# the first call; once COMPOSER_DIRTY_ALERT_SECS has passed, emits one
+# coord.wake.blocked state=start event and files one needs-you item. Never
+# fails the caller: a needs-you.sh failure is logged and the event still stands.
+coord_composer_blocked_note_dirty() {
+    [ "$COMPOSER_DIRTY_ALERT_SECS" -gt 0 ] || return 0
+    local now since="" held label=""
+    now=$(date +%s)
+    if [ ! -e "$COORD_WAKE_BLOCKED_FILE" ]; then
+        printf 'since=%s\n' "$now" > "$COORD_WAKE_BLOCKED_FILE" 2>/dev/null || return 0
+        return 0
+    fi
+    grep -q '^alerted=' "$COORD_WAKE_BLOCKED_FILE" 2>/dev/null && return 0
+    since="$(sed -n 's/^since=//p' "$COORD_WAKE_BLOCKED_FILE" 2>/dev/null | head -n 1)"
+    [[ "$since" =~ ^[0-9]+$ ]] || since="$now"
+    held=$((now - since))
+    [ "$held" -ge "$COMPOSER_DIRTY_ALERT_SECS" ] || return 0
+
+    local proj mins
+    proj="$(basename "$PROJECT_DIR")"
+    mins=$((held / 60))
+    echo "[$(date +%T)] WARNING: coordinator wakes held ${held}s behind an unsent draft in $SESSION_NAME:coordinator — filing a needs-you item"
+    log_event coord.wake.blocked "state=start reason=composer_dirty blocked=${held}s project=$proj"
+    if [ "$DRY_RUN" != "1" ] && [ -x "$SCRIPT_DIR/needs-you.sh" ]; then
+        label="$(timeout 60 "$SCRIPT_DIR/needs-you.sh" add --project "$PROJECT_DIR" --kind todo \
+            --title "$proj coordinator has not been woken for ${mins} minutes: unsent text sits in its input box" \
+            --background "The $proj coordinator's input box holds text that was typed but never sent. The watcher will not type over it, so every wake for finished workers and new work is being skipped and retried. Until the text is sent or cleared, nothing gets triaged or dispatched in $proj." \
+            --do "Attach with \`tmux attach -t $SESSION_NAME:coordinator\`, then press Enter to send the text or Ctrl-U to clear it." \
+            --risk "$proj stays idle while this is open" \
+            --rec "Send or clear the text now; the watcher delivers the held wake within a retry or two." \
+            --default "The watcher keeps retrying, backing off to every ${COMPOSER_DIRTY_BACKOFF_SECS}s, and closes this item itself when a wake lands." \
+            2>/dev/null)" || label=""
+        [ -n "$label" ] || log_event coord.wake.blocked "state=needs_you_failed project=$proj"
+    fi
+    printf 'alerted=%s\nlabel=%s\n' "$now" "$label" >> "$COORD_WAKE_BLOCKED_FILE" 2>/dev/null || true
+}
+
+# coord_composer_blocked_clear
+#
+# (issue #973) Ends the episode coord_composer_blocked_note_dirty opened:
+# removes the state file and, if the alert had fired, emits
+# coord.wake.blocked state=clear with the total hold time and closes the
+# needs-you item. A no-op (one -e test) when no episode is open.
+coord_composer_blocked_clear() {
+    [ -e "$COORD_WAKE_BLOCKED_FILE" ] || return 0
+    local since alerted label now
+    since="$(sed -n 's/^since=//p' "$COORD_WAKE_BLOCKED_FILE" 2>/dev/null | head -n 1)"
+    alerted="$(sed -n 's/^alerted=//p' "$COORD_WAKE_BLOCKED_FILE" 2>/dev/null | head -n 1)"
+    label="$(sed -n 's/^label=//p' "$COORD_WAKE_BLOCKED_FILE" 2>/dev/null | head -n 1)"
+    rm -f "$COORD_WAKE_BLOCKED_FILE"
+    [ -n "$alerted" ] || return 0
+    now=$(date +%s)
+    [[ "$since" =~ ^[0-9]+$ ]] || since="$now"
+    log_event coord.wake.blocked "state=clear reason=composer_dirty blocked=$((now - since))s project=$(basename "$PROJECT_DIR")"
+    if [ -n "$label" ] && [ "$DRY_RUN" != "1" ] && [ -x "$SCRIPT_DIR/needs-you.sh" ]; then
+        timeout 60 "$SCRIPT_DIR/needs-you.sh" done "$label" --project "$PROJECT_DIR" >/dev/null 2>&1 || true
+    fi
+}
+
+# coord_wake_retry_interval
+#
+# (issue #973) The cadence run_watch_timer_loop gates coord_wake_retry_pass on:
+# COORD_WAKE_RETRY_SECS normally, COMPOSER_DIRTY_BACKOFF_SECS once the blocked
+# alert has fired (and only if that is slower).
+coord_wake_retry_interval() {
+    if [ "$COMPOSER_DIRTY_BACKOFF_SECS" -gt "$COORD_WAKE_RETRY_SECS" ] \
+       && grep -q '^alerted=' "$COORD_WAKE_BLOCKED_FILE" 2>/dev/null; then
+        printf '%s' "$COMPOSER_DIRTY_BACKOFF_SECS"
+    else
+        printf '%s' "$COORD_WAKE_RETRY_SECS"
+    fi
 }
 
 # coord_wake_retry_pass
@@ -11357,6 +11469,7 @@ coord_wake_retry_pass() {
             ;;
         3)
             log_event coord.wake.skip "reason=composer_dirty trigger=retry age=${age}s"
+            coord_composer_blocked_note_dirty
             ;;
         *)
             echo "[$(date +%T)] WARN: deferred coordinator wake retry exited non-zero (continuing watch)"
