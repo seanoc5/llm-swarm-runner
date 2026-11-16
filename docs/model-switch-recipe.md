@@ -127,6 +127,24 @@ claude --version
 Rollback is `claude install <old version>`; prior builds stay on disk under
 `~/.local/share/claude/versions/`.
 
+**Workers run a different install from the coordinator (#742).** The coordinator uses
+the host's native `claude` (`~/.local/bin/claude`, handled by the table above). Workers
+run `~/.npm-global/bin/claude`, mounted read-only into the container; it shadows the
+image's copy and is never touched by `claude update` on the host. A worker can therefore
+sit below the floor after the host passes it. Update the worker copy deliberately, then
+confirm the floor from inside the sandbox image:
+
+```bash
+scripts/update-worker-claude.sh            # or: scripts/update-worker-claude.sh <exact version>
+./sandbox.sh "$PWD" bash -lc 'which claude && claude --version'
+```
+
+Update model: **workers track `latest` on purpose, but only through this script.**
+In-worker auto-update is off (`DISABLE_AUTOUPDATER=1`) and the mount is read-only, so
+parallel workers cannot race writing it and only your deliberate update changes it.
+Running workers keep their process; new or restarted workers get the new version.
+Update when few workers are mid-run if you can (mid-run replacement is untested). Roll back with `scripts/update-worker-claude.sh <old version>`.
+
 ### Step 3 — Edit the one config file
 
 ```bash
@@ -271,8 +289,10 @@ Findings worth keeping:
 2. `claude-opus-5-5` was live on the API (1M input / 128K output) but refused by CLI
    2.1.257 with HTTP 400.
 3. `stable` was 2.1.273 — *below* the 2.1.280 floor. Only `latest` (2.1.281) cleared it,
-   so `claude update` alone would not have been enough. The CLI upgrade is machine-wide,
-   not per-swarm: coordinator and workers both invoke the `claude` on `PATH`.
+   so `claude update` alone would not have been enough. The CLI upgrade is per-host, not
+   per-swarm, but it is **two installs**: the coordinator runs the host's native
+   `claude`; workers run `~/.npm-global/bin/claude` (corrected 2026-11-12, #742: this
+   note previously said both use the `claude` on `PATH`). Update both.
 4. Claude Max OAuth entitlement covered the new model — worth probing with
    `env -u ANTHROPIC_API_KEY`, because `COORDINATOR_USE_API_KEY=0` (the default) strips
    the API key, so an API-key-only probe would not have proven the coordinator's path.

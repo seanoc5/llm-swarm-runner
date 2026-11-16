@@ -16,10 +16,20 @@ ENV LC_ALL=C.utf8
 # -----------------------------------------------------------------------------
 # Toolchain version pins
 # -----------------------------------------------------------------------------
-# All four LLM CLIs and the two non-apt installs (deno, uv) are pinned to
-# explicit versions so `docker build` is reproducible. To upgrade any tool,
-# bump its ARG below or pass `--build-arg <NAME>=<VERSION>` on the command
-# line. Verify upstream's release notes before bumping — npm packages
+# The LLM CLIs and the two non-apt installs (deno, uv) are pinned to explicit
+# versions so `docker build` is reproducible, with ONE exception: Claude Code.
+# Workers do not run the image's copy. sandbox.sh mounts the host's
+# ~/.npm-global read-only over /home/sandbox/.npm-global, which is first on
+# PATH, so a worker's `claude` is whatever scripts/update-worker-claude.sh
+# last installed there (#742). CLAUDE_CODE_VERSION below is only the fallback
+# for a host whose ~/.npm-global is empty, so it is `latest` as of the last cache-free build rather than
+# a pin implying a version nobody runs (docker caches that layer; use --no-cache to refresh). gemini-cli, codex and promptfoo are
+# NOT shadowed (the mount holds only claude), so their pins are what runs.
+#
+# To upgrade a pinned tool, bump its ARG below or pass
+# `--build-arg <NAME>=<VERSION>` on the command line. To update the Claude
+# Code that workers run, use scripts/update-worker-claude.sh (no image
+# rebuild). Verify upstream's release notes before bumping — npm packages
 # occasionally rename flags (claude-code) or change tool-call protocols
 # (gemini-cli) in minor releases.
 #
@@ -36,7 +46,7 @@ ENV LC_ALL=C.utf8
 # benefit for a personal-dev sandbox. Major versions are still pinned via
 # package selection: openjdk-21, NodeSource setup_22.x.)
 ARG NODE_MAJOR=22
-ARG CLAUDE_CODE_VERSION=2.1.126
+ARG CLAUDE_CODE_VERSION=latest
 ARG GEMINI_CLI_VERSION=0.62.0
 ARG AGY_SHA512=6d2e2eeda0cad6eac8e8b2df11257d684210f8d384a2ee011dc6ad0edacfa33e1ec9c554589f6ff6ef0697f4c3c777ba46b6e84639711f173377cc1554c67436
 ARG OPENAI_CODEX_VERSION=0.160.0
@@ -110,8 +120,9 @@ RUN curl -fsSL "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/
         uv-x86_64-unknown-linux-gnu/uv \
         uv-x86_64-unknown-linux-gnu/uvx
 
-# LLM CLIs & Tools — each npm package pinned to its exact version. Bump
-# the ARG above to upgrade. promptfoo and openai/codex are less impactful
+# LLM CLIs & Tools — each npm package pinned to its exact version (claude-code
+# excepted, see the header: its fallback copy tracks latest). Bump the ARG
+# above to upgrade. promptfoo and openai/codex are less impactful
 # (we don't currently script against them); claude-code and gemini-cli
 # are load-bearing for the swarm.
 RUN npm install -g \
