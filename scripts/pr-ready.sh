@@ -407,6 +407,8 @@ refuse() {
                           next="coordinator — 'gh run rerun <run-id>', then re-run pr-ready.sh $PR — waiting on the re-run finishing" ;;
             check-failing) text="the project's pre-ready check (WORKER_PR_READY_CHECK_CMD) failed on ${sha:0:7} at $ts."
                           next="$who — fix the failure, push, re-run pr-ready.sh $PR — waiting on nothing" ;;
+            lint-failing) text="a repo lint (PR_READY_LINTS) failed on ${sha:0:7} at $ts."
+                          next="$who — fix the lint output (see the worker pane), push, re-run pr-ready.sh $PR — waiting on nothing" ;;
             ci-failing)   text="CI failed on ${sha:0:7} at $ts."
                           next="$who — push a CI fix, re-run pr-ready.sh $PR — waiting on nothing" ;;
         esac
@@ -499,6 +501,43 @@ REVIEW_MODEL_ARGS=()
 if [ "$RISK" = "low" ] && [ "${GREEN_REVIEW:-0}" = "1" ]; then
     REVIEW_KIND=green
     REVIEW_MODEL_ARGS=(--model "${GREEN_REVIEW_MODEL:-haiku}")
+fi
+
+# issue #976: sub-second repo-wide lints run against the caller's checkout
+# before readying. Workers run only the suites their change touches, so three
+# PRs in two days (#966, #968, #974) added `| head -n 1` / `| grep -q` pipes
+# and failed tests/test-no-awk-exit-pipe.sh in CI, each costing a CI round plus
+# a fix round. PR_READY_LINTS is a space-separated list of repo-relative
+# scripts (default: that lint); a listed script the checkout lacks is skipped.
+# Same cwd rule as the ready check below: only when the checkout's HEAD is the
+# PR head (the coordinator runs this from its own checkout, where the lint
+# would judge unrelated code). A failure refuses with exit 6 and the lint's
+# output; PR_READY_LINTS="" turns it off.
+LINTS="${PR_READY_LINTS-tests/test-no-awk-exit-pipe.sh}"
+if [ -n "$LINTS" ]; then
+    LINT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+    LINT_PR_HEAD="$(head_sha)"
+    LINT_CWD_HEAD="$(git rev-parse HEAD 2>/dev/null || true)"
+    if [ -z "$LINT_ROOT" ] || [ -z "$LINT_PR_HEAD" ] || [ "$LINT_CWD_HEAD" != "$LINT_PR_HEAD" ]; then
+        : # not a checkout of the PR head: nothing to lint (silent, like a missing lint)
+    else
+        for lint in $LINTS; do
+            [ -f "$LINT_ROOT/$lint" ] || continue
+            LINT_LOG="$(mktemp)"
+            set +e
+            timeout -k 10 120 bash "$LINT_ROOT/$lint" >"$LINT_LOG" 2>&1
+            LINT_RC=$?
+            set -e
+            if [ "$LINT_RC" -ne 0 ]; then
+                echo "pr-ready: REFUSED — repo lint $lint exited $LINT_RC (124 = timed out). Output tail:" >&2
+                tail -n 20 "$LINT_LOG" | sed 's/^/    /' >&2
+                rm -f "$LINT_LOG"
+                refuse lint-failing 6
+            fi
+            rm -f "$LINT_LOG"
+            echo "pr-ready: repo lint $lint passed"
+        done
+    fi
 fi
 
 # issue #494: optional full check, once, right before readying. Projects keep
