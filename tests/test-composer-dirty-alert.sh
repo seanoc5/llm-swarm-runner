@@ -74,6 +74,37 @@ check "orphan: retry pass with no pending file closes the item" "0" "$(open_coun
 [ ! -e "$COORD_WAKE_BLOCKED_FILE" ] && green "orphan: marker removed" || red "orphan marker left behind"
 grep -q "state=clear" "$EV" && green "orphan: state=clear event emitted" || red "no state=clear for orphan"
 
+# (issue #975) Split mode: retry passes are off, so a pending wake file left in
+# place must not keep the alert open. The sweep (startup + every timer tick)
+# closes the episode with exactly one state=clear and the item closed.
+eval "$(sed -n '/^coord_composer_blocked_sweep() {/,/^}/p' "$WATCH")"
+declare -F coord_composer_blocked_sweep >/dev/null || red "could not extract coord_composer_blocked_sweep"
+COORD_WAKE_PENDING_FILE="$T/pending-wake"; echo "wake me" > "$COORD_WAKE_PENDING_FILE"
+COORD_MODE_FOR_TEST=resident
+coord_split_active() { [ "$COORD_MODE_FOR_TEST" = "split" ]; }
+: > "$EV"
+coord_composer_blocked_note_dirty >/dev/null; backdate 1000; coord_composer_blocked_note_dirty >/dev/null
+check "resident: item open with a pending wake" "1" "$(open_count)"
+coord_composer_blocked_sweep
+check "resident: sweep leaves a live episode (pending wake still held)" "1" "$(open_count)"
+COORD_MODE_FOR_TEST=split
+coord_composer_blocked_sweep
+check "split: sweep closes the item despite the pending file" "0" "$(open_count)"
+check "split: exactly one state=clear event" "1" "$(grep -c state=clear "$EV")"
+[ -e "$COORD_WAKE_PENDING_FILE" ] && green "split: pending file untouched" || red "sweep removed the pending file"
+coord_composer_blocked_sweep; coord_composer_blocked_sweep
+check "split: repeat sweeps stay silent" "1" "$(grep -c state=clear "$EV")"
+
+# Concurrent clears (timer loop + main loop): one state=clear, one item close.
+: > "$EV"
+coord_composer_blocked_note_dirty >/dev/null; backdate 1000; coord_composer_blocked_note_dirty >/dev/null
+for _ in 1 2 3 4 5 6; do coord_composer_blocked_clear & done; wait
+check "concurrent clears log state=clear once" "1" "$(grep -c state=clear "$EV" || true)"
+check "concurrent clears close the item" "0" "$(open_count)"
+
+# Both loop entry points must route through the sweep, not a bare pending test.
+check "startup and per-tick paths both call the sweep" "2" "$(grep -c "^ *coord_composer_blocked_sweep$" "$WATCH")"
+
 COMPOSER_DIRTY_ALERT_SECS=0
 coord_composer_blocked_note_dirty >/dev/null
 [ ! -e "$COORD_WAKE_BLOCKED_FILE" ] && green "COMPOSER_DIRTY_ALERT_SECS=0 disables the alert" || red "disabled alert still stamped"

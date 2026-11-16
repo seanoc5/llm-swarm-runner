@@ -7451,7 +7451,7 @@ run_watch_timer_loop() {
     last_sibling_sweep=$(date +%s)
     last_runner_health_sweep=$(date +%s)
     # (issue #973) Startup: a marker left by a previous watcher with no pending wake.
-    [ -e "$COORD_WAKE_PENDING_FILE" ] || coord_composer_blocked_clear
+    coord_composer_blocked_sweep
     # Tick order matters: tests/test-shape-window-flags.sh treats ready_sweep_pass as the
     # end-of-tick marker, so keep window sweeps and pr_poll_pass BEFORE ready_sweep_pass.
     while true; do
@@ -7459,9 +7459,8 @@ run_watch_timer_loop() {
         # issue #457: a full pause stops every sweep here (reaps, PR polls, hold
         # retries); the main poll loop still records outcomes into coord-inbox/.
         watch_pause_full "$PROJECT_DIR/.swarm" && continue
-        # (issue #973) Orphaned blocked marker (no pending wake, e.g. split mode or a
-        # hand-deleted pending file): close the alert. Two -e tests when idle.
-        [ -e "$COORD_WAKE_PENDING_FILE" ] || coord_composer_blocked_clear
+        # (issue #973/#975) Orphaned or split-mode blocked marker: close the alert.
+        coord_composer_blocked_sweep
         [ "$WATCH_CHECK_ON_DONE" = "1" ] && { status_poll_pass || true; }
         if [ "$WATCH_WINDOW_FLAGS" = "1" ] && [ "$WATCH_WINDOW_FLAGS_SWEEP_SECS" -gt 0 ]; then
             now=$(date +%s)
@@ -11305,17 +11304,36 @@ coord_composer_blocked_note_dirty() {
 # needs-you item. A no-op (one -e test) when no episode is open.
 coord_composer_blocked_clear() {
     [ -e "$COORD_WAKE_BLOCKED_FILE" ] || return 0
-    local since alerted label now
-    since="$(sed -n 's/^since=//p;T;q' "$COORD_WAKE_BLOCKED_FILE" 2>/dev/null)"
-    alerted="$(sed -n 's/^alerted=//p;T;q' "$COORD_WAKE_BLOCKED_FILE" 2>/dev/null)"
-    label="$(sed -n 's/^label=//p;T;q' "$COORD_WAKE_BLOCKED_FILE" 2>/dev/null)"
-    rm -f "$COORD_WAKE_BLOCKED_FILE"
+    local since alerted label now claimed="$COORD_WAKE_BLOCKED_FILE.clearing.${BASHPID:-$$}"
+    # (issue #975) The timer loop and the main loop can both reach here at once.
+    # mv is atomic: exactly one caller claims the marker and logs/closes; the
+    # loser's mv fails and it returns without a second state=clear.
+    mv "$COORD_WAKE_BLOCKED_FILE" "$claimed" 2>/dev/null || return 0
+    since="$(sed -n 's/^since=//p;T;q' "$claimed" 2>/dev/null)"
+    alerted="$(sed -n 's/^alerted=//p;T;q' "$claimed" 2>/dev/null)"
+    label="$(sed -n 's/^label=//p;T;q' "$claimed" 2>/dev/null)"
+    rm -f "$claimed"
     [ -n "$alerted" ] || return 0
     now=$(date +%s)
     [[ "$since" =~ ^[0-9]+$ ]] || since="$now"
     log_event coord.wake.blocked "state=clear reason=composer_dirty blocked=$((now - since))s project=$(basename "$PROJECT_DIR")"
     if [ -n "$label" ] && [ "$DRY_RUN" != "1" ] && [ -x "$SCRIPT_DIR/needs-you.sh" ]; then
         timeout 60 "$SCRIPT_DIR/needs-you.sh" done "$label" --project "$PROJECT_DIR" >/dev/null 2>&1 || true
+    fi
+}
+
+# coord_composer_blocked_sweep
+#
+# (issue #975) Closes a blocked episode nothing else will. Resident mode: no
+# pending wake means nothing is held (orphan marker, hand-deleted pending
+# file). Split mode: the composer is never typed into and the retry passes are
+# off, so a leftover pending wake file cannot be held by a dirty composer;
+# any marker is stale and is closed even while that file sits there. Cheap
+# when idle (one -e test on the marker).
+coord_composer_blocked_sweep() {
+    [ -e "$COORD_WAKE_BLOCKED_FILE" ] || return 0
+    if coord_split_active || [ ! -e "$COORD_WAKE_PENDING_FILE" ]; then
+        coord_composer_blocked_clear
     fi
 }
 
