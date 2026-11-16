@@ -1182,12 +1182,13 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
         echo "ERROR: PR #$PR_NUM is $LOCK_STATE at merge time (re-read under the action lock) — nothing merged." >&2
         log_event merge.gate "pr=$PR_NUM gate=action-lock result=state-$LOCK_STATE action=refuse"
         exit 1
-      elif [ "$LOCK_RC" = 0 ] && jq -e "$HOLD_LABEL_JQ_PRED" <<<"$LOCK_LABELS_JSON" >/dev/null 2>&1; then
-        # issue #612: a hold landed while the gates (CI wait, review) ran.
+      elif jq -e "$HOLD_LABEL_JQ_PRED" <<<"$LOCK_LABELS_JSON" >/dev/null 2>&1; then
+        # issue #612 / #970: a hold landed while the gates (CI wait, review) ran. Not gated on
+        # LOCK_RC: a failed head/state re-read must not skip the hold check.
         echo "ERROR: PR #$PR_NUM was put on hold (swarm-hold* label) while the gates ran — nothing merged." >&2
         log_event merge.gate "pr=$PR_NUM gate=hold-label result=hold-at-lock action=refuse"
         exit 1
-      elif [ "$LOCK_RC" = 0 ] && [ "$LOCK_LABELS_OK" != 1 ]; then
+      elif [ "$LOCK_LABELS_OK" != 1 ]; then
         echo "ERROR: could not re-read PR #$PR_NUM's labels under the action lock, so the hold lock can't be confirmed — nothing merged." >&2
         log_event merge.gate "pr=$PR_NUM gate=hold-label result=unreadable action=refuse"
         exit 1

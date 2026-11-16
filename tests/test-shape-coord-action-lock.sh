@@ -338,3 +338,12 @@ rc=0; ( cd "$REPO" && timeout 30 "$MERGE" 600 --no-kill >"$TEST_DIR/k5.log" 2>&1
 [ "$rc" = 1 ] && [ "$(merges)" = 0 ] || red "K5: unreadable labels under the lock must fail closed (rc $rc): $(cat "$TEST_DIR/k5.log")"
 grep -q "could not re-read" "$TEST_DIR/k5.log" || red "K5: no unreadable-labels message: $(cat "$TEST_DIR/k5.log")"
 green "K5: unreadable label re-read under the lock fails closed"
+reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/fail-reread" "$TEST_DIR/state/late-label"
+rc=0; ( cd "$REPO" && timeout 30 "$MERGE" 600 --no-kill >"$TEST_DIR/k6.log" 2>&1 ) || rc=$?
+[ "$rc" = 1 ] && [ "$(merges)" = 0 ] || red "K6: a late hold with a failed head/state re-read must refuse (rc $rc, merges $(merges)): $(cat "$TEST_DIR/k6.log")"
+grep -q 'put on hold' "$TEST_DIR/k6.log" || red "K6: no under-lock hold message: $(cat "$TEST_DIR/k6.log")"
+green "K6: a hold added after the early check is caught even when the head/state re-read fails"
+reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/fail-reread"
+( cd "$REPO" && timeout 30 "$MERGE" 600 --no-kill >"$TEST_DIR/k7.log" 2>&1 ) || red "K7: failed re-read with no hold must still merge (plain): $(cat "$TEST_DIR/k7.log")"
+[ "$(merges)" = 1 ] || red "K7: expected 1 merge, got $(merges)"
+green "K7: failed head/state re-read, no hold: plain merge still proceeds"
