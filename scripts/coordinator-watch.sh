@@ -8568,8 +8568,8 @@ pane_text_is_trust_dialog() {
     LC_ALL=C sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\xc2\xa0/ /g' \
         | LC_ALL=C grep -v '^[[:space:]]*$' | tail -n 12 \
         | LC_ALL=C awk '
-            /^[[:space:]]*((>|❯)[[:space:]]*)?1\.[[:space:]]+Yes, I trust this folder/ { a = 1 }
-            /^[[:space:]]*((>|❯)[[:space:]]*)?2\.[[:space:]]+No, exit/ { b = 1 }
+            /^[[:space:]]*(│[[:space:]]*)?((>|❯)[[:space:]]*)?1\.[[:space:]]+Yes, (I trust this folder|proceed)/ { a = 1 }
+            /^[[:space:]]*(│[[:space:]]*)?((>|❯)[[:space:]]*)?2\.[[:space:]]+No, exit/ { b = 1 }
             END { exit !(a && b) }'
 }
 

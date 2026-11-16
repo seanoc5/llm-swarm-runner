@@ -75,4 +75,6 @@ PANE=$'● Reading #950: the "Quick safety check" dialog, option "Yes, I trust t
 # Full option lines present but scrolled far above the bottom: not the live dialog.
 PANE=$' ❯ 1. Yes, I trust this folder\n   2. No, exit\n'"$(printf 'line %s\n' 1 2 3 4 5 6 7 8 9 10 11 12 13 14)"
 ! worker_pane_trust_dialog iss-9 || red "stale dialog text far above bottom misread"
+PANE=$' │ ❯ 1. Yes, proceed │\n │   2. No, exit    │'
+worker_pane_trust_dialog iss-9 || red "boxed older-wording dialog not detected"
 green "pane detection: dialog yes (plain, ANSI, scrollback), normal session / quoted phrases / stale text no (#957)"
