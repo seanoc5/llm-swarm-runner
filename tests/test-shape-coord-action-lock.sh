@@ -44,7 +44,12 @@ case "\${1:-} \${2:-}" in
       if [ -e "\$S/reread-merged-other" ]; then st=MERGED; head=bbb2222; fi
     fi
     body=""; [ -e "\$S/body-low" ] && body="<!-- BLIND_MERGE_RISK: low -->"
-    printf '{"state":"%s","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefName":"fix/issue-600","title":"t","closingIssuesReferences":[],"body":"%s","isDraft":false,"reviewDecision":"","baseRefName":"master","headRefOid":"%s"}\n' "\$st" "\$body" "\$head"
+    # issue #612: hold labels. state/hold-label = on the PR from the start;
+    # state/late-label = appears only on the labels-only re-read under the lock.
+    labels="[]"; [ -e "\$S/hold-label" ] && labels='[{"name":"swarm-hold:ci"}]'
+    if [ "\$*" = "pr view 600 --json labels" ] && [ -e "\$S/fail-labels" ]; then exit 1; fi
+    if [ "\$*" = "pr view 600 --json labels" ] && [ -e "\$S/late-label" ]; then labels='[{"name":"swarm-hold:coordinator"}]'; fi
+    printf '{"state":"%s","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefName":"fix/issue-600","title":"t","closingIssuesReferences":[],"body":"%s","isDraft":false,"reviewDecision":"","baseRefName":"master","headRefOid":"%s","labels":%s}\n' "\$st" "\$body" "\$head" "\$labels"
     exit 0 ;;
   "pr merge")
     sleep 1
@@ -304,3 +309,32 @@ reset
 ( cd "$REPO" && COORD_ACTIONS_LOCK="$TEST_DIR/not-a-dir/coord.lock" timeout 30 "$MERGE" 600 --no-kill >"$TEST_DIR/h.log" 2>&1 ) || red "plain merge should proceed without the lock: $(cat "$TEST_DIR/h.log")"
 [ "$(merges)" = 1 ] || red "plain merge expected 1 call, got $(merges)"
 green "no action lock: auto-low refused, plain merge continues with the warning"
+
+heading "K (issue #612): swarm-hold* label refuses every merge path; lifting it merges"
+reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/hold-label"
+rc=0; ( cd "$REPO" && timeout 30 "$MERGE" 600 --no-kill >"$TEST_DIR/k1.log" 2>&1 ) || rc=$?
+[ "$rc" = 1 ] || red "K1: plain merge of a held PR should exit 1, got $rc: $(cat "$TEST_DIR/k1.log")"
+grep -q 'carries a hold label (swarm-hold:ci)' "$TEST_DIR/k1.log" || red "K1: refusal must name the label: $(cat "$TEST_DIR/k1.log")"
+[ "$(merges)" = 0 ] || red "K1: merged a held PR"
+green "K1: plain swarm-merge refuses a held PR and names the label"
+reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/hold-label" "$TEST_DIR/state/body-low"
+rc=0; auto || rc=$?
+[ "$rc" != 0 ] || red "K2: --auto-low should refuse a held PR: $(cat "$TEST_DIR/auto.log")"
+grep -q 'carries a hold label' "$TEST_DIR/auto.log" || red "K2: no hold-label refusal: $(cat "$TEST_DIR/auto.log")"
+[ "$(merges)" = 0 ] || red "K2: --auto-low merged a held PR"
+green "K2: --auto-low refuses a held PR"
+reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/late-label"
+rc=0; ( cd "$REPO" && timeout 30 "$MERGE" 600 --no-kill >"$TEST_DIR/k3.log" 2>&1 ) || rc=$?
+[ "$rc" = 1 ] || red "K3: a hold placed during the gates should exit 1, got $rc: $(cat "$TEST_DIR/k3.log")"
+grep -q 'put on hold' "$TEST_DIR/k3.log" || red "K3: no under-lock hold message: $(cat "$TEST_DIR/k3.log")"
+[ "$(merges)" = 0 ] || red "K3: merged though a hold landed before the lock"
+green "K3: a hold that lands after the early read is caught under the lock"
+reset
+( cd "$REPO" && timeout 30 "$MERGE" 600 --no-kill >"$TEST_DIR/k4.log" 2>&1 ) || red "K4: unlabelled PR must still merge: $(cat "$TEST_DIR/k4.log")"
+[ "$(merges)" = 1 ] || red "K4: expected 1 merge, got $(merges)"
+green "K4: no label, no refusal"
+reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/fail-labels"
+rc=0; ( cd "$REPO" && timeout 30 "$MERGE" 600 --no-kill >"$TEST_DIR/k5.log" 2>&1 ) || rc=$?
+[ "$rc" = 1 ] && [ "$(merges)" = 0 ] || red "K5: unreadable labels under the lock must fail closed (rc $rc): $(cat "$TEST_DIR/k5.log")"
+grep -q "could not re-read" "$TEST_DIR/k5.log" || red "K5: no unreadable-labels message: $(cat "$TEST_DIR/k5.log")"
+green "K5: unreadable label re-read under the lock fails closed"

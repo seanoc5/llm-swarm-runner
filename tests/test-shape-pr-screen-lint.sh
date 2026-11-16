@@ -102,5 +102,24 @@ set +e; OUT=$(PR_SCREEN_BOTTOM_MAX=3 "$LINT" --file "$TEST_DIR/nofold.md" 2>&1);
 echo "$OUT" | grep -q "FAIL bottom-line-budget" || { echo "$OUT"; red "expected bottom-line-budget"; }
 green "PR_SCREEN_BOTTOM_MAX override respected"
 
+heading "Test 6 (issue #612): tool-written hold banners are not charged to the worker's screen"
+{
+  printf '<!-- SWARM_DRAFT_REASON: ci-pending sha=abc1234 -->\n'
+  printf '> ⏳ **Held (label swarm-hold:ci):** CI was still running at 2026-11-15 20:54Z.\n'
+  printf '> **Next:** coordinator (watcher) — re-runs `pr-ready.sh 42` — waiting on CI\n'
+  printf '<!-- /SWARM_DRAFT_REASON -->\n'
+  printf '> ⛔ **COORDINATOR HOLD** — fix brief queued to iss-9 (see `scripts/foo.sh`).\n'
+  printf '> **Next:** worker iss-9 — push the fix — waiting on nothing\n'
+  printf '\n'
+  printf '<!-- BLIND_MERGE_RISK: low -->\n**Bottom line:** Typo fix. Closes #7\n'
+} > "$TEST_DIR/banner.md"
+run "$TEST_DIR/banner.md"
+[ "$RC" -eq 0 ] || { echo "$OUT"; red "expected exit 0: backticks and lines inside the banners must not count, got $RC"; }
+# the worker's own backtick right under the banner is still caught
+printf '> ⛔ **COORDINATOR HOLD** — x\n> **Next:** y\n\n**Bottom line:** see `Foo.kt`. Closes #7\n' > "$TEST_DIR/banner2.md"
+run "$TEST_DIR/banner2.md"
+[ "$RC" -eq 3 ] && echo "$OUT" | grep -q "identifiers-above-fold" || { echo "$OUT"; red "a code span in the worker's own screen must still fail (got $RC)"; }
+green "banners are skipped; the worker's own screen is still linted"
+
 echo
 green "all lint-pr-screen shape tests passed"

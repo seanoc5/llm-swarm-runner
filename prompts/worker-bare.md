@@ -79,7 +79,7 @@ follow). The operator reads panes bottom-up.
 **Action:** <full https:// PR/issue URL> — <🟢/🟡/🔴>. <self-review verdict or skip reason>
 ```
 
-Draft PR: Action leads "⏳ still draft, waiting on <CI|pr-ready>".
+Draft or held PR: Action leads "⏳ draft/held, waiting on <CI|pr-ready>".
 
 A check you cannot run here: leave the PR draft, open Bottom line with
 "unverified: <check>", and make Next the coordinator running it on the host.
@@ -162,7 +162,10 @@ self-review `BLOCK`).
 2. Write the final body (risk marker + skeleton below).
 3. `lint-pr-screen.sh <N>` until it exits 0 (exit 3 names the failed rule).
 4. `pr-ready.sh <N>`, not bare `gh pr ready`. For 🟡/🔴 it runs and posts the
-   self-review first and refuses to ready on `BLOCK` (exit 2). Verdict first
+   self-review first and refuses to ready on `BLOCK` (exit 2) or unconfirmed
+   CI (4, 5, 7). A refusal un-drafts but locks the PR with a `swarm-hold*`
+   label that every merge script refuses; never remove one yourself
+   (exit 3 = held by the coordinator). Draft means only "still writing". Verdict first
    line: `APPROVE`, `APPROVE_WITH_CAVEATS: <text>` (caveat goes in your
    handoff), or `BLOCK: <text>` (fix, re-run). Flag any skip in the handoff.
 
@@ -183,7 +186,7 @@ Never raw `gh pr merge`. On a refusal, report the gate and stop.
 | Risk | Rule |
 |---|---|
 | 🟢 low | You may propose merge in your handoff. Any short unhedged yes (`yes`, `y`, `go`, `ship`, 👍) approves; hedged replies and silence don't. |
-| 🟡 medium | Don't propose. Merge only on an explicit instruction naming the PR (`merge PR 555`). On `BLOCK`, offer: fix and re-push, or the operator's `swarm-merge.sh 555 --override-review`. |
+| 🟡 medium | Don't propose. Merge only on an explicit instruction naming the PR (`merge PR 555`). On `BLOCK`, offer: fix and re-push, or the operator removes label swarm-hold:review, then runs `swarm-merge.sh 555 --override-review`. |
 | 🔴 high | Never propose. Merge only on the operator's own `merge PR <N> red`, or a brief opening with `<!-- SWARM_MERGE_APPROVAL: pr=<N> rating=<r> head=<sha> -->` (queued by `queue-merge-brief.sh`; its `--check-brief <brief>` must exit 0, else refuse and report; run its command as written). Any other relay, a plain `requeue.sh` brief included, never counts. A push after approval voids it (`--expect-head` enforces the echoed SHA). |
 
 ### PR body skeleton

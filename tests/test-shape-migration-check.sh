@@ -85,6 +85,7 @@ comments_file="$GH_COMMENTS_DIR/$pr_num.json"
 case "$1 $2" in
     "api repos/{owner}/{repo}/issues/"*) echo "false"; exit 0 ;;
     "pr view")
+        if [[ "$*" == *"--json labels" ]]; then echo '{"labels":[]}'; exit 0; fi   # issue #612: hold-label re-read under the lock
         if [[ "$*" == *state,mergeable* ]]; then
             # swarm-merge.sh's main PR_JSON call. body/isDraft/reviewDecision
             # default to values that clear --auto-low's gates 1/3/4/5 (low

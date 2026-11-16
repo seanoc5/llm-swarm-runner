@@ -71,6 +71,7 @@ case "${1:-} ${2:-}" in
     "pr merge")   exit 0 ;;
     "pr view")
         case "$*" in
+            *"--json labels") echo '{"labels":[]}'; exit 0 ;;   # issue #612: hold-label re-read under the lock
             *"--json headRefOid --jq"*) echo "${GH_HEAD:-}"; exit 0 ;;
             *"--json baseRefName"*) echo "${GH_BASE:-}"; exit 0 ;;
             *"--json comments") cat "$GH_PR_JSON_FILE" 2>/dev/null; exit 0 ;;

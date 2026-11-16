@@ -40,8 +40,8 @@ case "$1 $2" in
     "pr view")
         case "$*" in
             *"--json state,isDraft,headRefName"*)
-                jq -cn --arg s "${GH_STATE:-OPEN}" --argjson d "${GH_DRAFT:-false}" --arg h "$GH_HEAD" --arg r "${GH_RISK:-high}" \
-                    '{state:$s,isDraft:$d,headRefName:"fix/issue-2108",headRefOid:$h,title:"Needs-you store",body:("<!-- BLIND_MERGE_RISK: "+$r+" -->\nbody")}' ;;
+                jq -cn --arg s "${GH_STATE:-OPEN}" --argjson d "${GH_DRAFT:-false}" --arg h "$GH_HEAD" --arg r "${GH_RISK:-high}" --arg l "${GH_LABEL:-}" \
+                    '{state:$s,isDraft:$d,headRefName:"fix/issue-2108",headRefOid:$h,title:"Needs-you store",body:("<!-- BLIND_MERGE_RISK: "+$r+" -->\nbody"),labels:(if $l=="" then [] else [{name:$l}] end)}' ;;
             *"--json state "*)       echo OPEN ;;
             *"--json isDraft "*)     echo false ;;
             *"--json mergeable "*)   echo MERGEABLE ;;
@@ -83,6 +83,9 @@ GH_RISK=medium q 2113 --rating high; ec=$?
 check "PR not rated high -> refused (2), nothing queued" "2 0" "$ec $(inbox_n)"
 GH_DRAFT=true q 2113 --rating high; ec=$?
 check "draft PR -> refused (2), nothing queued" "2 0" "$ec $(inbox_n)"
+GH_LABEL=swarm-hold:coordinator q 2113 --rating high; ec=$?
+check "issue #612: PR carrying a hold label -> refused (2), nothing queued" "2 0" "$ec $(inbox_n)"
+GH_LABEL=swarm-hold:review q 2113 --rating high; grep -q 'hold label (swarm-hold:review)' "$T/out"; check "issue #612: refusal names the label" "0" "$?"
 GH_STATE=MERGED q 2113 --rating high; ec=$?
 check "merged PR -> refused (2), nothing queued" "2 0" "$ec $(inbox_n)"
 q 2113 --rating high --expect-head bbbbbbb; ec=$?

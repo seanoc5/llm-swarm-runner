@@ -16,7 +16,8 @@
 # decision made at a shell with plain swarm-merge.sh.
 #
 # Gates, cheap first:
-#   1. PR is OPEN, not a draft, not CONFLICTING, based on the default branch.
+#   1. PR is OPEN, not a draft, carries no swarm-hold* label (#612; see
+#      _hold-label.sh), not CONFLICTING, based on the default branch.
 #   2. Head matches --expect-head (≥7 hex chars; the short SHA the worker
 #      echoed back to the operator before merging). A push after the
 #      approval voids it. Re-enforced server-side by --match-head-commit.
@@ -76,7 +77,12 @@ view() { gh pr view "$PR" --json "$1" -q "$2"; }
 # Gate 1
 STATE=$(view state .state) || { echo "worker-merge: gh pr view $PR failed" >&2; exit 1; }
 [ "$STATE" = "OPEN" ] || refuse "PR #$PR is $STATE, not OPEN."
-[ "$(view isDraft .isDraft)" = "false" ] || refuse "PR #$PR is a draft (a coordinator hold or unfinished)."
+[ "$(view isDraft .isDraft)" = "false" ] || refuse "PR #$PR is a draft (the worker is still writing, or a hold placed before #612 — draft-as-hold PRs stay refused)."
+# issue #612: the hold lock is a swarm-hold* label (CI, review BLOCK, coordinator
+# or operator hold). Fails closed: an unreadable label list refuses.
+HOLDS=$(view labels '[.labels[].name | select(test("^swarm-hold(:.*)?$"))] | join(", ")') \
+    || refuse "could not read PR #$PR's labels, so the hold lock can't be checked."
+[ -z "$HOLDS" ] || refuse "PR #$PR carries a hold label ($HOLDS). A hold means someone (pr-ready.sh, the coordinator or the operator) said not to merge yet; only they lift it."
 [ "$(view mergeable .mergeable)" != "CONFLICTING" ] || refuse "PR #$PR conflicts with its base."
 BASE=$(view baseRefName .baseRefName)
 DEFAULT=$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name) || { echo "worker-merge: gh repo view failed" >&2; exit 1; }
@@ -115,9 +121,15 @@ case "$CRC" in
     *) refuse "CI is not green on PR #$PR (ci-wait.sh exit $CRC)." ;;
 esac
 
+# issue #612: a hold can land during the CI wait above (minutes); re-read the
+# labels right before merging, same fail-closed rule as gate 1.
+HOLDS=$(view labels '[.labels[].name | select(test("^swarm-hold(:.*)?$"))] | join(", ")') \
+    || refuse "could not re-read PR #$PR's labels right before merging."
+[ -z "$HOLDS" ] || refuse "PR #$PR was put on hold ($HOLDS) while the gates ran. Nothing merged."
+
 gh pr merge "$PR" --squash --match-head-commit "$HEAD" \
     || { echo "worker-merge: gh pr merge failed (head may have moved; nothing merged)" >&2; exit 1; }
 gh pr comment "$PR" --body "<!-- SWARM_WORKER_MERGE: $RATING head=${HEAD:0:12} -->
-Merged by the authoring worker on the operator's approval, at head \`${HEAD:0:12}\`, through \`worker-merge.sh\`. All gates passed: open, not draft, default base, head match, rating $RATING, self-review ${VERDICT:-not run}, migrations $([ "$MRC" = 4 ] && echo "n/a" || echo clean), CI $([ "$CRC" = 5 ] && echo "not configured" || echo green). (#564)" >/dev/null 2>&1 \
+Merged by the authoring worker on the operator's approval, at head \`${HEAD:0:12}\`, through \`worker-merge.sh\`. All gates passed: open, not draft, no hold label, default base, head match, rating $RATING, self-review ${VERDICT:-not run}, migrations $([ "$MRC" = 4 ] && echo "n/a" || echo clean), CI $([ "$CRC" = 5 ] && echo "not configured" || echo green). (#564)" >/dev/null 2>&1 \
     || echo "worker-merge: merged, but the audit comment failed to post" >&2
 echo "worker-merge: merged PR #$PR at ${HEAD:0:12}."

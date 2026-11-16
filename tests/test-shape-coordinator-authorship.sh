@@ -138,6 +138,9 @@ case "$1 $2" in
         if [[ "$*" == *"mergeable,mergeStateStatus,headRefOid"* ]]; then
             # ci-wait.sh's initial call shape.
             echo "{\"mergeable\":\"${GH_MERGEABLE:-MERGEABLE}\",\"mergeStateStatus\":\"${GH_MERGE_STATE:-CLEAN}\",\"headRefOid\":\"deadbeef\"}"
+        elif [[ "$*" == *"--json labels" ]]; then
+            # issue #612: swarm-merge.sh's hold-label re-read under the action lock.
+            echo '{"labels":[]}'
         elif [[ "$*" == *"--json state,headRefOid"* ]]; then
             # issue #766: swarm-merge.sh's re-read under the action lock.
             echo "{\"state\":\"${GH_LOCK_STATE:-OPEN}\",\"headRefOid\":\"${GH_HEAD_LIVE:-deadbeef}\"}"

@@ -33,6 +33,11 @@ case "\$1 \$2" in
             *"--json headRefOid "*)  echo "\${GH_HEAD:-abcdef1234567890abcdef1234567890abcdef12}" ;;
             *"--json body "*)        printf '<!-- BLIND_MERGE_RISK: %s -->\nbody\n' "\${GH_RISK:-high}" ;;
             *"--json comments "*)    echo "\${GH_VERDICT-APPROVE}" ;;
+            # issue #612: the script's own --jq joins the swarm-hold* names with ", ",
+            # so the stub answers that result. 2nd+ read returns GH_LABELS_LATE if set
+            # (a hold landing during the gates).
+            *"--json labels "*)      n=\$(cat "$TEST_DIR/labels.calls" 2>/dev/null || echo 0); echo \$((n+1)) > "$TEST_DIR/labels.calls"
+                                    if [ "\$n" -ge 1 ] && [ -n "\${GH_LABELS_LATE:-}" ]; then echo "\$GH_LABELS_LATE"; else echo "\${GH_LABELS-}"; fi ;;
         esac ;;
     "repo view") echo master ;;
     "pr merge"|"pr comment") exit 0 ;;
@@ -48,7 +53,7 @@ run() {
     local want="$1" desc="$2"; shift 2
     local envs=()
     while [ "$1" != "--" ]; do envs+=("$1"); shift; done; shift
-    : > "$GH_LOG"
+    : > "$GH_LOG"; rm -f "$TEST_DIR/labels.calls"
     local rc=0
     env "${envs[@]}" "$WM" "$@" > "$TEST_DIR/out" 2>&1 || rc=$?
     [ "$rc" = "$want" ] || red "$desc: expected exit $want, got $rc. Output: $(cat "$TEST_DIR/out")"
@@ -78,6 +83,15 @@ run 2 "draft (coordinator hold) → refused"                          GH_DRAFT=t
 run 2 "conflicting → refused"                                       GH_MERGEABLE=CONFLICTING -- 7 --expect-head abcdef1
 run 2 "not the default branch → refused"                            GH_BASE=feature-x -- 7 --expect-head abcdef1
 run 2 "already merged → refused"                                    GH_STATE=MERGED -- 7 --expect-head abcdef1
+heading "hold label lock (#612)"
+run 2 "swarm-hold:ci label → refused"            GH_LABELS=swarm-hold:ci -- 7 --expect-head abcdef1 --rating high
+grep -q "hold label (swarm-hold:ci)" "$TEST_DIR/out" || red "expected the label named in the refusal: $(cat "$TEST_DIR/out")"
+run 2 "swarm-hold:coordinator label → refused"   GH_LABELS=swarm-hold:coordinator -- 7 --expect-head abcdef1 --rating high
+run 2 "hold lands during the gates → refused"    GH_LABELS_LATE=swarm-hold:operator -- 7 --expect-head abcdef1 --rating high
+grep -q "put on hold" "$TEST_DIR/out" || red "expected the late-hold refusal: $(cat "$TEST_DIR/out")"
+run 0 "no hold label → merges"                   GH_LABELS= -- 7 --expect-head abcdef1 --rating high
+green "hold labels refuse the merge, before and after the CI wait"
+
 heading "🟢/🟡 through the same gates"
 run 0 "🟢 low, no self-review on record (pr-ready skips it) → merges" GH_RISK=low GH_VERDICT= -- 7 --expect-head abcdef1 --rating low
 run 0 "🟡 medium with APPROVE → merges"                              GH_RISK=medium -- 7 --expect-head abcdef1 --rating medium

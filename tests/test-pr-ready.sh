@@ -51,6 +51,8 @@ mkdir -p "$SHIM_DIR"
 GH_LOG="$TEST_DIR/gh.log"
 BODY_FILE="$TEST_DIR/pr-body.txt"
 EDITED_BODY="$TEST_DIR/edited-body.txt"
+LABELS_FILE="$TEST_DIR/labels.txt"
+: > "$LABELS_FILE"
 : > "$GH_LOG"
 
 cat > "$SHIM_DIR/gh" <<EOF
@@ -110,6 +112,10 @@ if [ "\$1" = "pr" ] && [ "\$2" = "view" ]; then
         echo "\${GH_ROLLUP_JSON:-{\"statusCheckRollup\":[]\}}"
     elif printf '%s\n' "\$*" | grep -q -- '--json isDraft'; then
         echo "\${GH_IS_DRAFT:-true}"
+    elif printf '%s\n' "\$*" | grep -q -- '--json labels'; then
+        # issue #612: label names the PR carries, one per line (the script's
+        # own --jq is '.labels[].name'; this stub answers its result).
+        cat "$LABELS_FILE" 2>/dev/null || true
     else
         cat "$BODY_FILE"
     fi
@@ -140,8 +146,22 @@ if [ "\$1" = "pr" ] && [ "\$2" = "ready" ]; then
     exit 0
 fi
 if [ "\$1" = "pr" ] && [ "\$2" = "edit" ]; then
+    # issue #612: label edits carry no body on stdin (reading it would hang).
+    if printf '%s\n' "\$*" | grep -q -- '--add-label'; then
+        all="\$*"; want="\${all##*--add-label }"; echo "\${want%% *}" >> "$LABELS_FILE"
+        exit "\${GH_LABEL_ADD_RC:-0}"
+    fi
+    if printf '%s\n' "\$*" | grep -q -- '--remove-label'; then
+        all="\$*"; want="\${all##*--remove-label }"; want="\${want%% *}"
+        grep -vxF "\$want" "$LABELS_FILE" > "$LABELS_FILE.new" 2>/dev/null || true
+        mv "$LABELS_FILE.new" "$LABELS_FILE"
+        exit 0
+    fi
     cat > "$EDITED_BODY"
     exit 0
+fi
+if [ "\$1" = "label" ] && [ "\$2" = "create" ]; then
+    exit "\${GH_LABEL_CREATE_RC:-0}"
 fi
 if [ "\$1" = "run" ] && [ "\$2" = "list" ]; then
     [ -n "\${GH_RUNLIST_STDERR:-}" ] && echo "\$GH_RUNLIST_STDERR" >&2
@@ -253,12 +273,19 @@ FEOF
 make_fake_floor 0
 # The real "ready" call is logged as `pr ready 42`; the hold's re-draft is
 # `pr ready --undo 42` and must not count (issue #616).
-gh_ready_called() { grep -q '^pr ready 42$' "$GH_LOG"; }
+# issue #612: a refusal now ALSO runs `gh pr ready 42` (it un-drafts the PR once
+# the swarm-hold:ci/:review label is on), so "readied" means the ready call
+# without that label having been added in the same run.
+gh_ready_called() { grep -q '^pr ready 42$' "$GH_LOG" && ! grep -qE -- '--add-label swarm-hold:(ci|review)( |$)' "$GH_LOG"; }
 gh_undo_called() { grep -q '^pr ready --undo 42$' "$GH_LOG"; }
+gh_label_added() { grep -qE -- "^pr edit 42 --add-label $1\$" "$GH_LOG"; }
+gh_label_removed() { grep -qE -- "^pr edit 42 --remove-label $1\$" "$GH_LOG"; }
+label_on() { grep -qxF "$1" "$LABELS_FILE"; }
 
 run_pr_ready() {
     : > "$GH_LOG"
     rm -f "$EDITED_BODY" "$TEST_DIR/hold-late"
+    [ "${KEEP_LABELS:-0}" = "1" ] || : > "$LABELS_FILE"
     : > "$FAKE_REVIEW_LOG"; : > "$FAKE_FLOOR_LOG"
     rc=0
     pushd "${PR_READY_CWD:-.}" >/dev/null
@@ -276,7 +303,7 @@ run_pr_ready() {
         MIGRATION_CHECK_SCRIPT="${MIGRATION_CHECK_SCRIPT:-}" \
         GH_SHA="${GH_SHA:-deadbeef}" GH_SHA_LOOKUP_FAILS="${GH_SHA_LOOKUP_FAILS:-0}" \
         GH_RUNLIST_JSON="${GH_RUNLIST_JSON:-[]}" GH_RUNLIST_RC="${GH_RUNLIST_RC:-0}" \
-        GH_RUNLIST_STDERR="${GH_RUNLIST_STDERR:-}" \
+        GH_RUNLIST_STDERR="${GH_RUNLIST_STDERR:-}" GH_LABEL_ADD_RC="${GH_LABEL_ADD_RC:-0}" \
         "$PR_READY" ${PR_READY_FLAGS:-} 42 ${PR_READY_TRAILING:-} \
         > "$TEST_DIR/out.log" 2>&1 || rc=$?
     popd >/dev/null
@@ -1060,7 +1087,7 @@ green "valid-JSON-but-non-array fallback output fails closed instead of readying
 # issue #602 (Tests 25-30): the SWARM_DRAFT_REASON banner.
 # ============================================================================
 banner() {  # banner <reason> <sha> — a body carrying an existing banner
-    printf '<!-- SWARM_DRAFT_REASON: %s sha=%s -->\n> ⏳ **Still a draft:** old text\n<!-- /SWARM_DRAFT_REASON -->\n<!-- BLIND_MERGE_RISK: medium -->\nsome change\n' "$1" "$2"
+    printf '<!-- SWARM_DRAFT_REASON: %s sha=%s -->\n> ⏳ **Held (label swarm-hold:ci):** old text\n<!-- /SWARM_DRAFT_REASON -->\n<!-- BLIND_MERGE_RISK: medium -->\nsome change\n' "$1" "$2"
 }
 
 heading "Test 25: CI pending — refusal writes a ci-pending banner with the head SHA, body kept"
@@ -1071,7 +1098,7 @@ GH_CHECKS_RC=0
 [ "$rc" -eq 4 ] || red "expected exit 4, got $rc: $(cat "$TEST_DIR/out.log")"
 [ -f "$EDITED_BODY" ] || red "expected the PR body to be edited with a banner"
 head -1 "$EDITED_BODY" | grep -qx '<!-- SWARM_DRAFT_REASON: ci-pending sha=deadbeef -->' || red "expected ci-pending banner first: $(cat "$EDITED_BODY")"
-grep -q 'Still a draft:.*CI was still running' "$EDITED_BODY" || red "expected plain-language reason: $(cat "$EDITED_BODY")"
+grep -q 'Held (label swarm-hold:ci):.*CI was still running' "$EDITED_BODY" || red "expected plain-language reason: $(cat "$EDITED_BODY")"
 grep -qxF '> **Next:** coordinator (watcher, automatic) — re-runs pr-ready.sh 42 — waiting on CI to finish on deadbee' "$EDITED_BODY" || red "expected issue #635 Next line: $(cat "$EDITED_BODY")"
 grep -q '^<!-- BLIND_MERGE_RISK: low -->$' "$EDITED_BODY" || red "expected original body kept: $(cat "$EDITED_BODY")"
 green "CI-pending refusal records why on the PR itself"
@@ -1092,7 +1119,7 @@ rc=0; run_pr_ready || rc=$?
 [ "$rc" -eq 0 ] || red "expected exit 0, got $rc: $(cat "$TEST_DIR/out.log")"
 [ ! -s "$FAKE_REVIEW_LOG" ] || red "expected self-review skipped for an already-reviewed head"
 gh_ready_called || red "expected gh pr ready to run"
-grep -q 'SWARM_DRAFT_REASON\|Still a draft' "$EDITED_BODY" && red "expected banner stripped: $(cat "$EDITED_BODY")"
+grep -q 'SWARM_DRAFT_REASON\|Held (label' "$EDITED_BODY" && red "expected banner stripped: $(cat "$EDITED_BODY")"
 grep -q '^<!-- BLIND_MERGE_RISK: medium -->$' "$EDITED_BODY" || red "expected rest of body kept: $(cat "$EDITED_BODY")"
 green "retry on the same commit spends no review round and cleans up the banner"
 
@@ -1149,10 +1176,11 @@ rc=0; run_pr_ready || rc=$?
 GH_HOLD_COMMENTS_JSON=; GH_IS_DRAFT=true
 [ "$rc" -eq 3 ] || red "expected exit 3 (held by comment), got $rc: $(cat "$TEST_DIR/out.log")"
 gh_ready_called && red "expected gh pr ready NOT to run on a comment-held PR"
-gh_undo_called || red "expected the non-draft held PR to be drafted again: $(cat "$GH_LOG")"
+gh_undo_called && red "issue #612: a held PR must NOT be drafted again (draft = worker still writing): $(cat "$GH_LOG")"
+gh_label_added swarm-hold:coordinator || red "expected the hold to be locked with swarm-hold:coordinator: $(cat "$GH_LOG")"
 head -1 "$EDITED_BODY" | grep -qE '^> ⛔ \*\*COORDINATOR HOLD\*\*' || red "expected the banner restored on top: $(cat "$EDITED_BODY" 2>/dev/null)"
 grep -q 'worker rewrote the whole body' "$EDITED_BODY" || red "expected the rewritten body kept under the banner: $(cat "$EDITED_BODY")"
-green "a dropped banner is restored and the PR stays draft (exit 3)"
+green "a dropped banner is restored and the PR is label-locked (exit 3)"
 
 heading "Test 33: hold comment followed by a lift comment — not held, readies"
 printf '<!-- BLIND_MERGE_RISK: low -->\nfix landed\n' > "$BODY_FILE"
@@ -1220,15 +1248,16 @@ gh_ready_called && red "expected gh pr ready NOT to run"
 [ ! -f "$EDITED_BODY" ] || red "expected no body rewrite (it would have dropped the new banner): $(cat "$EDITED_BODY")"
 green "a banner added mid-run is never overwritten by the stale start-of-run body"
 
-heading "Test 38: banner-held PR that is no longer a draft is drafted again"
+heading "Test 38: banner-held PR that is no longer a draft gets the hold label (issue #612: not re-drafted)"
 printf '> ⛔ **COORDINATOR HOLD** — fix queued\n\n<!-- BLIND_MERGE_RISK: low -->\nx\n' > "$BODY_FILE"
 GH_IS_DRAFT=false
 rc=0; run_pr_ready || rc=$?
 GH_IS_DRAFT=true
 [ "$rc" -eq 3 ] || red "expected exit 3, got $rc"
-gh_undo_called || red "expected gh pr ready --undo 42: $(cat "$GH_LOG")"
+gh_undo_called && red "issue #612: a held PR must NOT be drafted again: $(cat "$GH_LOG")"
+gh_label_added swarm-hold:coordinator || red "expected swarm-hold:coordinator applied to the ready-but-held PR: $(cat "$GH_LOG")"
 gh_ready_called && red "expected the real gh pr ready NOT to run"
-green "a held PR found ready is put back to draft"
+green "a held PR found ready gets the hold label instead of being re-drafted"
 
 heading "Test 39: legacy marker-less hold comment + free-text lift, no banner in the body — NOT re-held (PR #705 review)"
 printf '<!-- BLIND_MERGE_RISK: low -->\nfix landed\n' > "$BODY_FILE"
@@ -1494,5 +1523,72 @@ unset WORKER_PR_READY_CHECK_CMD PR_READY_CWD GH_SHA
 [ "$rc" -eq 0 ] || red "expected exit 0, got $rc: $(cat "$TEST_DIR/out.log")"
 [ -e "$TEST_DIR/ready-check.ran" ] || red "stale-SHA pass record must not skip the check"
 green "stale record → check runs"
+
+heading "Test 56 (issue #612): CI pending — label swarm-hold:ci applied, banner written, PR un-drafted"
+printf '<!-- BLIND_MERGE_RISK: low -->\nsome change\n' > "$BODY_FILE"
+GH_CHECKS_RC=8
+rc=0; run_pr_ready || rc=$?
+GH_CHECKS_RC=0
+[ "$rc" -eq 4 ] || red "expected exit 4, got $rc: $(cat "$TEST_DIR/out.log")"
+gh_label_added swarm-hold:ci || red "expected swarm-hold:ci added: $(cat "$GH_LOG")"
+label_on swarm-hold:ci || red "expected the label on the PR"
+grep -q '^label create swarm-hold:ci ' "$GH_LOG" || red "expected the label created idempotently first: $(cat "$GH_LOG")"
+grep -q '^pr ready 42$' "$GH_LOG" || red "expected the refused PR to be un-drafted (draft = worker still writing)"
+ADD_LN="$(grep -n -- '--add-label swarm-hold:ci' "$GH_LOG" | head -1 | cut -d: -f1)"; RDY_LN="$(grep -n '^pr ready 42$' "$GH_LOG" | head -1 | cut -d: -f1)"
+[ "$ADD_LN" -lt "$RDY_LN" ] || red "the label must be on BEFORE the PR is un-drafted"
+green "ci-pending refusal: label first, then un-draft, banner kept"
+
+heading "Test 57 (issue #612): label can't be applied — PR stays a draft (never ready AND unlocked)"
+GH_CHECKS_RC=8; GH_LABEL_ADD_RC=1
+rc=0; run_pr_ready || rc=$?
+GH_CHECKS_RC=0; GH_LABEL_ADD_RC=0
+[ "$rc" -eq 4 ] || red "expected exit 4, got $rc"
+grep -q '^pr ready 42$' "$GH_LOG" && red "expected NO un-draft when the label failed: $(cat "$GH_LOG")"
+grep -q "couldn't apply swarm-hold:ci" "$TEST_DIR/out.log" || red "expected a WARN naming the label: $(cat "$TEST_DIR/out.log")"
+green "label failure keeps the draft lock"
+
+heading "Test 58 (issue #612): self-review BLOCK — swarm-hold:review, not :ci"
+printf '<!-- BLIND_MERGE_RISK: medium -->\nsome change\n' > "$BODY_FILE"
+make_fake_review 2
+rc=0; run_pr_ready || rc=$?
+[ "$rc" -eq 2 ] || red "expected exit 2, got $rc"
+gh_label_added swarm-hold:review || red "expected swarm-hold:review added: $(cat "$GH_LOG")"
+gh_label_added swarm-hold:ci && red "a BLOCK must not carry the ci label"
+green "BLOCK maps to swarm-hold:review"
+
+heading "Test 59 (issue #612): retry after the refusal went green — owned labels removed, then ready; no self-hold"
+banner ci-pending deadbeef > "$BODY_FILE"
+printf 'swarm-hold:ci\n' > "$LABELS_FILE"
+make_fake_review 2
+KEEP_LABELS=1 rc=0; KEEP_LABELS=1 run_pr_ready || rc=$?
+[ "$rc" -eq 0 ] || red "own swarm-hold:ci must not hold the retry; got $rc: $(cat "$TEST_DIR/out.log")"
+gh_ready_called || red "expected gh pr ready: $(cat "$GH_LOG")"
+gh_label_removed swarm-hold:ci || red "expected swarm-hold:ci removed: $(cat "$GH_LOG")"
+label_on swarm-hold:ci && red "label should be gone"
+RDY_LN="$(grep -n '^pr ready 42$' "$GH_LOG" | head -1 | cut -d: -f1)"; REM_LN="$(grep -n -- '--remove-label swarm-hold:ci' "$GH_LOG" | head -1 | cut -d: -f1)"
+[ "$RDY_LN" -lt "$REM_LN" ] || red "ready must come BEFORE the lock is lifted"
+green "success: ready, then the owned label comes off"
+
+heading "Test 60 (issue #612): coordinator/operator/bare label alone holds — exit 3, label kept, nothing removed"
+for L in swarm-hold:coordinator swarm-hold:operator swarm-hold; do
+    printf '<!-- BLIND_MERGE_RISK: low -->\nfix landed\n' > "$BODY_FILE"
+    printf '%s\n' "$L" > "$LABELS_FILE"
+    KEEP_LABELS=1 rc=0; KEEP_LABELS=1 run_pr_ready || rc=$?
+    [ "$rc" -eq 3 ] || red "$L: expected exit 3, got $rc: $(cat "$TEST_DIR/out.log")"
+    gh_ready_called && red "$L: gh pr ready must not run"
+    label_on "$L" || red "$L: label must stay"
+    grep -q -- '--remove-label' "$GH_LOG" && red "$L: pr-ready must never remove a label it does not own: $(cat "$GH_LOG")"
+done
+green "manual hold labels hold pr-ready and are never removed by it"
+
+heading "Test 61 (issue #612 transition): PR held the OLD way (draft + banner, no label) still holds and is upgraded to the label"
+printf '> ⛔ **COORDINATOR HOLD** — fix queued\n\n<!-- BLIND_MERGE_RISK: low -->\nx\n' > "$BODY_FILE"
+: > "$LABELS_FILE"
+rc=0; run_pr_ready || rc=$?
+[ "$rc" -eq 3 ] || red "expected exit 3, got $rc"
+gh_ready_called && red "expected NOT readied"
+label_on swarm-hold:coordinator || red "expected the draft-held PR to gain swarm-hold:coordinator"
+grep -q '^pr ready' "$GH_LOG" && red "a draft-held PR stays as it is (no ready, no undo): $(cat "$GH_LOG")"
+green "old-style draft holds keep working and get the label"
 
 green "ALL TESTS PASSED"
