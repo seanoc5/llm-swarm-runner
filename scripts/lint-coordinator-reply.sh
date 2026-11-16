@@ -302,7 +302,7 @@ lede_hits() {
     printf '%s\n' "$text" | awk -v fence="$FENCE_RE" '
     function isid(w,   b) {
         if (w ~ /^`/ || w ~ /^#[0-9]+/) return 1
-        b = w; gsub(/^[("\[*]+|[)"\]*,;:!?]+$/, "", b)
+        b = w; gsub(/^[("\[*]+|[)"\]*,;:!?.]+$/, "", b)
         if (b ~ /^`/ || b ~ /^#[0-9]+$/) return 1
         if (b ~ /\// || b ~ /[A-Za-z0-9_-]\.(sh|md|json|ya?ml|kts?|sql|java|py|html|toml|xml|gradle|env|txt|jsonl|log)$/) return 1
         if (b ~ /^[A-Z][A-Z0-9]*(_[A-Z0-9]+)+$/) return 1
