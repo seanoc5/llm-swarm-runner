@@ -220,7 +220,7 @@ Every wake report and status update **ends** with the digest block — panes are
 
 ## Reporting worker outcomes
 
-**Draft first:** `gh pr view <N> --json isDraft,labels,body`. A draft with a placeholder body is a worker mid-self-review, not a violation — report "PR #N opened as a draft (worker still finalizing)" and re-check later. A `swarm-hold*` label (`:ci`, `:review`, `:coordinator`, `:operator`; #612) means not mergeable whatever the draft flag: report the `⏳ Held` or `⛔ COORDINATOR HOLD` banner's **Next:** line. Old-style holds (draft + banner) count too. Everything below applies once `isDraft` is false and no hold label is set.
+**Draft first:** `gh pr view <N> --json isDraft,labels,body`. A draft with a placeholder body is a worker mid-self-review, not a violation — report "PR #N opened as a draft (worker still finalizing)" and re-check later. A `swarm-hold*` label (`:ci`, `:review`, `:coordinator`, `:operator`; #612) means not mergeable whatever the draft flag: report the `⏳ Held` or `⛔ COORDINATOR HOLD` banner's **Next:** line. Everything below applies once `isDraft` is false and no hold label is set.
 
 Scrape the risk (`gh pr view <N> --json body --jq .body | grep -E 'BLIND_MERGE_RISK|Blind-merge risk'`) and render:
 
@@ -263,13 +263,13 @@ Opt-in via `SWARM_AUTOMERGE_LOW=1` (default off; shell env > `<project>/.swarm/.
 2. **CI green by real wait** — `scripts/ci-wait.sh <N>` exits 0. A single `gh pr checks` snapshot or `gh pr merge --auto` doesn't count; these repos lack branch protection, so `--auto` merges instantly. No CI configured (exit 5) passes with a warning.
 3. **No review block** — `reviewDecision` isn't `CHANGES_REQUESTED`.
 4. **Targets the default branch** — never feature-to-feature.
-5. **Open, not draft, no `swarm-hold*` label** (#612; the script refuses the label for every merge).
+5. **Open, not draft, no `swarm-hold*` label** (#612).
 6. **Your own `gh pr diff <N>` read** confirms the scope matches a low rating. This is the only gate a script can't check.
 7. **No collision/out-of-order** — `scripts/migration-collision-check.sh <N>` exits 0/4 (2=collision, 3=out-of-order).
 
 Merge only via `scripts/swarm-merge.sh <N> --auto-low`, which re-enforces gates 0–5 and 7 — never raw `gh pr merge --auto`. **Give the Bash call an explicit timeout covering `CI_WAIT_TIMEOUT_SECONDS`** (default 570s; tool max 600000ms); the CI wait runs inside it, and the default tool timeout kills it into a silent non-merge. `--auto-low` refuses `--override-review` and `--override-migration-gate`; overrides belong to a human running plain `swarm-merge.sh <N>`. Report `Auto-merged PR #555 (SWARM_AUTOMERGE_LOW=1, all gates passed).` or name the failed gate (`Not auto-merged: Gate 0 (authorship) refused — PR carries a coordinator-authored commit, routing to operator.`). Exit 3 means the PR conflicts and a resolve-conflicts brief went to its worker; re-run the same command once the worker has pushed and CI is green.
 
-**Self-review as machinery:** `scripts/self-review-pr.sh <N> --post` runs a fresh-context review and posts `<!-- SWARM_SELF_REVIEW: <verdict> -->` (exit 0 APPROVE / 3 CAVEATS / 2 BLOCK / 4 skipped). `swarm-merge.sh` refuses a latest-BLOCK PR without `--override-review` (a BLOCK also carries label swarm-hold:review, removed first), and collision/out-of-order without `--override-migration-gate` (or `MIGRATION_GATE=0`).
+**Self-review as machinery:** `scripts/self-review-pr.sh <N> --post` runs a fresh-context review and posts `<!-- SWARM_SELF_REVIEW: <verdict> -->` (exit 0 APPROVE / 3 CAVEATS / 2 BLOCK / 4 skipped). `swarm-merge.sh` refuses a latest-BLOCK PR without `--override-review` (BLOCK is labelled swarm-hold:review; remove it first), and collision/out-of-order without `--override-migration-gate` (or `MIGRATION_GATE=0`).
 
 ### Auto-merge medium-risk PRs
 
@@ -286,9 +286,9 @@ The agent that wrote a change never judges it.
 
 ### Hold label: lock a PR while a fix round-trip is queued
 
-Draft means only "worker still writing" (#612); a hold is a label that `swarm-merge.sh`, `worker-merge.sh` and `queue-merge-brief.sh` refuse (raw `gh pr merge` and the web UI ignore it, so never merge a held PR by hand). The reason must be in the body, not just a comment — readers otherwise take held PRs for stuck oversights. Once a fix brief is actually queued against an open PR (not merely proposed), or it waits on an operator decision:
+Draft means only "worker still writing" (#612); a hold is a label that `swarm-merge.sh`, `worker-merge.sh` and `queue-merge-brief.sh` refuse (raw `gh pr merge` ignores it: never merge a held PR by hand). The reason must be in the body, not just a comment — readers otherwise take held PRs for stuck oversights. Once a fix brief is actually queued against an open PR (not merely proposed), or it waits on an operator decision:
 
-1. `gh label create swarm-hold:coordinator --color B60205 2>/dev/null || true`, then `gh pr edit <N> --add-label swarm-hold:coordinator` (`:operator` for an operator decision). Don't draft it; `pr-ready.sh` adds the label if it finds the banner or comment alone.
+1. `gh label create swarm-hold:coordinator --color B60205 2>/dev/null || true`, then `gh pr edit <N> --add-label swarm-hold:coordinator` (`:operator` for an operator decision). `pr-ready.sh` adds the label if it finds the banner or comment alone.
 2. Prepend this banner to the body (`gh pr view <N> --json body -q .body`, prepend, pipe to `gh pr edit <N> --body-file -`):
    ```
    > ⛔ **COORDINATOR HOLD** — <reason, one line>; fix brief queued to <worker>. Do not merge; the coordinator re-readies when the fix is verified.
@@ -297,8 +297,8 @@ Draft means only "worker still writing" (#612); a hold is a label that `swarm-me
    ```
    Delete any `SWARM_DRAFT_REASON` block; the hold's Next line supersedes it. Before writing "waiting on #N merges", run `gh pr view N --json state,mergedAt`: if N already merged, act or queue the brief now instead. The watcher drops a `stale_wait` inbox note when a Next line's #N has merged.
 3. Post a PR comment saying what's pending and who's on it. Start it with `⛔ **COORDINATOR HOLD** — ` and end it with `<!-- SWARM_COORDINATOR_HOLD -->`: `pr-ready.sh` also holds on this comment, because a worker's body rewrite can drop the banner.
-4. When the fix lands or is moot: first comment `✅ **COORDINATOR HOLD lifted** — <why>` ending `<!-- SWARM_COORDINATOR_HOLD_LIFTED -->`, then remove the banner block from the body, then `gh pr edit <N> --remove-label swarm-hold:coordinator` (or `:operator`) and `gh pr ready <N>` if it is a draft — all before calling the PR mergeable in a digest. Lift comment first: a newer hold comment makes `pr-ready.sh` restore the banner and label. An old-style hold (draft + banner) lifts the same way without the label.
-   A `skipping` check is not a pass. Projects may skip lanes on drafts (corpusminder skips Integration), so a push made while the PR was a draft ran without them. Before calling the PR mergeable, confirm every CI job actually ran on the head commit. If one skipped because the PR was a draft, either re-ready first and wait for the `ready_for_review` run (`scripts/ci-wait.sh <N>`), or use the project's opt-in for that lane (corpusminder: the `ci-integration` label). `ci-wait.sh` prints a warning when a draft head has skipped checks.
+4. When the fix lands or is moot: first comment `✅ **COORDINATOR HOLD lifted** — <why>` ending `<!-- SWARM_COORDINATOR_HOLD_LIFTED -->`, then remove the banner block from the body, then `gh pr edit <N> --remove-label swarm-hold:coordinator` (or `:operator`) and `gh pr ready <N>` if it is a draft — all before calling the PR mergeable in a digest. Lift comment first: a newer hold comment makes `pr-ready.sh` restore the banner and label.
+   A `skipping` check is not a pass. Projects may skip lanes on drafts (corpusminder skips Integration), so draft pushes ran without them. Before calling the PR mergeable, confirm every CI job actually ran on the head commit. If one skipped because the PR was a draft, either re-ready first and wait for the `ready_for_review` run (`scripts/ci-wait.sh <N>`), or use the project's opt-in for that lane (corpusminder: the `ci-integration` label). `ci-wait.sh` prints a warning when a draft head has skipped checks.
 
 When reporting an `APPROVE_WITH_CAVEATS` you're about to requeue, say in the same breath that you're labelling the PR to hold it.
 
