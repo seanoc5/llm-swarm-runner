@@ -5,6 +5,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/../_lib.sh"
 FILE="$1"
 args=(); [ -n "${CHECKS_PROJECT:-}" ] && args=(--project "$CHECKS_PROJECT")
+[ -n "${CHECKS_SKIP_RULES:-}" ] && args+=(--skip "$CHECKS_SKIP_RULES")
 out="$("$HERE/../../lint-coordinator-reply.sh" "${args[@]}" "$FILE")"; ec=$?
 [ "$ec" -eq 0 ] || [ "$ec" -eq 3 ] || exit "$ec"
 while IFS= read -r hit; do

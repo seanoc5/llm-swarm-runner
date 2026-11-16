@@ -295,6 +295,14 @@ done
 for f in lede-pass-woke lede-pass-both lede-pass-plain lede-pass-fence lede-pass-short; do
     check "lede: $f passes" "" "$(lede "$FX/$f.txt")"
 done
+# --skip drops a rule, keeps the rest
+check "lede: --skip lede-identifier drops it" "" "$($LINT --skip lede-identifier < "$FX/lede-hit-pr.txt" | cut -d: -f1 | grep -x lede-identifier || true)"
+check "lede: --skip keeps other rules" "two-endings" "$($LINT --skip lede-identifier < "$FX/../../../test-fixtures/checks/two-endings/fail.txt" | cut -d: -f1 | grep -x two-endings | sort -u)"
+# "e.g." is not a sentence end: the identifier after it is still inside the first sentence
+printf 'e.g. `x.sh` broke.\n' > "$T/lede-eg.txt"
+check "lede: e.g. is not a sentence end" "lede-identifier" "$(lede "$T/lede-eg.txt")"
+printf 'Both fixes landed, i.e. the build is green. `x.sh` is next.\n' > "$T/lede-ie.txt"
+check "lede: i.e. mid-sentence still passes when plain words lead" "" "$(lede "$T/lede-ie.txt")"
 H2="$T/hlede"; mkdir -p "$H2/.swarm/coord-inbox"
 lstop2() { jq -n --rawfile m "$FX/lede-hit-pr.txt" '{last_assistant_message: $m, stop_hook_active: false}' | CLAUDE_PROJECT_DIR="$H2" COORD_HOOK_STATE=0 "$@" "$HOOK" Stop; }
 check "lede: default (warn) never blocks" "" "$(lstop2 env)"
