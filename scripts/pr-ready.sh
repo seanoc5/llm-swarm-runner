@@ -600,6 +600,29 @@ if [[ "$OLD_REASON" == ci-* ]] && [ -n "$OLD_REASON_SHA" ] && [ "$OLD_REASON_SHA
     SKIP_REVIEW=1
 fi
 
+# issue #984 (cost): ready-sweep.sh's lone-swarm-hold:ci retry sets
+# PR_READY_REUSE_REVIEW=1. That path has no ci-* banner, so without this every
+# retry of a 🟡/🔴 PR would start a full paid review (and a review that outlives
+# the sweep's timeout posts nothing, so the next sweep would start another).
+# If ANY SWARM_SELF_REVIEW marker (any actor) already names the current head,
+# reuse its verdict: BLOCK refuses, anything else skips the review step.
+if [ "$SKIP_REVIEW" = "0" ] && [ "${PR_READY_REUSE_REVIEW:-0}" = "1" ]; then
+    REUSE_VERDICT="$(gh pr view "$PR" --json comments 2>/dev/null \
+        | jq -r --arg h "$(head_sha)" '[.comments[].body // "" | capture("SWARM_SELF_REVIEW: (?<v>[A-Z_]+) actor=[A-Za-z0-9_-]+ head=(?<h>[0-9a-f]+)"; "g") | select(.h == $h) | .v] | last // empty' 2>/dev/null || true)"
+    case "$REUSE_VERDICT" in
+        BLOCK)
+            echo "pr-ready: REFUSED — the existing self-review of PR #$PR's current head is BLOCK; fix and re-push." >&2
+            refuse review-block 2
+            ;;
+        '') ;;
+        *)
+            SKIP_REVIEW=1
+            OLD_REASON_SHA="$(head_sha)"
+            OLD_REASON="existing $REUSE_VERDICT review"
+            ;;
+    esac
+fi
+
 if [ "$SKIP_REVIEW" = "1" ]; then
     echo "pr-ready: self-review already passed on ${OLD_REASON_SHA:0:7} (last refusal was $OLD_REASON on this same commit) — going straight to the CI gate"
 else

@@ -12,7 +12,7 @@
 # review-block and ci-failing need a fix first, so they are not retried
 # (ci-failing is reported instead; see issue #729 below).
 #
-# The retry costs no extra self-review round: pr-ready.sh skips review when
+# The ci-pending/ci-unknown retry costs no extra self-review round: pr-ready.sh skips review when
 # the banner's sha= still matches the head commit. Run from inside the
 # target repo's checkout (gh resolves the repo from cwd).
 #
@@ -73,7 +73,7 @@ CI_HOLD_GREEN="$(jq -r "$CI_ROLLUP_DROP_LIVENESS_JQ"'.[]
      | map(max_by(.completedAt // .startedAt // .createdAt // ""))) as $r
   | select(($r | length) > 0 and all($r[]; ((.status // "COMPLETED") == "COMPLETED")
         and (((.conclusion // .state // "") | test("^(SUCCESS|NEUTRAL|SKIPPED)$")))))
-  | "\(.number) ci-hold-green"' <<<"$DRAFTS")"
+  | "\(.number) ci-hold-green \(.headRefOid // "nohead")"' <<<"$DRAFTS")"
 if [ -n "$CI_HOLD_GREEN" ]; then
     CANDIDATES="$(printf '%s\n%s' "$CANDIDATES" "$CI_HOLD_GREEN" | sed '/^$/d')"
 fi
@@ -135,14 +135,30 @@ jq -r "$CI_ROLLUP_DROP_LIVENESS_JQ"'.[]
         and (((.conclusion // .state // "") | test("^(SUCCESS|NEUTRAL|SKIPPED)$")))))
   | "#\(.number) parked-green: banner-less draft, green CI (risk=\((.body // "") | (capture("BLIND_MERGE_RISK: (?<r>low|medium|high)").r) // "unknown"), issue=\((.headRefName // "") | (capture("issue-(?<i>[0-9]+)").i) // "none"), sha=\(.headRefOid // "unknown"))"' <<<"$DRAFTS"
 
-while read -r pr reason; do
+while read -r pr reason sha; do
     [ -n "$pr" ] || continue
     if [ "$DRY_RUN" = "1" ]; then
         echo "#$pr $reason: would retry (dry run)"
         continue
     fi
+    reuse=0
+    if [ "$reason" = "ci-hold-green" ]; then
+        # issue #984 cost guard: bannerless, so pr-ready.sh cannot tell a retry from a
+        # first run. One attempt per (PR, head sha), recorded BEFORE the call: a review
+        # that outlives the timeout below posts nothing and would otherwise be restarted
+        # (paid) every sweep. A new push (new sha) earns a new attempt.
+        state_dir="${READY_SWEEP_STATE_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || echo .)/.swarm/ready-sweep-state}"
+        mark="$state_dir/retry-$pr-${sha:-nohead}"
+        if [ -e "$mark" ]; then
+            echo "#$pr $reason: still draft (retry already spent on ${sha:0:7}; push or remove the label by hand)"
+            continue
+        fi
+        mkdir -p "$state_dir" 2>/dev/null || true
+        : > "$mark" 2>/dev/null || true
+        reuse=1
+    fi
     rc=0
-    timeout "${READY_SWEEP_PR_READY_TIMEOUT:-300}" "$PR_READY" "$pr" >/dev/null 2>&1 || rc=$?
+    PR_READY_REUSE_REVIEW="$reuse" timeout "${READY_SWEEP_PR_READY_TIMEOUT:-300}" "$PR_READY" "$pr" >/dev/null 2>&1 || rc=$?
     if [ "$rc" = "0" ]; then
         echo "#$pr $reason: readied"
     else
