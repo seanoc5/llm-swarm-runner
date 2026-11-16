@@ -1591,4 +1591,57 @@ label_on swarm-hold:coordinator || red "expected the draft-held PR to gain swarm
 grep -q '^pr ready' "$GH_LOG" && red "a draft-held PR stays as it is (no ready, no undo): $(cat "$GH_LOG")"
 green "old-style draft holds keep working and get the label"
 
+
+# issue #976 (Tests 62-64): repo-wide lints run before readying. The real
+# tests/test-no-awk-exit-pipe.sh is exercised end to end on a copy of this repo
+# whose HEAD is the faked PR head; a script that adds `sed ... | head -n 1`
+# must refuse (exit 6) and show the offending line.
+: > "$LABELS_FILE"
+LINT_REPO="$TEST_DIR/lint-repo"
+mkdir -p "$LINT_REPO"
+git -C "$SCRIPT_DIR/.." archive HEAD | tar -x -C "$LINT_REPO"
+git -C "$LINT_REPO" init -q
+git -C "$LINT_REPO" add -A
+git -C "$LINT_REPO" -c user.name=t -c user.email=t@t commit -q -m base
+LINT_CLEAN_SHA="$(git -C "$LINT_REPO" rev-parse HEAD)"
+
+heading "Test 62 (issue #976): clean worktree — lint passes, PR readied"
+printf '<!-- BLIND_MERGE_RISK: low -->\nsome change\n' > "$BODY_FILE"
+export PR_READY_CWD="$LINT_REPO" GH_SHA="$LINT_CLEAN_SHA"
+rc=0; run_pr_ready || rc=$?
+[ "$rc" -eq 0 ] || red "expected exit 0, got $rc: $(cat "$TEST_DIR/out.log")"
+grep -q 'repo lint tests/test-no-awk-exit-pipe.sh passed' "$TEST_DIR/out.log" || red "expected the lint to run and pass: $(cat "$TEST_DIR/out.log")"
+gh_ready_called || red "expected gh pr ready"
+green "clean worktree: lint ran, PR readied"
+
+heading "Test 63 (issue #976): worktree adds 'sed ... | head -n 1' — refuses (exit 6), prints the offending line, never readies"
+printf '\nfirst="$(sed -n 1,9p /etc/hostname | head -n 1)"\n' >> "$LINT_REPO/scripts/pr-ready.sh"
+git -C "$LINT_REPO" -c user.name=t -c user.email=t@t commit -q -am "bad pipe"
+export GH_SHA="$(git -C "$LINT_REPO" rev-parse HEAD)"
+rc=0; run_pr_ready || rc=$?
+[ "$rc" -eq 6 ] || red "expected exit 6, got $rc: $(cat "$TEST_DIR/out.log")"
+grep -q 'sed -n 1,9p /etc/hostname | head -n 1' "$TEST_DIR/out.log" || red "expected the offending line in the output: $(cat "$TEST_DIR/out.log")"
+gh_ready_called && red "gh pr ready must not run when the lint fails"
+head -1 "$EDITED_BODY" | grep -qx "<!-- SWARM_DRAFT_REASON: lint-failing sha=$GH_SHA -->" || red "expected lint-failing banner: $(cat "$EDITED_BODY" 2>/dev/null)"
+green "bad pipe: exit 6, offending line shown, no ready"
+
+heading "Test 64 (issue #976): PR_READY_LINTS='' switches the gate off; cwd not at PR head skips it"
+rc=0; PR_READY_LINTS="" run_pr_ready || rc=$?
+[ "$rc" -eq 0 ] || red "expected exit 0 with lints off, got $rc: $(cat "$TEST_DIR/out.log")"
+export GH_SHA=cafef00dcafef00dcafef00dcafef00dcafef00d
+rc=0; run_pr_ready || rc=$?
+unset PR_READY_CWD GH_SHA
+[ "$rc" -eq 0 ] || red "expected exit 0 when cwd is not the PR head, got $rc: $(cat "$TEST_DIR/out.log")"
+grep -q 'repo lint .* passed' "$TEST_DIR/out.log" && red "lint must not run from a checkout that is not the PR head"
+green "opt-out and head-mismatch both skip the lint"
+heading "Test 65 (issue #976): dirty working tree — lint skipped with a stderr line, not refused"
+printf 'x\n' > "$LINT_REPO/untracked.txt"
+export PR_READY_CWD="$LINT_REPO" GH_SHA="$(git -C "$LINT_REPO" rev-parse HEAD)"
+rc=0; run_pr_ready || rc=$?
+unset PR_READY_CWD GH_SHA
+[ "$rc" -eq 0 ] || red "expected exit 0 (skip), got $rc: $(cat "$TEST_DIR/out.log")"
+grep -q 'repo lints skipped: working tree has uncommitted changes' "$TEST_DIR/out.log" || red "expected the skip line: $(cat "$TEST_DIR/out.log")"
+green "dirty tree skips the lint with a visible line"
+
+
 green "ALL TESTS PASSED"
