@@ -1,0 +1,12 @@
+Both fixes are green and waiting for you.
+
+**In flight:** iss-973 waiting on #974
+
+Needs you:
+- **A87** Merge https://github.com/o/r/pull/972, the swarm-merge lock fix (recommended)
+- **A89** Merge https://github.com/o/r/pull/974, the composer alert (recommended)
+
+Do now: run this one command to merge both.
+```
+sm 972 && sm 974
+```

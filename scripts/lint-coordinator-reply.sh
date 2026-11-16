@@ -72,6 +72,19 @@
 #                by default (COORD_REPLY_LINT_LEDE=warn|block|off).
 #                Fix: open with the outcome in plain words; identifiers come after it.
 #
+#   repeat-item  one action item is asked for twice in one reply (issue #980; failure 2 of epic
+#                #488: the same pending item sat in the lede, body, Needs-you list and close).
+#                An ask is a Needs-you bullet ("- **A1**"), a "Do now:" line or a "Pending your
+#                approval:" line, each with its continuation lines up to a blank line (a fenced
+#                block is ignored). An ask's subject is the PR/issue numbers of its https URLs, or
+#                its "#N" mentions when it has no URL. Hit when two asks share a subject. The
+#                sanctioned shape passes: Needs-you items say what/why and a "Do now:" runs one
+#                command ("sm 972 && sm 974" in a fence) without repeating their URLs or #N.
+#                A plain mention outside an ask ("In flight: iss-973 waiting on #974") is no ask.
+#                coord-hook.sh runs it warn-only by default (COORD_REPLY_LINT_REPEAT=warn|block|off).
+#                Fix: say each item once: operator-only work in Do now, work the coordinator does
+#                on a yes in the approval line, never both.
+#
 # Usage: lint-coordinator-reply.sh [--project DIR] [--only RULE[,RULE]] [--skip RULE[,RULE]] [--gloss N] [--why] [file]
 # --gloss N sets the carryover threshold; --why prints the matched reference for each carryover hit to stderr.
 # --only keeps just the named rules (and skips the slow gh/worktree passes when
@@ -86,7 +99,7 @@ set -uo pipefail
 PROJECT=""; FILE=""; ONLY=""; SKIP=""; GLOSS=12; WHY=""
 while [ $# -gt 0 ]; do
     case "$1" in
-        -h|--help) sed -n "3,75p" "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n "3,90p" "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         --project) [ $# -ge 2 ] || { echo "--project needs a value" >&2; exit 2; }; PROJECT="$2"; shift 2 ;;
         --only) [ $# -ge 2 ] || { echo "--only needs a value" >&2; exit 2; }; ONLY=",$2,"; shift 2 ;;
         --only=*) ONLY=",${1#*=},"; shift ;;
@@ -347,13 +360,58 @@ lede_hits() {
     }'
 }
 
+# repeat-item (issue #980): see the rule text in the header.
+repeat_hits() {
+    printf '%s\n' "$text" | awk -v fence="$FENCE_RE" '
+    function start(kind, label, line) { n++; kind_[n] = kind; label_[n] = label; txt[n] = line; cur = n }
+    BEGIN {
+        dono = "^[[:space:]]*(\\*\\*)?do now(\\*\\*)?:"
+        pend = "^[[:space:]]*(\\*\\*)?pending your approval(\\*\\*)?:"
+    }
+    $0 ~ fence { inf = !inf; next }
+    inf { next }
+    {
+        l = tolower($0)
+        if ($0 ~ /^[[:space:]]*$/ || $0 ~ /^#/) { cur = 0; next }
+        if ($0 ~ /^[[:space:]]*-[[:space:]]+\*\*[A-Za-z][0-9]+\*\*/) {
+            lab = $0; sub(/^[[:space:]]*-[[:space:]]+\*\*/, "", lab); sub(/\*\*.*$/, "", lab)
+            start("L", lab, $0)
+        } else if (l ~ dono) start("D", "Do now", $0)
+        else if (l ~ pend) start("P", "Pending your approval", $0)
+        else if (cur && $0 ~ /^[[:space:]]/) txt[cur] = txt[cur] "\n" $0
+        else cur = 0
+    }
+    END {
+        for (i = 1; i <= n; i++) {
+            nu = 0; t = txt[i]; delete ku; delete kh
+            while (match(t, /https:\/\/github\.com\/[^ \/]+\/[^ \/]+\/(pull|issues)\/[0-9]+/)) {
+                m = substr(t, RSTART, RLENGTH); sub(/^.*\//, "", m); ku[m] = 1; nu++
+                t = substr(t, RSTART + RLENGTH)
+            }
+            t = txt[i]; gsub(/https?:\/\/[^ )>\]]*/, " ", t)
+            while (match(t, /#[0-9]+/)) { kh[substr(t, RSTART + 1, RLENGTH - 1)] = 1; t = substr(t, RSTART + RLENGTH) }
+            if (nu) { for (k in ku) { own[k] = own[k] " " i } }
+            else { for (k in kh) { own[k] = own[k] " " i } }
+        }
+        for (k in own) {
+            c = split(own[k], a, " ")
+            if (c < 2) continue
+            names = ""
+            for (j = 1; j <= c; j++) names = names (j > 1 ? ", " : "") label_[a[j]]
+            out[++m2] = sprintf("repeat-item: #%s is asked for %d times (%s)", k, c, names)
+        }
+        for (i = 1; i <= m2; i++) print out[i]
+    }'
+}
+
 want() { { [ -z "$ONLY" ] || [[ "$ONLY" == *",$1,"* ]]; } && ! [[ "$SKIP" == *",$1,"* ]]; }
-stale=""; issue=""; carry=""; lede=""
+stale=""; issue=""; carry=""; lede=""; repeat=""
 want stale-window && stale="$(stale_window_hits)"
 want issue-merged && issue="$(issue_merged_hits)"
 want carryover && carry="$(carryover_hits)"
 want lede-identifier && lede="$(lede_hits)"
-all="$(printf '%s\n%s\n%s\n%s\n%s\n' "$hits" "$stale" "$issue" "$carry" "$lede" | sed '/^$/d')"
+want repeat-item && repeat="$(repeat_hits)"
+all="$(printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$hits" "$stale" "$issue" "$carry" "$lede" "$repeat" | sed '/^$/d')"
 if [ -n "$ONLY" ]; then
     all="$(printf '%s\n' "$all" | awk -v only="$ONLY" '{ split($0, p, ":"); if (index(only, "," p[1] ",")) print }')"
 fi
