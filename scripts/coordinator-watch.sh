@@ -8552,9 +8552,25 @@ worker_pane_busy() {
 # capture-pane only.
 worker_pane_trust_dialog() {
     local win="$1"
-    tmux capture-pane -t "$SESSION_NAME:$win.0" -p 2>/dev/null \
-        | LC_ALL=C sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\xc2\xa0/ /g' \
-        | LC_ALL=C grep -qE 'Quick safety check|Yes, I trust this folder|Do you trust the files in this folder'
+    tmux capture-pane -t "$SESSION_NAME:$win.0" -p 2>/dev/null | pane_text_is_trust_dialog
+}
+
+# pane_text_is_trust_dialog  (stdin: captured pane text)
+#
+# (issue #957) The dialog is a menu pinned to the BOTTOM of the pane:
+# "1. Yes, I trust this folder" and "2. No, exit" as numbered option lines
+# (the selected one prefixed by the marker). Matching the phrases anywhere
+# sidelined idle workers that merely had them in ordinary output (working on
+# #950, reading this file). So: look only at the last 12 non-blank lines and
+# require BOTH option lines at line start. Quoted prose or a grep hit has a
+# file prefix or surrounding text, and does not satisfy both.
+pane_text_is_trust_dialog() {
+    LC_ALL=C sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\xc2\xa0/ /g' \
+        | LC_ALL=C grep -v '^[[:space:]]*$' | tail -n 12 \
+        | LC_ALL=C awk '
+            /^[[:space:]]*(│[[:space:]]*)?((>|❯)[[:space:]]*)?1\.[[:space:]]+Yes, (I trust this folder|proceed)/ { a = 1 }
+            /^[[:space:]]*(│[[:space:]]*)?((>|❯)[[:space:]]*)?2\.[[:space:]]+No, exit/ { b = 1 }
+            END { exit !(a && b) }'
 }
 
 # worker_pane_composer_text <window>

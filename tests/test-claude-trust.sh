@@ -55,16 +55,26 @@ echo '{"projects":[1]}' > "$CFG"; claude_config_trust_paths "$CFG" "$RESOLVED"; 
 ls "$T"/cfg.json.trust.* >/dev/null 2>&1 && red "temp file leaked"
 green "empty / invalid / missing / malformed-projects files untouched, no temp leak"
 
-# Detection regex (extracted verbatim from the watcher, tmux stubbed).
+# Detection (extracted verbatim from the watcher, tmux stubbed). Issue #957:
+# anchored to the option lines at the bottom of the pane, not phrases anywhere.
 SESSION_NAME=s
-eval "$(sed -n '/^worker_pane_trust_dialog() {/,/^}/p' "$REPO/scripts/coordinator-watch.sh")"
+eval "$(sed -n '/^worker_pane_trust_dialog() {/,/^}/p;/^pane_text_is_trust_dialog() {/,/^}/p' "$REPO/scripts/coordinator-watch.sh")"
 PANE=""
 tmux() { printf '%s\n' "$PANE"; }
-PANE=$' Quick safety check: Is this a project you created or one you trust?\n\n ❯ 1. Yes, I trust this folder\n   2. No, exit'
+PANE=$' Quick safety check: Is this a project you created or one you trust?\n\n ❯ 1. Yes, I trust this folder\n   2. No, exit\n\n Enter to confirm · Esc to cancel'
 worker_pane_trust_dialog iss-9 || red "trust dialog not detected"
-PANE=$'\x1b[1mQuick safety\x1b[0m check: ...'
-PANE=$'\x1b[1mQuick safety check\x1b[0m: Is this a project'
+PANE=$'\x1b[1mQuick safety check\x1b[0m: Is this a project\n \x1b[36m❯ 1. Yes, I trust this folder\x1b[0m\n   2. No, exit'
 worker_pane_trust_dialog iss-9 || red "ANSI-wrapped dialog not detected"
+PANE=$'older scrollback\n'"$(printf 'x\n%.0s' 1 2 3)"$'Quick safety check: ...\n ❯ 1. Yes, I trust this folder\n   2. No, exit'
+worker_pane_trust_dialog iss-9 || red "dialog with scrollback above not detected"
 PANE=$'❯ fix the bug\n  ctx: 12k/200k (6%)'
 ! worker_pane_trust_dialog iss-9 || red "normal session misread as trust dialog"
-green "pane detection: dialog yes (plain + ANSI), normal session no"
+# Ordinary output that merely contains the phrases must NOT match (#957).
+PANE=$'● Reading #950: the "Quick safety check" dialog, option "Yes, I trust this folder".\n  scripts/coordinator-watch.sh:8557: grep -qE '"'"'Quick safety check|Yes, I trust this folder'"'"'\n❯ \n  ctx: 12k/200k (6%)'
+! worker_pane_trust_dialog iss-9 || red "phrases in ordinary output misread as trust dialog (#957)"
+# Full option lines present but scrolled far above the bottom: not the live dialog.
+PANE=$' ❯ 1. Yes, I trust this folder\n   2. No, exit\n'"$(printf 'line %s\n' 1 2 3 4 5 6 7 8 9 10 11 12 13 14)"
+! worker_pane_trust_dialog iss-9 || red "stale dialog text far above bottom misread"
+PANE=$' │ ❯ 1. Yes, proceed │\n │   2. No, exit    │'
+worker_pane_trust_dialog iss-9 || red "boxed older-wording dialog not detected"
+green "pane detection: dialog yes (plain, ANSI, scrollback), normal session / quoted phrases / stale text no (#957)"
