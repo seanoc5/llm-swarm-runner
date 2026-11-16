@@ -6,6 +6,9 @@ set -euo pipefail
 # --- Configuration ---
 # Default to current directory if no path is provided
 PROJECT_DIR="$(realpath "${1:-$PWD}")"
+# The same path with symlinks NOT resolved (issue #950): the trust entry below
+# must cover both spellings of a symlinked worktree root.
+PROJECT_DIR_UNRESOLVED="$(realpath -s "${1:-$PWD}" 2>/dev/null || printf '%s' "$PROJECT_DIR")"
 if [ $# -gt 0 ]; then shift; fi
 
 # Determine the agent (claude, gemini, codex, agy, listener, or bash)
@@ -108,6 +111,16 @@ if [ "$_claude_cfg_needs_seed" = "1" ]; then
     cp "$HOME/.claude.json" "$CLAUDE_CONFIG_COPY"
 fi
 unset _claude_cfg_key _claude_cfg_needs_seed
+
+# Pre-accept the "trust this folder" dialog (issue #950) on EVERY launch, not
+# just at seed time: a copy seeded earlier (or by a plain provision) can lack
+# the entry, and a --wake relaunch reuses it. Both the resolved and the
+# symlinked spelling of the worktree path, since the CLI keys trust by cwd.
+# shellcheck source=scripts/_claude-trust.sh
+if [ -f "$(dirname "$0")/scripts/_claude-trust.sh" ]; then
+    . "$(dirname "$0")/scripts/_claude-trust.sh"
+    claude_config_trust_paths "$CLAUDE_CONFIG_COPY" "$PROJECT_DIR" "$PROJECT_DIR_UNRESOLVED"
+fi
 
 # Global gitconfig for the container (#918). The host ~/.gitconfig may carry
 # url.*.insteadOf / pushInsteadOf rules (e.g. https -> git@github.com:) that
