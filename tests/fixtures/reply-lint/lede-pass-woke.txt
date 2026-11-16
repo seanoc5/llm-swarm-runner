@@ -1,0 +1,3 @@
+Woke for: 1 worker result
+
+The lint rule is in and warns without blocking; PR #979 carries it.

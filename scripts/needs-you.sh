@@ -200,7 +200,7 @@ case "$cmd" in
         if hit="$(jargon_hit "$title $background")"; then
             die "title/background lean on an undefined internal label ($hit). Say what it is in plain words (what the check or hold is, which PR raised it, what each option changes) instead of a code. Refusing."
         fi
-        if hits="$("$LINT" --project "$project" < <(printf '%s\n%s\n' "$title $do_ $rec" "$background") || true)" && [ -n "$hits" ]; then
+        if hits="$("$LINT" --project "$project" --only backref,no-command,pointer,two-endings,bare-list,stale-window,issue-merged,carryover < <(printf "%s\n%s\n" "$title $do_ $rec" "$background") || true)" && [ -n "$hits" ]; then
             die "item points elsewhere instead of carrying its action (${hits%%:*}); restate the item in plain words (what it is, the options, your recommendation) instead of pointing at its label. Refusing."
         fi
         # An empty field is left out, not stored as "none" (issue #801).

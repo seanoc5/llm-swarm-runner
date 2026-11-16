@@ -18,7 +18,8 @@ FX="$ROOT/tests/fixtures/reply-lint"
 T="$(mktemp -d -t reply-lint-XXXXXX)"
 trap 'rm -rf "$T"' EXIT
 
-rules() { "$LINT" < "$1" | cut -d: -f1 | sort -u | paste -sd, -; }
+# lede-identifier has its own section below; the incident fixtures here are one-liners that may trip it
+rules() { "$LINT" < "$1" | grep -v '^lede-identifier:' | cut -d: -f1 | sort -u | paste -sd, -; }
 
 # ── lint: the incidents from the issue, replayed ─────────────────────────────
 check "A13 'Start the load (command above)': backref + no-command" "backref,no-command" "$(rules "$FX/incident-start-load.txt")"
@@ -88,7 +89,7 @@ esac
 EOF
 chmod +x "$T/ghbin/gh"
 export GH_LOG="$T/gh.log"
-gl() { PATH="$T/ghbin:$PATH" "$LINT" "$@"; }
+gl() { PATH="$T/ghbin:$PATH" "$LINT" "$@" | grep -v "^lede-identifier:" || true; }
 check "'until #1910 merges' (an issue): issue-merged" "issue-merged" "$(gl < "$FX/incident-issue-merged.txt" | cut -d: -f1 | sort -u | paste -sd, -)"
 check "'PR #1913 merged' (a PR), #1910 closes, merge conflict: clean" "" "$(gl < "$FX/clean-pr-merged.txt" | cut -d: -f1 | paste -sd, -)"
 check "the lookup asks the issues endpoint for that number" "yes" "$(grep -q 'repos/{owner}/{repo}/issues/1910' "$GH_LOG" && echo yes || echo no)"
@@ -105,7 +106,7 @@ check "a fenced line is skipped" "" "$(gl < "$T/m3" | paste -sd, -)"
 printf '~~~\nuntil #1910 merges\n~~~\n' > "$T/m5"
 check "a ~~~ fenced line is skipped too" "" "$(gl < "$T/m5" | paste -sd, -)"
 check "gh failing: never flags" "" "$(GH_FAIL=1 gl < "$FX/incident-issue-merged.txt" | paste -sd, -)"
-set +e; gl < "$FX/incident-issue-merged.txt" >/dev/null; ec=$?; set -e
+set +e; PATH="$T/ghbin:$PATH" "$LINT" --only issue-merged < "$FX/incident-issue-merged.txt" >/dev/null; ec=$?; set -e
 check "issue-merged exits 3" "3" "$ec"
 
 # ── carryover (issue #646): a bare backward reference with no gloss ─────────
@@ -285,6 +286,23 @@ out="$(stop "$FX/incident-start-load.txt" false)"
 case "$(jq -r .reason <<<"$out")" in "Inbox: 1 item(s)"*"Reply lint failed"*) got=both ;; *) got="$(jq -r .reason <<<"$out")" ;; esac
 check "doorbell and lint ride one block" "both" "$got"
 
+
+# ── lede-identifier (issue #979) ─────────────────────────────────────────────
+lede() { "$LINT" --only lede-identifier < "$1" | cut -d: -f1 | paste -sd, -; }
+for f in lede-hit-migration lede-hit-pr lede-hit-codespan lede-hit-env lede-hit-sha; do
+    check "lede: $f is a hit" "lede-identifier" "$(lede "$FX/$f.txt")"
+done
+for f in lede-pass-woke lede-pass-both lede-pass-plain lede-pass-fence lede-pass-short; do
+    check "lede: $f passes" "" "$(lede "$FX/$f.txt")"
+done
+H2="$T/hlede"; mkdir -p "$H2/.swarm/coord-inbox"
+lstop2() { jq -n --rawfile m "$FX/lede-hit-pr.txt" '{last_assistant_message: $m, stop_hook_active: false}' | CLAUDE_PROJECT_DIR="$H2" COORD_HOOK_STATE=0 "$@" "$HOOK" Stop; }
+check "lede: default (warn) never blocks" "" "$(lstop2 env)"
+grep -q 'coord.reply_lint.hit rules=lede-identifier' "$H2/.swarm/events.log" && got=yes || got=no
+check "lede: warn logs the hit" "yes" "$got"
+check "lede: off never blocks" "" "$(lstop2 env COORD_REPLY_LINT_LEDE=off)"
+rm -f "$H2/.swarm/coord-lint-blocked"
+check "lede: block mode blocks" "block" "$(lstop2 env COORD_REPLY_LINT_LEDE=block | jq -r .decision)"
 
 # ── Stop hook: hand-written list and stale prompt (issue #964) ───────────────
 W="$T/wproj"; mkdir -p "$W/.swarm"; printf '# Needs you\n- **A1** stub\n' > "$W/.swarm/needs-you.md"
