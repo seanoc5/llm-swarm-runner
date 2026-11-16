@@ -369,7 +369,7 @@ extract_fn() {
 for fn in log_event on_outcome outcome_path_issue outcome_path_task_id coord_wake_set_pending coord_wake_clear_pending \
           coord_inbox_write coord_inbox_count coord_inbox_nudge_text coord_inbox_nudge_pattern coord_typed_batching coord_last_ring coord_batch_note_ring coord_batch_window_open \
           coord_wake_hold_mark_pending coord_wake_hold_clear_pending coord_wake_hold_retry_pass \
-          coord_wake_retry_pass coord_wake_already_submitted \
+          coord_wake_retry_pass coord_wake_already_submitted coord_composer_blocked_note_dirty coord_composer_blocked_clear \
           coord_wake_hold_reason coord_human_present worker_human_present swarm_busy \
           human_typed_since transcript_dir_for watcher_paste_epochs coord_paste_epochs \
           wake_clock_get wake_clock_set wake_debounced \
@@ -407,6 +407,9 @@ COORD_WAKE_LOCK_TIMEOUT_SECS=10
 # never exercising a pending prompt.
 COORD_WAKE_PENDING_FILE="$LOCK_TEST_DIR/coord-wake-pending.prompt"
 COORD_WAKE_PENDING_WARNED_FILE="$LOCK_TEST_DIR/coord-wake-pending.warned"
+COORD_WAKE_BLOCKED_FILE="$LOCK_TEST_DIR/coord-wake-blocked"
+COMPOSER_DIRTY_ALERT_SECS=900
+COMPOSER_DIRTY_BACKOFF_SECS=120
 # issue #430: this test's busy-pane pairing needs its own pending marker
 # and inbox dir; every hold gate is switched OFF below so on_outcome's own
 # coord_wake_hold_reason check is a no-op (it always proceeds straight to
