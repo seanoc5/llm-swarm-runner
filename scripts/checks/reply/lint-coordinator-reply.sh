@@ -20,6 +20,7 @@ while IFS= read -r hit; do
         issue-merged) msg="an issue cannot merge; say \"the fix PR for #N merges\" or \"#N closes\"" ;;
         carryover) msg="refers to a carried-over item by label, section number or \"from earlier\" without restating it; say what it is, the options and your recommendation here" ;;
         lede-identifier) emit "$id" warn "$(find_line "$FILE" "$text")" "$text" "first sentence leads with an identifier (#N, path, code span, ENV_VAR, sha); say the outcome in plain words first"; continue ;;
+        repeat-item) emit "$id" warn "$(find_line "$FILE" "$text")" "$text" "the same issue/PR is asked for in more than one item; merge them into one item or say why they differ"; continue ;;
         *) msg="see scripts/lint-coordinator-reply.sh" ;;
     esac
     emit "$id" error "$(find_line "$FILE" "$text")" "$text" "$msg"

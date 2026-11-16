@@ -41,4 +41,10 @@ check "reply: a warn-only finding leaves no error severity" "0" "$(jq -r 'select
 # ...and the needs-you kind does not run it (denied by rule, not by an allowlist)
 check "needs-you: lede-identifier is not run" "0" "$("$RUN" needs-you "$LEDE" | grep -c lede-identifier || true)"
 check "needs-you: still runs the other reply rules" "1" "$("$RUN" needs-you "$NY/fail.txt" | grep -c two-endings || true)"
+# repeat-item (#980): warn on the reply path, so it never fails the check
+REP="$ROOT/tests/fixtures/reply-lint/repeat-hit-list-and-pending.txt"
+set +e; out="$("$RUN" reply "$REP")"; set -e
+check "reply: repeat-item is emitted with severity warn" "repeat-item warn" "$(jq -r 'select(.check=="repeat-item")|"\(.check) \(.severity)"' <<<"$out" | sort -u)"
+check "reply: repeat-item output has the documented shape" "" "$(jq -c "select($SHAPE|not)" <<<"$out")"
+check "reply: repeat-item adds no error severity" "0" "$(jq -r 'select(.check=="repeat-item" and .severity=="error")' <<<"$out" | grep -c . || true)"
 echo "all checks tests passed"

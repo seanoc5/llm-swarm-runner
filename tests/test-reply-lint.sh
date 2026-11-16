@@ -191,6 +191,7 @@ check "add refuses option codes in the background" "2" "$(gadd --title "Pick a r
 check "add accepts CI/CD (a well-known pair)" "0" "$(gadd --title "Fix the CI/CD cache" --background "$BG")"
 check "add refuses a capitalised 'Option B'" "2" "$(gadd --title "Pick Option B for the rebase" --background "$BG")"
 check "add accepts PR numbers and plain words" "0" "$(gadd --title "Rebase the check on PR #2387" --background "$BG")"
+check "add skips repeat-item (warn-only rule, not a refusal)" "0" "$(gadd --title "Merge PR 972 once" --background "$(printf -- '- **A1** Merge #972 (yes/no)\n- **A2** Merge #972 again (yes/no)\nThese two lines repeat one ask, which the reply lint only warns about, so adding the item still works.')")"
 out="$("$NY" render --project "$G")"
 check "render leads each of the 2 items with 'What this is:'" "2" "$(grep -c '^  What this is: Loads the county' <<<"$out")"
 check "check: a list written by add is clean" "0" "$("$NY" check --project "$G" >/dev/null 2>&1; echo $?)"
@@ -326,6 +327,10 @@ printf -- '- **A1** Merge #972 (yes/no)\n\n**In flight:** iss-973 waiting on #97
 check "repeat: a plain mention outside an ask passes" "" "$(rep "$T/rep-mention")"
 printf -- '- **A1** Merge https://github.com/o/r/pull/972\n\nPending your approval: merge #972 (yes/no)\n' > "$T/rep-urlnum"
 check "repeat: URL in one ask, #N in the other still matches" "repeat-item" "$(rep "$T/rep-urlnum")"
+printf -- '- **A1** Merge https://github.com/o/r/pull/972\n- **A2** Merge https://github.com/o/other/pull/972\n' > "$T/rep-repos"
+check "repeat: #972 in two different repos is two items" "" "$(rep "$T/rep-repos")"
+printf -- '- **A1** Merge https://github.com/o/r/pull/972\n- **A2** Merge https://github.com/o/r/pull/972\n' > "$T/rep-samerepo"
+check "repeat: the same URL twice is a hit" "repeat-item" "$(rep "$T/rep-samerepo")"
 H3="$T/hrep"; mkdir -p "$H3/.swarm/coord-inbox"
 rstop() { jq -n --rawfile m "$FX/repeat-hit-list-and-pending.txt" '{last_assistant_message: $m, stop_hook_active: false}' | CLAUDE_PROJECT_DIR="$H3" COORD_HOOK_STATE=0 "$@" "$HOOK" Stop; }
 check "repeat: default (warn) never blocks" "" "$(rstop env)"

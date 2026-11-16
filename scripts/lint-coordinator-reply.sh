@@ -382,23 +382,34 @@ repeat_hits() {
         else cur = 0
     }
     END {
+        # ref[i, num] = owner/repo for a URL ref, "-" for a bare #N. A URL names its repo, so
+        # #972 in two repos is two items; a bare #N matches any repo (the URL form may be
+        # elsewhere in the reply).
         for (i = 1; i <= n; i++) {
             nu = 0; t = txt[i]; delete ku; delete kh
             while (match(t, /https:\/\/github\.com\/[^ \/]+\/[^ \/]+\/(pull|issues)\/[0-9]+/)) {
-                m = substr(t, RSTART, RLENGTH); sub(/^.*\//, "", m); ku[m] = 1; nu++
+                m = substr(t, RSTART, RLENGTH); nm = m; sub(/^.*\//, "", nm)
+                sub(/^https:\/\/github\.com\//, "", m); sub(/\/(pull|issues)\/.*$/, "", m)
+                ku[nm] = m; nu++
                 t = substr(t, RSTART + RLENGTH)
             }
             t = txt[i]; gsub(/https?:\/\/[^ )>\]]*/, " ", t)
-            while (match(t, /#[0-9]+/)) { kh[substr(t, RSTART + 1, RLENGTH - 1)] = 1; t = substr(t, RSTART + RLENGTH) }
-            if (nu) { for (k in ku) { own[k] = own[k] " " i } }
-            else { for (k in kh) { own[k] = own[k] " " i } }
+            while (match(t, /#[0-9]+/)) { kh[substr(t, RSTART + 1, RLENGTH - 1)] = "-"; t = substr(t, RSTART + RLENGTH) }
+            if (nu) { for (k in ku) { ref[i, k] = ku[k]; nums[k] = 1 } }
+            else { for (k in kh) { ref[i, k] = "-"; nums[k] = 1 } }
         }
-        for (k in own) {
-            c = split(own[k], a, " ")
-            if (c < 2) continue
-            names = ""
-            for (j = 1; j <= c; j++) names = names (j > 1 ? ", " : "") label_[a[j]]
-            out[++m2] = sprintf("repeat-item: #%s is asked for %d times (%s)", k, c, names)
+        for (k in nums) {
+            names = ""; c = 0
+            for (i = 1; i <= n; i++) {
+                if (!((i, k) in ref)) continue
+                hit = 0
+                for (j = 1; j <= n; j++) {
+                    if (j == i || !((j, k) in ref)) continue
+                    if (ref[i, k] == "-" || ref[j, k] == "-" || ref[i, k] == ref[j, k]) { hit = 1; break }
+                }
+                if (hit) { c++; names = names (c > 1 ? ", " : "") label_[i] }
+            }
+            if (c >= 2) out[++m2] = sprintf("repeat-item: #%s is asked for %d times (%s)", k, c, names)
         }
         for (i = 1; i <= m2; i++) print out[i]
     }'
