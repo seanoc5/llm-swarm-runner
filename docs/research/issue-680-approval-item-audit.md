@@ -20,7 +20,7 @@ Audit date 2026-11-13. Window: coordinator replies from 2026-10-30 to
   between 2026-11-01 17:10 and 18:30 UTC. None of them named a file or a line.
 - The lint that existed on master (back-references plus run/click items with no
   command) did not flag it. The new `pointer` rule does.
-- Across the three swarms, 5.2% to 8.4% of item appearances now trip the lint
+- Across the three swarms, 5.4% to 8.4% of item appearances now trip the lint
   (6.2% to 6.9% before). Carried-over items (shown in 3+ replies) are 11% to 18%
   of distinct items, and only 1 to 7 per swarm said anything about being
   re-checked.
