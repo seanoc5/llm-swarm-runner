@@ -1,0 +1,1 @@
+COORD_HOOK_STATE is now read from the env file.

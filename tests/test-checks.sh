@@ -32,4 +32,13 @@ check "unknown kind and unreadable file exit 2" "2 2" "$a $b"
 NY="$ROOT/test-fixtures/checks-needs-you"
 set +e; "$RUN" needs-you "$NY/fail.txt" >/dev/null; a=$?; "$RUN" needs-you "$NY/pass.txt" >/dev/null; b=$?; set -e
 check "needs-you kind applies the reply rules (two-endings fails, one ending passes)" "1 0" "$a $b"
+# lede-identifier (#979): the adapter emits it as a warn, which does not fail the reply check
+LEDE="$ROOT/tests/fixtures/reply-lint/lede-hit-pr.txt"
+set +e; out="$("$RUN" reply "$LEDE")"; ec=$?; set -e
+check "reply: lede-identifier is emitted with severity warn" "lede-identifier warn" "$(jq -r 'select(.check=="lede-identifier")|"\(.check) \(.severity)"' <<<"$out" | sort -u)"
+check "reply: lede-identifier output has the documented shape" "" "$(jq -c "select($SHAPE|not)" <<<"$out")"
+check "reply: a warn-only finding leaves no error severity" "0" "$(jq -r 'select(.severity=="error")' <<<"$out" | grep -c . || true)"
+# ...and the needs-you kind does not run it (denied by rule, not by an allowlist)
+check "needs-you: lede-identifier is not run" "0" "$("$RUN" needs-you "$LEDE" | grep -c lede-identifier || true)"
+check "needs-you: still runs the other reply rules" "1" "$("$RUN" needs-you "$NY/fail.txt" | grep -c two-endings || true)"
 echo "all checks tests passed"

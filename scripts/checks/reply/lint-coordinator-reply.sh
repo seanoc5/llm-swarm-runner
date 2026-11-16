@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Adapter: scripts/lint-coordinator-reply.sh text hits -> JSON lines.
-# Checks: backref, no-command, pointer, two-endings, stale-window (needs CHECKS_PROJECT=DIR), issue-merged (needs gh), carryover.
+# Checks: backref, no-command, pointer, two-endings, stale-window (needs CHECKS_PROJECT=DIR), issue-merged (needs gh), carryover, lede-identifier (warn-only, issue #979).
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/../_lib.sh"
 FILE="$1"
 args=(); [ -n "${CHECKS_PROJECT:-}" ] && args=(--project "$CHECKS_PROJECT")
+[ -n "${CHECKS_SKIP_RULES:-}" ] && args+=(--skip "$CHECKS_SKIP_RULES")
 out="$("$HERE/../../lint-coordinator-reply.sh" "${args[@]}" "$FILE")"; ec=$?
 [ "$ec" -eq 0 ] || [ "$ec" -eq 3 ] || exit "$ec"
 while IFS= read -r hit; do
@@ -18,6 +19,7 @@ while IFS= read -r hit; do
         stale-window) msg="sends the operator to a worker window that does not exist (on hold); use the coordinator" ;;
         issue-merged) msg="an issue cannot merge; say \"the fix PR for #N merges\" or \"#N closes\"" ;;
         carryover) msg="refers to a carried-over item by label, section number or \"from earlier\" without restating it; say what it is, the options and your recommendation here" ;;
+        lede-identifier) emit "$id" warn "$(find_line "$FILE" "$text")" "$text" "first sentence leads with an identifier (#N, path, code span, ENV_VAR, sha); say the outcome in plain words first"; continue ;;
         *) msg="see scripts/lint-coordinator-reply.sh" ;;
     esac
     emit "$id" error "$(find_line "$FILE" "$text")" "$text" "$msg"

@@ -58,22 +58,40 @@
 #                see a coined phrase ("the keyboard overlay") or a bare "On #1378:" opener.
 #                Fix: restate the item (what it is, options, recommendation) on this screen.
 #
-# Usage: lint-coordinator-reply.sh [--project DIR] [--only RULE[,RULE]] [--gloss N] [--why] [file]
+#   lede-identifier  the first sentence leads with identifiers, not plain words (issue #979;
+#                failure 1 of epic #488: SAMlytics 2026-09-26 opened with migration numbers,
+#                script names and PR numbers). "First sentence" = the first non-empty line
+#                outside a code fence (a leading "Woke for: ..." line is skipped), cut at the
+#                first ". " or a final "." (not the dot of "e.g." / "i.e."). Hit when an identifier sits in its first 6 words
+#                and fewer than 2 plain words come before it. Identifier: #NNN, a `code span`,
+#                a path with "/" or a file extension, an ALL_CAPS_ENV token (needs "_"), a
+#                7-40 char hex sha (needs a digit). Not plain: label nouns (PR, issue,
+#                migration, script, commit...), stopwords (and, the, of...) and any word with
+#                a digit (V42). "PR #974 merged" and "Migration V42 and `scripts/x.sh`: ..."
+#                hit; "Both merged: #972 and #974" does not. coord-hook.sh runs it warn-only
+#                by default (COORD_REPLY_LINT_LEDE=warn|block|off).
+#                Fix: open with the outcome in plain words; identifiers come after it.
+#
+# Usage: lint-coordinator-reply.sh [--project DIR] [--only RULE[,RULE]] [--skip RULE[,RULE]] [--gloss N] [--why] [file]
 # --gloss N sets the carryover threshold; --why prints the matched reference for each carryover hit to stderr.
 # --only keeps just the named rules (and skips the slow gh/worktree passes when
 # their rule is not named); the Stop hook uses --only bare-list.
+# --skip drops the named rules and keeps every other (future rules included); prefer it
+# to --only when the intent is "all but X".
 # Exit 0 clean, 3 hits (printed to stdout), 2 usage error. Naive on purpose:
 # a regex that catches the real incident beats a perfect check nobody runs.
 # Fixtures: tests/fixtures/reply-lint/.
 set -uo pipefail
 
-PROJECT=""; FILE=""; ONLY=""; GLOSS=12; WHY=""
+PROJECT=""; FILE=""; ONLY=""; SKIP=""; GLOSS=12; WHY=""
 while [ $# -gt 0 ]; do
     case "$1" in
-        -h|--help) sed -n '3,59p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n "3,75p" "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         --project) [ $# -ge 2 ] || { echo "--project needs a value" >&2; exit 2; }; PROJECT="$2"; shift 2 ;;
         --only) [ $# -ge 2 ] || { echo "--only needs a value" >&2; exit 2; }; ONLY=",$2,"; shift 2 ;;
         --only=*) ONLY=",${1#*=},"; shift ;;
+        --skip) [ $# -ge 2 ] || { echo "--skip needs a value" >&2; exit 2; }; SKIP=",$2,"; shift 2 ;;
+        --skip=*) SKIP=",${1#*=},"; shift ;;
         --gloss) [ $# -ge 2 ] && [[ "$2" =~ ^[0-9]+$ ]] || { echo "--gloss needs a number" >&2; exit 2; }; GLOSS="$2"; shift 2 ;;
         --why) WHY=1; shift ;;
         --project=*) PROJECT="${1#*=}"; shift ;;
@@ -283,14 +301,64 @@ carryover_hits() {
     }'
 }
 
-want() { [ -z "$ONLY" ] || [[ "$ONLY" == *",$1,"* ]]; }
-stale=""; issue=""; carry=""
+# lede-identifier (issue #979): see the rule text in the header.
+lede_hits() {
+    printf '%s\n' "$text" | awk -v fence="$FENCE_RE" '
+    function isid(w,   b) {
+        if (w ~ /^`/ || w ~ /^#[0-9]+/) return 1
+        b = w; gsub(/^[("\[*]+|[)"\]*,;:!?.]+$/, "", b)
+        if (b ~ /^`/ || b ~ /^#[0-9]+$/) return 1
+        if (b ~ /\// || b ~ /[A-Za-z0-9_-]\.(sh|md|json|ya?ml|kts?|sql|java|py|html|toml|xml|gradle|env|txt|jsonl|log)$/) return 1
+        if (b ~ /^[A-Z][A-Z0-9]*(_[A-Z0-9]+)+$/) return 1
+        if (b ~ /^[0-9a-f]{7,40}$/ && b ~ /[0-9]/ && b ~ /[a-f]/) return 1
+        return 0
+    }
+    function plain(w,   b) {
+        b = tolower(w); gsub(/[^a-z0-9]/, "", b)
+        if (b == "" || b ~ /[0-9]/) return 0
+        return !(b in skip)
+    }
+    BEGIN {
+        n = split("pr prs issue issues migration migrations script scripts commit commits branch worker workers file files sha pull request the a an and or of to for in on at is are was were with from by", s, " ")
+        for (i = 1; i <= n; i++) skip[s[i]] = 1
+    }
+    $0 ~ fence { inf = !inf; next }
+    inf || $0 ~ /^[[:space:]]*$/ { next }
+    done { next }
+    {
+        line = $0
+        if (!seen_woke && tolower(line) ~ /^[[:space:]*_>-]*woke for:/) { seen_woke = 1; next }
+        done = 1
+        sub(/^[[:space:]>#*_-]+/, "", line); sub(/^[A-Za-z][0-9]{1,2}[*:.)]+[[:space:]]+/, "", line)   # list bullet and its A1 label
+        # cut at the first ". " that is not the end of "e.g." / "i.e."
+        cut = 0; rest = line; off = 0
+        while (match(rest, /\. /)) {
+            pre = tolower(substr(line, 1, off + RSTART))
+            if (pre !~ /(e\.g|i\.e)\.$/) { cut = off + RSTART; break }
+            off += RSTART + 1; rest = substr(line, off + 1)
+        }
+        if (cut) line = substr(line, 1, cut)
+        else sub(/\.[[:space:]]*$/, "", line)
+        nw = split(line, w, /[[:space:]]+/); pl = 0
+        for (i = 1; i <= nw && i <= 6; i++) {
+            if (isid(w[i])) { if (pl < 2) print "lede-identifier: " $0; break }
+            if (plain(w[i])) pl++
+        }
+    }'
+}
+
+want() { { [ -z "$ONLY" ] || [[ "$ONLY" == *",$1,"* ]]; } && ! [[ "$SKIP" == *",$1,"* ]]; }
+stale=""; issue=""; carry=""; lede=""
 want stale-window && stale="$(stale_window_hits)"
 want issue-merged && issue="$(issue_merged_hits)"
 want carryover && carry="$(carryover_hits)"
-all="$(printf '%s\n%s\n%s\n%s\n' "$hits" "$stale" "$issue" "$carry" | sed '/^$/d')"
+want lede-identifier && lede="$(lede_hits)"
+all="$(printf '%s\n%s\n%s\n%s\n%s\n' "$hits" "$stale" "$issue" "$carry" "$lede" | sed '/^$/d')"
 if [ -n "$ONLY" ]; then
     all="$(printf '%s\n' "$all" | awk -v only="$ONLY" '{ split($0, p, ":"); if (index(only, "," p[1] ",")) print }')"
+fi
+if [ -n "$SKIP" ]; then
+    all="$(printf '%s\n' "$all" | awk -v skip="$SKIP" '{ split($0, p, ":"); if (!index(skip, "," p[1] ",")) print }')"
 fi
 [ -z "$all" ] && exit 0
 printf '%s\n' "$all"
