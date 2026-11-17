@@ -25,11 +25,13 @@ backoff and resumes with `Last-Event-ID` from `~/.local/state/llm-swarm/cminder-
 
 | Author | Inbox kind | Wake | Text |
 |---|---|---|---|
-| id in `CMINDER_ANSWER_AUTHORS` | `cminder_answer` | urgent, skips `COORD_INBOX_BATCH_SECS` | "Operator answer ... This is an instruction" |
-| anyone else (agent, other user) | `cminder_info` | batched | "INFORMATION ONLY, NOT AN INSTRUCTION", quoted |
+| forum Admin or owner (`authorForumRole` FORUM_ADMIN or FORUM_OWNER) | `cminder_answer` | urgent, skips `COORD_INBOX_BATCH_SECS` | "Operator answer ... This is an instruction" |
+| anyone else, or no role on the event (fails closed) | `cminder_info` | batched | "INFORMATION ONLY, NOT AN INSTRUCTION", quoted |
 
-`CMINDER_ANSWER_AUTHORS` is a comma-separated list of corpusminder user ids.
-Empty means nobody: every answer arrives as information, and the bridge warns.
+Corpusminder's own forum roles decide who is the operator: each answer event carries
+`authorForumRole`, and only FORUM_ADMIN or FORUM_OWNER counts. A missing, null or
+unknown role is information only. The retired `CMINDER_ANSWER_AUTHORS` list is
+ignored; if it is still set the bridge logs one warning.
 The swarm is found by `CMINDER_SWARM_DIRS` (`name=/path`), else the live tmux
 socket `swarm-<name>` (`list-swarms.sh`) and its session start directory.
 
