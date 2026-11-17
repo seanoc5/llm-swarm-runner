@@ -410,6 +410,16 @@ while true; do
                                         PASS_NOW=0; PASS_MSG=""
                                         echo "ci-wait: PR #$PR has skipping checks and was marked ready at $READY_AT, after its newest run (${NEWEST_RUN:-none}) — that run predates the draft→ready transition, so its skipped lanes never ran. Treating as pending until the ready_for_review run registers." >&2
                                     fi
+                                    # issue #996: past the grace window (or no ready event
+                                    # seen) with NOTHING but skipping rows on a non-draft PR:
+                                    # no lane ever ran on this head, so this is not green.
+                                    # Seen when a worker's token-driven `gh pr ready` fails
+                                    # to start the ready_for_review workflow.
+                                    if [ "$PASS_NOW" = "1" ] && ! grep -qP '\tpass\t' <<<"$CHECKS_OUT"; then
+                                        echo "ci-wait: PR #$PR is not a draft but every check on the head is skipping — no CI lane ran (the draft-time run is all that exists). Re-ready to trigger CI: gh pr ready $PR --undo && gh pr ready $PR" >&2
+                                        echo "$CHECKS_OUT" >&2
+                                        exit 1
+                                    fi
                                 fi
                             fi
                             ;;
