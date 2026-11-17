@@ -203,7 +203,8 @@ case "$cmd" in
         # --skip (a deny-list), not an --only allowlist: a rule added later applies here by default.
         # lede-identifier is excluded on purpose: a needs-you item is a title plus background, not a reply lede.
         # repeat-item is excluded too: it is warn-only and one item cannot repeat itself across a reply.
-        if hits="$("$LINT" --project "$project" --skip lede-identifier,repeat-item < <(printf "%s\n%s\n" "$title $do_ $rec" "$background") || true)" && [ -n "$hits" ]; then
+        # offer-to-act is excluded too: it is warn-only and judges a Do now block, which an item has none of.
+        if hits="$("$LINT" --project "$project" --skip lede-identifier,repeat-item,offer-to-act < <(printf "%s\n%s\n" "$title $do_ $rec" "$background") || true)" && [ -n "$hits" ]; then
             die "item points elsewhere instead of carrying its action (${hits%%:*}); restate the item in plain words (what it is, the options, your recommendation) instead of pointing at its label. Refusing."
         fi
         # An empty field is left out, not stored as "none" (issue #801).

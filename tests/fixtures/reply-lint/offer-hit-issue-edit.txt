@@ -1,0 +1,6 @@
+Two stale labels are still on the issue.
+
+Do now: run this to clear the label.
+```
+gh issue edit 12 --remove-label blocked
+```

@@ -85,6 +85,21 @@
 #                Fix: say each item once: operator-only work in Do now, work the coordinator does
 #                on a yes in the approval line, never both.
 #
+#   offer-to-act a fenced block under a "Do now:" line or inside a Needs-you item hands the
+#                operator commands the coordinator may run itself (issue #981; failure 3 of
+#                epic #488: it listed commands to paste for small, reversible fixes it could
+#                have done after a yes). Hit when every command in the block (split on &&, ||,
+#                ; and newlines; a leading "cd <dir>" is ignored; quoted text is not split) is
+#                on the OFFER_ALLOW list in offer_hits: gh issue comment/edit/close/create/label,
+#                gh label create, gh pr comment, scripts/requeue.sh, scripts/provision-worker.sh,
+#                scripts/needs-you.sh, mv .swarm/..., and sm / swarm-merge.sh with --auto-low or
+#                --auto-medium. One operator-only or unrecognised command (plain sm, sudo, tmux
+#                kill-window, watcher-check.sh --pause, git push, ci-wait.sh...) makes the block
+#                legitimate. Naive: a heredoc body or a pipeline counts as unrecognised.
+#                coord-hook.sh runs it warn-only by default (COORD_REPLY_LINT_OFFER=warn|block|off).
+#                Fix: run the commands yourself and report; ask a yes first only when the step
+#                is not cheap and reversible.
+#
 # Usage: lint-coordinator-reply.sh [--project DIR] [--only RULE[,RULE]] [--skip RULE[,RULE]] [--gloss N] [--why] [file]
 # --gloss N sets the carryover threshold; --why prints the matched reference for each carryover hit to stderr.
 # --only keeps just the named rules (and skips the slow gh/worktree passes when
@@ -99,7 +114,7 @@ set -uo pipefail
 PROJECT=""; FILE=""; ONLY=""; SKIP=""; GLOSS=12; WHY=""
 while [ $# -gt 0 ]; do
     case "$1" in
-        -h|--help) sed -n "3,90p" "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n "3,110p" "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         --project) [ $# -ge 2 ] || { echo "--project needs a value" >&2; exit 2; }; PROJECT="$2"; shift 2 ;;
         --only) [ $# -ge 2 ] || { echo "--only needs a value" >&2; exit 2; }; ONLY=",$2,"; shift 2 ;;
         --only=*) ONLY=",${1#*=},"; shift ;;
@@ -415,14 +430,76 @@ repeat_hits() {
     }'
 }
 
+
+# offer-to-act (issue #981): see the rule text in the header.
+# Coordinator-runnable commands (prompts/coordinator.md "Act, then report": cheap, reversible steps that
+# touch nothing live are done, not handed over; "Auto-merge low/medium-risk PRs": the coordinator
+# merges with --auto-low / --auto-medium). One ERE per entry, matched at the start of a command
+# segment. Anything not matching (sm / swarm-merge.sh without an auto flag, sudo, tmux kill-window,
+# watcher-check.sh --pause, git push, unknown commands) is operator-only and clears the block.
+OFFER_ALLOW=(
+    'gh issue (comment|edit|close|create|label)'                  # filing, commenting, relabeling: "Act, then report"
+    'gh label create'                                             # a label is a cheap, reversible repo setting
+    'gh pr comment'                                               # a comment touches nothing live
+    '([^[:space:]]*/)?scripts/requeue\.sh'                        # requeue = write a brief into the inbox
+    '([^[:space:]]*/)?scripts/provision-worker\.sh'               # provisioning a worktree is coordinator work
+    '([^[:space:]]*/)?scripts/needs-you\.sh'                      # the coordinator owns the needs-you store
+    'mv \.swarm/'                                                 # inbox/outbox housekeeping inside .swarm
+    '(sm|([^[:space:]]*/)?(scripts/)?swarm-merge\.sh)[[:space:]].*--auto-(low|medium)'   # the "Auto-merge" gates run these
+)
+offer_hits() {
+    local allow; allow="$(IFS='|'; printf '%s' "${OFFER_ALLOW[*]}")"
+    # ENVIRON, not -v: -v would eat the backslashes in the patterns.
+    printf '%s\n' "$text" | OFFER_RE="$allow" awk -v fence="$FENCE_RE" '
+    function flush(   i, k, nseg, seg, s, parts, np, j, ok, cmds) {
+        if (blk == "") return
+        ok = 1; cmds = 0
+        gsub(/\\\n/, " ", blk)
+        gsub(/"[^"]*"/, "\"\"", blk); gsub(/\047[^\047]*\047/, "\047\047", blk)   # quoted text may hold ; or &&
+        nseg = split(blk, seg, /\n/)
+        for (i = 1; i <= nseg; i++) {
+            s = seg[i]; sub(/^[ \t]+/, "", s)
+            if (s == "" || s ~ /^#/) continue
+            sub(/^\$ /, "", s)
+            gsub(/&&|\|\||;/, "\n", s)
+            np = split(s, parts, /\n/)
+            for (j = 1; j <= np; j++) {
+                k = parts[j]; gsub(/^[ \t]+|[ \t]+$/, "", k)
+                if (k == "" || k ~ /^cd [^ ]+$/) continue
+                cmds++
+                if (k !~ ("^(" ENVIRON["OFFER_RE"] ")([ \t]|$)")) ok = 0
+            }
+        }
+        if (ok && cmds > 0) print "offer-to-act: " firstcmd
+        blk = ""; firstcmd = ""
+    }
+    BEGIN {
+        dono = "^[[:space:]]*(\\*\\*)?do now(\\*\\*)?:"
+        pend = "^[[:space:]]*(\\*\\*)?pending your approval(\\*\\*)?:"
+    }
+    $0 ~ fence {
+        if (inf) { inf = 0; flush(); if (ctx == "D") ctx = ""; next }
+        inf = 1; collect = (ctx != ""); blk = ""; firstcmd = ""; next
+    }
+    inf { if (collect) { if (blk != "") blk = blk "\n"; blk = blk $0; if (firstcmd == "" && $0 !~ /^[ \t]*(#|$)/) firstcmd = $0 } ; next }
+    {
+        l = tolower($0)
+        if ($0 ~ /^#/ || l ~ pend) ctx = ""
+        else if (l ~ dono) ctx = "D"
+        else if ($0 ~ /^[[:space:]]*-[[:space:]]+\*\*[A-Za-z][0-9]+\*\*/) ctx = "L"
+        else if ($0 ~ /^[[:space:]]*$/) { if (ctx == "L") ctx = "" }
+        else if (ctx == "L" && $0 !~ /^[[:space:]]/) ctx = ""
+    }'
+}
 want() { { [ -z "$ONLY" ] || [[ "$ONLY" == *",$1,"* ]]; } && ! [[ "$SKIP" == *",$1,"* ]]; }
-stale=""; issue=""; carry=""; lede=""; repeat=""
+stale=""; issue=""; carry=""; lede=""; repeat=""; offer=""
 want stale-window && stale="$(stale_window_hits)"
 want issue-merged && issue="$(issue_merged_hits)"
 want carryover && carry="$(carryover_hits)"
 want lede-identifier && lede="$(lede_hits)"
 want repeat-item && repeat="$(repeat_hits)"
-all="$(printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$hits" "$stale" "$issue" "$carry" "$lede" "$repeat" | sed '/^$/d')"
+want offer-to-act && offer="$(offer_hits)"
+all="$(printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' "$hits" "$stale" "$issue" "$carry" "$lede" "$repeat" "$offer" | sed '/^$/d')"
 if [ -n "$ONLY" ]; then
     all="$(printf '%s\n' "$all" | awk -v only="$ONLY" '{ split($0, p, ":"); if (index(only, "," p[1] ",")) print }')"
 fi

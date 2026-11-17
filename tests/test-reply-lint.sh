@@ -340,6 +340,33 @@ check "repeat: off never blocks" "" "$(rstop env COORD_REPLY_LINT_REPEAT=off)"
 rm -f "$H3/.swarm/coord-lint-blocked"
 check "repeat: block mode blocks" "block" "$(rstop env COORD_REPLY_LINT_REPEAT=block | jq -r .decision)"
 
+# ── offer-to-act (issue #981) ────────────────────────────────────────────────
+off() { "$LINT" --only offer-to-act < "$1" | cut -d: -f1 | sort -u | paste -sd, -; }
+for f in offer-hit-issue-edit offer-hit-needs-you; do
+    check "offer: $f is a hit" "offer-to-act" "$(off "$FX/$f.txt")"
+done
+for f in offer-pass-sm offer-pass-cd-ci-wait offer-pass-sudo offer-pass-no-ask; do
+    check "offer: $f passes" "" "$(off "$FX/$f.txt")"
+done
+printf 'Done.\n\nDo now: auto-merge.\n```\nsm 9 --auto-low\n```\n' > "$T/off-auto"
+check "offer: sm with --auto-low is coordinator-runnable: hit" "offer-to-act" "$(off "$T/off-auto")"
+printf 'Done.\n\nDo now: comment.\n```\ngh issue comment 5 --body "fixed; thanks && bye"\n```\n' > "$T/off-quote"
+check "offer: ; and && inside quotes do not split: hit" "offer-to-act" "$(off "$T/off-quote")"
+printf 'Done.\n\nDo now: move it.\n```\n$ mv .swarm/tasks/a.md .swarm/tasks/b.md \\\n  && git push\n```\n' > "$T/off-push"
+check "offer: git push after a continuation line clears the block" "" "$(off "$T/off-push")"
+printf 'Done.\n\nPending your approval: label it (yes/no)\n```\ngh issue edit 12 --add-label x\n```\n' > "$T/off-pend"
+check "offer: a Pending-approval block is not a Do now handover" "" "$(off "$T/off-pend")"
+printf 'Done.\n\nDo now: one command.\n```\ngh issue edit 12 --add-label x\n```\n\nNote:\n```\nsudo true\n```\n' > "$T/off-two"
+check "offer: only the block under Do now counts; one hit" "offer-to-act" "$(off "$T/off-two")"
+H4="$T/hoffer"; mkdir -p "$H4/.swarm/coord-inbox"
+ostop() { jq -n --rawfile m "$FX/offer-hit-issue-edit.txt" '{last_assistant_message: $m, stop_hook_active: false}' | CLAUDE_PROJECT_DIR="$H4" COORD_HOOK_STATE=0 "$@" "$HOOK" Stop; }
+check "offer: default (warn) never blocks" "" "$(ostop env)"
+grep -q 'coord.reply_lint.hit rules=offer-to-act' "$H4/.swarm/events.log" && got=yes || got=no
+check "offer: warn logs the hit" "yes" "$got"
+check "offer: off never blocks" "" "$(ostop env COORD_REPLY_LINT_OFFER=off)"
+rm -f "$H4/.swarm/coord-lint-blocked"
+check "offer: block mode blocks" "block" "$(ostop env COORD_REPLY_LINT_OFFER=block | jq -r .decision)"
+
 # ── Stop hook: hand-written list and stale prompt (issue #964) ───────────────
 W="$T/wproj"; mkdir -p "$W/.swarm"; printf '# Needs you\n- **A1** stub\n' > "$W/.swarm/needs-you.md"
 wstop() {   # <stop_hook_active>

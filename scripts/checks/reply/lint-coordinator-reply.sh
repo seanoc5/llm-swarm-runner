@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Adapter: scripts/lint-coordinator-reply.sh text hits -> JSON lines.
-# Checks: backref, no-command, pointer, two-endings, stale-window (needs CHECKS_PROJECT=DIR), issue-merged (needs gh), carryover, lede-identifier (warn-only, issue #979).
+# Checks: backref, no-command, pointer, two-endings, stale-window (needs CHECKS_PROJECT=DIR), issue-merged (needs gh), carryover, lede-identifier, repeat-item, offer-to-act (the last three warn-only, issues #979 #980 #981).
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/../_lib.sh"
 FILE="$1"
@@ -21,6 +21,7 @@ while IFS= read -r hit; do
         carryover) msg="refers to a carried-over item by label, section number or \"from earlier\" without restating it; say what it is, the options and your recommendation here" ;;
         lede-identifier) emit "$id" warn "$(find_line "$FILE" "$text")" "$text" "first sentence leads with an identifier (#N, path, code span, ENV_VAR, sha); say the outcome in plain words first"; continue ;;
         repeat-item) emit "$id" warn "$(find_line "$FILE" "$text")" "$text" "the same issue/PR is asked for in more than one item; merge them into one item or say why they differ"; continue ;;
+        offer-to-act) emit "$id" warn "$(find_line "$FILE" "$text")" "$text" "every command in this block is one the coordinator may run itself; run it and report instead of handing it over"; continue ;;
         *) msg="see scripts/lint-coordinator-reply.sh" ;;
     esac
     emit "$id" error "$(find_line "$FILE" "$text")" "$text" "$msg"

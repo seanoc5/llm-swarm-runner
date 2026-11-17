@@ -1,0 +1,5 @@
+Here is what I ran earlier.
+
+```
+gh issue edit 12 --remove-label blocked
+```
