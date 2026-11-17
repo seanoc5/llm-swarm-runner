@@ -78,6 +78,7 @@ input="$(cat 2>/dev/null || true)"
 # shellcheck source=scripts/_coord-split.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_coord-split.sh"
 project="${CLAUDE_PROJECT_DIR:-$PWD}"
+here_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 hook_state=0; [ "${COORD_HOOK_STATE:-0}" = "1" ] && hook_state=1
 split=0; [ "$(coord_mode "$project")" = "split" ] && split=1
 lint_on=1; [ "${COORD_REPLY_LINT:-1}" = "0" ] && lint_on=0
@@ -155,19 +156,27 @@ watcher_dead_warning() {
     printf '%s' "$out" | tr '\n' ' '
 }
 
+# reply_text: the coordinator's last reply, from the hook input (last_assistant_message,
+# else the last assistant text block of its transcript).
+reply_text() {
+    local text tp
+    text="$(printf '%s' "$input" | jq -r '.last_assistant_message // empty' 2>/dev/null || true)"
+    if [ -z "$text" ]; then
+        tp="$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/null || true)"
+        [ -n "$tp" ] && [ -r "$tp" ] && text="$(jq -rs '[.[] | select(.type == "assistant") | [.message.content[]? | select(.type == "text") | .text] | select(length > 0) | join("\n")] | last // empty' "$tp" 2>/dev/null || true)"
+    fi
+    printf '%s' "$text"
+}
+
 # reply_lint_message: prints the block reason when the last reply fails
 # lint-coordinator-reply.sh (and logs the hit); nothing otherwise. The reply is
 # the hook input's last_assistant_message, else the last assistant text block
 # of its transcript.
 reply_lint_message() {
     [ "${COORD_REPLY_LINT:-1}" = "0" ] && return 0
-    local text tp hits rules
+    local text hits rules
     [ "$active" = "true" ] || rm -f "$swarm/coord-lint-blocked" 2>/dev/null || true   # new reply chain
-    text="$(printf '%s' "$input" | jq -r '.last_assistant_message // empty' 2>/dev/null || true)"
-    if [ -z "$text" ]; then
-        tp="$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/null || true)"
-        [ -n "$tp" ] && [ -r "$tp" ] && text="$(jq -rs '[.[] | select(.type == "assistant") | [.message.content[]? | select(.type == "text") | .text] | select(length > 0) | join("\n")] | last // empty' "$tp" 2>/dev/null || true)"
-    fi
+    text="$(reply_text)"
     [ -n "$text" ] || return 0
     hits="$(printf '%s\n' "$text" | "$(cd "$(dirname "$0")" && pwd)/lint-coordinator-reply.sh" --project "$project" 2>/dev/null)" && return 0
     [ -n "$hits" ] || return 0
@@ -250,6 +259,13 @@ case "$event" in
         if [ "$active" != "true" ]; then
             notices="$(coord_notices)"
             [ -z "$notices" ] || lint="${lint:+$lint }$notices"
+        fi
+        # Issue #863: an accepted reply (nothing blocks it) that follows a doorbell is the
+        # wake report; keep it for the corpusminder mirror. Local file write only, and the
+        # helper does nothing unless NEEDS_YOU_BACKEND=corpusminder and CMINDER_EVENTS=1.
+        # Runs before the ring below so that ring is not mistaken for this reply's own.
+        if [ -z "$lint" ] && [ -x "$here_dir/coord-report-record.sh" ]; then
+            reply_text | "$here_dir/coord-report-record.sh" --project "$project" >/dev/null 2>&1 || true
         fi
         # Split mode never rings: nothing is typed into or blocked on this session
         # (only the reply lint can block it). The same holds for a resident
