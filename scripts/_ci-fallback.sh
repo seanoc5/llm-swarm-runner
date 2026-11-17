@@ -474,7 +474,7 @@ ci_pr_checks() {
     local raw rc=0 kept errf err
     # stdout only: a gh warning on stderr next to the JSON must not corrupt it.
     errf="$(mktemp)"
-    raw="$(gh pr checks "$pr" "$@" --json name,bucket,link,startedAt 2>"$errf")" || rc=$?
+    raw="$(gh pr checks "$pr" "$@" --json name,bucket,link,startedAt,workflow 2>"$errf")" || rc=$?
     err="$(cat "$errf" 2>/dev/null)"; rm -f "$errf"
     CHECKS_OUT="$raw"; CHECKS_RC=$rc
     if ! jq -e 'type == "array"' <<<"$raw" >/dev/null 2>&1; then
@@ -496,8 +496,11 @@ ci_pr_checks() {
     # the run that superseded it. Drop a `cancel` row only when a LATER non-cancel
     # row of the same name exists (needs startedAt on both; else keep it, so the
     # worst case is still a false red, never a false green).
-    kept="$(jq -c '. as $all | map(. as $r | select(($r.bucket == "cancel" and (($r.startedAt // "") != "")
-        and any($all[]; .name == $r.name and .bucket != "cancel" and ((.startedAt // "") > $r.startedAt))) | not))' <<<"$kept")"
+    # Match on workflow+name (job names repeat across workflows) and ignore gh's
+    # zero-time startedAt (a run that never started); both sides need a real time.
+    kept="$(jq -c 'def t: (.startedAt // "") | if startswith("0001") then "" else . end;
+        . as $all | map(. as $r | select(($r.bucket == "cancel" and ($r|t) != ""
+        and any($all[]; (.workflow // "") == ($r.workflow // "") and .name == $r.name and .bucket != "cancel" and (t) != "" and (t) > ($r|t))) | not))' <<<"$kept")"
     if [ "$(jq 'length' <<<"$kept")" = "0" ]; then
         CHECKS_OUT="no checks reported (only the $CI_LIVENESS_CONTEXT liveness status is on this commit)"
         CHECKS_RC=1

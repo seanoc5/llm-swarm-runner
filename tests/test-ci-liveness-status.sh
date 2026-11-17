@@ -106,6 +106,14 @@ run_checks '[{"name":"Fast","bucket":"cancel","link":"a"},{"name":"Fast","bucket
 ci_checks_output_has_bad_row "$CHECKS_OUT" || red "without startedAt the cancel row must be kept (fail closed)"
 green "no startedAt: cancel row kept (fails closed)"
 
+ZERO='"startedAt":"0001-01-01T00:00:00Z"'
+run_checks "[{\"name\":\"Fast\",\"bucket\":\"cancel\",\"link\":\"a\",$ZERO},{\"name\":\"Fast\",\"bucket\":\"pass\",\"link\":\"b\",$NEW}]" 0
+ci_checks_output_has_bad_row "$CHECKS_OUT" || red "zero-time cancelled run must stay a bad row"
+green "zero-time startedAt cancel row kept (fails closed)"
+run_checks "[{\"name\":\"test\",\"workflow\":\"A\",\"bucket\":\"cancel\",\"link\":\"a\",$OLD},{\"name\":\"test\",\"workflow\":\"B\",\"bucket\":\"pass\",\"link\":\"b\",$NEW}]" 0
+ci_checks_output_has_bad_row "$CHECKS_OUT" || red "same job name in another workflow must not hide a cancel"
+green "same name, different workflow: cancel row kept"
+
 # swarm-merge.sh has no CI reader of its own: its CI gate is ci-wait.sh, which
 # goes through ci_pr_checks (proved above and in test-shape-ci-wait.sh).
 if grep -nE 'gh pr checks|statusCheckRollup' "$SCRIPTS/swarm-merge.sh" | grep -v '^[0-9]*:[[:space:]]*#' ; then
