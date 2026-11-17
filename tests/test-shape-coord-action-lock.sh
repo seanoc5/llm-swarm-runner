@@ -327,12 +327,17 @@ rc=0; ( cd "$REPO" && SWARM_MERGE_TEST_HOOKS=1 CI_WAIT_SCRIPT="$FAKE_CIW" FAKE_C
 grep -q 'carries a hold label (swarm-hold:ci)' "$TEST_DIR/k1.log" || red "K1: refusal must name the label: $(cat "$TEST_DIR/k1.log")"
 [ "$(merges)" = 0 ] || red "K1: merged a held PR"
 green "K1: plain swarm-merge refuses a held PR and names the label"
-reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/hold-label" "$TEST_DIR/state/body-low" "$TEST_DIR/state/body-coord-banner"
+reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/hold-label" "$TEST_DIR/state/body-low"
 rc=0; auto || rc=$?
 [ "$rc" != 0 ] || red "K2: --auto-low should refuse a held PR: $(cat "$TEST_DIR/auto.log")"
 grep -q 'carries a hold label' "$TEST_DIR/auto.log" || red "K2: no hold-label refusal: $(cat "$TEST_DIR/auto.log")"
 [ "$(merges)" = 0 ] || red "K2: --auto-low merged a held PR"
 green "K2: --auto-low refuses a held PR"
+reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/hold-label" "$TEST_DIR/state/body-coord-banner"
+rc=0; auto || rc=$?
+[ "$rc" != 0 ] || red "K2b: --auto-low should refuse a held PR carrying a COORDINATOR HOLD banner: $(cat "$TEST_DIR/auto.log")"
+[ "$(merges)" = 0 ] || red "K2b: --auto-low merged a bannered held PR"
+green "K2b: --auto-low refuses a held PR with a coordinator banner"
 reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/late-label"
 rc=0; ( cd "$REPO" && timeout 30 "$MERGE" 600 --no-kill >"$TEST_DIR/k3.log" 2>&1 ) || rc=$?
 [ "$rc" = 1 ] || red "K3: a hold placed during the gates should exit 1, got $rc: $(cat "$TEST_DIR/k3.log")"
@@ -392,3 +397,8 @@ reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/hold-label" "$TEST_DIR
 rc=0; FAKE_CI_WAIT_MODE=green plain_hold || rc=$?
 [ "$rc" = 1 ] && [ "$(merges)" = 0 ] || red "L6: a failed label removal must refuse (rc $rc): $(cat "$TEST_DIR/hold.log")"
 green "L6: label removal fails: refused"
+reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/hold-label" "$TEST_DIR/state/body-low"
+rc=0; auto || rc=$?
+[ "$rc" != 0 ] && [ "$(merges)" = 0 ] || red "L7: --auto-low must not auto-clear a lone swarm-hold:ci even with green CI (rc $rc): $(cat "$TEST_DIR/auto.log")"
+[ ! -e "$TEST_DIR/state/edit-calls" ] || red "L7: --auto-low touched the label"
+green "L7: --auto-low never auto-clears the hold label (attended merges only)"

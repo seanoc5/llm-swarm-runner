@@ -710,10 +710,10 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
       # ready-sweep.sh only clears it on its next interval (300s), so an operator who runs
       # ci-wait.sh && sm right as CI goes green hit this refusal and removed the label by hand.
       # Clear it here instead, but only on fresh proof: a short ci-wait.sh that passes and names
-      # the SAME head this run read. Other hold labels, a COORDINATOR HOLD banner, or a banner
+      # the SAME head this run read. Attended merges only: --auto-* keeps refusing every hold (ready-sweep.sh clears it). Other hold labels, a COORDINATOR HOLD banner, or a banner
       # whose reason is not CI-timing (review-block, check-failing, lint-failing, ci-failing,
       # ci-cancelled) mean something other than CI timing is held: those keep refusing.
-      if [ "$PR_HOLD_LABELS" = "swarm-hold:ci" ]; then
+      if [ "$PR_HOLD_LABELS" = "swarm-hold:ci" ] && [ "$AUTO_LOW" != 1 ]; then
         HOLD_BODY="$(jq -r '.body // ""' <<<"$PR_JSON" 2>/dev/null || true)"
         HOLD_REASON="$(grep -m1 -oE '^<!-- SWARM_DRAFT_REASON: [a-z-]+' <<<"$HOLD_BODY" | sed 's/.*: //' || true)"
         if grep -qE '^> ⛔ \*\*COORDINATOR HOLD\*\*' <<<"$HOLD_BODY"; then
