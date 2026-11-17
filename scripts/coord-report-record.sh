@@ -52,7 +52,7 @@ triggers=()
 for d in "$inbox" "$inbox/processed"; do
     [ -d "$d" ] || continue
     find "$d" -maxdepth 1 -name '*.md' -type f -newermt "@$since" -printf '%f\n' 2>/dev/null
-done | sed 's/\.md$//' | sort -u | head -n 20 > "$swarm/.coord-report-triggers.tmp"
+done | sed 's/\.md$//' | sort -u | sed -n '1,20p' > "$swarm/.coord-report-triggers.tmp"
 mapfile -t triggers < "$swarm/.coord-report-triggers.tmp"; rm -f "$swarm/.coord-report-triggers.tmp"
 if [ "${#triggers[@]}" -gt 0 ]; then
     key="${triggers[0]}"

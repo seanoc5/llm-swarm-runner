@@ -66,7 +66,7 @@ CHECKS_SKIP_RULES="issue-merged,stale-window" CHECKS_PROJECT="$PROJECT" \
     "$HERE/checks/run.sh" reply "$R" > "$T/findings" 2>/dev/null
 ec=$?
 [ "$ec" -le 1 ] || { echo "score-wake-report: reply checks failed (exit $ec)" >&2; exit 2; }
-hit() { jq -r --arg c "$1" 'select(.check==$c) | .match' "$T/findings" | head -n1; }
+hit() { jq -r --arg c "$1" 'select(.check==$c) | .match' "$T/findings" | sed -n 1p; }
 
 checks="[]"
 add() {  # <id> <pass true|false> <detail>
@@ -74,7 +74,7 @@ add() {  # <id> <pass true|false> <detail>
 }
 
 # 1. bottom-line-first ------------------------------------------------------
-first="$(grep -vE '^[[:space:]]*$|^[[:space:]]*Woke for:' "$T/prose" | head -n1)"
+first="$(grep -vE '^[[:space:]]*$|^[[:space:]]*Woke for:' "$T/prose" | sed -n 1p)"
 why=""
 if [ -z "$first" ]; then why="the report is empty"
 elif [[ "$first" =~ ^[[:space:]]*([#*\>\|-]|[0-9]+[.\)]|[A-Z][0-9]*[.\)][[:space:]]) ]]; then why="opens with a heading, bullet or list marker: $first"
