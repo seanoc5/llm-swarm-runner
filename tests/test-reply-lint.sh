@@ -358,6 +358,10 @@ printf 'Done.\n\nPending your approval: label it (yes/no)\n```\ngh issue edit 12
 check "offer: a Pending-approval block is not a Do now handover" "" "$(off "$T/off-pend")"
 printf 'Done.\n\nDo now: one command.\n```\ngh issue edit 12 --add-label x\n```\n\nNote:\n```\nsudo true\n```\n' > "$T/off-two"
 check "offer: only the block under Do now counts; one hit" "offer-to-act" "$(off "$T/off-two")"
+printf 'Done.\n\nDo now: one command.\n\nBackground I already ran:\n```\ngh issue edit 12 --add-label x\n```\n' > "$T/off-para"
+check "offer: a block after a later prose paragraph is not under Do now" "" "$(off "$T/off-para")"
+printf 'Done.\n\nDo now: one command.\n```\n# don'"'"'t forget\nsudo true\n```\n' > "$T/off-apos"
+check "offer: an apostrophe in a comment line cannot hide a sudo line" "" "$(off "$T/off-apos")"
 H4="$T/hoffer"; mkdir -p "$H4/.swarm/coord-inbox"
 ostop() { jq -n --rawfile m "$FX/offer-hit-issue-edit.txt" '{last_assistant_message: $m, stop_hook_active: false}' | CLAUDE_PROJECT_DIR="$H4" COORD_HOOK_STATE=0 "$@" "$HOOK" Stop; }
 check "offer: default (warn) never blocks" "" "$(ostop env)"

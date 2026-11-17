@@ -455,11 +455,11 @@ offer_hits() {
         if (blk == "") return
         ok = 1; cmds = 0
         gsub(/\\\n/, " ", blk)
-        gsub(/"[^"]*"/, "\"\"", blk); gsub(/\047[^\047]*\047/, "\047\047", blk)   # quoted text may hold ; or &&
         nseg = split(blk, seg, /\n/)
         for (i = 1; i <= nseg; i++) {
             s = seg[i]; sub(/^[ \t]+/, "", s)
             if (s == "" || s ~ /^#/) continue
+            gsub(/"[^"]*"/, "\"\"", s); gsub(/\047[^\047]*\047/, "\047\047", s)   # quoted text may hold ; or &&; per line so a stray apostrophe cannot span lines
             sub(/^\$ /, "", s)
             gsub(/&&|\|\||;/, "\n", s)
             np = split(s, parts, /\n/)
@@ -485,9 +485,10 @@ offer_hits() {
     {
         l = tolower($0)
         if ($0 ~ /^#/ || l ~ pend) ctx = ""
-        else if (l ~ dono) ctx = "D"
+        else if (l ~ dono) { ctx = "D"; blank = 0 }
         else if ($0 ~ /^[[:space:]]*-[[:space:]]+\*\*[A-Za-z][0-9]+\*\*/) ctx = "L"
-        else if ($0 ~ /^[[:space:]]*$/) { if (ctx == "L") ctx = "" }
+        else if ($0 ~ /^[[:space:]]*$/) { if (ctx == "L") ctx = ""; blank = 1 }
+        else if (ctx == "D" && blank) ctx = ""   # a new prose paragraph after Do now ends it
         else if (ctx == "L" && $0 !~ /^[[:space:]]/) ctx = ""
     }'
 }
