@@ -46,6 +46,7 @@ case "\${1:-} \${2:-}" in
     body=""; [ -e "\$S/body-low" ] && body="<!-- BLIND_MERGE_RISK: low -->"
     [ -e "\$S/body-coord-banner" ] && body="\\n> ⛔ **COORDINATOR HOLD** x\\nbody"
     [ -e "\$S/body-reason-review" ] && body="<!-- SWARM_DRAFT_REASON: lint-failing sha=aaa1111 -->\\nbody"
+    [ -e "\$S/body-reason-stale" ] && body="<!-- SWARM_DRAFT_REASON: ci-pending sha=0ld0000 -->\\nbody"
     [ -e "\$S/body-reason-ci" ] && body="<!-- SWARM_DRAFT_REASON: ci-pending sha=aaa1111 -->\\nbody"
     # issue #612: hold labels. state/hold-label = on the PR from the start;
     # state/late-label = appears only on the labels-only re-read under the lock.
@@ -379,14 +380,14 @@ rc=0; FAKE_CI_WAIT_MODE=other-head plain_hold || rc=$?
 [ "$rc" = 1 ] && [ "$(merges)" = 0 ] || red "L4: CI verified a different head must refuse (rc $rc): $(cat "$TEST_DIR/hold.log")"
 [ ! -e "$TEST_DIR/state/edit-calls" ] || red "L4: label touched on a head mismatch"
 green "L4: ci-wait verified another head: refused, label untouched"
-for v in body-coord-banner body-reason-review; do
+for v in body-coord-banner body-reason-review body-reason-stale; do
   reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/hold-label" "$TEST_DIR/state/$v"; : > "$TEST_DIR/ciw.log"
   rc=0; FAKE_CI_WAIT_MODE=green plain_hold || rc=$?
   [ "$rc" = 1 ] && [ "$(merges)" = 0 ] || red "L5 ($v): a non-CI-timing hold must keep refusing (rc $rc): $(cat "$TEST_DIR/hold.log")"
   [ ! -s "$TEST_DIR/ciw.log" ] || red "L5 ($v): ci-wait ran although the hold is not CI timing"
   [ ! -e "$TEST_DIR/state/edit-calls" ] || red "L5 ($v): label touched"
 done
-green "L5: COORDINATOR HOLD banner or a lint-failing banner: refused without even checking CI"
+green "L5: COORDINATOR HOLD banner, a lint-failing banner or a ci-pending banner for an older commit: refused without even checking CI"
 reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/hold-label" "$TEST_DIR/state/edit-fails"
 rc=0; FAKE_CI_WAIT_MODE=green plain_hold || rc=$?
 [ "$rc" = 1 ] && [ "$(merges)" = 0 ] || red "L6: a failed label removal must refuse (rc $rc): $(cat "$TEST_DIR/hold.log")"

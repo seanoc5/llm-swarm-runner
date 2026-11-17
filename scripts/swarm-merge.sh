@@ -720,6 +720,9 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
           echo "       swarm-hold:ci not auto-cleared: the body carries a COORDINATOR HOLD banner." >&2
         elif [ -n "$HOLD_REASON" ] && [ "$HOLD_REASON" != "ci-pending" ] && [ "$HOLD_REASON" != "ci-unknown" ]; then
           echo "       swarm-hold:ci not auto-cleared: the banner reason is $HOLD_REASON, not CI timing; run pr-ready.sh $PR_NUM." >&2
+        elif [ -n "$HOLD_REASON" ] && ! grep -qE "^<!-- SWARM_DRAFT_REASON: $HOLD_REASON sha=${PR_HEAD_SHA} -->$" <<<"$HOLD_BODY"; then
+          # The banner proves pr-ready.sh's lint/check/review ran on ITS sha only; a newer push has had none of them.
+          echo "       swarm-hold:ci not auto-cleared: the $HOLD_REASON banner is for an older commit; run pr-ready.sh $PR_NUM." >&2
         elif [ -z "$PR_HEAD_SHA" ]; then
           echo "       swarm-hold:ci not auto-cleared: the head commit could not be read." >&2
         else
