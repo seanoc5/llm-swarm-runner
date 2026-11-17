@@ -191,6 +191,7 @@ check "add refuses option codes in the background" "2" "$(gadd --title "Pick a r
 check "add accepts CI/CD (a well-known pair)" "0" "$(gadd --title "Fix the CI/CD cache" --background "$BG")"
 check "add refuses a capitalised 'Option B'" "2" "$(gadd --title "Pick Option B for the rebase" --background "$BG")"
 check "add accepts PR numbers and plain words" "0" "$(gadd --title "Rebase the check on PR #2387" --background "$BG")"
+check "add skips repeat-item (warn-only rule, not a refusal)" "0" "$(gadd --title "Merge PR 972 once" --background "$(printf -- '- **A1** Merge #972 (yes/no)\n- **A2** Merge #972 again (yes/no)\nThese two lines repeat one ask, which the reply lint only warns about, so adding the item still works.')")"
 out="$("$NY" render --project "$G")"
 check "render leads each of the 2 items with 'What this is:'" "2" "$(grep -c '^  What this is: Loads the county' <<<"$out")"
 check "check: a list written by add is clean" "0" "$("$NY" check --project "$G" >/dev/null 2>&1; echo $?)"
@@ -311,6 +312,33 @@ check "lede: warn logs the hit" "yes" "$got"
 check "lede: off never blocks" "" "$(lstop2 env COORD_REPLY_LINT_LEDE=off)"
 rm -f "$H2/.swarm/coord-lint-blocked"
 check "lede: block mode blocks" "block" "$(lstop2 env COORD_REPLY_LINT_LEDE=block | jq -r .decision)"
+
+# ── repeat-item (issue #980) ─────────────────────────────────────────────────
+rep() { "$LINT" --only repeat-item < "$1" | cut -d: -f1 | paste -sd, -; }
+for f in repeat-hit-four-times repeat-hit-list-and-pending; do
+    check "repeat: $f is a hit" "repeat-item" "$(rep "$FX/$f.txt")"
+done
+check "repeat: A87/A89 + one Do now fence (sm 972 && sm 974) passes" "" "$(rep "$FX/repeat-pass-list-plus-do-now.txt")"
+printf -- '- **A1** Merge #972 (yes/no)\n- **A2** Merge #974 (yes/no)\n' > "$T/rep-two"
+check "repeat: two items, two subjects passes" "" "$(rep "$T/rep-two")"
+printf -- '- **A1** Merge #972 (yes/no)\n\nDo now: say yes to #972\n' > "$T/rep-dn"
+check "repeat: Do now prose repeating a listed item is a hit" "repeat-item" "$(rep "$T/rep-dn")"
+printf -- '- **A1** Merge #972 (yes/no)\n\n**In flight:** iss-973 waiting on #972\n' > "$T/rep-mention"
+check "repeat: a plain mention outside an ask passes" "" "$(rep "$T/rep-mention")"
+printf -- '- **A1** Merge https://github.com/o/r/pull/972\n\nPending your approval: merge #972 (yes/no)\n' > "$T/rep-urlnum"
+check "repeat: URL in one ask, #N in the other still matches" "repeat-item" "$(rep "$T/rep-urlnum")"
+printf -- '- **A1** Merge https://github.com/o/r/pull/972\n- **A2** Merge https://github.com/o/other/pull/972\n' > "$T/rep-repos"
+check "repeat: #972 in two different repos is two items" "" "$(rep "$T/rep-repos")"
+printf -- '- **A1** Merge https://github.com/o/r/pull/972\n- **A2** Merge https://github.com/o/r/pull/972\n' > "$T/rep-samerepo"
+check "repeat: the same URL twice is a hit" "repeat-item" "$(rep "$T/rep-samerepo")"
+H3="$T/hrep"; mkdir -p "$H3/.swarm/coord-inbox"
+rstop() { jq -n --rawfile m "$FX/repeat-hit-list-and-pending.txt" '{last_assistant_message: $m, stop_hook_active: false}' | CLAUDE_PROJECT_DIR="$H3" COORD_HOOK_STATE=0 "$@" "$HOOK" Stop; }
+check "repeat: default (warn) never blocks" "" "$(rstop env)"
+grep -q 'coord.reply_lint.hit rules=repeat-item' "$H3/.swarm/events.log" && got=yes || got=no
+check "repeat: warn logs the hit" "yes" "$got"
+check "repeat: off never blocks" "" "$(rstop env COORD_REPLY_LINT_REPEAT=off)"
+rm -f "$H3/.swarm/coord-lint-blocked"
+check "repeat: block mode blocks" "block" "$(rstop env COORD_REPLY_LINT_REPEAT=block | jq -r .decision)"
 
 # ── Stop hook: hand-written list and stale prompt (issue #964) ───────────────
 W="$T/wproj"; mkdir -p "$W/.swarm"; printf '# Needs you\n- **A1** stub\n' > "$W/.swarm/needs-you.md"

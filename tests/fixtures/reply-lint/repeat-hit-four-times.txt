@@ -1,0 +1,10 @@
+Pending your approval: merge PR https://github.com/o/r/pull/972 (yes/no)
+
+Needs you:
+- **A1** Merge https://github.com/o/r/pull/972, it fixes the watcher (recommended)
+
+Do now: merge https://github.com/o/r/pull/972
+```
+sm 972
+```
+Pending your approval: merge #972 (yes/no)
