@@ -896,6 +896,26 @@ out="$(GH_RUNLIST_JSON='[{"status":"completed","conclusion":"success","workflowN
     "$CI_WAIT" 42 5 2>&1)" || rc=$?
 check "exits 0" '[ "$rc" -eq 0 ]'
 
+heading "Test 24e: issue #996 — non-draft PR, every lane skipping, no recent ready event → exit 1 naming the re-ready fix"
+rc=0
+out="$(GH_RUNLIST_JSON='[{"status":"completed","conclusion":"success","workflowName":"CI","createdAt":"2020-01-01T00:00:00Z"}]' \
+    GH_ISSUE_EVENTS_JSON='[{"event":"ready_for_review","created_at":"2020-01-01T00:05:00Z"}]' \
+    GH_VIEW_ISDRAFT=false GH_CHECKS_OUT='Fast\tskipping\t0\turl\nIntegration\tskipping\t0\turl\nDetect\tskipping\t0\turl' \
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
+check "exits 1" '[ "$rc" -eq 1 ]'
+check "says to re-ready" 'grep -q "Re-ready to trigger CI" <<<"$out"'
+
+heading "Test 24f: issue #996 — every real lane skipping + swarm/worker SUCCESS on a non-draft PR → exit 1 (the liveness status is not a lane that ran)"
+rc=0
+out="$(GH_RUNLIST_JSON='[{"status":"completed","conclusion":"success","workflowName":"CI","createdAt":"2020-01-01T00:00:00Z"}]' \
+    GH_ISSUE_EVENTS_JSON='[{"event":"ready_for_review","created_at":"2020-01-01T00:05:00Z"}]' \
+    GH_VIEW_ISDRAFT=false \
+    GH_CHECKS_OUT='[{"name":"Fast","bucket":"skipping","link":"u"},{"name":"Integration","bucket":"skipping","link":"u"},{"name":"Detect","bucket":"skipping","link":"u"},{"name":"swarm/worker","bucket":"pass","link":""}]' \
+    "$CI_WAIT" 42 5 2>&1)" || rc=$?
+check "exits 1" '[ "$rc" -eq 1 ]'
+check "says to re-ready" 'grep -q "Re-ready to trigger CI" <<<"$out"'
+check "swarm/worker row is not in the reported checks" '! grep -q "swarm/worker" <<<"$out"'
+
 heading "Test 25: swarm/worker liveness status is not CI (issue #536) — real jq over a gh pr checks --json payload"
 RUNOK='[{"status":"completed","conclusion":"success","workflowName":"CI","createdAt":"2026-11-10T10:00:00Z"}]'
 rc=0
