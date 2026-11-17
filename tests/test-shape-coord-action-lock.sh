@@ -44,6 +44,9 @@ case "\${1:-} \${2:-}" in
       if [ -e "\$S/reread-merged-other" ]; then st=MERGED; head=bbb2222; fi
     fi
     body=""; [ -e "\$S/body-low" ] && body="<!-- BLIND_MERGE_RISK: low -->"
+    [ -e "\$S/body-coord-banner" ] && body="\\n> ⛔ **COORDINATOR HOLD** x\\nbody"
+    [ -e "\$S/body-reason-review" ] && body="<!-- SWARM_DRAFT_REASON: lint-failing sha=aaa1111 -->\\nbody"
+    [ -e "\$S/body-reason-ci" ] && body="<!-- SWARM_DRAFT_REASON: ci-pending sha=aaa1111 -->\\nbody"
     # issue #612: hold labels. state/hold-label = on the PR from the start;
     # state/late-label = appears only on the labels-only re-read under the lock.
     labels="[]"; [ -e "\$S/hold-label" ] && labels='[{"name":"swarm-hold:ci"}]'
@@ -56,6 +59,10 @@ case "\${1:-} \${2:-}" in
     echo "\$\$" >> "\$S/merge-calls"
     echo "\$*" >> "\$S/merge-args"
     touch "\$S/merged"; exit 0 ;;
+  "pr edit")
+    echo "\$*" >> "\$S/edit-calls"
+    case "\$*" in *--remove-label*) [ -e "\$S/edit-fails" ] && exit 1; rm -f "\$S/hold-label" ;; esac
+    exit 0 ;;
   "pr list") echo "[]"; exit 0 ;;
   "issue view")
     case "\$*" in *comments*) echo '{"comments":[]}' ;; *) echo "FAKE issue body" ;; esac; exit 0 ;;
@@ -311,13 +318,15 @@ reset
 green "no action lock: auto-low refused, plain merge continues with the warning"
 
 heading "K (issue #612): swarm-hold* label refuses every merge path; lifting it merges"
+FAKE_CIW="$ROOT/tests/fixtures/ci-wait-fake.sh"
+plain_hold() { ( cd "$REPO" && SWARM_MERGE_TEST_HOOKS=1 CI_WAIT_SCRIPT="$FAKE_CIW" FAKE_CI_WAIT_LOG="$TEST_DIR/ciw.log" timeout 30 "$MERGE" 600 --no-kill "$@" >"$TEST_DIR/hold.log" 2>&1 ); }
 reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/hold-label"
-rc=0; ( cd "$REPO" && timeout 30 "$MERGE" 600 --no-kill >"$TEST_DIR/k1.log" 2>&1 ) || rc=$?
+rc=0; ( cd "$REPO" && SWARM_MERGE_TEST_HOOKS=1 CI_WAIT_SCRIPT="$FAKE_CIW" FAKE_CI_WAIT_MODE=red timeout 30 "$MERGE" 600 --no-kill >"$TEST_DIR/k1.log" 2>&1 ) || rc=$?
 [ "$rc" = 1 ] || red "K1: plain merge of a held PR should exit 1, got $rc: $(cat "$TEST_DIR/k1.log")"
 grep -q 'carries a hold label (swarm-hold:ci)' "$TEST_DIR/k1.log" || red "K1: refusal must name the label: $(cat "$TEST_DIR/k1.log")"
 [ "$(merges)" = 0 ] || red "K1: merged a held PR"
 green "K1: plain swarm-merge refuses a held PR and names the label"
-reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/hold-label" "$TEST_DIR/state/body-low"
+reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/hold-label" "$TEST_DIR/state/body-low" "$TEST_DIR/state/body-coord-banner"
 rc=0; auto || rc=$?
 [ "$rc" != 0 ] || red "K2: --auto-low should refuse a held PR: $(cat "$TEST_DIR/auto.log")"
 grep -q 'carries a hold label' "$TEST_DIR/auto.log" || red "K2: no hold-label refusal: $(cat "$TEST_DIR/auto.log")"
@@ -347,3 +356,38 @@ reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/fail-reread"
 ( cd "$REPO" && timeout 30 "$MERGE" 600 --no-kill >"$TEST_DIR/k7.log" 2>&1 ) || red "K7: failed re-read with no hold must still merge (plain): $(cat "$TEST_DIR/k7.log")"
 [ "$(merges)" = 1 ] || red "K7: expected 1 merge, got $(merges)"
 green "K7: failed head/state re-read, no hold: plain merge still proceeds"
+
+heading "L (issue #989): a lone swarm-hold:ci clears itself at merge time when CI is verified green on the same head"
+: > "$TEST_DIR/ciw.log"
+reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/hold-label" "$TEST_DIR/state/body-reason-ci"
+FAKE_CI_WAIT_MODE=green plain_hold || red "L1: green CI on the same head must clear the label and merge: $(cat "$TEST_DIR/hold.log")"
+[ "$(merges)" = 1 ] || red "L1: expected 1 merge, got $(merges)"
+grep -q -- '--remove-label swarm-hold:ci' "$TEST_DIR/state/edit-calls" || red "L1: label was not removed"
+grep -q 'result=ci-hold-cleared' "$REPO/.swarm/events.log" || red "L1: no ci-hold-cleared gate event"
+green "L1: green on the same head (ci-pending banner, the PR #987 shape): label cleared, merged"
+reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/hold-label"
+FAKE_CI_WAIT_MODE=green plain_hold || red "L2: bannerless lone label (the PR #988 shape) must clear and merge: $(cat "$TEST_DIR/hold.log")"
+[ "$(merges)" = 1 ] || red "L2: expected 1 merge, got $(merges)"
+green "L2: bannerless lone label with green CI: cleared, merged"
+reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/hold-label"
+rc=0; FAKE_CI_WAIT_MODE=red plain_hold || rc=$?
+[ "$rc" = 1 ] && [ "$(merges)" = 0 ] || red "L3: red/pending CI must keep the refusal (rc $rc): $(cat "$TEST_DIR/hold.log")"
+[ ! -e "$TEST_DIR/state/edit-calls" ] || red "L3: label touched although CI was not green"
+green "L3: CI not green: refused, label untouched"
+reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/hold-label"
+rc=0; FAKE_CI_WAIT_MODE=other-head plain_hold || rc=$?
+[ "$rc" = 1 ] && [ "$(merges)" = 0 ] || red "L4: CI verified a different head must refuse (rc $rc): $(cat "$TEST_DIR/hold.log")"
+[ ! -e "$TEST_DIR/state/edit-calls" ] || red "L4: label touched on a head mismatch"
+green "L4: ci-wait verified another head: refused, label untouched"
+for v in body-coord-banner body-reason-review; do
+  reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/hold-label" "$TEST_DIR/state/$v"; : > "$TEST_DIR/ciw.log"
+  rc=0; FAKE_CI_WAIT_MODE=green plain_hold || rc=$?
+  [ "$rc" = 1 ] && [ "$(merges)" = 0 ] || red "L5 ($v): a non-CI-timing hold must keep refusing (rc $rc): $(cat "$TEST_DIR/hold.log")"
+  [ ! -s "$TEST_DIR/ciw.log" ] || red "L5 ($v): ci-wait ran although the hold is not CI timing"
+  [ ! -e "$TEST_DIR/state/edit-calls" ] || red "L5 ($v): label touched"
+done
+green "L5: COORDINATOR HOLD banner or a lint-failing banner: refused without even checking CI"
+reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/hold-label" "$TEST_DIR/state/edit-fails"
+rc=0; FAKE_CI_WAIT_MODE=green plain_hold || rc=$?
+[ "$rc" = 1 ] && [ "$(merges)" = 0 ] || red "L6: a failed label removal must refuse (rc $rc): $(cat "$TEST_DIR/hold.log")"
+green "L6: label removal fails: refused"

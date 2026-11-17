@@ -49,7 +49,7 @@ chmod +x "$TEST_DIR/shims/gh"
 cat > "$TEST_DIR/fake-pr-ready.sh" <<EOF
 #!/usr/bin/env bash
 echo "\$1" >> "$READY_LOG"
-[ "\$1" = "11" ] && exit 0
+case "\$1" in 11|31|32) exit 0 ;; esac
 exit 4
 EOF
 chmod +x "$TEST_DIR/fake-pr-ready.sh"
@@ -306,5 +306,17 @@ sed -i s/aaaaaaa1/bbbbbbb2/ "$FIXTURE"
 READY_SWEEP_PR_READY_TIMEOUT=1 READY_SWEEP_STATE_DIR="$TEST_DIR/state" PATH="$TEST_DIR/shims:$PATH" PR_READY_SCRIPT="$TEST_DIR/hang-pr-ready.sh" "$SWEEP" > "$TEST_DIR/out.log" 2>&1
 [ "$(wc -l < "$TEST_DIR/starts.log")" = "2" ] || red "new head should allow one more start"
 green "hung review: one start per head, none on repeat sweeps"
+
+heading "Test 15 (issue #989): both shapes seen on PRs 987 and 988 clear within one sweep"
+cat > "$FIXTURE" <<JSON
+[{"number": 31, "isDraft": false, "labels": $CI, "body": "<!-- SWARM_DRAFT_REASON: ci-pending sha=aaaaaaa1 -->\\n> held\\n<!-- /SWARM_DRAFT_REASON -->\\nbody", "headRefOid": "aaaaaaa1", "statusCheckRollup": $G},
+ {"number": 32, "isDraft": false, "labels": $CI, "body": "body", "headRefOid": "bbbbbbb2", "statusCheckRollup": $G}]
+JSON
+rm -rf "$TEST_DIR/state"; echo '{}' > "$STATES"
+run_sweep || red "expected exit 0: $(cat "$TEST_DIR/out.log")"
+[ "$(sort -n "$READY_LOG" | tr '\n' ' ')" = "31 32 " ] || red "expected pr-ready once on each of 31 and 32, got: $(tr '\n' ' ' < "$READY_LOG")"
+grep -qx '#31 ci-pending: readied' "$TEST_DIR/out.log" || red "987 shape (ci-pending banner, CI went green): $(cat "$TEST_DIR/out.log")"
+grep -qx '#32 ci-hold-green: readied' "$TEST_DIR/out.log" || red "988 shape (lone label, no banner): $(cat "$TEST_DIR/out.log")"
+green "a ci-pending bannered PR and a bannerless lone swarm-hold:ci PR, both green, are each retried once in a single sweep"
 
 green "ALL TESTS PASSED"
