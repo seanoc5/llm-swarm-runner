@@ -2099,6 +2099,7 @@ CONFIG  (precedence: shell env > <project>/.swarm/.env > <sandbox>/.env.example)
     WATCH_STRANDED_BRIEF_SWEEP_SECS 60  periodic detection of a queued/claimed brief with no live iss-N window to drain it (0=off); see header comment (issue #448)
     WATCH_SIBLING_SWEEP_SECS 300  warn (coord-inbox watcher_dead) about sibling projects whose watcher died while they had recent workers (0=off); see header comment (issue #756)
     WATCH_RUNNER_HEALTH_SECS 300  flag an offline self-hosted CI runner while jobs queue: one coord-inbox runner_offline note per outage (0=off; issue #899)
+    WATCH_CMINDER_EVENTS_SECS 30  mirror coord-inbox items + worker outcomes to the swarm's corpusminder forum; only with NEEDS_YOU_BACKEND=corpusminder and CMINDER_EVENTS=1 (0=off; issue #862, docs/cminder-bridge.md)
     COORD_WAKE_LOCK_TIMEOUT_SECS 60  max wait to flock COORD_WAKE_LOCK before a wake gives up (see that lock's header comment)
     COORD_MODE          resident  resident = typed doorbell (default); split = the watcher starts short work runs via scripts/coord-work-run.sh and types nothing (issue #765, ADR 0006)
     COORD_SPLIT_TICK_SECS 5       split mode: how often the batch window / pending inbox is rechecked
@@ -2839,6 +2840,10 @@ WATCHER_CHECK="${WATCHER_CHECK:-$LLM_SWARM_DIR/scripts/watcher-check.sh}"
 # issue #899 — CI runner health sweep; see header comment.
 WATCH_RUNNER_HEALTH_SECS="${WATCH_RUNNER_HEALTH_SECS:-300}"
 CI_RUNNER_HEALTH="${CI_RUNNER_HEALTH:-$LLM_SWARM_DIR/scripts/ci-runner-health.sh}"
+# issue #862 — corpusminder events mirror (opt-in via CMINDER_EVENTS=1, which the
+# script itself checks, so the default path costs one process start per tick).
+WATCH_CMINDER_EVENTS_SECS="${WATCH_CMINDER_EVENTS_SECS:-30}"
+CMINDER_EVENTS_SCRIPT="${CMINDER_EVENTS_SCRIPT:-$LLM_SWARM_DIR/scripts/cminder-events.sh}"
 # issue #622 — sidelining idle workers; see header comment.
 WATCH_SIDELINE_SECS="${WATCH_SIDELINE_SECS:-1800}"
 WATCH_SIDELINE_SWEEP_SECS="${WATCH_SIDELINE_SWEEP_SECS:-60}"
@@ -3192,6 +3197,10 @@ if ! [[ "$WATCH_PR_STATUS_SWEEP_SECS" =~ ^[0-9]+$ ]]; then
 fi
 if ! [[ "$WATCH_PENDING_BRIEF_SWEEP_SECS" =~ ^[0-9]+$ ]]; then
     echo "ERROR: WATCH_PENDING_BRIEF_SWEEP_SECS must be a non-negative integer (got: $WATCH_PENDING_BRIEF_SWEEP_SECS)" >&2
+    exit 1
+fi
+if ! [[ "$WATCH_CMINDER_EVENTS_SECS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: WATCH_CMINDER_EVENTS_SECS must be a non-negative integer (got: $WATCH_CMINDER_EVENTS_SECS)" >&2
     exit 1
 fi
 if ! [[ "$WATCH_RUNNER_HEALTH_SECS" =~ ^[0-9]+$ ]]; then
@@ -6136,6 +6145,15 @@ watcher_sibling_sweep_pass() {
 # reboot, jobs queued up to ~27h). Runs ci-runner-health.sh and turns each
 # error finding into ONE urgent coord-inbox note; warn findings are only
 # logged. See WATCH_RUNNER_HEALTH_SECS's header comment.
+# cminder_events_pass (issue #862): fire-and-forget. The sweep runs detached so a
+# slow or down corpusminder never delays this timer loop; it takes its own lock,
+# spools failed posts under .swarm/cminder-events-spool/ and retries them next time.
+cminder_events_pass() {
+    [ -x "$CMINDER_EVENTS_SCRIPT" ] || return 0
+    "$CMINDER_EVENTS_SCRIPT" sweep --project "$PROJECT_DIR" >/dev/null 2>&1 &
+    disown 2>/dev/null || true
+}
+
 runner_health_sweep_pass() {
     [ -x "$CI_RUNNER_HEALTH" ] || return 0
     local repos="${CI_HEALTH_REPOS:-}" url out ec line key sev chk repo runner msg
@@ -7445,7 +7463,7 @@ coord_pending_approval_age() {
 # run_auto_compact_poll_loop, started as its own background process right
 # after this function.
 run_watch_timer_loop() {
-    local last_pr_poll=0 last_orphan_sweep=0 last_ready_sweep=0 last_bg_violation_sweep=0 last_timeout_retry_sweep=0 last_activity_poll=0 last_coord_wake_retry=0 last_coord_wake_busy_retry=0 last_worktree_sweep=0 last_pending_brief_sweep=0 last_pr_status_sweep=0 last_stranded_brief_sweep=0 last_sibling_sweep=0 last_runner_health_sweep=0 last_window_flags_sweep=0 last_sideline_sweep=0 last_stale_checkout=0 now
+    local last_pr_poll=0 last_orphan_sweep=0 last_ready_sweep=0 last_bg_violation_sweep=0 last_timeout_retry_sweep=0 last_activity_poll=0 last_coord_wake_retry=0 last_coord_wake_busy_retry=0 last_worktree_sweep=0 last_pending_brief_sweep=0 last_pr_status_sweep=0 last_stranded_brief_sweep=0 last_sibling_sweep=0 last_runner_health_sweep=0 last_cminder_events=0 last_window_flags_sweep=0 last_sideline_sweep=0 last_stale_checkout=0 now
     # issue #756: first sibling scan one interval after start, not on tick one, so
     # it never delays the first deferred-wake retry or the startup passes.
     last_sibling_sweep=$(date +%s)
@@ -7576,6 +7594,13 @@ run_watch_timer_loop() {
             if [ $((now - last_runner_health_sweep)) -ge "$WATCH_RUNNER_HEALTH_SECS" ]; then
                 runner_health_sweep_pass || true
                 last_runner_health_sweep=$now
+            fi
+        fi
+        if [ "$WATCH_CMINDER_EVENTS_SECS" -gt 0 ]; then
+            now=$(date +%s)
+            if [ $((now - last_cminder_events)) -ge "$WATCH_CMINDER_EVENTS_SECS" ]; then
+                cminder_events_pass || true
+                last_cminder_events=$now
             fi
         fi
         if [ "$WATCH_SIDELINE_SWEEP_SECS" -gt 0 ]; then
@@ -13204,7 +13229,7 @@ run_poll() {
 # restarts. (COORD_WAKE_RETRY_SECS, issue #422's older dirty-draft retry,
 # has this identical gap and predates this fix — out of scope here, but
 # worth folding in alongside this one if it's ever revisited.)
-if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ] || [ "$WATCH_ORPHAN_SWEEP_SECS" -gt 0 ] || [ "$WATCH_READY_SWEEP_SECS" -gt 0 ] || [ "$WATCH_STALE_CHECKOUT_SECS" -gt 0 ] || [ "$WATCH_BG_VIOLATION_SWEEP_SECS" -gt 0 ] || [ "$WATCH_TIMEOUT_RETRY_SWEEP_SECS" -gt 0 ] || [ "$WATCH_ACTIVITY_POLL_SECS" -gt 0 ] || [ "$WATCH_WORKTREE_SWEEP_SECS" -gt 0 ] || [ "$WATCH_PENDING_BRIEF_SWEEP_SECS" -gt 0 ] || [ "$WATCH_PR_STATUS_SWEEP_SECS" -gt 0 ] || [ "$WATCH_STRANDED_BRIEF_SWEEP_SECS" -gt 0 ] || [ "$WATCH_RUNNER_HEALTH_SECS" -gt 0 ] || [ "$WATCH_SIBLING_SWEEP_SECS" -gt 0 ] || [ "$COORD_WAKE_HOLD_RETRY_SECS" -gt 0 ] || [ "$WATCH_SIDELINE_SWEEP_SECS" -gt 0 ] || { [ "$WATCH_WINDOW_FLAGS" = "1" ] && [ "$WATCH_WINDOW_FLAGS_SWEEP_SECS" -gt 0 ]; }; then
+if [ "$WATCH_PR_POLL_SECS" -gt 0 ] || [ "$WATCH_CHECK_ON_DONE" = "1" ] || [ "$WATCH_ORPHAN_SWEEP_SECS" -gt 0 ] || [ "$WATCH_READY_SWEEP_SECS" -gt 0 ] || [ "$WATCH_STALE_CHECKOUT_SECS" -gt 0 ] || [ "$WATCH_BG_VIOLATION_SWEEP_SECS" -gt 0 ] || [ "$WATCH_TIMEOUT_RETRY_SWEEP_SECS" -gt 0 ] || [ "$WATCH_ACTIVITY_POLL_SECS" -gt 0 ] || [ "$WATCH_WORKTREE_SWEEP_SECS" -gt 0 ] || [ "$WATCH_PENDING_BRIEF_SWEEP_SECS" -gt 0 ] || [ "$WATCH_PR_STATUS_SWEEP_SECS" -gt 0 ] || [ "$WATCH_STRANDED_BRIEF_SWEEP_SECS" -gt 0 ] || [ "$WATCH_RUNNER_HEALTH_SECS" -gt 0 ] || [ "$WATCH_CMINDER_EVENTS_SECS" -gt 0 ] || [ "$WATCH_SIBLING_SWEEP_SECS" -gt 0 ] || [ "$COORD_WAKE_HOLD_RETRY_SECS" -gt 0 ] || [ "$WATCH_SIDELINE_SWEEP_SECS" -gt 0 ] || { [ "$WATCH_WINDOW_FLAGS" = "1" ] && [ "$WATCH_WINDOW_FLAGS_SWEEP_SECS" -gt 0 ]; }; then
     run_watch_timer_loop &
     WATCH_TIMER_PID=$!
     log_event watch.timer.start "pr_poll_secs=$WATCH_PR_POLL_SECS check_on_done=$WATCH_CHECK_ON_DONE orphan_sweep_secs=$WATCH_ORPHAN_SWEEP_SECS ready_sweep_secs=$WATCH_READY_SWEEP_SECS bg_violation_sweep_secs=$WATCH_BG_VIOLATION_SWEEP_SECS timeout_retry_sweep_secs=$WATCH_TIMEOUT_RETRY_SWEEP_SECS activity_poll_secs=$WATCH_ACTIVITY_POLL_SECS worktree_sweep_secs=$WATCH_WORKTREE_SWEEP_SECS pending_brief_sweep_secs=$WATCH_PENDING_BRIEF_SWEEP_SECS pr_status_sweep_secs=$WATCH_PR_STATUS_SWEEP_SECS stranded_brief_sweep_secs=$WATCH_STRANDED_BRIEF_SWEEP_SECS sibling_sweep_secs=$WATCH_SIBLING_SWEEP_SECS runner_health_secs=$WATCH_RUNNER_HEALTH_SECS window_flags_sweep_secs=$([ "$WATCH_WINDOW_FLAGS" = "1" ] && echo "$WATCH_WINDOW_FLAGS_SWEEP_SECS" || echo 0) sideline_secs=$WATCH_SIDELINE_SECS sideline_sweep_secs=$WATCH_SIDELINE_SWEEP_SECS"
