@@ -104,3 +104,15 @@ sleep 2; printf 'b\n' > "$P5/.swarm/coord-inbox/20261117T040005Z-b-2-2.md"
 sleep 1; date +%s > "$P5/.swarm/coord-typed-ring"; sleep 1
 "$REC" --project "$P5" < "$FX/good.txt"
 check "recorder: the second report is keyed by the new item only" "20261117T040000Z-a-1-1.md 20261117T040005Z-b-2-2.md" "$(ls "$P5/.swarm/coordinator-reports" | grep '\.md$' | paste -sd' ' -)"
+
+# an item that lands in the same whole second as the previous record (but after it) is named next time (#994)
+P6="$T/proj6"; mkdir -p "$P6/.swarm/coord-inbox"
+printf 'a\n' > "$P6/.swarm/coord-inbox/20261117T050000Z-a-1-1.md"
+echo "$(( $(date +%s) - 3 ))" > "$P6/.swarm/coord-typed-ring"
+"$REC" --project "$P6" < "$FX/good.txt"
+at6="$(cat "$P6/.swarm/coord-report-at")"
+printf 'b\n' > "$P6/.swarm/coord-inbox/20261117T050001Z-b-2-2.md"
+touch -d "@$(awk -v a="$at6" 'BEGIN{printf "%.9f", a + 0.2}')" "$P6/.swarm/coord-inbox/20261117T050001Z-b-2-2.md"
+sleep 1; date +%s > "$P6/.swarm/coord-typed-ring"; sleep 1
+"$REC" --project "$P6" < "$FX/good.txt"
+check "recorder: a same-second item after the previous record is the next trigger" '["20261117T050001Z-b-2-2"]' "$(jq -c .triggers "$P6/.swarm/coordinator-reports/20261117T050001Z-b-2-2.meta.json" 2>/dev/null)"

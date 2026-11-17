@@ -47,11 +47,11 @@ prev="$(cat "$swarm/coord-report-last" 2>/dev/null || echo 0)"
 
 # Items that arrived since the previous report (never older than a day before the ring).
 prev_at="$(cat "$swarm/coord-report-at" 2>/dev/null || echo 0)"
-[[ "$prev_at" =~ ^[0-9]+$ ]] || prev_at=0
-# Window starts one second after the previous record time (whole seconds vs finer file times),
-# so an item the previous report already covered is never named again.
-low=$(( prev_at > 0 ? prev_at + 1 : 0 ))
-since=$(( low > ring - 86400 ? low : ring - 86400 ))
+[[ "$prev_at" =~ ^[0-9]+(\.[0-9]+)?$ ]] || prev_at=0
+# The previous record time is fractional (date +%s.%N), so an item that landed in the same whole
+# second but after it is still named; find -newermt is strictly newer, so a covered item is not.
+since="$prev_at"
+awk -v a="$prev_at" -v b="$((ring - 86400))" 'BEGIN{exit !(a<b)}' && since="$((ring - 86400))"
 inbox="${COORD_INBOX_DIR:-$swarm/coord-inbox}"
 triggers=()
 # Oldest first by name (names start with a UTC timestamp).
@@ -79,6 +79,6 @@ jq -nc --arg t "$key" --argjson tr "$tj" --argjson ring "$ring" --argjson at "$n
 # Stamp the ring, not now: the hook stamps its own ring with the time it started, which can be
 # earlier than this write, and the reply to that ring must still count as newer.
 printf '%s\n' "$ring" > "$swarm/coord-report-last"
-printf '%s\n' "$now" > "$swarm/coord-report-at"
+date +%s.%N > "$swarm/coord-report-at"
 find "$out" -type f -mtime +14 -delete 2>/dev/null || true
 exit 0
