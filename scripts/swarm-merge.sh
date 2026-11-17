@@ -706,6 +706,45 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
       # No override flag: lift the hold (remove the label) instead. A raw
       # `gh pr merge` or the web UI ignore this lock (accepted gap).
       PR_HOLD_LABELS="$(jq -r '[.labels[]?.name | select(test("^swarm-hold(:.*)?$"))] | join(", ")' <<<"$PR_JSON" 2>/dev/null || true)"
+      # issue #989: a lone swarm-hold:ci is pr-ready.sh's "CI was not green yet" lock, and
+      # ready-sweep.sh only clears it on its next interval (300s), so an operator who runs
+      # ci-wait.sh && sm right as CI goes green hit this refusal and removed the label by hand.
+      # Clear it here instead, but only on fresh proof: a short ci-wait.sh that passes and names
+      # the SAME head this run read. Attended merges only: --auto-* keeps refusing every hold (ready-sweep.sh clears it). Other hold labels, a COORDINATOR HOLD banner, or a banner
+      # whose reason is not CI-timing (review-block, check-failing, lint-failing, ci-failing,
+      # ci-cancelled) mean something other than CI timing is held: those keep refusing.
+      if [ "$PR_HOLD_LABELS" = "swarm-hold:ci" ] && [ "$AUTO_LOW" != 1 ]; then
+        HOLD_BODY="$(jq -r '.body // ""' <<<"$PR_JSON" 2>/dev/null || true)"
+        HOLD_REASON="$(grep -m1 -oE '^<!-- SWARM_DRAFT_REASON: [a-z-]+' <<<"$HOLD_BODY" | sed 's/.*: //' || true)"
+        if grep -qE '^> ⛔ \*\*COORDINATOR HOLD\*\*' <<<"$HOLD_BODY"; then
+          echo "       swarm-hold:ci not auto-cleared: the body carries a COORDINATOR HOLD banner." >&2
+        elif [ -n "$HOLD_REASON" ] && [ "$HOLD_REASON" != "ci-pending" ] && [ "$HOLD_REASON" != "ci-unknown" ]; then
+          echo "       swarm-hold:ci not auto-cleared: the banner reason is $HOLD_REASON, not CI timing; run pr-ready.sh $PR_NUM." >&2
+        elif [ -n "$HOLD_REASON" ] && ! grep -qE "^<!-- SWARM_DRAFT_REASON: $HOLD_REASON sha=${PR_HEAD_SHA} -->$" <<<"$HOLD_BODY"; then
+          # The banner proves pr-ready.sh's lint/check/review ran on ITS sha only; a newer push has had none of them.
+          echo "       swarm-hold:ci not auto-cleared: the $HOLD_REASON banner is for an older commit; run pr-ready.sh $PR_NUM." >&2
+        elif [ -z "$PR_HEAD_SHA" ]; then
+          echo "       swarm-hold:ci not auto-cleared: the head commit could not be read." >&2
+        else
+          echo "       swarm-hold:ci only: checking CI on ${PR_HEAD_SHA:0:7} before refusing (up to ${SWARM_MERGE_HOLD_CI_WAIT_SECS:-60}s)…"
+          HOLD_CI_LOG="$(mktemp)"
+          HOLD_CI_RC=0
+          "$CI_WAIT_SCRIPT" "$PR_NUM" "${SWARM_MERGE_HOLD_CI_WAIT_SECS:-60}" >"$HOLD_CI_LOG" 2>&1 || HOLD_CI_RC=$?
+          HOLD_CI_SHA="$(grep -o 'verified-head=[0-9a-f]\{7,40\}' "$HOLD_CI_LOG" | tail -1 | cut -d= -f2 || true)"
+          rm -f "$HOLD_CI_LOG"
+          if [ "$HOLD_CI_RC" = 0 ] && [ -n "$HOLD_CI_SHA" ] && [ "${PR_HEAD_SHA#"$HOLD_CI_SHA"}" != "$PR_HEAD_SHA" ]; then
+            if gh pr edit "$PR_NUM" --remove-label "swarm-hold:ci" >/dev/null 2>&1; then
+              echo "       $(c_amber "swarm-hold:ci cleared: CI is green on ${PR_HEAD_SHA:0:7} (verified just now)")"
+              log_event merge.gate "pr=$PR_NUM gate=hold-label result=ci-hold-cleared head=$PR_HEAD_SHA action=proceed"
+              PR_HOLD_LABELS=""
+            else
+              echo "       swarm-hold:ci not auto-cleared: gh could not remove the label." >&2
+            fi
+          else
+            echo "       swarm-hold:ci not auto-cleared: CI is not confirmed green on ${PR_HEAD_SHA:0:7} (ci-wait exit $HOLD_CI_RC, verified ${HOLD_CI_SHA:-none})." >&2
+          fi
+        fi
+      fi
       if [ -n "$PR_HOLD_LABELS" ]; then
         log_event merge.gate "pr=$PR_NUM gate=hold-label result=refused labels=\"$PR_HOLD_LABELS\" action=refuse"
         echo "ERROR: PR #$PR_NUM carries a hold label ($PR_HOLD_LABELS) — refusing to merge." >&2
