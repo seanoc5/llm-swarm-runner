@@ -31,7 +31,11 @@ body=""; prev=""
 for a in "$@"; do [ "$prev" = "--data-binary" ] && body="${a#@}"; prev="$a"; done
 printf '%s\n' "$*" >> "$CALLS"
 [ -n "$body" ] && cat "$body" >> "$BODIES" && echo >> "$BODIES"
-[ "$(cat "$STATUS_FILE")" = fail ] && { echo "curl: (22) The requested URL returned error: 500" >&2; exit 22; }
+case "$(cat "$STATUS_FILE")" in
+    fail) printf 500 ;;
+    reject) printf 422 ;;
+    *) printf 200 ;;
+esac
 exit 0
 STUB
 chmod +x "$T/bin/curl"
@@ -39,8 +43,16 @@ export PATH="$T/bin:$PATH" CALLS="$T/calls.log" BODIES="$T/bodies.log" STATUS_FI
 echo ok > "$STATUS_FILE"
 calls() { [ -f "$CALLS" ] && wc -l < "$CALLS" | tr -d ' ' || echo 0; }
 
-P="$T/ws/proj"; mkdir -p "$P/.swarm/coord-inbox" "$T/ws/wt-issue-7/.swarm/tasks/done"
-export WORKSPACE="$T/ws"
+# A real repo with one registered worker worktree, plus a sibling swarm's worktree
+# in the same parent folder that is NOT ours and must never be mirrored.
+P="$T/ws/proj"; mkdir -p "$P"
+git -C "$P" init -q -b main && git -C "$P" -c user.name=t -c user.email=t@t commit -q --allow-empty -m init
+git -C "$P" worktree add -q "$T/ws/wt-issue-7" -b iss-7
+mkdir -p "$P/.swarm/coord-inbox" "$T/ws/wt-issue-7/.swarm/tasks/done"
+mkdir -p "$T/ws/other/.swarm" "$T/ws/wt-issue-8/.swarm/tasks/done"
+git -C "$T/ws/other" init -q -b main && git -C "$T/ws/other" -c user.name=t -c user.email=t@t commit -q --allow-empty -m init
+git -C "$T/ws/other" worktree add -q "$T/ws/wt-issue-8" -b iss-8 2>/dev/null || true
+printf '{"task_id":"foreign-8","pr":999,"issue":8}\n' > "$T/ws/wt-issue-8/.swarm/tasks/done/foreign-8.ok.json"
 printf 'Idle capacity: 2 slots open for project proj.\nIssue #123 waits on PR #456.\napi_key = hunter2hunter2\nnotes: ghp_abcdefghijklmnopqrstuvwxyz0123456789\nlast line\n' \
     > "$P/.swarm/coord-inbox/20261117T010000Z-idle_capacity-111-222.md"
 printf '{"task_id":"20261117-000000-7","state":"ready-for-review","pr":555,"issue":7,"note":"opened PR","token":"abc123"}\n' \
@@ -71,6 +83,7 @@ check "ordinary lines are kept" "1" "$(grep -c 'Idle capacity: 2 slots' "$BODIES
 check "spool is empty after success" "0" "$(find "$P/.swarm/cminder-events-spool" -name '*.json' | wc -l | tr -d ' ')"
 "$EV" sweep --project "$P"
 check "a second sweep posts nothing" "2" "$(calls)"
+check "a sibling swarm's outcome is never posted" "0" "$(grep -c 'foreign-8' "$BODIES" || true)"
 
 # ── outage: spool, then retry ────────────────────────────────────────────────
 printf 'Worker 9 failed.\n' > "$P/.swarm/coord-inbox/20261117T020000Z-fyi-333-444.md"
@@ -86,3 +99,15 @@ check "once the endpoint is back the spooled event posts" "5" "$(calls)"
 check "spool drained" "0" "$(find "$P/.swarm/cminder-events-spool" -name '*.json' | wc -l | tr -d ' ')"
 "$EV" sweep --project "$P"
 check "and never posts again" "5" "$(calls)"
+
+# ── a permanent 4xx must not block the queue ─────────────────────────────────
+printf 'Bad item.\n' > "$P/.swarm/coord-inbox/20261117T030000Z-fyi-555-666.md"
+echo reject > "$STATUS_FILE"
+"$EV" sweep --project "$P"
+check "a 422 is attempted once" "6" "$(calls)"
+check "a 422 moves the body to the rejected folder" "1" "$(find "$P/.swarm/cminder-events-rejected" -name '*.json' | wc -l | tr -d ' ')"
+check "a 422 leaves nothing spooled" "0" "$(find "$P/.swarm/cminder-events-spool" -name '*.json' | wc -l | tr -d ' ')"
+check "the failure is logged" "1" "$(grep -c 'rejected with 422' "$P/.swarm/cminder-events.log")"
+echo ok > "$STATUS_FILE"
+"$EV" sweep --project "$P"
+check "a rejected item is not retried" "6" "$(calls)"

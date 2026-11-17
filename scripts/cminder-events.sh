@@ -28,6 +28,8 @@
 #
 # Knobs: CMINDER_EVENTS_TIMEOUT_SECS (5), CMINDER_EVENTS_MAX_AGE_DAYS (2),
 # CMINDER_EVENTS_MAX_LINES (20), CMINDER_EVENTS_MAX_BATCH (40 posts per sweep).
+# Failures are logged to <project>/.swarm/cminder-events.log; a 4xx other than 408/429
+# moves that body to .swarm/cminder-events-rejected/ so it cannot block the queue.
 set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -126,7 +128,15 @@ while IFS= read -r f; do
     enqueue "$base" "$kind" "$(iso_mtime "$f")" "$issue" "$pr" "$text"
 done < <(find "$inbox" "$inbox/processed" -maxdepth 1 -name '*.md' -type f -mtime "-$max_age" 2>/dev/null | sort)
 
-wt_parent="${WORKSPACE:-$(dirname "$project")}"
+# Only this project's own worktrees (git's registry), never a sibling swarm's
+# wt-issue-N that happens to share the parent folder.
+outcome_files() {
+    local wt
+    while IFS= read -r wt; do
+        [ -n "$wt" ] || continue
+        find "$wt/.swarm/tasks/done" -maxdepth 1 \( -name '*.ok.json' -o -name '*.err.json' \) -type f -mtime "-$max_age" 2>/dev/null
+    done < <(swarm_own_worktree_dirs "$project")
+}
 while IFS= read -r f; do
     [ -f "$f" ] || continue
     base="$(basename "$f")"
@@ -142,24 +152,33 @@ while IFS= read -r f; do
     [ -n "$issue" ] || issue="$(first_num 'wt-issue-([0-9]+)' "$f")"
     pr="$(first_num '^([0-9]+)$' "$(jq -r '.pr // empty' "$f" 2>/dev/null)")"
     enqueue "outcome:$base" "$kind" "$(iso_mtime "$f")" "$issue" "$pr" "$text"
-done < <(find "$wt_parent" -maxdepth 6 -path '*/wt-issue-*/.swarm/tasks/done/*' \( -name '*.ok.json' -o -name '*.err.json' \) -type f -mtime "-$max_age" 2>/dev/null | sort)
+done < <(outcome_files | sort)
 
 # ── 2. flush the spool, oldest first; stop at the first failure ──────────────
 url="${CMINDER_URL%/}/api/v1/forums/$CMINDER_FORUM_ID/swarm-events"
 n=0
+log="$swarm_dir/cminder-events.log"
+[ -f "$log" ] && [ "$(stat -c %s "$log")" -gt 100000 ] && : > "$log"
 while IFS= read -r body; do
     [ -f "$body" ] || continue
     [ "$n" -lt "$max_batch" ] || break
     n=$((n + 1))
-    if curl -sS --fail --max-time "$timeout_s" -o /dev/null -X POST \
+    code="$(curl -sS --max-time "$timeout_s" -o /dev/null -w '%{http_code}' -X POST \
             -H "Authorization: Bearer $CMINDER_API_KEY" -H "Content-Type: application/json" \
-            --data-binary "@$body" "$url" 2>/dev/null; then
-        : > "$sent/$(basename "$body" .json)"
-        rm -f "$body"
-    else
-        echo "cminder-events: post failed; $(find "$spool" -name '*.json' | wc -l | tr -d ' ') event(s) stay spooled for the next sweep" >&2
-        break
-    fi
+            --data-binary "@$body" "$url" 2>>"$log")" || code=000
+    case "$code" in
+        2??) : > "$sent/$(basename "$body" .json)"; rm -f "$body" ;;
+        # A permanent client error (not request-timeout / rate-limit) would block the
+        # queue forever: park the body for a human and move on.
+        4??) if [ "$code" = 408 ] || [ "$code" = 429 ]; then
+                 echo "$(date -u +%FT%TZ) post got $code; $(basename "$body") stays spooled" >> "$log"; break
+             fi
+             echo "$(date -u +%FT%TZ) post rejected with $code; $(basename "$body") moved to cminder-events-rejected/" >> "$log"
+             mkdir -p "$swarm_dir/cminder-events-rejected"
+             : > "$sent/$(basename "$body" .json)"
+             mv -f "$body" "$swarm_dir/cminder-events-rejected/" ;;
+        *) echo "$(date -u +%FT%TZ) post failed ($code); events stay spooled for the next sweep" >> "$log"; break ;;
+    esac
 done < <(ls -tr "$spool"/*.json 2>/dev/null)
 
 # Sent markers only need to outlive the discovery window.

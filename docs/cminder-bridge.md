@@ -48,7 +48,7 @@ set and `CMINDER_EVENTS=1` in `<project>/.swarm/.env`, `coordinator-watch.sh` ru
 0 = off). Any other setting makes zero calls.
 
 - **What is sent:** each coord-inbox item (`.swarm/coord-inbox/`, plus `processed/`) and
-  each worker outcome JSON (`wt-issue-*/.swarm/tasks/done/*.{ok,err}.json`) from the
+  each worker outcome JSON (`.swarm/tasks/done/*.{ok,err}.json` in this project's own worktrees only, from git's worktree list, never a sibling swarm's) from the
   last `CMINDER_EVENTS_MAX_AGE_DAYS` (default 2), as one POST to
   `/api/v1/forums/$CMINDER_FORUM_ID/swarm-events`: `event_key`, `swarm`, `kind`,
   `occurred_at`, and `payload` (`text` = the first `CMINDER_EVENTS_MAX_LINES` lines,
@@ -58,7 +58,9 @@ set and `CMINDER_EVENTS=1` in `<project>/.swarm/.env`, `coordinator-watch.sh` ru
   Every new item is first written to `.swarm/cminder-events-spool/`; a 2xx deletes it
   and leaves a marker in `.swarm/cminder-events-sent/`. The first failed POST ends
   that sweep (one `CMINDER_EVENTS_TIMEOUT_SECS`, default 5, per outage per sweep);
-  spooled items go out on the next sweep, oldest first.
+  spooled items go out on the next sweep, oldest first. Failures are logged to
+  `.swarm/cminder-events.log`. A permanent 4xx (not 408/429) moves that body to
+  `.swarm/cminder-events-rejected/` so it cannot block the queue.
 - **No secrets:** lines that look like tokens or keys (`ghp_...`, `sk-...`, `Bearer ...`,
   `password:` / `api_key=` / `token:` assignments, private-key headers, the configured
   API key) are dropped before anything is spooled; outcome fields named like a secret
