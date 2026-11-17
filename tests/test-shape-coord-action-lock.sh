@@ -336,6 +336,7 @@ green "K2: --auto-low refuses a held PR"
 reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/hold-label" "$TEST_DIR/state/body-coord-banner"
 rc=0; auto || rc=$?
 [ "$rc" != 0 ] || red "K2b: --auto-low should refuse a held PR carrying a COORDINATOR HOLD banner: $(cat "$TEST_DIR/auto.log")"
+grep -q 'carries a hold label' "$TEST_DIR/auto.log" || red "K2b: refused, but not for the hold label: $(cat "$TEST_DIR/auto.log")"
 [ "$(merges)" = 0 ] || red "K2b: --auto-low merged a bannered held PR"
 green "K2b: --auto-low refuses a held PR with a coordinator banner"
 reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/late-label"
@@ -401,4 +402,5 @@ reset; mkdir -p "$TEST_DIR/state"; touch "$TEST_DIR/state/hold-label" "$TEST_DIR
 rc=0; auto || rc=$?
 [ "$rc" != 0 ] && [ "$(merges)" = 0 ] || red "L7: --auto-low must not auto-clear a lone swarm-hold:ci even with green CI (rc $rc): $(cat "$TEST_DIR/auto.log")"
 [ ! -e "$TEST_DIR/state/edit-calls" ] || red "L7: --auto-low touched the label"
+grep -q 'carries a hold label' "$TEST_DIR/auto.log" || red "L7: refused, but not for the hold label: $(cat "$TEST_DIR/auto.log")"
 green "L7: --auto-low never auto-clears the hold label (attended merges only)"
