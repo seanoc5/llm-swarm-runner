@@ -362,6 +362,8 @@ printf 'Done.\n\nDo now: one command.\n\nBackground I already ran:\n```\ngh issu
 check "offer: a block after a later prose paragraph is not under Do now" "" "$(off "$T/off-para")"
 printf 'Done.\n\nDo now: one command.\n```\n# don'"'"'t forget\nsudo true\n```\n' > "$T/off-apos"
 check "offer: an apostrophe in a comment line cannot hide a sudo line" "" "$(off "$T/off-apos")"
+printf 'Done.\n\nDo now: comment.\n```\ngh issue comment 5 --body x | sudo tee /etc/f\n```\n' > "$T/off-pipe"
+check "offer: a pipe into sudo clears the block" "" "$(off "$T/off-pipe")"
 H4="$T/hoffer"; mkdir -p "$H4/.swarm/coord-inbox"
 ostop() { jq -n --rawfile m "$FX/offer-hit-issue-edit.txt" '{last_assistant_message: $m, stop_hook_active: false}' | CLAUDE_PROJECT_DIR="$H4" COORD_HOOK_STATE=0 "$@" "$HOOK" Stop; }
 check "offer: default (warn) never blocks" "" "$(ostop env)"

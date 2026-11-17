@@ -88,14 +88,14 @@
 #   offer-to-act a fenced block under a "Do now:" line or inside a Needs-you item hands the
 #                operator commands the coordinator may run itself (issue #981; failure 3 of
 #                epic #488: it listed commands to paste for small, reversible fixes it could
-#                have done after a yes). Hit when every command in the block (split on &&, ||,
+#                have done after a yes). Hit when every command in the block (split on &&, ||, |,
 #                ; and newlines; a leading "cd <dir>" is ignored; quoted text is not split) is
 #                on the OFFER_ALLOW list in offer_hits: gh issue comment/edit/close/create/label,
 #                gh label create, gh pr comment, scripts/requeue.sh, scripts/provision-worker.sh,
 #                scripts/needs-you.sh, mv .swarm/..., and sm / swarm-merge.sh with --auto-low or
 #                --auto-medium. One operator-only or unrecognised command (plain sm, sudo, tmux
 #                kill-window, watcher-check.sh --pause, git push, ci-wait.sh...) makes the block
-#                legitimate. Naive: a heredoc body or a pipeline counts as unrecognised.
+#                legitimate. Naive: a heredoc body counts as unrecognised; each side of a pipe is checked.
 #                coord-hook.sh runs it warn-only by default (COORD_REPLY_LINT_OFFER=warn|block|off).
 #                Fix: run the commands yourself and report; ask a yes first only when the step
 #                is not cheap and reversible.
@@ -461,7 +461,7 @@ offer_hits() {
             if (s == "" || s ~ /^#/) continue
             gsub(/"[^"]*"/, "\"\"", s); gsub(/\047[^\047]*\047/, "\047\047", s)   # quoted text may hold ; or &&; per line so a stray apostrophe cannot span lines
             sub(/^\$ /, "", s)
-            gsub(/&&|\|\||;/, "\n", s)
+            gsub(/&&|\|\||;|\|/, "\n", s)
             np = split(s, parts, /\n/)
             for (j = 1; j <= np; j++) {
                 k = parts[j]; gsub(/^[ \t]+|[ \t]+$/, "", k)
