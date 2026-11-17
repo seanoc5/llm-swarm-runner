@@ -6138,13 +6138,6 @@ watcher_sibling_sweep_pass() {
     done
 }
 
-# runner_health_sweep_pass
-#
-# issue #899: a self-hosted runner that stays offline while jobs queue is
-# otherwise silent (fand-etl, 2026-11-06: one runner down ~25h after a
-# reboot, jobs queued up to ~27h). Runs ci-runner-health.sh and turns each
-# error finding into ONE urgent coord-inbox note; warn findings are only
-# logged. See WATCH_RUNNER_HEALTH_SECS's header comment.
 # cminder_events_pass (issue #862): fire-and-forget. The sweep runs detached so a
 # slow or down corpusminder never delays this timer loop; it takes its own lock,
 # spools failed posts under .swarm/cminder-events-spool/ and retries them next time.
@@ -6154,6 +6147,13 @@ cminder_events_pass() {
     disown 2>/dev/null || true
 }
 
+# runner_health_sweep_pass
+#
+# issue #899: a self-hosted runner that stays offline while jobs queue is
+# otherwise silent (fand-etl, 2026-11-06: one runner down ~25h after a
+# reboot, jobs queued up to ~27h). Runs ci-runner-health.sh and turns each
+# error finding into ONE urgent coord-inbox note; warn findings are only
+# logged. See WATCH_RUNNER_HEALTH_SECS's header comment.
 runner_health_sweep_pass() {
     [ -x "$CI_RUNNER_HEALTH" ] || return 0
     local repos="${CI_HEALTH_REPOS:-}" url out ec line key sev chk repo runner msg

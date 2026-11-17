@@ -3,7 +3,7 @@
 # items and worker outcomes to corpusminder's swarm-events endpoint. curl is a stub
 # on PATH that logs each call (no network). Covers:
 #   - CMINDER_EVENTS=0 (default) or backend=file: zero calls, nothing written
-#   - an inbox item posts once (a second sweep makes no call), event_key = file name
+#   - an inbox item posts once (a second sweep makes no call), eventKey = file name
 #   - a worker outcome JSON posts once, with its issue and PR
 #   - a 500 spools the body, the next sweep retries it, then it never posts again
 #   - secret-looking lines never reach the body or the spool
@@ -74,10 +74,12 @@ export CMINDER_EVENTS=1
 "$EV" sweep --project "$P"
 check "inbox item + outcome: two posts" "2" "$(calls)"
 grep -q 'http://cm.test/api/v1/forums/9/swarm-events' "$CALLS" && green "posts to the forum's swarm-events URL" || red "wrong URL"
-check "inbox event_key is the file name" "1" "$(jq -s '[.[]|select(.event_key=="20261117T010000Z-idle_capacity-111-222.md")]|length' "$BODIES")"
+check "inbox eventKey is the file name" "1" "$(jq -s '[.[]|select(.eventKey=="20261117T010000Z-idle_capacity-111-222.md")]|length' "$BODIES")"
 check "inbox kind and refs parsed" "idle_capacity 123 456" "$(jq -sr '.[]|select(.kind=="idle_capacity")|"\(.kind) \(.payload.issue) \(.payload.pr)"' "$BODIES")"
-check "outcome event_key and refs" "outcome:20261117-000000-7.ok.json outcome_ok 7 555" \
-    "$(jq -sr '.[]|select(.kind=="outcome_ok")|"\(.event_key) \(.kind) \(.payload.issue) \(.payload.pr)"' "$BODIES")"
+check "outcome eventKey and refs" "outcome:20261117-000000-7.ok.json outcome_ok 7 555" \
+    "$(jq -sr '.[]|select(.kind=="outcome_ok")|"\(.eventKey) \(.kind) \(.payload.issue) \(.payload.pr)"' "$BODIES")"
+check "spooled JSON uses camelCase eventKey/occurredAt, no snake_case" "0 0" \
+    "$(jq -s '[.[]|select(has("eventKey") and has("occurredAt"))]|length' "$BODIES" | awk '{print ($1==2)?"0":"1"}') $(grep -cE 'event_key|occurred_at' "$BODIES" || true)"
 check "secret lines are dropped from the body" "0" "$(grep -cE 'hunter2|ghp_' "$BODIES" || true)"
 check "a secret-named outcome field is redacted" "[redacted]" "$(jq -sr '.[]|select(.kind=="outcome_ok")|.payload.text|fromjson|.token' "$BODIES")"
 check "ordinary lines are kept" "1" "$(grep -c 'Idle capacity: 2 slots' "$BODIES")"

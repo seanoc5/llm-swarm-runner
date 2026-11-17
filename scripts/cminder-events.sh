@@ -21,8 +21,8 @@
 #      corpusminder outage costs one short timeout per sweep, never more; the
 #      spooled bodies are retried on the next sweep.
 #
-# event_key is the item's file name (outcomes: "outcome:<file name>"); the
-# receiver is idempotent on it. Payload: swarm, kind, occurred_at, payload
+# eventKey is the item's file name (outcomes: "outcome:<file name>"); the
+# receiver is idempotent on it. Payload: swarm, kind, occurredAt, payload (camelCase: corpusminder's SwarmEventRequest has no snake_case mapping)
 # {issue, pr, text (first lines of the body)}. Lines that look like tokens or
 # keys are dropped before anything is written to the spool.
 #
@@ -97,14 +97,14 @@ first_num() { if [[ "$2" =~ $1 ]]; then printf '%s' "${BASH_REMATCH[1]}"; fi; }
 # file_key <key> -> a filesystem-safe name.
 safe() { printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'; }
 
-# enqueue <event_key> <kind> <occurred_at> <issue> <pr> <text>
+# enqueue <eventKey> <kind> <occurredAt> <issue> <pr> <text>
 enqueue() {
     local key="$1" kind="$2" at="$3" issue="$4" pr="$5" text="$6" f
     f="$(safe "$key")"
     [ -e "$sent/$f" ] || [ -e "$spool/$f.json" ] && return 0
     jq -n --arg k "$key" --arg s "$swarm_name" --arg kind "$kind" --arg at "$at" \
         --arg issue "$issue" --arg pr "$pr" --arg text "$text" '
-        {event_key:$k, swarm:$s, kind:$kind, occurred_at:$at,
+        {eventKey:$k, swarm:$s, kind:$kind, occurredAt:$at,
          payload:({text:$text}
                   + (if $issue != "" then {issue:($issue|tonumber)} else {} end)
                   + (if $pr != "" then {pr:($pr|tonumber)} else {} end))}' \
