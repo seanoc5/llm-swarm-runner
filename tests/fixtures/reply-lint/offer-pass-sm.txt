@@ -1,0 +1,6 @@
+Both fixes are ready.
+
+Do now: merge both.
+```
+sm 972 && sm 974
+```

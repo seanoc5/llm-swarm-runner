@@ -1,0 +1,6 @@
+The fix is green.
+
+Do now: wait for CI, then merge.
+```
+cd /opt/work/x && scripts/ci-wait.sh 9 && sm 9
+```

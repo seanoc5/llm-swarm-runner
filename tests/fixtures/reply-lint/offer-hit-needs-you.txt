@@ -1,0 +1,6 @@
+Two fixes are ready.
+
+- **A1** The label needs clearing before the worker restarts (yes/no)
+  ```
+  gh issue edit 12 --remove-label blocked && scripts/requeue.sh 12 brief.md
+  ```

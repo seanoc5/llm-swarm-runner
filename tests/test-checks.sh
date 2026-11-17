@@ -47,4 +47,10 @@ set +e; out="$("$RUN" reply "$REP")"; set -e
 check "reply: repeat-item is emitted with severity warn" "repeat-item warn" "$(jq -r 'select(.check=="repeat-item")|"\(.check) \(.severity)"' <<<"$out" | sort -u)"
 check "reply: repeat-item output has the documented shape" "" "$(jq -c "select($SHAPE|not)" <<<"$out")"
 check "reply: repeat-item adds no error severity" "0" "$(jq -r 'select(.check=="repeat-item" and .severity=="error")' <<<"$out" | grep -c . || true)"
+# offer-to-act (#981): warn on the reply path, so it never fails the check
+OFR="$ROOT/tests/fixtures/reply-lint/offer-hit-issue-edit.txt"
+set +e; out="$("$RUN" reply "$OFR")"; set -e
+check "reply: offer-to-act is emitted with severity warn" "offer-to-act warn" "$(jq -r 'select(.check=="offer-to-act")|"\(.check) \(.severity)"' <<<"$out" | sort -u)"
+check "reply: offer-to-act output has the documented shape" "" "$(jq -c "select($SHAPE|not)" <<<"$out")"
+check "reply: offer-to-act adds no error severity" "0" "$(jq -r 'select(.check=="offer-to-act" and .severity=="error")' <<<"$out" | grep -c . || true)"
 echo "all checks tests passed"

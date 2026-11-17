@@ -56,7 +56,7 @@
 #      (still failing after the nudge; stop_hook_active, so no second block).
 #      COORD_REPLY_LINT=0 turns it off. Runs in split mode too.
 #      The lede-identifier rule (#979) only warns: it logs coord.reply_lint.hit rules=lede-identifier
-#      and never blocks unless COORD_REPLY_LINT_LEDE=block (off drops it; default warn). repeat-item (#980) is the same via COORD_REPLY_LINT_REPEAT.
+#      and never blocks unless COORD_REPLY_LINT_LEDE=block (off drops it; default warn). repeat-item (#980) is the same via COORD_REPLY_LINT_REPEAT, offer-to-act (#981) via COORD_REPLY_LINT_OFFER.
 #
 #   6. Hand-written Needs-you list and stale prompt (issue #964). On Stop (once
 #      per reply chain) and, in split mode, on UserPromptSubmit: if
@@ -171,11 +171,11 @@ reply_lint_message() {
     [ -n "$text" ] || return 0
     hits="$(printf '%s\n' "$text" | "$(cd "$(dirname "$0")" && pwd)/lint-coordinator-reply.sh" --project "$project" 2>/dev/null)" && return 0
     [ -n "$hits" ] || return 0
-    # lede-identifier (issue #979) and repeat-item (issue #980) are warn-only by default:
+    # lede-identifier (issue #979), repeat-item (issue #980) and offer-to-act (issue #981) are warn-only by default:
     # warn logs the hit but never blocks; block treats it like any rule; off drops it.
-    # COORD_REPLY_LINT_LEDE / COORD_REPLY_LINT_REPEAT.
+    # COORD_REPLY_LINT_LEDE / COORD_REPLY_LINT_REPEAT / COORD_REPLY_LINT_OFFER.
     local rule mode
-    for rule in lede-identifier:LEDE repeat-item:REPEAT; do
+    for rule in lede-identifier:LEDE repeat-item:REPEAT offer-to-act:OFFER; do
         mode="COORD_REPLY_LINT_${rule#*:}"; mode="${!mode:-warn}"; rule="${rule%%:*}"
         case "$mode" in
             block) ;;
