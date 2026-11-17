@@ -91,7 +91,7 @@ if [ "\$1" = "pr" ] && [ "\$2" = "view" ]; then
                 [ "\$prev" = "--jq" ] && JQ_EXPR="\$arg"
                 prev="\$arg"
             done
-            printf '%s' "\$GH_COMMENTS_JSON" | jq -r "\$JQ_EXPR"
+            printf '%s' "\$GH_COMMENTS_JSON" | jq -r "\${JQ_EXPR:-.}"
         elif printf '%s\n' "\$*" | grep -q -- 'last // empty'; then
             # LATEST_VERDICT's query ends '| last // empty'; ROUNDS_DONE's
             # now also contains 'capture(' (issue #601's actor extraction),
@@ -1643,5 +1643,26 @@ unset PR_READY_CWD GH_SHA
 grep -q 'repo lints skipped: working tree has uncommitted changes' "$TEST_DIR/out.log" || red "expected the skip line: $(cat "$TEST_DIR/out.log")"
 green "dirty tree skips the lint with a visible line"
 
+
+heading "Test 66 (issue #984 cost): PR_READY_REUSE_REVIEW=1 reuses an existing review of the current head instead of starting one"
+printf '<!-- BLIND_MERGE_RISK: medium -->\nsome change\n' > "$BODY_FILE"
+: > "$LABELS_FILE"
+make_fake_review 0
+GH_COMMENTS_JSON='{"comments":[{"body":"<!-- SWARM_SELF_REVIEW: APPROVE actor=coordinator head=deadbeef -->\nok"}]}'
+PR_READY_REUSE_REVIEW=1 rc=0; PR_READY_REUSE_REVIEW=1 run_pr_ready || rc=$?
+[ ! -s "$FAKE_REVIEW_LOG" ] || red "review must not start when a marker names the head: $(cat "$FAKE_REVIEW_LOG")"
+[ "$rc" -eq 0 ] || red "expected exit 0 got $rc: $(cat "$TEST_DIR/out.log")"
+# a marker for an OLDER head does not count; a BLOCK on this head refuses
+GH_COMMENTS_JSON='{"comments":[{"body":"<!-- SWARM_SELF_REVIEW: APPROVE actor=worker head=cafe0001 -->\nold"}]}'
+: > "$FAKE_REVIEW_LOG"
+PR_READY_REUSE_REVIEW=1 rc=0; PR_READY_REUSE_REVIEW=1 run_pr_ready || rc=$?
+[ -s "$FAKE_REVIEW_LOG" ] || red "stale-head marker must not suppress the review"
+GH_COMMENTS_JSON='{"comments":[{"body":"<!-- SWARM_SELF_REVIEW: BLOCK actor=coordinator head=deadbeef -->\nno"}]}'
+: > "$FAKE_REVIEW_LOG"
+PR_READY_REUSE_REVIEW=1 rc=0; PR_READY_REUSE_REVIEW=1 run_pr_ready || rc=$?
+GH_COMMENTS_JSON=
+[ "$rc" -eq 2 ] || red "BLOCK on current head must refuse (2), got $rc"
+[ ! -s "$FAKE_REVIEW_LOG" ] || red "BLOCK reuse must not start a review"
+green "reuse: current-head marker skips review, stale marker does not, BLOCK refuses"
 
 green "ALL TESTS PASSED"

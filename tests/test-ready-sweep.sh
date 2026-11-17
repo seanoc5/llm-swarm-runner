@@ -56,7 +56,7 @@ chmod +x "$TEST_DIR/fake-pr-ready.sh"
 
 run_sweep() {
     : > "$READY_LOG"
-    PATH="$TEST_DIR/shims:$PATH" PR_READY_SCRIPT="$TEST_DIR/fake-pr-ready.sh" "$SWEEP" "$@" > "$TEST_DIR/out.log" 2>&1
+    READY_SWEEP_STATE_DIR="$TEST_DIR/state" PATH="$TEST_DIR/shims:$PATH" PR_READY_SCRIPT="$TEST_DIR/fake-pr-ready.sh" "$SWEEP" "$@" > "$TEST_DIR/out.log" 2>&1
 }
 
 cat > "$FIXTURE" <<'EOF'
@@ -261,5 +261,50 @@ want='#81 stale-wait: waiting on #1461, which merged at 2026-10-15T06:52:00Z
 #83 stale-wait: waiting on #1461, which merged at 2026-10-15T06:52:00Z'
 [ "$(cat "$TEST_DIR/out.log")" = "$want" ] || red "unexpected stale-wait output: $(cat "$TEST_DIR/out.log")"
 green "stale waits reported for drafts and label-held PRs only"
+
+heading "Test 13 (issue #984): a lone swarm-hold:ci with green CI and no banner is retried; anything else is left alone"
+G='[{"name":"unit","status":"COMPLETED","conclusion":"SUCCESS"}]'
+P='[{"name":"unit","status":"IN_PROGRESS","conclusion":""}]'
+R='[{"name":"unit","status":"COMPLETED","conclusion":"FAILURE"}]'
+CI='[{"name":"swarm-hold:ci"}]'
+cat > "$FIXTURE" <<JSON
+[{"number": 11, "isDraft": false, "labels": $CI, "body": "body", "statusCheckRollup": $G},
+ {"number": 91, "isDraft": false, "labels": $CI, "body": "body", "statusCheckRollup": $P},
+ {"number": 92, "isDraft": false, "labels": $CI, "body": "body", "statusCheckRollup": $R},
+ {"number": 93, "isDraft": false, "labels": [{"name":"swarm-hold:ci"},{"name":"swarm-hold:coordinator"}], "body": "body", "statusCheckRollup": $G},
+ {"number": 94, "isDraft": false, "labels": $CI, "body": "> ⛔ **COORDINATOR HOLD** — x\nbody", "statusCheckRollup": $G},
+ {"number": 95, "isDraft": false, "labels": [{"name":"swarm-hold:review"}], "body": "body", "statusCheckRollup": $G},
+ {"number": 96, "isDraft": false, "labels": $CI, "body": "body", "statusCheckRollup": []},
+ {"number": 97, "isDraft": false, "labels": [], "body": "body", "statusCheckRollup": $G}]
+JSON
+echo '{}' > "$STATES"
+run_sweep || red "expected exit 0: $(cat "$TEST_DIR/out.log")"
+[ "$(tr '\n' ' ' < "$READY_LOG")" = "11 " ] || red "expected pr-ready on 11 only, got: $(tr '\n' ' ' < "$READY_LOG")"
+grep -qx '#11 ci-hold-green: readied' "$TEST_DIR/out.log" || red "expected readied line: $(cat "$TEST_DIR/out.log")"
+green "pending, red, no-check, coordinator-held, bannered, review-held and unlabelled PRs keep their labels untouched"
+
+heading "Test 14 (issue #984 cost): a hung review is started at most once per head across sweeps"
+rm -rf "$TEST_DIR/state"
+cat > "$TEST_DIR/hang-pr-ready.sh" <<HANG
+#!/usr/bin/env bash
+echo "start reuse=\${PR_READY_REUSE_REVIEW:-}" >> "$TEST_DIR/starts.log"
+sleep 30
+HANG
+chmod +x "$TEST_DIR/hang-pr-ready.sh"
+: > "$TEST_DIR/starts.log"
+cat > "$FIXTURE" <<JSON
+[{"number": 11, "isDraft": false, "labels": $CI, "body": "body", "headRefOid": "aaaaaaa1", "statusCheckRollup": $G}]
+JSON
+for i in 1 2; do
+    READY_SWEEP_PR_READY_TIMEOUT=1 READY_SWEEP_STATE_DIR="$TEST_DIR/state" PATH="$TEST_DIR/shims:$PATH" PR_READY_SCRIPT="$TEST_DIR/hang-pr-ready.sh" "$SWEEP" > "$TEST_DIR/out.log" 2>&1 || red "sweep $i failed"
+done
+[ "$(wc -l < "$TEST_DIR/starts.log")" = "1" ] || red "expected 1 review start across 2 sweeps: $(cat "$TEST_DIR/starts.log")"
+grep -q "reuse=1" "$TEST_DIR/starts.log" || red "sweep must set PR_READY_REUSE_REVIEW=1"
+grep -q "retry already spent" "$TEST_DIR/out.log" || red "second sweep should report spent retry: $(cat "$TEST_DIR/out.log")"
+# a new head earns a new attempt
+sed -i s/aaaaaaa1/bbbbbbb2/ "$FIXTURE"
+READY_SWEEP_PR_READY_TIMEOUT=1 READY_SWEEP_STATE_DIR="$TEST_DIR/state" PATH="$TEST_DIR/shims:$PATH" PR_READY_SCRIPT="$TEST_DIR/hang-pr-ready.sh" "$SWEEP" > "$TEST_DIR/out.log" 2>&1
+[ "$(wc -l < "$TEST_DIR/starts.log")" = "2" ] || red "new head should allow one more start"
+green "hung review: one start per head, none on repeat sweeps"
 
 green "ALL TESTS PASSED"

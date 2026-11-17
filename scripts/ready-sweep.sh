@@ -12,7 +12,7 @@
 # review-block and ci-failing need a fix first, so they are not retried
 # (ci-failing is reported instead; see issue #729 below).
 #
-# The retry costs no extra self-review round: pr-ready.sh skips review when
+# The ci-pending/ci-unknown retry costs no extra self-review round: pr-ready.sh skips review when
 # the banner's sha= still matches the head commit. Run from inside the
 # target repo's checkout (gh resolves the repo from cwd).
 #
@@ -52,6 +52,31 @@ DRY_RUN=0
 DRAFTS="$(gh pr list --state open --limit 100 --json number,body,headRefOid,headRefName,statusCheckRollup,isDraft,labels)" \
     || { echo "ready-sweep: ERROR: gh pr list failed" >&2; exit 1; }
 CANDIDATES="$(jq -r '.[] | (.body // "" | capture("(?m)^<!-- SWARM_DRAFT_REASON: (?<r>ci-pending|ci-unknown) sha=").r) as $r | "\(.number) \($r)"' <<<"$DRAFTS")"
+
+# issue #984: a PR left carrying ONLY swarm-hold:ci with no banner and CI green
+# on the live head. Typical path: a fix push re-added the label (CI pending),
+# the CI-green retry hit pr-ready.sh's exit 3 because a coordinator hold was on,
+# and the hold-lift (comment, banner, label removal) never re-ran pr-ready.sh,
+# so swarm-merge.sh refused until someone removed the label by hand. Retry it.
+# Guards: the label set is exactly {swarm-hold:ci} (any coordinator / operator /
+# review / bare hold label means someone else owns the PR), no COORDINATOR HOLD
+# banner and no SWARM_DRAFT_REASON banner (those have their own paths above), and
+# every newest-per-check run is SUCCESS/NEUTRAL/SKIPPED with at least one check,
+# so the label is never touched while CI is pending or red. pr-ready.sh stays the
+# only thing that removes it (it re-checks CI and the hold itself).
+CI_HOLD_GREEN="$(jq -r "$CI_ROLLUP_DROP_LIVENESS_JQ"'.[]
+  | select([(.labels // [])[] | (.name // "") | select(test("^swarm-hold(:.*)?$"))] == ["swarm-hold:ci"])
+  | select((.body // "") | (test("<!-- SWARM_DRAFT_REASON:") or test("(?m)^> ⛔ \\*\\*COORDINATOR HOLD\\*\\*")) | not)
+  | (.statusCheckRollup // []
+     | ci_real
+     | group_by((.workflowName // "") + "\u0000" + (.name // .context // ""))
+     | map(max_by(.completedAt // .startedAt // .createdAt // ""))) as $r
+  | select(($r | length) > 0 and all($r[]; ((.status // "COMPLETED") == "COMPLETED")
+        and (((.conclusion // .state // "") | test("^(SUCCESS|NEUTRAL|SKIPPED)$")))))
+  | "\(.number) ci-hold-green \(.headRefOid // "nohead")"' <<<"$DRAFTS")"
+if [ -n "$CI_HOLD_GREEN" ]; then
+    CANDIDATES="$(printf '%s\n%s' "$CANDIDATES" "$CI_HOLD_GREEN" | sed '/^$/d')"
+fi
 
 # issue #729: a parked PR whose CI went red has no live owner (its worker ended
 # after writing an fyi note), so report it; coordinator-watch.sh turns the line
@@ -110,14 +135,30 @@ jq -r "$CI_ROLLUP_DROP_LIVENESS_JQ"'.[]
         and (((.conclusion // .state // "") | test("^(SUCCESS|NEUTRAL|SKIPPED)$")))))
   | "#\(.number) parked-green: banner-less draft, green CI (risk=\((.body // "") | (capture("BLIND_MERGE_RISK: (?<r>low|medium|high)").r) // "unknown"), issue=\((.headRefName // "") | (capture("issue-(?<i>[0-9]+)").i) // "none"), sha=\(.headRefOid // "unknown"))"' <<<"$DRAFTS"
 
-while read -r pr reason; do
+while read -r pr reason sha; do
     [ -n "$pr" ] || continue
     if [ "$DRY_RUN" = "1" ]; then
         echo "#$pr $reason: would retry (dry run)"
         continue
     fi
+    reuse=0
+    if [ "$reason" = "ci-hold-green" ]; then
+        # issue #984 cost guard: bannerless, so pr-ready.sh cannot tell a retry from a
+        # first run. One attempt per (PR, head sha), recorded BEFORE the call: a review
+        # that outlives the timeout below posts nothing and would otherwise be restarted
+        # (paid) every sweep. A new push (new sha) earns a new attempt.
+        state_dir="${READY_SWEEP_STATE_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || echo .)/.swarm/ready-sweep-state}"
+        mark="$state_dir/retry-$pr-${sha:-nohead}"
+        if [ -e "$mark" ]; then
+            echo "#$pr $reason: still draft (retry already spent on ${sha:0:7}; push or remove the label by hand)"
+            continue
+        fi
+        mkdir -p "$state_dir" 2>/dev/null || true
+        : > "$mark" 2>/dev/null || true
+        reuse=1
+    fi
     rc=0
-    timeout "${READY_SWEEP_PR_READY_TIMEOUT:-300}" "$PR_READY" "$pr" >/dev/null 2>&1 || rc=$?
+    PR_READY_REUSE_REVIEW="$reuse" timeout "${READY_SWEEP_PR_READY_TIMEOUT:-300}" "$PR_READY" "$pr" >/dev/null 2>&1 || rc=$?
     if [ "$rc" = "0" ]; then
         echo "#$pr $reason: readied"
     else
