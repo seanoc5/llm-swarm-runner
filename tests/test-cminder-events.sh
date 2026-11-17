@@ -34,6 +34,7 @@ printf '%s\n' "$*" >> "$CALLS"
 case "$(cat "$STATUS_FILE")" in
     fail) printf 500 ;;
     reject) printf 422 ;;
+    unauth) printf 404 ;;
     *) printf 200 ;;
 esac
 exit 0
@@ -100,14 +101,24 @@ check "spool drained" "0" "$(find "$P/.swarm/cminder-events-spool" -name '*.json
 "$EV" sweep --project "$P"
 check "and never posts again" "5" "$(calls)"
 
+# ── a 404 (endpoint not deployed yet) keeps events spooled, not discarded ────
+printf 'Early item.\n' > "$P/.swarm/coord-inbox/20261117T025000Z-fyi-777-888.md"
+echo unauth > "$STATUS_FILE"
+"$EV" sweep --project "$P" 2>/dev/null
+check "a 404 keeps the event spooled" "1" "$(find "$P/.swarm/cminder-events-spool" -name '*.json' | wc -l | tr -d ' ')"
+check "a 404 rejects nothing" "no" "$([ -d "$P/.swarm/cminder-events-rejected" ] && echo yes || echo no)"
+echo ok > "$STATUS_FILE"
+"$EV" sweep --project "$P"
+check "and it posts once the endpoint exists" "0" "$(find "$P/.swarm/cminder-events-spool" -name '*.json' | wc -l | tr -d ' ')"
+
 # ── a permanent 4xx must not block the queue ─────────────────────────────────
 printf 'Bad item.\n' > "$P/.swarm/coord-inbox/20261117T030000Z-fyi-555-666.md"
 echo reject > "$STATUS_FILE"
 "$EV" sweep --project "$P"
-check "a 422 is attempted once" "6" "$(calls)"
+check "a 422 is attempted once" "8" "$(calls)"
 check "a 422 moves the body to the rejected folder" "1" "$(find "$P/.swarm/cminder-events-rejected" -name '*.json' | wc -l | tr -d ' ')"
 check "a 422 leaves nothing spooled" "0" "$(find "$P/.swarm/cminder-events-spool" -name '*.json' | wc -l | tr -d ' ')"
 check "the failure is logged" "1" "$(grep -c 'rejected with 422' "$P/.swarm/cminder-events.log")"
 echo ok > "$STATUS_FILE"
 "$EV" sweep --project "$P"
-check "a rejected item is not retried" "6" "$(calls)"
+check "a rejected item is not retried" "8" "$(calls)"

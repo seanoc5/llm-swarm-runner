@@ -28,7 +28,7 @@
 #
 # Knobs: CMINDER_EVENTS_TIMEOUT_SECS (5), CMINDER_EVENTS_MAX_AGE_DAYS (2),
 # CMINDER_EVENTS_MAX_LINES (20), CMINDER_EVENTS_MAX_BATCH (40 posts per sweep).
-# Failures are logged to <project>/.swarm/cminder-events.log; a 4xx other than 408/429
+# Failures are logged to <project>/.swarm/cminder-events.log; a 4xx other than 401/403/404/408/429
 # moves that body to .swarm/cminder-events-rejected/ so it cannot block the queue.
 set -uo pipefail
 
@@ -168,9 +168,10 @@ while IFS= read -r body; do
             --data-binary "@$body" "$url" 2>>"$log")" || code=000
     case "$code" in
         2??) : > "$sent/$(basename "$body" .json)"; rm -f "$body" ;;
-        # A permanent client error (not request-timeout / rate-limit) would block the
-        # queue forever: park the body for a human and move on.
-        4??) if [ "$code" = 408 ] || [ "$code" = 429 ]; then
+        # A permanent client error would block the queue forever: park the body for a
+        # human and move on. Not 401/403/404 (wrong key, endpoint not deployed yet:
+        # fixable without losing events), nor 408/429 (timeout, rate limit).
+        4??) if [[ "$code" =~ ^(401|403|404|408|429)$ ]]; then
                  echo "$(date -u +%FT%TZ) post got $code; $(basename "$body") stays spooled" >> "$log"; break
              fi
              echo "$(date -u +%FT%TZ) post rejected with $code; $(basename "$body") moved to cminder-events-rejected/" >> "$log"

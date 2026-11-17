@@ -59,7 +59,7 @@ set and `CMINDER_EVENTS=1` in `<project>/.swarm/.env`, `coordinator-watch.sh` ru
   and leaves a marker in `.swarm/cminder-events-sent/`. The first failed POST ends
   that sweep (one `CMINDER_EVENTS_TIMEOUT_SECS`, default 5, per outage per sweep);
   spooled items go out on the next sweep, oldest first. Failures are logged to
-  `.swarm/cminder-events.log`. A permanent 4xx (not 408/429) moves that body to
+  `.swarm/cminder-events.log`. A permanent 4xx (not 401/403/404/408/429, which stay spooled until the key or endpoint is fixed) moves that body to
   `.swarm/cminder-events-rejected/` so it cannot block the queue.
 - **No secrets:** lines that look like tokens or keys (`ghp_...`, `sk-...`, `Bearer ...`,
   `password:` / `api_key=` / `token:` assignments, private-key headers, the configured
