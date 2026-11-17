@@ -94,3 +94,13 @@ check "hook ring: the reply to the hook's own doorbell is recorded" "20261117T03
 P4="$T/proj4"; mkdir -p "$P4/.swarm"; echo "$(( $(date +%s) - 200000 ))" > "$P4/.swarm/coord-typed-ring"
 "$REC" --project "$P4" < "$FX/good.txt"
 check "recorder: a stale doorbell (over a day) records nothing" "no" "$([ -d "$P4/.swarm/coordinator-reports" ] && echo yes || echo no)"
+
+# an item written in the same second as the previous report is not named by the next one
+P5="$T/proj5"; mkdir -p "$P5/.swarm/coord-inbox"
+printf 'a\n' > "$P5/.swarm/coord-inbox/20261117T040000Z-a-1-1.md"
+echo "$(( $(date +%s) - 3 ))" > "$P5/.swarm/coord-typed-ring"
+"$REC" --project "$P5" < "$FX/good.txt"
+sleep 2; printf 'b\n' > "$P5/.swarm/coord-inbox/20261117T040005Z-b-2-2.md"
+sleep 1; date +%s > "$P5/.swarm/coord-typed-ring"; sleep 1
+"$REC" --project "$P5" < "$FX/good.txt"
+check "recorder: the second report is keyed by the new item only" "20261117T040000Z-a-1-1.md 20261117T040005Z-b-2-2.md" "$(ls "$P5/.swarm/coordinator-reports" | grep '\.md$' | paste -sd' ' -)"
