@@ -92,6 +92,20 @@ out="$(jq -r "$CI_ROLLUP_DROP_LIVENESS_JQ"'.statusCheckRollup | ci_real | map(.c
 [ "$out" = "lint" ] || red "ci_real kept: $out"
 green "ci_real rollup def keeps only the real check"
 
+# issue #991: a concurrency-cancelled run next to the newer run of the same name.
+OLD='"startedAt":"2026-10-19T23:20:00Z"'; NEW='"startedAt":"2026-10-19T23:25:00Z"'
+run_checks "[{\"name\":\"Fast\",\"bucket\":\"cancel\",\"link\":\"a\",$OLD},{\"name\":\"Fast\",\"bucket\":\"pass\",\"link\":\"b\",$NEW}]" 0
+expect "cancelled-then-passed same-name pair reads green (rc 0)" 0
+ci_checks_output_has_bad_row "$CHECKS_OUT" && red "superseded cancel row still reads as a bad row"
+run_checks "[{\"name\":\"Fast\",\"bucket\":\"pass\",\"link\":\"a\",$OLD},{\"name\":\"Fast\",\"bucket\":\"cancel\",\"link\":\"b\",$NEW}]" 0
+ci_checks_output_has_bad_row "$CHECKS_OUT" || red "a NEWEST cancelled run must stay a bad row"
+green "passed-then-cancelled keeps the cancel row (genuinely cancelled)"
+run_checks "[{\"name\":\"Fast\",\"bucket\":\"cancel\",\"link\":\"a\",$OLD},{\"name\":\"Fast\",\"bucket\":\"fail\",\"link\":\"b\",$NEW}]" 1
+expect "cancelled-then-failed still reads red" 1
+run_checks '[{"name":"Fast","bucket":"cancel","link":"a"},{"name":"Fast","bucket":"pass","link":"b"}]' 0
+ci_checks_output_has_bad_row "$CHECKS_OUT" || red "without startedAt the cancel row must be kept (fail closed)"
+green "no startedAt: cancel row kept (fails closed)"
+
 # swarm-merge.sh has no CI reader of its own: its CI gate is ci-wait.sh, which
 # goes through ci_pr_checks (proved above and in test-shape-ci-wait.sh).
 if grep -nE 'gh pr checks|statusCheckRollup' "$SCRIPTS/swarm-merge.sh" | grep -v '^[0-9]*:[[:space:]]*#' ; then
