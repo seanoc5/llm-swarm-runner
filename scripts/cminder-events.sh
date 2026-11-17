@@ -88,6 +88,10 @@ scrub() {
     done
 }
 
+# first_num <ERE with one group> <string>: the group's first match, or nothing.
+# (Built-ins, not `| head -1`: an early-exit reader races SIGPIPE under pipefail.)
+first_num() { if [[ "$2" =~ $1 ]]; then printf '%s' "${BASH_REMATCH[1]}"; fi; }
+
 # file_key <key> -> a filesystem-safe name.
 safe() { printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'; }
 
@@ -114,9 +118,11 @@ while IFS= read -r f; do
     # <UTC-timestamp>-<kind>-<pid>-<rand>.md
     kind="$(sed -E 's/^[0-9]{8}T[0-9]{6}Z-(.*)-[0-9]+-[0-9]+\.md$/\1/' <<<"$base")"
     [ "$kind" != "$base" ] || kind=inbox
-    text="$(head -n "$max_lines" "$f" | scrub | head -c 4000)"
-    issue="$(grep -oiE '(issue #|iss-)[0-9]+' <<<"$text" | head -1 | grep -oE '[0-9]+$' || true)"
-    pr="$(grep -oiE '(PR #|pull/)[0-9]+' <<<"$text" | head -1 | grep -oE '[0-9]+$' || true)"
+    mapfile -n "$max_lines" -t lines < "$f"
+    text="$(printf '%s\n' "${lines[@]}" | scrub)"
+    text="${text:0:4000}"
+    [[ "$text" =~ ([Ii]ssue\ \#|iss-)([0-9]+) ]] && issue="${BASH_REMATCH[2]}" || issue=""
+    [[ "$text" =~ ([Pp][Rr]\ \#|pull/)([0-9]+) ]] && pr="${BASH_REMATCH[2]}" || pr=""
     enqueue "$base" "$kind" "$(iso_mtime "$f")" "$issue" "$pr" "$text"
 done < <(find "$inbox" "$inbox/processed" -maxdepth 1 -name '*.md' -type f -mtime "-$max_age" 2>/dev/null | sort)
 
@@ -129,11 +135,12 @@ while IFS= read -r f; do
     text="$(jq -c --arg re "$SECRET_RE" '
         walk(if type == "object" then with_entries(if (.key | test("token|secret|passw|api.?key|authorization|credential"; "i")) then .value = "[redacted]" else . end)
              elif type == "string" then (if test($re) then "[redacted]" else .[0:500] end) else . end)' "$f" 2>/dev/null \
-        | scrub | head -c 4000)"
+        | scrub)"
+    text="${text:0:4000}"
     [ -n "$text" ] || continue
-    issue="$(jq -r '.issue // empty' "$f" 2>/dev/null | grep -E '^[0-9]+$' || true)"
-    [ -n "$issue" ] || issue="$(grep -oE 'wt-issue-[0-9]+' <<<"$f" | head -1 | grep -oE '[0-9]+$' || true)"
-    pr="$(jq -r '.pr // empty' "$f" 2>/dev/null | grep -E '^[0-9]+$' || true)"
+    issue="$(first_num '^([0-9]+)$' "$(jq -r '.issue // empty' "$f" 2>/dev/null)")"
+    [ -n "$issue" ] || issue="$(first_num 'wt-issue-([0-9]+)' "$f")"
+    pr="$(first_num '^([0-9]+)$' "$(jq -r '.pr // empty' "$f" 2>/dev/null)")"
     enqueue "outcome:$base" "$kind" "$(iso_mtime "$f")" "$issue" "$pr" "$text"
 done < <(find "$wt_parent" -maxdepth 6 -path '*/wt-issue-*/.swarm/tasks/done/*' \( -name '*.ok.json' -o -name '*.err.json' \) -type f -mtime "-$max_age" 2>/dev/null | sort)
 
