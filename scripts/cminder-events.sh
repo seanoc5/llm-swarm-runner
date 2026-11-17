@@ -97,15 +97,16 @@ first_num() { if [[ "$2" =~ $1 ]]; then printf '%s' "${BASH_REMATCH[1]}"; fi; }
 # file_key <key> -> a filesystem-safe name.
 safe() { printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'; }
 
-# enqueue <eventKey> <kind> <occurredAt> <issue> <pr> <text>
+# enqueue <eventKey> <kind> <occurredAt> <issue> <pr> <text> [extra payload JSON object]
 enqueue() {
-    local key="$1" kind="$2" at="$3" issue="$4" pr="$5" text="$6" f
+    local key="$1" kind="$2" at="$3" issue="$4" pr="$5" text="$6" extra="${7:-}" f
+    [ -n "$extra" ] || extra="{}"
     f="$(safe "$key")"
     [ -e "$sent/$f" ] || [ -e "$spool/$f.json" ] && return 0
     jq -n --arg k "$key" --arg s "$swarm_name" --arg kind "$kind" --arg at "$at" \
-        --arg issue "$issue" --arg pr "$pr" --arg text "$text" '
+        --arg issue "$issue" --arg pr "$pr" --arg text "$text" --argjson extra "$extra" '
         {eventKey:$k, swarm:$s, kind:$kind, occurredAt:$at,
-         payload:({text:$text}
+         payload:({text:$text} + $extra
                   + (if $issue != "" then {issue:($issue|tonumber)} else {} end)
                   + (if $pr != "" then {pr:($pr|tonumber)} else {} end))}' \
         > "$spool/.tmp.$f" 2>/dev/null && mv -f "$spool/.tmp.$f" "$spool/$f.json" || rm -f "$spool/.tmp.$f"
@@ -127,6 +128,22 @@ while IFS= read -r f; do
     [[ "$text" =~ ([Pp][Rr]\ \#|pull/)([0-9]+) ]] && pr="${BASH_REMATCH[2]}" || pr=""
     enqueue "$base" "$kind" "$(iso_mtime "$f")" "$issue" "$pr" "$text"
 done < <(find "$inbox" "$inbox/processed" -maxdepth 1 -name '*.md' -type f -mtime "-$max_age" 2>/dev/null | sort)
+
+# Coordinator wake reports (issue #863): coord-report-record.sh keeps the reply after each
+# doorbell in .swarm/coordinator-reports/<trigger>.md (+ .meta.json); each goes out as one
+# coordinator_report event with the whole report (scrubbed, capped) and its trigger item names.
+reports="$swarm_dir/coordinator-reports"
+report_max="${CMINDER_EVENTS_REPORT_MAX_CHARS:-8000}"
+while IFS= read -r f; do
+    [ -f "$f" ] || continue
+    base="$(basename "$f")"
+    text="$(scrub < "$f")"
+    text="${text:0:$report_max}"
+    [ -n "$text" ] || continue
+    extra="$(jq -c '{trigger, triggers}' "${f%.md}.meta.json" 2>/dev/null || true)"
+    [ -n "$extra" ] || extra="{}"
+    enqueue "report:$base" coordinator_report "$(iso_mtime "$f")" "" "" "$text" "$extra"
+done < <(find "$reports" -maxdepth 1 -name '*.md' -type f -mtime "-$max_age" 2>/dev/null | sort)
 
 # Only this project's own worktrees (git's registry), never a sibling swarm's
 # wt-issue-N that happens to share the parent folder.

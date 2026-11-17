@@ -71,4 +71,27 @@ set and `CMINDER_EVENTS=1` in `<project>/.swarm/.env`, `coordinator-watch.sh` ru
 Tests: `tests/test-cminder-events.sh` (fake endpoint: post once, 500 spools and
 retries, `CMINDER_EVENTS=0` makes zero calls).
 
+### Coordinator wake reports and the shadow comparison (issue #863)
+
+With the same `CMINDER_EVENTS=1`, the coordinator's reply after each doorbell is mirrored
+as a `coordinator_report` event. `coord-hook.sh` (Stop) hands an accepted, lint-clean reply
+to `scripts/coord-report-record.sh` when a doorbell rang after the previous report; it
+writes `.swarm/coordinator-reports/<trigger>.md` plus `<trigger>.meta.json` (local files,
+no network). `<trigger>` is the first coord-inbox item the wake covered, without `.md`.
+The next `cminder-events.sh sweep` posts the whole report (scrubbed like inbox items, capped
+at `CMINDER_EVENTS_REPORT_MAX_CHARS`, default 8000) with `payload.trigger` and
+`payload.triggers`; `eventKey` is `report:<file name>`. Resident mode only: `COORD_MODE=split`
+rings no doorbell, so nothing is recorded there.
+
+- `scripts/score-wake-report.sh <file>` prints JSON: five equal pass/fail checks
+  (bottom-line-first, one-do-now, lettered-lists, full-urls, no-back-references) built on
+  the #811 reply checks (`docs/checks.md`), plus `score` 0-100. Offline and repeatable.
+- `scripts/compare-wake-reports.sh --shadow-dir DIR [--claude-dir DIR] [--since 7] [--json]`
+  pairs reports by trigger name across the two directories and prints per-pair scores,
+  the average and the shadow's recorded `cost_usd` (from `<trigger>.meta.json`). The
+  shadow's reports are read from a directory; fetching them from the forum waits on
+  corpusminder-spring #2221's endpoint.
+
+Tests: `tests/test-wake-report-score.sh` (fixtures in `tests/fixtures/wake-report/`).
+
 Tests: `tests/test-cminder-backend.sh` (curl is stubbed; no network).
