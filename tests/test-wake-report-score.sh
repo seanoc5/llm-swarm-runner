@@ -80,3 +80,17 @@ hook "$T/blocked.txt" >/dev/null
 check "hook: a lint-blocked reply is not recorded" "no" "$([ -d "$P2/.swarm/coordinator-reports" ] && echo yes || echo no)"
 hook "$FX/good.txt" >/dev/null
 check "hook: an accepted reply after a doorbell is recorded" "20261117T020000Z-idle-3-4.md" "$(ls "$P2/.swarm/coordinator-reports" 2>/dev/null | grep '\.md$')"
+
+# a ring the hook itself made: the reply to it (a continuation, stop_hook_active=true) is recorded
+P3="$T/proj3"; mkdir -p "$P3/.swarm/coord-inbox"
+printf 'Worker done.\n' > "$P3/.swarm/coord-inbox/20261117T030000Z-outcome-5-6.md"
+hook3() { jq -nc --rawfile m "$2" --argjson a "$1" '{stop_hook_active:$a, last_assistant_message:$m}' | CLAUDE_PROJECT_DIR="$P3" COORD_HOOK_STATE=1 COORD_INBOX_BATCH_SECS=0 "$ROOT/scripts/coord-hook.sh" Stop; }
+printf 'Nothing happened yet. Nothing to do.\n' > "$T/pre.txt"
+out="$(hook3 false "$T/pre.txt")"
+check "hook ring: the first Stop rings the doorbell and records nothing" "block|no" "$(jq -r .decision <<<"$out")|$([ -d "$P3/.swarm/coordinator-reports" ] && echo yes || echo no)"
+hook3 true "$FX/good.txt" >/dev/null
+check "hook ring: the reply to the hook's own doorbell is recorded" "20261117T030000Z-outcome-5-6.md" "$(ls "$P3/.swarm/coordinator-reports" 2>/dev/null | grep '\.md$')"
+# a doorbell older than a day is not what a reply answers
+P4="$T/proj4"; mkdir -p "$P4/.swarm"; echo "$(( $(date +%s) - 200000 ))" > "$P4/.swarm/coord-typed-ring"
+"$REC" --project "$P4" < "$FX/good.txt"
+check "recorder: a stale doorbell (over a day) records nothing" "no" "$([ -d "$P4/.swarm/coordinator-reports" ] && echo yes || echo no)"

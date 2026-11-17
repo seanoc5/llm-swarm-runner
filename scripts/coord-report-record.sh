@@ -43,6 +43,7 @@ ring="$(coord_last_ring_at "$swarm")"
 prev="$(cat "$swarm/coord-report-last" 2>/dev/null || echo 0)"
 [[ "$prev" =~ ^[0-9]+$ ]] || prev=0
 [ "$ring" -gt "$prev" ] || exit 0          # no doorbell since the last report: not a wake report
+[ "$ring" -ge $((now - 86400)) ] || exit 0   # a doorbell more than a day old is not what this reply answers
 
 # Items that arrived since the previous report (never older than a day before the ring).
 since=$(( prev > ring - 86400 ? prev : ring - 86400 ))
@@ -70,6 +71,8 @@ printf '%s\n' "$reply" > "$tmp" && mv -f "$tmp" "$f" || { rm -f "$tmp"; exit 0; 
 tj="$(printf '%s\n' "${triggers[@]:-}" | jq -R . | jq -sc 'map(select(. != ""))')"
 jq -nc --arg t "$key" --argjson tr "$tj" --argjson ring "$ring" --argjson at "$now" \
     '{trigger:$t, triggers:$tr, ring_epoch:$ring, recorded_epoch:$at}' > "${f%.md}.meta.json" 2>/dev/null || true
-printf '%s\n' "$now" > "$swarm/coord-report-last"
+# Stamp the ring, not now: the hook stamps its own ring with the time it started, which can be
+# earlier than this write, and the reply to that ring must still count as newer.
+printf '%s\n' "$ring" > "$swarm/coord-report-last"
 find "$out" -type f -mtime +14 -delete 2>/dev/null || true
 exit 0

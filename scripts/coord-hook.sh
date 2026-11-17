@@ -256,15 +256,16 @@ case "$event" in
     Stop)
         active="$(printf '%s' "$input" | jq -r '.stop_hook_active // false' 2>/dev/null || echo false)"
         lint="$(reply_lint_message)"
+        reply_lint="$lint"
         if [ "$active" != "true" ]; then
             notices="$(coord_notices)"
             [ -z "$notices" ] || lint="${lint:+$lint }$notices"
         fi
-        # Issue #863: an accepted reply (nothing blocks it) that follows a doorbell is the
+        # Issue #863: a reply the reply lint accepts (hook notices do not count) that follows a doorbell is the
         # wake report; keep it for the corpusminder mirror. Local file write only, and the
         # helper does nothing unless NEEDS_YOU_BACKEND=corpusminder and CMINDER_EVENTS=1.
         # Runs before the ring below so that ring is not mistaken for this reply's own.
-        if [ -z "$lint" ] && [ -x "$here_dir/coord-report-record.sh" ]; then
+        if [ -z "$reply_lint" ] && [ -x "$here_dir/coord-report-record.sh" ]; then
             reply_text | "$here_dir/coord-report-record.sh" --project "$project" >/dev/null 2>&1 || true
         fi
         # Split mode never rings: nothing is typed into or blocked on this session
