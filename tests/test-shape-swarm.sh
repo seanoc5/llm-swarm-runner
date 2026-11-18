@@ -54,10 +54,12 @@ sleep 0.5  # let listener finish creating dirs and enter polling loop
 
 # Helper: poll for a condition with timeout. $1 = description, $2 = test cmd
 wait_for() {
-    local desc="$1" cmd="$2" max=20
+    # 30 s ceiling, polled every 0.25 s (issue #1000): returns the moment the
+    # condition holds, so the ceiling only matters on a loaded runner.
+    local desc="$1" cmd="$2" max=120
     for ((i=0; i<max; i++)); do
         if eval "$cmd"; then return 0; fi
-        sleep 0.5
+        sleep 0.25
     done
     red "timeout waiting for: $desc"
 }
@@ -100,7 +102,9 @@ jq -e --arg id "$TASK_ID" '
 }
 green "outcome JSON: task_id, outcome, exit_code, agent, headless, duration, started, finished all correct"
 
-# Brief archived
+# Brief archived. The outcome JSON and the archive/cleanup are separate steps,
+# so poll rather than assume they have all landed (issue #1000).
+wait_for "brief archived and queue dirs drained" "[ -f .swarm/tasks/done/$TASK_ID.md ] && [ -z \"\$(ls .swarm/tasks/inbox/ 2>/dev/null)\" ] && [ -z \"\$(ls .swarm/tasks/processing/ 2>/dev/null)\" ]"
 [ -f ".swarm/tasks/done/$TASK_ID.md" ] || red "brief not archived to done/"
 green "brief archived to done/$TASK_ID.md"
 
@@ -141,6 +145,9 @@ wait_for "legacy output" '[ -f legacy-output.txt ]'
 [ "$(cat legacy-output.txt)" = "LEGACY_OK" ] || red "legacy output unexpected"
 green "legacy v1 task ran"
 
+# The archive move happens after the agent exits, i.e. after legacy-output.txt
+# appears, so poll for it rather than checking at once (issue #1000).
+wait_for "legacy archive" '[ -f .agent-task-last.md ] && [ ! -f .agent-task.md ]'
 [ -f ".agent-task-last.md" ] || red "legacy file not archived"
 [ ! -f ".agent-task.md" ] || red ".agent-task.md should have been moved"
 green "legacy v1: archived to .agent-task-last.md, original gone"
@@ -168,6 +175,10 @@ ACTUAL=$(cat sequence.txt)
 }
 green "3 tasks processed in lex order"
 
+# The third agent's sequence line lands BEFORE its outcome JSON (the listener
+# writes that after the agent exits), so wait for the files, not just the
+# lines (issue #1000: "expected 3 .ok.json files; got 2").
+wait_for "3 t4 outcome JSONs" '[ "$(ls .swarm/tasks/done/t4-*.ok.json 2>/dev/null | wc -l)" = 3 ]'
 JSON_COUNT=$(ls .swarm/tasks/done/t4-*.ok.json 2>/dev/null | wc -l)
 [ "$JSON_COUNT" = "3" ] || red "expected 3 .ok.json files; got $JSON_COUNT"
 green "3 outcome JSONs written"

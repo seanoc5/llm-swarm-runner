@@ -39,6 +39,10 @@ red()     { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 yellow()  { printf '\033[33m%s\033[0m\n' "$*"; }
 heading() { printf '\n\033[1;34m=== %s ===\033[0m\n' "$*"; }
 
+# A bare `set -e` death prints nothing, and scripts/run-all-tests.sh then can only
+# report "exited 1" (issue #1000). Name the failing line and command instead.
+trap 'rc=$?; printf "\033[31m✗ unexpected exit %s at line %s: %s\033[0m\n" "$rc" "$LINENO" "$BASH_COMMAND" >&2' ERR
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCH="$SCRIPT_DIR/../scripts/coordinator-watch.sh"
 LOAD_ENV="$SCRIPT_DIR/../scripts/_load-env.sh"
