@@ -489,6 +489,9 @@ test_husk_reap() {
         find "$tmproot/wt-issue-$d" -exec touch -d '2 hours ago' {} +
     done
     echo fresh > "$tmproot/wt-issue-22/.gradle/gc.properties"
+    # Pin 22 inside the quiet window (1 min old vs the 30m threshold) instead of
+    # relying on "just created" (issue #1002).
+    find "$tmproot/wt-issue-22" -exec touch -d "1 minute ago" {} +
 
     local fakebin="$tmproot/fakebin"
     mkdir -p "$fakebin"
@@ -509,13 +512,18 @@ exit 1
 FAKEDOCKER
     chmod +x "$fakebin/gh" "$fakebin/tmux" "$fakebin/docker"
 
+    # Pin the husk knobs so an inherited operator/CI environment cannot change the
+    # window or allowlist these fixtures were built against (issue #1002).
+    export REAP_HUSK_QUIET_MINUTES=30
+    export REAP_HUSK_ALLOWLIST=".gradle build .kotlin out .swarm node_modules"
+
     local out rc
     out="$(PATH="$fakebin:$PATH" "$LLM_SWARM_DIR/scripts/reap-orphan-worktrees.sh" \
             --dry-run --project "$project" 2>&1)" && rc=0 || rc=$?
     if [ "$rc" -ne 0 ]; then
         red "  ✗ $name: dry-run exited $rc"; echo "$out"; FAIL=$((FAIL + 1)); return
     fi
-    if ! echo "$out" | grep -q "wt-issue-20 .*remove husk"; then
+    if ! grep -q "wt-issue-20 .*remove husk" <<<"$out"; then
         red "  ✗ $name: dry-run did not flag wt-issue-20 as a husk"; echo "$out"; FAIL=$((FAIL + 1)); return
     fi
     for d in 11 20 21 22 23 24; do
@@ -537,7 +545,7 @@ FAKEDOCKER
         if [ ! -d "$tmproot/wt-issue-$d" ]; then
             red "  ✗ $name: wt-issue-$d was removed (expected kept: ${want#*:})"; echo "$out"; FAIL=$((FAIL + 1)); return
         fi
-        if ! echo "$out" | grep -q "wt-issue-$d .*${want#*:}.*skip"; then
+        if ! grep -q "wt-issue-$d .*${want#*:}.*skip" <<<"$out"; then
             red "  ✗ $name: wt-issue-$d kept without the expected reason (${want#*:})"; echo "$out"; FAIL=$((FAIL + 1)); return
         fi
     done
