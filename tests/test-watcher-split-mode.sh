@@ -40,6 +40,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# A bare `set -e` death prints nothing, and scripts/run-all-tests.sh can then only
+# report "exited 1" (issue #1000). Name the failing line and command instead.
+trap 'rc=$?; printf "\033[31m✗ unexpected exit %s at line %s: %s\033[0m\n" "$rc" "$LINENO" "$BASH_COMMAND" >&2' ERR
+
 # wait_for <secs> <cmd...>: poll a command every 0.2 s until it succeeds.
 wait_for() {
     local secs="$1" i; shift
@@ -161,7 +165,8 @@ exec "$REAL_TMUX" "\$@"
 EOF
 chmod +x "$SHIM_DIR/tmux"
 
-tmux new-session -d -s "$SESSION_NAME" -n coordinator 2>/dev/null
+tmux new-session -d -s "$SESSION_NAME" -n coordinator 2>/dev/null \
+    || red "could not start the throwaway tmux session $SESSION_NAME"
 
 # The stub "work run": archives what is in the inbox (a coordinator's triage),
 # records start and end, and runs for the number of seconds in STUB_SECS_FILE.
@@ -221,6 +226,13 @@ stop_watcher() {
     unset WATCH_PID
 }
 reset_state() {
+    # The previous phase's run may still be finishing its post-run writes
+    # (runs.log, retry-from): the stub logs "end" BEFORE the wrapper does them,
+    # and `rm -rf` racing those writes dies "Directory not empty", which under
+    # set -e ended the whole suite with no message (issue #1000). The wrapper
+    # holds this single-flight lock until it exits, so taking it means the run
+    # is truly over. First call: the lock file does not exist yet; flock makes it.
+    flock -w 20 "$PROJECT_DIR/.swarm/work-run.lock" true 2>/dev/null || true
     : > "$STUB_RUNS"
     rm -f "$FAIL_FILE" "$FAIL_ALWAYS" "$RELEASE_FILE"
     rm -rf "$INBOX_DIR" "$RUN_DIR" "$PROJECT_DIR/.swarm/work-run.lock" \

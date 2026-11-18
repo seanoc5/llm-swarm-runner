@@ -51,10 +51,12 @@ cleanup() {
 trap cleanup EXIT
 
 wait_for() {
-    local desc="$1" cmd="$2" max=20
+    # 30 s ceiling, polled every 0.25 s: a pass returns as soon as the condition
+    # holds, so the ceiling only matters on a loaded runner (issue #1000).
+    local desc="$1" cmd="$2" max=120
     for ((i=0; i<max; i++)); do
         if eval "$cmd"; then return 0; fi
-        sleep 0.5
+        sleep 0.25
     done
     red "timeout waiting for: $desc"
 }
@@ -202,7 +204,12 @@ drop_v2 "c9" "if [ ! -f attempt1-marker ]; then
 fi
 echo try >> attempts9.txt
 # <!-- SWARM_CHECK: test \"\$(wc -l < attempts9.txt)\" -ge 2 -->"
-wait_for "c9 outcome" '[ -f .swarm/tasks/done/c9.ok.json ] || [ -f .swarm/tasks/done/c9.err.json ]'
+# Wait for the FINAL record only. Attempt 1's task-done.sh err is provisional and
+# lands as c9.err.json while the retry is still pending; accepting either file
+# here raced the retry and then read a c9.ok.json that did not exist yet
+# (issue #1000). A retry that wrongly stays pinned to err never produces
+# c9.ok.json, so the wait times out and the red below still reports it.
+wait_for "c9 outcome" '[ -f .swarm/tasks/done/c9.ok.json ]'
 jq -e '.outcome == "ok" and .check_exit == 0 and .retried == true' \
     .swarm/tasks/done/c9.ok.json >/dev/null 2>&1 \
     || { cat .swarm/tasks/done/c9.ok.json 2>/dev/null || cat .swarm/tasks/done/c9.err.json; \
