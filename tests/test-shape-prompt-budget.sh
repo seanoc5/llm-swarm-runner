@@ -155,11 +155,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # the hold-label rules (label names, who lifts, old-style holds still honoured) replace
 # the draft-as-hold text in the worker and coordinator prompts; net growth is the label
 # vocabulary, ~300-800 bytes per file.
+# 2026-11-19 (#1011): coordinator 35200 -> 36200, work 25800 -> 26700. One new
+# "Auto-merge high-risk PRs" section (~950 bytes) in coordinator.md and
+# coordinator-work.md: opt-in 🔴 auto-merge behind two-model review and protected
+# paths. The gates live in swarm-merge.sh, not in the prose.
 WORKER_MAX="${WORKER_MD_MAX_BYTES:-26400}"
-COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-35200}"
+COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-36200}"
 BARE_MAX="${WORKER_BARE_MD_MAX_BYTES:-13100}"   # issue #510 trial prompt; ~7.5KB is script-parsed contract
 SHARED_MAX="${COORD_SHARED_MD_MAX_BYTES:-6400}"   # issue #767 split prompts; 6100 -> 6400 for #1017 Asks section
-WORK_MAX="${COORD_WORK_MD_MAX_BYTES:-25800}"
+WORK_MAX="${COORD_WORK_MD_MAX_BYTES:-26700}"
 CHAT_MAX="${COORD_CHAT_MD_MAX_BYTES:-5500}"
 
 check() {

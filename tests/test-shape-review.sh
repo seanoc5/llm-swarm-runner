@@ -469,7 +469,7 @@ if SELF_REVIEW_MAX_FILE_BYTES=20000 SELF_REVIEW_MAX_PROMPT_BYTES=900000 WORKER_C
 [ "$RC" -eq 0 ] || red "run failed ($RC): $(cat "$TEST_DIR/o.err")"
 grep -q 'val v2999' "$CODEX_PAYLOAD_LOG" || red "an oversized source file must stay in the prompt"
 grep -q 'row2999' "$CODEX_PAYLOAD_LOG" && red "oversized csv leaked into the prompt"
-grep -q 'SWARM_SELF_REVIEW: APPROVE actor=worker head=abc123 excluded=1 -->' "$GH_LOG" || red "marker must carry excluded=1 (log: $(grep SWARM "$GH_LOG"))"
+grep -q 'SWARM_SELF_REVIEW: APPROVE actor=worker head=abc123 excluded=1 model=default -->' "$GH_LOG" || red "marker must carry excluded=1 (log: $(grep SWARM "$GH_LOG"))"
 
 # (b) nothing excluded -> no excluded= field at all
 : > "$GH_LOG"; echo '{"comments":[]}' > "$GH_PR_JSON_FILE"
@@ -477,7 +477,13 @@ export GH_DIFF_FILE="$TEST_DIR/small.diff"; printf 'diff --git a/a.kt b/a.kt\n+x
 if WORKER_CMD=codex "$REVIEW" 42 --post >"$TEST_DIR/o.out" 2>&1; then RC=0; else RC=$?; fi
 [ "$RC" -eq 0 ] || red "clean run failed ($RC)"
 grep 'SWARM_SELF_REVIEW:' "$GH_LOG" | grep -q excluded= && red "clean review must not carry excluded="
-grep -q "SWARM_SELF_REVIEW: APPROVE actor=worker head=abc123 -->" "$GH_LOG" || red "clean marker format changed: $(grep SWARM "$GH_LOG")"
+grep -q "SWARM_SELF_REVIEW: APPROVE actor=worker head=abc123 model=default -->" "$GH_LOG" || red "clean marker format changed: $(grep SWARM "$GH_LOG")"
+
+# (b2) the marker records the reviewing model, last (issue #1011); --model wins
+: > "$GH_LOG"; echo '{"comments":[]}' > "$GH_PR_JSON_FILE"
+if WORKER_CMD=codex "$REVIEW" 42 --post --model 'claude-opus-5-5' >"$TEST_DIR/o.out" 2>&1; then RC=0; else RC=$?; fi
+[ "$RC" -eq 0 ] || red "model run failed ($RC)"
+grep -q "SWARM_SELF_REVIEW: APPROVE actor=worker head=abc123 model=claude-opus-5-5 -->" "$GH_LOG" || red "marker must end with model=<id>: $(grep SWARM "$GH_LOG")"
 
 # (c) oversized source that busts the prompt cap fails with the next step
 export GH_DIFF_FILE="$BIGSRC"

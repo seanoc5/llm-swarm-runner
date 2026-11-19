@@ -15,7 +15,7 @@ Before you exit, in this order: rewrite `.swarm/needs-you.md` only if the list c
 
 ## Merges in a work run
 
-You perform **only the opt-in automerges** ("Auto-merge low-risk PRs", "Auto-merge medium-risk PRs"). Every merge the operator must say explicitly (`merge N` at any rating, 🔴 included, or a 🟢 `yes`) belongs to the conversation session, in the operator's own turn: list such PRs under Needs you with the command, and never run `swarm-merge.sh` without `--auto-low` or `--auto-medium`.
+You perform **only the opt-in automerges** ("Auto-merge low-risk PRs", "Auto-merge medium-risk PRs", "Auto-merge high-risk PRs"). Every merge the operator must say explicitly (`merge N` at any rating, 🔴 included, or a 🟢 `yes`) belongs to the conversation session, in the operator's own turn: list such PRs under Needs you with the command, and never run `swarm-merge.sh` without `--auto-low`, `--auto-medium` or `--auto-high`.
 
 ## Initial Startup Checklist
 
@@ -189,6 +189,10 @@ Merge only via `scripts/swarm-merge.sh <N> --auto-low`, which re-enforces gates 
 ### Auto-merge medium-risk PRs
 
 Opt-in via `SWARM_AUTOMERGE_MEDIUM=1`. For a readied 🟡 PR: run the "Find ≠ fix" coordinator review; on bare `APPROVE`, read the diff (gate 6; hold if Your move or `#### Decide` asks the operator something), then `scripts/swarm-merge.sh <N> --auto-medium` (same timeout as `--auto-low`; it enforces the 🟢 gates, no hold banner, and that review on the exact head). Caveats on correctness, security, data loss or schema/migrations block; others → file a follow-up issue labeled `from-pr-<N>` (create if missing), `scripts/self-review-pr.sh <N> --caveats-nonblocking <issue#> --actor coordinator`, proceed. Blocking caveats or BLOCK → hold label and requeue. Report `Auto-merged 🟡 PR #N (SWARM_AUTOMERGE_MEDIUM=1, all gates passed).` or the failed gate.
+
+### Auto-merge high-risk PRs
+
+Opt-in via `SWARM_AUTOMERGE_HIGH=1` (default off; `.swarm-policy.md` can force it off). For a readied 🔴 PR run two "Find ≠ fix" reviews on the same head from two different named models: `scripts/self-review-pr.sh <N> --post --actor coordinator --model claude-opus-5-5`, then the same with `--rerun --model claude-sonnet-5-5` (a review with no `--model` never counts). Both must be a bare `APPROVE`; any caveat or BLOCK → hold label and requeue (no non-blocking-caveat shortcut). Then read the diff (gate 6) and run `scripts/swarm-merge.sh <N> --auto-high` (same timeout as `--auto-low`). It also refuses a diff touching `scripts/protected-paths.txt` (the merge/hold/review/risk scripts, these prompts, policy, secrets/auth, data-dropping migrations): those go to the operator. Report `Auto-merged 🔴 PR #N (SWARM_AUTOMERGE_HIGH=1)` with both review comment links (the script prints them) or the failed gate.
 
 ### Find ≠ fix: independent review dispatch
 

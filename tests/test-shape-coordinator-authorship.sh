@@ -212,6 +212,11 @@ case "$1 $2" in
         [ -n "$runlist_json" ] || runlist_json='[{"status":"completed","conclusion":"success"}]'
         echo "$runlist_json"
         exit "${GH_RUNLIST_RC:-0}" ;;
+    "pr diff")
+        # issue #1011: protected-paths-check.sh reads the file list and the patch.
+        if [ "${GH_DIFF_FAIL:-0}" = "1" ]; then echo "gh: simulated diff failure" >&2; exit 1; fi
+        if [[ "$*" == *--name-only* ]]; then printf "%s\n" "${GH_DIFF_NAMES:-src/App.kt}"; elif [ -n "${GH_DIFF_FILE:-}" ]; then cat "$GH_DIFF_FILE"; fi
+        exit 0 ;;
     "pr merge")
         # issue #629 self-review follow-up: swarm-merge.sh now pins this
         # call to the exact commit ci-wait.sh verified via
@@ -725,7 +730,7 @@ MEDIUM_BODY='<!-- BLIND_MERGE_RISK: medium -->'
 set_reviews() {   # set_reviews <headRefOid> <marker-body>... (ASSOC= sets authorAssociation)
     local head="$1"; shift
     printf '%s\n' "$@" | jq -R -s -c --arg h "$head" \
-        --arg a "${ASSOC:-OWNER}" '{headRefOid:$h, comments: (split("\n") | map(select(length>0)) | map({body:., authorAssociation:$a}))}' \
+        --arg a "${ASSOC:-OWNER}" '{headRefOid:$h, comments: (split("\n") | map(select(length>0)) | to_entries | map({body:.value, authorAssociation:$a, url:("https://example.test/c/" + (.key|tostring))}))}' \
         > "$GH_COMMENTS_DIR/501.json"
 }
 run_medium() {   # run_medium [env assignments...] — sets OUT/RC
@@ -970,6 +975,152 @@ if OUT=$(GH_CHECKS_RC=0 "$MERGE" 501 --auto-low 2>&1); then RC=0; else RC=$?; fi
 echo "$OUT" | grep -q "Gate 10" && red "--auto-low: quoted marker must not hit Gate 10 (rc=$RC, output: $OUT)"
 [ "$RC" -eq 0 ] || red "--auto-low with a clean marker plus a quoted one should merge (rc=$RC, output: $OUT)"
 green "Gate 10 reads only '<!-- ' markers"
+
+# ============================================================================
+# --auto-high (#1011): every --auto-low gate with the high marker, Gate 8, plus
+# Gate 11 (bare APPROVE on the exact head from two different named models) and
+# Gate 12 (protected paths). Opt-in SWARM_AUTOMERGE_HIGH=1; policy can force off.
+# ============================================================================
+HIGH_BODY='<!-- BLIND_MERGE_RISK: high -->'
+run_high() {   # run_high [env assignments...] — sets OUT/RC
+    : > "$GH_LOG"
+    if ! git -C "$CLONE" ls-remote --exit-code --heads origin fix/issue-501 >/dev/null 2>&1; then
+        git -C "$CLONE" checkout -q -B fix/issue-501 master
+        git -C "$CLONE" push -q origin fix/issue-501
+    fi
+    if OUT=$(env GH_CHECKS_RC=0 GH_PR_BODY="$HIGH_BODY" SWARM_AUTOMERGE_HIGH=1 "$@" "$MERGE" 501 --auto-high 2>&1); then RC=0; else RC=$?; fi
+}
+no_merge() { ! grep -q -- "pr merge" "$GH_LOG"; }
+OPUS='<!-- SWARM_SELF_REVIEW: APPROVE actor=coordinator head=deadbeef model=claude-opus-5-5 -->'
+SONNET='<!-- SWARM_SELF_REVIEW: APPROVE actor=coordinator head=deadbeef model=claude-sonnet-5-5 -->'
+
+heading "Test H1: --auto-high refused unless SWARM_AUTOMERGE_HIGH=1"
+set_reviews deadbeef "$OPUS" "$SONNET"
+run_high SWARM_AUTOMERGE_HIGH=0
+[ "$RC" -ne 0 ] && echo "$OUT" | grep -q "SWARM_AUTOMERGE_HIGH is not 1" && no_merge || red "--auto-high must refuse without the opt-in (rc=$RC, output: $OUT)"
+green "--auto-high needs the per-project opt-in"
+
+heading "Test H2: .swarm-policy.md forces it off even with the env on"
+printf '# policy\nSWARM_AUTOMERGE_HIGH: off\n' > "$CLONE/.swarm-policy.md"
+run_high
+[ "$RC" -ne 0 ] && echo "$OUT" | grep -q "swarm-policy.md forces" && no_merge || red "policy force-off must refuse (rc=$RC, output: $OUT)"
+printf '# policy\nSWARM_AUTOMERGE_HIGH: on\n' > "$CLONE/.swarm-policy.md"
+run_high
+[ "$RC" -eq 0 ] || red "a policy that does not say off must not block (rc=$RC, output: $OUT)"
+rm -f "$CLONE/.swarm-policy.md"
+green "policy off refuses; the other policy text does not"
+
+heading "Test H3: only one model approved → Gate 11"
+set_reviews deadbeef "$OPUS"
+run_high
+[ "$RC" -ne 0 ] && echo "$OUT" | grep -q "auto-high Gate 11" && no_merge || red "one model must not satisfy Gate 11 (rc=$RC, output: $OUT)"
+set_reviews deadbeef "$OPUS" "$OPUS"
+run_high
+[ "$RC" -ne 0 ] && echo "$OUT" | grep -q "auto-high Gate 11" && no_merge || red "the same model twice must not satisfy Gate 11 (rc=$RC, output: $OUT)"
+set_reviews deadbeef "$OPUS" '<!-- SWARM_SELF_REVIEW: APPROVE actor=coordinator head=deadbeef model=default -->'
+run_high
+[ "$RC" -ne 0 ] && echo "$OUT" | grep -q "auto-high Gate 11" && no_merge || red "model=default must not count as a second model (rc=$RC, output: $OUT)"
+set_reviews deadbeef "$OPUS" '<!-- SWARM_SELF_REVIEW: APPROVE actor=coordinator head=deadbeef -->'
+run_high
+[ "$RC" -ne 0 ] && echo "$OUT" | grep -q "auto-high Gate 11" && no_merge || red "a marker with no model= must not count (rc=$RC, output: $OUT)"
+green "Gate 11 needs two different named models"
+
+heading "Test H4: a caveat or a BLOCK from the second model → Gate 11"
+set_reviews deadbeef "$OPUS" '<!-- SWARM_SELF_REVIEW: APPROVE_WITH_CAVEATS actor=coordinator head=deadbeef model=claude-sonnet-5-5 -->'
+run_high
+[ "$RC" -ne 0 ] && echo "$OUT" | grep -q "auto-high Gate 11" && echo "$OUT" | grep -q "APPROVE_WITH_CAVEATS" && no_merge || red "a caveat must refuse (rc=$RC, output: $OUT)"
+set_reviews deadbeef "$OPUS" "$SONNET" '<!-- SWARM_SELF_REVIEW: APPROVE_WITH_CAVEATS actor=coordinator head=deadbeef caveats=nonblocking followup=900 model=claude-sonnet-5-5 -->'
+run_high GH_ISSUES=900
+[ "$RC" -ne 0 ] && echo "$OUT" | grep -q "auto-high Gate 11" && no_merge || red "non-blocking caveats must NOT be an escape hatch for high (rc=$RC, output: $OUT)"
+set_reviews deadbeef "$OPUS" '<!-- SWARM_SELF_REVIEW: BLOCK actor=coordinator head=deadbeef model=claude-sonnet-5-5 -->'
+run_high
+[ "$RC" -ne 0 ] && no_merge || red "a BLOCK must refuse (rc=$RC, output: $OUT)"
+set_reviews deadbeef "$OPUS" "$SONNET" '<!-- SWARM_SELF_REVIEW: BLOCK actor=coordinator head=deadbeef model=default -->'
+run_high
+[ "$RC" -ne 0 ] && echo "$OUT" | grep -q "auto-high Gate 11" && no_merge || red "a BLOCK from an unnamed-model review must still refuse (rc=$RC, output: $OUT)"
+green "Gate 11 wants bare APPROVEs only; any non-APPROVE latest review refuses"
+
+heading "Test H5: approvals for another commit, or from the worker only → Gate 11"
+set_reviews deadbeef '<!-- SWARM_SELF_REVIEW: APPROVE actor=coordinator head=cafef00d model=claude-opus-5-5 -->' \
+    '<!-- SWARM_SELF_REVIEW: APPROVE actor=coordinator head=cafef00d model=claude-sonnet-5-5 -->'
+run_high
+[ "$RC" -ne 0 ] && echo "$OUT" | grep -q "auto-high Gate 11" && no_merge || red "reviews of an older head must not count (rc=$RC, output: $OUT)"
+set_reviews deadbeef '<!-- SWARM_SELF_REVIEW: APPROVE actor=worker head=deadbeef model=claude-opus-5-5 -->' \
+    '<!-- SWARM_SELF_REVIEW: APPROVE actor=worker head=deadbeef model=claude-sonnet-5-5 -->'
+run_high
+[ "$RC" -ne 0 ] && echo "$OUT" | grep -q "auto-high Gate 11" && no_merge || red "worker reviews must not count (rc=$RC, output: $OUT)"
+ASSOC=NONE set_reviews deadbeef "$OPUS" "$SONNET"
+run_high
+[ "$RC" -ne 0 ] && echo "$OUT" | grep -q "auto-high Gate 11" && no_merge || red "reviews from an outside commenter must not count (rc=$RC, output: $OUT)"
+green "Gate 11 needs independent, current-head, collaborator reviews"
+
+set_reviews deadbeef "$OPUS" "$SONNET"
+
+heading "Test H6: protected path in the diff → Gate 12"
+for P in scripts/swarm-merge.sh scripts/_hold-label.sh prompts/coordinator-work.md .swarm-policy.md src/main/resources/application-secrets.yml app/AuthConfig.kt; do
+    run_high GH_DIFF_NAMES=$'src/App.kt\n'"$P"
+    [ "$RC" -ne 0 ] && echo "$OUT" | grep -q "auto-high Gate 12" && echo "$OUT" | grep -qF "$P" && no_merge || red "$P must be protected (rc=$RC, output: $OUT)"
+done
+green "Gate 12 refuses the guardrail scripts, merge prompts, policy, secrets and auth, naming the path"
+
+heading "Test H7: data-dropping migration → Gate 12; add-only migration passes it"
+cat > "$TEST_DIR/drop.diff" <<'DIFF'
+diff --git a/src/main/resources/db/migration/V9__x.sql b/src/main/resources/db/migration/V9__x.sql
+--- /dev/null
++++ b/src/main/resources/db/migration/V9__x.sql
+@@ -0,0 +1,2 @@
++ALTER TABLE t ADD COLUMN c int;
++DROP TABLE old_things;
+DIFF
+cat > "$TEST_DIR/add.diff" <<'DIFF'
+diff --git a/src/main/resources/db/migration/V9__x.sql b/src/main/resources/db/migration/V9__x.sql
+--- /dev/null
++++ b/src/main/resources/db/migration/V9__x.sql
+@@ -0,0 +1,2 @@
++ALTER TABLE t ADD COLUMN c int;
++CREATE INDEX IF NOT EXISTS i ON t(c);
+DIFF
+run_high GH_DIFF_NAMES=src/main/resources/db/migration/V9__x.sql GH_DIFF_FILE="$TEST_DIR/drop.diff"
+[ "$RC" -ne 0 ] && echo "$OUT" | grep -q "auto-high Gate 12" && echo "$OUT" | grep -qi "data-dropping" && no_merge || red "DROP TABLE migration must be protected (rc=$RC, output: $OUT)"
+run_high GH_DIFF_NAMES=src/main/resources/db/migration/V9__x.sql GH_DIFF_FILE="$TEST_DIR/add.diff"
+echo "$OUT" | grep -q "Gate 12" && [ "$RC" -ne 0 ] && red "an add-only migration must pass Gate 12 (rc=$RC, output: $OUT)"
+green "Gate 12 scans added migration lines for destructive SQL only"
+
+heading "Test H8: protected-paths check errors → fails closed; project list extends the default"
+run_high GH_DIFF_FAIL=1
+[ "$RC" -ne 0 ] && echo "$OUT" | grep -q "auto-high Gate 12" && no_merge || red "an unreadable diff must refuse (rc=$RC, output: $OUT)"
+printf 'path: ^src/billing/\n' > "$TEST_DIR/extra-paths.txt"
+run_high GH_DIFF_NAMES=src/billing/Charge.kt PROTECTED_PATHS_EXTRA="$TEST_DIR/extra-paths.txt"
+[ "$RC" -ne 0 ] && echo "$OUT" | grep -q "auto-high Gate 12" && no_merge || red "a project-extended path must be protected (rc=$RC, output: $OUT)"
+green "Gate 12 fails closed and honours the project extension"
+
+heading "Test H9: --auto-high on a medium-rated PR → Gate 1"
+run_high GH_PR_BODY='<!-- BLIND_MERGE_RISK: medium -->'
+[ "$RC" -ne 0 ] && echo "$OUT" | grep -q "auto-high Gate 1" && no_merge || red "--auto-high must refuse a non-high marker (rc=$RC, output: $OUT)"
+run_high GH_PR_BODY=$'<!-- BLIND_MERGE_RISK: high -->\n> ⛔ **COORDINATOR HOLD** — reason'
+[ "$RC" -ne 0 ] && echo "$OUT" | grep -q "auto-high Gate 8" && no_merge || red "--auto-high must refuse a held PR (rc=$RC, output: $OUT)"
+run_high GH_CHECKS_RC=1
+[ "$RC" -ne 0 ] && no_merge || red "--auto-high must refuse red CI (rc=$RC, output: $OUT)"
+green "--auto-high keeps the --auto-low gates (rating, hold, CI)"
+
+heading "Test H10: two clean APPROVEs from different models, clean diff, green CI → merges pinned to the head"
+rm -f "$EVENTS_LOG"
+run_high
+[ "$RC" -eq 0 ] || red "--auto-high should merge (rc=$RC, output: $OUT)"
+echo "$OUT" | grep -q "https://example.test/c/0" && echo "$OUT" | grep -q "https://example.test/c/1" || red "the output must carry both review links (output: $OUT)"
+echo "$OUT" | grep -q "claude-opus-5-5" && echo "$OUT" | grep -q "claude-sonnet-5-5" || red "the output must name both models (output: $OUT)"
+grep -q -- "pr merge 501 --squash --match-head-commit deadbeef" "$GH_LOG" || red "merge was not pinned to the reviewed commit. gh log: $(cat "$GH_LOG")"
+grep -q "merge.gate.*pr=501 gate=11-two-model-review result=approve.*models=claude-opus-5-5,claude-sonnet-5-5" "$EVENTS_LOG" || red "merge.gate event for Gate 11 was not logged"
+green "--auto-high merges a two-model-approved 🔴 PR with both review links"
+
+heading "Test H11: a later BLOCK by one of the two models (latest per model wins) → Gate 11"
+set_reviews deadbeef "$OPUS" "$SONNET" '<!-- SWARM_SELF_REVIEW: BLOCK actor=coordinator head=deadbeef model=claude-sonnet-5-5 -->'
+run_high
+[ "$RC" -ne 0 ] && no_merge || red "a later BLOCK from one model must refuse (rc=$RC, output: $OUT)"
+set_reviews deadbeef '<!-- SWARM_SELF_REVIEW: BLOCK actor=coordinator head=deadbeef model=claude-sonnet-5-5 -->' "$OPUS" "$SONNET"
+run_high
+[ "$RC" -eq 0 ] || red "a model's later APPROVE supersedes its earlier BLOCK (rc=$RC, output: $OUT)"
+green "latest review per model wins"
 
 heading "All coordinator-authorship shape tests passed"
 green "Gates 0/1/2/3/4/5 refusal/pass/fail-closed, no-CI-configured pass-with-warning, --auto-low scoping vs plain merge, override-flag rejection"

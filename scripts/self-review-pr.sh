@@ -34,6 +34,9 @@
 #             opinion, e.g. the coordinator's different-model re-review.
 #   --model   model for the review session (default: $SELF_REVIEW_MODEL,
 #             else $WORKER_MODEL for Codex, else the CLI's default).
+#             The marker also records `model=<id>` (last attribute; `default`
+#             when no model was named): swarm-merge.sh --auto-high needs two
+#             bare APPROVEs from two different named models (issue #1011).
 #   --actor   who is running this round — "worker" (default), "coordinator",
 #             or "operator". Recorded in the posted marker's actor=<name>
 #             attribute (issue #601): scripts/pr-ready.sh's round cap
@@ -125,7 +128,7 @@ while [ $# -gt 0 ]; do
         --caveats-nonblocking) shift; NONBLOCKING_FOLLOWUP="${1:-}"
             [[ "$NONBLOCKING_FOLLOWUP" =~ ^[0-9]+$ ]] \
                 || { echo "ERROR: --caveats-nonblocking needs a follow-up issue number" >&2; exit 1; } ;;
-        -h|--help) sed -n '2,95p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,102p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         -*) echo "ERROR: unknown flag '$1'" >&2; exit 1 ;;
         *)  [ -z "$PR" ] || { echo "ERROR: multiple PR numbers" >&2; exit 1; }
             PR="$1" ;;
@@ -532,8 +535,13 @@ if [ "$POST" = "1" ]; then
         # round for the same reason.
         # excluded=N (issue #789) only when files were left out: the merge
         # gates read the marker, not the body, and refuse unattended merge.
-        COMMENT="$(printf '<!-- SWARM_SELF_REVIEW: %s actor=%s head=%s%s -->\n## Fresh-context self-review\n\n%s\n%s\n\n<sub>Adversarial review by a fresh %s session against prompts/skill-self-review.md — no shared context with the PR author. Machinery: scripts/self-review-pr.sh (docs/ringer-adoptions.md #2).</sub>\n' \
-            "$VERDICT" "$ACTOR" "${HEAD_SHA:-unknown}" "$([ "$EXCLUDED_COUNT" -gt 0 ] && printf ' excluded=%s' "$EXCLUDED_COUNT")" "$REVIEW" "${EXCLUDED_NOTE:+$'\n'$EXCLUDED_NOTE}" "$REVIEW_CMD")"
+        # model=<id> (issue #1011) goes LAST, after excluded=, so every parser
+        # that stops at head=/excluded= still reads the marker; swarm-merge.sh
+        # --auto-high needs it to tell two reviews by different models apart.
+        # `default` = no --model/SELF_REVIEW_MODEL, i.e. the CLI's own default.
+        MODEL_TAG="$(printf '%s' "${MODEL:-default}" | tr -c 'A-Za-z0-9._:/-' '_')"
+        COMMENT="$(printf '<!-- SWARM_SELF_REVIEW: %s actor=%s head=%s%s model=%s -->\n## Fresh-context self-review\n\n%s\n%s\n\n<sub>Adversarial review by a fresh %s session against prompts/skill-self-review.md — no shared context with the PR author. Machinery: scripts/self-review-pr.sh (docs/ringer-adoptions.md #2).</sub>\n' \
+            "$VERDICT" "$ACTOR" "${HEAD_SHA:-unknown}" "$([ "$EXCLUDED_COUNT" -gt 0 ] && printf ' excluded=%s' "$EXCLUDED_COUNT")" "$MODEL_TAG" "$REVIEW" "${EXCLUDED_NOTE:+$'\n'$EXCLUDED_NOTE}" "$REVIEW_CMD")"
         gh pr comment "$PR" --body "$COMMENT" \
             || { echo "ERROR: gh pr comment failed" >&2; exit 1; }
         echo "post: verdict comment added to PR #$PR"

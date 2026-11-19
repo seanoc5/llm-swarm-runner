@@ -14,6 +14,7 @@
 #   swarm-merge.sh <issue#|PR#> --squash  # accepted-and-ignored: squash is the only mode
 #   swarm-merge.sh <issue#|PR#> --auto-low  # unattended low-risk auto-merge path (#452)
 #   swarm-merge.sh <issue#|PR#> --auto-medium  # unattended 🟡 path (SWARM_AUTOMERGE_MEDIUM=1)
+#   swarm-merge.sh <issue#|PR#> --auto-high  # unattended 🔴 path (SWARM_AUTOMERGE_HIGH=1, #1011)
 #   swarm-merge.sh --sweep-only      # just run the local-branch sweep
 #
 # --squash is accepted as a no-op alias (this script always squashes); it is
@@ -109,6 +110,24 @@
 #                         trusted SWARM_SELF_REVIEW marker (any actor)
 #                         must not carry `excluded=N` (N>0 = files left out of
 #                         the review). Plain `swarm-merge.sh <N>` is unaffected.
+#
+# --auto-high (issue #1011) is the same unattended path for a 🔴 PR, for projects
+# that set SWARM_AUTOMERGE_HIGH=1 (refused outright otherwise; a line
+# `SWARM_AUTOMERGE_HIGH: off` in <project>/.swarm-policy.md forces it off even
+# then). Every --auto-low gate runs with the exact high marker, Gate 8 (hold
+# banner) and Gate 10 apply as for medium, Gate 9 is replaced by:
+#   Gate 11 (two-model review) two coordinator/operator reviews on the exact head
+#                         from two DIFFERENT named models (marker `model=<id>`;
+#                         `model=default` or no model= never counts), each the
+#                         latest of its model, each a bare APPROVE. A caveat, a
+#                         BLOCK, one model, or an older head → refused. No
+#                         non-blocking-caveats escape hatch. Reports both
+#                         comment URLs. The merge is pinned to that head.
+#   Gate 12 (protected paths) scripts/protected-paths-check.sh: refuse when the
+#                         diff touches the guardrails themselves, a data-dropping
+#                         migration, or secrets/auth (list: scripts/protected-
+#                         paths.txt, projects extend via .swarm/protected-paths.txt).
+# (Gate numbers 11/12 are this script's; the issue calls them its gates 2 and 3.)
 #
 # --auto-low also refuses outright (usage error, before any gate runs) if
 # combined with --override-review or --override-migration-gate: the
@@ -206,7 +225,7 @@ OVERRIDE_MIGRATION_GATE=0
 FORCE_CLEANUP=0
 HOUSEKEEP_ONLY=0
 AUTO_LOW=0          # 1 = an unattended path (--auto-low or --auto-medium)
-AUTO_RATING=""      # low | medium: the rating that unattended path accepts
+AUTO_RATING=""      # low | medium | high: the rating that unattended path accepts
 REVIEWED_SHA=""
 EXPECT_HEAD=""      # --expect-head <sha>: refuse unless the PR head still starts with this (#775)
 EXPECT_NEXT=0
@@ -245,8 +264,8 @@ for arg in "$@"; do
     --override-review) OVERRIDE_REVIEW=1 ;;
     --override-migration-gate) OVERRIDE_MIGRATION_GATE=1 ;;
     --force-cleanup) FORCE_CLEANUP=1 ;;
-    --auto-low|--auto-medium)
-      [ -z "$AUTO_RATING" ] || { echo "ERROR: give only one of --auto-low / --auto-medium" >&2; exit 2; }
+    --auto-low|--auto-medium|--auto-high)
+      [ -z "$AUTO_RATING" ] || { echo "ERROR: give only one of --auto-low / --auto-medium / --auto-high" >&2; exit 2; }
       AUTO_LOW=1; AUTO_RATING="${arg#--auto-}" ;;
     --squash)    ;;   # no-op: squash is the only mode this script implements
     --merge|--rebase)
@@ -501,6 +520,29 @@ if [ "$AUTO_RATING" = medium ] && [ "${SWARM_AUTOMERGE_MEDIUM:-0}" != 1 ]; then
   echo "ERROR: --auto-medium refused: SWARM_AUTOMERGE_MEDIUM is not 1 for this project." >&2
   echo "       Set it in <project>/.swarm/.env to opt in, or merge by hand: swarm-merge.sh <N>." >&2
   exit 1
+fi
+
+if [ "$AUTO_RATING" = high ]; then
+  if [ "${SWARM_AUTOMERGE_HIGH:-0}" != 1 ]; then
+    echo "ERROR: --auto-high refused: SWARM_AUTOMERGE_HIGH is not 1 for this project." >&2
+    echo "       Set it in <project>/.swarm/.env to opt in, or merge by hand: swarm-merge.sh <N>." >&2
+    exit 1
+  fi
+  # .swarm-policy.md can force it off (issue #1011): the env knob says "on", a
+  # policy line `SWARM_AUTOMERGE_HIGH: off|0|false|no` overrules it. Fails
+  # closed: an unreadable policy file refuses rather than assuming "no line".
+  POLICY_FILE="$MAIN_WT/.swarm-policy.md"
+  if [ -e "$POLICY_FILE" ]; then
+    if [ ! -r "$POLICY_FILE" ]; then
+      echo "ERROR: --auto-high refused: $POLICY_FILE exists but is not readable (failing closed)." >&2
+      exit 1
+    fi
+    if grep -qiE '^[[:space:]>*_-]*SWARM_AUTOMERGE_HIGH[`*_]*[[:space:]]*[:=][[:space:]]*[`*_]*(off|0|false|no)\b' "$POLICY_FILE"; then
+      echo "ERROR: --auto-high refused: .swarm-policy.md forces SWARM_AUTOMERGE_HIGH off for this project." >&2
+      echo "       Merge by hand: swarm-merge.sh <N>." >&2
+      exit 1
+    fi
+  fi
 fi
 
 # issue #465: swarm-merge.sh no longer removes the worktree itself (see
@@ -897,7 +939,7 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
         G10_LOOSE="$(jq -r '.comments[] | select(.authorAssociation as $a | ["OWNER","MEMBER","COLLABORATOR"] | index($a)) | .body // ""' <<<"$G10_JSON" 2>/dev/null \
                       | grep -oE "<!-- SWARM_SELF_REVIEW: [A-Za-z_]+( [A-Za-z_]+=[^ >]*)*" \
                       | sed "s/^<!-- //" | tail -1 || true)"
-        G10_STRICT='^SWARM_SELF_REVIEW: [A-Z_]+ actor=[A-Za-z0-9_-]+( head=[^ ]+)?( caveats=[a-z]+)?( followup=[0-9]+)?( excluded=[0-9]+)?$'
+        G10_STRICT='^SWARM_SELF_REVIEW: [A-Z_]+ actor=[A-Za-z0-9_-]+( head=[^ ]+)?( caveats=[a-z]+)?( followup=[0-9]+)?( excluded=[0-9]+)?( model=[^ ]+)?$'
         G10_MARKER="$G10_LOOSE"
         G10_BAD=""
         if [ -n "$G10_LOOSE" ] && ! grep -qE "$G10_STRICT" <<<"$G10_LOOSE"; then
@@ -907,7 +949,7 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
         # if THAT one left files out, a later clean worker marker must not
         # paper over it, so check it too.
         G10_IND=""
-        if [ "$AUTO_RATING" = medium ]; then
+        if [ "$AUTO_RATING" = medium ] || [ "$AUTO_RATING" = high ]; then
           G10_IND="$(jq -r '.comments[] | select(.authorAssociation as $a | ["OWNER","MEMBER","COLLABORATOR"] | index($a)) | .body // ""' <<<"$G10_JSON" 2>/dev/null \
                       | grep -oE "<!-- SWARM_SELF_REVIEW: [A-Za-z_]+ actor=(coordinator|operator)( [A-Za-z_]+=[^ >]*)*" \
                       | sed "s/^<!-- //" | tail -1 || true)"
@@ -992,6 +1034,74 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
             echo "       or non-blocking caveats with a filed follow-up issue (self-review-pr.sh $PR_NUM --caveats-nonblocking <issue#> --actor coordinator)." >&2
             exit 1
           fi
+          REVIEWED_SHA="$HEAD_NOW"
+        fi
+        if [ "$AUTO_RATING" = high ]; then
+          # --auto-high (#1011). Gate 8 as for medium; Gate 9 is replaced by the
+          # two-model Gate 11; Gate 12 keeps the guardrails out of reach.
+          echo "       auto-high gate 8 (hold banner): checking…"
+          if grep -qE '^> ⛔ \*\*COORDINATOR HOLD\*\*' <<<"$PR_BODY"; then
+            echo "ERROR: PR #$PR_NUM refused by --auto-high Gate 8 (hold): a COORDINATOR HOLD banner is on the body." >&2
+            exit 1
+          fi
+
+          echo "       auto-high gate 12 (protected paths): checking…"
+          PP_RC=0
+          PP_OUT="$("$SCRIPT_DIR/protected-paths-check.sh" "$PR_NUM" 2>&1)" || PP_RC=$?
+          if [ "$PP_RC" = 10 ]; then
+            log_event merge.gate "pr=$PR_NUM gate=12-protected-paths result=refused action=refuse-auto-high"
+            echo "ERROR: PR #$PR_NUM refused by --auto-high Gate 12 (protected paths)." >&2
+            echo "       The diff touches something an unattended merge must never decide (list: scripts/protected-paths.txt):" >&2
+            sed 's/^/       /' <<<"$PP_OUT" >&2
+            echo "       Merge it yourself: swarm-merge.sh $PR_NUM (no --auto-high)." >&2
+            exit 1
+          elif [ "$PP_RC" != 0 ]; then
+            echo "ERROR: PR #$PR_NUM refused by --auto-high Gate 12 (protected paths, exit $PP_RC)." >&2
+            echo "       protected-paths-check.sh errored rather than returning a verdict — failing closed:" >&2
+            sed 's/^/       /' <<<"$PP_OUT" >&2
+            exit 1
+          fi
+
+          echo "       auto-high gate 11 (two-model review): checking…"
+          G11_JSON="$(gh pr view "$PR_NUM" --json comments,headRefOid 2>/dev/null || true)"
+          HEAD_NOW="$(jq -r '.headRefOid // ""' <<<"$G11_JSON" 2>/dev/null || true)"
+          # Every coordinator/operator marker (owner/member/collaborator comments
+          # only, anchored on "<!-- " so quoted prose never counts), oldest first,
+          # as "<marker>\t<comment url>".
+          G11_LINES="$(jq -r '.comments[] | select(.authorAssociation as $a | ["OWNER","MEMBER","COLLABORATOR"] | index($a)) | . as $c | (($c.body // "") | capture("<!-- (?<m>SWARM_SELF_REVIEW: [A-Z_]+ actor=(coordinator|operator)( [A-Za-z_]+=[^ >]*)*)")? // empty) | "\(.m)\t\($c.url // "<no url>")"' <<<"$G11_JSON" 2>/dev/null || true)"
+          declare -A G11_VERDICT=() G11_URL=()
+          while IFS=$'\t' read -r G11_M G11_U; do
+            [ -n "$G11_M" ] || continue
+            G11_V="$(sed -E 's/^SWARM_SELF_REVIEW: ([A-Z_]+).*/\1/' <<<"$G11_M")"
+            G11_H="$(grep -oE ' head=[0-9a-f]+' <<<"$G11_M" | head -n1 | cut -d= -f2 || true)"
+            G11_MODEL="$(grep -oE ' model=[^ ]+' <<<"$G11_M" | head -n1 | cut -d= -f2 || true)"
+            [ -n "$HEAD_NOW" ] && [ "$G11_H" = "$HEAD_NOW" ] || continue   # another commit's review proves nothing
+            G11_VERDICT["${G11_MODEL:-unnamed}"]="$G11_V"                   # latest per model wins
+            G11_URL["${G11_MODEL:-unnamed}"]="$G11_U"
+          done <<<"$G11_LINES"
+          G11_OK_MODELS=()
+          G11_WHY=""
+          for G11_K in "${!G11_VERDICT[@]}"; do
+            if [ "${G11_VERDICT[$G11_K]}" != APPROVE ]; then
+              G11_WHY="the latest review by model '$G11_K' on this head is ${G11_VERDICT[$G11_K]} (${G11_URL[$G11_K]}), not a bare APPROVE"
+            elif [ "$G11_K" != default ] && [ "$G11_K" != unnamed ]; then
+              G11_OK_MODELS+=("$G11_K")
+            fi
+          done
+          if [ -z "$G11_WHY" ] && [ "${#G11_OK_MODELS[@]}" -lt 2 ]; then
+            G11_WHY="need bare APPROVEs from 2 different named models on head ${HEAD_NOW:-<unreadable>}, found ${#G11_OK_MODELS[@]} (a review with model=default or no model= does not count)"
+          fi
+          if [ -n "$G11_WHY" ]; then
+            log_event merge.gate "pr=$PR_NUM gate=11-two-model-review result=refused models=${#G11_VERDICT[@]} approved=${#G11_OK_MODELS[@]} action=refuse-auto-high"
+            echo "ERROR: PR #$PR_NUM refused by --auto-high Gate 11 (two-model review): $G11_WHY." >&2
+            echo "       Run both on this head: self-review-pr.sh $PR_NUM --post --actor coordinator --model <id-1>" >&2
+            echo "       and: self-review-pr.sh $PR_NUM --post --rerun --actor coordinator --model <id-2>  (two different ids)." >&2
+            exit 1
+          fi
+          G11_SORTED="$(printf '%s\n' "${G11_OK_MODELS[@]}" | sort)"
+          G11_SUMMARY="$(while IFS= read -r G11_K; do printf '%s (%s) ' "$G11_K" "${G11_URL[$G11_K]}"; done <<<"$G11_SORTED")"
+          echo "       $(c_green "auto-high gate 11: bare APPROVE on ${HEAD_NOW:0:7} from ${#G11_OK_MODELS[@]} models: ${G11_SUMMARY% }")"
+          log_event merge.gate "pr=$PR_NUM gate=11-two-model-review result=approve head=$HEAD_NOW models=$(tr '\n' ',' <<<"$G11_SORTED" | sed 's/,$//') action=proceed"
           REVIEWED_SHA="$HEAD_NOW"
         fi
       fi
@@ -1124,7 +1234,7 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
       # commit, and the merge pins to it (also when no CI is configured).
       if [ -n "$REVIEWED_SHA" ]; then
         if [ -n "$MATCH_SHA" ] && [ "$MATCH_SHA" != "$REVIEWED_SHA" ]; then
-          echo "ERROR: PR #$PR_NUM refused by --auto-medium Gate 9: CI verified $MATCH_SHA but the review was for $REVIEWED_SHA (a push landed in between). Re-review the new head." >&2
+          echo "ERROR: PR #$PR_NUM refused by --auto-$AUTO_RATING $([ "$AUTO_RATING" = high ] && echo "Gate 11" || echo "Gate 9"): CI verified $MATCH_SHA but the review was for $REVIEWED_SHA (a push landed in between). Re-review the new head." >&2
           exit 1
         fi
         MATCH_SHA="$REVIEWED_SHA"

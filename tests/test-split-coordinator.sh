@@ -164,7 +164,7 @@ check "issue #781: chat prompt has hook-less sessions run watcher-check.sh, and 
 W="$ROOT/prompts/coordinator-work.md"; C="$ROOT/prompts/coordinator-chat.md"
 grep -q 'only the opt-in automerges' "$W" && got=yes || got=no
 check "work prompt: opt-in automerges only" "yes" "$got"
-grep -q 'never run `swarm-merge.sh` without `--auto-low` or `--auto-medium`' "$W" && got=yes || got=no
+grep -q 'never run `swarm-merge.sh` without `--auto-low`, `--auto-medium` or `--auto-high`' "$W" && got=yes || got=no
 check "work prompt: no explicit merges" "yes" "$got"
 grep -q 'merge N' "$W" && grep -q '🔴' "$W" && grep -q '🔴 a plain `merge N`\|🔴 .*merge N' "$C" && got=yes || got=no
 check "red merges are named in both prompts (listed by the run, executed by chat)" "yes" "$got"
