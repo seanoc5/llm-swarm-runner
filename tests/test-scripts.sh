@@ -563,6 +563,33 @@ FAKEDOCKER
 }
 test_husk_reap
 
+# issue #1005: a worktree dir reached through a symlinked parent was listed
+# twice by swarm_own_worktree_dirs (git's registry spelling + the glob's), so
+# the watcher raised two inbox items per outbox note. One worktree must list
+# exactly once, under its canonical path.
+test_own_worktree_dirs_symlinked_parent() {
+    local name="own-worktree-dirs: symlinked parent lists each worktree once"
+    echo "Checking $name..."
+    local t proj out n
+    t="$(mktemp -d)"
+    mkdir -p "$t/parent" "$t/store/proj-worktrees"
+    proj="$t/parent/proj"
+    git init -q "$proj"
+    git -C "$proj" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+    # Production shape: <parent>/proj-worktrees is a symlink to another disk.
+    ln -s "$t/store/proj-worktrees" "$t/parent/proj-worktrees"
+    git -C "$proj" worktree add -q "$t/parent/proj-worktrees/wt-issue-5" -b wt5 2>/dev/null
+    out="$(bash -c 'source "$1"; swarm_own_worktree_dirs "$2"' _ "$PWD/scripts/_load-env.sh" "$proj")"
+    n="$(printf '%s\n' "$out" | grep -c 'wt-issue-5$' || true)"
+    if [ "$n" != "1" ] || [ "$out" != "$(cd "$t/store/proj-worktrees/wt-issue-5" && pwd -P)" ]; then
+        red "  ✗ $name: got: $out"; FAIL=$((FAIL + 1)); rm -rf "$t"; return
+    fi
+    green "  ✓ $name: Passed"
+    PASS=$((PASS + 1))
+    rm -rf "$t"
+}
+test_own_worktree_dirs_symlinked_parent
+
 echo ""
 echo "Summary: $PASS passed, $FAIL failed."
 [[ $FAIL -eq 0 ]] && exit 0 || exit 1
