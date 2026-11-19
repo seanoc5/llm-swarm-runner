@@ -454,8 +454,8 @@ repeat_hits() {
 
 # offer-to-act (issue #981): see the rule text in the header.
 # Coordinator-runnable commands (prompts/coordinator.md "Act, then report": cheap, reversible steps that
-# touch nothing live are done, not handed over; "Auto-merge low/medium-risk PRs": the coordinator
-# merges with --auto-low / --auto-medium). One ERE per entry, matched at the start of a command
+# touch nothing live are done, not handed over; "Auto-merge low/medium/high-risk PRs": the coordinator
+# merges with --auto-low / --auto-medium / --auto-high). One ERE per entry, matched at the start of a command
 # segment. Anything not matching (sm / swarm-merge.sh without an auto flag, sudo, tmux kill-window,
 # watcher-check.sh --pause, git push, unknown commands) is operator-only and clears the block.
 OFFER_ALLOW=(
@@ -466,7 +466,7 @@ OFFER_ALLOW=(
     '([^[:space:]]*/)?scripts/provision-worker\.sh'               # provisioning a worktree is coordinator work
     '([^[:space:]]*/)?scripts/needs-you\.sh'                      # the coordinator owns the needs-you store
     'mv \.swarm/'                                                 # inbox/outbox housekeeping inside .swarm
-    '(sm|([^[:space:]]*/)?(scripts/)?swarm-merge\.sh)[[:space:]].*--auto-(low|medium)'   # the "Auto-merge" gates run these
+    '(sm|([^[:space:]]*/)?(scripts/)?swarm-merge\.sh)[[:space:]].*--auto-(low|medium|high)'   # the "Auto-merge" gates run these
 )
 offer_hits() {
     local allow; allow="$(IFS='|'; printf '%s' "${OFFER_ALLOW[*]}")"

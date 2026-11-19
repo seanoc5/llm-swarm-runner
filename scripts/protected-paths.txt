@@ -1,0 +1,49 @@
+# protected-paths.txt — what swarm-merge.sh --auto-high (issue #1011) never merges
+# unattended. The guardrails must not approve changes to themselves, and a few
+# classes of change are too costly to undo to leave to two model reviews.
+#
+# One rule per line: `<kind>: <extended regex>`; blank lines and `#` lines are
+# ignored. Regexes match the repo-relative path (or, for `destructive`, an
+# added line of SQL; all matching is case-insensitive). Projects EXTEND this list in
+# <project>/.swarm/protected-paths.txt (same format; it adds, never removes).
+#
+#   path         a changed path matching this makes the PR protected
+#   migration    paths that hold DB migrations: their ADDED lines are scanned
+#                with every `destructive` rule below
+#   destructive  an added line in a `migration` file matching this is a
+#                data-dropping migration
+#
+# Used by scripts/protected-paths-check.sh. Keep this the single list.
+
+# --- the merge, hold, review and risk guardrails themselves -------------------
+path: ^scripts/(swarm-merge|worker-merge|_hold-label|lift-hold|self-review-pr|risk-floor|queue-merge-brief|pr-ready|ci-wait|protected-paths-check)\.sh$
+path: ^scripts/protected-paths\.txt$
+# the merge sections of the prompts, and the review rubric the reviewers run
+path: ^prompts/(coordinator|coordinator-work|coordinator-shared|coordinator-chat|worker|worker-bare)\.md$
+path: ^prompts/skill-self-review(-followup)?\.md$
+path: (^|/)\.swarm-policy\.md$
+path: (^|/)\.swarm/protected-paths\.txt$
+
+# --- secrets and auth ---------------------------------------------------------
+path: (^|/)\.env($|\.)
+path: (^|/)[^/]*(secret|credential|password|token)[^/]*$
+path: \.(pem|key|p12|jks|keystore)$
+path: (^|/)[^/]*(auth|oauth|security|permission|acl)[^/]*\.(kt|java|py|js|ts|rb|go|rs|sh|ya?ml|properties|json)$
+path: (^|/)(auth|security)/
+
+# --- data-dropping migrations -------------------------------------------------
+migration: (^|/)db/migration/
+migration: (^|/)alembic/versions/
+migration: (^|/)migrations/.+\.(sql|py)$
+migration: (^|/)db/migrate/
+migration: (changelog|liquibase).*\.(xml|ya?ml|json|sql)$
+destructive: \bdrop[[:space:]]+(table|column|schema|database|index|constraint|view)\b
+destructive: \balter[[:space:]]+table\b.*\bdrop\b
+destructive: \btruncate\b
+destructive: \bdelete[[:space:]]+from\b
+destructive: \bupdate\b.*\bset\b.*=[[:space:]]*null\b
+destructive: <drop(table|column|schema|view|index)\b|"drop(table|column|schema|view|index)"|\bdrop_(table|column)\b
+# Liquibase row deletes: YAML `delete:` / `- delete:` and XML `<delete ` / `<delete>`
+# (not onDelete / deleteCascade, which have no word boundary or no colon).
+destructive: (^|[[:space:]{-])delete[[:space:]]*:|<delete([[:space:]>/]|$)
+destructive: \bdrop(table|column|view|index|schema|foreignkeyconstraint|primarykey|uniqueconstraint)[[:space:]]*:
