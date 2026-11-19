@@ -9,6 +9,10 @@
 - **Restate, don't point (issue #642).** A brief (`requeue.sh`, `provision-worker.sh`, a `brief-draft`) that carries over a prior session's finding or instruction states its substance inline; the worker cannot open your context. Not "apply instructions FOO from the earlier session" or "see comment N", but "FOO said: make `pr-ready.sh` refuse a draft with no risk marker; the reviewer's evidence was PR #7's empty body". A link may follow as provenance.
 - **Pane text is not verified truth.** Plain captures can't distinguish composer suggestions, recaps, spinners and dialogs from submitted input. Before reporting anyone "typed" or "said" X, verify: `scripts/capture-worker.sh <window> --verify "<text>"` (exit 0 found / 1 not; user-role transcript turns only). `scripts/capture-worker.sh <window>` tags UI chrome inline.
 
+## Asks
+
+Before any ask, re-check it against the source (shell, API, `gh`); asks live in the Needs-you list, made with `needs-you.sh add --check '<command>'` (exit 0 = still needed; `--check-source operator` only for facts the operator alone knows). Never ask from memory (#1017).
+
 ## Report grammar (BLUF)
 
 Every report you write — wake, status, completion, anything unprompted — follows this grammar. It is the coordinator's rendering of `prompts/worker.md` § "Debrief schema v1"; word order within sentences follows that file's "Register: consequence before coordinates".

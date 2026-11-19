@@ -183,9 +183,9 @@ reply_lint_message() {
     [ -n "$hits" ] || return 0
     # lede-identifier (issue #979), repeat-item (issue #980) and offer-to-act (issue #981) are warn-only by default:
     # warn logs the hit but never blocks; block treats it like any rule; off drops it.
-    # COORD_REPLY_LINT_LEDE / COORD_REPLY_LINT_REPEAT / COORD_REPLY_LINT_OFFER.
+    # COORD_REPLY_LINT_LEDE / COORD_REPLY_LINT_REPEAT / COORD_REPLY_LINT_OFFER / COORD_REPLY_LINT_ASK (ask-not-listed, issue #1017).
     local rule mode
-    for rule in lede-identifier:LEDE repeat-item:REPEAT offer-to-act:OFFER; do
+    for rule in lede-identifier:LEDE repeat-item:REPEAT offer-to-act:OFFER ask-not-listed:ASK; do
         mode="COORD_REPLY_LINT_${rule#*:}"; mode="${!mode:-warn}"; rule="${rule%%:*}"
         case "$mode" in
             block) ;;

@@ -32,16 +32,16 @@ check "'Nothing to do.' alone is clean" "" "$(rules "$FX/clean-nothing.txt")"
 set +e; "$LINT" < "$FX/incident-start-load.txt" >/dev/null; ec=$?; "$LINT" < "$FX/clean-nothing.txt" >/dev/null; ec2=$?; set -e
 check "exit 3 on hits, 0 clean" "3 0" "$ec $ec2"
 printf 'Pending your approval: merge PR 4 (yes/no)\nDo now: say yes\n' > "$T/two"
-check "Pending your approval + Do now: two-endings" "two-endings" "$(rules "$T/two")"
+check "Pending your approval + Do now: two-endings" "ask-not-listed,two-endings" "$(rules "$T/two")"
 printf -- '- **A1** Click the Approve button\n  https://github.com/o/r/pull/4 (Files changed > Review)\n' > "$T/url"
 check "a click item with an https URL is clean" "" "$(rules "$T/url")"
 # issue #680: an approval item must state its change, not point at it
-check "#680 incident (\"make those three edits yourself\"): pointer" "pointer" "$(rules "$FX/incident-pointer-edits.txt")"
+check "#680 incident (\"make those three edits yourself\"): pointer" "ask-not-listed,pointer" "$(rules "$FX/incident-pointer-edits.txt")"
 check "#680 version naming ci.yml, the line and the change: clean" "" "$(rules "$FX/clean-pointer-edits-named.txt")"
 printf -- "- **A1** Pick option A: rescope the export to CSV only (default if silent)\n" > "$T/optok"
 check "#680 \"option A: <text>\" carries its text: clean" "" "$(rules "$T/optok")"
 printf "Pending your approval: apply the fix above (yes/no)\n" > "$T/pend"
-check "#680 a Pending-approval line is linted as an item (apply, no change shown): no-command" "no-command" "$(rules "$T/pend")"
+check "#680 a Pending-approval line is linted as an item (apply, no change shown): no-command" "ask-not-listed,no-command" "$(rules "$T/pend")"
 printf -- "- **A1** Edit the workflow so checkout fetches submodules (yes/no)\n" > "$T/edit"
 check "#680 an edit verb with no file, line or command: no-command" "no-command" "$(rules "$T/edit")"
 printf -- "- **A1** Edit scripts/needs-you.sh:44 to drop the retry (yes/no)\n" > "$T/editok"
@@ -55,11 +55,11 @@ check "#680 same phrase with the edits in a code span: clean" "" "$(rules "$T/ur
 printf -- '- **A3** #2148: when searches start defaulting to forum-visible, should saved searches stay private? (yes/no)\n' > "$T/yn"
 check "#680 a yes/no decision using the word 'start' needs no command: clean" "" "$(rules "$T/yn")"
 printf 'Pending your approval: the one-line nightly config edit (yes/no)\n' > "$T/pe"
-check "#680 a Pending edit with no file or change: no-command" "no-command" "$(rules "$T/pe")"
+check "#680 a Pending edit with no file or change: no-command" "ask-not-listed,no-command" "$(rules "$T/pe")"
 printf 'Pending your approval: merge this PR, #2311 (yes/no)\n' > "$T/pm"
-check "#680 'your' in a Pending line is not 'you ... merge this': clean" "" "$(rules "$T/pm")"
+check "#680 'your' in a Pending line is not 'you ... merge this': no other hit" "ask-not-listed" "$(rules "$T/pm")"
 printf 'Pending your approval: make this the default (yes/no)\n' > "$T/pd"
-check "#680 Pending 'make this the default' (your != you): clean" "" "$(rules "$T/pd")"
+check "#680 Pending 'make this the default' (your != you): no other hit" "ask-not-listed" "$(rules "$T/pd")"
 printf -- '- **A1** Click Approve on the PR (yes/no)\n' > "$T/ck"
 check "#680 click + yes/no with no URL is not exempt: no-command" "no-command" "$(rules "$T/ck")"
 printf -- '- **A1** If you say yes, I will merge it (https://github.com/o/r/pull/1810)\n' > "$T/y1"
@@ -165,23 +165,23 @@ check "13-row incident fixture: flagged rows are exactly the expect=flag rows" "
 
 # ── needs-you.sh ─────────────────────────────────────────────────────────────
 P="$T/proj"; mkdir -p "$P/.swarm"
-set +e; "$NY" add --background "$BG" --project "$P" --title "Start load" --do "Start it in 1:util" >/dev/null 2>&1; ec=$?; set -e
+set +e; "$NY" add --check-source operator --background "$BG" --project "$P" --title "Start load" --do "Start it in 1:util" >/dev/null 2>&1; ec=$?; set -e
 check "add refuses a --do with no command or URL" "2" "$ec"
-set +e; "$NY" add --background "$BG" --project "$P" --title "Start load" --do 'run the command above `x`' >/dev/null 2>&1; ec=$?
-"$NY" add --background "$BG" --project "$P" --title "Start load" >/dev/null 2>&1; ec2=$?; set -e
+set +e; "$NY" add --check-source operator --background "$BG" --project "$P" --title "Start load" --do 'run the command above `x`' >/dev/null 2>&1; ec=$?
+"$NY" add --check-source operator --background "$BG" --project "$P" --title "Start load" >/dev/null 2>&1; ec2=$?; set -e
 check "add refuses a back-reference and a missing --do" "2 2" "$ec $ec2"
-set +e; "$NY" add --background "$BG" --project "$P" --title "Review plan" --do 'run `./review.sh` for the plan in §4' >/dev/null 2>&1; ec=$?
-mkdir -p "$T/cproj/.swarm"; "$NY" add --background "$BG" --project "$T/cproj" --title "Review the Tailwind carve plan" --rec "yes: the carve order keeps the layout stable and touches only templates, so rollback is one revert" --do 'run `./review.sh tailwind`' >/dev/null 2>&1; ec2=$?; set -e
+set +e; "$NY" add --check-source operator --background "$BG" --project "$P" --title "Review plan" --do 'run `./review.sh` for the plan in §4' >/dev/null 2>&1; ec=$?
+mkdir -p "$T/cproj/.swarm"; "$NY" add --check-source operator --background "$BG" --project "$T/cproj" --title "Review the Tailwind carve plan" --rec "yes: the carve order keeps the layout stable and touches only templates, so rollback is one revert" --do 'run `./review.sh tailwind`' >/dev/null 2>&1; ec2=$?; set -e
 check "add refuses a bare section pointer (carryover) and accepts a self-contained item" "2 0" "$ec $ec2"
-set +e; "$NY" add --background "$BG" --project "$T/bproj" --title "Start load" --do "$(printf 'run the command below
+set +e; "$NY" add --check-source operator --background "$BG" --project "$T/bproj" --title "Start load" --do "$(printf 'run the command below
 ```
 ./load.sh
 ```')" >/dev/null 2>&1; ec=$?; set -e
 check "add accepts 'the command below' followed by a fence" "0" "$ec"
 rm -rf "$T/bproj"
 check "refused items leave no store" "none" "$([ -e "$P/.swarm/needs-you.jsonl" ] && echo some || echo none)"
-check "add prints the label" "A1" "$("$NY" add --background "$BG" --project "$P" --title "Load kdeyoga data" --risk "writes dev DB" --rec "yes, high confidence" --do 'In 1:util run `./load-tiger.sh kdeyoga`')"
-"$NY" add --background "$BG" --project "$P" --title "PR 689" --kind decision --do 'Say `merge PR 689`' --url https://github.com/o/r/pull/689 >/dev/null
+check "add prints the label" "A1" "$("$NY" add --check-source operator --background "$BG" --project "$P" --title "Load kdeyoga data" --risk "writes dev DB" --rec "yes, high confidence" --do 'In 1:util run `./load-tiger.sh kdeyoga`')"
+"$NY" add --check-source operator --background "$BG" --project "$P" --title "PR 689" --kind decision --do 'Say `merge PR 689`' --url https://github.com/o/r/pull/689 >/dev/null
 out="$("$NY" render --project "$P")"
 case "$out" in *'./load-tiger.sh kdeyoga'*'merge PR 689'*) got=yes ;; *) got=no ;; esac
 check "render prints every do in full" "yes" "$got"
@@ -192,11 +192,11 @@ check "needs-you.md (the file the hook diffs) holds the items" "yes" "$got"
 check "render --json lists open items" "A1,A2" "$("$NY" render --json --project "$P" | jq -r 'map(.label) | join(",")')"
 "$NY" done A1 --project "$P"
 check "done closes one" "A2" "$("$NY" render --json --project "$P" | jq -r 'map(.label) | join(",")')"
-check "labels are never reused" "A3" "$("$NY" add --background "$BG" --project "$P" --title t --do 'run `x`')"
+check "labels are never reused" "A3" "$("$NY" add --check-source operator --background "$BG" --project "$P" --title t --do 'run `x`')"
 "$NY" done A2 --project "$P"; "$NY" done A3 --project "$P"
 # a fenced --do: the fence must open on its own line and Do now: must show the command
 F="$T/fproj"; mkdir -p "$F/.swarm"
-"$NY" add --background "$BG" --project "$F" --title "Load data" --do "$(printf '```\n./load.sh kdeyoga\n```')" >/dev/null
+"$NY" add --check-source operator --background "$BG" --project "$F" --title "Load data" --do "$(printf '```\n./load.sh kdeyoga\n```')" >/dev/null
 out="$("$NY" render --project "$F")"
 check "fenced --do: opening fence starts its own line" "1" "$(grep -c '^```$' <<<"$out" | awk '{print ($1 == 2) ? 1 : 0}')"
 check "fenced --do: Do now shows the command, not a bare fence" "Do now: A1 — ./load.sh kdeyoga" "$(grep '^Do now:' <<<"$out")"
@@ -205,7 +205,7 @@ check "empty list renders 'Nothing to do.'" "Nothing to do." "$("$NY" render --p
 
 # ── needs-you.sh: cold-reader background and hand-written guard (issue #964) ──
 G="$T/gproj"; mkdir -p "$G/.swarm"
-gadd() { "$NY" add --project "$G" --do 'Say `merge PR 9`' "$@" >/dev/null 2>&1; echo $?; }
+gadd() { "$NY" add --check-source operator --project "$G" --do 'Say `merge PR 9`' "$@" >/dev/null 2>&1; echo $?; }
 check "add refuses an item with no --background" "2" "$(gadd --title "Rebase the check")"
 check "add refuses a --background under 12 words" "2" "$(gadd --title "Rebase the check" --background "Check needs a rebase")"
 check "add refuses slash-joined acronyms (the 2026-11-14 stub)" "2" "$(gadd --title "SI/SR check re-base" --background "$BG")"
@@ -224,7 +224,7 @@ HW="$T/hwproj"; mkdir -p "$HW/.swarm"; printf '# Needs you\n- **A1** stub\n' > "
 check "check: a md with no store is flagged" "3" "$("$NY" check --project "$HW" >/dev/null 2>&1; echo $?)"
 check "render --write clears a stale hand-written list (no store)" "0" "$("$NY" render --write --project "$HW" >/dev/null 2>&1; "$NY" check --project "$HW" >/dev/null 2>&1; echo $?)"
 check "...and leaves an empty list" "Nothing to do." "$(tail -1 "$HW/.swarm/needs-you.md")"
-OLD="$T/oldproj"; mkdir -p "$OLD"; "$NY" add --background "$BG" --project "$OLD" --title "Old layout item" --do 'Say `go`' >/dev/null
+OLD="$T/oldproj"; mkdir -p "$OLD"; "$NY" add --check-source operator --background "$BG" --project "$OLD" --title "Old layout item" --do 'Say `go`' >/dev/null
 sed -i '/What this is:/d' "$OLD/.swarm/needs-you.md"
 check "check: an older-layout list (same labels) is not flagged" "0" "$("$NY" check --project "$OLD" >/dev/null 2>&1; echo $?)"
 check "check: no md at all is fine" "0" "$("$NY" check --project "$T/none" >/dev/null 2>&1; echo $?)"
@@ -232,7 +232,7 @@ check "check: no md at all is fine" "0" "$("$NY" check --project "$T/none" >/dev
 # ── verification stamp (issue #680): claim, verified, verify, unverified-since ──
 export TZ=UTC   # render shows local time; pin it so the "01-01" checks hold anywhere
 V="$T/vproj"; mkdir -p "$V/.swarm"
-"$NY" add --project "$V" --background "$BG" --title "Unblock fand-app 1810" --claim "only ci.yml builds with Gradle" --do 'Edit `.github/workflows/ci.yml` line 31: add `submodules: true`' >/dev/null
+"$NY" add --check-source operator --project "$V" --background "$BG" --title "Unblock fand-app 1810" --claim "only ci.yml builds with Gradle" --do 'Edit `.github/workflows/ci.yml` line 31: add `submodules: true`' >/dev/null
 out="$("$NY" render --project "$V")"
 case "$out" in *"Claim: only ci.yml builds with Gradle — verified "*) got=yes ;; *) got=no ;; esac
 check "a fresh item renders its claim with a verified time" "yes" "$got"
@@ -250,6 +250,37 @@ check "verify on an unknown label fails" "2" "$ec"
 printf '{"label":"A1","kind":"todo","title":"old item","do":"run `x`","risk":"","rec":"","default":"","url":"","added":"2026-01-01T00:00:00Z","done":false}\n' > "$V/.swarm/needs-you.jsonl"
 case "$("$NY" render --project "$V")" in *"(unverified since 01-01 "*) got=yes ;; *) got=no ;; esac
 check "a pre-#680 item with no stamp falls back to its added time" "yes" "$got"
+
+# ── real --check (issue #1017) ───────────────────────────────────────────────
+K="$T/kproj"; mkdir -p "$K/.swarm"; KDONE="$T/kdone"
+kadd() { "$NY" add --project "$K" --background "$BG" --title "Deploy it" --do 'Run `./deploy.sh`' "$@" 2>&1; }
+set +e; kadd --check 'test -e /nonexistent-1017' >/dev/null; ec=$?; set -e
+check "add refuses an item whose --check exits non-zero" "2" "$ec"
+set +e; kadd >/dev/null; ec=$?; set -e
+check "add refuses an item with no check at all" "2" "$ec"
+check "refused adds leave no store" "none" "$([ -s "$K/.swarm/needs-you.jsonl" ] && echo some || echo none)"
+check "add with a passing --check files the item" "A1" "$(kadd --check "test ! -e $KDONE && echo still-needed" | tail -1)"
+check "the check result is stored" "0|still-needed" "$(jq -r '[.checkResult, .checkOutput] | join("|")' "$K/.swarm/needs-you.jsonl")"
+case "$("$NY" render --project "$K")" in *"Check: test ! -e"*"→ exit 0 at "*) got=yes ;; *) got=no ;; esac
+check "render shows the check and its exit code" "yes" "$got"
+check "--check-source operator is accepted without a command" "A2" "$(kadd --check-source operator | tail -1)"
+case "$("$NY" render --project "$K")" in *"Source: operator-stated, not machine-checked"*) got=yes ;; *) got=no ;; esac
+check "render marks an operator-sourced item" "yes" "$got"
+"$NY" verify A1 --project "$K"; check "verify re-runs a still-passing check" "0" "$?"
+touch "$KDONE"
+set +e; "$NY" verify A1 --project "$K" >/dev/null 2>&1; ec=$?; set -e
+check "verify exits 1 when the check now fails" "1" "$ec"
+check "the failed result is stored" "1" "$(jq -r 'select(.label == "A1") | .checkResult' "$K/.swarm/needs-you.jsonl")"
+case "$("$NY" render --project "$K")" in *"CHECK FAILED (exit 1)"*) got=yes ;; *) got=no ;; esac
+check "render flags the failed check" "yes" "$got"
+check "the failed item stays open" "A1,A2" "$("$NY" render --json --project "$K" | jq -r 'map(.label) | join(",")')"
+
+# ── ask-not-listed (issue #1017) ─────────────────────────────────────────────
+ask() { "$LINT" --only ask-not-listed | cut -d: -f1 | sort -u | paste -sd, -; }
+check "ask: a Pending-approval line with no label is a hit" "ask-not-listed" "$(printf 'Done.\nPending your approval: deploy fand-app to kdeyoga (yes/no)\n' | ask)"
+check "ask: a Pending-approval line naming a Needs-you label passes" "" "$(printf 'Pending your approval: A1 (yes/no)\n' | ask)"
+check "ask: 'Nothing needed from you' passes" "" "$(printf 'Nothing needed from you right now\n' | ask)"
+check "ask: a Pending-approval line inside a fence is ignored" "" "$(printf '```\nPending your approval: deploy\n```\n' | ask)"
 
 # ── Stop hook ────────────────────────────────────────────────────────────────
 H="$T/hproj"; mkdir -p "$H/.swarm/coord-inbox"
