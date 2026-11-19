@@ -1073,8 +1073,8 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
           while IFS=$'\t' read -r G11_M G11_U; do
             [ -n "$G11_M" ] || continue
             G11_V="$(sed -E 's/^SWARM_SELF_REVIEW: ([A-Z_]+).*/\1/' <<<"$G11_M")"
-            G11_H="$(grep -oE ' head=[0-9a-f]+' <<<"$G11_M" | head -n1 | cut -d= -f2 || true)"
-            G11_MODEL="$(grep -oE ' model=[^ ]+' <<<"$G11_M" | head -n1 | cut -d= -f2 || true)"
+            G11_H="$(grep -oE ' head=[0-9a-f]+' <<<"$G11_M" | sed -n 1p | cut -d= -f2 || true)"
+            G11_MODEL="$(grep -oE ' model=[^ ]+' <<<"$G11_M" | sed -n 1p | cut -d= -f2 || true)"
             [ -n "$HEAD_NOW" ] && [ "$G11_H" = "$HEAD_NOW" ] || continue   # another commit's review proves nothing
             G11_VERDICT["${G11_MODEL:-unnamed}"]="$G11_V"                   # latest per model wins
             G11_URL["${G11_MODEL:-unnamed}"]="$G11_U"
