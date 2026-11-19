@@ -132,6 +132,14 @@ for a in "$@"; do [[ "$a" =~ ^[0-9]+$ ]] && pr_num="$a" && break; done
 comments_file="$GH_COMMENTS_DIR/$pr_num.json"
 [ -f "$comments_file" ] || echo '{"comments":[]}' > "$comments_file"
 
+# issue #1011: protected-paths-check.sh lists files via the pulls/N/files API (filename + previous_filename).
+if [[ "$*" == *"/pulls/"*"/files"* ]]; then
+    if [ "${GH_DIFF_FAIL:-0}" = "1" ]; then echo "gh: simulated diff failure" >&2; exit 1; fi
+    printf "%s\n" "${GH_DIFF_NAMES:-src/App.kt}"
+    [ -z "${GH_DIFF_PREV:-}" ] || printf "%s\n" "$GH_DIFF_PREV"
+    exit 0
+fi
+
 case "$1 $2" in
     "api repos/{owner}/{repo}/issues/"*) echo "false"; exit 0 ;;
     "pr view")
@@ -1023,8 +1031,16 @@ run_high
 set_reviews deadbeef "$OPUS" '<!-- SWARM_SELF_REVIEW: APPROVE actor=coordinator head=deadbeef -->'
 run_high
 [ "$RC" -ne 0 ] && echo "$OUT" | grep -q "auto-high Gate 11" && no_merge || red "a marker with no model= must not count (rc=$RC, output: $OUT)"
+set_reviews deadbeef "$OPUS" '<!-- SWARM_SELF_REVIEW: APPROVE actor=coordinator head=deadbeef model=opus -->'
+run_high
+[ "$RC" -ne 0 ] && echo "$OUT" | grep -q "auto-high Gate 11" && no_merge || red "opus and claude-opus-5-5 are one model, not two (rc=$RC, output: $OUT)"
+set_reviews deadbeef "$OPUS" '<!-- SWARM_SELF_REVIEW: APPROVE actor=coordinator head=deadbeef model=Claude-Opus-5-5[1m] -->'
+run_high
+[ "$RC" -ne 0 ] && echo "$OUT" | grep -q "auto-high Gate 11" && no_merge || red "a [1m] / mixed-case spelling must normalise to the same model (rc=$RC, output: $OUT)"
+set_reviews deadbeef '<!-- SWARM_SELF_REVIEW: APPROVE actor=coordinator head=deadbeef model=opus -->' "$SONNET"
+run_high
+[ "$RC" -eq 0 ] || red "opus alias plus sonnet are two models and should pass Gate 11 (rc=$RC, output: $OUT)"
 green "Gate 11 needs two different named models"
-
 heading "Test H4: a caveat or a BLOCK from the second model → Gate 11"
 set_reviews deadbeef "$OPUS" '<!-- SWARM_SELF_REVIEW: APPROVE_WITH_CAVEATS actor=coordinator head=deadbeef model=claude-sonnet-5-5 -->'
 run_high
@@ -1061,8 +1077,12 @@ for P in scripts/swarm-merge.sh scripts/_hold-label.sh prompts/coordinator-work.
     run_high GH_DIFF_NAMES=$'src/App.kt\n'"$P"
     [ "$RC" -ne 0 ] && echo "$OUT" | grep -q "auto-high Gate 12" && echo "$OUT" | grep -qF "$P" && no_merge || red "$P must be protected (rc=$RC, output: $OUT)"
 done
+# A rename lists only the new path in `gh pr diff --name-only`; the files API also gives the old one.
+for OLD in scripts/swarm-merge.sh scripts/protected-paths.txt prompts/coordinator-work.md; do
+    run_high GH_DIFF_NAMES=tmp/moved-guardrail GH_DIFF_PREV="$OLD"
+    [ "$RC" -ne 0 ] && echo "$OUT" | grep -q "auto-high Gate 12" && echo "$OUT" | grep -qF "$OLD" && no_merge || red "a guardrail renamed away from $OLD must be protected (rc=$RC, output: $OUT)"
+done
 green "Gate 12 refuses the guardrail scripts, merge prompts, policy, secrets and auth, naming the path"
-
 heading "Test H7: data-dropping migration → Gate 12; add-only migration passes it"
 cat > "$TEST_DIR/drop.diff" <<'DIFF'
 diff --git a/src/main/resources/db/migration/V9__x.sql b/src/main/resources/db/migration/V9__x.sql
@@ -1097,8 +1117,23 @@ for LB in src/main/resources/db/changelog/changes/0007-drop.yaml src/main/resour
     [ "$RC" -ne 0 ] && echo "$OUT" | grep -q "auto-high Gate 12" && no_merge || red "a Liquibase dropTable in $LB must be protected (rc=$RC, output: $OUT)"
   done
 done
+for LINE in "delete from users where active = false;" "DELETE FROM users;" "TRUNCATE TABLE users;" "truncate users;"; do
+    printf 'diff --git a/db/migration/V10__d.sql b/db/migration/V10__d.sql\n--- /dev/null\n+++ b/db/migration/V10__d.sql\n@@ -0,0 +1 @@\n+%s\n' "$LINE" > "$TEST_DIR/del.diff"
+    run_high GH_DIFF_NAMES=db/migration/V10__d.sql GH_DIFF_FILE="$TEST_DIR/del.diff"
+    [ "$RC" -ne 0 ] && echo "$OUT" | grep -q "auto-high Gate 12" && no_merge || red "raw SQL '$LINE' must be protected (rc=$RC, output: $OUT)"
+done
+for LINE in "  - delete: {tableName: users}" "- delete:" "<delete tableName=\"users\">" "<delete>"; do
+    LB=src/main/resources/db/changelog/changes/0008-del.yaml
+    printf 'diff --git a/%s b/%s\n--- /dev/null\n+++ b/%s\n@@ -0,0 +1 @@\n+%s\n' "$LB" "$LB" "$LB" "$LINE" > "$TEST_DIR/lbd.diff"
+    run_high GH_DIFF_NAMES="$LB" GH_DIFF_FILE="$TEST_DIR/lbd.diff"
+    [ "$RC" -ne 0 ] && echo "$OUT" | grep -q "auto-high Gate 12" && no_merge || red "Liquibase row delete '$LINE' must be protected (rc=$RC, output: $OUT)"
+done
+# an add-only Liquibase change with ON DELETE / deleteCascade is not a row delete
+LB=src/main/resources/db/changelog/changes/0009-fk.yaml
+printf 'diff --git a/%s b/%s\n--- /dev/null\n+++ b/%s\n@@ -0,0 +1 @@\n+      onDelete: CASCADE\n' "$LB" "$LB" "$LB" > "$TEST_DIR/fk.diff"
+run_high GH_DIFF_NAMES="$LB" GH_DIFF_FILE="$TEST_DIR/fk.diff"
+echo "$OUT" | grep -q "Gate 12" && [ "$RC" -ne 0 ] && red "onDelete: CASCADE is not a row delete (rc=$RC, output: $OUT)"
 green "Gate 12 scans added migration lines for destructive SQL only"
-
 heading "Test H8: protected-paths check errors → fails closed; project list extends the default"
 run_high GH_DIFF_FAIL=1
 [ "$RC" -ne 0 ] && echo "$OUT" | grep -q "auto-high Gate 12" && no_merge || red "an unreadable diff must refuse (rc=$RC, output: $OUT)"

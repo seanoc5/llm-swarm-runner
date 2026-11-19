@@ -1069,21 +1069,30 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
           # only, anchored on "<!-- " so quoted prose never counts), oldest first,
           # as "<marker>\t<comment url>".
           G11_LINES="$(jq -r '.comments[] | select(.authorAssociation as $a | ["OWNER","MEMBER","COLLABORATOR"] | index($a)) | . as $c | (($c.body // "") | capture("<!-- (?<m>SWARM_SELF_REVIEW: [A-Z_]+ actor=(coordinator|operator)( [A-Za-z_]+=[^ >]*)*)")? // empty) | "\(.m)\t\($c.url // "<no url>")"' <<<"$G11_JSON" 2>/dev/null || true)"
-          declare -A G11_VERDICT=() G11_URL=()
+          declare -A G11_VERDICT=() G11_URL=() G11_NAME=()
           while IFS=$'\t' read -r G11_M G11_U; do
             [ -n "$G11_M" ] || continue
             G11_V="$(sed -E 's/^SWARM_SELF_REVIEW: ([A-Z_]+).*/\1/' <<<"$G11_M")"
             G11_H="$(grep -oE ' head=[0-9a-f]+' <<<"$G11_M" | sed -n 1p | cut -d= -f2 || true)"
             G11_MODEL="$(grep -oE ' model=[^ ]+' <<<"$G11_M" | sed -n 1p | cut -d= -f2 || true)"
             [ -n "$HEAD_NOW" ] && [ "$G11_H" = "$HEAD_NOW" ] || continue   # another commit's review proves nothing
-            G11_VERDICT["${G11_MODEL:-unnamed}"]="$G11_V"                   # latest per model wins
-            G11_URL["${G11_MODEL:-unnamed}"]="$G11_U"
+            # One key per model FAMILY: `opus`, `claude-opus-5-5` and
+            # `claude-opus-5-5[1m]` are one model, so two spellings never count as two.
+            G11_RAW="${G11_MODEL:-unnamed}"
+            G11_KEY="$(tr 'A-Z' 'a-z' <<<"${G11_RAW%%\[*}")"
+            case "$G11_KEY" in
+              *opus*) G11_KEY=opus ;; *sonnet*) G11_KEY=sonnet ;;
+              *fable*) G11_KEY=fable ;; *haiku*) G11_KEY=haiku ;;
+            esac
+            G11_VERDICT["$G11_KEY"]="$G11_V"                                # latest per model wins
+            G11_URL["$G11_KEY"]="$G11_U"
+            G11_NAME["$G11_KEY"]="$G11_RAW"
           done <<<"$G11_LINES"
           G11_OK_MODELS=()
           G11_WHY=""
           for G11_K in "${!G11_VERDICT[@]}"; do
             if [ "${G11_VERDICT[$G11_K]}" != APPROVE ]; then
-              G11_WHY="the latest review by model '$G11_K' on this head is ${G11_VERDICT[$G11_K]} (${G11_URL[$G11_K]}), not a bare APPROVE"
+              G11_WHY="the latest review by model '${G11_NAME[$G11_K]}' on this head is ${G11_VERDICT[$G11_K]} (${G11_URL[$G11_K]}), not a bare APPROVE"
             elif [ "$G11_K" != default ] && [ "$G11_K" != unnamed ]; then
               G11_OK_MODELS+=("$G11_K")
             fi
@@ -1098,10 +1107,10 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
             echo "       and: self-review-pr.sh $PR_NUM --post --rerun --actor coordinator --model <id-2>  (two different ids)." >&2
             exit 1
           fi
-          G11_SORTED="$(printf '%s\n' "${G11_OK_MODELS[@]}" | sort)"
-          G11_SUMMARY="$(while IFS= read -r G11_K; do printf '%s (%s) ' "$G11_K" "${G11_URL[$G11_K]}"; done <<<"$G11_SORTED")"
+          G11_SORTED="$(for G11_K in "${G11_OK_MODELS[@]}"; do printf "%s\t%s\n" "${G11_NAME[$G11_K]}" "${G11_URL[$G11_K]}"; done | sort)"
+          G11_SUMMARY="$(while IFS=$'\t' read -r G11_N G11_U; do printf "%s (%s) " "$G11_N" "$G11_U"; done <<<"$G11_SORTED")"
           echo "       $(c_green "auto-high gate 11: bare APPROVE on ${HEAD_NOW:0:7} from ${#G11_OK_MODELS[@]} models: ${G11_SUMMARY% }")"
-          log_event merge.gate "pr=$PR_NUM gate=11-two-model-review result=approve head=$HEAD_NOW models=$(tr '\n' ',' <<<"$G11_SORTED" | sed 's/,$//') action=proceed"
+          log_event merge.gate "pr=$PR_NUM gate=11-two-model-review result=approve head=$HEAD_NOW models=$(cut -f1 <<<"$G11_SORTED" | tr "\n" "," | sed "s/,$//") action=proceed"
           REVIEWED_SHA="$HEAD_NOW"
         fi
       fi

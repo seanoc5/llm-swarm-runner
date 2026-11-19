@@ -40,8 +40,12 @@ MIG_RES="$(rules_of migration)"
 DEST_RES="$(rules_of destructive)"
 [ -n "$PATH_RES" ] || { echo "ERROR: $RULES has no 'path:' rules — refusing to treat everything as clean" >&2; exit 1; }
 
-FILES="$(gh pr diff "$PR" --name-only 2>/dev/null)" \
+# Both the new and (for renames) the previous path: `gh pr diff --name-only` lists
+# only the new name, so moving a guardrail out of scripts/ would look clean.
+FILES_RAW="$(gh api --paginate "repos/{owner}/{repo}/pulls/$PR/files" \
+  --jq '.[] | .filename, (.previous_filename // empty)' 2>/dev/null)" \
   || { echo "ERROR: couldn't list PR #$PR's changed files" >&2; exit 1; }
+FILES="$(sort -u <<<"$FILES_RAW" | sed '/^$/d')"
 [ -n "$FILES" ] || { echo "ERROR: PR #$PR lists no changed files" >&2; exit 1; }
 
 HITS=0
