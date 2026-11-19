@@ -44,8 +44,9 @@
 # "(unverified since MM-DD HH:MM)" once the stamp is older than NEEDS_YOU_STALE_HOURS
 # (default 6), so a repeated item can never look settled without a check behind it.
 #
-# render ends with exactly one closing line: "Do now: <label> ..." when items
-# are open, "Nothing to do." when none are. Placeholder values ("none", "nothing",
+# render ends with exactly one closing line: "Do now: <label>" (label alone, issue
+# #1016: repeating the item's --do text or URL made the reply lint hit repeat-item)
+# when items are open, "Nothing to do." when none are. Placeholder values ("none", "nothing",
 # "n/a") for --risk/--rec/--default are dropped: an empty field is left out.
 #
 # Backend (issue #801): NEEDS_YOU_BACKEND=file (default) keeps everything local.
@@ -133,7 +134,7 @@ render_md() {
            else "" end)
         + (if .default != "" then "\n  Default if silent: \(.default)" else "" end)' <<<"$items"
     if [ "$n" -gt 0 ]; then
-        printf '\nDo now: %s\n' "$(jq -r '.[0] | "\(.label) — \([.do | split("\n")[] | select((test("^[[:space:]]*```") or test("^[[:space:]]*$")) | not)] | first // .do)"' <<<"$items")"
+        printf '\nDo now: %s\n' "$(jq -r '.[0].label' <<<"$items")"
     else
         printf '\nNothing to do.\n'
     fi

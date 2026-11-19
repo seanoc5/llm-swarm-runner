@@ -77,8 +77,7 @@ for B in file corpusminder; do
     out="$("$NY" render --project "$Q")"
     check "$B: open items print exactly one Do now line" "1" "$(grep -c '^Do now:' <<<"$out")"
     check "$B: open items never print Nothing to do / Nothing needed" "0" "$(grep -ciE 'nothing (to do|needed)' <<<"$out" || true)"
-    case "$(grep '^Do now:' <<<"$out")" in *'`'*|*https://*|*./load.sh*) got=carries ;; *) got=bare ;; esac
-    check "$B: the Do now line carries a command or URL" "carries" "$got"
+    check "$B: the Do now line names the label only (issue #1016)" "Do now: A1" "$(grep '^Do now:' <<<"$out")"
     check "$B: the rendered list passes the reply lint" "" "$("$LINT" <<<"$out" | cut -d: -f1 | paste -sd, -)"
 done
 check "the 2026-11-09 fixture is flagged by the lint" "two-endings" "$("$LINT" < "$FX/incident-contradictory-ending.txt" | cut -d: -f1 | sort -u | paste -sd, -)"

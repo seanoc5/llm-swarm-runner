@@ -199,7 +199,11 @@ F="$T/fproj"; mkdir -p "$F/.swarm"
 "$NY" add --check-source operator --background "$BG" --project "$F" --title "Load data" --do "$(printf '```\n./load.sh kdeyoga\n```')" >/dev/null
 out="$("$NY" render --project "$F")"
 check "fenced --do: opening fence starts its own line" "1" "$(grep -c '^```$' <<<"$out" | awk '{print ($1 == 2) ? 1 : 0}')"
-check "fenced --do: Do now shows the command, not a bare fence" "Do now: A1 — ./load.sh kdeyoga" "$(grep '^Do now:' <<<"$out")"
+check "fenced --do: Do now names the label only, the item above carries the command" "Do now: A1" "$(grep '^Do now:' <<<"$out")"
+check "fenced --do: item above still shows the command" "1" "$(grep -c '^./load.sh kdeyoga$' <<<"$out")"
+U="$T/uproj"; mkdir -p "$U/.swarm"
+"$NY" add --check-source operator --background "$BG" --project "$U" --title "Merge it" --do "sm 2743 (https://github.com/o/r/pull/2743)" --url "https://github.com/o/r/pull/2743" >/dev/null
+check "url item: render passes the reply lint (no repeat-item)" "" "$("$LINT" <<<"$("$NY" render --project "$U")" | cut -d: -f1 | paste -sd, -)"
 check "fenced --do: render passes the reply lint" "" "$("$LINT" <<<"$out" | cut -d: -f1 | paste -sd, -)"
 check "empty list renders 'Nothing to do.'" "Nothing to do." "$("$NY" render --project "$P" | tail -1)"
 
