@@ -13,7 +13,9 @@
 #                extension, file:line or quoted phrase. A "Pending your approval:" line
 #                and its continuation lines count as an item too (issue #680); a "yes/no"
 #                ask or Pending line needs no command for run/start/open, but copy/click/type/paste/execute/edit/apply
-#                must still show the change.
+#                must still show the change. In a list item the verb must be aimed at the operator (issue #1008):
+#                at the item start, after punctuation or after then/please/you/can/should/must/and/or;
+#                "the run finished" or "3 open PRs" is a description and needs no command.
 #   pointer      the #680 incident phrase only: an item tells the operator to act "yourself" /
 #                "on your end" (also "on your side", "yourselves") and carries no `code span`
 #                and no file path. The fix is the change itself: file, line, before and after.
@@ -136,11 +138,17 @@ fi
 
 FENCE_RE='^[[:space:]]*(```|~~~)'   # one fence definition for the main pass and issue_merged_hits
 hits="$(printf '%s\n' "$text" | awk -v fence="$FENCE_RE" '
-function flush_item(   hit, li) {
+function flush_item(   hit, li, body) {
     li = tolower(item)
     if (item != "") {
         if (li ~ pointer && item !~ cmd_ptr) hits[++n] = "pointer: " first
-        else if (item !~ cmd && (li ~ verbs_hard || (!ispend && li !~ /yes\/no/ && li ~ verbs))) hits[++n] = "no-command: " first
+        else if (item !~ cmd) {
+            # Issue #1008: a list item that only describes a change ("the run finished", "3 open PRs")
+            # has no verb aimed at the operator, so it needs no command. A Pending line keeps the loose match.
+            body = li; sub(/^[[:space:]]*-[[:space:]]+\*\*[a-z][0-9]+\*\*[[:space:]:.-]*/, "", body)
+            sub(/^[^a-z0-9]+/, "", body)   # em dash, emoji, bold markers between the label and the verb
+            if (ispend ? li ~ verbs_hard : (body ~ ctx_hard || (li !~ /yes\/no/ && body ~ ctx_soft))) hits[++n] = "no-command: " first
+        }
     }
     item = ""; first = ""
 }
@@ -148,6 +156,11 @@ BEGIN {
     back = "(command|commands|step|steps|link|url|snippet|block)s? above|from my (last|previous|earlier) (message|reply)|as (before|above)|see (earlier|above|my (last|previous))|in my (previous|last|earlier)|details in [`]?\\.swarm/needs-you\\.md"
     verbs = "(^|[^a-z])(run|start|copy|click|type|paste|execute|open|edit|apply)([^a-z]|$)"
     verbs_hard = "(^|[^a-z])(copy|click|type|paste|execute|edit|apply)([^a-z]|$)"   # no yes/no or Pending exemption: only run/start/open are exempt (the change itself must be on screen)
+    # Operator-aimed verb (issue #1008): at the start of the item body, after clause punctuation, or after
+    # then/please/you/can/should/must/and/or, or at the start of a continuation line. "the run finished" and "3 open PRs" do not match.
+    lead = "(^|\n[^a-z0-9\n]*|[:;.,(!?] *|(^|[^a-z])(then|please|you|can|should|must|and|or)[[:space:]]+)"
+    ctx_hard = lead "(copy|click|type|paste|execute|edit|apply)([^a-z]|$)"
+    ctx_soft = lead "(run|start|open|copy|click|type|paste|execute|edit|apply)([^a-z]|$)"
     # An action item names its change: a command, a fence, a URL, a path with an
     # extension (".github/workflows/ci.yml"), file:line, or a quoted phrase to type.
     cmd = "```|`[^`]+`|https://|[A-Za-z0-9_./-]+\\.(ya?ml|kts?|sh|md|json|sql|java|py|html|toml|properties|xml|gradle|env|txt)([^A-Za-z]|$)|[A-Za-z0-9_-]*[./][A-Za-z0-9_./-]*:[0-9]+|\"[^\"]{5,}\""
