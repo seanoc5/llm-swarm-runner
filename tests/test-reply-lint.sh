@@ -205,7 +205,7 @@ check "empty list renders 'Nothing to do.'" "Nothing to do." "$("$NY" render --p
 
 # ── needs-you.sh: cold-reader background and hand-written guard (issue #964) ──
 G="$T/gproj"; mkdir -p "$G/.swarm"
-gadd() { "$NY" add --check-source operator --check-source operator --project "$G" --do 'Say `merge PR 9`' "$@" >/dev/null 2>&1; echo $?; }
+gadd() { "$NY" add --check-source operator --project "$G" --do 'Say `merge PR 9`' "$@" >/dev/null 2>&1; echo $?; }
 check "add refuses an item with no --background" "2" "$(gadd --title "Rebase the check")"
 check "add refuses a --background under 12 words" "2" "$(gadd --title "Rebase the check" --background "Check needs a rebase")"
 check "add refuses slash-joined acronyms (the 2026-11-14 stub)" "2" "$(gadd --title "SI/SR check re-base" --background "$BG")"

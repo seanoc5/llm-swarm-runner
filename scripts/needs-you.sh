@@ -230,7 +230,7 @@ case "$cmd" in
         # lede-identifier is excluded on purpose: a needs-you item is a title plus background, not a reply lede.
         # repeat-item is excluded too: it is warn-only and one item cannot repeat itself across a reply.
         # offer-to-act is excluded too: it is warn-only and judges a Do now block, which an item has none of.
-        if hits="$("$LINT" --project "$project" --skip lede-identifier,repeat-item,offer-to-act < <(printf "%s\n%s\n" "$title $do_ $rec" "$background") || true)" && [ -n "$hits" ]; then
+        if hits="$("$LINT" --project "$project" --skip lede-identifier,repeat-item,offer-to-act,ask-not-listed < <(printf "%s\n%s\n" "$title $do_ $rec" "$background") || true)" && [ -n "$hits" ]; then
             die "item points elsewhere instead of carrying its action (${hits%%:*}); restate the item in plain words (what it is, the options, your recommendation) instead of pointing at its label. Refusing."
         fi
         check_json='{}'
