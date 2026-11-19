@@ -54,6 +54,19 @@ MIGRATION_CHECK_SCRIPT="${MIGRATION_CHECK_SCRIPT:-$SCRIPT_DIR/migration-collisio
 
 usage() { echo "Usage: worker-merge.sh <PR#> --expect-head <sha> [--rating low|medium|high]" >&2; exit 1; }
 refuse() { echo "worker-merge: REFUSED — $*" >&2; exit 2; }
+# issue #1004: a hold-label refusal otherwise stays in this worker pane; tell the coordinator
+# (outbox decision-needed = urgent) so a stale lock gets lifted. Best effort, never changes the exit.
+refuse_hold() {
+    local holds="$1" msg="$2" ob tmp
+    ob="$(git rev-parse --show-toplevel 2>/dev/null)/.swarm/tasks/outbox"
+    if mkdir -p "$ob" 2>/dev/null && tmp="$(mktemp -p "$ob" .tmp.XXXXXX 2>/dev/null)"; then
+        printf -- '---\nkind: decision-needed\ntask_id: %s\nts: %s\n---\nworker-merge.sh refused the merge of PR #%s the operator asked for: it carries hold label(s) %s. If the hold is over, run scripts/lift-hold.sh %s "<why>" (comment, banner, label, ready in one call) and tell the operator to re-run the merge; if it should stay, nothing to do.\n' \
+            "${TASK_ID:-worker-merge}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$PR" "$holds" "$PR" > "$tmp" 2>/dev/null \
+            && mv -f "$tmp" "$ob/$(date -u +%Y%m%dT%H%M%SZ)-hold-refused.md" 2>/dev/null \
+            || rm -f "$tmp" 2>/dev/null
+    fi
+    refuse "$msg"
+}
 
 PR="" EXPECT="" RATING="high"
 while [ $# -gt 0 ]; do
@@ -82,7 +95,7 @@ STATE=$(view state .state) || { echo "worker-merge: gh pr view $PR failed" >&2; 
 # or operator hold). Fails closed: an unreadable label list refuses.
 HOLDS=$(view labels '[.labels[].name | select(test("^swarm-hold(:.*)?$"))] | join(", ")') \
     || refuse "could not read PR #$PR's labels, so the hold lock can't be checked."
-[ -z "$HOLDS" ] || refuse "PR #$PR carries a hold label ($HOLDS). A hold means someone (pr-ready.sh, the coordinator or the operator) said not to merge yet; only they lift it."
+[ -z "$HOLDS" ] || refuse_hold "$HOLDS" "PR #$PR carries a hold label ($HOLDS). A hold means someone (pr-ready.sh, the coordinator or the operator) said not to merge yet; only they lift it."
 [ "$(view mergeable .mergeable)" != "CONFLICTING" ] || refuse "PR #$PR conflicts with its base."
 BASE=$(view baseRefName .baseRefName)
 DEFAULT=$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name) || { echo "worker-merge: gh repo view failed" >&2; exit 1; }
@@ -125,7 +138,7 @@ esac
 # labels right before merging, same fail-closed rule as gate 1.
 HOLDS=$(view labels '[.labels[].name | select(test("^swarm-hold(:.*)?$"))] | join(", ")') \
     || refuse "could not re-read PR #$PR's labels right before merging."
-[ -z "$HOLDS" ] || refuse "PR #$PR was put on hold ($HOLDS) while the gates ran. Nothing merged."
+[ -z "$HOLDS" ] || refuse_hold "$HOLDS" "PR #$PR was put on hold ($HOLDS) while the gates ran. Nothing merged."
 
 gh pr merge "$PR" --squash --match-head-commit "$HEAD" \
     || { echo "worker-merge: gh pr merge failed (head may have moved; nothing merged)" >&2; exit 1; }

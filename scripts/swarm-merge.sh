@@ -750,6 +750,8 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
         echo "ERROR: PR #$PR_NUM carries a hold label ($PR_HOLD_LABELS) — refusing to merge." >&2
         echo "       A hold means pr-ready.sh, the coordinator or the operator said not to merge yet; the PR body banner says why." >&2
         echo "       To lift it: gh pr edit $PR_NUM --remove-label \"${PR_HOLD_LABELS%%,*}\"  (then re-run this merge)." >&2
+        NOTE_FILE="$(hold_refusal_inbox_note "${COORD_INBOX_DIR:-$MAIN_WT/.swarm/coord-inbox}" "$PR_NUM" "$PR_HOLD_LABELS" "swarm-merge.sh")"
+        [ -n "$NOTE_FILE" ] && echo "       Coordinator notified (${NOTE_FILE##*/})." >&2
         exit 1
       fi
       if [ "$PR_MERGEABLE" = "CONFLICTING" ]; then

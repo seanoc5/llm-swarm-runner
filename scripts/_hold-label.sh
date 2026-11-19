@@ -99,3 +99,21 @@ hold_label_manual_present() {
     manual="$(grep -vxF -e "$HOLD_LABEL_CI" -e "$HOLD_LABEL_REVIEW" <<<"$have" || true)"
     [ -n "$manual" ]
 }
+
+# hold_refusal_inbox_note <inbox-dir> <pr> <labels> <who>
+#   A merge refused on a hold label used to leave only a line in the pane that
+#   ran it (issue #1004: the operator's `merge PR 793 red` in a worker pane,
+#   refused over a stale swarm-hold:coordinator the coordinator never saw).
+#   Drops an item in the coordinator inbox. Kind "merge_refused" is not in the
+#   batched list, so the inbox classifier treats it as urgent. Best effort:
+#   prints the file path, or nothing when the write fails.
+hold_refusal_inbox_note() {
+    local dir="$1" pr="$2" labels="$3" who="$4" tmp final
+    mkdir -p "$dir" 2>/dev/null || return 0
+    tmp="$(mktemp "$dir/.tmp.merge-refused.XXXXXX" 2>/dev/null)" || return 0
+    printf 'Merge of PR #%s refused by %s: it carries hold label(s) %s.\n\nIf the hold is over, run: scripts/lift-hold.sh %s "<why>" (comment, banner, label and ready in one call), then ask the operator to re-run the merge. If the hold should stay, nothing to do.\n' \
+        "$pr" "$who" "$labels" "$pr" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
+    final="$dir/$(date -u +%Y%m%dT%H%M%SZ)-merge_refused-$$-${RANDOM}.md"
+    mv -f "$tmp" "$final" 2>/dev/null && printf '%s\n' "$final" || rm -f "$tmp"
+    return 0
+}

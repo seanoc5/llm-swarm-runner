@@ -47,6 +47,9 @@ printf '#!/usr/bin/env bash\nexit "${CI_RC:-0}"\n'  > "$TEST_DIR/ci-wait"
 printf '#!/usr/bin/env bash\nexit "${MIG_RC:-0}"\n' > "$TEST_DIR/mig-check"
 chmod +x "$TEST_DIR/shims/gh" "$TEST_DIR/ci-wait" "$TEST_DIR/mig-check"
 export PATH="$TEST_DIR/shims:$PATH" CI_WAIT_SCRIPT="$TEST_DIR/ci-wait" MIGRATION_CHECK_SCRIPT="$TEST_DIR/mig-check"
+# issue #1004: a hold refusal writes an outbox note under the repo toplevel; run in a scratch repo, not the real worktree.
+REPO="$TEST_DIR/repo"; git init -q "$REPO"
+OUTBOX="$REPO/.swarm/tasks/outbox"
 
 # run <expected-rc> <description> [env assignments...] -- <args...>
 run() {
@@ -55,7 +58,7 @@ run() {
     while [ "$1" != "--" ]; do envs+=("$1"); shift; done; shift
     : > "$GH_LOG"; rm -f "$TEST_DIR/labels.calls"
     local rc=0
-    env "${envs[@]}" "$WM" "$@" > "$TEST_DIR/out" 2>&1 || rc=$?
+    (cd "$REPO" && env "${envs[@]}" "$WM" "$@") > "$TEST_DIR/out" 2>&1 || rc=$?
     [ "$rc" = "$want" ] || red "$desc: expected exit $want, got $rc. Output: $(cat "$TEST_DIR/out")"
     if [ "$want" = 0 ]; then
         grep -q -- "pr merge 7 --squash --match-head-commit abcdef1234567890" "$GH_LOG" \
@@ -91,6 +94,19 @@ run 2 "hold lands during the gates → refused"    GH_LABELS_LATE=swarm-hold:ope
 grep -q "put on hold" "$TEST_DIR/out" || red "expected the late-hold refusal: $(cat "$TEST_DIR/out")"
 run 0 "no hold label → merges"                   GH_LABELS= -- 7 --expect-head abcdef1 --rating high
 green "hold labels refuse the merge, before and after the CI wait"
+
+heading "hold refusal notifies the coordinator (#1004)"
+rm -rf "$OUTBOX"
+run 2 "stale swarm-hold:coordinator → refused" TASK_ID=t-1004 GH_LABELS=swarm-hold:coordinator -- 7 --expect-head abcdef1 --rating high
+note="$(ls "$OUTBOX"/*-hold-refused.md 2>/dev/null | head -1)"
+[ -n "$note" ] || red "no outbox note after a hold-label refusal"
+grep -q "^kind: decision-needed" "$note" || red "outbox note is not decision-needed: $(cat "$note")"
+grep -q "^task_id: t-1004" "$note" || red "outbox note lacks the task id: $(cat "$note")"
+grep -q "swarm-hold:coordinator" "$note" && grep -q "lift-hold.sh 7" "$note" || red "outbox note must name the label and lift-hold.sh: $(cat "$note")"
+rm -rf "$OUTBOX"
+run 0 "no hold label → merges, no note" GH_LABELS= -- 7 --expect-head abcdef1 --rating high
+[ ! -e "$OUTBOX" ] || red "a clean merge wrote an outbox note"
+green "refusal on a hold label leaves a decision-needed outbox note naming lift-hold.sh"
 
 heading "🟢/🟡 through the same gates"
 run 0 "🟢 low, no self-review on record (pr-ready skips it) → merges" GH_RISK=low GH_VERDICT= -- 7 --expect-head abcdef1 --rating low
