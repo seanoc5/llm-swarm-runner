@@ -19,11 +19,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PR="${1:-}"
 [[ "$PR" =~ ^[0-9]+$ ]] || { echo "usage: protected-paths-check.sh <PR#>" >&2; exit 1; }
 
+MAIN_WT="$(git worktree list --porcelain 2>/dev/null | awk '!d && /^worktree / { print $2; d=1 }')"
+# .swarm/.env values (PROTECTED_PATHS_EXTRA / _FILE) are not left in the tmux
+# env; reload them for this project. Caller-set variables still win.
+# shellcheck source=_load-env.sh
+. "$SCRIPT_DIR/_load-env.sh" "${MAIN_WT:-$PWD}"
+
 RULES="${PROTECTED_PATHS_FILE:-$SCRIPT_DIR/protected-paths.txt}"
 [ -r "$RULES" ] || { echo "ERROR: protected-paths file not readable: $RULES" >&2; exit 1; }
 EXTRA="${PROTECTED_PATHS_EXTRA:-}"
 if [ -z "$EXTRA" ]; then
-  MAIN_WT="$(git worktree list --porcelain 2>/dev/null | awk '!d && /^worktree / { print $2; d=1 }')"
   [ -z "$MAIN_WT" ] || EXTRA="$MAIN_WT/.swarm/protected-paths.txt"
 fi
 
