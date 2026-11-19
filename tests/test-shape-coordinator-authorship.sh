@@ -1084,6 +1084,12 @@ run_high GH_DIFF_NAMES=src/main/resources/db/migration/V9__x.sql GH_DIFF_FILE="$
 [ "$RC" -ne 0 ] && echo "$OUT" | grep -q "auto-high Gate 12" && echo "$OUT" | grep -qi "data-dropping" && no_merge || red "DROP TABLE migration must be protected (rc=$RC, output: $OUT)"
 run_high GH_DIFF_NAMES=src/main/resources/db/migration/V9__x.sql GH_DIFF_FILE="$TEST_DIR/add.diff"
 echo "$OUT" | grep -q "Gate 12" && [ "$RC" -ne 0 ] && red "an add-only migration must pass Gate 12 (rc=$RC, output: $OUT)"
+printf 'diff --git a/prisma/migrations/20261119_x/migration.sql b/prisma/migrations/20261119_x/migration.sql\n--- /dev/null\n+++ b/prisma/migrations/20261119_x/migration.sql\n@@ -0,0 +1 @@\n+DROP TABLE "User";\n' > "$TEST_DIR/prisma.diff"
+run_high GH_DIFF_NAMES=prisma/migrations/20261119_x/migration.sql GH_DIFF_FILE="$TEST_DIR/prisma.diff"
+[ "$RC" -ne 0 ] && echo "$OUT" | grep -q "auto-high Gate 12" && no_merge || red "a nested Prisma migration with DROP must be protected (rc=$RC, output: $OUT)"
+printf 'diff --git a/db/migrate/20261119_x.rb b/db/migrate/20261119_x.rb\n--- /dev/null\n+++ b/db/migrate/20261119_x.rb\n@@ -0,0 +1 @@\n+    drop_table :users\n' > "$TEST_DIR/rails.diff"
+run_high GH_DIFF_NAMES=db/migrate/20261119_x.rb GH_DIFF_FILE="$TEST_DIR/rails.diff"
+[ "$RC" -ne 0 ] && echo "$OUT" | grep -q "auto-high Gate 12" && no_merge || red "a Rails drop_table migration must be protected (rc=$RC, output: $OUT)"
 green "Gate 12 scans added migration lines for destructive SQL only"
 
 heading "Test H8: protected-paths check errors → fails closed; project list extends the default"

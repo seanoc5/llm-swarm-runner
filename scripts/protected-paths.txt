@@ -34,9 +34,12 @@ path: (^|/)(auth|security)/
 # --- data-dropping migrations -------------------------------------------------
 migration: (^|/)db/migration/
 migration: (^|/)alembic/versions/
-migration: (^|/)migrations/[^/]+\.(sql|py)$
+migration: (^|/)migrations/.+\.(sql|py)$
+migration: (^|/)db/migrate/
+migration: (^|/)(db/)?(changelog|liquibase)[^/]*\.(xml|ya?ml|json|sql)$
 destructive: \bdrop[[:space:]]+(table|column|schema|database|index|constraint|view)\b
 destructive: \balter[[:space:]]+table\b.*\bdrop\b
 destructive: \btruncate\b
 destructive: \bdelete[[:space:]]+from\b
 destructive: \bupdate\b.*\bset\b.*=[[:space:]]*null\b
+destructive: <drop(table|column|schema|view|index)\b|"drop(table|column|schema|view|index)"|\bdrop_(table|column)\b
