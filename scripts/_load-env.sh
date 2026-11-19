@@ -236,7 +236,9 @@ swarm_own_worktree_dirs() {
         [ -n "$wt" ] || continue
         wt_real="$(cd "$wt" 2>/dev/null && pwd -P)" || wt_real="$wt"
         [ "$wt_real" = "$main_dir" ] && continue
-        seen["$wt"]=1
+        # Key by the canonical path (issue #1005): a symlinked parent made the
+        # same worktree show up under two spellings (git registry vs glob).
+        seen["$wt_real"]=1
     done < <(git -C "$project_dir" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print substr($0, 10)}')
 
     parent1="$(dirname "$project_dir")"                                # flat
@@ -244,6 +246,7 @@ swarm_own_worktree_dirs() {
     for cand in "$parent1"/wt-issue-*/ "$parent2"/wt-issue-*/; do
         cand="${cand%/}"
         [ -d "$cand" ] || continue
+        cand="$(cd "$cand" 2>/dev/null && pwd -P)" || continue
         [ -n "${seen[$cand]:-}" ] && continue
         [ -f "$cand/.git" ] || continue
         admin_dir="$(sed -n 's/^gitdir: //p' "$cand/.git" 2>/dev/null | sed -n 1p)"
