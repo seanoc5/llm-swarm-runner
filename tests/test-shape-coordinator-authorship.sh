@@ -1091,10 +1091,11 @@ printf 'diff --git a/db/migrate/20261119_x.rb b/db/migrate/20261119_x.rb\n--- /d
 run_high GH_DIFF_NAMES=db/migrate/20261119_x.rb GH_DIFF_FILE="$TEST_DIR/rails.diff"
 [ "$RC" -ne 0 ] && echo "$OUT" | grep -q "auto-high Gate 12" && no_merge || red "a Rails drop_table migration must be protected (rc=$RC, output: $OUT)"
 for LB in src/main/resources/db/changelog/changes/0007-drop.yaml src/main/resources/db/changelog/db.changelog-master.yaml; do
-    printf 'diff --git a/%s b/%s\n--- /dev/null\n+++ b/%s\n@@ -0,0 +1 @@\n+  - dropTable: {tableName: users}\n' "$LB" "$LB" "$LB" > "$TEST_DIR/lb.diff"
-    sed -i 's/dropTable: /<dropTable /' "$TEST_DIR/lb.diff"
+  for LINE in "  - dropTable: {tableName: users}" "<dropTable tableName=\"users\"/>"; do
+    printf 'diff --git a/%s b/%s\n--- /dev/null\n+++ b/%s\n@@ -0,0 +1 @@\n+%s\n' "$LB" "$LB" "$LB" "$LINE" > "$TEST_DIR/lb.diff"
     run_high GH_DIFF_NAMES="$LB" GH_DIFF_FILE="$TEST_DIR/lb.diff"
     [ "$RC" -ne 0 ] && echo "$OUT" | grep -q "auto-high Gate 12" && no_merge || red "a Liquibase dropTable in $LB must be protected (rc=$RC, output: $OUT)"
+  done
 done
 green "Gate 12 scans added migration lines for destructive SQL only"
 
