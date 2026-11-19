@@ -4596,7 +4596,19 @@ ctime_epoch() {
 # (see USAGE in the header comment) can answer "is my watcher stale?" from a
 # second terminal without touching this live process.
 WATCHER_SELF_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
-WATCHER_LAUNCH_MTIME="$(mtime_epoch "$WATCHER_SELF_PATH" 2>/dev/null || echo 0)"
+# issue #1013: staleness is the newest mtime across this script AND the
+# scripts/_*.sh helpers it sources, so a merged helper fix (e.g. _load-env.sh)
+# also trips the check. A touched-but-unsourced helper costs one harmless respawn.
+watcher_code_mtime() {
+    local f m newest=0
+    for f in "$WATCHER_SELF_PATH" "$(dirname "$WATCHER_SELF_PATH")"/_*.sh; do
+        [ -f "$f" ] || continue
+        m="$(mtime_epoch "$f" 2>/dev/null)" || continue
+        if [ -n "$m" ] && [ "$m" -gt "$newest" ]; then newest="$m"; fi
+    done
+    echo "$newest"
+}
+WATCHER_LAUNCH_MTIME="$(watcher_code_mtime)"
 [ -n "$WATCHER_LAUNCH_MTIME" ] || WATCHER_LAUNCH_MTIME=0
 WATCHER_STARTED_AT="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 # issue #366 Part A: epoch twin of WATCHER_STARTED_AT above, so
@@ -4631,7 +4643,7 @@ rm -f "$PROJECT_DIR/.swarm/watcher-stopped" "$PROJECT_DIR/.swarm/watcher-paused"
 # logic is unit-testable without also triggering the shutdown side effects.
 watcher_is_stale() {
     local current_mtime
-    current_mtime="$(mtime_epoch "$WATCHER_SELF_PATH" 2>/dev/null || echo 0)"
+    current_mtime="$(watcher_code_mtime 2>/dev/null || echo 0)"
     [ -n "$current_mtime" ] || current_mtime=0
     [ "$current_mtime" != "$WATCHER_LAUNCH_MTIME" ]
 }
@@ -4682,7 +4694,7 @@ watcher_check_staleness() {
     [ "$WATCHER_STALE_CHECK" = "1" ] || return 0
     watcher_is_stale || return 0
     local current_mtime
-    current_mtime="$(mtime_epoch "$WATCHER_SELF_PATH" 2>/dev/null || echo 0)"
+    current_mtime="$(watcher_code_mtime 2>/dev/null || echo 0)"
     [ -n "$current_mtime" ] || current_mtime=0
     log_event watch.stale_daemon "script=$WATCHER_SELF_PATH launch_mtime=$WATCHER_LAUNCH_MTIME current_mtime=$current_mtime pid=$$ started_at=$WATCHER_STARTED_AT"
     echo "[$(date +%T)] STALE DAEMON: $WATCHER_SELF_PATH changed on disk since this watcher started ($WATCHER_STARTED_AT, mtime $WATCHER_LAUNCH_MTIME -> $current_mtime)."
