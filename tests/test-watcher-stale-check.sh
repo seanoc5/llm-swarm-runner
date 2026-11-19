@@ -95,6 +95,7 @@ rc=0; watcher_is_stale || rc=$?
 check "launch mtime re-captured to match current -> fresh again" "1" "$rc"
 
 # issue #1013: a change to a sourced scripts/_*.sh helper must also read as stale.
+unset SCRIPT_DIR  # production uses it; the fake script lives in TEST_DIR
 HELPER="$TEST_DIR/_fake-helper.sh"
 echo ':' > "$HELPER"
 touch -d '-10 seconds' "$FAKE_SCRIPT" "$HELPER"
