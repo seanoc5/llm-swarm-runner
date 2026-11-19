@@ -4601,7 +4601,7 @@ WATCHER_SELF_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH
 # also trips the check. A touched-but-unsourced helper costs one harmless respawn.
 watcher_code_mtime() {
     local f m newest=0
-    for f in "$WATCHER_SELF_PATH" "$(dirname "$WATCHER_SELF_PATH")"/_*.sh; do
+    for f in "$WATCHER_SELF_PATH" "${SCRIPT_DIR:-$(dirname "$WATCHER_SELF_PATH")}"/_*.sh; do
         [ -f "$f" ] || continue
         m="$(mtime_epoch "$f" 2>/dev/null)" || continue
         if [ -n "$m" ] && [ "$m" -gt "$newest" ]; then newest="$m"; fi
@@ -4697,7 +4697,7 @@ watcher_check_staleness() {
     current_mtime="$(watcher_code_mtime 2>/dev/null || echo 0)"
     [ -n "$current_mtime" ] || current_mtime=0
     log_event watch.stale_daemon "script=$WATCHER_SELF_PATH launch_mtime=$WATCHER_LAUNCH_MTIME current_mtime=$current_mtime pid=$$ started_at=$WATCHER_STARTED_AT"
-    echo "[$(date +%T)] STALE DAEMON: $WATCHER_SELF_PATH changed on disk since this watcher started ($WATCHER_STARTED_AT, mtime $WATCHER_LAUNCH_MTIME -> $current_mtime)."
+    echo "[$(date +%T)] STALE DAEMON: $WATCHER_SELF_PATH or a scripts/_*.sh helper changed on disk since this watcher started ($WATCHER_STARTED_AT, mtime $WATCHER_LAUNCH_MTIME -> $current_mtime)."
     cleanup_on_exit
     # issue #405 — respawn our own pane before the unconditional kill below,
     # so the current code comes back up in seconds instead of leaving the
