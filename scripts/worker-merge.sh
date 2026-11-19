@@ -138,7 +138,7 @@ esac
 # labels right before merging, same fail-closed rule as gate 1.
 HOLDS=$(view labels '[.labels[].name | select(test("^swarm-hold(:.*)?$"))] | join(", ")') \
     || refuse "could not re-read PR #$PR's labels right before merging."
-[ -z "$HOLDS" ] || refuse_hold "$HOLDS" "PR #$PR was put on hold ($HOLDS) while the gates ran. Nothing merged."
+[ -z "$HOLDS" ] || refuse "PR #$PR was put on hold ($HOLDS) while the gates ran. Nothing merged."
 
 gh pr merge "$PR" --squash --match-head-commit "$HEAD" \
     || { echo "worker-merge: gh pr merge failed (head may have moved; nothing merged)" >&2; exit 1; }

@@ -102,6 +102,9 @@ setup false swarm-hold:coordinator
 printf '# Title\n> ⛔ **COORDINATOR HOLD** — x\n' > "$S/body"
 lift 793 "tiny body"
 [ "$rc" = 0 ] || red "banner-only body: expected exit 0, got $rc: $(cat "$TEST_DIR/out")"
+grep -q "COORDINATOR HOLD" "$S/body" && red "banner-only body: banner still there: $(cat "$S/body")"
+[ -s "$S/body" ] || red "banner-only body: body left empty"
+[ "$(cat "$S/body")" = "# Title" ] || red "banner-only body: rest not intact: $(cat "$S/body")"
 # runaway match (a long blockquote right after the banner) → refused, body untouched, exit 2
 setup false swarm-hold:coordinator
 { echo "> ⛔ **COORDINATOR HOLD** — x"; for i in $(seq 1 15); do echo "> quoted line $i"; done; echo; echo ok; } > "$S/body"

@@ -90,8 +90,10 @@ heading "hold label lock (#612)"
 run 2 "swarm-hold:ci label → refused"            GH_LABELS=swarm-hold:ci -- 7 --expect-head abcdef1 --rating high
 grep -q "hold label (swarm-hold:ci)" "$TEST_DIR/out" || red "expected the label named in the refusal: $(cat "$TEST_DIR/out")"
 run 2 "swarm-hold:coordinator label → refused"   GH_LABELS=swarm-hold:coordinator -- 7 --expect-head abcdef1 --rating high
+rm -rf "$OUTBOX"
 run 2 "hold lands during the gates → refused"    GH_LABELS_LATE=swarm-hold:operator -- 7 --expect-head abcdef1 --rating high
 grep -q "put on hold" "$TEST_DIR/out" || red "expected the late-hold refusal: $(cat "$TEST_DIR/out")"
+[ ! -e "$OUTBOX" ] || red "a hold placed mid-merge is new, yet it wrote an outbox note: $(ls "$OUTBOX")"
 run 0 "no hold label → merges"                   GH_LABELS= -- 7 --expect-head abcdef1 --rating high
 green "hold labels refuse the merge, before and after the CI wait"
 
