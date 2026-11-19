@@ -147,7 +147,9 @@ TDIR="${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}/$(printf '%s' "$TPROJ" | se
 # inside a long note or starts with a tag (hook/notice text) is not typed words.
 # Issue #1010: one phrase for every rating: merge, optional PR, optional #, the
 # number (other numbers may precede it: `merge 1006 1009`), optional red; case-insensitive.
-RE="(^|[^A-Za-z0-9])merge\\s+(PR\\s*)?(#?[0-9]+[\\s,]+(and\\s+)?)*#?${PR}([^A-Za-z0-9]|\$)"
+# Anchored to the start of the turn (an optional ok/yes/please lead-in) and never a
+# question, so "do not merge 2113" and "can we merge 2113?" are not approvals.
+RE="^\\s*((ok|yes|please)[,.!]?\\s+)?merge\\s+(PR\\s*)?(#?[0-9]+[\\s,]+(and\\s+)?)*#?${PR}([^A-Za-z0-9]|\$)"
 VERIFIED_TS=""
 for f in "$TDIR"/*.jsonl; do
     [ -e "$f" ] || continue
@@ -157,7 +159,7 @@ for f in "$TDIR"/*.jsonl; do
         (if ($c | type) == "string" then $c
          elif ($c | type) == "array" then ([$c[] | select(.type == "text") | .text] | join("\n"))
          else "" end) as $t |
-        select(($t | length) <= 200 and ($t | test("^\\s*[<\\[]") | not) and ($t | test($re; "i"))) |
+        select(($t | length) <= 200 and ($t | test("^\\s*[<\\[]") | not) and ($t | test($re; "i")) and ($t | test("\\?\\s*$") | not)) |
         select((.timestamp // "") != "" and ((.timestamp | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) > $since)) |
         .timestamp' "$f" 2>/dev/null | sort | tail -1)"
     [ -n "$ts" ] || continue
