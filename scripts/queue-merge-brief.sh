@@ -147,9 +147,11 @@ TDIR="${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}/$(printf '%s' "$TPROJ" | se
 # inside a long note or starts with a tag (hook/notice text) is not typed words.
 # Issue #1010: one phrase for every rating: merge, optional PR, optional #, the
 # number (other numbers may precede it: `merge 1006 1009`), optional red; case-insensitive.
-# Anchored to the start of the turn (an optional ok/yes/please lead-in) and never a
-# question, so "do not merge 2113" and "can we merge 2113?" are not approvals.
-RE="^\\s*((ok|yes|please)[,.!]?\\s+)?merge\\s+(PR\\s*)?(#?[0-9]+[\\s,]+(and\\s+)?)*#?${PR}([^A-Za-z0-9]|\$)"
+# Anchored to the whole turn (\A..\z: jq's ^ matches at every line start, so
+# "Hold off.\nmerge 2113" would pass): an optional ok/yes/please lead-in, the phrase,
+# an optional rating word and trailing punctuation, nothing else. Never a question,
+# never a qualifier ("merge 2113 after CI", "merge 2113 not yet").
+RE="\\A\\s*((ok|yes|please)[,.!]?\\s+)?merge\\s+(PR\\s*)?(#?[0-9]+[\\s,]+(and\\s+)?)*#?${PR}(?![0-9])([\\s,]+(and\\s+)?#?[0-9]+)*(\\s+(red|yellow|green|high|medium|low))?[\\s.!,;]*\\z"
 VERIFIED_TS=""
 for f in "$TDIR"/*.jsonl; do
     [ -e "$f" ] || continue
@@ -159,7 +161,7 @@ for f in "$TDIR"/*.jsonl; do
         (if ($c | type) == "string" then $c
          elif ($c | type) == "array" then ([$c[] | select(.type == "text") | .text] | join("\n"))
          else "" end) as $t |
-        select(($t | length) <= 200 and ($t | test("^\\s*[<\\[]") | not) and ($t | test($re; "i")) and ($t | test("\\?\\s*$") | not)) |
+        select(($t | length) <= 200 and ($t | test("\\A\\s*[<\\[]") | not) and ($t | test($re; "i")) and ($t | test("\\?\\s*\\z") | not)) |
         select((.timestamp // "") != "" and ((.timestamp | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) > $since)) |
         .timestamp' "$f" 2>/dev/null | sort | tail -1)"
     [ -n "$ts" ] || continue

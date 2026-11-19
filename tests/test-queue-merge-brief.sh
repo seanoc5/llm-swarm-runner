@@ -122,10 +122,10 @@ phrase_ok() { # text expected-exit label
     set +e; q 2113 --rating high; ec=$?; set -e
     check "$3" "$2" "$ec"
 }
-for ph in 'merge 2113' 'merge 2113 red' 'merge PR 2113 red' 'Merge PR 2113' 'merge #2113' 'merge PR #2113 red' 'merge 2110 2113' 'merge 2113, 2115 red' 'merge 2110 and 2113' 'ok, merge 2113 red' '  merge 2113'; do
+for ph in 'merge 2113' 'merge 2113 red' 'merge 2113 high' 'merge 2113.' 'merge PR 2113 red' 'Merge PR 2113' 'merge #2113' 'merge PR #2113 red' 'merge 2110 2113' 'merge 2113, 2115 red' 'merge 2110 and 2113' 'ok, merge 2113 red' '  merge 2113'; do
     phrase_ok "$ph" 0 "user-typed '$ph' approves PR 2113"
 done
-for ph in 'merge 2110' 'merge 2114 red' 'merged 2113' 'merge PR 21131' 'do not merge 2113' 'can we merge 2113?' "why won't merge 2113 work" 'merge 2113?'; do
+for ph in 'merge 2110' 'merge 2114 red' 'merged 2113' 'merge PR 21131' 'do not merge 2113' 'can we merge 2113?' "why won't merge 2113 work" 'merge 2113?' 'merge 2113 after CI' 'merge 2113 not yet' 'merge 2113 red but wait' "$(printf 'Hold off.\nmerge 2113')" "$(printf 'merge 2113\nactually no')"; do
     phrase_ok "$ph" 2 "user-typed '$ph' does not approve PR 2113"
 done
 : > "$TR"; rm -f "$WT/.swarm/tasks/inbox/"*.md
