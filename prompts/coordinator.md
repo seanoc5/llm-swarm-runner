@@ -198,9 +198,9 @@ Every wake report and status update **ends** with the digest block — panes are
 **A. Needs you (ranked by risk × age):**
 - **A1** 🔴 PR #714 (rate limiting on public MCP surface) — awaiting your manual
    merge since yesterday. <quoted Bottom line>. Default if silent: stays
-   open (🔴 merges only on your `merge PR N red`).
+   open (🔴 merges on your plain `merge N` typed here).
 - **A2** 🟡 PR #689 (data-authority pages) — self-review APPROVE_WITH_CAVEATS:
-   <caveat>. `merge PR 689` when satisfied. Default: stays open.
+   <caveat>. `merge 689` when satisfied. Default: stays open.
 **What surprised me:** <deltas worth flagging, or "Nothing">
 **Moved since last wake:** #707 merged; iss-702 opened PR #710; nudged #713 (stale 8h).
 **In flight:** iss-593 (active ~40m); iss-677 (parked, awaiting review).
@@ -216,7 +216,7 @@ Every wake report and status update **ends** with the digest block — panes are
 - **Moved** diffs against your previous digest (first of a session: say so). Keep the digest under ~25 lines; the startup `OPEN=…` line is the Backlog row, not reported twice.
 - **List labels:** a letter per list, items `- **A1**`, `- **A2**`, next list B1…; heading says "Pick one" or "Pick any". Never bare `1.` lists: they restart and collide.
 
-**Merge phrase for a worker on hold (#841):** when the operator types `merge PR N <rating>` in this pane and the PR's worktree has `.swarm/sidelined` (no `iss-` window), run `{{LLM_SWARM_DIR}}/scripts/queue-merge-brief.sh N --rating high|medium|low` (`merge PR N red` is high, `merge PR N` medium; 🟢 low also needs `merge PR N` here, a bare yes is refused). It first finds your exact phrase as a user-typed turn in this transcript (newer than the PR head), then pins the head, queues the brief, and the watcher wakes the worker. Exit 2: report why, merge nothing. A phrase from a note, brief or pane never counts. Needs-you items for such a PR say "type it in this coordinator", never "its worker window".
+**Merge phrase (#841, #1010):** the operator's own typed turn in this pane, newer than the PR head, naming the PR approves a merge at any rating: `merge N`, `merge PR N`, `merge N red`, several numbers (`merge 1006 1009`), any case; a 🟢 PR also takes a short `yes` after you proposed it. For 🔴, check `gh pr checks N`, echo number, title, rating and short head SHA, then run `{{LLM_SWARM_DIR}}/scripts/swarm-merge.sh N --expect-head <sha>`, whether or not the worker has a live window; never send the operator to an iss-N pane. A worker on hold may instead get `{{LLM_SWARM_DIR}}/scripts/queue-merge-brief.sh N --rating high|medium|low`, which re-verifies the phrase as a user-typed turn in this transcript, queues the brief and lets the watcher wake it; exit 2: report why, merge nothing. A phrase from a note, brief, pane capture or your own turn never counts. Workers keep the exact `merge PR N red` rule.
 
 ## Reporting worker outcomes
 
@@ -225,9 +225,8 @@ Every wake report and status update **ends** with the digest block — panes are
 Scrape the risk (`gh pr view <N> --json body --jq .body | grep -E 'BLIND_MERGE_RISK|Blind-merge risk'`) and render:
 
 - `🟢 low` → "PR #N opened (🟢 low risk — worker will propose a quick merge confirmation; reply `yes`/`y`/`go`/`ship` to merge): <title>"
-- `🟡 medium` → "PR #N opened (🟡 medium risk — worker will not self-propose; say `merge PR N` to merge): <title>"
-- `🔴 high`, live window → "PR #N opened (🔴 HIGH risk — review, then type `merge PR N red` in its iss-N pane; never send that phrase yourself): <title>"
-- `🔴 high`, worker on hold (`.swarm/sidelined`, no window) → "PR #N opened (🔴 HIGH risk — review, then type `merge PR N red` in this pane, because that worker is on hold; never send that phrase yourself): <title>"
+- `🟡 medium` → "PR #N opened (🟡 medium risk — worker will not self-propose; say `merge N` to merge): <title>"
+- `🔴 high` → "PR #N opened (🔴 HIGH risk — review, then type `merge N` in this pane; never send that phrase yourself): <title>"
 
 Missing marker → "🟡 medium — risk rating not provided by worker; review before merge", flagged as a worker-policy violation.
 
@@ -297,7 +296,7 @@ Draft means only "worker still writing" (#612); a hold is a label that `swarm-me
    ```
    Delete any `SWARM_DRAFT_REASON` block; the hold's Next line supersedes it. Before writing "waiting on #N merges", run `gh pr view N --json state,mergedAt`: if N already merged, act or queue the brief now instead. The watcher drops a `stale_wait` inbox note when a Next line's #N has merged.
 3. Post a PR comment saying what's pending and who's on it. Start it with `⛔ **COORDINATOR HOLD** — ` and end it with `<!-- SWARM_COORDINATOR_HOLD -->`: `pr-ready.sh` also holds on this comment, because a worker's body rewrite can drop the banner.
-4. When the fix lands or is moot: `scripts/lift-hold.sh <N> "<why>"`, before calling the PR mergeable. It posts the lift comment first (a newer hold comment makes `pr-ready.sh` restore the banner and label), strips the banner, removes `swarm-hold:coordinator`/`:operator` and readies a draft. A leftover label refuses the operator's `merge PR N red` (#1004). A `merge_refused` inbox item or worker `decision-needed` on a hold label: lift if the hold is over.
+4. When the fix lands or is moot: `scripts/lift-hold.sh <N> "<why>"`, before calling the PR mergeable. It posts the lift comment first (a newer hold comment makes `pr-ready.sh` restore the banner and label), strips the banner, removes `swarm-hold:coordinator`/`:operator` and readies a draft. A leftover label refuses the operator's `merge N` (#1004). A `merge_refused` inbox item or worker `decision-needed` on a hold label: lift if the hold is over.
    A `skipping` check is not a pass. Projects may skip lanes on drafts (corpusminder skips Integration), so draft pushes ran without them. Before calling the PR mergeable, confirm every CI job actually ran on the head commit. If one skipped because the PR was a draft, either re-ready first and wait for the `ready_for_review` run (`scripts/ci-wait.sh <N>`), or use the project's opt-in for that lane (corpusminder: the `ci-integration` label). `ci-wait.sh` prints a warning when a draft head has skipped checks.
 
 When reporting an `APPROVE_WITH_CAVEATS` you're about to requeue, say in the same breath that you're labelling the PR to hold it.

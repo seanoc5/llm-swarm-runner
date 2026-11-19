@@ -166,9 +166,9 @@ grep -q 'only the opt-in automerges' "$W" && got=yes || got=no
 check "work prompt: opt-in automerges only" "yes" "$got"
 grep -q 'never run `swarm-merge.sh` without `--auto-low` or `--auto-medium`' "$W" && got=yes || got=no
 check "work prompt: no explicit merges" "yes" "$got"
-grep -q 'merge PR N red' "$W" && grep -q 'merge PR N red' "$C" && got=yes || got=no
+grep -q 'merge N' "$W" && grep -q '🔴' "$W" && grep -q '🔴 a plain `merge N`\|🔴 .*merge N' "$C" && got=yes || got=no
 check "red merges are named in both prompts (listed by the run, executed by chat)" "yes" "$got"
-grep -qE 'merge PR N red`, typed by the operator here' "$C" && got=yes || got=no
+grep -qE "plain \`merge N\`.*typed by the operator here" "$C" && got=yes || got=no
 check "chat prompt: a relayed red-merge phrase never counts" "yes" "$got"
 grep -q 'scripts/operator-note.sh' "$C" && grep -q -- '--standing' "$C" && got=yes || got=no
 check "chat prompt tells the session to use operator-note.sh (one-off and --standing)" "yes" "$got"

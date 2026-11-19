@@ -15,7 +15,7 @@ Before you exit, in this order: rewrite `.swarm/needs-you.md` only if the list c
 
 ## Merges in a work run
 
-You perform **only the opt-in automerges** ("Auto-merge low-risk PRs", "Auto-merge medium-risk PRs"). Every merge the operator must say explicitly (`merge PR N`, a 🟢 `yes`, a 🔴 `merge PR N red`) belongs to the conversation session, in the operator's own turn: list such PRs under Needs you with the command, and never run `swarm-merge.sh` without `--auto-low` or `--auto-medium`.
+You perform **only the opt-in automerges** ("Auto-merge low-risk PRs", "Auto-merge medium-risk PRs"). Every merge the operator must say explicitly (`merge N` at any rating, 🔴 included, or a 🟢 `yes`) belongs to the conversation session, in the operator's own turn: list such PRs under Needs you with the command, and never run `swarm-merge.sh` without `--auto-low` or `--auto-medium`.
 
 ## Initial Startup Checklist
 

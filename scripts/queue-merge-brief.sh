@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# queue-merge-brief.sh — carry the operator's `merge PR N <rating>` to the
+# queue-merge-brief.sh — carry the operator's `merge N` (any rating) to the
 # worker that owns the PR, waking it if it is on hold (issue #841).
 #
 # Why: worker-merge.sh runs inside the worker sandbox, so a 🔴 PR was merged by
@@ -28,8 +28,9 @@
 # Exit 5 or 7 are requeue.sh's (identical brief already pending / lock timeout).
 #
 # The approval is bound to the operator's own words (PR #852 review): before
-# queueing, the exact phrase (`merge PR N red` for high, `merge PR N`
-# otherwise) must appear in a USER-role turn of this coordinator's Claude
+# queueing, a merge phrase (`merge N`, `merge PR N`, `merge #N`, optional
+# trailing `red`, case-insensitive, other PR numbers may precede: `merge 1006
+# 1009`; issue #1010) must appear in a USER-role turn of this coordinator's Claude
 # transcript, newer than the PR head commit's time. Assistant turns, tool
 # results and long quoted text never count (same rule as capture-worker.sh
 # --verify, #360). The verified turn's timestamp goes in the brief's second line.
@@ -134,7 +135,7 @@ done < <("$LIST_WORKTREES_SCRIPT" "$PROJECT" 2>/dev/null)
 
 # The operator's own typed words: a user-role turn in THIS coordinator's
 # transcript, newer than the head commit. Nothing is queued without one.
-PHRASE="merge PR $PR"; [ "$RATING" = high ] && PHRASE="merge PR $PR red"
+PHRASE="merge $PR"
 HEAD_TIME="$(cd "$PROJECT" && gh pr view "$PR" --json commits -q '.commits[-1].committedDate' 2>/dev/null)"
 HEAD_EPOCH="$(epoch "$HEAD_TIME")"
 [ -n "$HEAD_EPOCH" ] || { echo "queue-merge-brief: could not read the PR head commit time" >&2; exit 1; }
@@ -144,8 +145,9 @@ if [ -n "$COMMON" ] && [ "$(basename "$COMMON")" = ".git" ]; then TPROJ="$(dirna
 TDIR="${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}/$(printf '%s' "$TPROJ" | sed 's/[^A-Za-z0-9]/-/g')"
 # Whole-word phrase (not a prefix of another PR number); a turn that quotes it
 # inside a long note or starts with a tag (hook/notice text) is not typed words.
-if [ "$RATING" = high ]; then RE="(^|[^A-Za-z0-9])merge PR $PR red([^A-Za-z0-9]|\$)"
-else RE="(^|[^A-Za-z0-9])merge PR $PR([^0-9]|\$)"; fi
+# Issue #1010: one phrase for every rating: merge, optional PR, optional #, the
+# number (other numbers may precede it: `merge 1006 1009`), optional red; case-insensitive.
+RE="(^|[^A-Za-z0-9])merge\\s+(PR\\s*)?(#?[0-9]+[\\s,]+(and\\s+)?)*#?${PR}([^A-Za-z0-9]|\$)"
 VERIFIED_TS=""
 for f in "$TDIR"/*.jsonl; do
     [ -e "$f" ] || continue
@@ -155,7 +157,7 @@ for f in "$TDIR"/*.jsonl; do
         (if ($c | type) == "string" then $c
          elif ($c | type) == "array" then ([$c[] | select(.type == "text") | .text] | join("\n"))
          else "" end) as $t |
-        select(($t | length) <= 200 and ($t | test("^\\s*[<\\[]") | not) and ($t | test($re))) |
+        select(($t | length) <= 200 and ($t | test("^\\s*[<\\[]") | not) and ($t | test($re; "i"))) |
         select((.timestamp // "") != "" and ((.timestamp | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) > $since)) |
         .timestamp' "$f" 2>/dev/null | sort | tail -1)"
     [ -n "$ts" ] || continue
@@ -173,7 +175,7 @@ cat > "$BRIEF" <<EOF
 <!-- SWARM_MERGE_VERIFIED: by=queue-merge-brief.sh operator_turn=$VERIFIED_TS head_commit=$HEAD_TIME pr=$PR head=$SHORT -->
 # Merge approval for PR #$PR (${TITLE})
 
-The operator typed \`$PHRASE\` in the coordinator's conversation session (verified in its transcript at $VERIFIED_TS, after the head commit), and the swarm's own
+The operator typed a merge phrase naming PR #$PR (\`$PHRASE\` or a variant) in the coordinator's conversation session (verified in its transcript at $VERIFIED_TS, after the head commit), and the swarm's own
 \`queue-merge-brief.sh\` queued this brief. It counts as the operator's approval for exactly
 this PR, rating **$RATING** and head **$SHORT**. It is not a relay.
 

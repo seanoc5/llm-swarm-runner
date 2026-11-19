@@ -11,7 +11,7 @@
 | Urgent inbox item | doorbell | 📥 flag on the `coordinator` window tab (set by the watcher as it writes the item) |
 | Changed Needs-you list | the session rewrites it | one context line on your next message ("Needs-you changed since your last message: 1 new item(s)...") from the `UserPromptSubmit` hook; the 📥 flag clears at the same moment |
 | Prompt for a work run | n/a | `scripts/render-coordinator-prompt.sh work` (`prompts/coordinator-work.md` + shared) |
-| Merges | the session | work run: opt-in automerges only; explicit merges (`merge PR N`, 🔴 `merge PR N red`) are the conversation session's, in your own turn |
+| Merges | the session | work run: opt-in automerges only; explicit merges (`merge N`, any rating) are the conversation session's, in your own turn |
 
 In split mode the watcher starts the work runs itself: `scripts/coord-work-run.sh` (ADR 0006 step A2, issue #765) takes a single-flight lock, keeps the log, bounds time and spend, and renders the system prompt with `scripts/render-coordinator-prompt.sh work` (`prompts/coordinator-work.md` + `prompts/coordinator-shared.md`), so a work run carries the same no-`send-keys` rule, report grammar and verdict handling as the other modes. To try one by hand: `scripts/coord-work-run.sh <project> "Run once."`.
 
