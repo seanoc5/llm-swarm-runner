@@ -69,7 +69,7 @@ extract_fn() {
 }
 
 heading "Test 1: watcher_is_stale — pure predicate (in-process)"
-for fn in mtime_epoch watcher_is_stale log_event; do
+for fn in mtime_epoch watcher_code_mtime watcher_is_stale log_event; do
     body="$(extract_fn "$fn")"
     [ -n "$body" ] || red "could not extract function '$fn' from $WATCH — has it been renamed?"
     eval "$body"
@@ -93,6 +93,20 @@ touch -r "$FAKE_SCRIPT" "$FAKE_SCRIPT" 2>/dev/null || true
 WATCHER_LAUNCH_MTIME="$(mtime_epoch "$FAKE_SCRIPT")"
 rc=0; watcher_is_stale || rc=$?
 check "launch mtime re-captured to match current -> fresh again" "1" "$rc"
+
+# issue #1013: a change to a sourced scripts/_*.sh helper must also read as stale.
+unset SCRIPT_DIR  # production uses it; the fake script lives in TEST_DIR
+HELPER="$TEST_DIR/_fake-helper.sh"
+echo ':' > "$HELPER"
+touch -d '-10 seconds' "$FAKE_SCRIPT" "$HELPER"
+WATCHER_LAUNCH_MTIME="$(watcher_code_mtime)"
+rc=0; watcher_is_stale || rc=$?
+check "helper untouched -> fresh" "1" "$rc"
+touch "$HELPER"
+rc=0; watcher_is_stale || rc=$?
+check "touching a sibling _*.sh helper -> watcher_is_stale returns 0 (issue #1013)" "0" "$rc"
+rm -f "$HELPER"
+WATCHER_LAUNCH_MTIME="$(mtime_epoch "$FAKE_SCRIPT")"
 
 heading "Test 2: watcher_check_staleness — logs, attempts shutdown, exits cleanly (separate subprocess)"
 # Run in a genuinely separate \`bash\` process (not eval'd in-process here)
@@ -139,7 +153,7 @@ echo '#!/usr/bin/env bash' > "$FAKE_SCRIPT2"
 sleep 1
 touch "$FAKE_SCRIPT2"   # bump mtime so it's stale relative to a launch mtime captured just before this
 
-STALE_FNS="$(extract_fn mtime_epoch; extract_fn watcher_is_stale; extract_fn watcher_check_staleness; extract_fn cleanup_on_exit; extract_fn log_event)"
+STALE_FNS="$(extract_fn mtime_epoch; extract_fn watcher_code_mtime; extract_fn watcher_is_stale; extract_fn watcher_check_staleness; extract_fn cleanup_on_exit; extract_fn log_event)"
 
 cat > "$TEST_DIR/run-check.sh" <<SCRIPT
 #!/usr/bin/env bash
