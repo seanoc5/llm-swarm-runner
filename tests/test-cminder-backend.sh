@@ -53,11 +53,11 @@ labels() { jq -r 'map(.label) | join(",")' <<<"$("$NY" render --json --project "
 
 # ── default backend: no corpusminder calls ───────────────────────────────────
 P="$T/p"; mkdir -p "$P/.swarm"
-"$NY" add --background "$BG" --project "$P" --title "Merge PR 5" --kind decision --do 'Say `merge PR 5`' --url https://github.com/o/r/pull/5 >/dev/null
+"$NY" add --check-source operator --background "$BG" --project "$P" --title "Merge PR 5" --kind decision --do 'Say `merge PR 5`' --url https://github.com/o/r/pull/5 >/dev/null
 "$NY" render --project "$P" >/dev/null
 "$NY" done A1 --project "$P"
 check "backend unset: add/render/done make no corpusminder calls" "0" "$(calls)"
-NEEDS_YOU_BACKEND=file "$NY" add --background "$BG" --project "$P" --title t --do 'run `x`' >/dev/null
+NEEDS_YOU_BACKEND=file "$NY" add --check-source operator --background "$BG" --project "$P" --title t --do 'run `x`' >/dev/null
 check "backend=file: no calls either" "0" "$(calls)"
 set +e; NEEDS_YOU_BACKEND=bogus "$NY" render --project "$P" >/dev/null 2>&1; ec=$?; set -e
 check "an unknown backend is refused" "2" "$ec"
@@ -72,8 +72,8 @@ for B in file corpusminder; do
     check "$B: zero open items print Nothing to do." "Nothing to do." "$(tail -1 <<<"$out")"
     check "$B: zero open items print no Do now line" "0" "$(grep -c '^Do now:' <<<"$out" || true)"
     check "$B: zero open items make no corpusminder record" "0" "$(( $(calls) - before ))"
-    "$NY" add --background "$BG" --project "$Q" --title "Load data" --do 'In 1:util run `./load.sh`' >/dev/null
-    "$NY" add --background "$BG" --project "$Q" --title "PR 7" --kind decision --do 'Say `merge PR 7`' --url https://github.com/o/r/pull/7 >/dev/null
+    "$NY" add --check-source operator --background "$BG" --project "$Q" --title "Load data" --do 'In 1:util run `./load.sh`' >/dev/null
+    "$NY" add --check-source operator --background "$BG" --project "$Q" --title "PR 7" --kind decision --do 'Say `merge PR 7`' --url https://github.com/o/r/pull/7 >/dev/null
     out="$("$NY" render --project "$Q")"
     check "$B: open items print exactly one Do now line" "1" "$(grep -c '^Do now:' <<<"$out")"
     check "$B: open items never print Nothing to do / Nothing needed" "0" "$(grep -ciE 'nothing (to do|needed)' <<<"$out" || true)"
@@ -87,7 +87,7 @@ check "the 2026-11-09 fixture is flagged by the lint" "two-endings" "$("$LINT" <
 # ── corpusminder backend: file, complete, outage ─────────────────────────────
 export NEEDS_YOU_BACKEND=corpusminder CMINDER_URL=http://cm.test/ CMINDER_API_KEY=secret CMINDER_FORUM_ID=77
 C="$T/c"; mkdir -p "$C/.swarm"
-check "add prints the label" "A1" "$("$NY" add --background "$BG" --project "$C" --title "Approve PR 9" --kind decision --risk "touches auth" --rec "yes, high confidence" --default "automerges at 18:00" --do 'Say `merge PR 9`' --url https://github.com/o/r/pull/9)"
+check "add prints the label" "A1" "$("$NY" add --check-source operator --background "$BG" --project "$C" --title "Approve PR 9" --kind decision --risk "touches auth" --rec "yes, high confidence" --default "automerges at 18:00" --do 'Say `merge PR 9`' --url https://github.com/o/r/pull/9)"
 check "add made one POST /api/items" "1" "$(cut -f1 "$CALLS" | grep -c 'POST .*cm.test/api/items$' || true)"
 body="$(cut -f2 "$CALLS" | tail -1)"
 check "item kind is DECISION" "DECISION" "$(jq -r .kind <<<"$body")"
@@ -100,7 +100,7 @@ grep -q -- '- \*\*A1\*\*' "$C/.swarm/needs-you.md" && got=yes || got=no
 check "the local copy is written too" "yes" "$got"
 "$NY" done A1 --project "$C"
 check "done completes the corpusminder item" "1" "$(cut -f1 "$CALLS" | grep -c 'POST .*cm.test/api/items/42/complete' || true)"
-FAIL=1 "$NY" add --background "$BG" --project "$C" --title "Outage item" --do 'run `x`' >/dev/null 2>"$T/err" && ec=0 || ec=$?
+FAIL=1 "$NY" add --check-source operator --background "$BG" --project "$C" --title "Outage item" --do 'run `x`' >/dev/null 2>"$T/err" && ec=0 || ec=$?
 check "an outage does not fail add" "0" "$ec"
 check "...it warns" "1" "$(grep -c 'corpusminder filing failed' "$T/err")"
 check "...and the item is still in the local list" "A2" "$(labels "$C")"
@@ -109,10 +109,10 @@ check "an outage does not fail done; the item closes locally" "" "$(labels "$C")
 
 # ── empty fields: "none" placeholders are dropped ────────────────────────────
 D="$T/d"; mkdir -p "$D/.swarm"
-NEEDS_YOU_BACKEND=file "$NY" add --background "$BG" --project "$D" --title "PR 3" --risk None --rec "Nothing" --default "n/a" --do 'Say `merge PR 3`' >/dev/null
+NEEDS_YOU_BACKEND=file "$NY" add --check-source operator --background "$BG" --project "$D" --title "PR 3" --risk None --rec "Nothing" --default "n/a" --do 'Say `merge PR 3`' >/dev/null
 check "placeholder risk/rec/default are stored empty" "||" "$(jq -r '[.risk, .rec, .default] | join("|")' "$D/.swarm/needs-you.jsonl")"
 check "needs-you.md has no 'risk:' or 'Default if silent' line" "0" "$(grep -c 'risk:\|Default if silent' "$D/.swarm/needs-you.md" || true)"
-NEEDS_YOU_BACKEND=file "$NY" add --background "$BG" --project "$D" --title "PR 4" --default "automerges at 18:00" --do 'Say `merge PR 4`' >/dev/null
+NEEDS_YOU_BACKEND=file "$NY" add --check-source operator --background "$BG" --project "$D" --title "PR 4" --default "automerges at 18:00" --do 'Say `merge PR 4`' >/dev/null
 check "a real default is kept" "1" "$(grep -c 'Default if silent: automerges at 18:00' "$D/.swarm/needs-you.md")"
 
 # ── bridge ───────────────────────────────────────────────────────────────────

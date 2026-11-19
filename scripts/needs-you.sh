@@ -3,11 +3,20 @@
 # needs-you.sh — the standing Needs-you list as structured items (issue #798).
 #
 #   needs-you.sh add --title T --background B --do D [--kind decision|todo]
-#                    [--risk R] [--rec TEXT] [--default TEXT] [--url U] [--claim TEXT] [--project DIR]
+#                    [--risk R] [--rec TEXT] [--default TEXT] [--url U] [--claim TEXT] (--check CMD | --check-source operator) [--project DIR]
 #   needs-you.sh done <label> [--project DIR]
 #   needs-you.sh verify <label> [--claim TEXT] [--project DIR]
 #   needs-you.sh render [--json] [--write] [--project DIR]
 #   needs-you.sh check [--project DIR]
+#
+# --check CMD (issue #1017): `add` runs CMD itself (bash, 30s cap: a shell test, `gh`,
+# `curl`, `psql`) before filing and stores checkCmd, checkedAt, checkResult (exit code)
+# and checkOutput (last line). Exit 0 means "the ask is still needed". A non-zero exit
+# refuses the item: the ask is already done or false. An item with neither --check nor
+# --check-source operator (a fact only the operator knows) is refused too, so
+# "verified" always has a command behind it. `verify <label>` re-runs the stored
+# checkCmd; a failing re-check keeps the item open, records the failure, exits 1, and
+# `render` shows "CHECK FAILED".
 #
 # --background (issue #964) is the cold-reader paragraph: what the thing is, why
 # it is open, what each option changes (>= 12 words). `add` refuses one that
@@ -52,14 +61,14 @@ SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LINT="$SELF_DIR/lint-coordinator-reply.sh"
 
 die() { echo "needs-you.sh: $*" >&2; exit 2; }
-usage() { sed -n '3,48p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '3,58p' "$0" | sed 's/^# \{0,1\}//'; }
 
 cmd="${1:-}"
 [ -n "$cmd" ] || { usage >&2; exit 2; }
 case "$cmd" in -h|--help) usage; exit 0 ;; esac
 shift
 
-title=""; background=""; do_=""; kind="todo"; risk=""; rec=""; deflt=""; url=""; claim=""; project="${CLAUDE_PROJECT_DIR:-$PWD}"
+title=""; background=""; do_=""; kind="todo"; risk=""; rec=""; deflt=""; url=""; claim=""; check=""; check_source=""; project="${CLAUDE_PROJECT_DIR:-$PWD}"
 json=0; write=0; label=""
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -72,6 +81,8 @@ while [ $# -gt 0 ]; do
         --default) deflt="${2-}"; shift 2 ;;
         --url)     url="${2-}"; shift 2 ;;
         --claim)   claim="${2-}"; shift 2 ;;
+        --check)   check="${2-}"; shift 2 ;;
+        --check-source) check_source="${2-}"; shift 2 ;;
         --project) project="${2-}"; shift 2 ;;
         --json)    json=1; shift ;;
         --write)   write=1; shift ;;
@@ -115,6 +126,11 @@ render_md() {
            | ($v | fromdateiso8601) as $t
            | (if (now - $t) > ($sh * 3600) then "(unverified since \($t | localtime | strftime("%m-%d %H:%M")))" else "verified \($t | localtime | strftime("%m-%d %H:%M"))" end) as $vs
            | "\n  " + (if (.claim // "") != "" then "Claim: \(.claim) — " else "" end) + $vs)
+        + (if (.checkCmd // "") != "" then
+             (if (.checkResult // 0) != 0 then "\n  CHECK FAILED (exit \(.checkResult)) at \(.checkedAt | fromdateiso8601 | localtime | strftime("%m-%d %H:%M")): \(.checkCmd) → \(.checkOutput // "")"
+              else "\n  Check: \(.checkCmd) → exit 0 at \(.checkedAt | fromdateiso8601 | localtime | strftime("%m-%d %H:%M"))" end)
+           elif (.checkSource // "") == "operator" then "\n  Source: operator-stated, not machine-checked"
+           else "" end)
         + (if .default != "" then "\n  Default if silent: \(.default)" else "" end)' <<<"$items"
     if [ "$n" -gt 0 ]; then
         printf '\nDo now: %s\n' "$(jq -r '.[0] | "\(.label) — \([.do | split("\n")[] | select((test("^[[:space:]]*```") or test("^[[:space:]]*$")) | not)] | first // .do)"' <<<"$items")"
@@ -180,6 +196,16 @@ cm_file() {
     resp="$(cm_api POST /api/items "$body")" && jq -r '.id // empty' <<<"$resp"
 }
 
+# run_check <cmd>: sets check_ec and check_out (last output line). Never aborts the script.
+run_check() {
+    local out
+    set +e
+    out="$(cd "$project" && timeout 30 bash -c "$1" 2>&1)"
+    check_ec=$?
+    set -e
+    check_out="$(printf '%s' "$out" | tail -n 1 | cut -c1-200)"
+}
+
 write_md() {
     local tmp
     mkdir -p "$swarm"
@@ -207,6 +233,16 @@ case "$cmd" in
         if hits="$("$LINT" --project "$project" --skip lede-identifier,repeat-item,offer-to-act < <(printf "%s\n%s\n" "$title $do_ $rec" "$background") || true)" && [ -n "$hits" ]; then
             die "item points elsewhere instead of carrying its action (${hits%%:*}); restate the item in plain words (what it is, the options, your recommendation) instead of pointing at its label. Refusing."
         fi
+        check_json='{}'
+        if [ -n "$check" ]; then
+            run_check "$check"
+            [ "$check_ec" -eq 0 ] || die "--check failed (exit $check_ec: ${check_out:-no output}), so the ask is already done or no longer true. Not filing it. Command: $check"
+            check_json="$(jq -cn --arg c "$check" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg o "$check_out" '{checkCmd: $c, checkedAt: $at, checkResult: 0, checkOutput: $o}')"
+        elif [ "$check_source" = operator ]; then
+            check_json='{"checkSource": "operator"}'
+        else
+            die "add needs --check '<command>' (a shell test, gh or curl that exits 0 while the ask is still needed) or --check-source operator (a fact only the operator knows). Re-check the ask against the source before listing it. Refusing."
+        fi
         # An empty field is left out, not stored as "none" (issue #801).
         ! is_placeholder "$risk" || risk=""
         ! is_placeholder "$rec" || rec=""
@@ -220,7 +256,7 @@ case "$cmd" in
         jq -cn --arg label "$new" --arg title "$title" --arg bg "$background" --arg act "$do_" --arg kind "$kind" \
             --arg risk "$risk" --arg rec "$rec" --arg default "$deflt" --arg url "$url" --arg claim "$claim" \
             --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            '{label: $label, kind: $kind, title: $title, background: $bg, do: $act, risk: $risk, rec: $rec, default: $default, url: $url, claim: $claim, added: $at, verified: $at, done: false}' >> "$store"
+            '{label: $label, kind: $kind, title: $title, background: $bg, do: $act, risk: $risk, rec: $rec, default: $default, url: $url, claim: $claim, added: $at, verified: $at, done: false} + $chk' --argjson chk "$check_json" >> "$store"
         if [ "$backend" = corpusminder ]; then
             errf="$(mktemp -p "$swarm" .tmp.needs-you-cm.XXXXXX)"
             if cmid="$(cm_file "$new" 2>"$errf")" && [ -n "$cmid" ]; then
@@ -239,11 +275,23 @@ case "$cmd" in
         [ -n "$label" ] || die "verify needs a label (e.g. A1)"
         [ -s "$store" ] && jq -se --arg l "$label" 'any(.[]; .label == $l and .done != true)' "$store" >/dev/null \
             || die "no open item $label"
+        vcheck="$(jq -r --arg l "$label" 'select(.label == $l and .done != true) | .checkCmd // empty' "$store")"
+        check_ec=0; check_out=""
+        [ -z "$vcheck" ] || run_check "$vcheck"
         tmp="$(mktemp -p "$swarm" .tmp.needs-you-store.XXXXXX)"
         jq -c --arg l "$label" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg claim "$claim" \
-            'if .label == $l then .verified = $at | (if $claim != "" then .claim = $claim else . end) else . end' "$store" > "$tmp" && mv -f "$tmp" "$store" \
+            --argjson ec "$check_ec" --arg out "$check_out" --arg hascheck "$vcheck" \
+            'if .label == $l then
+                (if $hascheck != "" then .checkedAt = $at | .checkResult = $ec | .checkOutput = $out else . end)
+                | (if $hascheck == "" or $ec == 0 then .verified = $at else . end)
+                | (if $claim != "" then .claim = $claim else . end)
+             else . end' "$store" > "$tmp" && mv -f "$tmp" "$store" \
             || { rm -f "$tmp"; die "could not update $store"; }
         write_md
+        if [ "$check_ec" -ne 0 ]; then
+            echo "needs-you.sh: $label check failed (exit $check_ec: ${check_out:-no output}); the ask may already be done. Item stays open, flagged CHECK FAILED. Close it with done $label if so." >&2
+            exit 1
+        fi
         ;;
     done)
         [ -n "$label" ] || die "done needs a label (e.g. A1)"

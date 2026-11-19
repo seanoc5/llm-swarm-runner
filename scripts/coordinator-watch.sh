@@ -11320,7 +11320,7 @@ coord_composer_blocked_note_dirty() {
     echo "[$(date +%T)] WARNING: coordinator wakes held ${held}s behind an unsent draft in $SESSION_NAME:coordinator — filing a needs-you item"
     log_event coord.wake.blocked "state=start reason=composer_dirty blocked=${held}s project=$proj"
     if [ "$DRY_RUN" != "1" ] && [ -x "$SCRIPT_DIR/needs-you.sh" ]; then
-        label="$(timeout 60 "$SCRIPT_DIR/needs-you.sh" add --project "$PROJECT_DIR" --kind todo \
+        label="$(timeout 60 "$SCRIPT_DIR/needs-you.sh" add --project "$PROJECT_DIR" --kind todo --check-source operator \
             --title "$proj coordinator has not been woken for ${mins} minutes: unsent text sits in its input box" \
             --background "The $proj coordinator's input box holds text that was typed but never sent. The watcher will not type over it, so every wake for finished workers and new work is being skipped and retried. Until the text is sent or cleared, nothing gets triaged or dispatched in $proj." \
             --do "Attach with \`tmux attach -t $SESSION_NAME:coordinator\`, then press Enter to send the text or Ctrl-U to clear it." \

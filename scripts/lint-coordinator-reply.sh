@@ -87,6 +87,14 @@
 #                Fix: say each item once: operator-only work in Do now, work the coordinator does
 #                on a yes in the approval line, never both.
 #
+#   ask-not-listed an operator ask made in plain reply text (issue #1017): a "Pending your
+#                approval:" line that names no Needs-you label (A1, B2...) and is not
+#                "Nothing needed" / "Nothing to do". Asks live in the Needs-you list, where
+#                `needs-you.sh add --check` runs a real check before filing them, so an ask typed
+#                from memory skips it. coord-hook.sh runs it warn-only by default
+#                (COORD_REPLY_LINT_ASK=warn|block|off). Fix: file the ask with needs-you.sh add
+#                --check '<command>' and cite its label.
+#
 #   offer-to-act a fenced block under a "Do now:" line or inside a Needs-you item hands the
 #                operator commands the coordinator may run itself (issue #981; failure 3 of
 #                epic #488: it listed commands to paste for small, reversible fixes it could
@@ -505,15 +513,29 @@ offer_hits() {
         else if (ctx == "L" && $0 !~ /^[[:space:]]/) ctx = ""
     }'
 }
+# ask-not-listed (issue #1017): see the rule text in the header.
+ask_hits() {
+    printf '%s\n' "$text" | awk -v fence="$FENCE_RE" '
+    $0 ~ fence { inf = !inf; next }
+    inf { next }
+    {
+        l = tolower($0)
+        if (l !~ /^[[:space:]]*(\*\*)?(pending your approval)(\*\*)?:/) next
+        if (l ~ /nothing (needed|to do)/) next
+        if ($0 ~ /(^|[^A-Za-z0-9])[A-Z][0-9]+([^A-Za-z0-9]|$)/) next
+        print "ask-not-listed: " $0
+    }'
+}
 want() { { [ -z "$ONLY" ] || [[ "$ONLY" == *",$1,"* ]]; } && ! [[ "$SKIP" == *",$1,"* ]]; }
-stale=""; issue=""; carry=""; lede=""; repeat=""; offer=""
+stale=""; issue=""; carry=""; lede=""; repeat=""; offer=""; ask=""
 want stale-window && stale="$(stale_window_hits)"
 want issue-merged && issue="$(issue_merged_hits)"
 want carryover && carry="$(carryover_hits)"
 want lede-identifier && lede="$(lede_hits)"
 want repeat-item && repeat="$(repeat_hits)"
 want offer-to-act && offer="$(offer_hits)"
-all="$(printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' "$hits" "$stale" "$issue" "$carry" "$lede" "$repeat" "$offer" | sed '/^$/d')"
+want ask-not-listed && ask="$(ask_hits)"
+all="$(printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' "$hits" "$stale" "$issue" "$carry" "$lede" "$repeat" "$offer" "$ask" | sed '/^$/d')"
 if [ -n "$ONLY" ]; then
     all="$(printf '%s\n' "$all" | awk -v only="$ONLY" '{ split($0, p, ":"); if (index(only, "," p[1] ",")) print }')"
 fi
