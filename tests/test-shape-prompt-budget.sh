@@ -158,7 +158,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKER_MAX="${WORKER_MD_MAX_BYTES:-26400}"
 COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-35200}"
 BARE_MAX="${WORKER_BARE_MD_MAX_BYTES:-13100}"   # issue #510 trial prompt; ~7.5KB is script-parsed contract
-SHARED_MAX="${COORD_SHARED_MD_MAX_BYTES:-6100}"   # issue #767 split prompts
+SHARED_MAX="${COORD_SHARED_MD_MAX_BYTES:-6400}"   # issue #767 split prompts; 6100 -> 6400 for #1017 Asks section
 WORK_MAX="${COORD_WORK_MD_MAX_BYTES:-25800}"
 CHAT_MAX="${COORD_CHAT_MD_MAX_BYTES:-5500}"
 
