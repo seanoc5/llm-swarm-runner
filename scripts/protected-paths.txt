@@ -45,5 +45,5 @@ destructive: \bupdate\b.*\bset\b.*=[[:space:]]*null\b
 destructive: <drop(table|column|schema|view|index)\b|"drop(table|column|schema|view|index)"|\bdrop_(table|column)\b
 # Liquibase row deletes: YAML `delete:` / `- delete:` and XML `<delete ` / `<delete>`
 # (not onDelete / deleteCascade, which have no word boundary or no colon).
-destructive: (^|[[:space:]{-])delete[[:space:]]*:|<delete([[:space:]>/]|$)
+destructive: (^|[[:space:]{"-])delete"?[[:space:]]*:|<delete([[:space:]>/]|$)
 destructive: \bdrop(table|column|view|index|schema|foreignkeyconstraint|primarykey|uniqueconstraint)[[:space:]]*:
