@@ -17,8 +17,8 @@ before and never contacts corpusminder.
    `needs-you.sh` only.
 4. The wire contract for these calls (field names, rules, who owns what) is corpusminder's
    [swarm integration contract](https://github.com/seanoc5/corpusminder-spring/blob/master/docs/api/swarm-integration.md).
-   A change on either side needs a matching issue in the other repo. Items that carry a
-   `--check` send `claim`, `check_cmd`, `checked_at` (UTC ISO-8601, ends in `Z`) and
+   A change on either side needs a matching issue in the other repo. Every item sends `claim` when it has one; items filed with a
+   `--check` also send `check_cmd`, `checked_at` (UTC ISO-8601, ends in `Z`) and
    `check_result` (exit code as text) in `fields`, snake_case, as that contract requires; the
    local jsonl keeps camelCase.
 
