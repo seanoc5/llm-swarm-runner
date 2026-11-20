@@ -190,7 +190,9 @@ cm_file() {
          description: (if (.background // "") != "" then .background else .rec end),
          targetUrl: (if .url != "" then .url else null end),
          fields: ({swarm: $swarm, repo: $repo, issue: $issue, item: $lbl, problem: .title, background: (.background // ""), recommendation: .rec,
-                   blast_radius: .risk, do: .do, default_if_silent: .default}
+                   blast_radius: .risk, do: .do, default_if_silent: .default,
+                   claim: (.claim // ""), check_cmd: (.checkCmd // ""), checked_at: (.checkedAt // ""),
+                   check_result: (if .checkResult == null then "" else (.checkResult | tostring) end)}
                   | with_entries(select(.value != "")))}
         + (if $forum != "" then {forumId: ($forum | tonumber)} else {} end)
         | if .description == "" then del(.description) else . end' <<<"$item")"
