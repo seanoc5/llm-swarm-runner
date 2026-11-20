@@ -1122,7 +1122,7 @@ for LINE in "delete from users where active = false;" "DELETE FROM users;" "TRUN
     run_high GH_DIFF_NAMES=db/migration/V10__d.sql GH_DIFF_FILE="$TEST_DIR/del.diff"
     [ "$RC" -ne 0 ] && echo "$OUT" | grep -q "auto-high Gate 12" && no_merge || red "raw SQL '$LINE' must be protected (rc=$RC, output: $OUT)"
 done
-for LINE in "  - delete: {tableName: users}" "- delete:" "<delete tableName=\"users\">" "<delete>"; do
+for LINE in "  - delete: {tableName: users}" "- delete:" "<delete tableName=\"users\">" "<delete>" "{\"delete\": {\"tableName\": \"users\"}}" "  \"delete\": {" "{\"changeSet\": {\"changes\": [{\"delete\": {\"tableName\": \"users\"}}]}}"; do
     LB=src/main/resources/db/changelog/changes/0008-del.yaml
     printf 'diff --git a/%s b/%s\n--- /dev/null\n+++ b/%s\n@@ -0,0 +1 @@\n+%s\n' "$LB" "$LB" "$LB" "$LINE" > "$TEST_DIR/lbd.diff"
     run_high GH_DIFF_NAMES="$LB" GH_DIFF_FILE="$TEST_DIR/lbd.diff"
