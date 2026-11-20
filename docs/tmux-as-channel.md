@@ -214,3 +214,5 @@ the composer. If it cannot deliver, `coord.wake.doorbell_failed` and
 `coord.wake.fallback` appear in `.swarm/events.log` and the guarded paste runs.
 gemini/codex/agy coordinators and `COORD_DOORBELL=0` always use the guarded
 paste. `/compact` injection and worker brief delivery are unchanged.
+
+**Synchronous release of a finished parked worker (issue #1025).** The watcher's `/quit` path above depends on a running watcher and several pane-text gates all agreeing; it failed twice in fand-app on 2026-11-19 (iss-2259, iss-2320). `scripts/release-parked-worker.sh <issue|wt-path>` does the same release from the coordinator's own shell, gating only on files and git state (inbox brief waiting, `processing/` empty, a `done/` outcome JSON, no busy marker on the pane, clean and pushed worktree), then kills the window and runs `provision-worker.sh --wake`. `requeue.sh` calls it automatically when the target window is a live agent (`REQUEUE_AUTO_RELEASE=0` disables); a refusal leaves the brief queued for the watcher.

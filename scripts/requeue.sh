@@ -452,11 +452,19 @@ case "$LISTENER_STATE" in
         echo "  NOTE: window '$WIN' is running a live agent process (${LISTENER_STATE#live-busy:}) — if it's an interactive"
         echo "        session parked at rest (task finished, but /quit was never run), worker-listener.sh's"
         echo "        own poll loop cannot see this brief until that session ends (issue #313)."
-        echo "        A running coordinator-watch.sh sweep (WORKER_AUTO_DELIVER=1, the default) ends an"
-        echo "        idle parked session automatically within one scan interval (WORKER_COMPACT_SCAN_SECS,"
-        echo "        default 30s) and lets the listener claim this brief normally. If no such watcher is"
-        echo "        running for this swarm, attach and release it by hand:"
-        echo "          tmux attach -t $SESSION_NAME  (switch to window '$WIN', then run /quit)"
+        # issue #1025: don't leave delivery to the watcher's pane-text gates
+        # (they failed twice in fand-app on 2026-11-19). A finished worker with
+        # a clean, pushed worktree is restarted right here; anything else is
+        # refused by release-parked-worker.sh and left to the watcher.
+        if [ "${REQUEUE_AUTO_RELEASE:-1}" = "1" ] && [ -n "$WIN" ] \
+            && "$SCRIPT_DIR/release-parked-worker.sh" "$WT"; then
+            :
+        else
+            echo "        A running coordinator-watch.sh sweep (WORKER_AUTO_DELIVER=1, the default) also ends an"
+            echo "        idle parked session within one scan interval (WORKER_COMPACT_SCAN_SECS, default 30s)."
+            echo "        To release a FINISHED worker yourself (no tmux attach needed):"
+            echo "          $LLM_SWARM_DIR/scripts/release-parked-worker.sh $WT"
+        fi
         ;;
     no-listener)
         echo "  WARN: session '$SESSION_NAME' is alive but has no iss-* listener window."
