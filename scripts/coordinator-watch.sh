@@ -2700,8 +2700,22 @@ EOF
         CHECK_STARTED_AT="$(state_get started_at)"
         CHECK_SCRIPT_PATH="$(state_get script_path)"
         CHECK_MTIME_AT_LAUNCH="$(state_get script_mtime_at_launch)"
-        CHECK_MTIME_NOW="$(stat -c %Y "$CHECK_SCRIPT_PATH" 2>/dev/null || stat -f %m "$CHECK_SCRIPT_PATH" 2>/dev/null || echo "")"
-        echo "watcher pid:          ${CHECK_PID:-?}"
+        # Same definition as watcher_code_mtime (defined further down, not yet
+        # available here): newest mtime of the script AND its sibling _*.sh
+        # helpers. The launch value in the state file is that max (#1013), so
+        # comparing it to the main script's mtime alone reads STALE/FRESH
+        # wrongly whenever a helper is newer than coordinator-watch.sh.
+        CHECK_MTIME_NOW=""
+        if [ -n "$CHECK_SCRIPT_PATH" ]; then
+            CHECK_NEWEST=0
+            for _cf in "$CHECK_SCRIPT_PATH" "$(dirname "$CHECK_SCRIPT_PATH")"/_*.sh; do
+                [ -f "$_cf" ] || continue
+                _cm="$(stat -c %Y "$_cf" 2>/dev/null || stat -f %m "$_cf" 2>/dev/null || echo "")"
+                if [ -n "$_cm" ] && [ "$_cm" -gt "$CHECK_NEWEST" ]; then CHECK_NEWEST="$_cm"; fi
+            done
+            [ "$CHECK_NEWEST" -gt 0 ] && CHECK_MTIME_NOW="$CHECK_NEWEST"
+        fi
+        echo "watcher pid:         ${CHECK_PID:-?}"
         echo "started at:           ${CHECK_STARTED_AT:-?}"
         echo "script:               ${CHECK_SCRIPT_PATH:-?}"
         echo "script mtime@launch:  ${CHECK_MTIME_AT_LAUNCH:-?}"
