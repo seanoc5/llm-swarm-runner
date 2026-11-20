@@ -63,6 +63,8 @@ MAIN_REPO="$(dirname "$GIT_COMMON_DIR")"
 SESSION_NAME="llm-$(basename "$MAIN_REPO")"
 
 refuse() { echo "release-parked-worker: not releasing $WIN — $1" >&2; exit 1; }
+# has_file <dir> [find-tests...]: true if a regular file matches (-quit, no pipe).
+has_file() { local d="$1"; shift; [ -n "$(find "$d" -maxdepth 1 -type f "$@" -print -quit 2>/dev/null)" ]; }
 
 tmux has-session -t "$SESSION_NAME" 2>/dev/null || refuse "no tmux session $SESSION_NAME"
 pane_cmd="$(tmux list-panes -t "$SESSION_NAME:$WIN" -F '#{pane_current_command}' 2>/dev/null | sed -n 1p)" || pane_cmd=""
@@ -72,11 +74,11 @@ case "$pane_cmd" in
 esac
 
 TASKS="$WT/.swarm/tasks"
-find "$TASKS/inbox" -maxdepth 1 -type f -name '*.md' 2>/dev/null | grep -q . \
+has_file "$TASKS/inbox" -name '*.md' \
     || refuse "no brief waiting in inbox/"
-find "$TASKS/processing" -maxdepth 1 -type f 2>/dev/null | grep -q . \
+has_file "$TASKS/processing" \
     && refuse "a task is still claimed in processing/ (worker not finished)"
-find "$TASKS/done" -maxdepth 1 -type f \( -name '*.ok.json' -o -name '*.err.json' \) 2>/dev/null | grep -q . \
+has_file "$TASKS/done" \( -name '*.ok.json' -o -name '*.err.json' \) \
     || refuse "no done/ outcome JSON (worker never declared itself done)"
 
 # ANSI-stripped capture; the dim suggested-prompt on the composer line is not
@@ -106,7 +108,7 @@ fi
 
 # Last-moment race check: a slow /quit (or the watcher) may have let the
 # listener claim the brief already. Killing now would destroy that fresh run.
-if ! find "$TASKS/inbox" -maxdepth 1 -type f -name '*.md' 2>/dev/null | grep -q .; then
+if ! has_file "$TASKS/inbox" -name '*.md'; then
     rm -f "$WT/.swarm/sidelined"
     refuse "brief was claimed while checking (nothing to do)"
 fi
