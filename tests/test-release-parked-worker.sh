@@ -53,30 +53,30 @@ check "dry-run touches nothing" "no" "$([ -e "$T/wake.args" ] && echo yes || ech
 
 reset
 rm "$WT/.swarm/tasks/inbox/new.md"
-check "no queued brief: refused" 1 "$(run)"
+check "no queued brief: refused" 1 "$(run)"; grep -q "no brief waiting" "$T/out" || red "wrong refusal reason"
 
 reset
 echo x > "$WT/.swarm/tasks/processing/cur.md"
-check "task still in processing/: refused" 1 "$(run)"
+check "task still in processing/: refused" 1 "$(run)"; grep -q "still claimed" "$T/out" || red "wrong refusal reason"
 
 reset
 rm "$WT/.swarm/tasks/done/old.ok.json"
-check "no done/ outcome: refused" 1 "$(run)"
+check "no done/ outcome: refused" 1 "$(run)"; grep -q "no done/ outcome" "$T/out" || red "wrong refusal reason"
 
 reset
 echo dirty > "$WT/dirty.txt"
-check "dirty worktree: refused" 1 "$(run)"
+check "dirty worktree: refused" 1 "$(run)"; grep -q "uncommitted" "$T/out" || red "wrong refusal reason"
 rm -f "$WT/dirty.txt"
 
 reset
 git -C "$WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m unpushed
-check "unpushed commit: refused" 1 "$(run)"
+check "unpushed commit: refused" 1 "$(run)"; grep -q "unpushed" "$T/out" || red "wrong refusal reason"
 git -C "$WT" reset -q --hard HEAD~1
 
 reset
 tmux kill-window -t "$SESSION:iss-7"; tmux new-window -d -t "$SESSION" -n iss-7 "bash -c 'echo \"(esc to interrupt)\"; sleep 600'"
 sleep 0.5
-check "busy marker on pane: refused" 1 "$(run)"
+check "busy marker on pane: refused" 1 "$(run)"; grep -q "busy marker" "$T/out" || red "wrong refusal reason"
 tmux kill-window -t "$SESSION:iss-7"
 
 reset

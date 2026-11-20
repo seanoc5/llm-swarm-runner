@@ -456,13 +456,13 @@ case "$LISTENER_STATE" in
         # (they failed twice in fand-app on 2026-11-19). A finished worker with
         # a clean, pushed worktree is restarted right here; anything else is
         # refused by release-parked-worker.sh and left to the watcher.
-        if [ "${REQUEUE_AUTO_RELEASE:-1}" = "1" ] && [ -n "$WIN" ] \
+        if [ "${RELEASE_PARKED_WORKER:-0}" = "1" ] && [ -n "$WIN" ] \
             && "$SCRIPT_DIR/release-parked-worker.sh" "$WT"; then
             :
         else
             echo "        A running coordinator-watch.sh sweep (WORKER_AUTO_DELIVER=1, the default) also ends an"
             echo "        idle parked session within one scan interval (WORKER_COMPACT_SCAN_SECS, default 30s)."
-            echo "        To release a FINISHED worker yourself (no tmux attach needed):"
+            echo "        To release a FINISHED worker yourself (ends its session, so only if nobody is talking to it; no tmux attach needed):"
             echo "          $LLM_SWARM_DIR/scripts/release-parked-worker.sh $WT"
         fi
         ;;
