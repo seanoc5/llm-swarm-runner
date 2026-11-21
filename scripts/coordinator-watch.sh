@@ -3755,6 +3755,11 @@ HOST_LOAD_REFUSED_FILE="$PROJECT_DIR/.swarm/host-load-refused"
 # issue #729: ready_sweep_pass (timer-loop process) drops one file per new ci_failing
 # note here; ci_failing_ring_pass (run_capacity_wake_loop process) rings for them.
 CI_FAILING_RING_DIR="$PROJECT_DIR/.swarm/ci-failing-ring-pending"
+# issue #1033: same hand-off for pr_ci_green notes (pr_poll_pass writes, capacity loop rings).
+# PR_CI_GREEN_NOTED_DIR holds one "<pr>-<sha>" marker per noted head, on disk so a watcher
+# restart does not re-note a PR the coordinator already saw.
+PR_CI_GREEN_RING_DIR="$PROJECT_DIR/.swarm/pr-ci-green-ring-pending"
+PR_CI_GREEN_NOTED_DIR="$PROJECT_DIR/.swarm/pr-ci-green-noted"
 # issue #756: same hand-off for watcher_dead notes (sweep in the timer loop, ring in the capacity loop).
 WATCHER_DEAD_RING_DIR="$PROJECT_DIR/.swarm/watcher-dead-ring-pending"
 
@@ -5042,6 +5047,44 @@ pr_comment_hold() {
     [ "$state" = "held" ]
 }
 
+# pr_ci_green_note <issue> <pr> (issue #1033)
+#
+# pr_poll_pass just put iss-<issue> on ✅ (open, not draft, CI all green, worker
+# declared done). A coordinator merge refused earlier on swarm-hold:ci stays
+# refused until someone re-runs it, and nothing told the coordinator the hold
+# had gone: two fand-etl PRs sat mergeable for 36 and 47 minutes. Write ONE
+# urgent pr_ci_green inbox note per PR + head sha and queue a doorbell. A
+# coordinator-held PR (banner) is skipped: it is not mergeable yet. Never rings
+# here (the capacity loop does, pr_ci_green_ring_pass), same as ci_failing.
+pr_ci_green_note() {
+    local issue="$1" pr="$2" m h b risk mark cmd
+    pr_open_details_load
+    [ "${PR_HOLD_CACHE[$pr]:-}" = "hold" ] && return 0
+    IFS=$'\t' read -r m h b <<< "${PR_MERGE_CACHE[$pr]:-}"
+    [[ "$h" =~ ^[0-9a-fA-F]{7,64}$ ]] || return 0
+    [ "$m" = "CONFLICTING" ] && return 0
+    mark="$PR_CI_GREEN_NOTED_DIR/$pr-$h"
+    [ ! -e "$mark" ] || return 0
+    case "$(pr_risk_glyph "$pr")" in
+        🟢) risk="low";    cmd="swarm-merge.sh $pr --auto-low" ;;
+        🟡) risk="medium"; cmd="swarm-merge.sh $pr --auto-medium" ;;
+        *)  risk="";       cmd="swarm-merge.sh $pr (high or unrated: needs the operator's merge decision)" ;;
+    esac
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "[DRY] would write coord-inbox pr_ci_green note for PR #$pr (sha ${h:0:7})"
+        return 0
+    fi
+    if coord_inbox_write pr_ci_green "$(printf 'PR #%s (worker iss-%s) is ready to merge: CI is green on %s and the worker is done. If a merge was refused earlier on swarm-hold:ci, re-run it now: %s. Check gh pr view %s --json labels first; a leftover hold label still refuses (scripts/lift-hold.sh does not clear :ci/:review). One note per head sha.\n' "$pr" "$issue" "${h:0:7}" "$cmd" "$pr")"; then
+        log_event coord.inbox.write "trigger=pr_ci_green pr=$pr sha=$h risk=${risk:-none}"
+        mkdir -p "$PR_CI_GREEN_NOTED_DIR" "$PR_CI_GREEN_RING_DIR" 2>/dev/null || true
+        : > "$mark" 2>/dev/null || true
+        : > "$PR_CI_GREEN_RING_DIR/$pr-$h" 2>/dev/null || true
+    else
+        echo "[$(date +%T)] WARN: failed to write coord-inbox pr_ci_green note for PR #$pr" >&2
+    fi
+    return 0
+}
+
 # conflict_brief_pass_one <issue> <pr> <wt_dir> (issue #656)
 #
 # A ready PR can turn CONFLICTING after its worker finished, when another PR
@@ -5168,6 +5211,7 @@ pr_poll_pass() {
                     fi
                 fi
                 pr_flag_apply "$issue" "$want" "$why pr=$pr_number"
+                [ "$why" != "pr_done_idle" ] || pr_ci_green_note "$issue" "$pr_number"
                 if [ "$WATCH_CONFLICT_BRIEF" = "1" ]; then
                     pr_open_details_load
                     conflict_brief_pass_one "$issue" "$pr_number" "$wt_dir"
@@ -12906,6 +12950,25 @@ ci_failing_ring_pass() {
     done
 }
 
+# pr_ci_green_ring_pass (issue #1033)
+#
+# Rings once for the pr_ci_green notes pr_poll_pass queued in
+# $PR_CI_GREEN_RING_DIR ("<pr>-<sha>" files); same disk hand-off and
+# remove-before-ring contract as watcher_dead_ring_pass. The note is already
+# durable, so a lost ring only delays it until the coordinator's next wake.
+pr_ci_green_ring_pass() {
+    [ -d "$PR_CI_GREEN_RING_DIR" ] || return 0
+    local f n=0 list=""
+    for f in "$PR_CI_GREEN_RING_DIR"/*; do
+        [ -e "$f" ] || continue
+        rm -f "$f" 2>/dev/null || continue
+        n=$((n + 1))
+        list="${list:+$list,}${f##*/}"
+    done
+    [ "$n" -gt 0 ] || return 0
+    coord_ring_doorbell pr_ci_green "count=$n prs=$list"
+}
+
 # watcher_dead_ring_pass (issue #756)
 #
 # Rings once for the watcher_dead notes watcher_sibling_sweep_pass queued in
@@ -12952,6 +13015,7 @@ run_capacity_wake_loop() {
         ci_failing_ring_pass || true
         watcher_dead_ring_pass || true
         runner_offline_ring_pass || true
+        pr_ci_green_ring_pass || true
     done
 }
 
