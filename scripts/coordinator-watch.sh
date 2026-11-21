@@ -5065,7 +5065,9 @@ pr_ci_green_note() {
     [ "$m" = "CONFLICTING" ] && return 0
     mark="$PR_CI_GREEN_NOTED_DIR/$pr-$h"
     [ ! -e "$mark" ] || return 0
-    case "$(pr_risk_glyph "$pr")" in
+    # Read the cache directly: pr_risk_glyph returns nothing under WATCH_WINDOW_FLAG_RISK=0
+    # (issue #1036), which would rate every PR "high or unrated".
+    case "${PR_RISK_CACHE[$pr]:-}" in
         🟢) risk="low";    cmd="swarm-merge.sh $pr --auto-low" ;;
         🟡) risk="medium"; cmd="swarm-merge.sh $pr --auto-medium" ;;
         *)  risk="";       cmd="swarm-merge.sh $pr (high or unrated: needs the operator's merge decision)" ;;
@@ -5074,7 +5076,7 @@ pr_ci_green_note() {
         echo "[DRY] would write coord-inbox pr_ci_green note for PR #$pr (sha ${h:0:7})"
         return 0
     fi
-    if coord_inbox_write pr_ci_green "$(printf 'PR #%s (worker iss-%s) is ready to merge: CI is green on %s and the worker is done. If a merge was refused earlier on swarm-hold:ci, re-run it now: %s. Check gh pr view %s --json labels first; a leftover hold label still refuses (scripts/lift-hold.sh does not clear :ci/:review). One note per head sha.\n' "$pr" "$issue" "${h:0:7}" "$cmd" "$pr")"; then
+    if coord_inbox_write pr_ci_green "$(printf 'PR #%s (worker iss-%s) is ready to merge: CI is green on %s and the worker is done. If a merge was refused earlier on swarm-hold:ci, re-run it now: %s. Check gh pr view %s --json labels first: a leftover swarm-hold:ci/:review still refuses (lift-hold.sh leaves them), so run pr-ready.sh %s once to clear it, then merge. One note per head sha.\n' "$pr" "$issue" "${h:0:7}" "$cmd" "$pr" "$pr")"; then
         log_event coord.inbox.write "trigger=pr_ci_green pr=$pr sha=$h risk=${risk:-none}"
         mkdir -p "$PR_CI_GREEN_NOTED_DIR" "$PR_CI_GREEN_RING_DIR" 2>/dev/null || true
         : > "$mark" 2>/dev/null || true
@@ -5082,6 +5084,18 @@ pr_ci_green_note() {
     else
         echo "[$(date +%T)] WARN: failed to write coord-inbox pr_ci_green note for PR #$pr" >&2
     fi
+    return 0
+}
+
+# pr_ci_green_markers_clear <pr> (issue #1036)
+#
+# A merged/closed PR never notes again, so drop its "<pr>-<sha>" markers
+# (one per head sha noted) instead of letting the directory grow forever.
+pr_ci_green_markers_clear() {
+    local f
+    for f in "$PR_CI_GREEN_NOTED_DIR/$1"-*; do
+        [ -e "$f" ] && rm -f "$f" 2>/dev/null
+    done
     return 0
 }
 
@@ -5218,6 +5232,7 @@ pr_poll_pass() {
                 fi
                 ;;
             MERGED|CLOSED)
+                pr_ci_green_markers_clear "$pr_number"
                 if ! pr_predates_worktree "$created_at" "$wt_dir"; then
                     clear_window_flag "iss-$issue" "🟡" "legacy_glyph pr=$pr_number"
                     pr_flag_apply "$issue" "" "pr_${state,,} pr=$pr_number"
