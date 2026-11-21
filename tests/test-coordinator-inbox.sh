@@ -351,8 +351,9 @@ poll_until 10 0.3 bash -c "grep -q 'coord.wake.defer ' '$EVENTS_LOG' 2>/dev/null
 $(cat "$TEST_DIR/watch-5.log")"
 DEFER_AT=$(date +%s)
 # Precondition: the deferral really wrote the marker, so "marker cleared"
-# below proves 908 cleared it rather than that it never existed.
-[ -e "$PROJECT_DIR/.swarm/coord-wake-busy-pending" ] \
+# below proves 908 cleared it rather than that it never existed. Polled: the
+# watcher logs the defer event just BEFORE it writes the marker.
+poll_until 10 0.3 bash -c "[ -e '$PROJECT_DIR/.swarm/coord-wake-busy-pending' ]" \
     || red "setup: 907's busy-defer did not leave a busy-pending marker"
 
 # Pane goes idle and a second outcome lands immediately, well BEFORE the first
