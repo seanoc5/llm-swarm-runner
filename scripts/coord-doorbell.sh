@@ -120,7 +120,7 @@ LIST_TEXT="$(jq -rs '
         | .content | if type == "array" then map(.text // "") | join("") else (. // "") end ]
     | join("\n")' "$CLEAN" 2>/dev/null)"
 ALLOWED="$TARGET"
-if ! printf '%s\n' "$LIST_TEXT" | grep -qE "(^|[^A-Za-z0-9._-])$(printf '%s' "$TARGET" | sed 's/[.[\*^$]/\\&/g')([^A-Za-z0-9._-]|$)"; then
+if ! grep -qE "(^|[^A-Za-z0-9._-])$(printf '%s' "$TARGET" | sed 's/[.[\*^$]/\\&/g')([^A-Za-z0-9._-]|$)" <<<"$LIST_TEXT"; then
     ROWS="$(printf '%s\n' "$LIST_TEXT" | grep -E "(^|[^A-Za-z0-9._-])$(printf '%s' "$TMUX_SESSION" | sed 's/[.[\*^$]/\\&/g')([^A-Za-z0-9._-]|$)" | grep -i interactive)"
     if [ -n "$ROWS" ] && [ "$(printf '%s\n' "$ROWS" | wc -l)" = 1 ]; then
         ALLOWED="$(printf '%s' "$ROWS" | sed -E 's/^[[:space:]*•·-]+//' | awk '{print $1}')"
