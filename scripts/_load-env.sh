@@ -25,7 +25,8 @@
 #   - inline comments NOT supported (kept literal — keep .env entries clean)
 #
 # Host-only keys: HOST_MAX_WORKERS, HOST_MAX_LOAD1, HOST_MIN_MEM_AVAIL_MB,
-# HOST_SPAWN_STAGGER_SECS and HOST_STATE_DIR describe the box, not the
+# HOST_SPAWN_STAGGER_SECS, HOST_STATE_DIR, TEST_SLOT_DIR and TEST_SLOT_COUNT
+# (the machine-wide test-run cap, #1030) describe the box, not the
 # project, so tier 2 (<project>/.swarm/.env) is NOT allowed to set them. A
 # project file that does gets a one-line warning and the key is skipped.
 # Reason (2026-09-29): fand-app's .swarm/.env said HOST_MAX_WORKERS=12 while
@@ -37,7 +38,7 @@
 # them. Use guards on each var read instead.
 
 # Keys that only the host tiers (3, 4) or the shell may set. See header.
-_LOAD_ENV_HOST_ONLY_KEYS=" HOST_MAX_WORKERS HOST_MAX_LOAD1 HOST_MIN_MEM_AVAIL_MB HOST_SPAWN_STAGGER_SECS HOST_STATE_DIR "
+_LOAD_ENV_HOST_ONLY_KEYS=" HOST_MAX_WORKERS HOST_MAX_LOAD1 HOST_MIN_MEM_AVAIL_MB HOST_SPAWN_STAGGER_SECS HOST_STATE_DIR TEST_SLOT_DIR TEST_SLOT_COUNT "
 
 _apply_env_file() {
     local f="$1"

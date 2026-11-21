@@ -46,3 +46,18 @@ green "released slot is reusable"
 "$SLOT" 2>/dev/null; [ $? -eq 2 ] || red "no command should be usage error"
 TEST_SLOT_DISABLE=1 "$SLOT" -- true || red "disable escape hatch failed"
 green "usage errors and disable switch"
+
+# #1030: a background child left running must not hold the slot.
+"$SLOT" --slots 1 -- sh -c 'sleep 30 >/dev/null 2>&1 & echo $! > "'"$T"'/bgpid"' 2>/dev/null
+"$SLOT" --slots 1 --wait 3 -- true 2>/dev/null || red "leaked background child held the slot"
+kill "$(cat "$T/bgpid")" 2>/dev/null
+green "background child does not hold the slot"
+
+# #1030: project-tier TEST_SLOT_DIR/COUNT are ignored with a warning.
+mkdir -p "$T/proj/.swarm"
+printf 'TEST_SLOT_DIR=%s\nTEST_SLOT_COUNT=99\n' "$T/escape" > "$T/proj/.swarm/.env"
+out=$(cd "$T/proj" && env -u TEST_SLOT_DIR -u TEST_SLOT_COUNT bash -c ". '$SCRIPT_DIR/../scripts/_load-env.sh' '$T/proj'; echo \"dir=\${TEST_SLOT_DIR:-unset} count=\${TEST_SLOT_COUNT:-unset}\"" 2>&1)
+case "$out" in *"$T/escape"*) red "project TEST_SLOT_DIR leaked: $out" ;; esac
+case "$out" in *"count=99"*) red "project TEST_SLOT_COUNT leaked: $out" ;; esac
+case "$out" in *"host-only keys are ignored"*) ;; *) red "no warning: $out" ;; esac
+green "project .swarm/.env cannot move the shared cap"
