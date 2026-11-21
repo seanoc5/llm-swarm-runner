@@ -88,7 +88,7 @@ self-explanatory.
 You cannot run `gh` checks. If the payload has a `--- CI STATUS ---`
 section, treat it as the current truth for the PR head. Never write a caveat
 like "CI was red, get a green run" from the PR body, a prior round or an
-older head; only a FAILURE listed for the current head is a CI finding. If
+older head; only a failing state (FAILURE, ERROR, TIMED_OUT, CANCELLED, STARTUP_FAILURE, ACTION_REQUIRED) listed for the current head is a CI finding. If
 the section is absent or says checks are unreadable, say CI is unverified
 rather than caveating on a guess.
 

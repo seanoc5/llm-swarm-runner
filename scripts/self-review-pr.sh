@@ -362,7 +362,7 @@ if [ -n "$HEAD_SHA" ]; then
           else (group_by(.s) | map("\(.[0].s): \(length) (\([.[].n] | unique | .[0:6] | join(", ")))") | join("\n")) end' \
         <<<"$CI_ROLLUP" 2>/dev/null || true)"
     if [ -n "$CI_LINES" ]; then
-        CI_NOTE="Check runs for the current head ${HEAD_SHA:0:7}, read just now by the review script. This is authoritative. Results on earlier heads are stale and superseded; do not caveat on them. A check shown as pending or absent is not a failure and not a reason to caveat; only a FAILURE here is.
+        CI_NOTE="Check runs for the current head ${HEAD_SHA:0:7}, read just now by the review script. This is authoritative. Results on earlier heads are stale and superseded; do not caveat on them. A check shown as pending or absent is not a failure and not a reason to caveat; only a failing state here (FAILURE, ERROR, TIMED_OUT, CANCELLED, STARTUP_FAILURE, ACTION_REQUIRED) is.
 ${CI_LINES}"
     else
         CI_NOTE="Check runs for the current head ${HEAD_SHA:0:7} could not be read (the review has no network access to checks). State that CI is unverified; do not infer CI results."
