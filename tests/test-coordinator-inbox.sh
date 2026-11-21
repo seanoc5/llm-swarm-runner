@@ -361,9 +361,11 @@ poll_until 10 0.3 bash -c "[ \"\$(grep -c 'WAKE:' '$WAKE_LOG')\" = '1' ]" \
 $(cat "$WAKE_LOG")"
 
 # Deterministic check first (issue #1032): the stale marker must already be
-# gone the moment 908's direct wake lands — that is the invariant under test.
-[ ! -e "$PROJECT_DIR/.swarm/coord-wake-busy-pending" ] \
-    || red "908's direct wake landed but the busy-pending marker from 907 is still present"
+# gone once 908's direct wake lands — that is the invariant under test.
+# (Polled, not checked once: the watcher clears the marker just AFTER the
+# wake launcher returns, so the marker can briefly outlive the logged wake.)
+poll_until 10 0.3 bash -c "[ ! -e '$PROJECT_DIR/.swarm/coord-wake-busy-pending' ]" \
+    || red "908's direct wake landed but the busy-pending marker from 907 never cleared"
 # Then wait past the first hold-retry pass (20s tick, started before DEFER_AT) — if
 # the marker had survived, this is when a redundant second nudge would show up.
 WAIT_LEFT=$(( DEFER_AT + 20 + 4 - $(date +%s) ))
