@@ -89,6 +89,23 @@ make_stub samebase "emit_use tu1 $(q "$NB") $(q "$EXPECTED_MSG")" "emit_result t
 check "sent to a same-basename project's coordinator: exit 1" 1 "$(run samebase)"
 check "same-basename: failure logged, no delivery logged" "1 0" "$(printf '%s %s' "$(grep -c doorbell_failed "$EV")" "$(grep -c 'coord.wake.doorbell target' "$EV")")"
 
+# #1040: the coordinator answers to a different harness name than the pinned
+# one (resumed/renamed). The courier lists agents and sends to the one row on
+# this project's tmux session; anything else still fails.
+TMUXS="llm-$(basename "$PROJ")"
+emit_list='emit_list() { jq -cn --arg id "$1" --arg r "$2" '"'"'{type:"assistant",message:{content:[{type:"tool_use",id:$id,name:"ListAgents",input:{}}]}},{type:"user",message:{content:[{type:"tool_result",tool_use_id:$id,content:[{type:"text",text:$r}]}]}}'"'"'; }'
+make_stub renamed "$emit_list" "emit_list la1 $(q "- fand-coord [ref1] · interactive · idle · tmux $TMUXS:coordinator.0
+- swarm-other-1234abcd [ref2] · interactive · idle · tmux llm-other:coordinator.0")" "emit_use tu1 fand-coord $(q "$EXPECTED_MSG")" "emit_result tu1 '$OKRES'"
+check "renamed coordinator found via ListAgents tmux row: exit 0" 0 "$(run renamed)"
+check "renamed coordinator: delivery logs the resolved name" 1 "$(grep -c 'coord.wake.doorbell target=fand-coord' "$EV")"
+make_stub renamed_wrong "$emit_list" "emit_list la1 $(q "- fand-coord [ref1] · interactive · idle · tmux $TMUXS:coordinator.0")" "emit_use tu1 swarm-other-1234abcd $(q "$EXPECTED_MSG")" "emit_result tu1 '$OKRES'"
+check "ListAgents found a name but courier sent elsewhere: exit 1" 1 "$(run renamed_wrong)"
+make_stub renamed_two "$emit_list" "emit_list la1 $(q "- a [r1] · interactive · idle · tmux $TMUXS:coordinator.0
+- b [r2] · interactive · idle · tmux $TMUXS:coordinator.1")" "emit_use tu1 a $(q "$EXPECTED_MSG")" "emit_result tu1 '$OKRES'"
+check "two rows on the tmux session (ambiguous): exit 1" 1 "$(run renamed_two)"
+make_stub pinned_listed "$emit_list" "emit_list la1 $(q "- $TARGET [r1] · interactive · idle · tmux $TMUXS:coordinator.0")" "emit_use tu1 $(q "$TARGET") $(q "$EXPECTED_MSG")" "emit_result tu1 '$OKRES'"
+check "pinned name listed: exit 0" 0 "$(run pinned_listed)"
+
 # B: exactly one SendMessage call, and the result must belong to it.
 make_stub zero "echo 'no tools today'"
 check "zero SendMessage calls: exit 1" 1 "$(run zero)"
