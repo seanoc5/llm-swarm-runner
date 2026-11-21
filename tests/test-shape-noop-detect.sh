@@ -46,7 +46,7 @@ cleanup() {
 trap cleanup EXIT
 
 wait_for() {
-    local desc="$1" cmd="$2" max=20
+    local desc="$1" cmd="$2" max=120   # 60s: polling, so free when fast; 10s flaked under host load (issue #1032)
     for ((i=0; i<max; i++)); do
         if eval "$cmd"; then return 0; fi
         sleep 0.5

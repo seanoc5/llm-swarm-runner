@@ -61,11 +61,24 @@ chmod +x "$FAKE_LLM_START"
 
 tmux new-session -d -s "$SESSION_NAME" -n coordinator 2>/dev/null
 
+# Both helpers wait until the marker text is actually rendered in the pane
+# (issue #1032): send-keys is asynchronous, so on a loaded host the watcher
+# could otherwise inspect the pane before the repaint and see stale state.
+pane_has() {
+    local want="$1" i
+    for ((i = 0; i < 100; i++)); do
+        tmux capture-pane -p -t "$SESSION_NAME:coordinator" 2>/dev/null | grep -q -- "^$want" && return 0   # anchored: the typed command line also contains the text
+        sleep 0.1
+    done
+    return 0   # best effort — the test's own assertions will report a real problem
+}
 set_pane_idle() {
     tmux send-keys -t "$SESSION_NAME:coordinator" "clear; echo 'some idle prompt >'" Enter
+    pane_has "some idle prompt >"
 }
 set_pane_busy() {
     tmux send-keys -t "$SESSION_NAME:coordinator" "clear; echo '✻ Considering… (esc to interrupt)'" Enter
+    pane_has "✻ Considering"
 }
 set_pane_idle
 sleep 0.3
@@ -78,6 +91,9 @@ sleep 0.3
 # uses for its single-wake cases.
 start_watcher() {
     local logfile="$1"
+    local baselined_before
+    baselined_before="$(grep -c "watch.baselined" "$EVENTS_LOG" 2>/dev/null || true)"
+    baselined_before="${baselined_before:-0}"
     LLM_START="$FAKE_LLM_START" \
         SESSION_NAME="$SESSION_NAME" \
         WORKSPACE="$TEST_DIR" \
@@ -96,9 +112,16 @@ start_watcher() {
         DRY_RUN=0 ONCE=0 POLL_SECS=1 \
         "$WATCH" "$PROJECT_DIR" > "$logfile" 2>&1 &
     WATCH_PID=$!
-    # Let the watcher baseline existing outcomes before we drop a new one
-    # (mirrors test-watcher-autoclose.sh's start_watcher).
-    sleep 1.5
+    # Wait for the watcher to finish baselining existing outcomes before the
+    # test drops a new one (issue #1032: a fixed `sleep 1.5` lost the race on
+    # a loaded host — the watcher baselined the new outcome and never rang).
+    local i n
+    for ((i = 0; i < 240; i++)); do
+        n=$(grep -c "watch.baselined" "$EVENTS_LOG" 2>/dev/null || true)
+        [ "${n:-0}" -gt "$baselined_before" ] && break
+        sleep 0.25
+    done
+    sleep 0.3
 }
 
 stop_watcher() {
@@ -143,9 +166,14 @@ atomic_note_write() {
 # Retries a condition rather than a single fixed sleep — this daemon's
 # poll loop (POLL_SECS=1) and timer loop (2s tick) both introduce real
 # scheduling slack that a single sleep would either under- or over-shoot.
+# Tries are scaled x6 (issue #1032): every caller is a positive wait that
+# returns the instant its condition holds, so the scale is free on a quiet
+# host and only buys headroom when the host is loaded (load avg hit ~270 on
+# the CI runner box; the unscaled 3-10s budgets flaked one-per-day).
 poll_until() {
     local tries="$1" delay="$2"; shift 2
-    local i
+    tries=$((tries * ${POLL_UNTIL_SCALE:-6}))
+    local i n
     for ((i = 0; i < tries; i++)); do
         if "$@"; then return 0; fi
         sleep "$delay"
@@ -265,8 +293,9 @@ poll_until 20 0.5 bash -c "grep -q 'WAKE:' '$WAKE_LOG'" \
     || red "burst never produced even the one expected wake. watch log:
 $(cat "$TEST_DIR/watch-4.log")"
 # Give the two debounced-skip outcomes time to be observed and inbox-written
-# before asserting the final counts.
-sleep 2
+# before asserting the final counts — poll on the end state itself rather
+# than a fixed sleep (issue #1032: 2s was not enough on a loaded host).
+poll_until 10 0.5 bash -c "[ \"\$(grep -c 'coord.wake.defer .*reason=debounce' '$EVENTS_LOG' 2>/dev/null)\" = 2 ]" || true
 stop_watcher
 
 [ "$(wake_count)" = "1" ] || red "expected exactly ONE doorbell nudge for a burst inside the debounce window; got $(wake_count). wake.log:
@@ -308,14 +337,22 @@ reset_state
 set_pane_busy
 sleep 0.3
 
-COORD_WAKE_BUSY_RETRY_SECS=5 COORD_WAKE_BUSY_CEILING_SECS=900 DEBOUNCE_SECS=0 start_watcher "$TEST_DIR/watch-5.log"
+# Timing (issue #1032): the timer loop sleeps one tick before its FIRST
+# hold-retry pass (which is due immediately, last-run = 0), then runs one
+# every RETRY_SECS. With the default 2s tick that first pass lands ~2s after
+# boot — right in the middle of this test, so on a loaded host it could
+# deliver 907's deferred wake just before 908's direct one and look like a
+# duplicate. A 20s tick pushes the first pass well past 908; the stale-marker
+# check below is deterministic and does not depend on that pass at all.
+WATCH_TIMER_TICK_SECS=20 COORD_WAKE_BUSY_RETRY_SECS=20 COORD_WAKE_BUSY_CEILING_SECS=900 DEBOUNCE_SECS=0 start_watcher "$TEST_DIR/watch-5.log"
 echo '{"task_id":"t907","outcome":"ok"}' > "$TEST_DIR/wt-issue-907/.swarm/tasks/done/t907-907.ok.json"
 poll_until 10 0.3 bash -c "grep -q 'coord.wake.defer ' '$EVENTS_LOG' 2>/dev/null" \
     || red "setup: busy-defer for outcome 907 never landed. watch log:
 $(cat "$TEST_DIR/watch-5.log")"
+DEFER_AT=$(date +%s)
 
-# Pane goes idle and a second outcome lands immediately, well BEFORE the 5s
-# busy-retry tick — it must paste its own nudge directly (idle branch) and
+# Pane goes idle and a second outcome lands immediately, well BEFORE the first
+# hold-retry pass — it must paste its own nudge directly (idle branch) and
 # clear the stale busy-pending marker from outcome 907 in the same step.
 set_pane_idle
 echo '{"task_id":"t908","outcome":"ok"}' > "$TEST_DIR/wt-issue-908/.swarm/tasks/done/t908-908.ok.json"
@@ -323,11 +360,14 @@ poll_until 10 0.3 bash -c "[ \"\$(grep -c 'WAKE:' '$WAKE_LOG')\" = '1' ]" \
     || red "outcome 908's direct idle-path wake never landed. wake.log:
 $(cat "$WAKE_LOG")"
 
-# Wait past the busy-retry tick (5s, started when the watcher booted —
-# comfortably after outcome 908's near-immediate direct delivery above)
-# plus margin — if the marker wasn't cleared, this is when the redundant
-# second nudge would show up.
-sleep 6
+# Deterministic check first (issue #1032): the stale marker must already be
+# gone the moment 908's direct wake lands — that is the invariant under test.
+[ ! -e "$PROJECT_DIR/.swarm/coord-wake-busy-pending" ] \
+    || red "908's direct wake landed but the busy-pending marker from 907 is still present"
+# Then wait past the first hold-retry pass (20s tick, started before DEFER_AT) — if
+# the marker had survived, this is when a redundant second nudge would show up.
+WAIT_LEFT=$(( DEFER_AT + 20 + 4 - $(date +%s) ))
+[ "$WAIT_LEFT" -gt 0 ] && sleep "$WAIT_LEFT"
 stop_watcher
 
 [ "$(wake_count)" = "1" ] || red "expected exactly ONE doorbell nudge total — a stale busy-pending marker produced a duplicate. wake.log:

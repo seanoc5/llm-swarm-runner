@@ -13187,6 +13187,10 @@ run_poll() {
     local wt_list
     wt_list="$(own_worktree_dirs_for_scan "$PROJECT_DIR")"
     scan_outcomes "$wt_list" > "$seen_file"
+    # Readiness signal (issue #1032): outcomes dropped after this line fire a
+    # wake; ones that landed before it are baselined and never will. Tests
+    # wait on this instead of guessing a boot time with a fixed sleep.
+    log_event watch.baselined "backend=poll"
     # Drain any marker/inbox-note already on disk before this watcher's
     # first full tick — see scan_claims' and scan_inbox_drops' headers for
     # why these two scans must NOT be skipped the way the done/outbox
