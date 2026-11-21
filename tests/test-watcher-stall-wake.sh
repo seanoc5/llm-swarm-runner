@@ -73,6 +73,9 @@ sleep 0.3
 # the outcome/outbox backend it shares wake machinery with) can produce a
 # WAKE_LOG line.
 start_watcher() {
+    local baselined_before n i
+    baselined_before="$(grep -c "watch.baselined" "$EVENTS_LOG" 2>/dev/null || true)"
+    baselined_before="${baselined_before:-0}"
     local stall_secs="$1" logfile="$2"
     LLM_START="$FAKE_LLM_START" \
         SESSION_NAME="$SESSION_NAME" \
@@ -99,7 +102,14 @@ start_watcher() {
         DRY_RUN=0 ONCE=0 POLL_SECS=1 \
         "$WATCH" "$PROJECT_DIR" > "$logfile" 2>&1 &
     WATCH_PID=$!
-    sleep 1.5
+    # Wait for the watcher's baseline scan, not a fixed sleep (issue #1032): on a
+    # loaded host the watcher baselined the test's first outcome and never rang.
+    for ((i = 0; i < 240; i++)); do
+        n=$(grep -c "watch.baselined" "$EVENTS_LOG" 2>/dev/null || true)
+        [ "${n:-0}" -gt "$baselined_before" ] && break
+        sleep 0.25
+    done
+    sleep 0.3
 }
 
 stop_watcher() {
