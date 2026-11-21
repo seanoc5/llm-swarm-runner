@@ -71,7 +71,8 @@ fail() {
 TARGET="$(coord_session_name "$PROJECT_DIR")"
 # The coordinator's tmux session (llm-start.sh's SESSION_NAME). Used only to
 # find the coordinator's CURRENT harness name when the pinned one is not
-# listed (issue #1040: a resumed/restarted/renamed session no longer answers
+# listed, and only via its "coordinator" window (workers are other windows of
+# the same tmux session) (issue #1040: a resumed/restarted/renamed session no longer answers
 # to swarm-<base>-<hash>, so SendMessage said "No agent named ... reachable").
 TMUX_SESSION="llm-$(basename "$(cd "$PROJECT_DIR" 2>/dev/null && pwd -P || echo "$PROJECT_DIR")")"
 [ -r "$PROMPT_FILE" ] || fail "prompt file unreadable: $PROMPT_FILE"
@@ -81,7 +82,7 @@ command -v "$CLAUDE_BIN" >/dev/null 2>&1 || fail "claude binary not found: $CLAU
 # Command substitution strips trailing newlines on both sides of the compare.
 EXPECTED="[swarm wake doorbell, no reply needed] $(cat "$PROMPT_FILE")"
 
-COURIER_PROMPT="First call ListAgents once. The recipient is the listed agent named exactly \"$TARGET\". If no agent has that name, it is the single listed interactive agent whose tmux session is \"$TMUX_SESSION\" (use that agent's listed name); if there is not exactly one such agent, call nothing further and reply none. Then call SendMessage exactly once, with to set to the recipient's name and message set to exactly the text between the two marker lines below (no edits, no additions, markers excluded). Then reply with the single word done. Do not call any other tool.
+COURIER_PROMPT="First call ListAgents once. The recipient is the listed agent named exactly \"$TARGET\". If no agent has that name, it is the single listed interactive agent whose tmux target is in window \"$TMUX_SESSION:coordinator\" (workers share that tmux session in other windows; never pick them) (use that agent's listed name); if there is not exactly one such agent, call nothing further and reply none. Then call SendMessage exactly once, with to set to the recipient's name and message set to exactly the text between the two marker lines below (no edits, no additions, markers excluded). Then reply with the single word done. Do not call any other tool.
 <<<WAKE_BEGIN>>>
 $EXPECTED
 <<<WAKE_END>>>"
@@ -109,7 +110,7 @@ TIMED_OUT=""
 [ "$rc" = 124 ] && TIMED_OUT="courier timed out after ${TIMEOUT_SECS}s; "
 
 # Names the coordinator may be reached under: the pinned TARGET, plus (issue
-# #1040) the name of the one ListAgents row on this project's tmux session when
+# #1040) the name of the one ListAgents row in this project's tmux "coordinator" window when
 # TARGET is not listed. Decided here from the transcript, never from the
 # courier's prose, so a wrong-swarm recipient still fails.
 LIST_TEXT="$(jq -rs '
@@ -121,7 +122,7 @@ LIST_TEXT="$(jq -rs '
     | join("\n")' "$CLEAN" 2>/dev/null)"
 ALLOWED="$TARGET"
 if ! grep -qE "(^|[^A-Za-z0-9._-])$(printf '%s' "$TARGET" | sed 's/[.[\*^$]/\\&/g')([^A-Za-z0-9._-]|$)" <<<"$LIST_TEXT"; then
-    ROWS="$(printf '%s\n' "$LIST_TEXT" | grep -E "(^|[^A-Za-z0-9._-])$(printf '%s' "$TMUX_SESSION" | sed 's/[.[\*^$]/\\&/g')([^A-Za-z0-9._-]|$)" | grep -i interactive)"
+    ROWS="$(printf '%s\n' "$LIST_TEXT" | grep -E "(^|[^A-Za-z0-9._-])$(printf '%s' "$TMUX_SESSION" | sed 's/[.[\*^$]/\\&/g'):coordinator([^A-Za-z0-9_-]|$)" | grep -iE '(^|[^A-Za-z-])interactive')"
     if [ -n "$ROWS" ] && [ "$(printf '%s\n' "$ROWS" | wc -l)" = 1 ]; then
         ALLOWED="$(printf '%s' "$ROWS" | sed -E 's/^[[:space:]*•·-]+//' | awk '{print $1}')"
     fi

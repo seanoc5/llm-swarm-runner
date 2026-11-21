@@ -103,6 +103,11 @@ check "ListAgents found a name but courier sent elsewhere: exit 1" 1 "$(run rena
 make_stub renamed_two "$emit_list" "emit_list la1 $(q "- a [r1] · interactive · idle · tmux $TMUXS:coordinator.0
 - b [r2] · interactive · idle · tmux $TMUXS:coordinator.1")" "emit_use tu1 a $(q "$EXPECTED_MSG")" "emit_result tu1 '$OKRES'"
 check "two rows on the tmux session (ambiguous): exit 1" 1 "$(run renamed_two)"
+make_stub worker_only "$emit_list" "emit_list la1 $(q "- iss-5 [r1] · interactive · idle · tmux $TMUXS:iss-5.0")" "emit_use tu1 iss-5 $(q "$EXPECTED_MSG")" "emit_result tu1 '$OKRES'"
+check "only a worker window is listed (no coordinator row): exit 1" 1 "$(run worker_only)"
+make_stub renamed_plus_worker "$emit_list" "emit_list la1 $(q "- iss-5 [r1] · interactive · idle · tmux $TMUXS:iss-5.0
+- fand-coord [r2] · interactive · idle · tmux $TMUXS:coordinator.0")" "emit_use tu1 fand-coord $(q "$EXPECTED_MSG")" "emit_result tu1 '$OKRES'"
+check "renamed coordinator with a worker running: exit 0" 0 "$(run renamed_plus_worker)"
 make_stub pinned_listed "$emit_list" "emit_list la1 $(q "- $TARGET [r1] · interactive · idle · tmux $TMUXS:coordinator.0")" "emit_use tu1 $(q "$TARGET") $(q "$EXPECTED_MSG")" "emit_result tu1 '$OKRES'"
 check "pinned name listed: exit 0" 0 "$(run pinned_listed)"
 
