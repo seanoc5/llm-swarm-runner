@@ -28,21 +28,21 @@ Then skip, by judgment:
 - **Tracking/epic issues** with sub-issue links and no atomic acceptance criteria.
 - **Policy-blocked** issues needing paths `.swarm-policy.md` forbids (consider labeling `blocked`).
 - **Issues with an open PR** (`gh issue view N --json closedByPullRequestsReferences`).
-- **Epic-listed sub-issues already shipped** — search `gh issue list --state all --search "<2-3 distinctive words>"` before filing from an epic's "Suggested sub-issues".
+- **Epic sub-issues already shipped** — search `gh issue list --state all --search "<2-3 distinctive words>"` before filing from an epic's "Suggested sub-issues".
 
-Cache the result for this checklist run.
+Cache the result for this run.
 
 **Overrides:** operator free-text like "grab anything" / "include others" → `INCLUDE_ASSIGNED_TO_OTHERS=1` for this run only (say so); "include the demo issues" → `EXTRA_STOP_LABELS=""` for this run only. A watcher wake carries no override intent. Sticky versions go in `<project>/.swarm/.env`.
 
 ## Night queue
 
-Dispatching ready, unblocked work and filing follow-ups are act-then-report: never ask "start workers on #N?" or hold "filing N issues" for approval.
+Dispatching ready work and filing follow-ups are act-then-report: never ask "start workers on #N?" or hold "filing N issues" for approval.
 
 - **Evening** (operator's last interaction, or AVAILABLE low): propose 5–10 self-contained, independently mergeable issues for one batch approval; label approved ones `night-ok` (`gh label create night-ok` if missing). Also re-check open `blocked` issues: if every named blocker (#N, or `owner/repo#N` in that repo) is closed/merged and no other condition is named (operator ruling, files, a person, an outside party), remove `blocked` and list them next message; else put them under "Needs you".
 - **Weekly** (first Monday evening pass, or `night-ok` + AVAILABLE low): propose epics to carve and their child issues as one yes/no; on yes, file them ("Issue skeleton") and label suitable ones `night-ok`.
 - **Overnight, or AVAILABLE > 0 with free slots:** dispatch AVAILABLE work without asking (`night-ok` first); `night_ok=0` is not "nothing to do".
-- `pr_ci_green` item: re-run the merge it names.
-- Inbox items `dispatch_pause_lifted` and `idle_capacity` mean: dispatch now, then report; if nothing really is dispatchable, say so in one line.
+- `pr_ci_green` item: if a merge was refused earlier, re-run it (hold label left: `pr-ready.sh <N>` first).
+- Inbox items `dispatch_pause_lifted` and `idle_capacity`: dispatch now, then report; if none is dispatchable, say so.
 
 ## Caps
 

@@ -57,5 +57,19 @@ PR_MERGE_CACHE[2969]=$'CONFLICTING\t'"$SHA1"$'\tmaster'; PR_HOLD_CACHE[2969]="-"
 pr_ci_green_note 14 2969
 check "a conflicting PR writes no note" "$n" "$(notes)"
 
+WATCH_WINDOW_FLAG_RISK=0
+PR_MERGE_CACHE[2970]=$'MERGEABLE\t'"$SHA1"$'\tmaster'; PR_RISK_CACHE[2970]="🟢"; PR_HOLD_CACHE[2970]="-"
+pr_ci_green_note 15 2970
+grep -q "swarm-merge.sh 2970 --auto-low" "$COORD_INBOX_DIR"/*-pr_ci_green-15-*.md 2>/dev/null || grep -l "PR #2970" "$COORD_INBOX_DIR"/*-pr_ci_green-*.md | xargs grep -q "swarm-merge.sh 2970 --auto-low" || red "risk lost with WATCH_WINDOW_FLAG_RISK=0"
+green "risk still read from the PR body with the flag-risk window glyph off"
+WATCH_WINDOW_FLAG_RISK=1
+
+eval "$(sed -n '/^pr_ci_green_markers_clear() {/,/^}/p' "$WATCH")"
+[ -e "$PR_CI_GREEN_NOTED_DIR/2966-$SHA1" ] && [ -e "$PR_CI_GREEN_NOTED_DIR/2966-$SHA2" ] || red "setup: expected two markers for 2966"
+pr_ci_green_markers_clear 2966
+ls "$PR_CI_GREEN_NOTED_DIR" | grep -q '^2966-' && red "markers for merged PR 2966 not removed"
+[ -e "$PR_CI_GREEN_NOTED_DIR/2967-$SHA1" ] || red "cleanup removed another PR's marker"
+green "merged/closed PR's markers are cleared, others kept"
+
 check "the first note is classified urgent" urgent "$(. "$ROOT/scripts/_coord-inbox-batch.sh"; coord_item_urgency "$(ls "$COORD_INBOX_DIR"/*-pr_ci_green-*.md | head -1)")"
 echo "all pr_ci_green checks passed"

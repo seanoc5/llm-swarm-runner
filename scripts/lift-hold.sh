@@ -99,6 +99,9 @@ fi
 if LEFT="$(hold_label_names "$PR")"; then
     if [ -n "$LEFT" ]; then
         echo "lift-hold: PR #$PR still carries: $(paste -sd, <<<"$LEFT") — still not mergeable until that clears (pr-ready.sh owns :ci and :review)"
+        if grep -qE '^swarm-hold:(ci|review)$' <<<"$LEFT"; then
+            echo "lift-hold: next: run pr-ready.sh $PR once (it removes :ci/:review when CI is green); --auto-low refuses until then"
+        fi
     else
         echo "lift-hold: PR #$PR carries no swarm-hold* label"
     fi
