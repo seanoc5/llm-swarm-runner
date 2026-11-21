@@ -129,3 +129,13 @@ run_case "one skipped job + one success -> pass" '[{
     {"__typename":"CheckRun","workflowName":"CI","name":"Integration","status":"COMPLETED","conclusion":"SKIPPED","startedAt":"2026-11-21T17:20:00Z","completedAt":"2026-11-21T17:20:01Z"}
   ]
 }]' "pass"
+# Review caveat (#1039): an older CANCELLED real run next to a newer SKIPPED
+# label-event run reads "fail" (not green). Deliberately the safe direction: it
+# withholds the ready-to-merge note until a real run reports.
+run_case "cancelled real run + newer skipped run -> fail (safe, never pass)" '[{
+  "number": 1, "body": "",
+  "statusCheckRollup": [
+    {"__typename":"CheckRun","workflowName":"CI","name":"Fast","status":"COMPLETED","conclusion":"CANCELLED","startedAt":"2026-11-21T17:10:00Z","completedAt":"2026-11-21T17:15:00Z"},
+    {"__typename":"CheckRun","workflowName":"CI","name":"Fast","status":"COMPLETED","conclusion":"SKIPPED","startedAt":"2026-11-21T17:20:00Z","completedAt":"2026-11-21T17:20:01Z"}
+  ]
+}]' "fail"
