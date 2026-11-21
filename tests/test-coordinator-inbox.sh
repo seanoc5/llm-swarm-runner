@@ -173,7 +173,7 @@ atomic_note_write() {
 poll_until() {
     local tries="$1" delay="$2"; shift 2
     tries=$((tries * ${POLL_UNTIL_SCALE:-6}))
-    local i n
+    local i
     for ((i = 0; i < tries; i++)); do
         if "$@"; then return 0; fi
         sleep "$delay"
@@ -350,6 +350,10 @@ poll_until 10 0.3 bash -c "grep -q 'coord.wake.defer ' '$EVENTS_LOG' 2>/dev/null
     || red "setup: busy-defer for outcome 907 never landed. watch log:
 $(cat "$TEST_DIR/watch-5.log")"
 DEFER_AT=$(date +%s)
+# Precondition: the deferral really wrote the marker, so "marker cleared"
+# below proves 908 cleared it rather than that it never existed.
+[ -e "$PROJECT_DIR/.swarm/coord-wake-busy-pending" ] \
+    || red "setup: 907's busy-defer did not leave a busy-pending marker"
 
 # Pane goes idle and a second outcome lands immediately, well BEFORE the first
 # hold-retry pass — it must paste its own nudge directly (idle branch) and
