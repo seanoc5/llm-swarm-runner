@@ -100,3 +100,42 @@ run_case "only the swarm/worker status -> none (no CI)" '[{
   "number": 1, "body": "",
   "statusCheckRollup": [{"__typename":"StatusContext","context":"swarm/worker","state":"PENDING"}]
 }]' "none"
+
+# issue #1038: a label-event run concluded SKIPPED on every job while the real
+# run is still queued: never "pass" (no tests ran).
+run_case "all jobs skipped (label-event run) + swarm/worker pass -> none" '[{
+  "number": 2815, "body": "",
+  "statusCheckRollup": [
+    {"__typename":"CheckRun","workflowName":"CI","name":"Detect","status":"COMPLETED","conclusion":"SKIPPED","startedAt":"2026-11-21T17:20:00Z","completedAt":"2026-11-21T17:20:01Z"},
+    {"__typename":"CheckRun","workflowName":"CI","name":"Fast","status":"COMPLETED","conclusion":"SKIPPED","startedAt":"2026-11-21T17:20:00Z","completedAt":"2026-11-21T17:20:01Z"},
+    {"__typename":"CheckRun","workflowName":"CI","name":"Integration","status":"COMPLETED","conclusion":"SKIPPED","startedAt":"2026-11-21T17:20:00Z","completedAt":"2026-11-21T17:20:01Z"},
+    {"__typename":"StatusContext","context":"swarm/worker","state":"SUCCESS"}
+  ]
+}]' "none"
+# Same shape, but the queued real run's jobs are visible: newer skipped entries
+# must not hide them.
+run_case "skipped run newer than a queued run of the same check -> pending" '[{
+  "number": 2815, "body": "",
+  "statusCheckRollup": [
+    {"__typename":"CheckRun","workflowName":"CI","name":"Fast","status":"QUEUED","conclusion":null,"startedAt":"2026-11-21T17:10:00Z"},
+    {"__typename":"CheckRun","workflowName":"CI","name":"Fast","status":"COMPLETED","conclusion":"SKIPPED","startedAt":"2026-11-21T17:20:00Z","completedAt":"2026-11-21T17:20:01Z"}
+  ]
+}]' "pending"
+# A job skipped by design next to a passing one still passes.
+run_case "one skipped job + one success -> pass" '[{
+  "number": 1, "body": "",
+  "statusCheckRollup": [
+    {"__typename":"CheckRun","workflowName":"CI","name":"Fast","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-11-21T17:20:00Z","completedAt":"2026-11-21T17:25:00Z"},
+    {"__typename":"CheckRun","workflowName":"CI","name":"Integration","status":"COMPLETED","conclusion":"SKIPPED","startedAt":"2026-11-21T17:20:00Z","completedAt":"2026-11-21T17:20:01Z"}
+  ]
+}]' "pass"
+# Review caveat (#1039): an older CANCELLED real run next to a newer SKIPPED
+# label-event run reads "fail" (not green). Deliberately the safe direction: it
+# withholds the ready-to-merge note until a real run reports.
+run_case "cancelled real run + newer skipped run -> fail (safe, never pass)" '[{
+  "number": 1, "body": "",
+  "statusCheckRollup": [
+    {"__typename":"CheckRun","workflowName":"CI","name":"Fast","status":"COMPLETED","conclusion":"CANCELLED","startedAt":"2026-11-21T17:10:00Z","completedAt":"2026-11-21T17:15:00Z"},
+    {"__typename":"CheckRun","workflowName":"CI","name":"Fast","status":"COMPLETED","conclusion":"SKIPPED","startedAt":"2026-11-21T17:20:00Z","completedAt":"2026-11-21T17:20:01Z"}
+  ]
+}]' "fail"

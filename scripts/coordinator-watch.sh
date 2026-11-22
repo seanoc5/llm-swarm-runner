@@ -4972,11 +4972,18 @@ pr_open_details_load() {
                     # a stale CANCELLED/FAILURE entry next to the current
                     # one for the same check, and only the newest should
                     # count (issue #650).
+                    # issue #1038: a SKIPPED/NEUTRAL entry is a label-event run
+                    # shadowing the real run (often still queued, so invisible
+                    # here): within a check, ignore it when a non-skipped entry
+                    # exists. A rollup with no non-skipped check at all is "none",
+                    # never "pass" (no tests ran).
                     | ($all
                        | group_by((.workflowName // "") + "\u0000" + (.name // .context // ""))
-                       | map(max_by(.completedAt // .startedAt // .createdAt // ""))
+                       | map(. as $g | ($g | map(select((.conclusion // "") | test("^(SKIPPED|NEUTRAL)$") | not))) as $ns
+                                       | if ($ns | length) > 0 then $ns else $g end
+                                       | max_by(.completedAt // .startedAt // .createdAt // ""))
                       ) as $r
-                    | if ($r | length) == 0 then "none"
+                    | if ($r | length) == 0 or all($r[]; (.conclusion // "") | test("^(SKIPPED|NEUTRAL)$")) then "none"
                       elif any($r[]; ((.conclusion // "") | test("^(FAILURE|TIMED_OUT|CANCELLED|ACTION_REQUIRED|STARTUP_FAILURE)$"))
                                      or ((.state // "") | test("^(FAILURE|ERROR)$"))) then "fail"
                       elif any($r[]; ((.status // "COMPLETED") != "COMPLETED")
