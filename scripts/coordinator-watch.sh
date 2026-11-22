@@ -13011,20 +13011,25 @@ approval_reminder_pass() {
     else
         start="$saved_start"
     fi
-    due="$(approval_remind_due_secs "$sent")"
-    if [ "$age" -lt "$due" ]; then
+    # Catch up in one step: a watcher restarted (or unparked) hours into an
+    # approval has no state, and must send ONE reminder, not one per tick.
+    local advanced=0
+    while [ "$age" -ge "$(approval_remind_due_secs "$sent")" ]; do
+        sent=$((sent + 1)); advanced=1
+    done
+    if [ "$advanced" = 0 ]; then
         printf '%s %s\n' "$start" "$sent" > "$state" 2>/dev/null || true
         return 0
     fi
-    msg="Approval waiting on you for $((age / 3600))h$(( (age % 3600) / 60 ))m in $(basename "$PROJECT_DIR") (reminder $((sent + 1))): answer in the coordinator window; the swarm does not wait on it for unrelated work."
-    log_event approval.reminder "age=${age}s n=$((sent + 1)) next_due=$(approval_remind_due_secs $((sent + 1)))s"
+    msg="Approval waiting on you for $((age / 3600))h$(( (age % 3600) / 60 ))m in $(basename "$PROJECT_DIR") (reminder ${sent}): answer in the coordinator window; the swarm does not wait on it for unrelated work."
+    log_event approval.reminder "age=${age}s n=${sent} next_due=$(approval_remind_due_secs "$sent")s"
     if [ "$DRY_RUN" = "1" ]; then
         echo "[DRY] would remind operator: $msg"
     else
         printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$msg" >> "$APPROVAL_REMIND_LOG" 2>/dev/null || true
         [ -z "${WATCH_OPERATOR_REMIND_CMD:-}" ] || timeout 30 "$WATCH_OPERATOR_REMIND_CMD" "$msg" >/dev/null 2>&1 || true
     fi
-    printf '%s %s\n' "$start" "$((sent + 1))" > "$state" 2>/dev/null || true
+    printf '%s %s\n' "$start" "$sent" > "$state" 2>/dev/null || true
 }
 
 # blocked_pr_sweep_pass (issue #1046 C)
@@ -13034,13 +13039,13 @@ approval_reminder_pass() {
 # blocked:pr-* label remains, and ring the coordinator once (blocked_pr_cleared)
 # that those issues are dispatchable. A closed-unmerged PR is left alone: the
 # block is then a human call. At most one gh sweep per
-# WATCH_BLOCKED_PR_SWEEP_SECS (600; 0 = off). Label edits happen before the
-# note, so a failed edit is retried next sweep and never announced.
+# WATCH_BLOCKED_PR_SWEEP_SECS (600; 0 = off). `blocked` is removed before
+# the blocked:pr-N labels, so a failed edit is retried next sweep and never announced.
 LAST_BLOCKED_PR_SWEEP=0
 blocked_pr_sweep_pass() {
     [ "${WATCH_BLOCKED_PR_SWEEP_SECS:-600}" -gt 0 ] || return 0
     [ -e "$SWARM_PARKED_FILE" ] && return 0
-    local now json pr st issue rest other cleared="" list="" n=0
+    local now json pr st issue rest list="" n=0
     now=$(date +%s)
     [ $((now - LAST_BLOCKED_PR_SWEEP)) -ge "${WATCH_BLOCKED_PR_SWEEP_SECS:-600}" ] || return 0
     LAST_BLOCKED_PR_SWEEP=$now
@@ -13052,32 +13057,34 @@ blocked_pr_sweep_pass() {
     local -A merged=() checked=()
     while read -r issue rest; do
         [ -n "$issue" ] || continue
-        other=0; cleared=""
+        local mergedprs="" open_left=0
         for pr in ${rest//,/ }; do
             if [ -z "${checked[$pr]:-}" ]; then
                 st="$(cd "$PROJECT_DIR" && gh pr view "$pr" --json state --jq .state 2>/dev/null)" || st=""
                 checked[$pr]=1
                 [ "$st" = "MERGED" ] && merged[$pr]=1
             fi
-            if [ -n "${merged[$pr]:-}" ]; then
-                if [ "$DRY_RUN" = "1" ]; then
-                    echo "[DRY] would remove blocked:pr-$pr from issue #$issue"
-                elif (cd "$PROJECT_DIR" && gh issue edit "$issue" --remove-label "blocked:pr-$pr" >/dev/null 2>&1); then
-                    cleared="${cleared:+$cleared,}$pr"
-                else
-                    other=1
-                fi
-            else
-                other=1
-            fi
+            if [ -n "${merged[$pr]:-}" ]; then mergedprs="${mergedprs:+$mergedprs,}$pr"; else open_left=1; fi
         done
-        [ -n "$cleared" ] || continue
-        if [ "$other" = 0 ] && [ "$DRY_RUN" != "1" ]; then
+        [ -n "$mergedprs" ] || continue
+        if [ "$DRY_RUN" = "1" ]; then
+            echo "[DRY] would remove blocked:pr-$mergedprs from issue #$issue"
+            continue
+        fi
+        # Fully unblocked: drop `blocked` FIRST. If that edit fails the
+        # blocked:pr-N labels are still there, so the next sweep retries; the
+        # other order would strand the issue blocked with nothing to find it by.
+        if [ "$open_left" = 0 ]; then
             (cd "$PROJECT_DIR" && gh issue edit "$issue" --remove-label blocked >/dev/null 2>&1) || continue
-            list="${list:+$list, }#$issue (PR $cleared merged)"
+        fi
+        for pr in ${mergedprs//,/ }; do
+            (cd "$PROJECT_DIR" && gh issue edit "$issue" --remove-label "blocked:pr-$pr" >/dev/null 2>&1) || true
+        done
+        log_event blocked_pr.cleared "issue=$issue prs=$mergedprs unblocked=$((1 - open_left))"
+        if [ "$open_left" = 0 ]; then
+            list="${list:+$list, }#$issue (PR $mergedprs merged)"
             n=$((n + 1))
         fi
-        log_event blocked_pr.cleared "issue=$issue prs=$cleared unblocked=$([ "$other" = 0 ] && echo 1 || echo 0)"
     done <<< "$lines"
     [ "$n" -gt 0 ] || return 0
     if coord_inbox_write blocked_pr_cleared "Unblocked: $list. The PR each issue waited on has merged; the watcher removed its blocked:pr-N and blocked labels. These issues are dispatchable now (act, then report)."; then

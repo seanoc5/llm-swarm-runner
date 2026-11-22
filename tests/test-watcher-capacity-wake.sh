@@ -424,6 +424,9 @@ done
 check "#1046 B: 8h open approval: reminders at 45m, 1.5h, 3h, 6h only" "4" "$(wc -l < "$T/remind-out" | tr -d ' ')"
 check "#1046 B: reminders go to the operator command, not the coordinator inbox" "0" "$(ls "$COORD_INBOX_DIR" 2>/dev/null | grep -c . || true)"
 check "#1046 B: no doorbell for reminders" "0" "$(rings)"
+rm -f "$APPROVAL_REMIND_STATE_FILE" "$T/remind-out"; APPROVAL_AGE=28800
+approval_reminder_pass; approval_reminder_pass; approval_reminder_pass
+check "#1046 B: watcher restarted 8h into an approval: ONE catch-up reminder, not a burst" "1" "$(wc -l < "$T/remind-out" | tr -d ' ')"
 APPROVAL_AGE=""; approval_reminder_pass
 check "#1046 B: answered approval clears the schedule" "no" "$([ -e "$APPROVAL_REMIND_STATE_FILE" ] && echo yes || echo no)"
 WATCH_OPERATOR_REMIND_CMD=""
@@ -462,6 +465,20 @@ check "#1046 C: rate-limited: no second gh call inside the interval" "0" "$(wc -
 LAST_BLOCKED_PR_SWEEP=0; echo '[{"number":52,"labels":[{"name":"blocked"},{"name":"blocked:pr-9"}]}]' > "$GH_BLOCKED_JSON"
 blocked_pr_sweep_pass
 check "#1046 C: closed-unmerged PR: no note, no edit" "0:0" "$(notes blocked_pr_cleared):$(grep -c 'issue edit' "$GHLOG")"
+# a failed `blocked` removal must leave blocked:pr-N in place so the next sweep retries
+cat > "$GH2/gh" <<'GHEOF'
+#!/bin/bash
+echo "$*" >> "$GH_LOG"
+case "$1 $2" in
+  "issue list") cat "$GH_BLOCKED_JSON" ;;
+  "pr view") echo MERGED ;;
+  "issue edit") [ "$5" = blocked ] && exit 1; exit 0 ;;
+esac
+GHEOF
+LAST_BLOCKED_PR_SWEEP=0; : > "$GHLOG"; rm -rf "$COORD_INBOX_DIR" "$RANG"
+echo '[{"number":60,"labels":[{"name":"blocked"},{"name":"blocked:pr-7"}]}]' > "$GH_BLOCKED_JSON"
+blocked_pr_sweep_pass
+check "#1046 C: failed blocked removal: blocked:pr-7 kept for retry, no note" "0:0" "$(grep -c 'remove-label blocked:pr-7' "$GHLOG" || true):$(notes blocked_pr_cleared)"
 PATH="$SAVED_PATH"
 
 reset; echo '[{"number":21,"title":"epic: big thing","labels":[]},{"number":12,"title":"Tracking: stuff","labels":[]},{"number":13,"title":"FYI - note","labels":[]},{"number":14,"title":"Fix bug","labels":[]},{"number":15,"title":"Tracking pixel broken","labels":[]},{"number":16,"title":"Tracker UI crash","labels":[]},{"number":17,"title":"FYI update","labels":[]},{"number":18,"title":"Tracking – stuff","labels":[]}]' > "$AVAILABLE_JSON"
