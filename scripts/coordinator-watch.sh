@@ -2027,6 +2027,19 @@
 #                           to the set notes at the next pass that clears the
 #                           WAKE_SECS/CHECK_SECS gates. Titles starting
 #                           epic/tracking/tracker/fyi never count.
+#                           (#1046 A) "Unchanged" means nothing NEW: a set that only
+#                           shrank (issues closed or picked up) stays quiet; a newly
+#                           listed issue, or a newly night-ok one, notes within one check.
+#   WATCH_APPROVAL_REMIND=1 (#1046 B) An open "Pending your approval:" question is
+#                           re-pinged to the OPERATOR (not as a coordinator wake) at
+#                           approval ages WAKE_SECS x1, x2, x4, x8 (45 min, 1.5 h, 3 h,
+#                           6 h), then every 6 h: approval.reminder event,
+#                           .swarm/approval-reminders.log, and WATCH_OPERATOR_REMIND_CMD
+#                           "<message>" when set (a push/mail hook). 0=off.
+#   WATCH_BLOCKED_PR_SWEEP_SECS=600
+#                           (#1046 C) When PR N of a `blocked:pr-N` issue label is merged,
+#                           remove it (and `blocked` once no blocked:pr-* is left) and ring
+#                           the coordinator once with a blocked_pr_cleared note. 0=off.
 #   WATCH_CAPACITY_POLL_SECS=60
 #                           Tick of run_capacity_wake_loop, the own process
 #                           running both checks above.
@@ -3749,6 +3762,9 @@ DISPATCH_PAUSE_FILE="$HOST_STATE_DIR/dispatch-paused"
 IDLE_CAPACITY_WAKE_FILE="$PROJECT_DIR/.swarm/idle-capacity-wake.last"
 IDLE_CAPACITY_SET_FILE="$PROJECT_DIR/.swarm/idle-capacity-set.last"
 IDLE_CAPACITY_OUTCOME_FILE="$PROJECT_DIR/.swarm/idle-capacity-outcome.pending"
+# issue #1046 B: approval_reminder_pass state ("<episode start epoch> <reminders sent>") and log.
+APPROVAL_REMIND_STATE_FILE="$PROJECT_DIR/.swarm/approval-remind.state"
+APPROVAL_REMIND_LOG="$PROJECT_DIR/.swarm/approval-reminders.log"
 DISPATCH_PAUSE_SEEN_FILE="$PROJECT_DIR/.swarm/dispatch-pause-seen"
 # issue #803: provision-worker.sh writes "<epoch> <max_load> <issue>" here when it refuses for host_load.
 HOST_LOAD_REFUSED_FILE="$PROJECT_DIR/.swarm/host-load-refused"
@@ -12704,7 +12720,7 @@ capacity_free_slots() {
     printf '%s\n' $(( a < b ? a : b ))
 }
 
-# dispatchable_issue_counts: echoes "<ready> <night_ok> <set_hash>" — the mechanical
+# dispatchable_issue_counts: echoes "<ready> <night_ok> <set_hash> <nums>" — the mechanical
 # AVAILABLE set (available-issues.sh, the same script the startup checklist
 # runs) minus issues that already have an own worktree here (in progress,
 # including sidelined), and how many of those carry night-ok. night-ok issues
@@ -12731,7 +12747,28 @@ dispatchable_issue_counts() {
                | select((.title // "") | test("^[\\[( ]*(epic\\b|(tracking|tracker|fyi)[\\])]*\\s*([:–—-]|$))"; "i") | not)] as $r
         | "\($r | length) \([$r[] | select(any(.labels[]?; .name == "night-ok"))] | length) \([$r[].number] | sort | join(","))|\([$r[] | select(any(.labels[]?; .name == "night-ok")) | .number] | sort | join(","))"' 2>/dev/null)" || return 1
     read -r ready night_ok nums <<< "$out"
-    printf '%s %s %s\n' "$ready" "$night_ok" "$(printf '%s' "$nums" | cksum | cut -d' ' -f1)"
+    printf '%s %s %s %s\n' "$ready" "$night_ok" "$(printf '%s' "$nums" | cksum | cut -d' ' -f1)" "$nums"
+}
+
+# idle_set_has_new <current_nums> <saved_nums> (issue #1046 A)
+#
+# Both args are dispatchable_issue_counts' "<all numbers>|<night-ok numbers>"
+# string. Returns 0 when the current set holds an issue number the saved set
+# did not, or an issue now labelled night-ok that was not before (#728). A
+# SHRUNK set (issues closed or picked up elsewhere) is not a change: nothing
+# new is there for the coordinator to dispatch. Empty saved_nums (a state file
+# written before #1046) returns 0 so the caller falls back to the hash compare.
+idle_set_has_new() {
+    local cur_all="${1%%|*}" cur_nok="${1#*|}" old_all old_nok n
+    [ -n "${2:-}" ] || return 0
+    old_all=",${2%%|*},"; old_nok=",${2#*|},"
+    for n in ${cur_all//,/ }; do
+        case "$old_all" in *",$n,"*) ;; *) return 0 ;; esac
+    done
+    for n in ${cur_nok//,/ }; do
+        case "$old_nok" in *",$n,"*) ;; *) return 0 ;; esac
+    done
+    return 1
 }
 
 # dispatch_pause_wake_pass
@@ -12874,7 +12911,7 @@ idle_capacity_wake_pass() {
     [ -e "$SWARM_PARKED_FILE" ] && return 0
     dispatch_pause_active && return 0
 
-    local now last slots age counts ready night_ok set_hash seen_hash seen_ts
+    local now last slots age counts ready night_ok set_hash set_nums seen_hash seen_ts seen_nums
     now=$(date +%s)
     last="$(cat "$IDLE_CAPACITY_WAKE_FILE" 2>/dev/null)" || last=0
     [[ "$last" =~ ^[0-9]+$ ]] || last=0
@@ -12891,7 +12928,7 @@ idle_capacity_wake_pass() {
 
     LAST_IDLE_CAPACITY_CHECK=$now
     counts="$(dispatchable_issue_counts)" || { log_event capacity.idle_check "reason=available_issues_failed"; return 0; }
-    read -r ready night_ok set_hash <<< "$counts"
+    read -r ready night_ok set_hash set_nums <<< "$counts"
     [[ "${ready:-}" =~ ^[0-9]+$ ]] || return 0
     [[ "${night_ok:-}" =~ ^[0-9]+$ ]] || night_ok=0
     if [ "$ready" -eq 0 ]; then
@@ -12899,13 +12936,18 @@ idle_capacity_wake_pass() {
         return 0
     fi
 
-    # Same issue set (and night-ok labels) as the last note and still inside
-    # the repeat window: skip. The state file only records that a note was
-    # written, not that the coordinator found nothing (#718, #728).
-    seen_hash=""; seen_ts=0
-    [ -r "$IDLE_CAPACITY_SET_FILE" ] && read -r seen_hash seen_ts < "$IDLE_CAPACITY_SET_FILE"
+    # Nothing NEW since the last note and still inside the repeat window: skip.
+    # "New" = an issue number (or night-ok label) the last-noted set lacked; a
+    # shrunk set is not a change (#1046 A). The baseline then shrinks with it,
+    # so an issue that drops out and comes back counts as new. The state file
+    # only records that a note was written, not that the coordinator found
+    # nothing (#718, #728).
+    seen_hash=""; seen_ts=0; seen_nums=""
+    [ -r "$IDLE_CAPACITY_SET_FILE" ] && read -r seen_hash seen_ts seen_nums < "$IDLE_CAPACITY_SET_FILE"
     [[ "$seen_ts" =~ ^[0-9]+$ ]] || seen_ts=0
-    if [ -n "$set_hash" ] && [ "$set_hash" = "$seen_hash" ] && [ $((now - seen_ts)) -lt "$WATCH_IDLE_CAPACITY_REPEAT_SECS" ]; then
+    if [ -n "$set_hash" ] && [ $((now - seen_ts)) -lt "$WATCH_IDLE_CAPACITY_REPEAT_SECS" ] \
+        && { [ "$set_hash" = "$seen_hash" ] || { [ -n "$seen_nums" ] && ! idle_set_has_new "$set_nums" "$seen_nums"; }; }; then
+        [ "$set_hash" = "$seen_hash" ] || printf '%s %s %s\n' "$set_hash" "$seen_ts" "$set_nums" > "$IDLE_CAPACITY_SET_FILE" 2>/dev/null || true
         log_event capacity.idle_check "slots=$slots ready=$ready reason=unchanged_set"
         return 0
     fi
@@ -12916,13 +12958,134 @@ idle_capacity_wake_pass() {
         echo "[DRY] would write coord-inbox entry: trigger=idle_capacity slots=$slots ready=$ready"
     elif coord_inbox_write idle_capacity "Idle capacity: $slots worker slot(s) free and $ready open issue(s) pass available-issues.sh with no worktree here ($night_ok of them labelled night-ok). Dispatch AVAILABLE work without asking (\`night-ok\` first); \`night_ok=0\` is not \"nothing to do\". Act, then report; if none of it is really dispatchable (epics, open PRs), say so in one line."; then
         log_event coord.inbox.write "trigger=idle_capacity slots=$slots ready=$ready"
-        printf '%s %s\n' "$set_hash" "$now" > "$IDLE_CAPACITY_SET_FILE" 2>/dev/null || true
+        printf '%s %s %s\n' "$set_hash" "$now" "$set_nums" > "$IDLE_CAPACITY_SET_FILE" 2>/dev/null || true
         { printf '%s %s %s %s\n' "$now" "$slots" "$ready" "$night_ok"; tmux list-windows -t "$SESSION_NAME" -F '#{window_name}' 2>/dev/null | grep '^iss-' || true; } > "$IDLE_CAPACITY_OUTCOME_FILE" 2>/dev/null || true
     else
         echo "[$(date +%T)] WARN: failed to write coord-inbox idle_capacity entry" >&2
         return 0
     fi
     coord_ring_doorbell idle_capacity "slots=$slots ready=$ready"
+}
+
+# approval_remind_due_secs <n> (issue #1046 B)
+#
+# Echoes the approval age at which reminder number n (0-based) is due:
+# WATCH_IDLE_CAPACITY_WAKE_SECS doubling (45 min, 1.5 h, 3 h, 6 h at the
+# default), then every 6 h more (12 h, 18 h...). Capped by
+# WATCH_APPROVAL_REMIND_MAX_SECS (21600).
+approval_remind_due_secs() {
+    local n="$1" base="${WATCH_IDLE_CAPACITY_WAKE_SECS:-2700}" cap="${WATCH_APPROVAL_REMIND_MAX_SECS:-21600}" due
+    due=$(( base << (n > 20 ? 20 : n) ))
+    if [ "$due" -gt "$cap" ]; then
+        due=$(( cap * (n > 1 ? n - 2 : 1) ))
+        [ "$due" -ge "$cap" ] || due="$cap"
+    fi
+    printf '%s\n' "$due"
+}
+
+# approval_reminder_pass (issue #1046 B)
+#
+# An open "Pending your approval:" question is the OPERATOR's to answer, so
+# the reminder goes to the operator, never to the coordinator as a wake (the
+# coordinator can't answer it). Reminders come at approval ages
+# approval_remind_due_secs 0,1,2... : logged as approval.reminder, appended to
+# $APPROVAL_REMIND_LOG, and handed to $WATCH_OPERATOR_REMIND_CMD (one argument:
+# the message; unset = log only) for a push or mail hook. State (episode start +
+# count sent) lives on disk in $APPROVAL_REMIND_STATE_FILE; it resets when the
+# question is answered. WATCH_APPROVAL_REMIND=0 turns it off.
+approval_reminder_pass() {
+    [ "${WATCH_APPROVAL_REMIND:-1}" = "1" ] || return 0
+    local state="$APPROVAL_REMIND_STATE_FILE" age now start sent=0 saved_start=0 due msg
+    if [ -e "$SWARM_PARKED_FILE" ] || ! age="$(coord_pending_approval_age)"; then
+        rm -f "$state" 2>/dev/null || true
+        return 0
+    fi
+    now=$(date +%s)
+    start=$(( now - age ))
+    [ -r "$state" ] && read -r saved_start sent < "$state"
+    [[ "$saved_start" =~ ^[0-9]+$ ]] || saved_start=0
+    [[ "$sent" =~ ^[0-9]+$ ]] || sent=0
+    # A different approval (start moved by more than clock jitter) restarts the schedule.
+    if [ $(( start - saved_start )) -gt 120 ] || [ $(( saved_start - start )) -gt 120 ]; then
+        sent=0
+    else
+        start="$saved_start"
+    fi
+    due="$(approval_remind_due_secs "$sent")"
+    if [ "$age" -lt "$due" ]; then
+        printf '%s %s\n' "$start" "$sent" > "$state" 2>/dev/null || true
+        return 0
+    fi
+    msg="Approval waiting on you for $((age / 3600))h$(( (age % 3600) / 60 ))m in $(basename "$PROJECT_DIR") (reminder $((sent + 1))): answer in the coordinator window; the swarm does not wait on it for unrelated work."
+    log_event approval.reminder "age=${age}s n=$((sent + 1)) next_due=$(approval_remind_due_secs $((sent + 1)))s"
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "[DRY] would remind operator: $msg"
+    else
+        printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$msg" >> "$APPROVAL_REMIND_LOG" 2>/dev/null || true
+        [ -z "${WATCH_OPERATOR_REMIND_CMD:-}" ] || timeout 30 "$WATCH_OPERATOR_REMIND_CMD" "$msg" >/dev/null 2>&1 || true
+    fi
+    printf '%s %s\n' "$start" "$((sent + 1))" > "$state" 2>/dev/null || true
+}
+
+# blocked_pr_sweep_pass (issue #1046 C)
+#
+# Issues blocked behind a PR carry `blocked` plus a `blocked:pr-N` label. When
+# PR N is merged, remove `blocked:pr-N`, remove `blocked` too if no other
+# blocked:pr-* label remains, and ring the coordinator once (blocked_pr_cleared)
+# that those issues are dispatchable. A closed-unmerged PR is left alone: the
+# block is then a human call. At most one gh sweep per
+# WATCH_BLOCKED_PR_SWEEP_SECS (600; 0 = off). Label edits happen before the
+# note, so a failed edit is retried next sweep and never announced.
+LAST_BLOCKED_PR_SWEEP=0
+blocked_pr_sweep_pass() {
+    [ "${WATCH_BLOCKED_PR_SWEEP_SECS:-600}" -gt 0 ] || return 0
+    [ -e "$SWARM_PARKED_FILE" ] && return 0
+    local now json pr st issue rest other cleared="" list="" n=0
+    now=$(date +%s)
+    [ $((now - LAST_BLOCKED_PR_SWEEP)) -ge "${WATCH_BLOCKED_PR_SWEEP_SECS:-600}" ] || return 0
+    LAST_BLOCKED_PR_SWEEP=$now
+    json="$(cd "$PROJECT_DIR" && gh issue list --state open --label blocked --limit 200 --json number,labels 2>/dev/null)" || return 0
+    # one "<issue> <pr>[,<pr>...]" line per issue carrying blocked:pr-N labels
+    local lines
+    lines="$(printf '%s' "$json" | jq -r '.[] | [(.labels[].name | select(test("^blocked:pr-[0-9]+$")) | sub("^blocked:pr-"; ""))] as $p | select($p | length > 0) | "\(.number) \($p | join(","))"' 2>/dev/null)" || return 0
+    [ -n "$lines" ] || return 0
+    local -A merged=() checked=()
+    while read -r issue rest; do
+        [ -n "$issue" ] || continue
+        other=0; cleared=""
+        for pr in ${rest//,/ }; do
+            if [ -z "${checked[$pr]:-}" ]; then
+                st="$(cd "$PROJECT_DIR" && gh pr view "$pr" --json state --jq .state 2>/dev/null)" || st=""
+                checked[$pr]=1
+                [ "$st" = "MERGED" ] && merged[$pr]=1
+            fi
+            if [ -n "${merged[$pr]:-}" ]; then
+                if [ "$DRY_RUN" = "1" ]; then
+                    echo "[DRY] would remove blocked:pr-$pr from issue #$issue"
+                elif (cd "$PROJECT_DIR" && gh issue edit "$issue" --remove-label "blocked:pr-$pr" >/dev/null 2>&1); then
+                    cleared="${cleared:+$cleared,}$pr"
+                else
+                    other=1
+                fi
+            else
+                other=1
+            fi
+        done
+        [ -n "$cleared" ] || continue
+        if [ "$other" = 0 ] && [ "$DRY_RUN" != "1" ]; then
+            (cd "$PROJECT_DIR" && gh issue edit "$issue" --remove-label blocked >/dev/null 2>&1) || continue
+            list="${list:+$list, }#$issue (PR $cleared merged)"
+            n=$((n + 1))
+        fi
+        log_event blocked_pr.cleared "issue=$issue prs=$cleared unblocked=$([ "$other" = 0 ] && echo 1 || echo 0)"
+    done <<< "$lines"
+    [ "$n" -gt 0 ] || return 0
+    if coord_inbox_write blocked_pr_cleared "Unblocked: $list. The PR each issue waited on has merged; the watcher removed its blocked:pr-N and blocked labels. These issues are dispatchable now (act, then report)."; then
+        log_event coord.inbox.write "trigger=blocked_pr_cleared count=$n"
+        coord_ring_doorbell blocked_pr_cleared "count=$n"
+    else
+        echo "[$(date +%T)] WARN: failed to write coord-inbox blocked_pr_cleared entry" >&2
+    fi
 }
 
 # ci_failing_ring_pass (issue #729)
@@ -13027,6 +13190,8 @@ run_capacity_wake_loop() {
         dispatch_pause_wake_pass || true
         host_load_wake_pass || true
         idle_capacity_wake_pass || true
+        approval_reminder_pass || true
+        blocked_pr_sweep_pass || true
         ci_failing_ring_pass || true
         watcher_dead_ring_pass || true
         runner_offline_ring_pass || true
