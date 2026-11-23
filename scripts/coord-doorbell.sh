@@ -69,6 +69,12 @@ fail() {
 }
 
 TARGET="$(coord_session_name "$PROJECT_DIR")"
+# The coordinator's tmux session (llm-start.sh's SESSION_NAME). Used only to
+# find the coordinator's CURRENT harness name when the pinned one is not
+# listed, and only via its "coordinator" window (workers are other windows of
+# the same tmux session) (issue #1040: a resumed/restarted/renamed session no longer answers
+# to swarm-<base>-<hash>, so SendMessage said "No agent named ... reachable").
+TMUX_SESSION="llm-$(basename "$(cd "$PROJECT_DIR" 2>/dev/null && pwd -P || echo "$PROJECT_DIR")")"
 [ -r "$PROMPT_FILE" ] || fail "prompt file unreadable: $PROMPT_FILE"
 command -v jq >/dev/null 2>&1 || fail "jq not found"
 command -v "$CLAUDE_BIN" >/dev/null 2>&1 || fail "claude binary not found: $CLAUDE_BIN"
@@ -76,7 +82,7 @@ command -v "$CLAUDE_BIN" >/dev/null 2>&1 || fail "claude binary not found: $CLAU
 # Command substitution strips trailing newlines on both sides of the compare.
 EXPECTED="[swarm wake doorbell, no reply needed] $(cat "$PROMPT_FILE")"
 
-COURIER_PROMPT="Call SendMessage exactly once, with to=\"$TARGET\" and message set to exactly the text between the two marker lines below (no edits, no additions, markers excluded). Then reply with the single word done. Do not call any other tool.
+COURIER_PROMPT="First call ListAgents once. The recipient is the listed agent named exactly \"$TARGET\". If no agent has that name, it is the single listed interactive agent whose tmux target is in window \"$TMUX_SESSION:coordinator\" (workers share that tmux session in other windows; never pick them) (use that agent's listed name); if there is not exactly one such agent, call nothing further and reply none. Then call SendMessage exactly once, with to set to the recipient's name and message set to exactly the text between the two marker lines below (no edits, no additions, markers excluded). Then reply with the single word done. Do not call any other tool.
 <<<WAKE_BEGIN>>>
 $EXPECTED
 <<<WAKE_END>>>"
@@ -91,7 +97,7 @@ CLEAN="$WORK/clean.jsonl"
 # Prompt on stdin: --tools is variadic and would swallow a positional prompt.
 ( cd "$WORK" && printf '%s' "$COURIER_PROMPT" | timeout "$TIMEOUT_SECS" "$CLAUDE_BIN" -p \
     --model "$MODEL" --dangerously-skip-permissions --no-session-persistence \
-    --output-format stream-json --verbose --tools SendMessage ) > "$OUT" 2> "$WORK/courier.err"
+    --output-format stream-json --verbose --tools SendMessage ListAgents ) > "$OUT" 2> "$WORK/courier.err"
 rc=$?
 # rc != 0 (including a 124 timeout) may still carry a usable transcript: a
 # courier that delivered and then hung must not get a duplicate fallback paste
@@ -103,11 +109,30 @@ jq -cR 'fromjson? // empty' "$OUT" > "$CLEAN" 2>/dev/null
 TIMED_OUT=""
 [ "$rc" = 124 ] && TIMED_OUT="courier timed out after ${TIMEOUT_SECS}s; "
 
+# Names the coordinator may be reached under: the pinned TARGET, plus (issue
+# #1040) the name of the one ListAgents row in this project's tmux "coordinator" window when
+# TARGET is not listed. Decided here from the transcript, never from the
+# courier's prose, so a wrong-swarm recipient still fails.
+LIST_TEXT="$(jq -rs '
+    [ .[] | select(.type == "assistant") | .message.content[]?
+      | select(.type == "tool_use" and .name == "ListAgents") | .id ] as $ids
+    | [ .[] | select(.type == "user") | .message.content[]?
+        | select(.type == "tool_result" and (.tool_use_id as $i | $ids | index($i)))
+        | .content | if type == "array" then map(.text // "") | join("") else (. // "") end ]
+    | join("\n")' "$CLEAN" 2>/dev/null)"
+ALLOWED="$TARGET"
+if ! grep -qE "(^|[^A-Za-z0-9._-])$(printf '%s' "$TARGET" | sed 's/[.[\*^$]/\\&/g')([^A-Za-z0-9._-]|$)" <<<"$LIST_TEXT"; then
+    ROWS="$(printf '%s\n' "$LIST_TEXT" | grep -E "(^|[^A-Za-z0-9._-])$(printf '%s' "$TMUX_SESSION" | sed 's/[.[\*^$]/\\&/g'):coordinator([^A-Za-z0-9_-]|$)" | grep -iE '(^|[^A-Za-z-])interactive')"
+    if [ -n "$ROWS" ] && [ "$(printf '%s\n' "$ROWS" | wc -l)" = 1 ]; then
+        ALLOWED="$(printf '%s' "$ROWS" | sed -E 's/^[[:space:]*•·-]+//' | awk '{print $1}')"
+    fi
+fi
+
 # Exactly one SendMessage call in the whole transcript, to the expected
 # recipient with the expected text. Zero calls, two calls (even if one is
 # right), or a call to anyone else is a failure: the caller falls back to the
 # paste. Prints that call's tool_use id on success.
-SEND_ID="$(jq -rs --arg to "$TARGET" --arg exp "$EXPECTED" '
+SEND_ID="$(jq -rs --arg to "$ALLOWED" --arg exp "$EXPECTED" '
     [ .[] | select(.type == "assistant") | .message.content[]?
       | select(.type == "tool_use" and .name == "SendMessage") ]
     | if length == 1
@@ -128,5 +153,5 @@ if [ "$(printf '%s' "$RESULT" | jq -r '.success // false' 2>/dev/null)" != "true
     fail "${TIMED_OUT}SendMessage reported not delivered: $(printf '%s' "$RESULT" | jq -r '(.message // .) | .[0:160]' 2>/dev/null)"
 fi
 
-log_event coord.wake.doorbell "target=$TARGET via=sendmessage${TIMED_OUT:+ courier_timeout=1}"
+log_event coord.wake.doorbell "target=$ALLOWED via=sendmessage${TIMED_OUT:+ courier_timeout=1}"
 exit 0
