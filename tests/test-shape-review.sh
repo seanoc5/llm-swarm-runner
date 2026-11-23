@@ -652,8 +652,17 @@ grep -q 'SUCCESS: 2 (build, swarm-gates)' "$CODEX_PAYLOAD_LOG" || red "CI STATUS
 grep -q 'IN_PROGRESS: 1' "$CODEX_PAYLOAD_LOG" || red "CI STATUS must show pending checks"
 GH_ROLLUP_FAIL=1 WORKER_CMD=codex "$REVIEW" 42 --rerun >"$TEST_DIR/o.out" 2>&1 || red "unreadable-CI round failed"
 grep -q 'could not be read' "$CODEX_PAYLOAD_LOG" || red "unreadable checks must say CI is unverified"
+# A failing check must reach the reviewer by name (issue #1045): the CI section
+# exists for this case. One CheckRun (conclusion) and one StatusContext (state,
+# context) failure, alongside a pass.
+echo '{"statusCheckRollup":[{"name":"build","conclusion":"SUCCESS"},{"name":"integration","conclusion":"FAILURE"},{"context":"legacy-ci","state":"ERROR"}]}' > "$GH_ROLLUP_FILE"
+WORKER_CMD=codex "$REVIEW" 42 --rerun >"$TEST_DIR/o.out" 2>&1 || red "failing-CI round failed: $(cat "$TEST_DIR/o.out")"
+sed -n '/--- CI STATUS ---/,/--- DIFF ---/p' "$CODEX_PAYLOAD_LOG" > "$TEST_DIR/ci.txt"
+grep -q 'FAILURE: 1 (integration)' "$TEST_DIR/ci.txt" || red "failing check must reach the reviewer by name: $(cat "$TEST_DIR/ci.txt")"
+grep -q 'ERROR: 1 (legacy-ci)' "$TEST_DIR/ci.txt" || red "failing status context must reach the reviewer by name: $(cat "$TEST_DIR/ci.txt")"
+grep -q 'SUCCESS: 1 (build)' "$TEST_DIR/ci.txt" || red "passing check must still be listed alongside failures"
 unset GH_HEAD GH_ROLLUP_FILE
-green "payload carries current-head check runs; unreadable checks say unverified"
+green "payload carries current-head check runs, failures by name; unreadable checks say unverified"
 
 # ============================================================================
 heading "All self-review machinery shape tests passed"
