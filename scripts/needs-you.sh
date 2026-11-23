@@ -39,7 +39,7 @@
 # else the repo's first 3 letters). The letter is the next unused one for that item across
 # the whole store, done items included, so a letter is never reused. No URL, or a
 # non-GitHub URL: the old counter label (A1, A2...). `done`/`verify` also take short input
-# (last digits + letter, prefix optional: 042a, ui42a) when exactly one open item matches;
+# (last digits + letter, prefix optional: 42a, ui42a) when exactly one open item matches;
 # several matches are listed and the exit is 1. Old labels keep working; no migration.
 #
 # Store: .swarm/needs-you.jsonl (one JSON object per item; done items stay,
@@ -275,26 +275,27 @@ next_letter() {
 }
 
 # resolve_open <label-or-short>: sets label to the one open item it names.
-# 1. An exact full label acts on that item only: open -> it; already done -> say so, exit 0
-#    (a retried `done` is a no-op, never a different item).
-# 2. Only when no label matches exactly: short input (digits + letter, prefix optional) matching
-#    from the START of the item number. Several matches: list them, exit 1; none: exit 2.
+# 1. An exact full label (case-insensitive) acts on that item only: open -> it; already done -> say
+#    so, exit 0 (a retried `done` is a no-op, never a different item).
+# 2. Only when no label matches exactly: short input = the LAST digits of the item number + the
+#    letter, prefix optional (42a, ui42a), among OPEN items only. Several matches: list them,
+#    exit 1; none: exit 2.
 resolve_open() {
     local in="$1" lc m n state
     [ -s "$store" ] || die "no open item $in"
-    state="$(jq -rs --arg l "$in" '[.[] | select(.label == $l)] | if length == 0 then "none" elif any(.[]; .done != true) then "open" else "done" end' "$store")"
+    lc="$(printf '%s' "$in" | tr '[:upper:]' '[:lower:]')"
+    state="$(jq -rs --arg l "$lc" '[.[] | select((.label | ascii_downcase) == $l)] | if length == 0 then "none" elif any(.[]; .done != true) then "open:" + (map(select(.done != true))[0].label) else "done" end' "$store")"
     case "$state" in
-        open) label="$in"; return ;;
+        open:*) label="${state#open:}"; return ;;
         done) echo "needs-you.sh: $in is already done; nothing to do." >&2; exit 0 ;;
     esac
-    lc="$(printf '%s' "$in" | tr '[:upper:]' '[:lower:]')"
     m="$(jq -rs --arg i "$lc" '
         ($i | capture("^(?<p>[a-z]*)(?<n>[0-9]+)(?<l>[a-z]+)$")?) as $in
         | if $in == null then empty else
             .[] | select(.done != true)
             | select(.label | test("^[a-z]*[0-9]+[a-z]+$"))
             | (.label | capture("^(?<p>[a-z]*)(?<n>[0-9]+)(?<l>[a-z]+)$")) as $c
-            | select($c.l == $in.l and ($c.n | startswith($in.n)) and ($in.p == "" or $in.p == $c.p))
+            | select($c.l == $in.l and ($c.n | endswith($in.n)) and ($in.p == "" or $in.p == $c.p))
             | .label end' "$store")"
     n="$(printf '%s' "$m" | grep -c . || true)"
     case "$n" in

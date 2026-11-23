@@ -69,26 +69,27 @@ rlabels() { "$NY" render --json --project "$R" | jq -r 'map(.label) | join(",")'
 radd --url $SELF/pull/1042 >/dev/null; radd --url $SELF/pull/1142 >/dev/null; radd --url https://github.com/seanoc5/oconeco-ui/pull/1042 >/dev/null; radd >/dev/null
 "$NY" done 1142a --project "$R"
 check "done with the full label" "1042a,ui1042a,A1" "$(rlabels)"
-set +e; "$NY" done 10a --project "$R" >"$T/out" 2>"$T/err"; ec=$?; set -e
-check "ambiguous short input exits 1" "1" "$ec"
+set +e; "$NY" done 42a --project "$R" >"$T/out" 2>"$T/err"; ec=$?; set -e
+check "ambiguous short input (suffix 42a, no prefix) exits 1" "1" "$ec"
 check "...and lists both candidates" "1042a ui1042a" "$(grep -oE '^  [a-z0-9]+' "$T/err" | tr -d ' ' | paste -sd' ' -)"
 check "...and closes nothing" "1042a,ui1042a,A1" "$(rlabels)"
-"$NY" done ui10a --project "$R"
+"$NY" done ui42a --project "$R"
 check "short input with a prefix picks that prefix" "1042a,A1" "$(rlabels)"
-"$NY" done 104a --project "$R"
-check "unique short input (leading digits + letter) closes it" "A1" "$(rlabels)"
+"$NY" done 42a --project "$R"
+check "unique short input (last digits + letter) closes it" "A1" "$(rlabels)"
 set +e; "$NY" done 99z --project "$R" >/dev/null 2>"$T/err"; ec=$?; set -e
 check "no match exits non-zero" "2" "$ec"
 check "short input never matches a done item" "A1" "$(rlabels)"
-set +e; "$NY" done 042a --project "$R" >/dev/null 2>&1; ec=$?; set -e
+set +e; "$NY" done 42a --project "$R" >/dev/null 2>&1; ec=$?; set -e
 check "a done item's short input matches nothing" "2" "$ec"
-# review round (PR #1060): an exact full label is final; short input matches from the START of the number
+# review round (PR #1060): an exact full label is final; short input is the LAST digits + letter; exact label (any case) is final
 "$NY" add --check-source operator --background "$BG" --project "$R" --title "Ask x" --do 'Say `merge PR 9`' --url $SELF/pull/1042 >/dev/null  # 1042b (1042a is done)
 "$NY" add --check-source operator --background "$BG" --project "$R" --title "Ask y" --do 'Say `merge PR 9`' --url https://github.com/seanoc5/oconeco-ui/pull/1042 >/dev/null  # ui1042b
 "$NY" add --check-source operator --background "$BG" --project "$R" --title "Ask z" --do 'Say `merge PR 9`' --url $SELF/pull/11042 >/dev/null  # 11042a
 before="$(rlabels)"
-set +e; "$NY" done 42b --project "$R" >/dev/null 2>&1; ec=$?; set -e
-check "short input matching only by suffix of a longer number matches nothing" "2" "$ec"
+set +e; "$NY" done 42b --project "$R" >/dev/null 2>"$T/err"; ec=$?; set -e
+check "short suffix 42b matching 1042b and ui1042b is ambiguous" "1" "$ec"
+check "...and lists both (not 11042a, letter a)" "1042b ui1042b" "$(grep -oE '^  [a-z0-9]+' "$T/err" | tr -d ' ' | paste -sd' ' -)"
 check "...and closes nothing" "$before" "$(rlabels)"
 "$NY" done 1042b --project "$R"
 check "exact label closes only that item" "ui1042b,11042a" "$(rlabels | tr ',' '\n' | grep -v '^A1$' | paste -sd, -)"
@@ -96,6 +97,10 @@ set +e; "$NY" done 1042b --project "$R" >/dev/null 2>"$T/err"; ec=$?; set -e
 check "retry of done on a closed full label exits 0" "0" "$ec"
 check "...says already done" "1" "$(grep -c 'already done' "$T/err")"
 check "...and does not close a longer-number or prefixed item" "ui1042b,11042a" "$(rlabels | tr ',' '\n' | grep -v '^A1$' | paste -sd, -)"
+set +e; "$NY" done 1042B --project "$R" >/dev/null 2>"$T/err"; ec=$?; set -e
+check "retry in another case exits 0" "0" "$ec"
+check "...says already done" "1" "$(grep -c 'already done' "$T/err")"
+check "...and still closes nothing else" "ui1042b,11042a" "$(rlabels | tr ',' '\n' | grep -v '^A1$' | paste -sd, -)"
 "$NY" done ui1042b --project "$R"; "$NY" done 11042a --project "$R"
 
 # digit-only repo name still gets a prefix; letters continue past z (aa, ab...)
