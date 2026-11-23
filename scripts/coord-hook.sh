@@ -223,7 +223,12 @@ coord_notices() {
     ny="$("$here/needs-you.sh" check --project "$project" 2>&1 >/dev/null)"; rc=$?
     if [ "$rc" = "3" ]; then
         log_event "coord.needs_you.handwritten"
-        out="${ny}. The operator treats .swarm/needs-you.md as the one cold-reader file: never write it by hand. Rebuild every open item with scripts/needs-you.sh add (--title, --background in plain words: what it is, why it is open, what each option changes; --do), close finished ones with done, and print scripts/needs-you.sh render. If nothing is open, run scripts/needs-you.sh render --write (it replaces the hand-written file with an empty list) or delete .swarm/needs-you.md."
+        fwd=""
+        backend="${NEEDS_YOU_BACKEND:-$(grep -hE '^(export +)?NEEDS_YOU_BACKEND=' "$swarm/.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d "\"' ")}"
+        if [ "$backend" = "corpusminder" ]; then
+            fwd=" This swarm files asks in corpusminder: a hand-written list never reaches the forum, so the operator sees nothing there."
+        fi
+        out="${ny}.${fwd} The operator treats .swarm/needs-you.md as the one cold-reader file: never write it by hand. Rebuild every open item with scripts/needs-you.sh add (--title, --background in plain words: what it is, why it is open, what each option changes; --do), close finished ones with done, and print scripts/needs-you.sh render. If nothing is open, run scripts/needs-you.sh render --write (it replaces the hand-written file with an empty list) or delete .swarm/needs-you.md."
     fi
     started="$(cat "$swarm/coord-prompt.sha" 2>/dev/null || true)"
     if [ -n "$started" ]; then
