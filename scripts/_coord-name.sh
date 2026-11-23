@@ -25,3 +25,16 @@ coord_session_name() {
     [ -n "$hash" ] || hash="$(printf '%s' "$abs" | cksum | cut -d' ' -f1)"
     printf 'swarm-%s-%s\n' "$(printf '%s' "$base" | LC_ALL=C tr -c 'A-Za-z0-9._\n-' '-')" "$hash"
 }
+
+# coord_tmux_session_name <project-dir> -> the tmux session the project's
+# coordinator and workers live in: an exported SESSION_NAME wins, else
+# llm-<basename of the physical project path>. Shared by coordinator-watch.sh
+# and coord-doorbell.sh so both resolve the path (symlinks followed) and honour
+# the override identically (issue #1044).
+coord_tmux_session_name() {
+    local dir abs
+    dir="${1:?coord_tmux_session_name: project dir required}"
+    if [ -n "${SESSION_NAME:-}" ]; then printf '%s\n' "$SESSION_NAME"; return 0; fi
+    abs="$(realpath "$dir" 2>/dev/null)" || abs="${dir%/}"
+    printf 'llm-%s\n' "$(basename "$abs")"
+}

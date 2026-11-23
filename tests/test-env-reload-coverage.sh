@@ -27,6 +27,7 @@ declare -A ALLOW=(
   [scripts/coord-hook.sh]="inherits: hook child of coordinator-claude.sh, which sources the loader"
   [scripts/_coord-inbox-batch.sh]="inherits: sourced by coord-hook.sh / coord-inbox-wait.sh / coordinator-watch.sh, which have the key"
   [scripts/coord-inbox-wait.sh]="inherits: armed from inside the coordinator claude process"
+  [scripts/_coord-name.sh]="inherits: sourced by coordinator-claude.sh, coord-doorbell.sh and coordinator-watch.sh, which all source the loader"
   [scripts/_coord-layout.sh]="inherits: sourced by llm-start.sh, coordinator-watch.sh and coordinator-layout.sh, which all source the loader"
   [scripts/_pane-composer.sh]="inherits: sourced by coordinator-watch.sh and swarm-nudge.sh, which both source the loader"
   [scripts/_project-reap-hook.sh]="inherits: called by kill-worktree.sh / reap-orphan-worktrees.sh, which source the loader"

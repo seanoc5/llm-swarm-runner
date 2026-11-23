@@ -74,7 +74,7 @@ TARGET="$(coord_session_name "$PROJECT_DIR")"
 # listed, and only via its "coordinator" window (workers are other windows of
 # the same tmux session) (issue #1040: a resumed/restarted/renamed session no longer answers
 # to swarm-<base>-<hash>, so SendMessage said "No agent named ... reachable").
-TMUX_SESSION="llm-$(basename "$(cd "$PROJECT_DIR" 2>/dev/null && pwd -P || echo "$PROJECT_DIR")")"
+TMUX_SESSION="$(coord_tmux_session_name "$PROJECT_DIR")"
 [ -r "$PROMPT_FILE" ] || fail "prompt file unreadable: $PROMPT_FILE"
 command -v jq >/dev/null 2>&1 || fail "jq not found"
 command -v "$CLAUDE_BIN" >/dev/null 2>&1 || fail "claude binary not found: $CLAUDE_BIN"

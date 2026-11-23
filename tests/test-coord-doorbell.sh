@@ -111,6 +111,17 @@ check "renamed coordinator with a worker running: exit 0" 0 "$(run renamed_plus_
 make_stub pinned_listed "$emit_list" "emit_list la1 $(q "- $TARGET [r1] · interactive · idle · tmux $TMUXS:coordinator.0")" "emit_use tu1 $(q "$TARGET") $(q "$EXPECTED_MSG")" "emit_result tu1 '$OKRES'"
 check "pinned name listed: exit 0" 0 "$(run pinned_listed)"
 
+# #1044: a custom SESSION_NAME (exported, as the watcher honours it) names the
+# tmux session the courier must match, and a symlinked project path resolves
+# to the physical basename in both the helper and the doorbell.
+check "tmux session name: default is llm-<basename>" "llm-app" "$(env -u SESSION_NAME bash -c '. "$1"; coord_tmux_session_name "$2"' _ "$SCRIPT_DIR/../scripts/_coord-name.sh" "$T/a/app")"
+check "tmux session name: exported SESSION_NAME wins" "custom-sess" "$(SESSION_NAME=custom-sess bash -c '. "$1"; coord_tmux_session_name "$2"' _ "$SCRIPT_DIR/../scripts/_coord-name.sh" "$T/a/app")"
+check "tmux session name: symlink resolves to physical basename" "llm-app" "$(env -u SESSION_NAME bash -c '. "$1"; coord_tmux_session_name "$2"' _ "$SCRIPT_DIR/../scripts/_coord-name.sh" "$T/a/applink")"
+make_stub custom_sess "$emit_list" "emit_list la1 $(q "- fand-coord [ref1] · interactive · idle · tmux custom-sess:coordinator.0
+- swarm-other-1234abcd [ref2] · interactive · idle · tmux $TMUXS:coordinator.0")" "emit_use tu1 fand-coord $(q "$EXPECTED_MSG")" "emit_result tu1 '$OKRES'"
+check "custom SESSION_NAME: coordinator found on that session: exit 0" 0 "$(SESSION_NAME=custom-sess run custom_sess)"
+check "custom SESSION_NAME: default-named session's row is not picked: exit 1" 1 "$(SESSION_NAME=other-sess run custom_sess)"
+
 # B: exactly one SendMessage call, and the result must belong to it.
 make_stub zero "echo 'no tools today'"
 check "zero SendMessage calls: exit 1" 1 "$(run zero)"
