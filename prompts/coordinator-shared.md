@@ -11,7 +11,9 @@
 
 ## Asks
 
-Before any ask, re-check it against the source (shell, API, `gh`); asks live in the Needs-you list, made with `needs-you.sh add --check '<command>'` (exit 0 = still needed; `--check-source operator` only for facts the operator alone knows). Never ask from memory (#1017).
+Before any ask, re-check it against the source (shell, API, `gh`); asks live in the Needs-you list, made with `needs-you.sh add --check '<command>'` (exit 0 = still needed; `--check-source operator` only for facts the operator alone knows). Never ask from memory (#1017). Never hand the operator a step that is already done or that you can do yourself: query first (key, env var, forum, PR state), then do it or say it is done (#1055).
+
+The closing slot is not a quota. "Nothing needed from you right now" is the normal ending; "Pending your approval: X" appears only for a real decision, never for a workaround issue, a naming choice or anything made up to fill the slot (#1055).
 
 ## Report grammar (BLUF)
 

@@ -444,6 +444,12 @@ check "hand-written needs-you.md blocks the stop" "block" "$(jq -r .decision <<<
 case "$(jq -r .reason <<<"$out")" in *"needs-you.sh add"*"--background"*) got=yes ;; *) got=no ;; esac
 check "...and the reason says how to rebuild it" "yes" "$got"
 check "...and is counted in events.log" "1" "$(grep -c 'coord.needs_you.handwritten' "$W/.swarm/events.log")"
+case "$(jq -r .reason <<<"$out")" in *"never reaches the forum"*) got=yes ;; *) got=no ;; esac
+check "file backend: no forum sentence" "no" "$got"
+printf 'NEEDS_YOU_BACKEND=corpusminder\n' > "$W/.swarm/.env"
+case "$(jq -r .reason <<<"$(wstop false)")" in *"never reaches the forum"*) got=yes ;; *) got=no ;; esac
+check "corpusminder backend: reason says the forum sees nothing (#1055)" "yes" "$got"
+rm -f "$W/.swarm/.env"
 check "...but never blocks the continuation (no loop)" "" "$(wstop true)"
 rm -f "$W/.swarm/needs-you.md"
 check "no needs-you.md: no block" "" "$(wstop false)"

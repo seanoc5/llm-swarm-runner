@@ -101,3 +101,14 @@ rings no doorbell, so nothing is recorded there.
 Tests: `tests/test-wake-report-score.sh` (fixtures in `tests/fixtures/wake-report/`).
 
 Tests: `tests/test-cminder-backend.sh` (curl is stubbed; no network).
+
+## Forum visibility and ownership (issue #1055)
+
+Forums a swarm creates through the API belong to the account that owns the API key (for
+example a POWER_USER service account), and they start PRIVATE. The operator can read them
+because corpusminder lets an ADMIN see every forum; that rule is tracked in
+seanoc5/corpusminder-spring#2919. Until it merges, an admin who is not a member sees the
+forum list instead of the forum. Do not work around it by adding the operator as a member
+of each forum: the product rule is that admins see everything, and the fix belongs there.
+Only `needs-you.sh add` files items in a forum; a hand-written `.swarm/needs-you.md` never
+reaches it (`needs-you.sh check` exits 3 and the coordinator hook says so).
