@@ -232,7 +232,7 @@ own_repo() {
 
 # repo_prefix <repo-name>: the short label prefix for another repo (issue #1052).
 repo_prefix() {
-    local n
+    local n p
     n="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
     case "$n" in
         oconeco-ui) echo ui ;;
@@ -240,7 +240,7 @@ repo_prefix() {
         fand-app) echo fa ;;
         fand-etl) echo fe ;;
         samlytics) echo sam ;;
-        *) printf '%s' "$n" | tr -cd 'a-z0-9' | cut -c1-3 | tr -d '0-9' ;;
+        *) p="$(printf '%s' "$n" | tr -cd 'a-z0-9' | cut -c1-3 | tr -d '0-9')"; echo "${p:-r}" ;;
     esac
 }
 
@@ -257,30 +257,44 @@ gh_label_base() {
     fi
 }
 
-# next_letter <base>: the next unused letter for <base> across the whole store, done items included.
+# next_letter <base>: the next unused letter run for <base> across the whole store, done items
+# included: a..z, then aa..zz (bijective base 26), so a label is never reused.
 next_letter() {
-    local last=""
-    [ -s "$store" ] && last="$(jq -rs --arg b "$1" '[.[].label | select(test("^" + $b + "[a-z]$")) | .[-1:]] | max // ""' "$store")"
+    local last="" s i c out="" carry=1
+    [ -s "$store" ] && last="$(jq -rs --arg b "$1" '[.[].label | select(test("^" + $b + "[a-z]+$")) | .[($b | length):]] | sort_by([length, .]) | last // ""' "$store")"
     if [ -z "$last" ]; then echo a; return; fi
-    [ "$last" != z ] || die "item $1 already has letters a-z; file the next ask under a new item"
-    printf "\\x$(printf '%x' $(( $(printf '%d' "'$last") + 1 )))"
+    s="$last"
+    for (( i=${#s}-1; i>=0; i-- )); do
+        c="${s:i:1}"
+        if [ "$carry" = 1 ]; then
+            if [ "$c" = z ]; then out="a$out"; else out="$(printf "\\x$(printf '%x' $(( $(printf '%d' "'$c") + 1 )))")$out"; carry=0; fi
+        else out="$c$out"; fi
+    done
+    [ "$carry" = 0 ] || out="a$out"
+    printf '%s' "$out"
 }
 
-# resolve_open <label-or-short>: sets label to the one open item it names. Exact label first;
-# then short input (digits + letter, prefix optional, suffix of the number). Several matches:
-# list them and exit 1; none: exit 2.
+# resolve_open <label-or-short>: sets label to the one open item it names.
+# 1. An exact full label acts on that item only: open -> it; already done -> say so, exit 0
+#    (a retried `done` is a no-op, never a different item).
+# 2. Only when no label matches exactly: short input (digits + letter, prefix optional) matching
+#    from the START of the item number. Several matches: list them, exit 1; none: exit 2.
 resolve_open() {
-    local in="$1" lc m n
+    local in="$1" lc m n state
     [ -s "$store" ] || die "no open item $in"
-    if jq -se --arg l "$in" 'any(.[]; .label == $l and .done != true)' "$store" >/dev/null; then label="$in"; return; fi
+    state="$(jq -rs --arg l "$in" '[.[] | select(.label == $l)] | if length == 0 then "none" elif any(.[]; .done != true) then "open" else "done" end' "$store")"
+    case "$state" in
+        open) label="$in"; return ;;
+        done) echo "needs-you.sh: $in is already done; nothing to do." >&2; exit 0 ;;
+    esac
     lc="$(printf '%s' "$in" | tr '[:upper:]' '[:lower:]')"
     m="$(jq -rs --arg i "$lc" '
-        ($i | capture("^(?<p>[a-z]*)(?<n>[0-9]+)(?<l>[a-z])$")?) as $in
+        ($i | capture("^(?<p>[a-z]*)(?<n>[0-9]+)(?<l>[a-z]+)$")?) as $in
         | if $in == null then empty else
             .[] | select(.done != true)
-            | select(.label | test("^[a-z]*[0-9]+[a-z]$"))
-            | (.label | capture("^(?<p>[a-z]*)(?<n>[0-9]+)(?<l>[a-z])$")) as $c
-            | select($c.l == $in.l and ($c.n | endswith($in.n)) and ($in.p == "" or $in.p == $c.p))
+            | select(.label | test("^[a-z]*[0-9]+[a-z]+$"))
+            | (.label | capture("^(?<p>[a-z]*)(?<n>[0-9]+)(?<l>[a-z]+)$")) as $c
+            | select($c.l == $in.l and ($c.n | startswith($in.n)) and ($in.p == "" or $in.p == $c.p))
             | .label end' "$store")"
     n="$(printf '%s' "$m" | grep -c . || true)"
     case "$n" in
@@ -412,7 +426,7 @@ case "$cmd" in
         # means a render wrote it, not a hand (it is rewritten at the next add/done).
         IFS= read -r first_line < "$md" || true
         if [ -e "$store" ] && [[ $first_line =~ ^'## Needs you ('[0-9]+' open)'$ ]] \
-            && [ "$(grep -oE '^- \*\*([A-Za-z][0-9]+|[a-z]*[0-9]+[a-z])\*\*' "$md" | tr -d '* -' | sort | paste -sd,)" = "$(open_items | jq -r '[.[].label] | sort | join(",")')" ]; then
+            && [ "$(grep -oE '^- \*\*([A-Za-z][0-9]+|[a-z]*[0-9]+[a-z]+)\*\*' "$md" | tr -d '* -' | sort | paste -sd,)" = "$(open_items | jq -r '[.[].label] | sort | join(",")')" ]; then
             exit 0
         fi
         echo "needs-you.md does not match needs-you.jsonl (or no list exists): it was written by hand" >&2
