@@ -2878,7 +2878,9 @@ SIDELINE_WORKER="${SIDELINE_WORKER:-$LLM_SWARM_DIR/scripts/sideline-worker.sh}"
 PROVISION_WORKER="${PROVISION_WORKER:-$LLM_SWARM_DIR/scripts/provision-worker.sh}"
 WATCH_CHECK_ON_DONE="${WATCH_CHECK_ON_DONE:-1}"
 CHECK_RUNNER="${CHECK_RUNNER:-}"
-SESSION_NAME="${SESSION_NAME:-llm-$(basename "$PROJECT_DIR")}"
+# shellcheck source=_coord-name.sh
+. "$SCRIPT_DIR/_coord-name.sh"
+SESSION_NAME="$(coord_tmux_session_name "$PROJECT_DIR")"
 # issue #594 — per-window tmux status flags (📬/👀/✅/❌/💤/✋ on worker windows,
 # 🔔 on the coordinator window); see scripts/_window-flags.sh for the
 # flags themselves and window_flags_sweep_pass/coord_approval_flag_pass
