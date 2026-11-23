@@ -347,6 +347,28 @@ else
     HEAD_NOTE="Repository files: the PR head could NOT be determined. Files under $REPO_ROOT may be stale; rely on the diff and say so for any claim you could not verify."
 fi
 
+# --- CI status of the head (issue #1041) --------------------------------------
+# The reviewer cannot run `gh pr checks` (read-only allowlist), so without this
+# it answered "CI was red on <old sha>; get a green run" even after CI went
+# green, and a medium PR never reached a bare APPROVE. Hand it the check-run
+# summary for the CURRENT head instead. Unreadable -> say so, never guess.
+CI_NOTE=""
+if [ -n "$HEAD_SHA" ]; then
+    CI_ROLLUP="$(gh pr view "$PR" --json statusCheckRollup 2>/dev/null || true)"
+    CI_LINES="$(jq -r '
+        [.statusCheckRollup[]? | {n: (.name // .context // "check"),
+            s: ((if (.conclusion // .state // "") == "" then (.status // "PENDING") else (.conclusion // .state) end)) }]
+        | if length == 0 then "no check runs reported for this head yet"
+          else (group_by(.s) | map("\(.[0].s): \(length) (\([.[].n] | unique | .[0:6] | join(", ")))") | join("\n")) end' \
+        <<<"$CI_ROLLUP" 2>/dev/null || true)"
+    if [ -n "$CI_LINES" ]; then
+        CI_NOTE="Check runs for the current head ${HEAD_SHA:0:7}, read just now by the review script. This is authoritative. Results on earlier heads are stale and superseded; do not caveat on them. A check shown as pending or absent is not a failure and not a reason to caveat; only a failing state here (FAILURE, ERROR, TIMED_OUT, CANCELLED, STARTUP_FAILURE, ACTION_REQUIRED) is.
+${CI_LINES}"
+    else
+        CI_NOTE="Check runs for the current head ${HEAD_SHA:0:7} could not be read (the review has no network access to checks). State that CI is unverified; do not infer CI results."
+    fi
+fi
+
 # --- earlier rounds (issue #611: converging review) -------------------------
 # Later rounds get the findings of earlier rounds plus the diff since the last
 # reviewed head, and are told to BLOCK only on an unresolved prior BLOCK or a
@@ -428,6 +450,7 @@ review_payload() {
     fi
     printf -- '--- PR ---\n%s\n\n' "$BODY"
     [ -z "$HEAD_NOTE" ] || printf -- '--- CHECKOUT ---\n%s\n\n' "$HEAD_NOTE"
+    [ -z "$CI_NOTE" ] || printf -- '--- CI STATUS ---\n%s\n\n' "$CI_NOTE"
     if [ -n "$PRIOR_ROUNDS" ]; then
         printf -- '--- PRIOR ROUNDS ---\n%s\n' "$PRIOR_ROUNDS"
         if [ -n "$SINCE_DIFF" ]; then

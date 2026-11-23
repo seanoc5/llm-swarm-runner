@@ -640,6 +640,22 @@ unset GH_HEAD
 green "prompt assembly: first round clean; round 2 has prior findings, since-diff, instructions; failure and trust paths covered"
 
 # ============================================================================
+heading "Test: reviewer payload carries current-head CI status (issue #1041)"
+# ============================================================================
+sed -i 's#^            \*"--json labels")#            *statusCheckRollup*) [ "${GH_ROLLUP_FAIL:-0}" = 1 ] \&\& exit 1; cat "${GH_ROLLUP_FILE:-/dev/null}"; exit 0 ;;\n            *"--json labels")#' "$TEST_DIR/bin/gh"
+echo '{"headRefOid":"c3f3333","comments":[]}' > "$GH_PR_JSON_FILE"; export GH_HEAD=c3f3333
+export GH_ROLLUP_FILE="$TEST_DIR/rollup.json"
+echo '{"statusCheckRollup":[{"name":"build","conclusion":"SUCCESS"},{"name":"swarm-gates","conclusion":"SUCCESS"},{"name":"slow","status":"IN_PROGRESS","conclusion":""}]}' > "$GH_ROLLUP_FILE"
+WORKER_CMD=codex "$REVIEW" 42 --rerun >"$TEST_DIR/o.out" 2>&1 || red "CI-status round failed: $(cat "$TEST_DIR/o.out")"
+grep -q -- '--- CI STATUS ---' "$CODEX_PAYLOAD_LOG" || red "payload missing CI STATUS section"
+grep -q 'SUCCESS: 2 (build, swarm-gates)' "$CODEX_PAYLOAD_LOG" || red "CI STATUS must summarise passing checks: $(cat "$CODEX_PAYLOAD_LOG")"
+grep -q 'IN_PROGRESS: 1' "$CODEX_PAYLOAD_LOG" || red "CI STATUS must show pending checks"
+GH_ROLLUP_FAIL=1 WORKER_CMD=codex "$REVIEW" 42 --rerun >"$TEST_DIR/o.out" 2>&1 || red "unreadable-CI round failed"
+grep -q 'could not be read' "$CODEX_PAYLOAD_LOG" || red "unreadable checks must say CI is unverified"
+unset GH_HEAD GH_ROLLUP_FILE
+green "payload carries current-head check runs; unreadable checks say unverified"
+
+# ============================================================================
 heading "All self-review machinery shape tests passed"
 green "verdict parsing, exit codes, --post idempotency, kill switch, merge gate"
 echo ""
