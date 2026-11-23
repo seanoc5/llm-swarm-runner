@@ -37,10 +37,13 @@ WATCH_IDLE_CAPACITY_REPEAT_SECS=21600
 IDLE_CAPACITY_SET_FILE="$PROJECT_DIR/.swarm/idle-capacity-set.last"
 IDLE_CAPACITY_OUTCOME_FILE="$PROJECT_DIR/.swarm/idle-capacity-outcome.pending"
 CI_FAILING_RING_DIR="$PROJECT_DIR/.swarm/ci-failing-ring-pending"
+APPROVAL_REMIND_STATE_FILE="$PROJECT_DIR/.swarm/approval-remind.state"
+APPROVAL_REMIND_LOG="$PROJECT_DIR/.swarm/approval-reminders.log"
+WATCH_BLOCKED_PR_SWEEP_SECS=600; LAST_BLOCKED_PR_SWEEP=0
 WATCH_STALE_WAIT_CHECK=1; declare -A STALE_WAIT_NOTED=() CI_FAILING_NOTED=()
 
-eval "$(sed -n '/^coord_inbox_write() {/,/^}/p; /^coord_ring_doorbell() {/,/^}/p; /^dispatch_pause_active() {/,/^}/p; /^capacity_free_slots() {/,/^}/p; /^dispatchable_issue_counts() {/,/^}/p; /^dispatch_pause_wake_pass() {/,/^}/p; /^host_load_wake_pass() {/,/^}/p; /^idle_capacity_outcome_pass() {/,/^}/p; /^idle_capacity_wake_pass() {/,/^}/p; /^ci_failing_ring_pass() {/,/^}/p; /^ready_sweep_pass() {/,/^}/p; /^coord_pending_approval_age() {/,/^}/p' "$WATCH")"
-for fn in coord_ring_doorbell dispatch_pause_wake_pass host_load_wake_pass idle_capacity_outcome_pass idle_capacity_wake_pass ci_failing_ring_pass ready_sweep_pass coord_pending_approval_age; do
+eval "$(sed -n '/^coord_inbox_write() {/,/^}/p; /^coord_ring_doorbell() {/,/^}/p; /^dispatch_pause_active() {/,/^}/p; /^capacity_free_slots() {/,/^}/p; /^dispatchable_issue_counts() {/,/^}/p; /^idle_set_has_new() {/,/^}/p; /^approval_remind_due_secs() {/,/^}/p; /^approval_reminder_pass() {/,/^}/p; /^blocked_pr_sweep_pass() {/,/^}/p; /^dispatch_pause_wake_pass() {/,/^}/p; /^host_load_wake_pass() {/,/^}/p; /^idle_capacity_outcome_pass() {/,/^}/p; /^idle_capacity_wake_pass() {/,/^}/p; /^ci_failing_ring_pass() {/,/^}/p; /^ready_sweep_pass() {/,/^}/p; /^coord_pending_approval_age() {/,/^}/p' "$WATCH")"
+for fn in idle_set_has_new approval_remind_due_secs approval_reminder_pass blocked_pr_sweep_pass coord_ring_doorbell dispatch_pause_wake_pass host_load_wake_pass idle_capacity_outcome_pass idle_capacity_wake_pass ci_failing_ring_pass ready_sweep_pass coord_pending_approval_age; do
     declare -F "$fn" >/dev/null || red "could not extract $fn from coordinator-watch.sh"
 done
 LAST_IDLE_CAPACITY_CHECK=0
@@ -81,7 +84,7 @@ echo '[{"number":10,"labels":[{"name":"night-ok"}]},{"number":11,"labels":[{"nam
 
 notes() { find "$COORD_INBOX_DIR" -maxdepth 1 -name "*-$1-*.md" 2>/dev/null | wc -l | tr -d ' '; }
 rings() { [ -f "$RANG" ] && wc -l < "$RANG" | tr -d ' ' || echo 0; }
-reset() { rm -rf "$CI_FAILING_RING_DIR" "$COORD_INBOX_DIR" "$RANG" "$IDLE_CAPACITY_WAKE_FILE" "$IDLE_CAPACITY_SET_FILE" "$IDLE_CAPACITY_OUTCOME_FILE" "$DISPATCH_PAUSE_SEEN_FILE" "$HOST_LOAD_REFUSED_FILE"; : > "$EV"; LAST_IDLE_CAPACITY_CHECK=0; HOLD=""; BUSY=0; APPROVAL_AGE=""; }
+reset() { rm -rf "$CI_FAILING_RING_DIR" "$COORD_INBOX_DIR" "$RANG" "$IDLE_CAPACITY_WAKE_FILE" "$IDLE_CAPACITY_SET_FILE" "$IDLE_CAPACITY_OUTCOME_FILE" "$DISPATCH_PAUSE_SEEN_FILE" "$HOST_LOAD_REFUSED_FILE" "$APPROVAL_REMIND_STATE_FILE" "$APPROVAL_REMIND_LOG"; LAST_BLOCKED_PR_SWEEP=0; : > "$EV"; LAST_IDLE_CAPACITY_CHECK=0; HOLD=""; BUSY=0; APPROVAL_AGE=""; }
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 check "free slots = min(MAX_WORKERS - iss windows, MAX_TMUX_WINDOWS - windows)" "2" "$(capacity_free_slots)"
@@ -380,6 +383,103 @@ echo "$(( $(date +%s) - 2700 ))" > "$IDLE_CAPACITY_WAKE_FILE"
 echo "$(cut -d' ' -f1 "$IDLE_CAPACITY_SET_FILE") $(( $(date +%s) - 21600 ))" > "$IDLE_CAPACITY_SET_FILE"
 idle_capacity_wake_pass
 check "unchanged set past the repeat window: notes again" "1" "$(notes idle_capacity)"
+
+# ── #1046 A: a shrunk set is not a change ────────────────────────────────────
+reset
+echo '[{"number":10,"labels":[]},{"number":12,"labels":[]},{"number":13,"labels":[]}]' > "$AVAILABLE_JSON"
+idle_capacity_wake_pass
+mv "$COORD_INBOX_DIR"/*-idle_capacity-*.md "$T/"
+echo "$(( $(date +%s) - 2700 ))" > "$IDLE_CAPACITY_WAKE_FILE"
+echo '[{"number":10,"labels":[]},{"number":12,"labels":[]}]' > "$AVAILABLE_JSON"
+idle_capacity_wake_pass
+check "#1046 A: issue closed/picked up (shorter list): no note" "0" "$(notes idle_capacity)"
+echo "$(( $(date +%s) - 2700 ))" > "$IDLE_CAPACITY_WAKE_FILE"
+echo '[{"number":10,"labels":[]},{"number":12,"labels":[]},{"number":14,"labels":[]}]' > "$AVAILABLE_JSON"
+idle_capacity_wake_pass
+check "#1046 A: a new issue after the shrink notes within one check" "1" "$(notes idle_capacity)"
+mv "$COORD_INBOX_DIR"/*-idle_capacity-*.md "$T/"
+echo "$(( $(date +%s) - 2700 ))" > "$IDLE_CAPACITY_WAKE_FILE"
+echo '[{"number":10,"labels":[]}]' > "$AVAILABLE_JSON"; idle_capacity_wake_pass
+echo "$(( $(date +%s) - 2700 ))" > "$IDLE_CAPACITY_WAKE_FILE"
+echo '[{"number":10,"labels":[]},{"number":12,"labels":[]}]' > "$AVAILABLE_JSON"; idle_capacity_wake_pass
+check "#1046 A: issue that dropped out and came back counts as new" "1" "$(notes idle_capacity)"
+check "idle_set_has_new: subset is not new" "1" "$(idle_set_has_new '1,2|' '1,2,3|' && echo 0 || echo 1)"
+check "idle_set_has_new: new night-ok label is new" "0" "$(idle_set_has_new '1,2|2' '1,2|' && echo 0 || echo 1)"
+
+# ── #1046 B: approval reminders back off, go to the operator ─────────────────
+coord_pending_approval_age() { [ -n "$APPROVAL_AGE" ] && echo "$APPROVAL_AGE"; }
+check "#1046 B: reminder schedule 45m,1.5h,3h,6h,12h" "2700 5400 10800 21600 43200" "$(for n in 0 1 2 3 4; do approval_remind_due_secs $n; done | tr '\n' ' ' | sed 's/ $//')"
+reset; APPROVAL_AGE=600
+approval_reminder_pass
+check "#1046 B: approval 10 min old: no reminder" "0" "$([ -s "$APPROVAL_REMIND_LOG" ] && echo 1 || echo 0)"
+RC="$T/remind-cmd"; printf '#!/bin/sh\necho "$1" >> "%s"\n' "$T/remind-out" > "$RC"; chmod +x "$RC"; rm -f "$T/remind-out"
+WATCH_OPERATOR_REMIND_CMD="$RC"
+# 8 h approval, simulated by moving the episode start back: state holds start+count
+now=$(date +%s); got=""
+for age in 2800 3000 5500 10900 21700 28000 30000; do
+    APPROVAL_AGE=$age; start=$((now - age)); [ -e "$APPROVAL_REMIND_STATE_FILE" ] || echo "$start 0" > "$APPROVAL_REMIND_STATE_FILE"
+    sed -i "1s/^[0-9]*/$start/" "$APPROVAL_REMIND_STATE_FILE"
+    approval_reminder_pass
+done
+check "#1046 B: 8h open approval: reminders at 45m, 1.5h, 3h, 6h only" "4" "$(wc -l < "$T/remind-out" | tr -d ' ')"
+check "#1046 B: reminders go to the operator command, not the coordinator inbox" "0" "$(ls "$COORD_INBOX_DIR" 2>/dev/null | grep -c . || true)"
+check "#1046 B: no doorbell for reminders" "0" "$(rings)"
+rm -f "$APPROVAL_REMIND_STATE_FILE" "$T/remind-out"; APPROVAL_AGE=28800
+approval_reminder_pass; approval_reminder_pass; approval_reminder_pass
+check "#1046 B: watcher restarted 8h into an approval: ONE catch-up reminder, not a burst" "1" "$(wc -l < "$T/remind-out" | tr -d ' ')"
+APPROVAL_AGE=""; approval_reminder_pass
+check "#1046 B: answered approval clears the schedule" "no" "$([ -e "$APPROVAL_REMIND_STATE_FILE" ] && echo yes || echo no)"
+WATCH_OPERATOR_REMIND_CMD=""
+
+# ── #1046 C: merged PR clears blocked:pr-N ───────────────────────────────────
+GH2="$T/gh2bin"; mkdir -p "$GH2"; GHLOG="$T/gh2.log"
+cat > "$GH2/gh" <<'GHEOF'
+#!/bin/bash
+echo "$*" >> "$GH_LOG"
+case "$1 $2" in
+  "issue list") cat "$GH_BLOCKED_JSON" ;;
+  "pr view") case "$3" in 7) echo MERGED ;; 8) echo OPEN ;; 9) echo CLOSED ;; esac ;;
+  "issue edit") exit 0 ;;
+esac
+GHEOF
+chmod +x "$GH2/gh"; export GH_LOG="$GHLOG" GH_BLOCKED_JSON="$T/blocked.json"
+SAVED_PATH="$PATH"; PATH="$GH2:$PATH"
+reset; : > "$GHLOG"
+echo '[{"number":50,"labels":[{"name":"blocked"},{"name":"blocked:pr-7"}]},
+      {"number":51,"labels":[{"name":"blocked"},{"name":"blocked:pr-7"},{"name":"blocked:pr-8"}]},
+      {"number":52,"labels":[{"name":"blocked"},{"name":"blocked:pr-8"}]},
+      {"number":53,"labels":[{"name":"blocked"}]}]' > "$GH_BLOCKED_JSON"
+blocked_pr_sweep_pass
+grep -q "issue edit 50 --remove-label blocked:pr-7" "$GHLOG" && grep -q "issue edit 50 --remove-label blocked$" "$GHLOG" && got=yes || got=no
+check "#1046 C: merged PR: issue 50 loses blocked:pr-7 and blocked" "yes" "$got"
+grep -q "issue edit 51 --remove-label blocked:pr-7" "$GHLOG" && ! grep -q "issue edit 51 --remove-label blocked$" "$GHLOG" && got=yes || got=no
+check "#1046 C: issue 51 still waits on open PR 8: only blocked:pr-7 removed" "yes" "$got"
+grep -q "issue edit 52" "$GHLOG" && got=yes || got=no
+check "#1046 C: open PR: issue 52 untouched" "no" "$got"
+check "#1046 C: one blocked_pr_cleared note, one ring" "1:1" "$(notes blocked_pr_cleared):$(rings)"
+grep -q "#50" "$COORD_INBOX_DIR"/*-blocked_pr_cleared-*.md && ! grep -q "#51" "$COORD_INBOX_DIR"/*-blocked_pr_cleared-*.md && got=yes || got=no
+check "#1046 C: note names only fully unblocked issues" "yes" "$got"
+: > "$GHLOG"; rm -rf "$COORD_INBOX_DIR" "$RANG"
+blocked_pr_sweep_pass
+check "#1046 C: rate-limited: no second gh call inside the interval" "0" "$(wc -l < "$GHLOG" | tr -d ' ')"
+LAST_BLOCKED_PR_SWEEP=0; echo '[{"number":52,"labels":[{"name":"blocked"},{"name":"blocked:pr-9"}]}]' > "$GH_BLOCKED_JSON"
+blocked_pr_sweep_pass
+check "#1046 C: closed-unmerged PR: no note, no edit" "0:0" "$(notes blocked_pr_cleared):$(grep -c 'issue edit' "$GHLOG")"
+# a failed `blocked` removal must leave blocked:pr-N in place so the next sweep retries
+cat > "$GH2/gh" <<'GHEOF'
+#!/bin/bash
+echo "$*" >> "$GH_LOG"
+case "$1 $2" in
+  "issue list") cat "$GH_BLOCKED_JSON" ;;
+  "pr view") echo MERGED ;;
+  "issue edit") [ "$5" = blocked ] && exit 1; exit 0 ;;
+esac
+GHEOF
+LAST_BLOCKED_PR_SWEEP=0; : > "$GHLOG"; rm -rf "$COORD_INBOX_DIR" "$RANG"
+echo '[{"number":60,"labels":[{"name":"blocked"},{"name":"blocked:pr-7"}]}]' > "$GH_BLOCKED_JSON"
+blocked_pr_sweep_pass
+check "#1046 C: failed blocked removal: blocked:pr-7 kept for retry, no note" "0:0" "$(grep -c 'remove-label blocked:pr-7' "$GHLOG" || true):$(notes blocked_pr_cleared)"
+PATH="$SAVED_PATH"
 
 reset; echo '[{"number":21,"title":"epic: big thing","labels":[]},{"number":12,"title":"Tracking: stuff","labels":[]},{"number":13,"title":"FYI - note","labels":[]},{"number":14,"title":"Fix bug","labels":[]},{"number":15,"title":"Tracking pixel broken","labels":[]},{"number":16,"title":"Tracker UI crash","labels":[]},{"number":17,"title":"FYI update","labels":[]},{"number":18,"title":"Tracking – stuff","labels":[]}]' > "$AVAILABLE_JSON"
 check "epic/tracking/FYI titles are not counted (real bugs are)" "4 0" "$(dispatchable_issue_counts | cut -d' ' -f1,2)"
