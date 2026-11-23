@@ -187,13 +187,13 @@ case "$out" in *'./load-tiger.sh kdeyoga'*'merge PR 689'*) got=yes ;; *) got=no 
 check "render prints every do in full" "yes" "$got"
 check "render ends with exactly one closing line" "1" "$(grep -cE '^(Do now:|Nothing to do)' <<<"$out")"
 check "a rendered list passes the reply lint" "" "$("$LINT" <<<"$out" | cut -d: -f1 | paste -sd, -)"
-grep -q -- '- \*\*A2\*\*' "$P/.swarm/needs-you.md" && got=yes || got=no
+grep -q -- '- \*\*r689a\*\*' "$P/.swarm/needs-you.md" && got=yes || got=no
 check "needs-you.md (the file the hook diffs) holds the items" "yes" "$got"
-check "render --json lists open items" "A1,A2" "$("$NY" render --json --project "$P" | jq -r 'map(.label) | join(",")')"
+check "render --json lists open items" "A1,r689a" "$("$NY" render --json --project "$P" | jq -r 'map(.label) | join(",")')"
 "$NY" done A1 --project "$P"
-check "done closes one" "A2" "$("$NY" render --json --project "$P" | jq -r 'map(.label) | join(",")')"
-check "labels are never reused" "A3" "$("$NY" add --check-source operator --background "$BG" --project "$P" --title t --do 'run `x`')"
-"$NY" done A2 --project "$P"; "$NY" done A3 --project "$P"
+check "done closes one" "r689a" "$("$NY" render --json --project "$P" | jq -r 'map(.label) | join(",")')"
+check "labels are never reused" "A2" "$("$NY" add --check-source operator --background "$BG" --project "$P" --title t --do 'run `x`')"
+"$NY" done r689a --project "$P"; "$NY" done A2 --project "$P"
 # a fenced --do: the fence must open on its own line and Do now: must show the command
 F="$T/fproj"; mkdir -p "$F/.swarm"
 "$NY" add --check-source operator --background "$BG" --project "$F" --title "Load data" --do "$(printf '```\n./load.sh kdeyoga\n```')" >/dev/null

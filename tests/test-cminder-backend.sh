@@ -55,13 +55,13 @@ labels() { jq -r 'map(.label) | join(",")' <<<"$("$NY" render --json --project "
 P="$T/p"; mkdir -p "$P/.swarm"
 "$NY" add --check-source operator --background "$BG" --project "$P" --title "Merge PR 5" --kind decision --do 'Say `merge PR 5`' --url https://github.com/o/r/pull/5 >/dev/null
 "$NY" render --project "$P" >/dev/null
-"$NY" done A1 --project "$P"
+"$NY" done r5a --project "$P"
 check "backend unset: add/render/done make no corpusminder calls" "0" "$(calls)"
 NEEDS_YOU_BACKEND=file "$NY" add --check-source operator --background "$BG" --project "$P" --title t --do 'run `x`' >/dev/null
 check "backend=file: no calls either" "0" "$(calls)"
 set +e; NEEDS_YOU_BACKEND=bogus "$NY" render --project "$P" >/dev/null 2>&1; ec=$?; set -e
 check "an unknown backend is refused" "2" "$ec"
-NEEDS_YOU_BACKEND=file "$NY" done A2 --project "$P"
+NEEDS_YOU_BACKEND=file "$NY" done A1 --project "$P"
 
 # ── render closing line, both backends (no contradictory endings) ────────────
 for B in file corpusminder; do
@@ -86,7 +86,7 @@ check "the 2026-11-09 fixture is flagged by the lint" "two-endings" "$("$LINT" <
 # ── corpusminder backend: file, complete, outage ─────────────────────────────
 export NEEDS_YOU_BACKEND=corpusminder CMINDER_URL=http://cm.test/ CMINDER_API_KEY=secret CMINDER_FORUM_ID=77
 C="$T/c"; mkdir -p "$C/.swarm"
-check "add prints the label" "A1" "$("$NY" add --check-source operator --background "$BG" --project "$C" --title "Approve PR 9" --kind decision --risk "touches auth" --rec "yes, high confidence" --default "automerges at 18:00" --do 'Say `merge PR 9`' --url https://github.com/o/r/pull/9)"
+check "add prints the label" "r9a" "$("$NY" add --check-source operator --background "$BG" --project "$C" --title "Approve PR 9" --kind decision --risk "touches auth" --rec "yes, high confidence" --default "automerges at 18:00" --do 'Say `merge PR 9`' --url https://github.com/o/r/pull/9)"
 check "add made one POST /api/items" "1" "$(cut -f1 "$CALLS" | grep -c 'POST .*cm.test/api/items$' || true)"
 body="$(cut -f2 "$CALLS" | tail -1)"
 check "item kind is DECISION" "DECISION" "$(jq -r .kind <<<"$body")"
@@ -95,15 +95,15 @@ check "fields carry the do, risk and issue number" "Say \`merge PR 9\`|touches a
 check "forumId from CMINDER_FORUM_ID" "77" "$(jq -r .forumId <<<"$body")"
 check "the API key goes in a bearer header" "1" "$(grep -c 'Authorization: Bearer secret' "$CALLS")"
 check "corpusminder id is kept in the local store" "42" "$(jq -r .cm_id "$C/.swarm/needs-you.jsonl")"
-grep -q -- '- \*\*A1\*\*' "$C/.swarm/needs-you.md" && got=yes || got=no
+grep -q -- '- \*\*r9a\*\*' "$C/.swarm/needs-you.md" && got=yes || got=no
 check "the local copy is written too" "yes" "$got"
-"$NY" done A1 --project "$C"
+"$NY" done r9a --project "$C"
 check "done completes the corpusminder item" "1" "$(cut -f1 "$CALLS" | grep -c 'POST .*cm.test/api/items/42/complete' || true)"
 FAIL=1 "$NY" add --check-source operator --background "$BG" --project "$C" --title "Outage item" --do 'run `x`' >/dev/null 2>"$T/err" && ec=0 || ec=$?
 check "an outage does not fail add" "0" "$ec"
 check "...it warns" "1" "$(grep -c 'corpusminder filing failed' "$T/err")"
-check "...and the item is still in the local list" "A2" "$(labels "$C")"
-FAIL=1 "$NY" done A2 --project "$C" 2>"$T/err"
+check "...and the item is still in the local list" "A1" "$(labels "$C")"
+FAIL=1 "$NY" done A1 --project "$C" 2>"$T/err"
 check "an outage does not fail done; the item closes locally" "" "$(labels "$C")"
 
 # ── empty fields: "none" placeholders are dropped ────────────────────────────

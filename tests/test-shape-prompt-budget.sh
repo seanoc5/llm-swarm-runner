@@ -159,8 +159,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # "Auto-merge high-risk PRs" section (~950 bytes) in coordinator.md and
 # coordinator-work.md: opt-in 🔴 auto-merge behind two-model review and protected
 # paths. The gates live in swarm-merge.sh, not in the prose.
+# 2026-11-23 (#1052): coordinator 36200 -> 36300. Needs-you items are labelled by
+# PR/issue number plus letter (1042a): one sentence in the standing-list bullet.
 WORKER_MAX="${WORKER_MD_MAX_BYTES:-26400}"
-COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-36200}"
+COORD_MAX="${COORDINATOR_MD_MAX_BYTES:-36300}"
 BARE_MAX="${WORKER_BARE_MD_MAX_BYTES:-13100}"   # issue #510 trial prompt; ~7.5KB is script-parsed contract
 SHARED_MAX="${COORD_SHARED_MD_MAX_BYTES:-6400}"   # issue #767 split prompts; 6100 -> 6400 for #1017 Asks section
 WORK_MAX="${COORD_WORK_MD_MAX_BYTES:-26700}"

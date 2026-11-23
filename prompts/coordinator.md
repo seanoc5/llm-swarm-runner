@@ -197,10 +197,10 @@ Every wake report and status update **ends** with the digest block — panes are
 ```
 ## Wake digest — <time> (wake: iss-696 finished | manual status request)
 **A. Needs you (ranked by risk × age):**
-- **A1** 🔴 PR #714 (rate limiting on public MCP surface) — awaiting your manual
+- **714a** 🔴 PR #714 (rate limiting on public MCP surface) — awaiting your manual
    merge since yesterday. <quoted Bottom line>. Default if silent: stays
    open (🔴 merges on your plain `merge N` typed here).
-- **A2** 🟡 PR #689 (data-authority pages) — self-review APPROVE_WITH_CAVEATS:
+- **689a** 🟡 PR #689 (data-authority pages) — self-review APPROVE_WITH_CAVEATS:
    <caveat>. `merge 689` when satisfied. Default: stays open.
 **What surprised me:** <deltas worth flagging, or "Nothing">
 **Moved since last wake:** #707 merged; iss-702 opened PR #710; nudged #713 (stale 8h).
@@ -211,8 +211,8 @@ Every wake report and status update **ends** with the digest block — panes are
 - **Needs you** (new or changed items): per PR: plain name, quoted Bottom line, caveat + recommendation, then the command (alternative last), then the default if silent. Every rendered item carries what it does, its risk, your recommendation + confidence, and the full https PR URL; never a name-and-time stub. Re-check `gh pr view N --json mergeable` right before listing a merge: CONFLICTING → "conflicts, its worker is resolving" (the watcher sends the brief), not a merge command.
 - **What surprised me** is always present ("Nothing" when empty).
 - **No-ceremony** (nudge has no `Woke for:`): Needs you unchanged, "Nothing" surprised and every open item a pure yes/no or pick-one decision → one line (`Wake 16:52: 2 inbox items triaged, Needs you unchanged: <PR URLs>`), no digest. Any open item with an action: use the Quiet reply rule.
-- **Standing list:** keep it with `scripts/needs-you.sh add|done|verify|render` (writes `.swarm/needs-you.md`); `add` needs a plain-words `--background` and a `--do` with a command or https URL; never hand-write the file. State the facts an item rests on with `--claim`; before it rides into another digest, re-check them and run `needs-you.sh verify <label>`, else render flags it unverified. Digests render from this list, never retyped. An item names its change itself (file, line, before and after), never "do it yourself" alone (#680).
-- **Quiet reply** (nudge carries `Woke for:`): Needs-you unchanged and nothing surprising → the `Woke for:` line, one line (`Handled 3 items: 2 merged, 1 idle slot.`), then `scripts/needs-you.sh render` pasted verbatim: every open action with its command or URL in full, never "details in a file" or "command above" (the operator reads cold; scrolled-off text is gone). Only an all-decision list may shrink to "Your list unchanged (2 items)" plus PR URLs. `lint-coordinator-reply.sh` runs on every reply (Stop hook) and blocks back-references, command-less actions and two closing lines. Changed list: new/changed items in full plus a count. Status requests get the full list.
+- **Standing list:** `add` labels a PR/issue `--url` item number+letter (`1042a`; no URL: `A1`), cited in full; `done 042a` works. Keep it with `scripts/needs-you.sh add|done|verify|render`; `add` needs a plain-words `--background` and a `--do` with a command or https URL; never hand-write the file. State the facts an item rests on with `--claim`; before it rides into another digest, re-check them and run `needs-you.sh verify <label>`, else render flags it unverified. Digests render from this list, never retyped. An item names its change itself (file, line, before and after), never "do it yourself" alone (#680).
+- **Quiet reply** (nudge carries `Woke for:`): Needs-you unchanged and nothing surprising → the `Woke for:` line, one line (`Handled 3 items: 2 merged, 1 idle slot.`), then `scripts/needs-you.sh render` pasted verbatim: every open action with its command or URL in full, never "details in a file" or "command above". Only an all-decision list may shrink to "Your list unchanged (2 items)" plus PR URLs. `lint-coordinator-reply.sh` runs on every reply (Stop hook) and blocks back-references, command-less actions and two closing lines. Changed list: new/changed items in full plus a count. Status requests get the full list.
 - **`<details>` isn't folded in a pane:** put it above the digest.
 - **Moved** diffs against your previous digest (first of a session: say so). Keep the digest under ~25 lines; the startup `OPEN=…` line is the Backlog row, not reported twice.
 - **List labels:** a letter per list, items `- **A1**`, `- **A2**`, next list B1…; heading says "Pick one" or "Pick any". Never bare `1.` lists: they restart and collide.

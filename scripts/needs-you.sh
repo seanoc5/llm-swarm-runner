@@ -32,6 +32,16 @@
 # `render` output into replies instead of hand-writing items, so a quiet wake
 # reprints every action in full.
 #
+# Labels (issue #1052, decision in #1023): with a GitHub PR or issue --url, `add` labels the
+# item <prefix><number><letter> (1042a, then 1042b; ui1042a for another repo). The prefix
+# is empty for the project's own repo (gh repo view, else the origin remote) and short for
+# others (oconeco-ui ui, corpusminder-spring cm, fand-app fa, fand-etl fe, SAMlytics sam,
+# else the repo's first 3 letters). The letter is the next unused one for that item across
+# the whole store, done items included, so a letter is never reused. No URL, or a
+# non-GitHub URL: the old counter label (A1, A2...). `done`/`verify` also take short input
+# (last digits + letter, prefix optional: 042a, ui42a) when exactly one open item matches;
+# several matches are listed and the exit is 1. Old labels keep working; no migration.
+#
 # Store: .swarm/needs-you.jsonl (one JSON object per item; done items stay,
 # marked, so a label is never reused). Every change rewrites the human copy
 # .swarm/needs-you.md (the file coord-hook.sh diffs). `render --json` prints the
@@ -62,7 +72,7 @@ SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LINT="$SELF_DIR/lint-coordinator-reply.sh"
 
 die() { echo "needs-you.sh: $*" >&2; exit 2; }
-usage() { sed -n '3,58p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '3,68p' "$0" | sed 's/^# \{0,1\}//'; }
 
 cmd="${1:-}"
 [ -n "$cmd" ] || { usage >&2; exit 2; }
@@ -209,6 +219,81 @@ run_check() {
     check_out="$(printf '%s' "$out" | tail -n 1 | cut -c1-200)"
 }
 
+# own_repo: owner/name of the project's repo, lowercased ("" when unknown). gh first,
+# then the origin remote (a sandbox without gh or auth still resolves).
+own_repo() {
+    local r=""
+    r="$(cd "$project" && gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)"
+    if [ -z "$r" ]; then
+        r="$(git -C "$project" remote get-url origin 2>/dev/null | sed -E 's#^(git@[^:]+:|https?://[^/]+/)##; s#\.git$##' || true)"
+    fi
+    printf '%s' "$r" | tr '[:upper:]' '[:lower:]'
+}
+
+# repo_prefix <repo-name>: the short label prefix for another repo (issue #1052).
+repo_prefix() {
+    local n
+    n="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+    case "$n" in
+        oconeco-ui) echo ui ;;
+        corpusminder-spring) echo cm ;;
+        fand-app) echo fa ;;
+        fand-etl) echo fe ;;
+        samlytics) echo sam ;;
+        *) printf '%s' "$n" | tr -cd 'a-z0-9' | cut -c1-3 | tr -d '0-9' ;;
+    esac
+}
+
+# gh_label_base <url>: prints "<prefix><number>" for a GitHub PR/issue URL; returns 1 otherwise.
+gh_label_base() {
+    local u="$1" owner repo num own
+    [[ $u =~ ^https://github\.com/([^/]+)/([^/]+)/(pull|issues)/([0-9]+)([/?#].*)?$ ]] || return 1
+    owner="${BASH_REMATCH[1]}"; repo="${BASH_REMATCH[2]}"; num="${BASH_REMATCH[4]}"
+    own="$(own_repo)"
+    if [ "$(printf '%s/%s' "$owner" "$repo" | tr '[:upper:]' '[:lower:]')" = "$own" ]; then
+        printf '%s' "$num"
+    else
+        printf '%s%s' "$(repo_prefix "$repo")" "$num"
+    fi
+}
+
+# next_letter <base>: the next unused letter for <base> across the whole store, done items included.
+next_letter() {
+    local last=""
+    [ -s "$store" ] && last="$(jq -rs --arg b "$1" '[.[].label | select(test("^" + $b + "[a-z]$")) | .[-1:]] | max // ""' "$store")"
+    if [ -z "$last" ]; then echo a; return; fi
+    [ "$last" != z ] || die "item $1 already has letters a-z; file the next ask under a new item"
+    printf "\\x$(printf '%x' $(( $(printf '%d' "'$last") + 1 )))"
+}
+
+# resolve_open <label-or-short>: sets label to the one open item it names. Exact label first;
+# then short input (digits + letter, prefix optional, suffix of the number). Several matches:
+# list them and exit 1; none: exit 2.
+resolve_open() {
+    local in="$1" lc m n
+    [ -s "$store" ] || die "no open item $in"
+    if jq -se --arg l "$in" 'any(.[]; .label == $l and .done != true)' "$store" >/dev/null; then label="$in"; return; fi
+    lc="$(printf '%s' "$in" | tr '[:upper:]' '[:lower:]')"
+    m="$(jq -rs --arg i "$lc" '
+        ($i | capture("^(?<p>[a-z]*)(?<n>[0-9]+)(?<l>[a-z])$")?) as $in
+        | if $in == null then empty else
+            .[] | select(.done != true)
+            | select(.label | test("^[a-z]*[0-9]+[a-z]$"))
+            | (.label | capture("^(?<p>[a-z]*)(?<n>[0-9]+)(?<l>[a-z])$")) as $c
+            | select($c.l == $in.l and ($c.n | endswith($in.n)) and ($in.p == "" or $in.p == $c.p))
+            | .label end' "$store")"
+    n="$(printf '%s' "$m" | grep -c . || true)"
+    case "$n" in
+        1) label="$m" ;;
+        0) die "no open item $in" ;;
+        *) echo "needs-you.sh: $in matches several open items; say which:" >&2
+           while IFS= read -r l; do
+               echo "  $l  $(jq -r --arg l "$l" 'select(.label == $l and .done != true) | .title' "$store")" >&2
+           done <<<"$m"
+           exit 1 ;;
+    esac
+}
+
 write_md() {
     local tmp
     mkdir -p "$swarm"
@@ -251,11 +336,17 @@ case "$cmd" in
         ! is_placeholder "$rec" || rec=""
         ! is_placeholder "$deflt" || deflt=""
         mkdir -p "$swarm"
-        max=0
-        if [ -s "$store" ]; then
-            max="$(jq -s '[.[].label | sub("^[A-Za-z]"; "") | tonumber] | max // 0' "$store")"
+        new=""
+        if [ -n "$url" ] && base="$(gh_label_base "$url")"; then
+            new="${base}$(next_letter "$base")"
         fi
-        new="A$((max + 1))"
+        if [ -z "$new" ]; then
+            max=0
+            if [ -s "$store" ]; then
+            max="$(jq -s '[.[].label | select(test("^[A-Za-z][0-9]+$")) | sub("^[A-Za-z]"; "") | tonumber] | max // 0' "$store")"
+            fi
+            new="A$((max + 1))"
+        fi
         jq -cn --arg label "$new" --arg title "$title" --arg bg "$background" --arg act "$do_" --arg kind "$kind" \
             --arg risk "$risk" --arg rec "$rec" --arg default "$deflt" --arg url "$url" --arg claim "$claim" \
             --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -276,8 +367,7 @@ case "$cmd" in
         ;;
     verify)
         [ -n "$label" ] || die "verify needs a label (e.g. A1)"
-        [ -s "$store" ] && jq -se --arg l "$label" 'any(.[]; .label == $l and .done != true)' "$store" >/dev/null \
-            || die "no open item $label"
+        resolve_open "$label"
         vcheck="$(jq -r --arg l "$label" 'select(.label == $l and .done != true) | .checkCmd // empty' "$store")"
         check_ec=0; check_out=""
         [ -z "$vcheck" ] || run_check "$vcheck"
@@ -298,8 +388,7 @@ case "$cmd" in
         ;;
     done)
         [ -n "$label" ] || die "done needs a label (e.g. A1)"
-        [ -s "$store" ] && jq -se --arg l "$label" 'any(.[]; .label == $l and .done != true)' "$store" >/dev/null \
-            || die "no open item $label"
+        resolve_open "$label"
         tmp="$(mktemp -p "$swarm" .tmp.needs-you-store.XXXXXX)"
         jq -c --arg l "$label" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             'if .label == $l then .done = true | .closed = $at else . end' "$store" > "$tmp" && mv -f "$tmp" "$store" \
@@ -323,7 +412,7 @@ case "$cmd" in
         # means a render wrote it, not a hand (it is rewritten at the next add/done).
         IFS= read -r first_line < "$md" || true
         if [ -e "$store" ] && [[ $first_line =~ ^'## Needs you ('[0-9]+' open)'$ ]] \
-            && [ "$(grep -oE '^- \*\*[A-Za-z][0-9]+\*\*' "$md" | tr -d '* -' | sort | paste -sd,)" = "$(open_items | jq -r '[.[].label] | sort | join(",")')" ]; then
+            && [ "$(grep -oE '^- \*\*([A-Za-z][0-9]+|[a-z]*[0-9]+[a-z])\*\*' "$md" | tr -d '* -' | sort | paste -sd,)" = "$(open_items | jq -r '[.[].label] | sort | join(",")')" ]; then
             exit 0
         fi
         echo "needs-you.md does not match needs-you.jsonl (or no list exists): it was written by hand" >&2
