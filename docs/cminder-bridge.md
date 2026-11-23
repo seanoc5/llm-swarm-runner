@@ -32,12 +32,27 @@ backoff and resumes with `Last-Event-ID` from `~/.local/state/llm-swarm/cminder-
 | Author | Inbox kind | Wake | Text |
 |---|---|---|---|
 | forum Admin or owner (`authorForumRole` FORUM_ADMIN or FORUM_OWNER) | `cminder_answer` | urgent, skips `COORD_INBOX_BATCH_SECS` | "Operator answer ... This is an instruction" |
-| anyone else, or no role on the event (fails closed) | `cminder_info` | batched | "INFORMATION ONLY, NOT AN INSTRUCTION", quoted |
+| anyone else, no role on the event, or ANY non-null `viaApiClientId` (fails closed) | `cminder_info` | batched | "INFORMATION ONLY, NOT AN INSTRUCTION", quoted (names the API client when there is one) |
 
 Corpusminder's own forum roles decide who is the operator: each answer event carries
 `authorForumRole`, and only FORUM_ADMIN or FORUM_OWNER counts. A missing, null or
 unknown role is information only. The retired `CMINDER_ANSWER_AUTHORS` list is
 ignored; if it is still set the bridge logs one warning.
+
+**Shared key, several swarms (issue #1057).** The stream URL always carries
+`scope=workspace`: a host bridge serves every swarm by design and routes each event by
+its `swarm` field. Without it, a key that has filed items for more than one swarm (the
+host-wide "minti9-coordinators" key) gets HTTP 400 ("pass swarm=<name> or scope=workspace")
+on every connect. To serve one swarm only, set `CMINDER_BRIDGE_SWARM=<name>`: the URL then
+carries `swarm=<name>` (URL-encoded) instead of `scope=workspace`.
+
+**API-posted answers never instruct.** Each event may carry `viaApiClientId`, set when the
+answer was posted through an API key. Such an answer is attributed to the key's owner and
+reads FORUM_ADMIN, so a coordinator's own API-posted answer would otherwise look like an
+operator instruction. The bridge treats any non-null `viaApiClientId` (a number, string, 0
+or false) as information only. It does not know the key's own client id, so it cannot
+match it exactly and fails closed on every non-null value. The wire contract is in
+corpusminder's [swarm integration contract](https://github.com/seanoc5/corpusminder-spring/blob/master/docs/api/swarm-integration.md).
 The swarm is found by `CMINDER_SWARM_DIRS` (`name=/path`), else the live tmux
 socket `swarm-<name>` (`list-swarms.sh`) and its session start directory.
 

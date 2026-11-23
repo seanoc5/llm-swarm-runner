@@ -167,6 +167,21 @@ set +e; env -u CMINDER_API_KEY "$BRIDGE" >/dev/null 2>&1; ec=$?; set -e
 check "the bridge refuses to start without its key" "2" "$ec"
 
 
+
+# ── shared multi-swarm key (#1057): scope=workspace, and API-posted answers never instruct ──
+check "the stream asks for scope=workspace by default (every stream call so far)" "0" "$(grep 'answers/stream' "$CALLS" | grep -vc 'workspaceId=5&scope=workspace' || true)"
+rm -f "$BP/.swarm/coord-inbox/"* "$T/last-id"
+: > "$CALLS"; : > "$SSE"
+CMINDER_BRIDGE_SWARM="my swarm" "$BRIDGE" 2>/dev/null
+check "CMINDER_BRIDGE_SWARM narrows to swarm=<name> (url-encoded), without scope=workspace" "1" "$(grep -c 'workspaceId=5&swarm=my%20swarm' "$CALLS" || true)"
+check "...and then sends no scope=workspace" "0" "$(grep -c 'scope=workspace' "$CALLS" || true)"
+# viaApiClientId: an owner's own API-posted answer reads FORUM_ADMIN but must not instruct (fail closed on any non-null).
+printf 'id: 40\nevent: answer\ndata: {"id":40,"itemId":42,"swarm":"swarm-proj","answer":"posted by my agent","authorUserId":7,"authorForumRole":"FORUM_ADMIN","viaApiClientId":12}\n\nid: 41\nevent: answer\ndata: {"id":41,"itemId":42,"swarm":"swarm-proj","answer":"owner via key","authorUserId":3,"authorForumRole":"FORUM_OWNER","viaApiClientId":"abc"}\n\nid: 42\nevent: answer\ndata: {"id":42,"itemId":42,"swarm":"swarm-proj","answer":"zero client id","authorUserId":7,"authorForumRole":"FORUM_ADMIN","viaApiClientId":0}\n\nid: 43\nevent: answer\ndata: {"id":43,"itemId":42,"swarm":"swarm-proj","answer":"human admin","authorUserId":7,"authorForumRole":"FORUM_ADMIN","viaApiClientId":null}\n\n' > "$SSE"
+"$BRIDGE" 2>/dev/null
+check "an admin/owner answer with a non-null viaApiClientId (12, \"abc\", 0) lands as cminder_info" "3" "$(ls "$BP/.swarm/coord-inbox/" | grep -c cminder_info)"
+check "...only the one with viaApiClientId null is an instruction" "1" "$(ls "$BP/.swarm/coord-inbox/" | grep -c cminder_answer)"
+check "...the info text names the API client" "1" "$(cat "$BP"/.swarm/coord-inbox/*cminder_info* | grep -c 'posted through API client 12')"
+rm -f "$BP/.swarm/coord-inbox/"*
 # ── answers are never lost: hold when the swarm is down, keep the id on failure ──
 export CMINDER_BRIDGE_HELD="$T/held"
 LP="$T/late-proj"; mkdir -p "$LP/.swarm"
