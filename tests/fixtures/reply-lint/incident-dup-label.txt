@@ -1,0 +1,9 @@
+Yes, it shipped.
+
+Why it waited:
+- **A.** The issue was written in worker language.
+- **B.** The fix touches kdeyoga.
+
+What happens now:
+- **A.** The worker checks the sign-in.
+- **B.** The PR spells out what he will see.

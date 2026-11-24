@@ -22,6 +22,9 @@ trap 'rm -rf "$T"' EXIT
 rules() { "$LINT" < "$1" | grep -v '^lede-identifier:' | cut -d: -f1 | sort -u | paste -sd, -; }
 
 # ── lint: the incidents from the issue, replayed ─────────────────────────────
+# dup-label: lettered lists that restart at A (operator, repeated many times)
+check "restarting A./B. lists: dup-label" "dup-label" "$("$LINT" --only dup-label < "$FX/incident-dup-label.txt" | cut -d: -f1 | sort -u)"
+check "A1/A2 then B1, prose starting with A: clean" "" "$("$LINT" --only dup-label < "$FX/clean-dup-label.txt")"
 check "A13 'Start the load (command above)': backref + no-command" "backref,no-command" "$(rules "$FX/incident-start-load.txt")"
 check "forward pointer 'run the command below' + fence: clean" "" "$(rules "$FX/clean-command-below.txt")"
 check "quiet reply 'details in .swarm/needs-you.md': backref" "backref" "$(rules "$FX/incident-quiet-pointer.txt")"
