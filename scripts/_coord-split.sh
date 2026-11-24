@@ -51,12 +51,12 @@ coord_split_flag_urgent() {
 # coord_needs_you_items <file>: the "- **A1** ..." item lines of a Needs-you
 # list, one per line (the shape coordinator-work.md's digest block uses).
 coord_needs_you_items() {
-    grep -E '^[[:space:]]*-[[:space:]]+\*\*[A-Za-z][0-9]+\*\*' "$1" 2>/dev/null || true
+    grep -E '^[[:space:]]*-[[:space:]]+\*\*([A-Za-z][0-9]+|[a-z]*[0-9]+[a-z]+)\*\*' "$1" 2>/dev/null || true
 }
 
 # Item text without its A1/B2 label: renumbering a list is not a new item.
 coord_needs_you_bodies() {
-    coord_needs_you_items "$1" | sed -E 's/^[[:space:]]*-[[:space:]]+\*\*[A-Za-z][0-9]+\*\*[[:space:]]*//'
+    coord_needs_you_items "$1" | sed -E 's/^[[:space:]]*-[[:space:]]+\*\*([A-Za-z][0-9]+|[a-z]*[0-9]+[a-z]+)\*\*[[:space:]]*//'
 }
 
 # coord_needs_you_note <swarm-dir>

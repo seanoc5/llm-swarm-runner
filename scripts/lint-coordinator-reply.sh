@@ -192,7 +192,7 @@ BEGIN {
     if (infence) { if (item != "") item = item "\n" line; next }
     if (l ~ back) hits[++n] = "backref: " line
     if (line ~ /^[[:space:]]*[0-9]+[.)][[:space:]]/ && !bl++) hits[++n] = "bare-list: " line
-    if (line ~ /^[[:space:]]*-[[:space:]]+\*\*[A-Za-z][0-9]+\*\*/ || l ~ pend) {
+    if (line ~ /^[[:space:]]*-[[:space:]]+\*\*([A-Za-z][0-9]+|[a-z]*[0-9]+[a-z]+)\*\*/ || l ~ pend) {
         flush_item(); item = line; first = line; ispend = (l ~ pend)
     } else if (item != "") {
         if (line ~ /^[[:space:]]*$/ || line ~ /^(#|\*\*)/ ) flush_item()
@@ -238,7 +238,7 @@ stale_window_hits() {
         done < <(printf '%s' "$block" | grep -oiE '(PR[ #/]*|pull/|iss-|#)[0-9]+' | grep -oE '[0-9]+')
     done < <(printf '%s\n' "$text" | awk '
         function out() { if (b != "") print b; b = "" }
-        /^[[:space:]]*-[[:space:]]+\*\*[A-Za-z][0-9]+\*\*/ { out(); b = $0; next }
+        /^[[:space:]]*-[[:space:]]+\*\*([A-Za-z][0-9]+|[a-z]*[0-9]+[a-z]+)\*\*/ { out(); b = $0; next }
         /^[[:space:]]*$/ || /^(#|\*\*)/ { out(); next }
         { if (b != "" && $0 ~ /^[[:space:]]/) b = b " " $0; else { out(); b = $0 } }
         END { out() }')
@@ -409,7 +409,7 @@ repeat_hits() {
     {
         l = tolower($0)
         if ($0 ~ /^[[:space:]]*$/ || $0 ~ /^#/) { cur = 0; next }
-        if ($0 ~ /^[[:space:]]*-[[:space:]]+\*\*[A-Za-z][0-9]+\*\*/) {
+        if ($0 ~ /^[[:space:]]*-[[:space:]]+\*\*([A-Za-z][0-9]+|[a-z]*[0-9]+[a-z]+)\*\*/) {
             lab = $0; sub(/^[[:space:]]*-[[:space:]]+\*\*/, "", lab); sub(/\*\*.*$/, "", lab)
             start("L", lab, $0)
         } else if (l ~ dono) start("D", "Do now", $0)
@@ -507,7 +507,7 @@ offer_hits() {
         l = tolower($0)
         if ($0 ~ /^#/ || l ~ pend) ctx = ""
         else if (l ~ dono) { ctx = "D"; blank = 0 }
-        else if ($0 ~ /^[[:space:]]*-[[:space:]]+\*\*[A-Za-z][0-9]+\*\*/) ctx = "L"
+        else if ($0 ~ /^[[:space:]]*-[[:space:]]+\*\*([A-Za-z][0-9]+|[a-z]*[0-9]+[a-z]+)\*\*/) ctx = "L"
         else if ($0 ~ /^[[:space:]]*$/) { if (ctx == "L") ctx = ""; blank = 1 }
         else if (ctx == "D" && blank) ctx = ""   # a new prose paragraph after Do now ends it
         else if (ctx == "L" && $0 !~ /^[[:space:]]/) ctx = ""
