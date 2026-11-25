@@ -109,6 +109,11 @@
 #                coord-hook.sh runs it warn-only by default (COORD_REPLY_LINT_OFFER=warn|block|off).
 #                Fix: run the commands yourself and report; ask a yes first only when the step
 #                is not cheap and reversible.
+#   dup-label    a list label is used for two items in one reply (operator, repeated
+#                since 2025): "A." in a why-list and "A." again in a fix-list, or "A1" twice.
+#                Also a bare single-letter label ("- **A.**", "- B)"), since those restart
+#                per list by habit. Fix: one letter per list, digits per item, never restarting:
+#                A1-A3 for the first list, B1-B2 for the next, C1... after that.
 #
 # Usage: lint-coordinator-reply.sh [--project DIR] [--only RULE[,RULE]] [--skip RULE[,RULE]] [--gloss N] [--why] [file]
 # --gloss N sets the carryover threshold; --why prints the matched reference for each carryover hit to stderr.
@@ -526,8 +531,26 @@ ask_hits() {
         print "ask-not-listed: " $0
     }'
 }
+dup_label_hits() {
+    printf '%s\n' "$text" | awk -v fence="$FENCE_RE" '
+    $0 ~ fence { inf = !inf; next }
+    inf { next }
+    {
+        line = $0
+        if (line ~ /^[[:space:]]*\*\*[A-Z]\.[[:space:]].*:\*\*/) next   # digest list heading "**A. Needs you:**"
+        if (!match(line, /^[[:space:]]*([-*][[:space:]]+)?(\*\*)?[A-Z][0-9]*[.):]?(\*\*)?([[:space:]]|$)/)) next
+        head = substr(line, RSTART, RLENGTH)
+        lab = head; gsub(/[^A-Z0-9]/, "", lab)
+        if (lab == "") next
+        if (head !~ /^[[:space:]]*[-*][[:space:]]/ && head !~ /\*\*/ && head !~ /[A-Z][0-9]*[.)]/) next
+        if (lab ~ /^[A-Z]$/ && head !~ /^[[:space:]]*[-*][[:space:]]+\*\*/ && head !~ /[A-Z][.)]/) next
+        if (lab ~ /^[A-Z]$/) { print "dup-label: bare letter " lab " (use " lab "1, " lab "2...): " line }
+        if (lab in seen) print "dup-label: " lab " used twice: " line
+        seen[lab] = 1
+    }'
+}
 want() { { [ -z "$ONLY" ] || [[ "$ONLY" == *",$1,"* ]]; } && ! [[ "$SKIP" == *",$1,"* ]]; }
-stale=""; issue=""; carry=""; lede=""; repeat=""; offer=""; ask=""
+stale=""; issue=""; carry=""; lede=""; repeat=""; offer=""; ask=""; dup=""
 want stale-window && stale="$(stale_window_hits)"
 want issue-merged && issue="$(issue_merged_hits)"
 want carryover && carry="$(carryover_hits)"
@@ -535,7 +558,8 @@ want lede-identifier && lede="$(lede_hits)"
 want repeat-item && repeat="$(repeat_hits)"
 want offer-to-act && offer="$(offer_hits)"
 want ask-not-listed && ask="$(ask_hits)"
-all="$(printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' "$hits" "$stale" "$issue" "$carry" "$lede" "$repeat" "$offer" "$ask" | sed '/^$/d')"
+want dup-label && dup="$(dup_label_hits)"
+all="$(printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' "$hits" "$stale" "$issue" "$carry" "$lede" "$repeat" "$offer" "$ask" "$dup" | sed '/^$/d')"
 if [ -n "$ONLY" ]; then
     all="$(printf '%s\n' "$all" | awk -v only="$ONLY" '{ split($0, p, ":"); if (index(only, "," p[1] ",")) print }')"
 fi

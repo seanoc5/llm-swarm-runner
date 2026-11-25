@@ -1,0 +1,10 @@
+Yes, it shipped.
+
+Why it waited:
+- **A1** The issue was written in worker language.
+- **A2** The fix touches kdeyoga.
+
+What happens now:
+- **B1** The worker checks the sign-in.
+- A worker also reads the logs.
+A plain sentence that starts with A.
