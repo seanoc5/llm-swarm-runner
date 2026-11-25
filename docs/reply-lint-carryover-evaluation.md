@@ -4,8 +4,9 @@ What this measures: whether `lint-coordinator-reply.sh`'s `carryover` rule
 catches "I referred to a carried-over item instead of restating it" (Cluster A
 of `docs/research/issue-645-reporting-rules.md`) without blocking ordinary
 replies. Same shape as `docs/grokkability-evaluation.md`: a known-bad fixture
-plus a sample of replies that drew no recorded complaint. Re-run with
-`scripts/eval-carryover-lint.sh --transcripts <claude project dir> --skip-dates <complaint days>`.
+plus a sample of replies that drew no recorded complaint. The run script
+(`scripts/eval-carryover-lint.sh`) was removed in #1067; recover it from git history
+(`git show a91e7c2:scripts/eval-carryover-lint.sh`).
 
 ## The rule in one paragraph
 
@@ -44,7 +45,7 @@ Fixture: `tests/fixtures/reply-lint/carryover-incidents.tsv`.
 Sample (rerun 2026-11-14 on master, final rule): all 2,327 assistant text replies
 in the 198 local civicstrata coordinator sessions, dated 2026-08-01 to 2026-11-14,
 leaving out 2026-10-15 (the one civicstrata complaint day the rule was tuned
-against). Command: `scripts/eval-carryover-lint.sh --transcripts
+against). Script: removed, see the note at the top; it was run with `--transcripts
 ~/.claude/projects/-opt-work-springboot-civicstrata --skip-dates 2026-10-15`.
 The transcripts keep growing, so a later rerun will give different counts; the
 numbers below are for that rerun only. "No complaint recorded" is not "was
