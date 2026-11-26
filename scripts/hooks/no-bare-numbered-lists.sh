@@ -1,29 +1,39 @@
 #!/usr/bin/env bash
 #
-# no-bare-numbered-lists.sh — user-level Claude Code Stop hook (issue #800).
-# Blocks a reply that contains a bare "1." / "2)" list outside a code fence and
-# asks for letter labels (A1, B1...). The terminal renumbers every "N." list from
-# 1, so two lists in one reply both read "1, 2, 3" and "your 2" is ambiguous.
-# Prose rules and memories did not hold; this runs on every reply in every
-# session, swarm or not. The regex lives in lint-coordinator-reply.sh (rule
-# bare-list), so swarm coordinators and interactive sessions share one check.
+# no-bare-numbered-lists.sh — user-level Claude Code hook (issue #800).
+# Catches a reply that contains a bare "1." / "2)" list outside a code fence.
+# The terminal renumbers every "N." list from 1, so two lists in one reply both
+# read "1, 2, 3" and "your 2" is ambiguous. The regex lives in
+# lint-coordinator-reply.sh (rule bare-list), shared with swarm coordinators.
 #
-# Install (user-level, covers every session) in ~/.claude/settings.json:
-#   {"hooks": {"Stop": [{"hooks": [{"type": "command",
-#     "command": "/path/to/llm-swarm-runner/scripts/hooks/no-bare-numbered-lists.sh"}]}]}}
+# Two modes, never a resend:
+#   Stop (no args): on a hit, save a reminder for this session and exit 0.
+#     It used to exit 2, which made the model resend a reply the operator had
+#     already read: the same message twice, looking like a glitch (2026-11-26).
+#   --remind (UserPromptSubmit): print the saved reminder, if any, as context
+#     for the next reply, then delete it. Never blocks the prompt.
 #
-# Input: Stop hook JSON on stdin (last_assistant_message, else transcript_path,
-# stop_hook_active). Exit 2 + stderr = block and show the reason to the model;
-# 0 = fine. Blocks at most once per reply chain (stop_hook_active => allow), and
-# any failure (no jq, unreadable transcript) lets the reply through.
-# Known trade-off: Stop runs after the reply is displayed, so a caught reply
-# shows twice. Move the check to a pre-display hook if Claude Code gains one.
-# Opt out for one session: NO_BARE_LISTS_HOOK=0.
+# Install in ~/.claude/settings.json:
+#   "Stop":             [{"hooks": [{"type": "command", "command": "<this script>"}]}]
+#   "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "<this script> --remind"}]}]
+#
+# State: ${BARE_LIST_STATE_DIR:-~/.local/state/llm-swarm/bare-list-pending}/<session_id>.
+# Any failure (no jq, unreadable transcript) does nothing. Opt out: NO_BARE_LISTS_HOOK=0.
 set -uo pipefail
 input="$(cat)"   # drain stdin first so the writer never sees a broken pipe
 [ "${NO_BARE_LISTS_HOOK:-1}" = "0" ] && exit 0
 command -v jq >/dev/null 2>&1 || exit 0
-[ "$(printf '%s' "$input" | jq -r '.stop_hook_active // false' 2>/dev/null)" = "true" ] && exit 0
+dir="${BARE_LIST_STATE_DIR:-$HOME/.local/state/llm-swarm/bare-list-pending}"
+sid="$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null || true)"
+sid="${sid//[^A-Za-z0-9_-]/}"; sid="${sid:-nosession}"
+note="$dir/$sid"
+
+if [ "${1:-}" = "--remind" ]; then
+    [ -s "$note" ] || exit 0
+    cat "$note"; rm -f "$note"
+    exit 0
+fi
+
 text="$(printf '%s' "$input" | jq -r '.last_assistant_message // empty' 2>/dev/null || true)"
 if [ -z "$text" ]; then
     tp="$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/null || true)"
@@ -36,5 +46,6 @@ lint="$(dirname "$self")/../lint-coordinator-reply.sh"
 [ -x "$lint" ] || exit 0
 hit="$(printf '%s\n' "$text" | "$lint" --only bare-list 2>/dev/null)" || true
 [ -n "$hit" ] || exit 0
-echo "Relabel every list with a letter prefix (A1, B1...), continuing letters already used; resend. Bare numbered lists collapse to 1, 2, 3 in the terminal, so \"your 2\" is ambiguous. First hit: ${hit#bare-list: }" >&2
-exit 2
+mkdir -p "$dir" 2>/dev/null || exit 0
+printf '%s\n' "Reminder from the bare-list hook: your previous reply used a bare numbered list (\"${hit#bare-list: }\"). Don't resend it. Use letter labels (A1, B1...) from now on, continuing letters already used; if the operator answers \"your 2\", ask which list they mean." > "$note"
+exit 0
