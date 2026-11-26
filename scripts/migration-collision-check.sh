@@ -73,10 +73,23 @@
 #            a one-time `spring.flyway.out-of-order=true` recovery start.
 #            Skipped when the version is already part of a same-version
 #            collision above (that's reported as a collision, unchanged).
-#            Opt-out: a project that intentionally runs Flyway with
-#            `outOfOrder=true` can set MIGRATION_ALLOW_OUT_OF_ORDER=1 in
-#            <project>/.swarm/.env — the verdict then becomes a warning
-#            (printed, same detail) and exits 0 instead of refusing.
+#            Opt-out (#1069): a project that runs Flyway with
+#            `outOfOrder=true` (e.g. timestamp versions V<yyyyMMddHHmm>,
+#            where PRs legitimately merge in any order and only an exact
+#            duplicate version is a real conflict) gets the verdict
+#            downgraded to a one-line note and exit 0, with no renumber
+#            recipe. MIGRATION_ALLOW_OUT_OF_ORDER (alias
+#            MIGRATION_OUT_OF_ORDER_OK), from the shell or
+#            <project>/.swarm/.env:
+#              unset/auto  auto-detect from the BASE branch tree: any of
+#                          src/main/resources/application*.{yml,yaml,properties},
+#                          build.gradle(.kts), pom.xml, flyway.conf/.toml
+#                          with an uncommented `out-of-order: true`,
+#                          `spring.flyway.out-of-order=true`,
+#                          `outOfOrder = true` or `<outOfOrder>true`
+#              1           always allow
+#              0           never allow (exit 3 even if the config says so)
+#            Duplicate versions (exit 2) are never affected by this.
 #   Alembic  Revision files under a `versions/` directory in that same
 #            union. Static parse of `revision = ...` / `down_revision = ...`
 #            assignments — no project venv or DB required. The same
@@ -100,11 +113,13 @@
 #
 # Exit codes:
 #   0  clean — no collision or out-of-order migration detected (or an
-#      out-of-order verdict downgraded to a warning by
-#      MIGRATION_ALLOW_OUT_OF_ORDER=1)
+#      out-of-order verdict downgraded to a warning because the project
+#      runs Flyway outOfOrder, auto-detected or MIGRATION_ALLOW_OUT_OF_ORDER=1;
+#      the verdict then reads clean, plus one "Allowed: ..." line)
 #   2  collision — duplicate Flyway version(s) and/or Alembic multi-head
 #   3  out-of-order — a PR-side Flyway file numbered below the base tip's
-#      max version (#556); PR mode only, see --ref note above
+#      max version (#556); PR mode only, see --ref note above; never
+#      returned for a project that runs Flyway outOfOrder (see Opt-out)
 #   4  skipped — no migration files found in the union (nothing to check)
 #   6  open-PR clash — --against-open-prs only (#633): another open PR adds
 #      the same migration version; advisory, never a merge refusal
@@ -150,7 +165,7 @@ PROJECT_DIR="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 # shellcheck source=/dev/null
 . "$SCRIPT_DIR/_load-env.sh" "$PROJECT_DIR"
 MIGRATION_GLOB="${MIGRATION_GLOB:-**/db/migration/**/V*__*.sql}"
-MIGRATION_ALLOW_OUT_OF_ORDER="${MIGRATION_ALLOW_OUT_OF_ORDER:-0}"
+MIGRATION_ALLOW_OUT_OF_ORDER="${MIGRATION_ALLOW_OUT_OF_ORDER:-${MIGRATION_OUT_OF_ORDER_OK:-auto}}"
 
 shopt -s extglob
 
@@ -576,7 +591,35 @@ if [ -z "$REF" ] && [ -n "$BASE_TIP_MAX_VER" ]; then
     done <<< "$FLYWAY_FILES"
 fi
 
+flyway_out_of_order_source() {
+    # $1 = ref. Print the first config file in that tree that turns on
+    # Flyway outOfOrder (see the header's Opt-out list); print nothing and
+    # return 1 when none does. Comment-only lines (# or //) don't count.
+    local ref="$1" f
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        if git show "$ref:$f" 2>/dev/null \
+            | grep -qiE "^[^#/]*(out-of-order|outOfOrder|out_of_order)[\"']?[[:space:]]*[:=][[:space:]]*[\"']?true|<outOfOrder>[[:space:]]*true"; then
+            echo "$f"
+            return 0
+        fi
+    done < <(list_tree_files "$ref" | grep -E '(^|/)(src/main/resources/application[^/]*\.(ya?ml|properties)|build\.gradle(\.kts)?|pom\.xml|flyway\.(conf|toml))$' || true)
+    return 1
+}
+
+OOO_ALLOWED_NOTE=""
 if [ "${#OUT_OF_ORDER[@]}" -gt 0 ]; then
+    case "$MIGRATION_ALLOW_OUT_OF_ORDER" in
+        1) OOO_ALLOWED_NOTE="Allowed: MIGRATION_ALLOW_OUT_OF_ORDER=1 (project runs Flyway outOfOrder) — downgraded to a warning, exit 0." ;;
+        0) ;;
+        *)
+            if ooo_src="$(flyway_out_of_order_source "$BASE_LOCAL")"; then
+                OOO_ALLOWED_NOTE="Allowed: the project runs Flyway outOfOrder ($ooo_src on $BASE_REF), so a lower version merging later is fine — downgraded to a warning, exit 0."
+            fi ;;
+    esac
+fi
+
+if [ "${#OUT_OF_ORDER[@]}" -gt 0 ] && [ -z "$OOO_ALLOWED_NOTE" ]; then
     compute_next_free
     OOO_RECIPE+=("Remediation — renumber the PR-side file(s) on branch $HEAD_REF to the next free version; base-side ($BASE_REF, max V$BASE_TIP_MAX_VER) files are already applied downstream and never move.")
     OOO_RECIPE+=("  next free version: V$next_ver (max across $BASE_REF, $HEAD_REF, and $OTHER_PR_COUNT other open PR(s))")
@@ -683,7 +726,13 @@ if [ "${#ALEMBIC_HEADS[@]}" -gt 1 ]; then
 fi
 
 OUT_OF_ORDER_VERDICT=0
-if [ "${#OUT_OF_ORDER[@]}" -gt 0 ]; then
+if [ "${#OUT_OF_ORDER[@]}" -gt 0 ] && [ -n "$OOO_ALLOWED_NOTE" ]; then
+    # #1069: the project runs Flyway outOfOrder, so a PR-side version below
+    # the base max is expected (timestamp versions merging in any order).
+    # One line, no renumber recipe; the verdict stays whatever else decides.
+    OOO_NAMES="$(printf '%s, ' "${OUT_OF_ORDER[@]}")"
+    BODY_LINES+=("${OOO_ALLOWED_NOTE} Below base max V$BASE_TIP_MAX_VER: ${OOO_NAMES%, }")
+elif [ "${#OUT_OF_ORDER[@]}" -gt 0 ]; then
     OUT_OF_ORDER_VERDICT=1
     BODY_LINES+=("Out-of-order Flyway merge — PR-side file(s) below the base tip's max version (V$BASE_TIP_MAX_VER on $BASE_REF):")
     for o in "${OUT_OF_ORDER[@]}"; do BODY_LINES+=("- $o"); done
@@ -699,16 +748,15 @@ if [ "$COLLISION" = "1" ]; then
     EXIT=2
 elif [ "$OUT_OF_ORDER_VERDICT" = "1" ]; then
     VERDICT="out-of-order"
-    if [ "$MIGRATION_ALLOW_OUT_OF_ORDER" = "1" ]; then
-        EXIT=0
-        BODY_LINES+=("MIGRATION_ALLOW_OUT_OF_ORDER=1: downgraded to a warning, exit 0.")
-    else
-        EXIT=3
-    fi
+    EXIT=3
 else
     VERDICT="clean"
     EXIT=0
-    BODY_LINES+=("No duplicate Flyway versions, out-of-order merges, or Alembic multi-heads in $SCOPE_DESC.")
+    if [ -n "$OOO_ALLOWED_NOTE" ]; then
+        BODY_LINES+=("No duplicate Flyway versions or Alembic multi-heads in $SCOPE_DESC.")
+    else
+        BODY_LINES+=("No duplicate Flyway versions, out-of-order merges, or Alembic multi-heads in $SCOPE_DESC.")
+    fi
 fi
 
 if [ -n "$REF" ]; then

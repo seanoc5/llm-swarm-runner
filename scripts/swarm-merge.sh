@@ -174,7 +174,8 @@
 #      Also runs scripts/migration-collision-check.sh, refusing on a
 #      duplicate Flyway version / Alembic multi-head collision (exit 2) or
 #      an out-of-order Flyway merge (exit 3, #556: a PR-side migration
-#      numbered below the base branch's current max) unless
+#      numbered below the base branch's current max; never returned for a
+#      project whose Flyway config sets outOfOrder, #1069) unless
 #      --override-migration-gate is given. MIGRATION_GATE=0 disables this
 #      gate entirely (default on) — see #294.
 #   3. cds to the MAIN worktree of the current repo (not the feature one).
@@ -1162,8 +1163,9 @@ if [ "$HOUSEKEEP_ONLY" = 0 ]; then
             # distinct from the collision case above, but equally refused by
             # default (the same override flag, since a project that runs
             # Flyway with outOfOrder=true may accept it deliberately; see
-            # MIGRATION_ALLOW_OUT_OF_ORDER in migration-collision-check.sh's
-            # header for an opt-out that avoids this gate firing at all).
+            # migration-collision-check.sh's header: a project that runs
+            # Flyway outOfOrder is auto-detected and never gets exit 3, #1069;
+            # MIGRATION_ALLOW_OUT_OF_ORDER=1/0 forces it either way).
             if [ "$OVERRIDE_MIGRATION_GATE" = 0 ]; then
               echo "ERROR: PR #$PR_NUM has an out-of-order Flyway merge (a PR-side" >&2
               echo "       migration numbered below the base branch's current max)." >&2
