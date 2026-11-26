@@ -595,11 +595,14 @@ flyway_out_of_order_source() {
     # $1 = ref. Print the first config file in that tree that turns on
     # Flyway outOfOrder (see the header's Opt-out list); print nothing and
     # return 1 when none does. Comment-only lines (# or //) don't count.
-    local ref="$1" f
+    local ref="$1" f content
     while IFS= read -r f; do
         [ -n "$f" ] || continue
-        if git show "$ref:$f" 2>/dev/null \
-            | grep -qiE "^[^#/]*(out-of-order|outOfOrder|out_of_order)[\"']?[[:space:]]*[:=][[:space:]]*[\"']?true|<outOfOrder>[[:space:]]*true"; then
+        # Capture first: `git show | grep -q` would SIGPIPE git show under
+        # pipefail when grep exits early, turning a match into a miss.
+        content="$(git show "$ref:$f" 2>/dev/null || true)"
+        if printf '%s\n' "$content" \
+            | grep -iE "^[^#/]*(out-of-order|outOfOrder|out_of_order)[\"']?[[:space:]]*[:=][[:space:]]*[\"']?true|<outOfOrder>[[:space:]]*true" >/dev/null; then
             echo "$f"
             return 0
         fi
