@@ -123,6 +123,7 @@ MRC=0; "$MIGRATION_CHECK_SCRIPT" "$PR" || MRC=$?
 case "$MRC" in
     0|4) ;;
     2) refuse "migration collision on PR #$PR (see migration-collision-check.sh output above)." ;;
+    3) refuse "out-of-order Flyway migration on PR #$PR (see migration-collision-check.sh output above; a project that runs Flyway outOfOrder never gets this, #1069)." ;;
     *) refuse "migration-collision-check.sh exited $MRC (error); failing closed." ;;
 esac
 

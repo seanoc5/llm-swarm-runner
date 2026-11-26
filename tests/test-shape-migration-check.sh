@@ -440,9 +440,12 @@ heading "Test 10: MIGRATION_ALLOW_OUT_OF_ORDER=1 downgrades out-of-order to a wa
 # ============================================================================
 if OUT=$(MIGRATION_ALLOW_OUT_OF_ORDER=1 "$CHECK" 20 2>&1); then RC=0; else RC=$?; fi
 [ "$RC" -eq 0 ] || red "expected exit 0 under MIGRATION_ALLOW_OUT_OF_ORDER=1, got $RC"
-echo "$OUT" | grep -q "verdict: out-of-order" || red "verdict should still read out-of-order"
-echo "$OUT" | grep -q "downgraded to a warning" || red "warning note missing"
-green "MIGRATION_ALLOW_OUT_OF_ORDER=1: out-of-order warns and exits 0"
+echo "$OUT" | grep -q "verdict: clean" || red "allowed out-of-order should read clean (#1069): $OUT"
+echo "$OUT" | grep -q "^Allowed: MIGRATION_ALLOW_OUT_OF_ORDER=1.*downgraded to a warning" || red "Allowed note missing: $OUT"
+echo "$OUT" | grep -q "git mv" && red "no renumber recipe when out-of-order is allowed: $OUT"
+if OUT=$(MIGRATION_OUT_OF_ORDER_OK=1 "$CHECK" 20 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -eq 0 ] || red "MIGRATION_OUT_OF_ORDER_OK=1 alias should allow too, got $RC"
+green "MIGRATION_ALLOW_OUT_OF_ORDER=1 (and alias MIGRATION_OUT_OF_ORDER_OK=1): one Allowed line, exit 0"
 # ============================================================================
 heading "Test 10b: dotted-version out-of-order (#556 self-review) — V5.1 after base's V5.2 → exit 3"
 # ============================================================================
@@ -607,6 +610,90 @@ green "--override-migration-gate proceeds to merge despite out-of-order"
 cd "$CLONE"
 
 # ============================================================================
+heading "Test 12b: project runs Flyway outOfOrder (#1069) — timestamp versions merge in any order"
+# ============================================================================
+# corpusminder-spring shape: V<yyyyMMddHHmm> versions, spring.flyway.out-of-order
+# in application.yml and outOfOrder = true in build.gradle.kts's flyway {} block.
+TS_ORIGIN="$TEST_DIR/ts-origin.git"
+TS_CLONE="$TEST_DIR/ts-clone"
+git init -q --bare -b master "$TS_ORIGIN"
+git init -q -b master "$TS_CLONE"
+git -C "$TS_CLONE" remote add origin "$TS_ORIGIN"
+ts_commit() { git -C "$TS_CLONE" -c user.email=t@t -c user.name=t commit -q -m "$1"; }
+mkdir -p "$TS_CLONE/$MIG"
+echo "select 1;" > "$TS_CLONE/$MIG/V554__legacy.sql"
+echo "select 2;" > "$TS_CLONE/$MIG/V202611261200__newest.sql"
+printf 'spring:\n  flyway:\n    # comment first\n    out-of-order: true\n' > "$TS_CLONE/src/main/resources/application.yml"
+git -C "$TS_CLONE" add -A; ts_commit "base: V554 + V202611261200, flyway out-of-order"
+git -C "$TS_CLONE" push -q origin master
+cd "$TS_CLONE"
+
+# (a) lower stamp merging after a higher one → allowed, exit 0, one Allowed line
+git -C "$TS_CLONE" checkout -q -b ts-lower master
+echo "select 3;" > "$TS_CLONE/$MIG/V202611250900__older_stamp.sql"
+git -C "$TS_CLONE" add -A; ts_commit "PR stamped earlier than master's newest"
+git -C "$TS_CLONE" push -q origin ts-lower
+set_pr 50 master ts-lower
+if OUT=$("$CHECK" 50 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -eq 0 ] || red "outOfOrder project + lower stamp: expected exit 0, got $RC ($OUT)"
+echo "$OUT" | grep -q "verdict: clean" || red "expected verdict clean: $OUT"
+[ "$(echo "$OUT" | grep -c '^Allowed: ')" -eq 1 ] || red "expected exactly one Allowed line: $OUT"
+echo "$OUT" | grep -qF "Allowed: the project runs Flyway outOfOrder (src/main/resources/application.yml on master)" \
+    || red "Allowed line must name the config file: $OUT"
+echo "$OUT" | grep -qF "$MIG/V202611250900__older_stamp.sql" || red "Allowed line should name the file: $OUT"
+echo "$OUT" | grep -q "git mv" && red "no renumber recipe when allowed: $OUT"
+green "(a) outOfOrder project (application.yml) + lower stamp → exit 0, one Allowed line"
+
+# MIGRATION_ALLOW_OUT_OF_ORDER=0 forces the check back on
+if OUT=$(MIGRATION_ALLOW_OUT_OF_ORDER=0 "$CHECK" 50 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -eq 3 ] || red "MIGRATION_ALLOW_OUT_OF_ORDER=0 must force exit 3, got $RC ($OUT)"
+green "MIGRATION_ALLOW_OUT_OF_ORDER=0 overrides auto-detection → exit 3"
+
+# (b) exact duplicate version in the same project → still exit 2
+git -C "$TS_CLONE" checkout -q -b ts-dup master
+echo "select 4;" > "$TS_CLONE/$MIG/V202611261200__same_minute.sql"
+git -C "$TS_CLONE" add -A; ts_commit "PR picks master's exact stamp"
+git -C "$TS_CLONE" push -q origin ts-dup
+set_pr 51 master ts-dup
+if OUT=$("$CHECK" 51 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -eq 2 ] || red "outOfOrder project + exact duplicate: expected exit 2, got $RC ($OUT)"
+echo "$OUT" | grep -q "verdict: collision" || red "expected verdict collision: $OUT"
+green "(b) outOfOrder project + exact duplicate version → still exit 2"
+
+# Gradle-only detection: flyway {} block in build.gradle.kts, application.yml says nothing
+git -C "$TS_CLONE" checkout -q master
+printf 'spring:\n  flyway:\n    enabled: true\n' > "$TS_CLONE/src/main/resources/application.yml"
+printf 'flyway {\n    url = "jdbc:postgresql://localhost/x"\n    outOfOrder = true\n}\n' > "$TS_CLONE/build.gradle.kts"
+git -C "$TS_CLONE" add -A; ts_commit "config moves to build.gradle.kts"
+git -C "$TS_CLONE" push -q origin master
+if OUT=$("$CHECK" 50 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -eq 0 ] || red "build.gradle.kts outOfOrder = true should be detected, got $RC ($OUT)"
+echo "$OUT" | grep -qF "(build.gradle.kts on master)" || red "Allowed line must name build.gradle.kts: $OUT"
+green "build.gradle.kts flyway { outOfOrder = true } detected"
+
+# (c) project without outOfOrder (commented-out lines don't count) → still exit 3
+printf 'spring:\n  flyway:\n    # out-of-order: true\n' > "$TS_CLONE/src/main/resources/application.yml"
+printf 'flyway {\n    // outOfOrder = true\n}\n' > "$TS_CLONE/build.gradle.kts"
+git -C "$TS_CLONE" add -A; ts_commit "outOfOrder only in comments"
+git -C "$TS_CLONE" push -q origin master
+if OUT=$("$CHECK" 50 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -eq 3 ] || red "project without outOfOrder: expected exit 3, got $RC ($OUT)"
+echo "$OUT" | grep -q "verdict: out-of-order" || red "expected verdict out-of-order: $OUT"
+green "(c) project without outOfOrder (commented lines ignored) → still exit 3"
+
+# swarm-merge plain path merges the outOfOrder project's lower-stamp PR with no override
+printf 'spring.flyway.out-of-order=true\n' > "$TS_CLONE/src/main/resources/application-prod.properties"
+git -C "$TS_CLONE" add -A; ts_commit "properties file turns it on"
+git -C "$TS_CLONE" push -q origin master
+: > "$GH_LOG"
+if OUT=$("$MERGE" 50 2>&1); then RC=0; else RC=$?; fi
+[ "$RC" -eq 0 ] || red "swarm-merge should merge an allowed out-of-order PR without override (rc=$RC): $OUT"
+grep -q "pr merge 50" "$GH_LOG" || red "gh pr merge not called for allowed out-of-order PR"
+echo "$OUT" | grep -q "migration gate: clean" || red "swarm-merge should report the gate clean: $OUT"
+green "swarm-merge merges an outOfOrder project's lower-stamp PR, no --override-migration-gate"
+cd "$CLONE"
+
+# ============================================================================
 heading "Test 13: --against-open-prs — two open PRs claiming the same version (#633)"
 # ============================================================================
 # Each PR passes the base-vs-head check alone; only the open-PR comparison
@@ -730,6 +817,6 @@ cd "$CLONE"
 
 # ============================================================================
 heading "All migration-collision-check shape tests passed"
-green "Flyway dup detection + remediation recipe (loser/next-free/open-PR sweep/internal dup), dotted-version distinctness, out-of-order merge detection + MIGRATION_ALLOW_OUT_OF_ORDER opt-out (#556), Alembic multi-head, exit 4 skip, --post idempotency, swarm-merge gate + override + kill switch + --auto-low refusal"
+green "Flyway dup detection + remediation recipe (loser/next-free/open-PR sweep/internal dup), dotted-version distinctness, out-of-order merge detection + outOfOrder auto-detect / MIGRATION_ALLOW_OUT_OF_ORDER opt-out (#556, #1069), Alembic multi-head, exit 4 skip, --post idempotency, swarm-merge gate + override + kill switch + --auto-low refusal"
 echo ""
 yellow "Run with KEEP=1 to leave $TEST_DIR for inspection."
